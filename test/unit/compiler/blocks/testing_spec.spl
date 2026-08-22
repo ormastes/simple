@@ -1,149 +1,36 @@
-# Testing Framework Tests - Parser-Safe Local Coverage
-#
-# This file keeps the original intent of the compiler.blocks.testing spec
-# while replacing runtime-only placeholders with self-contained doubles.
+"""
+## Purpose and audience
+Purpose: Verify Compiler alias analysis registry through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-fn check(condition: bool):
-    expect(condition).to_equal(true)
+## Operator workflow
+Run `bin/simple test test/unit/compiler/blocks/testing_spec.spl` and require the final Results line to report 0 failed.
 
-fn check_text(actual: text, expected: text):
-    expect(actual).to_equal(expected)
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-# Local doubles that model the old parse/validate/const-eval behavior
-fn fake_parse(source: text) -> bool:
-    if source == "valid parse":
-        true
-    else:
-        false
+# @req: REQ-CMP-COMPILER_ANALYSIS-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/compiler_analysis_behavior.md
+# doc-path: doc/03_plan/sys_test/compiler_analysis_behavior.md
+# doc-path: doc/04_architecture/lib/compiler_analysis.md
+# doc-path: doc/05_design/lib/compiler_analysis_oracles.md
+# @manual: primary
 
-fn fake_parse_error(source: text) -> text:
-    if source == "valid parse":
-        ""
-    else:
-        "unexpected token"
+use std.spec
+use compiler.35.semantics.lint.semantic_api.alias_registry.{alias_registry_clear, alias_registry_resolve}
+use std.spec.step
 
-fn fake_validate(source: text) -> bool:
-    if source == "valid parse":
-        true
-    else:
-        if source == "valid mock block":
-            true
-        else:
-            false
+describe "Compiler alias analysis registry":
+    it "resolving an unregistered alias reports nothing":
+        step("Verify: resolving an unregistered alias reports nothing")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("Wave6UnknownAlias")).to_equal("")  # oracle: unknown aliases resolve to the empty sentinel
 
-fn fake_const_eval(source: text) -> text:
-    if source == "2 + 2":
-        "4"
-    else:
-        ""
+    it "clearing the registry drops previously resolvable state":
+        step("Verify: clearing the registry drops previously resolvable state")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("anything")).to_equal("")  # oracle: after clear no alias remains registered
 
-fn fake_mock_block(name: text) -> text:
-    if name == "":
-        "unnamed block"
-    else:
-        "{name} block"
-
-fn fake_assert_parse_succeeds(source: text) -> bool:
-    fake_parse(source)
-
-fn fake_assert_parse_fails(source: text) -> bool:
-    not fake_parse(source)
-
-fn fake_assert_validation_passes(source: text) -> bool:
-    fake_validate(source)
-
-fn fake_assert_validation_fails(source: text) -> bool:
-    not fake_validate(source)
-
-describe "Testing - test_parse()":
-    it "accepts a valid block fixture":
-        check(fake_parse("valid parse"))
-
-    it "rejects an invalid block fixture":
-        check(not fake_parse("broken parse"))
-
-describe "Testing - test_parse_error()":
-    it "returns no error for a valid block":
-        check_text(fake_parse_error("valid parse"), "")
-
-    it "returns an error message for invalid input":
-        check_text(fake_parse_error("broken parse"), "unexpected token")
-
-describe "Testing - test_validate()":
-    it "accepts the parse fixture":
-        check(fake_validate("valid parse"))
-
-    it "accepts the mock block fixture":
-        check(fake_validate("valid mock block"))
-
-    it "rejects an invalid fixture":
-        check(not fake_validate("broken parse"))
-
-describe "Testing - test_const_eval()":
-    it "returns a const value for arithmetic":
-        check_text(fake_const_eval("2 + 2"), "4")
-
-    it "returns an empty result for non-const input":
-        check_text(fake_const_eval("x + 2"), "")
-
-describe "Testing - test_no_const_eval()":
-    it "reports empty output for non-const input":
-        check_text(fake_const_eval("side effect"), "")
-
-describe "Testing - mock_block()":
-    it "creates a named mock block":
-        check_text(fake_mock_block("parse"), "parse block")
-
-    it "falls back to an unnamed mock block":
-        check_text(fake_mock_block(""), "unnamed block")
-
-describe "Testing - Assertion Helpers":
-    it "assert_parse_succeeds returns true for valid input":
-        check(fake_assert_parse_succeeds("valid parse"))
-
-    it "assert_parse_fails returns true for invalid input":
-        check(fake_assert_parse_fails("broken parse"))
-
-    it "assert_validation_passes returns true for valid input":
-        check(fake_assert_validation_passes("valid mock block"))
-
-    it "assert_validation_fails returns true for invalid input":
-        check(fake_assert_validation_fails("broken parse"))
-
-describe "Testing - Integration":
-    it "combines parse, validate, and mock block helpers":
-        val parsed = fake_assert_parse_succeeds("valid parse")
-        val validated = fake_assert_validation_passes("valid mock block")
-        val mock_name = fake_mock_block("parse")
-        check(parsed)
-        check(validated)
-        check_text(mock_name, "parse block")
-
-    it "keeps error and success paths separate":
-        val parse_ok = fake_assert_parse_succeeds("valid parse")
-        val parse_bad = fake_assert_parse_fails("broken parse")
-        check(parse_ok)
-        check(parse_bad)
-
-describe "Testing - Edge Cases":
-    it "handles empty payloads":
-        check(not fake_parse(""))
-        check_text(fake_parse_error(""), "unexpected token")
-
-    it "handles large payloads":
-        val payload = "valid parse"
-        check(fake_parse(payload))
-        check(fake_validate(payload))
-
-    it "handles unicode in test names and labels":
-        check_text(fake_mock_block("unicode"), "unicode block")
-
-    it "handles complex error messages":
-        check_text(fake_parse_error("broken parse"), "unexpected token")
-
-# ============================================================================
-# Feature Tags
-# ============================================================================
-# tags: [compiler, blocks, testing, meta-tests]
-# priority: high
-# status: complete

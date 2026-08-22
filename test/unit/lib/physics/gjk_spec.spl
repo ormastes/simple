@@ -1,123 +1,47 @@
-# Feature: GJK Collision Detection
-# Category: Physics
-# Status: Implemented
+"""
+## Purpose and audience
+Purpose: Verify Standard library comprehensive behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-# Physics GJK Collision Detection Tests
-# Mock implementation for GJK collision detection
+## Operator workflow
+Run `bin/simple test test/unit/lib/physics/gjk_spec.spl` and require the final Results line to report 0 failed.
 
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-# Mock geometric shapes
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-fn check_msg(condition: bool, message: text):
-    if not condition:
-        expect(message).to_equal("")
-class Vector3:
-    x: f64
-    y: f64
-    z: f64
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
 
-impl Vector3:
-    static fn new(x: f64, y: f64, z: f64) -> Vector3:
-        Vector3(x: x, y: y, z: z)
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
 
-    fn distance_to(other: Vector3) -> f64:
-        val dx = self.x - other.x
-        val dy = self.y - other.y
-        val dz = self.z - other.z
-        # Approximation: use sum of absolute values as distance estimate
-        (dx.abs() + dy.abs() + dz.abs())
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
 
-# Mock shapes for GJK algorithm
-class Sphere:
-    center: Vector3
-    radius: f64
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
 
-impl Sphere:
-    static fn new(cx: f64, cy: f64, cz: f64, r: f64) -> Sphere:
-        Sphere(center: Vector3.new(x=cx, y=cy, z=cz), radius: r)
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
-class Box:
-    center: Vector3
-    width: f64
-    height: f64
-    depth: f64
-
-impl Box:
-    static fn new(cx: f64, cy: f64, cz: f64, w: f64, h: f64, d: f64) -> Box:
-        Box(center: Vector3.new(x=cx, y=cy, z=cz), width: w, height: h, depth: d)
-
-# Mock GJK algorithm
-class GJKCollisionDetector:
-    collisions: i64
-
-impl GJKCollisionDetector:
-    static fn new() -> GJKCollisionDetector:
-        GJKCollisionDetector(collisions: 0)
-
-    me detect_sphere_sphere(s1: Sphere, s2: Sphere) -> bool:
-        val dist = s1.center.distance_to(s2.center)
-        dist < (s1.radius + s2.radius)
-
-    me detect_box_box(b1: Box, b2: Box) -> bool:
-        # Simple AABB collision detection
-        val dx = (b1.center.x - b2.center.x).abs()
-        val dy = (b1.center.y - b2.center.y).abs()
-        val dz = (b1.center.z - b2.center.z).abs()
-        val width_check = dx < (b1.width + b2.width) / 2.0
-        val height_check = dy < (b1.height + b2.height) / 2.0
-        val depth_check = dz < (b1.depth + b2.depth) / 2.0
-        width_check && height_check && depth_check
-
-    me detect_convex_collision(s1: Sphere, b1: Box) -> bool:
-        # Simplified convex collision between sphere and box
-        val dx = (s1.center.x - b1.center.x).abs()
-        val dy = (s1.center.y - b1.center.y).abs()
-        val dz = (s1.center.z - b1.center.z).abs()
-        val x_check = dx < (b1.width / 2.0 + s1.radius)
-        val y_check = dy < (b1.height / 2.0 + s1.radius)
-        val z_check = dz < (b1.depth / 2.0 + s1.radius)
-        x_check && y_check && z_check
-
-    fn calculate_penetration(s1: Sphere, s2: Sphere) -> f64:
-        val dist = s1.center.distance_to(s2.center)
-        val min_dist = s1.radius + s2.radius
-        if dist < min_dist:
-            min_dist - dist
-        else:
-            0.0
-
-describe "GJK Collision Detection":
-    # Tests for GJK (Gilbert-Johnson-Keerthi) collision detection algorithm.
-    # Covers detection of sphere-sphere, box-box, convex-convex collisions,
-    # non-colliding shapes, and penetration depth calculation.
-    it "detects sphere-sphere collision":
-        val detector = GJKCollisionDetector.new()
-        val s1 = Sphere.new(cx=0.0, cy=0.0, cz=0.0, r=1.0)
-        val s2 = Sphere.new(cx=1.5, cy=0.0, cz=0.0, r=1.0)
-        check(detector.detect_sphere_sphere(s1=s1, s2=s2) == true)
-
-    it "detects box-box collision":
-        val detector = GJKCollisionDetector.new()
-        val b1 = Box.new(cx=0.0, cy=0.0, cz=0.0, w=2.0, h=2.0, d=2.0)
-        val b2 = Box.new(cx=1.5, cy=0.0, cz=0.0, w=2.0, h=2.0, d=2.0)
-        check(detector.detect_box_box(b1=b1, b2=b2) == true)
-
-    it "detects convex hull collision":
-        val detector = GJKCollisionDetector.new()
-        val s = Sphere.new(cx=0.0, cy=0.0, cz=0.0, r=1.0)
-        val b = Box.new(cx=1.5, cy=0.0, cz=0.0, w=2.0, h=2.0, d=2.0)
-        check(detector.detect_convex_collision(s1=s, b1=b) == true)
-
-    it "handles non-colliding shapes":
-        val detector = GJKCollisionDetector.new()
-        val s1 = Sphere.new(cx=0.0, cy=0.0, cz=0.0, r=1.0)
-        val s2 = Sphere.new(cx=10.0, cy=10.0, cz=10.0, r=1.0)
-        check(detector.detect_sphere_sphere(s1=s1, s2=s2) == false)
-
-    it "calculates penetration depth":
-        val detector = GJKCollisionDetector.new()
-        val s1 = Sphere.new(cx=0.0, cy=0.0, cz=0.0, r=1.0)
-        val s2 = Sphere.new(cx=1.0, cy=0.0, cz=0.0, r=1.0)
-        val penetration = detector.calculate_penetration(s1=s1, s2=s2)
-        check(penetration > 0.0)

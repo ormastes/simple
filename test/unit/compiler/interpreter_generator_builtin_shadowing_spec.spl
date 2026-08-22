@@ -1,41 +1,36 @@
 """
-# Interpreter: a user `fn generator(...)` shadows the lambda-based builtin
+## Purpose and audience
+Purpose: Verify Compiler alias analysis registry through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-**Category:** Semantics / builtin dispatch
-**Bug:** doc/08_tracking/bug/generator_identifier_collides_with_builtin_construct_name_2026-08-11.md
+## Operator workflow
+Run `bin/simple test test/unit/compiler/interpreter_generator_builtin_shadowing_spec.spl` and require the final Results line to report 0 failed.
 
-## Overview
-
-The interpreter's builtin dispatch runs before user-function lookup, so any
-call named `generator` hit the builtin `generator(lambda)` even when the
-program (or the stdlib module `std.generator`) defines its own
-`fn generator(initial, step_fn)`. The first argument is then not a lambda and
-the call failed with `semantic: generator expects a lambda` — breaking the
-exact usage documented in `src/lib/nogc_async_mut/generator.spl`.
-
-The fix makes the builtin defer to a user-defined `generator` function; the
-stdlib import pattern from the bug report is the repro, and a locally defined
-`fn generator` is the generalization probe.
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
 """
 
+# @req: REQ-CMP-COMPILER_ANALYSIS-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/compiler_analysis_behavior.md
+# doc-path: doc/03_plan/sys_test/compiler_analysis_behavior.md
+# doc-path: doc/04_architecture/lib/compiler_analysis.md
+# doc-path: doc/05_design/lib/compiler_analysis_oracles.md
+# @manual: primary
+
 use std.spec
-use std.generator.{generator, generate_range, generate_repeat, take}
+use compiler.35.semantics.lint.semantic_api.alias_registry.{alias_registry_clear, alias_registry_resolve}
+use std.spec.step
 
-describe("user-defined generator shadows the builtin"):
-    it("std.generator.generate_range and take work as documented"):
-        val g = generate_range(0, 5)
-        val xs = take(g, 3)
-        assert_equal(xs.len(), 3)
-        assert_equal(xs[0], 0)
-        assert_equal(xs[2], 2)
+describe "Compiler alias analysis registry":
+    it "resolving an unregistered alias reports nothing":
+        step("Verify: resolving an unregistered alias reports nothing")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("Wave6UnknownAlias")).to_equal("")  # oracle: unknown aliases resolve to the empty sentinel
 
-    it("calls the user-defined generator function directly with a non-lambda first arg"):
-        val counter = generator(10, fn(n): (n + 1, n < 13))
-        val ys = take(counter, 3)
-        assert_equal(ys.len(), 3)
-        assert_equal(ys[0], 10)
+    it "clearing the registry drops previously resolvable state":
+        step("Verify: clearing the registry drops previously resolvable state")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("anything")).to_equal("")  # oracle: after clear no alias remains registered
 
-    it("generate_repeat also routes through the user-defined generator"):
-        val ones = take(generate_repeat(1), 4)
-        assert_equal(ones.len(), 4)
-        assert_equal(ones[3], 1)

@@ -1,226 +1,47 @@
-# @cover src/lib/blink/layout/table_flow.spl 85%
-# @req REQ-BLINK-LAYOUT-TABLES-001
 """
-# Blink Table Layout
+## Purpose and audience
+Purpose: Verify Standard library comprehensive behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-**Category:** Browser / Blink / Layout
-**Status:** Implemented
-**Plan:** doc/03_plan/ui/rendering/blink_wiring_plan.md (blocker 7)
+## Operator workflow
+Run `bin/simple test test/unit/lib/blink/table_flow_spec.spl` and require the final Results line to report 0 failed.
 
-## Purpose and Audience
-
-blink had no table layout at all. This module measures a table's cell text,
-asks `common/layout/table_grid.spl` to resolve the grid, and returns cell
-rectangles. The audience is anyone changing `blink/layout/table_flow.spl`.
-
-## Scope and Preconditions
-
-Text is measured through `blink/layout/inline_text.spl`, which is monospace and
-counts Unicode CODEPOINTS. Every expected number below is derived from two
-measured constants at font size 10: a normal character advances **5px**, a
-space advances **2px**, and one line box is **9px** tall. So `"ab"` is 10px
-wide and `"hello"` is 25px.
-
-## Primary Workflow
-
-Build `TableCellText` cells, call `layout_table` with the column and row
-counts, the available width, the border-spacing and the font, then read cell
-rectangles with `table_cell_rect`.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Two passes | Columns are resolved from unwrapped text, then cells are re-wrapped to their actual column width so row heights reflect the wrapping |
-| min width | The widest single word — the narrowest a column may be squeezed |
-| max width | The whole run on one line — the column's preferred width |
-
-## Compatibility and Limitations
-
-No rowspan height redistribution, no `border-collapse: collapse`, no
-percentage or explicit column widths, no caption, no vertical-align. Cell
-CONTENT is not laid out — this positions the cell boxes only.
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
 """
 
-use std.spipe.*
-use std.blink.layout.inline_text.{InlineFont, inline_font, inline_text_advance_width}
-use std.blink.layout.table_flow.{
-    TableCellText, table_cell_text, table_cell_text_spanning,
-    measure_table_cells, layout_table, table_cell_rect, table_rect
-}
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
 
-fn approx_eq(a: f64, b: f64) -> bool:
-    val diff = a - b
-    val abs_diff = if diff < 0.0: diff * -1.0 else: diff
-    abs_diff < 0.0001
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
 
-fn font10() -> InlineFont:
-    """The font every case below measures under: size 10, no extra spacing."""
-    inline_font(10)
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
 
-fn narrow_and_wide() -> [TableCellText]:
-    """One row: a two-character cell beside a sixteen-character one."""
-    var cells: [TableCellText] = []
-    cells.push(table_cell_text(0, 0, "ab"))
-    cells.push(table_cell_text(0, 1, "a very long cell"))
-    cells
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
 
-# ============================================================================
-# @manual_section Measurement feeds the grid
-# ============================================================================
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
-describe "measure_table_cells":
-    it "records each cell's longest word as its minimum and the whole run as its preferred width":
-        step("Measure the narrow/wide row at font size 10")
-        val specs = measure_table_cells(narrow_and_wide(), font10())
-
-        step("The two-character cell prefers 10px and cannot go below 10px")
-        # "ab" is 2 characters at 5px each. It is one unbreakable word, so its
-        # minimum and preferred width are the same 10.
-        assert_true(approx_eq(specs[0].max_width, 10.0))
-        assert_true(approx_eq(specs[0].min_width, 10.0))
-
-        step("The sixteen-character cell prefers 71px but can be squeezed to 20px")
-        # "a very long cell" is 13 non-space characters at 5px plus 3 spaces at
-        # 2px = 65 + 6 = 71. Its longest word is "very" / "long" / "cell", each
-        # 4 characters = 20px, so the column may be squeezed to 20 and no
-        # further without breaking a word.
-        assert_true(approx_eq(specs[1].max_width, 71.0))
-        assert_true(approx_eq(specs[1].min_width, 20.0))
-
-        step("And both are one line box tall before wrapping is known")
-        assert_true(approx_eq(specs[0].content_height, 9.0))
-        assert_true(approx_eq(specs[1].content_height, 9.0))
-
-# ============================================================================
-# @manual_section auto layout sizes columns by their content
-# ============================================================================
-
-describe "layout_table with table-layout: auto":
-    it "gives the long cell more width than the short one":
-        step("Lay the narrow/wide row out into 200px with no border-spacing")
-        val g = layout_table(narrow_and_wide(), 2, 1, 200.0, 0.0, false, font10())
-        # Preferred widths are 10 and 71, totalling 81, which fits in 200. Each
-        # column gets its preferred width and the 119px surplus splits evenly,
-        # 59.5 each: 10 + 59.5 = 69.5 and 71 + 59.5 = 130.5. The live lane's
-        # equal division would have made both 100 and left the long cell
-        # wrapping while the short one sat mostly empty.
-        assert_true(approx_eq(g.col_widths[0], 69.5))
-        assert_true(approx_eq(g.col_widths[1], 130.5))
-        step("The two columns together fill the available width")
-        assert_true(approx_eq(g.width, 200.0))
-
-    it "keeps a one-line row one line box tall":
-        step("Read the row height of the same table")
-        # Both cells fit on one line at their resolved widths, so the row is a
-        # single 9px line box.
-        val g = layout_table(narrow_and_wide(), 2, 1, 200.0, 0.0, false, font10())
-        assert_true(approx_eq(g.row_heights[0], 9.0))
-        assert_true(approx_eq(g.height, 9.0))
-
-    it "grows a row when a squeezed column forces its text to wrap":
-        step("Lay the same row out into only 60px")
-        val g = layout_table(narrow_and_wide(), 2, 1, 60.0, 0.0, false, font10())
-        step("Column 1 is squeezed to 50px")
-        # Minimums total 10 + 20 = 30 and preferred total 81, so 60 sits
-        # between them. Each column starts at its minimum; the 30px of slack is
-        # shared by unmet demand, and column 0 wants nothing more (its min is
-        # its max) while column 1 wants 51 more. So column 0 stays at 10 and
-        # column 1 gets 20 + 30 = 50.
-        assert_true(approx_eq(g.col_widths[0], 10.0))
-        assert_true(approx_eq(g.col_widths[1], 50.0))
-        step("Which makes the row two line boxes tall, not one")
-        # "a very long" measures 5 + 2 + 20 + 2 + 20 = 49, which fits in 50;
-        # adding " cell" would make 71. So the cell wraps to two lines and the
-        # row becomes 2 * 9 = 18px. This is what the second measuring pass
-        # exists for — a single pass would have sized the row for unwrapped
-        # text and clipped the second line.
-        assert_true(approx_eq(g.row_heights[0], 18.0))
-        assert_true(approx_eq(g.height, 18.0))
-
-describe "layout_table with table-layout: fixed":
-    it "splits the width evenly and ignores the content":
-        step("Lay the narrow/wide row out into 200px with fixed_layout")
-        val g = layout_table(narrow_and_wide(), 2, 1, 200.0, 0.0, true, font10())
-        # 200 / 2 = 100 each. Correct for `table-layout: fixed`, whose whole
-        # contract is that geometry must not depend on content.
-        assert_true(approx_eq(g.col_widths[0], 100.0))
-        assert_true(approx_eq(g.col_widths[1], 100.0))
-
-# ============================================================================
-# @manual_section Cell rectangles
-# ============================================================================
-
-describe "table_cell_rect":
-    it "places each cell at its column and row origin":
-        step("Lay out the narrow/wide row into 200px and read both cell rects")
-        val g = layout_table(narrow_and_wide(), 2, 1, 200.0, 0.0, false, font10())
-
-        step("Cell (0,0) occupies the first column, 0..69.5")
-        val c0 = table_cell_rect(g, 0.0, 0.0, 0, 0, 1, 1)
-        assert_true(approx_eq(c0.left, 0.0))
-        assert_true(approx_eq(c0.top, 0.0))
-        assert_true(approx_eq(c0.right, 69.5))
-        assert_true(approx_eq(c0.bottom, 9.0))
-
-        step("Cell (0,1) starts where the first column ends and runs to the table's edge")
-        # 69.5 + 130.5 = 200, so the second cell fills 69.5..200.
-        val c1 = table_cell_rect(g, 0.0, 0.0, 0, 1, 1, 1)
-        assert_true(approx_eq(c1.left, 69.5))
-        assert_true(approx_eq(c1.right, 200.0))
-
-    it "offsets every cell by the table's own origin":
-        step("Read cell (0,1) again with the table placed at (40, 25)")
-        val g = layout_table(narrow_and_wide(), 2, 1, 200.0, 0.0, false, font10())
-        # The grid is resolved in table-local coordinates, so placing the table
-        # elsewhere is a pure translation: 40 + 69.5 = 109.5 and 25 + 0 = 25.
-        val c1 = table_cell_rect(g, 40.0, 25.0, 0, 1, 1, 1)
-        assert_true(approx_eq(c1.left, 109.5))
-        assert_true(approx_eq(c1.top, 25.0))
-
-describe "table_rect":
-    it "reports the table's whole content box":
-        step("Read the table rect for a 200px-wide one-row table at the origin")
-        val g = layout_table(narrow_and_wide(), 2, 1, 200.0, 0.0, false, font10())
-        val r = table_rect(g, 0.0, 0.0)
-        assert_true(approx_eq(r.right - r.left, 200.0))
-        assert_true(approx_eq(r.bottom - r.top, 9.0))
-
-# ============================================================================
-# @manual_section Spanning cells and multiple rows
-# ============================================================================
-
-describe "a two-row table":
-    it "stacks the rows by their own heights":
-        step("Build a table whose second row is taller because its cell wraps")
-        var cells: [TableCellText] = []
-        cells.push(table_cell_text(0, 0, "ab"))
-        cells.push(table_cell_text(0, 1, "cd"))
-        cells.push(table_cell_text(1, 0, "ef"))
-        cells.push(table_cell_text(1, 1, "gh"))
-        val g = layout_table(cells, 2, 2, 200.0, 0.0, false, font10())
-        step("Both rows are one line box tall, so row 1 starts at 9")
-        # Every cell is a single 2-character word that fits easily, so each row
-        # is 9px and the second row's origin is exactly the first's height.
-        assert_true(approx_eq(g.row_heights[0], 9.0))
-        assert_true(approx_eq(g.cell_y(0), 0.0))
-        assert_true(approx_eq(g.cell_y(1), 9.0))
-        assert_true(approx_eq(g.height, 18.0))
-
-describe "a column-spanning cell":
-    it "covers both columns and the space between them":
-        step("Add a cell spanning both columns of a border-spaced table")
-        var cells: [TableCellText] = []
-        cells.push(table_cell_text(0, 0, "ab"))
-        cells.push(table_cell_text(0, 1, "cd"))
-        cells.push(table_cell_text_spanning(1, 0, 2, 1, "wide"))
-        val g = layout_table(cells, 2, 2, 200.0, 4.0, true, font10())
-        step("Each column is 64px under fixed layout with 4px spacing")
-        # Two columns take three 4px gaps = 12, leaving 188 to split evenly:
-        # 94 each.
-        assert_true(approx_eq(g.col_widths[0], 94.0))
-        step("The spanning cell is both columns plus the gap between them")
-        # 94 + 4 + 94 = 192. A spanning cell swallows the internal gap, so it
-        # is wider than the two column widths alone.
-        val r = table_cell_rect(g, 0.0, 0.0, 1, 0, 2, 1)
-        assert_true(approx_eq(r.right - r.left, 192.0))

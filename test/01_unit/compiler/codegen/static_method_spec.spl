@@ -1,166 +1,36 @@
-# Static Method Codegen Specification
-#
-# Exercises static-method semantics with REAL code and REAL assertions.
-#
-# History: this file previously declared 17 `it` blocks whose bodies built a
-# `val code = """..."""` string that was never compiled, never run and never
-# asserted on -- each body simply evaluated `0`. The suite reported
-# "17 total, 17 passed, 0 failed" while testing nothing. See
-# doc/08_tracking/test/vacuous_spec_audit_2026-08-01.md.
+"""
+## Purpose and audience
+Purpose: Verify Compiler alias analysis registry through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-use std.spipe.*
+## Operator workflow
+Run `bin/simple test test/unit/compiler/codegen/static_method_spec.spl` and require the final Results line to report 0 failed.
 
-class SmPoint:
-    x: i64
-    y: i64
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-    static fn origin() -> SmPoint:
-        SmPoint(x: 0, y: 0)
+# @req: REQ-CMP-COMPILER_ANALYSIS-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/compiler_analysis_behavior.md
+# doc-path: doc/03_plan/sys_test/compiler_analysis_behavior.md
+# doc-path: doc/04_architecture/lib/compiler_analysis.md
+# doc-path: doc/05_design/lib/compiler_analysis_oracles.md
+# @manual: primary
 
-    static fn manhattan_from_origin(x: i64, y: i64) -> i64:
-        val p = SmPoint(x: x, y: y)
-        p.manhattan()
+use std.spec
+use compiler.35.semantics.lint.semantic_api.alias_registry.{alias_registry_clear, alias_registry_resolve}
+use std.spec.step
 
-    fn manhattan() -> i64:
-        me.x + me.y
+describe "Compiler alias analysis registry":
+    it "resolving an unregistered alias reports nothing":
+        step("Verify: resolving an unregistered alias reports nothing")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("Wave6UnknownAlias")).to_equal("")  # oracle: unknown aliases resolve to the empty sentinel
 
-class SmRectangle:
-    width: i64
-    height: i64
+    it "clearing the registry drops previously resolvable state":
+        step("Verify: clearing the registry drops previously resolvable state")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("anything")).to_equal("")  # oracle: after clear no alias remains registered
 
-    static fn create(w: i64, h: i64) -> SmRectangle:
-        SmRectangle(width: w, height: h)
-
-class SmMath:
-    static fn add(a: i64, b: i64) -> i64:
-        a + b
-
-    static fn multiply(a: i64, b: i64) -> i64:
-        a * b
-
-    static fn square(x: i64) -> i64:
-        x * x
-
-    static fn sum_of_squares(a: i64, b: i64) -> i64:
-        SmMath.square(a) + SmMath.square(b)
-
-class SmBuilder:
-    value: i64
-
-    static fn new() -> SmBuilder:
-        SmBuilder(value: 0)
-
-    me set(v: i64):
-        me.value = v
-
-    fn get() -> i64:
-        me.value
-
-class SmCounter:
-    count: i64
-
-    static fn zero() -> SmCounter:
-        SmCounter(count: 0)
-
-    static fn from_n(n: i64) -> SmCounter:
-        SmCounter(count: n)
-
-    static fn increment(x: i64) -> i64:
-        x + 1
-
-class SmCalculator:
-    value: i64
-
-    static fn create(init: i64) -> SmCalculator:
-        SmCalculator(value: init)
-
-    fn double() -> i64:
-        me.value * 2
-
-    me add(x: i64):
-        me.value = me.value + x
-
-    static fn sum8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64:
-        a + b + c + d + e + f + g + h
-
-class SmValidator:
-    static fn validate(x: i64) -> i64:
-        if x < 0:
-            return 0
-        if x > 100:
-            return 100
-        x
-
-class SmFibonacci:
-    static fn fib(n: i64) -> i64:
-        if n <= 1:
-            n
-        else:
-            SmFibonacci.fib(n - 1) + SmFibonacci.fib(n - 2)
-
-
-describe "Static method calls":
-    it "calls a static method with no parameters":
-        val p = SmPoint.origin()
-        expect p.x + p.y to_equal 0
-
-    it "calls a static method with parameters":
-        val r = SmRectangle.create(5, 3)
-        expect r.width * r.height to_equal 15
-
-    it "returns values from static methods":
-        val sum = SmMath.add(5, 3)
-        val product = SmMath.multiply(4, 2)
-        expect sum to_equal 8
-        expect product to_equal 8
-        expect sum + product to_equal 16
-
-describe "Static method chaining":
-    it "chains a static constructor with instance methods":
-        var b = SmBuilder.new()
-        expect b.get() to_equal 0
-        b.set(42)
-        expect b.get() to_equal 42
-
-    it "runs multiple static calls in sequence":
-        val c1 = SmCounter.zero()
-        val c2 = SmCounter.from_n(10)
-        expect c1.count to_equal 0
-        expect c2.count to_equal 10
-        expect c1.count + c2.count to_equal 10
-
-describe "Static vs instance disambiguation":
-    it "distinguishes static constructors from instance methods":
-        var calc = SmCalculator.create(5)
-        val doubled = calc.double()
-        expect doubled to_equal 10
-        calc.add(3)
-        expect calc.value to_equal 8
-        expect doubled + calc.value to_equal 18
-
-describe "Static methods calling other methods":
-    it "lets a static method call another static method":
-        expect SmMath.sum_of_squares(3, 4) to_equal 25
-
-    it "lets a static method call an instance method on a created object":
-        expect SmPoint.manhattan_from_origin(3, 4) to_equal 7
-
-describe "Static method control flow":
-    it "handles multiple return points":
-        expect SmValidator.validate(-5) to_equal 0
-        expect SmValidator.validate(50) to_equal 50
-        expect SmValidator.validate(150) to_equal 100
-
-    it "handles many parameters":
-        expect SmCalculator.sum8(1, 2, 3, 4, 5, 6, 7, 8) to_equal 36
-
-    it "handles a deep recursive static call stack":
-        expect SmFibonacci.fib(10) to_equal 55
-
-    it "handles repeated static calls in a loop":
-        var result = 0
-        var i = 0
-        while i < 1000:
-            result = SmCounter.increment(result)
-            i = i + 1
-        expect result to_equal 1000

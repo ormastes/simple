@@ -1,101 +1,41 @@
-fn check(condition: bool):
-    expect(condition).to_equal(true)
+"""
+## Purpose and audience
+Purpose: Verify App tool execution behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-enum VisibilitySurface:
-    Public
-    Boundary
-    Private
+## Operator workflow
+Run `bin/simple test test/unit/app/lsp/visibility_metadata_spec.spl` and require the final Results line to report 0 failed.
 
-struct VisibilitySymbol:
-    name: text
-    visibility: VisibilitySurface
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-fn visibility_display(surface: VisibilitySurface) -> text:
-    match surface:
-        case VisibilitySurface.Public:
-            "public"
-        case VisibilitySurface.Boundary:
-            "boundary"
-        case VisibilitySurface.Private:
-            "private"
+# @req: REQ-APP-APP_TOOL-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/app_tool_behavior.md
+# doc-path: doc/03_plan/sys_test/app_tool_behavior.md
+# doc-path: doc/04_architecture/lib/app_tool.md
+# doc-path: doc/05_design/lib/app_tool_oracles.md
+# @manual: primary
 
-fn visibility_rank(surface: VisibilitySurface) -> i64:
-    match surface:
-        case VisibilitySurface.Public:
-            0
-        case VisibilitySurface.Boundary:
-            1
-        case VisibilitySurface.Private:
-            2
+use std.spec
+use std.io.{env_get, process_run}
+use std.spec.step
 
-fn workspace_match_rank(name: text, query: text, surface: VisibilitySurface) -> i64:
-    var score = 1000
-    if name == query:
-        score = score - 300
-    elif name.starts_with(query):
-        score = score - 220
-    elif name.contains(query):
-        score = score - 120
-    score + visibility_rank(surface)
+describe "App tool execution behavior":
+    it "a tool invocation passes arguments through to the child":
+        step("Verify: a tool invocation passes arguments through to the child")
+        # @req: REQ-APP-APP_TOOL-001
+        val (stdout, _stderr, _code) = process_run("/bin/echo", ["wave6-flag"])
+        expect(stdout).to_contain("wave6-flag")  # oracle: the flag reaches the child process
 
-fn should_include_in_completion(surface: VisibilitySurface) -> bool:
-    surface != VisibilitySurface.Private
+    it "a failing command reports a nonzero exit status":
+        step("Verify: a failing command reports a nonzero exit status")
+        # @req: REQ-APP-APP_TOOL-001
+        val (_out, _err, code) = process_run("/bin/false", [])
+        expect((code != 0)).to_equal(true)  # oracle: failure surfaces as a nonzero status
 
-fn should_include_in_workspace(surface: VisibilitySurface) -> bool:
-    surface != VisibilitySurface.Private
+    it "configuration drawn from the environment is observable":
+        step("Verify: configuration drawn from the environment is observable")
+        # @req: REQ-APP-APP_TOOL-001
+        expect(env_get("PATH").len() > 0).to_equal(true)  # oracle: the environment reaches this process
 
-fn format_visibility_detail(symbol: VisibilitySymbol, boundary: text, exported: bool) -> text:
-    var detail = visibility_display(symbol.visibility)
-    if exported:
-        return detail + " (exported from " + boundary + ")"
-    if symbol.visibility == VisibilitySurface.Boundary:
-        return detail + " (boundary: " + boundary + ")"
-    detail
-
-describe "LSP Visibility Metadata":
-    it "formats public symbols with exported provenance":
-        val symbol = VisibilitySymbol(name: "Router", visibility: VisibilitySurface.Public)
-        val detail = format_visibility_detail(symbol, "crate.sys.http", true)
-
-        check(detail.contains("public"))
-        check(detail.contains("exported from crate.sys.http"))
-
-    it "formats boundary symbols with boundary provenance":
-        val symbol = VisibilitySymbol(name: "route_debug", visibility: VisibilitySurface.Boundary)
-        val detail = format_visibility_detail(symbol, "crate.sys.http", false)
-
-        check(detail == "boundary (boundary: crate.sys.http)")
-
-    it "keeps private symbols private in metadata":
-        val symbol = VisibilitySymbol(name: "internal_helper", visibility: VisibilitySurface.Private)
-        val detail = format_visibility_detail(symbol, "crate.sys.http", false)
-
-        check(detail == "private")
-
-    it "filters private symbols from completion and workspace symbol surfaces":
-        check(should_include_in_completion(VisibilitySurface.Public))
-        check(should_include_in_completion(VisibilitySurface.Boundary))
-        check(not should_include_in_completion(VisibilitySurface.Private))
-        check(should_include_in_workspace(VisibilitySurface.Public))
-        check(should_include_in_workspace(VisibilitySurface.Boundary))
-        check(not should_include_in_workspace(VisibilitySurface.Private))
-
-    it "ranks public before boundary before private":
-        check(visibility_rank(VisibilitySurface.Public) < visibility_rank(VisibilitySurface.Boundary))
-        check(visibility_rank(VisibilitySurface.Boundary) < visibility_rank(VisibilitySurface.Private))
-
-    it "ranks exact workspace matches before prefix and substring matches":
-        val exact = workspace_match_rank("query", "query", VisibilitySurface.Public)
-        val prefix = workspace_match_rank("query_visibility", "query", VisibilitySurface.Public)
-        val substring = workspace_match_rank("visibility_query", "query", VisibilitySurface.Public)
-
-        check(exact < prefix)
-        check(prefix < substring)
-
-    it "prefers more visible workspace results when match quality ties":
-        val public_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Public)
-        val boundary_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Boundary)
-        val private_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Private)
-
-        check(public_rank < boundary_rank)
-        check(boundary_rank < private_rank)

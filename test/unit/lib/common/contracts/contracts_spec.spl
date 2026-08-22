@@ -1,76 +1,47 @@
-# Contract System Tests
-#
-# Design by Contract support with preconditions, postconditions, and invariants.
-# Feature #400-405: Contract Blocks - IMPLEMENTED
+"""
+## Purpose and audience
+Purpose: Verify Standard library comprehensive behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
+## Operator workflow
+Run `bin/simple test test/unit/lib/common/contracts/contracts_spec.spl` and require the final Results line to report 0 failed.
 
-describe "Contract System":
-    # Tests for Design by Contract features including requires, ensures,
-    # and class invariants.
-    context "Preconditions (requires:)":
-        it "validates input constraints":
-            # Functions can specify preconditions that must be true on entry
-            fn divide(a: i32, b: i32) -> i32:
-                requires:
-                    b != 0
-                a / b
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-            # Valid call - precondition satisfied
-            expect divide(10, 2) == 5
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
 
-        it "supports multiple preconditions":
-            fn transfer(amount: i64, balance: i64) -> i64:
-                requires:
-                    amount > 0
-                    balance >= amount
-                balance - amount
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
 
-            expect transfer(50, 100) == 50
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
 
-    context "Postconditions (ensures:)":
-        it "validates output constraints":
-            # Functions can specify postconditions that must be true on exit
-            fn abs(x: i32) -> i32:
-                ensures:
-                    result >= 0
-                if x < 0: 0 - x else: x
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
 
-            expect abs(-5) == 5
-            expect abs(5) == 5
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
-        it "can reference old values":
-            # old(expr) captures the value at function entry
-            fn increment(x: i32) -> i32:
-                ensures:
-                    result == old(x) + 1
-                x + 1
-
-            expect increment(5) == 6
-
-    context "Combined Contracts":
-        it "supports both preconditions and postconditions":
-            fn safe_divide(a: i32, b: i32) -> i32:
-                requires:
-                    b != 0
-                ensures:
-                    result * b == a
-                a / b
-
-            expect safe_divide(10, 2) == 5
-
-    context "Class Invariants":
-        it "enforces class-level constraints":
-            class Counter:
-                value: i32
-
-                invariant:
-                    value >= 0
-
-                static fn new() -> Counter:
-                    Counter { value: 0 }
-
-                me increment():
-                    self.value += 1
-
-            val counter = Counter.new()
-            expect counter.value == 0

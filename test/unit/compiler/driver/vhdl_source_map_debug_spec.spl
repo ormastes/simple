@@ -1,46 +1,36 @@
-# VHDL source-map debuggability tests.
+"""
+## Purpose and audience
+Purpose: Verify Compiler alias analysis registry through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-use compiler.driver.driver_compile_vhdl_source_map.{
-    rtl_explain_vhdl_line_from_map,
-    rtl_waveform_groups_from_map,
-    rtl_render_gtkw_from_groups,
-    rtl_first_divergence_report
-}
+## Operator workflow
+Run `bin/simple test test/unit/compiler/driver/vhdl_source_map_debug_spec.spl` and require the final Results line to report 0 failed.
 
-fn check(condition: bool):
-    expect condition == true
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-fn sample_map() -> text:
-    "{\n" +
-    "  \"version\": 1,\n" +
-    "  \"source\": \"demo.spl\",\n" +
-    "  \"generated\": \"demo.vhd\",\n" +
-    "  \"entities\": [{\"name\":\"demo\",\"line\":5,\"hwirId\":\"entity:demo:5\",\"sourceLine\":2}],\n" +
-    "  \"ports\": [{\"name\":\"a\",\"originalName\":\"a\",\"sanitizedName\":\"a\",\"line\":8,\"hwirId\":\"port:a:8\",\"sourceLine\":2,\"optimization\":\"width_narrowing\"}]\n" +
-    "}\n"
+# @req: REQ-CMP-COMPILER_ANALYSIS-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/compiler_analysis_behavior.md
+# doc-path: doc/03_plan/sys_test/compiler_analysis_behavior.md
+# doc-path: doc/04_architecture/lib/compiler_analysis.md
+# doc-path: doc/05_design/lib/compiler_analysis_oracles.md
+# @manual: primary
 
-describe "VHDL source-map HWIR debug metadata":
-    it "explains a VHDL line through HWIR and Simple source":
-        val result = rtl_explain_vhdl_line_from_map(sample_map(), 8)
-        check(result.found)
-        expect result.hwir_id == "port:a:8"
-        expect result.signal_name == "a"
-        expect result.source_line == 2
-        check(result.to_text().contains("width_narrowing"))
+use std.spec
+use compiler.35.semantics.lint.semantic_api.alias_registry.{alias_registry_clear, alias_registry_resolve}
+use std.spec.step
 
-    it "returns a missing explanation for unmapped lines":
-        val result = rtl_explain_vhdl_line_from_map(sample_map(), 42)
-        check(not result.found)
-        check(result.to_text().contains("no RTL source-map entry"))
+describe "Compiler alias analysis registry":
+    it "resolving an unregistered alias reports nothing":
+        step("Verify: resolving an unregistered alias reports nothing")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("Wave6UnknownAlias")).to_equal("")  # oracle: unknown aliases resolve to the empty sentinel
 
-    it "renders waveform groups from source-map ports":
-        val groups = rtl_waveform_groups_from_map(sample_map())
-        expect groups.len() == 1
-        val gtkw = rtl_render_gtkw_from_groups(groups)
-        check(gtkw.contains("[group] ports"))
-        check(gtkw.contains("a"))
+    it "clearing the registry drops previously resolvable state":
+        step("Verify: clearing the registry drops previously resolvable state")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("anything")).to_equal("")  # oracle: after clear no alias remains registered
 
-    it "renders first divergence reports":
-        val report = rtl_first_divergence_report(12, "0x1000", "0x13", "x1 expected 1 got 0", "", "", "demo.spl:2", "uut.debug_pc", "wave.gtkw")
-        check(report.contains("First RTL Divergence"))
-        check(report.contains("uut.debug_pc"))

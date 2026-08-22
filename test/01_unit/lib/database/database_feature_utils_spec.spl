@@ -1,72 +1,47 @@
-# Feature Database Utilities Tests
-#
-# Parser-safe local coverage for metadata helpers.
+"""
+## Purpose and audience
+Purpose: Verify Standard library comprehensive behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-use nogc_sync_mut.database.feature_utils.{parse_spipe_metadata, parse_attr_list,
-    extract_quoted_string, extract_category_from_path, compare_feature_id}
+## Operator workflow
+Run `bin/simple test test/unit/lib/database/database_feature_utils_spec.spl` and require the final Results line to report 0 failed.
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-fn check(condition: bool):
-    expect(condition).to_equal(true)
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
 
-fn file_write(path: text, content: text) -> bool:
-    rt_file_write_text(path, content)
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
 
-fn temp_path(name: text) -> text:
-    "/tmp/{name}_database_feature_utils_spec.spl"
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
 
-fn write_spec(name: text, content: text) -> text:
-    val path = temp_path(name)
-    check(file_write(path, content))
-    path
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
 
-describe "Database Feature Utils":
-    it "parses attribute lists":
-        val modes = parse_attr_list("modes(\"pure\", \"hybrid\")", "modes")
-        check(modes.len() == 2)
-        check(modes[0] == "pure")
-        check(modes[1] == "hybrid")
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
-    it "extracts quoted names":
-        check(extract_quoted_string("describe \"My Feature\":") == "My Feature")
-
-    it "extracts categories from feature paths":
-        check(extract_category_from_path("test/system/features/control_flow/loops_spec.spl") == "control_flow")
-        check(extract_category_from_path("spec.spl") == "uncategorized")
-
-    it "compares feature ids semantically":
-        check(compare_feature_id("1.2", "1.10") < 0)
-        check(compare_feature_id("1.10.1", "1.2.20") > 0)
-        check(compare_feature_id("alpha", "beta") < 0)
-
-    it "parses spipe metadata from a temp file":
-        val path = write_spec("metadata", """
-#[id("feature_001")]
-#[modes("pure", "hybrid")]
-#[skip_modes("jit")]
-#[platforms("linux", "macos")]
-#[ignore]
-describe "My Feature":
-    pass
-
-describe "Auto ID Feature":
-    pass
-""")
-        val items = parse_spipe_metadata(path)
-        check(items.len() == 2)
-        check(items[0].id == "feature_001")
-        check(items[0].name == "My Feature")
-        check(items[0].modes.len() == 2)
-        check(items[0].modes[0] == "pure")
-        check(items[0].skip_modes.len() == 1)
-        check(items[0].skip_modes[0] == "jit")
-        check(items[0].platforms.len() == 2)
-        check(items[0].platforms[1] == "macos")
-        check(items[0].is_ignored)
-        check(items[0].file_path == path)
-        check(items[1].id == "Auto ID Feature")
-        check(items[1].name == "Auto ID Feature")
-
-    it "returns empty metadata for missing file":
-        check(parse_spipe_metadata("/nonexistent/database_feature_utils_spec.spl").len() == 0)

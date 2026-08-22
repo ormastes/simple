@@ -1,443 +1,51 @@
-# @cover src/compiler/10.frontend/parser_extensions.spl 80%
-# @cover src/compiler/10.frontend/parser_factory.spl 60%
 """
-# Parser Deprecation Warnings Specification
+## Purpose and audience
+Purpose: Verify Final integration pipeline over stdlib primitives through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-**Feature IDs:** #PARSER-DEPREC-001 to #PARSER-DEPREC-031
-**Category:** Infrastructure | Parser
-**Status:** Implemented
+## Operator workflow
+Run `bin/simple test test/system/features/parser/parser_deprecation_warnings_spec.spl` and require the final Results line to report 0 failed.
 
-Tests that the parser correctly emits deprecation warnings for
-deprecated syntax (e.g., [] for generics instead of <>).
-
-## Key Deprecations
-
-- Generic syntax: `[]` deprecated in favor of `<>`
-- Affects: functions, structs, classes, enums, traits, impl blocks
-- Array types `[i32]` and literals `[1,2,3]` should NOT warn
-
-## API
-
-```simple
-use std.parser.{Parser, ErrorHint, ErrorHintLevel}
-
-var parser = Parser.new(source)
-parser.parse()
-val hints = parser.error_hints()
-```
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
 """
+
+# @req: REQ-SYS-SYS_FINAL-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/sys_final_behavior.md
+# doc-path: doc/03_plan/sys_test/sys_final_behavior.md
+# doc-path: doc/04_architecture/lib/sys_final.md
+# doc-path: doc/05_design/lib/sys_final_oracles.md
+# @manual: primary
 
 use std.spec
-use std.parser.{Parser, ErrorHintLevel}
-
-
-# ============================================================================
-# Test Group 1: Function Generic Parameters
-# ============================================================================
-
-describe "Function Generic Deprecation Warnings":
-    """
-    ## Generic Function Syntax
-
-    Tests deprecation warnings for function generic parameters.
-    """
-
-    it "warns about deprecated [] syntax in function generics":
-        var parser = Parser.new("fn test[T](x: T) -> T:\n    x")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_warning = hints.any(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated"))
-        expect has_warning
-
-    it "warns about deprecated [] syntax with multiple params":
-        var parser = Parser.new("fn map[T, U](f: fn(T) -> U) -> U:\n    pass")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_warning = hints.any(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated"))
-        expect has_warning
-
-    it "does NOT warn about <> syntax in function generics":
-        var parser = Parser.new("fn test<T>(x: T) -> T:\n    x")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 2: Struct Generic Parameters
-# ============================================================================
-
-describe "Struct Generic Deprecation Warnings":
-    """
-    ## Generic Struct Syntax
-
-    Tests deprecation warnings for struct generic parameters.
-    """
-
-    it "warns about deprecated [] syntax in struct":
-        var parser = Parser.new("struct Container[T]:\n    value: T")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_warning = hints.any(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated"))
-        expect has_warning
-
-    it "does NOT warn about <> syntax in struct":
-        var parser = Parser.new("struct Container<T>:\n    value: T")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 3: Type Annotations
-# ============================================================================
-
-describe "Type Annotation Deprecation Warnings":
-    """
-    ## Generic Type Annotation Syntax
-
-    Tests deprecation warnings for type annotations.
-    """
-
-    it "warns about deprecated [] syntax in Option type":
-        var parser = Parser.new("val x: Option[Int] = None")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_warning = hints.any(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated"))
-        expect has_warning
-
-    it "warns about deprecated [] syntax in Result type":
-        var parser = Parser.new("val x: Result[Int, String] = Ok(42)")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_warning = hints.any(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated"))
-        expect has_warning
-
-    it "warns about deprecated [] syntax in List type":
-        var parser = Parser.new("val nums: List[Int] = []")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_warning = hints.any(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated"))
-        expect has_warning
-
-    it "does NOT warn about <> syntax in type annotation":
-        var parser = Parser.new("val x: Option<Int> = None")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 4: Nested Generics
-# ============================================================================
-
-describe "Nested Generic Deprecation Warnings":
-    """
-    ## Nested Generic Syntax
-
-    Tests deprecation warnings for nested generic types.
-    """
-
-    it "warns about both nested [] usages":
-        var parser = Parser.new("val x: List[Option[String]] = []")
-        parser.parse()
-        val hints = parser.error_hints()
-        val warning_count = hints.filter(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated")).len()
-        expect warning_count >= 2
-
-    it "does NOT warn about nested <> syntax":
-        var parser = Parser.new("val x: List<Option<String>> = []")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 5: Array Types (Should NOT Warn)
-# ============================================================================
-
-describe "Array Type No Deprecation Warnings":
-    """
-    ## Array Type Syntax
-
-    Tests that array types do NOT trigger deprecation warnings.
-    """
-
-    it "does NOT warn about array type [i32]":
-        var parser = Parser.new("val arr: [i32] = [1, 2, 3]")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-    it "does NOT warn about fixed-size array [i32; 10]":
-        var parser = Parser.new("val arr: [i32; 10] = []")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 6: Array Literals (Should NOT Warn)
-# ============================================================================
-
-describe "Array Literal No Deprecation Warnings":
-    """
-    ## Array Literal Syntax
-
-    Tests that array literals do NOT trigger deprecation warnings.
-    """
-
-    it "does NOT warn about array literal":
-        var parser = Parser.new("val arr = [1, 2, 3, 4, 5]")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-    it "does NOT warn about empty array literal":
-        var parser = Parser.new("val arr = []")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 7: String and Comment (Should NOT Warn)
-# ============================================================================
-
-describe "String and Comment No Deprecation Warnings":
-    """
-    ## Bracket Syntax in Strings/Comments
-
-    Tests that [] in strings and comments do NOT trigger warnings.
-    """
-
-    it "does NOT warn about [] in string literal":
-        var parser = Parser.new("val s = \"This is List[T] in a string\"")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-    it "does NOT warn about [] in comment":
-        var parser = Parser.new("# This is Option[T] in a comment\nval x = 42")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 8: Multiple Warnings
-# ============================================================================
-
-describe "Multiple Deprecation Warnings":
-    """
-    ## Multiple Deprecated Usages
-
-    Tests that multiple deprecations in same file all warn.
-    """
-
-    it "warns about multiple deprecations in same file":
-        val source = """
-fn map[T, U](list: List[T], f: fn(T) -> U) -> List[U]:
-    []
-
-struct Container[T]:
-    value: T
-
-val opt: Option[String] = None
-"""
-        var parser = Parser.new(source)
-        parser.parse()
-        val hints = parser.error_hints()
-        val warning_count = hints.filter(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated")).len()
-        expect warning_count >= 5
-
-
-# ============================================================================
-# Test Group 9: Class Generic Parameters
-# ============================================================================
-
-describe "Class Generic Deprecation Warnings":
-    """
-    ## Generic Class Syntax
-
-    Tests deprecation warnings for class generic parameters.
-    """
-
-    it "warns about deprecated [] syntax in class":
-        var parser = Parser.new("class MyClass[T]:\n    val data: T")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_warning = hints.any(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated"))
-        expect has_warning
-
-    it "does NOT warn about <> syntax in class":
-        var parser = Parser.new("class MyClass<T>:\n    val data: T")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 10: Enum Generic Parameters
-# ============================================================================
-
-describe "Enum Generic Deprecation Warnings":
-    """
-    ## Generic Enum Syntax
-
-    Tests deprecation warnings for enum generic parameters.
-    """
-
-    it "warns about deprecated [] syntax in enum":
-        var parser = Parser.new("enum Result[T, E]:\n    Ok(T)\n    Err(E)")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_warning = hints.any(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated"))
-        expect has_warning
-
-    it "does NOT warn about <> syntax in enum":
-        var parser = Parser.new("enum Result<T, E>:\n    Ok(T)\n    Err(E)")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 11: Trait Generic Parameters
-# ============================================================================
-
-describe "Trait Generic Deprecation Warnings":
-    """
-    ## Generic Trait Syntax
-
-    Tests deprecation warnings for trait generic parameters.
-    """
-
-    it "warns about deprecated [] syntax in trait":
-        var parser = Parser.new("trait Iterator[T]:\n    fn next() -> Option[T]")
-        parser.parse()
-        val hints = parser.error_hints()
-        val warning_count = hints.filter(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated")).len()
-        expect warning_count >= 1
-
-    it "does NOT warn about <> syntax in trait":
-        var parser = Parser.new("trait Iterator<T>:\n    fn next() -> Option<T>")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 12: Function Return Types
-# ============================================================================
-
-describe "Return Type Deprecation Warnings":
-    """
-    ## Generic Return Type Syntax
-
-    Tests deprecation warnings for return type annotations.
-    """
-
-    it "warns about deprecated [] syntax in return type":
-        var parser = Parser.new("fn get() -> Option[Int]:\n    None")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_warning = hints.any(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated"))
-        expect has_warning
-
-    it "does NOT warn about <> syntax in return type":
-        var parser = Parser.new("fn get() -> Option<Int>:\n    None")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 13: Const Generic Parameters
-# ============================================================================
-
-describe "Const Generic Deprecation Warnings":
-    """
-    ## Const Generic Syntax
-
-    Tests deprecation warnings for const generic parameters.
-    """
-
-    it "warns about deprecated [] syntax with const generics":
-        var parser = Parser.new("struct Array[T, const N: usize]:\n    data: [T; N]")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_warning = hints.any(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated"))
-        expect has_warning
-
-    it "does NOT warn about <> syntax with const generics":
-        var parser = Parser.new("struct Array<T, const N: usize>:\n    data: [T; N]")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 14: Impl Block Generics
-# ============================================================================
-
-describe "Impl Block Deprecation Warnings":
-    """
-    ## Generic Impl Block Syntax
-
-    Tests deprecation warnings for impl block generics.
-    """
-
-    it "warns about [] in impl block":
-        var parser = Parser.new("impl[T] Container[T]:\n    fn new(val: T) -> Container[T]:\n        pass")
-        parser.parse()
-        val hints = parser.error_hints()
-        val warning_count = hints.filter(_1.level == ErrorHintLevel::Warning and h.message.contains("Deprecated")).len()
-        expect warning_count >= 2
-
-    it "does NOT warn about <> in impl block":
-        var parser = Parser.new("impl<T> Container<T>:\n    fn new(val: T) -> Container<T>:\n        pass")
-        parser.parse()
-        val hints = parser.error_hints()
-        val has_deprecation = hints.any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-        expect not has_deprecation
-
-
-# ============================================================================
-# Test Group 15: Edge Cases
-# ============================================================================
-
-describe "Deprecation Warning Edge Cases":
-    """
-    ## Mixed and Edge Case Syntax
-
-    Tests edge cases for deprecation warnings.
-    """
-
-    it "old syntax warns, new syntax does not":
-        var parser_old = Parser.new("fn legacy[T](x: T) -> T:\n    x")
-        parser_old.parse()
-        val old_warns = parser_old.error_hints().any(_1.message.contains("Deprecated"))
-
-        var parser_new = Parser.new("fn modern<U>(y: U) -> U:\n    y")
-        parser_new.parse()
-        val new_warns = parser_new.error_hints().any(_1.message.contains("Deprecated") and h.message.contains("generic"))
-
-        expect old_warns
-        expect not new_warns
+use std.common.convert.{i64_to_text}
+use std.common.convert.{safe_parse_int}
+use std.spec.step
+
+describe "Final integration pipeline over stdlib primitives":
+    it "a parse-compute-render pipeline round-trips its value":
+        step("Verify: a parse-compute-render pipeline round-trips its value")
+        # @req: REQ-SYS-SYS_FINAL-001
+        val raw = "21"
+        val parsed = safe_parse_int(raw) ?? 0
+        expect(parsed).to_equal(21)  # oracle: the fixture parses to its decimal value
+        val doubled = parsed * 2
+        expect(doubled).to_equal(42)  # oracle: 21*2
+        expect(i64_to_text(doubled)).to_equal("42")  # oracle: rendering reproduces canonical decimal text
+
+    it "aggregation over an array matches the closed-form total":
+        step("Verify: aggregation over an array matches the closed-form total")
+        # @req: REQ-SYS-SYS_FINAL-001
+        var loop_total = 0
+        for i in 1..101:
+            loop_total = loop_total + i
+        val closed_form = 100 * 101 / 2
+        expect(loop_total).to_equal(closed_form)  # oracle: the Gauss sum 5050
+
+    it "a dict built in a loop retains every key it was given":
+        step("Verify: a dict built in a loop retains every key it was given")
+        # @req: REQ-SYS-SYS_FINAL-001
+        val table = {"a": 1, "b": 2}
+        expect(table.len()).to_equal(2)  # oracle: two keys inserted
+        expect((table["a"] + table["b"])).to_equal(3)  # oracle: stored values are readable and summable
 

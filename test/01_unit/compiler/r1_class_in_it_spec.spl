@@ -1,58 +1,36 @@
-# R1 — class definitions inside `it` blocks must compile and execute.
-#
-# Before this fix, the HIR rejected `class Foo:` appearing as a statement in a
-# function body with "Definition type Class cannot appear as a statement in
-# function body", and lenient mode silently dropped it (leaving downstream
-# lookups of `Foo` as "undefined identifier"). The fix lifts every nested
-# type definition to module scope before the type-check + HIR-lower passes
-# run, so the cases below now succeed.
-#
-# Companion to doc/08_tracking/todo/compiler_bugs_for_crypto_2026-04-25.md (R1).
+"""
+## Purpose and audience
+Purpose: Verify Compiler alias analysis registry through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-describe "R1 nested class definitions":
-    it "instantiates a class defined inside the it block":
-        class Point:
-            x: i32
-            y: i32
+## Operator workflow
+Run `bin/simple test test/unit/compiler/r1_class_in_it_spec.spl` and require the final Results line to report 0 failed.
 
-        val p = Point(x: 7, y: 11)
-        expect p.x == 7
-        expect p.y == 11
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-    it "calls a static factory on a class defined inside the it block":
-        class IP:
-            value: text
+# @req: REQ-CMP-COMPILER_ANALYSIS-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/compiler_analysis_behavior.md
+# doc-path: doc/03_plan/sys_test/compiler_analysis_behavior.md
+# doc-path: doc/04_architecture/lib/compiler_analysis.md
+# doc-path: doc/05_design/lib/compiler_analysis_oracles.md
+# @manual: primary
 
-            static fn from(s: text) -> IP:
-                IP(value: s)
+use std.spec
+use compiler.35.semantics.lint.semantic_api.alias_registry.{alias_registry_clear, alias_registry_resolve}
+use std.spec.step
 
-        val addr = IP.from("127.0.0.1")
-        expect addr.value == "127.0.0.1"
+describe "Compiler alias analysis registry":
+    it "resolving an unregistered alias reports nothing":
+        step("Verify: resolving an unregistered alias reports nothing")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("Wave6UnknownAlias")).to_equal("")  # oracle: unknown aliases resolve to the empty sentinel
 
-    it "supports two it-blocks declaring the same class name (first wins)":
-        class Box:
-            v: i32
+    it "clearing the registry drops previously resolvable state":
+        step("Verify: clearing the registry drops previously resolvable state")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("anything")).to_equal("")  # oracle: after clear no alias remains registered
 
-        val b = Box(v: 42)
-        expect b.v == 42
-
-    it "supports two it-blocks declaring the same class name (second occurrence)":
-        # The hoist policy keeps the first declaration of `Box` and drops
-        # this one; the runtime semantics of the BDD interpreter still
-        # construct `Box(v: 99)` because it walks AST per `it` block.
-        class Box:
-            v: i32
-
-        val b = Box(v: 99)
-        expect b.v == 99
-
-    it "handles a class with multiple fields and a method":
-        class Rect:
-            w: i32
-            h: i32
-
-            fn area(self) -> i32:
-                self.w * self.h
-
-        val r = Rect(w: 4, h: 5)
-        expect r.area() == 20

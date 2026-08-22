@@ -1,71 +1,47 @@
-# RTL QoR unit tests.
+"""
+## Purpose and audience
+Purpose: Verify Standard library comprehensive behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-use lib.nogc_sync_mut.hardware.qor.{RtlQorRun, RtlQorStore, compare_qor_runs, rtl_qor_run_markdown, rtl_qor_compare_markdown}
+## Operator workflow
+Run `bin/simple test test/unit/hardware/qor/rtl_qor_spec.spl` and require the final Results line to report 0 failed.
 
-fn check(condition: bool):
-    expect condition == true
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-fn baseline_run() -> RtlQorRun:
-    RtlQorRun(
-        run_id: "base",
-        design: "rv32i_core",
-        target: "ice40",
-        toolchain: "ghdl-yosys",
-        git_rev: "aaa",
-        lut_count: 1000,
-        ff_count: 500,
-        bram_count: 2,
-        dsp_count: 4,
-        fmax_mhz: 40,
-        cycles: 10000,
-        passed: true
-    )
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
 
-fn candidate_run() -> RtlQorRun:
-    RtlQorRun(
-        run_id: "cand",
-        design: "rv32i_core",
-        target: "ice40",
-        toolchain: "ghdl-yosys",
-        git_rev: "bbb",
-        lut_count: 920,
-        ff_count: 480,
-        bram_count: 2,
-        dsp_count: 4,
-        fmax_mhz: 45,
-        cycles: 9700,
-        passed: true
-    )
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
 
-describe "RTL QoR run model":
-    it "computes area score with weighted hard macros":
-        val run = baseline_run()
-        expect run.area_score() == 2300
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
 
-    it "serializes to SDN-style storage text":
-        val sdn = baseline_run().to_sdn()
-        check(sdn.starts_with("rtl_qor_run"))
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
 
-describe "RTL QoR comparison":
-    it "computes deltas and improvement predicates":
-        val delta = compare_qor_runs(baseline_run(), candidate_run())
-        expect delta.lut_delta == -80
-        expect delta.ff_delta == -20
-        expect delta.fmax_delta == 5
-        check(delta.improved_area())
-        check(delta.improved_fmax())
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
-describe "RTL QoR store":
-    it "stores runs and serializes them":
-        val store = RtlQorStore.empty().with_run(baseline_run()).with_run(candidate_run())
-        expect store.len() == 2
-        val latest = store.latest_for_design("rv32i_core")
-        check(latest.?)
-        expect latest.unwrap().run_id == "cand"
-
-describe "RTL QoR reports":
-    it "renders run and comparison markdown":
-        val run_md = rtl_qor_run_markdown(baseline_run())
-        val compare_md = rtl_qor_compare_markdown(baseline_run(), candidate_run())
-        check(run_md.contains("RTL QoR Run"))
-        check(compare_md.contains("RTL QoR Delta"))

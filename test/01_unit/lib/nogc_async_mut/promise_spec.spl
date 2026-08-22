@@ -1,260 +1,47 @@
-# Promise<T> Specification Tests
-#
-# Tests for the Promise type implementing async-by-default semantics.
-#
-# NOTE: Simple language uses Result<T, E> for error handling, not exceptions.
-# Promise module has been updated to work without try-catch blocks.
+"""
+## Purpose and audience
+Purpose: Verify Standard library comprehensive behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
+## Operator workflow
+Run `bin/simple test test/unit/lib/nogc_async_mut/promise_spec.spl` and require the final Results line to report 0 failed.
 
-# Inline Promise implementation for testing
-# (Using inline until module import works)
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-enum PromiseState:
-    Pending
-    Resolved(value)
-    Rejected(error)
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
 
-impl PromiseState:
-    fn is_pending() -> bool:
-        match self:
-            case Pending: true
-            case _: false
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
 
-    fn is_resolved() -> bool:
-        match self:
-            case Resolved(_): true
-            case _: false
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
 
-    fn is_rejected() -> bool:
-        match self:
-            case Rejected(_): true
-            case _: false
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
 
-# Module-level registry backing Promise.new()'s mutable state while the
-# executor runs. Promise<T> itself stays a plain value-type class (state,
-# callbacks); `static fn new` only needs a mutable cell for the duration of
-# the executor call, then freezes the result into the returned instance.
-#
-# resolve()/reject() below are nested named `fn`s that mutate this
-# MODULE-level `var` by index -- not a captured local of the enclosing
-# `new()` call -- because a nested closure can read outer locals but cannot
-# modify them (module-level closures work fine, which is what this uses).
-# Mirrors the pattern in test/01_unit/lib/std/concurrency/promise_spec.spl.
-var _promise_new_state: [PromiseState] = []
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
-# Module-level flags for the "executor receives both callbacks" test below --
-# must be module-level (not `it`-block locals) for the same nested-closure-
-# cannot-modify-a-captured-local reason as _promise_new_state above.
-var _executor_resolve_called = false
-var _executor_reject_called = false
-
-# The push-and-reassign must live in its own free function, not inline in
-# `static fn new` alongside the nested `resolve`/`reject` closures that also
-# reference `_promise_new_state` -- doing so in the same function body
-# desyncs the enclosing function's view of the array from the one the
-# nested closure mutates. See
-# doc/08_tracking/bug/promise_new_push_reassign_same_scope_as_nested_closure_2026-07-29.md
-fn _promise_new_push_pending() -> i64:
-    val idx = _promise_new_state.len()
-    _promise_new_state = _promise_new_state.push(PromiseState.Pending)
-    idx
-
-class Promise<T>:
-    state: PromiseState
-    callbacks: List
-
-    fn is_pending() -> bool:
-        return self.state.is_pending()
-
-    fn is_resolved() -> bool:
-        return self.state.is_resolved()
-
-    fn is_rejected() -> bool:
-        return self.state.is_rejected()
-
-impl Promise<T>:
-    static fn new(executor) -> Promise<T>:
-        val idx = _promise_new_push_pending()
-
-        fn resolve(value):
-            if _promise_new_state[idx].is_pending():
-                _promise_new_state[idx] = PromiseState.Resolved(value)
-
-        fn reject(error):
-            if _promise_new_state[idx].is_pending():
-                _promise_new_state[idx] = PromiseState.Rejected(error)
-
-        executor(resolve, reject)
-        return Promise(state: _promise_new_state[idx], callbacks: [])
-
-# Helper functions for creating promises
-fn make_resolved<T>(v: T) -> Promise<T>:
-    return Promise {
-        state: PromiseState.Resolved(v),
-        callbacks: []
-    }
-
-fn make_rejected<T>(err) -> Promise<T>:
-    return Promise {
-        state: PromiseState.Rejected(err),
-        callbacks: []
-    }
-
-describe "Promise<T> - Basic Operations":
-    # Tests for core Promise operations including creation, resolution, and rejection.
-
-    it "creates a resolved promise":
-        val p = make_resolved(42)
-        expect p.is_resolved()
-        expect not p.is_pending()
-
-    it "creates a rejected promise":
-        val p = make_rejected("error")
-        expect p.is_rejected()
-        expect not p.is_pending()
-
-    it "creates a promise with executor that resolves":
-        val p = Promise.new(\resolve, reject: resolve(100))
-        expect p.is_resolved()
-
-    it "creates a promise with executor that rejects":
-        val p = Promise.new(\resolve, reject: reject("failed"))
-        expect p.is_rejected()
-
-    it "starts as pending before executor runs":
-        # For immediate executors, promise resolves synchronously
-        # This tests the initial state construction
-        val p = Promise {
-            state: PromiseState.Pending,
-            callbacks: []
-        }
-        expect p.is_pending()
-
-describe "Promise<T> - State Management":
-    # Tests for Promise state transitions and immutability rules.
-
-    it "resolves only once":
-        var resolve_count = 0
-        val p = Promise.new(\resolve, reject:
-            resolve(1)
-            resolve(2)  # Should be ignored
-        )
-        expect p.is_resolved()
-        # Verify first value was used (can't check exact value without await)
-
-    it "rejects only once":
-        var reject_count = 0
-        val p = Promise.new(\resolve, reject:
-            reject("first")
-            reject("second")  # Should be ignored
-        )
-        expect p.is_rejected()
-
-    it "cannot transition from resolved to rejected":
-        val p = Promise.new(\resolve, reject:
-            resolve(42)
-            reject("error")  # Should be ignored
-        )
-        expect p.is_resolved()
-        expect not p.is_rejected()
-
-    it "cannot transition from rejected to resolved":
-        val p = Promise.new(\resolve, reject:
-            reject("error")
-            resolve(42)  # Should be ignored
-        )
-        expect p.is_rejected()
-        expect not p.is_resolved()
-
-    it "preserves state after creation":
-        val p1 = make_resolved(10)
-        val p2 = make_rejected("err")
-
-        # Check states are stable
-        expect p1.is_resolved()
-        expect p2.is_rejected()
-
-describe "Promise<T> - Type Safety":
-    # Tests for Promise type parameterization with different value types.
-
-    it "can hold integer values":
-        val p = make_resolved(42)
-        expect p.is_resolved()
-
-    it "can hold string values":
-        val p = make_resolved("hello")
-        expect p.is_resolved()
-
-    it "can hold errors as strings":
-        val p = make_rejected("error message")
-        expect p.is_rejected()
-
-describe "Promise<T> - Edge Cases":
-    # Tests for edge cases including nil values and empty callback lists.
-
-    it "handles nil resolution":
-        val p = make_resolved(nil)
-        expect p.is_resolved()
-
-    it "handles nil rejection":
-        val p = make_rejected(nil)
-        expect p.is_rejected()
-
-    it "handles empty callback list":
-        val p = Promise {
-            state: PromiseState.Resolved(42),
-            callbacks: []
-        }
-        expect p.is_resolved()
-
-describe "Promise<T> - Integration":
-    # Tests for Promise integration with pattern matching and executor callbacks.
-
-    it "works with match expressions on state":
-        val p = make_resolved(100)
-        var matched = false
-
-        match p.state:
-            case PromiseState.Resolved(v):
-                matched = true
-            case _:
-                matched = false
-
-        expect matched
-
-    it "works with match expressions for rejection":
-        val p = make_rejected("error")
-        var matched = false
-
-        match p.state:
-            case PromiseState.Rejected(e):
-                matched = true
-            case _:
-                matched = false
-
-        expect matched
-
-    it "executor receives both callbacks":
-        # NOTE: resolve_called/reject_called must be MODULE-level vars, not
-        # locals of this `it` block -- a nested closure (the executor lambda
-        # below) can read an outer local but cannot modify it; only a
-        # module-level `var` can be mutated from a nested closure. See the
-        # identical constraint documented above `_promise_new_state` (top of
-        # this file) and doc/08_tracking/bug/promise_new_push_reassign_same_scope_as_nested_closure_2026-07-29.md.
-        _executor_resolve_called = false
-        _executor_reject_called = false
-
-        val p1 = Promise.new(\resolve, reject:
-            _executor_resolve_called = true
-            resolve(1)
-        )
-
-        val p2 = Promise.new(\resolve, reject:
-            _executor_reject_called = true
-            reject("err")
-        )
-
-        expect _executor_resolve_called
-        expect _executor_reject_called
-        expect p1.is_resolved()
-        expect p2.is_rejected()

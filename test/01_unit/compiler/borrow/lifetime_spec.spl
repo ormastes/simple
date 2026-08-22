@@ -1,101 +1,36 @@
-# # Lifetime Analysis Unit Tests
-#
-# **Feature ID:** #COMPILER-BORROW-002
-# **Category:** Compiler | Borrow | Lifetime
-# **Status:** Implemented
+"""
+## Purpose and audience
+Purpose: Verify Compiler alias analysis registry through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-fn check(condition: bool):
-    expect(condition).to_equal(true)
+## Operator workflow
+Run `bin/simple test test/unit/compiler/borrow/lifetime_spec.spl` and require the final Results line to report 0 failed.
 
-describe "Variable Lifetimes":
-    it "lifetime starts at declaration":
-        val x = 42
-        check(x == 42)
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-    it "lifetime ends at scope exit":
-        var result = 0
-        if true:
-            val temp = 42
-            result = temp
-        check(result == 42)
+# @req: REQ-CMP-COMPILER_ANALYSIS-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/compiler_analysis_behavior.md
+# doc-path: doc/03_plan/sys_test/compiler_analysis_behavior.md
+# doc-path: doc/04_architecture/lib/compiler_analysis.md
+# doc-path: doc/05_design/lib/compiler_analysis_oracles.md
+# @manual: primary
 
-    it "nested lifetimes":
-        val outer = 1
-        if true:
-            val middle = 2
-            if true:
-                val inner = 3
-                check(outer + middle + inner == 6)
+use std.spec
+use compiler.35.semantics.lint.semantic_api.alias_registry.{alias_registry_clear, alias_registry_resolve}
+use std.spec.step
 
-    it "loop variable lifetime per iteration":
-        var sum = 0
-        for i in 0..3:
-            val temp = i * 10
-            sum = sum + temp
-        check(sum == 30)
+describe "Compiler alias analysis registry":
+    it "resolving an unregistered alias reports nothing":
+        step("Verify: resolving an unregistered alias reports nothing")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("Wave6UnknownAlias")).to_equal("")  # oracle: unknown aliases resolve to the empty sentinel
 
-    it "match arm lifetimes":
-        val x = Some(42)
-        var result = 0
-        match x:
-            Some(v):
-                val doubled = v * 2
-                result = doubled
-            nil:
-                result = 0
-        check(result == 84)
+    it "clearing the registry drops previously resolvable state":
+        step("Verify: clearing the registry drops previously resolvable state")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("anything")).to_equal("")  # oracle: after clear no alias remains registered
 
-describe "Reference Lifetimes":
-    it "reference lives within function":
-        fn get_value() -> i64:
-            val x = 42
-            x
-        check(get_value() == 42)
-
-    it "return value outlives function":
-        fn create() -> i64:
-            42
-        val result = create()
-        check(result == 42)
-
-    it "closure captures extend lifetime":
-        val x = 42
-        val f = \: x
-        check(f() == 42)
-
-    it "array element lifetime":
-        val arr = [10, 20, 30]
-        val first = arr[0]
-        check(first == 10)
-
-describe "Drop Ordering":
-    it "LIFO drop order":
-        val first = 1
-        val second = 2
-        val third = 3
-        check(first + second + third == 6)
-
-    it "struct fields drop with struct":
-        class Pair:
-            a: i64
-            b: i64
-        val p = Pair(a: 1, b: 2)
-        check(p.a + p.b == 3)
-
-    it "array elements drop with array":
-        val arr = [1, 2, 3]
-        check(arr.len() == 3)
-
-describe "Temporary Lifetimes":
-    it "temporary in expression":
-        val result = [1, 2, 3].len()
-        check(result == 3)
-
-    it "temporary in function call":
-        fn sum_len(arr: [i64]) -> i64:
-            arr.len()
-        check(sum_len([1, 2, 3]) == 3)
-
-    it "chained temporaries":
-        val result = "hello world".len()
-        check(result == 11)

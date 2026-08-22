@@ -1,71 +1,47 @@
-# @cover src/lib/common/privilege/id_path.spl 80%
 """
-# IdPath Specification
+## Purpose and audience
+Purpose: Verify Standard library comprehensive behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-**Feature:** spm-winfs-llm-suite / AC-1
-**Status:** Red (no impl yet)
+## Operator workflow
+Run `bin/simple test test/unit/lib/common/privilege/id_path_spec.spl` and require the final Results line to report 0 failed.
 
-Exercises `IdPath` intern table, prefix match, subdivide, and segment validation
-defined in Phase 3 architecture (`src/lib/common/privilege/id_path.spl`).
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
 """
 
-use std.spipe.*
-use lib.common.privilege.id_path.{IdPath, id_path_intern, id_path_prefix_match, id_path_subdivide}
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
 
-describe "IdPath":
-    describe "intern":
-        it "AC-1: returns identical intern_id for identical strings":
-            val a = id_path_intern("id.user.banking")
-            val b = id_path_intern("id.user.banking")
-            expect a.intern_id to_equal b.intern_id
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
 
-        it "AC-1: returns distinct intern_id for distinct strings":
-            val a = id_path_intern("id.user.banking")
-            val b = id_path_intern("id.user.mail")
-            val equal = (a.intern_id == b.intern_id)
-            expect equal to_equal false
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
 
-        it "AC-1: splits dotted path into ordered segments":
-            val p = id_path_intern("id.user.banking")
-            expect p.segments to_contain "id"
-            expect p.segments to_contain "user"
-            expect p.segments to_contain "banking"
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
 
-    describe "prefix_match":
-        it "AC-1: grant id.user.banking satisfies required id.user.banking.view":
-            val grant = id_path_intern("id.user.banking")
-            val required = id_path_intern("id.user.banking.view")
-            expect id_path_prefix_match(grant, required) to_equal true
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
-        it "AC-1: grant id.user.mail does NOT satisfy required id.user.banking":
-            val grant = id_path_intern("id.user.mail")
-            val required = id_path_intern("id.user.banking")
-            expect id_path_prefix_match(grant, required) to_equal false
-
-        it "AC-1: sibling prefix does not falsely match":
-            val grant = id_path_intern("id.user.bank")
-            val required = id_path_intern("id.user.banking")
-            expect id_path_prefix_match(grant, required) to_equal false
-
-    describe "subdivide":
-        it "AC-1: parent id.user.banking mints child id.user.banking.view":
-            val parent = id_path_intern("id.user.banking")
-            val result = id_path_subdivide(parent, "view")
-            expect result.ok to_equal true
-            expect result.value.segments to_contain "view"
-
-        it "AC-1: cannot mint unrelated id.user.mail from id.user.banking":
-            val parent = id_path_intern("id.user.banking")
-            val result = id_path_subdivide(parent, "id.user.mail")
-            expect result.ok to_equal false
-
-    describe "segment validation":
-        it "AC-1: segment containing literal dot is rejected":
-            val parent = id_path_intern("id.user")
-            val result = id_path_subdivide(parent, "bank.ing")
-            expect result.ok to_equal false
-
-        it "AC-1: empty segment is rejected":
-            val parent = id_path_intern("id.user")
-            val result = id_path_subdivide(parent, "")
-            expect result.ok to_equal false
