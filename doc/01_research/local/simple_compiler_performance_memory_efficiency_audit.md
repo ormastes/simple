@@ -1999,3 +1999,21 @@ and propagates direct assertions with an append-only queue. Expected work is
 `O(source bytes + F + E)` and graph storage is `O(F + E)`. The rewrite preserves
 method-call exclusion, forward references, duplicate-definition name union,
 seedless-cycle rejection, and seeded-cycle propagation.
+
+### Query diagnostic error-code classifier audit
+
+The query CLI carried two near-identical 220-line ordered classifiers in
+`query_check` and `query_diagnostics`. Both were compiled into the rich query
+surface even though the active path uses the latter; their sole semantic delta
+was the legacy `FFI error` versus active `SFFI error` phrase. This duplicated
+parser/compiler work, generated code, instruction-cache footprint, and
+maintenance state.
+
+One cycle-free `query_error_codes` owner now retains the ordered classifier and
+accepts the codegen phrase explicitly. Both entry modules keep thin wrappers, so
+their exact phrase behavior, explicit-code handling, first-match precedence, and
+fallback codes remain unchanged. Replacing 473 entry-local lines with one
+242-line owner and four wrapper lines yields a net 227-line reduction. The
+active classifier still performs up to 136 substring
+scans over 117 needles for late/no-match diagnostics; a generated immutable
+multi-pattern matcher remains the next runtime-complexity tranche.
