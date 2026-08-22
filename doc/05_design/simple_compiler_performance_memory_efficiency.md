@@ -380,3 +380,11 @@ once. Repeated token/delimiter searches use absolute forward cursors over the
 original text; they never allocate a suffix per match. Each warning entrypoint
 has one method owner so diagnostic construction and policy cannot diverge across
 duplicate declarations.
+
+## Lint deduplication collection contract
+
+Rules that need membership only use dictionary/set storage plus an explicit
+count when native dictionary length is not an admitted contract. They do not
+scan a growing array for every candidate. Ordering-sensitive diagnostics retain
+an ordered result array separately; count-only rules such as `wide_public` never
+iterate the membership dictionary.
