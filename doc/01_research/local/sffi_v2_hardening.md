@@ -1190,3 +1190,19 @@ resolution failures and an 8.9-second formatter threshold breach. Census and
 ratchet pass at 12,487 declarations, 11,701 untouched, 512 tagged, 586
 contracted, 558 Simple implementation rows (519 symbols) across 46 files, and
 zero signed admissions.
+
+Signal callback storage is now structurally bounded to 33 entries: one slot for
+each signal accepted by the hosted provider (`0..31`) plus one atexit slot.
+Repeated signal and atexit registrations replace their existing slot, and a
+new distinct entry fails closed at capacity. Dispatch remains a single linear
+pass over only registered callbacks and registration remains bounded O(33),
+with no per-dispatch allocation, lookup table, lock, process, or hashing work.
+The `COLL008` static lint previously warned on every global push even when its
+own recommended capacity guard was present. It now proves a dominating
+`global.len() >= capacity` return guard before the push; tests retain warnings
+for unbounded growth and post-push guards. Focused compiler/signal checks and
+lint pass, as do the collection lint tests. Full compiler, lib, MCP, and LSP-MCP
+source checks pass. Broader release evidence remains red independently: the
+MCP stdio integration did not complete under the bootstrap seed, core compile
+smoke produced SMF rather than the expected executable result, and the native
+MCP smoke lacks `bin/simple_mcp_server`. None is promoted to verified evidence.

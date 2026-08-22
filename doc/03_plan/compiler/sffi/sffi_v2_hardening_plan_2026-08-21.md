@@ -946,3 +946,12 @@ census: 12,487 declarations, 11,701 untouched, 512 tagged, 586 contracted, 558
 Simple implementation rows, and zero signed admissions. A later memory-focused
 slice must bound or reset the callback registry before calling this family
 complete.
+
+The signal callback registry is now capped at 33 unique keys and replaces
+duplicate signal/atexit callbacks. `COLL008` understands and tests a dominating
+capacity-return guard, so the memory proof is tool-enforced rather than
+suppressed. Runtime dispatch remains allocation-free and unchanged in
+complexity. Compiler/lib/MCP/LSP-MCP source checks pass; do not claim release
+verification until the missing native MCP artifact, core SMF/executable smoke
+mismatch, bootstrap-seed signal provider gap, and MCP stdio integration failure
+are resolved and rerun by their owning lanes.

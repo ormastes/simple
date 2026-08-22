@@ -9,7 +9,7 @@
 # COLL005: Chained .filter().filter()                           MEDIUM
 # COLL006: String concat in loop       str = str + x            CRITICAL
 # COLL007: Array rebuild to pop last   arr = arr[0:len-1]       HIGH
-# COLL008: Unbounded global .push()    module var with no reset MEDIUM
+# COLL008: Unbounded global .push()    no reset or capacity-return guard MEDIUM
 # COLL019: Mutation through indexed    d[k].push(x)             HIGH
 #          access is silently lost     a[i].field.push(x)
 #          (ADR-004 value semantics; COLL009-018 are reserved for the
@@ -28,14 +28,14 @@ use compiler.core.ast_expr.{
 use compiler.core.types.{TYPE_TEXT, TYPE_DICT, TYPE_DICT_BASE, TYPE_TUPLE_BASE}
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN,
-    STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_COMPOUND_ASSIGN,
+    STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_COMPOUND_ASSIGN, STMT_RETURN,
     stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_body, stmt_get_type
 }
 use compiler.core.ast.{
     DECL_FN, DECL_VAR, decl_get_tag, decl_get_name, decl_get_body,
     decl_get_param_names, decl_get_param_types
 }
-use compiler.core.tokens.{TOK_PLUS}
+use compiler.core.tokens.{TOK_PLUS, TOK_GT_EQ}
 
 # ============================================================================
 # Warning Struct
@@ -571,7 +571,7 @@ fn is_array_rebuild_pop(e: i64) -> bool:
                         return true
     false
 
-# COLL008: Detect unbounded global array with .push() but no reset
+# COLL008: Detect global array growth without reset or a dominating bound
 # Scans module-level var declarations + function bodies for .push() on those vars
 fn check_unbounded_globals(decl_indices: [i64]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
@@ -589,7 +589,7 @@ fn check_unbounded_globals(decl_indices: [i64]) -> [CollectionLintWarning]:
         return warnings
 
     # For each function, check if it pushes to a global array
-    # without any corresponding reset/clear/trim
+    # without a reset/clear/trim or a dominating len >= capacity return guard
     for idx in decl_indices:
         if decl_get_tag(idx) == DECL_FN:
             val fn_name = decl_get_name(idx)
@@ -600,7 +600,7 @@ fn check_unbounded_globals(decl_indices: [i64]) -> [CollectionLintWarning]:
             for rv in reset_vars:
                 reset_vars_set[rv] = true
             for pv in pushed_vars:
-                if not reset_vars_set.has(pv):
+                if not reset_vars_set.has(pv) and not has_bounded_push(body, pv):
                     warnings.push(CollectionLintWarning(
                         code: "COLL008",
                         severity: "MEDIUM",
@@ -609,6 +609,58 @@ fn check_unbounded_globals(decl_indices: [i64]) -> [CollectionLintWarning]:
                         item_name: fn_name
                     ))
     warnings
+
+fn is_len_call_for(e: i64, global_name: text) -> bool:
+    if e < 0 or expr_get_tag(e) != EXPR_METHOD_CALL or expr_get_str(e) != "len":
+        return false
+    val receiver = expr_get_left(e)
+    receiver >= 0 and expr_get_tag(receiver) == EXPR_IDENT and expr_get_str(receiver) == global_name
+
+fn body_returns(stmts: [i64]) -> bool:
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_get_tag(s)
+        if tag == STMT_RETURN:
+            return true
+        if tag == STMT_IF or tag == STMT_BLOCK:
+            if body_returns(stmt_get_body(s)):
+                return true
+    false
+
+fn is_capacity_return_guard(s: i64, global_name: text) -> bool:
+    if s < 0 or stmt_get_tag(s) != STMT_IF:
+        return false
+    val condition = stmt_get_expr(s)
+    if condition < 0 or expr_get_tag(condition) != EXPR_BINARY:
+        return false
+    if expr_get_int(condition) != TOK_GT_EQ:
+        return false
+    is_len_call_for(expr_get_left(condition), global_name) and body_returns(stmt_get_body(s))
+
+fn is_push_of_global(s: i64, global_name: text) -> bool:
+    if s < 0 or stmt_get_tag(s) != STMT_EXPR:
+        return false
+    val e = stmt_get_expr(s)
+    if e < 0 or expr_get_tag(e) != EXPR_METHOD_CALL or expr_get_str(e) != "push":
+        return false
+    val receiver = expr_get_left(e)
+    receiver >= 0 and expr_get_tag(receiver) == EXPR_IDENT and expr_get_str(receiver) == global_name
+
+fn has_bounded_push(stmts: [i64], global_name: text) -> bool:
+    var guarded = false
+    for s in stmts:
+        if s < 0:
+            continue
+        if is_capacity_return_guard(s, global_name):
+            guarded = true
+        elif guarded and is_push_of_global(s, global_name):
+            return true
+        val tag = stmt_get_tag(s)
+        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
+            if has_bounded_push(stmt_get_body(s), global_name):
+                return true
+    false
 
 fn find_pushed_globals(stmts: [i64], globals: [text]) -> [text]:
     var pushed: [text] = []
@@ -878,4 +930,3 @@ fn check_stmts_for_index_mutation(stmts: [i64], fn_name: text, dict_vars: [text]
 # ============================================================================
 # Exports
 # ============================================================================
-
