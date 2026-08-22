@@ -16,6 +16,7 @@
 use std.common.crypto.types.{rotr32}
 use std.common.crypto.sha256_core.{sha256_initial_hash, sha256_pad_message, sha256_process_block}
 use std.common.crypto.secure_memory.{secure_zero_i64_slots}
+use std.common.string_core.{text_to_bytes as string_core_text_to_bytes}
 
 # SHA-256 round constants (first 32 bits of fractional parts of cube roots of first 64 primes).
 fn _sha256_k() -> [i64]:
@@ -204,12 +205,14 @@ fn sha256_bytes(data: [i64]) -> [i64]:
 # Digest bit-identity with the previous implementation was verified over
 # n = 0,1,2,3,55,56,64,65,127,128,129,1000,25553 bytes (block-boundary cases
 # included) plus the published FIPS 180-4 vectors for "" and "abc".
-extern fn rt_text_to_bytes(s: text) -> [u8]
+@unsafe(reason: "raw SHA-256 accelerator; a non-32-byte result is the unsupported or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_tls13_sha256(data: [u8]) -> [u8]
 
 fn sha256_text(data: text) -> text:
-    val raw = rt_text_to_bytes(data)
-    val digest = rt_tls13_sha256(raw)
+    val raw = string_core_text_to_bytes(data)
+    var digest: [u8] = []
+    unsafe(capabilities: [ffi]):
+        digest = rt_tls13_sha256(raw)
     # rt_tls13_sha256 returns a 0-length array under the Cranelift JIT while
     # returning the correct 32 bytes interpreted, so the fast path silently
     # produced the EMPTY digest for every input under `bin/simple run` (which
@@ -220,16 +223,16 @@ fn sha256_text(data: text) -> text:
     if digest.len() != 32u64:
         return sha256_u8_hex(raw)
     val hex_digits = "0123456789abcdef"
-    var out = ""
+    var out: [text] = [""; 64]
     var oi = 0
     while oi < digest.len():
         val v = digest[oi] as i64
         val hi = (v >> 4) & 15
         val lo = v & 15
-        out = out + hex_digits.substring(hi, hi + 1)
-        out = out + hex_digits.substring(lo, lo + 1)
+        out[oi * 2] = hex_digits.substring(hi, hi + 1)
+        out[oi * 2 + 1] = hex_digits.substring(lo, lo + 1)
         oi = oi + 1
-    out
+    out.join("")
 
 # Virtual byte j of the SHA-256 padded message for `data` (padding computed,
 # never materialized): data bytes, then 0x80, zeros, and the 8-byte big-endian
@@ -360,15 +363,17 @@ fn _sha256_u8_hex_owned(data: [u8], require_zeroization: bool) -> text:
         block_offset = block_offset + 64
 
     val digits = "0123456789abcdef"
-    var result = ""
+    var result: [text] = [""; 64]
     val words = [h0, h1, h2, h3, h4, h5, h6, h7]
     var out_i = 0
+    var result_i = 0
     while out_i < 8:
         val word = words[out_i]
         var shift = 28
         while shift >= 0:
             val nibble = (word >> shift) & 15
-            result = result + digits[nibble:nibble + 1]
+            result[result_i] = digits[nibble:nibble + 1]
+            result_i = result_i + 1
             shift = shift - 4
         out_i = out_i + 1
     # `w` contains the expanded credential-derived message schedule and
@@ -379,7 +384,7 @@ fn _sha256_u8_hex_owned(data: [u8], require_zeroization: bool) -> text:
     if require_zeroization and
        (not schedule_wipe.verified() or not words_wipe.verified()):
         return ""
-    result
+    result.join("")
 
 fn sha256_u8_hex(data: [u8]) -> text:
     _sha256_u8_hex_owned(data, false)

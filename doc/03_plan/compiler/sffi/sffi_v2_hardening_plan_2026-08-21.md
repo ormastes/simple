@@ -1274,3 +1274,13 @@ call, keep the pure-Simple fallback, and do not call that provider verified unti
 signed evidence is admitted. The summary-only call-authority census is the
 required low-output ratchet command; current counts are 21,331 raw, 1,970
 explicit, and 19,361 missing.
+
+The canonical SHA-256 text boundary is now unsafe-minimized: duplicated text-
+byte declarations are removed, string-core owns the raw conversion, and the
+accelerator retains one checked call plus pure-Simple fallback. Keep its fixed
+64-slot hex buffer; do not reintroduce growing-string concatenation. Current
+authoritative totals are 12,053 unsafe declaration rows, 365 minimized, 10,954
+untouched, and zero signed/admitted. Next prioritize `rt_file` (2,604 untouched),
+`rt_process` (970), `rt_env` (459), and `rt_time` (354), while preserving the
+one-call/no-lookup/no-unbounded-allocation rule. The repaired census must keep
+file-output mode and must never read `/dev/stdout` as an input.

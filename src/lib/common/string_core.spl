@@ -1,4 +1,5 @@
 extern fn rt_string_len(s: text) -> i64
+@unsafe(reason: "raw UTF-8 byte lift; an empty array is valid for empty text but otherwise may include provider failure", capabilities: [ffi])
 extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # Basic string operations
@@ -193,13 +194,14 @@ fn str_join(parts: [text], sep: text) -> text:
 
 # Inline char code lookup (ASCII-based)
 fn char_code_inline(c: text) -> i64:
-    val bytes = rt_text_to_bytes(c)
-    if bytes.len() == 0:
-        return 0
-    val code = bytes[0] as i64
-    if code >= 0 and code <= 127:
-        return code
-    0
+    unsafe(capabilities: [ffi]):
+        val bytes = rt_text_to_bytes(c)
+        if bytes.len() == 0:
+            return 0
+        val code = bytes[0] as i64
+        if code >= 0 and code <= 127:
+            return code
+        0
 
 fn char_from_code_inline(code: i64) -> text:
     if code == 9:
@@ -263,6 +265,7 @@ fn char_from_code_inline(code: i64) -> text:
 # _utf8_char_from_codepoint_inline, which mirrors utf8_encode_one's already
 # fully covered byte math). The regression spec still asserts the correct
 # end-to-end behavior so this is caught the moment the toolchain gap closes.
+@unsafe(reason: "raw UTF-8 text lift; empty text is valid for empty bytes but otherwise may include provider failure", capabilities: [ffi])
 extern fn rt_bytes_to_text(bytes: [u8]) -> text
 
 # UTF-8 encode a single validated codepoint (0..0x10FFFF, non-surrogate) and
@@ -273,20 +276,23 @@ extern fn rt_bytes_to_text(bytes: [u8]) -> text
 fn _utf8_char_from_codepoint_inline(code: i64) -> text:
     if code < 0x80:
         val b: [u8] = [code as u8]
-        return rt_bytes_to_text(b)
+        unsafe(capabilities: [ffi]):
+            return rt_bytes_to_text(b)
     elif code < 0x800:
         val b: [u8] = [
             (0xC0 | (code >> 6)) as u8,
             (0x80 | (code & 0x3F)) as u8
         ]
-        return rt_bytes_to_text(b)
+        unsafe(capabilities: [ffi]):
+            return rt_bytes_to_text(b)
     elif code < 0x10000:
         val b: [u8] = [
             (0xE0 | (code >> 12)) as u8,
             (0x80 | ((code >> 6) & 0x3F)) as u8,
             (0x80 | (code & 0x3F)) as u8
         ]
-        return rt_bytes_to_text(b)
+        unsafe(capabilities: [ffi]):
+            return rt_bytes_to_text(b)
     else:
         val b: [u8] = [
             (0xF0 | (code >> 18)) as u8,
@@ -294,7 +300,8 @@ fn _utf8_char_from_codepoint_inline(code: i64) -> text:
             (0x80 | ((code >> 6) & 0x3F)) as u8,
             (0x80 | (code & 0x3F)) as u8
         ]
-        return rt_bytes_to_text(b)
+        unsafe(capabilities: [ffi]):
+            return rt_bytes_to_text(b)
 
 # Character classification
 fn is_alpha_char(c: text) -> bool:
@@ -418,9 +425,11 @@ export char_code, char_from_code
 # product code must not call rt_* directly; this module is the sanctioned
 # provider). Thin passthroughs — identical signatures to the externs above.
 pub fn text_to_bytes(s: text) -> [u8]:
-    rt_text_to_bytes(s)
+    unsafe(capabilities: [ffi]):
+        rt_text_to_bytes(s)
 
 pub fn bytes_to_text(bytes: [u8]) -> text:
-    rt_bytes_to_text(bytes)
+    unsafe(capabilities: [ffi]):
+        rt_bytes_to_text(bytes)
 
 export text_to_bytes, bytes_to_text

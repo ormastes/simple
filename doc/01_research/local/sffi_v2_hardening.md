@@ -2105,3 +2105,30 @@ one-scan census keeps 21,337 raw calls constant, raises lexical authority from
 1,378 to 1,401, and lowers missing authority from 19,451 to 19,428. All 23 file
 calls in this owner are lexical and zero are missing. The provider artifact is
 still unsigned and evidence-unadmitted.
+
+## Canonical SHA-256 text boundary
+
+`sha256_text` and `crypto.types` no longer duplicate the raw
+`rt_text_to_bytes` declaration. Both use the existing `common.string_core`
+owner, whose text/byte declarations now document the empty-result ambiguity and
+whose seven direct provider calls have minimal lexical FFI authority. The SHA
+accelerator declaration documents its non-32-byte failure sentinel and its one
+call is lexical; the existing pure-Simple fallback remains mandatory.
+
+The hot path still performs one text conversion and one SHA provider call, with
+no symbol lookup, retry, or payload copy added. Both 64-character hex lifts now
+fill a fixed 64-slot text buffer and join once instead of repeatedly copying a
+growing string. SHA-2 vectors pass 8/8, string-core codepoint behavior passes
+112/112, and the ownership contract passes 3/3. Focused SHA/spec lint passes
+with zero errors. The source-contract invocation measured 4.65 s / 173,696 KiB
+before the bounded-buffer follow-up and 8.43 s / 173,620 KiB after; this
+startup-dominated seed result does not prove a latency improvement, while the
+unchanged RSS and removal of repeated output copies provide the retained memory
+shape evidence.
+
+The call census is now 21,329 raw, 1,978 explicit, and 19,351 missing. The
+repaired declaration census completes in 28.13 s at 75,832 KiB instead of
+blocking on `cat /dev/stdout`: 12,053 declaration rows are still unsafe, 365
+are minimized, 10,954 are untouched, and zero are evidence-verified, signature-
+verified, or admitted. Implementation definitions are Simple 558, Rust 2,161,
+C 2,321, and C++ 219. These are definition counts, not safety claims.
