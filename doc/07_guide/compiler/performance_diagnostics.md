@@ -88,6 +88,14 @@ file for every COLL warning. This is a secondary improvement: repository measure
 still place the dominant cost in `parse_module_silent_checked`, and the architectural
 fix remains reuse of the driver/LSP parsed and typed revision rather than another parser.
 
+Compiler and LSP owners can now call `lint_cli_source_with_parsed_revision`. Its
+`LintParsedRevision` binds declaration indices to path, source SHA-256, and AST arena
+generation; a mismatch produces deny-level `LINTREV001` and runs no AST rule. The
+standalone command retains its one parse for compatibility, then delegates to the same
+parsed-results function. This bridge removes the need for a second lint parse when a
+caller already owns the exact live revision; driver/LSP wiring and measured latency
+evidence remain pending.
+
 ## Current safety containment
 
 - Unknown escape state remains escaping after finalization.
