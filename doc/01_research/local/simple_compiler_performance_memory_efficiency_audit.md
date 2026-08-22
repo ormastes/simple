@@ -1391,3 +1391,17 @@ authored names and N registered names, membership changes from O(K*N) comparison
 temporary N-element arrays to O(K) dispatch and no membership allocation. Enumeration
 remains available for `--warn-all`; a parity fixture checks every enumerated name against
 the matcher and rejects recurrence of `all_lint_names().contains`.
+
+## 2026-08-22 implementation addendum: effective lint defaults
+
+`LintConfig.get_level` rebuilt `build_default_levels()` for every diagnostic without an
+explicit override. With a selected profile it then built the tier projection as well.
+Collection diagnostics commonly call policy twice—once for suppression and once for
+effective severity—so a file with D diagnostics and N configured rules incurred O(D*N)
+dictionary insertion/copy work and transient allocations unrelated to analysis.
+
+`LintConfig.effective_defaults` now owns the immutable selected default table. It is built
+once for a new configuration, recomputed only when the profile changes, and shared into
+child configurations. `get_level` performs O(1) override/default lookups and allocates
+nothing. Explicit overrides, profile semantics, evidence-tier capping, and suppression
+behavior are unchanged. Project SDN discovery/caching remains a separate open tool lane.
