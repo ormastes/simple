@@ -46,6 +46,14 @@ fn foo_bar_path() -> Path:
 fn real_driver() -> DriverInstance:
     DriverInstance.RamFs(driver: RamFsDriver.new())
 
+fn table_with_program() -> MountTable:
+    var table = MountTable.new()
+    table.mount("/", real_driver(), MountOptions.default()).unwrap()
+    val writer = table.open("/program", OpenFlags.create_write()).unwrap()
+    table.ftruncate(writer, 4).unwrap()
+    table.close(writer).unwrap()
+    table
+
 fn is_permission(error: FsError) -> bool:
     match error:
         case Permission: true
@@ -206,6 +214,61 @@ describe "MountTable — execute-open policy and ownership":
         expect(mt.read(FileHandle(id: 1u64), 16777217).is_err()).to_be(true)
         expect(mt.pread(FileHandle(id: 1u64), 0, 16777217).is_err()).to_be(true)
         expect(mt.pread(FileHandle(id: 1u64), 0 - 1, 1).is_err()).to_be(true)
+
+
+describe "MountTable — replacement lifecycle":
+    it "reports an empty table as quiescent":
+        val mt = MountTable.new()
+        expect(mt.has_live_handles()).to_be(false)
+        expect(mt.can_replace()).to_be(true)
+
+    it "reports mounted but quiescent tables as ready for owner review":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        expect(mt.has_live_handles()).to_be(false)
+        expect(mt.can_replace()).to_be(true)
+
+    it "reports Busy without mutation while a file handle is live":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        val handle = mt.open("/file", OpenFlags.create_write()).unwrap()
+        val mounts_before = mt.mounts.len()
+        val next_id_before = mt.next_id
+        val files_before = mt.open_files.len()
+        expect(mt.has_live_handles()).to_be(true)
+        expect(mt.can_replace()).to_be(false)
+        expect(mt.unmount("/").unwrap_err()).to_equal(FsError.Busy)
+        expect(mt.mounts.len()).to_equal(mounts_before)
+        expect(mt.next_id).to_equal(next_id_before)
+        expect(mt.open_files.len()).to_equal(files_before)
+        expect(mt.read(handle, 1).is_ok()).to_be(true)
+        expect(mt.close(handle).is_ok()).to_be(true)
+        expect(mt.can_replace()).to_be(true)
+        expect(mt.unmount("/").is_ok()).to_be(true)
+
+    it "reports Busy for a directory binding without a close contract":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        val directory = mt.opendir("/").unwrap()
+        val mounts_before = mt.mounts.len()
+        expect(mt.readdir(directory).is_ok()).to_be(true)
+        expect(mt.has_live_handles()).to_be(true)
+        expect(mt.can_replace()).to_be(false)
+        expect(mt.unmount("/").unwrap_err()).to_equal(FsError.Busy)
+        expect(mt.mounts.len()).to_equal(mounts_before)
+        expect(mt.readdir(directory).is_ok()).to_be(true)
+
+    it "reports Busy for execute bindings until their owned file is closed":
+        var mt = table_with_program()
+        val binding = mt.open_for_execute("/program", ExecuteTrust.Trusted).unwrap()
+        expect(mt.has_live_handles()).to_be(true)
+        expect(mt.can_replace()).to_be(false)
+        expect(mt.unmount("/").unwrap_err()).to_equal(FsError.Busy)
+        expect(mt.execute_binding_is_current(binding)).to_be(true)
+        expect(mt.close(binding.file_handle).is_ok()).to_be(true)
+        expect(mt.has_live_handles()).to_be(false)
+        expect(mt.can_replace()).to_be(true)
+        expect(mt.unmount("/").is_ok()).to_be(true)
 
 
 # ============================================================================

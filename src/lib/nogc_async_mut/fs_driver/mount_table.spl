@@ -110,6 +110,29 @@ impl MountTable:
     static fn new() -> MountTable:
         MountTable(mounts: [], next_id: 1, open_files: [], open_dirs: [], dir_capacity_limit: MOUNT_TABLE_MAX_OPEN_DIRS)
 
+    fn has_live_handles() -> bool:
+        """Report whether this table still owns any live virtual binding.
+
+        Execute-open bindings are deliberately represented by OpenFileBinding,
+        so this one bounded scan accounts for ordinary and executable files.
+        Directory bindings are independent and must also be quiescent.
+
+        This is observational evidence only. It does not authorize copying,
+        detaching, replacing, or tearing down the table or backend resources;
+        those operations require a separate unique-owner transaction.
+        """
+        for binding in self.open_files:
+            if binding.active:
+                return true
+        for binding in self.open_dirs:
+            if binding.active:
+                return true
+        false
+
+    fn can_replace() -> bool:
+        """Report quiescence, without authorizing a replacement transaction."""
+        not self.has_live_handles()
+
     fn _dir_admission_available() -> bool:
         for binding in self.open_dirs:
             if not binding.active and not binding.retired:
