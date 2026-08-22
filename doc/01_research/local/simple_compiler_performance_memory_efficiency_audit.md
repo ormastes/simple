@@ -1835,3 +1835,15 @@ two output matrices. Duplicate-local incompleteness prevents all four matrices;
 later CFG/instruction incompleteness allocates only the USE/DEF working pair and
 releases it before returning facts. Complete-input semantics and the four-million
 cell budget are unchanged.
+
+### Unchanged CLI diagnostic policy projection
+
+The active lint CLI applied policy by reconstructing every `LintRunResult` and
+`LintDiag`, even when the computed severity equaled the authored severity. That
+is the entire normal `deny_all = false` path, every already-Deny/Allow diagnostic,
+and unproven performance warnings that remain advisory under deny-all. The helper
+now computes the effective level once and returns the immutable input result when
+it is unchanged. Only a real Warn-to-Deny transition rebuilds the diagnostic.
+Traversal remains `O(D)`, but unchanged diagnostics avoid constructor dispatch,
+COW/reference traffic for message/fix/evidence/uncertainty payloads, and transient
+result objects. Formatting, ordering, counts, and JSON/text bytes are unchanged.
