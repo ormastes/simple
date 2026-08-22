@@ -2163,6 +2163,20 @@ state cells and no per-probe allocation.
 No timing, RSS, allocation, optimizer, or executable-test evidence is claimed
 because verification was explicitly disabled for this tranche.
 
+The same scoped accessor now covers one complete FlatAstBridge assembly. Seven
+module-assembly gates and seven node-conversion gates previously performed a
+fresh environment/text lookup each time, including probes around declaration
+conversion. `flat_ast_to_module` now enters once, restores on its early-empty and
+normal exits, and both split modules consume the cached flag. The mutable
+`SIMPLE_BOOTSTRAP` build policy deliberately remains dynamic. Thus a bridge
+transaction performs one compiler-trace environment lookup instead of up to 14,
+without adding another cache or changing bootstrap-mode semantics.
+
+The driver-facing `parse_and_build_module_scoped` owns an outer token across
+parsing, interpolation/desugaring, and assembly, so its recursive parser probes
+also reuse that same single snapshot. Cache-hit reconstruction enters at
+`flat_ast_to_module` and receives the equivalent one-lookup bridge scope.
+
 ### Leading explicit-code allocation audit
 
 The leading `Edddd` probe previously allocated a one-character prefix, a
