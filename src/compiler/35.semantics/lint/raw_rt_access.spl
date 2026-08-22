@@ -116,6 +116,16 @@ fn _rra_is_ident_char(ch: text) -> bool:
     val is_digit = ch >= "0" and ch <= "9"
     is_lower or is_upper or is_digit
 
+fn _rra_leading_indent(line: text) -> i64:
+    """Count leading indentation without allocating a trimmed copy."""
+    var indent = 0
+    while indent < line.len():
+        val ch = line.substring(indent, indent + 1)
+        if ch != " " and ch != "\t":
+            break
+        indent = indent + 1
+    indent
+
 pub fn raw_rt_wrapper_replacement(name: text) -> text:
     """Canonical wrapper name when a mechanical call rename is known."""
     # Only this mapping is signature-identical across the canonical facades.
@@ -260,21 +270,37 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
     val lines = raw_rt_lexical_code_lines(source)
     var line_num = 0
     var in_selective_import = false
+    var pending_ffi_declaration = false
+    var ffi_block_indent = -1
     for line in lines:
         line_num = line_num + 1
         val code_line = line
+        val t = code_line.trim()
+        val indent = _rra_leading_indent(code_line)
+        if t != "" and ffi_block_indent >= 0 and indent <= ffi_block_indent:
+            ffi_block_indent = -1
+        if t.starts_with("@unsafe"):
+            pending_ffi_declaration = t.contains("ffi") or t.contains("Ffi")
+            continue
+        if t.starts_with("unsafe(") and t.ends_with(":") and
+           (t.contains("ffi") or t.contains("Ffi")):
+            ffi_block_indent = indent
+            pending_ffi_declaration = false
+            continue
         if not code_line.contains("rt_"):
-            val no_rt_trimmed = code_line.trim()
-            val starts_import = no_rt_trimmed.starts_with("use ") or no_rt_trimmed.starts_with("export use ")
+            val starts_import = t.starts_with("use ") or t.starts_with("export use ")
             if starts_import and code_line.contains("{") and not code_line.contains("}"):
                 in_selective_import = true
             if in_selective_import and code_line.contains("}"):
                 in_selective_import = false
+            if t != "" and not t.starts_with("@"):
+                pending_ffi_declaration = false
             continue
-        val t = code_line.trim()
         if t.starts_with("extern fn "):
             val name = _rra_extern_fn_name(t)
-            if name.starts_with("rt_"):
+            val acknowledged_unsafe = pending_ffi_declaration
+            pending_ffi_declaration = false
+            if name.starts_with("rt_") and not acknowledged_unsafe:
                 findings.push(RawRtAccessFinding(
                     code: "RAW-RT-001", severity: "WARNING",
                     message: "product code must not declare raw runtime intrinsic `{name}` directly",
@@ -282,6 +308,7 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
                     column: code_line.find(name) + 1
                 ))
             continue
+        pending_ffi_declaration = false
         val is_rt_alias_decl = t.starts_with("fn rt_") or t.starts_with("pub fn rt_") or t.starts_with("static fn rt_") or t.starts_with("pub static fn rt_") or t.starts_with("async fn rt_") or t.starts_with("pub async fn rt_")
         if is_rt_alias_decl:
             val fn_start = t.find("fn ") + 3
@@ -312,7 +339,8 @@ pub fn check_raw_rt_access_with_allowlist(source: text, file_path: text, allowli
             ))
             continue
         val call_names = _rra_names_in_call_position(code_line)
-        if call_names.len() > 0:
+        val inside_ffi_block = ffi_block_indent >= 0 and indent > ffi_block_indent
+        if call_names.len() > 0 and not inside_ffi_block:
             val name = call_names[0]
             findings.push(RawRtAccessFinding(
                 code: "RAW-RT-002", severity: "WARNING",

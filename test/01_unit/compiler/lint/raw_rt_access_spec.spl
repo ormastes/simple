@@ -84,6 +84,12 @@ describe "RAW-RT-001: raw extern fn rt_* outside privileged tiers":
             expect(findings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
             expect(findings[0].code).to_equal("RAW-RT-001")
 
+        it "accepts an explicitly ffi-unsafe raw declaration":
+            step("Verify: explicit ffi authority acknowledges the raw declaration")
+            val source = "@unsafe(reason: \"raw nullable file boundary\", capabilities: [ffi])\nextern fn rt_file_read_text(path: text) -> text?\n"
+            val findings = check_raw_rt_access(source, "src/app/cli/main.spl")
+            expect(findings.len()).to_equal(0)
+
     context "when declared in a sanctioned provider":
         """
         ### Scenario: src/lib/ and src/runtime/ still exempt
@@ -120,6 +126,19 @@ describe "RAW-RT-002: direct raw runtime use":
         expect(findings[0].name).to_equal("rt_file_read_text")
         expect(findings[0].note).to_contain("file_read_text")
         expect(findings[0].note).to_contain("simple lint --fix")
+
+    it "accepts a call contained by a minimal ffi-unsafe block":
+        step("Verify: lexical ffi containment discharges the raw-call lint")
+        val source = "@unsafe(reason: \"raw nullable file boundary\", capabilities: [ffi])\nextern fn rt_file_read_text(path: text) -> text?\nfn load(path: text) -> text?:\n    unsafe(capabilities: [ffi]):\n        rt_file_read_text(path)\n"
+        val findings = check_raw_rt_access(source, "src/app/config/load.spl")
+        expect(findings.len()).to_equal(0)
+
+    it "still rejects an uncontained call after a tagged declaration":
+        step("Verify: declaration authority does not leak into ordinary code")
+        val source = "@unsafe(reason: \"raw nullable file boundary\", capabilities: [ffi])\nextern fn rt_file_read_text(path: text) -> text?\nfn load(path: text) -> text?:\n    rt_file_read_text(path)\n"
+        val findings = check_raw_rt_access(source, "src/app/config/load.spl")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].code).to_equal("RAW-RT-002")
 
     it "warns on a direct selective import":
         step("Verify: warns on a direct selective import")

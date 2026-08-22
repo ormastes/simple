@@ -973,3 +973,14 @@ untouched). Every scope has zero signed admissions and remains fail-closed
 unsafe. The contract gate proves that scope totals equal the complete census
 and rejects unknown paths, preventing a production row from disappearing into
 an exclusion. This is audit-only and adds no runtime work.
+
+The raw-runtime lint now recognizes two narrow forms of explicit containment:
+an `@unsafe(... capabilities: [ffi])` immediately attached to a raw declaration,
+and a raw call indented inside `unsafe(capabilities: [ffi])`. Declaration
+authority does not leak into later ordinary code, so an uncontained call after
+a tagged declaration still emits `RAW-RT-002`. Ordinary files retain the
+single-`contains("rt_")` fast path. The performance fixture completes its clean
+~889 KB input in 14–38 ms and 2,000 raw findings in 2.54–2.76 s under the
+existing interpreted ceilings. The two newly contained parse-shard modules lint
+without RAW-RT findings. Four pre-existing auto-fix expectations remain failing
+and are recorded separately; they do not affect the new containment cases.

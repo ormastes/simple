@@ -809,3 +809,10 @@ exclusion or a safety claim. Current top untouched production families are
 `rt_file` (560), `rt_cuda` (256), `rt_torch` (205), `rt_env` (165), and
 `rt_vulkan` (156). Prefer canonical owners for file/environment families and
 explicit unsafe generated bindings for accelerator families.
+
+The raw-access lint now treats exact lexical FFI containment as the accepted
+fallback when importing a semantic facade would violate a measured closure or
+latency constraint. This does not classify the call as verified or safe: it
+only distinguishes reviewed unsafe containment from accidental raw access.
+Next lint work must fix the pre-existing process-run auto-fix scope bug without
+inventing nullable file/env rewrites, then ratchet uncontained production calls.
