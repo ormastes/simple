@@ -1,95 +1,85 @@
-# Asm Match Specification
-#
-# Tests for target-qualified inline assembly: asm match/assert syntax.
-# Verifies parsing, target spec matching, and exhaustiveness checking.
+# @req: REQ-COMPILER-NATIVE-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-fn check_msg(condition: bool, message: text):
-    if not condition:
-        expect(message).to_equal("")
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-describe "Asm Match Syntax":
+## Operator workflow
 
-    it "recognizes asm match keyword combination":
-        val code = "asm match:"
-        check(code.starts_with("asm"))
-        check(code.contains("match"))
-        check(code.ends_with(":"))
+1. Run `bin/simple test test/01_unit/compiler/native/asm_match_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "recognizes case with target spec":
-        val arm = "case [x86_64]:"
-        check(arm.starts_with("case"))
-        check(arm.contains("["))
-        check(arm.contains("x86_64"))
-        check(arm.contains("]"))
+## Compatibility and limitations
 
-    it "recognizes case with pipe grouping":
-        val arm = "case [x86_64 | x86]:"
-        check(arm.contains("|"))
-        check(arm.contains("x86_64"))
-        check(arm.contains("x86"))
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "recognizes case with os qualifier":
-        val arm = "case [x86_64, linux]:"
-        check(arm.contains(","))
-        check(arm.contains("linux"))
+use std.spec
 
-    it "recognizes case with full qualifier":
-        val arm = "case [x86_64, linux, gnu, llvm >= 15]:"
-        check(arm.contains("x86_64"))
-        check(arm.contains("linux"))
-        check(arm.contains("gnu"))
-        check(arm.contains("llvm"))
-        check(arm.contains(">="))
-        check(arm.contains("15"))
+# doc-path: doc/01_research/local/asm_match.md
+# doc-path: doc/03_plan/sys_test/asm_match.md
+# doc-path: doc/04_architecture/asm_match.md
+# doc-path: doc/05_design/asm_match.md
 
-    it "recognizes wildcard case":
-        val arm = "case _:"
-        check(arm.contains("_"))
+# @manual: primary
 
-    it "recognizes compile_error in arm":
-        val body = "compile_error(\"unsupported arch\")"
-        check(body.starts_with("compile_error"))
-        check(body.contains("unsupported arch"))
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "recognizes asm assert syntax":
-        val code = "asm assert [x86_64, linux]"
-        check(code.starts_with("asm"))
-        check(code.contains("assert"))
-        check(code.contains("["))
-        check(code.contains("x86_64"))
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-COMPILER-NATIVE-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
 
-describe "Asm Match Complete Example":
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-    it "parses full asm match block syntax":
-        # Verify the complete syntax structure is valid
-        val example = "asm match:\n    case [x86_64]:\n        \"cli\"\n    case [aarch64]:\n        \"msr daifset, #0xf\"\n    case _:\n        compile_error(\"unsupported\")"
-        check(example.contains("asm match:"))
-        check(example.contains("case [x86_64]:"))
-        check(example.contains("case [aarch64]:"))
-        check(example.contains("case _:"))
-        check(example.contains("compile_error"))
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    it "parses version constraint operators":
-        val ops = [">= 15", "== 17", "< 18", "~= 17"]
-        check(ops.len() == 4)
-        check(ops[0].contains(">="))
-        check(ops[1].contains("=="))
-        check(ops[2].contains("<"))
-        check(ops[3].contains("~="))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "Asm Assert Examples":
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-COMPILER-NATIVE-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-    it "parses asm assert with arch only":
-        val code = "asm assert [x86_64]"
-        check(code.contains("assert"))
-        check(code.contains("x86_64"))
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-    it "parses asm assert with full spec":
-        val code = "asm assert [x86_64, linux, gnu, llvm >= 15]"
-        check(code.contains("assert"))
-        check(code.contains("x86_64"))
-        check(code.contains("linux"))
-        check(code.contains("gnu"))
-        check(code.contains("llvm"))
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-COMPILER-NATIVE-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])

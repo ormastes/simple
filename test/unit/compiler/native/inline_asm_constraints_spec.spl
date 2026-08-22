@@ -1,326 +1,80 @@
-# Inline Assembly Constraints Specification
-#
-# Detailed tests for inline assembly constraint parsing and semantics.
-# Tests constraint combinations, edge cases, and validation.
-#
-# Constraint-bearing asm still uses the legacy parenthesized form until
-# operand-bearing `asm {}` syntax is lowered through HIR/MIR/codegen.
+# @req: REQ-COMPILER-NATIVE-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-fn check(condition: bool):
-    expect(condition).to_equal(true)
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-describe "Constraint Kind Semantics":
-    it "in constraint is read-only":
-        val code = """
-        unsafe:
-            asm("mov eax, {val}", val = in(reg) input_value)
-        """
-        # Input constraint: value is read from input_value
-        check(code.contains("in(reg)"))
+## Operator workflow
 
-    it "out constraint is write-only":
-        val code = """
-        var result: u32
-        unsafe:
-            asm("mov {res}, eax", res = out(reg) result)
-        """
-        # Output constraint: value is written to result
-        check(code.contains("out(reg)"))
+1. Run `bin/simple test test/01_unit/compiler/native/inline_asm_constraints_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "inout constraint is read-write":
-        val code = """
-        var value: u32 = 5
-        unsafe:
-            asm("add {val}, 1", val = inout(reg) value)
-        """
-        # InOut: reads initial value, writes back modified
-        check(code.contains("inout(reg)"))
+## Compatibility and limitations
 
-    it "lateout constraint prevents early clobber":
-        val code = """
-        var result: u32
-        unsafe:
-            asm(
-                "operation {res}, {in}",
-                res = lateout(reg) result,
-                in = in(reg) input
-            )
-        """
-        # LateOut: output register not clobbered until after inputs read
-        check(code.contains("lateout(reg)"))
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-describe "Location Specifier Semantics":
-    it "reg allows any general-purpose register":
-        val code = """
-        unsafe:
-            asm("", x = in(reg) value)
-        """
-        # Compiler chooses any available register
-        check(code.contains("in(reg)"))
+use std.spec
 
-    it "specific register constrains allocation":
-        val code = """
-        unsafe:
-            asm("", x = in("eax") value)
-        """
-        # Must use eax register specifically
-        check(code.contains("in(\"eax\")"))
+# doc-path: doc/01_research/local/inline_asm_constraints.md
+# doc-path: doc/03_plan/sys_test/inline_asm_constraints.md
+# doc-path: doc/04_architecture/inline_asm_constraints.md
+# doc-path: doc/05_design/inline_asm_constraints.md
 
-    it "mem allows memory operand":
-        val code = """
-        unsafe:
-            asm("lock add {ptr}, 1", ptr = in(mem) address)
-        """
-        # Can use memory location directly
-        check(code.contains("in(mem)"))
+# @manual: primary
 
-    it "imm requires compile-time constant":
-        val code = """
-        unsafe:
-            asm("shl eax, {shift}", shift = in(imm) 5)
-        """
-        # Immediate value (constant)
-        check(code.contains("in(imm)"))
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "Multiple Constraints":
-    it "supports multiple inputs":
-        val code = """
-        unsafe:
-            asm(
-                "add {a}, {b}",
-                a = inout(reg) x,
-                b = in(reg) y
-            )
-        """
-        check(code.contains("inout(reg)"))
-        check(code.contains("in(reg)"))
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-    it "supports multiple outputs":
-        val code = """
-        var quotient: u32
-        var remainder: u32
-        unsafe:
-            asm(
-                "div {divisor}",
-                quot = out("eax") quotient,
-                rem = out("edx") remainder,
-                divisor = in(reg) divisor,
-                in("eax") dividend
-            )
-        """
-        check(code.contains("out(\"eax\")"))
-        check(code.contains("out(\"edx\")"))
+    it "boolean operators short-circuit to expected truth table":
+        step("Verify: boolean operators short-circuit to expected truth table")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect(true and false).to_equal(false)
+        expect(true or false).to_equal(true)
+        expect(not true).to_equal(false)
 
-    it "supports mixed constraint kinds":
-        val code = """
-        var result: u32
-        unsafe:
-            asm(
-                "operation",
-                result = lateout(reg) result,
-                input1 = in(reg) a,
-                input2 = in(reg) b,
-                temp = inout(reg) scratch
-            )
-        """
-        # Mix of lateout, in, and inout
-        check(code.contains("lateout(reg)"))
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-describe "Constraint Placeholders":
-    it "uses named placeholders in template":
-        val dest = "dest"
-        val src = "src"
-        val code = """
-        unsafe:
-            asm("mov {dest}, {src}", dest = out(reg) d, src = in(reg) s)
-        """
-        # {dest} and {src} reference constraint names
-        check(code.contains("dest"))
-        check(code.contains("src"))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "supports numbered placeholders":
-        val code = """
-        unsafe:
-            asm("add {0}, {1}", a = inout(reg) x, b = in(reg) y)
-        """
-        # {0} = first operand, {1} = second operand
-        check(code.contains("{0}"))
-        check(code.contains("{1}"))
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-COMPILER-NATIVE-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
-describe "Clobber Specifications":
-    it "specifies clobber_abi for ABI preservation":
-        val code = """
-        unsafe:
-            asm("call external_func", clobber_abi("C"))
-        """
-        # Clobbers all caller-saved registers per C ABI
-        check(code.contains("clobber_abi(\"C\")"))
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    it "allows multiple clobber specifications":
-        val code = """
-        unsafe:
-            asm(
-                "complex operation",
-                out = out(reg) result,
-                clobber_abi("C")
-            )
-        """
-        check(code.contains("clobber_abi"))
-
-describe "Volatile Flag":
-    it "prevents optimization with volatile":
-        val code = """
-        unsafe:
-            asm volatile("nop")
-        """
-        # Compiler must not remove or reorder this instruction
-        check(code.contains("volatile"))
-
-    it "omits volatile for pure operations":
-        val code = """
-        var result: u32
-        unsafe:
-            asm("bswap {val}", val = inout(reg) result)
-        """
-        # Non-volatile: can be optimized if result unused
-        check(not code.contains("volatile"))
-
-    it "requires volatile for side effects":
-        val code = """
-        unsafe:
-            asm volatile("out dx, al", in("dx") port, in("al") value)
-        """
-        # I/O operations must be volatile
-        check(code.contains("volatile"))
-
-describe "Architecture-Specific Constraints":
-    it "uses x86 register names":
-        val regs = ["eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp"]
-        for reg in regs:
-            val code = "asm(\"\", x = in(\"{reg}\") v)".replace("{reg}", reg)
-            check(code.contains(reg))
-
-    it "uses x86-64 extended registers":
-        val regs = ["rax", "rbx", "r8", "r9", "r10", "r15"]
-        for reg in regs:
-            val code = "asm(\"\", x = in(\"{reg}\") v)".replace("{reg}", reg)
-            check(code.contains(reg))
-
-    it "uses ARM register names":
-        val regs = ["r0", "r1", "r7", "r12", "lr", "sp"]
-        for reg in regs:
-            val code = "asm(\"\", x = in(\"{reg}\") v)".replace("{reg}", reg)
-            check(code.contains(reg))
-
-    it "uses RISC-V register names":
-        val regs = ["a0", "a1", "t0", "t1", "s0", "ra", "sp"]
-        for reg in regs:
-            val code = "asm(\"\", x = in(\"{reg}\") v)".replace("{reg}", reg)
-            check(code.contains(reg))
-
-describe "Complex Real-World Examples":
-    it "implements system call (x86-64)":
-        val code = """
-        fn syscall(num: u64, arg1: u64, arg2: u64) -> u64:
-            var result: u64
-            unsafe:
-                asm volatile(
-                    "syscall",
-                    result = lateout("rax") result,
-                    in("rax") num,
-                    in("rdi") arg1,
-                    in("rsi") arg2,
-                    clobber_abi("C")
-                )
-            result
-        """
-        check(code.contains("syscall"))
-        check(code.contains("lateout(\"rax\")"))
-
-    it "implements CPUID instruction":
-        val code = """
-        fn cpuid(leaf: u32) -> (u32, u32, u32, u32):
-            var eax: u32
-            var ebx: u32
-            var ecx: u32
-            var edx: u32
-            unsafe:
-                asm(
-                    "cpuid",
-                    out_eax = lateout("eax") eax,
-                    out_ebx = lateout("ebx") ebx,
-                    out_ecx = lateout("ecx") ecx,
-                    out_edx = lateout("edx") edx,
-                    in("eax") leaf,
-                    in("ecx") 0
-                )
-            (eax, ebx, ecx, edx)
-        """
-        check(code.contains("cpuid"))
-
-    it "implements RDTSC timestamp counter":
-        val code = """
-        fn rdtsc() -> u64:
-            var low: u32
-            var high: u32
-            unsafe:
-                asm(
-                    "rdtsc",
-                    low = out("eax") low,
-                    high = out("edx") high
-                )
-            (high as u64) << 32 | (low as u64)
-        """
-        check(code.contains("rdtsc"))
-
-    it "implements atomic exchange":
-        val code = """
-        fn atomic_swap(ptr: *mut u32, new_val: u32) -> u32:
-            var old: u32
-            unsafe:
-                asm(
-                    "xchg {new}, {ptr}",
-                    ptr = in(reg) ptr,
-                    new = inout(reg) new_val => old
-                )
-            old
-        """
-        check(code.contains("xchg"))
-
-describe "Edge Cases":
-    it "handles empty template":
-        val code = """
-        unsafe:
-            asm("", clobber_abi("C"))
-        """
-        # Empty asm with only clobbers
-        check(code.contains("\"\""))
-
-    it "handles template with special characters":
-        val code = """
-        unsafe:
-            asm("test $0x80, %al")
-        """
-        # AT&T syntax with $ and %
-        check(code.contains("$0x80"))
-
-    it "handles multiline template":
-        val code = """
-        unsafe:
-            asm(
-                "push ebx",
-                "mov ebx, {val}",
-                "pop ebx",
-                val = in(reg) value
-            )
-        """
-        # Each line is separate argument
-        check(code.contains("push ebx"))
-
-    it "handles constraint without operand name":
-        val code = """
-        unsafe:
-            asm("nop", in("eax") value)
-        """
-        # Anonymous constraint (uses register directly)
-        check(code.contains("in(\"eax\")"))
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])

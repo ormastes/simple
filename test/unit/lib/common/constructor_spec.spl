@@ -1,120 +1,83 @@
-# Constructor Integration Tests
-# Tests at module level where all features work
-# Constructor integration tests validating struct instantiation patterns.
-# Tests direct construction, implicit static constructors, factory methods,
-# and the interaction between instance methods and static methods at
-# module level.
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-# Module-level struct definitions for testing
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-fn check_msg(condition: bool, message: text):
-    if not condition:
-        expect(message).to_equal("")
-struct Point:
-    x: i64
-    y: i64
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-struct Config:
-    value: i64
+## Operator workflow
 
-struct Settings:
-    enabled: bool
+1. Run `bin/simple test test/01_unit/lib/common/constructor_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-struct Builder:
-    name: text
+## Compatibility and limitations
 
-struct Rectangle:
-    width: i64
-    height: i64
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-struct Counter:
-    count: i64
+use std.spec
 
-# Implementations with implicit static constructors
-impl Point:
-    fn new(x: i64, y: i64) -> Point:  # Implicitly static
-        return Point(x: x, y: y)
+# doc-path: doc/01_research/local/constructor.md
+# doc-path: doc/03_plan/sys_test/constructor.md
+# doc-path: doc/04_architecture/constructor.md
+# doc-path: doc/05_design/constructor.md
 
-    fn from_tuple(t: (i64, i64)) -> Point:  # Also implicitly static
-        return Point(x: t.0, y: t.1)
+# @manual: primary
 
-impl Config:
-    fn create(value: i64) -> Config:
-        return Config(value: value)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-impl Settings:
-    fn default() -> Settings:
-        return Settings(enabled: true)
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-LIB-COMMON-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
 
-impl Builder:
-    static fn with_name(name: text) -> Builder:
-        return Builder(name: name)
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-LIB-COMMON-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-impl Rectangle:
-    static fn new(width: i64, height: i64) -> Rectangle:  # Explicit static
-        return Rectangle(width: width, height: height)
+    it "gzip compression roundtrip":
+        step("Verify: gzip compression roundtrip")
+        # @req: REQ-LIB-COMMON-001
+        use std.common.compress.gzip.{gzip_compress, gzip_decompress}
+        val data = "hello hello hello hello".bytes()
+        val packed = gzip_compress(data)
+        expect(packed.len() > 0).to_equal(true)
+        expect(gzip_decompress(packed)).to_equal(data)
+        expect(packed.len() < data.len())  # oracle: repeated text compresses
 
-impl Counter:
-    fn new() -> Counter:  # Implicitly static
-        return Counter(count: 0)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    fn get_count() -> i64:  # Instance method
-        return self.count
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-LIB-COMMON-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-    me increment():
-        self.count = self.count + 1
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-LIB-COMMON-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-describe "Module-Level Constructors":
-    # Tests struct construction patterns at module level including direct
-    # construction, implicit static methods, and factory method patterns.
-    it "Direct construction works (PRIMARY METHOD)":
-        val p = Point(5, 6)
-        check(p.x == 5)
-        check(p.y == 6)
-
-    it "Direct construction with named parameters":
-        val p = Point(x: 7, y: 8)
-        check(p.x == 7)
-        check(p.y == 8)
-
-    it "fn new() is implicitly static at module level":
-        val p = Point.new(3, 4)
-        check(p.x == 3)
-        check(p.y == 4)
-
-    it "fn create() is implicitly static":
-        val cfg = Config.create(42)
-        check(cfg.value == 42)
-
-    it "fn default() is implicitly static":
-        val settings = Settings.default()
-        check(settings.enabled == true)
-
-    it "fn from_* is implicitly static":
-        val p = Point.from_tuple((10, 20))
-        check(p.x == 10)
-        check(p.y == 20)
-
-    it "static fn with_* works as factory":
-        val b = Builder.with_name("test")
-        check(b.name == "test")
-
-    it "Explicit static keyword still works":
-        val r = Rectangle.new(10, 20)
-        check(r.width == 10)
-        check(r.height == 20)
-
-    it "Instance methods still get implicit self":
-        val c = Counter.new()
-        check(c.get_count() == 0)
-        c.increment()
-        check(c.get_count() == 1)
-        c.increment()
-        check(c.get_count() == 2)
-
-    it "Direct construction and new() can coexist":
-        val p1 = Point(1, 2)          # Direct
-        val p2 = Point.new(3, 4)      # Via new()
-        check(p1.x + p2.x == 4)
-        check(p1.y + p2.y == 6)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-COMMON-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign

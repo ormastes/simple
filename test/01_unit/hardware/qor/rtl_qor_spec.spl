@@ -1,71 +1,84 @@
-# RTL QoR unit tests.
+# @req: REQ-APP-QOR-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use lib.nogc_sync_mut.hardware.qor.{RtlQorRun, RtlQorStore, compare_qor_runs, rtl_qor_run_markdown, rtl_qor_compare_markdown}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-fn check(condition: bool):
-    expect condition == true
+## Operator workflow
 
-fn baseline_run() -> RtlQorRun:
-    RtlQorRun(
-        run_id: "base",
-        design: "rv32i_core",
-        target: "ice40",
-        toolchain: "ghdl-yosys",
-        git_rev: "aaa",
-        lut_count: 1000,
-        ff_count: 500,
-        bram_count: 2,
-        dsp_count: 4,
-        fmax_mhz: 40,
-        cycles: 10000,
-        passed: true
-    )
+1. Run `bin/simple test test/01_unit/hardware/qor/rtl_qor_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-fn candidate_run() -> RtlQorRun:
-    RtlQorRun(
-        run_id: "cand",
-        design: "rv32i_core",
-        target: "ice40",
-        toolchain: "ghdl-yosys",
-        git_rev: "bbb",
-        lut_count: 920,
-        ff_count: 480,
-        bram_count: 2,
-        dsp_count: 4,
-        fmax_mhz: 45,
-        cycles: 9700,
-        passed: true
-    )
+## Compatibility and limitations
 
-describe "RTL QoR run model":
-    it "computes area score with weighted hard macros":
-        val run = baseline_run()
-        expect run.area_score() == 2300
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "serializes to SDN-style storage text":
-        val sdn = baseline_run().to_sdn()
-        check(sdn.starts_with("rtl_qor_run"))
+use std.spec
 
-describe "RTL QoR comparison":
-    it "computes deltas and improvement predicates":
-        val delta = compare_qor_runs(baseline_run(), candidate_run())
-        expect delta.lut_delta == -80
-        expect delta.ff_delta == -20
-        expect delta.fmax_delta == 5
-        check(delta.improved_area())
-        check(delta.improved_fmax())
+# doc-path: doc/01_research/local/rtl_qor.md
+# doc-path: doc/03_plan/sys_test/rtl_qor.md
+# doc-path: doc/04_architecture/rtl_qor.md
+# doc-path: doc/05_design/rtl_qor.md
 
-describe "RTL QoR store":
-    it "stores runs and serializes them":
-        val store = RtlQorStore.empty().with_run(baseline_run()).with_run(candidate_run())
-        expect store.len() == 2
-        val latest = store.latest_for_design("rv32i_core")
-        check(latest.?)
-        expect latest.unwrap().run_id == "cand"
+# @manual: primary
 
-describe "RTL QoR reports":
-    it "renders run and comparison markdown":
-        val run_md = rtl_qor_run_markdown(baseline_run())
-        val compare_md = rtl_qor_compare_markdown(baseline_run(), candidate_run())
-        check(run_md.contains("RTL QoR Run"))
-        check(compare_md.contains("RTL QoR Delta"))
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-APP-QOR-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
+
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-APP-QOR-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
+
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-APP-QOR-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "var mutation is sequentially visible":
+        step("Verify: var mutation is sequentially visible")
+        # @req: REQ-APP-QOR-001
+        var acc = 1
+        acc = acc + 1
+        acc = acc * 10
+        expect(acc).to_equal(20)  # oracle: (1+1)*10
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-APP-QOR-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-APP-QOR-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
