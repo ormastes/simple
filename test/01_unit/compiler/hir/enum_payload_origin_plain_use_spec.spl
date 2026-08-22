@@ -43,6 +43,10 @@ fn owner_surface() -> ModuleSurface:
         is_lazy: false, span: Span.new(0, 0, 1, 1))]
     s.import_target_indices = [0]
     s.import_target_names = ["pv.value"]
+    s.import_item_offsets = [0, 1]
+    s.import_item_names = ["Payload"]
+    s.import_item_aliases = [""]
+    s.import_item_has_alias = [false]
     s
 
 describe "enum payload origin through a plain `use` in the owner":
@@ -60,3 +64,55 @@ describe "enum payload origin through a plain `use` in the owner":
         expect(origin.module_name).to_equal("pv.value")
         expect(origin.item_name).to_equal("Payload")
         expect(origin.item_kind).to_equal("enum")
+
+    it "resolves the payload through the owner's retained glob target":
+        var lowering = HirLowering.new()
+        var owner = owner_surface()
+        owner.imports = [ParserImport(
+            module: "pv.value", items: [], is_lazy: false,
+            span: Span.new(0, 0, 1, 1))]
+        owner.import_item_offsets = [0, 0]
+        owner.import_item_names = []
+        owner.import_item_aliases = []
+        owner.import_item_has_alias = []
+        var registry = ModuleSurfacesByName.empty()
+        registry.surfaces = [payload_surface(), owner]
+        registry.index_by_name = {"pv.value": 0, "pv.defs": 1}
+        registry.ordered_names = ["pv.value", "pv.defs"]
+        registry.ordered_indices = [0, 1]
+        lowering.module_surfaces = registry
+        val origin = lowering.resolve_materialized_enum_payload_origin(
+            registry.surfaces[1], "pv.defs", "Payload")
+        expect(origin.found).to_be_true()
+        expect(origin.module_name).to_equal("pv.value")
+        expect(origin.item_name).to_equal("Payload")
+        expect(origin.item_kind).to_equal("enum")
+
+    it "keeps two matching glob targets ambiguous":
+        var lowering = HirLowering.new()
+        var owner = owner_surface()
+        var other = payload_surface()
+        other.module_name = "pv.other"
+        other.physical_index = 2
+        other.preferred_registry_name = "pv.other"
+        owner.imports = [
+            ParserImport(module: "pv.value", items: [], is_lazy: false,
+                span: Span.new(0, 0, 1, 1)),
+            ParserImport(module: "pv.other", items: [], is_lazy: false,
+                span: Span.new(0, 0, 1, 1))
+        ]
+        owner.import_target_indices = [0, 2]
+        owner.import_target_names = ["pv.value", "pv.other"]
+        owner.import_item_offsets = [0, 0, 0]
+        owner.import_item_names = []
+        owner.import_item_aliases = []
+        owner.import_item_has_alias = []
+        var registry = ModuleSurfacesByName.empty()
+        registry.surfaces = [payload_surface(), owner, other]
+        registry.index_by_name = {"pv.value": 0, "pv.defs": 1, "pv.other": 2}
+        registry.ordered_names = ["pv.value", "pv.defs", "pv.other"]
+        registry.ordered_indices = [0, 1, 2]
+        lowering.module_surfaces = registry
+        val origin = lowering.resolve_materialized_enum_payload_origin(
+            registry.surfaces[1], "pv.defs", "Payload")
+        expect(origin.found).to_be_false()

@@ -1387,3 +1387,34 @@ but failed later on existing bootstrap-wide HIR categories (`BlockValue`,
 No focused PASS is claimed. The session cap prevents another Stage-3 run, so
 this correction remains queued for a fresh admitted verification session.
 ARM64 artifact and QEMU 2D/web/GUI/window-manager evidence remain pending.
+
+## Scalar field and MIR payload cycles (2026-08-22)
+
+Cycle 1 rebuilt and admitted Stage 2, passed compiler sanity plus the
+struct-receiver/runtime capability gate, and then ran strict Stage 3 with the
+scalar field-dependency boundary. The prior source-1 `HirImpl` family was gone.
+HIR advanced to source 21 before exit 139. The first new fatal family began in
+`backend_types.spl` and repeated through driver modules: `LocalId`,
+`MirConstValue`, `MirExecutionDomain`, `MirTransferMode`, and other payload
+types of `MirInstKind` were unresolved.
+
+Those types are declared in `mir_types.spl` and
+`mir_instruction_support.spl`; `mir_instruction_kinds.spl` reaches them through
+glob imports. Payload-origin resolution supported declarations, re-exports,
+and named imports only. An initial unique-package fallback used the shared
+declaration-owner index. Cycle 2 regressed to the source-1 `HirImpl` family,
+showing that initializing that shared cache from the nested payload walk changes
+return-side `HirLowering` state. Replacing it with the package-sibling cache did
+not cure the ordering hazard: Cycle 3 again began with the `HirImpl` family and
+exited 139. Both unverified package fallbacks were removed.
+
+The queued correction follows the exact immutable route instead of inferring a
+package. A retained glob import has an empty item range and a scalar target
+index; payload origin now checks that target directly, returns one unique
+terminal declaration, and remains unresolved when two glob targets declare the
+same name. The existing named-import fixture now populates its flattened import
+arrays, and adjacent regression cases cover a unique glob target plus ambiguous
+dual glob targets. This correction is intentionally unclaimed because the
+session's three-cycle cap is exhausted. A fresh admitted Stage-3 session must
+prove both that source-1 stays clear and that the MIR payload family disappears.
+No ARM64 artifact or QEMU rendering evidence is claimed.
