@@ -27,6 +27,38 @@ describe "SymbolTable qualified and exact indexes":
         expect(symbols.lookup_qualified_type_raw("owner", "Other")).to_equal(10)
         expect(symbols.lookup_qualified_type_raw("owner", "Missing")).to_equal(-1)
 
+    it "checks exact names when two qualified types share a hash bucket":
+        var symbols = SymbolTable.new()
+        # These pairs both map to bucket 16 under the fixed pair hash. The
+        # accelerator may collide; the exact module/member arrays decide.
+        symbols.bind_qualified_type("owner.23", "Item.23", SymbolId(id: 23))
+        symbols.bind_qualified_type("owner.25", "Item.25", SymbolId(id: 25))
+
+        expect(symbols.lookup_qualified_type_raw("owner.23", "Item.23")).to_equal(23)
+        expect(symbols.lookup_qualified_type_raw("owner.25", "Item.25")).to_equal(25)
+        expect(symbols.qualified_type_probe_steps("owner.25", "Item.25")).to_equal(1)
+        expect(symbols.qualified_type_probe_steps("owner.23", "Item.23")).to_equal(2)
+
+    it "keeps ten thousand qualified probes proportional to query count":
+        var symbols = SymbolTable.new()
+        var index: i64 = 0
+        while index < 4096:
+            symbols.bind_qualified_type(
+                "owner.{index}", "Item.{index}", SymbolId(id: index))
+            index = index + 1
+
+        var comparisons: i64 = 0
+        index = 0
+        while index < 10000:
+            val item = index % 4096
+            comparisons = comparisons + symbols.qualified_type_probe_steps(
+                "owner.{item}", "Item.{item}")
+            index = index + 1
+        # A linear scan would perform ~20 million exact comparisons. With
+        # 256 collision-checked buckets the measured bound stays below thirty
+        # comparisons/query even at sixteen entries per bucket on average.
+        expect(comparisons).to_be_less_than(300000)
+
     it "resets scalar qualified indexes with module state":
         var symbols = SymbolTable.new()
         symbols.bind_qualified_type("owner", "Item", SymbolId(id: 4))
@@ -34,6 +66,10 @@ describe "SymbolTable qualified and exact indexes":
         symbols.reset_module()
         expect(symbols.lookup_qualified_type_raw("owner", "Item")).to_equal(-1)
         expect(symbols.lookup_qualified_function_raw("owner", "call")).to_equal(-1)
+        symbols.bind_qualified_type("owner", "Item", SymbolId(id: 6))
+        symbols.bind_qualified_function("owner", "call", SymbolId(id: 7))
+        expect(symbols.lookup_qualified_type_raw("owner", "Item")).to_equal(6)
+        expect(symbols.lookup_qualified_function_raw("owner", "call")).to_equal(7)
 
     it "indexes exact definitions and keeps old aliases after rename":
         var symbols = SymbolTable.new()
