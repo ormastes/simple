@@ -51,6 +51,9 @@ of opcode type correctness, SSA dominance, ownership, or
 semantic equivalence; those omissions remain explicit blockers for `--verify-each`.
 CFG terminator edges are checked in place against the indexed block set; verification does
 not allocate a target collection per basic block, including high-fanout switches.
+Verifier consumers should key automation on stable `MIRV001`-`MIRV019` codes, not message
+text. `MIRV999` means the failure remains fail-closed but its machine category has not yet
+been admitted.
 
 ## Diagnostic policy
 
