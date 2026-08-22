@@ -310,3 +310,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Share immutable effective defaults while keeping overrides mutable per file.
 - Pin absence of per-file `LintConfig.new()` in the no-manifest branch.
 - Follow-up: reduce CLI argument policy rescans to one parsed command policy.
+## Completed compiler tranche: storage-layout advisory indexing
+
+- Replace growing-array field-ID deduplication with dictionary membership and an explicit count.
+- Remove the redundant field-ID array allocation.
+- Replace handwritten selection sort with the standard deterministic sort.
+- Preserve identity format, completeness decisions, and overlap semantics.
+- Follow-up: design a region-grouped interval sweep for overlap proof before changing the remaining pair analysis.

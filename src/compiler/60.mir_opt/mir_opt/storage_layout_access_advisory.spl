@@ -30,7 +30,8 @@ fn storage_layout_access_advisory_v1(
 ) -> StorageLayoutAccessAdvisoryV1:
     var complete = summary.complete and summary.typed_facts.len() > 0
         and not summary.address_observed and not summary.unknown_access
-    var field_ids: [i64] = []
+    var field_id_set: Dict<i64, bool> = {}
+    var field_count = 0
     var identity_rows: [text] = []
     for fact in summary.typed_facts:
         if fact.path.region_id == MIR_STORAGE_UNKNOWN_REGION_ID:
@@ -38,14 +39,13 @@ fn storage_layout_access_advisory_v1(
         if fact.has_field:
             if fact.field_id < 0 or not fact.path.known_range:
                 complete = false
-            var found = false
-            for existing in field_ids:
-                if existing == fact.field_id: found = true
-            if not found: field_ids.push(fact.field_id)
+            if not field_id_set.contains_key(fact.field_id):
+                field_id_set[fact.field_id] = true
+                field_count = field_count + 1
             identity_rows.push("{fact.field_id}|{fact.path.region_id}|{fact.path.start}|{fact.path.end}|{parallel_access_mode_to_u8(fact.path.mode)}")
         elif not fact.structural_record_load:
             complete = false
-    if field_ids.len() < 2 or schema_field_count <= field_ids.len():
+    if field_count < 2 or schema_field_count <= field_count:
         complete = false
 
     # Fields consumed together from an overlapping logical element range are
@@ -66,18 +66,9 @@ fn storage_layout_access_advisory_v1(
                 right = right + 1
         left = left + 1
 
-    var i = 0
-    while i < identity_rows.len():
-        var j = i + 1
-        while j < identity_rows.len():
-            if identity_rows[j] < identity_rows[i]:
-                val temporary = identity_rows[i]
-                identity_rows[i] = identity_rows[j]
-                identity_rows[j] = temporary
-            j = j + 1
-        i = i + 1
+    identity_rows.sort()
 
-    val independent = complete and field_ids.len() >= 2
+    val independent = complete and field_count >= 2
     val request = storage_layout_request_v1(logical_type_id, element_count,
         alignment, simd_width, gpu_bulk_fields, independent, abi_pinned,
         policy_hash)
