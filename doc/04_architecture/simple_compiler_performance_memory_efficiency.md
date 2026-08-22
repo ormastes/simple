@@ -263,3 +263,11 @@ selection. Validation remains after unique selection.
 - `doc/02_requirements/nfr/simple_compiler_performance_memory_efficiency.md`
 - `doc/04_architecture/compiler/perf/simple_optimization_plugin.md`
 - `doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md`
+
+### Deterministic catalog ordering
+
+Deterministic VHDL catalog ordering is an operation-local fact. Key snapshots
+use stable bottom-up merge passes with the existing raw comparators, one bounded
+scratch array, left-biased equal keys, odd-run copying, and guarded width
+growth. The catalog owns and reuses module and category snapshots rather than
+rebuilding or resorting the same dictionary keys at each consumer.
