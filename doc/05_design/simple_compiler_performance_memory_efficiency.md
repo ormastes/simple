@@ -490,9 +490,17 @@ an identical output. If ESC is present, retain the legacy state machine rather
 than broadening terminal parsing: discard ESC and subsequent characters through
 the next lowercase `m`, repeat for later escapes, and discard the remaining suffix
 for an unterminated escape. Empty text, Unicode and all ANSI-free bytes are
-unchanged. A later shared-output design may remove duplicate normalization across
-lint gating and JSON collection, but must preserve their current call ordering and
-diagnostic semantics.
+unchanged. Shared output must preserve the current call ordering and diagnostic
+semantics while removing duplicate normalization across lint gating and JSON
+collection.
+
+The active design now materializes `clean_output = strip(stdout + "\n" + stderr)`
+once per compiler result. Lint gating, JSON parsing, and text-workspace counting
+consume that immutable value; text rendering still prints the original channel
+values. Counting uses the same nonblank `file + ":"` admission predicate as the
+JSON parser without constructing messages, codes, escaped JSON, or diagnostic
+objects. Compatibility wrappers may normalize independently, but active callers
+must use the clean-input helpers.
 
 ## Workspace diagnostic session design
 

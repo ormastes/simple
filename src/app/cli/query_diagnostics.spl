@@ -15,12 +15,16 @@ fn query_check(file: text, cmd_args: [text]) -> i64:
     val check_stdout = check_result.0
     val check_stderr = check_result.1
     val check_code = check_result.2
-    val should_lint = _should_run_lint_after_check(check_stdout, check_stderr)
+    # JSON diagnostics and the lint gate consume the same normalized compiler
+    # output. Own that O(S) combine/ANSI scan once at the command boundary.
+    val clean_output = _clean_check_output(check_stdout, check_stderr)
+    val should_lint = _should_run_lint_after_clean_output(clean_output)
 
     if format == "json":
         _DIAG_COLLECT_MODE = true
         _DIAG_COLLECTED = []
-        val check_diags = _collect_check_output_diagnostics_json(file, check_stdout, check_stderr)
+        val check_diags = _collect_check_output_diagnostics_json_clean(
+            file, clean_output)
         for diagnostic in check_diags:
             _diag_emit_or_collect(diagnostic)
         if should_lint:
@@ -132,7 +136,8 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
         val check_stdout = check_result.0
         val check_stderr = check_result.1
         val check_code = check_result.2
-        val should_lint = _should_run_lint_after_check(check_stdout, check_stderr)
+        val clean_output = _clean_check_output(check_stdout, check_stderr)
+        val should_lint = _should_run_lint_after_clean_output(clean_output)
         if format != "json":
             if check_stdout != "":
                 print check_stdout
@@ -140,7 +145,9 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
                 print check_stderr
             if check_code != 0:
                 file_has_issues = true
-                file_diag_count = file_diag_count + _count_check_output_diagnostics(spl_file, check_stdout, check_stderr)
+                file_diag_count = file_diag_count +
+                    _count_check_output_diagnostics_clean(
+                        spl_file, clean_output)
 
         if format != "json" and query_file_exists(spl_file):
             val source = query_file_read_rich(spl_file) ?? ""
@@ -198,10 +205,16 @@ fn _run_query_check_json(file: text) -> (text, text, i64):
     query_process_run(_find_simple_binary(), ["run", "src/app/cli/query.spl", "check", file, "--format", "json"])
 
 fn _should_run_lint_after_check(check_stdout: text, check_stderr: text) -> bool:
-    val combined = _strip_ansi(check_stdout + "\n" + check_stderr)
-    if combined.trim() == "":
+    _should_run_lint_after_clean_output(
+        _clean_check_output(check_stdout, check_stderr))
+
+fn _clean_check_output(check_stdout: text, check_stderr: text) -> text:
+    _strip_ansi(check_stdout + "\n" + check_stderr)
+
+fn _should_run_lint_after_clean_output(clean_output: text) -> bool:
+    if clean_output.trim() == "":
         return true
-    if combined.contains("unexpected token") or combined.contains("ParseError"):
+    if clean_output.contains("unexpected token") or clean_output.contains("ParseError"):
         return false
     true
 
@@ -225,10 +238,28 @@ fn _strip_ansi(s: text) -> text:
     parts.join("")
 
 fn _count_check_output_diagnostics(file: text, check_stdout: text, check_stderr: text) -> i64:
-    _collect_check_output_diagnostics_json(file, check_stdout, check_stderr).len()
+    _count_check_output_diagnostics_clean(
+        file, _clean_check_output(check_stdout, check_stderr))
+
+fn _count_check_output_diagnostics_clean(file: text, clean_output: text) -> i64:
+    val prefix = file + ":"
+    var count = 0
+    for line in clean_output.split("\n"):
+        val trimmed = line.trim()
+        # _parse_check_output_line_json emits one object for every nonblank
+        # line with this prefix, even when location fields fall back to 1:1.
+        # Count that exact admission predicate without allocating JSON objects.
+        if trimmed != "" and trimmed.starts_with(prefix):
+            count = count + 1
+    count
 
 fn _collect_check_output_diagnostics_json(file: text, check_stdout: text, check_stderr: text) -> [text]:
-    val clean_output = _strip_ansi(check_stdout + "\n" + check_stderr)
+    _collect_check_output_diagnostics_json_clean(
+        file, _clean_check_output(check_stdout, check_stderr))
+
+fn _collect_check_output_diagnostics_json_clean(
+    file: text, clean_output: text
+) -> [text]:
     val lines = clean_output.split("\n")
     var diagnostics: [text] = []
     for line in lines:
