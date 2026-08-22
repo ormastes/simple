@@ -1,0 +1,84 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-016 REQ-017 NFR-005 NFR-006
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.common.structural.environment_instruction.*
+
+fn metadata(operation: i64, invocation: i64, sequence: i64,
+            opcode: EnvOpcodeV1, capability: i64,
+            argument_length: i64 = 0) -> RtHalAutomaticAccessMetadataV1:
+    rt_hal_automatic_access_metadata_v1(operation, invocation, sequence,
+        opcode, capability, 0, 0, argument_length, argument_length,
+        0, 16, 16)
+
+describe "automatic rt(hal) environment extraction":
+    it "records clock env file and stream metadata in exact order":
+        var clock = rt_hal_automatic_extraction_owner_v1(101, 41, 1)
+        val c = rt_hal_automatic_extract_v1(clock,
+            metadata(101, 41, 0, EnvOpcodeV1.ClockRead, 11))
+        expect(c.accepted).to_be(true)
+
+        var env = rt_hal_automatic_extraction_owner_v1(102, 42, 1)
+        val e = rt_hal_automatic_extract_v1(env,
+            metadata(102, 42, 0, EnvOpcodeV1.EnvironmentGet, 10, 8))
+        expect(e.accepted).to_be(true)
+
+        var file = rt_hal_automatic_extraction_owner_v1(1001, 43, 1)
+        val f = rt_hal_automatic_extract_v1(file,
+            metadata(1001, 43, 0, EnvOpcodeV1.FileRead, 2, 8))
+        expect(f.accepted).to_be(true)
+
+        var stream = rt_hal_automatic_extraction_owner_v1(1004, 44, 1)
+        val s = rt_hal_automatic_extract_v1(stream,
+            metadata(1004, 44, 0, EnvOpcodeV1.StreamRead, 5, 8))
+        expect(s.accepted).to_be(true)
+        expect(s.instruction.sequence).to_equal(0)
+
+    it "supports every generic typed opcode without a lookup table":
+        val operation = rt_hal_environment_operation_for_opcode_v1(
+            EnvOpcodeV1.DmaSubmit)
+        val step = rt_hal_automatic_extract_v1(
+            rt_hal_automatic_extraction_owner_v1(operation, 45, 1),
+            metadata(operation, 45, 0, EnvOpcodeV1.DmaSubmit, 23, 16))
+        expect(step.accepted).to_be(true)
+        expect(step.instruction.opcode).to_equal(EnvOpcodeV1.DmaSubmit)
+
+    it "fails closed for absent owner overflow reorder and bad bounds":
+        val absent = rt_hal_automatic_extract_v1(
+            rt_hal_automatic_extraction_owner_absent_v1(),
+            metadata(101, 46, 0, EnvOpcodeV1.ClockRead, 11))
+        expect(absent.accepted).to_be(false)
+        expect(absent.owner.binding.extraction.sealed).to_be(true)
+
+        val owner = rt_hal_automatic_extraction_owner_v1(101, 47, 1)
+        val first = rt_hal_automatic_extract_v1(owner,
+            metadata(101, 47, 0, EnvOpcodeV1.ClockRead, 11))
+        val overflow = rt_hal_automatic_extract_v1(first.owner,
+            metadata(101, 47, 1, EnvOpcodeV1.ClockRead, 11))
+        expect(overflow.accepted).to_be(false)
+        expect(overflow.owner.binding.extraction.status).to_equal(
+            EnvInstructionStatusV1.Overflow)
+
+        val reorder = rt_hal_automatic_extract_v1(owner,
+            metadata(101, 47, 1, EnvOpcodeV1.ClockRead, 11))
+        expect(reorder.accepted).to_be(false)
+        val invalid = rt_hal_automatic_extract_v1(owner,
+            rt_hal_automatic_access_metadata_v1(101, 47, 0,
+                EnvOpcodeV1.ClockRead, 11, 0, 7, 8, 8, 0, 17, 16))
+        expect(invalid.accepted).to_be(false)
+
+    it "keeps the automatic hook scalar constant-time and allocation-free":
+        val source = file_read(
+            "src/lib/common/structural/environment_instruction/automatic_hook.spl")
+        val begin = source.find("fn rt_hal_automatic_extract_v1(")
+        val finish = source.find("fn rt_hal_automatic_extraction_seal_v1(")
+        val hook = source.substring(begin, finish)
+        expect(begin).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(begin)
+        expect(hook.contains("while ")).to_equal(false)
+        expect(hook.contains("for ")).to_equal(false)
+        expect(hook.contains(".push(")).to_equal(false)
+        expect(hook.contains("Dict<")).to_equal(false)
+        expect(hook.contains("file_")).to_equal(false)
+        expect(hook.contains("env_get")).to_equal(false)

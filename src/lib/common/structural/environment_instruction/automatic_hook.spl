@@ -1,0 +1,132 @@
+# codex-impl
+# Automatic @rt(hal) environment-access extraction ingress.
+#
+# Compiler-generated metadata is scalar and pointer-free.  The parent-owned
+# binding remains the sole mutable plan authority; adapters retain ownership of
+# argument/result storage and pass only checked offsets and capacities.
+
+use std.common.structural.environment_instruction.contracts.*
+use std.common.structural.environment_instruction.extraction.*
+use std.common.structural.environment_instruction.hal_binding.*
+
+val RT_HAL_AUTOMATIC_METADATA_SCHEMA_V1: i64 = 1
+
+struct RtHalAutomaticAccessMetadataV1:
+    schema_version: i64
+    tagged_operation_id: i64
+    invocation_id: i64
+    sequence: i64
+    opcode: EnvOpcodeV1
+    capability_id: i64
+    flags: i64
+    argument_offset: i64
+    argument_length: i64
+    argument_capacity: i64
+    result_offset: i64
+    result_capacity: i64
+    result_region_capacity: i64
+
+fn rt_hal_automatic_access_metadata_v1(
+        tagged_operation_id: i64, invocation_id: i64, sequence: i64,
+        opcode: EnvOpcodeV1, capability_id: i64, flags: i64,
+        argument_offset: i64, argument_length: i64,
+        argument_capacity: i64, result_offset: i64,
+        result_capacity: i64, result_region_capacity: i64)
+        -> RtHalAutomaticAccessMetadataV1:
+    RtHalAutomaticAccessMetadataV1(
+        RT_HAL_AUTOMATIC_METADATA_SCHEMA_V1, tagged_operation_id,
+        invocation_id, sequence, opcode, capability_id, flags,
+        argument_offset, argument_length, argument_capacity, result_offset,
+        result_capacity, result_region_capacity)
+
+fn rt_hal_automatic_access_metadata_v1_well_formed(
+        value: RtHalAutomaticAccessMetadataV1) -> bool:
+    value.schema_version == RT_HAL_AUTOMATIC_METADATA_SCHEMA_V1
+        and value.tagged_operation_id > 0
+        and value.tagged_operation_id <= RT_HAL_ENV_OPERATION_MAX_V1
+        and env_access_event_v1_well_formed(env_access_event_v1(
+            value.invocation_id, value.sequence, value.opcode,
+            value.capability_id, value.flags, value.argument_offset,
+            value.argument_length, value.argument_capacity,
+            value.result_offset, value.result_capacity,
+            value.result_region_capacity))
+
+struct RtHalAutomaticExtractionOwnerV1:
+    installed: bool
+    binding: RtHalEnvironmentBindingV1
+
+fn rt_hal_automatic_extraction_owner_v1(
+        tagged_operation_id: i64, invocation_id: i64,
+        instruction_capacity: i64) -> RtHalAutomaticExtractionOwnerV1:
+    RtHalAutomaticExtractionOwnerV1(true,
+        rt_hal_environment_binding_v1(tagged_operation_id, invocation_id,
+                                      instruction_capacity))
+
+fn rt_hal_automatic_extraction_owner_absent_v1()
+        -> RtHalAutomaticExtractionOwnerV1:
+    # Deliberately invalid scalar binding.  The hook seals it on first use and
+    # never performs or records an environment effect.
+    RtHalAutomaticExtractionOwnerV1(false,
+        rt_hal_environment_binding_v1(0, 0, 0))
+
+struct RtHalAutomaticExtractionStepV1:
+    owner: RtHalAutomaticExtractionOwnerV1
+    instruction: EnvInstructionV1
+    accepted: bool
+
+fn _rt_hal_automatic_rejected_step_v1(
+        owner: RtHalAutomaticExtractionOwnerV1,
+        metadata: RtHalAutomaticAccessMetadataV1)
+        -> RtHalAutomaticExtractionStepV1:
+    val rejected = env_extract_access_v1(owner.binding.extraction,
+        env_access_event_v1(metadata.invocation_id, metadata.sequence + 1,
+            metadata.opcode, metadata.capability_id, metadata.flags,
+            metadata.argument_offset, metadata.argument_length,
+            metadata.argument_capacity, metadata.result_offset,
+            metadata.result_capacity, metadata.result_region_capacity))
+    RtHalAutomaticExtractionStepV1(
+        RtHalAutomaticExtractionOwnerV1(owner.installed,
+            RtHalEnvironmentBindingV1(owner.binding.tagged_operation_id,
+                owner.binding.environment_schema_id, rejected.cursor)),
+        rejected.instruction, false)
+
+fn rt_hal_automatic_extract_v1(
+        owner: RtHalAutomaticExtractionOwnerV1,
+        metadata: RtHalAutomaticAccessMetadataV1)
+        -> RtHalAutomaticExtractionStepV1:
+    # Constant work: scalar validation plus the existing fixed cursor update.
+    # No array growth, map lookup, string operation, physical access, or copy.
+    val admitted = owner.installed
+        and rt_hal_automatic_access_metadata_v1_well_formed(metadata)
+        and rt_hal_environment_binding_v1_well_formed(owner.binding)
+        and not owner.binding.extraction.sealed
+        and metadata.tagged_operation_id == owner.binding.tagged_operation_id
+        and metadata.invocation_id == owner.binding.extraction.invocation_id
+        and metadata.sequence == owner.binding.extraction.next_sequence
+        and rt_hal_environment_opcode_admitted_v1(
+            metadata.tagged_operation_id, metadata.opcode)
+    if not admitted:
+        return _rt_hal_automatic_rejected_step_v1(owner, metadata)
+    val extracted = rt_hal_environment_extract_v1(owner.binding,
+        metadata.opcode, metadata.capability_id, metadata.flags,
+        metadata.argument_offset, metadata.argument_length,
+        metadata.argument_capacity, metadata.result_offset,
+        metadata.result_capacity, metadata.result_region_capacity)
+    RtHalAutomaticExtractionStepV1(
+        RtHalAutomaticExtractionOwnerV1(true, extracted.binding),
+        extracted.instruction, extracted.accepted)
+
+fn rt_hal_automatic_extraction_seal_v1(
+        owner: RtHalAutomaticExtractionOwnerV1)
+        -> RtHalAutomaticExtractionOwnerV1:
+    RtHalAutomaticExtractionOwnerV1(owner.installed,
+        rt_hal_environment_binding_seal_v1(owner.binding))
+
+export RT_HAL_AUTOMATIC_METADATA_SCHEMA_V1
+export RtHalAutomaticAccessMetadataV1
+export rt_hal_automatic_access_metadata_v1
+export rt_hal_automatic_access_metadata_v1_well_formed
+export RtHalAutomaticExtractionOwnerV1, RtHalAutomaticExtractionStepV1
+export rt_hal_automatic_extraction_owner_v1
+export rt_hal_automatic_extraction_owner_absent_v1
+export rt_hal_automatic_extract_v1, rt_hal_automatic_extraction_seal_v1

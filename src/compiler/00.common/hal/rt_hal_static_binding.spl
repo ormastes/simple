@@ -24,7 +24,18 @@ struct RtHalStaticBindingV1:
     result_abi: RtHalResultAbiV1
     direct_rewrite_supported: bool
     compare_supported: bool
+    tagged_operation_id: i64
+    environment_opcode_code: i64
+    environment_capability_id: i64
+    automatic_extraction_supported: bool
     diagnostic: text
+
+val RT_HAL_CLOCK_TAGGED_OPERATION_ID_V1: i64 = 101
+val RT_HAL_ENVIRONMENT_TAGGED_OPERATION_ID_V1: i64 = 102
+val RT_HAL_TYPED_ENV_OPERATION_BASE_V1: i64 = 1000
+
+fn _rt_hal_typed_environment_operation_id_v1(opcode_code: i64) -> i64:
+    RT_HAL_TYPED_ENV_OPERATION_BASE_V1 + opcode_code
 
 fn rt_hal_manifest_operation_v1(manifest: text) -> text:
     val prefix = "rt-hal-v1|operation="
@@ -58,49 +69,57 @@ fn rt_hal_provider_mask_compares_v1(mask: i64) -> bool:
 
 fn _rt_hal_metadata_binding_v1(operation: text, raw_symbol: text,
                                signature: text,
-                               result_abi: RtHalResultAbiV1) -> RtHalStaticBindingV1:
+                               result_abi: RtHalResultAbiV1,
+                               opcode_code: i64,
+                               capability_id: i64,
+                               tagged_operation_id: i64 = 0) -> RtHalStaticBindingV1:
     RtHalStaticBindingV1(
         true, operation, raw_symbol, "", "", signature, result_abi,
         false, false,
+        if tagged_operation_id > 0: tagged_operation_id
+        else: _rt_hal_typed_environment_operation_id_v1(opcode_code),
+        opcode_code, capability_id, true,
         "E-RT-HAL-BIND-003: " + operation +
         " has no frozen direct-rewrite/comparison ABI; validation metadata only")
 
 fn rt_hal_static_binding_v1(operation: text) -> RtHalStaticBindingV1:
     if operation == "io.file.read.v1":
         return _rt_hal_metadata_binding_v1(operation, "rt_io_file_read",
-            "fn(i64,i64)->[u8]", RtHalResultAbiV1.BytesU8)
+            "fn(i64,i64)->[u8]", RtHalResultAbiV1.BytesU8, 1, 2)
     if operation == "io.stream.read.v1":
         return _rt_hal_metadata_binding_v1(operation, "rt_process_read_stdout",
-            "fn(i64)->text", RtHalResultAbiV1.Text)
+            "fn(i64)->text", RtHalResultAbiV1.Text, 4, 5)
     if operation == "io.process.wait.v1":
         return _rt_hal_metadata_binding_v1(operation, "rt_process_wait",
-            "fn(i64,i64)->i64", RtHalResultAbiV1.ScalarI64)
+            "fn(i64,i64)->i64", RtHalResultAbiV1.ScalarI64, 7, 8)
     if operation == "io.environment.get.v1":
         return _rt_hal_metadata_binding_v1(operation, "rt_env_get",
-            "fn(text)->text?", RtHalResultAbiV1.OptionalText)
+            "fn(text)->text?", RtHalResultAbiV1.OptionalText, 9, 10,
+            RT_HAL_ENVIRONMENT_TAGGED_OPERATION_ID_V1)
     if operation == "io.clock.monotonic_nanos.v1":
         return RtHalStaticBindingV1(
             true, operation, "hal_clock_monotonic_nanos_v1",
             "rt_time_now_nanos", "rt_hal_clock_dispatch_compare_v2",
-            "fn()->i64", RtHalResultAbiV1.ScalarI64, true, true, "")
+            "fn()->i64", RtHalResultAbiV1.ScalarI64, true, true,
+            RT_HAL_CLOCK_TAGGED_OPERATION_ID_V1, 10, 11, true, "")
     if operation == "io.random.fill.v1":
         return _rt_hal_metadata_binding_v1(operation, "rt_entropy_fill",
-            "fn([u8])->i64", RtHalResultAbiV1.ScalarI64)
+            "fn([u8])->i64", RtHalResultAbiV1.ScalarI64, 11, 12)
     if operation == "io.socket.connect_timeout.v1":
         return _rt_hal_metadata_binding_v1(operation, "rt_io_tcp_connect_timeout",
-            "fn(text,i64)->i64", RtHalResultAbiV1.ScalarI64)
+            "fn(text,i64)->i64", RtHalResultAbiV1.ScalarI64, 12, 13)
     if operation == "io.interrupt.acknowledge.v1":
         return _rt_hal_metadata_binding_v1(operation, "plic_claim",
-            "fn()->i32", RtHalResultAbiV1.ScalarI32)
+            "fn()->i32", RtHalResultAbiV1.ScalarI32, 17, 18)
     if operation == "io.mmio.read_u32.v1":
         return _rt_hal_metadata_binding_v1(operation, "rt_mmio_read_u32",
-            "fn(u64)->u32", RtHalResultAbiV1.ScalarU32)
+            "fn(u64)->u32", RtHalResultAbiV1.ScalarU32, 18, 19)
     if operation == "io.dma.map.v1":
         return _rt_hal_metadata_binding_v1(operation, "rt_dma_alloc",
-            "fn(i64,i32)->i64", RtHalResultAbiV1.ScalarI64)
+            "fn(i64,i32)->i64", RtHalResultAbiV1.ScalarI64, 20, 21)
     RtHalStaticBindingV1(
         false, operation, "", "", "", "", RtHalResultAbiV1.Unsupported,
-        false, false,
+        false, false, 0, -1, 0, false,
         "E-RT-HAL-BIND-001: no closed compiler binding for @rt(hal) operation '" + operation + "'")
 
 fn rt_hal_binding_signature_key_diagnostic_v1(
@@ -132,6 +151,9 @@ fn rt_hal_binding_signature_diagnostic_v1(
     rt_hal_binding_signature_key_diagnostic_v1(binding, signature)
 
 export RtHalResultAbiV1, RtHalStaticBindingV1
+export RT_HAL_CLOCK_TAGGED_OPERATION_ID_V1
+export RT_HAL_ENVIRONMENT_TAGGED_OPERATION_ID_V1
+export RT_HAL_TYPED_ENV_OPERATION_BASE_V1
 export rt_hal_manifest_operation_v1, rt_hal_manifest_provider_mask_v1
 export rt_hal_provider_mask_compares_v1, rt_hal_static_binding_v1
 export rt_hal_binding_signature_diagnostic_v1
