@@ -1,5 +1,10 @@
 use std.spec
-use os.installer.image_builder.{build_install_image_with_simple_binary, build_install_image_with_rootfs, build_usb_installer_image}
+use os.installer.image_builder.{
+    ImageSimpleboxArtifactReceiptV1, ImageSimpleboxArtifactV1,
+    build_install_image_with_simple_binary,
+    build_install_image_with_simplebox_artifact, build_install_image_with_rootfs,
+    build_usb_installer_image, run_image_builder,
+}
 use os.installer.image_bounded_file_reader.{IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1}
 use os.tools.pkg.pkg_format.{PkgArch}
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -28,19 +33,190 @@ fn _header_only_elf() -> [u8]:
     data[52] = 64u8
     data
 
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xFF).to_u8()
+    data[offset + 1] = ((value >> 8) & 0xFF).to_u8()
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var i: i64 = 0
+    while i < 4:
+        data[offset + i] = ((value >> (i * 8)) & 0xFF).to_u8()
+        i = i + 1
+    data
+
+fn _put_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var i: i64 = 0
+    while i < 8:
+        data[offset + i] = ((value >> (i * 8)) & 0xFF).to_u8()
+        i = i + 1
+    data
+
+fn _elf64_arm64() -> [u8]:
+    var data: [u8] = [0u8; 121]
+    data[0] = 0x7Fu8
+    data[1] = 0x45u8
+    data[2] = 0x4Cu8
+    data[3] = 0x46u8
+    data[4] = 2u8
+    data[5] = 1u8
+    data[6] = 1u8
+    data = _put_u16_le(data, 16, 2)
+    data = _put_u16_le(data, 18, 183)
+    data = _put_u32_le(data, 20, 1)
+    data = _put_u64_le(data, 24, 0x400000)
+    data = _put_u64_le(data, 32, 64)
+    data = _put_u16_le(data, 52, 64)
+    data = _put_u16_le(data, 54, 56)
+    data = _put_u16_le(data, 56, 1)
+    data = _put_u32_le(data, 64, 1)
+    data = _put_u32_le(data, 68, 5)
+    data = _put_u64_le(data, 72, 120)
+    data = _put_u64_le(data, 80, 0x400000)
+    data = _put_u64_le(data, 96, 1)
+    data = _put_u64_le(data, 104, 1)
+    data = _put_u64_le(data, 112, 0x1000)
+    data[120] = 0xC0u8
+    data
+
+fn _elf64_arm64_padded(size: i64) -> [u8]:
+    var data = _elf64_arm64()
+    while data.len() < size:
+        data.push(0u8)
+    data
+
 fn _simple_stamp(digest: text, compiler: text) -> text:
     "target=x86_64-unknown-simpleos\n" +
         "entry=src/app/simpleos_tool/main.spl\nentry_closure=true\n" +
         "backend=llvm\ncompiler={compiler}\nartifact_sha256={digest}\n"
 
 describe "Image builder artifacts":
+    it "fails closed when explicit simplebox artifact bytes are absent":
+        val result = build_install_image_with_simplebox_artifact(
+            PkgArch.Arm64, "", "", "build/test-artifacts/missing-simplebox.img", 128,
+            ImageSimpleboxArtifactV1(
+                bytes: [],
+                receipt: ImageSimpleboxArtifactReceiptV1(
+                    schema_version: 0, artifact_sha256: "", target: "",
+                    canonical_role: "", entry: "", entry_closure: false,
+                    backend: "", compiler: "")))
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain("artifact bytes are required")
+
+    it "stages one SHA-bound simplebox payload with structured alias receipts":
+        val dir = "build/test-artifacts/image-builder-simplebox"
+        _reset_dir(dir)
+        val output = "{dir}/simpleos-arm64.img"
+        val bytes = _elf64_arm64()
+        val digest = sha256_u8_hex(bytes)
+        val artifact_path = "{dir}/simplebox"
+        val receipt_path = "{dir}/simplebox.receipt"
+        expect(rt_file_write_bytes(artifact_path, bytes)).to_be(true)
+        expect(rt_file_write_text(receipt_path,
+            "schema_version=1\nartifact_sha256={digest}\n" +
+            "target=aarch64-unknown-simpleos\n" +
+            "canonical_role=/bin/simplebox\n" +
+            "entry=src/os/tools/simplebox/simplebox_main.spl\n" +
+            "entry_closure=true\nbackend=llvm\ncompiler=bin/release/simple\n")).to_be(true)
+        expect(run_image_builder([
+            "create", "--arch=arm64", "--output={output}", "--size=128",
+            "--simplebox-artifact={artifact_path}",
+            "--simplebox-receipt={receipt_path}",
+        ])).to_equal(0)
+        for path in [
+            "/bin/simplebox", "/bin/echo", "/bin/true", "/bin/false",
+            "/bin/pwd", "/bin/seq", "/bin/cat", "/bin/head", "/bin/wc",
+        ]:
+            if path == "/bin/simplebox":
+                expect(rt_file_exists("{output}.contents/rootfs{path}")).to_be(true)
+            else:
+                expect(rt_file_exists("{output}.contents/rootfs{path}")).to_be(false)
+        val manifest = rt_file_read_text("{output}.manifest.sdn")
+        expect(manifest).to_contain("artifact_sha256 = \"{digest}\"")
+        expect(manifest).to_contain("target = \"aarch64-unknown-simpleos\"")
+        expect(manifest).to_contain("canonical_role = \"/bin/simplebox\"")
+        expect(manifest).to_contain("entry = \"src/os/tools/simplebox/simplebox_main.spl\"")
+        expect(manifest).to_contain("entry_closure = true")
+        expect(manifest).to_contain("backend = \"llvm\"")
+        expect(manifest).to_contain("compiler = \"bin/release/simple\"")
+        expect(manifest).to_contain("alias_of = \"/bin/simplebox\"")
+
+    it "rejects simplebox bytes whose digest or structured receipt is not bound":
+        val bytes = _elf64_arm64()
+        val wrong_digest = build_install_image_with_simplebox_artifact(
+            PkgArch.Arm64, "", "", "build/test-artifacts/wrong-simplebox.img", 128,
+            ImageSimpleboxArtifactV1(
+                bytes: bytes,
+                receipt: ImageSimpleboxArtifactReceiptV1(
+                    schema_version: 1, artifact_sha256: "f" * 64,
+                    target: "aarch64-unknown-simpleos",
+                    canonical_role: "/bin/simplebox",
+                    entry: "src/os/tools/simplebox/simplebox_main.spl",
+                    entry_closure: true, backend: "llvm",
+                    compiler: "bin/release/simple")))
+        expect(wrong_digest.is_err()).to_be(true)
+        val missing_provenance = build_install_image_with_simplebox_artifact(
+            PkgArch.Arm64, "", "", "build/test-artifacts/no-provenance.img", 128,
+            ImageSimpleboxArtifactV1(
+                bytes: bytes,
+                receipt: ImageSimpleboxArtifactReceiptV1(
+                    schema_version: 1, artifact_sha256: sha256_u8_hex(bytes),
+                    target: "aarch64-unknown-simpleos",
+                    canonical_role: "/bin/simplebox",
+                    entry: "src/os/tools/simplebox/simplebox_main.spl",
+                    entry_closure: true, backend: "llvm", compiler: "")))
+        expect(missing_provenance.is_err()).to_be(true)
+
+    it "rejects a bootstrap compiler in the simplebox build receipt":
+        val bytes = _elf64_arm64()
+        val result = build_install_image_with_simplebox_artifact(
+            PkgArch.Arm64, "", "", "build/test-artifacts/seed-simplebox.img", 128,
+            ImageSimpleboxArtifactV1(
+                bytes: bytes,
+                receipt: ImageSimpleboxArtifactReceiptV1(
+                    schema_version: 1, artifact_sha256: sha256_u8_hex(bytes),
+                    target: "aarch64-unknown-simpleos",
+                    canonical_role: "/bin/simplebox",
+                    entry: "src/os/tools/simplebox/simplebox_main.spl",
+                    entry_closure: true, backend: "llvm",
+                    compiler: "src/compiler_rust/target/bootstrap/simple")))
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain("bootstrap seed")
+
+    it "rejects image sizes that cannot contain EFI and root partitions":
+        val result = build_install_image_with_rootfs(
+            PkgArch.Arm64, "", "", "build/test-artifacts/undersized.img", 64, "fat32")
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain("at least 67 MB")
+
+    it "rejects aggregate staging when a two MiB artifact alone fits the root partition":
+        val near_capacity = _elf64_arm64_padded(2097152)
+        val result = build_install_image_with_simplebox_artifact(
+            PkgArch.Arm64, "", "", "build/test-artifacts/capacity.img", 72,
+            ImageSimpleboxArtifactV1(
+                bytes: near_capacity,
+                receipt: ImageSimpleboxArtifactReceiptV1(
+                    schema_version: 1,
+                    artifact_sha256: sha256_u8_hex(near_capacity),
+                    target: "aarch64-unknown-simpleos",
+                    canonical_role: "/bin/simplebox",
+                    entry: "src/os/tools/simplebox/simplebox_main.spl",
+                    entry_closure: true, backend: "llvm",
+                    compiler: "bin/release/simple")))
+        expect(result.is_err()).to_be(true)
+        if val Err(message) = result:
+            expect(message).to_contain("aggregate staged rootfs allocation")
+
     it "rejects a marker file pretending to be a target Simple payload":
         val dir = "build/test-artifacts/image-builder"
         _reset_dir(dir)
         val output = "{dir}/simpleos-x86_64.img"
         val simple_payload = "{dir}/simple-target.smf"
         expect(rt_file_write_text(simple_payload, "SMF_FAKE_TARGET_SIMPLE\n")).to_be(true)
-        val result = build_install_image_with_simple_binary(PkgArch.X86_64, "", "", output, 64, simple_payload)
+        val result = build_install_image_with_simple_binary(PkgArch.X86_64, "", "", output, 128, simple_payload)
         expect(result.is_err()).to_be(true)
         if val Err(message) = result:
             expect(message).to_contain("lacks target provenance")
@@ -56,7 +232,7 @@ describe "Image builder artifacts":
         expect(rt_file_write_text("{simple_payload}.build_stamp",
             _simple_stamp(sha256_u8_hex(bytes), "bin/release/simple"))).to_be(true)
         val result = build_install_image_with_simple_binary(
-            PkgArch.X86_64, "", "", output, 64, simple_payload)
+            PkgArch.X86_64, "", "", output, 128, simple_payload)
         expect(result.is_err()).to_be(true)
         if val Err(message) = result:
             expect(message).to_contain(IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1)
@@ -73,7 +249,7 @@ describe "Image builder artifacts":
             _simple_stamp(sha256_u8_hex(bytes),
                 "src/compiler_rust/target/bootstrap/simple"))).to_be(true)
         val result = build_install_image_with_simple_binary(
-            PkgArch.X86_64, "", "", output, 64, simple_payload)
+            PkgArch.X86_64, "", "", output, 128, simple_payload)
         expect(result.is_err()).to_be(true)
         if val Err(message) = result:
             expect(message).to_contain(IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1)
@@ -89,7 +265,7 @@ describe "Image builder artifacts":
         expect(rt_file_write_text("{simple_payload}.build_stamp",
             _simple_stamp("f" * 64, "bin/release/simple"))).to_be(true)
         val result = build_install_image_with_simple_binary(
-            PkgArch.X86_64, "", "", output, 64, simple_payload)
+            PkgArch.X86_64, "", "", output, 128, simple_payload)
         expect(result.is_err()).to_be(true)
         if val Err(message) = result:
             expect(message).to_contain(IMAGE_BOUNDED_FILE_READER_UNAVAILABLE_V1)
@@ -99,7 +275,7 @@ describe "Image builder artifacts":
         val dir = "build/test-artifacts/image-builder-installer"
         _reset_dir(dir)
         val output = "{dir}/simpleos-arm64-installer.iso"
-        val result = build_usb_installer_image(PkgArch.Arm64, "", "", output, 64)
+        val result = build_usb_installer_image(PkgArch.Arm64, "", "", output, 128)
         expect(result.is_ok()).to_be(true)
         expect(rt_file_exists(output)).to_be(true)
         expect(rt_file_exists("{output}.manifest.sdn")).to_be(true)
@@ -126,7 +302,7 @@ describe "Image builder artifacts":
         val dir = "build/test-artifacts/image-builder-rootfs"
         _reset_dir(dir)
         val output = "{dir}/simpleos-x86_64-nvfs.img"
-        val result = build_install_image_with_rootfs(PkgArch.X86_64, "", "", output, 64, "nvfs")
+        val result = build_install_image_with_rootfs(PkgArch.X86_64, "", "", output, 128, "nvfs")
         expect(result.is_ok()).to_be(true)
         expect(rt_file_exists("{output}.contents/rootfs/etc/rootfs.sdn")).to_be(true)
         expect(rt_file_exists("{output}.contents/rootfs/SYS/ROOTFS.CFG")).to_be(true)

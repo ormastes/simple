@@ -19,6 +19,10 @@ doc/05_design/REQ-OS-KERNEL-001.md
 use std.spec
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.process_image.{X86_64_USER_STACK_TOP, X86_32_USER_STACK_TOP}
+use os.kernel.loader.executable_source.{
+    resolve_executable_bytes, _set_synthetic_vfs_file_for_test,
+    _clear_synthetic_initramfs_for_test, _clear_synthetic_vfs_for_test,
+}
 use os.kernel.arch.arch_context.{Architecture}
 
 fn push_u16_le(buf: [u8], value: i64) -> [u8]:
@@ -289,3 +293,22 @@ describe "process image builder":
         expect(built.envp[0]).to_equal("PWD=/work")
         expect(built.envp[1]).to_equal("TERM=simple")
         expect(built.initial_stack_bytes.len()).to_be_greater_than(0)
+
+    it "canonicalizes simplebox byte lookup without rewriting requested argv zero":
+        val requested = "/bin/cat"
+        val canonical_bytes = make_x86_64_exec()
+        _clear_synthetic_initramfs_for_test()
+        _clear_synthetic_vfs_for_test()
+        _set_synthetic_vfs_file_for_test("/bin/simplebox", canonical_bytes)
+        val resolved = resolve_executable_bytes(requested, Architecture.X86_64)
+        expect(resolved.is_ok()).to_equal(true)
+
+        val image = build_user_process_image(
+            requested, resolved.unwrap(), Architecture.X86_64,
+            [requested, "/tmp/input"], [])
+        expect(image.is_ok()).to_equal(true)
+        val built = image.unwrap()
+        expect(built.binary_path).to_equal(requested)
+        expect(built.argv[0]).to_equal(requested)
+        expect(built.argv[1]).to_equal("/tmp/input")
+        _clear_synthetic_vfs_for_test()

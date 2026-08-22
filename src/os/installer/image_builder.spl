@@ -18,15 +18,20 @@ use os.installer.image_builder_payloads.{
     image_rootfs_boot_marker, image_rc_conf_payload,
     image_default_bootloader_config, image_installer_bootloader_config,
 }
-use os.installer.image_bounded_file_reader.{IMAGE_MAX_PACKAGE_ARCHIVE_BYTES_V1, image_read_file_bounded_v1, image_read_text_bounded_v1}
+use os.installer.image_bounded_file_reader.{IMAGE_MAX_PACKAGE_ARCHIVE_BYTES_V1, IMAGE_MAX_BUILD_STAMP_BYTES_V1, image_read_file_bounded_v1, image_read_text_bounded_v1}
+use os.tools.simplebox.simplebox_artifact_contract.{SIMPLEBOX_CANONICAL_PATH_V1, simplebox_canonical_aliases_v1}
+use std.common.crypto.sha256.{sha256_u8_hex}
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_write_bytes(path: text, content: [u8]) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
 val DEFAULT_IMAGE_SIZE_MB: u64 = 512
 val EFI_PARTITION_SIZE_MB: u64 = 64
+pub const MIN_IMAGE_SIZE_MB_V1: u64 = 67
 val _ROOT_LAYOUT = [
     "/boot",
     "/boot/efi",
@@ -69,7 +74,127 @@ struct ImageConfig:
     bootloader_config: text
     package_dir: text
     simple_binary: text
+    simplebox_artifact: ImageSimpleboxArtifactV1
     include_installer: bool
+
+pub struct ImageSimpleboxArtifactV1:
+    bytes: [u8]
+    receipt: ImageSimpleboxArtifactReceiptV1
+
+pub struct ImageSimpleboxArtifactReceiptV1:
+    schema_version: i64
+    artifact_sha256: text
+    target: text
+    canonical_role: text
+    entry: text
+    entry_closure: bool
+    backend: text
+    compiler: text
+
+fn _empty_simplebox_artifact_v1() -> ImageSimpleboxArtifactV1:
+    ImageSimpleboxArtifactV1(
+        bytes: [],
+        receipt: ImageSimpleboxArtifactReceiptV1(
+            schema_version: 0, artifact_sha256: "", target: "",
+            canonical_role: "", entry: "", entry_closure: false,
+            backend: "", compiler: ""))
+
+fn _safe_simplebox_receipt_scalar_v1(value: text) -> bool:
+    value != "" and value.len() <= 1024 and not value.contains("\0") and
+        not value.contains("\n") and not value.contains("\r") and
+        not value.contains("\t") and not value.contains("\"") and
+        not value.contains("\\")
+
+fn _valid_simplebox_sha256_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f')):
+            return false
+    true
+
+fn _validate_simplebox_artifact_v1(
+    artifact: ImageSimpleboxArtifactV1, arch: PkgArch,
+) -> Result<bool, text>:
+    if artifact.bytes.len() == 0:
+        return Err("SimpleOS simplebox artifact bytes are required")
+    if artifact.bytes.len() > IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1:
+        return Err("SimpleOS simplebox artifact exceeds bounded payload limit")
+    val receipt = artifact.receipt
+    if receipt.schema_version != 1:
+        return Err("SimpleOS simplebox artifact receipt schema is invalid")
+    if not _valid_simplebox_sha256_v1(receipt.artifact_sha256):
+        return Err("SimpleOS simplebox artifact SHA-256 is invalid")
+    if sha256_u8_hex(artifact.bytes) != receipt.artifact_sha256:
+        return Err("SimpleOS simplebox artifact SHA-256 does not match its bytes")
+    if receipt.target != _simplebox_target_triple_v1(arch):
+        return Err("SimpleOS simplebox artifact receipt target mismatch")
+    if receipt.canonical_role != SIMPLEBOX_CANONICAL_PATH_V1:
+        return Err("SimpleOS simplebox artifact receipt canonical role mismatch")
+    if receipt.entry != "src/os/tools/simplebox/simplebox_main.spl" or
+       not receipt.entry_closure:
+        return Err("SimpleOS simplebox artifact receipt entry closure is invalid")
+    if receipt.backend != "llvm" and receipt.backend != "cranelift":
+        return Err("SimpleOS simplebox artifact receipt backend is invalid")
+    if not _safe_simplebox_receipt_scalar_v1(receipt.compiler):
+        return Err("SimpleOS simplebox artifact receipt compiler is missing or invalid")
+    if receipt.compiler.contains("compiler_rust") or
+       receipt.compiler.contains("simple_seed") or
+       receipt.compiler.contains("target/bootstrap"):
+        return Err("SimpleOS simplebox artifact was built by a bootstrap seed")
+    if not image_native_executable_payload_admitted_v1(
+        artifact.bytes, image_target_architecture(arch)):
+        return Err("SimpleOS simplebox artifact executable structure or architecture is invalid")
+    Ok(true)
+
+fn _simplebox_target_triple_v1(arch: PkgArch) -> text:
+    match arch:
+        PkgArch.X86_64: "x86_64-unknown-simpleos"
+        PkgArch.Arm64: "aarch64-unknown-simpleos"
+        PkgArch.Riscv64: "riscv64gc-unknown-simpleos"
+        PkgArch.Riscv32: "riscv32-unknown-simpleos"
+        PkgArch.Any: "x86_64-unknown-simpleos"
+
+fn _simplebox_receipt_field_v1(receipt: text, key: text) -> Result<text, text>:
+    val prefix = "{key}="
+    var found = ""
+    var count: i64 = 0
+    for line in receipt.split("\n"):
+        if line.starts_with(prefix):
+            count = count + 1
+            found = line.slice(prefix.len(), line.len())
+    if count != 1 or found == "":
+        return Err("SimpleOS simplebox artifact receipt has invalid {key}")
+    Ok(found)
+
+fn _load_simplebox_artifact_v1(
+    artifact_path: text, receipt_path: text, arch: PkgArch,
+) -> Result<ImageSimpleboxArtifactV1, text>:
+    if artifact_path == "" or receipt_path == "":
+        return Err("SimpleOS simplebox artifact and receipt paths are both required")
+    val bytes = image_read_file_bounded_v1(
+        artifact_path, IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1,
+        "SimpleOS simplebox artifact")?
+    val text_receipt = image_read_text_bounded_v1(
+        receipt_path, IMAGE_MAX_BUILD_STAMP_BYTES_V1,
+        "SimpleOS simplebox artifact receipt")?
+    val artifact = ImageSimpleboxArtifactV1(
+        bytes: bytes,
+        receipt: ImageSimpleboxArtifactReceiptV1(
+            schema_version: _simplebox_receipt_field_v1(
+                text_receipt, "schema_version")?.to_i64(),
+            artifact_sha256: _simplebox_receipt_field_v1(
+                text_receipt, "artifact_sha256")?,
+            target: _simplebox_receipt_field_v1(text_receipt, "target")?,
+            canonical_role: _simplebox_receipt_field_v1(
+                text_receipt, "canonical_role")?,
+            entry: _simplebox_receipt_field_v1(text_receipt, "entry")?,
+            entry_closure: _simplebox_receipt_field_v1(
+                text_receipt, "entry_closure")? == "true",
+            backend: _simplebox_receipt_field_v1(text_receipt, "backend")?,
+            compiler: _simplebox_receipt_field_v1(text_receipt, "compiler")?))
+    _validate_simplebox_artifact_v1(artifact, arch)?
+    Ok(artifact)
 struct PartitionLayout:
     efi_start_sector: u64
     efi_size_sectors: u64
@@ -134,6 +259,8 @@ impl ImageBuilder:
         ImageBuilder(config: config, layout: layout)
 
     fn build() -> Result<text, text>:
+        if self.config.image_size_mb < MIN_IMAGE_SIZE_MB_V1:
+            return Err("SimpleOS image size must be at least {MIN_IMAGE_SIZE_MB_V1} MB")
         val arch_name = pkg_arch_to_text(self.config.arch)
         val artifact_kind = if self.config.include_installer: "installer-dvd" else: "disk-image"
         val simple_binary = image_effective_simple_binary(self.config.simple_binary)
@@ -141,6 +268,9 @@ impl ImageBuilder:
             val simple_check = image_validate_simple_binary(simple_binary, self.config.arch)
             if val Err(e) = simple_check:
                 return Err(e)
+        if self.config.simplebox_artifact.bytes.len() > 0 or
+           self.config.simplebox_artifact.receipt.schema_version != 0:
+            _validate_simplebox_artifact_v1(self.config.simplebox_artifact, self.config.arch)?
         var kernel_bytes: [u8] = []
         if self.config.kernel_path != "" and rt_file_exists(self.config.kernel_path):
             kernel_bytes = image_read_file_bounded_v1(self.config.kernel_path, IMAGE_MAX_NATIVE_PAYLOAD_BYTES_V1, "SimpleOS kernel payload")?
@@ -171,6 +301,7 @@ impl ImageBuilder:
 
         if self.config.include_installer:
             deploy_manifest = deploy_manifest + self._populate_install_media(rootfs_root, kernel_bytes)?
+        _validate_staged_rootfs_budget_v1(rootfs_root, self.layout)?
         val manifest_path = "{reports_root}/deployed-files.sdn"
         write_text(manifest_path, deploy_manifest)
         write_text(_sidecar_manifest_path(self.config.output_path), deploy_manifest)
@@ -238,8 +369,7 @@ impl ImageBuilder:
         manifest = manifest + self._native_payload_manifest(
             "{rootfs_root}/boot/kernel.elf", "/boot/kernel.elf",
             "simpleos-kernel", "runtime-kernel", kernel_bytes)
-        manifest = manifest + image_package_payload_decision_v1(
-            "simpleos-core", "/bin/simplebox", [], image_target_architecture(self.config.arch)).inventory_row
+        manifest = manifest + self._stage_simplebox_payload(rootfs_root)?
         manifest = manifest + _manifest_file("/SYS/ROOTFS.CFG", "rootfs-boot-marker", "simpleos-core")
 
         val packages = list_all_packages(self.config.arch)
@@ -258,6 +388,28 @@ impl ImageBuilder:
             val kind = if font_path.ends_with(".ttf"): "font-asset" else: "font-notice"
             manifest = manifest + _manifest_file(font_path, kind, "simpleos-core")
             font_index = font_index + 1
+        Ok(manifest)
+
+    fn _stage_simplebox_payload(rootfs_root: text) -> Result<text, text>:
+        val artifact = self.config.simplebox_artifact
+        if artifact.bytes.len() == 0:
+            return Ok(image_package_payload_decision_v1(
+                "simpleos-core", SIMPLEBOX_CANONICAL_PATH_V1, [],
+                image_target_architecture(self.config.arch)).inventory_row)
+        _validate_simplebox_artifact_v1(artifact, self.config.arch)?
+        val decision = image_package_payload_decision_v1(
+            "simpleos-tools", SIMPLEBOX_CANONICAL_PATH_V1, artifact.bytes,
+            image_target_architecture(self.config.arch))
+        if not decision.write_payload or not decision.manifest_deployed:
+            return Err("SimpleOS simplebox payload policy rejected")
+        if not rt_file_write_bytes(rootfs_root + SIMPLEBOX_CANONICAL_PATH_V1, artifact.bytes):
+            return Err("SimpleOS simplebox artifact staging failed")
+        val receipt = artifact.receipt
+        var manifest = _manifest_file(
+            SIMPLEBOX_CANONICAL_PATH_V1, "simplebox-native", "simpleos-tools")
+        manifest = manifest + "[artifact_receipt]\npath = \"{SIMPLEBOX_CANONICAL_PATH_V1}\"\nschema_version = {receipt.schema_version}\nartifact_sha256 = \"{receipt.artifact_sha256}\"\ntarget = \"{receipt.target}\"\ncanonical_role = \"{receipt.canonical_role}\"\nentry = \"{receipt.entry}\"\nentry_closure = {receipt.entry_closure}\nbackend = \"{receipt.backend}\"\ncompiler = \"{receipt.compiler}\"\n\n"
+        for alias in simplebox_canonical_aliases_v1():
+            manifest = manifest + "[deploy_alias]\npath = \"{alias}\"\nalias_of = \"{SIMPLEBOX_CANONICAL_PATH_V1}\"\nartifact_sha256 = \"{receipt.artifact_sha256}\"\n\n"
         Ok(manifest)
 
     fn _stage_simple_toolchain_payload(rootfs_root: text) -> Result<text, text>:
@@ -480,6 +632,7 @@ fn build_usb_installer_image(
         bootloader_config: image_installer_bootloader_config(arch),
         package_dir: package_dir,
         simple_binary: "",
+        simplebox_artifact: _empty_simplebox_artifact_v1(),
         include_installer: true
     )
     _image_builder_rootfs_backend = "fat32"
@@ -501,6 +654,7 @@ fn build_usb_installer_image_with_rootfs(
         bootloader_config: image_installer_bootloader_config(arch),
         package_dir: package_dir,
         simple_binary: "",
+        simplebox_artifact: _empty_simplebox_artifact_v1(),
         include_installer: true
     )
     _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
@@ -521,6 +675,7 @@ fn build_install_image(
         bootloader_config: "",
         package_dir: package_dir,
         simple_binary: "",
+        simplebox_artifact: _empty_simplebox_artifact_v1(),
         include_installer: false
     )
     _image_builder_rootfs_backend = "fat32"
@@ -542,6 +697,29 @@ fn build_install_image_with_simple_binary(
         bootloader_config: "",
         package_dir: package_dir,
         simple_binary: simple_binary,
+        simplebox_artifact: _empty_simplebox_artifact_v1(),
+        include_installer: false
+    )
+    _image_builder_rootfs_backend = "fat32"
+    ImageBuilder.new(config).build()
+
+pub fn build_install_image_with_simplebox_artifact(
+    arch: PkgArch,
+    kernel_path: text,
+    package_dir: text,
+    output_path: text,
+    size_mb: u64,
+    artifact: ImageSimpleboxArtifactV1,
+) -> Result<text, text>:
+    val config = ImageConfig(
+        arch: arch,
+        output_path: output_path,
+        image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
+        kernel_path: kernel_path,
+        bootloader_config: "",
+        package_dir: package_dir,
+        simple_binary: "",
+        simplebox_artifact: artifact,
         include_installer: false
     )
     _image_builder_rootfs_backend = "fat32"
@@ -563,13 +741,14 @@ fn build_install_image_with_rootfs(
         bootloader_config: "",
         package_dir: package_dir,
         simple_binary: "",
+        simplebox_artifact: _empty_simplebox_artifact_v1(),
         include_installer: false
     )
     _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
     ImageBuilder.new(config).build()
 
 fn _print_image_usage():
-    print "Usage: image-builder create [--arch=ARCH] [--output=PATH] [--size=MB] [--kernel=PATH] [--packages=DIR] [--simple-binary=PATH] [--rootfs=fat32|dbfs|nvfs] [--screen-type=T] [--screen-res=WxH] [--screen-simd=S] [--installer]"
+    print "Usage: image-builder create [--arch=ARCH] [--output=PATH] [--size=MB] [--kernel=PATH] [--packages=DIR] [--simple-binary=PATH] [--simplebox-artifact=PATH --simplebox-receipt=PATH] [--rootfs=fat32|dbfs|nvfs] [--screen-type=T] [--screen-res=WxH] [--screen-simd=S] [--installer]"
 
 fn run_image_builder(args: [text]) -> i32:
     for arg in args:
@@ -586,6 +765,8 @@ fn run_image_builder(args: [text]) -> i32:
     var kernel_elf = ""
     var packages = ""
     var simple_binary = ""
+    var simplebox_artifact_path = ""
+    var simplebox_receipt_path = ""
     var installer = false
     var rootfs_backend = "fat32"
     var screen_type = ""
@@ -607,6 +788,10 @@ fn run_image_builder(args: [text]) -> i32:
             packages = arg.slice(11, arg.len())
         else if arg.starts_with("--simple-binary="):
             simple_binary = arg.slice(16, arg.len())
+        else if arg.starts_with("--simplebox-artifact="):
+            simplebox_artifact_path = arg.slice(21, arg.len())
+        else if arg.starts_with("--simplebox-receipt="):
+            simplebox_receipt_path = arg.slice(20, arg.len())
         else if arg.starts_with("--rootfs="):
             rootfs_backend = arg.slice(9, arg.len())
         else if arg.starts_with("--screen-type="):
@@ -630,6 +815,15 @@ fn run_image_builder(args: [text]) -> i32:
         print "Error: {e}"
         return 1
 
+    var simplebox_artifact = _empty_simplebox_artifact_v1()
+    if simplebox_artifact_path != "" or simplebox_receipt_path != "":
+        val loaded = _load_simplebox_artifact_v1(
+            simplebox_artifact_path, simplebox_receipt_path, arch)
+        if val Err(e) = loaded:
+            print "Error: {e}"
+            return 1
+        simplebox_artifact = loaded.unwrap()
+
     val result = if installer:
         val config = ImageConfig(
             arch: arch,
@@ -639,6 +833,7 @@ fn run_image_builder(args: [text]) -> i32:
             bootloader_config: image_installer_bootloader_config(arch),
             package_dir: packages,
             simple_binary: simple_binary,
+            simplebox_artifact: simplebox_artifact,
             include_installer: true
         )
         _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
@@ -652,6 +847,7 @@ fn run_image_builder(args: [text]) -> i32:
             bootloader_config: "",
             package_dir: packages,
             simple_binary: simple_binary,
+            simplebox_artifact: simplebox_artifact,
             include_installer: false
         )
         _image_builder_rootfs_backend = image_normalized_rootfs_backend(rootfs_backend)
@@ -670,7 +866,11 @@ fn _compute_layout(image_size_mb: u64) -> PartitionLayout:
     val efi_start: u64 = 2048
     val efi_sectors = (EFI_PARTITION_SIZE_MB * 1024 * 1024) / 512
     val root_start = efi_start + efi_sectors
-    val root_sectors = total_sectors - root_start - 2048
+    val reserved_end = root_start + 2048
+    val root_sectors = if total_sectors > reserved_end:
+        total_sectors - reserved_end
+    else:
+        0u64
     PartitionLayout(
         efi_start_sector: efi_start,
         efi_size_sectors: efi_sectors,
@@ -684,6 +884,71 @@ fn _staging_root(output_path: text) -> text:
 
 fn _sidecar_manifest_path(output_path: text) -> text:
     "{output_path}.manifest.sdn"
+
+val _IMAGE_ROOTFS_CLUSTER_BYTES_V1: u64 = 4096u64
+val _IMAGE_ROOTFS_METADATA_MIN_BYTES_V1: u64 = 4194304u64
+val _IMAGE_ROOTFS_MAX_ENTRIES_V1: i64 = 65536
+val _IMAGE_ROOTFS_MAX_DEPTH_V1: i64 = 64
+
+fn _checked_rootfs_add_v1(left: u64, right: u64) -> Result<u64, text>:
+    val sum = left + right
+    if sum < left:
+        return Err("SimpleOS staged rootfs budget arithmetic overflow")
+    Ok(sum)
+
+fn _staged_rootfs_allocation_v1(
+    path: text, depth: i64,
+) -> Result<(u64, i64), text>:
+    if depth > _IMAGE_ROOTFS_MAX_DEPTH_V1:
+        return Err("SimpleOS staged rootfs directory depth exceeds bound")
+    if not rt_dir_exists(path):
+        val size = rt_file_size(path)
+        if size < 0:
+            return Err("SimpleOS staged rootfs contains an unreadable file: {path}")
+        val raw = size.to_u64()
+        val rounded = if raw == 0u64:
+            _IMAGE_ROOTFS_CLUSTER_BYTES_V1
+        else:
+            ((raw - 1u64) / _IMAGE_ROOTFS_CLUSTER_BYTES_V1 + 1u64) *
+                _IMAGE_ROOTFS_CLUSTER_BYTES_V1
+        if rounded < raw:
+            return Err("SimpleOS staged rootfs file allocation overflow")
+        return Ok((rounded, 1))
+    val entries = rt_dir_list(path)
+    if entries == nil:
+        return Err("SimpleOS staged rootfs directory is unreadable: {path}")
+    var allocation = _IMAGE_ROOTFS_CLUSTER_BYTES_V1
+    var count: i64 = 1
+    for name in entries:
+        if name == "" or name == "." or name == ".." or
+           name.contains("/") or name.contains("\\"):
+            return Err("SimpleOS staged rootfs directory entry is invalid")
+        val child = _staged_rootfs_allocation_v1("{path}/{name}", depth + 1)?
+        allocation = _checked_rootfs_add_v1(allocation, child[0])?
+        count = count + child[1]
+        if count > _IMAGE_ROOTFS_MAX_ENTRIES_V1:
+            return Err("SimpleOS staged rootfs entry count exceeds bound")
+    Ok((allocation, count))
+
+fn _validate_staged_rootfs_budget_v1(
+    rootfs_root: text, layout: PartitionLayout,
+) -> Result<bool, text>:
+    val capacity = layout.root_size_sectors * 512u64
+    if layout.root_size_sectors > 0u64 and
+       capacity / 512u64 != layout.root_size_sectors:
+        return Err("SimpleOS root partition capacity arithmetic overflow")
+    val measured = _staged_rootfs_allocation_v1(rootfs_root, 0)?
+    val staged = measured[0]
+    val ten_percent = capacity / 10u64
+    val metadata_reserve = if ten_percent > _IMAGE_ROOTFS_METADATA_MIN_BYTES_V1:
+        ten_percent
+    else:
+        _IMAGE_ROOTFS_METADATA_MIN_BYTES_V1
+    if metadata_reserve > capacity:
+        return Err("SimpleOS staged rootfs metadata reserve exceeds root partition capacity")
+    if staged > capacity - metadata_reserve:
+        return Err("SimpleOS aggregate staged rootfs allocation exceeds root partition capacity")
+    Ok(true)
 
 fn write_text(path: text, content: text) -> bool:
     rt_file_write_text(path, content)
