@@ -12,10 +12,12 @@ use compiler.mir.mir_instructions.{MirFunction, MirBlock}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.mir_opt.mir_opt.perf_facts.{
-    PerfFactKind, PerfFactPreservation,
+    PerfFactKind, PerfFactPreservation, PerfFactRequest,
     perf_instruction_access,
     perf_facts_build, perf_facts_build_without_liveness,
-    perf_facts_build_for_verification,
+    perf_facts_build_for_verification, perf_facts_build_requested,
+    perf_fact_request_cfg_dominators, perf_fact_request_def_use,
+    perf_fact_request_with_dependencies, perf_fact_request_dependency_errors,
     perf_facts_successors, perf_facts_predecessors,
     perf_facts_dominates, perf_facts_definitions, perf_facts_uses,
     perf_facts_is_live_in, perf_facts_is_live_out,
@@ -356,15 +358,67 @@ describe "shared MIR PerfFacts":
         expect(facts.live_out_bits.len()).to_equal(0)
         expect(facts.liveness_worklist_visits).to_equal(0)
 
-    it "uses no-liveness facts in production analyses that never query liveness":
-        step("Prevent dense matrices from returning to active analysis paths")
-        val files = [
-            "src/compiler/60.mir_opt/mir_opt/loop_detect.spl",
+    it "closes fact dependencies and reports implicit capability expansion":
+        step("Make requested compiler analysis costs explicit")
+        val raw_dominators = PerfFactRequest(false, true, false, false)
+        val dominators = perf_fact_request_with_dependencies(raw_dominators)
+        expect(perf_fact_request_dependency_errors(raw_dominators)).to_equal([
+            "dominators require CFG"])
+        expect(dominators.cfg).to_equal(true)
+        expect(dominators.def_use).to_equal(false)
+        val raw_liveness = PerfFactRequest(false, false, false, true)
+        val liveness = perf_fact_request_with_dependencies(raw_liveness)
+        expect(perf_fact_request_dependency_errors(raw_liveness)).to_equal([
+            "liveness requires CFG", "liveness requires def-use"])
+        expect(liveness.cfg).to_equal(true)
+        expect(liveness.def_use).to_equal(true)
+        expect(liveness.dominators).to_equal(false)
+
+    it "builds CFG and dominators without classifying MIR instructions":
+        step("Remove def-use CPU and allocation from loop detection")
+        val func = _pf_function_with_locals_blocks([], [
+            _pf_block_with(0, [MirInst(MirInstKind.GpuLaunch([]), nil)],
+                MirTerminator.Ret(nil))
+        ])
+        val facts = perf_facts_build_requested(
+            func, perf_fact_request_cfg_dominators())
+        expect(facts.cfg_complete).to_equal(true)
+        expect(facts.reverse_postorder.len()).to_equal(1)
+        expect(facts.def_use_complete).to_equal(false)
+        expect(facts.locals.len()).to_equal(0)
+        expect(facts.uncovered_instruction_count).to_equal(0)
+
+    it "builds def-use without CFG or dominator storage":
+        step("Remove graph CPU and allocation from storage analyses")
+        val local0 = LocalId(id: 0)
+        val func = _pf_function_with_locals_blocks([
+            MirLocal(local0, Some("value"), MirType.i64(), LocalKind.Temp, false)
+        ], [
+            _pf_block_with(0, [
+                MirInst(MirInstKind.Const(
+                    local0, MirConstValue.Int(1), MirType.i64()), nil)
+            ], MirTerminator.Goto(BlockId(id: 99)))
+        ])
+        val facts = perf_facts_build_requested(func, perf_fact_request_def_use())
+        expect(facts.def_use_complete).to_equal(true)
+        expect(perf_facts_definitions(facts, local0).len()).to_equal(1)
+        expect(facts.cfg_complete).to_equal(false)
+        expect(facts.successors.len()).to_equal(0)
+        expect(facts.reverse_postorder.len()).to_equal(0)
+        expect(facts.immediate_dominator.len()).to_equal(0)
+
+    it "uses exact capability presets in production analyses":
+        step("Prevent unrelated fact families from returning to active paths")
+        val loop_source = read_file(
+            "src/compiler/60.mir_opt/mir_opt/loop_detect.spl")
+        expect(loop_source).to_contain("perf_fact_request_cfg_dominators()")
+        expect(loop_source).not.to_contain("perf_facts_build_without_liveness")
+        val def_use_files = [
             "src/compiler/60.mir_opt/mir_opt/_AutoVectorize/recipe.spl",
             "src/compiler/60.mir_opt/mir_opt/storage_access_analysis.spl",
             "src/compiler/60.mir_opt/mir_opt/typed_storage_view_producer.spl"
         ]
-        for file in files:
+        for file in def_use_files:
             val source = read_file(file)
-            expect(source).to_contain("perf_facts_build_without_liveness")
-            expect(source).not.to_contain("perf_facts_build(")
+            expect(source).to_contain("perf_fact_request_def_use()")
+            expect(source).not.to_contain("perf_facts_build_without_liveness")
