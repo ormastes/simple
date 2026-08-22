@@ -1,0 +1,56 @@
+# Mechanism pin for the dominant fixed cost of `simple test <dir>`.
+#
+# `src/compiler/99.loader/compiler_sffi.spl` (the compat surface) used to
+# REDEFINE `TypeInfo` and `CompilerContext` with different field shapes than
+# the real definitions in `compiler/99.loader/loader/compiler_sffi.spl`
+# (`type_name` vs `kind`/`name`; `alive` vs `handle`). Both modules land in one
+# HIR symbol table, so a construction site of the REAL type lowered against the
+# COMPAT declaration and HIR lowering aborted with
+# "Cannot infer field type: struct 'CompilerContext' field 'handle'
+#  (declared fields: alive)".
+#
+# A single such abort drops the WHOLE enclosing module to the interpreter
+# ("expect ~100-1000x slowdown"), which is what made the pure-Simple test
+# runner cost minutes of fixed session time before running any test:
+# measured 2026-08-21 on origin/main, `simple test test/01_unit/compiler/config/`
+# took 413s wall for 7 spec files whose own execution was 4.2s, with discovery
+# at 64ms. The one-spec lane (`test_runner_client.spl`) has no such fallback
+# and takes 4.2s total.
+#
+# This spec pins the ABSENCE of the shadow declarations, not a wall time.
+# Record: doc/08_tracking/bug/test_runner_fixed_session_cost_2026-08-21.md
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn compat_text() -> text:
+    rt_file_read_text("src/compiler/99.loader/compiler_sffi.spl")
+
+fn real_text() -> text:
+    rt_file_read_text("src/compiler/99.loader/loader/compiler_sffi.spl")
+
+describe "loader compiler_sffi compat surface declares no shadow types":
+    it "the real module still owns the one TypeInfo and CompilerContext definition":
+        val real_src = real_text()
+        expect(real_src).to_contain("struct TypeInfo:")
+        expect(real_src).to_contain("struct CompilerContext:")
+
+    it "the compat module does not redeclare TypeInfo":
+        val compat = compat_text()
+        expect(compat.contains("class TypeInfo:")).to_equal(false)
+        expect(compat.contains("struct TypeInfo:")).to_equal(false)
+
+    it "the compat module does not redeclare CompilerContext":
+        val compat = compat_text()
+        expect(compat.contains("class CompilerContext:")).to_equal(false)
+        expect(compat.contains("struct CompilerContext:")).to_equal(false)
+
+    it "the compat module re-exports the real definitions instead":
+        val compat = compat_text()
+        expect(compat).to_contain("export use compiler.loader.loader.compiler_sffi.")
+        expect(compat).to_contain("TypeInfo, CompilerContext,")
+
+    it "the compat module no longer shadows the real sffi entry points with stubs":
+        val compat = compat_text()
+        expect(compat.contains("fn compiler_create_context() -> i64:")).to_equal(false)
+        expect(compat.contains("fn make_named_type(name: text) -> TypeInfo:")).to_equal(false)
