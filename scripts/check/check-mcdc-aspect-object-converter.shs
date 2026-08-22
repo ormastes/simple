@@ -15,6 +15,16 @@ cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic \
   -o "$work_dir/selfcheck"
 "$work_dir/selfcheck" "$work_dir/provider-a.o"
 
+# Exercise the runtime address bridge used by retained inner-SMF relocation,
+# plus the fully disarmed patchpoint. Linker wrapping makes the zero-allocation
+# result observable rather than inferred from source.
+cc -std=gnu11 -O2 -Wall -Wextra -Werror -pedantic \
+  "$repo_dir/test/01_unit/runtime/mcdc_aspect_smf_activation_selfcheck.c" \
+  "$repo_dir/src/runtime/runtime_coverage_core.c" \
+  -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free \
+  -lm -lpthread -ldl -o "$work_dir/smf-activation-selfcheck"
+"$work_dir/smf-activation-selfcheck"
+
 # The policy owner must branch before conversion, hashing, or packing. This is
 # a source-level zero-work guard that remains meaningful without a Simple CLI.
 policy_file="$repo_dir/src/compiler/99.loader/mcdc_aspect_pack_payload.spl"
@@ -24,6 +34,17 @@ awk '
   in_fn && /mcdc_build_aspect_pack_v1\(object_bytes\)/ { build=NR }
   END { if (!off || !build || off >= build) exit 1 }
 ' "$policy_file"
+
+# Publication is the final phase: exact relocation preflight, RW patching and
+# RX restoration must all precede target registration/binding.
+activation_file="$repo_dir/src/compiler/99.loader/loader/module_loader.spl"
+awk '
+  /fn moduleloader_activate_mcdc_aspect_payload_v1/ { in_fn=1 }
+  in_fn && /apply_smf_relocations\(/ && !apply { apply=NR }
+  in_fn && /native_make_executable\(address/ && !rx { rx=NR }
+  in_fn && /val bind_status = rt_mcdc_dynamic_bind_v1\(/ && !publish { publish=NR }
+  END { if (!apply || !rx || !publish || apply >= publish || rx >= publish) exit 1 }
+' "$activation_file"
 
 hash_a=$(sha256sum "$work_dir/provider-a.o" | cut -d ' ' -f 1)
 hash_b=$(sha256sum "$work_dir/provider-b.o" | cut -d ' ' -f 1)

@@ -61,6 +61,7 @@ use compiler.loader.mcdc_aspect_binding.{
 }
 use compiler.loader.mcdc_aspect_pack_payload.{
     MCDC_ASPECT_VECTOR_SYMBOL_V1, MCDC_ASPECT_VECTOR_ABI_MARKER_V1,
+    MCDC_ASPECT_RUNTIME_IMPORT_V1,
     mcdc_validate_aspect_module_payload_v1
 }
 use std.nogc_sync_mut.io.coverage_mcdc.{
@@ -72,6 +73,10 @@ extern fn rt_mcdc_dynamic_register_target_v1(target_address: u64,
 @unsafe(reason: "loader retires its opaque target handle only after quiescence", capabilities: [ffi, raw_ptr])
 extern fn rt_mcdc_dynamic_unregister_target_v1(target_handle: u64,
                                                 owner_cookie: u64) -> i32
+@unsafe(reason: "loader performs the final allocation-free MC/DC target publication after all metadata is staged", capabilities: [ffi, raw_ptr])
+extern fn rt_mcdc_dynamic_bind_v1(target_handle: u64) -> i32
+@unsafe(reason: "loader resolves the one allowlisted MC/DC aspect import without generic dlsym", capabilities: [ffi, raw_ptr])
+extern fn rt_mcdc_compiled_target_address_v1() -> u64
 
 # ============================================================================
 # Loaded Module
@@ -281,6 +286,66 @@ fn moduleloader_activate_mcdc_aspect_payload_v1(
     val checked = mcdc_validate_aspect_module_payload_v1(payload)
     if not checked.ok: return Err(checked.error)
 
+    # Parse and resolve every retained relocation before mapping anything.
+    # The converter/validator admits exactly one import spelling and PLT32;
+    # no ambient global-symbol dictionary is exposed to an aspect payload.
+    val payload_reader_result = SmfReaderMemory.from_data(payload)
+    if payload_reader_result.is_err():
+        return Err("MCDC-ASPECT-E-SMF: " + payload_reader_result.unwrap_err())
+    val payload_reader = payload_reader_result.unwrap()
+    val relocs_result = payload_reader.read_relocations()
+    if relocs_result.is_err():
+        return Err("MCDC-ASPECT-E-RELOC: " + relocs_result.unwrap_err())
+    val relocs = relocs_result.unwrap()
+    if relocs.len() <= 0 or relocs.len() > 64:
+        return Err("MCDC-ASPECT-E-RELOC: retained relocation count is outside 1..64")
+    val ordered_result = payload_reader.symbols_in_table_order()
+    if ordered_result.is_err():
+        return Err("MCDC-ASPECT-E-SYMBOL: " + ordered_result.unwrap_err())
+    val ordered = ordered_result.unwrap()
+    if ordered.len() > 64:
+        return Err("MCDC-ASPECT-E-SYMBOL: symbol table exceeds fixed capacity")
+    val collector_raw = rt_mcdc_compiled_target_address_v1()
+    if collector_raw == 0u64 or collector_raw > 9223372036854775807u64:
+        return Err("MCDC-ASPECT-E-IMPORT: runtime collector address is unavailable")
+    # x86_64 movabs r11, imm64; jmp r11. The thunk is retained in the same
+    # owner mapping, so every admitted PLT32 call can reach it regardless of
+    # ASLR distance to the runtime image. r11 is caller-saved by the SysV ABI.
+    var mapped_code = checked.vector_code
+    mapped_code.push(0x49u8)
+    mapped_code.push(0xBBu8)
+    var address_byte = 0
+    while address_byte < 8:
+        mapped_code.push(((collector_raw >> (address_byte * 8)) & 0xFFu64) as u8)
+        address_byte = address_byte + 1
+    mapped_code.push(0x41u8)
+    mapped_code.push(0xFFu8)
+    mapped_code.push(0xE3u8)
+    var resolved: [ResolvedSymbol] = []
+    var import_count = 0
+    var symbol_index = 0
+    while symbol_index < ordered.len():
+        val symbol_name = ordered[symbol_index].name
+        var symbol_address = 0i64
+        if symbol_name == MCDC_ASPECT_RUNTIME_IMPORT_V1:
+            import_count = import_count + 1
+        else:
+            if symbol_name != MCDC_ASPECT_VECTOR_SYMBOL_V1 and
+                    symbol_name != MCDC_ASPECT_VECTOR_ABI_MARKER_V1:
+                return Err("MCDC-ASPECT-E-IMPORT: unexpected inner-SMF symbol " + symbol_name)
+        resolved.push(ResolvedSymbol(name: symbol_name, address: symbol_address))
+        symbol_index = symbol_index + 1
+    if import_count != 1:
+        return Err("MCDC-ASPECT-E-IMPORT: inner SMF must name exactly one runtime collector import")
+    for reloc in relocs:
+        if reloc.symbol_index < 0 or reloc.symbol_index >= resolved.len() or
+                resolved[reloc.symbol_index].name != MCDC_ASPECT_RUNTIME_IMPORT_V1:
+            return Err("MCDC-ASPECT-E-IMPORT: relocation target is not the allowlisted runtime collector")
+        if reloc.reloc_type != 3:
+            return Err("MCDC-ASPECT-E-RELOC: aspect payload requires exact PLT32 relocation")
+        if reloc.offset < 0 or reloc.offset > checked.vector_code.len() - 4:
+            return Err("MCDC-ASPECT-E-RELOC: four-byte patch exceeds vector code")
+
     val marker_address = native_alloc_rw_memory(checked.marker_bytes.len())
     if marker_address == 0:
         return Err("MCDC-ASPECT-E-MAP: ABI marker mapping failed")
@@ -298,11 +363,63 @@ fn moduleloader_activate_mcdc_aspect_payload_v1(
         current_time())
     val address = moduleloader_allocate_exec_module(
         self, owner_id, MCDC_ASPECT_VECTOR_SYMBOL_V1,
-        checked.vector_code, false)
+        mapped_code, false)
     if address == 0:
         _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
         lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
         return Err("MCDC-ASPECT-E-MAP: vector code mapping failed")
+
+    val import_thunk_address = address + checked.vector_code.len()
+    if import_thunk_address < address:
+        _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+        lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+        return Err("MCDC-ASPECT-E-RELOC: import thunk address overflow")
+    var resolved_index = 0
+    while resolved_index < resolved.len():
+        if resolved[resolved_index].name == MCDC_ASPECT_RUNTIME_IMPORT_V1:
+            resolved[resolved_index] = ResolvedSymbol(
+                name: MCDC_ASPECT_RUNTIME_IMPORT_V1,
+                address: import_thunk_address)
+        resolved_index = resolved_index + 1
+
+    # Prove the signed PC-relative result before the existing resolver casts
+    # it to i32. Both addresses are non-negative, so their difference cannot
+    # overflow i64; the guarded addend addition cannot overflow either.
+    for reloc in relocs:
+        val patch_address = address + reloc.offset
+        if patch_address < address:
+            _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+            lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+            return Err("MCDC-ASPECT-E-RELOC: patch address overflow")
+        val delta = import_thunk_address - patch_address
+        if (reloc.addend > 0 and delta > 9223372036854775807 - reloc.addend) or
+                (reloc.addend < 0 and delta < -9223372036854775807 - 1 - reloc.addend):
+            _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+            lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+            return Err("MCDC-ASPECT-E-RELOC: displacement arithmetic overflow")
+        val displacement = delta + reloc.addend
+        if displacement < -2147483648 or displacement > 2147483647:
+            _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+            lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+            return Err("MCDC-ASPECT-E-RELOC: PLT32 target is outside signed 32-bit reach")
+    if not native_make_rw(address, mapped_code.len()):
+        _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+        lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+        return Err("MCDC-ASPECT-E-WX: vector could not enter relocation-only RW state")
+    val no_fallback_globals: Dict<text, i64> = {}
+    val applied = apply_smf_relocations(
+        address, checked.vector_code.len(), relocs, resolved, no_fallback_globals)
+    if applied.is_err():
+        # Restore non-writable state before unmapping even on a failed patch.
+        _ = native_make_executable(address, mapped_code.len())
+        _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+        lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+        return Err("MCDC-ASPECT-E-RELOC: " + applied.unwrap_err())
+    if not native_make_executable(address, mapped_code.len()):
+        _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+        lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+        return Err("MCDC-ASPECT-E-WX: vector RX publication failed")
+    native_flush_icache(address, mapped_code.len())
 
     val target_handle = rt_mcdc_dynamic_register_target_v1(
         address as u64, generation as u64)
@@ -310,15 +427,13 @@ fn moduleloader_activate_mcdc_aspect_payload_v1(
         _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
         lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
         return Err("MCDC-ASPECT-E-REGISTRY: target registry rejected mapped vector")
-    var binding = McdcAspectBinding.dormant()
-    val bound = binding.bind(target_handle, generation)
-    if bound.is_err():
-        _ = rt_mcdc_dynamic_unregister_target_v1(
-            target_handle, generation as u64)
-        _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
-        lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
-        return bound
-    self.mcdc_aspect_bindings[owner_id] = binding
+    # Stage all allocation-capable loader metadata before the final runtime
+    # publication. The successful bind is the activation boundary and the
+    # function returns immediately afterward.
+    self.mcdc_aspect_bindings[owner_id] = McdcAspectBinding(
+        state: McdcAspectBindingState.Active,
+        target: target_handle,
+        generation: generation)
     self.mcdc_aspect_marker_pages[owner_id] = (
         marker_address, checked.marker_bytes.len())
     val symbol = LoadedSymbol(
@@ -340,6 +455,17 @@ fn moduleloader_activate_mcdc_aspect_payload_v1(
         owner_id, marker_symbol)
     lifecycle_on_symbol_mapped(lifecycle, owner_id,
         MCDC_ASPECT_VECTOR_SYMBOL_V1)
+    val bind_status = rt_mcdc_dynamic_bind_v1(target_handle)
+    if bind_status != MCDC_STATUS_OK:
+        self.mcdc_aspect_bindings = self.mcdc_aspect_bindings.remove(owner_id)
+        self.mcdc_aspect_marker_pages = self.mcdc_aspect_marker_pages.remove(owner_id)
+        self.global_symbols = self.global_symbols.remove(MCDC_ASPECT_VECTOR_SYMBOL_V1)
+        self.global_symbols = self.global_symbols.remove(MCDC_ASPECT_VECTOR_ABI_MARKER_V1)
+        _ = rt_mcdc_dynamic_unregister_target_v1(
+            target_handle, generation as u64)
+        _ = native_free_exec_memory(marker_address, checked.marker_bytes.len())
+        lifecycle_unload_module(lifecycle, jit.exec_mapper, owner_id)
+        return Err("MCDC-ASPECT-E-BIND: runtime status {bind_status}")
     Ok(())
 
 fn moduleloader_retire_mcdc_aspect_payload_v1(

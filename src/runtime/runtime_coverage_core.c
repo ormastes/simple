@@ -526,6 +526,16 @@ uint64_t rt_mcdc_compiled_target_v1(void) {
     return MCDC_DYNAMIC_COMPILED_HANDLE;
 }
 
+uint64_t rt_mcdc_compiled_target_address_v1(void) {
+    /* ISO C does not promise a direct function-pointer/integer cast.  Mirror
+     * the checked inverse used by the target registry without allocating. */
+    SimpleMcdcDynamicTargetV1 target = rt_mcdc_record_compiled_vector_v1;
+    uintptr_t raw = 0;
+    if (sizeof(target) > sizeof(raw)) return 0;
+    memcpy(&raw, &target, sizeof(target));
+    return (uint64_t)raw;
+}
+
 int32_t rt_mcdc_dynamic_bind_v1(uint64_t target_handle) {
     mcdc_lock();
     SimpleMcdcDynamicTargetV1 target = mcdc_dynamic_registered_target(target_handle);

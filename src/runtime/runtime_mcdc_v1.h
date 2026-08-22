@@ -216,6 +216,9 @@ int32_t rt_mcdc_dynamic_bind_v1(uint64_t target_handle);
 int32_t rt_mcdc_dynamic_unbind_v1(uint64_t target_handle);
 int32_t rt_mcdc_dynamic_settled_v1(void);
 uint64_t rt_mcdc_compiled_target_v1(void);
+/* Loader-only address bridge for the one allowlisted dynamic-aspect import.
+ * The public MC/DC facade continues to expose only the opaque target handle. */
+uint64_t rt_mcdc_compiled_target_address_v1(void);
 uint64_t rt_mcdc_dynamic_register_target_v1(uint64_t target_address,
                                              uint64_t owner_cookie);
 int32_t rt_mcdc_dynamic_unregister_target_v1(uint64_t target_handle,

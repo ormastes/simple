@@ -44,6 +44,12 @@ int main(void) {
     assert(rt_mcdc_record_vector_v1(7, 9, 2, 99, 3, 3, 1, 1, 1) == 0);
     assert(rt_mcdc_record_compiled_vector_v1(10, 2, 99, 3, 2, 1) == 3);
     assert(rt_mcdc_compiled_last_status_v1() == 3);
+    uint64_t compiled_address = rt_mcdc_compiled_target_address_v1();
+    assert(compiled_address != 0);
+    uint64_t registered_target =
+        rt_mcdc_dynamic_register_target_v1(compiled_address, 991);
+    assert(registered_target > 1);
+    assert(rt_mcdc_dynamic_unregister_target_v1(registered_target, 991) == 0);
     uint64_t compiled_target = rt_mcdc_compiled_target_v1();
     assert(rt_mcdc_dynamic_bind_v1(compiled_target) == 0);
     assert(rt_mcdc_dynamic_bind_v1(compiled_target) == 7);

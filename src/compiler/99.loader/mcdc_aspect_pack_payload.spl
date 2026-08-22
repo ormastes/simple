@@ -115,6 +115,41 @@ fn mcdc_validate_aspect_module_payload_v1(payload: [u8]) -> McdcAspectPayloadVal
             marker_found = true
     if not vector_found or not marker_found:
         return _mcdc_payload_error("MCDC-ASPECT-E-EXPORTS: canonical exports are incomplete")
+
+    # Retained relocations are part of the executable payload contract, not
+    # opaque metadata. Reject everything except the bounded call-site patches
+    # to the single runtime collector import before any mapping is attempted.
+    val ordered_result = reader.symbols_in_table_order()
+    if ordered_result.is_err():
+        return _mcdc_payload_error("MCDC-ASPECT-E-SYMBOL: " + ordered_result.unwrap_err())
+    val ordered = ordered_result.unwrap()
+    if ordered.len() <= 0 or ordered.len() > MCDC_ASPECT_OBJECT_MAX_SYMBOLS_V1:
+        return _mcdc_payload_error("MCDC-ASPECT-E-SYMBOL: inner symbol count is outside 1..64")
+    var import_count = 0
+    for symbol in ordered:
+        if symbol.name == MCDC_ASPECT_RUNTIME_IMPORT_V1:
+            import_count = import_count + 1
+        else:
+            if symbol.name != MCDC_ASPECT_VECTOR_SYMBOL_V1 and
+                    symbol.name != MCDC_ASPECT_VECTOR_ABI_MARKER_V1:
+                return _mcdc_payload_error("MCDC-ASPECT-E-IMPORT: unexpected inner-SMF symbol " + symbol.name)
+    if import_count != 1:
+        return _mcdc_payload_error("MCDC-ASPECT-E-IMPORT: inner SMF must contain exactly one runtime collector import")
+    val relocs_result = reader.read_relocations()
+    if relocs_result.is_err():
+        return _mcdc_payload_error("MCDC-ASPECT-E-RELOC: " + relocs_result.unwrap_err())
+    val relocs = relocs_result.unwrap()
+    if relocs.len() <= 0 or relocs.len() > MCDC_ASPECT_OBJECT_MAX_RELOCS_V1:
+        return _mcdc_payload_error("MCDC-ASPECT-E-RELOC: retained relocation count is outside 1..64")
+    for reloc in relocs:
+        if reloc.symbol_index < 0 or reloc.symbol_index >= ordered.len() or
+                ordered[reloc.symbol_index].name != MCDC_ASPECT_RUNTIME_IMPORT_V1:
+            return _mcdc_payload_error("MCDC-ASPECT-E-IMPORT: relocation target is not the runtime collector")
+        if reloc.reloc_type != 3:
+            return _mcdc_payload_error("MCDC-ASPECT-E-RELOC: inner SMF requires exact PLT32 relocation")
+        if vector_code.len() < 4 or reloc.offset < 0 or
+                reloc.offset > vector_code.len() - 4:
+            return _mcdc_payload_error("MCDC-ASPECT-E-RELOC: four-byte patch exceeds vector code")
     McdcAspectPayloadValidationV1(
         ok: true, error: "", vector_code: vector_code,
         marker_bytes: marker_bytes)
