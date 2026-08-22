@@ -1512,3 +1512,14 @@ avoiding a hidden second split. Compatibility wrappers preserve pre-split path g
 facade and non-script files. Normal lint removes six line arrays plus the primitive allow
 array and redundant short-grammar context derivation. Stdlib-owned contextual-keyword,
 deprecated-if-let, and stub scanners remain the next cross-module view boundary.
+
+## 2026-08-22 implementation addendum: canonical EasyFix context owner
+
+The remaining contextual-keyword, deprecated-if-let, and stub rules lived in the stdlib
+EasyFix layer and each built its own stdlib `LineContext` array. Worse, compiler EasyFix
+helpers defined a structurally duplicate context type, preventing direct sharing. The
+stdlib now owns `EasyFixSourceView(lines, contexts)` and view-taking rule entrypoints.
+Compiler helpers re-export that canonical context type/builders instead of redefining
+them, and the registry derives both compiler and stdlib rule facts from one view. Normal
+lint therefore falls from four context arrays (one compiler plus three stdlib) to one,
+with no additional split and no retained source after dispatch.
