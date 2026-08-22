@@ -1420,3 +1420,10 @@ check. Each selected path retains one availability query, dimension checks,
 one direct raw constructor call, and one handle check; it adds no allocation,
 lookup, hash, I/O, retry, or synchronization. The raw provider remains tagged
 unsafe and is not signed or evidence-verified.
+
+Dynamic Torch fixed-dimension empty, rand, and randn constructors for ranks
+1-4 now use the same typed-result boundary. Their owner dispatcher also removes
+its duplicate availability probe. Readiness passes 11/11; each selected path
+keeps one availability query and one raw call plus constant dimension/handle
+checks, with no added allocation, lookup, hashing, I/O, retry, or sync. These
+providers remain unsafe-tagged rather than signed or evidence-verified.

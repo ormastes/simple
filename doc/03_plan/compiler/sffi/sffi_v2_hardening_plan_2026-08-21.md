@@ -1120,3 +1120,9 @@ Readiness passes 10/10 and focused checks pass. Next migrate empty/rand/randn,
 then eye/arange/linspace, softmax/leaky-relu, and scalar status/value results.
 Signed and evidence-verified admission remains pending; these raw declarations
 remain explicitly `unsafe(ffi)`.
+
+Empty, rand, and randn fixed-dimension constructors now preserve typed provider
+errors for ranks 1-4 and remove the second availability probe from their owner
+dispatcher. Readiness passes 11/11 with the same one-query/one-call hot path.
+Next migrate eye/arange/linspace, softmax/leaky-relu, and scalar status/value
+results; signed evidence admission remains a separate unfinished phase.
