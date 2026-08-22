@@ -99,6 +99,17 @@ fn any_type_is_any(t: HirType) -> bool:
     `Optional(Named(T))` regardless of where `T` is declared -- and the
     exclusion, whose cost was that a written `Any?` was invisible, is gone.
     """
+    # `HirStmtKind.Let` declares `type_: HirType`, but HIR lowering builds
+    # DESUGARED bindings with no declared type at all -- `Let(sym, nil, init)`
+    # at 10+ sites in hir_lowering (tuple destructure, match scrutinee temps,
+    # `for` index temps). Reading `.kind` off that nil aborted the whole
+    # compile with `semantic: undefined field 'kind': cannot access field on
+    # value of type 'nil'`, which killed every single-module `native-build`
+    # (and with it the engine-differential native lane). An absent annotation
+    # is not a declared `Any`: §8.1 is about what the source WROTE, and the
+    # value's own type is judged where it is used.
+    if t == nil:
+        return false
     match t.kind:
         case Any: true
         case Optional(inner): any_type_is_any(inner)
@@ -113,6 +124,8 @@ fn any_type_mentions_any(t: HirType) -> bool:
     §8.2 matrix: `[Any]`, `Dict<text, Any>` and `(i64, Any)` all keep an
     erased value alive past the boundary just as a bare `Any` would.
     """
+    if t == nil:
+        return false
     if any_type_is_any(t):
         return true
     match t.kind:
