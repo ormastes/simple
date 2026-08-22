@@ -352,3 +352,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Remove per-instance loop detectors from disabled transforms.
 - Replace simulated transformation fixtures in both test layouts with quarantine contracts.
 - Follow-up: rehabilitate only on canonical LoopForest, SSA, MemorySSA-lite, effect and profitability facts.
+## Completed compiler tranche: quarantine generator state-machine rewrite
+
+- Preserve exported yield point/analysis types, discovery, class/factory/statistics, and identity methods.
+- Remove dispatcher/signature/local/state-block construction and private segment lowering.
+- Replace per-yield whole-function definition rescans with one forward definition walk plus conservative local snapshots.
+- Pin separation of analysis and transformation with a source contract.
+- Follow-up: move admitted coroutine lowering to an ABI/runtime owner backed by shared CFG liveness and ownership facts.
