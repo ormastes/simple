@@ -14,7 +14,7 @@ use compiler.core.tokens.{TOK_STRING_LIT, TOK_LBRACE, TOK_RBRACE, TOK_EOF, TOK_E
 fn formatter_gap_fingerprint(gap: String, preserve_whitespace: bool) -> String:
     if preserve_whitespace and gap != "":
         return "gap:{gap.len()}:{gap}"
-    var result = ""
+    var parts: [String] = []
     for line in gap.split("\n"):
         val trimmed = line.trim()
         if trimmed == "":
@@ -26,15 +26,15 @@ fn formatter_gap_fingerprint(gap: String, preserve_whitespace: bool) -> String:
         # substring, not line[marker:]: a find result is a tag-boxed raw i64 and
         # slicing uses the tagged word raw, yielding the wrong cut.
         val comment = line.substring(marker, line.len())
-        result = result + "comment:{comment.len()}:{comment}\n"
-    result
+        parts.push("comment:{comment.len()}:{comment}\n")
+    parts.join("")
 
 fn formatter_lexical_fingerprint(source: String) -> Result<String, String>:
     var lexer = make_core_lexer(source)
     val source_len = source.chars().len()
     var previous_end: i64 = 0
     var brace_depth: i64 = 0
-    var result = ""
+    var parts: [String] = []
     for _i in 0..1000000:
         val (next_lexer, kind) = core_lexer_next_token(lexer)
         lexer = next_lexer
@@ -42,17 +42,17 @@ fn formatter_lexical_fingerprint(source: String) -> Result<String, String>:
         val end_pos = core_lexer_token_end(lexer)
         if kind == TOK_EOF:
             if previous_end < source_len:
-                result = result + formatter_gap_fingerprint(source[previous_end:], brace_depth > 0)
-            return Ok(result)
+                parts.push(formatter_gap_fingerprint(source[previous_end:], brace_depth > 0))
+            return Ok(parts.join(""))
         if kind == TOK_ERROR:
             return Err("formatter rejected lexically invalid source")
         if start > previous_end:
-            result = result + formatter_gap_fingerprint(source[previous_end:start], brace_depth > 0)
+            parts.push(formatter_gap_fingerprint(source[previous_end:start], brace_depth > 0))
         val token_text = core_lexer_token_text(lexer)
-        result = result + "token:{kind}:{token_text.len()}:{token_text}\n"
+        parts.push("token:{kind}:{token_text.len()}:{token_text}\n")
         if kind == TOK_STRING_LIT and start >= 0 and end_pos >= start and end_pos <= source_len:
             val literal = source[start:end_pos]
-            result = result + "literal:{literal.len()}:{literal}\n"
+            parts.push("literal:{literal.len()}:{literal}\n")
         if kind == TOK_LBRACE:
             brace_depth = brace_depth + 1
         elif kind == TOK_RBRACE and brace_depth > 0:
