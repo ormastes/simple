@@ -429,3 +429,85 @@ pub fn named_fn_value_targets(mir: &crate::mir::MirModule) -> Vec<String> {
     }
     out
 }
+
+/// Name of the vtable-slot thunk for a method whose MIR function takes no
+/// `self` parameter (the body never references `self`, so HIR dropped it).
+pub fn vtable_selfless_entry_name(fn_name: &str) -> String {
+    format!("{fn_name}$vt")
+}
+
+impl<M: Module> CodegenBackend<M> {
+    /// Emit `name$vt(self, p1..pn)` -> `name(p1..pn)` for every function in
+    /// `functions` named by a vtable slot whose MIR params do not start with
+    /// `self`. A virtual call (`compile_method_call_virtual`) always passes the
+    /// receiver first; a slot pointing straight at a selfless body would read
+    /// the receiver as its first user argument (measured: a fieldless
+    /// `FileReader.lookup(name)` saw the object as `name`, `name.len()` == -1).
+    /// Returns the set of thunk-backed names so the vtable writer can pick
+    /// the thunk. Must run AFTER `declare_functions`.
+    pub fn emit_vtable_selfless_entries(
+        &mut self,
+        functions: &[MirFunction],
+        slot_fn_names: &std::collections::HashSet<String>,
+    ) -> BackendResult<std::collections::HashSet<String>> {
+        let mut thunked = std::collections::HashSet::new();
+        for func in functions {
+            if !slot_fn_names.contains(&func.name) {
+                continue;
+            }
+            if func.params.first().is_some_and(|p| p.name == "self") {
+                continue;
+            }
+            let raw_name = vtable_selfless_entry_name(&func.name);
+            if self.func_ids.contains_key(&raw_name) {
+                thunked.insert(func.name.clone());
+                continue;
+            }
+            let Some(&target_id) = self.func_ids.get(&func.name) else {
+                continue;
+            };
+            let target_sig = build_mir_signature(func);
+            let mut sig = Signature::new(platform_call_conv());
+            sig.params.push(AbiParam::new(types::I64)); // receiver, dropped
+            for p in &target_sig.params {
+                sig.params.push(AbiParam::new(p.value_type));
+            }
+            for r in &target_sig.returns {
+                sig.returns.push(AbiParam::new(r.value_type));
+            }
+            let symbol = match &self.module_prefix {
+                Some(prefix) => format!("{prefix}__{raw_name}"),
+                None => raw_name.clone(),
+            };
+            let func_id = self
+                .module
+                .declare_function(&symbol, Linkage::Local, &sig)
+                .map_err(|e| BackendError::ModuleError(format!("declare {symbol}: {e}")))?;
+            self.func_ids.insert(raw_name.clone(), func_id);
+
+            self.module.clear_context(&mut self.ctx);
+            self.ctx.func.signature = sig;
+            self.ctx.func.name = UserFuncName::user(0, func_id.as_u32());
+            {
+                let target_ref = self.module.declare_func_in_func(target_id, &mut self.ctx.func);
+                let mut fb_ctx = FunctionBuilderContext::new();
+                let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut fb_ctx);
+                let entry = b.create_block();
+                b.append_block_params_for_function_params(entry);
+                b.switch_to_block(entry);
+                b.seal_block(entry);
+                let params: Vec<_> = b.block_params(entry).to_vec();
+                let call = b.ins().call(target_ref, &params[1..]);
+                let results = b.inst_results(call).to_vec();
+                b.ins().return_(&results);
+                b.finalize();
+            }
+            self.module
+                .define_function(func_id, &mut self.ctx)
+                .map_err(|e| BackendError::ModuleError(format!("define {symbol}: {e}")))?;
+            self.module.clear_context(&mut self.ctx);
+            thunked.insert(func.name.clone());
+        }
+        Ok(thunked)
+    }
+}

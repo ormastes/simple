@@ -364,9 +364,34 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::AggregateCopy {
-            dest, src, byte_size, deep_fields, ..
+            dest,
+            src,
+            byte_size,
+            type_name,
+            deep_fields,
         } => {
-            closures_structs::compile_aggregate_copy(ctx, builder, *dest, *src, *byte_size, deep_fields);
+            // A struct that implements a trait carries an 8-byte vtable header
+            // (StructInit / FieldGet shift by +8, keyed on `vtable_data_ids`).
+            // MIR sizes the copy from the field layout only, so without the
+            // same shift a by-value `self` copy of such a struct copied ONLY
+            // the vtable word and every field read through the copy answered
+            // 0 (`self.base + n` == n). Mirror the shift here.
+            let has_vtable = type_name
+                .as_deref()
+                .is_some_and(|name| ctx.vtable_data_ids.contains_key(name));
+            if has_vtable {
+                let shifted: Vec<crate::mir::AggregateFieldCopy> = deep_fields
+                    .iter()
+                    .map(|f| crate::mir::AggregateFieldCopy {
+                        word_index: f.word_index + 1,
+                        byte_size: f.byte_size,
+                        nested: f.nested.clone(),
+                    })
+                    .collect();
+                closures_structs::compile_aggregate_copy(ctx, builder, *dest, *src, *byte_size + 8, &shifted);
+            } else {
+                closures_structs::compile_aggregate_copy(ctx, builder, *dest, *src, *byte_size, deep_fields);
+            }
         }
 
         MirInst::BinOp { dest, op, left, right } => {

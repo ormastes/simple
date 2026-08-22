@@ -1565,6 +1565,46 @@ impl Lowerer {
                         let hir_func = self.lower_function(method, Some(&s.name))?;
                         self.module.functions.push(hir_func);
                     }
+                    // `struct Name(Trait):` (parser-synthesised `implements`
+                    // attribute): record the trait impl exactly as an
+                    // `impl Trait for Name` block would, so the struct gets a
+                    // vtable (its runtime type identity for erased-receiver
+                    // dispatch in the JIT) and default methods it does not
+                    // override are lowered against it.
+                    if let Some(trait_name) = struct_implements_trait(s) {
+                        let type_id = self
+                            .resolve_type(&simple_parser::ast::Type::Simple(s.name.clone()))
+                            .unwrap_or(TypeId::ANY);
+                        let mut methods_map = HashMap::new();
+                        let own: std::collections::HashSet<&str> =
+                            s.methods.iter().map(|m| m.name.as_str()).collect();
+                        for method in &s.methods {
+                            methods_map.insert(method.name.clone(), format!("{}.{}", s.name, method.name));
+                        }
+                        if let Some(trait_def) = ast_module.items.iter().find_map(|item| match item {
+                            Node::Trait(t) if t.name == trait_name => Some(t),
+                            _ => None,
+                        }) {
+                            for default_method in &trait_def.methods {
+                                if default_method.is_abstract || own.contains(default_method.name.as_str()) {
+                                    continue;
+                                }
+                                let hir_func = self.lower_function(default_method, Some(&s.name))?;
+                                self.module.functions.push(hir_func);
+                                methods_map.insert(
+                                    default_method.name.clone(),
+                                    format!("{}.{}", s.name, default_method.name),
+                                );
+                            }
+                        }
+                        self.module.impls.push(crate::hir::HirImpl {
+                            type_id,
+                            trait_id: None,
+                            trait_name: Some(trait_name),
+                            type_name: s.name.clone(),
+                            methods: methods_map,
+                        });
+                    }
                 }
                 Node::Enum(e) => {
                     for method in &e.methods {
@@ -2254,4 +2294,15 @@ mod scalar_const_eval_tests {
     fn nil_global_scalar_uses_tagged_nil_sentinel() {
         assert_eq!(try_const_eval(&Expr::Nil), Some(3));
     }
+}
+
+/// The trait named by `struct Name(Trait):`, carried by the parser as a
+/// synthetic `implements(Trait)` attribute (parser/src/types_def/mod.rs).
+fn struct_implements_trait(s: &simple_parser::ast::StructDef) -> Option<String> {
+    s.attributes.iter().find(|a| a.name == "implements").and_then(|a| {
+        a.args.as_ref()?.first().and_then(|e| match e {
+            simple_parser::ast::Expr::Identifier(name) => Some(name.clone()),
+            _ => None,
+        })
+    })
 }

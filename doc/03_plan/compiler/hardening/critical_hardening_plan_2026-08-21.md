@@ -368,3 +368,9 @@ Phase 7 stays blocked by the four SEGVing stage binaries.
 
 **LLM wiki:** `doc/00_llm_process/feature_expert/compiler_hardening/skill.md` and the
 2026-08-21 sections of `layer_expert/{compiler_driver,mir_lowering,bootstrap,test_runner}/skill.md`.
+
+## 27. Seed JIT: erased-receiver method dispatch (2026-08-22)
+
+| Lane | Status | Evidence |
+|---|---|---|
+| 27 erased-receiver dispatch | `partial` | A bare method on an `Any`/trait-typed receiver is dispatched at runtime over the receiver's vtable identity instead of bailing the whole module (`try_emit_vtable_type_switch`, `closures_structs.rs`); `struct Name(Trait):` now records a real `HirImpl` so such structs HAVE a vtable (was parsed and discarded); two soundness bugs fixed on the way — a by-value copy of a vtable-bearing struct dropped every field (`AggregateCopy` +8), and a vtable slot on a selfless body read the receiver as its first argument (`emit_vtable_selfless_entries`). Test `compiler/tests/any_receiver_vtable_dispatch_jit.rs` (Err pre-fix, Ok + correct post-fix); fixtures `test/01_unit/compiler/jit_dyn_dispatch/`; perf gate rows `ANYVTJIT` → `PASS — 74 mechanism(s) checked, 0 regressed`. Stage1 blocking bodies 6 → 3. `partial`: the three `objtaker_*` bodies remain — `SmfReaderImpl`/`SmfReaderMemory` are duck-typed against `SmfReader` and declare no trait, so they carry no vtable and there is no runtime identity to switch on. Per-function deopt (the general fix) is blocked on the JIT lane never seeding interpreter definitions AND `value_bridge` reconstructing a struct with EMPTY fields. Both recorded in `doc/08_tracking/bug/jit_any_receiver_ambiguous_method_bails_stage1_2026-08-22.md`. |

@@ -110,6 +110,19 @@ impl<'a> Parser<'a> {
             }));
         }
 
+        // `struct Name(Trait):` — keep the implemented trait on the node as a
+        // synthetic `implements(Trait)` attribute so HIR lowering can record the
+        // trait impl (vtable identity) without a new StructDef field.
+        let mut attributes = attributes;
+        if let Some(ref trait_name) = implements_trait {
+            attributes.push(Attribute {
+                span: self.make_span(start_span),
+                name: "implements".to_string(),
+                value: None,
+                args: Some(vec![Expr::Identifier(trait_name.clone())]),
+                named_args: None,
+            });
+        }
         let struct_def = StructDef {
             span: self.make_span(start_span),
             name: name.clone(),
