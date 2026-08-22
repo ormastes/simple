@@ -397,3 +397,15 @@ dictionary/count pair: clear resets both, and every insertion increments the
 count exactly once. Default-policy emission must not scan JSON or allocate a code
 substring. The count is authoritative because dictionary length is not an
 admitted cross-engine contract.
+
+## CFG predecessor bucket contract
+
+PerfFacts constructs predecessor adjacency in two phases. Edge discovery maps a
+successor block ID to one owned bucket and appends the source ID exactly once per
+terminator edge. Publication assigns each completed bucket to the public
+dictionary once. Bucket-key order is internal; predecessor-list order follows
+function block storage and terminator successor order. Duplicate edges and
+dangling targets are retained so CFG integrity diagnostics remain behaviorally
+identical. Builder indexes and outer bucket storage are released immediately
+after publication. No edge loop may read, grow, and write back a
+dictionary-held array.
