@@ -7,7 +7,11 @@
 - Prove bootstrap receipt promotion is deterministic and requires all four
   compiler phase oracle lines.
 - Prove bootstrap completion also runs automated rows, retains an evidence log,
-  rejects self-test runner overrides in production, and preserves broad TODOs.
+  binds them to the exact validated Stage 4 candidate despite a conflicting
+  ambient `SIMPLE_BINARY`, rejects self-test runner overrides in production,
+  and preserves broad TODOs.
+- Prove the existing interpreter/JIT/native differential producer is owned by
+  the bootstrap tier and cannot run from the lightweight push path.
 - Prove PASS rows without timestamps or evidence references fail validation.
 - Prove unowned rows, TODO rows without an unblock condition, and PASS rows
   with a pending unblock condition fail validation.
