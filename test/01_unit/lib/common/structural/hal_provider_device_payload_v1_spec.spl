@@ -1,0 +1,84 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-012 REQ-013 REQ-015 REQ-016 REQ-017
+
+use std.spec.*
+use std.common.structural.hal_provider.*
+use std.common.structural.environment_instruction.*
+
+fn observation(sequence: i64, length: i64, capacity: i64,
+               digest: i64) -> EnvObservationV1:
+    env_observation_v1(77, sequence, EnvInstructionStatusV1.Applied, 0,
+        length, capacity, digest, digest + 1)
+
+fn payload(sequence: i64, kind: HalCapturedPayloadKindV1,
+           opcode: EnvOpcodeV1, length: i64, token: i64,
+           region_digest: i64 = 51) -> HalCapturedDevicePayloadV1:
+    val random = kind == HalCapturedPayloadKindV1.RandomBytes
+    hal_captured_device_payload_v1(77, sequence, kind, opcode, 9,
+        if random: 0 else: 3,
+        31, 32,
+        token, 17, 19,
+        hal_caller_region_v1(1, length, length,
+            if length == 0: 0 else: region_digest,
+            if length == 0: 0 else: region_digest + 1),
+        observation(sequence, length, length, 71 + sequence))
+
+describe "captured HAL randomness and device provider payload":
+    it "normalizes randomness, IRQ, MMIO, and DMA without a device handle":
+        val random = payload(0, HalCapturedPayloadKindV1.RandomBytes,
+            EnvOpcodeV1.RandomFill, 4, 1)
+        val irq = payload(1, HalCapturedPayloadKindV1.Interrupt,
+            EnvOpcodeV1.InterruptAcknowledge, 0, 2)
+        val mmio = payload(2, HalCapturedPayloadKindV1.Mmio,
+            EnvOpcodeV1.MmioRead, 4, 3)
+        val dma = payload(3, HalCapturedPayloadKindV1.Dma,
+            EnvOpcodeV1.DmaPoll, 4, 4)
+        expect(hal_captured_device_payload_v1_well_formed(random)).to_be(true)
+        expect(hal_captured_device_payload_v1_well_formed(irq)).to_be(true)
+        expect(hal_captured_device_payload_v1_well_formed(mmio)).to_be(true)
+        expect(hal_captured_device_payload_v1_well_formed(dma)).to_be(true)
+
+    it "compares exact caller-owned bytes instead of trusting the digest":
+        val a = payload(0, HalCapturedPayloadKindV1.RandomBytes,
+            EnvOpcodeV1.RandomFill, 4, 1)
+        val b = payload(0, HalCapturedPayloadKindV1.RandomBytes,
+            EnvOpcodeV1.RandomFill, 4, 1)
+        expect(hal_captured_device_payload_v1_exact_equal(
+            a, [0u8, 11u8, 12u8, 13u8, 14u8],
+            b, [9u8, 11u8, 12u8, 13u8, 14u8])).to_be(true)
+        expect(hal_captured_device_payload_v1_exact_equal(
+            a, [0u8, 11u8, 12u8, 13u8, 14u8],
+            b, [9u8, 11u8, 99u8, 13u8, 14u8])).to_be(false)
+
+    it "consumes read-once observations once in exact sequence":
+        var cursor = hal_device_payload_replay_cursor_v1(77, 4)
+        val recorded = payload(0, HalCapturedPayloadKindV1.Mmio,
+            EnvOpcodeV1.MmioRead, 4, 3)
+        val bytes = [0u8, 1u8, 2u8, 3u8, 4u8]
+        val first = cursor.replay(recorded, bytes, recorded, bytes)
+        expect(first.status).to_equal(HalPayloadReplayStatusV1.Replayed)
+        expect(first.physical_effect).to_be(false)
+        expect(first.allocation_count).to_equal(0)
+        val reused_token = payload(1, HalCapturedPayloadKindV1.Mmio,
+            EnvOpcodeV1.MmioRead, 4, 3)
+        val second = cursor.replay(reused_token, bytes, reused_token, bytes)
+        expect(second.status).to_equal(HalPayloadReplayStatusV1.AlreadyConsumed)
+        expect(second.consumed_count).to_equal(1)
+
+    it "fails closed on region overflow, changed grants, and wrong payload kind":
+        var cursor = hal_device_payload_replay_cursor_v1(77, 4)
+        val mmio = payload(0, HalCapturedPayloadKindV1.Mmio,
+            EnvOpcodeV1.MmioRead, 4, 3)
+        val too_short = [0u8, 1u8, 2u8, 3u8]
+        val overflow = cursor.replay(mmio, too_short, mmio, too_short)
+        expect(overflow.status).to_equal(HalPayloadReplayStatusV1.RegionOverflow)
+        val changed_grant = hal_captured_device_payload_v1(
+            77, 0, HalCapturedPayloadKindV1.Mmio, EnvOpcodeV1.MmioRead,
+            9, 3, 31, 99, 3, 17, 19, mmio.region, mmio.observation)
+        val bytes = [0u8, 1u8, 2u8, 3u8, 4u8]
+        val mismatch = cursor.replay(mmio, bytes, changed_grant, bytes)
+        expect(mismatch.status).to_equal(
+            HalPayloadReplayStatusV1.PayloadDifference)
+        val wrong_kind = payload(0, HalCapturedPayloadKindV1.Dma,
+            EnvOpcodeV1.RandomFill, 4, 1)
+        expect(hal_captured_device_payload_v1_well_formed(wrong_kind)).to_be(false)

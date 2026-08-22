@@ -1,0 +1,256 @@
+# codex-impl
+# Exact, allocation-free normalized payload for randomness and device effects.
+# The parent authority captures bytes/grants once. Provider workers receive only
+# this sealed value plus caller-owned regions and can never perform physical I/O.
+
+use std.common.structural.environment_instruction.*
+
+val HAL_DEVICE_PAYLOAD_SCHEMA_V1: i64 = 1
+val HAL_DEVICE_PAYLOAD_MAX_BYTES_V1: i64 = 65536
+val HAL_DEVICE_PAYLOAD_MAX_READ_ONCE_TOKENS_V1: i64 = 62
+
+enum HalCapturedPayloadKindV1:
+    RandomBytes
+    Interrupt
+    Mmio
+    Dma
+
+enum HalPayloadReplayStatusV1:
+    Replayed
+    InvalidPayload
+    WrongSequence
+    AlreadyConsumed
+    RegionOverflow
+    PayloadDifference
+
+struct HalCallerRegionV1:
+    offset: i64
+    length: i64
+    capacity: i64
+    digest_hi: i64
+    digest_lo: i64
+
+struct HalCapturedDevicePayloadV1:
+    contract_version: i64
+    invocation_id: i64
+    sequence: i64
+    kind: HalCapturedPayloadKindV1
+    opcode: EnvOpcodeV1
+    capability_id: i64
+    capability_generation: i64
+    grant_digest_hi: i64
+    grant_digest_lo: i64
+    read_once_token: i64
+    scalar0: i64
+    scalar1: i64
+    region: HalCallerRegionV1
+    observation: EnvObservationV1
+    sealed: bool
+
+struct HalPayloadReplayReceiptV1:
+    status: HalPayloadReplayStatusV1
+    invocation_id: i64
+    sequence: i64
+    consumed_count: i64
+    read_once_consumed_mask: i64
+    physical_effect: bool
+    allocation_count: i64
+
+fn hal_caller_region_v1(offset: i64, length: i64, capacity: i64,
+                        digest_hi: i64, digest_lo: i64) -> HalCallerRegionV1:
+    HalCallerRegionV1(offset, length, capacity, digest_hi, digest_lo)
+
+fn hal_captured_device_payload_v1(
+        invocation_id: i64, sequence: i64, kind: HalCapturedPayloadKindV1,
+        opcode: EnvOpcodeV1, capability_id: i64,
+        capability_generation: i64, grant_digest_hi: i64,
+        grant_digest_lo: i64, read_once_token: i64,
+        scalar0: i64, scalar1: i64, region: HalCallerRegionV1,
+        observation: EnvObservationV1) -> HalCapturedDevicePayloadV1:
+    HalCapturedDevicePayloadV1(HAL_DEVICE_PAYLOAD_SCHEMA_V1, invocation_id,
+        sequence, kind, opcode, capability_id, capability_generation,
+        grant_digest_hi, grant_digest_lo, read_once_token, scalar0, scalar1,
+        region, observation, true)
+
+fn _hal_payload_digest_present(hi: i64, lo: i64) -> bool:
+    hi != 0 or lo != 0
+
+fn hal_caller_region_v1_well_formed(region: HalCallerRegionV1) -> bool:
+    region.offset >= 0 and region.length >= 0 and region.capacity >= 0
+        and region.length <= region.capacity
+        and region.capacity <= HAL_DEVICE_PAYLOAD_MAX_BYTES_V1
+        and region.offset <= 9223372036854775807 - region.capacity
+        and (region.length == 0
+            or _hal_payload_digest_present(region.digest_hi, region.digest_lo))
+        and (region.length != 0
+            or (region.digest_hi == 0 and region.digest_lo == 0))
+
+fn _hal_payload_opcode_matches(kind: HalCapturedPayloadKindV1,
+                               opcode: EnvOpcodeV1) -> bool:
+    match kind:
+        case HalCapturedPayloadKindV1.RandomBytes:
+            opcode == EnvOpcodeV1.RandomFill
+        case HalCapturedPayloadKindV1.Interrupt:
+            opcode == EnvOpcodeV1.InterruptMask
+                or opcode == EnvOpcodeV1.InterruptAcknowledge
+        case HalCapturedPayloadKindV1.Mmio:
+            opcode == EnvOpcodeV1.MmioRead or opcode == EnvOpcodeV1.MmioWrite
+        case HalCapturedPayloadKindV1.Dma:
+            opcode == EnvOpcodeV1.DmaMap or opcode == EnvOpcodeV1.DmaSubmit
+                or opcode == EnvOpcodeV1.DmaPoll
+                or opcode == EnvOpcodeV1.DmaUnmap
+
+fn _hal_payload_requires_region(value: HalCapturedDevicePayloadV1) -> bool:
+    value.opcode == EnvOpcodeV1.RandomFill
+        or value.opcode == EnvOpcodeV1.MmioRead
+        or value.opcode == EnvOpcodeV1.MmioWrite
+        or value.opcode == EnvOpcodeV1.DmaSubmit
+        or value.opcode == EnvOpcodeV1.DmaPoll
+
+fn _hal_payload_requires_read_once(value: HalCapturedDevicePayloadV1) -> bool:
+    value.opcode == EnvOpcodeV1.RandomFill
+        or value.opcode == EnvOpcodeV1.InterruptAcknowledge
+        or value.opcode == EnvOpcodeV1.MmioRead
+        or value.opcode == EnvOpcodeV1.DmaPoll
+
+fn hal_captured_device_payload_v1_well_formed(
+        value: HalCapturedDevicePayloadV1) -> bool:
+    if value.contract_version != HAL_DEVICE_PAYLOAD_SCHEMA_V1
+            or value.invocation_id <= 0 or value.sequence < 0
+            or value.capability_id <= 0 or not value.sealed
+            or not _hal_payload_opcode_matches(value.kind, value.opcode)
+            or not hal_caller_region_v1_well_formed(value.region):
+        return false
+    if value.observation.contract_version != ENV_INSTRUCTION_SCHEMA_VERSION
+            or value.observation.invocation_id != value.invocation_id
+            or value.observation.sequence != value.sequence
+            or value.observation.bytes_length != value.region.length
+            or value.observation.bytes_capacity != value.region.capacity
+            or not _hal_payload_digest_present(
+                value.observation.interaction_digest_hi,
+                value.observation.interaction_digest_lo):
+        return false
+    val is_random = value.kind == HalCapturedPayloadKindV1.RandomBytes
+    if is_random:
+        # Randomness binds the captured entropy authorization in the grant
+        # digest lanes but has no physical-device generation.
+        if value.capability_generation != 0
+                or not _hal_payload_digest_present(
+                    value.grant_digest_hi, value.grant_digest_lo)
+                or value.region.length <= 0:
+            return false
+    elif value.capability_generation <= 0
+            or not _hal_payload_digest_present(
+                value.grant_digest_hi, value.grant_digest_lo):
+        return false
+    if _hal_payload_requires_region(value) != (value.region.length > 0):
+        return false
+    if _hal_payload_requires_read_once(value):
+        value.read_once_token > 0
+            and value.read_once_token <= HAL_DEVICE_PAYLOAD_MAX_READ_ONCE_TOKENS_V1
+    else:
+        value.read_once_token == 0
+
+fn _hal_caller_region_fits(region: HalCallerRegionV1, bytes: [u8]) -> bool:
+    hal_caller_region_v1_well_formed(region)
+        and region.offset <= bytes.len() - region.length
+
+fn hal_caller_region_exact_equal_v1(a: HalCallerRegionV1, a_bytes: [u8],
+                                    b: HalCallerRegionV1,
+                                    b_bytes: [u8]) -> bool:
+    if a.length != b.length or a.digest_hi != b.digest_hi
+            or a.digest_lo != b.digest_lo
+            or not _hal_caller_region_fits(a, a_bytes)
+            or not _hal_caller_region_fits(b, b_bytes):
+        return false
+    var i = 0
+    while i < a.length:
+        if a_bytes[a.offset + i] != b_bytes[b.offset + i]:
+            return false
+        i = i + 1
+    true
+
+fn hal_captured_device_payload_v1_exact_equal(
+        a: HalCapturedDevicePayloadV1, a_bytes: [u8],
+        b: HalCapturedDevicePayloadV1, b_bytes: [u8]) -> bool:
+    hal_captured_device_payload_v1_well_formed(a)
+        and hal_captured_device_payload_v1_well_formed(b)
+        and a.invocation_id == b.invocation_id and a.sequence == b.sequence
+        and a.kind == b.kind and a.opcode == b.opcode
+        and a.capability_id == b.capability_id
+        and a.capability_generation == b.capability_generation
+        and a.grant_digest_hi == b.grant_digest_hi
+        and a.grant_digest_lo == b.grant_digest_lo
+        and a.read_once_token == b.read_once_token
+        and a.scalar0 == b.scalar0 and a.scalar1 == b.scalar1
+        and env_instruction_status_to_i64(a.observation.status)
+            == env_instruction_status_to_i64(b.observation.status)
+        and a.observation.status_code == b.observation.status_code
+        and a.observation.interaction_digest_hi
+            == b.observation.interaction_digest_hi
+        and a.observation.interaction_digest_lo
+            == b.observation.interaction_digest_lo
+        and hal_caller_region_exact_equal_v1(
+            a.region, a_bytes, b.region, b_bytes)
+
+class HalDevicePayloadReplayCursorV1:
+    invocation_id: i64
+    next_sequence: i64
+    capacity: i64
+    consumed_count: i64
+    read_once_consumed_mask: i64
+    sealed: bool
+
+    me replay(recorded: HalCapturedDevicePayloadV1, recorded_bytes: [u8],
+              candidate: HalCapturedDevicePayloadV1,
+              candidate_bytes: [u8]) -> HalPayloadReplayReceiptV1:
+        var status = HalPayloadReplayStatusV1.Replayed
+        if not self.sealed
+                or not hal_captured_device_payload_v1_well_formed(recorded)
+                or not hal_captured_device_payload_v1_well_formed(candidate):
+            status = HalPayloadReplayStatusV1.InvalidPayload
+        elif recorded.invocation_id != self.invocation_id
+                or candidate.invocation_id != self.invocation_id
+                or recorded.sequence != self.next_sequence
+                or candidate.sequence != self.next_sequence
+                or self.consumed_count >= self.capacity:
+            status = HalPayloadReplayStatusV1.WrongSequence
+        elif not _hal_caller_region_fits(recorded.region, recorded_bytes)
+                or not _hal_caller_region_fits(candidate.region, candidate_bytes):
+            status = HalPayloadReplayStatusV1.RegionOverflow
+        else:
+            val token_mask = if recorded.read_once_token > 0:
+                1 << recorded.read_once_token
+            else:
+                0
+            if token_mask != 0
+                    and (self.read_once_consumed_mask & token_mask) != 0:
+                status = HalPayloadReplayStatusV1.AlreadyConsumed
+            elif not hal_captured_device_payload_v1_exact_equal(
+                    recorded, recorded_bytes, candidate, candidate_bytes):
+                status = HalPayloadReplayStatusV1.PayloadDifference
+            else:
+                self.next_sequence = self.next_sequence + 1
+                self.consumed_count = self.consumed_count + 1
+                self.read_once_consumed_mask =
+                    self.read_once_consumed_mask | token_mask
+        HalPayloadReplayReceiptV1(status, self.invocation_id,
+            recorded.sequence, self.consumed_count,
+            self.read_once_consumed_mask, false, 0)
+
+fn hal_device_payload_replay_cursor_v1(
+        invocation_id: i64, capacity: i64) -> HalDevicePayloadReplayCursorV1:
+    HalDevicePayloadReplayCursorV1(invocation_id, 0, capacity, 0, 0,
+        invocation_id > 0 and capacity > 0 and capacity <= 62)
+
+export HAL_DEVICE_PAYLOAD_SCHEMA_V1, HAL_DEVICE_PAYLOAD_MAX_BYTES_V1
+export HAL_DEVICE_PAYLOAD_MAX_READ_ONCE_TOKENS_V1
+export HalCapturedPayloadKindV1, HalPayloadReplayStatusV1
+export HalCallerRegionV1, HalCapturedDevicePayloadV1
+export HalPayloadReplayReceiptV1, HalDevicePayloadReplayCursorV1
+export hal_caller_region_v1, hal_captured_device_payload_v1
+export hal_caller_region_v1_well_formed
+export hal_captured_device_payload_v1_well_formed
+export hal_caller_region_exact_equal_v1
+export hal_captured_device_payload_v1_exact_equal
+export hal_device_payload_replay_cursor_v1
