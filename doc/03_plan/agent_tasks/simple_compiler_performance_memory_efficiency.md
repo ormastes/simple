@@ -179,3 +179,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve allocation-free compatibility path gates on excluded files.
 - Pin registry dispatch to every new view variant.
 - Follow-up: migrate stdlib contextual-keyword/deprecation/stub scanners.
+
+## Completed tool tranche: canonical EasyFix context owner
+
+- Add stdlib `EasyFixSourceView` and a from-lines context builder.
+- Add view entrypoints for contextual-keyword, deprecated-if-let, and stub rules.
+- Re-export canonical stdlib context facts from compiler helpers; delete the duplicate type.
+- Use one registry view for every compiler and stdlib context consumer.
+- Pin single-view dispatch and absence of the compiler duplicate with source contracts.
+- Follow-up: index duplicate-typed calls and audit remaining whole-source algorithms.
