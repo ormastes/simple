@@ -106,6 +106,25 @@ Every manifest declares required frame depth, event words, trace operations/byte
 
 The verifier uses compiler-resolved declarations and entry closures. Its baseline fingerprint is `(rule_id, canonical_module, symbol, source_span, normalized_signature)`. Candidate recording never modifies the accepted baseline. Receipt status passes only when new/changed/stale/malformed/expired counts are zero and every pre-milestone warning exactly matches the baseline; at/after milestone total findings and baseline entries must both be zero.
 
+The bounded source migration scan also treats every `@rt(hal)` and `@noalloc`
+body as a zero-growth closure. It recognizes raw heap entry points and hidden
+growth through `push`, `append`, `insert`, and `reserve`; comments are ignored.
+Allocation is admitted only when the same declaration is explicitly on the
+`@init_phase` side of the startup seal. This is a migration aid, while the
+compiler semantic no-allocation closure remains authoritative. Findings in
+new or changed files are immediate errors, exact untouched baseline findings
+are warnings, and the configured enforcement epoch promotes every remaining
+finding and baseline row to an error.
+
+The scan runs only during build/verification and is absent from HAL runtime
+closures. It inventories files once, reads each admitted file once, and uses
+bounded file/byte/finding limits; the policy evaluator uses indexed sets and
+is linear in findings, baseline rows, and changed paths. Its receipt reports
+scan microseconds, source bytes, file reads, and inventory process count;
+the companion performance runner reports wall time and peak RSS. No new
+runtime allocation, branch, table, or logging surface is introduced by this
+guard.
+
 ## Error handling
 
 All APIs return `Result<T, E>` or closed status values. Unknown dispatch arms, schema versions, providers, opcodes, comparators, normalizers, predicates, and receipt fields are catchable failures. No abort/unreachable fallback is permitted. Overflow, timeout, child crash, malformed receipt, pack failure, stale exclusion, and allocation violation preserve actionable bounded provenance.

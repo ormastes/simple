@@ -143,16 +143,13 @@ fn _obsolete_symbol(symbol: text) -> bool:
         symbol == "register_decision_tree" or symbol == "clear_mcdc_trees" or
         symbol == "clear_decisions" or symbol == "clear_evaluations"
 
-fn _allocation_call(line: text) -> bool:
-    line.contains(".push(") or line.contains("Array(") or line.contains("Map(") or
-        line.contains("Dict(") or line.contains("malloc(") or line.contains("realloc(") or
-        line.contains("rt_alloc(") or line.contains("rt_gc_alloc(")
-
 fn _scan_file(rel: text, source: text, max_findings: i64) -> [MigrationFindingV1]:
     var findings: [MigrationFindingV1] = []
     var pending_rt_hal = false
     var pending_noalloc = false
+    var pending_init_phase = false
     var critical_body = false
+    var init_body = false
     var current_symbol = "<module>"
     var line_no = 0
     for raw in source.split("\n"):
@@ -162,10 +159,14 @@ fn _scan_file(rel: text, source: text, max_findings: i64) -> [MigrationFindingV1
             pending_rt_hal = true
         if line.starts_with("@noalloc"):
             pending_noalloc = true
+        if line.starts_with("@init_phase"):
+            pending_init_phase = true
         if line.starts_with("fn ") or line.starts_with("pub fn ") or line.starts_with("extern fn "):
             critical_body = pending_rt_hal or pending_noalloc
+            init_body = pending_init_phase
             pending_rt_hal = false
             pending_noalloc = false
+            pending_init_phase = false
             val symbol = _symbol(line)
             current_symbol = symbol
             if line.contains("extern fn rt_") and not critical_body:
@@ -176,10 +177,15 @@ fn _scan_file(rel: text, source: text, max_findings: i64) -> [MigrationFindingV1
             ()
         elif not raw.starts_with(" ") and not raw.starts_with("\t"):
             critical_body = false
+            init_body = false
             current_symbol = "<module>"
             pending_rt_hal = false
             pending_noalloc = false
-        if critical_body and _allocation_call(line):
+            pending_init_phase = false
+        # REQ-011 permits allocation only on the explicitly declared
+        # initialization side of the seal. Steady-state rt(hal)/@noalloc
+        # bodies fail closed on every recognized growth surface.
+        if critical_body and not init_body and mcdc_hal_source_line_allocates(line):
             findings = findings.push(MigrationFindingV1("forbidden-allocation", rel, line_no, current_symbol, _normalize_signature(line)))
         if line.starts_with("# @compat-shim:") or line.starts_with("Compatibility facade") or line.starts_with("# Compatibility facade"):
             findings = findings.push(MigrationFindingV1("obsolete-interface", rel, line_no, "<compat-shim>", _normalize_signature(line)))
