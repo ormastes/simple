@@ -1160,7 +1160,17 @@ impl MirLowering:
                     case HirTypeKind.Str:
                         bootstrap_fn_ret_type_register(fn_.name, self.lower_type(fn_.return_type))
                     case _: ()
-                if not self.hir_function_is_extern(fn_):
+                # #158 Phase C: a generic TEMPLATE is non-emittable (hardening
+                # plan 9.3 step 12). It carries unsubstituted TypeParams, so
+                # lowering it produces opaque pointer-width slots and silent
+                # wrong answers. 40.mono emits the specializations that ARE
+                # reachable; anything still flagged here has zero live
+                # instantiations and must simply not be emitted. A generic
+                # call that mono could NOT rewrite is still a hard error
+                # (E-MONO-030), so this skip cannot hide a real use.
+                if fn_.is_generic_template:
+                    ()
+                elif not self.hir_function_is_extern(fn_):
                     if bootstrap_trace:
                         print "[mir-lower] function:start {fn_.name}"
                     var mir_fn = self.lower_function(fn_)
@@ -1445,7 +1455,11 @@ impl MirLowering:
         var fni = 0
         while fni < fn_values.len():
             val fn_: HirFunction = fn_values[fni]
-            if self.hir_function_is_extern(fn_):
+            if fn_.is_generic_template:
+                fni = fni + 1
+                # #158 Phase C: generic templates are non-emittable (see the
+                # function-symbol loop above for the full rationale).
+            elif self.hir_function_is_extern(fn_):
                 fni = fni + 1
                 # skip extern functions
             else:

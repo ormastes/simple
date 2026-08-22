@@ -1,6 +1,11 @@
 # HIR: generic impl methods still gated on the native path — `async/poll.spl` (2026-08-22)
 
-**Status: OPEN** (filed; not fixed). Class 3 of the stage1-closure HIR fatals.
+**Status: SUPERSEDED 2026-08-22** by
+`generic_class_and_impl_declaration_gates_block_stage1_closure_2026-08-22.md`,
+which covers all THREE run13 sites (this record named only `poll.spl`; the
+other two are the class and impl tiers of `async/future.spl`) and fixes the
+declaration-site half. The Phase C gap this record describes -- real
+instantiation-driven monomorphization of impl methods -- remains OPEN there.
 
 ## Exact text
 ```

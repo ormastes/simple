@@ -54,8 +54,14 @@ impl HirLowering:
         for tp in class_type_params:
             type_params = type_params.push(self.lower_type_param(tp))
 
-        if class_type_params.len() > 0:
-            self.error("generic classes are not supported on the native build path yet: class '{class_name}' declares type parameter(s); monomorphization is not implemented (#158 Phase B)", class_span)
+        # #158 Phase C: a generic class is a non-emittable TEMPLATE, not an
+        # error at its declaration site (hardening plan 9.3 step 12). It is
+        # recorded as `is_generic_template` below, its methods are flagged
+        # the same way, and 50.mir/_MirLowering/module_lowering.spl skips
+        # every flagged function. Loudness is preserved downstream, not here:
+        # any REACHABLE instantiation still fails as an unrewritten generic
+        # call in 40.mono (E-MONO-030/032) and HWIR-E-GENERIC in strict MIR.
+        # Declaring the template is not the defect; emitting it is.
 
         var fields: [HirField] = []
         for f in class_fields:
@@ -69,7 +75,11 @@ impl HirLowering:
         self.current_method_self_symbol_id = symbol.id
         for name in class_methods.keys():
             val fn_: ParserFunction = class_methods[name]
-            val hir_fn = self.lower_function(fn_)
+            var hir_fn = self.lower_function(fn_)
+            # #158 Phase C: same rule as trait_impl_lowering -- a class with
+            # type parameter(s) makes every one of its methods a template.
+            if class_type_params.len() > 0:
+                hir_fn.is_generic_template = true
             methods[name] = hir_fn.symbol
             self.lowered_impl_functions[hir_fn.symbol] = hir_fn
         self.current_method_self_type = previous_self_type
