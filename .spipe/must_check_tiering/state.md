@@ -397,3 +397,15 @@ implementation-blocked-by-bootstrap-authority
   HIR import processing; the owned child was safely terminated with exit 143.
   Stage 3/4, optimizer, SPipe/docgen execution, and ledger PASS publication
   remain blocked on the tracked recursive HIR/SymbolTable promotion leak.
+- automated-gate-contract-fix: The predicate-parser native checker previously
+  ignored the admitted Stage 4 identity and preferred an ambient legacy Stage 2
+  path; its constant-space resolver now prioritizes explicit diagnostics,
+  `SIMPLE_BINARY`, `SIMPLE_BIN`, legacy Stage 2, then the deployed default, with
+  all branches self-tested. The essential-tools producer now ends with the
+  explicit PASS verdict required by the fail-closed ledger consumer.
+- push-performance-review: The canonical push chain remains behaviorally
+  bounded only for small outgoing ranges. Its tree guard rescans and sorts the
+  complete tree for every commit and materializes revision lists in shell
+  variables; the retained self-test is already documented at about four
+  minutes. Deduplicated streamed commit/tree inspection is tracked separately
+  and is not silently folded into this bootstrap identity repair.
