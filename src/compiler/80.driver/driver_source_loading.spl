@@ -161,19 +161,6 @@ pub fn _driver_text_bucket_set_new(bucket_count: i64) -> Dict<text, bool>:
 pub fn _driver_text_bucket_set_has(buckets: Dict<text, bool>, key: text) -> bool:
     buckets.contains_key(key)
 
-pub fn _driver_text_bucket_set_add(buckets: Dict<text, bool>, key: text) -> Dict<text, bool>:
-    # Insert in place and hand the same Dict back; every call site is
-    # `set = _driver_text_bucket_set_add(set, k)`, so the returned handle is the
-    # only one that survives. Measured: this is the same cost as binding a fresh
-    # `var` first (~1.0 s vs ~1.1 s over 4000 inserts) because the remaining
-    # per-insert copy happens at the call boundary, not here — an inline
-    # `d[k] = true` in the same benchmark is 26 ms. Collapsing these three
-    # helpers into direct Dict operations at the call sites would recover that,
-    # but those call sites live in driver_source_pipeline_loading.spl and
-    # compile_targets.spl; left as a follow-up in the bug record.
-    buckets[key] = true
-    buckets
-
 pub fn _driver_unique_physical_sources(sources: [SourceFile]) -> [SourceFile]:
     """Keep the first logical source for each normalized physical path.
     Logical aliases remain in the caller's source list for module registration;
@@ -183,7 +170,10 @@ pub fn _driver_unique_physical_sources(sources: [SourceFile]) -> [SourceFile]:
     for source in sources:
         val key = _driver_physical_source_key(source.path)
         if not _driver_text_bucket_set_has(seen, key):
-            seen = _driver_text_bucket_set_add(seen, key)
+            # Direct indexed mutation is intentional. Passing Dict by value to
+            # an add helper copies the complete set in compiled Simple, making
+            # closure discovery quadratic in its source count.
+            seen[key] = true
             unique = unique.push(source)
     unique
 

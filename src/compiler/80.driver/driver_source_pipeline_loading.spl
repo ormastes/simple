@@ -19,7 +19,6 @@ use compiler.driver.driver_source_loading.{
     _driver_module_name_collision,
     _driver_text_bucket_set_new,
     _driver_text_bucket_set_has,
-    _driver_text_bucket_set_add,
     _driver_unique_physical_sources
 }
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
@@ -31,6 +30,13 @@ extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_bytes_to_text(data: [u8]) -> text
 extern fn rt_hash_text(data: text) -> i64
+
+# Entry-closure discovery is compiler infrastructure exposed to authored input.
+# Keep its line splitting, import arrays, and BFS queue under explicit ceilings;
+# exceeding a ceiling is a diagnostic, never partial/truncated compilation.
+val DRIVER_CLOSURE_MAX_SOURCE_BYTES: i64 = 8 * 1024 * 1024
+val DRIVER_CLOSURE_MAX_IMPORTS_PER_SOURCE: i64 = 65536
+val DRIVER_CLOSURE_MAX_PHYSICAL_SOURCES: i64 = 65536
 
 fn driver_source_owner_text_copy(value: text) -> text:
     rt_bytes_to_text(value.bytes())
@@ -140,7 +146,7 @@ impl CompilerDriver:
             for s in loaded:
                 val source_key = s.path + "::" + s.module_name
                 if not _driver_text_bucket_set_has(seen_sources, source_key):
-                    seen_sources = _driver_text_bucket_set_add(seen_sources, source_key)
+                    seen_sources[source_key] = true
                     all_sources = all_sources.push(s)
             if input_path.starts_with("src/"):
                 has_project_source = true
@@ -189,15 +195,16 @@ impl CompilerDriver:
             var closure_preidx = 0
             while closure_preidx < all_sources.len():
                 val loaded_module_name = all_sources[closure_preidx].module_name
-                closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, loaded_module_name)
+                closure_loaded_mods[loaded_module_name] = true
                 closure_preidx = closure_preidx + 1
             var closure_seen_mods = _driver_text_bucket_set_new(512)
             var closure_scan_sources = _driver_unique_physical_sources(all_sources)
+            if closure_scan_sources.len() > DRIVER_CLOSURE_MAX_PHYSICAL_SOURCES:
+                self.ctx.add_error("native entry closure seed exceeds {DRIVER_CLOSURE_MAX_PHYSICAL_SOURCES} physical sources")
+                return (self.ctx, false)
             var closure_queued_paths = _driver_text_bucket_set_new(512)
             for queued_source in closure_scan_sources:
-                closure_queued_paths = _driver_text_bucket_set_add(
-                    closure_queued_paths,
-                    _driver_physical_source_key(queued_source.path))
+                closure_queued_paths[_driver_physical_source_key(queued_source.path)] = true
             var closure_idx = 0
             log_phase(
                 "phase1:load_sources:closure:start logical={all_sources.len()} physical={closure_scan_sources.len()}")
@@ -208,6 +215,9 @@ impl CompilerDriver:
                     log_phase(
                         "phase1:load_sources:closure:progress index={closure_idx} physical={closure_scan_sources.len()} logical={all_sources.len()}")
                 val closure_src = closure_scan_sources[closure_idx]
+                if closure_src.content.len() > DRIVER_CLOSURE_MAX_SOURCE_BYTES:
+                    self.ctx.add_error("native entry closure source '{closure_src.path}' exceeds the {DRIVER_CLOSURE_MAX_SOURCE_BYTES}-byte scan limit")
+                    return (self.ctx, false)
                 if closure_idx % 64 == 0:
                     log_build_progress("source_closure", "files", closure_idx,
                         closure_scan_sources.len(), closure_src.path,
@@ -222,12 +232,15 @@ impl CompilerDriver:
                 # receiver decays into an unresolved global.
                 for sibling in _driver_entry_sibling_module_paths(closure_src.content):
                     closure_imports = closure_imports.push(sibling)
+                if closure_imports.len() > DRIVER_CLOSURE_MAX_IMPORTS_PER_SOURCE:
+                    self.ctx.add_error("native entry closure source '{closure_src.path}' exceeds the {DRIVER_CLOSURE_MAX_IMPORTS_PER_SOURCE}-import scan limit")
+                    return (self.ctx, false)
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp in closure_imports:
                     if _driver_text_bucket_set_has(closure_seen_mods, closure_mp):
                         continue
-                    closure_seen_mods = _driver_text_bucket_set_add(closure_seen_mods, closure_mp)
+                    closure_seen_mods[closure_mp] = true
                     if _driver_text_bucket_set_has(closure_loaded_mods, closure_mp):
                         # Already satisfied by an explicit --source root (or an
                         # earlier closure step): nothing to resolve, not an error.
@@ -257,12 +270,15 @@ impl CompilerDriver:
                             closure_has_exact = true
                         val closure_key = cs.path + "::" + cs.module_name
                         if not _driver_text_bucket_set_has(seen_sources, closure_key):
-                            seen_sources = _driver_text_bucket_set_add(seen_sources, closure_key)
+                            seen_sources[closure_key] = true
                             all_sources = all_sources.push(cs)
-                            closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, cs.module_name)
+                            closure_loaded_mods[cs.module_name] = true
                         val closure_physical_key = _driver_physical_source_key(cs.path)
                         if not _driver_text_bucket_set_has(closure_queued_paths, closure_physical_key):
-                            closure_queued_paths = _driver_text_bucket_set_add(closure_queued_paths, closure_physical_key)
+                            if closure_scan_sources.len() >= DRIVER_CLOSURE_MAX_PHYSICAL_SOURCES:
+                                self.ctx.add_error("native entry closure exceeds {DRIVER_CLOSURE_MAX_PHYSICAL_SOURCES} physical sources while resolving '{closure_mp}'")
+                                return (self.ctx, false)
+                            closure_queued_paths[closure_physical_key] = true
                             closure_scan_sources = closure_scan_sources.push(cs)
                     if not closure_has_exact:
                         # The path-derived module name differs from the import
@@ -271,9 +287,9 @@ impl CompilerDriver:
                         # resolve_import_symbols finds it by name.
                         val closure_alias_key = closure_file + "::" + closure_mp
                         if not _driver_text_bucket_set_has(seen_sources, closure_alias_key):
-                            seen_sources = _driver_text_bucket_set_add(seen_sources, closure_alias_key)
+                            seen_sources[closure_alias_key] = true
                             all_sources = all_sources.push(SourceFile(path: closure_file, content: closure_content, module_name: closure_mp))
-                            closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, closure_mp)
+                            closure_loaded_mods[closure_mp] = true
                 closure_idx = closure_idx + 1
             log_phase(
                 "phase1:load_sources:closure:done scanned={closure_idx} logical={all_sources.len()}")
@@ -301,7 +317,7 @@ impl CompilerDriver:
                 for s in bulk_loaded:
                     val source_key = s.path + "::" + s.module_name
                     if not _driver_text_bucket_set_has(seen_sources, source_key):
-                        seen_sources = _driver_text_bucket_set_add(seen_sources, source_key)
+                        seen_sources[source_key] = true
                         all_sources = all_sources.push(s)
             else:
                 for p in paths:
@@ -309,7 +325,7 @@ impl CompilerDriver:
                     for s in loaded:
                         val source_key = s.path + "::" + s.module_name
                         if not _driver_text_bucket_set_has(seen_sources, source_key):
-                            seen_sources = _driver_text_bucket_set_add(seen_sources, source_key)
+                            seen_sources[source_key] = true
                             all_sources = all_sources.push(s)
 
         log_phase("phase1:load_sources:bulk:done logical={all_sources.len()}")
