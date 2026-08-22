@@ -84,3 +84,41 @@ Fix `lookup_qualified_type_raw` (or its caller) to resolve a projected argument
 in the module that DECLARES it, following the owner's import table and
 re-export hops, then re-land `d481f15e1ac` and `86787968989` behind a measured
 stage-1 census. Do not re-land either without that census.
+
+## Corroboration from the generic-callable lane (2026-08-22, post-revert)
+
+The `86787968989` lane owner independently produced attribution evidence that
+**agrees with the mechanism above and shifts weight off their own commit**:
+
+1. **Full `test/01_unit/compiler/hir` sweep, A/B, same seed.** origin/main
+   76 PASS / 48 FAIL; origin/main minus `86787968989` 75 PASS / 48 FAIL. The
+   FAIL sets are **byte-identical** — 0 newly red, 0 newly green. (Logs
+   `/mnt/fast/gc1/hirsweep.log`, `/mnt/fast/gc1b/hirsweep_baseline.log`.)
+2. **Construct census of run15's new names.** Occurrences in a GENERIC callable
+   signature / as a generic ARGUMENT / as `T?`:
+   HirContractBlock 0 / 0 / 6; Span 0 / 0 / 58;
+   ModuleSurfaceExportOrigin 0 / 2 / 0; SymbolId 0 / 94 / 61;
+   MirFunction 2 / 27 / 12; HirType 1 / 53 / 100.
+   The three names with **zero** generic-callable exposure include the largest
+   population. HirContractBlock's only cross-module signature use is
+   NON-generic: `lean_backend.spl:528`
+   `fn function_contract_from_hir(name: text, contract: HirContractBlock?, param_aliases: [(text, text)]) -> Result<FunctionContract, CompileError>`
+   — Optional + array-of-tuple + `Result<..>` args, no type params at all.
+3. A synthetic A/B on that exact shape (plus bare `T?`, `Result<A,B>`,
+   `Dict<text,T>`, control) produced 0 errors at origin/main — the shape alone
+   does not reproduce without real-module context.
+
+This is the same conclusion this record reached statically from the opposite
+direction: the fatal population is the **generic-ARGUMENT / Optional** surface
+(`d481f15e1ac`), not the generic-callable surface. Their honest limit stands and
+is repeated here: no harness reproduced the regression, so this is "no exposure
+and no spec-level effect", **not** an exoneration.
+
+**Both stay reverted regardless.** `86787968989`'s `Function` arm and
+`bound_type_params` threading are entangled with `d481f15e1ac`'s argument
+recursion (they share the parameter and the recursion sites), so the pair could
+not be separated cleanly in a revert, and neither can be re-landed on evidence
+from unit specs — the failing population is invisible to them by construction
+(48 of 124 hir specs are red on BOTH sides). Re-land condition is unchanged and
+applies to each commit independently: a measured stage-1 `[hir-fatal]` census at
+or below post19's 48 / 9.
