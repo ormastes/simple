@@ -450,3 +450,15 @@ same source to the same header are ignored. The edge loop performs no growing
 array extraction, linear duplicate scan, or dictionary copyback. Incomplete CFG
 or dominance still produces no loops, and loop body/exit construction is
 unchanged.
+
+## Fix application fast-path contract
+
+Per-file replacements are ordered descending by start. When starts are distinct,
+the applicator uses comparator sorting; when any start repeats, it uses the exact
+legacy selection order. Overlap validation runs on that order before assembly.
+Only spans satisfying `0 <= start <= end <= original_source_len` enter the
+chunk-assembly path. It walks replacements in reverse, emits each untouched source
+slice and replacement once, then joins one time. Any range outside that contract
+uses the historical descending incremental splice loop. This preserves insertion,
+deletion, equal-start, invalid-range, missing-file, and conflict behavior while
+bounding the ordinary valid path.
