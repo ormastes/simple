@@ -1592,6 +1592,8 @@ int32_t rt_mcdc_report_mcdp_v1(
                             (size_t)witness_capacity * sizeof(*witnesses)) ||
         mcdc_ranges_overlap(exclusions, report_exclusion_bytes, events,
                             report_event_bytes) ||
+        mcdc_ranges_overlap(events, report_event_bytes, manifest_bytes,
+                            (size_t)manifest_byte_count) ||
         mcdc_ranges_overlap(exclusions, report_exclusion_bytes, programs,
                             (size_t)program_capacity * sizeof(*programs)) ||
         mcdc_ranges_overlap(exclusions, report_exclusion_bytes, tokens,
