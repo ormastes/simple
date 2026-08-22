@@ -1534,3 +1534,16 @@ signature index. Records are ordered by `(signature index, source sequence)` so 
 replacement order remains unchanged. Cost becomes O(source characters + signatures +
 replacements log replacements), with O(signatures + replacements) transient memory and
 no per-signature source traversal or replacement-bucket COW growth.
+
+## 2026-08-22 implementation addendum: allocation-free annotation and ID policy
+
+Unknown-annotation checks reconstructed 31-entry decorator and 15-entry attribute arrays
+for every annotation line, then linearly searched them. Exact match dispatch now encodes
+the same sets without registry arrays or per-line allocation.
+
+The lint bridge also parsed every EasyFix ID with `split(":")[1]`. Besides allocating a
+parts array per fix, this misclassified direct IDs such as `W0406:17` as code `17`, so
+suppression and severity policy targeted the wrong key. `lint_rule_code_from_easyfix_id`
+now recognizes `L:`/`E:` namespaced IDs, preserves direct codes before the first colon,
+and returns malformed IDs unchanged. It performs one necessary code slice and no parts
+array, restoring correct W0404/W0406 policy ownership.
