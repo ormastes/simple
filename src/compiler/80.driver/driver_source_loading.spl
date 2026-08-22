@@ -419,6 +419,19 @@ fn _driver_import_path_is_valid(path_text: text) -> bool:
         i = i + 1
     path_text != ""
 
+fn _driver_line_end(content: text, start: i64) -> i64:
+    """Return the exclusive end of one source line without splitting the file.
+
+    Entry-closure discovery retains the canonical source text for later parse
+    phases.  `content.split("\n")` therefore created a second, source-sized
+    array plus one text object per line at the peak of closure discovery.  This
+    bounded cursor keeps only the current line live.  The caller's existing
+    8 MiB source ceiling bounds the worst-case single-line slice."""
+    var end = start
+    while end < content.len() and content.char_code_at(end) != 10:
+        end = end + 1
+    end
+
 fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
     # Whole-content early-out, mirroring the `mod `/`export ` gate in
     # _driver_entry_sibling_paths below: a file with no use/import keyword at all
@@ -427,7 +440,13 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
         return []
     var result: [text] = []
     var in_doc = false
-    for raw_line in content.split("\n"):
+    var line_start: i64 = 0
+    while line_start < content.len():
+        val line_end = _driver_line_end(content, line_start)
+        val raw_line = content[line_start:line_end]
+        # Advance before any fast-path `continue`; unlike a `for` loop, the
+        # cursor does not advance implicitly.
+        line_start = line_end + 1
         # PERF (2026-08-21): fast reject before any comment/docstring work.
         # This body runs over every line of every file in the entry closure and
         # measured 46.7 ms per call -- 56.5 s of a 91 s `[build] source_closure`
@@ -570,7 +589,11 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
         return []
     var result: [text] = []
     var in_doc = false
-    for raw_line in content.split("\n"):
+    var line_start: i64 = 0
+    while line_start < content.len():
+        val line_end = _driver_line_end(content, line_start)
+        val raw_line = content[line_start:line_end]
+        line_start = line_end + 1
         var scan_line = raw_line
         if not in_doc:
             val comment_at = _driver_text_index_of(scan_line, "#")
