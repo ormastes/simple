@@ -220,6 +220,30 @@ must_not_contain "QTYPEIDX no parallel-array type scan"           "$QTYPES" 'sel
 must_not_contain "QTYPEIDX no parallel-array function scan"       "$QTYPES" 'self.qualified_function_names'
 must_contain     "QTYPEIDX scaling spec pins the 3x ratio"        "$QTYPESPEC" 'val budget = (small_ms + 1) * 3'
 
+# --- GLBMEMO (2026-08-22). Follow-up to QTYPEIDX: with the qualified-type
+# lookup O(1), the terms left standing (field_dep, sigtype, declared_dep,
+# project) are all dominated by that same lookup, so QTYPEIDX removed their
+# superlinear component too. The one repeat it did NOT remove is the MISS
+# fallback: lower_named_kind's default arm calls try_register_glob_reachable_symbol,
+# which has no early exit on failure (it must visit every glob target to prove
+# no route exists) and remembered nothing -- so the sweep re-ran for every
+# unbound-name occurrence, ~1.25M times per stage1 build (run12: 1,251,806 of
+# 1,496,719 probes take the miss path), at O(glob targets x 6 linear surface
+# name scans) each. Charged to sigtype / project / field_dep. Fixed by a
+# registry-pure-per-importer negative memo plus routing the declaration
+# question through the existing NAMEIDX index.
+# Record: doc/08_tracking/bug/hir_glob_reachable_sweep_unmemoized_2026-08-22.md
+GLBREG="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl"
+GLBTYPES="$ROOT/src/compiler/20.hir/hir_lowering/types.spl"
+GLBSPEC="$ROOT/test/01_unit/compiler/hir/hir_glob_reachable_miss_memo_spec.spl"
+must_contain     "GLBMEMO negative memo is consulted"             "$GLBREG" 'if self.glob_reachable_miss_memo.contains_key(miss_key):'
+must_contain     "GLBMEMO records only a completed miss"          "$GLBREG" 'self.glob_reachable_miss_memo[miss_key] = true'
+must_contain     "GLBMEMO key carries generation and importer"    "$GLBREG" 'val miss_key = "{self.module_surfaces.generation} {importer_index} {name}"'
+must_contain     "GLBMEMO declares-item uses the NAMEIDX index"   "$GLBREG" 'if self.surface_declares_item_indexed(target, name):'
+must_not_contain "GLBMEMO no linear declares-item in the sweep"   "$GLBREG" 'if hir_module_declares_item(target, name):'
+must_contain     "GLBMEMO sweep counter exists"                   "$GLBTYPES" 'glob_reachable_scan_count: i64'
+must_contain     "GLBMEMO spec pins one sweep per repeat"         "$GLBSPEC" 'expect(lowering.glob_reachable_scan_count).to_equal(1)'
+
 # --- HIRCODECCHUNK (2026-08-22). The HIR per-module cliffs in stage1 run12 were
 # not lowering at all: `[build] hir` completion minus the `[hir-prof]` lowering
 # total left 1,535 s unaccounted on zca_rows (lowering was 7.8 s), and that gap

@@ -276,6 +276,28 @@ class HirLowering:
     name_index_built: {text: bool}
     name_index_positions: {text: i64}
     name_index_build_count: i64
+    # GLBMEMO (2026-08-22): negative memo for `try_register_glob_reachable_symbol`,
+    # keyed `{generation} {importer surface index} {name}`. That sweep runs from
+    # `lower_named_kind`'s default arm for every UNBOUND name occurrence and has
+    # no early exit on failure -- it must visit every glob target to prove no
+    # route exists -- so the MISS path (84% of probes in run12) re-swept per
+    # occurrence, charged to whichever slot the caller was in (`sigtype`,
+    # `project`, `field_dep`). Registry-pure per importer: both questions the
+    # sweep asks are pure functions of the frozen registry, and the one
+    # importer-local step is already suppressed on repeat by the RISDONE memo,
+    # so a recorded failure can never have become a success. Only failures are
+    # recorded; a success returns before the write. The key carries the
+    # generation, so a re-frozen registry cannot be answered from a stale entry.
+    glob_reachable_miss_memo: {text: bool}
+    # Sweeps actually performed. Observable mechanism counter, same role as
+    # `explicit_dep_scan_count`: a spec pins that repeating one unbound name
+    # sweeps exactly once.
+    glob_reachable_scan_count: i64
+    # Resolved importer surface index for `glob_reachable_importer_owner`, so a
+    # repeat name in one module does not rebuild the key by three string
+    # rewrites and re-resolve it. "" = none yet.
+    glob_reachable_importer_index: i64
+    glob_reachable_importer_owner: text
     # Sweeps actually performed. Observable mechanism counter for the memo
     # above; a spec pins that N importers of one surface cause exactly one
     # sweep per (surface, dependency) pair.
@@ -347,6 +369,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_impl_index_positions: {text: [i64]} = {}
     val empty_name_index_built: {text: bool} = {}
     val empty_name_index_positions: {text: i64} = {}
+    val empty_glob_reachable_miss_memo: {text: bool} = {}
     val empty_reexport_root_memo_index: {text: i64} = {}
     val empty_reexport_root_memo_item: {text: text} = {}
     val empty_imported_type_methods_in_progress: [text] = []
@@ -410,6 +433,10 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         name_index_built: empty_name_index_built,
         name_index_positions: empty_name_index_positions,
         name_index_build_count: 0,
+        glob_reachable_miss_memo: empty_glob_reachable_miss_memo,
+        glob_reachable_scan_count: 0,
+        glob_reachable_importer_index: -1,
+        glob_reachable_importer_owner: "",
         reexport_root_memo_index: empty_reexport_root_memo_index,
         reexport_root_memo_item: empty_reexport_root_memo_item,
         reexport_visit_surface_indices: empty_reexport_visit_surface_indices,

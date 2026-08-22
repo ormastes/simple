@@ -744,15 +744,44 @@ impl HirLowering:
         env gate: the route is a user-written glob, not a bootstrap exemption."""
         if self.symbols.lookup_or_invalid(name).is_valid():
             return true
-        var importer_key = self.module_filename
-        if importer_key.ends_with(".spl"):
-            importer_key = importer_key[0:importer_key.len() - 4]
-        importer_key = importer_key.replace("/", ".")
-        if importer_key.starts_with("src."):
-            importer_key = importer_key.substring(4)
-        val importer_index = self.surface_index_for_name(importer_key)
+        # GLBMEMO (2026-08-22): this runs from `lower_named_kind`'s default arm
+        # for every UNBOUND name occurrence, and the sweep below has no early
+        # exit on failure -- it must visit every glob target to prove no route
+        # exists. run12's counters put 1,251,806 of 1,496,719 qualified-type
+        # probes (84%) on the MISS path that lands here, so the unmemoized
+        # sweep ran ~1.25M times per stage-1 build at O(glob targets x 6 linear
+        # surface name scans) each, charged to whichever profile slot the
+        # caller was in (`sigtype`, `project`, `field_dep`).
+        #
+        # The importer key is derived from `self.module_filename` by three
+        # string rewrites; cache the resolved index so a repeat name in the
+        # same module does not rebuild and re-resolve it.
+        if self.glob_reachable_importer_owner != self.module_filename:
+            var derived_key = self.module_filename
+            if derived_key.ends_with(".spl"):
+                derived_key = derived_key[0:derived_key.len() - 4]
+            derived_key = derived_key.replace("/", ".")
+            if derived_key.starts_with("src."):
+                derived_key = derived_key.substring(4)
+            self.glob_reachable_importer_index = self.surface_index_for_name(derived_key)
+            self.glob_reachable_importer_owner = self.module_filename
+        val importer_index = self.glob_reachable_importer_index
         if importer_index < 0 or importer_index >= self.module_surfaces.surfaces.len():
             return false
+        # A completed sweep that found NO route is memoized per (frozen
+        # registry, importer, name). It cannot later become a success: the two
+        # questions it asks -- `hir_module_declares_item` and
+        # `find_reexport_source` -- are pure functions of the frozen registry,
+        # and the only importer-local step, `register_imported_symbol`, is
+        # itself suppressed on a repeat by the RISDONE memo, so a second sweep
+        # is guaranteed to reach the same `false`. A name that becomes bound by
+        # some OTHER route in the meantime never reaches here at all: the
+        # `lookup_or_invalid` guard above returns first. Only the negative is
+        # recorded -- a success returns before the memo write.
+        val miss_key = "{self.module_surfaces.generation} {importer_index} {name}"
+        if self.glob_reachable_miss_memo.contains_key(miss_key):
+            return false
+        self.glob_reachable_scan_count = self.glob_reachable_scan_count + 1
         val importer = self.module_surfaces.surfaces[importer_index]
         var import_idx = 0
         while import_idx < importer.imports.len() and import_idx < importer.import_target_indices.len():
@@ -764,7 +793,12 @@ impl HirLowering:
                     val target = self.module_surfaces.surfaces[target_index]
                     var owner_index = -1
                     var owner_item = name
-                    if hir_module_declares_item(target, name):
+                    # NAMEIDX: the same six-array declaration question
+                    # `register_imported_symbol_inner` already answers by Dict
+                    # probe. `hir_module_declares_item` runs it as six linear
+                    # `module_surface_name_position` sweeps; this call site was
+                    # never converted. Same answer, same first-occurrence-wins.
+                    if self.surface_declares_item_indexed(target, name):
                         owner_index = target.physical_index
                     else:
                         val hop = self.find_reexport_source(target.physical_index, name)
@@ -783,4 +817,19 @@ impl HirLowering:
                         if self.symbols.lookup_or_invalid(name).is_valid():
                             return true
             import_idx = import_idx + 1
+        self.glob_reachable_miss_memo[miss_key] = true
         false
+
+    me surface_declares_item_indexed(target: ModuleSurface, name: text) -> bool:
+        """`hir_module_declares_item` answered from the NAMEIDX per-surface
+        index instead of six linear name-array sweeps. Identical predicate:
+        the index is built by one sweep per surface over the SAME six arrays,
+        first occurrence wins, and it is keyed on the frozen registry so the
+        answer is shared across importers."""
+        val surface_key = self.ensure_surface_name_index(target)
+        if self.surface_name_position(surface_key, "F", name) >= 0: return true
+        if self.surface_name_position(surface_key, "C", name) >= 0: return true
+        if self.surface_name_position(surface_key, "E", name) >= 0: return true
+        if self.surface_name_position(surface_key, "T", name) >= 0: return true
+        if self.surface_name_position(surface_key, "A", name) >= 0: return true
+        self.surface_name_position(surface_key, "K", name) >= 0

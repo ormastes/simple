@@ -1,0 +1,109 @@
+# @tag: unit, compiler, hir, native-safe
+#
+# Pins the MECHANISM behind GLBMEMO
+# (doc/08_tracking/bug/hir_glob_reachable_sweep_unmemoized_2026-08-22.md).
+#
+# `try_register_glob_reachable_symbol` runs from `lower_named_kind`'s default
+# arm for every UNBOUND name occurrence, and the sweep has no early exit on
+# failure -- it must visit every glob target to prove no route exists. run12's
+# counters put 1,251,806 of 1,496,719 qualified-type probes (84%) on the MISS
+# path that lands here, so the unmemoized sweep ran ~1.25M times per stage-1
+# build at O(glob targets x 6 linear surface name scans) each, charged to
+# whichever profile slot the caller was in (`sigtype`, `project`, `field_dep`)
+# -- the three terms left standing after QTYPEIDX
+# (doc/08_tracking/bug/hir_qualified_type_lookup_linear_scan_2026-08-22.md).
+#
+# The observable here is the sweep COUNT, not a wall clock, so this spec
+# discriminates the algorithm rather than the machine: it cannot pass on the
+# pre-fix code (the counter did not exist and the sweep really did repeat), and
+# a faster box cannot satisfy it.
+
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface,
+    ModuleSurfacesByName
+}
+
+fn glob_registry() -> ModuleSurfacesByName:
+    """One declaring surface plus two importers. Neither importer writes any
+    import row, so every glob probe is a MISS -- the case that used to re-sweep
+    for every occurrence of the name."""
+    val decl = ModuleSurface.empty("pkg.decl")
+    val i1 = ModuleSurface.empty("pkg.imp1")
+    val i2 = ModuleSurface.empty("pkg.imp2")
+    val built = ModuleSurfacesByName.from_parts(
+        [decl, i1, i2],
+        {"pkg.decl": 0, "pkg.imp1": 1, "pkg.imp2": 2},
+        ["pkg.decl", "pkg.imp1", "pkg.imp2"],
+        [0, 1, 2])
+    built.unwrap()
+
+describe("HIR glob-reachable resolution facts", fn():
+    it("sweeps once per (importer, unbound name), not once per occurrence", fn():
+        val registry = glob_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        # The same unbound name asked three times, exactly as a module body
+        # naming one unresolvable type three times would ask it.
+        expect(lowering.try_register_glob_reachable_symbol("NeverDeclared", span)).to_be(false)
+        expect(lowering.glob_reachable_scan_count).to_equal(1)
+        expect(lowering.try_register_glob_reachable_symbol("NeverDeclared", span)).to_be(false)
+        expect(lowering.try_register_glob_reachable_symbol("NeverDeclared", span)).to_be(false)
+        expect(lowering.glob_reachable_scan_count).to_equal(1)
+    )
+
+    it("still sweeps for a DIFFERENT name -- the memo is per name, not a latch", fn():
+        val registry = glob_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        expect(lowering.try_register_glob_reachable_symbol("One", span)).to_be(false)
+        expect(lowering.try_register_glob_reachable_symbol("Two", span)).to_be(false)
+        expect(lowering.glob_reachable_scan_count).to_equal(2)
+    )
+
+    it("still sweeps for a DIFFERENT importer -- the memo is not shared across modules", fn():
+        # The sweep's one importer-local step (`register_imported_symbol`)
+        # writes into the IMPORTING module's symbol table, so unlike the
+        # registry-pure `explicit_dep_target_memo` this answer must NOT be
+        # reused across importers. The key carries the importer surface index
+        # for exactly that reason.
+        val registry = glob_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        expect(lowering.try_register_glob_reachable_symbol("Shared", span)).to_be(false)
+        expect(lowering.glob_reachable_scan_count).to_equal(1)
+        lowering.begin_module("pkg/imp2.spl")
+        expect(lowering.try_register_glob_reachable_symbol("Shared", span)).to_be(false)
+        expect(lowering.glob_reachable_scan_count).to_equal(2)
+    )
+
+    it("answers the declaration question identically to the linear predicate", fn():
+        # The other half of the fix routes `hir_module_declares_item`'s six
+        # linear name-array sweeps through the existing NAMEIDX per-surface
+        # index. Same predicate, so the two must agree -- on a name that is
+        # declared and on one that is not.
+        val registry = glob_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val decl = registry.surfaces[0]
+        expect(lowering.surface_declares_item_indexed(decl, "Absent"))
+            .to_equal(hir_module_declares_item(decl, "Absent"))
+        expect(lowering.surface_declares_item_indexed(decl, "AlsoAbsent"))
+            .to_equal(hir_module_declares_item(decl, "AlsoAbsent"))
+    )
+
+    it("leaves the lowered result unchanged: a memoized miss still defines no symbol", fn():
+        # Correctness half. The memo changes only how often the answer is
+        # recomputed, never what it is: an unresolvable name stays unresolved
+        # and no symbol is invented for it.
+        val registry = glob_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.try_register_glob_reachable_symbol("NeverDeclared", span)
+        lowering.try_register_glob_reachable_symbol("NeverDeclared", span)
+        expect(lowering.symbols.lookup_or_invalid("NeverDeclared").id).to_equal(-1)
+    )
+)
