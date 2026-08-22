@@ -224,6 +224,83 @@ fn hal_socket_connect_timeout_buffer_v3(
         output, output_capacity, trace_identity_hi, trace_identity_lo,
         trace_cursor, trace_length, trace_capacity)
 
+# Additive stateful facade.  Keeping the owner as a class field and mutating it
+# through `me` avoids the value-copy hazard of passing lifecycle state through a
+# free function.  The V3 pointer ABI remains available for established callers.
+class RtHalProcessSocketDispatchOwnerV4:
+    admission: HalExternalCapturedAdmissionOwnerV2
+    sealed: bool
+
+    me register_process_spawn(
+            fixture_id: i64, generation: i64,
+            trace_identity_hi: i64, trace_identity_lo: i64,
+            trace_cursor: i64, trace_length: i64,
+            trace_capacity: i64) -> bool:
+        self.sealed and self.admission.register_process_spawn(
+            fixture_id, generation, trace_identity_hi, trace_identity_lo,
+            trace_cursor, trace_length, trace_capacity)
+
+    me process_wait_buffer(
+            compare: bool, fixture_id: i64, generation: i64,
+            captured_status: i32, error_domain: i32,
+            error_code: i64, error_detail: i64, captured: *u8,
+            captured_length: i64, output: *mut u8, output_capacity: i64,
+            trace_identity_hi: i64, trace_identity_lo: i64,
+            trace_cursor: i64, trace_length: i64,
+            trace_capacity: i64) -> i32:
+        if not self.sealed: return 1
+        val receipt = self.admission.begin_process_poll(
+            fixture_id, generation, trace_identity_hi, trace_identity_lo,
+            trace_cursor, trace_length, trace_capacity)
+        if not receipt.accepted: return 1
+        val status = if compare:
+            rt_hal_process_wait_buffer_compare_v3(
+                fixture_id, captured_status, error_domain, error_code,
+                error_detail, captured, captured_length, output,
+                output_capacity, trace_identity_hi, trace_identity_lo,
+                trace_cursor, trace_length, trace_capacity)
+        else:
+            rt_hal_process_wait_buffer_direct_v3(
+                fixture_id, captured_status, error_domain, error_code,
+                error_detail, captured, captured_length, output,
+                output_capacity, trace_identity_hi, trace_identity_lo,
+                trace_cursor, trace_length, trace_capacity)
+        self.admission.finish(receipt, status == 0)
+        status
+
+    me socket_connect_timeout_buffer(
+            compare: bool, fixture_id: i64, generation: i64,
+            captured_status: i32, error_domain: i32,
+            error_code: i64, error_detail: i64, captured: *u8,
+            captured_length: i64, output: *mut u8, output_capacity: i64,
+            trace_identity_hi: i64, trace_identity_lo: i64,
+            trace_cursor: i64, trace_length: i64,
+            trace_capacity: i64) -> i32:
+        if not self.sealed: return 1
+        val receipt = self.admission.begin_socket_open(
+            fixture_id, generation, trace_identity_hi, trace_identity_lo,
+            trace_cursor, trace_length, trace_capacity)
+        if not receipt.accepted: return 1
+        val status = if compare:
+            rt_hal_socket_connect_timeout_buffer_compare_v3(
+                fixture_id, captured_status, error_domain, error_code,
+                error_detail, captured, captured_length, output,
+                output_capacity, trace_identity_hi, trace_identity_lo,
+                trace_cursor, trace_length, trace_capacity)
+        else:
+            rt_hal_socket_connect_timeout_buffer_direct_v3(
+                fixture_id, captured_status, error_domain, error_code,
+                error_detail, captured, captured_length, output,
+                output_capacity, trace_identity_hi, trace_identity_lo,
+                trace_cursor, trace_length, trace_capacity)
+        self.admission.finish(receipt, status == 0)
+        status
+
+fn rt_hal_process_socket_dispatch_owner_v4(
+        capacity: i64) -> RtHalProcessSocketDispatchOwnerV4:
+    val admission = hal_external_captured_admission_owner_v2(capacity)
+    RtHalProcessSocketDispatchOwnerV4(admission, admission.sealed)
+
 export RT_HAL_PROCESS_WAIT_OPERATION_V3
 export RT_HAL_SOCKET_CONNECT_TIMEOUT_OPERATION_V3
 export RT_HAL_EXTERNAL_STATUS_BUSY_V3, RT_HAL_EXTERNAL_STATUS_TIMEOUT_V3
@@ -238,3 +315,5 @@ export rt_hal_process_wait_buffer_direct_v3
 export rt_hal_process_wait_buffer_compare_v3
 export rt_hal_socket_connect_timeout_buffer_direct_v3
 export rt_hal_socket_connect_timeout_buffer_compare_v3
+export RtHalProcessSocketDispatchOwnerV4
+export rt_hal_process_socket_dispatch_owner_v4

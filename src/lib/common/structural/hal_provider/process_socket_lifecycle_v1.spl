@@ -14,6 +14,7 @@ use std.common.structural.hal_provider.normalized_result_v2.*
 val HAL_EXTERNAL_LIFECYCLE_SCHEMA_V1: i64 = 1
 val HAL_EXTERNAL_LIFECYCLE_MAX_STEPS_V1: i64 = 4096
 val HAL_EXTERNAL_LIFECYCLE_MAX_ID_V1: i64 = 1000000000
+val HAL_EXTERNAL_CAPTURED_MAX_SLOTS_V2: i64 = 256
 val HAL_EXTERNAL_ERROR_BUSY_V1: i64 = 1001
 val HAL_EXTERNAL_ERROR_TIMEOUT_V1: i64 = 1002
 val HAL_EXTERNAL_ERROR_COMPARISON_V1: i64 = 1003
@@ -73,6 +74,179 @@ struct HalExternalCommitReceiptV1:
     result_length: i64
     committed: bool
     allocation_count_after_seal: i64
+
+struct HalExternalCapturedAdmissionReceiptV2:
+    accepted: bool
+    slot: i64
+    kind: HalExternalLifecycleKindV1
+    fixture_id: i64
+    generation: i64
+    identity_hi: i64
+    identity_lo: i64
+    cursor: i64
+    nonce: i64
+
+fn _hal_external_empty_admission_v2(
+        kind: HalExternalLifecycleKindV1) -> HalExternalCapturedAdmissionReceiptV2:
+    HalExternalCapturedAdmissionReceiptV2(
+        false, -1, kind, 0, 0, 0, 0, 0, 0)
+
+# Fixed storage is allocated only by the factory. Fixture id selects one exact
+# slot, making every admission O(1); collisions fail closed without eviction.
+class HalExternalCapturedAdmissionOwnerV2:
+    capacity: i64
+    fixture_ids: [i64]
+    generations: [i64]
+    identity_his: [i64]
+    identity_los: [i64]
+    next_cursors: [i64]
+    kinds: [i64]
+    occupied: [bool]
+    terminal: [bool]
+    in_flight: [bool]
+    nonces: [i64]
+    sealed: bool
+
+    fn _slot(fixture_id: i64) -> i64:
+        fixture_id % self.capacity
+
+    fn _base_valid(fixture_id: i64, generation: i64,
+                   identity_hi: i64, identity_lo: i64,
+                   cursor: i64, length: i64,
+                   trace_capacity: i64) -> bool:
+        self.sealed and fixture_id > 0
+            and fixture_id <= HAL_EXTERNAL_LIFECYCLE_MAX_ID_V1
+            and generation > 0
+            and generation <= HAL_EXTERNAL_LIFECYCLE_MAX_ID_V1
+            and identity_hi != 0 and identity_lo != 0
+            and cursor >= 0
+            and cursor < HAL_EXTERNAL_LIFECYCLE_MAX_STEPS_V1
+            and length == cursor + 1
+            and trace_capacity >= length
+            and trace_capacity <= HAL_EXTERNAL_LIFECYCLE_MAX_STEPS_V1
+
+    me register_process_spawn(fixture_id: i64, generation: i64,
+                              identity_hi: i64, identity_lo: i64,
+                              cursor: i64, length: i64,
+                              trace_capacity: i64) -> bool:
+        if not self._base_valid(fixture_id, generation,
+                identity_hi, identity_lo, cursor, length, trace_capacity)
+                or cursor != 0:
+            return false
+        val slot = self._slot(fixture_id)
+        if self.in_flight[slot]: return false
+        if self.occupied[slot]:
+            if self.fixture_ids[slot] != fixture_id
+                    or generation <= self.generations[slot]:
+                return false
+        self.fixture_ids[slot] = fixture_id
+        self.generations[slot] = generation
+        self.identity_his[slot] = identity_hi
+        self.identity_los[slot] = identity_lo
+        self.next_cursors[slot] = 1
+        self.kinds[slot] = 0
+        self.occupied[slot] = true
+        self.terminal[slot] = false
+        self.nonces[slot] = self.nonces[slot] + 1
+        true
+
+    me begin_process_poll(fixture_id: i64, generation: i64,
+                          identity_hi: i64, identity_lo: i64,
+                          cursor: i64, length: i64,
+                          trace_capacity: i64)
+            -> HalExternalCapturedAdmissionReceiptV2:
+        if not self._base_valid(fixture_id, generation,
+                identity_hi, identity_lo, cursor, length, trace_capacity):
+            return _hal_external_empty_admission_v2(
+                HalExternalLifecycleKindV1.Process)
+        val slot = self._slot(fixture_id)
+        if not self.occupied[slot] or self.in_flight[slot]
+                or self.terminal[slot] or self.fixture_ids[slot] != fixture_id
+                or self.generations[slot] != generation
+                or self.kinds[slot] != 0
+                or self.identity_his[slot] != identity_hi
+                or self.identity_los[slot] != identity_lo
+                or self.next_cursors[slot] != cursor:
+            return _hal_external_empty_admission_v2(
+                HalExternalLifecycleKindV1.Process)
+        self.in_flight[slot] = true
+        self.nonces[slot] = self.nonces[slot] + 1
+        HalExternalCapturedAdmissionReceiptV2(true, slot,
+            HalExternalLifecycleKindV1.Process, fixture_id, generation,
+            identity_hi, identity_lo, cursor, self.nonces[slot])
+
+    me begin_socket_open(fixture_id: i64, generation: i64,
+                         identity_hi: i64, identity_lo: i64,
+                         cursor: i64, length: i64,
+                         trace_capacity: i64)
+            -> HalExternalCapturedAdmissionReceiptV2:
+        if not self._base_valid(fixture_id, generation,
+                identity_hi, identity_lo, cursor, length, trace_capacity)
+                or cursor != 0:
+            return _hal_external_empty_admission_v2(
+                HalExternalLifecycleKindV1.Socket)
+        val slot = self._slot(fixture_id)
+        if self.in_flight[slot]:
+            return _hal_external_empty_admission_v2(
+                HalExternalLifecycleKindV1.Socket)
+        if self.occupied[slot]:
+            if self.fixture_ids[slot] != fixture_id
+                    or generation <= self.generations[slot]:
+                return _hal_external_empty_admission_v2(
+                    HalExternalLifecycleKindV1.Socket)
+        self.fixture_ids[slot] = fixture_id
+        self.generations[slot] = generation
+        self.identity_his[slot] = identity_hi
+        self.identity_los[slot] = identity_lo
+        self.next_cursors[slot] = 0
+        self.kinds[slot] = 1
+        self.occupied[slot] = true
+        self.terminal[slot] = false
+        self.in_flight[slot] = true
+        self.nonces[slot] = self.nonces[slot] + 1
+        HalExternalCapturedAdmissionReceiptV2(true, slot,
+            HalExternalLifecycleKindV1.Socket, fixture_id, generation,
+            identity_hi, identity_lo, cursor, self.nonces[slot])
+
+    me finish(receipt: HalExternalCapturedAdmissionReceiptV2,
+              committed: bool) -> bool:
+        if not receipt.accepted or receipt.slot < 0
+                or receipt.slot >= self.capacity:
+            return false
+        val slot = receipt.slot
+        if not self.in_flight[slot]
+                or self.fixture_ids[slot] != receipt.fixture_id
+                or self.generations[slot] != receipt.generation
+                or self.identity_his[slot] != receipt.identity_hi
+                or self.identity_los[slot] != receipt.identity_lo
+                or self.nonces[slot] != receipt.nonce:
+            return false
+        self.in_flight[slot] = false
+        if receipt.kind == HalExternalLifecycleKindV1.Process:
+            if self.kinds[slot] != 0
+                    or self.next_cursors[slot] != receipt.cursor:
+                return false
+            if committed:
+                self.next_cursors[slot] = receipt.cursor + 1
+            return committed
+        if self.kinds[slot] != 1 or receipt.cursor != 0:
+            return false
+        if committed:
+            self.next_cursors[slot] = 1
+            self.terminal[slot] = true
+            return true
+        self.occupied[slot] = false
+        self.terminal[slot] = false
+        false
+
+fn hal_external_captured_admission_owner_v2(
+        capacity: i64) -> HalExternalCapturedAdmissionOwnerV2:
+    val valid = capacity > 0
+        and capacity <= HAL_EXTERNAL_CAPTURED_MAX_SLOTS_V2
+    val size = if valid: capacity else: 1
+    HalExternalCapturedAdmissionOwnerV2(size, [0; size], [0; size],
+        [0; size], [0; size], [0; size], [0; size], [false; size],
+        [false; size], [false; size], [0; size], valid)
 
 fn _hal_external_trace_v1(invocation_id: i64, operation_id: i64,
                           sequence: i64, handle_id: i64, generation: i64,
@@ -433,6 +607,7 @@ fn hal_external_lifecycle_owner_v1(
 export HAL_EXTERNAL_LIFECYCLE_SCHEMA_V1
 export HAL_EXTERNAL_LIFECYCLE_MAX_STEPS_V1
 export HAL_EXTERNAL_LIFECYCLE_MAX_ID_V1
+export HAL_EXTERNAL_CAPTURED_MAX_SLOTS_V2
 export HAL_EXTERNAL_ERROR_BUSY_V1, HAL_EXTERNAL_ERROR_TIMEOUT_V1
 export HAL_EXTERNAL_ERROR_COMPARISON_V1, HAL_EXTERNAL_ERROR_INVALID_V1
 export HAL_EXTERNAL_ERROR_OVERFLOW_V1, HAL_EXTERNAL_ERROR_CLOSED_V1
@@ -440,6 +615,9 @@ export HalExternalLifecycleKindV1, HalExternalOwnerStatusV1
 export HalExternalLifecycleHandleV1, HalExternalLifecycleTraceV1
 export HalExternalBeginReceiptV1, HalExternalCommitReceiptV1
 export HalExternalLifecycleOwnerV1
+export HalExternalCapturedAdmissionReceiptV2
+export HalExternalCapturedAdmissionOwnerV2
 export hal_external_lifecycle_handle_v1_well_formed
 export hal_external_captured_step_v1_well_formed
 export hal_external_lifecycle_owner_v1
+export hal_external_captured_admission_owner_v2
