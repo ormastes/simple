@@ -554,3 +554,20 @@ input yields `diagnostics:[]`; input order, nested diagnostic JSON, summary text
 numeric count and `isError:false` remain byte-identical. Callers use the shared
 emitter and must not construct `diags_array` or structured-content payload copies.
 Complexity is `O(S + D)` work, `O(D)` fragment references and one `O(S)` output.
+
+## Shared short-grammar identifier rewrite contract
+
+`std.tooling.easy_fix.rules_helpers` owns the canonical contains, plain-rewrite
+and interpolation-rewrite operations. A nonempty parameter matches only when its
+neighbors are outside ASCII `[A-Za-z0-9_]`; matching remains context-blind and
+replacement text is inserted verbatim without rescanning during that call. Empty
+parameters return unchanged. No-match paths return the original text; changed
+paths append unchanged spans and replacements and join once.
+
+Interpolation retains the legacy boolean state: `{{` and `}}` are copied without
+state changes, a single `{` enables replacement and a single `}` disables it;
+quotes, nesting and malformed braces are not reinterpreted. Compiler and stdlib
+private entrypoints remain delegates, preserving sequential multi-parameter
+rewrites. Contains-callers explicitly retain the `_`-to-`_` no-change edge. The
+shared owner must not regress to per-character result concatenation or emit one
+fragment per unchanged character.
