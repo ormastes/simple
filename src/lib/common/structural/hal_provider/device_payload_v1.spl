@@ -4,6 +4,7 @@
 # this sealed value plus caller-owned regions and can never perform physical I/O.
 
 use std.common.structural.environment_instruction.*
+use std.common.structural.hal_provider.contracts.*
 
 val HAL_DEVICE_PAYLOAD_SCHEMA_V1: i64 = 1
 val HAL_DEVICE_PAYLOAD_MAX_BYTES_V1: i64 = 65536
@@ -22,6 +23,12 @@ enum HalPayloadReplayStatusV1:
     AlreadyConsumed
     RegionOverflow
     PayloadDifference
+
+enum HalDeviceCompareOwnerStatusV1:
+    Open
+    CommitReady
+    Diverged
+    InvalidSubmission
 
 struct HalCallerRegionV1:
     offset: i64
@@ -53,6 +60,18 @@ struct HalPayloadReplayReceiptV1:
     sequence: i64
     consumed_count: i64
     read_once_consumed_mask: i64
+    physical_effect: bool
+    allocation_count: i64
+
+struct HalDeviceCompareReceiptV1:
+    status: HalDeviceCompareOwnerStatusV1
+    expected_provider_mask: i64
+    received_provider_mask: i64
+    equivalent_provider_mask: i64
+    difference_provider_mask: i64
+    duplicate_provider_mask: i64
+    commit_allowed: bool
+    selected_provider: HalProviderKind
     physical_effect: bool
     allocation_count: i64
 
@@ -249,14 +268,104 @@ fn hal_device_payload_replay_cursor_v1(
     HalDevicePayloadReplayCursorV1(invocation_id, 0, capacity, 0, 0,
         invocation_id > 0 and capacity > 0 and capacity <= 62)
 
+# The parent is the sole mutable authority. Provider domains publish only a
+# candidate over caller-owned bytes. Three fixed cursors consume read-once
+# tokens independently; no provider receives a device handle or can replay an
+# entropy/IRQ/MMIO/DMA effect.
+class HalDeviceCompareOwnerV1:
+    invocation_id: i64
+    mode: HalRunMode
+    preferred_provider: HalProviderKind
+    expected_provider_mask: i64
+    received_provider_mask: i64
+    equivalent_provider_mask: i64
+    difference_provider_mask: i64
+    duplicate_provider_mask: i64
+    pure_cursor: HalDevicePayloadReplayCursorV1
+    c_cursor: HalDevicePayloadReplayCursorV1
+    rust_cursor: HalDevicePayloadReplayCursorV1
+    sealed: bool
+
+    me submit(provider: HalProviderKind,
+              recorded: HalCapturedDevicePayloadV1, recorded_bytes: [u8],
+              candidate: HalCapturedDevicePayloadV1,
+              candidate_bytes: [u8]) -> HalPayloadReplayStatusV1:
+        val bit = 1 << hal_provider_kind_to_i64(provider)
+        if not self.sealed or (self.expected_provider_mask & bit) == 0:
+            return HalPayloadReplayStatusV1.InvalidPayload
+        if (self.received_provider_mask & bit) != 0:
+            self.duplicate_provider_mask = self.duplicate_provider_mask | bit
+            return HalPayloadReplayStatusV1.AlreadyConsumed
+        var status = HalPayloadReplayStatusV1.InvalidPayload
+        match provider:
+            case HalProviderKind.PureSimple:
+                status = self.pure_cursor.replay(
+                    recorded, recorded_bytes, candidate, candidate_bytes)
+            case HalProviderKind.C:
+                status = self.c_cursor.replay(
+                    recorded, recorded_bytes, candidate, candidate_bytes)
+            case HalProviderKind.Rust:
+                status = self.rust_cursor.replay(
+                    recorded, recorded_bytes, candidate, candidate_bytes)
+        self.received_provider_mask = self.received_provider_mask | bit
+        if status == HalPayloadReplayStatusV1.Replayed:
+            self.equivalent_provider_mask = self.equivalent_provider_mask | bit
+        else:
+            self.difference_provider_mask = self.difference_provider_mask | bit
+        status
+
+    me receipt() -> HalDeviceCompareReceiptV1:
+        val complete = self.sealed
+            and self.received_provider_mask == self.expected_provider_mask
+        val equivalent = complete and self.difference_provider_mask == 0
+            and self.duplicate_provider_mask == 0
+        val preferred_bit = 1 << hal_provider_kind_to_i64(
+            self.preferred_provider)
+        val preferred_ok = (self.equivalent_provider_mask & preferred_bit) != 0
+        val may_commit = complete and preferred_ok
+            and self.duplicate_provider_mask == 0
+            and (equivalent
+                or hal_run_mode_allows_preferred_commit_on_difference(self.mode))
+        var status = HalDeviceCompareOwnerStatusV1.Open
+        if complete:
+            if self.duplicate_provider_mask != 0:
+                status = HalDeviceCompareOwnerStatusV1.InvalidSubmission
+            elif equivalent or may_commit:
+                status = HalDeviceCompareOwnerStatusV1.CommitReady
+            else:
+                status = HalDeviceCompareOwnerStatusV1.Diverged
+        HalDeviceCompareReceiptV1(status, self.expected_provider_mask,
+            self.received_provider_mask, self.equivalent_provider_mask,
+            self.difference_provider_mask, self.duplicate_provider_mask,
+            may_commit, self.preferred_provider, false, 0)
+
+fn hal_device_compare_owner_v1(invocation_id: i64, capacity: i64,
+                               mode: HalRunMode,
+                               preferred_provider: HalProviderKind) ->
+        HalDeviceCompareOwnerV1:
+    val preferred_bit = 1 << hal_provider_kind_to_i64(preferred_provider)
+    val expected = if hal_run_mode_executes_all(mode):
+        HAL_PROVIDER_MASK_ALL
+    else:
+        preferred_bit
+    val valid = invocation_id > 0 and capacity > 0 and capacity <= 62
+    HalDeviceCompareOwnerV1(invocation_id, mode, preferred_provider, expected,
+        0, 0, 0, 0,
+        hal_device_payload_replay_cursor_v1(invocation_id, capacity),
+        hal_device_payload_replay_cursor_v1(invocation_id, capacity),
+        hal_device_payload_replay_cursor_v1(invocation_id, capacity), valid)
+
 export HAL_DEVICE_PAYLOAD_SCHEMA_V1, HAL_DEVICE_PAYLOAD_MAX_BYTES_V1
 export HAL_DEVICE_PAYLOAD_MAX_READ_ONCE_TOKENS_V1
 export HalCapturedPayloadKindV1, HalPayloadReplayStatusV1
+export HalDeviceCompareOwnerStatusV1
 export HalCallerRegionV1, HalCapturedDevicePayloadV1
 export HalPayloadReplayReceiptV1, HalDevicePayloadReplayCursorV1
+export HalDeviceCompareReceiptV1, HalDeviceCompareOwnerV1
 export hal_caller_region_v1, hal_captured_device_payload_v1
 export hal_caller_region_v1_well_formed
 export hal_captured_device_payload_v1_well_formed
 export hal_caller_region_exact_equal_v1
 export hal_captured_device_payload_v1_exact_equal
 export hal_device_payload_replay_cursor_v1
+export hal_device_compare_owner_v1

@@ -53,6 +53,38 @@ typedef struct simple_hal_payload_cursor_v1 {
     uint8_t sealed;
 } simple_hal_payload_cursor_v1;
 
+typedef enum simple_hal_device_compare_mode_v1 {
+    SIMPLE_HAL_COMPARE_ALPHA_V1 = 0,
+    SIMPLE_HAL_COMPARE_BETA_V1 = 1,
+    SIMPLE_HAL_COMPARE_NORMAL_V1 = 2
+} simple_hal_device_compare_mode_v1;
+
+typedef struct simple_hal_device_compare_owner_v1 {
+    uint64_t invocation_id;
+    uint8_t mode;
+    uint8_t preferred_provider;
+    uint8_t expected_provider_mask;
+    uint8_t received_provider_mask;
+    uint8_t equivalent_provider_mask;
+    uint8_t difference_provider_mask;
+    uint8_t duplicate_provider_mask;
+    simple_hal_payload_cursor_v1 cursors[3];
+    uint8_t sealed;
+} simple_hal_device_compare_owner_v1;
+
+typedef struct simple_hal_device_compare_receipt_v1 {
+    uint8_t complete;
+    uint8_t equivalent;
+    uint8_t commit_allowed;
+    uint8_t expected_provider_mask;
+    uint8_t received_provider_mask;
+    uint8_t equivalent_provider_mask;
+    uint8_t difference_provider_mask;
+    uint8_t duplicate_provider_mask;
+    uint8_t physical_effect;
+    uint32_t allocation_count;
+} simple_hal_device_compare_receipt_v1;
+
 int simple_hal_captured_device_payload_well_formed_v1(
     const simple_hal_captured_device_payload_v1 *value);
 
@@ -62,5 +94,20 @@ simple_hal_payload_replay_status_v1 simple_hal_payload_replay_exact_v1(
     const uint8_t *recorded_bytes, size_t recorded_capacity,
     const simple_hal_captured_device_payload_v1 *candidate,
     const uint8_t *candidate_bytes, size_t candidate_capacity);
+
+int simple_hal_device_compare_owner_init_v1(
+    simple_hal_device_compare_owner_v1 *owner, uint64_t invocation_id,
+    uint32_t capacity, simple_hal_device_compare_mode_v1 mode,
+    uint8_t preferred_provider);
+
+simple_hal_payload_replay_status_v1 simple_hal_device_compare_submit_v1(
+    simple_hal_device_compare_owner_v1 *owner, uint8_t provider,
+    const simple_hal_captured_device_payload_v1 *recorded,
+    const uint8_t *recorded_bytes, size_t recorded_capacity,
+    const simple_hal_captured_device_payload_v1 *candidate,
+    const uint8_t *candidate_bytes, size_t candidate_capacity);
+
+simple_hal_device_compare_receipt_v1 simple_hal_device_compare_get_receipt_v1(
+    const simple_hal_device_compare_owner_v1 *owner);
 
 #endif

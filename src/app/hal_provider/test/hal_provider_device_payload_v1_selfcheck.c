@@ -25,6 +25,21 @@ static simple_hal_captured_device_payload_v1 random_payload(uint32_t sequence) {
     return value;
 }
 
+static simple_hal_captured_device_payload_v1 payload_for_opcode(
+    uint32_t opcode, uint32_t token) {
+    simple_hal_captured_device_payload_v1 value = random_payload(0u);
+    value.opcode = opcode;
+    value.read_once_token = token;
+    if (opcode != 11u) value.capability_generation = 3u;
+    if (opcode == 17u) {
+        value.region.length = 0u;
+        value.region.capacity = 0u;
+        value.region.digest_hi = 0u;
+        value.region.digest_lo = 0u;
+    }
+    return value;
+}
+
 int main(void) {
     uint8_t recorded[5] = {0u, 1u, 2u, 3u, 4u};
     uint8_t same[5] = {9u, 1u, 2u, 3u, 4u};
@@ -49,6 +64,68 @@ int main(void) {
             SIMPLE_HAL_PAYLOAD_REGION_OVERFLOW_V1) {
         return 3;
     }
-    puts("hal-provider-device-payload-v1-selfcheck: PASS");
+    {
+        const uint32_t opcodes[4] = {11u, 17u, 18u, 22u};
+        uint32_t index;
+        for (index = 0u; index < 4u; ++index) {
+            simple_hal_device_compare_owner_v1 owner;
+            simple_hal_device_compare_receipt_v1 receipt;
+            simple_hal_captured_device_payload_v1 captured =
+                payload_for_opcode(opcodes[index], index + 1u);
+            uint8_t provider;
+            if (!simple_hal_device_compare_owner_init_v1(&owner, 77u, 4u,
+                    SIMPLE_HAL_COMPARE_ALPHA_V1, 0u)) return 4;
+            for (provider = 0u; provider < 3u; ++provider) {
+                if (simple_hal_device_compare_submit_v1(&owner, provider,
+                        &captured, recorded, sizeof(recorded), &captured,
+                        same, sizeof(same)) !=
+                        SIMPLE_HAL_PAYLOAD_REPLAYED_V1) return 5;
+            }
+            receipt = simple_hal_device_compare_get_receipt_v1(&owner);
+            if (!receipt.complete || !receipt.equivalent ||
+                !receipt.commit_allowed ||
+                receipt.equivalent_provider_mask != 7u ||
+                receipt.physical_effect != 0u ||
+                receipt.allocation_count != 0u) return 6;
+        }
+    }
+    {
+        simple_hal_captured_device_payload_v1 captured =
+            payload_for_opcode(18u, 3u);
+        simple_hal_device_compare_owner_v1 owner;
+        simple_hal_device_compare_receipt_v1 receipt;
+        uint8_t provider;
+        if (!simple_hal_device_compare_owner_init_v1(&owner, 77u, 4u,
+                SIMPLE_HAL_COMPARE_ALPHA_V1, 0u)) return 7;
+        for (provider = 0u; provider < 3u; ++provider) {
+            const uint8_t *candidate = provider == 1u ? changed : same;
+            (void)simple_hal_device_compare_submit_v1(&owner, provider,
+                &captured, recorded, sizeof(recorded), &captured,
+                candidate, sizeof(same));
+        }
+        receipt = simple_hal_device_compare_get_receipt_v1(&owner);
+        if (receipt.commit_allowed || receipt.difference_provider_mask != 2u)
+            return 8;
+
+        if (!simple_hal_device_compare_owner_init_v1(&owner, 77u, 4u,
+                SIMPLE_HAL_COMPARE_BETA_V1, 0u)) return 9;
+        for (provider = 0u; provider < 3u; ++provider) {
+            const uint8_t *candidate = provider == 1u ? changed : same;
+            (void)simple_hal_device_compare_submit_v1(&owner, provider,
+                &captured, recorded, sizeof(recorded), &captured,
+                candidate, sizeof(same));
+        }
+        if (!simple_hal_device_compare_get_receipt_v1(&owner).commit_allowed)
+            return 10;
+
+        if (!simple_hal_device_compare_owner_init_v1(&owner, 77u, 4u,
+                SIMPLE_HAL_COMPARE_NORMAL_V1, 2u) ||
+            simple_hal_device_compare_submit_v1(&owner, 2u, &captured,
+                recorded, sizeof(recorded), &captured, same, sizeof(same)) !=
+                SIMPLE_HAL_PAYLOAD_REPLAYED_V1 ||
+            !simple_hal_device_compare_get_receipt_v1(&owner).commit_allowed)
+            return 11;
+    }
+    puts("hal-provider-device-payload-v1-selfcheck: PASS parity_mask=7 effects=0 allocations=0");
     return 0;
 }

@@ -122,3 +122,84 @@ simple_hal_payload_replay_status_v1 simple_hal_payload_replay_exact_v1(
     cursor->read_once_consumed_mask |= token_mask;
     return SIMPLE_HAL_PAYLOAD_REPLAYED_V1;
 }
+
+int simple_hal_device_compare_owner_init_v1(
+    simple_hal_device_compare_owner_v1 *owner, uint64_t invocation_id,
+    uint32_t capacity, simple_hal_device_compare_mode_v1 mode,
+    uint8_t preferred_provider) {
+    uint8_t index;
+    if (owner == NULL || invocation_id == 0u || capacity == 0u ||
+        capacity > 62u || (uint8_t)mode > SIMPLE_HAL_COMPARE_NORMAL_V1 ||
+        preferred_provider > 2u) {
+        return 0;
+    }
+    memset(owner, 0, sizeof(*owner));
+    owner->invocation_id = invocation_id;
+    owner->mode = (uint8_t)mode;
+    owner->preferred_provider = preferred_provider;
+    owner->expected_provider_mask = mode == SIMPLE_HAL_COMPARE_NORMAL_V1 ?
+        (uint8_t)(1u << preferred_provider) : 7u;
+    for (index = 0u; index < 3u; ++index) {
+        owner->cursors[index].invocation_id = invocation_id;
+        owner->cursors[index].capacity = capacity;
+        owner->cursors[index].sealed = 1u;
+    }
+    owner->sealed = 1u;
+    return 1;
+}
+
+simple_hal_payload_replay_status_v1 simple_hal_device_compare_submit_v1(
+    simple_hal_device_compare_owner_v1 *owner, uint8_t provider,
+    const simple_hal_captured_device_payload_v1 *recorded,
+    const uint8_t *recorded_bytes, size_t recorded_capacity,
+    const simple_hal_captured_device_payload_v1 *candidate,
+    const uint8_t *candidate_bytes, size_t candidate_capacity) {
+    simple_hal_payload_replay_status_v1 status;
+    uint8_t bit;
+    if (owner == NULL || owner->sealed != 1u || provider > 2u) {
+        return SIMPLE_HAL_PAYLOAD_INVALID_V1;
+    }
+    bit = (uint8_t)(1u << provider);
+    if ((owner->expected_provider_mask & bit) == 0u) {
+        return SIMPLE_HAL_PAYLOAD_INVALID_V1;
+    }
+    if ((owner->received_provider_mask & bit) != 0u) {
+        owner->duplicate_provider_mask |= bit;
+        return SIMPLE_HAL_PAYLOAD_ALREADY_CONSUMED_V1;
+    }
+    status = simple_hal_payload_replay_exact_v1(&owner->cursors[provider],
+        recorded, recorded_bytes, recorded_capacity, candidate,
+        candidate_bytes, candidate_capacity);
+    owner->received_provider_mask |= bit;
+    if (status == SIMPLE_HAL_PAYLOAD_REPLAYED_V1) {
+        owner->equivalent_provider_mask |= bit;
+    } else {
+        owner->difference_provider_mask |= bit;
+    }
+    return status;
+}
+
+simple_hal_device_compare_receipt_v1 simple_hal_device_compare_get_receipt_v1(
+    const simple_hal_device_compare_owner_v1 *owner) {
+    simple_hal_device_compare_receipt_v1 receipt = {0};
+    uint8_t preferred_bit;
+    if (owner == NULL || owner->sealed != 1u) return receipt;
+    receipt.expected_provider_mask = owner->expected_provider_mask;
+    receipt.received_provider_mask = owner->received_provider_mask;
+    receipt.equivalent_provider_mask = owner->equivalent_provider_mask;
+    receipt.difference_provider_mask = owner->difference_provider_mask;
+    receipt.duplicate_provider_mask = owner->duplicate_provider_mask;
+    receipt.complete = owner->received_provider_mask ==
+        owner->expected_provider_mask;
+    receipt.equivalent = receipt.complete &&
+        owner->difference_provider_mask == 0u &&
+        owner->duplicate_provider_mask == 0u;
+    preferred_bit = (uint8_t)(1u << owner->preferred_provider);
+    receipt.commit_allowed = receipt.complete &&
+        owner->duplicate_provider_mask == 0u &&
+        (owner->equivalent_provider_mask & preferred_bit) != 0u &&
+        (receipt.equivalent || owner->mode == SIMPLE_HAL_COMPARE_BETA_V1);
+    receipt.physical_effect = 0u;
+    receipt.allocation_count = 0u;
+    return receipt;
+}

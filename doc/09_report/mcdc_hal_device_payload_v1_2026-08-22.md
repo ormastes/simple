@@ -32,3 +32,29 @@ both payloads on every replay.
 The Pure Simple optimizer was not run because the deployed self-hosted compiler
 is currently inadmissible; the Rust seed was not substituted and no full build
 was retried.
+
+## Parent-authoritative three-provider comparison
+
+`HalDeviceCompareOwnerV1` now owns three fixed Pure/C/Rust result slots and
+three independent read-once cursors. Providers receive only a sealed captured
+payload plus caller-owned byte regions; the parent alone validates and commits.
+Entropy, IRQ acknowledge, MMIO read, and DMA poll parity vectors prove that
+validation never repeats the physical interaction. Duplicate publication and
+out-of-policy providers fail closed.
+
+- alpha: all three providers are required and any difference blocks commit;
+- beta: all three are required, but a validated preferred result may commit;
+- normal: only the configured preferred provider slot executes;
+- hot path: O(payload bytes), one byte pass, fixed slot state, zero heap
+  allocations/copies/device calls.
+
+Native C/Rust parity passed exact four-kind vectors with
+`parity_mask=7 effects=0 allocations=0`. On this host the unchanged C replay
+baseline measured 38.204 ns/replay and 1,536 KiB peak RSS. After the owner
+addition the same replay measured 37.063 ns/replay (-3.0%, noise/improvement),
+while the three-slot owner measured 55.294 ns/provider across 30,000,000
+validations at the same 1,536 KiB peak RSS. The independent Rust validator's
+final parity run measured 44.084 ns/replay and 1,792 KiB peak RSS across
+10,000,000 iterations.
+The Simple optimizer remains unavailable for the same inadmissible compiler
+reason; no Rust-seed substitution or full build was used.

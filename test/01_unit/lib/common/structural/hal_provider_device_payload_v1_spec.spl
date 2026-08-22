@@ -82,3 +82,76 @@ describe "captured HAL randomness and device provider payload":
         val wrong_kind = payload(0, HalCapturedPayloadKindV1.Dma,
             EnvOpcodeV1.RandomFill, 4, 1)
         expect(hal_captured_device_payload_v1_well_formed(wrong_kind)).to_be(false)
+
+    it "commits three exact provider candidates only through the parent owner":
+        var owner = hal_device_compare_owner_v1(
+            77, 4, HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
+        val value = payload(0, HalCapturedPayloadKindV1.Dma,
+            EnvOpcodeV1.DmaPoll, 4, 4)
+        val bytes = [0u8, 1u8, 2u8, 3u8, 4u8]
+        expect(owner.submit(HalProviderKind.Rust,
+            value, bytes, value, bytes)).to_equal(
+                HalPayloadReplayStatusV1.Replayed)
+        expect(owner.submit(HalProviderKind.PureSimple,
+            value, bytes, value, bytes)).to_equal(
+                HalPayloadReplayStatusV1.Replayed)
+        expect(owner.submit(HalProviderKind.C,
+            value, bytes, value, bytes)).to_equal(
+                HalPayloadReplayStatusV1.Replayed)
+        val receipt = owner.receipt()
+        expect(receipt.status).to_equal(
+            HalDeviceCompareOwnerStatusV1.CommitReady)
+        expect(receipt.equivalent_provider_mask).to_equal(7)
+        expect(receipt.commit_allowed).to_be(true)
+        expect(receipt.physical_effect).to_be(false)
+        expect(receipt.allocation_count).to_equal(0)
+
+    it "uses alpha beta and normal difference policies without replay effects":
+        val value = payload(0, HalCapturedPayloadKindV1.Mmio,
+            EnvOpcodeV1.MmioRead, 4, 3)
+        val bytes = [0u8, 1u8, 2u8, 3u8, 4u8]
+        val changed = [0u8, 1u8, 2u8, 99u8, 4u8]
+        var alpha = hal_device_compare_owner_v1(
+            77, 4, HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
+        expect(alpha.submit(HalProviderKind.PureSimple,
+            value, bytes, value, bytes)).to_equal(
+                HalPayloadReplayStatusV1.Replayed)
+        expect(alpha.submit(HalProviderKind.C,
+            value, bytes, value, changed)).to_equal(
+                HalPayloadReplayStatusV1.PayloadDifference)
+        expect(alpha.submit(HalProviderKind.Rust,
+            value, bytes, value, bytes)).to_equal(
+                HalPayloadReplayStatusV1.Replayed)
+        expect(alpha.receipt().status).to_equal(
+            HalDeviceCompareOwnerStatusV1.Diverged)
+        expect(alpha.receipt().commit_allowed).to_be(false)
+
+        var beta = hal_device_compare_owner_v1(
+            77, 4, HalRunMode.BetaCompare, HalProviderKind.PureSimple)
+        beta.submit(HalProviderKind.PureSimple, value, bytes, value, bytes)
+        beta.submit(HalProviderKind.C, value, bytes, value, changed)
+        beta.submit(HalProviderKind.Rust, value, bytes, value, bytes)
+        expect(beta.receipt().status).to_equal(
+            HalDeviceCompareOwnerStatusV1.CommitReady)
+        expect(beta.receipt().commit_allowed).to_be(true)
+
+        var normal = hal_device_compare_owner_v1(
+            77, 4, HalRunMode.NormalPreferred, HalProviderKind.Rust)
+        normal.submit(HalProviderKind.Rust, value, bytes, value, bytes)
+        expect(normal.receipt().expected_provider_mask).to_equal(4)
+        expect(normal.receipt().commit_allowed).to_be(true)
+
+    it "rejects duplicate provider publication in fixed slots":
+        var owner = hal_device_compare_owner_v1(
+            77, 4, HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
+        val value = payload(0, HalCapturedPayloadKindV1.RandomBytes,
+            EnvOpcodeV1.RandomFill, 4, 1)
+        val bytes = [0u8, 1u8, 2u8, 3u8, 4u8]
+        owner.submit(HalProviderKind.PureSimple, value, bytes, value, bytes)
+        expect(owner.submit(HalProviderKind.PureSimple,
+            value, bytes, value, bytes)).to_equal(
+                HalPayloadReplayStatusV1.AlreadyConsumed)
+        owner.submit(HalProviderKind.C, value, bytes, value, bytes)
+        owner.submit(HalProviderKind.Rust, value, bytes, value, bytes)
+        expect(owner.receipt().status).to_equal(
+            HalDeviceCompareOwnerStatusV1.InvalidSubmission)

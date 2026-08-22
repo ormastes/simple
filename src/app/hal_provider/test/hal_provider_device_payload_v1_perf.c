@@ -48,5 +48,32 @@ int main(void) {
     printf("iterations=%u elapsed_ns=%llu ns_per_replay=%.3f allocations=0\n",
         iterations, (unsigned long long)elapsed,
         (double)elapsed / (double)iterations);
+    {
+        enum { compare_iterations = 10000000 };
+        simple_hal_device_compare_owner_v1 owner;
+        uint64_t compare_start = now_ns();
+        for (uint32_t i = 0u; i < compare_iterations; ++i) {
+            if (!simple_hal_device_compare_owner_init_v1(&owner, 77u, 1u,
+                    SIMPLE_HAL_COMPARE_ALPHA_V1, 0u)) return 2;
+            for (uint8_t provider = 0u; provider < 3u; ++provider) {
+                checksum += (uint64_t)simple_hal_device_compare_submit_v1(
+                    &owner, provider, &value, bytes, sizeof(bytes),
+                    &value, bytes, sizeof(bytes));
+            }
+        }
+        uint64_t compare_elapsed = now_ns() - compare_start;
+        simple_hal_device_compare_receipt_v1 receipt =
+            simple_hal_device_compare_get_receipt_v1(&owner);
+        if (checksum != 0u || compare_elapsed == 0u ||
+            !receipt.commit_allowed || receipt.equivalent_provider_mask != 7u)
+            return 3;
+        printf("compare_iterations=%u provider_validations=%u elapsed_ns=%llu ns_per_provider=%.3f parity_mask=%u effects=%u allocations=%u\n",
+            compare_iterations, compare_iterations * 3u,
+            (unsigned long long)compare_elapsed,
+            (double)compare_elapsed / (double)(compare_iterations * 3u),
+            (unsigned)receipt.equivalent_provider_mask,
+            (unsigned)receipt.physical_effect,
+            (unsigned)receipt.allocation_count);
+    }
     return 0;
 }

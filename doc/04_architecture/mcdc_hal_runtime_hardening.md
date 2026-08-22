@@ -115,3 +115,12 @@ External hardware rows remain explicit excluded/blocked rows with stable executo
 - Duplicate physical side effects per provider: unsafe and nondeterministic.
 - Free-text skip or defect waiver: weakens the 100% eligible claim.
 - Private MC/DC dynloader: duplicates canonical aspect-pack ownership.
+# Parent-authoritative captured device comparison
+
+Captured entropy, IRQ, MMIO, and DMA observations cross provider domains as
+sealed payloads over caller-owned bounded regions. `HalDeviceCompareOwnerV1`
+is the only mutable commit authority. Each fixed provider slot has an
+independent read-once cursor, publishes once, and cannot receive a physical
+device handle. Alpha and beta always collect the exact Pure/C/Rust set; normal
+collects only the configured preferred slot. Commit policy is applied only
+after deterministic parent validation, with no payload copy or hot allocation.
