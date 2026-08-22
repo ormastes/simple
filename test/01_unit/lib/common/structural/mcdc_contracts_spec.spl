@@ -3,6 +3,7 @@
 
 use std.spec.*
 use std.common.structural.mcdc.contracts.*
+use std.common.structural.environment_instruction.contracts.*
 
 fn decision() -> McdcDecisionIdV1:
     mcdc_decision_id_v1(11, 12, 100, 3)
@@ -83,3 +84,52 @@ describe "bounded MC/DC evidence contracts":
             val all_excluded = mcdc_coverage_summary_v1(2, 2, 0)
             expect(mcdc_coverage_summary_v1_is_exact_100(empty)).to_be(false)
             expect(mcdc_coverage_summary_v1_is_exact_100(all_excluded)).to_be(false)
+
+        it "joins a governed capability exclusion to the exact stable decision":
+            val excluded = scenario_exclusion_v1(
+                31, ExclusionKindV1.CapabilityUnavailable, 41,
+                0, 24, 24, 51, 61, 62, 71, 100, 200)
+            val wrong_span = mcdc_decision_id_v1(11, 12, 101, 3)
+            val joined = mcdc_decision_exclusion_v1(decision(), excluded)
+            expect(mcdc_decision_exclusion_v1_well_formed(joined, decision(), 150)).to_be(true)
+            expect(mcdc_decision_exclusion_v1_well_formed(joined, wrong_span, 150)).to_be(false)
+
+        it "rejects non-capability and stale exclusions from the eligible join":
+            val fixture = scenario_exclusion_v1(
+                31, ExclusionKindV1.FixtureUnavailable, 41,
+                0, 24, 24, 51, 61, 62, 71, 100, 200)
+            val stale = scenario_exclusion_v1(
+                31, ExclusionKindV1.CapabilityUnavailable, 41,
+                0, 24, 24, 51, 61, 62, 71, 100, 149)
+            val fixture_join = mcdc_decision_exclusion_v1(decision(), fixture)
+            val stale_join = mcdc_decision_exclusion_v1(decision(), stale)
+            expect(mcdc_decision_exclusion_v1_well_formed(fixture_join, decision(), 150)).to_be(false)
+            expect(mcdc_decision_exclusion_v1_well_formed(stale_join, decision(), 150)).to_be(false)
+
+        it "passes normal coverage only with exact 100 percent and validated exclusions":
+            val summary = mcdc_coverage_summary_v1(10, 2, 8)
+            val complete = mcdc_normal_gate_v1(
+                McdcReportModeV1.Normal, true, summary, 2, 2, 0)
+            val unvalidated = mcdc_normal_gate_v1(
+                McdcReportModeV1.Normal, true, summary, 2, 1, 0)
+            val unexplained = mcdc_normal_gate_v1(
+                McdcReportModeV1.Normal, true, summary, 2, 2, 1)
+            val accounting_mismatch = mcdc_normal_gate_v1(
+                McdcReportModeV1.Normal, true, summary, 1, 1, 0)
+            expect(mcdc_normal_gate_v1_passes(complete)).to_be(true)
+            expect(mcdc_normal_gate_v1_passes(unvalidated)).to_be(false)
+            expect(mcdc_normal_gate_v1_passes(unexplained)).to_be(false)
+            expect(mcdc_normal_gate_v1_passes(accounting_mismatch)).to_be(false)
+
+        it "rejects non-normal, disabled, and below-100 coverage gates":
+            val summary = mcdc_coverage_summary_v1(10, 2, 8)
+            val alpha = mcdc_normal_gate_v1(
+                McdcReportModeV1.Alpha, true, summary, 2, 2, 0)
+            val disabled = mcdc_normal_gate_v1(
+                McdcReportModeV1.Normal, false, summary, 2, 2, 0)
+            val incomplete = mcdc_normal_gate_v1(
+                McdcReportModeV1.Normal, true,
+                mcdc_coverage_summary_v1(10, 2, 7), 2, 2, 0)
+            expect(mcdc_normal_gate_v1_passes(alpha)).to_be(false)
+            expect(mcdc_normal_gate_v1_passes(disabled)).to_be(false)
+            expect(mcdc_normal_gate_v1_passes(incomplete)).to_be(false)

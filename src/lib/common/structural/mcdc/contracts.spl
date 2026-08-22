@@ -1,6 +1,10 @@
 # codex-impl
 # Pointer-free MC/DC evidence vocabulary for bounded runtime collection.
 
+use std.common.structural.environment_instruction.contracts.{
+    ExclusionKindV1, ScenarioExclusionV1, scenario_exclusion_v1_well_formed
+}
+
 val MCDC_SCHEMA_VERSION: i64 = 1
 val MCDC_MAX_CONDITIONS: i64 = 62
 
@@ -66,6 +70,30 @@ fn mcdc_same_decision(a: McdcEvaluationV1, b: McdcEvaluationV1) -> bool:
         and a.decision.source_digest_lo == b.decision.source_digest_lo
         and a.decision.span_start == b.decision.span_start
         and a.decision.condition_count == b.decision.condition_count)
+
+struct McdcDecisionExclusionV1:
+    schema_version: i64
+    decision: McdcDecisionIdV1
+    exclusion: ScenarioExclusionV1
+
+fn mcdc_decision_exclusion_v1(decision: McdcDecisionIdV1,
+                              exclusion: ScenarioExclusionV1) -> McdcDecisionExclusionV1:
+    McdcDecisionExclusionV1(schema_version: MCDC_SCHEMA_VERSION,
+                            decision: decision, exclusion: exclusion)
+
+fn mcdc_decision_exclusion_v1_well_formed(value: McdcDecisionExclusionV1,
+                                           expected: McdcDecisionIdV1,
+                                           current_epoch: i64) -> bool:
+    value.schema_version == MCDC_SCHEMA_VERSION
+        and value.exclusion.kind == ExclusionKindV1.CapabilityUnavailable
+        and scenario_exclusion_v1_well_formed(value.exclusion, current_epoch)
+        and mcdc_decision_id_v1_well_formed(value.decision)
+        and mcdc_decision_id_v1_well_formed(expected)
+        and value.decision.schema_version == expected.schema_version
+        and value.decision.source_digest_hi == expected.source_digest_hi
+        and value.decision.source_digest_lo == expected.source_digest_lo
+        and value.decision.span_start == expected.span_start
+        and value.decision.condition_count == expected.condition_count
 
 struct McdcWitnessV1:
     schema_version: i64
@@ -144,12 +172,47 @@ fn mcdc_coverage_summary_v1_is_exact_100(value: McdcCoverageSummaryV1) -> bool:
     val eligible = value.gross_conditions - value.excluded_conditions
     eligible > 0 and value.covered_conditions == eligible
 
+enum McdcReportModeV1:
+    Normal
+    Alpha
+    Beta
+
+struct McdcNormalGateV1:
+    mode: McdcReportModeV1
+    coverage_enabled: bool
+    summary: McdcCoverageSummaryV1
+    excluded_conditions: i64
+    validated_excluded_conditions: i64
+    unexplained_exclusion_count: i64
+
+fn mcdc_normal_gate_v1(mode: McdcReportModeV1, coverage_enabled: bool,
+                       summary: McdcCoverageSummaryV1,
+                       excluded_conditions: i64,
+                       validated_excluded_conditions: i64,
+                       unexplained_exclusion_count: i64) -> McdcNormalGateV1:
+    McdcNormalGateV1(mode: mode, coverage_enabled: coverage_enabled,
+                     summary: summary, excluded_conditions: excluded_conditions,
+                     validated_excluded_conditions: validated_excluded_conditions,
+                     unexplained_exclusion_count: unexplained_exclusion_count)
+
+fn mcdc_normal_gate_v1_passes(value: McdcNormalGateV1) -> bool:
+    value.mode == McdcReportModeV1.Normal
+        and value.coverage_enabled
+        and value.excluded_conditions >= 0
+        and value.validated_excluded_conditions == value.excluded_conditions
+        and value.unexplained_exclusion_count == 0
+        and value.summary.excluded_conditions == value.excluded_conditions
+        and mcdc_coverage_summary_v1_is_exact_100(value.summary)
+
 export MCDC_SCHEMA_VERSION, MCDC_MAX_CONDITIONS
 export McdcWitnessPolicyV1, McdcDecisionIdV1, McdcEvaluationV1, McdcWitnessV1
-export McdcCoverageSummaryV1
+export McdcCoverageSummaryV1, McdcDecisionExclusionV1
 export mcdc_decision_id_v1, mcdc_decision_id_v1_well_formed, mcdc_condition_mask
 export mcdc_evaluation_v1, mcdc_evaluation_v1_well_formed, mcdc_same_decision
+export mcdc_decision_exclusion_v1, mcdc_decision_exclusion_v1_well_formed
 export mcdc_witness_v1, mcdc_witness_v1_evidence_well_formed
 export mcdc_unique_cause_pair
 export mcdc_coverage_summary_v1, mcdc_coverage_summary_v1_well_formed
 export mcdc_coverage_summary_v1_is_exact_100
+export McdcReportModeV1, McdcNormalGateV1
+export mcdc_normal_gate_v1, mcdc_normal_gate_v1_passes
