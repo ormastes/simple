@@ -94,10 +94,57 @@ against the deployed seed `/mnt/data/worktrees/goal-main-1/bin/simple`) was star
 and had not reached HIR lowering after ~1h on a box running run13 plus three sibling
 lanes. That run is the evidence needed to name the exact competing glob route.
 
+## Iteration 2 (2026-08-22): why the fixtures cannot reach the sweep
+
+Instrumented `materialize_imported_callable_dependency` (env-gated `SIMPLE_AMBIGDBG=1`
+`eprint` at the router, at each of its three step guards, and at the sweep) and re-ran
+the fixtures on the deployed seed. Result, reproduced across four fixture shapes
+(glob re-export of the same entity; glob module DECLARING its own `Backend`; with and
+without `export Backend` on the owner; and a two-hop `env -> facade -> api` route):
+
+```
+[AMBIGDBG] router       owner=graph.*.env dep=Backend
+[AMBIGDBG] router-step1 owner=graph.*.env dep=Backend      <- always
+```
+
+`sweep` never fires. **Step 1 always resolves**, and the reason is now pinned: it is
+not the owner's own declarations at all, but the `else` branch of
+`register_imported_symbol_inner`
+(`_Items/module_import_registration.spl`, "Re-export facade chase"), which calls
+`find_reexport_source` -> `find_reexport_source_walk`. That walk scans the SAME import
+rows the sweep scans — named rows AND wildcard rows (`matches = item_start == item_end`)
+— but it is **first-match-wins with no ambiguity notion**, so on every simple graph it
+binds before the sweep is ever consulted.
+
+Consequences for reproducing:
+
+- The sweep is reachable only on graphs where the first-wins chase FAILS TO BIND while
+  the sweep still finds two or more candidates. The walk's asymmetries that can produce
+  that are narrow and all structural: the `depth > 8` cap, the shared
+  `HirReexportWalkState` visited-memo (`seen_depth <= depth` returns not-found, so a
+  diamond can suppress the second route) and its `state.valid` / `state.complete`
+  bailouts, and the terminal registration's `already_bound and not same_owner -> return`
+  path, which can chase successfully and still bind nothing in the OWNER's qualified
+  scope. The sweep, by contrast, calls `find_reexport_source` per target with a FRESH
+  state.
+- A fixture must therefore reproduce one of those structural conditions, not merely the
+  explicit-vs-glob name collision. A fifth fixture attempt (two-hop explicit route) was
+  built and is NOT retained: it failed only on its own guard-the-guard assertion
+  (`explicit_dep_scan_count > 0`), i.e. green for the wrong reason, which is exactly the
+  failure mode the guard exists to catch.
+
+The definitive evidence is still the real-tree trace, and it is blocked on cost, not on
+method: an interpreted single-module `compile` of `llvm_backend.spl` on the deployed
+seed spent **over four hours still in the parser** (`PARSEPROF` lines, 6,919 log lines,
+zero `AMBIGDBG` traces) and was killed. The stage1 lane that produced the original
+diagnostic is sharded and parallel; a single-process interpreted repro is not a
+practical substitute on this box.
+
 ## Next steps
 
-1. Finish the instrumented repro (or re-run it on an idle box) and record the two
-   competing `(target module, item)` pairs.
+1. Get the real-tree trace from a SHARDED stage1 lane (or an idle box) rather than a
+   single interpreted `compile`, and record the two competing `(target module, item)`
+   pairs plus the reason step 1's chase did not bind.
 2. Land the rank-based fix with a fixture built from the observed route shape, so the
    spec is red pre-fix.
 3. Re-check the `-2` memo: with the rank rule, `-2` should only ever cache a
