@@ -8,7 +8,7 @@ Audience: compiler and tooling engineers who maintain this spec.
 use compiler.tools.fix.rules.{check_short_grammar_refactor}
 use std.tooling.easy_fix.{check_field_access_refactor}
 use compiler.tools.fix.main.{FixToolApplicator, collect_fixes_from_source}
-use std.tooling.easy_fix.{easyfix_replacements}
+use std.tooling.easy_fix.{EasyFix, Replacement, FixConfidence, easyfix_replacements}
 
 use std.spec.step
 
@@ -34,6 +34,53 @@ describe "short grammar easy fix":
                 expect(updated["sample.spl"]).to_contain("words.map(&:len)")
             case Err(e):
                 expect(e).to_equal("")
+
+    it "assembles distinct ordered replacements in one source pass":
+        step("Preserve multi-edit output without repeated whole-source rebuilding")
+        var fix = EasyFix.create("bulk", "bulk replacements", FixConfidence.Safe)
+        fix.add_replacement(Replacement.create(
+            "sample.spl", 10, 10, 1, 11, "!"))
+        fix.add_replacement(Replacement.create(
+            "sample.spl", 1, 2, 1, 2, "B"))
+        fix.add_replacement(Replacement.create(
+            "sample.spl", 4, 6, 1, 5, "XY"))
+        var sources: Dict<text, text> = {}
+        sources["sample.spl"] = "abcdefghij"
+        match FixToolApplicator.apply([fix], sources):
+            case Ok(updated):
+                expect(updated["sample.spl"]).to_equal("aBcdXYghij!")
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "preserves equal-start insertion order and skips out-of-range edits":
+        step("Keep legacy compatibility fallbacks")
+        var fix = EasyFix.create("edge", "edge replacements", FixConfidence.Safe)
+        fix.add_replacement(Replacement.create(
+            "sample.spl", 1, 1, 1, 2, "X"))
+        fix.add_replacement(Replacement.create(
+            "sample.spl", 1, 1, 1, 2, "Y"))
+        var sources: Dict<text, text> = {}
+        sources["sample.spl"] = "ab"
+        match FixToolApplicator.apply([fix], sources):
+            case Ok(updated):
+                expect(updated["sample.spl"]).to_equal("aYXb")
+            case Err(e):
+                expect(e).to_equal("")
+        var invalid_fix = EasyFix.create(
+            "invalid", "invalid replacement", FixConfidence.Safe)
+        invalid_fix.add_replacement(Replacement.create(
+            "sample.spl", 99, 99, 1, 100, "ignored"))
+        var invalid_sources: Dict<text, text> = {}
+        invalid_sources["sample.spl"] = "ab"
+        match FixToolApplicator.apply([invalid_fix], invalid_sources):
+            case Ok(updated):
+                expect(updated["sample.spl"]).to_equal("ab")
+            case Err(e):
+                expect(e).to_equal("")
+        val implementation = file_read("src/compiler/90.tools/fix/main.spl")
+        expect(implementation).to_contain(
+            "val replacements = _sort_replacements_descending(by_file[file])")
+        expect(implementation).to_contain("parts.join(\"\")")
 
     it "rewrites no-arg receiver method expressions to placeholder grammar":
         step("Verify: rewrites no-arg receiver method expressions to placeholder grammar")
