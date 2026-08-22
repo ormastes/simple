@@ -206,3 +206,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve malformed IDs as unknown authored codes rather than dropping diagnostics.
 - Add functional ID-shape and source-allocation regression contracts.
 - Follow-up: unify unknown decorator/attribute classification with typed annotation facts.
+
+## Completed tool tranche: EasyFix policy reachability
+
+- Compare emitted EasyFix semantic codes with configurable lint names/default levels.
+- Add exact mappings for all already-declared EasyFix policy names.
+- Map W0406 to the visibility-boundary family.
+- Pin default-deny promotion and explicit-allow suppression behavior.
+- Keep mapping allocation-free and shared by text/JSON policy projection.
+- Follow-up: register intentional policy names for remaining advisory-only EasyFix codes.
