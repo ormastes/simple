@@ -2,9 +2,11 @@
 # @req REQ-011 REQ-016 REQ-017
 
 use std.spec.*
-use app.io.{getpid}
+use app.io.{cwd, getpid}
 use app.test.hal_environment_executor.{
-    HostedProcessPollEnvExecutorV1, hosted_prepare_environment_get_v1
+    HostedProcessPollEnvExecutorV1, hosted_prepare_environment_get_v1,
+    hosted_prepare_file_read_v1, hosted_prepare_stream_read_v1,
+    hosted_prepare_clock_read_v1, hosted_prepare_random_fill_v1
 }
 use std.common.structural.environment_instruction.*
 
@@ -21,6 +23,23 @@ fn ascii_bytes(value: text) -> [u8]:
         out[i] = value.char_code_at(i) as u8
         i = i + 1
     out
+
+fn capture_policy(opcode: EnvOpcodeV1, capability_id: i64,
+                  allow_nondeterministic: bool = false) -> EnvExecutorPolicyV1:
+    val nondeterministic = if opcode == EnvOpcodeV1.ClockRead
+            or opcode == EnvOpcodeV1.RandomFill:
+        env_opcode_mask_v1(opcode)
+    else:
+        0
+    env_executor_policy_v1(env_opcode_mask_v1(opcode), 1 << capability_id,
+        0, nondeterministic, false, allow_nondeterministic, true)
+
+fn capture_instruction(opcode: EnvOpcodeV1, capability_id: i64,
+                       argument_length: i64,
+                       result_capacity: i64) -> EnvInstructionV1:
+    env_instruction_v1(41, 0, opcode, capability_id, 0,
+        0, argument_length, argument_length, 0,
+        result_capacity, result_capacity)
 
 describe "hosted physical environment executor":
     it "polls the current process through the canonical process facade":
@@ -80,3 +99,96 @@ describe "hosted physical environment executor":
         expect(env_instruction_status_to_i64(receipt.observation.status)).to_equal(
             env_instruction_status_to_i64(EnvInstructionStatusV1.UnsupportedCapability))
         expect(results[0]).to_equal(9u8)
+
+    it "captures a bounded regular file once and replays without a second effect":
+        val root = cwd()
+        val path = root + "/config/critical_mode.sdn"
+        val executor = hosted_prepare_file_read_v1(path, root, 65536)
+        val arguments = ascii_bytes(path)
+        val operation = capture_instruction(
+            EnvOpcodeV1.FileRead, 9, arguments.len(), executor.captured_length)
+        var captured: [u8] = [0u8; executor.captured_length]
+        var replayed: [u8] = [0u8; executor.captured_length]
+
+        val receipt = executor.execute(
+            capture_policy(EnvOpcodeV1.FileRead, 9), operation,
+            arguments, captured)
+        val replay = env_replay_exact_v1(
+            operation, operation, receipt.observation,
+            arguments, captured, replayed)
+
+        expect(receipt.applied).to_be(true)
+        expect(receipt.physical_effect).to_be(true)
+        expect(receipt.allocation_count_after_seal).to_equal(0)
+        expect(replay.applied).to_be(true)
+        expect(replay.physical_effect).to_be(false)
+        expect(replay.allocation_count_after_seal).to_equal(0)
+        expect(replayed).to_equal(captured)
+
+    it "binds a prepared stream snapshot to its exact handle and capacity":
+        val payload: [u8] = [7u8, 8u8, 9u8]
+        val executor = hosted_prepare_stream_read_v1(73, payload, 3, 3)
+        var arguments: [u8] = [0u8; 8]
+        put_i64_le(arguments, 73)
+        val operation = capture_instruction(EnvOpcodeV1.StreamRead, 10, 8, 3)
+        var results: [u8] = [0u8; 3]
+        val receipt = executor.execute(
+            capture_policy(EnvOpcodeV1.StreamRead, 10), operation,
+            arguments, results)
+
+        expect(receipt.applied).to_be(true)
+        expect(receipt.allocation_count_after_seal).to_equal(0)
+        expect(results).to_equal(payload)
+
+        arguments[0] = 72u8
+        val changed = executor.execute(
+            capture_policy(EnvOpcodeV1.StreamRead, 10), operation,
+            arguments, results)
+        expect(env_instruction_status_to_i64(changed.observation.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+
+    it "captures clock and random once and blocks them without nondeterminism authority":
+        val clock = hosted_prepare_clock_read_v1()
+        val random = hosted_prepare_random_fill_v1(16)
+        val clock_op = capture_instruction(EnvOpcodeV1.ClockRead, 11, 0, 8)
+        val random_op = capture_instruction(EnvOpcodeV1.RandomFill, 12, 0, 16)
+        var blocked_result: [u8] = [91u8; 8]
+        var clock_result: [u8] = [0u8; 8]
+        var clock_replay: [u8] = [0u8; 8]
+        var random_result: [u8] = [92u8; 16]
+
+        val blocked_clock = clock.execute(
+            capture_policy(EnvOpcodeV1.ClockRead, 11), clock_op, [], blocked_result)
+        val captured_random = random.execute(
+            capture_policy(EnvOpcodeV1.RandomFill, 12, true),
+            random_op, [], random_result)
+        val captured_clock = clock.execute(
+            capture_policy(EnvOpcodeV1.ClockRead, 11, true),
+            clock_op, [], clock_result)
+        val replayed_clock = env_replay_exact_v1(
+            clock_op, clock_op, captured_clock.observation,
+            [], clock_result, clock_replay)
+
+        expect(env_instruction_status_to_i64(
+            blocked_clock.observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.UnsafeInstruction))
+        expect(blocked_result[0]).to_equal(91u8)
+        expect(captured_clock.applied).to_be(true)
+        expect(captured_clock.allocation_count_after_seal).to_equal(0)
+        expect(replayed_clock.applied).to_be(true)
+        expect(replayed_clock.physical_effect).to_be(false)
+        expect(clock_replay).to_equal(clock_result)
+        expect(captured_random.applied).to_be(true)
+        expect(captured_random.allocation_count_after_seal).to_equal(0)
+        expect(captured_random.observation.bytes_length).to_equal(16)
+
+    it "rejects oversized capture before allocating or touching result storage":
+        val executor = hosted_prepare_random_fill_v1(65537)
+        val operation = capture_instruction(EnvOpcodeV1.RandomFill, 12, 0, 1)
+        var result: [u8] = [55u8]
+        val receipt = executor.execute(
+            capture_policy(EnvOpcodeV1.RandomFill, 12, true),
+            operation, [], result)
+
+        expect(receipt.applied).to_be(false)
+        expect(result[0]).to_equal(55u8)

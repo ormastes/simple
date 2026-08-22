@@ -1,8 +1,11 @@
 # codex-impl
 # Hosted physical executor adapter. All process access stays behind app.io.
 
-use app.io.{env_get, process_is_alive}
+use app.io.{env_get, file_is_regular_no_follow, file_read_bytes, file_size,
+            process_is_alive, random_randint, time_now_unix_micros}
 use std.common.structural.environment_instruction.*
+
+val HOSTED_ENV_CAPTURE_MAX_BYTES_V1: i64 = 65536
 
 class HostedProcessPollEnvExecutorV1:
     sealed: bool
@@ -11,6 +14,15 @@ class HostedPreparedEnvironmentGetExecutorV1:
     key_bytes: [u8]
     value_bytes: [u8]
     captured_from_host: bool
+    sealed: bool
+
+class HostedPreparedCaptureExecutorV1:
+    opcode: EnvOpcodeV1
+    argument_bytes: [u8]
+    captured_bytes: [u8]
+    captured_length: i64
+    physical_effect: bool
+    capture_valid: bool
     sealed: bool
 
 fn _env_text_bytes(value: text) -> [u8]:
@@ -29,6 +41,106 @@ fn _env_text_byte_safe(value: text) -> bool:
             return false
         i = i + 1
     true
+
+fn _env_path_safe_under_root(path: text, allowed_root: text) -> bool:
+    if path.len() == 0 or allowed_root.len() == 0
+            or not path.starts_with(allowed_root):
+        return false
+    if path.len() > allowed_root.len():
+        val boundary = path.char_code_at(allowed_root.len())
+        if boundary != 47 and boundary != 92:
+            return false
+    var i = 0
+    while i < path.len():
+        val code = path.char_code_at(i)
+        if code <= 0 or code > 255:
+            return false
+        if code == 46 and i + 1 < path.len()
+                and path.char_code_at(i + 1) == 46:
+            val left_boundary = i == 0
+                or path.char_code_at(i - 1) == 47
+                or path.char_code_at(i - 1) == 92
+            val right_index = i + 2
+            val right_boundary = right_index == path.len()
+                or path.char_code_at(right_index) == 47
+                or path.char_code_at(right_index) == 92
+            if left_boundary and right_boundary:
+                return false
+        i = i + 1
+    true
+
+fn _hosted_invalid_capture_v1(opcode: EnvOpcodeV1) -> HostedPreparedCaptureExecutorV1:
+    HostedPreparedCaptureExecutorV1(opcode: opcode, argument_bytes: [],
+        captured_bytes: [], captured_length: 0, physical_effect: false,
+        capture_valid: false, sealed: true)
+
+fn _hosted_capture_v1(opcode: EnvOpcodeV1, argument_bytes: [u8],
+                      captured_bytes: [u8], captured_length: i64,
+                      physical_effect: bool) -> HostedPreparedCaptureExecutorV1:
+    val valid = captured_length >= 0
+        and captured_length <= captured_bytes.len()
+        and captured_length <= HOSTED_ENV_CAPTURE_MAX_BYTES_V1
+    HostedPreparedCaptureExecutorV1(opcode: opcode,
+        argument_bytes: argument_bytes, captured_bytes: captured_bytes,
+        captured_length: captured_length, physical_effect: physical_effect,
+        capture_valid: valid, sealed: true)
+
+fn hosted_prepare_file_read_v1(path: text, allowed_root: text,
+                               max_bytes: i64) -> HostedPreparedCaptureExecutorV1:
+    if max_bytes < 0 or max_bytes > HOSTED_ENV_CAPTURE_MAX_BYTES_V1
+            or not _env_path_safe_under_root(path, allowed_root)
+            or not file_is_regular_no_follow(path):
+        return _hosted_invalid_capture_v1(EnvOpcodeV1.FileRead)
+    val size_before = file_size(path)
+    if size_before < 0 or size_before > max_bytes:
+        return _hosted_invalid_capture_v1(EnvOpcodeV1.FileRead)
+    val bytes = file_read_bytes(path)
+    val size_after = file_size(path)
+    if size_after != size_before or bytes.len() != size_before
+            or not file_is_regular_no_follow(path):
+        return _hosted_invalid_capture_v1(EnvOpcodeV1.FileRead)
+    _hosted_capture_v1(EnvOpcodeV1.FileRead, _env_text_bytes(path), bytes,
+                       bytes.len(), true)
+
+fn hosted_prepare_stream_read_v1(stream_id: i64, captured_bytes: [u8],
+                                 captured_length: i64,
+                                 max_bytes: i64) -> HostedPreparedCaptureExecutorV1:
+    if stream_id < 0 or max_bytes < 0
+            or max_bytes > HOSTED_ENV_CAPTURE_MAX_BYTES_V1
+            or captured_length < 0 or captured_length > max_bytes
+            or captured_length > captured_bytes.len():
+        return _hosted_invalid_capture_v1(EnvOpcodeV1.StreamRead)
+    var key: [u8] = [0u8; 8]
+    var i = 0
+    while i < 8:
+        key[i] = ((stream_id >> (i * 8)) & 255) as u8
+        i = i + 1
+    _hosted_capture_v1(EnvOpcodeV1.StreamRead, key, captured_bytes,
+                       captured_length, true)
+
+fn hosted_prepare_clock_read_v1() -> HostedPreparedCaptureExecutorV1:
+    val captured = time_now_unix_micros()
+    if captured < 0:
+        return _hosted_invalid_capture_v1(EnvOpcodeV1.ClockRead)
+    var bytes: [u8] = [0u8; 8]
+    var i = 0
+    while i < 8:
+        bytes[i] = ((captured >> (i * 8)) & 255) as u8
+        i = i + 1
+    _hosted_capture_v1(EnvOpcodeV1.ClockRead, [], bytes, 8, true)
+
+fn hosted_prepare_random_fill_v1(length: i64) -> HostedPreparedCaptureExecutorV1:
+    if length < 0 or length > HOSTED_ENV_CAPTURE_MAX_BYTES_V1:
+        return _hosted_invalid_capture_v1(EnvOpcodeV1.RandomFill)
+    var bytes: [u8] = [0u8; length]
+    var i = 0
+    while i < length:
+        val value = random_randint(0, 255)
+        if value < 0 or value > 255:
+            return _hosted_invalid_capture_v1(EnvOpcodeV1.RandomFill)
+        bytes[i] = value as u8
+        i = i + 1
+    _hosted_capture_v1(EnvOpcodeV1.RandomFill, [], bytes, length, true)
 
 fn hosted_prepare_environment_get_v1(key: text) -> HostedPreparedEnvironmentGetExecutorV1:
     val value = env_get(key)
@@ -96,6 +208,40 @@ impl EnvPhysicalExecutorPortV1 for HostedPreparedEnvironmentGetExecutorV1:
             instruction, argument_bytes, result_bytes,
             self.value_bytes.len(), true, 0)
 
+impl EnvPhysicalExecutorPortV1 for HostedPreparedCaptureExecutorV1:
+    fn execute(policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+               argument_bytes: [u8], result_bytes: [u8]) -> EnvExecutionReceiptV1:
+        val validation = env_executor_validate_instruction(
+            policy, instruction, argument_bytes, result_bytes)
+        if env_instruction_status_to_i64(validation)
+                != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+            return env_execution_rejected_v1(instruction, validation)
+        if not self.sealed or not self.capture_valid
+                or instruction.opcode != self.opcode:
+            return env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.UnsupportedCapability)
+        if instruction.argument_length != self.argument_bytes.len()
+                or self.captured_length > instruction.result_capacity:
+            return env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.Overflow)
+        var i = 0
+        while i < self.argument_bytes.len():
+            if argument_bytes[instruction.argument_offset + i]
+                    != self.argument_bytes[i]:
+                return env_execution_rejected_v1(
+                    instruction, EnvInstructionStatusV1.Diverged)
+            i = i + 1
+        i = 0
+        while i < self.captured_length:
+            result_bytes[instruction.result_offset + i] = self.captured_bytes[i]
+            i = i + 1
+        env_execution_record_applied_v1(
+            instruction, argument_bytes, result_bytes,
+            self.captured_length, self.physical_effect, 0)
+
 export HostedProcessPollEnvExecutorV1
 export HostedPreparedEnvironmentGetExecutorV1
 export hosted_prepare_environment_get_v1
+export HOSTED_ENV_CAPTURE_MAX_BYTES_V1, HostedPreparedCaptureExecutorV1
+export hosted_prepare_file_read_v1, hosted_prepare_stream_read_v1
+export hosted_prepare_clock_read_v1, hosted_prepare_random_fill_v1
