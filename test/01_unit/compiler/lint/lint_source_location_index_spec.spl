@@ -6,9 +6,10 @@ Audience: lint and compiler-tool maintainers.
 # @req: REQ-007, REQ-017
 
 use std.spec.*
+use std.fs.{read_file}
 use compiler.tools.lint.main.{
     lint_source_location_index, lint_source_function_line,
-    lint_source_collection_fix_line
+    lint_source_collection_fix_line, lint_source_export_star_line
 }
 
 describe "lint fallback source location index":
@@ -37,3 +38,18 @@ describe "lint fallback source location index":
             "items = items + [second]"
         ])
         expect(lint_source_collection_fix_line(duplicate, "COLL001")).to_equal(-1)
+
+    it "indexes wildcard exports once for constant-time diagnostic lookup":
+        step("Reuse wildcard-export source locations")
+        var lines: [text] = ["# decoy: export ignored.path.*"]
+        var i = 0
+        while i < 128:
+            lines.push("export use fixture.module_{i}.*")
+            i = i + 1
+        val index = lint_source_location_index(lines)
+        expect(lint_source_export_star_line(index, "fixture.module_0")).to_equal(2)
+        expect(lint_source_export_star_line(index, "fixture.module_127")).to_equal(129)
+        expect(lint_source_export_star_line(index, "missing.module")).to_equal(1)
+        val source = read_file("src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl")
+        expect(source).not.to_contain(
+            "lint_cli_find_decl_line(lines, \"export \", warning.module_path)")
