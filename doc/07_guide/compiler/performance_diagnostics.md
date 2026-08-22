@@ -45,7 +45,8 @@ candidate-count scan before the rewrite. The boundary rejects disagreement betwe
 native outcomes and serialized MIR change. It
 never substitutes `candidates=1` merely because a function changed, and a newly active
 function pass without an exact outcome adapter fails closed. This is a
-structural receipt, not yet proof of SSA dominance, type correctness, ownership, or
+structural receipt with indexed identity, CFG-target, canonical access-coverage, and
+declared operand/local checks, but not yet proof of SSA dominance, type correctness, ownership, or
 semantic equivalence; those omissions remain explicit blockers for `--verify-each`.
 
 ## Diagnostic policy
