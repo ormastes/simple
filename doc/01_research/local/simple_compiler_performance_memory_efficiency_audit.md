@@ -2438,3 +2438,23 @@ equal starts, unknown ranges, incomplete summaries, and input-order identity.
 Repository references currently show this advisory is not yet called by a
 production compiler pipeline; the change hardens the planned activation path
 and does not claim present build-time, RSS, or allocation improvement.
+
+### Command-scoped lint manifest discovery
+
+The current command path already resolves each file's target manifest once,
+caches parsed manifests, applies file attributes from the shared line view, and
+reuses the resolved config for AST append. The remaining cold-path duplication
+was smaller: `Linter.new()` independently searched for and could parse a cwd
+manifest before the target-scoped command immediately replaced it.
+
+Command-owned linters now opt out of cwd discovery while the default constructor
+retains direct-library behavior. This removes at most one independent ten-level
+filesystem ascent and, when cwd has a manifest, one redundant read, split, and
+parse per target-scoped command. Manifest precedence, parse errors, CLI profile, file
+attributes, and command-scoped freshness remain unchanged. No executed timing,
+filesystem-call, allocation, or RSS evidence is claimed.
+
+Ancestor path compression was reviewed but rejected from this tranche: without
+cached manifest-distance metadata, two valid cache hops can bypass the original
+ten-directory search limit. A future implementation must retain that distance
+and enforce the remaining budget at every cache hit.
