@@ -861,7 +861,14 @@ fn handle_method_call_with_self_update_inner(
                 }
             }
             // Handle Object mutations for MODULE_GLOBALS variables (not in local env)
-            let global_obj = MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned());
+            // Only an Object is used below. Cloning whatever the flat map holds
+            // kept a second reference to a global ARRAY alive across the in-place
+            // mutation branch, so `Arc::make_mut` deep-copied it on every push
+            // (doc/08_tracking/bug/seed_global_array_push_cow_per_frame_2026-08-22.md).
+            let global_obj = MODULE_GLOBALS.with(|cell| match cell.borrow().get(obj_name) {
+                Some(obj @ Value::Object { .. }) => Some(obj.clone()),
+                _ => None,
+            });
             if let Some(Value::Object { class, fields }) = global_obj {
                 if let Some((result, updated_self)) = find_and_exec_method_with_self(
                     method,
@@ -1051,6 +1058,13 @@ fn handle_method_call_with_self_update_inner(
                                 &crate::perf_counters::ARR_MUT_COW_ELEMS_CLONED,
                                 arc.len() as u64,
                             );
+                            crate::perf_counters::trace_array("arr_mut_cow", obj_name, arc.len());
+                            if crate::perf_counters::trace_min_len() > 0 {
+                                let mut where_ = Vec::new();
+                                crate::interpreter::MODULE_GLOBALS.with(|c| for (k, v) in c.borrow().iter() { if let Value::Array(o) = v { if Arc::ptr_eq(o, arc) { where_.push(format!("flat:{k}")); } } });
+                                crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|c| for (ow, g) in c.borrow().iter() { for (k, v) in g.iter() { if let Value::Array(o) = v { if Arc::ptr_eq(o, arc) { where_.push(format!("owned:{ow}::{k}")); } } } });
+                                eprintln!("[perf-trace] arr_mut_cow_pins name={obj_name} rc={} store_pins={:?}", Arc::strong_count(arc), where_);
+                            }
                         }
                         let popped = {
                             let vec = Arc::make_mut(arc);

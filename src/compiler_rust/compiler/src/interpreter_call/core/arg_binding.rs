@@ -87,13 +87,14 @@ fn copy_value_type_params(
         // source (12,590 elements x 5,625 calls = 70M scans for three small
         // fixture files). A declared scalar element type answers the scan
         // without reading the array.
-        if let Value::Array(_) = value {
+        if let Value::Array(items) = value {
             if params
                 .iter()
                 .any(|param| param.name == *name && array_param_has_scalar_elements(param))
             {
                 continue;
             }
+            crate::perf_counters::trace_array("vt_arg_scan", name, items.len());
         }
         copy_value_type_in_place(value, classes);
     }

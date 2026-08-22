@@ -663,6 +663,36 @@ impl CowEnv {
 
     /// Re-point the scope at the current live stores. O(1): the frame keeps
     /// no copy of any global, so "refreshing" is swapping one `Arc`.
+    /// After the overlay has been published to the store, drop the overlay's
+    /// copies of globals the scope can resolve. Reads resume through the
+    /// refreshed scope snapshot (the published value), so nothing observable
+    /// changes -- but the frame no longer pins those collections while a callee
+    /// runs, which is what let `steal_owned_global` hand the callee unique
+    /// ownership. Locals, tombstoned names and names the scope cannot resolve
+    /// are left alone.
+    pub fn drop_published_globals(&mut self) {
+        let Some(scope) = self.scope.as_ref() else {
+            return;
+        };
+        let names: Vec<String> = self
+            .overlay
+            .keys()
+            .filter(|name| !self.is_local(name) && !self.tombstones.contains(name.as_str()))
+            .filter(|name| scope.binding(name).is_some())
+            .cloned()
+            .collect();
+        for name in names {
+            self.overlay.remove(&name);
+            self.dirty_names.remove(&name);
+            self.refreshed_globals.remove(&name);
+        }
+        // Values a callee forwarded for OTHER owners are a fallback for sync's
+        // `owned_global(..).unwrap_or(fallback)`; once the store holds the
+        // global they are redundant and only pin the collection.
+        self.forwarded_globals
+            .retain(|(owner, name), _| !crate::interpreter::owned_global_present(owner, name));
+    }
+
     pub fn refresh_scope(&mut self, globals: OwnedGlobals) {
         if let Some(scope) = &mut self.scope {
             scope.globals = globals;
@@ -688,6 +718,30 @@ impl CowEnv {
     /// promoted value Arc-clones the container handle, so a genuinely aliased
     /// container still deep-copies on the first `Arc::make_mut` and only then
     /// mutates in place.
+    /// Promotion-time unique ownership for a global collection (see
+    /// `interpreter_state::steal_owned_global`): drop this frame's scope
+    /// snapshot so the store is uniquely owned, take the value out of the
+    /// store, then re-pin a fresh snapshot. Everything is O(1); nothing is
+    /// cloned. Scalars are left alone -- copying them is already O(1).
+    fn steal_for_mutation(&mut self, key: &str, promoted: &Value) {
+        let shared = match promoted {
+            Value::Array(a) => Arc::strong_count(a) > 1,
+            Value::Dict(d) => Arc::strong_count(d) > 1,
+            Value::Object { fields, .. } => Arc::strong_count(fields) > 1,
+            _ => false,
+        };
+        if !shared || self.local_bindings.contains(key) {
+            return;
+        }
+        let Some((owner, source)) = self.scope.as_ref().and_then(|scope| scope.binding(key)) else {
+            crate::perf_counters::bump(&crate::perf_counters::STEAL_NO_BINDING, 1);
+            return;
+        };
+        self.release_scope();
+        let _ = crate::interpreter::steal_owned_global(&owner, &source, promoted);
+        self.refresh_scope(crate::interpreter::owned_globals_snapshot());
+    }
+
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
         if self.overlay.contains_key(key) {
             self.refreshed_globals.remove(key);
@@ -699,6 +753,7 @@ impl CowEnv {
         }
         let promoted = self.get(key).cloned();
         if let Some(v) = promoted {
+            self.steal_for_mutation(key, &v);
             self.overlay.insert(key.to_string(), v);
             self.refreshed_globals.remove(key);
             self.dirty_names.insert(key.to_string());

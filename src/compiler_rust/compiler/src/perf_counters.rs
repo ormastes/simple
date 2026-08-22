@@ -37,6 +37,13 @@ counters!(
     SELF_FIELD_ARR_COW_CLONES,
     SELF_FIELD_ARR_COW_ELEMS_CLONED,
     // filter_functions_from_value: imported-module dict rebuilt vs memo hit
+    // steal_owned_global (promotion-time unique ownership of a global collection)
+    STEAL_OK,
+    STEAL_NO_BINDING,
+    STEAL_OUTER_SHARED,
+    STEAL_INNER_SHARED,
+    STEAL_MISSING,
+    STEAL_MISMATCH,
     FILTERED_DICT_BUILDS,
     FILTERED_DICT_HITS,
 );
@@ -67,6 +74,27 @@ fn init() -> bool {
 /// test already ran in the same process would be ignored).
 pub fn set_enabled(on: bool) {
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
+}
+
+/// Attribution trace for the hot counters (default OFF): with
+/// `SIMPLE_PERF_COUNTERS_TRACE=<min_len>` each COW clone or value-type scan of an
+/// array of at least `min_len` elements logs one stderr line naming the
+/// receiver/parameter, so a counter that grows quadratically can be tied to the
+/// Simple-level variable that causes it.
+pub fn trace_min_len() -> u64 {
+    static MIN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("SIMPLE_PERF_COUNTERS_TRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+    })
+}
+
+pub fn trace_array(site: &str, name: &str, len: usize) {
+    if enabled() {
+        let min = trace_min_len();
+        if min > 0 && len as u64 >= min {
+            eprintln!("[perf-trace] {site} name={name} len={len}");
+        }
+    }
 }
 
 #[inline(always)]

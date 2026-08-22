@@ -209,6 +209,7 @@ pub(crate) fn publish_and_repoint(env: &mut Env) {
     env.release_scope();
     publish_live_bound_globals(env);
     env.refresh_scope(owned_globals_snapshot());
+    env.drop_published_globals();
 }
 
 pub(crate) fn publish_live_bound_globals(env: &Env) {

@@ -1193,3 +1193,66 @@ mod enum_payload_diag_tests {
         );
     }
 }
+
+/// Hand a global's collection to the frame that is about to mutate it, so the
+/// frame's overlay holds the ONLY reference and `Arc::make_mut` mutates in
+/// place instead of deep-copying the whole collection.
+///
+/// Before 2026-08-22 `Env::get_mut` promoted a global into the overlay by
+/// cloning its `Arc`, while the store's owner map (shared with the frame's own
+/// scope snapshot) and the flat `MODULE_GLOBALS` mirror kept theirs, so every
+/// `global_array.push(x)` inside a function copied the array once per frame:
+/// O(len) per push, O(n^2) per parse (the parser's ~70 flat-AST pools are all
+/// pushed per node). See
+/// doc/08_tracking/bug/seed_global_array_push_cow_per_frame_2026-08-22.md.
+///
+/// Only succeeds when the store is uniquely owned (the caller released its
+/// scope snapshot first and every caller frame released its own at call time,
+/// which `exec_function_*` already does), so it never clones a map. The store
+/// keeps a `Value::Nil` placeholder until the frame publishes (every call
+/// boundary and frame exit publishes first), so no other frame can observe the
+/// hole. Returns whether the value was taken.
+pub(crate) fn steal_owned_global(owner: &str, name: &str, promoted: &Value) -> bool {
+    let same = |stored: &Value| match (stored, promoted) {
+        (Value::Array(a), Value::Array(b)) => Arc::ptr_eq(a, b),
+        (Value::Dict(a), Value::Dict(b)) => Arc::ptr_eq(a, b),
+        (Value::Object { fields: a, .. }, Value::Object { fields: b, .. }) => Arc::ptr_eq(a, b),
+        _ => false,
+    };
+    let taken = MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        let mut all = cell.borrow_mut();
+        if Arc::strong_count(&all) != 1 {
+            crate::perf_counters::bump(&crate::perf_counters::STEAL_OUTER_SHARED, 1);
+            return false;
+        }
+        let Some(globals) = Arc::get_mut(&mut *all).and_then(|all| all.get_mut(owner)) else {
+            crate::perf_counters::bump(&crate::perf_counters::STEAL_MISSING, 1);
+            return false;
+        };
+        if Arc::strong_count(globals) != 1 {
+            crate::perf_counters::bump(&crate::perf_counters::STEAL_INNER_SHARED, 1);
+            return false;
+        }
+        let Some(slot) = Arc::get_mut(globals).and_then(|globals| globals.get_mut(name)) else {
+            crate::perf_counters::bump(&crate::perf_counters::STEAL_MISSING, 1);
+            return false;
+        };
+        if !same(slot) {
+            crate::perf_counters::bump(&crate::perf_counters::STEAL_MISMATCH, 1);
+            return false;
+        }
+        *slot = Value::Nil;
+        crate::perf_counters::bump(&crate::perf_counters::STEAL_OK, 1);
+        true
+    });
+    if taken {
+        MODULE_GLOBALS.with(|cell| {
+            if let Some(slot) = cell.borrow_mut().get_mut(name) {
+                if same(slot) {
+                    *slot = Value::Nil;
+                }
+            }
+        });
+    }
+    taken
+}

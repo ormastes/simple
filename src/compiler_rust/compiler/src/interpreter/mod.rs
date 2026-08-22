@@ -71,7 +71,7 @@ pub(crate) use interpreter_state::{
     UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS,
     CLASS_OVERLOADS, FUNCTION_MODULE_OWNER, CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
     FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner,
-    report_globals_census, owned_globals_snapshot, owned_global, owned_global_present, owner_has_globals,
+    report_globals_census, owned_globals_snapshot, owned_global, owned_global_present, owner_has_globals, steal_owned_global,
     set_owned_global, seed_owner_globals, reset_owned_globals_from_initial, owner_bindings, record_owner_binding,
 };
 
@@ -130,6 +130,10 @@ mod interpreter_control;
 use interpreter_control::{exec_context, exec_for, exec_if, exec_loop, exec_match, exec_while};
 pub(crate) use interpreter_control::{exec_if_expr, exec_if_core, exec_match_expr, exec_match_core};
 pub(crate) use interpreter_control::exec_with;
+// Restored 2026-08-22: 13d09a45d80 removed this declaration while
+// `expr.rs` still calls `crate::interpreter::dispatch_profile::record`, which
+// left the seed unbuildable (E0433).
+pub(crate) mod dispatch_profile;
 mod expr;
 pub(crate) use expr::evaluate_expr;
 
