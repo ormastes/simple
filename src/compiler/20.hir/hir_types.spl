@@ -209,6 +209,48 @@ enum ScopeKind:
     Class
     Impl
 
+# QUALIDX (2026-08-22): fixed scalar buckets keep qualified lookups off the
+# staged-native Dict/Optional boundary. 256 buckets cover the measured
+# 1,529-entry per-module table at an average chain near six while retaining
+# only 2 KiB of bucket heads per active index. Heads are allocated lazily on
+# first bind, so the common table with no qualified symbols pays zero bucket
+# storage. Exact module/member arrays remain the authority: the hash is only
+# an accelerator and collisions are always checked.
+val QUALIFIED_SYMBOL_BUCKET_COUNT: i64 = 256
+
+fn _qualified_symbol_hash(value: text) -> i64:
+    # Hash code points directly from the text view. Unlike `value.bytes()`,
+    # `char_code_at` does not materialize a temporary array for every query.
+    var hash: i64 = -3750763034362895579
+    val length = value.len()
+    var index: i64 = 0
+    while index < length:
+        hash = hash xor value.char_code_at(index)
+        hash = hash * 1099511628211
+        index = index + 1
+    hash
+
+fn _qualified_symbol_empty_buckets() -> [i64]:
+    var buckets: [i64] = []
+    var index: i64 = 0
+    while index < QUALIFIED_SYMBOL_BUCKET_COUNT:
+        buckets.push(-1)
+        index = index + 1
+    buckets
+
+fn _qualified_symbol_bucket(module_name: text, member_name: text) -> i64:
+    # Hash the pair directly. Building `module_name + "." + member_name` in
+    # every lookup retained a fresh text allocation on the hottest HIR import
+    # route. Signed overflow is intentional and the normalized remainder is a
+    # bucket hint only.
+    val mixed = _qualified_symbol_hash(module_name) xor (
+        _qualified_symbol_hash(member_name) * 1099511628211)
+    val raw = mixed % QUALIFIED_SYMBOL_BUCKET_COUNT
+    if raw < 0:
+        raw + QUALIFIED_SYMBOL_BUCKET_COUNT
+    else:
+        raw
+
 class SymbolTable:
     """Symbol table for name resolution."""
     symbols: Dict<i64, HirSymbol>
@@ -220,11 +262,16 @@ class SymbolTable:
     gpu_function_backend_orders: Dict<text, text>
     qualified_functions: Dict<text, i64>
     qualified_types: Dict<text, i64>
-    qualified_function_names: [text]
+    qualified_function_module_names: [text]
+    qualified_function_member_names: [text]
     qualified_function_ids: [i64]
+    qualified_function_buckets: [i64]
+    qualified_function_nexts: [i64]
     qualified_type_module_names: [text]
     qualified_type_member_names: [text]
     qualified_type_ids: [i64]
+    qualified_type_buckets: [i64]
+    qualified_type_nexts: [i64]
     exact_symbols: Dict<text, i64>
     # MODCALLIDX (2026-08-21): "{defining_module}#{name}" -> raw symbol id for
     # every symbol that carries a defining_module, plus the same row under the
@@ -251,11 +298,16 @@ impl SymbolTable:
             gpu_function_backend_orders: {},
             qualified_functions: {},
             qualified_types: {},
-            qualified_function_names: [],
+            qualified_function_module_names: [],
+            qualified_function_member_names: [],
             qualified_function_ids: [],
+            qualified_function_buckets: [],
+            qualified_function_nexts: [],
             qualified_type_module_names: [],
             qualified_type_member_names: [],
             qualified_type_ids: [],
+            qualified_type_buckets: [],
+            qualified_type_nexts: [],
             exact_symbols: {},
             module_callables: {},
             root_scope_symbols: root_scope_symbols
@@ -282,11 +334,16 @@ impl SymbolTable:
         self.gpu_function_backend_orders = {}
         self.qualified_functions = {}
         self.qualified_types = {}
-        self.qualified_function_names = []
+        self.qualified_function_module_names = []
+        self.qualified_function_member_names = []
         self.qualified_function_ids = []
+        self.qualified_function_buckets = []
+        self.qualified_function_nexts = []
         self.qualified_type_module_names = []
         self.qualified_type_member_names = []
         self.qualified_type_ids = []
+        self.qualified_type_buckets = []
+        self.qualified_type_nexts = []
         self.exact_symbols = {}
         self.module_callables = {}
         self.current_scope = ScopeId(id: 0)
@@ -386,14 +443,25 @@ impl SymbolTable:
         id
 
     me bind_qualified_function(module_name: text, member_name: text, id: SymbolId):
-        val key = module_name + "." + member_name
-        var index = 0
-        while index < self.qualified_function_names.len():
-            if self.qualified_function_names[index] == key:
+        if self.qualified_function_buckets.len() != QUALIFIED_SYMBOL_BUCKET_COUNT:
+            self.qualified_function_buckets = _qualified_symbol_empty_buckets()
+        val bucket = _qualified_symbol_bucket(module_name, member_name)
+        var index = self.qualified_function_buckets[bucket]
+        while index >= 0 and
+              index < self.qualified_function_module_names.len() and
+              index < self.qualified_function_member_names.len() and
+              index < self.qualified_function_nexts.len():
+            if self.qualified_function_module_names[index] == module_name and
+               self.qualified_function_member_names[index] == member_name:
                 return
-            index = index + 1
-        self.qualified_function_names = self.qualified_function_names.push(key)
-        self.qualified_function_ids = self.qualified_function_ids.push(id.id)
+            index = self.qualified_function_nexts[index]
+        val entry_index = self.qualified_function_ids.len()
+        self.qualified_function_module_names.push(module_name)
+        self.qualified_function_member_names.push(member_name)
+        self.qualified_function_ids.push(id.id)
+        self.qualified_function_nexts.push(self.qualified_function_buckets[bucket])
+        self.qualified_function_buckets[bucket] = entry_index
+        val key = module_name + "." + member_name
         self.qualified_functions[key] = id.id
 
     fn lookup_qualified_function(module_name: text, member_name: text) -> SymbolId?:
@@ -403,27 +471,41 @@ impl SymbolTable:
         nil
 
     fn lookup_qualified_function_raw(module_name: text, member_name: text) -> i64:
-        """Native-safe scalar qualified-function lookup, including id zero."""
-        val key = module_name + "." + member_name
-        var index = 0
-        while index < self.qualified_function_names.len() and
-              index < self.qualified_function_ids.len():
-            if self.qualified_function_names[index] == key:
+        """Allocation-free native-safe qualified-function lookup, including id zero."""
+        if self.qualified_function_buckets.len() != QUALIFIED_SYMBOL_BUCKET_COUNT:
+            return -1
+        val bucket = _qualified_symbol_bucket(module_name, member_name)
+        var index = self.qualified_function_buckets[bucket]
+        while index >= 0 and
+              index < self.qualified_function_module_names.len() and
+              index < self.qualified_function_member_names.len() and
+              index < self.qualified_function_ids.len() and
+              index < self.qualified_function_nexts.len():
+            if self.qualified_function_module_names[index] == module_name and
+               self.qualified_function_member_names[index] == member_name:
                 return self.qualified_function_ids[index]
-            index = index + 1
+            index = self.qualified_function_nexts[index]
         -1
 
     me bind_qualified_type(module_name: text, member_name: text, id: SymbolId):
-        var index = 0
-        while index < self.qualified_type_module_names.len() and
-              index < self.qualified_type_member_names.len():
+        if self.qualified_type_buckets.len() != QUALIFIED_SYMBOL_BUCKET_COUNT:
+            self.qualified_type_buckets = _qualified_symbol_empty_buckets()
+        val bucket = _qualified_symbol_bucket(module_name, member_name)
+        var index = self.qualified_type_buckets[bucket]
+        while index >= 0 and
+              index < self.qualified_type_module_names.len() and
+              index < self.qualified_type_member_names.len() and
+              index < self.qualified_type_nexts.len():
             if self.qualified_type_module_names[index] == module_name and
                self.qualified_type_member_names[index] == member_name:
                 return
-            index = index + 1
-        self.qualified_type_module_names = self.qualified_type_module_names.push(module_name)
-        self.qualified_type_member_names = self.qualified_type_member_names.push(member_name)
-        self.qualified_type_ids = self.qualified_type_ids.push(id.id)
+            index = self.qualified_type_nexts[index]
+        val entry_index = self.qualified_type_ids.len()
+        self.qualified_type_module_names.push(module_name)
+        self.qualified_type_member_names.push(member_name)
+        self.qualified_type_ids.push(id.id)
+        self.qualified_type_nexts.push(self.qualified_type_buckets[bucket])
+        self.qualified_type_buckets[bucket] = entry_index
         val key = module_name + "." + member_name
         self.qualified_types[key] = id.id
 
@@ -440,15 +522,56 @@ impl SymbolTable:
         a value-type ``SymbolId`` carried inside ``Optional`` even though the
         exact dictionary entry is valid.
         """
-        var index = 0
-        while index < self.qualified_type_module_names.len() and
+        if self.qualified_type_buckets.len() != QUALIFIED_SYMBOL_BUCKET_COUNT:
+            return -1
+        val bucket = _qualified_symbol_bucket(module_name, member_name)
+        var index = self.qualified_type_buckets[bucket]
+        while index >= 0 and
+              index < self.qualified_type_module_names.len() and
               index < self.qualified_type_member_names.len() and
-              index < self.qualified_type_ids.len():
+              index < self.qualified_type_ids.len() and
+              index < self.qualified_type_nexts.len():
             if self.qualified_type_module_names[index] == module_name and
                self.qualified_type_member_names[index] == member_name:
                 return self.qualified_type_ids[index]
-            index = index + 1
+            index = self.qualified_type_nexts[index]
         -1
+
+    fn qualified_type_probe_steps(module_name: text, member_name: text) -> i64:
+        """Exact comparisons used by the scalar index (perf evidence only)."""
+        if self.qualified_type_buckets.len() != QUALIFIED_SYMBOL_BUCKET_COUNT:
+            return 0
+        val bucket = _qualified_symbol_bucket(module_name, member_name)
+        var index = self.qualified_type_buckets[bucket]
+        var steps: i64 = 0
+        while index >= 0 and
+              index < self.qualified_type_module_names.len() and
+              index < self.qualified_type_member_names.len() and
+              index < self.qualified_type_nexts.len():
+            steps = steps + 1
+            if self.qualified_type_module_names[index] == module_name and
+               self.qualified_type_member_names[index] == member_name:
+                return steps
+            index = self.qualified_type_nexts[index]
+        steps
+
+    fn qualified_function_probe_steps(module_name: text, member_name: text) -> i64:
+        """Exact comparisons used by the scalar index (perf evidence only)."""
+        if self.qualified_function_buckets.len() != QUALIFIED_SYMBOL_BUCKET_COUNT:
+            return 0
+        val bucket = _qualified_symbol_bucket(module_name, member_name)
+        var index = self.qualified_function_buckets[bucket]
+        var steps: i64 = 0
+        while index >= 0 and
+              index < self.qualified_function_module_names.len() and
+              index < self.qualified_function_member_names.len() and
+              index < self.qualified_function_nexts.len():
+            steps = steps + 1
+            if self.qualified_function_module_names[index] == module_name and
+               self.qualified_function_member_names[index] == member_name:
+                return steps
+            index = self.qualified_function_nexts[index]
+        steps
 
     me push_scope(kind: ScopeKind) -> ScopeId:
         """Push a new scope."""
