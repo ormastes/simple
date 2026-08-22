@@ -717,6 +717,8 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   removing about 135 helper calls and variable shifts on late/no-match paths.
 - Remaining follow-up: stale-file CLI red fixture and executed latency/RSS
   evidence when verification is permitted.
+- Completed bounded leading `Edddd` validation: reject non-`E` without a slice,
+  then validate one five-byte candidate to avoid repeated raw-string `strlen`.
 - Verification intentionally not run under the user's no-verify instruction.
 
 ## Completed diagnostic tranche: shared query error-code ownership
