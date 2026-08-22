@@ -69,6 +69,16 @@ fn vhdl_catalog_module_alias_key(module_name: text) -> text:
         return module_name.substring(4, module_name.len())
     module_name
 
+fn vhdl_catalog_metadata_key(module_name: text, function_name: text) -> text:
+    "{module_name.len()}:{module_name}{function_name.len()}:{function_name}"
+
+fn vhdl_catalog_metadata_index_record(mut rows: Dict<text, i64>,
+                                      key: text, row_index: i64):
+    if rt_dict_contains(rows, key):
+        rows[key] = -2
+    else:
+        rows[key] = row_index
+
 fn vhdl_catalog_sorted_symbols(values: [SymbolId]) -> [SymbolId]:
     var result = values
     var i = 0
@@ -605,6 +615,28 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
         return Err("VHDL design catalog requires one explicit root module")
     val trace_enabled = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
+    # Join sidecar metadata by exact raw identity or by an alias only when the
+    # row's module spelling is absent from the loaded design. -2 retains every
+    # duplicate as ambiguity evidence without copying heavyweight row payloads.
+    var metadata_exact_rows: Dict<text, i64> = {}
+    var metadata_alias_rows: Dict<text, i64> = {}
+    var metadata_row_index = 0
+    while metadata_row_index < hardware_metadata_rows.len():
+        val metadata_row = hardware_metadata_rows[metadata_row_index]
+        vhdl_catalog_metadata_index_record(
+            metadata_exact_rows,
+            vhdl_catalog_metadata_key(
+                metadata_row.module_name, metadata_row.function_name),
+            metadata_row_index)
+        if not rt_dict_contains(modules, metadata_row.module_name):
+            vhdl_catalog_metadata_index_record(
+                metadata_alias_rows,
+                vhdl_catalog_metadata_key(
+                    vhdl_catalog_module_alias_key(metadata_row.module_name),
+                    metadata_row.function_name),
+                metadata_row_index)
+        metadata_row_index = metadata_row_index + 1
+
     # Types need stable design identities because every source module owns a
     # local SymbolTable. HIR retains the defining-module provenance that MIR's
     # raw SymbolId intentionally omits.
@@ -679,30 +711,30 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                 type_def.name, hir_modules)
             rebase[symbol.id] = global_type_symbols[identity]
 
+        val module_alias_key = vhdl_catalog_module_alias_key(module_name)
         for symbol in vhdl_catalog_sorted_symbols(module.functions.keys()):
             var func = vhdl_catalog_function(module.functions[symbol], rebase)
-            var metadata_index = 0
-            var metadata_match_index = -1
-            var metadata_match_rank = 0
-            val module_alias_key = vhdl_catalog_module_alias_key(module_name)
-            while metadata_index < hardware_metadata_rows.len():
-                val metadata_row = hardware_metadata_rows[metadata_index]
-                var match_rank = 0
-                if metadata_row.function_name == func.name:
-                    if metadata_row.module_name == module_name:
-                        match_rank = 2
-                    else:
-                        val aliases_match = vhdl_catalog_module_alias_key(
-                            metadata_row.module_name) == module_alias_key
-                        if aliases_match and not rt_dict_contains(modules,
-                                metadata_row.module_name):
-                            match_rank = 1
-                if match_rank > 0 and metadata_match_rank > 0:
-                    return Err("VHDL hardware metadata for `{func.name}` is ambiguous")
-                if match_rank > metadata_match_rank:
-                    metadata_match_index = metadata_index
-                    metadata_match_rank = match_rank
-                metadata_index = metadata_index + 1
+            val metadata_exact_key = vhdl_catalog_metadata_key(
+                module_name, func.name)
+            val metadata_alias_key = vhdl_catalog_metadata_key(
+                module_alias_key, func.name)
+            val metadata_exact_index = if rt_dict_contains(
+                    metadata_exact_rows, metadata_exact_key):
+                metadata_exact_rows[metadata_exact_key]
+            else:
+                -1
+            val metadata_alias_index = if rt_dict_contains(
+                    metadata_alias_rows, metadata_alias_key):
+                metadata_alias_rows[metadata_alias_key]
+            else:
+                -1
+            if (metadata_exact_index == -2 or metadata_alias_index == -2 or
+                (metadata_exact_index >= 0 and metadata_alias_index >= 0)):
+                return Err("VHDL hardware metadata for `{func.name}` is ambiguous")
+            val metadata_match_index = if metadata_exact_index >= 0:
+                metadata_exact_index
+            else:
+                metadata_alias_index
             if metadata_match_index >= 0:
                 val metadata_row = hardware_metadata_rows[metadata_match_index]
                 if trace_enabled and func.name.starts_with("core32_"):
