@@ -409,3 +409,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add mirrored source contracts for driver, barrel, removed file, and retained const evaluation.
 - Count eliminated evaluator construction, function/expression traversal, and temporary HIR arrays as active compiler CPU/memory improvement.
 - Follow-up: quarantine or rehabilitate the canonical MIR constant-fold direct method with shared arithmetic/result-type semantics.
+
+## Completed tooling tranche: compact lint parsed-handoff state
+
+- Build fallback source-location dictionaries during the existing canonical text-line traversal.
+- Retain only function, collection-fix, and star-export location maps across parsing; remove full split-line state.
+- Materialize config/index and release handoff state before AST diagnostic loops.
+- Preserve defensive fallback indexing and all early-return releases.
+- Pin absence of `last_source_lines` and immediate release with source contracts.
+- Follow-up: evaluate result-array in-place compaction only after value-semantics/alias tests prove it safe.
