@@ -470,6 +470,15 @@ entry points bind `trace_enabled` and `bare_metal` before phase output and use
 those locals through result dispatch. Disabled trace formatting remains
 branch-guarded, and function count reads `Dict.len()` directly.
 
+### VHDL trace loop policy
+
+`compile_to_vhdl` binds `trace_enabled` after extracting a valid entry module.
+`vhdl_build_design_catalog_with_metadata` binds its own value after validating
+the selected roots. Metadata, rebase, candidate, catalog-result, and payload
+receipts consume these locals. This retains independent call semantics and
+avoids new environment work on early invalid-input returns. The trace gate does
+not enter catalog records or emitted VHDL.
+
 ## Fix application fast-path contract
 
 Per-file replacements use a typed stable merge sort ordered by descending start.
