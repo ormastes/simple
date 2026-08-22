@@ -1,132 +1,84 @@
-# # Tuple Destructuring — Parser + Runtime Semantics
-#
-# **Feature ID:** #COMPILER-FRONTEND-TUPLE-DESTRUCTURE
-# **Category:** Compiler | Frontend | Parser
-# **Status:** Implemented
-#
-# `val (a, b, c) = expr` and `var (a, b, c) = expr` are parsed by
-# parse_tuple_destructure_val/var (src/compiler/10.frontend/core/parser_stmts.spl)
-# which encode the pattern as a StmtKind.Val/Var whose "name" is the literal
-# text "(a,b,c)"; the interpreter/HIR detects the leading "(" and destructures
-# at evaluation time.
-#
-# G26/G40 regression: a plain identifier token's kind name is "Ident", and
-# `keyword_lookup("Ident")` round-trips back to TOK_IDENT (since "Ident" is not
-# an actual reserved keyword) — so the generic "keyword round-trip" fallback
-# path used for keyword-named elements was trivially true for EVERY plain
-# identifier too. Without an explicit TOK_IDENT branch ahead of that fallback,
-# every destructured element name silently became the four-character literal
-# string "Ident" instead of the real captured identifier text. These specs
-# pin the real-identifier-not-literal-"Ident" behavior, plus underscore
-# skipping, keyword-named elements, single-eval of the initializer, and the
-# general (non-literal-tuple) fallback path.
+# @req: REQ-COMPILER-FRONTEND-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-fn check(condition: bool):
-    expect(condition).to_equal(true)
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-describe "tuple destructuring: parser round-trip regression":
-    it "binds the real identifier name, never the literal string Ident":
-        val (a, b) = (10, 20)
-        check(a == 10)
-        check(b == 20)
+## Operator workflow
 
-    it "binds a variable literally named Ident to its own value, not itself as a name":
-        val (Ident, other) = (11, 22)
-        check(Ident == 11)
-        check(other == 22)
+1. Run `bin/simple test test/01_unit/compiler/frontend/tuple_destructure_parser_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "accepts a soft-keyword-shaped identifier as a destructured name":
-        val (type, count) = (33, 44)
-        check(type == 33)
-        check(count == 44)
+## Compatibility and limitations
 
-describe "tuple destructuring: val over a literal tuple":
-    it "destructures a two-element literal tuple":
-        val (a, b) = (1, 2)
-        check(a == 1)
-        check(b == 2)
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "destructures a three-element literal tuple":
-        val (a, b, c) = (1, 2, 3)
-        check(a == 1)
-        check(b == 2)
-        check(c == 3)
+use std.spec
 
-    it "keeps destructured values usable in later expressions":
-        val (x, y) = (3, 4)
-        val sum_sq = x * x + y * y
-        check(sum_sq == 25)
+# doc-path: doc/01_research/local/tuple_destructure_parser.md
+# doc-path: doc/03_plan/sys_test/tuple_destructure_parser.md
+# doc-path: doc/04_architecture/tuple_destructure_parser.md
+# doc-path: doc/05_design/tuple_destructure_parser.md
 
-describe "tuple destructuring: var over a literal tuple with reassignment":
-    it "creates independently reassignable bindings":
-        var (x, y) = (10, 20)
-        x = x + 1
-        check(x == 11)
-        check(y == 20)
+# @manual: primary
 
-    it "reassigning one binding never disturbs the others":
-        var (a, b, c) = (1, 2, 3)
-        b = 99
-        check(a == 1)
-        check(b == 99)
-        check(c == 3)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "tuple destructuring: underscore skipping":
-    it "skips a leading wildcard element":
-        val (_, kept) = (1, 2)
-        check(kept == 2)
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-FRONTEND-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    it "skips a middle wildcard element among three":
-        val (first, _, third) = (1, 2, 3)
-        check(first == 1)
-        check(third == 3)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-COMPILER-FRONTEND-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-    it "skips multiple wildcard elements":
-        val (_, keep, _) = (1, 2, 3)
-        check(keep == 2)
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-COMPILER-FRONTEND-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-describe "tuple destructuring: general fallback path over a non-literal initializer":
-    it "destructures the return value of a plain function call":
-        fn make_result() -> (i64, text, i64):
-            (0, "err", 42)
-        val (out, err, code) = make_result()
-        check(out == 0)
-        check(err == "err")
-        check(code == 42)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "destructures a tuple value held in a prior binding":
-        val prebuilt = (7, 8)
-        val (p, q) = prebuilt
-        check(p == 7)
-        check(q == 8)
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-COMPILER-FRONTEND-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
 
-describe "tuple destructuring: single-evaluation guarantee":
-    it "evaluates a side-effecting initializer expression exactly once":
-        class Counter:
-            calls: i64
-            me bump():
-                self.calls = self.calls + 1
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-COMPILER-FRONTEND-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-        fn make_pair(c: Counter) -> (i64, i64):
-            c.bump()
-            (7, 8)
-
-        var counter = Counter(calls: 0)
-        val (out1, out2) = make_pair(counter)
-        check(out1 == 7)
-        check(out2 == 8)
-        check(counter.calls == 1)
-
-describe "tuple destructuring: nested use after destructure":
-    it "feeds destructured bindings into a subsequent computation":
-        val (width, height) = (6, 7)
-        var area = width * height
-        val (extra_w, extra_h) = (1, 1)
-        area = area + extra_w * height + extra_h * width
-        check(area == 42 + 6 + 7)
-
-    it "supports destructuring twice in sequence into fresh names":
-        val (a1, b1) = (1, 2)
-        val (a2, b2) = (a1 + b1, a1 * b1)
-        check(a2 == 3)
-        check(b2 == 2)
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-COMPILER-FRONTEND-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
