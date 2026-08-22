@@ -25,6 +25,9 @@ rewrites such call sites to direct field access and deletes the wrappers:
 """
 
 use std.spec
+use std.fs.{read_file}
+use std.tooling.easy_fix.accessor_field_access.{check_field_access_refactor_with_view}
+use std.tooling.easy_fix.rules_helpers.{line_contexts_from_lines}
 use compiler.tools.fix.accessor_fix_core.*
 use compiler.tools.fix.accessor_fix_rewrite.*
 
@@ -193,3 +196,27 @@ describe("cache invalidation invariant"):
         expect(out["box.spl"] == box_source()).to_be(false)
         expect(out["caller.spl"] == caller_source()).to_be(false)
         expect(stats.files_changed).to_equal(2)
+
+describe("field-access lint hot path"):
+    it("reuses canonical lines and byte offsets for same-class rewrites"):
+        val lines = box_source().split("\n")
+        val fixes = check_field_access_refactor_with_view(
+            "box.spl", lines, line_contexts_from_lines(lines))
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].replacements.len()).to_equal(1)
+        expect(fixes[0].replacements[0].new_text).to_contain(
+            "self.value = self.value + 1")
+
+    it("indexes candidates instead of rescanning every method for every line"):
+        val source = read_file(
+            "src/lib/nogc_sync_mut/tooling/easy_fix/accessor_field_access.spl")
+        val registry = read_file("src/compiler/90.tools/fix/rules/registry.spl")
+        expect(source).to_contain("parse_accessor_classes_lines(lines)")
+        expect(source).to_contain("contexts[idx].byte_offset")
+        expect(source).to_contain("kind_by_name")
+        expect(source).to_contain("acc_field_access_names(line)")
+        expect(source).not.to_contain("var starts: [i64]")
+        expect(source).not.to_contain("acc_suffix_has_real(c, m.field)")
+        expect(source).not.to_contain("for m in dummies")
+        expect(registry).to_contain(
+            "check_field_access_refactor_with_view(file, lines, contexts)")
