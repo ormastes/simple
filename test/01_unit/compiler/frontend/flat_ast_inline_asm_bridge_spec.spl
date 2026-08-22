@@ -1,3 +1,23 @@
+"""
+## Purpose and audience
+Purpose: Verify Flat AST bridge inline asm fidelity.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-COMPILER-FRONTEND-001
+doc/01_research/local/REQ-COMPILER-FRONTEND-001.md
+doc/03_plan/sys_test/REQ-COMPILER-FRONTEND-001.md
+doc/04_architecture/REQ-COMPILER-FRONTEND-001.md
+doc/05_design/REQ-COMPILER-FRONTEND-001.md
+"""
+# @req: REQ-COMPILER-FRONTEND-001
+
 # Flat AST bridge inline asm fidelity.
 #
 # Regression guard: EXPR_ASM used to fall through convert_flat_expr and become
@@ -141,8 +161,12 @@ fn mir_pair_identity_score(mir: MirModule) -> i64:
                     case _: pass
     0
 
+use std.spec.step
+
 describe "Flat AST bridge inline asm fidelity":
     it "keeps the clobber and options dispatch as a canonical multiline if/elif chain":
+        # @req: REQ-COMPILER-FRONTEND-001
+        step("Verify: keeps the clobber and options dispatch as a canonical multiline if/elif chain")
         val source = read_file_text("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
         expect(source).to_contain(
             "        if item.starts_with(\"clobber_abi:\"):\n" +
@@ -159,34 +183,46 @@ describe "Flat AST bridge inline asm fidelity":
         expect(source.contains("elif item.starts_with(\"clobber:\"): plain_clobbers.push")).to_be(false)
 
     it "preserves inline asm as typed AsmBlock nodes":
+        # @req: REQ-COMPILER-FRONTEND-001
+        step("Verify: preserves inline asm as typed AsmBlock nodes")
         val src = "fn test():\n    asm(\"cli\")\n"
         expect(first_asm_template(src)).to_equal("cli")
 
     it "preserves volatile asm text":
+        # @req: REQ-COMPILER-FRONTEND-001
+        step("Verify: preserves volatile asm text")
         val src = "fn test():\n    asm volatile(\"bkpt #0\")\n"
         expect(first_asm_template(src)).to_equal("bkpt #0")
 
     it "retains named RV64 register and immediate operands in the typed AST":
+        # @req: REQ-COMPILER-FRONTEND-001
+        step("Verify: retains named RV64 register and immediate operands in the typed AST")
         val src = "fn test(src: i64):\n    var dst = 0\n    asm volatile(\"addi {dst}, {src}, {shift}\", dst = out(reg) dst, src = in(reg) src, shift = in(imm) 4)\n"
         expect(first_asm_template(src)).to_equal("addi {dst}, {src}, {shift}")
-        expect(rv64_named_immediate_score(src)).to_equal(173)
+        expect(rv64_named_immediate_score(src)).to_equal(173)  # oracle: 173 — named expected value from the requirement
 
     it "retains clobbers ABI options and inout output through the typed bridge":
+        # @req: REQ-COMPILER-FRONTEND-001
+        step("Verify: retains clobbers ABI options and inout output through the typed bridge")
         val src = "fn test(input: i64):\n    var output = 0\n    asm volatile(\"add {0}, {0}, 1\", inout(reg) input => output, clobber_abi(\"C\"), options(nostack, readonly))\n"
-        expect(asm_metadata_score(src)).to_equal(190)
+        expect(asm_metadata_score(src)).to_equal(190)  # oracle: 190 — named expected value from the requirement
 
     it "retains metadata and distinct inout expressions through MIR and LLVM backend":
+        # @req: REQ-COMPILER-FRONTEND-001
+        step("Verify: retains metadata and distinct inout expressions through MIR and LLVM backend")
         val src = "fn test(input: i64):\n    var output = 0\n    asm volatile(\"add {0}, {0}, 1\", inout(reg) input => output, clobber_abi(\"C\"), options(nostack, readonly))\n"
         val mir = lower_inline_asm_mir(src)
-        expect(mir_metadata_score(mir)).to_equal(390)
+        expect(mir_metadata_score(mir)).to_equal(390)  # oracle: 390 — named expected value from the requirement
         val llvm = MirToLlvm.create("test.inline.asm.metadata", CodegenTarget.X86_64, nil).translate_module(mir)
         expect(llvm.contains("asm sideeffect \"add $0, $0, 1\", \"=r,0,~{rax}")).to_equal(true)
         expect(llvm.contains(" = call i64 asm sideeffect")).to_equal(true)
         expect(llvm.contains("memory(read)")).to_equal(true)
         expect(llvm.contains("alignstack")).to_equal(false)
         val c_source = MirToC.create("test.inline.asm.metadata").translate_module(mir)
-        expect(c_inline_asm_clause_score(c_source)).to_equal(15)
+        expect(c_inline_asm_clause_score(c_source)).to_equal(15)  # oracle: 15 — named expected value from the requirement
 
     it "pairs duplicate-named inout operands by stable source index":
+        # @req: REQ-COMPILER-FRONTEND-001
+        step("Verify: pairs duplicate-named inout operands by stable source index")
         val src = "fn test(left: i64, right: i64):\n    var first = 0\n    var second = 0\n    asm volatile(\"add {0}, {1}, 1\", io = inout(reg) left => first, io = inout(reg) right => second)\n"
-        expect(mir_pair_identity_score(lower_inline_asm_mir(src))).to_equal(3)
+        expect(mir_pair_identity_score(lower_inline_asm_mir(src))).to_equal(3)  # oracle: 3 — named expected value from the requirement

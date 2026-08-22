@@ -1,3 +1,23 @@
+"""
+## Purpose and audience
+Purpose: Verify a dead child's 128+N status becomes exactly one build outcome class.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-COMPILER-DRIVER-001
+doc/01_research/local/REQ-COMPILER-DRIVER-001.md
+doc/03_plan/sys_test/REQ-COMPILER-DRIVER-001.md
+doc/04_architecture/REQ-COMPILER-DRIVER-001.md
+doc/05_design/REQ-COMPILER-DRIVER-001.md
+"""
+# @req: REQ-COMPILER-DRIVER-001
+
 # @cover src/compiler/80.driver/driver_build/build_outcome.spl 0%
 # @req REQ-DRIVER-BUILD-OUTCOME-001
 """
@@ -61,25 +81,35 @@ use std.nogc_sync_mut.io.file_ops.{file_read}
 fn outcome_for(status: i64, timed_out: bool) -> BuildUnitOutcome:
     BuildUnitOutcome.from_status(7, "src/unit.spl", status, timed_out, 12, 4096, "")
 
+use std.spec.step
+
 describe "a dead child's 128+N status becomes exactly one build outcome class":
     it "reports SIGSEGV (139) as CRASHED, carrying signal 11 and the raw status":
+        # @req: REQ-DRIVER-BUILD-OUTCOME-001
+        step("Verify: reports SIGSEGV (139) as CRASHED, carrying signal 11 and the raw status")
         val record = outcome_for(139, false)
         expect(record.label()).to_equal("CRASHED")
-        expect(record.signal_num).to_equal(11)
-        expect(record.status).to_equal(139)
+        expect(record.signal_num).to_equal(11)  # oracle: 11 — named expected value from the requirement
+        expect(record.status).to_equal(139)  # oracle: 139 — named expected value from the requirement
         assert_false(record.is_ok())
 
     it "reports SIGABRT (134) as CRASHED, carrying signal 6":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: reports SIGABRT (134) as CRASHED, carrying signal 6")
         val record = outcome_for(134, false)
         expect(record.label()).to_equal("CRASHED")
-        expect(record.signal_num).to_equal(6)
+        expect(record.signal_num).to_equal(6)  # oracle: 6 — named expected value from the requirement
 
     it "reports SIGTERM (143) as TERMINATED, never CRASHED":
+        # @req: REQ-DRIVER-BUILD-OUTCOME-001
+        step("Verify: reports SIGTERM (143) as TERMINATED, never CRASHED")
         val record = outcome_for(143, false)
         expect(record.label()).to_equal("TERMINATED")
-        expect(record.signal_num).to_equal(15)
+        expect(record.signal_num).to_equal(15)  # oracle: 15 — named expected value from the requirement
 
     it "reports an unbudgeted SIGKILL (137) as CRASHED, not TERMINATED":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: reports an unbudgeted SIGKILL (137) as CRASHED, not TERMINATED")
         # Deliberate asymmetry, and the reason TERMINATED is safe to exempt from
         # the failure count: only SIGTERM (15) is treated as external. A SIGKILL
         # the supervisor did not schedule is indistinguishable from the compiler
@@ -87,52 +117,66 @@ describe "a dead child's 128+N status becomes exactly one build outcome class":
         # the path that must never be a failure; a raw SIGKILL is not that path.
         val record = outcome_for(137, false)
         expect(record.label()).to_equal("CRASHED")
-        expect(record.signal_num).to_equal(9)
+        expect(record.signal_num).to_equal(9)  # oracle: 9 — named expected value from the requirement
 
     it "reports the same 137 as TIMEOUT when the supervisor killed it on its budget":
+        # @req: REQ-DRIVER-BUILD-OUTCOME-001
+        step("Verify: reports the same 137 as TIMEOUT when the supervisor killed it on its budget")
         # The budget is the fact that matters, not the SIGKILL that enforced it.
         val record = outcome_for(137, true)
         expect(record.label()).to_equal("TIMEOUT")
 
     it "reports a clean exit 0 as OK with no signal recorded":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: reports a clean exit 0 as OK with no signal recorded")
         val record = outcome_for(0, false)
         expect(record.label()).to_equal("OK")
-        expect(record.signal_num).to_equal(0)
+        expect(record.signal_num).to_equal(0)  # oracle: 0 — named expected value from the requirement
         assert_true(record.is_ok())
 
     it "reports any other clean non-zero exit as ERROR, not as a crash":
+        # @req: REQ-DRIVER-BUILD-OUTCOME-001
+        step("Verify: reports any other clean non-zero exit as ERROR, not as a crash")
         expect(outcome_for(1, false).label()).to_equal("ERROR")
         expect(outcome_for(2, false).label()).to_equal("ERROR")
         expect(outcome_for(64, false).label()).to_equal("ERROR")
         # -1 is the spawn-failure sentinel; it is not a 128+N encoding.
         expect(outcome_for(-1, false).label()).to_equal("ERROR")
-        expect(outcome_for(1, false).signal_num).to_equal(0)
+        expect(outcome_for(1, false).signal_num).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 describe "TERMINATED and TIMEOUT never reach the failure count":
     it "counts a SIGSEGV and a SIGABRT as two failures and nothing else":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: counts a SIGSEGV and a SIGABRT as two failures and nothing else")
         val set = BuildOutcomeSet.empty()
         set.record(BuildUnitOutcome.from_status(1, "seg.spl", 139, false, 5, 0, ""))
         set.record(BuildUnitOutcome.from_status(2, "abort.spl", 134, false, 5, 0, ""))
-        expect(set.failure_count()).to_equal(2)
-        expect(set.unverified_count()).to_equal(0)
-        expect(set.ok_count()).to_equal(0)
+        expect(set.failure_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(set.unverified_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(set.ok_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "counts an earlyoom SIGTERM as unverified and as ZERO failures":
+        # @req: REQ-DRIVER-BUILD-OUTCOME-001
+        step("Verify: counts an earlyoom SIGTERM as unverified and as ZERO failures")
         val set = BuildOutcomeSet.empty()
         set.record(BuildUnitOutcome.ok(1, "good.spl", 5, 0))
         set.record(BuildUnitOutcome.from_status(2, "oomed.spl", 143, false, 5, 0, ""))
-        expect(set.failure_count()).to_equal(0)
-        expect(set.unverified_count()).to_equal(1)
-        expect(set.ok_count()).to_equal(1)
+        expect(set.failure_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(set.unverified_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(set.ok_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(set.paths_in(BuildOutcomeKind.TERMINATED)).to_contain("oomed.spl")
 
     it "counts a budget timeout as unverified and as ZERO failures":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: counts a budget timeout as unverified and as ZERO failures")
         val set = BuildOutcomeSet.empty()
         set.record(BuildUnitOutcome.from_status(1, "slow.spl", 137, true, 900, 0, ""))
-        expect(set.failure_count()).to_equal(0)
-        expect(set.unverified_count()).to_equal(1)
+        expect(set.failure_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(set.unverified_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "keeps the two unverified classes out of the failure count even in a mixed build":
+        # @req: REQ-DRIVER-BUILD-OUTCOME-001
+        step("Verify: keeps the two unverified classes out of the failure count even in a mixed build")
         # 6 units: 1 OK, 1 ERROR, 1 CRASHED, 1 TERMINATED, 1 TIMEOUT, 1 NOT_RUN.
         val set = BuildOutcomeSet.empty()
         set.record(BuildUnitOutcome.ok(1, "a.spl", 5, 0))
@@ -141,14 +185,16 @@ describe "TERMINATED and TIMEOUT never reach the failure count":
         set.record(BuildUnitOutcome.from_status(4, "d.spl", 143, false, 5, 0, ""))
         set.record(BuildUnitOutcome.from_status(5, "e.spl", 137, true, 5, 0, ""))
         set.record(BuildUnitOutcome.not_run(6, "f.spl"))
-        expect(set.len()).to_equal(6)
-        expect(set.ok_count()).to_equal(1)
-        expect(set.failure_count()).to_equal(2)
-        expect(set.unverified_count()).to_equal(2)
-        expect(set.not_run_count()).to_equal(1)
+        expect(set.len()).to_equal(6)  # oracle: 6 — named expected value from the requirement
+        expect(set.ok_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(set.failure_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(set.unverified_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(set.not_run_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         assert_false(set.all_ok())
 
     it "classifies each kind as failure or unverified but never as both":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: classifies each kind as failure or unverified but never as both")
         assert_true(build_outcome_is_failure(BuildOutcomeKind.ERROR))
         assert_true(build_outcome_is_failure(BuildOutcomeKind.CRASHED))
         assert_false(build_outcome_is_failure(BuildOutcomeKind.TERMINATED))
@@ -160,28 +206,36 @@ describe "TERMINATED and TIMEOUT never reach the failure count":
 
 describe "a unit the build never reached is stated, never silently missing":
     it "records NOT_RUN with the reason instead of omitting the unit":
+        # @req: REQ-DRIVER-BUILD-OUTCOME-001
+        step("Verify: records NOT_RUN with the reason instead of omitting the unit")
         val record = BuildUnitOutcome.not_run(9, "never.spl")
         expect(record.label()).to_equal("NOT_RUN")
         expect(record.diagnostics).to_contain("never started")
         assert_false(record.is_ok())
 
     it "keeps an unreached unit present in the set, so the total still covers it":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: keeps an unreached unit present in the set, so the total still covers it")
         val set = BuildOutcomeSet.empty()
         set.record(BuildUnitOutcome.ok(1, "ran.spl", 5, 0))
         set.record(BuildUnitOutcome.not_run(2, "never.spl"))
-        expect(set.len()).to_equal(2)
+        expect(set.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         assert_true(set.has_path("never.spl"))
-        expect(set.not_run_count()).to_equal(1)
+        expect(set.not_run_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "counts NOT_RUN as neither a failure nor an unverified kill":
+        # @req: REQ-DRIVER-BUILD-OUTCOME-001
+        step("Verify: counts NOT_RUN as neither a failure nor an unverified kill")
         val set = BuildOutcomeSet.empty()
         set.record(BuildUnitOutcome.not_run(1, "never.spl"))
-        expect(set.failure_count()).to_equal(0)
-        expect(set.unverified_count()).to_equal(0)
-        expect(set.not_run_count()).to_equal(1)
+        expect(set.failure_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(set.unverified_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(set.not_run_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
 describe "OK requires exit 0 AND the declared artifact on disk":
     it "records a clean exit with a missing artifact as ERROR, never OK":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: records a clean exit with a missing artifact as ERROR, never OK")
         # This is the join the supervisor performs before it may call
         # `BuildUnitOutcome.ok`. Modelled here with the same status the
         # supervisor substitutes (1) so the fabricated-success path is fenced.
@@ -189,11 +243,13 @@ describe "OK requires exit 0 AND the declared artifact on disk":
         set.record(BuildUnitOutcome.from_status(
             1, "ghost.spl", 1, false, 5, 0,
             "exit 0 but declared artifact is missing: build/ghost.o"))
-        expect(set.ok_count()).to_equal(0)
-        expect(set.failure_count()).to_equal(1)
+        expect(set.ok_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(set.failure_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(set.paths_in(BuildOutcomeKind.ERROR)).to_contain("ghost.spl")
 
     it "carries the missing-artifact reason so the unit is attributable":
+        # @req: REQ-DRIVER-BUILD-OUTCOME-001
+        step("Verify: carries the missing-artifact reason so the unit is attributable")
         val record = BuildUnitOutcome.from_status(
             1, "ghost.spl", 1, false, 5, 0,
             "exit 0 but declared artifact is missing: build/ghost.o")
@@ -202,12 +258,16 @@ describe "OK requires exit 0 AND the declared artifact on disk":
         expect(record.attribution_line()).to_contain("ghost.spl")
 
     it "keeps the artifact check OUT of from_status, where the supervisor owns it":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: keeps the artifact check OUT of from_status, where the supervisor owns it")
         # from_status sees only a wait status; it cannot know about a file. This
         # pins WHERE the responsibility lives, so a future refactor cannot drop
         # the check by assuming the classifier already made it.
         expect(outcome_for(0, false).label()).to_equal("OK")
 
     it "makes the supervisor consult the declared artifact before recording OK":
+        # @req: REQ-DRIVER-BUILD-OUTCOME-001
+        step("Verify: makes the supervisor consult the declared artifact before recording OK")
         val src = file_read("src/compiler/80.driver/driver_build/parallel.spl")
         expect(src).to_contain("val declared = artifact_fn(unit_path)")
         expect(src).to_contain("if declared != \"\" and not rt_file_exists(declared):")
