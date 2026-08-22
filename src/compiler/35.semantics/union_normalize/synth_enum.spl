@@ -49,6 +49,20 @@ fn synth_union_enum_normalized(
 ) -> HirEnum:
     """Build from one canonicalization result so keys, payloads, and name
     cannot diverge or repeat flatten/key/sort work."""
+    var variant_symbols: [SymbolId] = []
+    for key in normalized.keys:
+        variant_symbols.push(SymbolId.new(
+            union_synth_symbol_id(normalized.name + "::" + key)))
+    synth_union_enum_normalized_with_symbols(
+        normalized, span_from,
+        SymbolId.new(union_synth_symbol_id(normalized.name)), variant_symbols)
+
+fn synth_union_enum_normalized_with_symbols(
+    normalized: UnionNormalized, span_from: HirType,
+    enum_symbol: SymbolId, variant_symbols: [SymbolId]
+) -> HirEnum:
+    """Build with module-registry-assigned IDs. The compatibility wrapper
+    above retains preferred hash IDs for standalone callers."""
     val norm = normalized.members
     val keys = normalized.keys
     val name = normalized.name
@@ -56,7 +70,7 @@ fn synth_union_enum_normalized(
     var i = 0
     for k in keys:
         variants = variants.push(HirVariant(
-            symbol: SymbolId.new(union_synth_symbol_id(name + "::" + k)),
+            symbol: variant_symbols[i],
             name: union_variant_name(k),
             kind: HirVariantKind.Tuple([norm[i]]),
             has_discriminant: false,
@@ -64,7 +78,7 @@ fn synth_union_enum_normalized(
             span: span_from.span))
         i = i + 1
     HirEnum(
-        symbol: SymbolId.new(union_synth_symbol_id(name)),
+        symbol: enum_symbol,
         name: name,
         runtime_name: name,
         type_params: [],
@@ -190,7 +204,15 @@ fn union_normalize_module(module: HirModule) -> HirModule:
         if registered.contains_key(name):
             continue
         registered[name] = true
-        val e = synth_union_enum_normalized(normalized, ut)
+        val enum_symbol = out.symbols.structural_union_symbol(
+            name, 0)
+        var variant_symbols: [SymbolId] = []
+        for key in normalized.keys:
+            val identity = name + "::" + key
+            variant_symbols.push(out.symbols.structural_union_symbol(
+                identity, 0))
+        val e = synth_union_enum_normalized_with_symbols(
+            normalized, ut, enum_symbol, variant_symbols)
         out.enums[e.symbol] = e
     out
 

@@ -27,7 +27,62 @@ fn _hir_symbol_last_segment(name: text) -> text:
         index = index + 1
     if cut < 0: name else: name.substring(cut + 1)
 
+fn _structural_union_preferred_id(name: text) -> i64:
+    # Keep this deliberately identical to union_synth_symbol_id without
+    # importing semantics into the core HIR layer. Recomputing from identity
+    # prevents a caller-supplied/colliding hint from changing the identity's
+    # normal starting slot. Genuine FNV collisions retain fixed-encounter-order
+    # probing and are tracked separately.
+    var h: i64 = 2166136261
+    for ch in name:
+        h = h ^ ch.to_int()
+        h = (h * 16777619) % 2147483647
+        if h < 0:
+            h = 0 - h
+    900000000 + (h % 100000000)
+
 impl SymbolTable:
+    me structural_union_symbol(name: text, _preferred: i64) -> SymbolId:
+        """Return one module-local collision-free ID for a canonical union or
+        variant identity. Preferred IDs remain byte-compatible when free.
+
+        Reserved IDs do not advance next_symbol_id: ordinary source symbols
+        therefore retain compact allocation and cannot jump to the 900M lane."""
+        if self.structural_union_symbols.contains_key(name):
+            return SymbolId(id: self.structural_union_symbols[name])
+
+        val first_reserved = 900000000
+        val reserved_count = 100000000
+        # The hint position is retained in the API for compatibility, but identity is
+        # authoritative. This makes caller hints irrelevant while preserving
+        # every correctly derived legacy preferred ID. Genuine same-hash names
+        # remain collision-free but fixed-encounter-order dependent.
+        var candidate = _structural_union_preferred_id(name)
+        var attempts = 0
+        val probe_budget = 4096
+        while attempts < probe_budget:
+            # SymbolTable's established raw-id path uses has()+bracket for this
+            # i64-keyed struct dictionary; Dict.get is the tagged-value hazard.
+            val normal_symbol_occupied = self.symbols.has(candidate)
+            val union_symbol_occupied =
+                self.structural_union_owners.contains_key(candidate)
+            if not normal_symbol_occupied and not union_symbol_occupied:
+                self.structural_union_symbols[name] = candidate
+                self.structural_union_owners[candidate] = name
+                return SymbolId(id: candidate)
+            candidate = candidate + 1
+            if candidate >= first_reserved + reserved_count:
+                candidate = first_reserved
+            attempts = attempts + 1
+
+        # Adversarial clusters cannot turn compilation into a 100M-step scan.
+        # Aliasing is never an acceptable recovery; use one ordinary unique ID.
+        val fallback = self.next_symbol_id
+        self.next_symbol_id = fallback + 1
+        self.structural_union_symbols[name] = fallback
+        self.structural_union_owners[fallback] = name
+        SymbolId(id: fallback)
+
     me index_module_callable(module_name: text, symbol_name: text, raw_id: i64):
         """MODCALLIDX: record one (defining_module, name) row for
         field_module_callable. Both the full name and its last dotted segment
@@ -483,5 +538,3 @@ impl SymbolTable:
                 case _: pass
 
         functions
-
-
