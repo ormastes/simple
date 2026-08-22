@@ -48,6 +48,16 @@ This is a virtual capsule at build composition, not an MDSOC feature transform o
 | `80.driver` | Compiler session/CLI orchestration | Reuse artifacts, route diagnostic/remark/deep modes, no semantic duplication |
 | `90.tools/perf` | Tool projections | `.sperf`/curve/report commands over compiler owners, not a separate analyzer |
 
+The first shared-analysis implementation uses declared-local bucket indexes for def/use
+sites. A fact build is a single MIR traversal; growing per-local arrays are owned by a
+dense outer array so recording a use does not repeatedly copy a dictionary-held array.
+Coverage is explicit: an unknown instruction or undeclared local reference makes
+`def_use_complete=false`. No consumer may interpret partial coverage as absence of uses.
+
+Pass preservation is fail-closed. Until proved otherwise, a changed active pass
+invalidates CFG, dominators, and def/use. Analysis-only, remark-only, skeleton, and
+disabled routes preserve all facts because they cannot replace MIR.
+
 `40.mono` remains monomorphization; no `40.collection_plan` sibling is introduced. No undocumented `65` layer is introduced. CollectionPlan extraction belongs in `35.semantics/perf/collection_plan`, while MIR planning/lowering and interprocedural MIR summaries remain under `60.mir_opt`.
 
 ## Frozen contracts
