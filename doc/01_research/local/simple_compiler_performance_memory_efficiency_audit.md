@@ -2229,6 +2229,21 @@ uses `modules.len()` rather than materializing `modules.keys()`. Generated VHDL,
 catalog data, public APIs, and error behavior are unchanged; no runtime evidence
 is claimed.
 
+### VHDL call/port-map target index
+
+Each reachable string call or port map previously materialized every function
+key, selection-sorted `F` symbols, scanned them, and rebuilt `module::name` for
+every candidate. For `E` edges this cost `E*F*(F-1)/2` comparisons plus `E*F`
+scans and qualified texts: `O(E*F^2)` time with heavy allocator churn.
+
+Catalog construction now records exact raw qualified and bare keys once for all
+functions and the hardware-only subset. Parallel symbol/count dictionaries
+preserve duplicate qualified identities, global bare ambiguity, hardware
+filtering, qualified-missing errors, and bare-missing `nil`. Stored symbols are
+read only when count is one, so encounter order cannot affect output. Expected
+total work becomes `O(F+E)` with `O(F)` operation-local index memory. No name
+sanitization, aliasing, local preference, API, or diagnostic text changed.
+
 ### Leading explicit-code allocation audit
 
 The leading `Edddd` probe previously allocated a one-character prefix, a
