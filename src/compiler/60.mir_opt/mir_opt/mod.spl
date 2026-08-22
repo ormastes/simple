@@ -38,7 +38,9 @@ use compiler.mir_opt.mir_opt.pattern_dispatch (run_pattern_idiom_pass_x86, run_p
 use compiler.mir_opt.mir_opt.perf_facts.{
     PerfFactPreservation, perf_fact_preservation_all,
     perf_fact_preservation_none, perf_fact_preservation_integrity_errors,
-    perf_instruction_access, perf_terminator_access
+    perf_instruction_access, perf_terminator_access,
+    perf_facts_build_for_verification, perf_facts_definitions,
+    perf_facts_uses, perf_facts_dominates
 }
 extern fn rt_env_get(key: text) -> text?
 
@@ -550,14 +552,19 @@ fn mir_structural_verification_error_code(message: text) -> text:
     if message.contains(" terminator uses missing local "): return "MIRV017"
     if message.contains(" terminator defines missing local "): return "MIRV018"
     if message.contains(" targets missing block "): return "MIRV019"
+    if message.starts_with("local ") and message.ends_with(" is used without a definition"): return "MIRV020"
+    if message.starts_with("local ") and message.contains(" has multiple definitions"): return "MIRV021"
+    if message.starts_with("local ") and message.contains(" is used before its definition in block "): return "MIRV022"
+    if message.starts_with("local ") and message.contains(" definition does not dominate use in block "): return "MIRV023"
+    if message.starts_with("local ") and message.contains(" dominance is unavailable for use in block "): return "MIRV024"
     "MIRV999"
 
 fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerificationReceipt:
     """Fail-closed minimum verifier for optimizer boundaries.
 
     This receipt proves block/local identity, operand-local validity, canonical
-    access coverage, entry membership, and CFG target membership. It deliberately
-    does not claim SSA, type, ownership, or dominance verification.
+    access coverage, entry/CFG closure, and single-definition SSA dominance. It
+    deliberately does not claim full opcode typing, ownership, or loop proof.
     """
     var errors: [text] = []
     var instruction_count = 0
@@ -664,6 +671,63 @@ fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerifi
                     if not block_ids.has(unwind_target.id):
                         errors.push("block " + block.id.id.to_string() + " targets missing block " + unwind_target.id.to_string())
             case Ret(_) | Unreachable | Abort(_): pass_dn
+
+    # Only construct dominance/def-use after structural closure succeeds.
+    # The verifier-specific builder deliberately omits dense liveness matrices.
+    if errors.is_empty():
+        val facts = perf_facts_build_for_verification(func)
+        for local in func.locals:
+            val definitions = perf_facts_definitions(facts, local.id)
+            val uses = perf_facts_uses(facts, local.id)
+            var virtual_entry_definition = false
+            match local.kind:
+                case Arg(_): virtual_entry_definition = true
+                case Var | Temp | Return: pass_dn
+            if virtual_entry_definition and not definitions.is_empty():
+                errors.push(
+                    "local " + local.id.id.to_string() +
+                    " has multiple definitions including its argument definition")
+            elif not virtual_entry_definition and definitions.len() > 1:
+                errors.push(
+                    "local " + local.id.id.to_string() +
+                    " has multiple definitions")
+            elif not virtual_entry_definition and definitions.is_empty() and not uses.is_empty():
+                errors.push(
+                    "local " + local.id.id.to_string() +
+                    " is used without a definition")
+            elif definitions.len() == 1:
+                val definition = definitions[0]
+                var dominance_definition_block = definition.block
+                var edge_definition_known = true
+                if definition.is_terminator:
+                    val definition_block = func.blocks[facts.block_index[definition.block.id]]
+                    match definition_block.terminator:
+                        case CallTerminator(_, _, _, normal, _):
+                            # The result exists on the normal edge, not on unwind.
+                            dominance_definition_block = normal
+                        case _:
+                            edge_definition_known = false
+                for use_site in uses:
+                    if definition.block.id == use_site.block.id:
+                        if definition.is_terminator or (
+                            not use_site.is_terminator and
+                            use_site.instruction_index <= definition.instruction_index):
+                            errors.push(
+                                "local " + local.id.id.to_string() +
+                                " is used before its definition in block " +
+                                use_site.block.id.to_string())
+                    elif (not edge_definition_known or
+                          not facts.immediate_dominator.has(dominance_definition_block.id) or
+                          not facts.immediate_dominator.has(use_site.block.id)):
+                        errors.push(
+                            "local " + local.id.id.to_string() +
+                            " dominance is unavailable for use in block " +
+                            use_site.block.id.to_string())
+                    elif not perf_facts_dominates(facts, dominance_definition_block, use_site.block):
+                        errors.push(
+                            "local " + local.id.id.to_string() +
+                            " definition does not dominate use in block " +
+                            use_site.block.id.to_string())
     var error_codes: [text] = []
     for error in errors:
         error_codes.push(mir_structural_verification_error_code(error))
