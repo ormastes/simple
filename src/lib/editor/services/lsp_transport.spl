@@ -1,14 +1,29 @@
 # LSP Transport
 #
 # Content-Length framed JSON-RPC transport for LSP communication.
-# StdioTransport is a stub awaiting rt_process_spawn_piped runtime support.
+# StdioTransport uses the canonical checked piped-process owner.
 # WebSocket transport can be wired via std.nogc_sync_mut.websocket.
 
-extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
-extern fn rt_process_write_stdin(pid: i64, data: text) -> bool
-extern fn rt_process_read_stdout(pid: i64) -> text
-extern fn rt_process_is_alive(pid: i64) -> bool
-extern fn rt_process_kill(pid: i64) -> bool
+use std.io.{
+    process_spawn_piped, process_write_stdin, process_read_stdout_result,
+    process_is_piped_alive_result, process_close_piped
+}
+
+fn _lsp_process_spawn(command: text, args: [text]) -> Result<i64, text>:
+    if command == "": return Err("empty_process_command")
+    val pid = process_spawn_piped(command, args)
+    if pid <= 0: return Err("process_spawn_failed")
+    Ok(pid)
+
+fn _lsp_process_write(pid: i64, data: text) -> Result<(), text>:
+    if pid <= 0: return Err("invalid_process_handle")
+    if not process_write_stdin(pid, data): return Err("process_write_failed")
+    Ok(())
+
+fn _lsp_process_close(pid: i64) -> Result<(), text>:
+    if pid <= 0: return Err("invalid_process_handle")
+    if not process_close_piped(pid): return Err("process_close_failed")
+    Ok(())
 
 struct LspTransportConfig:
     server_command: text
@@ -316,40 +331,89 @@ class StdioProcessTransport:
     server_cmd: text
     server_args: [text]
     buffer: text
+    last_error: text
 
 impl StdioProcessTransport:
 
     static fn new(cmd: text, args: [text]) -> StdioProcessTransport:
-        val pid = rt_process_spawn_piped(cmd, args)
+        var pid = 0
+        var error = ""
+        match _lsp_process_spawn(cmd, args):
+            case Ok(handle): pid = handle
+            case Err(message): error = message
+            case _("fail closed if Result gains another variant"):
+                error = "unknown_process_spawn_result"
         StdioProcessTransport(
             pid: pid,
             server_cmd: cmd,
             server_args: args,
-            buffer: ""
+            buffer: "",
+            last_error: error
         )
 
     me send(message: text) -> bool:
-        if not rt_process_is_alive(me.pid):
-            return false
+        match process_is_piped_alive_result(me.pid):
+            case Ok(true): pass_dn
+            case Ok(false):
+                me.last_error = "process_exited"
+                return false
+            case Err(error):
+                me.last_error = error
+                return false
+            case _("fail closed if Result gains another variant"):
+                me.last_error = "unknown_process_liveness_result"
+                return false
         val framed = lsp_frame_message(message)
-        rt_process_write_stdin(me.pid, framed)
+        match _lsp_process_write(me.pid, framed):
+            case Ok(()): true
+            case Err(error):
+                me.last_error = error
+                false
+            case _("fail closed if Result gains another variant"):
+                me.last_error = "unknown_process_write_result"
+                false
 
-    me receive() -> text:
-        val chunk = rt_process_read_stdout(me.pid)
-        me.buffer = me.buffer + chunk
+    me receive_result() -> Result<Option<text>, text>:
+        match process_read_stdout_result(me.pid):
+            case Ok(Some(chunk)): me.buffer = me.buffer + chunk
+            case Ok(nil): pass_dn
+            case Err(error):
+                me.last_error = error
+                return Err(error)
+            case _("fail closed if Result gains another variant"):
+                me.last_error = "unknown_process_read_result"
+                return Err(me.last_error)
         val result = lsp_parse_frame(me.buffer)
         val json = result.0
         val consumed = result.1
         if json == "":
-            return ""
+            return Ok(nil)
         me.buffer = me.buffer.slice(consumed, me.buffer.len())
-        json
+        Ok(Some(json))
 
-    fn is_connected() -> bool:
-        rt_process_is_alive(me.pid)
+    me receive() -> text:
+        match me.receive_result():
+            case Ok(Some(json)): json
+            case Ok(nil): ""
+            case Err(_): ""
+            case _("fail closed if Result gains another variant"): ""
+
+    me is_connected() -> bool:
+        match process_is_piped_alive_result(me.pid):
+            case Ok(alive): alive
+            case Err(error):
+                me.last_error = error
+                false
+            case _("fail closed if Result gains another variant"):
+                me.last_error = "unknown_process_liveness_result"
+                false
 
     me close():
-        rt_process_kill(me.pid)
+        match _lsp_process_close(me.pid):
+            case Ok(()): me.pid = 0
+            case Err(error): me.last_error = error
+            case _("fail closed if Result gains another variant"):
+                me.last_error = "unknown_process_close_result"
 
 fn _lsp_transport_escape(s: text) -> text:
     # INDEX SPACE: BYTE-indexed throughout. `s.len()` and `s.slice(a, b)` count

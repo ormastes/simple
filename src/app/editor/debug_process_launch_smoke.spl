@@ -2,11 +2,11 @@
 #
 # Native-only smoke entry for initialize + launch over DAP stdio.
 
-use app.io.mod.{process_is_alive, process_kill}
-
-extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
-extern fn rt_process_write_stdin(pid: i64, data: text) -> bool
-extern fn rt_process_read_stdout(pid: i64) -> text
+use std.io.{
+    process_spawn_piped, process_write_stdin, process_read_stdout_result,
+    process_is_piped_alive_result, process_close_piped
+}
+use std.concurrent.thread.{thread_sleep}
 use std.io_runtime.{file_exists}
 
 fn _frame(json: text) -> text:
@@ -18,32 +18,41 @@ fn main() -> i64:
         print "STATUS: FAIL editor_dap_process_launch_smoke missing_program"
         return 1
     val simple_runner = if file_exists("bin/simple") then "bin/simple" else: "bin/release/linux-x86_64/simple"
-    val pid = rt_process_spawn_piped(simple_runner, ["run", "src/app/dap/simple_dap_main.spl"])
+    val pid = process_spawn_piped(simple_runner, ["run", "src/app/dap/simple_dap_main.spl"])
     if pid <= 0:
         print "STATUS: FAIL editor_dap_process_launch_smoke start"
         return 1
     val init_json = "{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\",\"arguments\":{\"adapterID\":\"simple\"}}"
     val launch_json = "{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":{\"program\":\"" + program + "\",\"cwd\":\".\"}}"
-    if not rt_process_write_stdin(pid, _frame(init_json)):
-        process_kill(pid)
+    if not process_write_stdin(pid, _frame(init_json)):
+        process_close_piped(pid)
         print "STATUS: FAIL editor_dap_process_launch_smoke write_init"
         return 1
-    if not rt_process_write_stdin(pid, _frame(launch_json)):
-        process_kill(pid)
+    if not process_write_stdin(pid, _frame(launch_json)):
+        process_close_piped(pid)
         print "STATUS: FAIL editor_dap_process_launch_smoke write_launch"
         return 1
 
     var attempts = 0
     var saw_stopped = false
     var raw = ""
-    while attempts < 100000 and not saw_stopped and process_is_alive(pid):
-        val chunk = rt_process_read_stdout(pid)
-        if chunk != "":
-            raw = raw + chunk
+    var polling = true
+    while attempts < 100000 and not saw_stopped and polling:
+        match process_read_stdout_result(pid):
+            case Ok(Some(chunk)): raw = raw + chunk
+            case Ok(nil):
+                match process_is_piped_alive_result(pid):
+                    case Ok(alive):
+                        polling = alive
+                        if alive: thread_sleep(1)
+                    case Err(_): polling = false
+                    case _("fail closed if Result gains another variant"): polling = false
+            case Err(_): polling = false
+            case _("fail closed if Result gains another variant"): polling = false
         if raw.contains("\"type\":\"event\"") and raw.contains("\"event\":\"stopped\""):
             saw_stopped = true
         attempts = attempts + 1
-    process_kill(pid)
+    process_close_piped(pid)
 
     if not saw_stopped:
         print "STATUS: FAIL editor_dap_process_launch_smoke no_stopped_event"
