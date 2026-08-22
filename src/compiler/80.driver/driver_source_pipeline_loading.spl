@@ -12,6 +12,7 @@ use compiler.driver.driver_source_loading.{
     _driver_collect_sources_via_find,
     _driver_entry_import_dirname,
     _driver_entry_import_module_paths,
+    _driver_entry_sibling_module_paths,
     _driver_resolve_entry_import,
     _driver_collect_entry_import_source,
     _driver_physical_source_key,
@@ -212,7 +213,15 @@ impl CompilerDriver:
                         closure_scan_sources.len(), closure_src.path,
                         0, 6, 0, 0, "running")
                 val closure_dir = _driver_entry_import_dirname(closure_src.path)
-                val closure_imports = _driver_entry_import_module_paths(closure_src.content)
+                var closure_imports = _driver_entry_import_module_paths(closure_src.content)
+                # `mod package.member` is a relative sibling declaration, not
+                # a `use`/`import`, but it must enter the same physical-source
+                # closure before HIR binds `member.call()`. Keep this path in
+                # lockstep with native_build_closure.spl; otherwise focused
+                # pure-Simple builds load only the entry and every namespace
+                # receiver decays into an unresolved global.
+                for sibling in _driver_entry_sibling_module_paths(closure_src.content):
+                    closure_imports = closure_imports.push(sibling)
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp in closure_imports:
