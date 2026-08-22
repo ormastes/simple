@@ -4,7 +4,7 @@
 # Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
 
 # Helpers from cli_ops.spl
-use app.io.cli_ops (cli_handle_compile, env_set, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl, _cli_driver_binary)
+use app.io.cli_ops (cli_handle_compile, cli_env_get, env_set, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl, _cli_driver_binary)
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
@@ -239,6 +239,8 @@ fn cli_compile_via_runtime(args: [text]) -> i64:
     exit_code
 
 fn cli_compile(args: [text]) -> i64:
+    val prior_mcdc_mode = cli_env_get("SIMPLE_MCDC_MODE")
+    defer env_set("SIMPLE_MCDC_MODE", prior_mcdc_mode)
     val opt_level_validation = cli_validate_opt_level_args(args)
     if opt_level_validation != 0:
         return opt_level_validation
@@ -291,6 +293,8 @@ fn cli_compile(args: [text]) -> i64:
             print "  --driver-mode=<mode>  Driver packaging mode: dynamic emits .lsm"
             print "  --emit-c              Emit C++20 source code (C backend)"
             print "  --coverage            Enable coverage instrumentation"
+            print "  --mcdc                Enable static MC/DC instrumentation"
+            print "  --mcdc-mode=<mode>    MC/DC policy: off, static, or dynamic"
             print "  --coverage-output=<p> Coverage output file path"
             print "  --release             Release build (optimized, prefers LLVM)"
             print "  --release-optimized   Max optimization: -O3 + x86-64-v3 + ThinLTO"
@@ -475,8 +479,25 @@ fn cli_compile(args: [text]) -> i64:
         elif arg.starts_with("--pgo-use="):
             pgo_use_path = arg.substring(10)
         elif arg == "--coverage":
-            # Pass-through (compiler config reads env/args)
-            pass
+            env_set("SIMPLE_MCDC_MODE", "static")
+        elif arg == "--mcdc":
+            env_set("SIMPLE_MCDC_MODE", "static")
+        elif arg.starts_with("--mcdc-mode="):
+            val mcdc_mode = arg.substring(12)
+            if mcdc_mode != "off" and mcdc_mode != "static" and mcdc_mode != "dynamic":
+                _cli_eprint("Error: MC/DC mode must be off, static, or dynamic")
+                return 1
+            env_set("SIMPLE_MCDC_MODE", mcdc_mode)
+        elif arg == "--mcdc-mode":
+            i = i + 1
+            if i >= args.len():
+                _cli_eprint("Error: --mcdc-mode requires an argument")
+                return 1
+            val mcdc_mode = args[i]
+            if mcdc_mode != "off" and mcdc_mode != "static" and mcdc_mode != "dynamic":
+                _cli_eprint("Error: MC/DC mode must be off, static, or dynamic")
+                return 1
+            env_set("SIMPLE_MCDC_MODE", mcdc_mode)
         elif arg.starts_with("--coverage-output="):
             # Pass-through (handled by compiler)
             pass

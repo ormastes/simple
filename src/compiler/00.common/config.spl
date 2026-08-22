@@ -35,6 +35,39 @@ impl CompilerProfile:
             case "sdn" | "data": CompilerProfile.Sdn
             case _: CompilerProfile.Dev
 
+enum McdcPolicy:
+    StaticOff
+    StaticOn
+    Dynamic
+    Invalid
+
+impl McdcPolicy:
+    fn to_text() -> text:
+        match self:
+            case StaticOff: "off"
+            case StaticOn: "static"
+            case Dynamic: "dynamic"
+            case Invalid: "invalid"
+
+    static fn from_text(value: text) -> McdcPolicy:
+        match value.lower():
+            case "" | "off" | "disabled" | "0": McdcPolicy.StaticOff
+            case "static" | "on" | "enabled" | "1": McdcPolicy.StaticOn
+            case "dynamic" | "dynload" | "aspect": McdcPolicy.Dynamic
+            case _: McdcPolicy.Invalid
+
+    fn emits_manifest() -> bool:
+        self == McdcPolicy.StaticOn or self == McdcPolicy.Dynamic
+
+    fn emits_direct_probes() -> bool:
+        self == McdcPolicy.StaticOn
+
+    fn emits_dynamic_patchpoints() -> bool:
+        self == McdcPolicy.Dynamic
+
+    fn links_static_payload() -> bool:
+        self == McdcPolicy.StaticOn
+
 # ============================================================================
 # Config (key-value bag)
 # ============================================================================
@@ -73,6 +106,7 @@ struct CompilerConfig:
     use_rust_lexer: bool      # --fast-lex Rust lexer fallback
     deterministic: bool       # Deterministic mode (fixed seeds, sorted)
     coverage_enabled: bool
+    mcdc_policy: McdcPolicy
 
 impl CompilerConfig:
     static fn default() -> CompilerConfig:
@@ -85,7 +119,8 @@ impl CompilerConfig:
             use_rust_interp: false,
             use_rust_lexer: false,
             deterministic: false,
-            coverage_enabled: false
+            coverage_enabled: false,
+            mcdc_policy: McdcPolicy.StaticOff
         )
 
     static fn from_env() -> CompilerConfig:
@@ -115,6 +150,12 @@ impl CompilerConfig:
         if val cov_value = cov_env:
             if cov_value == "1":
                 config.coverage_enabled = true
+                config.mcdc_policy = McdcPolicy.StaticOn
+
+        val mcdc_env = env_get("SIMPLE_MCDC_MODE")
+        if val mcdc_value = mcdc_env:
+            config.mcdc_policy = McdcPolicy.from_text(mcdc_value)
+            config.coverage_enabled = config.mcdc_policy.emits_manifest()
 
         config
 
@@ -138,6 +179,18 @@ impl CompilerConfig:
                     self.deterministic = true
                 case "--coverage":
                     self.coverage_enabled = true
+                    self.mcdc_policy = McdcPolicy.StaticOn
+                case "--mcdc":
+                    self.coverage_enabled = true
+                    self.mcdc_policy = McdcPolicy.StaticOn
+                case "--mcdc-mode":
+                    if i + 1 < args.len():
+                        self.mcdc_policy = McdcPolicy.from_text(args[i + 1])
+                        self.coverage_enabled = self.mcdc_policy.emits_manifest()
+                        i = i + 1
+                    else:
+                        self.mcdc_policy = McdcPolicy.Invalid
+                        self.coverage_enabled = false
                 case _:
                     # Check for --key=value form
                     if arg.starts_with("--") and arg.contains("="):
