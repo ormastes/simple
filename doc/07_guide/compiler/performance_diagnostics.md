@@ -46,7 +46,8 @@ native outcomes and serialized MIR change. It
 never substitutes `candidates=1` merely because a function changed, and a newly active
 function pass without an exact outcome adapter fails closed. This is a
 structural receipt with indexed identity, CFG-target, canonical access-coverage, and
-declared operand/local checks, but not yet proof of SSA dominance, type correctness, ownership, or
+declared operand/local checks plus exact function ABI-local type checks, but not yet proof
+of opcode type correctness, SSA dominance, ownership, or
 semantic equivalence; those omissions remain explicit blockers for `--verify-each`.
 
 ## Diagnostic policy
