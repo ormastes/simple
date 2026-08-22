@@ -6,7 +6,12 @@ Audience: lint CLI, LSP, and machine-output maintainers.
 # @req: REQ-009, REQ-010
 
 use std.spec.*
-use compiler.tools.lint._LintMain.config_and_model.{LintDiag, LintRunResult, LintLevel, LintCategory}
+use std.fs.{read_file}
+use compiler.tools.lint._LintMain.config_and_model.{
+    LintDiag, LintRunResult, LintLevel, LintCategory, LintEvidenceTier,
+    LintConfig, LintProfile, apply_config_level_for_evidence,
+    lint_diag_effective_level, lint_run_result_apply_cli_policy
+}
 
 describe "performance diagnostic records":
     it "renders stable evidence and uncertainty without claiming a proven fix":
@@ -17,8 +22,49 @@ describe "performance diagnostic records":
         ).with_fix("consider building an index")
          .with_evidence(["outer=orders.len", "lookup=users.len", "cost=O(orders.len*users.len)"])
          .with_uncertainty("receiver mutation summary unavailable")
+         .with_evidence_tier(LintEvidenceTier.SourcePattern)
         val rendered = LintRunResult.new("fixture.spl", 7, 3, lint).format()
         expect(rendered).to_contain("warning[COLL010]")
         expect(rendered).to_contain("evidence: cost=O(orders.len*users.len)")
         expect(rendered).to_contain("uncertainty: receiver mutation summary unavailable")
+        expect(rendered).to_contain("confidence: source-pattern")
         expect(lint.easy_fix).to_be_nil()
+
+    it "keeps uncertain performance advice non-deniable":
+        step("Apply one evidence-aware CLI severity policy")
+        val uncertain = LintDiag.new(
+            "COLL010", LintLevel.Warn, LintCategory.Warning,
+            "source-shape lookup candidate"
+        ).with_uncertainty("receiver type unavailable")
+         .with_evidence_tier(LintEvidenceTier.SourcePattern)
+        val proven = LintDiag.new(
+            "COLL010", LintLevel.Warn, LintCategory.Warning,
+            "typed repeated linear lookup"
+        ).with_evidence(["receiver=Array<User>", "lookup_cost=linear"])
+         .with_evidence_tier(LintEvidenceTier.TypedProven)
+        expect(lint_diag_effective_level(uncertain, true)).to_equal(LintLevel.Warn)
+        expect(lint_diag_effective_level(proven, true)).to_equal(LintLevel.Deny)
+        val robust = LintConfig.new()
+        robust.set_profile(LintProfile.Robust)
+        expect(apply_config_level_for_evidence(
+            robust, "COLL010", LintLevel.Warn,
+            LintEvidenceTier.SourcePattern)).to_equal(LintLevel.Warn)
+        expect(apply_config_level_for_evidence(
+            robust, "COLL010", LintLevel.Warn,
+            LintEvidenceTier.TypedProven)).to_equal(LintLevel.Deny)
+        val rendered = lint_run_result_apply_cli_policy(
+            LintRunResult.new("fixture.spl", 9, 1, uncertain), true).format()
+        expect(rendered).to_contain("warning[COLL010]")
+
+    it "projects evidence severity without parsing or scanning source":
+        step("Keep performance severity metadata-only")
+        val source = read_file("src/compiler/90.tools/lint/_LintMain/config_and_model.spl")
+        val begin = source.find("fn apply_config_level_for_evidence(")
+        val finish = source.find("fn lint_diag_effective_level(")
+        val policy = source.substring(begin, finish)
+        expect(begin).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(begin)
+        expect(policy).not.to_contain("parse_module")
+        expect(policy).not.to_contain("read_file")
+        expect(policy).not.to_contain("split(")
+        expect(policy).not.to_contain("check_collection_patterns")
