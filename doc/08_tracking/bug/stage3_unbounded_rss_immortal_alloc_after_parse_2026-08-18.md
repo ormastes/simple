@@ -127,3 +127,36 @@ does **not** yet have source-matched Stage 3 timing or peak-RSS admission.
 Stage 4, the Simple optimizer, SPipe/docgen, and final ledger publication remain
 blocked. Do not report this bug fixed until one clean-host Stage 2/3 transaction
 reaches a terminal receipt and the canonical RSS sampler records the result.
+
+## Four-core producer and Stage 3 safety stop (2026-08-22)
+
+A later source-matched retry completed the canonical receipt-free Stage 2
+producer with `--full-bootstrap --stop-after-stage2 --mode=dynload --jobs=4`.
+It exited 0 after 1:11:20 wall time, averaged 322% CPU, peaked at 2,794,780 KiB
+RSS, and used no swap. The Stage 2 sanity and struct-receiver/runtime capability
+proofs passed and the compiler was admitted. A fresh planner-admission-v2
+receipt bound to that compiler also passed the read-only policy validator.
+
+The canonical one-thread Stage 3 resume then released all 687 surfaces and
+entered `phase3:hir:imports:start` for `src/compiler/driver/driver.spl`. RSS was
+11,404,492 KiB at HIR 1/687, 19,520,888 KiB 39 seconds later, and 25,736,636
+KiB shortly afterward without advancing past that import step. To protect the
+shared host, only this owned compiler child was sent SIGTERM. `/usr/bin/time`
+recorded exit 143 after 7:03.55 and a 26,419,744 KiB peak, with no swap.
+
+This is not evidence that the qualified-symbol index itself added 19 GiB. Its
+two 256-head bucket arrays and per-binding scalar/reference arrays are bounded
+to a few MiB even across 687 retained module tables; it also changes qualified
+bind from aggregate O(n^2) to O(n) and lookup from O(n) to average O(1). The
+earlier 7,341 MiB observation was an earlyoom interruption, not a completed
+peak, so the two termination points are not an A/B regression comparison.
+
+The evidence instead tightens the existing root cause to recursive promotion
+of the closure-wide `SymbolTable` embedded in the first `HirModule`, with the
+no-GC/immortal owner retaining imported symbols and auxiliary lookup state.
+The next bounded Pure-Simple fix must instrument symbol cardinality and promoted
+nodes/bytes immediately around each HIR-module promotion, then retain only the
+downstream-required snapshot or rebuild lowering-only accelerators. Preserve
+the public `SymbolTable` API and run an identical-parent A/B before changing the
+qualified index. Stage 3, Stage 4, optimizer, SPipe/docgen, and ledger PASS stay
+blocked until that measured fix converges.
