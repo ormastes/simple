@@ -13,7 +13,8 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.mir_opt.mir_opt.mod.{
     PassRunDisposition, mir_structural_verification_receipt,
-    mir_module_structural_verification_receipt, run_named_pass_with_record
+    mir_module_structural_verification_receipt, run_named_pass_with_record,
+    run_pass_on_module_checked
 }
 
 fn _pv_block(id: i64, terminator: MirTerminator) -> MirBlock:
@@ -181,6 +182,28 @@ describe "MIR optimizer structural verifier":
         expect(receipt.error_codes.contains("MIRVM001")).to_equal(true)
         expect(receipt.error_codes.contains("MIRV011")).to_equal(true)
         expect(receipt.errors[0]).to_contain("function map key 7")
+
+    it "rejects a malformed module before checked pass dispatch":
+        step("Fail closed at the checked module boundary")
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[SymbolId(id: 193)] = _pv_function([], 0)
+        val result = run_pass_on_module_checked("write_coalesce", MirModule(
+            "invalid_checked_module", functions, {}, {}, {}))
+        expect(result.is_err()).to_equal(true)
+        expect(result.err().unwrap()).to_contain("MIRV011")
+
+    it "runs a valid module through the recorded function boundary":
+        step("Preserve a valid unchanged module through checked dispatch")
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[SymbolId(id: 193)] = _pv_function([
+            _pv_block(0, MirTerminator.Ret(nil))
+        ], 0)
+        val result = run_pass_on_module_checked("write_coalesce", MirModule(
+            "valid_checked_module", functions, {}, {}, {}))
+        expect(result.is_ok()).to_equal(true)
+        val receipt = mir_module_structural_verification_receipt(result.ok().unwrap())
+        expect(receipt.valid).to_equal(true)
+        expect(receipt.function_count).to_equal(1)
 
     it "records an honest unchanged active function pass":
         step("Record a verified optimizer outcome")
