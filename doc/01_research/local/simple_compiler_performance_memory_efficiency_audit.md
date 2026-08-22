@@ -1921,3 +1921,22 @@ collection still contain module-global mutable state. Introduce a serial in-proc
 fresh compilation/diagnostic context per file, pass source directly to lint, tag
 results with discovery ordinals and preserve standalone per-file isolation. Move
 parser-owned globals into request/session state before bounded workers are enabled.
+
+### Variable-reassignment analysis map audit
+
+The active SSA/JIT admission analysis represented counts, alias parents, borrowed
+roots and escaped roots as parallel arrays. Each instruction/operand linearly
+searched growing local sets; alias resolution repeated that search up to 64 times,
+and unique insertions copied growing arrays under current value semantics. For `I`
+visits and `L` locals this produced `O(I*L + L²)` work and quadratic cumulative
+copied-element traffic.
+
+The analyzer now uses local `Dict<i64,i64>` count/alias maps and
+`Dict<i64,bool>` sets. Membership is always `contains_key` followed by a typed
+bracket read; local ID 0 never passes through optional truthiness. Alias walking
+retains its exact 64-transition bound and no path compression. Instruction order
+is unchanged: check the destination against its old root, count the definition,
+capture Ref borrows, capture escapes using old aliases, then install/reset the
+new alias. Final count/escape aggregation is commutative, so dictionary key order
+cannot affect public booleans, counts, reasons or fixed JIT fact order. Expected
+runtime is `O(I*64 + L)` with `O(L)` retained state.
