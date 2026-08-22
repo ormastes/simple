@@ -1,5 +1,5 @@
 use std.spec.*
-use std.io_runtime.{env_get}
+use std.io_runtime.{env_get, file_read}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 
 extern fn rt_process_run_timeout(
@@ -28,6 +28,24 @@ fn run_lint_trace_probe(mode: text) -> (text, text, i32):
         simple_binary(), args, 30000)
 
 describe "silent parser trace channel":
+    it "scopes one compiler-trace snapshot across FlatAstBridge conversion":
+        val assembly = file_read(
+            "src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
+        val nodes = file_read(
+            "src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
+        expect(assembly).to_contain(
+            "val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()")
+        expect(assembly).to_contain(
+            "pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:\n    val saved_compiler_trace_scope")
+        expect(assembly).to_contain(
+            "frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)")
+        expect(assembly).not.to_contain(
+            "flat_module_env_get(\"SIMPLE_COMPILER_TRACE\")")
+        expect(nodes).not.to_contain(
+            "flat_bridge_env_get(\"SIMPLE_COMPILER_TRACE\")")
+        expect(nodes).to_contain(
+            "flat_bridge_env_get(\"SIMPLE_BOOTSTRAP\")")
+
     it "suppresses AST reset stdout only inside silent parsing":
         val silent = run_trace_probe("silent", "ast")
         expect(silent.2).to_equal(0)

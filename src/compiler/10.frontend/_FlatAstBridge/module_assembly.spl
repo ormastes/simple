@@ -1,5 +1,9 @@
 # Flat AST Bridge: module assembly (flat_ast_to_module, parse_and_build_module).
 use compiler.frontend.flat_ast_bridge.*
+use compiler.frontend.trace_policy.{
+    frontend_compiler_trace_enabled,
+    frontend_compiler_trace_scope_enter,
+    frontend_compiler_trace_scope_exit}
 # Flat AST Bridge
 #
 # Converts the core parser's flat, index-based AST into the richer frontend
@@ -82,7 +86,7 @@ fn flat_bootstrap_enabled() -> bool:
     flat_module_env_get("SIMPLE_BOOTSTRAP") == "1"
 
 fn flat_bridge_trace_enabled() -> bool:
-    (flat_module_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    frontend_compiler_trace_enabled()
 
 fn flat_module_trace_function(stage: text, fn_: ParserFunction):
     if flat_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
@@ -138,10 +142,13 @@ fn flat_i64_list_at(raw: text, target: i64) -> i64:
     0
 
 fn flat_ast_to_module(path: text) -> ParserModule:
+    val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
     if flat_bridge_trace_enabled():
         print "[flat-bridge] path={path}"
     if flat_bootstrap_enabled() and not flat_is_bootstrap_entry_path(path):
-        return flat_empty_module(path)
+        val empty_module = flat_empty_module(path)
+        frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
+        return empty_module
     if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
         eprint("[flat-bridge] bootstrap real entry:start")
     val raw_decl_count = module_decl_count_get()
@@ -1080,6 +1087,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     built_module.extend_enums = build_parser_extend_enums()
     if flat_bridge_trace_enabled():
         print "[flat-bridge] built frontend module path={path}"
+    frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
     built_module
 
 
@@ -1231,6 +1239,7 @@ pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) ->
     Some(built)
 
 pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:
+    val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
     val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     reset_all_pools()
@@ -1300,6 +1309,7 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     else:
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
     built_module
 
 fn parse_and_build_module(source: text, path: text) -> ParserModule:
