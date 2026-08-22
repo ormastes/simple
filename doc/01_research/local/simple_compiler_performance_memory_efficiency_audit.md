@@ -1959,6 +1959,30 @@ array before the lint pipeline allocated its own. Work remains linear, but one
 full split and its allocation volume/churn are removed. Peak RSS improvement
 requires measurement because the two arrays were not proven simultaneously live.
 
+### Silent frontend trace-output audit
+
+`parse_module_silent_checked` suppressed parser errors but inherited trace/profile
+knobs could still write parser-init, AST-reset, parser-warning, parser-type,
+per-token profile, debug-pass, statement-tag and expression-tag lines to stdout.
+Post-parse AST lint walks could emit some of the same instrumentation, so a
+parser-local flag was insufficient for machine JSON.
+
+A cycle-free frontend trace-policy owner now provides a nested scalar suppression
+scope. Silent parsing establishes it before preprocessing/parser initialization;
+the structured lint collector holds it across parsing and AST lint traversal.
+Affected trace predicates consult the scope before output and restore the caller's
+prior value on normal return. Cached-off token/tag paths avoid a new policy call;
+ordinary parsing retains its trace knobs and channels. The expression-call
+constructor caches its trace decision once, replacing six identical environment
+reads per allocation with one.
+
+This does not authorize in-process workspace compilation. Cleanup-safe unwinding
+and request-owned parser/AST arenas remain required. Always-on stale-index
+containment diagnostics remain active and update their sequence/deduplication
+state. Ordinary calls retain stdout; machine-output scopes route them to stderr
+so they cannot splice text into a JSON envelope.
+Timing and RSS effects remain measurement-required under the no-verify instruction.
+
 ### Variable-reassignment analysis map audit
 
 The active SSA/JIT admission analysis represented counts, alias parents, borrowed
