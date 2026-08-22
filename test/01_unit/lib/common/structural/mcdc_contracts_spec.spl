@@ -8,6 +8,14 @@ use std.common.structural.environment_instruction.contracts.*
 fn decision() -> McdcDecisionIdV1:
     mcdc_decision_id_v1(11, 12, 100, 3)
 
+fn exclusion(kind: ExclusionKindV1, reason_length: i64 = 24,
+             evidence_hi: i64 = 61, evidence_lo: i64 = 62,
+             owner: i64 = 71, review: i64 = 100,
+             expiry: i64 = 200) -> ScenarioExclusionV1:
+    scenario_exclusion_v1(
+        31, kind, 41, 0, reason_length, 24, 51,
+        evidence_hi, evidence_lo, owner, review, expiry)
+
 describe "bounded MC/DC evidence contracts":
     describe "REQ-001 and REQ-002: stable decisions and correlated vectors":
         it "accepts a bounded stable decision and short-circuit vector":
@@ -85,26 +93,51 @@ describe "bounded MC/DC evidence contracts":
             expect(mcdc_coverage_summary_v1_is_exact_100(empty)).to_be(false)
             expect(mcdc_coverage_summary_v1_is_exact_100(all_excluded)).to_be(false)
 
-        it "joins a governed capability exclusion to the exact stable decision":
-            val excluded = scenario_exclusion_v1(
-                31, ExclusionKindV1.CapabilityUnavailable, 41,
-                0, 24, 24, 51, 61, 62, 71, 100, 200)
+        it "joins each of the five governed REQ-018 kinds":
+            val kinds = [
+                ExclusionKindV1.CapabilityUnavailable,
+                ExclusionKindV1.FixtureUnavailable,
+                ExclusionKindV1.PlatformInapplicable,
+                ExclusionKindV1.SafetyProhibited,
+                ExclusionKindV1.UncontrollableNondeterminism]
+            for kind in kinds:
+                val joined = mcdc_decision_exclusion_v1(decision(), exclusion(kind))
+                expect(mcdc_decision_exclusion_v1_well_formed(
+                    joined, decision(), 150)).to_be(true)
+
+        it "joins a governed exclusion only to the exact stable decision":
+            val excluded = exclusion(ExclusionKindV1.CapabilityUnavailable)
             val wrong_span = mcdc_decision_id_v1(11, 12, 101, 3)
             val joined = mcdc_decision_exclusion_v1(decision(), excluded)
             expect(mcdc_decision_exclusion_v1_well_formed(joined, decision(), 150)).to_be(true)
             expect(mcdc_decision_exclusion_v1_well_formed(joined, wrong_span, 150)).to_be(false)
 
-        it "rejects non-capability and stale exclusions from the eligible join":
-            val fixture = scenario_exclusion_v1(
-                31, ExclusionKindV1.FixtureUnavailable, 41,
-                0, 24, 24, 51, 61, 62, 71, 100, 200)
-            val stale = scenario_exclusion_v1(
-                31, ExclusionKindV1.CapabilityUnavailable, 41,
-                0, 24, 24, 51, 61, 62, 71, 100, 149)
-            val fixture_join = mcdc_decision_exclusion_v1(decision(), fixture)
+        it "rejects invalid and stale kinds from the eligible join":
+            val invalid = exclusion(ExclusionKindV1.Invalid)
+            val stale = exclusion(
+                ExclusionKindV1.CapabilityUnavailable, expiry: 149)
+            val invalid_join = mcdc_decision_exclusion_v1(decision(), invalid)
             val stale_join = mcdc_decision_exclusion_v1(decision(), stale)
-            expect(mcdc_decision_exclusion_v1_well_formed(fixture_join, decision(), 150)).to_be(false)
+            expect(mcdc_decision_exclusion_v1_well_formed(invalid_join, decision(), 150)).to_be(false)
             expect(mcdc_decision_exclusion_v1_well_formed(stale_join, decision(), 150)).to_be(false)
+
+        it "rejects missing reason, evidence, and owner fields":
+            val blank_reason = exclusion(
+                ExclusionKindV1.FixtureUnavailable, reason_length: 0)
+            val no_evidence = exclusion(
+                ExclusionKindV1.PlatformInapplicable,
+                evidence_hi: 0, evidence_lo: 0)
+            val no_owner = exclusion(
+                ExclusionKindV1.SafetyProhibited, owner: 0)
+            expect(mcdc_decision_exclusion_v1_well_formed(
+                mcdc_decision_exclusion_v1(decision(), blank_reason),
+                decision(), 150)).to_be(false)
+            expect(mcdc_decision_exclusion_v1_well_formed(
+                mcdc_decision_exclusion_v1(decision(), no_evidence),
+                decision(), 150)).to_be(false)
+            expect(mcdc_decision_exclusion_v1_well_formed(
+                mcdc_decision_exclusion_v1(decision(), no_owner),
+                decision(), 150)).to_be(false)
 
         it "passes normal coverage only with exact 100 percent and validated exclusions":
             val summary = mcdc_coverage_summary_v1(10, 2, 8)
