@@ -1132,3 +1132,8 @@ remove duplicate availability probes. Readiness passes 12/12 while each path
 keeps one direct raw constructor call. Next migrate softmax/log-softmax/leaky-
 relu, then scalar status/value results; cryptographic provider admission and
 C++ exception barriers remain pending.
+
+Softmax, log-softmax, and leaky ReLU now preserve typed errors end-to-end.
+Readiness passes 13/13 and each wrapper retains one direct raw call. Next
+migrate scalar reductions to status/value results so valid numeric zero cannot
+be confused with provider failure; signed admission remains pending.

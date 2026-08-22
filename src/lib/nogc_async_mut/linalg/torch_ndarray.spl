@@ -1,5 +1,5 @@
 use std.ndarray.*
-use std.common.torch.dyn_sffi_ops.{dyn_torch_tensor_add_scalar_result, dyn_torch_tensor_arange_result, dyn_torch_tensor_argmax_result, dyn_torch_tensor_argmin_result, dyn_torch_tensor_clone_result, dyn_torch_tensor_contiguous_result, dyn_torch_tensor_det, dyn_torch_tensor_div_scalar_result, dyn_torch_tensor_eye_result, dyn_torch_tensor_free, dyn_torch_tensor_inverse_result, dyn_torch_tensor_leaky_relu, dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_linspace_result, dyn_torch_tensor_log_softmax, dyn_torch_tensor_matmul_result, dyn_torch_tensor_max, dyn_torch_tensor_max_dim_result, dyn_torch_tensor_mean, dyn_torch_tensor_mean_dim_result, dyn_torch_tensor_min, dyn_torch_tensor_min_dim_result, dyn_torch_tensor_mul_scalar_result, dyn_torch_tensor_norm, dyn_torch_tensor_pow_result, dyn_torch_tensor_slice_result, dyn_torch_tensor_softmax, dyn_torch_tensor_squeeze_dim_result, dyn_torch_tensor_std, dyn_torch_tensor_sub_scalar_result, dyn_torch_tensor_sum, dyn_torch_tensor_sum_dim_result, dyn_torch_tensor_unsqueeze_result, dyn_torch_tensor_var}
+use std.common.torch.dyn_sffi_ops.{dyn_torch_tensor_add_scalar_result, dyn_torch_tensor_arange_result, dyn_torch_tensor_argmax_result, dyn_torch_tensor_argmin_result, dyn_torch_tensor_clone_result, dyn_torch_tensor_contiguous_result, dyn_torch_tensor_det, dyn_torch_tensor_div_scalar_result, dyn_torch_tensor_eye_result, dyn_torch_tensor_free, dyn_torch_tensor_inverse_result, dyn_torch_tensor_leaky_relu_result, dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_linspace_result, dyn_torch_tensor_log_softmax_result, dyn_torch_tensor_matmul_result, dyn_torch_tensor_max, dyn_torch_tensor_max_dim_result, dyn_torch_tensor_mean, dyn_torch_tensor_mean_dim_result, dyn_torch_tensor_min, dyn_torch_tensor_min_dim_result, dyn_torch_tensor_mul_scalar_result, dyn_torch_tensor_norm, dyn_torch_tensor_pow_result, dyn_torch_tensor_slice_result, dyn_torch_tensor_softmax_result, dyn_torch_tensor_squeeze_dim_result, dyn_torch_tensor_std, dyn_torch_tensor_sub_scalar_result, dyn_torch_tensor_sum, dyn_torch_tensor_sum_dim_result, dyn_torch_tensor_unsqueeze_result, dyn_torch_tensor_var}
 use std.common.torch.dyn_sffi_tensor_ops.{dyn_torch_tensor_atan2_result, dyn_torch_tensor_binary_op_result, dyn_torch_tensor_cat_2_result, dyn_torch_tensor_cat_3_result, dyn_torch_tensor_cat_4_result, dyn_torch_tensor_copy_values_result, dyn_torch_tensor_from_values_1d_result, dyn_torch_tensor_from_values_2d_result, dyn_torch_tensor_permute_2d_result, dyn_torch_tensor_permute_3d_result, dyn_torch_tensor_permute_4d_result, dyn_torch_tensor_reshape_1d_result, dyn_torch_tensor_reshape_2d_result, dyn_torch_tensor_reshape_3d_result, dyn_torch_tensor_reshape_4d_result, dyn_torch_tensor_stack_2_result, dyn_torch_tensor_stack_3_result, dyn_torch_tensor_stack_4_result, dyn_torch_tensor_to_float_result}
 use std.linalg.linalg_core.{BackendError, torch_positive_slice_length, float64_values_to_f64, float64_matrix_to_f64}
 use std.linalg.torch_ndarray_helpers.{torch_arange_count, torch_fill_handle_f64, torch_create_handle_f64, torch_unary_handle_f64}
@@ -175,9 +175,9 @@ class TorchNDArray:
     fn leaky_relu_f64(negative_slope: Float64) -> Result<TorchNDArray, BackendError>:
         if self.dtype != DType.F64:
             return Err(BackendError.BackendExecutionFailed("pytorch tensor owner only supports Float64 leaky_relu"))
-        val handle = dyn_torch_tensor_leaky_relu(self.handle, negative_slope.value)
-        if handle <= 0:
-            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_leaky_relu_bits"))
+        val handle = match dyn_torch_tensor_leaky_relu_result(self.handle, negative_slope.value):
+            case Ok(value): value
+            case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch leaky_relu failed: " + reason))
         Ok(TorchNDArray(
             handle: handle,
             shape: self.shape,
@@ -676,15 +676,16 @@ class TorchNDArray:
             normalized = self.shape.dims.len() + normalized
         if normalized < 0 or normalized >= self.shape.dims.len():
             return Err(BackendError.BackendExecutionFailed("pytorch tensor owner softmax received invalid axis"))
-        var handle = 0
+        var result: Result<i64, text> = Err("unsupported_softmax_op")
         if op == "softmax":
-            handle = dyn_torch_tensor_softmax(self.handle, normalized)
+            result = dyn_torch_tensor_softmax_result(self.handle, normalized)
         elif op == "log_softmax":
-            handle = dyn_torch_tensor_log_softmax(self.handle, normalized)
+            result = dyn_torch_tensor_log_softmax_result(self.handle, normalized)
         else:
             return Err(BackendError.BackendExecutionFailed("unsupported pytorch tensor owner softmax op"))
-        if handle <= 0:
-            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_softmax"))
+        val handle = match result:
+            case Ok(value): value
+            case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch " + op + " failed: " + reason))
         Ok(TorchNDArray(
             handle: handle,
             shape: self.shape,

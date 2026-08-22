@@ -1434,3 +1434,9 @@ and propagates the provider reason before conversion. Readiness passes 12/12;
 each constructor retains one availability query, input checks, one direct raw
 call, and one handle check, with no added allocation, lookup, hash, I/O, retry,
 or synchronization. The raw provider remains unsafe-tagged and unverified.
+
+Dynamic Torch softmax, log-softmax, and leaky ReLU now return typed errors
+through `TorchNDArray` instead of fabricating handle zero. Readiness passes
+13/13. Each path keeps one availability query, one direct raw call, and
+constant input/output checks with no allocation, lookup, hashing, I/O, retry,
+or synchronization added. The foreign implementations remain unsafe-tagged.
