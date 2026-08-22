@@ -32,12 +32,15 @@ Every ledger v3 row also names its owner and unblock condition. Unowned rows,
 unfinished rows without actionable unblock text, and PASS rows that retain a
 pending unblock condition fail closed. The focused fixture obtains its PASS
 ledger from the bootstrap producer and then feeds that committed result through
-the real pre-push ref-input path.
-An exact legacy canonical payload preserved as `pre-push.local` is recognized
-as duplicate and runs only through the canonical dispatcher path; unrelated
-local hooks remain chained.
+the real pre-push ref-input path. It also creates two linked worktrees with one
+shared Git hooks directory, installs from the first, and validates hook
+freshness and wiring from the second. The installed payload is a stable
+worktree-resolving launcher, not an absolute symlink to whichever checkout ran
+setup last. Exact legacy guard or dispatcher payloads are replaced without
+being preserved recursively; unrelated local hooks remain chained.
 
-Focused evidence: `sh test/01_unit/scripts/must_check_tiering_test.shs`.
+Focused evidence: `sh test/01_unit/scripts/must_check_tiering_test.shs` produced
+`selftest=4s ref-path=0s installed-hook=1s` on 2026-08-22 after rebase.
 
 The executable scenario invokes the push self-test, bootstrap self-test, and
 the real bootstrap-produced-ledger to committed-ref push transition fixture.
