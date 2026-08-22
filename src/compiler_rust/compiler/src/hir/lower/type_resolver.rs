@@ -20,10 +20,26 @@ impl Lowerer {
                 }
             }
         }
-        self.unique_global_struct_owners
+        if let Some(owner) = self
+            .unique_global_struct_owners
             .as_ref()
             .and_then(|owners| owners.get(name))
-            .cloned()
+        {
+            return Some(owner.clone());
+        }
+        // Plain-name fallback: `global_struct_defs` is keyed by the BARE struct
+        // name whenever there is no cross-module owner map (single-module
+        // compiles, and every direct `set_global_struct_defs` caller). Without
+        // this, `global_struct_key_for_name` returned None for such a map, so
+        // `global_struct_fields_for_name` -- and with it every name-based
+        // global field/type lookup in `expr/access.rs` -- silently reported
+        // "no such struct", collapsing `t.compiler_ctx.handle` to struct 'ANY'
+        // and failing the field-type inference. Qualified owners still win, so
+        // the multi-module keying is unchanged.
+        self.global_struct_defs
+            .as_ref()
+            .is_some_and(|defs| defs.contains_key(name))
+            .then(|| name.to_string())
     }
 
     pub(super) fn global_struct_fields_for_name(&self, name: &str) -> Option<&Vec<(String, Type)>> {

@@ -656,8 +656,19 @@ fn test_lower_local_function_value_call_uses_function_return_type() {
     .unwrap();
 
     let func = module.functions.iter().find(|f| f.name == "test").expect("test fn");
+    // The call-result local is `value` (locals are [holder, thunk, value]);
+    // index 1 is `thunk`, the fn-VALUE local, whose type is correctly the
+    // function type, not its return type. Look the local up by name so the
+    // assertion below tests what its message says. Contract (call result takes
+    // the callee's declared return type via `call_return_type`) has held since
+    // cfe0506e336; the assertion itself is unchanged.
+    let value_local = func
+        .locals
+        .iter()
+        .find(|l| l.name == "value")
+        .expect("call result local `value`");
     assert_eq!(
-        func.locals[1].ty,
+        value_local.ty,
         TypeId::I64,
         "call result local must be typed as the function return type"
     );

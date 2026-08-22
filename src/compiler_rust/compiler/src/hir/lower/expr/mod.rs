@@ -331,13 +331,31 @@ impl Lowerer {
                 ty,
             })
         } else if let Some(ty) = self.named_callable_value_type(name) {
+            // `named_callable_value_type` resolves the alias FIRST
+            // (`resolve_function_alias`), so a `use m.{f as g}` reaching here
+            // was typed from `f` but still emitted `Global("g")` -- a symbol
+            // nothing defines, because flattening merges the import under its
+            // ORIGINAL name. Emit the symbol whose type we just took.
+            let symbol = self
+                .resolve_function_alias(name)
+                .map(str::to_string)
+                .unwrap_or_else(|| name.to_string());
             Ok(HirExpr {
-                kind: HirExprKind::Global(name.to_string()),
+                kind: HirExprKind::Global(symbol),
                 ty,
             })
         } else if let Some(ty) = self.globals.get(name).copied() {
+            // Same alias correction as the callable branch above:
+            // `materialize_import_aliases` records BOTH a function alias and a
+            // global typed under the ALIAS name, so `use m.{f as g}` whose
+            // target is not inlined into `module.functions` landed here and
+            // emitted `Global("g")` -- unresolved at link time.
+            let symbol = self
+                .resolve_function_alias(name)
+                .map(str::to_string)
+                .unwrap_or_else(|| name.to_string());
             Ok(HirExpr {
-                kind: HirExprKind::Global(name.to_string()),
+                kind: HirExprKind::Global(symbol),
                 ty,
             })
         } else {
@@ -1099,9 +1117,18 @@ impl Lowerer {
         if matches!(method, "push" | "append") && hir_args.len() == 1 {
             if let HirExprKind::Local(local_index) = receiver.kind {
                 if self.untyped_empty_array_locals.remove(&local_index) {
+                    // Keep the literal's declared size. Hardcoding `None` here
+                    // dropped the `[]` literal's `Some(0)`, so this path -- which
+                    // runs BEFORE the sibling refinement in `lower_method_call`
+                    // and consumes the `untyped_empty_array_locals` entry it
+                    // needs -- silently disagreed with it about the refined type.
+                    let size = match self.module.types.get(receiver.ty) {
+                        Some(HirType::Array { size, .. }) => *size,
+                        _ => None,
+                    };
                     let specialized_array_ty = self.module.types.register(HirType::Array {
                         element: hir_args[0].ty,
-                        size: None,
+                        size,
                     });
                     if let Some(local) = ctx.locals.get_mut(local_index) {
                         local.ty = specialized_array_ty;

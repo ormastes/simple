@@ -869,6 +869,33 @@ impl Lowerer {
         self.current_file = Some(resolved.path.clone());
 
         let result = (|| {
+            // Transitive type NAMES first, mirroring the entry module's Pass
+            // 0.5a in module_pass.rs. Without this, only the ENTRY module's
+            // `use` statements ever pre-registered names, so a symbol whose
+            // signature mentions a type the IMPORTED module itself imports
+            // (`trait InputBackend: me poll_mouse() -> MouseEvent?` in a module
+            // that does `use input.event.{MouseEvent}`) failed with
+            // `Unknown type: MouseEvent`, the whole import was abandoned with a
+            // [WARN], and the value degraded to ANY -- which then fails every
+            // later field access. Names only, and `preregister_imported_type_names`
+            // is already cycle-safe, so this cannot recurse unboundedly.
+            for item in &imported_module.items {
+                if let Node::UseStmt(use_stmt) = item {
+                    let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+                }
+            }
+            // ...then their full definitions (Pass 0.5b's counterpart). The
+            // name alone only yields an EMPTY placeholder struct, so field
+            // access on it still fails; the fields have to come across too.
+            // Cycle-guarded by `loaded_modules`/`loaded_import_targets` above,
+            // and failures stay non-fatal here exactly as they are for the
+            // entry module.
+            for item in &imported_module.items {
+                if let Node::UseStmt(use_stmt) = item {
+                    let _ = self.load_imported_types(&use_stmt.path, &use_stmt.target);
+                }
+            }
+
             let imported_count = self.register_imported_symbols_from_items(&imported_module.items, target)?;
 
             if imported_count == 0 && resolved.path.file_name().is_some_and(|name| name == "__init__.spl") {
@@ -1277,10 +1304,28 @@ fn pressed(backend: InputBackend) -> bool:
             .expect("pressed function");
         let body = format!("{:?}", pressed.body);
 
-        assert!(
-            body.contains("left_just_pressed"),
-            "optional trait result field must lower as a field access: {body}"
-        );
+        // `HirExprKind::FieldAccess` carries a `field_index`, never the field
+        // NAME (contract since cfe0506e336), so grepping the Debug output for
+        // "left_just_pressed" could only ever match the FAILURE shape, where
+        // the access degraded to a named dynamic call. Assert the shape the
+        // test name describes instead: `event.left_just_pressed` lowers to a
+        // FieldAccess on MouseEvent's only field, typed bool.
+        let returned = pressed
+            .body
+            .iter()
+            .find_map(|stmt| match stmt {
+                HirStmt::If { then_block, .. } => then_block.iter().find_map(|inner| match inner {
+                    HirStmt::Return(Some(value)) => Some(value),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("optional trait result must return a field access: {body}"));
+        let HirExprKind::FieldAccess { field_index, .. } = &returned.kind else {
+            panic!("optional trait result field must lower as a field access: {body}");
+        };
+        assert_eq!(*field_index, 0, "MouseEvent.left_just_pressed is field 0: {body}");
+        assert_eq!(returned.ty, TypeId::BOOL, "field type must survive the import: {body}");
     }
 
     #[test]
