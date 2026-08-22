@@ -1,70 +1,86 @@
 """
-# CORE Integration Test
-
-**Feature IDs:** #CORE-INT
-**Category:** Integration Testing
-**Status:** Implemented
+## Purpose and audience
+Purpose: Pin core_integration behavior with real computed-value oracles so regressions in the
+stdlib surface this spec covers fail loudly instead of passing vacuously.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-INT-CORE-INTEGRATION-8306
+doc/01_research/local/REQ-INT-CORE-INTEGRATION-8306.md
+doc/03_plan/sys_test/REQ-INT-CORE-INTEGRATION-8306.md
+doc/04_architecture/REQ-INT-CORE-INTEGRATION-8306.md
+doc/05_design/REQ-INT-CORE-INTEGRATION-8306.md
 """
+# @req: REQ-INT-CORE-INTEGRATION-8306
+
+# core_integration behavior oracles — every expect() compares a computed value against a
+# named expected constant (see the "# oracle:" comments), never x == x.
 
 use std.spec
+use std.spec.step
+use std.math.{abs, min, max, sqrt, floor, ceil}
+use std.string_core.{char_code, char_from_code}
 
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-
-describe "CORE Integration":
-    it "lexer to parser":
-        val code = "val x = 42"
-        check(code.contains("val"))
-        
-    it "parser to AST":
-        
-        val code = "fn foo(): pass"
-        check(code.contains("fn"))
-        
-    it "AST to MIR":
-        
-        val code = "x + y"
-        check(code.contains("+"))
-        
-    it "MIR to backend":
-        
-        val code = "1 + 2"
-        check(code.len() > 0)
-        
-    it "end-to-end pipeline":
-        
-        val input = "test"
-        val result = input + "_processed"
-        check(result == "test_processed")
-        
-    it "error recovery":
-        
-        var error = nil
-        if error == nil:
-            check(true)
-        else:
-            check(false)
-            
-    it "type checking":
-            
-        val x = 5
-        check(x > 0)
-        
-    it "interpreter integration":
-        
-        val arr = [1, 2, 3]
+describe "core_integration stdlib behavior oracles":
+    it "array append and len":
+        # @req: REQ-INT-CORE-INTEGRATION-8306
+        step("Verify: array append and len")
+        # oracle: 4 — append grows the owner list by one and returns it
+        var arr = [1, 2, 3]
+        arr.append(4)
+        expect(arr.len()).to_equal(4)
+        expect(arr[3]).to_equal(4)
+    it "dict read":
+        # @req: REQ-INT-CORE-INTEGRATION-8306
+        step("Verify: dict read")
+        # oracle: 2/1/2 — two keys, value lookup, key count
+        val d = {"a": 1, "b": 2}
+        expect(d.len()).to_equal(2)
+        expect(d["a"]).to_equal(1)
+        expect(d.keys().len()).to_equal(2)
+    it "dict write":
+        # @req: REQ-INT-CORE-INTEGRATION-8306
+        step("Verify: dict write")
+        # oracle: 3 — inserting a new key grows the dict by one
+        val d = {"a": 1, "b": 2}
+        d["c"] = 3
+        expect(d.len()).to_equal(3)
+        expect(d["c"]).to_equal(3)
+    it "option map unwrap":
+        # @req: REQ-INT-CORE-INTEGRATION-8306
+        step("Verify: option map unwrap")
+        # oracle: Some(10)/5 — map doubles the payload; unwrap_or yields it
+        val o = Some(5)
+        expect(o.map(fn (x: i64) -> i64: x * 2)).to_equal(Some(10))
+        expect(o.unwrap_or(0)).to_equal(5)
+        expect(o.is_some()).to_equal(true)
+    it "option none default":
+        # @req: REQ-INT-CORE-INTEGRATION-8306
+        step("Verify: option none default")
+        # oracle: 0 — a nil option falls back to the supplied default
+        expect(nil.unwrap_or(0)).to_equal(0)
+    it "result ok err":
+        # @req: REQ-INT-CORE-INTEGRATION-8306
+        step("Verify: result ok err")
+        # oracle: true/7 — Ok is ok and unwraps; Err is err
+        expect(Ok(7).is_ok()).to_equal(true)
+        expect(Err("e").is_err()).to_equal(true)
+        expect(Ok(7).unwrap_or(0)).to_equal(7)
+    it "char code roundtrip":
+        # @req: REQ-INT-CORE-INTEGRATION-8306
+        step("Verify: char code roundtrip")
+        # oracle: 97/"b" — 'a' is codepoint 97; code 98 decodes to 'b'
+        expect(char_code("a")).to_equal(97)
+        expect(char_from_code(98)).to_equal("b")
+    it "loop accumulates in order":
+        # @req: REQ-INT-CORE-INTEGRATION-8306
+        step("Verify: loop accumulates in order")
+        # oracle: 10 — sum of 0..5 exclusive end
         var sum = 0
-        for x in arr:
-            sum = sum + x
-        check(sum == 6)
-        
-    it "value representation":
-        
-        val opt = Some(100)
-        check(opt.?)
-        check(opt? == 100)
-        
-    it "environment handling":
-        
-        val dict = {"key": "value"}
-        check(dict["key"] == "value")
+        for i in 0..5:
+            sum = sum + i
+        expect(sum).to_equal(10)
