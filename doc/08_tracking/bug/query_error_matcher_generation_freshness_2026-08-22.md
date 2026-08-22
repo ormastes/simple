@@ -53,3 +53,9 @@ Still open under the user's no-verify instruction: an executed stale-output CLI
 negative fixture and runtime parity evidence for the newly authored freshness
 contracts. Until that evidence is permitted, status must not be reported as
 verified or closed.
+
+The generated runtime cascade now lowers fixed hits to direct constant `u64`
+mask tests. This removes helper dispatch and runtime ID/shift work without
+introducing a runtime manifest or changing rule order. Boundary source contracts
+pin low bit 63, high bit 0, and high bit 51; behavioral contracts cover the
+63/64 transition through macro and AOP rules.
