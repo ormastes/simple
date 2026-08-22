@@ -214,16 +214,14 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
     """
     _load_lint_config_for(file, source)
     val lines = source.split("\n")
+    val source_locations = _query_ast_lint_location_index(lines)
     var count = 0
-    if format == "json":
-        count = count + _emit_basic_line_lints(lines, file, format)
-        count = count + _emit_text_heuristic_lints(lines, file, format)
-        count = count + _emit_primitive_api_text(lines, file, format)
-    else:
-        count = count + _emit_basic_line_lints(lines, file, format)
-        count = count + _emit_text_heuristic_lints(lines, file, format)
-        count = count + _emit_primitive_api_text(lines, file, format)
-    count = count + _run_ast_lint_passes(source, lines, file, format)
+    count = count + _emit_basic_line_lints(lines, file, format)
+    count = count + _emit_text_heuristic_lints(
+        lines, source_locations, file, format)
+    count = count + _emit_primitive_api_text(lines, file, format)
+    count = count + _run_ast_lint_passes(
+        source, source_locations, file, format)
     _clear_lint_config_overrides()
     count
 
@@ -266,10 +264,13 @@ fn _emit_basic_line_lints(lines: [text], file: text, format: text) -> i64:
         lint_i = lint_i + 1
     count
 
-fn _emit_text_heuristic_lints(lines: [text], file: text, format: text) -> i64:
+fn _emit_text_heuristic_lints(
+    lines: [text], source_locations: QueryAstLintLocationIndex,
+    file: text, format: text
+) -> i64:
     var count = 0
     count = count + _check_unused_vars_text(lines, file, format)
-    count = count + _check_gc_boundary_imports_text(lines, file, format)
+    count = count + _check_gc_boundary_imports_text(source_locations, file, format)
     count = count + _check_match_exhaustiveness_text(lines, file, format)
     count = count + _check_closure_capture_text(lines, file, format)
     count = count + _check_ignored_return_text(lines, file, format)
@@ -298,25 +299,22 @@ fn _check_param_tag_text(lines: [text], file: text, format: text) -> i64:
         count = count + 1
     count
 
-fn _check_gc_boundary_imports_text(lines: [text], file: text, format: text) -> i64:
+fn _check_gc_boundary_imports_text(
+    source_locations: QueryAstLintLocationIndex, file: text, format: text
+) -> i64:
     """Emit GC/runtime-family boundary warnings for direct source imports."""
     val source_module = _runtime_module_from_file_path(file)
     if source_module == "":
         return 0
 
-    var imported_modules: [text] = []
-    for line in lines:
-        val imported = _extract_import_module_path(line)
-        if imported != "":
-            imported_modules.push(imported)
-
-    val warnings = check_gc_boundary_imports(source_module, imported_modules)
+    val warnings = check_gc_boundary_imports(
+        source_module, source_locations.imported_modules)
     val messages = format_family_warnings(warnings)
     var count = 0
     for msg in messages:
         val w: FamilyImportWarning = warnings[count]
         val imported = w.imported_module
-        val line_num = _find_use_line_in_source(lines, imported)
+        val line_num = source_locations.import_lines[imported] ?? 1
         if format == "json":
             val json_msg = _escape_json(msg)
             _diag_emit_or_collect("{\"severity\":2,\"code\":\"gc_boundary_crossing\",\"message\":\"{json_msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
@@ -569,6 +567,8 @@ struct QueryAstLintLocationIndex:
     callable_lines: Dict<text, i64>
     use_star_lines: Dict<text, i64>
     export_star_lines: Dict<text, i64>
+    imported_modules: [text]
+    import_lines: Dict<text, i64>
 
 fn _query_callable_name(trimmed: text) -> text:
     val is_declaration = trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ") or
@@ -606,6 +606,8 @@ fn _query_ast_lint_location_index(lines: [text]) -> QueryAstLintLocationIndex:
     var callable_lines: Dict<text, i64> = {}
     var use_star_lines: Dict<text, i64> = {}
     var export_star_lines: Dict<text, i64> = {}
+    var imported_modules: [text] = []
+    var import_lines: Dict<text, i64> = {}
     var line_index = 0
     while line_index < lines.len():
         val trimmed = lines[line_index].trim()
@@ -618,8 +620,15 @@ fn _query_ast_lint_location_index(lines: [text]) -> QueryAstLintLocationIndex:
         val export_module = _query_star_module(trimmed, "export ")
         if export_module != "" and not export_star_lines.has(export_module):
             export_star_lines[export_module] = line_index + 1
+        val imported = _extract_import_module_path(lines[line_index])
+        if imported != "":
+            imported_modules.push(imported)
+            if not import_lines.has(imported):
+                import_lines[imported] = line_index + 1
         line_index = line_index + 1
-    QueryAstLintLocationIndex(callable_lines, use_star_lines, export_star_lines)
+    QueryAstLintLocationIndex(
+        callable_lines, use_star_lines, export_star_lines,
+        imported_modules, import_lines)
 
 fn _query_callable_line(index: QueryAstLintLocationIndex, name: text) -> i64:
     index.callable_lines[name] ?? 1
@@ -644,21 +653,6 @@ fn _emit_wildcard_warnings(warnings: [StarWildcardWarning], locations: QueryAstL
         count = count + 1
     count
 
-fn _find_decl_line_in_source(lines: [text], keyword: text, module_path: text) -> i64:
-    var li = 0
-    while li < lines.len():
-        val trimmed = lines[li].trim()
-        if trimmed.starts_with(keyword) and trimmed.contains(module_path):
-            return li + 1
-        li = li + 1
-    1
-
-fn _find_use_line_in_source(lines: [text], module_path: text) -> i64:
-    val line = _find_decl_line_in_source(lines, "use ", module_path)
-    if line > 1:
-        return line
-    _find_decl_line_in_source(lines, "import ", module_path)
-
 fn _severity_text_to_json(severity: text) -> i64:
     """Convert severity string to LSP severity number.
     1=Error, 2=Warning, 3=Information, 4=Hint
@@ -673,7 +667,10 @@ fn _severity_text_to_json(severity: text) -> i64:
         return 2
     2
 
-fn _run_ast_lint_passes(source: text, lines: [text], file: text, format: text) -> i64:
+fn _run_ast_lint_passes(
+    source: text, locations: QueryAstLintLocationIndex,
+    file: text, format: text
+) -> i64:
     """Parse source into AST and run all AST-based lint passes.
 
     Runs the following checks after parsing the source:
@@ -687,8 +684,6 @@ fn _run_ast_lint_passes(source: text, lines: [text], file: text, format: text) -
     Returns the number of diagnostics emitted.
     """
     var count = 0
-    val locations = _query_ast_lint_location_index(lines)
-
     # Parse source into the AST arena. The checked result must cross the parser
     # module boundary by value; parse_module_silent() followed by
     # parser_has_errors() can fail open in self-hosted execution.
