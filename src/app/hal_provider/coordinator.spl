@@ -1,0 +1,347 @@
+# codex-impl
+# Parent-owned process coordinator for rt(hal) provider workers.
+
+use app.io.mod.{
+    process_spawn_piped, process_write_stdin_some, process_read_stdout,
+    process_is_piped_alive, process_close_piped, process_kill,
+    current_time_ms, rt_sleep_ms
+}
+use std.common.structural.hal_provider.*
+
+val HAL_PROCESS_PROTOCOL_V1: text = "HALRES1"
+val HAL_PROCESS_RESPONSE_FIELDS_V1: i64 = 17
+val HAL_PROCESS_MAX_RESPONSE_BYTES_V1: i64 = 512
+
+struct HalWorkerEndpointV1:
+    provider: HalProviderKind
+    command: text
+    args: [text]
+
+fn hal_worker_endpoint_v1(provider: HalProviderKind, command: text,
+                          args: [text]) -> HalWorkerEndpointV1:
+    HalWorkerEndpointV1(provider: provider, command: command, args: args)
+
+struct HalProcessCoordinatorReceiptV1:
+    comparison: HalOrchestrationReceiptV1
+    launched_mask: i64
+    completed_mask: i64
+    cancelled_mask: i64
+    reaped_mask: i64
+    protocol_error_mask: i64
+    output_overflow_mask: i64
+    isolation_proven_mask: i64
+    critical_ready: bool
+
+class HalProcessLaneOwnerV1:
+    endpoint: HalWorkerEndpointV1
+    pid: i64
+    request: text
+    request_offset: i64
+    output: text
+    result: HalProviderResultV1
+    result_valid: bool
+    spawned: bool
+    terminal: bool
+    reaped: bool
+    cancelled: bool
+    protocol_error: bool
+    output_overflow: bool
+
+fn _hal_invalid_result(provider: HalProviderKind,
+                       invocation_id: i64) -> HalProviderResultV1:
+    hal_provider_result_v1(provider, invocation_id,
+        HalStatusV1.InvalidRequest, 1, 0, 0, 0, 0,
+        0, 0, 0, 0, HalOverflowKindV1.None, -1, 0, 0)
+
+fn _hal_unproven_isolation(provider: HalProviderKind, invocation_id: i64,
+                           pid: i64) -> HalIsolationReceiptV1:
+    # The generic piped-process facade does not prove handle/env/memory
+    # isolation. Preserve the actual handle but make admission fail closed.
+    hal_isolation_receipt_v1(
+        provider, invocation_id, pid, 0, -1, -1, -1, true, false)
+
+fn _hal_request_line(operation: HalOperationV1,
+                     request: HalProviderRequestV1) -> text:
+    "HALREQ1|{operation.contract_version}|{operation.operation_id}|" +
+        "{request.invocation_id}|{request.fixture_id}|{request.input_offset}|" +
+        "{request.input_length}|{request.input_capacity}|{request.trace_capacity}\n"
+
+fn _hal_process_lane_owner(endpoint: HalWorkerEndpointV1,
+                           request: text,
+                           invocation_id: i64) -> HalProcessLaneOwnerV1:
+    HalProcessLaneOwnerV1(
+        endpoint: endpoint, pid: -1, request: request, request_offset: 0,
+        output: "", result: _hal_invalid_result(endpoint.provider, invocation_id),
+        result_valid: false, spawned: false, terminal: false, reaped: false,
+        cancelled: false, protocol_error: false, output_overflow: false)
+
+fn _hal_signed_decimal(value: text) -> bool:
+    if value == "":
+        return false
+    var index = 0
+    if value.substring(0, 1) == "-":
+        if value.len() == 1:
+            return false
+        index = 1
+    while index < value.len():
+        val ch = value.substring(index, index + 1)
+        if ch < "0" or ch > "9":
+            return false
+        index = index + 1
+    true
+
+fn _hal_status_from_i64(value: i64) -> (bool, HalStatusV1):
+    match value:
+        case 0: (true, HalStatusV1.Ok)
+        case 1: (true, HalStatusV1.UnsupportedCapability)
+        case 2: (true, HalStatusV1.InvalidRequest)
+        case 3: (true, HalStatusV1.ProviderError)
+        case 4: (true, HalStatusV1.Timeout)
+        case 5: (true, HalStatusV1.Overflow)
+        case 6: (true, HalStatusV1.Diverged)
+        case 7: (true, HalStatusV1.Cancelled)
+        case _: (false, HalStatusV1.InvalidRequest)
+
+fn _hal_overflow_from_i64(value: i64) -> (bool, HalOverflowKindV1):
+    match value:
+        case 0: (true, HalOverflowKindV1.None)
+        case 1: (true, HalOverflowKindV1.Payload)
+        case 2: (true, HalOverflowKindV1.Trace)
+        case 3: (true, HalOverflowKindV1.DifferenceReport)
+        case 4: (true, HalOverflowKindV1.Log)
+        case _: (false, HalOverflowKindV1.None)
+
+fn _hal_parse_result_line(provider: HalProviderKind, line: text,
+                          expected_invocation: i64) -> (bool, HalProviderResultV1):
+    val invalid = _hal_invalid_result(provider, expected_invocation)
+    if line.len() <= 0 or line.len() > HAL_PROCESS_MAX_RESPONSE_BYTES_V1:
+        return (false, invalid)
+    val fields = line.split("|")
+    if fields.len() != HAL_PROCESS_RESPONSE_FIELDS_V1:
+        return (false, invalid)
+    if fields[0] != HAL_PROCESS_PROTOCOL_V1:
+        return (false, invalid)
+    var index = 1
+    while index < fields.len():
+        if not _hal_signed_decimal(fields[index]):
+            return (false, invalid)
+        if fields[index].parse_int() == nil:
+            return (false, invalid)
+        index = index + 1
+    if int(fields[1]) != hal_provider_kind_to_i64(provider):
+        return (false, invalid)
+    val invocation = int(fields[2])
+    if invocation != expected_invocation:
+        return (false, invalid)
+    val status_pair = _hal_status_from_i64(int(fields[3]))
+    val overflow_pair = _hal_overflow_from_i64(int(fields[13]))
+    if not status_pair.0 or not overflow_pair.0:
+        return (false, invalid)
+    val result = hal_provider_result_v1(
+        provider, invocation, status_pair.1, int(fields[4]),
+        int(fields[5]), int(fields[6]), int(fields[7]), int(fields[8]),
+        int(fields[9]), int(fields[10]), int(fields[11]), int(fields[12]),
+        overflow_pair.1, int(fields[14]), int(fields[15]), int(fields[16]))
+    (hal_provider_result_v1_well_formed(result), result)
+
+impl HalProcessLaneOwnerV1:
+    me spawn(enabled: bool, preflight_valid: bool):
+        if not enabled:
+            return
+        if not preflight_valid:
+            self.protocol_error = true
+            self.terminal = true
+            return
+        if self.endpoint.command == "":
+            self.protocol_error = true
+            self.terminal = true
+            return
+        self.pid = process_spawn_piped(self.endpoint.command, self.endpoint.args)
+        self.spawned = self.pid > 0
+        if not self.spawned:
+            self.protocol_error = true
+            self.terminal = true
+
+    me advance_write():
+        if not self.spawned or self.terminal:
+            return
+        if self.request_offset >= self.request.len():
+            return
+        val written = process_write_stdin_some(
+            self.pid, self.request, self.request_offset,
+            self.request.len() - self.request_offset)
+        if written < 0:
+            self.protocol_error = true
+            self.cancel()
+        else:
+            self.request_offset = self.request_offset + written
+
+    me advance_read(expected_invocation: i64):
+        if not self.spawned or self.terminal:
+            return
+        val chunk = process_read_stdout(self.pid)
+        if chunk.len() > 0:
+            if self.output.len() + chunk.len() > HAL_PROCESS_MAX_RESPONSE_BYTES_V1:
+                self.output = ""
+                self.output_overflow = true
+                self.cancel()
+                return
+            self.output = self.output + chunk
+            val newline = self.output.find("\n")
+            if newline >= 0:
+                if newline != self.output.len() - 1:
+                    self.protocol_error = true
+                    self.cancel()
+                    return
+                val parsed = _hal_parse_result_line(
+                    self.endpoint.provider,
+                    self.output.substring(0, newline), expected_invocation)
+                self.result_valid = parsed.0
+                self.result = parsed.1
+                if not parsed.0:
+                    self.protocol_error = true
+        if not process_is_piped_alive(self.pid):
+            self.terminal = true
+            self.reaped = true
+
+    me cancel():
+        if self.terminal or not self.spawned:
+            return
+        self.cancelled = true
+        # A response is not eligible if its provider misses the terminal
+        # deadline after emitting it. Cancellation revokes child-owned output.
+        self.result_valid = false
+        self.result = _hal_invalid_result(
+            self.endpoint.provider, self.result.invocation_id)
+        if self.pid > 1:
+            process_kill(self.pid)
+            val alive_after_kill = process_is_piped_alive(self.pid)
+            if not alive_after_kill:
+                self.reaped = true
+            else:
+                self.reaped = process_close_piped(self.pid)
+        self.terminal = true
+
+    me close_after_result():
+        if self.terminal:
+            return
+        if self.result_valid:
+            if process_is_piped_alive(self.pid):
+                return
+            self.terminal = true
+            self.reaped = true
+
+    fn structural_lane(invocation_id: i64) -> HalProviderLaneV1:
+        hal_provider_lane_v1(
+            self.endpoint.provider, self.result_valid,
+            self.terminal, self.reaped,
+            self.request_offset == self.request.len(),
+            _hal_unproven_isolation(
+                self.endpoint.provider, invocation_id, self.pid),
+            self.result)
+
+fn _hal_lane_enabled(operation: HalOperationV1, mode: HalRunMode,
+                     provider: HalProviderKind) -> bool:
+    (hal_execution_expected_mask(operation, mode)
+        & hal_provider_kind_mask(provider)) != 0
+
+fn _hal_all_terminal(expected_mask: i64,
+                     pure_lane: HalProcessLaneOwnerV1,
+                     c_lane: HalProcessLaneOwnerV1,
+                     rust_lane: HalProcessLaneOwnerV1) -> bool:
+    if (expected_mask & 1) != 0 and not pure_lane.terminal:
+        return false
+    if (expected_mask & 2) != 0 and not c_lane.terminal:
+        return false
+    if (expected_mask & 4) != 0 and not rust_lane.terminal:
+        return false
+    true
+
+fn _hal_mask_if(value: bool, provider: HalProviderKind) -> i64:
+    if value:
+        return hal_provider_kind_mask(provider)
+    0
+
+fn hal_coordinate_provider_processes_v1(
+        operation: HalOperationV1, request: HalProviderRequestV1,
+        mode: HalRunMode, pure_endpoint: HalWorkerEndpointV1,
+        c_endpoint: HalWorkerEndpointV1, rust_endpoint: HalWorkerEndpointV1,
+        deadline_ms: i64) -> HalProcessCoordinatorReceiptV1:
+    val request_line = _hal_request_line(operation, request)
+    val pure_lane = _hal_process_lane_owner(
+        pure_endpoint, request_line, request.invocation_id)
+    val c_lane = _hal_process_lane_owner(
+        c_endpoint, request_line, request.invocation_id)
+    val rust_lane = _hal_process_lane_owner(
+        rust_endpoint, request_line, request.invocation_id)
+    val pure_enabled = _hal_lane_enabled(
+        operation, mode, HalProviderKind.PureSimple)
+    val c_enabled = _hal_lane_enabled(operation, mode, HalProviderKind.C)
+    val rust_enabled = _hal_lane_enabled(operation, mode, HalProviderKind.Rust)
+    val effective_deadline = if deadline_ms > 0:
+        deadline_ms
+    else:
+        operation.capacity.deadline_ticks
+    val preflight_valid = (hal_operation_v1_well_formed(operation)
+        and hal_provider_request_v1_well_formed(request)
+        and request.operation_id == operation.operation_id
+        and request_line.len() <= operation.capacity.request_bytes
+        and effective_deadline > 0)
+    # Spawn every requested lane before servicing any lane: provider work may
+    # proceed concurrently while the parent remains the sole result owner.
+    pure_lane.spawn(pure_enabled, preflight_valid)
+    c_lane.spawn(c_enabled, preflight_valid)
+    rust_lane.spawn(rust_enabled, preflight_valid)
+    val expected = hal_execution_expected_mask(operation, mode)
+    val start_ms = current_time_ms()
+    while not _hal_all_terminal(expected, pure_lane, c_lane, rust_lane):
+        pure_lane.advance_write()
+        c_lane.advance_write()
+        rust_lane.advance_write()
+        pure_lane.advance_read(request.invocation_id)
+        c_lane.advance_read(request.invocation_id)
+        rust_lane.advance_read(request.invocation_id)
+        pure_lane.close_after_result()
+        c_lane.close_after_result()
+        rust_lane.close_after_result()
+        if current_time_ms() - start_ms >= effective_deadline:
+            if pure_enabled:
+                pure_lane.cancel()
+            if c_enabled:
+                c_lane.cancel()
+            if rust_enabled:
+                rust_lane.cancel()
+        elif not _hal_all_terminal(expected, pure_lane, c_lane, rust_lane):
+            rt_sleep_ms(1)
+    val comparison = hal_orchestrate_provider_receipts_v1(
+        operation, request, mode,
+        pure_lane.structural_lane(request.invocation_id),
+        c_lane.structural_lane(request.invocation_id),
+        rust_lane.structural_lane(request.invocation_id))
+    HalProcessCoordinatorReceiptV1(
+        comparison: comparison,
+        launched_mask: _hal_mask_if(pure_lane.spawned, HalProviderKind.PureSimple)
+            | _hal_mask_if(c_lane.spawned, HalProviderKind.C)
+            | _hal_mask_if(rust_lane.spawned, HalProviderKind.Rust),
+        completed_mask: _hal_mask_if(pure_lane.result_valid, HalProviderKind.PureSimple)
+            | _hal_mask_if(c_lane.result_valid, HalProviderKind.C)
+            | _hal_mask_if(rust_lane.result_valid, HalProviderKind.Rust),
+        cancelled_mask: _hal_mask_if(pure_lane.cancelled, HalProviderKind.PureSimple)
+            | _hal_mask_if(c_lane.cancelled, HalProviderKind.C)
+            | _hal_mask_if(rust_lane.cancelled, HalProviderKind.Rust),
+        reaped_mask: _hal_mask_if(pure_lane.reaped, HalProviderKind.PureSimple)
+            | _hal_mask_if(c_lane.reaped, HalProviderKind.C)
+            | _hal_mask_if(rust_lane.reaped, HalProviderKind.Rust),
+        protocol_error_mask: _hal_mask_if(pure_lane.protocol_error, HalProviderKind.PureSimple)
+            | _hal_mask_if(c_lane.protocol_error, HalProviderKind.C)
+            | _hal_mask_if(rust_lane.protocol_error, HalProviderKind.Rust),
+        output_overflow_mask: _hal_mask_if(pure_lane.output_overflow, HalProviderKind.PureSimple)
+            | _hal_mask_if(c_lane.output_overflow, HalProviderKind.C)
+            | _hal_mask_if(rust_lane.output_overflow, HalProviderKind.Rust),
+        isolation_proven_mask: 0,
+        critical_ready: false)
+
+export HAL_PROCESS_PROTOCOL_V1, HAL_PROCESS_RESPONSE_FIELDS_V1
+export HAL_PROCESS_MAX_RESPONSE_BYTES_V1
+export HalWorkerEndpointV1, HalProcessCoordinatorReceiptV1
+export hal_worker_endpoint_v1, hal_coordinate_provider_processes_v1

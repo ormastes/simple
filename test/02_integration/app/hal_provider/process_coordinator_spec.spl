@@ -1,0 +1,89 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-013 REQ-014
+
+use std.spec.*
+use app.hal_provider.coordinator.*
+use std.common.structural.hal_provider.*
+
+fn capacity() -> HalCapacityV1:
+    hal_capacity_v1(128, 64, 8, 512, 4, 512, 512, 2000)
+
+fn operation() -> HalOperationV1:
+    hal_operation_v1_default_critical(
+        101, 7, 0, 11, 12, HalSideEffectPolicy.PlanThenCommit,
+        capacity(), 13, 14, HalProviderKind.PureSimple)
+
+fn request() -> HalProviderRequestV1:
+    hal_provider_request_v1(101, 7, 9, 0, 32, 64, 8)
+
+fn fake(provider: HalProviderKind) -> HalWorkerEndpointV1:
+    val ordinal = hal_provider_kind_to_i64(provider)
+    val response = "HALRES1|{ordinal}|7|0|0|10|20|30|40|32|64|8|8|0|-1|0|5"
+    hal_worker_endpoint_v1(provider, "/bin/sh", [
+        "-c", "IFS= read -r request; printf '%s\\n' \"$1\"", "hal-fake", response])
+
+describe "isolated rt(hal) process coordinator":
+    it "launches, drains, validates, and reaps all fake provider processes":
+        val receipt = hal_coordinate_provider_processes_v1(
+            operation(), request(), HalRunMode.AlphaCompare,
+            fake(HalProviderKind.PureSimple), fake(HalProviderKind.C),
+            fake(HalProviderKind.Rust), 2000)
+        expect(receipt.launched_mask).to_equal(7)
+        expect(receipt.completed_mask).to_equal(7)
+        expect(receipt.reaped_mask).to_equal(7)
+        expect(receipt.cancelled_mask).to_equal(0)
+        expect(receipt.protocol_error_mask).to_equal(0)
+        expect(receipt.output_overflow_mask).to_equal(0)
+        expect(receipt.isolation_proven_mask).to_equal(0)
+        expect(receipt.critical_ready).to_be(false)
+        expect(receipt.comparison.status).to_equal(
+            HalOrchestrationStatusV1.InvalidReceipt)
+        expect(receipt.comparison.commit_allowed).to_be(false)
+
+    it "cancels and reaps workers that miss the shared deadline":
+        val slow = hal_worker_endpoint_v1(
+            HalProviderKind.PureSimple, "/bin/sh",
+            ["-c", "IFS= read -r request; sleep 5"])
+        val receipt = hal_coordinate_provider_processes_v1(
+            operation(), request(), HalRunMode.NormalPreferred,
+            slow, fake(HalProviderKind.C), fake(HalProviderKind.Rust), 100)
+        expect(receipt.launched_mask).to_equal(1)
+        expect(receipt.cancelled_mask).to_equal(1)
+        expect(receipt.reaped_mask).to_equal(1)
+        expect(receipt.comparison.commit_allowed).to_be(false)
+
+    it "rejects malformed worker identity without admitting a receipt":
+        val wrong = hal_worker_endpoint_v1(
+            HalProviderKind.PureSimple, "/bin/sh", [
+                "-c", "IFS= read -r request; printf '%s\\n' \"$1\"",
+                "hal-fake", "HALRES1|0|99|0|0|10|20|30|40|32|64|8|8|0|-1|0|5"])
+        val receipt = hal_coordinate_provider_processes_v1(
+            operation(), request(), HalRunMode.NormalPreferred,
+            wrong, fake(HalProviderKind.C), fake(HalProviderKind.Rust), 2000)
+        expect(receipt.protocol_error_mask).to_equal(1)
+        expect(receipt.completed_mask).to_equal(0)
+        expect(receipt.comparison.commit_allowed).to_be(false)
+
+    it "bounds retained stdout and cancels an overflowing worker":
+        val noisy = hal_worker_endpoint_v1(
+            HalProviderKind.PureSimple, "/bin/sh", [
+                "-c", "IFS= read -r request; printf '%0600d\\n' 0"])
+        val receipt = hal_coordinate_provider_processes_v1(
+            operation(), request(), HalRunMode.NormalPreferred,
+            noisy, fake(HalProviderKind.C), fake(HalProviderKind.Rust), 2000)
+        expect(receipt.output_overflow_mask).to_equal(1)
+        expect(receipt.completed_mask).to_equal(0)
+        expect(receipt.comparison.commit_allowed).to_be(false)
+
+    it "revokes a valid response when its worker misses terminal deadline":
+        val hangs_after_result = hal_worker_endpoint_v1(
+            HalProviderKind.PureSimple, "/bin/sh", [
+                "-c", "IFS= read -r request; printf '%s\\n' \"$1\"; sleep 5",
+                "hal-fake", "HALRES1|0|7|0|0|10|20|30|40|32|64|8|8|0|-1|0|5"])
+        val receipt = hal_coordinate_provider_processes_v1(
+            operation(), request(), HalRunMode.NormalPreferred,
+            hangs_after_result, fake(HalProviderKind.C),
+            fake(HalProviderKind.Rust), 100)
+        expect(receipt.cancelled_mask).to_equal(1)
+        expect(receipt.completed_mask).to_equal(0)
+        expect(receipt.comparison.commit_allowed).to_be(false)
