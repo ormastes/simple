@@ -1,0 +1,37 @@
+# @feature: compiler-performance-memory-efficiency
+# @req: REQ-011
+
+use std.spec.*
+use std.fs.{read_file}
+use app.cli.query_lint_checks.{_query_last_statement_flags}
+
+describe "query lint last-statement index":
+    it "preserves sibling and dedent semantics":
+        val flags = _query_last_statement_flags([
+            "fn probe():",
+            "    first()",
+            "    if ready:",
+            "        nested_last()",
+            "",
+            "    final()"
+        ])
+        expect(flags[1]).to_be(false)
+        expect(flags[2]).to_be(false)
+        expect(flags[3]).to_be(true)
+        expect(flags[5]).to_be(true)
+
+    it "indexes a high-depth suffix once":
+        var lines: [text] = ["fn deep():"]
+        var indent = ""
+        var depth = 0
+        while depth < 128:
+            indent = indent + "    "
+            lines.push("{indent}call_{depth}()")
+            depth = depth + 1
+        val flags = _query_last_statement_flags(lines)
+        expect(flags.len()).to_equal(129)
+        expect(flags[1]).to_be(true)
+        expect(flags[128]).to_be(true)
+        val source = read_file("src/app/cli/query_lint_checks.spl")
+        expect(source).not.to_contain("fn _is_last_stmt_ret")
+        expect(source).to_contain("val last_statement = _query_last_statement_flags(lines)")
