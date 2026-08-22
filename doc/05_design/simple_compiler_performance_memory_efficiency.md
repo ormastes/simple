@@ -409,3 +409,13 @@ dangling targets are retained so CFG integrity diagnostics remain behaviorally
 identical. Builder indexes and outer bucket storage are released immediately
 after publication. No edge loop may read, grow, and write back a
 dictionary-held array.
+
+## Short-lambda candidate scan contract
+
+Short-grammar discovery performs one forward line scan. The first `#` terminates
+discovery exactly as in the compatibility scanner; each quote toggles the existing
+single-line string state; only an unquoted backslash followed by an identifier
+start or `(` becomes a candidate. Parsing may advance a consumed offset, and
+precomputed candidates before that offset are skipped. Discovery must not recurse
+or rescan a growing prefix per backslash. Candidate position storage is linear in
+eligible candidates and is released after the line.
