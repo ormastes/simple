@@ -146,3 +146,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Remove five rule-local source splits without changing rule order or locations.
 - Pin the normal call graph and forbid regression to content-taking method signatures.
 - Follow-up: extend the shared view through EasyFix registry owners.
+
+## Completed tool tranche: single EasyFix ownership
+
+- Confirm `primitive_api` and `simple_script_required` are full-registry members.
+- Remove their duplicate direct invocations and imports from normal lint.
+- Pin registry membership and absence of duplicate call sites with source contracts.
+- Follow-up: construct one bounded line/context view inside the registry.
