@@ -79,6 +79,8 @@ post-bootstrap command sanity; it does not replace release `--whole` tests or
 the applicable full lint and duplication gates. If duplicate caching changed,
 the same gate must prove token/cosine create/reuse parity, changed/deleted-file
 invalidation, `--no-cache`, exit parity, and JSON stdout purity.
+The completion recorder must override ambient `SIMPLE_BINARY`/`SIMPLE_BIN` and bind every
+automated bootstrap gate to the exact validated Stage 4 candidate.
 
 For bootstrap/compiler debugging, keep normal SPipe verification on the
 default-off path. Use `--diagnostics=test` for progress and coarse phase
