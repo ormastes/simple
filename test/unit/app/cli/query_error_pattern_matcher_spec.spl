@@ -4,11 +4,58 @@ Purpose: Prove generated query diagnostic multi-pattern parity.
 Audience: Maintainers changing query diagnostic code inference.
 """
 use std.spec.{step}
+use app.io.mod.{file_read_text}
 use app.cli.query_error_pattern_matcher.{
     QUERY_ERROR_PATTERN_COUNT, query_error_pattern_hits, query_error_pattern_hit
 }
+use app.query_error_pattern_gen.patterns.{query_error_pattern_specs}
+use app.query_error_pattern_gen.generator.{
+    QueryErrorGeneratorLimits, query_error_pattern_build, query_error_pattern_build_default
+}
+use app.query_error_pattern_gen.render.{query_error_pattern_render}
 
 describe "query diagnostic multi-pattern matcher":
+    it "renders the committed matcher exactly and fails closed on bounds":
+        step("checks matcher source freshness and generator bounds")
+        val specs = query_error_pattern_specs()
+        match query_error_pattern_build_default():
+            case Err(message):
+                expect(message).to_equal("")
+            case Ok(model):
+                val rendered = query_error_pattern_render(model, specs.len())
+                expect(rendered).to_equal(file_read_text("src/app/cli/query_error_pattern_matcher.spl"))
+        val tiny = QueryErrorGeneratorLimits(max_patterns: 128, max_states: 1, max_edges: 65535)
+        match query_error_pattern_build(specs, tiny):
+            case Ok(model):
+                expect(model.fail.len()).to_equal(-1)
+            case Err(message):
+                expect(message).to_equal("query error matcher state limit exceeded")
+
+    it "rebuilds the committed sparse table cardinalities":
+        step("builds deterministic query error matcher tables")
+        match query_error_pattern_build_default():
+            case Err(message):
+                expect(message).to_equal("")
+            case Ok(model):
+                expect(model.root_next.len()).to_equal(128)
+                expect(model.fail.len()).to_equal(1160)
+                expect(model.edge_byte.len()).to_equal(1159)
+                expect(model.edge_next.len()).to_equal(1159)
+                expect(model.edge_start.len()).to_equal(1161)
+                expect(model.output_lo.len()).to_equal(117)
+                expect(model.output_hi.len()).to_equal(117)
+
+    it "keeps generated matcher IDs aligned with the canonical manifest":
+        step("checks canonical query error pattern IDs")
+        val specs = query_error_pattern_specs()
+        expect(specs.len()).to_equal(QUERY_ERROR_PATTERN_COUNT)
+        var pattern_id = 0
+        while pattern_id < specs.len():
+            expect(specs[pattern_id].id).to_equal(pattern_id)
+            val hits = query_error_pattern_hits("日本語 " + specs[pattern_id].literal + " café")
+            expect(query_error_pattern_hit(hits, pattern_id)).to_equal(true)
+            pattern_id = pattern_id + 1
+
     it "recognizes every generated fixed literal with Unicode neighbors":
         step("recognizes every generated query error literal")
         val cases: [(text, i64)] = [
