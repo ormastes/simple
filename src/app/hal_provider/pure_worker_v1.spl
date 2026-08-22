@@ -21,6 +21,19 @@ struct PureHalRequestV1:
     input_capacity: i64
     trace_capacity: i64
 
+struct PureHalRequestV2:
+    contract: i64
+    operation: i64
+    invocation: i64
+    fixture: i64
+    captured_scalar: i64
+    result_capacity: i64
+    trace_hi: i64
+    trace_lo: i64
+    trace_cursor: i64
+    trace_length: i64
+    trace_capacity: i64
+
 fn _parse_u64(value: text) -> (bool, i64):
     if value == "" or value.len() > 19:
         return (false, 0)
@@ -69,6 +82,44 @@ fn _request(line: text) -> (bool, PureHalRequestV1):
         and request.input_capacity <= 1048576 and request.trace_capacity <= 65536
     (valid, request)
 
+fn _request_v2(line: text) -> (bool, PureHalRequestV2):
+    val invalid = PureHalRequestV2(contract: 0, operation: 0, invocation: 0,
+        fixture: 0, captured_scalar: 0, result_capacity: 0,
+        trace_hi: 0, trace_lo: 0, trace_cursor: 0, trace_length: 0,
+        trace_capacity: 0)
+    if line.len() >= FRAME_CAP or not line.starts_with("HALREQ2|"):
+        return (false, invalid)
+    val fields = line.split("|")
+    if fields.len() != 12:
+        return (false, invalid)
+    val f0 = _parse_u64(fields[1])
+    val f1 = _parse_u64(fields[2])
+    val f2 = _parse_u64(fields[3])
+    val f3 = _parse_u64(fields[4])
+    val f4 = _parse_u64(fields[5])
+    val f5 = _parse_u64(fields[6])
+    val f6 = _parse_u64(fields[7])
+    val f7 = _parse_u64(fields[8])
+    val f8 = _parse_u64(fields[9])
+    val f9 = _parse_u64(fields[10])
+    val f10 = _parse_u64(fields[11])
+    if (not f0.0 or not f1.0 or not f2.0 or not f3.0 or not f4.0
+            or not f5.0 or not f6.0 or not f7.0 or not f8.0
+            or not f9.0 or not f10.0):
+        return (false, invalid)
+    val request = PureHalRequestV2(contract: f0.1, operation: f1.1,
+        invocation: f2.1, fixture: f3.1, captured_scalar: f4.1,
+        result_capacity: f5.1, trace_hi: f6.1, trace_lo: f7.1,
+        trace_cursor: f8.1, trace_length: f9.1, trace_capacity: f10.1)
+    val valid = request.contract == 2 and request.operation > 0
+        and request.invocation > 0 and request.fixture > 0
+        and request.result_capacity >= 8 and request.result_capacity <= 32
+        and (request.trace_hi != 0 or request.trace_lo != 0)
+        and request.trace_cursor <= request.trace_length
+        and request.trace_length <= request.trace_capacity
+        and request.trace_capacity > 0 and request.trace_capacity <= 65536
+    (valid, request)
+
 fn _mix(hash: i64, value: i64) -> i64:
     # A small positive modulus keeps every intermediate inside i64 while
     # preserving exact cross-language behavior without overflow assumptions.
@@ -99,6 +150,20 @@ fn _result(request: PureHalRequestV1) -> text:
     val trace_lo = trace ^ -4942790177534073029
     "HALRES1|{PROVIDER_PURE}|{request.invocation}|0|0|{digest}|{digest_lo}|{trace}|{trace_lo}|{request.input_length}|{request.input_capacity}|1|{request.trace_capacity}|0|-1|0|64"
 
+fn _result_v2(request: PureHalRequestV2) -> text:
+    "HALRES2|{PROVIDER_PURE}|{request.invocation}|0|0|0|0|1|{request.captured_scalar}|8|{request.result_capacity}|{request.trace_hi}|{request.trace_lo}|{request.trace_cursor}|{request.trace_length}|{request.trace_capacity}|0|-1|0|88"
+
+fn _dispatch(line: text, expected_invocation: i64) -> (bool, text):
+    val v1 = _request(line)
+    if v1.0:
+        return (expected_invocation == 0 or v1.1.invocation == expected_invocation,
+                _result(v1.1))
+    val v2 = _request_v2(line)
+    if v2.0:
+        return (expected_invocation == 0 or v2.1.invocation == expected_invocation,
+                _result_v2(v2.1))
+    (false, "")
+
 fn _parse_reset(line: text) -> (bool, i64, i64, i64):
     if line.len() >= FRAME_CAP or not line.starts_with("HALRESET1|"):
         return (false, 0, 0, 0)
@@ -115,10 +180,10 @@ fn _parse_reset(line: text) -> (bool, i64, i64, i64):
 fn main():
     val args = get_cli_args()
     if args.len() == 0:
-        val parsed = _request(read_line())
+        val parsed = _dispatch(read_line(), 0)
         if not parsed.0:
             return
-        write_line(_result(parsed.1))
+        write_line(parsed.1)
         return
     if args.len() != 1 or args[0] != "session":
         return
@@ -132,10 +197,10 @@ fn main():
             return
         generation = reset.1
         write_line("HALRESETOK1|{reset.1}|{reset.2}|{reset.3}")
-        val parsed = _request(read_line())
-        if not parsed.0 or parsed.1.invocation != reset.3:
+        val parsed = _dispatch(read_line(), reset.3)
+        if not parsed.0:
             return
-        write_line(_result(parsed.1))
+        write_line(parsed.1)
         next_sequence = next_sequence + 1
 
 main()

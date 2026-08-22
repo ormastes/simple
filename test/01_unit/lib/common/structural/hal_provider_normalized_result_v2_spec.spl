@@ -1,0 +1,50 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-013 REQ-014
+
+use std.spec.*
+use std.common.structural.hal_provider.*
+
+fn trace(cursor: i64 = 1) -> HalTracePositionV2:
+    hal_trace_position_v2(41, 42, cursor, 1, 4)
+
+fn scalar(provider: HalProviderKind, value: i64 = 9001) -> HalProviderResultV2:
+    hal_provider_scalar_result_v2(provider, 7, HalStatusV1.Ok, value,
+        hal_structured_error_v2(HalErrorDomainV2.None, 0), trace(), 5)
+
+describe "normalized rt(hal) provider result ABI v2":
+    it "compares the actual scalar and exact environment trace position":
+        expect(hal_provider_results_v2_equivalent(
+            scalar(HalProviderKind.PureSimple), scalar(HalProviderKind.C))).to_be(true)
+        expect(hal_provider_results_v2_equivalent(
+            scalar(HalProviderKind.C), scalar(HalProviderKind.Rust, 9002))).to_be(false)
+        val moved = hal_provider_scalar_result_v2(HalProviderKind.Rust, 7,
+            HalStatusV1.Ok, 9001,
+            hal_structured_error_v2(HalErrorDomainV2.None, 0), trace(0), 5)
+        expect(hal_provider_results_v2_equivalent(
+            scalar(HalProviderKind.C), moved)).to_be(false)
+
+    it "carries 32 caller-owned bytes without a dynamic payload":
+        val bytes = hal_inline_bytes_v2(16, 32, 11, 22, 0, 0)
+        val value = hal_provider_bytes_result_v2(HalProviderKind.PureSimple, 7,
+            HalStatusV1.Ok, bytes,
+            hal_structured_error_v2(HalErrorDomainV2.None, 0), trace(), 5)
+        expect(hal_provider_result_v2_well_formed(value)).to_be(true)
+        expect(value.bytes.word0).to_equal(11)
+        expect(value.bytes.word1).to_equal(22)
+
+    it "fails closed on overflow, malformed error, and unbound trace identity":
+        val oversized = hal_provider_bytes_result_v2(HalProviderKind.C, 7,
+            HalStatusV1.Ok, hal_inline_bytes_v2(33, 33),
+            hal_structured_error_v2(HalErrorDomainV2.None, 0), trace(), 5)
+        val malformed_error = hal_provider_scalar_result_v2(
+            HalProviderKind.C, 7, HalStatusV1.ProviderError, 0,
+            hal_structured_error_v2(HalErrorDomainV2.None, 0), trace(), 5)
+        val unbound_trace = hal_provider_scalar_result_v2(
+            HalProviderKind.C, 7, HalStatusV1.Ok, 0,
+            hal_structured_error_v2(HalErrorDomainV2.None, 0),
+            hal_trace_position_v2(0, 0, 0, 0, 4), 5)
+        expect(hal_provider_result_v2_well_formed(oversized)).to_be(false)
+        expect(hal_provider_result_v2_well_formed(malformed_error)).to_be(false)
+        expect(hal_provider_result_v2_well_formed(unbound_trace)).to_be(false)
+        expect(hal_inline_bytes_v2_well_formed(
+            hal_inline_bytes_v2(1, 32, 11, 22, 0, 0))).to_be(false)

@@ -1,0 +1,179 @@
+# codex-impl
+# Additive, pointer-free provider-result ABI. V1 remains the process compatibility
+# contract; V2 carries the normalized observation itself instead of trusting only
+# a digest. Four scalar words provide 32 caller-owned inline bytes with no heap.
+
+val HAL_PROVIDER_RESULT_SCHEMA_V2: i64 = 2
+val HAL_PROVIDER_RESULT_INLINE_BYTES_V2: i64 = 32
+
+enum HalNormalizedValueKindV2:
+    None
+    ScalarI64
+    Bytes
+
+enum HalErrorDomainV2:
+    None
+    Contract
+    Provider
+    Environment
+    Runtime
+
+struct HalInlineBytesV2:
+    length: i64
+    capacity: i64
+    word0: i64
+    word1: i64
+    word2: i64
+    word3: i64
+
+struct HalStructuredErrorV2:
+    domain: HalErrorDomainV2
+    code: i64
+    detail_id: i64
+
+struct HalTracePositionV2:
+    identity_hi: i64
+    identity_lo: i64
+    cursor: i64
+    length: i64
+    capacity: i64
+
+struct HalProviderResultV2:
+    contract_version: i64
+    provider: HalProviderKind
+    invocation_id: i64
+    status: HalStatusV1
+    value_kind: HalNormalizedValueKindV2
+    scalar: i64
+    bytes: HalInlineBytesV2
+    error: HalStructuredErrorV2
+    trace: HalTracePositionV2
+    overflow_kind: HalOverflowKindV1
+    overflow_first: i64
+    overflow_count: i64
+    elapsed_ticks: i64
+
+fn hal_inline_bytes_v2(length: i64, capacity: i64,
+                       word0: i64 = 0, word1: i64 = 0,
+                       word2: i64 = 0, word3: i64 = 0) -> HalInlineBytesV2:
+    HalInlineBytesV2(length: length, capacity: capacity,
+                     word0: word0, word1: word1,
+                     word2: word2, word3: word3)
+
+fn hal_inline_bytes_v2_well_formed(value: HalInlineBytesV2) -> bool:
+    val bounds = value.length >= 0 and value.capacity >= 0
+        and value.length <= value.capacity
+        and value.capacity <= HAL_PROVIDER_RESULT_INLINE_BYTES_V2
+    if not bounds:
+        return false
+    # Unused words must be canonical zero: comparison never observes padding
+    # and child providers cannot smuggle uncommitted bytes past the length.
+    if value.length <= 24 and value.word3 != 0:
+        return false
+    if value.length <= 16 and value.word2 != 0:
+        return false
+    if value.length <= 8 and value.word1 != 0:
+        return false
+    if value.length == 0 and value.word0 != 0:
+        return false
+    true
+
+fn hal_structured_error_v2(domain: HalErrorDomainV2, code: i64,
+                           detail_id: i64 = 0) -> HalStructuredErrorV2:
+    HalStructuredErrorV2(domain: domain, code: code, detail_id: detail_id)
+
+fn hal_trace_position_v2(identity_hi: i64, identity_lo: i64,
+                         cursor: i64, length: i64,
+                         capacity: i64) -> HalTracePositionV2:
+    HalTracePositionV2(identity_hi: identity_hi, identity_lo: identity_lo,
+                       cursor: cursor, length: length, capacity: capacity)
+
+fn hal_trace_position_v2_well_formed(value: HalTracePositionV2) -> bool:
+    value.cursor >= 0 and value.length >= 0 and value.capacity > 0
+        and value.cursor <= value.length and value.length <= value.capacity
+        and (value.identity_hi != 0 or value.identity_lo != 0)
+
+fn hal_provider_scalar_result_v2(provider: HalProviderKind, invocation_id: i64,
+                                 status: HalStatusV1, scalar: i64,
+                                 error: HalStructuredErrorV2,
+                                 trace: HalTracePositionV2,
+                                 elapsed_ticks: i64) -> HalProviderResultV2:
+    HalProviderResultV2(contract_version: HAL_PROVIDER_RESULT_SCHEMA_V2,
+        provider: provider, invocation_id: invocation_id, status: status,
+        value_kind: HalNormalizedValueKindV2.ScalarI64, scalar: scalar,
+        bytes: hal_inline_bytes_v2(0, 0), error: error, trace: trace,
+        overflow_kind: HalOverflowKindV1.None, overflow_first: -1,
+        overflow_count: 0, elapsed_ticks: elapsed_ticks)
+
+fn hal_provider_bytes_result_v2(provider: HalProviderKind, invocation_id: i64,
+                                status: HalStatusV1, bytes: HalInlineBytesV2,
+                                error: HalStructuredErrorV2,
+                                trace: HalTracePositionV2,
+                                elapsed_ticks: i64) -> HalProviderResultV2:
+    HalProviderResultV2(contract_version: HAL_PROVIDER_RESULT_SCHEMA_V2,
+        provider: provider, invocation_id: invocation_id, status: status,
+        value_kind: HalNormalizedValueKindV2.Bytes, scalar: 0,
+        bytes: bytes, error: error, trace: trace,
+        overflow_kind: HalOverflowKindV1.None, overflow_first: -1,
+        overflow_count: 0, elapsed_ticks: elapsed_ticks)
+
+fn _hal_error_v2_well_formed(status: HalStatusV1,
+                             error: HalStructuredErrorV2) -> bool:
+    val ok = hal_status_to_i64(status) == hal_status_to_i64(HalStatusV1.Ok)
+    if ok:
+        return error.domain == HalErrorDomainV2.None
+            and error.code == 0 and error.detail_id == 0
+    error.domain != HalErrorDomainV2.None and error.code > 0
+        and error.detail_id >= 0
+
+fn hal_provider_result_v2_well_formed(value: HalProviderResultV2) -> bool:
+    if value.contract_version != HAL_PROVIDER_RESULT_SCHEMA_V2
+            or value.invocation_id <= 0 or value.elapsed_ticks < 0:
+        return false
+    if not hal_inline_bytes_v2_well_formed(value.bytes)
+            or not hal_trace_position_v2_well_formed(value.trace)
+            or not _hal_error_v2_well_formed(value.status, value.error):
+        return false
+    if value.overflow_kind != HalOverflowKindV1.None
+            or value.overflow_first != -1 or value.overflow_count != 0:
+        return false
+    match value.value_kind:
+        case HalNormalizedValueKindV2.ScalarI64:
+            value.bytes.length == 0 and value.bytes.capacity == 0
+        case HalNormalizedValueKindV2.Bytes:
+            value.scalar == 0 and value.bytes.capacity > 0
+        case HalNormalizedValueKindV2.None:
+            false
+
+fn hal_provider_results_v2_comparable(a: HalProviderResultV2,
+                                      b: HalProviderResultV2) -> bool:
+    hal_provider_result_v2_well_formed(a)
+        and hal_provider_result_v2_well_formed(b)
+        and a.invocation_id == b.invocation_id
+        and a.provider != b.provider
+
+fn hal_provider_results_v2_equivalent(a: HalProviderResultV2,
+                                      b: HalProviderResultV2) -> bool:
+    hal_provider_results_v2_comparable(a, b)
+        and hal_status_to_i64(a.status) == hal_status_to_i64(b.status)
+        and a.value_kind == b.value_kind and a.scalar == b.scalar
+        and a.bytes.length == b.bytes.length
+        and a.bytes.word0 == b.bytes.word0 and a.bytes.word1 == b.bytes.word1
+        and a.bytes.word2 == b.bytes.word2 and a.bytes.word3 == b.bytes.word3
+        and a.error.domain == b.error.domain and a.error.code == b.error.code
+        and a.error.detail_id == b.error.detail_id
+        and a.trace.identity_hi == b.trace.identity_hi
+        and a.trace.identity_lo == b.trace.identity_lo
+        and a.trace.cursor == b.trace.cursor
+        and a.trace.length == b.trace.length
+
+export HAL_PROVIDER_RESULT_SCHEMA_V2, HAL_PROVIDER_RESULT_INLINE_BYTES_V2
+export HalNormalizedValueKindV2, HalErrorDomainV2
+export HalInlineBytesV2, HalStructuredErrorV2, HalTracePositionV2
+export HalProviderResultV2
+export hal_inline_bytes_v2, hal_inline_bytes_v2_well_formed
+export hal_structured_error_v2, hal_trace_position_v2
+export hal_trace_position_v2_well_formed
+export hal_provider_scalar_result_v2, hal_provider_bytes_result_v2
+export hal_provider_result_v2_well_formed
+export hal_provider_results_v2_comparable, hal_provider_results_v2_equivalent

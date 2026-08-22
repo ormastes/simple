@@ -15,6 +15,9 @@ unsafe extern "C" {
 #[derive(Copy, Clone)]
 struct Request { f: [u64; 8] }
 
+#[derive(Copy, Clone)]
+struct RequestV2 { f: [u64; 11] }
+
 fn write_all(p: &[u8]) -> bool {
     let mut at = 0;
     while at < p.len() {
@@ -59,6 +62,20 @@ fn request(p: &[u8]) -> Option<Request> {
        f[7] == 0 || f[5] > f[6] || f[4] > f[6] - f[5] ||
        f[6] > 1_048_576 || f[7] > 65_536 { return None; }
     Some(Request { f })
+}
+
+fn request_v2(p: &[u8]) -> Option<RequestV2> {
+    if !p.starts_with(b"HALREQ2|") { return None; }
+    let mut at = 8;
+    let mut f = [0u64; 11];
+    for i in 0..11 { f[i] = number(p, &mut at, i == 10)?; }
+    if at != p.len() || f.iter().any(|v| *v > i64::MAX as u64) ||
+       f[0] != 2 || f[1] == 0 || f[2] == 0 || f[3] == 0 ||
+       f[5] < 8 || f[5] > 32 || (f[6] == 0 && f[7] == 0) ||
+       f[8] > f[9] || f[9] > f[10] || f[10] == 0 || f[10] > 65_536 {
+        return None;
+    }
+    Some(RequestV2 { f })
 }
 
 fn reset(p: &[u8]) -> Option<[u64; 3]> {
@@ -107,6 +124,29 @@ fn result(r: &Request) -> bool {
     write_all(&out[..at])
 }
 
+fn result_v2(r: &RequestV2) -> bool {
+    let mut out = [0u8; CAP]; let mut at = 0;
+    let fields = [PROVIDER, r.f[2] as i64, 0, 0, 0, 0, 1,
+        r.f[4] as i64, 8, r.f[5] as i64, r.f[6] as i64, r.f[7] as i64,
+        r.f[8] as i64, r.f[9] as i64, r.f[10] as i64, 0, -1, 0, 88];
+    if !text(&mut out, &mut at, b"HALRES2|") { return false; }
+    for (i, v) in fields.iter().enumerate() {
+        if !integer(&mut out, &mut at, *v) || at == CAP { return false; }
+        out[at] = if i == 18 { b'\n' } else { b'|' }; at += 1;
+    }
+    write_all(&out[..at])
+}
+
+fn dispatch(p: &[u8], expected_invocation: u64) -> bool {
+    if let Some(v1) = request(p) {
+        return (expected_invocation == 0 || v1.f[2] == expected_invocation) && result(&v1);
+    }
+    if let Some(v2) = request_v2(p) {
+        return (expected_invocation == 0 || v2.f[2] == expected_invocation) && result_v2(&v2);
+    }
+    false
+}
+
 fn reset_ok(f: [u64; 3]) -> bool {
     let mut out = [0u8; 96]; let mut at = 0;
     if !text(&mut out, &mut at, b"HALRESETOK1|") { return false; }
@@ -124,7 +164,7 @@ fn main() {
     let mut line = [0u8; CAP];
     if direct {
         let n = read_line(&mut line);
-        if n <= 0 || request(&line[..n as usize]).is_none_or(|r| !result(&r)) { std::process::exit(64); }
+        if n <= 0 || !dispatch(&line[..n as usize], 0) { std::process::exit(64); }
         return;
     }
     if !write_all(b"HALWORKER1\n") { std::process::exit(64); }
@@ -136,8 +176,7 @@ fn main() {
         if (generation != 0 && rs[0] != generation) || rs[1] != sequence || !reset_ok(rs) { std::process::exit(65); }
         generation = rs[0];
         let n = read_line(&mut line);
-        let Some(req) = (if n > 0 { request(&line[..n as usize]) } else { None }) else { std::process::exit(66) };
-        if req.f[2] != rs[2] || !result(&req) { std::process::exit(66); }
+        if n <= 0 || !dispatch(&line[..n as usize], rs[2]) { std::process::exit(66); }
         sequence = sequence.checked_add(1).unwrap_or_else(|| std::process::exit(67));
     }
 }

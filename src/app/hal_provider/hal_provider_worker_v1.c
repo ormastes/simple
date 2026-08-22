@@ -17,12 +17,19 @@
 #define HAL_PROVIDER_KIND 1
 #endif
 
-enum { HAL_FRAME_CAP_V1 = 512, HAL_REQUEST_FIELDS_V1 = 8 };
+enum { HAL_FRAME_CAP_V1 = 512, HAL_REQUEST_FIELDS_V1 = 8,
+       HAL_REQUEST_FIELDS_V2 = 11 };
 
 typedef struct {
     uint64_t contract, operation, invocation, fixture;
     uint64_t input_offset, input_length, input_capacity, trace_capacity;
 } HalRequestV1;
+
+typedef struct {
+    uint64_t contract, operation, invocation, fixture, captured_scalar;
+    uint64_t result_capacity, trace_hi, trace_lo, trace_cursor;
+    uint64_t trace_length, trace_capacity;
+} HalRequestV2;
 
 static int write_all(const unsigned char *p, size_t n) {
     size_t at = 0;
@@ -80,6 +87,24 @@ static int parse_request(const unsigned char *p, size_t n, HalRequestV1 *r) {
         r->input_length <= r->input_capacity &&
         r->input_offset <= r->input_capacity - r->input_length &&
         r->input_capacity <= UINT64_C(1048576) &&
+        r->trace_capacity <= UINT64_C(65536);
+}
+
+static int parse_request_v2(const unsigned char *p, size_t n, HalRequestV2 *r) {
+    uint64_t *field = &r->contract;
+    size_t at = 8;
+    int i;
+    if (!prefix(p, n, "HALREQ2|", 8)) return 0;
+    for (i = 0; i < HAL_REQUEST_FIELDS_V2; ++i)
+        if (!u64_field(p, n, &at, &field[i], i == 10)) return 0;
+    for (i = 0; i < HAL_REQUEST_FIELDS_V2; ++i)
+        if (field[i] > INT64_MAX) return 0;
+    return at == n && r->contract == 2 && r->operation > 0 &&
+        r->invocation > 0 && r->fixture > 0 &&
+        r->result_capacity >= 8 && r->result_capacity <= 32 &&
+        (r->trace_hi != 0 || r->trace_lo != 0) &&
+        r->trace_cursor <= r->trace_length &&
+        r->trace_length <= r->trace_capacity && r->trace_capacity > 0 &&
         r->trace_capacity <= UINT64_C(65536);
 }
 
@@ -152,6 +177,40 @@ static int result(const HalRequestV1 *r) {
     return write_all(out, at);
 }
 
+static int result_v2(const HalRequestV2 *r) {
+    unsigned char out[HAL_FRAME_CAP_V1];
+    size_t at = 0;
+    int64_t fields[19] = {
+        HAL_PROVIDER_KIND, (int64_t)r->invocation, 0, 0, 0, 0,
+        1, (int64_t)r->captured_scalar, 8, (int64_t)r->result_capacity,
+        (int64_t)r->trace_hi, (int64_t)r->trace_lo,
+        (int64_t)r->trace_cursor, (int64_t)r->trace_length,
+        (int64_t)r->trace_capacity, 0, -1, 0,
+        HAL_REQUEST_FIELDS_V2 * 8
+    };
+    int i;
+    if (!append_text(out, sizeof(out), &at, "HALRES2|")) return 0;
+    for (i = 0; i < 19; ++i) {
+        if (!append_i64(out, sizeof(out), &at, fields[i]) || at >= sizeof(out))
+            return 0;
+        out[at++] = i == 18 ? '\n' : '|';
+    }
+    return write_all(out, at);
+}
+
+static int dispatch_request(const unsigned char *line, size_t n,
+                            uint64_t expected_invocation) {
+    HalRequestV1 v1;
+    HalRequestV2 v2;
+    if (parse_request(line, n, &v1))
+        return (expected_invocation == 0 || v1.invocation == expected_invocation)
+            && result(&v1);
+    if (parse_request_v2(line, n, &v2))
+        return (expected_invocation == 0 || v2.invocation == expected_invocation)
+            && result_v2(&v2);
+    return 0;
+}
+
 static int reset_ok(const uint64_t reset[3]) {
     unsigned char out[96];
     size_t at = 0;
@@ -168,11 +227,9 @@ static int reset_ok(const uint64_t reset[3]) {
 int main(int argc, char **argv) {
     unsigned char line[HAL_FRAME_CAP_V1];
     size_t n = 0;
-    HalRequestV1 request;
     uint64_t reset[3], generation = 0, next_sequence = 1;
     if (argc == 1) {
-        return read_line(line, &n) == 1 && parse_request(line, n, &request) &&
-            result(&request) ? 0 : 64;
+        return read_line(line, &n) == 1 && dispatch_request(line, n, 0) ? 0 : 64;
     }
     if (argc != 2 || strcmp(argv[1], "session") != 0 ||
         !write_all((const unsigned char *)"HALWORKER1\n", 11)) return 64;
@@ -183,8 +240,8 @@ int main(int argc, char **argv) {
             (generation != 0 && reset[0] != generation) ||
             reset[1] != next_sequence || !reset_ok(reset)) return 65;
         generation = reset[0];
-        if (read_line(line, &n) != 1 || !parse_request(line, n, &request) ||
-            request.invocation != reset[2] || !result(&request)) return 66;
+        if (read_line(line, &n) != 1 ||
+            !dispatch_request(line, n, reset[2])) return 66;
         next_sequence++;
         if (next_sequence == 0) return 67;
     }
