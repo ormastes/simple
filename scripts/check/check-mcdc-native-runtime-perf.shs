@@ -1,0 +1,60 @@
+#!/bin/sh
+# Compiler-independent retained performance/allocation evidence for the MC/DC
+# native ABI. This deliberately does not claim Simple compiler/codegen proof.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${MCDC_NATIVE_PERF_OUT:-"$root/build/mcdc-native-runtime-perf"}
+cc=${CC:-cc}
+time_bin=${MCDC_TIME_BIN:-/usr/bin/time}
+rss_limit_kib=${MCDC_NATIVE_RSS_LIMIT_KIB:-65536}
+
+fail() { echo "mcdc-native-runtime-perf: FAIL reason=$1 evidence=$out" >&2; exit 1; }
+case "$rss_limit_kib" in ''|*[!0-9]*) fail invalid-rss-limit;; esac
+[ -x "$time_bin" ] || fail time-tool-unavailable
+command -v "$cc" >/dev/null 2>&1 || fail c-compiler-unavailable
+command -v sha256sum >/dev/null 2>&1 || fail sha256sum-unavailable
+mkdir -p "$out"
+
+flags='-std=c11 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L'
+wrap='-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc'
+"$cc" $flags -DMCDC_SELFCHECK_PERF -DMCDC_SELFCHECK_WRAP_ALLOC \
+    "$root/src/runtime/test/runtime_mcdc_manifest_bridge_selfcheck.c" \
+    "$root/src/runtime/runtime_coverage_core.c" $wrap -lm -lpthread -ldl \
+    -o "$out/manifest-report-selfcheck"
+"$cc" $flags \
+    "$root/src/runtime/test/runtime_mcdc_sharded_concurrency_selfcheck.c" \
+    "$root/src/runtime/runtime_coverage_core.c" \
+    -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free \
+    -lm -lpthread -ldl -o "$out/sharded-selfcheck"
+
+printf 'check\tbinary_sha256\tmax_rss_kib\tresult_sha256\n' >"$out/identity.tsv"
+run_check() {
+    name=$1
+    bin=$2
+    "$time_bin" -f '%M' -o "$out/$name.rss" "$bin" >"$out/$name.result"
+    rss=$(sed -n '1p' "$out/$name.rss")
+    case "$rss" in ''|*[!0-9]*) fail "$name-invalid-rss";; esac
+    [ "$rss" -le "$rss_limit_kib" ] || fail "$name-rss-$rss-over-$rss_limit_kib"
+    grep -Eq '(^| )allocations=0($| )|(^| )hot_heap_allocations=0($| )' \
+        "$out/$name.result" || fail "$name-zero-allocation-receipt-missing"
+    binary_hash=$(sha256sum "$bin" | awk '{print $1}')
+    result_hash=$(sha256sum "$out/$name.result" | awk '{print $1}')
+    printf '%s\t%s\t%s\t%s\n' "$name" "$binary_hash" "$rss" "$result_hash" \
+        >>"$out/identity.tsv"
+}
+
+run_check manifest_report "$out/manifest-report-selfcheck"
+run_check sharded "$out/sharded-selfcheck"
+
+grep -q 'mcdc_manifest_identity_perf .* allocations=0' \
+    "$out/manifest_report.result" || fail manifest-perf-receipt-missing
+grep -q 'mcdc_report_perf .* allocations=0' \
+    "$out/manifest_report.result" || fail report-perf-receipt-missing
+grep -q 'event_capacity_bytes=4194304' \
+    "$out/sharded.result" || fail default-event-capacity-not-exactly-4mib
+grep -q 'hot_heap_allocations=0' \
+    "$out/sharded.result" || fail sharded-hot-allocation
+
+cat "$out/manifest_report.result" "$out/sharded.result" >"$out/results.txt"
+echo "mcdc-native-runtime-perf: PASS rss_limit_kib=$rss_limit_kib evidence=$out"

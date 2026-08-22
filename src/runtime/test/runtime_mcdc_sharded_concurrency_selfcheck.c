@@ -1,14 +1,20 @@
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <time.h>
 #include "../runtime_mcdc_v1.h"
 
-enum { WORKERS = 8, EVENTS_PER_WORKER = 20000 };
+/* 8 * 8192 * 64-byte vectors = exactly the 4 MiB default event-capacity
+ * ceiling. The snapshot buffer is caller-owned verification storage and is
+ * reported separately. */
+enum { WORKERS = 8, EVENTS_PER_WORKER = 8192 };
 
 static _Atomic int start_workers;
 static _Atomic uint64_t allocation_calls;
@@ -148,6 +154,17 @@ int main(void) {
     assert(epoch_output[0].owner_sequence == 0 &&
            epoch_output[1].owner_sequence == 0);
     assert(rt_mcdc_collector_reset_checked_v1() == SIMPLE_MCDC_V1_OK);
+    struct rusage usage;
+    assert(getrusage(RUSAGE_SELF, &usage) == 0);
+    printf("PASS workers=%u events=%zu event_capacity_bytes=%zu "
+           "snapshot_capacity_bytes=%zu elapsed_ns=%" PRIu64
+           " throughput_events_per_second=%" PRIu64
+           " hot_heap_allocations=%" PRIu64 " maxrss_kib=%ld\n",
+           WORKERS, event_count, event_count * sizeof(*storage),
+           event_count * sizeof(*snapshot_events), duration,
+           duration == 0 ? 0 : (uint64_t)event_count * UINT64_C(1000000000) / duration,
+           atomic_load_explicit(&allocation_calls, memory_order_relaxed),
+           usage.ru_maxrss);
     free(snapshot_events);
     free(storage);
     return 0;
