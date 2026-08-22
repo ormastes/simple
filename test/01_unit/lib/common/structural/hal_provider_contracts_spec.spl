@@ -1,0 +1,103 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-009 REQ-010 REQ-012 REQ-013 REQ-014
+
+use std.spec.*
+use std.common.structural.hal_provider.contracts.*
+
+fn test_capacity() -> HalCapacityV1:
+    hal_capacity_v1(256, 256, 16, 1024, 8, 1000)
+
+fn test_operation(assurance: HalAssurance, providers: i64,
+                  preferred: HalProviderKind, rationale: i64) -> HalOperationV1:
+    hal_operation_v1(101, assurance, providers, 0, 11, 12,
+                     HalSideEffectPolicy.PlanThenCommit, test_capacity(),
+                     13, 14, preferred, rationale)
+
+describe "rt(hal) frozen provider contracts":
+    describe "REQ-009: complete operation declarations":
+        it "accepts a bounded critical operation with an admitted provider":
+            step("Declare one critical HAL operation with fixed capacities")
+            val operation = test_operation(HalAssurance.Critical, 7,
+                                           HalProviderKind.PureSimple, 0)
+            step("Validate the frozen operation contract")
+            expect(hal_operation_v1_well_formed(operation)).to_be(true)
+
+        it "rejects a preferred provider outside the provider mask":
+            val operation = test_operation(HalAssurance.Critical, 1,
+                                           HalProviderKind.Rust, 0)
+            expect(hal_operation_v1_well_formed(operation)).to_be(false)
+
+        it "rejects zero and negative capacities":
+            val zero = hal_capacity_v1(0, 1, 1, 1, 1, 1)
+            val negative = hal_capacity_v1(1, 1, 1, 1, 1, -1)
+            expect(hal_capacity_v1_well_formed(zero)).to_be(false)
+            expect(hal_capacity_v1_well_formed(negative)).to_be(false)
+
+    describe "REQ-010: mission-critical default propagation":
+        it "promotes a critical operation into a verified entry closure":
+            val operation = test_operation(HalAssurance.Critical, 7,
+                                           HalProviderKind.PureSimple, 0)
+            val effective = hal_operation_effective_assurance(
+                operation, HalAssurance.Verified)
+            expect(hal_assurance_to_i64(effective)).to_equal(HAL_ASSURANCE_VERIFIED)
+
+        it "rejects lower assurance reached from a critical entry":
+            val operation = test_operation(HalAssurance.Strict, 7,
+                                           HalProviderKind.PureSimple, 99)
+            expect(hal_operation_rejects_lower_from_critical(
+                operation, HalAssurance.Critical)).to_be(true)
+
+        it "requires rationale for a lower-assurance declaration":
+            val operation = test_operation(HalAssurance.Strict, 7,
+                                           HalProviderKind.PureSimple, 0)
+            expect(hal_operation_v1_well_formed(operation)).to_be(false)
+
+    describe "REQ-012: bounded request and result regions":
+        it "accepts an exact-capacity request":
+            val request = hal_provider_request_v1(101, 7, 9, 0, 64, 64, 128)
+            expect(hal_provider_request_v1_well_formed(request)).to_be(true)
+
+        it "rejects a request that escapes its caller-owned region":
+            val request = hal_provider_request_v1(101, 7, 9, 48, 32, 64, 128)
+            expect(hal_provider_request_v1_well_formed(request)).to_be(false)
+
+        it "requires overflow provenance only for overflow results":
+            val overflow = hal_provider_result_v1(
+                HalProviderKind.C, 7, HalStatusV1.Overflow, 5,
+                10, 20, 64, 64, 8, 8, 7, 12)
+            val missing = hal_provider_result_v1(
+                HalProviderKind.C, 7, HalStatusV1.Overflow, 5,
+                10, 20, 64, 64, 8, 8, -1, 12)
+            expect(hal_provider_result_v1_well_formed(overflow)).to_be(true)
+            expect(hal_provider_result_v1_well_formed(missing)).to_be(false)
+
+    describe "REQ-013 and REQ-014: parent-authoritative comparison":
+        it "orders child receipts by invocation and provider, not arrival":
+            val rust = hal_provider_result_v1(
+                HalProviderKind.Rust, 7, HalStatusV1.Ok, 0,
+                10, 20, 64, 64, 8, 8, -1, 12)
+            val pure = hal_provider_result_v1(
+                HalProviderKind.PureSimple, 7, HalStatusV1.Ok, 0,
+                10, 20, 64, 64, 8, 8, -1, 14)
+            expect(hal_provider_result_before(pure, rust)).to_be(true)
+            expect(hal_provider_result_before(rust, pure)).to_be(false)
+
+        it "compares independently produced normalized receipts":
+            val pure = hal_provider_result_v1(
+                HalProviderKind.PureSimple, 7, HalStatusV1.Ok, 0,
+                10, 20, 64, 64, 8, 8, -1, 14)
+            val c = hal_provider_result_v1(
+                HalProviderKind.C, 7, HalStatusV1.Ok, 0,
+                10, 20, 64, 64, 8, 8, -1, 12)
+            expect(hal_provider_results_equivalent(pure, c)).to_be(true)
+
+        it "detects normalized divergence and same-provider vacuity":
+            val pure = hal_provider_result_v1(
+                HalProviderKind.PureSimple, 7, HalStatusV1.Ok, 0,
+                10, 20, 64, 64, 8, 8, -1, 14)
+            val divergent = hal_provider_result_v1(
+                HalProviderKind.C, 7, HalStatusV1.Ok, 0,
+                10, 21, 64, 64, 8, 8, -1, 12)
+            expect(hal_provider_results_equivalent(pure, divergent)).to_be(false)
+            expect(hal_provider_results_comparable(pure, pure)).to_be(false)
+

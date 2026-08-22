@@ -1,0 +1,75 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-016 REQ-017 REQ-018
+
+use std.spec.*
+use std.common.structural.environment_instruction.contracts.*
+
+fn instruction(sequence: i64) -> EnvInstructionV1:
+    env_instruction_v1(17, sequence, EnvOpcodeV1.FileRead, 21, 0,
+                       0, 32, 32, 32, 64)
+
+describe "typed environment instruction contracts":
+    describe "REQ-016: bounded extraction and replay identity":
+        it "accepts a bounded instruction and matching observation":
+            step("Extract one typed environment access instruction")
+            val planned = instruction(0)
+            val observed = env_observation_v1(
+                17, 0, EnvInstructionStatusV1.Applied, 0, 32, 64, 11, 12)
+            step("Match the parent observation to invocation and sequence")
+            expect(env_instruction_v1_well_formed(planned)).to_be(true)
+            expect(env_observation_matches(planned, observed)).to_be(true)
+
+        it "accepts only an exact next sequence in one invocation":
+            val first = instruction(0)
+            val next = instruction(1)
+            val duplicate = instruction(0)
+            expect(env_instruction_follows(first, next)).to_be(true)
+            expect(env_instruction_follows(first, duplicate)).to_be(false)
+
+    describe "REQ-017: malformed and divergent interactions fail closed":
+        it "rejects an argument region that exceeds capacity":
+            val invalid = env_instruction_v1(
+                17, 0, EnvOpcodeV1.FileRead, 21, 0, 16, 32, 32, 0, 64)
+            expect(env_instruction_v1_well_formed(invalid)).to_be(false)
+
+        it "rejects an observation from another invocation":
+            val planned = instruction(0)
+            val wrong = env_observation_v1(
+                18, 0, EnvInstructionStatusV1.Applied, 0, 32, 64, 11, 12)
+            expect(env_observation_matches(planned, wrong)).to_be(false)
+
+        it "rejects an observation larger than the requested result region":
+            val planned = instruction(0)
+            val overflow = env_observation_v1(
+                17, 0, EnvInstructionStatusV1.Overflow, 5, 65, 65, 11, 12)
+            expect(env_observation_matches(planned, overflow)).to_be(false)
+
+    describe "REQ-018: structured exclusions":
+        it "accepts a fresh capability exclusion with evidence and owner":
+            step("Record the unavailable capability and its durable predicate evidence")
+            val excluded = scenario_exclusion_v1(
+                31, ExclusionKindV1.CapabilityUnavailable, 41,
+                0, 24, 24, 51, 61, 62, 71, 100, 200)
+            step("Validate the reason, owner, review, expiry, and evidence")
+            expect(scenario_exclusion_v1_well_formed(excluded, 150)).to_be(true)
+
+        it "rejects blank reasons and missing evidence":
+            val blank = scenario_exclusion_v1(
+                31, ExclusionKindV1.FixtureUnavailable, 41,
+                0, 0, 24, 51, 61, 62, 71, 100, 200)
+            val no_evidence = scenario_exclusion_v1(
+                31, ExclusionKindV1.FixtureUnavailable, 41,
+                0, 24, 24, 51, 0, 0, 71, 100, 200)
+            expect(scenario_exclusion_v1_well_formed(blank, 150)).to_be(false)
+            expect(scenario_exclusion_v1_well_formed(no_evidence, 150)).to_be(false)
+
+        it "rejects stale and not-yet-reviewed exclusions":
+            val stale = scenario_exclusion_v1(
+                31, ExclusionKindV1.PlatformInapplicable, 41,
+                0, 24, 24, 51, 61, 62, 71, 100, 149)
+            val future_review = scenario_exclusion_v1(
+                31, ExclusionKindV1.SafetyProhibited, 41,
+                0, 24, 24, 51, 61, 62, 71, 151, 200)
+            expect(scenario_exclusion_v1_well_formed(stale, 150)).to_be(false)
+            expect(scenario_exclusion_v1_well_formed(future_review, 150)).to_be(false)
+

@@ -1,0 +1,229 @@
+# codex-impl
+# Frozen pointer-free V1 environment plan/replay vocabulary.
+
+val ENV_INSTRUCTION_SCHEMA_VERSION: i64 = 1
+
+enum EnvOpcodeV1:
+    FileOpen
+    FileRead
+    FileWrite
+    FileClose
+    StreamRead
+    StreamWrite
+    ProcessSpawn
+    ProcessPoll
+    ProcessKill
+    EnvironmentGet
+    ClockRead
+    RandomFill
+    SocketOpen
+    SocketSend
+    SocketReceive
+    SocketClose
+    InterruptMask
+    InterruptAcknowledge
+    MmioRead
+    MmioWrite
+    DmaMap
+    DmaSubmit
+    DmaPoll
+    DmaUnmap
+
+enum EnvInstructionStatusV1:
+    Planned
+    Applied
+    Replayed
+    UnsupportedCapability
+    InvalidInstruction
+    UnsafeInstruction
+    Timeout
+    Overflow
+    Diverged
+
+enum ExclusionKindV1:
+    CapabilityUnavailable
+    FixtureUnavailable
+    PlatformInapplicable
+    SafetyProhibited
+    UncontrollableNondeterminism
+
+fn env_opcode_to_i64(value: EnvOpcodeV1) -> i64:
+    match value:
+        case EnvOpcodeV1.FileOpen: 0
+        case EnvOpcodeV1.FileRead: 1
+        case EnvOpcodeV1.FileWrite: 2
+        case EnvOpcodeV1.FileClose: 3
+        case EnvOpcodeV1.StreamRead: 4
+        case EnvOpcodeV1.StreamWrite: 5
+        case EnvOpcodeV1.ProcessSpawn: 6
+        case EnvOpcodeV1.ProcessPoll: 7
+        case EnvOpcodeV1.ProcessKill: 8
+        case EnvOpcodeV1.EnvironmentGet: 9
+        case EnvOpcodeV1.ClockRead: 10
+        case EnvOpcodeV1.RandomFill: 11
+        case EnvOpcodeV1.SocketOpen: 12
+        case EnvOpcodeV1.SocketSend: 13
+        case EnvOpcodeV1.SocketReceive: 14
+        case EnvOpcodeV1.SocketClose: 15
+        case EnvOpcodeV1.InterruptMask: 16
+        case EnvOpcodeV1.InterruptAcknowledge: 17
+        case EnvOpcodeV1.MmioRead: 18
+        case EnvOpcodeV1.MmioWrite: 19
+        case EnvOpcodeV1.DmaMap: 20
+        case EnvOpcodeV1.DmaSubmit: 21
+        case EnvOpcodeV1.DmaPoll: 22
+        case EnvOpcodeV1.DmaUnmap: 23
+
+fn env_instruction_status_to_i64(value: EnvInstructionStatusV1) -> i64:
+    match value:
+        case EnvInstructionStatusV1.Planned: 0
+        case EnvInstructionStatusV1.Applied: 1
+        case EnvInstructionStatusV1.Replayed: 2
+        case EnvInstructionStatusV1.UnsupportedCapability: 3
+        case EnvInstructionStatusV1.InvalidInstruction: 4
+        case EnvInstructionStatusV1.UnsafeInstruction: 5
+        case EnvInstructionStatusV1.Timeout: 6
+        case EnvInstructionStatusV1.Overflow: 7
+        case EnvInstructionStatusV1.Diverged: 8
+
+fn exclusion_kind_to_i64(value: ExclusionKindV1) -> i64:
+    match value:
+        case ExclusionKindV1.CapabilityUnavailable: 0
+        case ExclusionKindV1.FixtureUnavailable: 1
+        case ExclusionKindV1.PlatformInapplicable: 2
+        case ExclusionKindV1.SafetyProhibited: 3
+        case ExclusionKindV1.UncontrollableNondeterminism: 4
+
+struct EnvInstructionV1:
+    contract_version: i64
+    invocation_id: i64
+    sequence: i64
+    opcode: EnvOpcodeV1
+    capability_id: i64
+    flags: i64
+    argument_offset: i64
+    argument_length: i64
+    argument_capacity: i64
+    result_offset: i64
+    result_capacity: i64
+
+fn env_instruction_v1(invocation_id: i64, sequence: i64,
+                      opcode: EnvOpcodeV1, capability_id: i64, flags: i64,
+                      argument_offset: i64, argument_length: i64,
+                      argument_capacity: i64, result_offset: i64,
+                      result_capacity: i64) -> EnvInstructionV1:
+    EnvInstructionV1(contract_version: ENV_INSTRUCTION_SCHEMA_VERSION,
+                     invocation_id: invocation_id, sequence: sequence,
+                     opcode: opcode, capability_id: capability_id, flags: flags,
+                     argument_offset: argument_offset,
+                     argument_length: argument_length,
+                     argument_capacity: argument_capacity,
+                     result_offset: result_offset, result_capacity: result_capacity)
+
+fn env_instruction_v1_well_formed(value: EnvInstructionV1) -> bool:
+    value.contract_version == ENV_INSTRUCTION_SCHEMA_VERSION
+        and value.invocation_id > 0 and value.sequence >= 0
+        and value.capability_id > 0 and value.flags >= 0
+        and value.argument_offset >= 0 and value.argument_length >= 0
+        and value.argument_capacity >= 0
+        and value.argument_length <= value.argument_capacity
+        and value.argument_offset <= value.argument_capacity - value.argument_length
+        and value.result_offset >= 0 and value.result_capacity >= 0
+
+fn env_instruction_follows(previous: EnvInstructionV1,
+                           current: EnvInstructionV1) -> bool:
+    env_instruction_v1_well_formed(previous)
+        and env_instruction_v1_well_formed(current)
+        and previous.invocation_id == current.invocation_id
+        and current.sequence == previous.sequence + 1
+
+struct EnvObservationV1:
+    contract_version: i64
+    invocation_id: i64
+    sequence: i64
+    status: EnvInstructionStatusV1
+    status_code: i64
+    bytes_length: i64
+    bytes_capacity: i64
+    interaction_digest_hi: i64
+    interaction_digest_lo: i64
+
+fn env_observation_v1(invocation_id: i64, sequence: i64,
+                      status: EnvInstructionStatusV1, status_code: i64,
+                      bytes_length: i64, bytes_capacity: i64,
+                      interaction_digest_hi: i64,
+                      interaction_digest_lo: i64) -> EnvObservationV1:
+    EnvObservationV1(contract_version: ENV_INSTRUCTION_SCHEMA_VERSION,
+                     invocation_id: invocation_id, sequence: sequence,
+                     status: status, status_code: status_code,
+                     bytes_length: bytes_length, bytes_capacity: bytes_capacity,
+                     interaction_digest_hi: interaction_digest_hi,
+                     interaction_digest_lo: interaction_digest_lo)
+
+fn env_observation_v1_well_formed(value: EnvObservationV1) -> bool:
+    value.contract_version == ENV_INSTRUCTION_SCHEMA_VERSION
+        and value.invocation_id > 0 and value.sequence >= 0
+        and value.bytes_length >= 0 and value.bytes_capacity >= 0
+        and value.bytes_length <= value.bytes_capacity
+
+fn env_observation_matches(instruction: EnvInstructionV1,
+                           observation: EnvObservationV1) -> bool:
+    env_instruction_v1_well_formed(instruction)
+        and env_observation_v1_well_formed(observation)
+        and instruction.invocation_id == observation.invocation_id
+        and instruction.sequence == observation.sequence
+        and observation.bytes_length <= instruction.result_capacity
+
+struct ScenarioExclusionV1:
+    contract_version: i64
+    scenario_id: i64
+    kind: ExclusionKindV1
+    stable_code_id: i64
+    reason_offset: i64
+    reason_length: i64
+    reason_capacity: i64
+    predicate_id: i64
+    predicate_evidence_hi: i64
+    predicate_evidence_lo: i64
+    owner_id: i64
+    review_epoch: i64
+    expiry_epoch: i64
+
+fn scenario_exclusion_v1(scenario_id: i64, kind: ExclusionKindV1,
+                         stable_code_id: i64, reason_offset: i64,
+                         reason_length: i64, reason_capacity: i64,
+                         predicate_id: i64, predicate_evidence_hi: i64,
+                         predicate_evidence_lo: i64, owner_id: i64,
+                         review_epoch: i64, expiry_epoch: i64) -> ScenarioExclusionV1:
+    ScenarioExclusionV1(contract_version: ENV_INSTRUCTION_SCHEMA_VERSION,
+                        scenario_id: scenario_id, kind: kind,
+                        stable_code_id: stable_code_id,
+                        reason_offset: reason_offset, reason_length: reason_length,
+                        reason_capacity: reason_capacity,
+                        predicate_id: predicate_id,
+                        predicate_evidence_hi: predicate_evidence_hi,
+                        predicate_evidence_lo: predicate_evidence_lo,
+                        owner_id: owner_id, review_epoch: review_epoch,
+                        expiry_epoch: expiry_epoch)
+
+fn scenario_exclusion_v1_well_formed(value: ScenarioExclusionV1,
+                                      current_epoch: i64) -> bool:
+    value.contract_version == ENV_INSTRUCTION_SCHEMA_VERSION
+        and value.scenario_id > 0 and value.stable_code_id > 0
+        and value.reason_offset >= 0 and value.reason_length > 0
+        and value.reason_capacity > 0 and value.reason_length <= value.reason_capacity
+        and value.reason_offset <= value.reason_capacity - value.reason_length
+        and value.predicate_id > 0 and value.owner_id > 0
+        and value.review_epoch >= 0 and value.review_epoch <= current_epoch
+        and value.expiry_epoch > current_epoch
+        and (value.predicate_evidence_hi != 0 or value.predicate_evidence_lo != 0)
+
+export ENV_INSTRUCTION_SCHEMA_VERSION
+export EnvOpcodeV1, EnvInstructionStatusV1, ExclusionKindV1
+export EnvInstructionV1, EnvObservationV1, ScenarioExclusionV1
+export env_opcode_to_i64, env_instruction_status_to_i64, exclusion_kind_to_i64
+export env_instruction_v1, env_instruction_v1_well_formed, env_instruction_follows
+export env_observation_v1, env_observation_v1_well_formed
+export env_observation_matches
+export scenario_exclusion_v1, scenario_exclusion_v1_well_formed
+

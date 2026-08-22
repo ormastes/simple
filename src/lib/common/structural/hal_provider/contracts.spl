@@ -1,0 +1,269 @@
+# codex-impl
+# Frozen pointer-free V1 vocabulary for rt(hal) provider execution.
+
+val HAL_PROVIDER_SCHEMA_VERSION: i64 = 1
+val HAL_ASSURANCE_CRITICAL: i64 = 3
+val HAL_ASSURANCE_VERIFIED: i64 = 4
+
+enum HalProviderKind:
+    PureSimple
+    C
+    Rust
+
+enum HalRunMode:
+    AlphaCompare
+    BetaCompare
+    NormalPreferred
+
+enum HalAssurance:
+    Moderate
+    Strict
+    Robust
+    Critical
+    Verified
+
+enum HalSideEffectPolicy:
+    Pure
+    PlanThenCommit
+    ReplayOnly
+
+enum HalStatusV1:
+    Ok
+    UnsupportedCapability
+    InvalidRequest
+    ProviderError
+    Timeout
+    Overflow
+    Diverged
+    Cancelled
+
+fn hal_provider_kind_to_i64(value: HalProviderKind) -> i64:
+    match value:
+        case HalProviderKind.PureSimple: 0
+        case HalProviderKind.C: 1
+        case HalProviderKind.Rust: 2
+
+fn hal_run_mode_to_i64(value: HalRunMode) -> i64:
+    match value:
+        case HalRunMode.AlphaCompare: 0
+        case HalRunMode.BetaCompare: 1
+        case HalRunMode.NormalPreferred: 2
+
+fn hal_assurance_to_i64(value: HalAssurance) -> i64:
+    match value:
+        case HalAssurance.Moderate: 0
+        case HalAssurance.Strict: 1
+        case HalAssurance.Robust: 2
+        case HalAssurance.Critical: HAL_ASSURANCE_CRITICAL
+        case HalAssurance.Verified: HAL_ASSURANCE_VERIFIED
+
+fn hal_side_effect_policy_to_i64(value: HalSideEffectPolicy) -> i64:
+    match value:
+        case HalSideEffectPolicy.Pure: 0
+        case HalSideEffectPolicy.PlanThenCommit: 1
+        case HalSideEffectPolicy.ReplayOnly: 2
+
+fn hal_status_to_i64(value: HalStatusV1) -> i64:
+    match value:
+        case HalStatusV1.Ok: 0
+        case HalStatusV1.UnsupportedCapability: 1
+        case HalStatusV1.InvalidRequest: 2
+        case HalStatusV1.ProviderError: 3
+        case HalStatusV1.Timeout: 4
+        case HalStatusV1.Overflow: 5
+        case HalStatusV1.Diverged: 6
+        case HalStatusV1.Cancelled: 7
+
+struct HalCapacityV1:
+    request_bytes: i64
+    result_bytes: i64
+    trace_operations: i64
+    trace_bytes: i64
+    diff_rows: i64
+    deadline_ticks: i64
+
+fn hal_capacity_v1(request_bytes: i64, result_bytes: i64,
+                   trace_operations: i64, trace_bytes: i64,
+                   diff_rows: i64, deadline_ticks: i64) -> HalCapacityV1:
+    HalCapacityV1(request_bytes: request_bytes, result_bytes: result_bytes,
+                  trace_operations: trace_operations, trace_bytes: trace_bytes,
+                  diff_rows: diff_rows, deadline_ticks: deadline_ticks)
+
+fn hal_capacity_v1_well_formed(value: HalCapacityV1) -> bool:
+    value.request_bytes > 0 and value.result_bytes > 0
+        and value.trace_operations > 0 and value.trace_bytes > 0
+        and value.diff_rows > 0 and value.deadline_ticks > 0
+
+struct HalOperationV1:
+    contract_version: i64
+    operation_id: i64
+    assurance_floor: HalAssurance
+    providers_mask: i64
+    required_capabilities_mask: i64
+    comparator_id: i64
+    normalizer_id: i64
+    side_effect_policy: HalSideEffectPolicy
+    capacity: HalCapacityV1
+    error_schema_id: i64
+    environment_schema_id: i64
+    preferred_provider: HalProviderKind
+    lower_assurance_rationale_id: i64
+
+fn hal_operation_v1(operation_id: i64, assurance_floor: HalAssurance,
+                    providers_mask: i64, required_capabilities_mask: i64,
+                    comparator_id: i64, normalizer_id: i64,
+                    side_effect_policy: HalSideEffectPolicy,
+                    capacity: HalCapacityV1, error_schema_id: i64,
+                    environment_schema_id: i64,
+                    preferred_provider: HalProviderKind,
+                    lower_assurance_rationale_id: i64) -> HalOperationV1:
+    HalOperationV1(contract_version: HAL_PROVIDER_SCHEMA_VERSION,
+                   operation_id: operation_id, assurance_floor: assurance_floor,
+                   providers_mask: providers_mask,
+                   required_capabilities_mask: required_capabilities_mask,
+                   comparator_id: comparator_id, normalizer_id: normalizer_id,
+                   side_effect_policy: side_effect_policy, capacity: capacity,
+                   error_schema_id: error_schema_id,
+                   environment_schema_id: environment_schema_id,
+                   preferred_provider: preferred_provider,
+                   lower_assurance_rationale_id: lower_assurance_rationale_id)
+
+fn hal_operation_v1_well_formed(value: HalOperationV1) -> bool:
+    if value.contract_version != HAL_PROVIDER_SCHEMA_VERSION:
+        return false
+    if value.operation_id <= 0 or value.providers_mask <= 0:
+        return false
+    if value.comparator_id <= 0 or value.normalizer_id <= 0:
+        return false
+    if value.error_schema_id <= 0 or value.environment_schema_id <= 0:
+        return false
+    if not hal_capacity_v1_well_formed(value.capacity):
+        return false
+    val assurance = hal_assurance_to_i64(value.assurance_floor)
+    if assurance < HAL_ASSURANCE_CRITICAL and value.lower_assurance_rationale_id <= 0:
+        return false
+    val preferred_bit = 1 << hal_provider_kind_to_i64(value.preferred_provider)
+    (value.providers_mask & preferred_bit) != 0
+
+fn hal_operation_effective_assurance(operation: HalOperationV1,
+                                     entry_assurance: HalAssurance) -> HalAssurance:
+    if hal_assurance_to_i64(entry_assurance) > hal_assurance_to_i64(operation.assurance_floor):
+        return entry_assurance
+    operation.assurance_floor
+
+fn hal_operation_rejects_lower_from_critical(operation: HalOperationV1,
+                                             entry_assurance: HalAssurance) -> bool:
+    hal_assurance_to_i64(entry_assurance) >= HAL_ASSURANCE_CRITICAL
+        and hal_assurance_to_i64(operation.assurance_floor) < HAL_ASSURANCE_CRITICAL
+
+struct HalProviderRequestV1:
+    contract_version: i64
+    operation_id: i64
+    invocation_id: i64
+    fixture_id: i64
+    input_offset: i64
+    input_length: i64
+    input_capacity: i64
+    trace_capacity: i64
+
+fn hal_provider_request_v1(operation_id: i64, invocation_id: i64,
+                           fixture_id: i64, input_offset: i64,
+                           input_length: i64, input_capacity: i64,
+                           trace_capacity: i64) -> HalProviderRequestV1:
+    HalProviderRequestV1(contract_version: HAL_PROVIDER_SCHEMA_VERSION,
+                         operation_id: operation_id, invocation_id: invocation_id,
+                         fixture_id: fixture_id, input_offset: input_offset,
+                         input_length: input_length, input_capacity: input_capacity,
+                         trace_capacity: trace_capacity)
+
+fn hal_provider_request_v1_well_formed(value: HalProviderRequestV1) -> bool:
+    value.contract_version == HAL_PROVIDER_SCHEMA_VERSION
+        and value.operation_id > 0 and value.invocation_id > 0
+        and value.fixture_id > 0 and value.input_offset >= 0
+        and value.input_length >= 0 and value.input_capacity >= 0
+        and value.input_length <= value.input_capacity
+        and value.input_offset <= value.input_capacity - value.input_length
+        and value.trace_capacity > 0
+
+struct HalProviderResultV1:
+    contract_version: i64
+    provider: HalProviderKind
+    invocation_id: i64
+    status: HalStatusV1
+    status_code: i64
+    normalized_digest_hi: i64
+    normalized_digest_lo: i64
+    payload_length: i64
+    payload_capacity: i64
+    trace_length: i64
+    trace_capacity: i64
+    overflow_at: i64
+    elapsed_ticks: i64
+
+fn hal_provider_result_v1(provider: HalProviderKind, invocation_id: i64,
+                          status: HalStatusV1, status_code: i64,
+                          normalized_digest_hi: i64, normalized_digest_lo: i64,
+                          payload_length: i64, payload_capacity: i64,
+                          trace_length: i64, trace_capacity: i64,
+                          overflow_at: i64, elapsed_ticks: i64) -> HalProviderResultV1:
+    HalProviderResultV1(contract_version: HAL_PROVIDER_SCHEMA_VERSION,
+                        provider: provider, invocation_id: invocation_id,
+                        status: status, status_code: status_code,
+                        normalized_digest_hi: normalized_digest_hi,
+                        normalized_digest_lo: normalized_digest_lo,
+                        payload_length: payload_length,
+                        payload_capacity: payload_capacity,
+                        trace_length: trace_length, trace_capacity: trace_capacity,
+                        overflow_at: overflow_at, elapsed_ticks: elapsed_ticks)
+
+fn hal_provider_result_v1_well_formed(value: HalProviderResultV1) -> bool:
+    if value.contract_version != HAL_PROVIDER_SCHEMA_VERSION or value.invocation_id <= 0:
+        return false
+    if value.payload_length < 0 or value.payload_capacity < 0:
+        return false
+    if value.trace_length < 0 or value.trace_capacity < 0:
+        return false
+    if value.payload_length > value.payload_capacity or value.trace_length > value.trace_capacity:
+        return false
+    if value.elapsed_ticks < 0:
+        return false
+    if hal_status_to_i64(value.status) == hal_status_to_i64(HalStatusV1.Overflow):
+        return value.overflow_at >= 0
+    value.overflow_at == -1
+
+fn hal_provider_result_before(a: HalProviderResultV1,
+                              b: HalProviderResultV1) -> bool:
+    if a.invocation_id != b.invocation_id:
+        return a.invocation_id < b.invocation_id
+    hal_provider_kind_to_i64(a.provider) < hal_provider_kind_to_i64(b.provider)
+
+fn hal_provider_results_comparable(a: HalProviderResultV1,
+                                   b: HalProviderResultV1) -> bool:
+    hal_provider_result_v1_well_formed(a)
+        and hal_provider_result_v1_well_formed(b)
+        and a.invocation_id == b.invocation_id
+        and hal_provider_kind_to_i64(a.provider) != hal_provider_kind_to_i64(b.provider)
+
+fn hal_provider_results_equivalent(a: HalProviderResultV1,
+                                   b: HalProviderResultV1) -> bool:
+    hal_provider_results_comparable(a, b)
+        and hal_status_to_i64(a.status) == hal_status_to_i64(b.status)
+        and a.status_code == b.status_code
+        and a.normalized_digest_hi == b.normalized_digest_hi
+        and a.normalized_digest_lo == b.normalized_digest_lo
+        and a.payload_length == b.payload_length
+        and a.trace_length == b.trace_length
+
+export HAL_PROVIDER_SCHEMA_VERSION, HAL_ASSURANCE_CRITICAL, HAL_ASSURANCE_VERIFIED
+export HalProviderKind, HalRunMode, HalAssurance, HalSideEffectPolicy, HalStatusV1
+export HalCapacityV1, HalOperationV1, HalProviderRequestV1, HalProviderResultV1
+export hal_provider_kind_to_i64, hal_run_mode_to_i64, hal_assurance_to_i64
+export hal_side_effect_policy_to_i64, hal_status_to_i64
+export hal_capacity_v1, hal_capacity_v1_well_formed
+export hal_operation_v1, hal_operation_v1_well_formed
+export hal_operation_effective_assurance, hal_operation_rejects_lower_from_critical
+export hal_provider_request_v1, hal_provider_request_v1_well_formed
+export hal_provider_result_v1, hal_provider_result_v1_well_formed
+export hal_provider_result_before, hal_provider_results_comparable
+export hal_provider_results_equivalent
+
