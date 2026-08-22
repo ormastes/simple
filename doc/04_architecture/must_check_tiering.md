@@ -17,6 +17,12 @@ tampered, evidence-less, or non-passing push-blocking rows. Non-blocking TODOs
 remain visible. Push-tier commands are registry rows dispatched through a
 closed ID/mode/command allowlist, so a changed manifest cannot turn the hook
 into an arbitrary shell-command executor.
+The consumer canonicalizes evidence beneath the repository root and applies a
+64 MiB aggregate byte budget before hashing. It deduplicates identical ref
+updates and accepts at most two unique updates per invocation; larger pushes
+fail closed with an instruction to split the push. These bounds prevent
+committed policy input from turning the interactive hook into unbounded local
+file I/O.
 The bootstrap owner writes logs before the ledger and records repository-relative
 evidence references and hashes. This avoids a circular Git hash dependency
 while binding PASS evidence to the source/config/scripts/tests/docs it qualifies.
@@ -25,6 +31,9 @@ validated Stage 4 path and injects it as `SIMPLE_BINARY` and the established
 `SIMPLE_BIN` compatibility name for every automated
 gate. Ambient or deployed `SIMPLE_BINARY` values cannot redirect that evidence
 to a stale compiler.
+The exhaustive structural-tree fixture campaign is a bootstrap automated row.
+Interactive push retains the same final-tree invariants but evaluates only each
+bounded committed tip and its count-only first-parent reference.
 Ledger schema v3 also binds every result to a non-empty owner. A non-passing
 row must retain an actionable unblock condition; a passing row must use
 `unblock_condition=none`. The push consumer rejects unowned work, vacuous TODOs,
