@@ -15,6 +15,34 @@
   replacements.
 - Verification status: intentionally not executed under the user's explicit
   no-verify instruction; static diff and ownership review only.
+
+## Workspace diagnostic session follow-up
+
+- Add `compiler/90.tools/workspace_diagnostics` config/request/result/session
+  owners; keep the first implementation serial and Pure Simple.
+- Replace per-file `_run_simple_check` and nested JSON query subprocesses with a
+  fresh per-file compiler/lint request inside one session.
+- Preserve discovery and diagnostic order, clean-file JSON omission, summaries,
+  exit codes and failure isolation; reset every mutable compiler/lint owner.
+- Require zero per-file subprocesses and standalone/session parity fixtures before
+  enabling the LSP path.
+- Instance-own parser/lexer/AST state and add contamination stress coverage before
+  any bounded parallel execution.
+- Measure the same 50/200-file fixtures: cold/warm p50/p95, process count and max
+  RSS; targets are >=50%/75% wall reduction and <=10% peak-RSS increase.
+
+## ANSI-free query diagnostic follow-up
+
+- Merge owner: compiler performance/memory lane.
+- Add an ESC-presence fast path to `_strip_ansi`; return the original compiler
+  output when ANSI stripping cannot change it.
+- Preserve exact legacy ANSI/malformed-sequence behavior on the slow path.
+- Pin plain Unicode, multiple terminated sequences and unterminated sequences in
+  mirrored query-diagnostic contracts.
+- Record repeated normalization and workspace process-per-file work as
+  architecture follow-ups rather than changing query APIs in this bounded tranche.
+- Verification status: intentionally not executed under the user's explicit
+  no-verify instruction; static diff and ownership review only.
 ## Authority
 
 Merge owner and final highest-capability reviewer: `/root`. Generated-manual review owner: `/root`. Sidecars may implement bounded disjoint lanes but cannot change frozen interfaces, accept exclusions, or mark done.
