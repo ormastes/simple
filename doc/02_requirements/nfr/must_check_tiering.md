@@ -10,8 +10,10 @@
   timestamp, commands, verdicts, and evidence.
 - NFR-MCT-004: PASS evidence must be non-symlinked, SHA-256 bound, source-fresh,
   and individually timestamped. TODO/blocked rows use `passed_at_utc=never`.
-- NFR-MCT-005: No full bootstrap is required merely to execute the push hook;
-  missing required bootstrap evidence is reported quickly and fails closed.
+- NFR-MCT-005: No full bootstrap is required merely to execute the push hook.
+  The initial all-TODO baseline is reported quickly while structural gates stay
+  mandatory; after first promotion, missing, stale, or downgraded required
+  bootstrap evidence fails closed.
 - NFR-MCT-006: Production PASS evidence is repository-contained, non-symlinked,
   committed, SHA-256 bound, read from the exact pushed revision, and limited to
   64 MiB aggregate input per ledger validation.

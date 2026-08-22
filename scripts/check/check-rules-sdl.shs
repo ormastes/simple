@@ -21,6 +21,10 @@ RULES_OVERRIDE=0
 GROUP=quick
 REF=HEAD
 SELFTEST_ONLY=0
+RULES_POLICY_SHA256=028c10460522549495d9142b90d5512dd5dcf79657f2fa9f3d72ca7b50442dfd
+if [ "${RULES_SELFTEST:-0}" = 1 ] && [ -n "${RULES_POLICY_SHA256_OVERRIDE:-}" ]; then
+    RULES_POLICY_SHA256=$RULES_POLICY_SHA256_OVERRIDE
+fi
 
 usage() {
     echo "usage: $0 [--group quick|full] [--ref <commit>] [--rules <file>] [--selftest]" >&2
@@ -60,6 +64,13 @@ parse_rules() {
         }
         END { flush() }
     ' "$1"
+}
+
+rules_policy_matches() {
+    _rules_file=$1
+    _expected=$2
+    _actual=$(sha256sum -- "$_rules_file" 2>/dev/null | awk '{print $1}') || return 1
+    [ "$_actual" = "$_expected" ]
 }
 
 run_scan() {
@@ -159,6 +170,14 @@ selftest() {
     TALLY=$(mktemp); out=$(run_scan "$st_dir/nonexistent.sdl" quick HEAD); code=$?; rm -f "$TALLY"
     [ $code -eq 2 ] || { echo "selftest: missing-file fixture exit $code (want 2)" >&2; rc=1; }
 
+    # fixtures 6-7: production command text is digest-bound. A reviewed file
+    # matches its binding; changing even one byte cannot inject a new command.
+    printf '%s\n' 'reviewed rules policy' > "$st_dir/policy.sdl"
+    policy_sha=$(sha256sum -- "$st_dir/policy.sdl" | awk '{print $1}')
+    rules_policy_matches "$st_dir/policy.sdl" "$policy_sha" || { echo "selftest: reviewed rules policy rejected" >&2; rc=1; }
+    printf '%s\n' 'cmd: echo injected' >> "$st_dir/policy.sdl"
+    rules_policy_matches "$st_dir/policy.sdl" "$policy_sha" && { echo "selftest: changed rules policy accepted" >&2; rc=1; }
+
     rm -rf "$st_dir"
     return $rc
 }
@@ -167,7 +186,7 @@ if ! selftest; then
     echo "ERROR — nothing was checked (selftest failed; the guard itself is broken)"
     exit 2
 fi
-[ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — 5 selftest fixtures checked, guard calibrated"; exit 0; }
+[ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — 7 selftest fixtures checked, guard calibrated"; exit 0; }
 
 COMMITTED_RULES=""
 if [ "$RULES_OVERRIDE" -eq 0 ]; then
@@ -178,6 +197,11 @@ if [ "$RULES_OVERRIDE" -eq 0 ]; then
         exit 2
     fi
     RULES=$COMMITTED_RULES
+    if ! rules_policy_matches "$RULES" "$RULES_POLICY_SHA256"; then
+        rm -f "$COMMITTED_RULES"
+        echo "ERROR — nothing was checked (committed rules.sdl is not bound to the reviewed policy digest)"
+        exit 2
+    fi
 fi
 
 TALLY=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }

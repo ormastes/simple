@@ -15,6 +15,18 @@ names a repository capability whose implementation owner is ambiguous.
 - Start detailed work at
   `doc/00_llm_process/feature_expert/must_check_tiering/skill.md`.
 
+## Sdoctest discovery
+
+- `simple test test --whole` is the release-wide command: positional `test`
+  scopes executable specs only, while Markdown comes from
+  `config/sdoctest.sdn` and source-comment doctests come from `src/lib`,
+  `src/compiler`, and `src/app`.
+- Use `--sdoctest <file.md>` for a focused Markdown file and
+  `--spl-doctest <file.spl>` for a focused source-comment file.
+- Runnable Markdown and comment examples use closed, non-empty
+  `simple`/`spl`/`sdoctest` fences. Use `text` for illustrative snippets.
+- Primary operator guide: `doc/07_guide/infra/testing.md`.
+
 ## Parent-authoritative actor/process transport
 
 - **Canonical owner rule:** the scheduler owns actor registry/admission/replies;

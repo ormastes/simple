@@ -88,6 +88,36 @@ row_value() {
     awk -F, -v id="$_id" -v col="$_column" '{x=$1; gsub(/^[[:space:]]+/, "", x); if (x==id) {v=$col; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); if (substr(v,1,1)=="\"") v=substr(v,2); if (substr(v,length(v),1)=="\"") v=substr(v,1,length(v)-1); print v; exit}}' "$LEDGER" 2>/dev/null
 }
 
+receipt_field() {
+    _receipt=$1
+    _field=$2
+    [ "$(grep -c "^${_field}=" "$_receipt" 2>/dev/null || true)" -eq 1 ] || return 1
+    sed -n "s/^${_field}=//p" "$_receipt"
+}
+
+validate_gate_receipt() {
+    _receipt=$1
+    _expected_gate=$2
+    _expected_fingerprint=$3
+
+    head_blob_metadata "$_receipt" || return 1
+    _receipt_sha=$HEAD_BLOB_SHA
+    _receipt_blob=$(mktemp) || return 1
+    git -C "$ROOT" show "HEAD:$_receipt" >"$_receipt_blob" 2>/dev/null || { rm -f "$_receipt_blob"; return 1; }
+    [ "$(receipt_field "$_receipt_blob" receipt_schema)" = simple.must-check-gate-receipt/v1 ] &&
+        [ "$(receipt_field "$_receipt_blob" gate_id)" = "$_expected_gate" ] &&
+        [ "$(receipt_field "$_receipt_blob" final_verdict)" = PASS ] &&
+        [ "$(receipt_field "$_receipt_blob" source_fingerprint)" = "$_expected_fingerprint" ] || {
+            rm -f "$_receipt_blob"
+            return 1
+        }
+    _artifact=$(receipt_field "$_receipt_blob" artifact_path) || { rm -f "$_receipt_blob"; return 1; }
+    _artifact_sha=$(receipt_field "$_receipt_blob" artifact_sha256) || { rm -f "$_receipt_blob"; return 1; }
+    rm -f "$_receipt_blob"
+    [ "$_artifact" != "$_receipt" ] && head_blob_metadata "$_artifact" && [ "$HEAD_BLOB_SHA" = "$_artifact_sha" ] || return 1
+    HEAD_BLOB_SHA=$_receipt_sha
+}
+
 gate_owner() {
     case "$1" in
         compiler-stage*) echo compiler-team ;;
@@ -208,11 +238,23 @@ if [ "$MODE" = selftest ]; then
         echo "bootstrap-must-check selftest: production validator override was accepted" >&2
         exit 1
     fi
+    if MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/bare-run.sdn" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 sh "$0" >/dev/null 2>&1; then
+        echo "bootstrap-must-check selftest: bare run recorded unbound automated PASS" >&2
+        exit 1
+    fi
+    [ ! -e "$_tmp/bare-run.sdn" ] || {
+        echo "bootstrap-must-check selftest: rejected bare run mutated the ledger" >&2
+        exit 1
+    }
     echo "bootstrap-must-check: PASS — phase promotion TODO preservation exact Stage4 binding stale reset override rejection and deterministic output checked"
     exit 0
 fi
 
 [ -f "$MANIFEST" ] || { echo "bootstrap-must-check: ERROR — missing manifest" >&2; exit 2; }
+if [ "$MODE" = run ]; then
+    echo "bootstrap-must-check: ERROR — automated PASS recording requires --record-bootstrap-success with exact --stage4-binary and --stage4-provenance" >&2
+    exit 2
+fi
 if [ -n "${MUST_CHECK_FINGERPRINT:-}" ]; then
     [ "${MUST_CHECK_SELFTEST:-0}" = 1 ] || {
         echo "bootstrap-must-check: ERROR — fingerprint override is self-test-only" >&2
@@ -254,8 +296,8 @@ if [ "$MODE" = record-gate ]; then
         echo "bootstrap-must-check: ERROR — $RECORD_GATE_ID is not a TODO receipt gate" >&2
         exit 2
     }
-    head_blob_metadata "$RECORD_GATE_EVIDENCE" || {
-        echo "bootstrap-must-check: ERROR — evidence must be a committed regular file at HEAD" >&2
+    validate_gate_receipt "$RECORD_GATE_EVIDENCE" "$RECORD_GATE_ID" "$_fp" || {
+        echo "bootstrap-must-check: ERROR — evidence must be a committed simple.must-check-gate-receipt/v1 bound to this gate, source fingerprint, final PASS, and committed artifact hash" >&2
         exit 2
     }
 fi
@@ -298,7 +340,7 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
     _unblock=$_description
     _unblock=$(printf '%s' "$_unblock" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
     if [ "$MODE" = record-gate ] && [ "$_id" = "$RECORD_GATE_ID" ]; then
-        head_blob_metadata "$RECORD_GATE_EVIDENCE" || exit 1
+        validate_gate_receipt "$RECORD_GATE_EVIDENCE" "$RECORD_GATE_ID" "$_fp" || exit 1
         _old=$(row_value "$_id" 2)
         _old_evidence=$(row_value "$_id" 5)
         _old_sha=$(row_value "$_id" 6)
@@ -352,6 +394,17 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
     printf '    %s, %s, %s, "%s", "%s", "%s", "%s", "%s"\n' "$_id" "$_status" "$_passed_at" "$_command" "$_evidence" "$_evidence_sha" "$_owner" "$_unblock" >> "$_rows_tmp"
 done < "$_manifest_tmp"
 
-write_ledger "$(cat "$_rows_tmp")" "$_fp" "$_at"
+_completed_at=never
+_completion_candidate=$(awk -F, '
+    /^[[:space:]]+[a-z0-9][a-z0-9-]*,/ {
+        status=$2; at=$3
+        gsub(/[[:space:]]/, "", status); gsub(/^[[:space:]]+|[[:space:]]+$/, "", at)
+        if (status != "pass" || at == "never" || at == "") incomplete=1
+        if (at > latest && at != "never") latest=at
+    }
+    END { if (!incomplete && latest != "") print latest }
+' "$_rows_tmp")
+[ -z "$_completion_candidate" ] || _completed_at=$_completion_candidate
+write_ledger "$(cat "$_rows_tmp")" "$_fp" "$_completed_at"
 [ "$_failed" -eq 0 ] || { echo "bootstrap-must-check: FAIL — one or more automated gates failed"; exit 1; }
 echo "bootstrap-must-check: PASS — ledger updated; TODO rows remain visible and are not counted as pass"

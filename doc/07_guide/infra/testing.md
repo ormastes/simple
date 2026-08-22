@@ -611,6 +611,12 @@ simple test --whole         # all specs/long tests + .spl and Markdown doctests
 `--all` expands spec discovery. `--whole` is the release gate: it also runs
 comment-embedded `.spl` doctests and executable `simple`, `spl`, and
 `sdoctest` fences from the configured Markdown sources.
+The conventional positional `test` in `simple test test --whole` applies only
+to spec discovery. It does not narrow either documentation lane: Markdown is
+loaded from `config/sdoctest.sdn`, while source-comment doctests are discovered
+under the production `src/lib`, `src/compiler`, and `src/app` roots. This is a
+`--whole` contract, not an alias for `--all`; focused `--sdoctest` and
+`--spl-doctest` commands continue to honor their explicit targets.
 
 Source doctests use the existing docstring form:
 

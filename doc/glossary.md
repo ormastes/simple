@@ -1181,7 +1181,9 @@ A documentation test discovered and executed by the full Simple test runner.
 A **Markdown sdoctest** is a closed, non-empty `simple`, `spl`, or `sdoctest`
 fence in Markdown. A **comment sdoctest** is a runnable fenced example or
 `sdoctest:` section in Simple source documentation comments. Text-only examples
-use a `text` fence and are not executable.
+use a `text` fence. In **whole-test scope**, the positional spec path does not
+become doctest provenance: Markdown follows `config/sdoctest.sdn`, and comment
+sdoctests follow the production `src/lib`, `src/compiler`, and `src/app` roots.
 
 ## LLM Fraud Prevention (rules.sdl)
 

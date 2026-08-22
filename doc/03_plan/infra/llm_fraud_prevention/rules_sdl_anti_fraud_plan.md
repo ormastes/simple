@@ -131,7 +131,7 @@ Every deliverable in this campaign additionally owes:
 | artifact | state |
 |---|---|
 | `rules.sdl` | 16 gates: 6 count, 4 file, 1 base, 2 list (planned), 3 scenario (planned) |
-| `scripts/check/check-rules-sdl.shs` | selftest PASS (5 fixtures); quick PASS 10 gates; full PASS 11 gates + 5 loud SKIPPED |
+| `scripts/check/check-rules-sdl.shs` | selftest PASS (7 fixtures, including policy-digest tamper rejection); quick PASS 10 gates; full PASS 11 gates + 5 loud SKIPPED |
 | `scripts/check/check-rules-sdl-integrity.shs` | selftest PASS (2 arms) |
 | pre-push wiring | added to `pre-push-conflict-tree-guard.shs`; `check-guard-wiring.shs` sees both as WIRED |
 | bootstrap wiring | `bootstrap_check.spl` check 9 runs `--group full` |

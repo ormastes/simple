@@ -612,12 +612,15 @@ print s.items.len()  # 2
 Run SDoctest examples:
 ```bash
 simple test --sdoctest README.md      # Run verified examples in Markdown/docs
-simple test --sdoctest src/math.spl   # Run file-local doctest examples
+simple test --spl-doctest src/math.spl # Run file-local source-comment doctests
 simple test --sdoctest --tag slow     # Filter by tag
-simple test test --whole              # Release gate: specs, long tests, source + Markdown doctests
+simple test test --whole              # Release gate: specs/long tests plus configured Markdown and production-source doctests
 ```
 
 `--doctest` is still accepted as a compatibility alias, but `--sdoctest` is the clearer name for the implemented path.
+In the canonical release command, the positional `test` selects the spec tree
+only. `--whole` still discovers Markdown from `config/sdoctest.sdn` and comment
+sdoctests from the production `src/lib`, `src/compiler`, and `src/app` roots.
 
 ### Functional Update Operator (`->`)
 

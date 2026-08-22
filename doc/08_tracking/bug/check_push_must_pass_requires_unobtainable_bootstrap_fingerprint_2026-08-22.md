@@ -1,6 +1,6 @@
 # check-push-must-pass requires a bootstrap fingerprint no tree can produce (2026-08-22)
 
-**Status:** OPEN (blocks every push through the tracked pre-push dispatcher)
+**Status:** RESOLVED — primary Codex must-check lane
 **Introduced by:** 09e879ff838 `fix(check): harden must-check ledger ownership`
 **Hook chain:** `scripts/hooks/pre-push` -> `pre-push-conflict-tree-guard.shs` -> `exec check-push-must-pass.shs`
 
@@ -39,12 +39,22 @@ shape of `fourth_tree_wipe_6f86ff32a7d_guard_not_enforced_2026-08-11.md`).
   this ledger-fingerprint bootstrap cycle.
 - `land.shs` pushes via `sj`, which segfaults in a plain `git worktree` (no `.jj`).
 
-## Proposed fix
+## Required fix
 
-Make the must-check ledger gate ADVISORY (report, exit 0) until the ledger
-has recorded one genuine PASS, or key the block on a ledger that is
-*stale relative to a previous pass* rather than on "never recorded" --
-the same promotion discipline used for `check-stage-binaries-runnable.shs`
-and `check-no-unresolved-runtime-symbols.shs` (landed advisory while honestly
-RED, promoted once green). Keep the structural guards mandatory; they must
-not be skipped as collateral of an unobtainable gate.
+Treat the canonical all-TODO `source_fingerprint=unrecorded` ledger as an
+unpromoted baseline, not as PASS. While both the pushed revision and its remote
+predecessor are unpromoted, report the debt and continue into every structural
+push gate. Once a predecessor contains genuine bootstrap-produced state, reject
+any attempted downgrade to `unrecorded`; normal fingerprint, evidence, and
+push-blocking validation remains fail-closed. Keep the structural guards
+mandatory in both states so missing bootstrap evidence cannot disable them.
+
+## Resolution evidence
+
+The focused fixture proves both sides of the ratchet: an unpromoted predecessor
+accepts an all-TODO ledger and still invokes structural gates; after genuine
+bootstrap-produced PASS evidence, a reset to `unrecorded` is rejected. The
+complete contract passed with `selftest=5s`, `ref-path=0s`, `two-ref=0s`, and
+`installed-hook=0s` at 59,136 KiB peak RSS.
+The representative committed-tree path then ran all five real production gates
+on the 118,074-file repository in 5.40s at 211,932 KiB peak RSS.

@@ -42,11 +42,18 @@ and are not reported as PASS.
 
 An unfinished receipt row becomes PASS only through
 `--record-gate-pass <id> --evidence <repo-relative-committed-receipt>`. Repeating
-the same receipt preserves the first PASS time, and later fingerprints carry it
+the same receipt preserves the first PASS time. The committed receipt uses
+`simple.must-check-gate-receipt/v1`, names the exact gate and source
+fingerprint, states a final PASS, and hash-binds a separate committed artifact;
+plain text and mismatched receipts fail closed. Later fingerprints carry it
 only while the exact committed blob/hash remains. Automated results remain
 source-fingerprint scoped. Bootstrap recording refuses dirty fingerprinted
 inputs, and automated/phase evidence is retained under
 `doc/08_tracking/check/evidence/<source-fingerprint>/` for the ledger commit.
+A bare recorder invocation cannot run automated rows or mutate the ledger;
+promotion requires exact Stage 1–4 admission through
+`--record-bootstrap-success`. Ledger completion remains `never` while any row
+is unfinished and otherwise records the latest first-PASS timestamp.
 
 Every ledger v3 row also names its owner and unblock condition. Unowned rows,
 unfinished rows without actionable unblock text, and PASS rows that retain a
@@ -63,20 +70,25 @@ linked-worktree installation remains the visible `windows-hook-installation`
 TODO and is not inferred from PowerShell source parity.
 
 Focused evidence: `sh test/01_unit/scripts/must_check_tiering_test.shs` produced
-`selftest=3s ref-path=0s installed-hook=1s` on 2026-08-22 after adding bounded
-ref/evidence handling and moving exhaustive tree fixtures to bootstrap. The
-complete command took 7.61s with 71,936 KiB peak RSS, including the hostile
-working-tree rules regression.
+`selftest=5s ref-path=0s two-ref=0s installed-hook=0s` on 2026-08-22 after
+adding bounded ref/evidence handling and moving exhaustive tree fixtures to
+bootstrap. The complete fixture took 11.18s with 59,136 KiB peak RSS; that
+total includes temporary Git repositories and linked-worktree setup outside
+the individually bounded NFR paths.
+The real committed-tree path over the 118,074-file repository then passed all
+five production gates for commit `4686d81b3bd` in 5.40s at 211,932 KiB peak
+RSS, scanning the 33 changed files and retaining every visible bootstrap TODO.
 
-The executable scenario invokes the push self-test, bootstrap self-test, and
-the real bootstrap-produced-ledger to committed-ref push transition fixture.
-Its assertions require explicit PASS markers, exact Stage 4 binding, and timing fields. This manual was
+The executable scenario invokes the push self-test, bootstrap self-test,
+Sdoctest bootstrap structural self-test, and the real bootstrap-produced-ledger
+to committed-ref push transition fixture. Its assertions require explicit PASS
+markers, exact Stage 4 binding, and timing fields. This manual was
 reviewed against that source; regeneration remains pending until an admitted
 Stage-4 CLI is available in the worktree.
 
 The Sdoctest bootstrap row first executes the named Markdown fixture
 `test/fixtures/doctest/green.md` and named source-comment fixture
-`test/fixtures/doc_coverage/fully_documented.spl`, then runs the whole tree.
+`test/fixtures/doctest/green.spl`, then runs the whole tree.
 Both `Sdoctest:` and `SPL Doctest:` summaries must report at least one passing
 case with zero failures and zero skips; the aggregate `Results:` count alone is
 insufficient.

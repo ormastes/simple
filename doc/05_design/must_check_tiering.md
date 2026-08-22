@@ -25,7 +25,9 @@ last non-empty line is an explicit PASS verdict. Ledger replacement is atomic
 only after row evaluation completes.
 Production recording requires fingerprinted inputs to match `HEAD`. The
 `--record-gate-pass <id> --evidence <repo-relative-path>` interface applies only
-to manifest `todo` rows and accepts a committed regular evidence blob. Repeating
+to manifest `todo` rows and accepts a committed
+`simple.must-check-gate-receipt/v1` whose gate ID, source fingerprint, final
+PASS verdict, and separate committed artifact SHA-256 all validate. Repeating
 the same receipt preserves its first PASS timestamp; later fingerprints retain
 it only while the same blob and SHA-256 remain committed.
 In completion mode, automated dispatch receives the canonical validated Stage 4
@@ -33,6 +35,9 @@ candidate as both `SIMPLE_BINARY` and `SIMPLE_BIN`; these assignments override
 any ambient value. The
 self-test supplies a conflicting ambient path and requires its fake gate runner
 to observe the admitted candidate.
+Bare run mode fails before evaluation or ledger mutation because it lacks that
+Stage 1–4 binding. The ledger completion timestamp stays `never` unless every
+bootstrap row is PASS, then equals the latest preserved row PASS timestamp.
 
 Statuses are `pass`, `todo`, `blocked`, or `fail`. TODO and blocked are never
 aliases for PASS. Only explicitly push-blocking rows prevent an interactive

@@ -27,6 +27,8 @@
 - Prove receipt-backed TODO first promotion requires an explicit committed
   evidence blob, preserves its first PASS timestamp for unchanged evidence,
   and carries across fingerprints only while the same blob/hash remains.
+- Prove the initial all-TODO unrecorded ledger still executes structural push
+  gates, and prove a promoted predecessor makes reset-to-unrecorded fail closed.
 - Prove live-worktree evidence modification/removal cannot affect exact-ref
   validation, while a pushed revision that omits its evidence blob fails.
 - Prove production bootstrap recording rejects fingerprinted input drift from

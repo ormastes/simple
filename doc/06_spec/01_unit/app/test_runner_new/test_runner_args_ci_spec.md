@@ -28,7 +28,7 @@ test_runner_args_ci_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -108,6 +108,55 @@ expect(options.sdoctest).to_equal(true)
 
 </details>
 
+#### enables every maintained test surface in whole mode
+
+The canonical positional `test` remains spec provenance. The resulting empty
+doctest scope tells the Markdown lane to use configured sources and the
+comment lane to use production source roots.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val options = parse_test_args(["test", "--whole"])
+
+expect(options.run_all).to_equal(true)
+expect(options.whole).to_equal(true)
+expect(options.path).to_equal("test")
+expect(options.path_explicit).to_equal(true)
+expect(options.sdoctest).to_equal(true)
+expect(options.spl_doctest).to_equal(true)
+expect(doctest_discovery_scope_path(options)).to_equal("")
+val source_roots = production_spl_doctest_roots()
+expect(source_roots.len()).to_equal(3)
+expect(source_roots[0]).to_equal("src/lib/")
+expect(source_roots[1]).to_equal("src/compiler/")
+expect(source_roots[2]).to_equal("src/app/")
+```
+
+</details>
+
+#### does not confuse --all with repository-wide doctest scope
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val options = parse_test_args(["test", "--all"])
+
+expect(options.run_all).to_equal(true)
+expect(options.whole).to_equal(false)
+expect(doctest_discovery_scope_path(options)).to_equal("test")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -127,8 +176,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

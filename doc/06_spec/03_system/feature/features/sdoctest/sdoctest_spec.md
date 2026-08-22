@@ -46,6 +46,12 @@ Verifies that SDoctest correctly discovers and collects documentation
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+Release-wide execution uses `simple test test --whole`. The positional `test`
+selects the spec tree; Markdown examples retain their configured-source
+provenance from `config/sdoctest.sdn`, and comment examples retain production
+source provenance from `src/lib`, `src/compiler`, and `src/app`. Explicit
+non-whole doctest commands remain path-scoped.
+
 Verifies that SDoctest correctly discovers and collects documentation
     examples from module and function docstrings. Tests discovery of examples
     in various documentation locations.

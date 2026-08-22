@@ -616,8 +616,12 @@ It retains commit-ready logs under
 `doc/08_tracking/check/evidence/<source-fingerprint>/`, refuses fingerprinted
 input drift from `HEAD`, and records external TODO receipts only through
 `--record-gate-pass <id> --evidence <repo-relative-committed-receipt>`. The
-push consumer validates evidence blobs from the exact pushed revision.
+receipt must have schema `simple.must-check-gate-receipt/v1`, bind the exact
+gate ID and source fingerprint, state final `PASS`, and hash-bind a separate
+committed artifact. The push consumer validates evidence blobs from the exact pushed revision.
 Schema v3 requires a named owner on every row, actionable unblock text for
 TODO/blocked rows, and `unblock_condition=none` for PASS. A bootstrap wrapper
 must not publish a phase PASS until its exact receipt has been validated and
 hashed; the bounded push consumer only verifies that retained state.
+A bare recorder invocation is invalid: automated rows may be promoted only by
+`--record-bootstrap-success` with exact admitted Stage 4 binary/provenance.

@@ -54,11 +54,19 @@ sh scripts/check/check-bootstrap-must-pass.shs --self-test
 sh test/01_unit/scripts/must_check_tiering_test.shs
 ```
 
-Run the bootstrap-owned automated gates with:
+Bootstrap automation is recorded only by the completion call made with the
+freshly admitted Stage 4 identity:
 
 ```sh
-sh scripts/check/check-bootstrap-must-pass.shs
+sh scripts/check/check-bootstrap-must-pass.shs \
+  --record-bootstrap-success \
+  --output-dir <bootstrap-output> \
+  --stage4-binary <exact-stage4-binary> \
+  --stage4-provenance <exact-stage4-provenance>
 ```
+
+A bare invocation fails closed. It cannot run automated rows or mutate the
+ledger because it has no Stage 1–4 admission binding.
 
 The Caret bootstrap suite has automated fixture-backed gates for the
 Claude/Codex/Gemini/Kimi argv/process wrapper contracts, agent-manager messaging
@@ -91,14 +99,20 @@ sh scripts/check/check-bootstrap-must-pass.shs \
   --record-gate-pass <gate-id> --evidence <repo-relative-committed-receipt>
 ```
 
-This interface accepts only a manifest `todo` row and a regular evidence blob
-already committed at `HEAD`. Its original PASS time carries forward across
+This interface accepts only a manifest `todo` row and a committed
+`simple.must-check-gate-receipt/v1`. The receipt must name the exact gate and
+source fingerprint, state `final_verdict=PASS`, and bind a separate committed
+artifact by repository-relative path and SHA-256. Arbitrary text, a receipt for
+another gate/source, or a mismatched artifact is rejected. Its original PASS time carries forward across
 source fingerprints only while the identical blob/hash remains committed.
 Automated source-sensitive rows still reset when their fingerprint changes.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.
 Production recording also refuses to run when fingerprinted inputs differ from
 `HEAD`.
+`completed_at_utc` remains `never` while any bootstrap row is unfinished; once
+all rows pass it is the latest row's first PASS time, so replaying an unchanged
+receipt cannot invent a later completion.
 
 ## Local hook installation
 

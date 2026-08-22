@@ -24,7 +24,8 @@ regressions for traversal, external absolute paths, and oversize evidence.
 
 The consumer canonicalizes the repository root and evidence parent, rejects
 production absolute/traversal/outside-root paths and symlink files, sums file
-sizes before each hash, and fails above 64 MiB aggregate input. The ledger
+sizes before reading or hashing each blob, and fails above 64 MiB aggregate
+input. The ledger
 self-test now covers all three rejection cases while retaining an explicitly
 isolated external-path allowance only inside `--self-test`.
 

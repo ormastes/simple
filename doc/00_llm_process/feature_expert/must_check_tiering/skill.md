@@ -24,9 +24,17 @@ ledger. The push consumer hashes the evidence blob from the exact pushed ref,
 not the live checkout. Production recording refuses fingerprinted input drift
 from `HEAD`. A receipt-backed TODO can earn its first durable PASS only through
 `check-bootstrap-must-pass.shs --record-gate-pass <id> --evidence
-<repo-relative-committed-receipt>`; carry-forward requires the identical
+<repo-relative-committed-receipt>`. The committed receipt must use
+`simple.must-check-gate-receipt/v1`, bind the gate ID and source fingerprint,
+end in `final_verdict=PASS`, and hash-bind a separate committed artifact;
+arbitrary committed text is not evidence. Carry-forward requires the identical
 committed blob/hash. Source-sensitive automated rows still invalidate when the
 fingerprint changes.
+
+Never invoke the recorder bare: automated PASS recording is valid only through
+`--record-bootstrap-success` with the exact Stage 4 binary and provenance after
+all four compiler phases validate. `completed_at_utc` is `never` until every
+bootstrap row passes and thereafter remains the latest first-PASS timestamp.
 
 The fixture-backed Caret wrapper gate proves argv routing and process lifecycle,
 not authenticated installed Claude/Codex/Gemini/Kimi execution. Keep

@@ -45,6 +45,7 @@ git -C "$rules_fixture" config user.email must-check-test@example.invalid
 git -C "$rules_fixture" add .
 git -C "$rules_fixture" commit -qm committed-rules
 rules_ref=$(git -C "$rules_fixture" rev-parse HEAD)
+rules_policy_sha=$(git -C "$rules_fixture" show "$rules_ref:rules.sdl" | sha256sum | awk '{print $1}')
 printf '%s\n' \
     'rules:' \
     '  count_gates:' \
@@ -52,7 +53,7 @@ printf '%s\n' \
     '      group: quick' \
     '      cmd: sleep 30; echo 0' \
     '      min: 1' > "$rules_fixture/rules.sdl"
-(cd "$rules_fixture" && sh scripts/check/check-rules-sdl.shs --group quick --ref "$rules_ref") |
+(cd "$rules_fixture" && RULES_SELFTEST=1 RULES_POLICY_SHA256_OVERRIDE="$rules_policy_sha" sh scripts/check/check-rules-sdl.shs --group quick --ref "$rules_ref") |
     grep -q 'PASS — 1 gates checked'
 
 # Linked worktrees share one hooks directory. Installing from one worktree must
@@ -100,7 +101,7 @@ sh "$hook_repo/scripts/setup/install-must-check-hooks.shs" --install >/dev/null
 grep -q 'unrelated-local-hook' "$shared_hooks/pre-push.local"
 cmp -s "$hook_repo/scripts/hooks/pre-push-worktree-launcher" "$shared_hooks/pre-push"
 
-if grep -E 'native-build|qemu|benchmark|--whole' "$PUSH" >/dev/null; then
+if grep -E 'sh .*(native-build|qemu|benchmark)|--whole' "$PUSH" >/dev/null; then
     echo "FAIL: push-tier driver directly names an expensive execution lane"
     exit 1
 fi
@@ -136,14 +137,17 @@ printf '%s\n' \
 printf '%s\n' \
     'must_check_ledger:' \
     '  schema: "simple.must-check-ledger/v3"' \
-    '  source_fingerprint: "pending"' \
+    '  source_fingerprint: "unrecorded"' \
     'must_check_results |id, status, passed_at_utc, command, evidence, evidence_sha256, owner, unblock_condition|' \
     > "$fixture/doc/08_tracking/check/must_check_db.sdn"
 mkdir -p "$fixture/build"
 printf '    compiler-stage1, todo, never, "", "fixture bootstrap evidence pending", "never", "compiler-team", "run the fixture bootstrap producer"\n' >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
 printf '    fixture-manual-receipt, todo, never, "", "fixture manual evidence pending", "never", "release-team", "record fixture evidence"\n' >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
+export MUST_CHECK_SELFTEST=1
+export MUST_CHECK_REQUIRED_IDS_FIXTURE='compiler-stage1
+fixture-manual-receipt'
 for phase in 1 2 3 4; do printf 'phase%s evidence\n' "$phase" > "$fixture/build/phase$phase.receipt"; done
-printf '%s\n' 'fixture manual receipt evidence' > "$fixture/build/manual.receipt"
+printf '%s\n' 'fixture manual gate artifact' > "$fixture/build/manual.artifact"
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\n" compiler-stage1=pass compiler-stage2=pass compiler-stage3=pass compiler-stage4=pass' \
     "printf '%s\\n' compiler-stage1-evidence=$fixture/build/phase1.receipt compiler-stage2-evidence=$fixture/build/phase2.receipt compiler-stage3-evidence=$fixture/build/phase3.receipt compiler-stage4-evidence=$fixture/build/phase4.receipt" \
@@ -157,6 +161,26 @@ git -C "$fixture" config user.email must-check-test@example.invalid
 git -C "$fixture" add .
 git -C "$fixture" commit -qm base
 base=$(git -C "$fixture" rev-parse HEAD)
+fixture_fp=$(git -C "$fixture" ls-tree -r HEAD -- src scripts config test rules.sdl doc/07_guide doc/00_llm_process doc/glossary.md | sha256sum | awk '{print $1}')
+manual_artifact_sha=$(sha256sum "$fixture/build/manual.artifact" | awk '{print $1}')
+printf '%s\n' \
+    'receipt_schema=simple.must-check-gate-receipt/v1' \
+    'gate_id=fixture-manual-receipt' \
+    'final_verdict=PASS' \
+    "source_fingerprint=$fixture_fp" \
+    'artifact_path=build/manual.artifact' \
+    "artifact_sha256=$manual_artifact_sha" \
+    > "$fixture/build/manual.receipt"
+git -C "$fixture" add build/manual.receipt
+git -C "$fixture" commit -qm bound-manual-receipt
+base=$(git -C "$fixture" rev-parse HEAD)
+printf '%s\n' 'unpromoted source change' > "$fixture/unpromoted-change"
+git -C "$fixture" add unpromoted-change
+git -C "$fixture" commit -qm unpromoted-source-change
+unpromoted_tip=$(git -C "$fixture" rev-parse HEAD)
+printf 'refs/heads/main %s refs/heads/main %s\n' "$unpromoted_tip" "$base" |
+    MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null
+base=$unpromoted_tip
 MUST_CHECK_ROOT="$fixture" \
 MUST_CHECK_MANIFEST="$fixture/config/check/must_check_gates.sdn" \
 MUST_CHECK_LEDGER="$fixture/doc/08_tracking/check/must_check_db.sdn" \
@@ -166,6 +190,26 @@ MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-01T00:00:00Z \
     sh "$BOOTSTRAP" --record-bootstrap-success >/dev/null
 grep -q 'compiler-stage1, pass, 2000-01-01T00:00:00Z' "$fixture/doc/08_tracking/check/must_check_db.sdn"
 grep -q '"compiler-team", "none"' "$fixture/doc/08_tracking/check/must_check_db.sdn"
+grep -q 'completed_at_utc: "never"' "$fixture/doc/08_tracking/check/must_check_db.sdn"
+
+# Arbitrary committed text and a schema-correct receipt for another gate are
+# not promotion authority, even when their files are regular HEAD blobs.
+printf '%s\n' 'STATUS: PASS arbitrary text' > "$fixture/build/arbitrary.txt"
+sed 's/gate_id=fixture-manual-receipt/gate_id=other-gate/' \
+    "$fixture/build/manual.receipt" > "$fixture/build/wrong-gate.receipt"
+git -C "$fixture" add build/arbitrary.txt build/wrong-gate.receipt
+git -C "$fixture" commit -qm rejected-manual-evidence-fixtures
+for rejected_receipt in build/arbitrary.txt build/wrong-gate.receipt; do
+    MUST_CHECK_ROOT="$fixture" \
+    MUST_CHECK_MANIFEST="$fixture/config/check/must_check_gates.sdn" \
+    MUST_CHECK_LEDGER="$fixture/doc/08_tracking/check/must_check_db.sdn" \
+    MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-02T00:00:00Z \
+        sh "$BOOTSTRAP" --record-gate-pass fixture-manual-receipt \
+            --evidence "$rejected_receipt" >/dev/null 2>&1 && {
+                echo "FAIL: malformed or mismatched receipt promoted TODO: $rejected_receipt"
+                exit 1
+            }
+done
 
 # A receipt-backed TODO becomes PASS only through the explicit recording
 # interface. Re-recording unchanged evidence must carry the original PASS
@@ -178,6 +222,7 @@ MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-02T00:00:00Z \
     sh "$BOOTSTRAP" --record-gate-pass fixture-manual-receipt \
         --evidence build/manual.receipt >/dev/null
 grep -q 'fixture-manual-receipt, pass, 2000-01-02T00:00:00Z' "$fixture/doc/08_tracking/check/must_check_db.sdn"
+grep -q 'completed_at_utc: "2000-01-02T00:00:00Z"' "$fixture/doc/08_tracking/check/must_check_db.sdn"
 manual_pass_row=$(grep '^[[:space:]]*fixture-manual-receipt,' "$fixture/doc/08_tracking/check/must_check_db.sdn")
 MUST_CHECK_ROOT="$fixture" \
 MUST_CHECK_MANIFEST="$fixture/config/check/must_check_gates.sdn" \
@@ -190,8 +235,28 @@ MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-03T00:00:00Z \
     echo "FAIL: unchanged committed receipt PASS was not carried forward"
     exit 1
 }
+grep -q 'completed_at_utc: "2000-01-02T00:00:00Z"' "$fixture/doc/08_tracking/check/must_check_db.sdn" || {
+    echo "FAIL: unchanged receipt invented a later completion time"
+    exit 1
+}
 git -C "$fixture" add doc/08_tracking/check/must_check_db.sdn build/must-check-evidence
 git -C "$fixture" commit -qm bootstrap-ledger
+tip=$(git -C "$fixture" rev-parse HEAD)
+
+cp "$fixture/doc/08_tracking/check/must_check_db.sdn" "$fixture/promoted-ledger.saved"
+sed 's/source_fingerprint: "[0-9a-f]*"/source_fingerprint: "unrecorded"/; s/completed_at_utc: "[^"]*"/completed_at_utc: "never"/; s/, pass, [^,]*,/, todo, never,/; s/, "none"$/, "produce fresh bootstrap-owned evidence for this gate"/' \
+    "$fixture/promoted-ledger.saved" > "$fixture/doc/08_tracking/check/must_check_db.sdn"
+git -C "$fixture" add doc/08_tracking/check/must_check_db.sdn
+git -C "$fixture" commit -qm attempted-ledger-downgrade
+downgrade_tip=$(git -C "$fixture" rev-parse HEAD)
+printf 'refs/heads/main %s refs/heads/main %s\n' "$downgrade_tip" "$tip" |
+    MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null 2>&1 && {
+        echo "FAIL: promoted ledger was allowed to downgrade to unrecorded"
+        exit 1
+    }
+mv "$fixture/promoted-ledger.saved" "$fixture/doc/08_tracking/check/must_check_db.sdn"
+git -C "$fixture" add doc/08_tracking/check/must_check_db.sdn
+git -C "$fixture" commit -qm restore-promoted-ledger
 tip=$(git -C "$fixture" rev-parse HEAD)
 start=$(date +%s)
 printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" | MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null

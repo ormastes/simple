@@ -12,11 +12,21 @@ Trust flows in one direction:
 The push consumer recomputes a content fingerprint excluding the ledger itself,
 requires one-to-one unique registry/result IDs and exact command agreement,
 retains a per-gate PASS time, and verifies each PASS evidence file against its
-recorded SHA-256. It fails closed on malformed, stale, failed, missing,
-tampered, evidence-less, or non-passing push-blocking rows. Non-blocking TODOs
-remain visible. Push-tier commands are registry rows dispatched through a
+recorded SHA-256. The canonical all-TODO `unrecorded` ledger is the sole
+pre-promotion state: when its pushed predecessor is also unpromoted, bootstrap
+debt is reported and every bounded structural gate still runs. A predecessor
+with genuine promoted evidence permanently closes that exception, preventing a
+downgrade to `unrecorded`. Promoted state fails closed on malformed, stale,
+failed, missing, tampered, evidence-less, or non-passing push-blocking rows.
+Non-blocking TODOs remain visible. Push-tier commands are registry rows dispatched through a
 closed ID/mode/command allowlist, so a changed manifest cannot turn the hook
 into an arbitrary shell-command executor.
+The quick rules evaluator separately binds the committed `rules.sdl` blob to a
+reviewed digest in its checker. A policy edit therefore requires a matching
+checker review; committed `cmd:` text cannot change independently and execute.
+The push consumer also owns a minimum required bootstrap-ID ratchet. Manifest
+and ledger may add gates together, but deleting a required TODO from both files
+does not make the obligation disappear.
 The quick rules checker parses `rules.sdl` from the exact pushed revision, and
 that policy file participates in the producer/consumer fingerprint; dirty or
 concurrent working-tree command text is never executed.
