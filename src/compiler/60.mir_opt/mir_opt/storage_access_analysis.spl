@@ -6,7 +6,7 @@
 # add conflicts, never manufacture disjointness.
 
 use compiler.mir.mir_data.*
-use compiler.mir_opt.mir_opt.auto_vectorize_analysis.{get_inst_uses, get_operand_locals}
+use compiler.mir_opt.mir_opt.perf_facts.{perf_facts_build, perf_facts_uses}
 use std.common.structural.parallel_commit.access_contracts.{
     ParallelAccessMode,
     ParallelAccessPathV1,
@@ -157,15 +157,15 @@ fn analyze_mir_storage_access_summary(
     var typed_facts: [MirStorageAccessFactV1] = []
     var address_observed = false
     var unknown_access = false
+    val perf_facts = perf_facts_build(function)
+    if not perf_facts.def_use_complete:
+        unknown_access = true
 
     for binding in bindings:
         address_locals[binding.local_id] = true
 
     for block in function.blocks:
         for instruction in block.instructions:
-            for used in get_inst_uses(instruction):
-                if load_total_uses.has(used.id):
-                    load_total_uses[used.id] = load_total_uses[used.id] + 1
             match instruction.kind:
                 case GetElementPtr(dest, base, indices):
                     val base_projection = mir_storage_projection_for_operand(base, projections, bindings)
@@ -210,7 +210,7 @@ fn analyze_mir_storage_access_summary(
                         path: path, has_field: false, field_id: -1,
                         structural_record_load: false))
                     load_fact_by_local[dest.id] = typed_facts.len() - 1
-                    load_total_uses[dest.id] = 0
+                    load_total_uses[dest.id] = perf_facts_uses(perf_facts, dest).len()
                     load_field_uses[dest.id] = 0
                     # Preserve record provenance through GEP -> Load -> GetField.
                     # The loaded value is not itself an address capability.
@@ -270,39 +270,23 @@ fn analyze_mir_storage_access_summary(
                     pass
         match block.terminator:
             case Ret(value):
-                if value.?:
-                    for used in get_operand_locals(value.unwrap()):
-                        if load_total_uses.has(used.id):
-                            load_total_uses[used.id] = load_total_uses[used.id] + 1
                 if value.? and mir_storage_operand_has_address(
                     value.unwrap(), address_locals, bindings):
                     address_observed = true
                     unknown_access = true
-            case If(condition, _, _):
-                for used in get_operand_locals(condition):
-                    if load_total_uses.has(used.id):
-                        load_total_uses[used.id] = load_total_uses[used.id] + 1
-            case Switch(value, _, _):
-                for used in get_operand_locals(value):
-                    if load_total_uses.has(used.id):
-                        load_total_uses[used.id] = load_total_uses[used.id] + 1
+            case If(_, _, _) | Switch(_, _, _): pass
             case CallTerminator(_, function_operand, args, _, _):
-                for used in get_operand_locals(function_operand):
-                    if load_total_uses.has(used.id):
-                        load_total_uses[used.id] = load_total_uses[used.id] + 1
                 val owner_finalizer = mir_storage_is_owner_finalizer_call(
                     function_operand, args, bindings)
                 for arg in args:
-                    for used in get_operand_locals(arg):
-                        if load_total_uses.has(used.id):
-                            load_total_uses[used.id] = load_total_uses[used.id] + 1
                     if mir_storage_operand_has_address(arg, address_locals, bindings)
                         and not owner_finalizer:
                         address_observed = true
                         unknown_access = true
             case _: pass
     for loaded_local in load_fact_by_local.keys():
-        if load_field_uses[loaded_local] > 0
+        if perf_facts.def_use_complete
+            and load_field_uses[loaded_local] > 0
             and load_total_uses[loaded_local] == load_field_uses[loaded_local]:
             val fact_index = load_fact_by_local[loaded_local]
             typed_facts[fact_index] = MirStorageAccessFactV1(
