@@ -260,3 +260,23 @@ an environment variable was silently load-bearing for correctness.
   `src/compiler/backend/backend/interpreter.spl` (`--threads 2`, no
   `SIMPLE_BOOTSTRAP`): see the landing commit message for the
   `unresolved name/type` counts.
+
+---
+
+## Round 3b (2026-08-22) — `has_X` optional sugar in sibling signatures
+
+After `ee143450ffa` (ungated second-level-glob resolution) a single-module
+`native-build` of `backend/interpreter.spl` (no env) still died with
+`unresolved type: GpuIntrinsicKind` blamed on `backend/feature_caps_types.spl`
+and `backend_port.spl` — files with ZERO imports. The route is package-sibling
+registration of `gpu_intrinsics.spl`, whose `recognize_gpu_intrinsic` returns
+`has_GpuIntrinsicKind` (the optional sugar for `GpuIntrinsicKind?`). The
+surface records the sugar verbatim, so (1) the callable dependency
+materializers looked up a type named `has_GpuIntrinsicKind` and materialized
+nothing, and (2) `imported_surface_type_projected` missed the qualified lookup
+and fell back to `lower_named_kind`, which strips the prefix and looks the base
+up UNQUALIFIED in the consumer, where the owner-scoped binding is not visible.
+Fix: `hir_dependency_type_name` (module_reexport_materialization.spl) and a
+qualified base projection (module_callable_types.spl). Both halves needed.
+Spec example "has_ optional sugar in a sibling callable signature": 16/17 ->
+17/17 without SIMPLE_BOOTSTRAP. Memo verifier: 0 mismatches, again.

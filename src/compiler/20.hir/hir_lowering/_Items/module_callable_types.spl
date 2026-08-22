@@ -221,6 +221,18 @@ impl HirLowering:
                 imported_module_name, type_name)
             if raw_symbol_id >= 0:
                 return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
+            # `has_X` is the optional sugar for `X?`; the surface records it
+            # verbatim. Project the BASE through the owner's qualified scope
+            # before falling back, otherwise lower_named_kind strips the
+            # prefix and looks `X` up unqualified in the consumer, where the
+            # materialized dependency is not bound (stage-1 run9:
+            # `unresolved type: GpuIntrinsicKind` blamed on zero-import
+            # package siblings of gpu_intrinsics.spl).
+            if type_name.starts_with("has_") and type_name.len() > 4:
+                val has_symbol_id = self.symbols.lookup_qualified_type_raw(
+                    imported_module_name, type_name[4:])
+                if has_symbol_id >= 0:
+                    return HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Named(SymbolId(id: has_symbol_id), []), span: type_.span)), span: type_.span)
             return HirType(kind: self.lower_named_kind(type_name, [], type_.span), span: type_.span)
         if array_element_name != "":
             val raw_element_id = self.symbols.lookup_qualified_type_raw(
