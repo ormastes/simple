@@ -1,6 +1,6 @@
 # MC/DC and HAL Runtime Hardening Requirements
 
-**Selection:** full canonical feature (`B`), unique-cause with validated masking fallback (`M2`), isolated parallel providers (`P2`), capability-only exclusions (`E1`), immediate strictness for new/changed code (`R3`), mission-critical performance/memory tier (`NFR-C`).
+**Selection:** full canonical feature (`B`), unique-cause with validated masking fallback (`M2`), isolated parallel providers (`P2`), governed REQ-018 exclusions (`E1`, expanded to the five explicitly selected causes below), immediate strictness for new/changed code (`R3`), mission-critical performance/memory tier (`NFR-C`).
 
 - REQ-001: The compiler shall enumerate every eligible Boolean decision and atomic condition in a stable static manifest before execution.
 - REQ-002: Interpreter, JIT, and supported native backends shall record correlated condition-evaluation vectors and final decision outcomes while preserving language short-circuit semantics.
@@ -21,4 +21,3 @@
 - REQ-017: Unknown, malformed, missing, extra, reordered, duplicated, unsafe, timed-out, or overflowing environment instructions shall fail closed with structured evidence.
 - REQ-018: A scenario may be excluded only for a validated unavailable capability, unavailable fixture, platform inapplicability, safety prohibition, or uncontrollable nondeterminism; the expression shall include stable code, human reason, predicate evidence, owner, and review/expiry, appear as excluded rather than PASS, and affect only the eligible denominator.
 - REQ-019: New/changed runtime/HAL code shall immediately error on missing assurance classification, forbidden allocation, or obsolete interfaces; untouched legacy shall emit actionable warnings until the next release, when the same findings become repository-wide errors and compatibility shims are removed.
-

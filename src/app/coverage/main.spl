@@ -31,8 +31,9 @@ use std.common.structural.mcdc.contracts.{
     McdcReportModeV1, mcdc_coverage_summary_v1, mcdc_normal_gate_v1
 }
 use compiler.tools.verify.mcdc_scenario_exclusion.{
-    MCDC_EXCLUSION_PREFIX,
+    MCDC_EXCLUSION_MAX_LINE_BYTES,
     parse_mcdc_scenario_exclusion_v1, mcdc_scenario_exclusion_report_v1,
+    mcdc_exclusion_line_is_directive_v1,
     scan_mcdc_scenario_exclusions_v1, mcdc_audited_normal_gate_v1_passes
 }
 
@@ -320,10 +321,22 @@ fn cmd_mcdc(args: [text]) -> i64:
         exclusion_source = exclusion_source + source_text + "\n"
     val exclusion_audit = scan_mcdc_scenario_exclusions_v1(
         exclusion_source, current_epoch)
-    for line in exclusion_source.split("\n"):
-        if line.trim().starts_with(MCDC_EXCLUSION_PREFIX):
-            val parsed = parse_mcdc_scenario_exclusion_v1(line, current_epoch)
-            print mcdc_scenario_exclusion_report_v1(parsed)
+    var exclusion_cursor: i64 = 0
+    while exclusion_cursor <= exclusion_source.len():
+        var line_end = exclusion_source.index_of("\n", exclusion_cursor)
+        if line_end < 0:
+            line_end = exclusion_source.len()
+        val next_cursor = line_end + 1
+        if mcdc_exclusion_line_is_directive_v1(
+                exclusion_source, exclusion_cursor, line_end):
+            if line_end - exclusion_cursor <= MCDC_EXCLUSION_MAX_LINE_BYTES:
+                val line = exclusion_source.substring(exclusion_cursor, line_end)
+                val parsed = parse_mcdc_scenario_exclusion_v1(line, current_epoch)
+                print mcdc_scenario_exclusion_report_v1(parsed)
+            else:
+                print "ERROR mcdc-exclusion invalid"
+        exclusion_cursor = next_cursor
+        if line_end == exclusion_source.len(): break
     if manifest.len() == 0 or manifest.len() > max_manifest_bytes:
         print "Error: MC/DC manifest is empty or exceeds --max-manifest-bytes"
         return 1

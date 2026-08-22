@@ -7,8 +7,13 @@ use std.common.structural.mcdc.contracts.*
 
 val DIGEST = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+fn exclusion_kind(kind: text, code: text, predicate: text,
+                  observed: i64, reviewed: i64, expires: i64) -> text:
+    "# @mcdc-exclude: scenario=rt.clock.monotonic.rollback | kind={kind} | code={code} | predicate={predicate} | producible=false | reason=host cannot produce the governed clock scenario | evidence={DIGEST} | observed={observed} | owner=runtime.safety | reviewed={reviewed} | expires={expires}"
+
 fn exclusion(reviewed: i64, expires: i64) -> text:
-    "# @mcdc-exclude: scenario=rt.clock.monotonic.rollback | capability=clock.monotonic.rollback.inject | reason=host clock cannot produce a monotonic rollback | evidence={DIGEST} | owner=runtime.safety | reviewed={reviewed} | expires={expires}"
+    exclusion_kind("capability-unavailable", "clock.rollback.inject",
+        "capability.unavailable", reviewed, reviewed, expires)
 
 describe "reason-bearing MC/DC scenario exclusions":
     it "accepts only a fresh capability-unproducible scenario expression":
@@ -16,7 +21,30 @@ describe "reason-bearing MC/DC scenario exclusions":
             exclusion(1700000000, 1705000000), 1701000000)
         expect(mcdc_scenario_exclusion_accepted_v1(parsed)).to_be(true)
         expect(parsed.scenario_id).to_equal("rt.clock.monotonic.rollback")
-        expect(parsed.capability_id).to_equal("clock.monotonic.rollback.inject")
+        expect(parsed.code).to_equal("clock.rollback.inject")
+        expect(parsed.kind == McdcScenarioExclusionKindV1.CapabilityUnavailable).to_be(true)
+
+    it "accepts every REQ-018 kind only with its registered predicate":
+        val rows = [
+            exclusion_kind("capability-unavailable", "clock.inject", "capability.unavailable", 1700000000, 1700000100, 1705000000),
+            exclusion_kind("fixture-unavailable", "board.fixture", "fixture.unavailable", 1700000000, 1700000100, 1705000000),
+            exclusion_kind("platform-inapplicable", "target.platform", "platform.inapplicable", 1700000000, 1700000100, 1705000000),
+            exclusion_kind("safety-prohibited", "voltage.damage", "safety.prohibited", 1700000000, 1700000100, 1705000000),
+            exclusion_kind("uncontrollable-nondeterminism", "cosmic.event", "nondeterminism.uncontrollable", 1700000000, 1700000100, 1705000000)
+        ]
+        for row in rows:
+            expect(mcdc_scenario_exclusion_accepted_v1(
+                parse_mcdc_scenario_exclusion_v1(row, 1701000000))).to_be(true)
+
+    it "rejects mismatched predicates and scenarios claimed producible":
+        val mismatch = exclusion_kind("fixture-unavailable", "board.fixture",
+            "platform.inapplicable", 1700000000, 1700000100, 1705000000)
+        val producible = exclusion(1700000000, 1705000000).replace(
+            "producible=false", "producible=true")
+        expect(mcdc_scenario_exclusion_accepted_v1(
+            parse_mcdc_scenario_exclusion_v1(mismatch, 1701000000))).to_be(false)
+        expect(mcdc_scenario_exclusion_accepted_v1(
+            parse_mcdc_scenario_exclusion_v1(producible, 1701000000))).to_be(false)
 
     it "reports an exclusion explicitly and never as covered or passed":
         val parsed = parse_mcdc_scenario_exclusion_v1(
@@ -29,7 +57,7 @@ describe "reason-bearing MC/DC scenario exclusions":
 
     it "rejects missing reasons evidence and unstable identities":
         val missing_reason = exclusion(1700000000, 1705000000).replace(
-            "reason=host clock cannot produce a monotonic rollback", "reason=")
+            "reason=host cannot produce the governed clock scenario", "reason=")
         val missing_evidence = exclusion(1700000000, 1705000000).replace(
             DIGEST, "sha256:0")
         val unstable = exclusion(1700000000, 1705000000).replace(
@@ -51,6 +79,18 @@ describe "reason-bearing MC/DC scenario exclusions":
         expect(stale.status == McdcScenarioExclusionStatusV1.Stale).to_be(true)
         expect(mcdc_scenario_exclusion_accepted_v1(future)).to_be(false)
         expect(mcdc_scenario_exclusion_accepted_v1(too_long)).to_be(false)
+
+    it "rejects future and stale predicate observations":
+        val future_observation = exclusion_kind(
+            "capability-unavailable", "clock.inject", "capability.unavailable",
+            1702000000, 1702000000, 1705000000)
+        val stale_observation = exclusion_kind(
+            "capability-unavailable", "clock.inject", "capability.unavailable",
+            1700000000, 1707000000, 1714000000)
+        expect(mcdc_scenario_exclusion_accepted_v1(
+            parse_mcdc_scenario_exclusion_v1(future_observation, 1701000000))).to_be(false)
+        expect(parse_mcdc_scenario_exclusion_v1(
+            stale_observation, 1708000000).status == McdcScenarioExclusionStatusV1.Stale).to_be(true)
 
     it "fails the normal-mode audit on any malformed or stale directive":
         var audit = mcdc_scenario_exclusion_audit_v1()
@@ -87,9 +127,18 @@ describe "reason-bearing MC/DC scenario exclusions":
 
     it "scans once with bounded storage and rejects duplicate stable scenarios":
         var source = exclusion(1700000000, 1705000000)
-        source = source + "\n" + exclusion(1700000000, 1705000000)
+        source = source + "\n  " + exclusion(1700000000, 1705000000)
         val audit = scan_mcdc_scenario_exclusions_v1(source, 1701000000)
         expect(audit.directive_count).to_equal(2)
         expect(audit.accepted_count).to_equal(1)
         expect(audit.rejected_count).to_equal(1)
         expect(mcdc_scenario_exclusion_normal_gate_v1(audit)).to_be(false)
+
+    it "rejects an oversized candidate before copying or parsing it":
+        var source = MCDC_EXCLUSION_PREFIX
+        while source.len() <= MCDC_EXCLUSION_MAX_LINE_BYTES:
+            source = source + "x"
+        val audit = scan_mcdc_scenario_exclusions_v1(source, 1701000000)
+        expect(audit.directive_count).to_equal(1)
+        expect(audit.accepted_count).to_equal(0)
+        expect(audit.rejected_count).to_equal(1)

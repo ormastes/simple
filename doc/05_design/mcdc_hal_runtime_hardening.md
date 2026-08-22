@@ -82,11 +82,12 @@ events without an unbounded token table.
 Replay revalidates the proof and grant against the same pinned authority and
 device identity, compares every device-specific scalar including address,
 width, IRQ, token, generation, and grant digest, then delegates to the canonical
-exact byte/digest replay. It never consults or changes the model. Hardware that cannot
-be safely produced may be removed from the eligible denominator only through a
-fresh `CapabilityUnavailable` exclusion with 8..256 printable, nonblank reason
-bytes and the existing evidence/owner/review/expiry proof. It is reported as
-excluded, never executed or counted as covered.
+exact byte/digest replay. It never consults or changes the model. Hardware that
+cannot be safely produced may be removed from the eligible denominator only
+through one of the five governed REQ-018 kinds, with its exact registered
+predicate, `producible=false`, fresh observation evidence, and 8..256 printable,
+nonblank reason bytes plus owner/review/expiry proof. It is reported as excluded,
+never executed or counted as covered.
 
 The applied receipt carries a second two-lane digest over the pinned authority
 and device identity, proof generation/lifetime/opcode mask, full grant policy,
@@ -115,19 +116,30 @@ An environment scenario that cannot be physically produced may use exactly one
 compiler-verifier directive:
 
 ```text
-# @mcdc-exclude: scenario=<stable-id> | capability=<stable-id> | reason=<8..256 byte reason> | evidence=sha256:<64 lowercase hex> | owner=<stable-id> | reviewed=<unix-seconds> | expires=<unix-seconds>
+# @mcdc-exclude: scenario=<stable-id> | kind=<capability-unavailable|fixture-unavailable|platform-inapplicable|safety-prohibited|uncontrollable-nondeterminism> | code=<stable-id> | predicate=<registered-kind-predicate> | producible=false | reason=<8..256 byte reason> | evidence=sha256:<64 lowercase hex> | observed=<unix-seconds> | owner=<stable-id> | reviewed=<unix-seconds> | expires=<unix-seconds>
 ```
 
-This expression means only `CapabilityUnavailable`; it is not a generic skip,
-fixture waiver, or platform filter. The line is bounded to 768 bytes, identifiers
-to 96 bytes, and review lifetime to 90 days. One linear compiler audit accepts
+The five registered predicates are `capability.unavailable`,
+`fixture.unavailable`, `platform.inapplicable`, `safety.prohibited`, and
+`nondeterminism.uncontrollable`, paired in that order with the five kinds. An
+unknown kind, predicate mismatch, or `producible=true` fails closed. This is not
+a generic skip. The predicate observation must precede review and remain fresh
+at verification time. The line is bounded to 1024 bytes, identifiers to 96
+bytes, and both observation and review lifetimes to 90 days. One linear compiler audit accepts
 at most 256 directives from a source of at most 4 MiB, retains only the bounded
 stable-ID set needed to reject duplicates, and performs no runtime/hot-path work.
+The scanner walks source offsets rather than splitting the full source into a
+line array: it copies at most one 1024-byte candidate line at a time and retains
+at most 256 identifiers of at most 96 bytes each. Parsing a candidate has a
+fixed 11-field shape. Thus auxiliary storage is bounded independently of source
+line count; the offline verifier may allocate within those caps, while runtime
+probe paths allocate nothing for exclusion governance.
 The verifier reports an accepted
 entry as `EXCLUDED`, never `PASS` or covered. Stable decision/exclusion joining
 owns denominator removal; the directive audit is an additional normal-mode
 gate. A blank or placeholder reason, malformed identity, missing SHA-256
-evidence, future review, expired entry, or overlong review window is an error.
+evidence, future/stale observation, future review, expired entry, or overlong
+review window is an error.
 Consequently, exclusions reduce only the eligible denominator and never increase
 the covered numerator.
 
