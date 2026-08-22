@@ -2204,6 +2204,18 @@ and transient-text work becomes four reads per outer module; storage is
 constant and disabled formatting stays guarded. No runtime measurements are
 claimed under the no-verify constraint.
 
+### LLVM adapter operation-local policy
+
+The direct LLVM adapter queried `SIMPLE_COMPILER_TRACE` eight times on a
+successful compile and twice on the compiled-module path. It also read and
+parsed `SIMPLE_NATIVE_BUILD_TARGET` independently for target configuration and
+translator construction. Each public operation now captures both booleans once
+and feeds private policy-taking helpers. The public IR translation signature
+remains unchanged. Trace text/order and Result behavior are unchanged. Direct
+trace lookups fall 8-to-1, compiled lookups 2-to-1, and target env/parse work
+2-to-1 per operation. Trace-only function count now uses dictionary length
+rather than materializing `keys()`. No runtime measurements are claimed.
+
 ### Leading explicit-code allocation audit
 
 The leading `Edddd` probe previously allocated a one-character prefix, a
