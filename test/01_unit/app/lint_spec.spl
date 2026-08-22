@@ -8,7 +8,13 @@ Audience: APP maintainers who read this spec to confirm the behavior still holds
 """
 
 
-use compiler.tools.lint.main.{lint_accessor_and_parent_names, Linter}
+extern fn rt_file_read_text(path: text) -> text
+
+use compiler.tools.lint.main.{
+    lint_accessor_and_parent_names,
+    name_lint_bounded_damerau_levenshtein,
+    Linter
+}
 use compiler.tools.fix.rules.impl_.lint_annotation.{check_unknown_attribute, check_unknown_decorator}
 use compiler.core.parser.{parse_module_silent}
 use compiler.core.ast.{module_get_decls}
@@ -249,6 +255,66 @@ describe "Linter - accessor and inherited name checks":
             "    fn render_farme(self):\n" +
             "        pass\n"
         expect(count_name_lint(source, "NAME001")).to_equal(0)
+
+    it "computes bounded byte edit distance including adjacent transposition":
+        step("Verify: computes bounded byte edit distance including adjacent transposition")
+        expect(name_lint_bounded_damerau_levenshtein("abcd", "abcd", 1)).to_equal(0)
+        expect(name_lint_bounded_damerau_levenshtein("abcd", "abcde", 1)).to_equal(1)
+        expect(name_lint_bounded_damerau_levenshtein("abcde", "abcd", 1)).to_equal(1)
+        expect(name_lint_bounded_damerau_levenshtein("abcd", "abxd", 1)).to_equal(1)
+        expect(name_lint_bounded_damerau_levenshtein("abcd", "abdc", 1)).to_equal(1)
+        expect(name_lint_bounded_damerau_levenshtein("abcdefghij", "abcdxfghyj", 2)).to_equal(2)
+        expect(name_lint_bounded_damerau_levenshtein("abcdefgh", "ijklmnop", 2)).to_equal(3)
+        expect(name_lint_bounded_damerau_levenshtein("café", "cafe", 1)).to_equal(2)
+        expect(name_lint_bounded_damerau_levenshtein("café", "cafe", 2)).to_equal(2)
+        expect(name_lint_bounded_damerau_levenshtein("", "", 1)).to_equal(0)
+        expect(name_lint_bounded_damerau_levenshtein("", "a", 1)).to_equal(1)
+        expect(name_lint_bounded_damerau_levenshtein("a", "", 1)).to_equal(1)
+        expect(name_lint_bounded_damerau_levenshtein(
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl",
+            "zyxwvutsrqponmlkjihgfedcbazyxwvutsrqponmlkjihgfedcbazyxwvutsrqpo",
+            2)).to_equal(3)
+        expect(name_lint_bounded_damerau_levenshtein(
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl",
+            "abc", 2)).to_equal(3)
+
+    it "keeps the NAME001 distance kernel allocation bounded by its band":
+        step("Verify: keeps the NAME001 distance kernel allocation bounded by its band")
+        val source = rt_file_read_text(
+            "src/compiler/90.tools/lint/_LintMain/name_lints.spl") ?? ""
+        expect(source).to_contain("val width = limit * 2 + 1")
+        expect(source).to_contain("while cell_count < width * 3")
+        expect(source).to_contain("a.byte_at(i - 1) == b.byte_at(j - 1)")
+        expect(source).to_contain("curr_row = reusable_row")
+        expect(source.contains("a.substring(i - 1, i)")).to_equal(false)
+        expect(source.contains("var curr: [Int]")).to_equal(false)
+
+    it "does not conflate a two-byte Unicode edit with one NAME001 edit":
+        step("Verify: does not conflate a two-byte Unicode edit with one NAME001 edit")
+        val source =
+            "class Base:\n" +
+            "    fn café(self):\n" +
+            "        pass\n" +
+            "class Child extends Base:\n" +
+            "    fn cafe(self):\n" +
+            "        pass\n"
+        expect(count_name_lint(source, "NAME001")).to_equal(0)
+
+    it "selects the first close inherited name in ancestry order":
+        step("Verify: selects the first close inherited name in ancestry order")
+        val source =
+            "class Base:\n" +
+            "    fn render_frama(self):\n" +
+            "        pass\n" +
+            "class Mid extends Base:\n" +
+            "    fn render_framb(self):\n" +
+            "        pass\n" +
+            "class Child extends Mid:\n" +
+            "    fn render_framc(self):\n" +
+            "        pass\n"
+        val warnings = lint_accessor_and_parent_names("sample.spl", source)
+        expect(warnings.len()).to_equal(2)
+        expect(warnings[1].message).to_contain("render_framb")
 
     it "preserves accessor group and diagnostic ordering":
         step("Verify: preserves accessor group and diagnostic ordering")
