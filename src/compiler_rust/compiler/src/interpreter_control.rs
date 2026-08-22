@@ -149,7 +149,14 @@ pub(crate) fn optional_let_binding(pattern: &Pattern, value: &Value) -> LetBind 
             if variant == "Some" {
                 match payload.as_ref().map(|b| &**b) {
                     Some(Value::Nil) | None => LetBind::Skip,
-                    Some(inner) => LetBind::Bind(name, inner.clone()),
+                    Some(inner) => {
+                        // READ side of the enum-payload provenance diagnostic
+                        // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1).
+                        crate::interpreter::note_enum_payload_function(
+                            "if-val", enum_name, variant, 0, inner,
+                        );
+                        LetBind::Bind(name, inner.clone())
+                    }
                 }
             } else {
                 LetBind::Skip

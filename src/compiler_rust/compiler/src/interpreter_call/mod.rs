@@ -795,6 +795,12 @@ pub(crate) fn evaluate_call(
                         }
                         Some(Box::new(Value::Tuple(values)))
                     };
+                    // WRITE side of the enum-payload provenance diagnostic
+                    // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
+                    // `EnumName.Variant(args)` construction path.
+                    crate::interpreter::note_enum_payload_function_opt(
+                        "variant-construction", &(module_name.clone()), &(field.clone()), &payload,
+                    );
                     return Ok(Value::Enum {
                         enum_name: module_name.clone(),
                         variant: field.clone(),
@@ -826,6 +832,12 @@ pub(crate) fn evaluate_call(
                         }
                         Some(Box::new(Value::Tuple(values)))
                     };
+                    // WRITE side of the enum-payload provenance diagnostic
+                    // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
+                    // `EnumName.Variant(args)` construction path.
+                    crate::interpreter::note_enum_payload_function_opt(
+                        "variant-construction", &(module_name.clone()), &(field.clone()), &payload,
+                    );
                     return Ok(Value::Enum {
                         enum_name: module_name.clone(),
                         variant: field.clone(),
@@ -977,6 +989,12 @@ pub(crate) fn evaluate_call(
                         }
                         Some(Box::new(Value::Tuple(values)))
                     };
+                    // WRITE side of the enum-payload provenance diagnostic
+                    // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
+                    // `EnumName.Variant(args)` construction path.
+                    crate::interpreter::note_enum_payload_function_opt(
+                        "variant-construction", &(type_name.clone()), &(method_name.clone()), &payload,
+                    );
                     return Ok(Value::Enum {
                         enum_name: type_name.clone(),
                         variant: method_name.clone(),
@@ -1112,6 +1130,12 @@ pub(crate) fn evaluate_call(
                 } else {
                     None
                 };
+                // WRITE side of the enum-payload provenance diagnostic
+                // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
+                // `EnumName.Variant(args)` construction path.
+                crate::interpreter::note_enum_payload_function_opt(
+                    "variant-construction", &("Option".to_string()), &(method_name.clone()), &payload,
+                );
                 return Ok(Value::Enum {
                     enum_name: "Option".to_string(),
                     variant: method_name.clone(),
@@ -1134,6 +1158,12 @@ pub(crate) fn evaluate_call(
                     enums,
                     impl_methods,
                 )?));
+                // WRITE side of the enum-payload provenance diagnostic
+                // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
+                // `EnumName.Variant(args)` construction path.
+                crate::interpreter::note_enum_payload_function_opt(
+                    "variant-construction", &("Result".to_string()), &(method_name.clone()), &payload,
+                );
                 return Ok(Value::Enum {
                     enum_name: "Result".to_string(),
                     variant: method_name.clone(),
@@ -1268,6 +1298,12 @@ pub(crate) fn evaluate_call(
                             .collect();
                         Some(Box::new(Value::Tuple(vals?)))
                     };
+                    // WRITE side of the enum-payload provenance diagnostic
+                    // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
+                    // `EnumName.Variant(args)` construction path.
+                    crate::interpreter::note_enum_payload_function_opt(
+                        "variant-construction", &(type_name.clone()), &(method_name.clone()), &payload,
+                    );
                     return Ok(Value::Enum {
                         enum_name: type_name.clone(),
                         variant: method_name.clone(),

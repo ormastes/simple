@@ -333,6 +333,11 @@ pub(crate) fn pattern_matches(
                     }
                     // Pattern has payload patterns, value has payload
                     if let (Some(patterns), Some(vp)) = (payload, value_payload) {
+                        // READ side of the enum-payload provenance diagnostic
+                        // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1).
+                        crate::interpreter::note_enum_payload_function(
+                            "match-arm", ve, vv, 0, vp.as_ref(),
+                        );
                         if patterns.len() == 1 {
                             // Single payload - match directly
                             if pattern_matches(&patterns[0], vp.as_ref(), bindings, enums, classes)? {

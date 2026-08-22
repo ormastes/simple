@@ -1146,6 +1146,11 @@ pub(crate) fn evaluate_method_call(
                                 .collect();
                             Some(Box::new(Value::Tuple(vals?)))
                         };
+                        // WRITE side of the enum-payload provenance diagnostic
+                        // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1).
+                        crate::interpreter::note_enum_payload_function_opt(
+                            "variant-construction", &(enum_name.clone()), &(method.to_string()), &payload,
+                        );
                         return Ok(Value::Enum {
                             enum_name: enum_name.clone(),
                             variant: method.to_string(),

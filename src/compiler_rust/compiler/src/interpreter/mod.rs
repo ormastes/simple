@@ -29,6 +29,7 @@ pub(crate) use interpreter_state::{
     decode_import_binding_marker, flatten_owner_mangled_name,
     clear_moved_vars, const_trace, const_trace_target, get_aop_config, get_di_config, mark_as_moved, set_aop_config,
     set_di_config, ExecutionMode, debug_call_stack_snapshot, field_access_debug_enabled,
+    note_enum_payload_function, note_enum_payload_function_opt,
 };
 pub use interpreter_state::{
     check_execution_limit,

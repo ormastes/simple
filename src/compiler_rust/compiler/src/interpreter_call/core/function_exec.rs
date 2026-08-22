@@ -769,11 +769,20 @@ pub(crate) fn execute_function_body(
                 variant: "None".to_string(),
                 payload: None,
             },
-            _ => Value::Enum {
-                enum_name: "Option".to_string(),
-                variant: "Some".to_string(),
-                payload: Some(Box::new(result)),
-            },
+            _ => {
+                // WRITE side of the enum-payload provenance diagnostic
+                // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the implicit
+                // `T -> Option<T>` wrap on a function return, the exact shape
+                // behind `emit_call() -> LocalId?`.
+                crate::interpreter::note_enum_payload_function(
+                    "fn-return-some-wrap", "Option", "Some", 0, &result,
+                );
+                Value::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: "Some".to_string(),
+                    payload: Some(Box::new(result)),
+                }
+            }
         }
     } else if let (
         Some(rt),

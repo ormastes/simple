@@ -166,3 +166,65 @@ simple native-build --source src/compiler --entry src/compiler/80.driver/driver_
 ```
 
 Both need `SIMPLE_DEBUG_FIELD_ACCESS=1`, without which neither names anything.
+
+## Defect 2, round 3 (2026-08-22) — producer located, gated diagnostic landed
+
+`SIMPLE_DEBUG_ENUM_PAYLOAD=1` (new, default off) reports any enum payload slot
+that holds a `Value::Function`, at both the READ and the WRITE. Instrumented
+sites, all in the seed:
+
+| side | site tag | file |
+|---|---|---|
+| read | `match-arm` | `compiler/src/interpreter_patterns.rs` (enum payload destructure) |
+| read | `if-val` | `compiler/src/interpreter_control.rs` (`optional_let_binding`) |
+| write | `fn-return-some-wrap` | `compiler/src/interpreter_call/core/function_exec.rs` (implicit `T -> Option<T>` on return) |
+| write | `variant-construction` | `compiler/src/interpreter_call/mod.rs` (6 sites), `compiler/src/interpreter_method/mod.rs` |
+
+On the `text_bytes_and_chars` reproduction it fires 4 writes and 2 reads. The
+**write** names the producer exactly:
+
+```
+[enum-payload-function] site=variant-construction enum=MirOperandKind variant=Copy
+  slot=0 fn=get_value def_ptr=0x5bcafccd810
+  stack=... lower_for -> lower_for_iterator -> lower_for_array_indexed ->
+  decode_runtime_value -> mir_operand_copy
+```
+
+So the corrupt `MirOperandKind.Copy(<fn:get_value>)` is built by
+`mir_operand_copy(raw)` inside `decode_runtime_value`
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:873`), whose `raw`
+argument is `elem_local` from `lower_for_array_indexed`
+(`mir_lowering_stmts.spl:2710-2714`). The read fires later in
+`record_operand_use` and the compile dies there. **`elem_local` therefore IS
+the function at the write** — the corruption happens at or inside
+
+```
+if val get_value = get_call:
+    elem_local = get_value
+```
+
+which puts the ORIGINAL name-resolution hypothesis back in play in a narrower
+form: the branch is entered correctly (an earlier `eprint` probe shows
+`get_call_present=LocalId(id: 27)` / `bound branch taken`), so what is wrong is
+the **body's read of `get_value`**, not the binding decision.
+
+**But it still does not reproduce standalone.** Six shapes now, all correct on
+this seed, including the closest one: an `impl`/`me` method doing
+`if val get_value = o:` … `elem = get_value` while a DIFFERENT module in the
+program declares `fn get_value(value_map: {i64: i64}, local_id: i64)` with the
+same signature as the real collider, under both `run` and `native-build`.
+Something the full compiler closure adds is still missing from the fixture.
+
+**Ruled out this round:** the interpreter↔native value bridge is not the
+producer. `value_bridge.rs:348` encodes an enum as the string
+`"EnumName::Variant"` with `payload: 0`, and `:603` decodes it with
+`payload: None` — that path **drops enum payloads entirely** rather than
+corrupting them. (That is a real latent lossy conversion and should be filed
+separately; it is not this bug.)
+
+**Next step:** the remaining difference between the failing site and the green
+fixtures is the closure, not the shape. Bisect by shrinking the real module
+rather than by growing a fixture: the diagnostic now names the exact frame, so
+a cut-down `mir_lowering_stmts.spl` that still fires
+`site=variant-construction ... fn=get_value` is a much shorter path to the
+minimal case than another synthetic guess.

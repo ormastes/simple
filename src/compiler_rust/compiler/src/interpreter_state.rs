@@ -711,6 +711,71 @@ pub(crate) fn debug_call_stack_snapshot() -> Vec<String> {
     DEBUG_CALL_STACK.with(|cell| cell.borrow().clone())
 }
 
+/// `note_enum_payload_function` for the `Option<Box<Value>>` payload slot as
+/// the generic variant-construction paths carry it.
+/// Gate for the enum-payload provenance diagnostic. Default OFF: this sits on
+/// the interpreter's hot payload paths, so an unset env var must cost one
+/// `OnceLock` read.
+///
+/// Motivation: two unrelated enums (`Option<LocalId>` and `MirOperandKind`)
+/// were observed handing back the SAME foreign value -- a `Value::Function`
+/// -- from their payload slots while self-hosting, surfacing much later as
+/// `undefined field 'id': cannot access field on value of type 'function'`
+/// against an innocent field access. A payload slot holding a function is
+/// never legitimate in those enums, so reporting it at the READ and at the
+/// WRITE pins which side corrupts it. See
+/// doc/08_tracking/bug/single_module_native_build_dies_in_any_escape_and_mir_for_2026-08-22.md
+pub(crate) fn enum_payload_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SIMPLE_DEBUG_ENUM_PAYLOAD").is_some())
+}
+
+/// Report an enum payload slot that holds a `Value::Function`.
+///
+/// `site` names the read/write path so a report can be attributed without a
+/// debugger. The `def` pointer is printed because the same `<fn:NAME>`
+/// rendering can come from distinct co-compiled definitions.
+pub(crate) fn note_enum_payload_function(
+    site: &str,
+    enum_name: &str,
+    variant: &str,
+    slot: usize,
+    payload: &crate::value::Value,
+) {
+    if !enum_payload_debug_enabled() {
+        return;
+    }
+    if let crate::value::Value::Function { name, def, .. } = payload {
+        let stack = debug_call_stack_snapshot();
+        let tail = stack
+            .iter()
+            .rev()
+            .take(10)
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        eprintln!(
+            "[enum-payload-function] site={site} enum={enum_name} variant={variant} slot={slot} fn={name} def_ptr={:p} stack={tail}",
+            std::sync::Arc::as_ptr(def)
+        );
+    }
+}
+
+pub(crate) fn note_enum_payload_function_opt(
+    site: &str,
+    enum_name: &str,
+    variant: &str,
+    payload: &Option<Box<crate::value::Value>>,
+) {
+    if !enum_payload_debug_enabled() {
+        return;
+    }
+    if let Some(inner) = payload {
+        note_enum_payload_function(site, enum_name, variant, 0, inner);
+    }
+}
+
 pub(crate) fn field_access_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -1082,5 +1147,49 @@ mod tests {
         assert!(is_timeout_exceeded());
         reset_timeout();
         assert!(!is_timeout_exceeded());
+    }
+}
+
+#[cfg(test)]
+mod enum_payload_diag_tests {
+    use super::*;
+
+    /// The gate must be default-OFF: it sits on the interpreter's hot payload
+    /// paths, so an unset env var may not turn the diagnostic on.
+    ///
+    /// `enum_payload_debug_enabled` memoizes in a `OnceLock`, so this asserts
+    /// the predicate over the environment rather than forcing the cell for
+    /// every other test in the process.
+    #[test]
+    fn enum_payload_diag_is_off_unless_env_var_is_set() {
+        if std::env::var_os("SIMPLE_DEBUG_ENUM_PAYLOAD").is_none() {
+            assert!(
+                !enum_payload_debug_enabled(),
+                "SIMPLE_DEBUG_ENUM_PAYLOAD is unset, so the enum-payload diagnostic must stay off"
+            );
+        }
+    }
+
+    /// A non-function payload is never reported, whatever the gate says. This
+    /// is what keeps the diagnostic silent on the overwhelming majority of
+    /// payload reads and writes.
+    #[test]
+    fn non_function_payloads_are_never_reported() {
+        note_enum_payload_function("test", "Option", "Some", 0, &crate::value::Value::Int(7));
+        note_enum_payload_function("test", "Option", "Some", 0, &crate::value::Value::Nil);
+        note_enum_payload_function(
+            "test",
+            "MirOperandKind",
+            "Copy",
+            0,
+            &crate::value::Value::text("not a function".to_string()),
+        );
+        note_enum_payload_function_opt("test", "MirOperandKind", "Copy", &None);
+        note_enum_payload_function_opt(
+            "test",
+            "MirOperandKind",
+            "Copy",
+            &Some(Box::new(crate::value::Value::Int(3))),
+        );
     }
 }
