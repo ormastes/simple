@@ -41,6 +41,23 @@ fn _is_real_assertion(line: text) -> bool:
             return false
     true
 
+fn _count_sub(haystack: text, needle: text) -> i64:
+    # Non-overlapping occurrence count; needle is never empty at call sites.
+    if needle == "" or haystack == "":
+        return 0
+    var count: i64 = 0
+    var rest = haystack
+    val needle_len = needle.len()
+    while rest != "":
+        val index = rest.index_of(needle)
+        if index < 0:
+            return count
+        count = count + 1
+        if index + needle_len >= rest.len():
+            return count
+        rest = rest.substring(index + needle_len)
+    count
+
 fn _calls_skip(trimmed_lower: text) -> bool:
     # A pending scaffold is a CALL to skip(...) — `test_env_gate_skip(` and
     # other *_skip(name) helpers are real oracles, not skips (2026-08-22).
@@ -224,11 +241,21 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     var requirements: i64 = 0
     var line_number: i64 = 0
     var has_bare_step = false
+    # Triple-quoted fixture strings often contain column-0 lines; without
+    # string-state tracking those lines END the current scenario early and
+    # every assertion after the fixture lands outside any scenario (2026-08-22).
+    var in_triple_string = false
     for raw in lines:
         line_number = line_number + 1
+        if in_triple_string:
+            if _count_sub(raw, "\"\"\"") > 0:
+                in_triple_string = false
+            continue
         val line = raw.trim()
         val line_lower = line.lower()
         val indent = _indent_width(raw)
+        if _count_sub(raw, "\"\"\"") % 2 == 1:
+            in_triple_string = true
         if current_line > 0 and line != "" and indent <= current_indent:
             scenarios.push(_finish_scenario(current_name, current_line,
                 line_number - 1, scenario_steps, scenario_assertions,
