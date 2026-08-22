@@ -223,3 +223,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Map four short-grammar wire codes to one stable policy family.
 - Pin direct/family mappings and authored allow suppression behavior.
 - Follow-up: generate code/name/default parity from one machine-readable descriptor.
+
+## Completed tool tranche: honest unknown-annotation fallback
+
+- Add one union-based source fallback with one diagnostic per unknown annotation.
+- Replace dual decorator/attribute registry scans with the generic owner.
+- Register `unknown_annotation` and alias legacy policy names bidirectionally.
+- Preserve legacy standalone rule entrypoints for compatibility.
+- Pin known decorator/attribute suppression and unknown single-result behavior.
+- Follow-up: move category-specific classification to typed HIR.
