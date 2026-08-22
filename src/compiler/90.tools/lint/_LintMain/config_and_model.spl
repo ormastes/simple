@@ -395,6 +395,9 @@ class LintConfig:
     # Immutable effective defaults for this selected profile. Built once when
     # the config/profile changes, never once per diagnostic lookup.
     effective_defaults: Dict<String, String>
+    # Exact simple.sdn path from which this config was parsed; empty for
+    # programmatic/inline configurations.
+    source_path: String
     # Selected strictness tier; nil = unset (legacy build_default_levels behavior).
     profile: Option<LintProfile>
     error: String
@@ -404,7 +407,7 @@ impl LintConfig:
     static fn new() -> LintConfig:
         LintConfig(
             levels: {}, effective_defaults: build_default_levels(),
-            profile: nil, error: "")
+            source_path: "", profile: nil, error: "")
 
     # Load config from an SDN file.  Parses the canonical `lints:` section.
     static fn from_sdn_file(path: String) -> LintConfig:
@@ -413,7 +416,9 @@ impl LintConfig:
         val content = file_read(path)
         if content == "":
             return LintConfig.new()
-        LintConfig.from_sdn_string(content)
+        var config = LintConfig.from_sdn_string(content)
+        config.source_path = path
+        config
 
     # Parse config from an SDN string.
     #
@@ -625,14 +630,15 @@ impl LintConfig:
                     new_levels[key] = src_levels[key]
         LintConfig(
             levels: new_levels, effective_defaults: self.effective_defaults,
-            profile: self.profile, error: self.error)
+            source_path: self.source_path, profile: self.profile,
+            error: self.error)
 
 fn resolve_lint_config(base: LintConfig, path: String, content: String) -> LintConfig:
     var config = base.child()
     config.apply_file_attributes(content)
 
     val sdn_path = find_project_sdn(path)
-    if sdn_path != "":
+    if sdn_path != "" and sdn_path != base.source_path:
         val file_config = LintConfig.from_sdn_file(sdn_path)
         for key in file_config.levels.keys():
             if not config.levels.has(key):
@@ -1008,3 +1014,5 @@ class Linter:
     lints: [LintDiag]
     results: [LintRunResult]
     config: LintConfig
+    last_resolved_path: String
+    last_resolved_config: LintConfig?
