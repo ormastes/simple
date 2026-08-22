@@ -510,7 +510,7 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
     run_lint_file_with_linter(linter, file_path, args)
 
 # Command-scoped entrypoint. The caller owns one Linter for the batch, so the
-# immutable rule descriptors and bounded last-project config cache are reused.
+# immutable rule descriptors and bounded parsed-project cache are reused.
 fn run_lint_file_with_linter(
     linter: Linter, file_path: String, args: [text]
 ) -> Int:
@@ -537,12 +537,17 @@ fn _run_lint_with_linter_source(
     val sdn_path = linter_find_project_sdn(linter, file_path)
     if sdn_path == "":
         linter.config = LintConfig.new()
-    elif linter.cached_sdn_path == sdn_path and linter.cached_sdn_config.?:
-        linter.config = linter.cached_sdn_config.unwrap().child()
+    elif linter.parsed_sdn_index.contains_key(sdn_path):
+        val config_index = linter.parsed_sdn_index[sdn_path]
+        linter.config = linter.parsed_sdn_configs[config_index].child()
     else:
         val loaded_config = LintConfig.from_sdn_file(sdn_path)
-        linter.cached_sdn_path = sdn_path
-        linter.cached_sdn_config = Some(loaded_config)
+        # A repository command normally sees one manifest. Bound unusual
+        # multi-project/generated trees without changing uncached correctness.
+        if linter.parsed_sdn_count < 256:
+            linter.parsed_sdn_index[sdn_path] = linter.parsed_sdn_configs.len()
+            linter.parsed_sdn_configs.push(loaded_config)
+            linter.parsed_sdn_count = linter.parsed_sdn_count + 1
         linter.config = loaded_config.child()
     linter.prepared_config_path = file_path
     if linter.config.error != "":
