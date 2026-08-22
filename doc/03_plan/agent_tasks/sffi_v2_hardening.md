@@ -204,3 +204,9 @@ passing placeholder.
     successful path retains one lock+insert with no new allocation. Continue
     the remaining 1,035 `rt_process` rows, then bind exact signed provider
     evidence before any process row can leave the unsafe class.
+39. The canonical library process owner now isolates twelve more raw contracts
+    in allocation-free lexical FFI wrappers. Its live relay uses checked offset
+    reads instead of quadratic whole-file polling, with focused correctness and
+    static hot-path guards. Continue the remaining 1,023 `rt_process` rows and
+    repair the module's existing primitive-API lint debt; signed artifact-bound
+    admission is still required before any SFFI row is classified verified.

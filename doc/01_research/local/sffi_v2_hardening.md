@@ -885,3 +885,19 @@ check/lint and Rust Clippy pass with pre-existing warnings, and the optimizer
 reports no new wrapper allocation/dispatch concern. Nine rows become explicitly
 unsafe and contracted, reducing untouched rows to 11,899. Artifact-bound signed
 admission remains zero, so all 12,650 rows remain classified unsafe.
+
+The second `rt_process` slice contracts all twelve process declarations in the
+canonical `std.nogc_sync_mut.io.process_ops` owner and confines each raw call to
+one minimal lexical `unsafe(ffi)` wrapper. The live timeout relay now reads only
+the appended stdout/stderr ranges through the checked file facade. This removes
+the prior whole-file-per-poll quadratic I/O and allocation pattern while keeping
+the same observation cadence, child registry, and final captured output.
+
+The focused multi-burst regression passes. Module check and the process contract
+audit pass; lint still reports the module's pre-existing public primitive API
+errors, so lint is not globally green. The optimizer finds no new allocation,
+lookup, or dispatch concern. The current census contains 12,659 declarations:
+C++ 211 definitions/211 symbols/1 file; C 2,301/1,821/82; Rust 2,161/2,097/172;
+Simple 584/535/51. Of these, 486 are unsafe-tagged, 572 have contracts, 11,896
+remain untouched, and all 12,659 remain fail-closed unsafe because signed and
+verified artifact admissions remain zero.

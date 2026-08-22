@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 binding="$root/src/app/io/process_ops.spl"
+lib_binding="$root/src/lib/nogc_sync_mut/io/process_ops.spl"
 runtime="$root/src/compiler_rust/runtime/src/value/sffi/env_process.rs"
 interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/system.rs"
 
@@ -16,6 +17,28 @@ done
 # bridge accounts for the tenth FFI scope in this module.
 test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$binding")" -eq 10
 test "$(grep -c '^fn _process_.*_raw' "$binding")" -eq 9
+
+lib_symbols='rt_process_run rt_process_run_bounded rt_process_is_running rt_process_spawn_async rt_process_wait rt_process_kill rt_process_spawn_piped rt_process_write_stdin rt_process_write_stdin_some rt_process_read_stdout rt_process_is_alive rt_process_close_piped'
+for symbol in $lib_symbols; do
+    grep -B1 -F "extern fn $symbol" "$lib_binding" |
+        grep -Eq 'sentinel|status'
+done
+
+# The library owner confines every raw call to one allocation-free lexical
+# wrapper. Live relay reads only newly appended ranges, avoiding quadratic
+# whole-file rereads as output grows.
+test "$(grep -c '^fn _process_.*_raw' "$lib_binding")" -eq 12
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$lib_binding")" -eq 12
+grep -q 'file_read_text_at(stdout_file, stdout_relayed, out_size - stdout_relayed)' "$lib_binding"
+grep -q 'file_read_text_at(stderr_file, stderr_relayed, err_size - stderr_relayed)' "$lib_binding"
+! grep -q 'val current = rt_file_read_text(stdout_file)' "$lib_binding"
+! grep -q 'val current_err = rt_file_read_text(stderr_file)' "$lib_binding"
+
+for wrapper in $(grep '^fn _process_.*_raw' "$lib_binding" | sed 's/(.*//; s/^fn //'); do
+    body=$(sed -n "/^fn $wrapper(/,/^$/p" "$lib_binding")
+    test "$(printf '%s\n' "$body" | grep -c 'unsafe(capabilities: \[ffi\]):')" -eq 1
+    ! printf '%s\n' "$body" | grep -Eq 'Array|Dict|sleep\(|\.push\('
+done
 
 # Successful publication performs the existing single lock+insert. Failure
 # must kill and reap before returning -1; it must never publish an untracked PID.
