@@ -535,7 +535,8 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve comment cutoff, quote toggling, eligibility, replacement ordering,
   and consumed-range suppression.
 - Pin quoted, live, and commented backslashes plus absence of recursive helpers.
-- Inventory and index remaining candidate-specific prefix guards before claiming
-  an end-to-end linear short-grammar rule.
+- Compute the functional-update boundary once rather than rescanning it for each
+  candidate; continue inventorying syntax-dependent candidate parsers before
+  claiming an end-to-end linear short-grammar rule.
 - Follow-up: share a lightweight lexical line-state service across source rules
   instead of retaining rule-local quote/comment models.
