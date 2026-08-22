@@ -533,8 +533,13 @@ Use attributes to override lint levels per-file:
 fn complex_fn(a, b, c, d, e, f, g, h):
     ...
 
-#[allow(unknown_annotation)]          # Meta-lint: suppresses both unknown_decorator + unknown_attribute
+#[allow(unknown_annotation)]          # Generic source fallback; aliases both legacy annotation policies
 ```
+
+Source-only lint emits one `unknown_annotation` warning because `@name` does not encode
+whether a name is a decorator or attribute. The legacy `unknown_decorator` and
+`unknown_attribute` settings remain bidirectional aliases until typed HIR owns the
+category-specific check.
 
 ---
 
