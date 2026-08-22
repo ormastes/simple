@@ -80,6 +80,21 @@ The QEMU command builders attach the root image first and server data second, wi
 
 Discovery matches the virtio serial/role and DBFS UUID, never “second probe result” alone. Duplicate matches, a boot-volume UUID match, read-only media when write access is requested, unsupported sector size, or missing flush support prevent the mount. x86 PCI transport and ARM/RV MMIO transports each return the same `BlockDevice` contract to the owner.
 
+Phase-B discovery is implemented first as the fixed-record, pure-Simple seam in
+`src/os/services/vfs/server_data_virtio_probe.spl`.  It visits at most 64
+candidates once (O(candidates), O(1) scalar working state), rejects ambiguous
+identity before considering usability, binds selection to one target transport,
+requires writable durable media, and returns a fixed scalar acquisition
+descriptor rather than a driver.  The x86 adapter encodes an already-decoded
+PCI domain/BDF; ARM and RV adapters encode an already-decoded, 512-byte-aligned
+MMIO base.  These adapters do not claim hardware discovery.  Existing virtio
+enumerators do not yet provide serial, DBFS UUID/role, write-protect, and flush
+evidence together, so only a future target transport owner may produce their
+verified candidate records and acquire/revalidate the live device.  Candidate
+arrays use the language's ordinary value-array call boundary; this model makes
+no additional candidate/index array or identity copy.  Runtime copy/RSS
+measurement remains required before Phase F admission.
+
 ## 5. Ownership and lease state machine
 
 Execution domains are explicit:

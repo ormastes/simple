@@ -43,6 +43,16 @@ Gate: contract compile, invalid state transitions rejected, ABI numbers identica
 
 Gate: byte-level image spec and transport-injected discovery specs. No live `DbFsDriver` yet.
 
+Transport discovery model status (2026-08-22): implemented as
+`server_data_virtio_probe.spl` with injected behavioral coverage.  The model is
+bounded to 64 fixed scalar candidates, makes one linear visit, allocates no
+secondary candidate/index collection, binds one expected target transport,
+requires write plus flush support, and returns only a fixed scalar acquisition
+descriptor.  Live PCI/MMIO enumeration remains deliberately unconnected until
+the target owners can prove serial, role/UUID, read-only, and flush facts; this
+status is not device or namespace readiness.  Image provisioning and live
+target transport evidence remain open Phase-B work.
+
 ### Phase C — unique owner and mount identity
 
 - Implement `ServerDataNamespaceOwnerV1` with one internal construction route. It receives no caller-created live driver candidate.
