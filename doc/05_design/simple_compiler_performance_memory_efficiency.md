@@ -51,6 +51,10 @@ Suppression and severity projection are one decision. `LintPolicyDecision(keep, 
 maps the stable code and reads effective configuration once, then applies the evidence-tier
 cap. Producers must not independently call keep and level APIs for the same diagnostic.
 
+The source-line view is request-scoped. Combined text/EasyFix plus parsed-AST lint may
+retain one COW line array between the two synchronous phases. Every success, parse error,
+revision mismatch, and non-Simple early exit releases it. Ordinary lint calls retain none.
+
 During compatibility migration, `LintDiag.evidence_tier` is the single severity
 input shared by CLI and query/LSP projections. `SourcePattern`,
 `ParsedStructural`, and `Incomplete` performance diagnostics are warning-capped;
