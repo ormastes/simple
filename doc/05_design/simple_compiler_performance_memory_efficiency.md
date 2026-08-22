@@ -532,3 +532,14 @@ Terminators observe post-block aliases. Alias resolution stops after the same 64
 transitions without compression. Borrow failure retains precedence over escape
 failure. Count summation and escaped membership are order-independent; public JIT
 facts continue to be emitted by `jit_var_optimization_fact_list` in fixed order.
+
+## Standalone rewriter assembly contract
+
+Source rewriters that already own a complete ordered line array must assemble it
+with one delimiter join, never immutable whole-prefix concatenation inside the
+line loop. The bare-import fixer keeps its current `split("\n")` representation,
+rewrites only recognized lines, then `join("\n")`; this preserves empty files,
+blank lines and final-newline shape. Persistence remains one `file_atomic_write`
+after complete assembly, with `0` unchanged, `1` written and `-1` failed. The
+rewrite deliberately retains existing indentation normalization for matched bare
+imports and does not broaden import recognition.
