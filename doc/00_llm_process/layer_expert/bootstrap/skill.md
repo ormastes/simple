@@ -18,6 +18,12 @@ LLVM llc by default; JIT is opt-in via `SIMPLE_BOOTSTRAP_REAL_LLVM` env var).
 Tracks redeploy gate (`scripts/check/cert/redeploy_gate/redeploy_gate.shs`), smoke-matrix
 verification, and all bootstrap-blocking regressions.
 
+Bootstrap ledger pushes use a shared Git hook directory across linked
+worktrees. The installed hook is `scripts/hooks/pre-push-worktree-launcher`, a
+stable launcher that resolves the active worktree before entering its tracked
+must-check dispatcher. An absolute dispatcher symlink is invalid across
+worktrees and must not be restored during bootstrap setup.
+
 ## Pipeline Links
 
 ## SimpleOS 32-bit cross-target boundary
