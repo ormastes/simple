@@ -984,3 +984,13 @@ single-`contains("rt_")` fast path. The performance fixture completes its clean
 existing interpreted ceilings. The two newly contained parse-shard modules lint
 without RAW-RT findings. Four pre-existing auto-fix expectations remain failing
 and are recorded separately; they do not affect the new containment cases.
+
+The first canonical production file-read slice found a provider inconsistency:
+native C and Rust runtime implementations return nil for an unreadable file,
+while the Rust interpreter fabricated empty text. The interpreter source now
+returns `Value::Nil`, with a focused Rust unit proving that valid empty text and
+failure remain distinct. The canonical facade exposes `Result<text, text>` and
+keeps the legacy empty fallback only in the compatibility API. The success hot
+path is unchanged; failure now uses the nil singleton rather than allocating an
+empty string, and the checked facade adds only the required null branch. The
+deployed bootstrap remains stale, so cross-lane verification is pending rebuild.

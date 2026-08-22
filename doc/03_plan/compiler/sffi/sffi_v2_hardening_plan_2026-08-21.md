@@ -816,3 +816,10 @@ latency constraint. This does not classify the call as verified or safe: it
 only distinguishes reviewed unsafe containment from accidental raw access.
 Next lint work must fix the pre-existing process-run auto-fix scope bug without
 inventing nullable file/env rewrites, then ratchet uncontained production calls.
+
+The first `rt_file` slice now has a nullable raw contract and a checked
+`file_read_result` facade. Before migrating the remaining production file-read
+declarations, rebuild the deployed Simple tool and run one contract fixture in
+interpreter, JIT, native, and sealed-dynload lanes. Do not bulk-rename callers:
+migrate semantic owners to the checked facade and measure closure, latency, and
+RSS at each owner boundary.

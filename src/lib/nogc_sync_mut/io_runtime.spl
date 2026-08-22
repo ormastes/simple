@@ -48,7 +48,8 @@ fn _io_runtime_process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64)
     unsafe(capabilities: [ffi]):
         rt_process_run_timeout(cmd, args, timeout_ms)
 
-extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw nullable file read; nil is the invalid, unreadable, or runtime-failure sentinel", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
@@ -133,14 +134,30 @@ pub fn shell_bool(command: text) -> bool:
 # ============================================================================
 
 pub fn file_read(path: text) -> text:
-    val content = rt_file_read_text(path)
-    content ?? ""
+    match file_read_result(path):
+        case Ok(content): content
+        case Err(_): ""
+
+pub fn file_read_result(path: text) -> Result<text, text>:
+    var content: text? = nil
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_text(path)
+    if content == nil:
+        Err("file read failed: {path}")
+    else:
+        # Nullable extern transport is a bare payload or nil in interpreter
+        # lanes. The nil check above proves this fallback cannot fabricate a
+        # value; it only removes the optional type wrapper.
+        Ok(content ?? "")
 
 pub fn read_file(path: text) -> text:
     file_read(path)
 
 pub fn read_file_text(path: text) -> text:
     file_read(path)
+
+pub fn read_file_text_result(path: text) -> Result<text, text>:
+    file_read_result(path)
 
 pub fn file_write(path: text, content: text) -> bool:
     if rt_file_write_text(path, content):

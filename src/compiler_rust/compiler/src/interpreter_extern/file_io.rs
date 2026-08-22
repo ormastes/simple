@@ -344,9 +344,9 @@ pub fn rt_file_canonicalize(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Read file as text
 ///
-/// Returns plain `Value::Str` (not Option-wrapped) to match the runtime
-/// `rt_file_read_text` ABI and the `extern fn rt_file_read_text(path: text) -> text`
-/// declarations used throughout the codebase. Returns an empty string on failure.
+/// Returns text on success and `Value::Nil` on failure, matching both native
+/// C and Rust runtime providers. A valid empty file remains empty text; it is
+/// never used as the failure sentinel.
 pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::read_to_string(&path) {
@@ -359,7 +359,7 @@ pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
             };
             Ok(Value::text(content))
         }
-        Err(_) => Ok(Value::text(String::new())),
+        Err(_) => Ok(Value::Nil),
     }
 }
 
@@ -1474,6 +1474,23 @@ mod tests {
     use super::*;
 
     static FILE_EXISTS_PROBE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn file_read_text_distinguishes_empty_success_from_failure() {
+        let path = std::env::temp_dir().join(format!(
+            "simple_file_read_text_empty_{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, "").unwrap();
+        let path_value = Value::text(path.to_string_lossy().to_string());
+
+        assert_eq!(
+            rt_file_read_text(std::slice::from_ref(&path_value)).unwrap(),
+            Value::text(String::new())
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(rt_file_read_text(&[path_value]).unwrap(), Value::Nil);
+    }
 
     #[test]
     fn checked_offset_read_distinguishes_empty_success_from_failure() {
