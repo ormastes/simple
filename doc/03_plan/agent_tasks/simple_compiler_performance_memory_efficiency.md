@@ -700,6 +700,16 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   is material.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed formatter fingerprint tranche
+
+- Replace immutable accumulator concatenation in token and comment-gap
+  fingerprints with ordered fragments and one join.
+- Preserve exact lexical-equivalence framing and failure behavior.
+- Add comment-byte/order and source-shape regression contracts.
+- Deferred: evaluate streaming fingerprint comparison only with representative
+  measurement and exact mismatch semantics.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed diagnostic runtime tranche: fixed-pattern automaton
 
 - Intern 116 fixed classifier literals into 1,160 sparse Aho-Corasick states.
