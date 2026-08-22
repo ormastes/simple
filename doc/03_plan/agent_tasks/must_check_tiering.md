@@ -15,6 +15,29 @@
   this repository; the Gemini command and Codex/Claude SPipe instructions are
   the applicable command surfaces.
 
+## Open bootstrap-row resume matrix
+
+These rows stay TODO until the named checker exists and produces real evidence.
+Contract/self-tests never promote live or performance acceptance. Merge owner
+and final reviewer for every row is the primary high-capability agent.
+
+| Gate | Owner / prerequisite | Exact resume command and retained evidence |
+|---|---|---|
+| `windows-hook-installation` | tooling-team; native Windows with two linked worktrees | Run the PowerShell install/check sequence in the system-test plan; retain both verdicts and launcher SHA-256. |
+| `caret-local-llm-launch` | llm-caret-team; Slang generation endpoint and Caret provider | Implement `scripts/check/check-caret-slang-inference-bootstrap.shs`, then run it with an admitted Stage 4 CLI; retain provider identity, bounded request/response, timeout, and stop receipt. `local_torch` is not equivalent. |
+| `caret-smux-multi-launch` | llm-caret-team; production `os.apps.smux` PTY adapter | Implement `scripts/check/check-caret-smux-multi-launch.shs`, then run it with an admitted Stage 4 CLI; retain launch/capture/resize/cancel/stop receipts. |
+| `web-server-gpu-nginx` | server-performance-team; device-origin GPU offload | Establish the CPU/nginx baseline with `sh test/perf/bench/http_server/run_bench.shs`; implement `scripts/check/check-web-server-gpu-nginx.shs`, then retain identical-request parity and CPU/GPU/nginx samples. The baseline alone does not pass. |
+| `db-server-gpu-sql` | server-performance-team; GPU database plan plus PostgreSQL/MySQL fixtures | Establish the Simple baseline with `bin/simple run test/05_perf/db/db_bench_driver.spl`; implement `scripts/check/check-db-server-gpu-sql.shs`, then retain result parity and throughput/latency samples. |
+| `simpleos-sbc-qemu-ls` | simpleos-platform-team; written-media receipt and connected UP2 | Run `sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf`, then `UP2_MEDIA_RECEIPT=<receipt> sh scripts/check/check-simpleos-up-squared-apollo-lake.shs --live`; retain image hash and paired filesystem transcripts. |
+| `simpleos-clang-hello` | simpleos-platform-team; admitted compiler | Run `SIMPLE_BUILD_COMPILER=<admitted-stage3> sh scripts/os/build_clang_disk.shs`; retain compiler/source/executable hashes, guest stdout, and exit status. |
+| `simpleos-simple-toolchain` | simpleos-platform-team; admitted SimpleOS images | Run `sh scripts/check/check-simpleos-fs-toolchain-qemu-matrix.shs`; retain per-architecture native tool identity and filesystem hello compile/run receipts. |
+| `simpleos-server-executables` | SimpleOS + server teams; signed per-architecture receipts and trust key | Run `sh scripts/check/check-simpleos-filesystem-servers-qemu.shs` with its documented receipt/signature environment; retain bounded launch/readiness/request/stop evidence. |
+| `riscv32-riscv64-shared` | simpleos-platform-team; template ownership inventory | Implement `scripts/check/check-riscv32-riscv64-template-ownership.shs`, then retain shared-path inventory and justified architecture-only leaves. |
+| `simple-generated-vhdl-linux` | hardware-team; admitted Stage 4 generator and RTL tools | Run `scripts/check/run-riscv-gen2-hwir-qualification.shs --stage4-cli <simple> --stage4-provenance <provenance> --output-dir <dir>`, then `sh scripts/check/check-riscv-rtl-linux-smoke.shs --timeout=30`; retain generator hashes, RTL qualification, Linux boot, and `ls`. |
+| `binary-size-go-parity` | performance-team; equivalent stripped programs | Run `RUNS=50 WORKERS=100 sh scripts/check/check-cross-language-perf.shs`, then implement the missing threshold validator `scripts/check/check-binary-size-go-parity.shs`; retain tool versions, hashes, and byte counts. |
+| `interpreter-startup-parity` | performance-team; controlled cold/warm host | Run the same cross-language profiler, then implement `scripts/check/check-interpreter-startup-parity.shs`; retain raw samples, environment identity, statistics, and verdict. |
+| `rust-go-benchmark-parity` | performance-team; semantic-equivalence oracle | Run the same cross-language profiler, then implement `scripts/check/check-rust-go-benchmark-parity.shs`; retain raw samples, statistics, and threshold verdict. |
+
 Shared interfaces: `push_must_check`, `bootstrap_must_check`, and
 `must_check_ledger`. Manual helpers: `step("Run the lightweight push
 must-check")`, `step("Run the bootstrap must-check")`, and `step("Validate the
