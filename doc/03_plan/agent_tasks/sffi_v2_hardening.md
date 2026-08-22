@@ -116,3 +116,8 @@ passing placeholder.
     and Simple with three lexical wrappers and unchanged SDL call counts.
     Continue with window flags/state and remaining property contracts before
     signed admission and sanitizer receipts.
+21. SDL2 window flags now reserve a disjoint invalid-handle sentinel and three
+    property wrappers return typed absence; quit-state operations enforce the
+    owner thread and clear returns status. Continue through remaining SDL2
+    properties, then implement signed provider admission and artifact-bound
+    sanitizer/proof receipts before declaring this module verified.

@@ -1063,11 +1063,14 @@ int64_t rt_sdl2_get_ticks_ns(void) {
  * ================================================================ */
 
 int64_t rt_sdl2_window_should_close(void) {
+    if (!sdl2_on_owner_thread()) return -1;
     return g_quit_requested ? 1 : 0;
 }
 
-void rt_sdl2_clear_quit(void) {
+bool rt_sdl2_clear_quit(void) {
+    if (!sdl2_on_owner_thread()) return false;
     g_quit_requested = 0;
+    return true;
 }
 
 /* ================================================================
@@ -1236,7 +1239,7 @@ int64_t rt_sdl2_focus_window(int64_t handle) {
 
 int64_t rt_sdl2_window_flags(int64_t handle) {
     SDL_Window* win = sdl2_window_get(handle);
-    return win ? (int64_t)SDL_GetWindowFlags(win) : 0;
+    return win ? (int64_t)SDL_GetWindowFlags(win) : -1;
 }
 
 const char* rt_sdl2_last_error(void) {
@@ -1490,6 +1493,8 @@ int64_t rt_sdl_event_window_data2(void) {
 
 #ifdef SIMPLE_SDL2_HANDLE_SELFTEST
 int main(void) {
+    if (rt_sdl2_window_flags(1) != -1 || rt_sdl2_window_should_close() != -1 ||
+        rt_sdl2_clear_quit()) return 14;
     if (rt_sdl2_set_cursor_visible(1) || rt_sdl2_set_cursor_grab(1, 1) ||
         rt_sdl2_warp_mouse(1, 0, 0)) return 13;
     if (rt_sdl2_quit() || rt_sdl2_destroy_window(1)) return 12;

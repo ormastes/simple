@@ -1285,7 +1285,7 @@ int64_t  rt_sdl2_get_ticks_ns(void);
 
 /* Window state */
 int64_t  rt_sdl2_window_should_close(void);
-void     rt_sdl2_clear_quit(void);
+bool     rt_sdl2_clear_quit(void);
 
 /* SDL editor-facing aliases. These forward to the existing SDL2 backend. */
 int64_t  rt_sdl_init(void);

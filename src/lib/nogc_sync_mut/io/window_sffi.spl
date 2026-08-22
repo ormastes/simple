@@ -87,10 +87,10 @@ extern fn rt_sdl2_get_ticks_ms() -> i64
 extern fn rt_sdl2_get_ticks_ns() -> i64
 
 # --- Window State ---
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 owner-thread quit-state ABI; negative sentinel means unavailable owner", capabilities: [ffi])
 extern fn rt_sdl2_window_should_close() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
-extern fn rt_sdl2_clear_quit()
+@unsafe(reason: "raw SDL2 owner-thread quit-state status ABI; false sentinel means unavailable owner", capabilities: [ffi])
+extern fn rt_sdl2_clear_quit() -> bool
 
 # --- Window Events ---
 @unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be a window event", capabilities: [ffi])
@@ -135,7 +135,7 @@ extern fn rt_sdl2_set_window_bordered(handle: i64, bordered: i64) -> i64
 extern fn rt_sdl2_set_window_always_on_top(handle: i64, on_top: i64) -> i64
 @unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
 extern fn rt_sdl2_focus_window(handle: i64) -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 generation-checked flag ABI; negative sentinel means stale handle or wrong owner", capabilities: [ffi])
 extern fn rt_sdl2_window_flags(handle: i64) -> i64
 @unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
 extern fn rt_sdl2_last_error() -> text
@@ -178,6 +178,20 @@ fn window_destroy_event_loop(event_loop: EventLoop) -> bool:
 fn window_run_event_loop(event_loop: EventLoop) -> bool:
     # SDL2 does not have a blocking run loop; polling is done per-frame.
     event_loop.is_valid
+
+fn window_should_close() -> bool?:
+    var state: i64 = -1
+    unsafe(capabilities: [ffi]):
+        state = rt_sdl2_window_should_close()
+    if state < 0:
+        return nil
+    state != 0
+
+fn window_clear_quit() -> bool:
+    var cleared = false
+    unsafe(capabilities: [ffi]):
+        cleared = rt_sdl2_clear_quit()
+    cleared
 
 # Polled input preserves provider/argument failure as typed absence. Each
 # wrapper performs exactly the same single SDL query as the raw ABI.
@@ -445,9 +459,15 @@ fn window_set_visible(window: Window, visible: bool) -> bool:
                 ok = rt_sdl2_hide_window(window.handle)
         ok
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
-fn window_is_visible(window: Window) -> bool:
-    window.is_valid and (rt_sdl2_window_flags(window.handle) & 4) != 0
+fn window_is_visible(window: Window) -> bool?:
+    if not window.is_valid:
+        return nil
+    var flags: i64 = -1
+    unsafe(capabilities: [ffi]):
+        flags = rt_sdl2_window_flags(window.handle)
+    if flags < 0:
+        return nil
+    (flags & 4) != 0
 
 fn window_set_resizable(window: Window, resizable: bool) -> bool:
     if not window.is_valid:
@@ -478,9 +498,15 @@ fn window_set_maximized(window: Window, maximized: bool) -> bool:
         else:
             rt_sdl2_restore_window(window.handle) != 0
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
-fn window_is_maximized(window: Window) -> bool:
-    window.is_valid and (rt_sdl2_window_flags(window.handle) & 128) != 0
+fn window_is_maximized(window: Window) -> bool?:
+    if not window.is_valid:
+        return nil
+    var flags: i64 = -1
+    unsafe(capabilities: [ffi]):
+        flags = rt_sdl2_window_flags(window.handle)
+    if flags < 0:
+        return nil
+    (flags & 128) != 0
 
 @unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn window_set_fullscreen(window: Window, fullscreen: bool) -> bool:
@@ -489,9 +515,15 @@ fn window_set_fullscreen(window: Window, fullscreen: bool) -> bool:
     else:
         rt_sdl2_set_window_fullscreen_checked(window.handle, if fullscreen: 1 else: 0) != 0
 
-@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
-fn window_is_fullscreen(window: Window) -> bool:
-    window.is_valid and (rt_sdl2_window_flags(window.handle) & 4097) != 0
+fn window_is_fullscreen(window: Window) -> bool?:
+    if not window.is_valid:
+        return nil
+    var flags: i64 = -1
+    unsafe(capabilities: [ffi]):
+        flags = rt_sdl2_window_flags(window.handle)
+    if flags < 0:
+        return nil
+    (flags & 4097) != 0
 
 @unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn window_set_decorations(window: Window, decorations: bool) -> bool:
@@ -1036,6 +1068,7 @@ export Event, KeyboardEvent, MouseButtonEvent, MousePosition, MouseWheel, Monito
 export sdl2_normalize_modifiers
 export window_is_key_pressed, window_mouse_position, window_is_mouse_button_pressed
 export window_ticks_ms, window_ticks_ns
+export window_should_close, window_clear_quit
 export rt_sdl2_init, rt_sdl2_quit
 export rt_sdl2_create_window, rt_sdl2_destroy_window
 export rt_sdl2_get_window_width, rt_sdl2_get_window_height, rt_sdl2_set_window_title

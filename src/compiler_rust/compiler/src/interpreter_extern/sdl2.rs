@@ -58,7 +58,7 @@ pub enum Ret {
 /// `family_matches_runtime_c_source`; `rt_sdl2_event_code` is deliberately
 /// absent because it is `static` in the C file and therefore not exported.
 pub const SDL2_FNS: &[(&str, Ret, &str)] = &[
-    ("rt_sdl2_clear_quit", Ret::V, ""),
+    ("rt_sdl2_clear_quit", Ret::B, ""),
     ("rt_sdl2_clipboard_get", Ret::TN, ""),
     ("rt_sdl2_clipboard_has_text", Ret::I, ""),
     ("rt_sdl2_clipboard_set", Ret::B, "s"),

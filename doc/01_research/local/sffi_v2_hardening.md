@@ -585,3 +585,19 @@ family, Simple, and cursor ABI/performance audits pass. Inventory improves to
 197 contracted and 279 uncontracted unsafe declarations. SDL’s void grab/warp
 primitives prove accepted inputs rather than post-call OS state, and signed
 provider evidence remains absent, so the family is not fully verified.
+
+SDL2 window flags previously returned zero for a stale, forged, or wrong-owner
+handle, fabricating `false` for visibility, maximized, and fullscreen state.
+The native function now reserves `-1` for invalid handles and the three public
+wrappers expose typed absence. Quit-state reads and clearing now validate the
+SDL owner thread; clearing returns explicit status instead of silently
+mutating or doing nothing.
+
+Each property wrapper still performs exactly one generation-table lookup and
+one `SDL_GetWindowFlags` query. The quit-state operations add only the existing
+owner-thread comparison and remain cold control paths. No allocation, retained
+memory, lock, hash, dynamic lookup, error query, or retry was added. Optimized
+C, Rust bridge tests, four Simple checks, and the ABI/performance audit pass.
+Inventory improves to 200 contracted and 276 uncontracted unsafe declarations.
+The dynamically loaded SDL artifact is still unsigned and lacks bound
+sanitizer/proof receipts, so these contracts are fail-closed but not verified.
