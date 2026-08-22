@@ -338,9 +338,14 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == binding.mount_id:
-                        val written = driver_positioned_write_bytes(
+                        self._generation_available_at(i, false)?
+                        val result = driver_positioned_write_bytes(
                             self.mounts[i].driver, kind, binding.inner_handle,
-                            offset as i64, data)?
+                            offset as i64, data)
+                        # A backend may write a prefix before reporting failure.
+                        # Invalidate after every admitted mutating call, not only Ok.
+                        self._advance_generation_at(i, false)?
+                        val written = result?
                         if written < 0 or written > data.len() as i64:
                             return Err(FsError.IoError(code: 0u32))
                         return Ok(written as u64)
@@ -417,10 +422,17 @@ impl MountTable:
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == mount_id:
                         if (flags.bits & 64) != 0:
-                            self._generation_available(mount_id, true)?
+                            self._generation_available_at(i, true)?
                         if (flags.bits & 512) != 0:
-                            self._generation_available(mount_id, false)?
+                            self._generation_available_at(i, false)?
                         val opened = _driver_open_path(self.mounts[i].driver, relpath, flags)
+                        # O_CREAT/O_TRUNC backends may mutate before returning an
+                        # error.  Each requested mutation class is invalidated
+                        # exactly once after the single backend call.
+                        if (flags.bits & 64) != 0:
+                            self._advance_generation_at(i, true)?
+                        if (flags.bits & 512) != 0:
+                            self._advance_generation_at(i, false)?
                         match opened:
                             case Err(e):
                                 return Err(e)
@@ -430,18 +442,6 @@ impl MountTable:
                                     val _ = _driver_close_handle(self.mounts[i].driver, inner)
                                     return Err(bound.unwrap_err())
                                 val virtual_handle = bound.unwrap().id
-                                if (flags.bits & 64) != 0:
-                                    val generation_result = self._advance_generation(mount_id, true)
-                                    if generation_result.is_err():
-                                        self._unbind_file_handle(FileHandle(id: virtual_handle))
-                                        _driver_close_handle(self.mounts[i].driver, inner)
-                                        return Err(generation_result.unwrap_err())
-                                if (flags.bits & 512) != 0:
-                                    val generation_result = self._advance_generation(mount_id, false)
-                                    if generation_result.is_err():
-                                        self._unbind_file_handle(FileHandle(id: virtual_handle))
-                                        _driver_close_handle(self.mounts[i].driver, inner)
-                                        return Err(generation_result.unwrap_err())
                                 return Ok(FileHandle(id: virtual_handle))
                     i = i + 1
                 Err(FsError.NotFound)
@@ -520,33 +520,37 @@ impl MountTable:
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             if self.mounts[i].id == mount_id:
-                var entry = self.mounts[i]
-                if is_namespace:
-                    if entry.namespace_generation == 0xFFFFFFFFFFFFFFFFu64:
-                        return Err(FsError.TooLarge)
-                    entry.namespace_generation = entry.namespace_generation + 1u64
-                else:
-                    if entry.content_generation == 0xFFFFFFFFFFFFFFFFu64:
-                        return Err(FsError.TooLarge)
-                    entry.content_generation = entry.content_generation + 1u64
-                self.mounts[i] = entry
-                return Ok(())
+                return self._advance_generation_at(i, is_namespace)
             i = i + 1
         Err(FsError.NotFound)
+
+    me fn _advance_generation_at(mount_index: i32, is_namespace: bool) -> Result<(), FsError>:
+        if is_namespace:
+            if self.mounts[mount_index].namespace_generation == HANDLE_ID_MAX:
+                return Err(FsError.TooLarge)
+            self.mounts[mount_index].namespace_generation = self.mounts[mount_index].namespace_generation + 1u64
+        else:
+            if self.mounts[mount_index].content_generation == HANDLE_ID_MAX:
+                return Err(FsError.TooLarge)
+            self.mounts[mount_index].content_generation = self.mounts[mount_index].content_generation + 1u64
+        Ok(())
 
     fn _generation_available(mount_id: MountId, is_namespace: bool) -> Result<(), FsError>:
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             if self.mounts[i].id == mount_id:
-                val generation = if is_namespace:
-                    self.mounts[i].namespace_generation
-                else:
-                    self.mounts[i].content_generation
-                if generation == HANDLE_ID_MAX:
-                    return Err(FsError.TooLarge)
-                return Ok(())
+                return self._generation_available_at(i, is_namespace)
             i = i + 1
         Err(FsError.NotFound)
+
+    fn _generation_available_at(mount_index: i32, is_namespace: bool) -> Result<(), FsError>:
+        val generation = if is_namespace:
+            self.mounts[mount_index].namespace_generation
+        else:
+            self.mounts[mount_index].content_generation
+        if generation == HANDLE_ID_MAX:
+            return Err(FsError.TooLarge)
+        Ok(())
 
     me fn opendir(path: text) -> Result<DirHandle, FsError>:
         """Open directory via the appropriate mounted driver."""
@@ -614,10 +618,9 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == mount_id:
-                        self._generation_available(mount_id, true)?
+                        self._generation_available_at(i, true)?
                         val result = _driver_mkdir_path(self.mounts[i].driver, relpath.raw, mode)
-                        if result.is_ok():
-                            self._advance_generation(mount_id, true)?
+                        self._advance_generation_at(i, true)?
                         return result
                     i = i + 1
                 Err(FsError.NotFound)
@@ -641,10 +644,9 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == binding.mount_id:
-                        self._generation_available(binding.mount_id, false)?
+                        self._generation_available_at(i, false)?
                         val result = _driver_write_text_handle(self.mounts[i].driver, binding.inner_handle, content)
-                        if result.is_ok():
-                            self._advance_generation(binding.mount_id, false)?
+                        self._advance_generation_at(i, false)?
                         return result
                     i = i + 1
             case nil: Err(FsError.StaleHandle)
@@ -660,10 +662,9 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == binding.mount_id:
-                        self._generation_available(binding.mount_id, false)?
+                        self._generation_available_at(i, false)?
                         val result = _driver_pwrite_text_handle(self.mounts[i].driver, binding.inner_handle, patch, offset)
-                        if result.is_ok():
-                            self._advance_generation(binding.mount_id, false)?
+                        self._advance_generation_at(i, false)?
                         return result
                     i = i + 1
             case nil: Err(FsError.StaleHandle)
@@ -742,10 +743,9 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == mount_id:
-                        self._generation_available(mount_id, true)?
+                        self._generation_available_at(i, true)?
                         val result = _driver_unlink_path_text(self.mounts[i].driver, relpath.raw)
-                        if result.is_ok():
-                            self._advance_generation(mount_id, true)?
+                        self._advance_generation_at(i, true)?
                         return result
                     i = i + 1
                 Err(FsError.NotFound)
@@ -767,10 +767,9 @@ impl MountTable:
                         var i: i32 = 0
                         while i < self.mounts.len() as i32:
                             if self.mounts[i].id == old_pair.mount_id:
-                                self._generation_available(old_pair.mount_id, true)?
+                                self._generation_available_at(i, true)?
                                 val result = _driver_rename_path_text(self.mounts[i].driver, old_pair.relpath.raw, new_pair.relpath.raw)
-                                if result.is_ok():
-                                    self._advance_generation(old_pair.mount_id, true)?
+                                self._advance_generation_at(i, true)?
                                 return result
                             i = i + 1
                         Err(FsError.NotFound)
@@ -783,10 +782,9 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == binding.mount_id:
-                        self._generation_available(binding.mount_id, false)?
+                        self._generation_available_at(i, false)?
                         val result = _driver_ftruncate_handle(self.mounts[i].driver, binding.inner_handle, new_size)
-                        if result.is_ok():
-                            self._advance_generation(binding.mount_id, false)?
+                        self._advance_generation_at(i, false)?
                         return result
                     i = i + 1
             case nil: Err(FsError.StaleHandle)
@@ -802,10 +800,9 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == binding.mount_id:
-                        self._generation_available(binding.mount_id, false)?
+                        self._generation_available_at(i, false)?
                         val result = _driver_mmap_shared_writable_handle(self.mounts[i].driver, binding.inner_handle, offset, length)
-                        if result.is_ok():
-                            self._advance_generation(binding.mount_id, false)?
+                        self._advance_generation_at(i, false)?
                         return result
                     i = i + 1
                 Err(FsError.StaleHandle)
@@ -818,5 +815,8 @@ impl MountTable:
             case nil:
                 Err(FsError.NotFound)
             case Some(entry):
-                _driver_link_path_text(entry.driver, target, link_path)
+                self._generation_available(entry.id, true)?
+                val result = _driver_link_path_text(entry.driver, target, link_path)
+                self._advance_generation(entry.id, true)?
+                result
 export PositionedDriverKind

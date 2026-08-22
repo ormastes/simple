@@ -141,13 +141,52 @@ use os.kernel.fs.fat32.*
             dirent_offset: d_offset
         ))
 
+    fn _data_cluster_valid(self, cluster: u32) -> bool:
+        cluster >= 2u32 and cluster < 0x0FFFFFF0u32 and cluster - 2u32 < self.data_clusters
+
+    fn _validated_read_clusters(self, dev: BlockDevice, start: u32, first_index: u64, count: u64) -> Result<[u32], i32>:
+        """Validate the complete chain and retain only this request's clusters.
+
+        Validation finishes before read_at writes caller memory, preserving the
+        fail-closed no-partial-copy behavior of the former full-chain array.
+        The transient array is bounded by the caller's requested byte range,
+        not by the complete file or the lifetime of an open descriptor.
+        """
+        if not self._data_cluster_valid(start):
+            return Err(EIO)
+        if count == 0u64 or first_index > FAT32_U64_MAX - count:
+            return Err(EIO)
+        val end_index = first_index + count
+        var current = start
+        var index = 0u64
+        var selected: [u32] = []
+        var fuel = self.data_clusters
+        while true:
+            if fuel == 0u32 or not self._data_cluster_valid(current):
+                return Err(EIO)
+            fuel = fuel - 1u32
+            if index >= first_index and index < end_index:
+                selected.push(current)
+            val next_result = self._read_fat_entry(dev, current)
+            if next_result.is_err():
+                return Err(EIO)
+            val next = next_result.unwrap()
+            if next >= 0x0FFFFFF8u32:
+                if selected.len().to_u64() != count:
+                    return Err(EIO)
+                return Ok(selected)
+            if not self._data_cluster_valid(next):
+                return Err(EIO)
+            current = next
+            index = index + 1u64
+
     fn read_at(self, dev: BlockDevice, h: FileHandle, offset: u64, buf: [u8]) -> Result<u64, i32>:
         """Read up to buf.len() bytes at an explicit file offset.
 
-        Walks the FAT32 cluster chain via read_cluster_chain(dev,
-        h.start_cluster), then reads each cluster's sectors from dev,
-        assembling file bytes in chain order.  Truncates at h.file_size
-        so the caller never sees cluster padding past the real EOF.
+        Validates the complete FAT chain, retaining only the clusters covered
+        by this request, then streams that immutable traversal snapshot.
+        Truncates at h.file_size so the caller never sees cluster padding past
+        real EOF.
 
         Never mutates h.offset. Returns the number of bytes actually copied.
         Returns Ok(0) when already at EOF or buf is empty.
@@ -155,41 +194,40 @@ use os.kernel.fs.fat32.*
         """
         if offset >= h.file_size:
             return Ok(0u64)
+        if buf.len() == 0:
+            return Ok(0u64)
+
+        if self.cluster_size == 0u32 or self.bytes_per_sector == 0u32 or self.sectors_per_cluster == 0u32:
+            return Err(EIO)
+        val cluster_bytes = self.cluster_size.to_u64()
+        val spc = self.sectors_per_cluster.to_u64()
+        val bps = self.bytes_per_sector.to_u64()
+        if cluster_bytes != spc * bps:
+            return Err(EIO)
         val remaining = h.file_size - offset
         var to_read = buf.len().to_u64()
         if remaining < to_read:
             to_read = remaining
-        if to_read == 0u64:
-            return Ok(0u64)
-
-        # Walk the full chain from the file's start cluster.
-        val chain_result = self.read_cluster_chain(dev, h.start_cluster)
-        if chain_result.is_err():
+        var byte_in_cluster = offset % cluster_bytes
+        if to_read > FAT32_U64_MAX - byte_in_cluster:
             return Err(EIO)
-        val chain = chain_result.unwrap()
-        if chain.len() == 0:
-            return Ok(0u64)
-
-        val cluster_bytes = self.cluster_size.to_u64()
-        val spc = self.sectors_per_cluster.to_u64()
-        val bps = self.bytes_per_sector.to_u64()
-
-        # Determine which cluster the explicit offset falls into,
-        # and the byte offset within that cluster.
-        var cluster_idx: u64 = offset / cluster_bytes
-        var byte_in_cluster: u64 = offset % cluster_bytes
-
-        var copied: u64 = 0u64
-        while copied < to_read and cluster_idx.to_i32() < chain.len():
-            val cluster = chain[cluster_idx.to_i32()]
-            # Compute the LBA of the first sector of this cluster.
+        var requested_clusters = (byte_in_cluster + to_read) / cluster_bytes
+        if (byte_in_cluster + to_read) % cluster_bytes != 0u64:
+            requested_clusters = requested_clusters + 1u64
+        val clusters_result = self._validated_read_clusters(
+            dev, h.start_cluster, offset / cluster_bytes, requested_clusters)
+        if clusters_result.is_err():
+            return Err(clusters_result.unwrap_err())
+        val clusters = clusters_result.unwrap()
+        var copied = 0u64
+        var cluster_index = 0
+        while copied < to_read and cluster_index < clusters.len():
+            val cluster = clusters[cluster_index]
             val first_sector = self.data_start_sector.to_u64() + (cluster - 2u32).to_u64() * spc
-            # Within this cluster, start reading from byte_in_cluster.
-            var sec_off: u64 = byte_in_cluster / bps
-            var byte_in_sec: u64 = byte_in_cluster % bps
+            var sec_off = byte_in_cluster / bps
+            var byte_in_sec = byte_in_cluster % bps
             while copied < to_read and sec_off < spc:
-                val lba = first_sector + sec_off
-                val sec_result = dev.read_sector(lba)
+                val sec_result = dev.read_sector(first_sector + sec_off)
                 if sec_result.is_err():
                     return Err(EIO)
                 val sec = sec_result.unwrap()
@@ -199,9 +237,8 @@ use os.kernel.fs.fat32.*
                     byte_in_sec = byte_in_sec + 1u64
                 sec_off = sec_off + 1u64
                 byte_in_sec = 0u64
-            cluster_idx = cluster_idx + 1u64
             byte_in_cluster = 0u64
-
+            cluster_index = cluster_index + 1
         Ok(copied)
 
     fn read(self, dev: BlockDevice, h: FileHandle, buf: [u8]) -> Result<u64, i32>:
@@ -459,4 +496,3 @@ use os.kernel.fs.fat32.*
             # Valid next cluster; continue walk
             current = next
         Ok(chain)
-

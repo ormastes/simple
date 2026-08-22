@@ -21,7 +21,7 @@ Tests for MountTable lifecycle:
 """
 
 use std.spipe.*
-use std.fs_driver.mount_table.{MountTable, MountId, ExecuteOpenBinding}
+use std.fs_driver.mount_table.{MountTable, MountId, ExecuteOpenBinding, PositionedDriverKind}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags, FileHandle, ExecuteTrust}
 use std.fs_driver.instance.{DriverInstance, RamFsStub}
 use std.fs_driver.error.{FsError}
@@ -214,6 +214,103 @@ describe "MountTable — execute-open policy and ownership":
         expect(mt.read(FileHandle(id: 1u64), 16777217).is_err()).to_be(true)
         expect(mt.pread(FileHandle(id: 1u64), 0, 16777217).is_err()).to_be(true)
         expect(mt.pread(FileHandle(id: 1u64), 0 - 1, 1).is_err()).to_be(true)
+
+
+describe "MountTable — mutation generation invalidation":
+    it "advances namespace exactly once after successful create open":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        val before = mt.mounts[0].namespace_generation
+        val opened = mt.open("/created", OpenFlags.create_write())
+        expect(opened.is_ok()).to_be(true)
+        expect(mt.mounts[0].namespace_generation).to_equal(before + 1u64)
+
+    it "advances both requested generations exactly once after failed create truncate open":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        val existing = mt.open("/existing", OpenFlags.create_write()).unwrap()
+        mt.close(existing).unwrap()
+        val namespace_before = mt.mounts[0].namespace_generation
+        val content_before = mt.mounts[0].content_generation
+        val create_exclusive = OpenFlags.create_write().with_excl()
+        val flags = create_exclusive.with_trunc()
+        expect(mt.open("/existing", flags).is_err()).to_be(true)
+        expect(mt.mounts[0].namespace_generation).to_equal(namespace_before + 1u64)
+        expect(mt.mounts[0].content_generation).to_equal(content_before + 1u64)
+
+    it "advances content exactly once after successful truncate open":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        val existing = mt.open("/existing", OpenFlags.create_write()).unwrap()
+        mt.close(existing).unwrap()
+        val before = mt.mounts[0].content_generation
+        val truncate_flags = OpenFlags.write_only().with_trunc()
+        expect(mt.open("/existing", truncate_flags).is_ok()).to_be(true)
+        expect(mt.mounts[0].content_generation).to_equal(before + 1u64)
+
+    it "invalidates namespace after a backend reports mutation failure":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        mt.mkdir("/present", 0o755).unwrap()
+        val before = mt.mounts[0].namespace_generation
+        expect(mt.mkdir("/present", 0o755).is_err()).to_be(true)
+        expect(mt.mounts[0].namespace_generation).to_equal(before + 1u64)
+
+    it "invalidates namespace after failed unlink and rename calls":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        val before_unlink = mt.mounts[0].namespace_generation
+        expect(mt.unlink("/missing").is_err()).to_be(true)
+        expect(mt.mounts[0].namespace_generation).to_equal(before_unlink + 1u64)
+        val before_rename = mt.mounts[0].namespace_generation
+        expect(mt.rename("/missing", "/new").is_err()).to_be(true)
+        expect(mt.mounts[0].namespace_generation).to_equal(before_rename + 1u64)
+
+    it "invalidates namespace after a failed link call":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        val before = mt.mounts[0].namespace_generation
+        expect(mt.link("/target", "/alias").is_err()).to_be(true)
+        expect(mt.mounts[0].namespace_generation).to_equal(before + 1u64)
+
+    it "invalidates content exactly once after failed handle mutations":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        val handle = mt.open("/data", OpenFlags.create_write()).unwrap()
+        val before_write = mt.mounts[0].content_generation
+        expect(mt.write(handle, "x").is_err()).to_be(true)
+        expect(mt.mounts[0].content_generation).to_equal(before_write + 1u64)
+        val before_pwrite = mt.mounts[0].content_generation
+        expect(mt.pwrite(handle, "y", 0).is_err()).to_be(true)
+        expect(mt.mounts[0].content_generation).to_equal(before_pwrite + 1u64)
+        val before_truncate = mt.mounts[0].content_generation
+        expect(mt.ftruncate(handle, 0).is_err()).to_be(true)
+        expect(mt.mounts[0].content_generation).to_equal(before_truncate + 1u64)
+
+    it "invalidates content after failed positioned write dispatch":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        val handle = mt.open("/data", OpenFlags.create_write()).unwrap()
+        val before = mt.mounts[0].content_generation
+        val bytes: [u8] = [1u8, 2u8]
+        expect(mt.positioned_write_bytes(handle.id, PositionedDriverKind.Auto, 0u64, bytes).is_err()).to_be(true)
+        expect(mt.mounts[0].content_generation).to_equal(before + 1u64)
+
+    it "invalidates content after failed shared writable mapping":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        val handle = mt.open("/data", OpenFlags.create_write()).unwrap()
+        val before = mt.mounts[0].content_generation
+        expect(mt.mmap_shared_writable(handle, 0, 4096).is_err()).to_be(true)
+        expect(mt.mounts[0].content_generation).to_equal(before + 1u64)
+
+    it "does not mutate the backend or advance generation when capacity is exhausted":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        mt.mounts[0].namespace_generation = 0xFFFFFFFFFFFFFFFFu64
+        expect(mt.mkdir("/blocked", 0o755).is_err()).to_be(true)
+        expect(mt.mounts[0].namespace_generation).to_equal(0xFFFFFFFFFFFFFFFFu64)
+        expect(mt.stat("/blocked").is_err()).to_be(true)
 
 
 describe "MountTable — replacement lifecycle":

@@ -35,16 +35,32 @@ struct PositionedSector:
 class PositionedDev:
     sectors: [PositionedSector]
     write_count: i32
+    fat_read_count: i32
+    mutate_fat_on_data_read: bool
 
 impl PositionedDev:
     static fn new() -> PositionedDev:
-        PositionedDev(sectors: [], write_count: 0)
+        PositionedDev(sectors: [], write_count: 0, fat_read_count: 0, mutate_fat_on_data_read: false)
 
     me fn with_sector(lba: u64, data: [u8]) -> PositionedDev:
         self.sectors.push(PositionedSector(lba: lba, data: data))
         self
 
+    me fn with_fat_mutation_on_data_read() -> PositionedDev:
+        self.mutate_fat_on_data_read = true
+        self
+
     fn read_sector(lba: u64) -> Result<[u8], text>:
+        if lba == 32u64:
+            self.fat_read_count = self.fat_read_count + 1
+        if lba == 64u64 and self.mutate_fat_on_data_read:
+            var fi = 0
+            while fi < self.sectors.len():
+                if self.sectors[fi].lba == 32u64:
+                    self.sectors[fi] = PositionedSector(
+                        lba: 32u64, data: _poke32(self.sectors[fi].data, 8, 4u32))
+                fi = fi + 1
+            self.mutate_fat_on_data_read = false
         var i = 0
         while i < self.sectors.len():
             if self.sectors[i].lba == lba:
@@ -98,6 +114,14 @@ fn _fat_with_chain(second_cluster: bool) -> [u8]:
         fat = _poke32(fat, 12, 0x0FFFFFFFu32)
     else:
         fat = _poke32(fat, 8, 0x0FFFFFFFu32)
+    fat
+
+fn _fat_with_entries(cluster_2: u32, cluster_3: u32) -> [u8]:
+    var fat = _filled_sector(0u8)
+    fat = _poke32(fat, 0, 0x0FFFFFF8u32)
+    fat = _poke32(fat, 4, 0x0FFFFFFFu32)
+    fat = _poke32(fat, 8, cluster_2)
+    fat = _poke32(fat, 12, cluster_3)
     fat
 
 fn _fs() -> Fat32Filesystem:
@@ -157,6 +181,97 @@ describe "FAT32 positioned I/O":
         expect(out[2]).to_equal(0x22u8)
         expect(out[3]).to_equal(0x22u8)
         expect(h.offset).to_equal(91u64)
+
+    it "streams a second-cluster positioned read without a full-chain array":
+        # @req: REQ-OS-KERNEL-001
+        var dev = PositionedDev.new()
+        dev = dev.with_sector(32u64, _fat_with_chain(true))
+        dev = dev.with_sector(64u64, _filled_sector(0x11u8))
+        dev = dev.with_sector(65u64, _filled_sector(0x22u8))
+        val fs = _fs()
+        val h = _handle(2u32, 1024u64, 37u64)
+        var out = _buffer(2)
+        step("walk exactly one FAT link to the explicit second-cluster offset")
+        val result = fs.read_at(dev, h, 512u64, out)
+        assert_true(result.is_ok())
+        expect(result.unwrap()).to_equal(2u64)
+        expect(out[0]).to_equal(0x22u8)
+        expect(out[1]).to_equal(0x22u8)
+        expect(dev.fat_read_count).to_equal(2)
+        expect(h.offset).to_equal(37u64)
+
+    it "rejects a truncated chain before reading a requested later cluster":
+        # @req: REQ-OS-KERNEL-001
+        var dev = PositionedDev.new()
+        dev = dev.with_sector(32u64, _fat_with_chain(false))
+        dev = dev.with_sector(64u64, _filled_sector(0x11u8))
+        val fs = _fs()
+        val h = _handle(2u32, 1024u64, 0u64)
+        var out = _buffer(1)
+        step("request bytes beyond an early end-of-chain marker")
+        val result = fs.read_at(dev, h, 512u64, out)
+        assert_true(result.is_err())
+        expect(result.unwrap_err()).to_equal(-5)
+
+    it "rejects first-cluster corruption before copying caller memory":
+        # @req: REQ-OS-KERNEL-001
+        var dev = PositionedDev.new()
+        dev = dev.with_sector(32u64, _fat_with_entries(0u32, 0x0FFFFFFFu32))
+        dev = dev.with_sector(64u64, _filled_sector(0x11u8))
+        val fs = _fs()
+        val h = _handle(2u32, 1u64, 0u64)
+        var out = _filled_prefix(1, 0x7Cu8)
+        val result = fs.read_at(dev, h, 0u64, out)
+        assert_true(result.is_err())
+        expect(result.unwrap_err()).to_equal(-5)
+        expect(out[0]).to_equal(0x7Cu8)
+
+    it "validates a later bad cluster before a cross-boundary copy":
+        # @req: REQ-OS-KERNEL-001
+        var dev = PositionedDev.new()
+        dev = dev.with_sector(32u64, _fat_with_entries(3u32, 0x0FFFFFF7u32))
+        dev = dev.with_sector(64u64, _filled_sector(0x11u8))
+        dev = dev.with_sector(65u64, _filled_sector(0x22u8))
+        val fs = _fs()
+        val h = _handle(2u32, 1024u64, 0u64)
+        var out = _filled_prefix(4, 0x7Cu8)
+        val result = fs.read_at(dev, h, 510u64, out)
+        assert_true(result.is_err())
+        expect(result.unwrap_err()).to_equal(-5)
+        expect(out[0]).to_equal(0x7Cu8)
+        expect(out[3]).to_equal(0x7Cu8)
+
+    it "rejects reserved and out-of-volume start clusters":
+        # @req: REQ-OS-KERNEL-001
+        val dev = PositionedDev.new()
+        val fs = _fs()
+        var out = _filled_prefix(1, 0x7Cu8)
+        val reserved = fs.read_at(dev, _handle(0x0FFFFFF0u32, 1u64, 0u64), 0u64, out)
+        val outside = fs.read_at(dev, _handle(34u32, 1u64, 0u64), 0u64, out)
+        assert_true(reserved.is_err())
+        assert_true(outside.is_err())
+        expect(reserved.unwrap_err()).to_equal(-5)
+        expect(outside.unwrap_err()).to_equal(-5)
+        expect(out[0]).to_equal(0x7Cu8)
+
+    it "copies through the validated request snapshot when the FAT changes later":
+        # @req: REQ-OS-KERNEL-001
+        var dev = PositionedDev.new()
+        dev = dev.with_sector(32u64, _fat_with_chain(true))
+        dev = dev.with_sector(64u64, _filled_sector(0x11u8))
+        dev = dev.with_sector(65u64, _filled_sector(0x22u8))
+        dev = dev.with_sector(66u64, _filled_sector(0x44u8))
+        dev = dev.with_fat_mutation_on_data_read()
+        val fs = _fs()
+        val h = _handle(2u32, 1024u64, 0u64)
+        var out = _buffer(4)
+        step("change cluster 2's FAT link after validation but before boundary copy")
+        val result = fs.read_at(dev, h, 510u64, out)
+        assert_true(result.is_ok())
+        expect(out[0]).to_equal(0x11u8)
+        expect(out[1]).to_equal(0x11u8)
+        expect(out[2]).to_equal(0x22u8)
+        expect(out[3]).to_equal(0x22u8)
 
     it "overwrites in place without changing file size cursor or adjacent bytes":
         # @req: REQ-OS-KERNEL-001
