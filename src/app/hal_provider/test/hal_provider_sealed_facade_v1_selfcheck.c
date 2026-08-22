@@ -2,6 +2,7 @@
 #include "../hal_provider_sealed_facade_v1.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -14,11 +15,29 @@ typedef struct {
     int32_t status;
 } RaceInvoke;
 
+typedef struct {
+    pthread_barrier_t *barrier;
+    int64_t result;
+} DispatchInvoke;
+
+static _Atomic int64_t fake_clock = 500000;
+
+int64_t rt_time_now_nanos(void) {
+    return atomic_fetch_add_explicit(&fake_clock, 1, memory_order_relaxed);
+}
+
 static void *race_invoke(void *opaque) {
     RaceInvoke *call = (RaceInvoke *)opaque;
     (void)pthread_barrier_wait(call->barrier);
     call->status = rt_hal_sealed_invoke_clock_v2(
         call->handle, 101, call->invocation, 9, call->invocation, 41, 42);
+    return NULL;
+}
+
+static void *dispatch_invoke(void *opaque) {
+    DispatchInvoke *call = (DispatchInvoke *)opaque;
+    (void)pthread_barrier_wait(call->barrier);
+    call->result = rt_hal_clock_dispatch_compare_v2();
     return NULL;
 }
 
@@ -51,6 +70,10 @@ static int fake_session(int argc, char **argv) {
                 &result_capacity, &trace_hi, &trace_lo, &cursor,
                 &length, &capacity) != 10 ||
                 parsed_invocation != (long long)invocation) return 8;
+            if (fixture == 1) {
+                struct timespec delay = {0, 10000000};
+                (void)nanosleep(&delay, NULL);
+            }
             if (fixture == 99 && lane == 1) scalar++;
             if (dprintf(STDOUT_FILENO,
                 "HALRES2|%d|%llu|0|0|0|0|1|%lld|8|%lld|%lld|%lld|%lld|%lld|%lld|0|-1|0|88\n",
@@ -72,6 +95,11 @@ int main(int argc, char **argv) {
     pthread_barrier_t race_barrier;
     pthread_t race_thread[2];
     RaceInvoke race_call[2];
+    pthread_barrier_t dispatch_barrier;
+    pthread_t dispatch_thread[8];
+    DispatchInvoke dispatch_call[8];
+    int dispatch_ok = 0, dispatch_busy = 0;
+    long long dispatch_batch_ns;
     if (argc > 1 && strcmp(argv[1], "--session") == 0)
         return fake_session(argc, argv);
     executable_size = readlink("/proc/self/exe", executable,
@@ -169,10 +197,52 @@ int main(int argc, char **argv) {
     if (rt_hal_sealed_maintenance_shutdown_v1(handle) != 0 ||
         rt_hal_sealed_invoke_v1(stale, 101, 1001, 9, 0, 32, 64, 8) !=
             HAL_SEALED_FACADE_STATUS_INVALID_V1) return 15;
+    if (rt_hal_clock_dispatch_compare_v2() != -1) return 27;
+    if (hal_clock_dispatch_init_config_v2(
+            executable, "/pure", "/c", "/rust", HAL_SEALED_RUN_ALPHA_V1,
+            0, 1000) != HAL_SEALED_FACADE_STATUS_OK_V1) return 28;
+    if (pthread_barrier_init(&dispatch_barrier, NULL, 8) != 0) return 29;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+    for (iteration = 0; iteration < 8; ++iteration) {
+        dispatch_call[iteration] =
+            (DispatchInvoke){&dispatch_barrier, INT64_MIN};
+        if (pthread_create(&dispatch_thread[iteration], NULL,
+                           dispatch_invoke, &dispatch_call[iteration]) != 0)
+            return 30;
+    }
+    for (iteration = 0; iteration < 8; ++iteration) {
+        if (pthread_join(dispatch_thread[iteration], NULL) != 0) return 31;
+        if (dispatch_call[iteration].result >= 500000)
+            dispatch_ok++;
+        else if (dispatch_call[iteration].result == -1)
+            dispatch_busy++;
+        else
+            return 32;
+    }
+    (void)pthread_barrier_destroy(&dispatch_barrier);
+    clock_gettime(CLOCK_MONOTONIC, &finished);
+    dispatch_batch_ns =
+        (long long)(finished.tv_sec - started.tv_sec) * 1000000000LL +
+        (finished.tv_nsec - started.tv_nsec);
+    if (dispatch_ok != 4 || dispatch_busy != 4)
+        return 33;
+    if (rt_hal_clock_dispatch_shutdown_v2() !=
+            HAL_SEALED_FACADE_STATUS_OK_V1 ||
+        rt_hal_clock_dispatch_compare_v2() != -1) return 34;
+    if (hal_clock_dispatch_init_config_v2(
+            executable, "/unneeded-pure", "/unneeded-c", "/unneeded-rust",
+            HAL_SEALED_RUN_NORMAL_V1, 2, 1000) !=
+                HAL_SEALED_FACADE_STATUS_OK_V1 ||
+        rt_hal_clock_dispatch_compare_v2() < 500000 ||
+        rt_hal_clock_dispatch_shutdown_v2() !=
+            HAL_SEALED_FACADE_STATUS_OK_V1) return 35;
     printf("hal sealed facade selfcheck: PASS v1_invocations=1000 "
            "v2_invocations=1000 hot_spawn=0 hot_alloc=0 "
            "race_winners=1 race_state_rejections=1 "
+           "dispatch_slots=%d dispatch_busy_rejections=%d "
+           "dispatch_batch_ns=%lld "
            "v1_mean_ns=%lld v2_mean_ns=%lld\n",
-           elapsed_ns / 1000, v2_elapsed_ns / 1000);
+           dispatch_ok, dispatch_busy, dispatch_batch_ns, elapsed_ns / 1000,
+           v2_elapsed_ns / 1000);
     return 0;
 }

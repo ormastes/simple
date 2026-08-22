@@ -86,9 +86,23 @@ uint64_t rt_hal_sealed_hot_spawn_count_v1(uint64_t handle);
 uint64_t rt_hal_sealed_hot_allocation_count_v1(uint64_t handle);
 int32_t rt_hal_sealed_maintenance_shutdown_v1(uint64_t handle);
 
+/* Process-lifetime owner for compiler-rewritten zero-argument ClockRead calls.
+ * Initialization is a maintenance/@init_phase operation.  Once sealed, mode,
+ * provider, worker paths, and the bounded session set are immutable.  The leaf
+ * returns the established negative clock sentinel on unavailable/busy/error. */
+int32_t rt_hal_clock_dispatch_init_v2(int32_t run_mode,
+                                      int32_t preferred_provider,
+                                      int64_t deadline_ms);
+int64_t rt_hal_clock_dispatch_compare_v2(void);
+int32_t rt_hal_clock_dispatch_shutdown_v2(void);
+
 /* Focused tests use an explicit absolute launcher/worker configuration. */
 uint64_t hal_sealed_facade_prepare_config_v1(
     const char *launcher, const char *pure_worker, const char *c_worker,
     const char *rust_worker, int64_t deadline_ms);
+int32_t hal_clock_dispatch_init_config_v2(
+    const char *launcher, const char *pure_worker, const char *c_worker,
+    const char *rust_worker, int32_t run_mode, int32_t preferred_provider,
+    int64_t deadline_ms);
 
 #endif

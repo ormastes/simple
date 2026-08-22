@@ -7,6 +7,7 @@
 #include <string.h>
 
 enum { HAL_FACADE_SLOT_COUNT_V1 = 4 };
+enum { HAL_CLOCK_OPERATION_ID_V2 = 101 };
 
 static const char *const HAL_LAUNCHER_V1 =
     "/usr/libexec/simple/hal-provider-launcher-v1";
@@ -38,6 +39,22 @@ typedef struct {
 static HalSealedFacadeSlotV1 g_slots[HAL_FACADE_SLOT_COUNT_V1];
 static atomic_flag g_maintenance_lock = ATOMIC_FLAG_INIT;
 static _Atomic uint64_t g_generation = 1;
+
+/* Immutable after init. Each entry owns one independently sealed process set;
+ * busy is the bounded ingress lease. No hot call allocates, spawns, reads the
+ * environment, or waits for another caller. */
+typedef struct {
+    uint64_t handle[HAL_FACADE_SLOT_COUNT_V1];
+    _Atomic int busy[HAL_FACADE_SLOT_COUNT_V1];
+    int32_t run_mode;
+    int32_t preferred_provider;
+    _Atomic uint64_t invocation;
+    _Atomic int state; /* 0 empty, 1 initializing, 2 sealed, 3 shutting down */
+} HalClockDispatchOwnerV2;
+
+static HalClockDispatchOwnerV2 g_clock_owner_v2;
+
+extern int64_t rt_time_now_nanos(void);
 
 static void maintenance_lock(void) {
     while (atomic_flag_test_and_set_explicit(&g_maintenance_lock,
@@ -208,6 +225,159 @@ uint64_t hal_sealed_facade_prepare_config_v1(
 uint64_t rt_hal_sealed_prepare_v1(int64_t deadline_ms) {
     return hal_sealed_facade_prepare_config_v1(
         HAL_LAUNCHER_V1, HAL_PURE_V1, HAL_C_V1, HAL_RUST_V1, deadline_ms);
+}
+
+static int32_t clock_dispatch_init_config_v2(
+        const char *launcher, const char *pure_worker, const char *c_worker,
+        const char *rust_worker, int32_t run_mode, int32_t preferred_provider,
+        int64_t deadline_ms) {
+    int expected = 0;
+    size_t index;
+    if (run_mode < HAL_SEALED_RUN_ALPHA_V1 ||
+        run_mode > HAL_SEALED_RUN_NORMAL_V1 || preferred_provider < 0 ||
+        preferred_provider >= HAL_SEALED_FACADE_LANES_V1 || deadline_ms <= 0)
+        return HAL_SEALED_FACADE_STATUS_INVALID_V1;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_clock_owner_v2.state, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire))
+        return HAL_SEALED_FACADE_STATUS_STATE_V1;
+    g_clock_owner_v2.run_mode = run_mode;
+    g_clock_owner_v2.preferred_provider = preferred_provider;
+    atomic_store_explicit(&g_clock_owner_v2.invocation, 0,
+                          memory_order_relaxed);
+    if (run_mode == HAL_SEALED_RUN_NORMAL_V1) {
+        for (index = 0; index < HAL_FACADE_SLOT_COUNT_V1; ++index) {
+            g_clock_owner_v2.handle[index] = 0;
+            atomic_store_explicit(&g_clock_owner_v2.busy[index], 0,
+                                  memory_order_relaxed);
+        }
+        atomic_store_explicit(&g_clock_owner_v2.state, 2,
+                              memory_order_release);
+        return HAL_SEALED_FACADE_STATUS_OK_V1;
+    }
+    for (index = 0; index < HAL_FACADE_SLOT_COUNT_V1; ++index) {
+        atomic_store_explicit(&g_clock_owner_v2.busy[index], 0,
+                              memory_order_relaxed);
+        g_clock_owner_v2.handle[index] = hal_sealed_facade_prepare_config_v1(
+            launcher, pure_worker, c_worker, rust_worker, deadline_ms);
+        if (!g_clock_owner_v2.handle[index] ||
+            rt_hal_sealed_seal_v1(g_clock_owner_v2.handle[index]) !=
+                HAL_SEALED_FACADE_STATUS_OK_V1)
+            break;
+    }
+    if (index != HAL_FACADE_SLOT_COUNT_V1) {
+        size_t rollback;
+        for (rollback = 0; rollback <= index; ++rollback) {
+            if (g_clock_owner_v2.handle[rollback])
+                (void)rt_hal_sealed_maintenance_shutdown_v1(
+                    g_clock_owner_v2.handle[rollback]);
+            g_clock_owner_v2.handle[rollback] = 0;
+        }
+        atomic_store_explicit(&g_clock_owner_v2.state, 0,
+                              memory_order_release);
+        return HAL_SEALED_FACADE_STATUS_IO_V1;
+    }
+    atomic_store_explicit(&g_clock_owner_v2.state, 2, memory_order_release);
+    return HAL_SEALED_FACADE_STATUS_OK_V1;
+}
+
+int32_t hal_clock_dispatch_init_config_v2(
+        const char *launcher, const char *pure_worker, const char *c_worker,
+        const char *rust_worker, int32_t run_mode, int32_t preferred_provider,
+        int64_t deadline_ms) {
+    return clock_dispatch_init_config_v2(
+        launcher, pure_worker, c_worker, rust_worker, run_mode,
+        preferred_provider, deadline_ms);
+}
+
+int32_t rt_hal_clock_dispatch_init_v2(int32_t run_mode,
+                                      int32_t preferred_provider,
+                                      int64_t deadline_ms) {
+    return clock_dispatch_init_config_v2(
+        HAL_LAUNCHER_V1, HAL_PURE_V1, HAL_C_V1, HAL_RUST_V1,
+        run_mode, preferred_provider, deadline_ms);
+}
+
+int64_t rt_hal_clock_dispatch_compare_v2(void) {
+    int64_t captured;
+    uint64_t invocation;
+    size_t index;
+    int32_t status;
+    HalClockDispatchOwnerV2 *owner = &g_clock_owner_v2;
+    if (atomic_load_explicit(&owner->state, memory_order_acquire) != 2)
+        return -1;
+    if (owner->run_mode == HAL_SEALED_RUN_NORMAL_V1)
+        return rt_time_now_nanos();
+    for (index = 0; index < HAL_FACADE_SLOT_COUNT_V1; ++index) {
+        int expected = 0;
+        if (!atomic_compare_exchange_strong_explicit(
+                &owner->busy[index], &expected, 1,
+                memory_order_acq_rel, memory_order_relaxed)) continue;
+        if (atomic_load_explicit(&owner->state, memory_order_acquire) != 2) {
+            atomic_store_explicit(&owner->busy[index], 0,
+                                  memory_order_release);
+            return -1;
+        }
+        /* Capture only after admission. A rejected concurrent caller must not
+         * consume an untraceable environment instruction. */
+        captured = rt_time_now_nanos();
+        if (captured < 0) {
+            atomic_store_explicit(&owner->busy[index], 0,
+                                  memory_order_release);
+            return captured;
+        }
+        invocation = atomic_fetch_add_explicit(
+            &owner->invocation, 1, memory_order_relaxed) + 1;
+        if (invocation == 0 || invocation > (uint64_t)INT64_MAX) {
+            atomic_store_explicit(&owner->busy[index], 0,
+                                  memory_order_release);
+            return -1;
+        }
+        status = rt_hal_sealed_invoke_clock_mode_v2(
+            owner->handle[index], owner->run_mode, owner->preferred_provider,
+            HAL_CLOCK_OPERATION_ID_V2, (int64_t)invocation, 1, captured, 8,
+            INT64_C(0x48414c434c4f434b), (int64_t)(index + 1), 1, 1, 1);
+        if (status == HAL_SEALED_FACADE_STATUS_OK_V1 &&
+            rt_hal_sealed_commit_allowed_v2(owner->handle[index]) == 1)
+            captured = rt_hal_sealed_result_field_v2(
+                owner->handle[index], owner->preferred_provider, 7);
+        else
+            captured = -1;
+        atomic_store_explicit(&owner->busy[index], 0, memory_order_release);
+        return captured;
+    }
+    return -1;
+}
+
+int32_t rt_hal_clock_dispatch_shutdown_v2(void) {
+    int expected = 2;
+    int32_t status = HAL_SEALED_FACADE_STATUS_OK_V1;
+    size_t index;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_clock_owner_v2.state, &expected, 3,
+            memory_order_acq_rel, memory_order_acquire))
+        return HAL_SEALED_FACADE_STATUS_STATE_V1;
+    for (index = 0; index < HAL_FACADE_SLOT_COUNT_V1; ++index) {
+        if (atomic_load_explicit(&g_clock_owner_v2.busy[index],
+                                 memory_order_acquire) != 0) {
+            atomic_store_explicit(&g_clock_owner_v2.state, 2,
+                                  memory_order_release);
+            return HAL_SEALED_FACADE_STATUS_STATE_V1;
+        }
+    }
+    for (index = 0; index < HAL_FACADE_SLOT_COUNT_V1; ++index) {
+        if (g_clock_owner_v2.handle[index] != 0 &&
+            rt_hal_sealed_maintenance_shutdown_v1(
+                g_clock_owner_v2.handle[index]) !=
+                    HAL_SEALED_FACADE_STATUS_OK_V1)
+            status = HAL_SEALED_FACADE_STATUS_STATE_V1;
+        else
+            g_clock_owner_v2.handle[index] = 0;
+    }
+    atomic_store_explicit(&g_clock_owner_v2.state,
+        status == HAL_SEALED_FACADE_STATUS_OK_V1 ? 0 : 2,
+        memory_order_release);
+    return status;
 }
 
 int32_t rt_hal_sealed_seal_v1(uint64_t handle) {

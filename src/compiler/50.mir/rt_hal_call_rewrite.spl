@@ -3,8 +3,7 @@
 # MIR direct-call operands already carry the semantic resolver's selected
 # callee. Normal mode substitutes the fixed provider ABI inside the tagged
 # wrapper, retaining its surrounding validation and panic behavior. Compare
-# mode fails closed until an @init_phase owner can supply the sealed V2 handle,
-# invocation cursor, captured instruction identity, and result extraction.
+# mode binds to a zero-argument leaf backed by an immutable @init_phase owner.
 
 use compiler.mir.mir_instructions.*
 use compiler.mir.mir_data.{MirFunction}
@@ -42,10 +41,21 @@ fn rt_hal_rewrite_function_calls_v1(
     if not binding.known:
         return RtHalCallRewriteResultV1(function, operation, "", "", 0,
             binding.diagnostic)
-    if mode == RtHalCallModeV1.SealedCompare:
+    if (mode == RtHalCallModeV1.NormalDirect
+            and not binding.direct_rewrite_supported):
         return RtHalCallRewriteResultV1(function, operation,
-            binding.raw_symbol, binding.compare_symbol, 0,
-            "E-RT-HAL-BIND-004: sealed comparison rewrite requires an immutable @init_phase session owner and bounded V2 result extraction")
+            binding.raw_symbol, binding.raw_symbol, 0, "")
+    if mode == RtHalCallModeV1.SealedCompare and not binding.compare_supported:
+        return RtHalCallRewriteResultV1(function, operation,
+            binding.raw_symbol, "", 0, binding.diagnostic)
+    val selected_symbol = if mode == RtHalCallModeV1.SealedCompare:
+        binding.compare_symbol
+    else:
+        binding.direct_symbol
+    if selected_symbol == "":
+        return RtHalCallRewriteResultV1(function, operation,
+            binding.raw_symbol, selected_symbol, 0,
+            "E-RT-HAL-BIND-004: selected @rt(hal) mode has no ABI-compatible closed binding")
 
     var blocks: [MirBlock] = []
     var rewritten: i64 = 0
@@ -56,7 +66,7 @@ fn rt_hal_rewrite_function_calls_v1(
             match instruction.kind:
                 case MirInstKind.Call(dest, callee, args):
                     val replacement = _rt_hal_rewrite_call_operand_v1(
-                        callee, binding.raw_symbol, binding.direct_symbol)
+                        callee, binding.raw_symbol, selected_symbol)
                     if replacement.1:
                         next = MirInst(kind: MirInstKind.Call(
                             dest, replacement.0, args), span: instruction.span)
@@ -66,7 +76,7 @@ fn rt_hal_rewrite_function_calls_v1(
         blocks.push(MirBlock(id: block.id, label: block.label,
             instructions: instructions, terminator: block.terminator))
     RtHalCallRewriteResultV1(MirFunction.with_blocks(function, blocks),
-        operation, binding.raw_symbol, binding.direct_symbol, rewritten, "")
+        operation, binding.raw_symbol, selected_symbol, rewritten, "")
 
 export RtHalCallModeV1, RtHalCallRewriteResultV1
 export rt_hal_rewrite_function_calls_v1
