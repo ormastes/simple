@@ -847,3 +847,12 @@ The driver fresh path opens an outer scope in
 `parse_and_build_module_scoped`; the inner assembly scope therefore inherits
 without resampling. Cache-hit reconstruction calls assembly directly and that
 inner scope becomes the sampling owner.
+
+### Parser profiling gate
+
+`par_prof_enabled_cached` is reset to unknown by `parser_init_with_path` and
+resolved once on first use. `parser_advance` and `parse_prof_now` share the
+getter. The latter returns zero immediately when disabled, preserving the
+existing `parse_prof_mark` zero sentinel so disabled mode performs no clock,
+formatting, or output work. Enabled interval boundaries and labels remain
+unchanged.
