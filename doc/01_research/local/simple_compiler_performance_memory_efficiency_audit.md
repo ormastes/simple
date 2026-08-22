@@ -1781,3 +1781,14 @@ count, avoiding unreliable dictionary-length behavior while reducing expected
 CPU to linear in parsed export names. Exact textual identity, case sensitivity,
 duplicate suppression, exclusions and diagnostic counts are unchanged; no name
 iteration order is observable.
+
+### Default diagnostic policy fast path
+
+The query/LSP emitter previously extracted every diagnostic code from serialized
+JSON before discovering that no severity override existed. Normal builds without
+an explicit lint profile therefore paid a full diagnostic-text scan and allocated
+a code substring per result. The emitter now consults an explicit override-entry
+count first. The config loader owns the dictionary and count together, resets both
+at request boundaries, and increments the count only when it inserts an Allow or
+Deny override. This avoids relying on native dictionary length behavior and makes
+the default path constant-time before its required emit/collect operation.
