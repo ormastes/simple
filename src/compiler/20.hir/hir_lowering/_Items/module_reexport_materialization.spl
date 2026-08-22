@@ -265,10 +265,13 @@ impl HirLowering:
         # `register_materialized_payload_named_dependency` turned that into a
         # later `unresolved type: {name}` attributed to whichever module
         # imported the ENUM, never to the owner. This mirrors the twin step in
-        # `materialize_imported_callable_explicit_dependency`. Exact glob
-        # targets are handled by that helper too; package inference stays
-        # excluded because the same short name can live in several sibling
-        # modules and picking one would silently rewrite the payload type.
+        # `materialize_imported_callable_explicit_dependency`. Glob imports
+        # stay excluded here: resolving them while recursively materializing
+        # enum payloads corrupts staged native HIR state. Owners that expose a
+        # payload dependency must name it explicitly; package inference also
+        # stays excluded because the same short name can live in several
+        # sibling modules and picking one would silently rewrite the payload
+        # type.
         # See doc/08_tracking/bug/hir_enum_payload_blockvalue_unresolved_2026-08-21.md
         val explicit = self.resolve_materialized_enum_payload_explicit_import(
             imported_mod, dependency)
@@ -277,36 +280,13 @@ impl HirLowering:
         HirMaterializedPayloadOrigin(found: false, module_name: "", item_name: "", item_kind: "", module_key: "")
 
     me resolve_materialized_enum_payload_explicit_import(imported_mod: ModuleSurface, dependency: text) -> HirMaterializedPayloadOrigin:
-        """Resolve `dependency` through a named or glob import of `imported_mod`."""
-        var glob_match = HirMaterializedPayloadOrigin(
-            found: false, module_name: "", item_name: "", item_kind: "", module_key: "")
-        var glob_ambiguous = false
+        """Resolve `dependency` through an explicit named import of `imported_mod`."""
         var import_index: i64 = 0
         while import_index < imported_mod.imports.len() and
               import_index < imported_mod.import_target_indices.len():
             val target_index = imported_mod.import_target_indices[import_index]
             val item_start = imported_mod.import_item_offsets[import_index]
             val item_end = imported_mod.import_item_offsets[import_index + 1]
-            # A wildcard `use owner.*` is retained as an import with an empty
-            # item range. Resolve only its exact target and keep multiple
-            # matching glob targets ambiguous. This is stateless: unlike
-            # package inference it neither initializes nor mutates a shared
-            # HirLowering index during the nested payload walk.
-            if item_start == item_end and target_index >= 0 and
-               target_index < self.module_surfaces.surfaces.len():
-                val target = self.module_surfaces.surfaces[target_index]
-                if hir_module_declares_item(target, dependency):
-                    val kind = hir_module_item_terminal_kind(target, dependency)
-                    if kind != "":
-                        if glob_match.found:
-                            glob_ambiguous = true
-                        else:
-                            glob_match = HirMaterializedPayloadOrigin(
-                                found: true,
-                                module_name: hir_pkg_canonical_module_name(target.module_name),
-                                item_name: dependency,
-                                item_kind: kind,
-                                module_key: target.preferred_registry_name)
             var item_index: i64 = item_start
             while item_index < item_end:
                 val item_name = imported_mod.import_item_names[item_index]
@@ -339,8 +319,6 @@ impl HirLowering:
                                 module_key: terminal.preferred_registry_name)
                 item_index = item_index + 1
             import_index = import_index + 1
-        if glob_match.found and not glob_ambiguous:
-            return glob_match
         HirMaterializedPayloadOrigin(found: false, module_name: "", item_name: "", item_kind: "", module_key: "")
 
     me claim_materialized_payload_binding(local_name: text, origin: HirMaterializedPayloadOrigin, import_span: Span) -> bool:

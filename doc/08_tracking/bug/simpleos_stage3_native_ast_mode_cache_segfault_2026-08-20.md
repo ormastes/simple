@@ -1502,3 +1502,36 @@ payload registration mutating the active lowerer during import registration;
 the next design should collect scalar routes during the walk and apply them
 after the import frame completes. No trusted Stage 3, ARM64 artifact, or QEMU
 rendering evidence is claimed.
+
+## Deferred-route and named-import cycles (2026-08-22)
+
+Cycle 1 deferred payload registration into aligned scalar route arrays and
+drained them only after import and package-sibling resolution. A fresh
+pure-Simple Stage 2 passed compiler sanity plus the struct-receiver/runtime
+gate, but Stage 3 retained the source-1 `HirImpl` family and exited 139. The
+queue hypothesis was disproven and all queue fields, drain logic, and tests
+were removed.
+
+Cycle 2 removed exact-glob traversal from nested enum-payload origin
+resolution and made the four MIR payload dependencies explicit. Stage 2 again
+passed both gates. Stage 3 then parsed and released all 694 module surfaces;
+the prior `HirImpl`, MIR, and blocks payload families were absent from the log.
+It nevertheless exited 139 immediately after the final surface and before the
+first HIR marker. No Stage-3 candidate, sanity receipt, or provenance manifest
+was produced.
+
+Cycle 3 removed the duplicate named-plus-wildcard import records by replacing
+both MIR wildcard imports with the owners' complete explicit export sets. A
+fresh Stage 2 passed both gates and its candidate hash matched both sanity and
+pure-Simple provenance receipts. A newly bound planner admission was accepted,
+including both cache-ownership checks. Stage 3 reproduced the same post-surface
+boundary exactly: 694 surfaces released, no payload-family or HIR marker, exit
+139, and no candidate/sanity/provenance artifacts.
+
+The three-cycle cap is exhausted. Exact nested glob traversal is confirmed as
+part of the earlier HIR corruption trigger, while duplicate import records are
+disproven as the remaining post-surface cause. The next session should
+instrument the single surface-to-HIR transition boundary (surface-registry
+finalization, module-order handoff, and first HIR module selection) without
+reintroducing payload recursion. No trusted Stage 3, ARM64 SimpleOS artifact,
+or QEMU 2D, web, GUI, or window-manager evidence is claimed.
