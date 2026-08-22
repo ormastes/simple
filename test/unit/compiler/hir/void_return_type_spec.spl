@@ -1,0 +1,68 @@
+# `void` as a type annotation must resolve like `unit`.
+#
+# Stage1 closure probe 2026-08-22: `[hir-fatal] src/compiler/semantics/
+# enum_contract/__init__.spl: unresolved type: void`. The fatal is attributed
+# to the package __init__ because it lowers the signatures of its imported
+# siblings, and `hir_match_coverage.spl:44` declares `-> void`. The flat AST
+# bridge maps tag TYPE_VOID to Named("void") and ~30 owned files spell the
+# unit type that way, so the HIR name switch must accept it alongside `unit`.
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn lower_void_chain(specs: Array<text>) -> text:
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: Array<SourceFile> = []
+    var consumer_name = ""
+    var consumer_source = ""
+    for spec in specs:
+        val bar = spec.index_of("|")
+        val name = spec.substring(0, bar)
+        val source = spec.substring(bar + 1, spec.len())
+        modules[name] = parse_full_frontend(source, name, name, log)
+        sources.push(SourceFile(path: name.replace(".", "/") + ".spl", content: source, module_name: name))
+        consumer_name = name
+        consumer_source = source
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+    val consumer = parse_full_frontend(consumer_source, consumer_name, consumer_name, log)
+    var lowering = hirlowering_for_module(consumer_name, surfaces)
+    val hir = lowering.lower_module(consumer)
+    var joined = ""
+    for message in lowering.diagnostic_messages:
+        joined = joined + message + "|"
+    joined
+
+describe("void resolves as the unit type in HIR lowering", fn():
+    it("accepts `-> void` on a local function", fn():
+        val diagnostics = lower_void_chain([
+            "pkg.local|fn walk(line: i64) -> void:\n    val x = line"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("accepts `-> void` on an imported sibling signature", fn():
+        val diagnostics = lower_void_chain([
+            "pkg.sib|fn walk(line: i64) -> void:\n    val x = line",
+            "pkg.__init__|use pkg.sib.\{walk\}\nexport walk"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("accepts `void` as a generic argument", fn():
+        val diagnostics = lower_void_chain([
+            "pkg.gen|fn make() -> Result<void, text>:\n    Ok(())"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("still accepts `unit` identically", fn():
+        val diagnostics = lower_void_chain([
+            "pkg.unit|fn walk(line: i64) -> unit:\n    val x = line"])
+        expect(diagnostics).to_equal("")
+    )
+)
