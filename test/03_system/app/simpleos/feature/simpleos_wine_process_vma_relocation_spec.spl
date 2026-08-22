@@ -1,3 +1,22 @@
+"""
+## Purpose and audience
+Purpose: Prove that SimpleOS Wine VMA relocation application.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-APP-WINE-PROCESS-001
+doc/01_research/app/REQ-APP-WINE-PROCESS-001.md
+doc/03_plan/app/REQ-APP-WINE-PROCESS-001.md
+doc/04_architecture/app/REQ-APP-WINE-PROCESS-001.md
+doc/05_design/app/REQ-APP-WINE-PROCESS-001.md
+"""
+# @req: REQ-APP-WINE-PROCESS-001
+
+
 use common.pe_coff_header.{pe_rva_to_file_offset}
 use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
 use common.wine_peb_teb.{wine_peb_teb_apply_layout_byte_writes, wine_peb_teb_init_default, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
@@ -68,23 +87,29 @@ fn _known_hello_with_dir64_relocation() -> [u8]:
     data = _put_u64_le(data, pe_rva_to_file_offset(data, 0x2018), 0x402018)
     data
 
+use std.spec.step
+
 describe "SimpleOS Wine VMA relocation application":
     describe "REQ-036: loader-owned relocation mutation through process VMA":
         it "should apply a bounded relocation in the mapped process image without executing PE code":
+            # @req: REQ-APP-WINE-PROCESS-001
+            step("Verify: should apply a bounded relocation in the mapped process image without executing PE code")
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val data = _known_hello_with_dir64_relocation()
             val target_offset = pe_rva_to_file_offset(data, 0x2018)
             val result = wine_process_apply_loader_relocations_in_vma(plan, data, 0x400000, 0x500000, "native-module-open tls-callback")
             expect(result.ok).to_equal(true)
-            expect(result.relocation_count).to_equal(1)
-            expect(result.target_rva).to_equal(0x2018)
-            expect(_read_u64_le(result.patched_image, target_offset)).to_equal(0x502018)
+            expect(result.relocation_count).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
+            expect(result.target_rva).to_equal(0x2018)  # oracle: 0x2018 — pinned expected value for this behavior
+            expect(_read_u64_le(result.patched_image, target_offset)).to_equal(0x502018)  # oracle: 0x502018 — pinned expected value for this behavior
             expect(result.evidence).to_contain("loader-relocations-vma-applied")
             expect(result.evidence).to_contain("process-vma-rx-restored")
             expect(result.evidence).to_contain("no-arbitrary-execution")
             expect(result.status).to_equal("loader-relocations-vma-applied")
 
         it "should require PEB/TEB VM byte-write readback before loader relocation mutation":
+            # @req: REQ-APP-WINE-PROCESS-001
+            step("Verify: should require PEB/TEB VM byte-write readback before loader relocation mutation")
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val data = _known_hello_with_dir64_relocation()
             val target_offset = pe_rva_to_file_offset(data, 0x2018)
@@ -97,7 +122,7 @@ describe "SimpleOS Wine VMA relocation application":
 
             expect(result.ok).to_equal(true)
             expect(result.status).to_equal("loader-relocations-vma-applied")
-            expect(_read_u64_le(result.patched_image, target_offset)).to_equal(0x502018)
+            expect(_read_u64_le(result.patched_image, target_offset)).to_equal(0x502018)  # oracle: 0x502018 — pinned expected value for this behavior
             expect(result.evidence).to_contain("peb-teb-vm-writes-ready")
             expect(result.evidence).to_contain("VMWriteReadback:PEBTEBLayoutBytes")
             expect(result.evidence).to_contain("no-arbitrary-execution")
