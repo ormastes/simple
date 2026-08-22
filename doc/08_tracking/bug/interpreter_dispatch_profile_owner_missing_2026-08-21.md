@@ -2,7 +2,7 @@
 
 Date: 2026-08-21
 
-Status: RESOLVED 2026-08-21 — verified by compiling the crate; regression guard added
+Status: REGRESSED 2026-08-22; repaired again — fresh bootstrap verification pending
 
 ## Symptom
 
@@ -20,6 +20,11 @@ blocks production evidence rather than representing an SFFI semantic change.
 
 Declare the existing level-gated module from its canonical interpreter owner.
 No profiler behavior, default state, or public interface changes.
+
+The defect recurred on 2026-08-22 because a conflict-deduplication commit
+removed what had become the last declaration. The existing guard was not wired
+to any push or bootstrap entrypoint, so its source contract never executed.
+The lightweight push registry now runs the guard against the exact pushed ref.
 
 ## Verification (2026-08-21)
 
