@@ -239,3 +239,43 @@ The added `Option`/`Result` debug branches are level-gated behind the existing
 landed rather than reverted because this class of span-less error is otherwise
 undiagnosable, and the missing arms cost two full ~9-minute build iterations to
 discover.
+
+---
+
+## Update 2026-08-22 (third pass) — the two entries now diverge
+
+Re-ran **both** entries on the fixes above, with a seed built from this tree
+(`/mnt/data/seedperf/simple.mcpdbg`, carries `f8681a7afa6`). They no longer fail
+the same way:
+
+| entry | wall | fails at |
+|---|---|---|
+| `src/app/simple_lsp_mcp/main.spl` | 544.9 s | `MIR lowering error: unresolved method call: merge` |
+| `src/app/mcp/main.spl` | 1620.9 s | `semantic: undefined field 'id': cannot access field on value of type 'function'` |
+
+So the MCP entry stops **earlier in the phase order** (semantic analysis) than the
+LSP entry (MIR), on a trap the LSP closure never reaches. The `merge` blocker is
+filed separately as
+`doc/08_tracking/bug/mir_unresolved_method_call_merge_2026-08-22.md`.
+
+### The `'id' on function` trap — NOT yet localized
+
+Honest scope note: that run did **not** have `SIMPLE_DEBUG_FIELD_ACCESS=1` set
+(only `SIMPLE_CACHE_SCOPE`), so it produced no `[field-access-error]` line and the
+site is **unlocalized**. Do not treat the guess below as established.
+
+It is the same *shape* as the traps already fixed — a field read on a value that
+is not the expected record — but the receiver is a `function`, not nil/Option, so
+it is a different failure. Plausible starting points, all `.id` reads on a symbol
+slot in `35.semantics/any_escape/checker.spl`, each currently guarded only by
+`!= nil` (which a function value passes):
+
+- `any_expr_is_any`: `case Var(symbol): symbol != nil and any_state_tracks(self, symbol.id)`
+  and the `NamedVar` arm beside it;
+- the `Let` arm: `if symbol != nil: self.any_symbols.push(symbol.id)`;
+- `any_check_function`: `if p.symbol != nil: ... p.symbol.id`.
+
+**Next step is mechanical:** re-run the MCP entry with
+`SIMPLE_DEBUG_FIELD_ACCESS=1` and read the `[field-access-error]` frame, exactly
+as was done for traps 1 and 3. That run costs ~27 min; the LSP entry cannot
+substitute for it here because its closure does not hit this trap.
