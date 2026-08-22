@@ -2065,7 +2065,8 @@ void rt_println(const char* s) {
 }
 
 void rt_eprintln(const char* s) {
-    spl_eprintln(s);
+    if (s) fputs(s, stderr);
+    fputc('\n', stderr);
 }
 
 char* rt_readline(void) {
