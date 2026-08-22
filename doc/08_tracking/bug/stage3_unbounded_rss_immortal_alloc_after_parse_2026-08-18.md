@@ -1,7 +1,7 @@
 # Stage 3 native-build RSS is unbounded: every heap object allocated outside a
 # transient parse scope is process-immortal and never freed (2026-08-18)
 
-Status: OPEN (analysis; no build run -- resource embargo, Stage-3 bootstrap live)
+Status: CLAIMED (Codex `/root`, 2026-08-22; measured Stage-3 HIR import fix in progress)
 
 ## Measured
 
@@ -100,3 +100,30 @@ SPipe/docgen, and bootstrap-ledger PASS publication remain unavailable. The
 unblock condition is unchanged: bound the Pure-Simple per-module HIR/MIR/codegen
 owner lifetime, preserve behavior/API, and rerun one provenance-bound Stage 3
 transaction with the canonical peak-RSS gate.
+
+## Qualified-index follow-up (2026-08-22)
+
+The reviewed Pure-Simple qualified-symbol index change from commit
+`d1d2e652818` was integrated as `18738b4323b`. Its retained focused evidence
+changes qualified lookup from a linear scan with a temporary concatenated key
+to an average O(1) chained scalar index with exact collision checks. The prior
+focused run passed 6/6 examples and measured 10.00x and 17.68x lookup speedups
+at 256 and 512 entries respectively; behavior for id zero, misses,
+first-write-wins duplicates, reset, rebind, and collisions was preserved.
+
+A source-matched four-core bootstrap transaction was started with strict
+fallback disabled. All Rust authority components rebuilt, then Stage 2 remained
+CPU-active at 362-396% with `stall_streak=0` and roughly 0.28-0.48 GiB tree RSS.
+It had not produced a Stage 2 terminal receipt after 4,362 seconds total
+transaction time (the Stage 2 substep was about 46 minutes), while unrelated
+worktrees occupied most host memory. The repository wall-clock/runaway guard
+therefore required terminating this owned transaction; the monitor recorded
+`exit-130`. Stage 3 was deliberately not launched under less than 2 GiB free
+physical memory, because an earlyoom result would not be a valid comparison
+against the 7,341 MiB baseline.
+
+Consequently the index change has direct algorithmic/correctness evidence but
+does **not** yet have source-matched Stage 3 timing or peak-RSS admission.
+Stage 4, the Simple optimizer, SPipe/docgen, and final ledger publication remain
+blocked. Do not report this bug fixed until one clean-host Stage 2/3 transaction
+reaches a terminal receipt and the canonical RSS sampler records the result.
