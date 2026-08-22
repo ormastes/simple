@@ -1133,3 +1133,16 @@ source checks and lint, and the capability/numeric guard passes 3/3. Census and
 ratchet pass at 12,492 declarations, 11,711 untouched, 508 tagged, 585
 contracted, and zero verified/signed; Simple `rt_*` implementations drop to
 576 rows (533 distinct symbols) across 48 files.
+
+JIT string execution no longer maps missing source and execution failure to the
+same empty text as a legitimate successful `""` result. The raw-looking
+`rt_exec_manager_execute_string` Simple implementation was removed; its single
+owner now returns `Result<text, text>`, with `Ok(out)` preserving empty output
+and explicit `Err` values for missing source and failed execution. There are no
+external production callers requiring a compatibility fallback. The path still
+performs one source read and one interpreter run, with no additional lookup,
+allocation, process, hash, or error-state pass. Both compatibility modules
+check, focused lint passes, and the numeric/capability/string guard passes 4/4.
+Census and ratchet remain at 12,492 declarations, 11,711 untouched, 508 tagged,
+585 contracted, and zero verified/signed; Simple implementations are now 574
+rows and 532 distinct symbols across 48 files.

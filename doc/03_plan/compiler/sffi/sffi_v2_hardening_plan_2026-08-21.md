@@ -908,3 +908,11 @@ empty-return paths, especially string execution, and either lift them to a
 typed result or delete unsupported APIs; do not introduce file-backed error
 state or per-call registries. Current gate: 12,492 declarations, 11,711
 untouched, 508 tagged, 585 contracted, and zero verified/signed admissions.
+
+JIT string execution now returns `Result<text, text>` and the raw-looking
+empty-on-error implementation is removed. Continue the same rule for other
+text/array APIs: preserve legitimate empty values inside `Ok`, represent
+absence with `Option`, and represent operational failure with `Err`; do not add
+second-pass last-error queries or persistent error maps. The declaration gate
+is unchanged at 12,492 rows with zero signed admissions, while Simple `rt_*`
+implementations drop to 574 rows (532 distinct symbols).
