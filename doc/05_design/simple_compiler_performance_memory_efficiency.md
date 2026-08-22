@@ -47,6 +47,10 @@ manifest. A `Linter` may retain one last resolved `(file path, config)` pair for
 immediately following parsed-rule projection; the next file overwrites it. Broader caches
 must add size/mtime or content-digest invalidation before admission.
 
+Suppression and severity projection are one decision. `LintPolicyDecision(keep, level)`
+maps the stable code and reads effective configuration once, then applies the evidence-tier
+cap. Producers must not independently call keep and level APIs for the same diagnostic.
+
 During compatibility migration, `LintDiag.evidence_tier` is the single severity
 input shared by CLI and query/LSP projections. `SourcePattern`,
 `ParsedStructural`, and `Incomplete` performance diagnostics are warning-capped;
