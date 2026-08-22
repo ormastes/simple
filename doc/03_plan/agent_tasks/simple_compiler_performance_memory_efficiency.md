@@ -518,3 +518,13 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve suppression, severity rewriting, collection, and direct-print behavior.
 - Avoid native dictionary length as a hot-path correctness predicate.
 - Follow-up: replace serialized JSON policy projection with typed diagnostics.
+
+## Completed compiler tranche: linear predecessor adjacency
+
+- Replace per-edge dictionary array copyback with indexed owned buckets.
+- Publish one predecessor array per distinct successor after edge discovery.
+- Preserve edge multiplicity, predecessor order, dangling-edge evidence, and
+  malformed-CFG counters.
+- Pin a high-fan-in/duplicate-edge example plus a source regression guard.
+- Follow-up: gate dense liveness allocation before matrix construction on every
+  incomplete-input path.
