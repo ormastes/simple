@@ -402,6 +402,53 @@ fn parse_lint_level(level_str: String) -> Option<LintLevel>:
         return Some(LintLevel.Deny)
     nil
 
+# Immutable command policy parsed once by repository lint. Keeping positional
+# targets out of the per-file hot path prevents N files from causing N scans of
+# an N-sized argument array. Standalone compatibility wrappers may still build
+# one policy for their single file.
+class LintCliPolicy:
+    deny_all: bool
+    warn_all: bool
+    json_output: bool
+    fix_mode: bool
+    fix_all: bool
+    fix_dry_run: bool
+    wm_lane: bool
+    profile: Option<LintProfile>
+    error: String
+
+impl LintCliPolicy:
+    static fn from_args(args: [text]) -> LintCliPolicy:
+        var policy = LintCliPolicy(
+            deny_all: false, warn_all: false, json_output: false,
+            fix_mode: false, fix_all: false, fix_dry_run: false,
+            wm_lane: false, profile: nil, error: "")
+        var expect_profile = false
+        for arg in args:
+            if expect_profile:
+                val parsed = parse_lint_profile(arg)
+                match parsed:
+                    case Some(profile): policy.profile = Some(profile)
+                    case nil: policy.error = "unknown profile: {arg}"
+                expect_profile = false
+            elif arg == "--deny-all": policy.deny_all = true
+            elif arg == "--warn-all": policy.warn_all = true
+            elif arg == "--json": policy.json_output = true
+            elif arg == "--fix": policy.fix_mode = true
+            elif arg == "--fix-all": policy.fix_all = true
+            elif arg == "--fix-dry-run": policy.fix_dry_run = true
+            elif arg == "--wm-lane": policy.wm_lane = true
+            elif arg == "--profile": expect_profile = true
+            elif arg.starts_with("--profile="):
+                val profile_text = arg.slice(10, arg.len())
+                val parsed = parse_lint_profile(profile_text)
+                match parsed:
+                    case Some(profile): policy.profile = Some(profile)
+                    case nil: policy.error = "unknown profile: {profile_text}"
+        if expect_profile and policy.error == "":
+            policy.error = "--profile requires a tier"
+        policy
+
 # LintDiag configuration — overrides for lint levels.
 # Loaded from the simple.sdn `lints:` section and/or file-level attributes.
 class LintConfig:
