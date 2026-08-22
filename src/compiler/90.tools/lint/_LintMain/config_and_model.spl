@@ -761,6 +761,21 @@ fn find_project_sdn(file_path: String) -> String:
 # the local enum; kept the removal, since the import at line 19 supplies the
 # same five variants.)
 
+enum LintEvidenceTier:
+    LegacyCompatible
+    SourcePattern
+    ParsedStructural
+    TypedProven
+    Incomplete
+
+fn lint_evidence_tier_name(tier: LintEvidenceTier) -> text:
+    match tier:
+        case LegacyCompatible: "legacy-compatible"
+        case SourcePattern: "source-pattern"
+        case ParsedStructural: "parsed-structural"
+        case TypedProven: "typed-proven"
+        case Incomplete: "incomplete"
+
 class LintDiag:
     code: String
     level: LintLevel
@@ -770,6 +785,7 @@ class LintDiag:
     easy_fix: Option<EasyFix>
     evidence: [String]
     uncertainty: Option<String>
+    evidence_tier: LintEvidenceTier
 
 impl LintDiag:
     fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> LintDiag:
@@ -781,7 +797,8 @@ impl LintDiag:
             fix_hint: nil,
             easy_fix: nil,
             evidence: [],
-            uncertainty: nil
+            uncertainty: nil,
+            evidence_tier: LintEvidenceTier.LegacyCompatible
         )
 
     fn with_fix(hint: String) -> LintDiag:
@@ -793,7 +810,8 @@ impl LintDiag:
             fix_hint: Some(hint),
             easy_fix: self.easy_fix,
             evidence: self.evidence,
-            uncertainty: self.uncertainty
+            uncertainty: self.uncertainty,
+            evidence_tier: self.evidence_tier
         )
 
     fn with_easy_fix(fix: EasyFix) -> LintDiag:
@@ -805,7 +823,8 @@ impl LintDiag:
             fix_hint: self.fix_hint,
             easy_fix: Some(fix),
             evidence: self.evidence,
-            uncertainty: self.uncertainty
+            uncertainty: self.uncertainty,
+            evidence_tier: self.evidence_tier
         )
 
     fn with_evidence(evidence: [String]) -> LintDiag:
@@ -813,7 +832,8 @@ impl LintDiag:
             code: self.code, level: self.level, category: self.category,
             message: self.message, fix_hint: self.fix_hint,
             easy_fix: self.easy_fix, evidence: evidence,
-            uncertainty: self.uncertainty
+            uncertainty: self.uncertainty,
+            evidence_tier: self.evidence_tier
         )
 
     fn with_uncertainty(reason: String) -> LintDiag:
@@ -821,8 +841,61 @@ impl LintDiag:
             code: self.code, level: self.level, category: self.category,
             message: self.message, fix_hint: self.fix_hint,
             easy_fix: self.easy_fix, evidence: self.evidence,
-            uncertainty: Some(reason)
+            uncertainty: Some(reason), evidence_tier: self.evidence_tier
         )
+
+    fn with_evidence_tier(tier: LintEvidenceTier) -> LintDiag:
+        LintDiag(
+            code: self.code, level: self.level, category: self.category,
+            message: self.message, fix_hint: self.fix_hint,
+            easy_fix: self.easy_fix, evidence: self.evidence,
+            uncertainty: self.uncertainty, evidence_tier: tier
+        )
+
+    fn with_level(level: LintLevel) -> LintDiag:
+        LintDiag(
+            code: self.code, level: level, category: self.category,
+            message: self.message, fix_hint: self.fix_hint,
+            easy_fix: self.easy_fix, evidence: self.evidence,
+            uncertainty: self.uncertainty, evidence_tier: self.evidence_tier
+        )
+
+fn lint_code_is_performance(code: text) -> bool:
+    code.starts_with("COLL") or code.starts_with("LOOP") or
+    code.starts_with("MEM") or code.starts_with("COPY") or
+    code.starts_with("LAYOUT") or code.starts_with("ALLOC") or
+    code.starts_with("ESCAPE") or code.starts_with("RETENTION") or
+    code.starts_with("CACHE") or code.starts_with("STACK")
+
+fn lint_evidence_tier_is_unproven(tier: LintEvidenceTier) -> bool:
+    match tier:
+        case SourcePattern | ParsedStructural | Incomplete: true
+        case LegacyCompatible | TypedProven: false
+
+fn lint_diag_is_unproven_performance_advisory(lint: LintDiag) -> bool:
+    lint_code_is_performance(lint.code) and
+        lint_evidence_tier_is_unproven(lint.evidence_tier)
+
+fn apply_config_level_for_evidence(
+    config: LintConfig, code: String, default_level: LintLevel,
+    evidence_tier: LintEvidenceTier
+) -> LintLevel:
+    val configured = apply_config_level(config, code, default_level)
+    if configured == LintLevel.Deny and lint_code_is_performance(code) and
+       lint_evidence_tier_is_unproven(evidence_tier):
+        return LintLevel.Warn
+    configured
+
+fn lint_diag_effective_level(lint: LintDiag, deny_all: bool) -> LintLevel:
+    if lint.level != LintLevel.Warn or not deny_all:
+        return lint.level
+    # `--deny-all` is not evidence. Source-shape performance guesses remain
+    # advisory until a producer explicitly supplies typed-proven receiver,
+    # effect, alias, and cardinality facts. Missing uncertainty text alone is
+    # never interpreted as proof.
+    if lint_diag_is_unproven_performance_advisory(lint):
+        return LintLevel.Warn
+    LintLevel.Deny
 
 class LintRunResult:
     file_path: String
@@ -866,6 +939,9 @@ impl LintRunResult:
         for evidence_line in self.lint.evidence:
             output = output + "\n  evidence: " + evidence_line
 
+        if self.lint.evidence_tier != LintEvidenceTier.LegacyCompatible:
+            output = output + "\n  confidence: " + lint_evidence_tier_name(self.lint.evidence_tier)
+
         match self.lint.uncertainty:
             case Some(reason):
                 output = output + "\n  uncertainty: " + reason
@@ -876,6 +952,11 @@ impl LintRunResult:
 
     fn has_easy_fix() -> Bool:
         self.lint.easy_fix.? == true
+
+fn lint_run_result_apply_cli_policy(result: LintRunResult, deny_all: bool) -> LintRunResult:
+    LintRunResult.new(
+        result.file_path, result.line, result.column,
+        result.lint.with_level(lint_diag_effective_level(result.lint, deny_all)))
 
 enum LintFileResult:
     LintFileOk([LintRunResult])
