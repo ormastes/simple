@@ -5,7 +5,7 @@ use std.spec.*
 use std.common.structural.hal_provider.contracts.*
 
 fn test_capacity() -> HalCapacityV1:
-    hal_capacity_v1(256, 256, 16, 1024, 8, 1000)
+    hal_capacity_v1(256, 256, 16, 1024, 8, 2048, 1024, 1000)
 
 fn test_operation(assurance: HalAssurance, providers: i64,
                   preferred: HalProviderKind, rationale: i64) -> HalOperationV1:
@@ -28,12 +28,20 @@ describe "rt(hal) frozen provider contracts":
             expect(hal_operation_v1_well_formed(operation)).to_be(false)
 
         it "rejects zero and negative capacities":
-            val zero = hal_capacity_v1(0, 1, 1, 1, 1, 1)
-            val negative = hal_capacity_v1(1, 1, 1, 1, 1, -1)
+            val zero = hal_capacity_v1(0, 1, 1, 1, 1, 1, 1, 1)
+            val negative = hal_capacity_v1(1, 1, 1, 1, 1, 1, 1, -1)
             expect(hal_capacity_v1_well_formed(zero)).to_be(false)
             expect(hal_capacity_v1_well_formed(negative)).to_be(false)
 
     describe "REQ-010: mission-critical default propagation":
+        it "defaults an unqualified operation to critical assurance":
+            val operation = hal_operation_v1_default_critical(
+                101, 7, 0, 11, 12, HalSideEffectPolicy.PlanThenCommit,
+                test_capacity(), 13, 14, HalProviderKind.PureSimple)
+            expect(hal_assurance_to_i64(operation.assurance_floor)).to_equal(
+                HAL_ASSURANCE_CRITICAL)
+            expect(hal_operation_v1_well_formed(operation)).to_be(true)
+
         it "promotes a critical operation into a verified entry closure":
             val operation = test_operation(HalAssurance.Critical, 7,
                                            HalProviderKind.PureSimple, 0)
@@ -64,10 +72,12 @@ describe "rt(hal) frozen provider contracts":
         it "requires overflow provenance only for overflow results":
             val overflow = hal_provider_result_v1(
                 HalProviderKind.C, 7, HalStatusV1.Overflow, 5,
-                10, 20, 64, 64, 8, 8, 7, 12)
+                10, 20, 30, 40, 64, 64, 8, 8,
+                HalOverflowKindV1.Trace, 7, 1, 12)
             val missing = hal_provider_result_v1(
                 HalProviderKind.C, 7, HalStatusV1.Overflow, 5,
-                10, 20, 64, 64, 8, 8, -1, 12)
+                10, 20, 30, 40, 64, 64, 8, 8,
+                HalOverflowKindV1.None, -1, 0, 12)
             expect(hal_provider_result_v1_well_formed(overflow)).to_be(true)
             expect(hal_provider_result_v1_well_formed(missing)).to_be(false)
 
@@ -75,29 +85,69 @@ describe "rt(hal) frozen provider contracts":
         it "orders child receipts by invocation and provider, not arrival":
             val rust = hal_provider_result_v1(
                 HalProviderKind.Rust, 7, HalStatusV1.Ok, 0,
-                10, 20, 64, 64, 8, 8, -1, 12)
+                10, 20, 30, 40, 64, 64, 8, 8, HalOverflowKindV1.None, -1, 0, 12)
             val pure = hal_provider_result_v1(
                 HalProviderKind.PureSimple, 7, HalStatusV1.Ok, 0,
-                10, 20, 64, 64, 8, 8, -1, 14)
+                10, 20, 30, 40, 64, 64, 8, 8, HalOverflowKindV1.None, -1, 0, 14)
             expect(hal_provider_result_before(pure, rust)).to_be(true)
             expect(hal_provider_result_before(rust, pure)).to_be(false)
 
         it "compares independently produced normalized receipts":
             val pure = hal_provider_result_v1(
                 HalProviderKind.PureSimple, 7, HalStatusV1.Ok, 0,
-                10, 20, 64, 64, 8, 8, -1, 14)
+                10, 20, 30, 40, 64, 64, 8, 8, HalOverflowKindV1.None, -1, 0, 14)
             val c = hal_provider_result_v1(
                 HalProviderKind.C, 7, HalStatusV1.Ok, 0,
-                10, 20, 64, 64, 8, 8, -1, 12)
+                10, 20, 30, 40, 64, 64, 8, 8, HalOverflowKindV1.None, -1, 0, 12)
             expect(hal_provider_results_equivalent(pure, c)).to_be(true)
 
         it "detects normalized divergence and same-provider vacuity":
             val pure = hal_provider_result_v1(
                 HalProviderKind.PureSimple, 7, HalStatusV1.Ok, 0,
-                10, 20, 64, 64, 8, 8, -1, 14)
+                10, 20, 30, 40, 64, 64, 8, 8, HalOverflowKindV1.None, -1, 0, 14)
             val divergent = hal_provider_result_v1(
                 HalProviderKind.C, 7, HalStatusV1.Ok, 0,
-                10, 21, 64, 64, 8, 8, -1, 12)
+                10, 21, 30, 40, 64, 64, 8, 8, HalOverflowKindV1.None, -1, 0, 12)
             expect(hal_provider_results_equivalent(pure, divergent)).to_be(false)
             expect(hal_provider_results_comparable(pure, pure)).to_be(false)
 
+        it "detects equal-length interaction-trace divergence":
+            val pure = hal_provider_result_v1(
+                HalProviderKind.PureSimple, 7, HalStatusV1.Ok, 0,
+                10, 20, 30, 40, 64, 64, 8, 8, HalOverflowKindV1.None, -1, 0, 14)
+            val c = hal_provider_result_v1(
+                HalProviderKind.C, 7, HalStatusV1.Ok, 0,
+                10, 20, 30, 41, 64, 64, 8, 8, HalOverflowKindV1.None, -1, 0, 12)
+            expect(hal_provider_results_equivalent(pure, c)).to_be(false)
+
+        it "defines the safe no-config mode and difference policies":
+            val default_mode = hal_default_run_mode()
+            expect(hal_run_mode_to_i64(default_mode)).to_equal(
+                hal_run_mode_to_i64(HalRunMode.AlphaCompare))
+            expect(hal_run_mode_executes_all(default_mode)).to_be(true)
+            expect(hal_run_mode_stops_on_difference(default_mode)).to_be(true)
+            expect(hal_run_mode_allows_preferred_commit_on_difference(
+                HalRunMode.BetaCompare)).to_be(true)
+            expect(hal_run_mode_executes_all(HalRunMode.BetaCompare)).to_be(true)
+            expect(hal_run_mode_allows_preferred_commit_on_difference(
+                HalRunMode.AlphaCompare)).to_be(false)
+            expect(hal_run_mode_executes_all(HalRunMode.NormalPreferred)).to_be(false)
+
+        it "rejects unknown provider mask bits and inconsistent status codes":
+            val unknown_mask = test_operation(HalAssurance.Critical, 9,
+                                              HalProviderKind.PureSimple, 0)
+            val bad_ok = hal_provider_result_v1(
+                HalProviderKind.PureSimple, 7, HalStatusV1.Ok, 9,
+                10, 20, 30, 40, 64, 64, 8, 8, HalOverflowKindV1.None, -1, 0, 14)
+            expect(hal_operation_v1_well_formed(unknown_mask)).to_be(false)
+            expect(hal_provider_result_v1_well_formed(bad_ok)).to_be(false)
+
+        it "rejects provider-asserted capacity beyond the operation frame":
+            val oversized = hal_provider_result_v1(
+                HalProviderKind.PureSimple, 7, HalStatusV1.Ok, 0,
+                10, 20, 30, 40, 64, 512, 8, 16,
+                HalOverflowKindV1.None, -1, 0, 14)
+            expect(hal_provider_result_v1_well_formed(oversized)).to_be(true)
+            expect(hal_provider_result_fits_operation(
+                oversized, test_operation(HalAssurance.Critical, 7,
+                                          HalProviderKind.PureSimple, 0))).to_be(false)

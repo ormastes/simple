@@ -106,19 +106,22 @@ struct EnvInstructionV1:
     argument_capacity: i64
     result_offset: i64
     result_capacity: i64
+    result_region_capacity: i64
 
 fn env_instruction_v1(invocation_id: i64, sequence: i64,
                       opcode: EnvOpcodeV1, capability_id: i64, flags: i64,
                       argument_offset: i64, argument_length: i64,
                       argument_capacity: i64, result_offset: i64,
-                      result_capacity: i64) -> EnvInstructionV1:
+                      result_capacity: i64,
+                      result_region_capacity: i64) -> EnvInstructionV1:
     EnvInstructionV1(contract_version: ENV_INSTRUCTION_SCHEMA_VERSION,
                      invocation_id: invocation_id, sequence: sequence,
                      opcode: opcode, capability_id: capability_id, flags: flags,
                      argument_offset: argument_offset,
                      argument_length: argument_length,
                      argument_capacity: argument_capacity,
-                     result_offset: result_offset, result_capacity: result_capacity)
+                     result_offset: result_offset, result_capacity: result_capacity,
+                     result_region_capacity: result_region_capacity)
 
 fn env_instruction_v1_well_formed(value: EnvInstructionV1) -> bool:
     value.contract_version == ENV_INSTRUCTION_SCHEMA_VERSION
@@ -129,6 +132,9 @@ fn env_instruction_v1_well_formed(value: EnvInstructionV1) -> bool:
         and value.argument_length <= value.argument_capacity
         and value.argument_offset <= value.argument_capacity - value.argument_length
         and value.result_offset >= 0 and value.result_capacity >= 0
+        and value.result_region_capacity >= 0
+        and value.result_capacity <= value.result_region_capacity
+        and value.result_offset <= value.result_region_capacity - value.result_capacity
 
 fn env_instruction_follows(previous: EnvInstructionV1,
                            current: EnvInstructionV1) -> bool:
@@ -161,10 +167,19 @@ fn env_observation_v1(invocation_id: i64, sequence: i64,
                      interaction_digest_lo: interaction_digest_lo)
 
 fn env_observation_v1_well_formed(value: EnvObservationV1) -> bool:
-    value.contract_version == ENV_INSTRUCTION_SCHEMA_VERSION
-        and value.invocation_id > 0 and value.sequence >= 0
-        and value.bytes_length >= 0 and value.bytes_capacity >= 0
-        and value.bytes_length <= value.bytes_capacity
+    if value.contract_version != ENV_INSTRUCTION_SCHEMA_VERSION:
+        return false
+    if value.invocation_id <= 0 or value.sequence < 0:
+        return false
+    if value.bytes_length < 0 or value.bytes_capacity < 0:
+        return false
+    if value.bytes_length > value.bytes_capacity:
+        return false
+    val status = env_instruction_status_to_i64(value.status)
+    if status == env_instruction_status_to_i64(EnvInstructionStatusV1.Applied)
+            or status == env_instruction_status_to_i64(EnvInstructionStatusV1.Replayed):
+        return value.status_code == 0
+    value.status_code > 0
 
 fn env_observation_matches(instruction: EnvInstructionV1,
                            observation: EnvObservationV1) -> bool:
@@ -172,6 +187,10 @@ fn env_observation_matches(instruction: EnvInstructionV1,
         and env_observation_v1_well_formed(observation)
         and instruction.invocation_id == observation.invocation_id
         and instruction.sequence == observation.sequence
+        and (env_instruction_status_to_i64(observation.status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Applied)
+            or env_instruction_status_to_i64(observation.status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Replayed))
         and observation.bytes_length <= instruction.result_capacity
 
 struct ScenarioExclusionV1:
@@ -226,4 +245,3 @@ export env_instruction_v1, env_instruction_v1_well_formed, env_instruction_follo
 export env_observation_v1, env_observation_v1_well_formed
 export env_observation_matches
 export scenario_exclusion_v1, scenario_exclusion_v1_well_formed
-
