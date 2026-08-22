@@ -63,6 +63,27 @@ typedef struct {
     uint64_t pair_budget;
 } SimpleMcdcAnalysisV1;
 
+enum {
+    SIMPLE_MCDC_EXPR_CONDITION_V1 = 1,
+    SIMPLE_MCDC_EXPR_NOT_V1 = 2,
+    SIMPLE_MCDC_EXPR_AND_V1 = 3,
+    SIMPLE_MCDC_EXPR_OR_V1 = 4
+};
+
+typedef struct {
+    uint8_t opcode;
+    uint8_t reserved[3];
+    uint32_t condition_index;
+} SimpleMcdcExprTokenV1;
+
+typedef struct {
+    uint64_t decision_id;
+    uint64_t source_digest;
+    uint32_t condition_count;
+    uint32_t token_count;
+    uint64_t token_offset;
+} SimpleMcdcDecisionExprV1;
+
 #if defined(__cplusplus)
 #define SIMPLE_MCDC_STATIC_ASSERT static_assert
 #else
@@ -79,6 +100,8 @@ SIMPLE_MCDC_STATIC_ASSERT(offsetof(SimpleMcdcWitnessV1, condition_index) == 16, 
 SIMPLE_MCDC_STATIC_ASSERT(offsetof(SimpleMcdcWitnessV1, owner_a) == 24, "witness owner A ABI");
 SIMPLE_MCDC_STATIC_ASSERT(offsetof(SimpleMcdcWitnessV1, sequence_b) == 48, "witness sequence B ABI");
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcAnalysisV1) == 48, "SimpleMcdcAnalysisV1 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcExprTokenV1) == 8, "SimpleMcdcExprTokenV1 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcDecisionExprV1) == 32, "SimpleMcdcDecisionExprV1 ABI");
 #undef SIMPLE_MCDC_STATIC_ASSERT
 
 int32_t rt_mcdc_collector_init_v1(void *storage, uint64_t storage_bytes,
@@ -136,6 +159,16 @@ int32_t rt_mcdc_analyze_unique_v1(const SimpleMcdcVectorV1 *events,
                                   uint64_t witness_capacity,
                                   uint64_t pair_budget,
                                   SimpleMcdcAnalysisV1 *analysis);
+/* Expression-aware unique-cause plus validated masking analysis. Programs and
+ * tokens are caller-owned, sorted by source_digest then decision_id, and use a
+ * bounded postfix Boolean representation. Policy 0 witnesses are unique-cause;
+ * policy 1 witnesses are masking proofs. */
+int32_t rt_mcdc_analyze_masking_v1(
+    const SimpleMcdcVectorV1 *events, uint64_t event_count,
+    const SimpleMcdcDecisionExprV1 *programs, uint64_t program_count,
+    const SimpleMcdcExprTokenV1 *tokens, uint64_t token_count,
+    SimpleMcdcWitnessV1 *witnesses, uint64_t witness_capacity,
+    uint64_t proof_budget, SimpleMcdcAnalysisV1 *analysis);
 int32_t rt_mcdc_sort_vectors_v1(SimpleMcdcVectorV1 *events,
                                 uint64_t event_count);
 void rt_mcdc_collector_reset_v1(void);

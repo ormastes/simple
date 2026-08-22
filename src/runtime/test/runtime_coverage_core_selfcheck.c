@@ -74,6 +74,32 @@ int main(void) {
     assert(analysis.covered_conditions == 1 && analysis.witness_count == 1);
     assert(rt_mcdc_analyze_unique_v1(vectors, 2, witnesses, 2, 0, &analysis) == 8);
     assert(analysis.pair_checks == 0);
+    /* A || B: B is short-circuit unevaluated in the true observation.  The
+       analyzer proves both completions of B preserve that outcome. */
+    SimpleMcdcExprTokenV1 expression[] = {
+        {SIMPLE_MCDC_EXPR_CONDITION_V1, {0}, 0},
+        {SIMPLE_MCDC_EXPR_CONDITION_V1, {0}, 1},
+        {SIMPLE_MCDC_EXPR_OR_V1, {0}, 0}
+    };
+    SimpleMcdcDecisionExprV1 program = {9, 99, 2, 3, 0};
+    SimpleMcdcVectorV1 masking[] = {
+        {9, 2, 0, 99, 3, 0, 1, 10, 0, {0}},
+        {9, 2, 0, 99, 1, 1, 1, 11, 1, {0}}
+    };
+    assert(rt_mcdc_analyze_masking_v1(masking, 2, &program, 1,
+                                      expression, 3, witnesses, 2, 20,
+                                      &analysis) == 0);
+    assert(analysis.covered_conditions == 1 && analysis.witness_count == 1);
+    assert(witnesses[0].condition_index == 0 && witnesses[0].policy == 1);
+    assert(rt_mcdc_analyze_masking_v1(masking, 2, &program, 1,
+                                      expression, 3, witnesses, 2, 1,
+                                      &analysis) == 8);
+    SimpleMcdcExprTokenV1 bad_expression[3];
+    memcpy(bad_expression, expression, sizeof(expression));
+    bad_expression[2].opcode = 99;
+    assert(rt_mcdc_analyze_masking_v1(masking, 2, &program, 1,
+                                      bad_expression, 3, witnesses, 2, 20,
+                                      &analysis) == 2);
     SimpleMcdcVectorV1 malformed[2] = {vectors[0], vectors[1]};
     malformed[1].condition_count = 3;
     assert(rt_mcdc_analyze_unique_v1(malformed, 2, witnesses, 2, 100, &analysis) == 2);

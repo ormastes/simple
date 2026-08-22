@@ -680,6 +680,195 @@ int32_t rt_mcdc_analyze_unique_v1(const SimpleMcdcVectorV1 *events,
     return output_overflow ? SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL : SIMPLE_MCDC_V1_OK;
 }
 
+#define MCDC_EXPR_TOKEN_LIMIT_V1 256u
+
+static bool mcdc_program_valid_v1(const SimpleMcdcDecisionExprV1 *program,
+                                  const SimpleMcdcExprTokenV1 *tokens,
+                                  size_t token_count) {
+    if (!program->decision_id || !program->source_digest ||
+        !program->condition_count || program->condition_count > 62u ||
+        !program->token_count || program->token_count > MCDC_EXPR_TOKEN_LIMIT_V1 ||
+        program->token_offset > token_count ||
+        program->token_count > token_count - (size_t)program->token_offset)
+        return false;
+    size_t depth = 0;
+    uint64_t referenced = 0;
+    for (size_t i = 0; i < program->token_count; ++i) {
+        const SimpleMcdcExprTokenV1 *token = &tokens[program->token_offset + i];
+        if (token->reserved[0] || token->reserved[1] || token->reserved[2]) return false;
+        if (token->opcode == SIMPLE_MCDC_EXPR_CONDITION_V1) {
+            if (token->condition_index >= program->condition_count ||
+                depth == MCDC_EXPR_TOKEN_LIMIT_V1) return false;
+            referenced |= UINT64_C(1) << token->condition_index;
+            ++depth;
+        } else if (token->opcode == SIMPLE_MCDC_EXPR_NOT_V1) {
+            if (token->condition_index || depth < 1) return false;
+        } else if (token->opcode == SIMPLE_MCDC_EXPR_AND_V1 ||
+                   token->opcode == SIMPLE_MCDC_EXPR_OR_V1) {
+            if (token->condition_index || depth < 2) return false;
+            --depth;
+        } else return false;
+    }
+    const uint64_t complete = (UINT64_C(1) << program->condition_count) - 1u;
+    return depth == 1 && referenced == complete;
+}
+
+static bool mcdc_eval_program_v1(const SimpleMcdcDecisionExprV1 *program,
+                                 const SimpleMcdcExprTokenV1 *tokens,
+                                 uint64_t values) {
+    bool stack[MCDC_EXPR_TOKEN_LIMIT_V1];
+    size_t depth = 0;
+    for (size_t i = 0; i < program->token_count; ++i) {
+        const SimpleMcdcExprTokenV1 *token = &tokens[program->token_offset + i];
+        if (token->opcode == SIMPLE_MCDC_EXPR_CONDITION_V1)
+            stack[depth++] = (values & (UINT64_C(1) << token->condition_index)) != 0;
+        else if (token->opcode == SIMPLE_MCDC_EXPR_NOT_V1)
+            stack[depth - 1] = !stack[depth - 1];
+        else {
+            const bool right = stack[--depth];
+            if (token->opcode == SIMPLE_MCDC_EXPR_AND_V1) stack[depth - 1] &= right;
+            else stack[depth - 1] |= right;
+        }
+    }
+    return stack[0];
+}
+
+static int32_t mcdc_observation_preserved_v1(
+    const SimpleMcdcVectorV1 *event, const SimpleMcdcVectorV1 *other,
+    uint64_t target, const SimpleMcdcDecisionExprV1 *program,
+    const SimpleMcdcExprTokenV1 *tokens, uint64_t budget,
+    uint64_t *checks) {
+    const uint64_t complete = (UINT64_C(1) << event->condition_count) - 1u;
+    const uint64_t changed_values = (event->true_mask ^ other->true_mask) &
+                                    event->evaluated_mask & other->evaluated_mask;
+    uint64_t variable = ((~event->evaluated_mask & complete) | changed_values) & ~target;
+    uint64_t assignment = 0;
+    for (;;) {
+        if (*checks == budget) return SIMPLE_MCDC_V1_BUDGET_EXHAUSTED;
+        ++*checks;
+        const uint64_t values = (event->true_mask & ~variable) | assignment;
+        if (mcdc_eval_program_v1(program, tokens, values) != (event->outcome != 0))
+            return SIMPLE_MCDC_V1_INVALID;
+        if (assignment == variable) break;
+        assignment = (assignment - variable) & variable;
+    }
+    return SIMPLE_MCDC_V1_OK;
+}
+
+int32_t rt_mcdc_analyze_masking_v1(
+    const SimpleMcdcVectorV1 *events, uint64_t event_count,
+    const SimpleMcdcDecisionExprV1 *programs, uint64_t program_count,
+    const SimpleMcdcExprTokenV1 *tokens, uint64_t token_count,
+    SimpleMcdcWitnessV1 *witnesses, uint64_t witness_capacity,
+    uint64_t proof_budget, SimpleMcdcAnalysisV1 *analysis) {
+    if (!analysis || (event_count && !events) || (program_count && !programs) ||
+        (token_count && !tokens) || (witness_capacity && !witnesses) ||
+        event_count > SIZE_MAX || program_count > SIZE_MAX || token_count > SIZE_MAX ||
+        witness_capacity > SIZE_MAX) return SIMPLE_MCDC_V1_INVALID;
+    if ((events && (uintptr_t)events % _Alignof(SimpleMcdcVectorV1)) ||
+        (programs && (uintptr_t)programs % _Alignof(SimpleMcdcDecisionExprV1)) ||
+        (tokens && (uintptr_t)tokens % _Alignof(SimpleMcdcExprTokenV1)) ||
+        (witnesses && (uintptr_t)witnesses % _Alignof(SimpleMcdcWitnessV1)) ||
+        ((uintptr_t)analysis % _Alignof(SimpleMcdcAnalysisV1)) ||
+        event_count > SIZE_MAX / sizeof(*events) ||
+        program_count > SIZE_MAX / sizeof(*programs) ||
+        token_count > SIZE_MAX / sizeof(*tokens) ||
+        witness_capacity > SIZE_MAX / sizeof(*witnesses))
+        return SIMPLE_MCDC_V1_INVALID;
+    const size_t event_bytes = (size_t)event_count * sizeof(*events);
+    const size_t program_bytes = (size_t)program_count * sizeof(*programs);
+    const size_t token_bytes = (size_t)token_count * sizeof(*tokens);
+    const size_t witness_bytes = (size_t)witness_capacity * sizeof(*witnesses);
+    if (mcdc_ranges_overlap(events, event_bytes, witnesses, witness_bytes) ||
+        mcdc_ranges_overlap(programs, program_bytes, witnesses, witness_bytes) ||
+        mcdc_ranges_overlap(tokens, token_bytes, witnesses, witness_bytes) ||
+        mcdc_ranges_overlap(events, event_bytes, analysis, sizeof(*analysis)) ||
+        mcdc_ranges_overlap(programs, program_bytes, analysis, sizeof(*analysis)) ||
+        mcdc_ranges_overlap(tokens, token_bytes, analysis, sizeof(*analysis)) ||
+        mcdc_ranges_overlap(witnesses, witness_bytes, analysis, sizeof(*analysis)))
+        return SIMPLE_MCDC_V1_INVALID;
+    *analysis = (SimpleMcdcAnalysisV1){0, 0, 0, 0, 0, proof_budget};
+    if (program_count == 0 && event_count != 0) return SIMPLE_MCDC_V1_INVALID;
+    for (size_t p = 0; p < (size_t)program_count; ++p) {
+        if (!mcdc_program_valid_v1(&programs[p], tokens, (size_t)token_count))
+            return SIMPLE_MCDC_V1_INVALID;
+        if (p && (programs[p - 1].source_digest > programs[p].source_digest ||
+                  (programs[p - 1].source_digest == programs[p].source_digest &&
+                   programs[p - 1].decision_id >= programs[p].decision_id)))
+            return SIMPLE_MCDC_V1_INVALID;
+    }
+    bool output_overflow = false;
+    size_t start = 0;
+    for (size_t p = 0; p < (size_t)program_count; ++p) {
+        const SimpleMcdcDecisionExprV1 *program = &programs[p];
+        if (start >= (size_t)event_count || events[start].decision_id != program->decision_id ||
+            events[start].source_digest != program->source_digest) return SIMPLE_MCDC_V1_INVALID;
+        size_t end = start;
+        while (end < (size_t)event_count && events[end].decision_id == program->decision_id &&
+               events[end].source_digest == program->source_digest) {
+            if (!mcdc_vector_valid(&events[end]) ||
+                events[end].condition_count != program->condition_count ||
+                (end > start && mcdc_vector_order(&events[end - 1], &events[end]) >= 0))
+                return SIMPLE_MCDC_V1_INVALID;
+            ++end;
+        }
+        if (analysis->decisions == UINT64_MAX ||
+            analysis->gross_conditions > UINT64_MAX - program->condition_count)
+            return SIMPLE_MCDC_V1_OVERFLOW;
+        ++analysis->decisions;
+        analysis->gross_conditions += program->condition_count;
+        uint64_t covered = 0;
+        for (uint32_t condition = 0; condition < program->condition_count; ++condition) {
+            const uint64_t target = UINT64_C(1) << condition;
+            for (unsigned policy = 0; policy < 2 && !(covered & target); ++policy) {
+                for (size_t a = start; a < end && !(covered & target); ++a) {
+                    for (size_t b = a + 1; b < end && !(covered & target); ++b) {
+                        if (events[a].outcome == events[b].outcome ||
+                            !(events[a].evaluated_mask & target) ||
+                            !(events[b].evaluated_mask & target) ||
+                            !((events[a].true_mask ^ events[b].true_mask) & target)) continue;
+                        const uint64_t changed = (events[a].true_mask ^ events[b].true_mask) |
+                                                 (events[a].evaluated_mask ^ events[b].evaluated_mask);
+                        if (policy == 0 && changed != target) continue;
+                        if (policy == 1 && changed == target) continue;
+                        if (policy == 1) {
+                            int32_t status = mcdc_observation_preserved_v1(
+                                &events[a], &events[b], target, program, tokens,
+                                proof_budget, &analysis->pair_checks);
+                            if (status == SIMPLE_MCDC_V1_BUDGET_EXHAUSTED) return status;
+                            if (status != SIMPLE_MCDC_V1_OK) continue;
+                            status = mcdc_observation_preserved_v1(
+                                &events[b], &events[a], target, program, tokens,
+                                proof_budget, &analysis->pair_checks);
+                            if (status == SIMPLE_MCDC_V1_BUDGET_EXHAUSTED) return status;
+                            if (status != SIMPLE_MCDC_V1_OK) continue;
+                        } else {
+                            if (analysis->pair_checks == proof_budget)
+                                return SIMPLE_MCDC_V1_BUDGET_EXHAUSTED;
+                            ++analysis->pair_checks;
+                        }
+                        if (analysis->witness_count < witness_capacity)
+                            witnesses[analysis->witness_count] = (SimpleMcdcWitnessV1){
+                                program->decision_id, program->source_digest, condition,
+                                policy, events[a].owner_id, events[a].owner_sequence,
+                                events[b].owner_id, events[b].owner_sequence};
+                        else output_overflow = true;
+                        if (analysis->witness_count == UINT64_MAX ||
+                            analysis->covered_conditions == UINT64_MAX)
+                            return SIMPLE_MCDC_V1_OVERFLOW;
+                        ++analysis->witness_count;
+                        ++analysis->covered_conditions;
+                        covered |= target;
+                    }
+                }
+            }
+        }
+        start = end;
+    }
+    if (start != (size_t)event_count) return SIMPLE_MCDC_V1_INVALID;
+    return output_overflow ? SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL : SIMPLE_MCDC_V1_OK;
+}
+
 static bool coverage_add_size(size_t a, size_t b, size_t *result) {
     if (a > SIZE_MAX - b) return false;
     *result = a + b;
