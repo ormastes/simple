@@ -2115,3 +2115,20 @@ interning parsed parameter vectors is a later, profile-gated optimization.
 Execution timing/RSS evidence is intentionally absent under the requested
 no-verify policy; the claim is limited to static complexity and allocation
 removal.
+
+### Formatter lexical-fingerprint assembly
+
+The formatter's semantics guard fingerprints both original and rewritten
+source. Both its token loop and skipped-comment helper previously appended each
+record to an immutable accumulated string. For a fingerprint of `F` bytes this
+copies the growing prefix repeatedly: worst-case `O(F^2)` time and cumulative
+allocation traffic, twice per formatting request, while live output remains
+`O(F)`.
+
+Both builders now retain exact framed fragments and join once. Token order,
+kind/text/length fields, literal source slices, comment indentation, raw skipped
+payload, brace-sensitive whitespace, lexer errors, and the token bound are
+unchanged. The runtime still necessarily retains each complete original and
+formatted fingerprint for comparison; streaming equality is a possible later
+design only if mismatch/error behavior can remain identical. No timing/RSS
+claim is made because execution remains excluded by the no-verify instruction.
