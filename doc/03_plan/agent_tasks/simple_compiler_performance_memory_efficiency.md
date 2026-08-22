@@ -558,3 +558,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve text/JSON bytes, ordering, counts, fixes, evidence, and uncertainty.
 - Follow-up: move policy projection before serialized output ownership entirely
   when typed diagnostic transport replaces compatibility JSON.
+
+## Completed compiler tranche: linear loop-latch aggregation
+
+- Index first-seen natural-loop headers into owned latch buckets.
+- Deduplicate source/header edges with per-header membership dictionaries.
+- Preserve loop order, backedge order, duplicate-edge coalescing, bodies, and exits.
+- Remove dictionary-held growing-array extraction and copyback.
+- Pin ordered multiple latches with a duplicate-target terminator.
