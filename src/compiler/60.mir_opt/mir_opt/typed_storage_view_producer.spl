@@ -6,7 +6,7 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.intrinsics.{MIR_STORAGE_ALLOC_OWNED_RAW_V1}
-use compiler.mir_opt.mir_opt.auto_vectorize_analysis.{get_inst_uses, get_operand_locals}
+use compiler.mir_opt.mir_opt.perf_facts.{PerfFacts, perf_facts_build, perf_facts_uses}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{
     MIR_STORAGE_PROJECT_FIELD_V1, MirStorageViewSiteBindingV1,
     mir_storage_address_recipe_v1
@@ -47,44 +47,10 @@ fn mir_typed_storage_operand_local_v1(operand: MirOperand) -> i64:
         case Copy(local) | Move(local): local.id
         case _: -1
 
-fn mir_typed_storage_extra_intrinsic_uses(inst: MirInst, local_id: i64) -> i64:
-    match inst.kind:
-        case Intrinsic(_, _, args):
-            var count = 0
-            for arg in args:
-                for used in get_operand_locals(arg):
-                    if used.id == local_id: count = count + 1
-            count
-        case _: 0
-
-fn mir_typed_storage_instruction_use_count(function: MirFunction,
+fn mir_typed_storage_instruction_use_count(facts: PerfFacts,
                                             local_id: i64) -> i64:
-    var count = 0
-    for block in function.blocks:
-        for instruction in block.instructions:
-            for used in get_inst_uses(instruction):
-                if used.id == local_id: count = count + 1
-            count = count + mir_typed_storage_extra_intrinsic_uses(
-                instruction, local_id)
-        match block.terminator:
-            case Ret(value):
-                if value.?:
-                    for used in get_operand_locals(value.unwrap()):
-                        if used.id == local_id: count = count + 1
-            case If(cond, _, _):
-                for used in get_operand_locals(cond):
-                    if used.id == local_id: count = count + 1
-            case Switch(value, _, _):
-                for used in get_operand_locals(value):
-                    if used.id == local_id: count = count + 1
-            case CallTerminator(_, func, args, _, _):
-                for used in get_operand_locals(func):
-                    if used.id == local_id: count = count + 1
-                for arg in args:
-                    for used in get_operand_locals(arg):
-                        if used.id == local_id: count = count + 1
-            case _: pass
-    count
+    if not facts.def_use_complete: return -1
+    perf_facts_uses(facts, LocalId(id: local_id)).len()
 
 fn mir_typed_storage_declaration_index(
     declarations: [MirTypedStorageViewDeclarationV1], function_symbol_id: i64,
@@ -195,6 +161,10 @@ fn produce_mir_typed_storage_views_v1(
     var rewritten_functions: Dict<SymbolId, MirFunction> = {}
     for symbol in module.functions.keys():
         val function = module.functions[symbol]
+        val perf_facts = perf_facts_build(function)
+        if not perf_facts.def_use_complete:
+            return mir_typed_storage_view_producer_failure(
+                module, "storage-view-def-use-incomplete")
         var blocks: [MirBlock] = []
         for block in function.blocks:
             var instructions: [MirInst] = []
@@ -232,9 +202,9 @@ fn produce_mir_typed_storage_views_v1(
                                                 case GetField(field_dest, record, field_id):
                                                     if mir_typed_storage_operand_local_v1(record) == record_dest.id:
                                                         if mir_typed_storage_instruction_use_count(
-                                                            function, gep_dest.id) != 1
+                                                            perf_facts, gep_dest.id) != 1
                                                             or mir_typed_storage_instruction_use_count(
-                                                                function, record_dest.id) != 1:
+                                                                perf_facts, record_dest.id) != 1:
                                                             return mir_typed_storage_view_producer_failure(
                                                                 module, "storage-projection-temporary-escapes")
                                                         val admitted = admit_mir_typed_storage_view_v1(declaration)
