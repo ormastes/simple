@@ -198,3 +198,12 @@ lines or contexts. Path-gated compatibility wrappers must perform their gate bef
 splitting, so direct calls on excluded files remain allocation-free. File-scope allow
 analysis has a lines variant and must not reconstruct the source view. Whole-source input
 remains only for algorithms that inspect cross-line text without a migrated fact owner.
+
+### Canonical EasyFix context ownership
+
+`std.tooling.easy_fix.rules_helpers` is the sole owner of `LineContext` and
+`EasyFixSourceView`. Compiler rule helpers re-export the type and builders; they must not
+declare a parallel structural copy. The registry builds one view from canonical lines and
+passes the same context array to compiler and stdlib rule owners. View-taking variants
+preserve compatibility wrappers, rule order, byte offsets, and replacement ordering.
+The view is request-scoped and must never enter a process-global cache.
