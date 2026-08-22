@@ -1,0 +1,152 @@
+use app.query_error_pattern_gen.rules.{
+    QueryErrorPredicateOp, QueryErrorPredicateToken, QueryErrorRuleSpec,
+    QueryErrorFallbackSpec, query_error_rule_specs, query_error_fallback_specs,
+    query_error_default_fallback_code
+}
+
+struct _QueryRenderedPredicate:
+    source: text
+    precedence: i64
+
+fn _query_error_code_valid(code: text) -> bool:
+    if code.len() != 5 or code.byte_at(0) != 69:
+        return false
+    var index = 1
+    while index < 5:
+        val byte = code.byte_at(index)
+        if byte < 48 or byte > 57:
+            return false
+        index = index + 1
+    true
+
+fn query_error_rule_validate(rules: [QueryErrorRuleSpec], pattern_count: i64) -> Result<bool, text>:
+    if rules.len() != 80:
+        return Err("query error classifier requires exactly 80 ordered rules")
+    var dynamic_count = 0
+    var rule_index = 0
+    while rule_index < rules.len():
+        val rule = rules[rule_index]
+        if rule.priority != rule_index:
+            return Err("query error rule priorities must be contiguous and ordered")
+        if not _query_error_code_valid(rule.error_code):
+            return Err("query error rule has invalid error code")
+        if rule.heading.contains("\n"):
+            return Err("query error rule heading must be one line")
+        var depth = 0
+        var token_index = 0
+        while token_index < rule.predicate.len():
+            val token = rule.predicate[token_index]
+            match token.op:
+                case QueryErrorPredicateOp.Hit:
+                    if token.pattern_id < 0 or token.pattern_id >= pattern_count:
+                        return Err("query error rule pattern ID is out of range")
+                    depth = depth + 1
+                case QueryErrorPredicateOp.CallerCodegenPhrase:
+                    if token.pattern_id != -1:
+                        return Err("query error dynamic token has a pattern ID")
+                    dynamic_count = dynamic_count + 1
+                    if rule_index != 49 or rule.predicate.len() != 1:
+                        return Err("query error dynamic phrase rule priority changed")
+                    depth = depth + 1
+                case QueryErrorPredicateOp.Not:
+                    if depth < 1:
+                        return Err("query error rule has invalid postfix not")
+                case QueryErrorPredicateOp.And:
+                    if depth < 2:
+                        return Err("query error rule has invalid postfix and")
+                    depth = depth - 1
+                case QueryErrorPredicateOp.Or:
+                    if depth < 2:
+                        return Err("query error rule has invalid postfix or")
+                    depth = depth - 1
+            token_index = token_index + 1
+        if depth != 1:
+            return Err("query error rule predicate does not reduce to one value")
+        rule_index = rule_index + 1
+    if dynamic_count != 1:
+        return Err("query error classifier requires one dynamic phrase rule")
+    Ok(true)
+
+fn _query_error_render_child(value: _QueryRenderedPredicate, parent_precedence: i64) -> text:
+    if value.precedence < parent_precedence:
+        return "(" + value.source + ")"
+    value.source
+
+fn _query_error_render_predicate(tokens: [QueryErrorPredicateToken]) -> text:
+    var stack: [_QueryRenderedPredicate] = []
+    var depth = 0
+    for token in tokens:
+        match token.op:
+            case QueryErrorPredicateOp.Hit:
+                val value = _QueryRenderedPredicate(
+                    source: "query_error_pattern_hit(pattern_hits, {token.pattern_id})",
+                    precedence: 3
+                )
+                if depth < stack.len(): stack[depth] = value
+                else: stack.push(value)
+                depth = depth + 1
+            case QueryErrorPredicateOp.CallerCodegenPhrase:
+                val value = _QueryRenderedPredicate(source: "msg.contains(codegen_phrase)", precedence: 3)
+                if depth < stack.len(): stack[depth] = value
+                else: stack.push(value)
+                depth = depth + 1
+            case QueryErrorPredicateOp.Not:
+                val child = stack[depth - 1]
+                stack[depth - 1] = _QueryRenderedPredicate(
+                    source: "not " + _query_error_render_child(child, 2),
+                    precedence: 2
+                )
+            case QueryErrorPredicateOp.And:
+                val left = stack[depth - 2]
+                val right = stack[depth - 1]
+                stack[depth - 2] = _QueryRenderedPredicate(
+                    source: _query_error_render_child(left, 1) + " and " + _query_error_render_child(right, 1),
+                    precedence: 1
+                )
+                depth = depth - 1
+            case QueryErrorPredicateOp.Or:
+                val left = stack[depth - 2]
+                val right = stack[depth - 1]
+                stack[depth - 2] = _QueryRenderedPredicate(
+                    source: _query_error_render_child(left, 0) + " or " + _query_error_render_child(right, 0),
+                    precedence: 0
+                )
+                depth = depth - 1
+    stack[0].source
+
+fn query_error_rule_block_render() -> Result<text, text>:
+    val rules = query_error_rule_specs()
+    match query_error_rule_validate(rules, 116):
+        case Err(message): return Err(message)
+        case Ok(_): pass
+    var parts: [text] = []
+    parts.push("    # BEGIN GENERATED QUERY ERROR RULES\n")
+    parts.push("    # --- Strategy 2: pattern-match message content to known E-codes ---\n")
+    var index = 0
+    while index < rules.len():
+        val rule = rules[index]
+        if rule.heading != "":
+            if index > 0: parts.push("\n")
+            parts.push("    # {rule.heading}\n")
+        parts.push("    if " + _query_error_render_predicate(rule.predicate) + ":\n")
+        parts.push("        return \"{rule.error_code}\"\n")
+        index = index + 1
+    parts.push("    # END GENERATED QUERY ERROR RULES\n")
+    Ok(parts.join(""))
+
+fn query_error_fallback_block_render() -> Result<text, text>:
+    val fallbacks = query_error_fallback_specs()
+    var parts: [text] = []
+    parts.push("    # BEGIN GENERATED QUERY ERROR FALLBACKS\n")
+    parts.push("    # --- Strategy 3: fall back to generic code based on error_kind ---\n")
+    parts.push("    match error_kind:\n")
+    for fallback in fallbacks:
+        if not _query_error_code_valid(fallback.error_code) or fallback.error_kind == "":
+            return Err("query error fallback manifest is invalid")
+        parts.push("        \"{fallback.error_kind}\": \"{fallback.error_code}\"\n")
+    val default_code = query_error_default_fallback_code()
+    if not _query_error_code_valid(default_code):
+        return Err("query error default fallback is invalid")
+    parts.push("        _: \"{default_code}\"\n")
+    parts.push("    # END GENERATED QUERY ERROR FALLBACKS\n")
+    Ok(parts.join(""))
