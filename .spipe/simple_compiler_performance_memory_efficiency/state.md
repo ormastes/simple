@@ -192,3 +192,9 @@ implementation-in-progress
   to file-attribute policy parsing. This removes a second full-source split and
   transient line array per linted file with unchanged attribute scan boundaries,
   policy precedence, diagnostic ordering, and linear complexity.
+- correctness/optimization: Silent parsing and structured lint collection now own
+  a nested frontend trace-suppression scope spanning initialization through AST
+  lint traversal. Optional trace/profile/debug output is scoped without adding
+  policy dispatch to cached-off paths, ordinary trace behavior is retained, and
+  expression-call tracing uses one decision instead of six env reads per allocation. Cleanup-safe unwinding
+  and request-owned parser arenas remain open; execution evidence is absent.
