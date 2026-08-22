@@ -1,0 +1,242 @@
+# Shared query diagnostic error-code classifier.
+# Keeps ordered, case-sensitive legacy inference in one cycle-free owner.
+use app.cli.query_rich_common.{_find_in_line_from}
+
+fn query_extract_error_code(msg: text, error_kind: text, codegen_phrase: text) -> text:
+    """Extract an E-code from an error message or infer one from the error kind.
+
+    Strategy:
+    1. Check if the message already contains an explicit error code (e.g. error[E1001])
+    2. Pattern-match common error message phrases to known E-codes
+    3. Fall back to a generic code based on error_kind
+    """
+    # --- Strategy 1: explicit error code in message ---
+    val bracket_idx = _find_in_line_from(msg, "[E", 0)
+    if bracket_idx >= 0:
+        val close_idx = _find_in_line_from(msg, "]", bracket_idx)
+        if close_idx > bracket_idx + 1:
+            return msg.substring(bracket_idx + 1, close_idx)
+
+    # Check for "Exxxx:" at the start of the message
+    if msg.len() >= 5 and msg.substring(0, 1) == "E":
+        val maybe_code = msg.substring(0, 5)
+        if _query_is_error_code(maybe_code):
+            return maybe_code
+
+    # --- Strategy 2: pattern-match message content to known E-codes ---
+    # Semantic errors (E10xx)
+    if (msg.contains("not found in this scope") or msg.contains("not defined")) and msg.contains("variable"):
+        return "E1001"
+    if (msg.contains("not found") or msg.contains("cannot find")) and msg.contains("function"):
+        return "E1002"
+    if msg.contains("expected type") and msg.contains("found"):
+        return "E1003"
+    if msg.contains("type mismatch") or msg.contains("incompatible type"):
+        return "E1003"
+    if msg.contains("cannot assign") or msg.contains("invalid assignment"):
+        return "E1004"
+    if msg.contains("cannot apply operator"):
+        return "E1005"
+    if msg.contains("invalid pattern"):
+        return "E1006"
+    if msg.contains("missing field") or msg.contains("missing required field"):
+        return "E1007"
+    if msg.contains("duplicate definition") or msg.contains("already defined"):
+        return "E1008"
+    if msg.contains("circular dependency") or msg.contains("circular import"):
+        return "E1009"
+    if msg.contains("module") and msg.contains("not found"):
+        return "E1010"
+    if msg.contains("type") and msg.contains("not found") and not msg.contains("function"):
+        return "E1011"
+    if msg.contains("no field named"):
+        return "E1012"
+    if msg.contains("no method named"):
+        return "E1013"
+    if msg.contains("unknown class"):
+        return "E1014"
+    if msg.contains("unknown enum"):
+        return "E1015"
+    if msg.contains("expected") and msg.contains("argument"):
+        return "E1020"
+    if msg.contains("missing") and msg.contains("struct field"):
+        return "E1021"
+    if msg.contains("duplicate") and msg.contains("method"):
+        return "E1025"
+    if msg.contains("missing") and msg.contains("trait") and msg.contains("method"):
+        return "E1031"
+    if msg.contains("self") and msg.contains("static"):
+        return "E1032"
+    if msg.contains("unresolved import"):
+        return "E1034"
+    if msg.contains("private") and msg.contains("field"):
+        return "E1046"
+    if msg.contains("not callable") or msg.contains("is not callable"):
+        return "E1048"
+    if msg.contains("inconsistent bindings"):
+        return "E1068"
+
+    # Control flow errors (E11xx / E1057)
+    if msg.contains("break") and msg.contains("outside") and msg.contains("loop"):
+        return "E1101"
+    if msg.contains("continue") and msg.contains("outside") and msg.contains("loop"):
+        return "E1102"
+    if msg.contains("return") and msg.contains("outside") and msg.contains("function"):
+        return "E1103"
+    if msg.contains("return") and msg.contains("closure"):
+        return "E1104"
+    if msg.contains("yield") and msg.contains("outside") and msg.contains("generator"):
+        return "E1057"
+    if msg.contains("await") and msg.contains("outside") and msg.contains("async"):
+        return "E1105"
+
+    # Actor/concurrency errors (E12xx)
+    if msg.contains("actor") and msg.contains("send"):
+        return "E1201"
+    if msg.contains("actor") and msg.contains("recv"):
+        return "E1202"
+    if msg.contains("channel closed"):
+        return "E1203"
+    if msg.contains("deadlock"):
+        return "E1204"
+
+    # Capability errors (E13xx)
+    if msg.contains("capability") and msg.contains("violation"):
+        return "E1301"
+    if msg.contains("isolation") and msg.contains("violation"):
+        return "E1302"
+    if msg.contains("borrow") and msg.contains("violation"):
+        return "E1303"
+
+    # Macro errors (E14xx)
+    if msg.contains("unknown macro"):
+        return "E1401"
+    if msg.contains("macro") and msg.contains("before definition"):
+        return "E1402"
+    if msg.contains("macro") and msg.contains("invocation failed"):
+        return "E1401"
+
+    # AOP errors (E15xx)
+    if msg.contains("pointcut") and msg.contains("syntax"):
+        return "E1501"
+    if msg.contains("joinpoint") and msg.contains("undefined"):
+        return "E1502"
+    if msg.contains("advice") and msg.contains("invalid"):
+        return "E1503"
+    if msg.contains("weaving") and msg.contains("target"):
+        return "E1505"
+    if msg.contains("aspect") and msg.contains("circular"):
+        return "E1506"
+
+    # Mixin errors (E17xx)
+    if msg.contains("mixin") and msg.contains("not found"):
+        return "E1701"
+    if msg.contains("mixin") and msg.contains("conflict"):
+        return "E1702"
+
+    # Codegen errors (E20xx)
+    if msg.contains("unsupported feature"):
+        return "E2001"
+    if msg.contains(codegen_phrase):
+        return "E2002"
+
+    # Runtime errors (E30xx)
+    if msg.contains("division by zero"):
+        return "E3001"
+    if msg.contains("index") and msg.contains("out of bounds"):
+        return "E3002"
+    if msg.contains("stack overflow"):
+        return "E3003"
+    if msg.contains("assertion failed"):
+        return "E3004"
+
+    # Method resolution special case
+    if msg.contains("Method resolution"):
+        return "E1013"
+
+    # Type inference errors
+    if msg.contains("infinite type") or msg.contains("occurs in"):
+        return "E0391"
+    if msg.contains("trait not implemented") or msg.contains("does not implement"):
+        return "E0277"
+
+    # Dimension constraint errors (E05xx from dim_constraints_types)
+    if msg.contains("dimension mismatch"):
+        return "E0501"
+    if msg.contains("layer dimension mismatch"):
+        return "E0502"
+    if msg.contains("tensor rank mismatch"):
+        return "E0503"
+    if msg.contains("matrix multiplication dimension"):
+        return "E0504"
+    if msg.contains("shapes cannot be broadcast"):
+        return "E0505"
+    if msg.contains("batch dimension mismatch"):
+        return "E0506"
+    if msg.contains("channel dimension mismatch"):
+        return "E0507"
+    if msg.contains("sequence length mismatch"):
+        return "E0508"
+
+    # Borrow checking errors
+    if msg.contains("cannot borrow") or msg.contains("also borrowed"):
+        return "E0502"
+    if msg.contains("cannot use") and msg.contains("mutably borrowed"):
+        return "E0503"
+    if msg.contains("cannot move") and msg.contains("borrowed"):
+        return "E0505"
+    if msg.contains("borrow") and msg.contains("still be active at return"):
+        return "E0515"
+
+    # Trait coherence errors
+    if msg.contains("foreign trait") and msg.contains("foreign type"):
+        return "E0117"
+    if msg.contains("Overlapping implementations"):
+        return "E0119"
+    if msg.contains("Blanket implementation") and msg.contains("conflicts"):
+        return "E0119"
+    if msg.contains("Conflicting associated type"):
+        return "E0271"
+
+    # Trait validation errors
+    if msg.contains("ambiguous trait impl"):
+        return "E0283"
+    if msg.contains("overlapping impls"):
+        return "E0119"
+    if msg.contains("missing method") and msg.contains("impl"):
+        return "E0046"
+    if msg.contains("cyclic trait bound"):
+        return "E0275"
+    if msg.contains("undefined trait"):
+        return "E0405"
+    if msg.contains("missing associated type"):
+        return "E0191"
+    if msg.contains("associated type mismatch"):
+        return "E0271"
+
+    # --- Strategy 3: fall back to generic code based on error_kind ---
+    match error_kind:
+        "TypeError": "E1003"
+        "ParseError": "E0001"
+        "BlockError": "E1601"
+        "ResolveError": "E1013"
+        "BorrowError": "E1303"
+        "CodegenError": "E2001"
+        "RuntimeError": "E3001"
+        _: "E0000"
+
+fn _query_is_error_code(s: text) -> bool:
+    """Check if a string looks like an error code (E followed by 4 digits)."""
+    if s.len() < 5:
+        return false
+    if s.substring(0, 1) != "E":
+        return false
+    var i = 1
+    while i < 5:
+        val ch = s.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
+
