@@ -188,3 +188,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Use one registry view for every compiler and stdlib context consumer.
 - Pin single-view dispatch and absence of the compiler duplicate with source contracts.
 - Follow-up: index duplicate-typed calls and audit remaining whole-source algorithms.
+
+## Completed tool tranche: indexed duplicate-typed calls
+
+- Count unique `(name, arity)` rewrite targets once and reject ambiguity fail-closed.
+- Scan identifier/call sites once instead of once per signature.
+- Store flat indexed replacements and restore signature/source order deterministically.
+- Remove obsolete per-signature scan and uniqueness helpers.
+- Pin indexed dictionaries and absence of the quadratic helper with source contracts.
+- Follow-up: replace lexical candidates with typed resolved-call facts when available.
