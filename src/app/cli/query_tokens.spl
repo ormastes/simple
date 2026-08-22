@@ -3,7 +3,7 @@
 # Token-related query implementations: semantic-tokens, inlay-hints.
 
 use app.cli.query_sanitize.{sanitize_path}
-use app.cli.query_helpers.{_collect_symbol_sets, _classify_token, _collect_fn_return_types, _infer_type_from_rhs, _extract_flag, _extract_call_name, _extract_ident_from, _extract_params_from}
+use app.cli.query_helpers.{_collect_symbol_sets, _classify_token, _collect_fn_outline, _infer_type_from_rhs, _extract_flag}
 use app.cli.query_rich_common.{query_file_read_rich, _find_in_line_from}
 
 fn query_tokens_nonnegative_int_or_default(value: text, default_value: i64) -> i64:
@@ -165,15 +165,8 @@ fn query_inlay_hints(file: text, cmd_args: [text]) -> i64:
     if end_line <= 0 or end_line > lines.len():
         end_line = lines.len()
 
-    # Build function return type map from outline for better inference
-    var fn_names: [text] = []
-    var fn_returns: [text] = []
-    _collect_fn_return_types(content, fn_names, fn_returns)
-
-    # Build function parameter name map for parameter hints
-    var fn_param_map_names: [text] = []
-    var fn_param_map_params: [text] = []
-    _collect_fn_param_names(content, fn_param_map_names, fn_param_map_params)
+    # Build both function maps in one pass over the already-split source.
+    val fn_outline = _collect_fn_outline(lines)
 
     var hint_count = 0
     var li = start_line
@@ -224,7 +217,7 @@ fn query_inlay_hints(file: text, cmd_args: [text]) -> i64:
                         eqi = eqi + 1
                     if found_eq:
                         val rhs = after_name.substring(eq_pos + 1).trim()
-                        val inferred = _infer_type_from_rhs(rhs, fn_names, fn_returns)
+                        val inferred = _infer_type_from_rhs(rhs, fn_outline.return_types)
                         if inferred != "":
                             val indent_len = line.len() - trimmed.len()
                             val col_pos = indent_len + name_start + var_name.len()
@@ -235,7 +228,7 @@ fn query_inlay_hints(file: text, cmd_args: [text]) -> i64:
                             hint_count = hint_count + 1
 
         # --- Parameter name hints at call sites ---
-        hint_count = hint_count + _emit_param_hints_for_line(line, li, fn_param_map_names, fn_param_map_params, format)
+        hint_count = hint_count + _emit_param_hints_for_line(line, li, fn_outline.parameter_names, format)
 
         li = li + 1
 
@@ -243,49 +236,7 @@ fn query_inlay_hints(file: text, cmd_args: [text]) -> i64:
         print "No inlay hints in range"
     0
 
-fn _collect_fn_param_names(content: text, fn_names: [text], fn_params: [text]):
-    """Collect function names and their parameter lists from source outline.
-    fn_params stores comma-separated parameter names (without types) for each function.
-    """
-    val lines = content.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        var rest = ""
-        if trimmed.starts_with("fn "):
-            rest = trimmed.substring(3)
-        elif trimmed.starts_with("static fn "):
-            rest = trimmed.substring(10)
-        elif trimmed.starts_with("me "):
-            rest = trimmed.substring(3)
-        elif trimmed.starts_with("extern fn "):
-            rest = trimmed.substring(10)
-        if rest != "":
-            val name = _extract_ident_from(rest)
-            if name != "":
-                val params_str = _extract_param_names_from(rest)
-                fn_names.push(name)
-                fn_params.push(params_str)
-
-fn _extract_param_names_from(s: text) -> text:
-    """Extract parameter names (without types) from a function signature string.
-    Returns comma-separated names like 'x,y,z'.
-    """
-    val inner = _extract_params_from(s)
-    if inner.trim() == "":
-        return ""
-    # Split by commas and extract each param name
-    val params = inner.split(",")
-    var names: [text] = []
-    for param in params:
-        val pt = param.trim()
-        if pt == "":
-            continue
-        val pname = _extract_ident_from(pt)
-        if pname != "" and pname != "self":
-            names.push(pname)
-    names.join(",")
-
-fn _emit_param_hints_for_line(line: text, line_num: i64, fn_names: [text], fn_params: [text], format: text) -> i64:
+fn _emit_param_hints_for_line(line: text, line_num: i64, fn_params: Dict<text, text>, format: text) -> i64:
     """Scan a line for function calls and emit parameter name hints.
     Returns the number of hints emitted.
     """
@@ -306,7 +257,7 @@ fn _emit_param_hints_for_line(line: text, line_num: i64, fn_names: [text], fn_pa
             # Check if followed by (
             if end_ci < line.len() and line.substring(end_ci, end_ci + 1) == "(":
                 # Look up parameter names for this function
-                val param_str = _lookup_params(call_name, fn_names, fn_params)
+                val param_str = if fn_params.contains_key(call_name): fn_params[call_name] else: ""
                 if param_str != "":
                     val param_list = param_str.split(",")
                     # Find the arguments in the call
@@ -328,15 +279,6 @@ fn _emit_param_hints_for_line(line: text, line_num: i64, fn_names: [text], fn_pa
         else:
             ci = ci + 1
     count
-
-fn _lookup_params(fn_name: text, fn_names: [text], fn_params: [text]) -> text:
-    """Look up parameter names for a function by name."""
-    var i = 0
-    while i < fn_names.len():
-        if fn_names[i] == fn_name and i < fn_params.len():
-            return fn_params[i]
-        i = i + 1
-    ""
 
 fn _extract_call_arg_positions(line: text, paren_pos: i64) -> [i64]:
     """Extract the column positions where each argument starts in a function call.
