@@ -40,9 +40,15 @@ extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
 extern fn rt_winit_window_set_fullscreen(win: i64, on: bool) -> bool
 extern fn rt_winit_window_is_fullscreen(win: i64) -> bool
-extern fn rt_winit_window_get_size(win: i64) -> (i64, i64)
-extern fn rt_winit_window_scale_factor(win: i64) -> f64
+@unsafe(reason: "raw Winit window width ABI; negative sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_window_inner_width(win: i64) -> i64
+@unsafe(reason: "raw Winit window height ABI; negative sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_window_inner_height(win: i64) -> i64
+@unsafe(reason: "raw Winit scale-factor milli ABI; negative sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_window_scale_factor_milli(win: i64) -> i64
+@unsafe(reason: "raw Winit window-position ABI; INT64_MIN sentinel reports stale handle or unavailable position", capabilities: [ffi])
 extern fn rt_winit_window_position_x(win: i64) -> i64
+@unsafe(reason: "raw Winit window-position ABI; INT64_MIN sentinel reports stale handle or unavailable position", capabilities: [ffi])
 extern fn rt_winit_window_position_y(win: i64) -> i64
 extern fn rt_winit_window_set_position(win: i64, x: i64, y: i64) -> i64
 extern fn rt_winit_event_window_x(ev: i64) -> i64
@@ -129,26 +135,45 @@ fn winit_window_is_fullscreen(win: WinitWindow) -> bool:
 
 # Current inner size (width, height) in physical pixels from the runtime window
 # record. Updated by present/resize handling, so it reflects fullscreen growth.
-fn winit_window_get_size(win: WinitWindow) -> (i64, i64):
+fn winit_window_get_size(win: WinitWindow) -> (i64, i64)?:
     if not win.is_valid:
-        return (0, 0)
-    rt_winit_window_get_size(win.handle)
+        return nil
+    var width: i64 = -1
+    var height: i64 = -1
+    unsafe(capabilities: [ffi]):
+        width = rt_winit_window_inner_width(win.handle)
+        height = rt_winit_window_inner_height(win.handle)
+    if width < 0 or height < 0:
+        return nil
+    (width, height)
 
 # Backing scale factor of the window (1.0 non-Retina, 2.0 Retina). Combined with
 # the physical inner size from winit_window_get_size this lets a caller confirm it
 # is rendering at native/physical resolution rather than logical points.
-fn winit_window_scale_factor(win: WinitWindow) -> f64:
+fn winit_window_scale_factor(win: WinitWindow) -> f64?:
     if not win.is_valid:
-        return 1.0
-    rt_winit_window_scale_factor(win.handle)
+        return nil
+    var milli: i64 = -1
+    unsafe(capabilities: [ffi]):
+        milli = rt_winit_window_scale_factor_milli(win.handle)
+    if milli < 0:
+        return nil
+    milli.to_f64() / 1000.0
 
 # Native outer position in physical desktop coordinates.
-fn winit_window_get_position(win: WinitWindow) -> WinitWindowPosition:
+fn winit_window_get_position(win: WinitWindow) -> WinitWindowPosition?:
     if not win.is_valid:
-        return WinitWindowPosition(x: 0, y: 0)
+        return nil
+    var x: i64 = -9223372036854775808
+    var y: i64 = -9223372036854775808
+    unsafe(capabilities: [ffi]):
+        x = rt_winit_window_position_x(win.handle)
+        y = rt_winit_window_position_y(win.handle)
+    if x == -9223372036854775808 or y == -9223372036854775808:
+        return nil
     WinitWindowPosition(
-        x: rt_winit_window_position_x(win.handle).to_i32(),
-        y: rt_winit_window_position_y(win.handle).to_i32()
+        x: x.to_i32(),
+        y: y.to_i32()
     )
 
 # Request a native outer-position change. Window-management policy remains in

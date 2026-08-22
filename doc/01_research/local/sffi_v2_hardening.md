@@ -635,3 +635,24 @@ improves to 220 contracted and 255 uncontracted unsafe declarations; the
 canonical SDL module itself is 65/65 contracted. The provider artifact and
 runtime evidence remain unsigned/unbound, so this is safe lifting of known
 sentinels rather than full verification.
+
+The owned-production inventory is substantially broader than the canonical SDL
+slice. After excluding tests, examples, and vendored runtime/compiler sources,
+the current declaration-row census contains 223 fully tagged/contracted rows,
+255 tagged rows missing contracts, 347 contracted rows missing unsafe tags, and
+7,584 rows missing both. These are declaration rows rather than unique symbols;
+the complete inventory contains 3,967 distinct extern symbols across all
+classifications. Therefore no repository-wide safe/verified claim is justified.
+
+The first Winit read slice exposed a cross-engine ABI split: Simple requested an
+interpreter-only tuple size and floating scale symbol, while the Rust provider
+exports scalar width/height and milli-scale C ABI functions. The wrapper now
+uses those native symbols in both engines. Width, height, scale, and x/y
+position reserve disjoint failure sentinels and lift invalid reads to typed
+absence. Five of Winit's thirty raw declarations are now contracted/tagged.
+
+Size and position retain two scalar reads; scale retains one. The changes add
+no allocation, retained memory, lock, hash, dynamic lookup, error query, or
+retry. The Simple check, Rust provider tests, GUI-feature interpreter sentinel
+test, and Winit call/memory-shape audit pass. Winit provider signing and bound
+runtime evidence remain absent, so the family is hardened but not verified.

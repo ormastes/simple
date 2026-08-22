@@ -416,4 +416,19 @@ mod tests {
         let args = [Value::text("Simple GUI")];
         assert_eq!(get_string(&args, 0, "test").unwrap(), "Simple GUI");
     }
+
+    #[test]
+    fn invalid_window_reads_use_disjoint_native_sentinels() {
+        let args = [Value::Int(i64::MAX)];
+        for name in [
+            "rt_winit_window_inner_width",
+            "rt_winit_window_inner_height",
+            "rt_winit_window_scale_factor_milli",
+        ] {
+            assert!(matches!(dispatch(name, &args).unwrap(), Value::Int(-1)));
+        }
+        for name in ["rt_winit_window_position_x", "rt_winit_window_position_y"] {
+            assert!(matches!(dispatch(name, &args).unwrap(), Value::Int(i64::MIN)));
+        }
+    }
 }

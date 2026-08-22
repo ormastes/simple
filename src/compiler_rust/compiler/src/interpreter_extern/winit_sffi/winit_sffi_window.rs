@@ -497,6 +497,36 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                     .unwrap_or(1.0),
             ))
         }
+        "rt_winit_window_scale_factor_milli" => {
+            let window_id = get_i64(args, 0, name)?;
+            Ok(int_value(
+                WINDOW_STATES
+                    .lock()
+                    .get(&window_id)
+                    .map(|window| (window.scale_factor * 1000.0).round() as i64)
+                    .unwrap_or(-1),
+            ))
+        }
+        "rt_winit_window_inner_width" => {
+            let window_id = get_i64(args, 0, name)?;
+            Ok(int_value(
+                WINDOW_STATES
+                    .lock()
+                    .get(&window_id)
+                    .map(|window| window.width as i64)
+                    .unwrap_or(-1),
+            ))
+        }
+        "rt_winit_window_inner_height" => {
+            let window_id = get_i64(args, 0, name)?;
+            Ok(int_value(
+                WINDOW_STATES
+                    .lock()
+                    .get(&window_id)
+                    .map(|window| window.height as i64)
+                    .unwrap_or(-1),
+            ))
+        }
         "rt_winit_window_position_x" => {
             let window_id = get_i64(args, 0, name)?;
             Ok(int_value(
@@ -504,7 +534,7 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                     .lock()
                     .get(&window_id)
                     .map(|window| window.x as i64)
-                    .unwrap_or(0),
+                    .unwrap_or(i64::MIN),
             ))
         }
         "rt_winit_window_position_y" => {
@@ -514,7 +544,7 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                     .lock()
                     .get(&window_id)
                     .map(|window| window.y as i64)
-                    .unwrap_or(0),
+                    .unwrap_or(i64::MIN),
             ))
         }
         _ => Err(super::unknown_function(name)),

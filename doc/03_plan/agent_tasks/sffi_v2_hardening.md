@@ -132,3 +132,8 @@ passing placeholder.
     contracted after removing the unused unchecked fullscreen ABI and typing
     error-text ownership. Next bind signed SDL artifact admission and sanitizer/
     proof receipts while continuing the wider 255-declaration SFFI inventory.
+24. Winit size/scale/position reads now share the provider's scalar C ABI in
+    interpreter and native lanes, use disjoint failure sentinels, and lift to
+    typed absence with unchanged read/memory shape. Continue the remaining 25
+    Winit declarations, then prioritize the full owned-production census
+    (255 tagged-contract gaps, 347 unsafe-tag gaps, 7,584 rows missing both).

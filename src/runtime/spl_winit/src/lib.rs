@@ -535,7 +535,7 @@ fn mouse_button_to_simple(button: MouseButton) -> i64 {
 
 #[cfg(test)]
 mod sided_modifier_tests {
-    use super::{keycode_to_simple, KeyCode};
+    use super::{KeyCode, keycode_to_simple};
 
     #[test]
     fn preserves_left_and_right_control_and_alt_identity() {
@@ -812,11 +812,7 @@ pub extern "C" fn rt_winit_window_present_staged(win: i64, _w: i64, _h: i64) -> 
     });
     // Let the loop breathe so the freshly presented frame is serviced.
     pump_once(1);
-    if ok {
-        1
-    } else {
-        0
-    }
+    if ok { 1 } else { 0 }
 }
 
 #[no_mangle]
@@ -843,7 +839,7 @@ pub extern "C" fn rt_winit_window_position_x(win: i64) -> i64 {
             .and_then(|ps| ps.inner.windows.get(&win))
             .and_then(|slot| slot.window.outer_position().ok())
             .map(|pos| pos.x as i64)
-            .unwrap_or(0)
+            .unwrap_or(i64::MIN)
     })
 }
 
@@ -856,7 +852,7 @@ pub extern "C" fn rt_winit_window_position_y(win: i64) -> i64 {
             .and_then(|ps| ps.inner.windows.get(&win))
             .and_then(|slot| slot.window.outer_position().ok())
             .map(|pos| pos.y as i64)
-            .unwrap_or(0)
+            .unwrap_or(i64::MIN)
     })
 }
 
@@ -916,7 +912,7 @@ pub extern "C" fn rt_winit_window_inner_width(win: i64) -> i64 {
             .as_ref()
             .and_then(|ps| ps.inner.windows.get(&win))
             .map(|slot| slot.window.inner_size().width as i64)
-            .unwrap_or(0)
+            .unwrap_or(-1)
     })
 }
 
@@ -928,7 +924,7 @@ pub extern "C" fn rt_winit_window_inner_height(win: i64) -> i64 {
             .as_ref()
             .and_then(|ps| ps.inner.windows.get(&win))
             .map(|slot| slot.window.inner_size().height as i64)
-            .unwrap_or(0)
+            .unwrap_or(-1)
     })
 }
 
@@ -991,7 +987,7 @@ pub extern "C" fn rt_winit_window_scale_factor_milli(win: i64) -> i64 {
             .as_ref()
             .and_then(|ps| ps.inner.windows.get(&win))
             .map(|slot| (slot.window.scale_factor() * 1000.0).round() as i64)
-            .unwrap_or(1000)
+            .unwrap_or(-1)
     })
 }
 
@@ -1644,11 +1640,7 @@ pub extern "C" fn rt_winit_buffer_present(
         buffer.present().is_ok()
     });
     pump_once(1);
-    if ok {
-        1
-    } else {
-        0
-    }
+    if ok { 1 } else { 0 }
 }
 
 #[no_mangle]
@@ -1973,6 +1965,15 @@ pub extern "C" fn rt_winit_save_pixels_bmp(
 #[cfg(test)]
 mod sffi_contract_tests {
     use super::*;
+
+    #[test]
+    fn invalid_window_reads_use_disjoint_sentinels() {
+        assert_eq!(rt_winit_window_inner_width(i64::MAX), -1);
+        assert_eq!(rt_winit_window_inner_height(i64::MAX), -1);
+        assert_eq!(rt_winit_window_scale_factor_milli(i64::MAX), -1);
+        assert_eq!(rt_winit_window_position_x(i64::MAX), i64::MIN);
+        assert_eq!(rt_winit_window_position_y(i64::MAX), i64::MIN);
+    }
 
     #[test]
     fn buffer_free_and_readback_fail_closed() {
