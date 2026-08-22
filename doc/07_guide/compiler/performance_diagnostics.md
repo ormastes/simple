@@ -76,6 +76,13 @@ unknown locals, or budget exhaustion make liveness explicitly incomplete. A
 `CallTerminator` result with an unwind edge is conservatively not treated as a block-wide
 kill because it exists only on the normal edge.
 
+The canonical access visitor explicitly models ownership, async, probes, pipeline,
+SIMD/warp, GPU, VHDL, nested-place, and inline-assembly operands. Assembly outputs must
+name locals. Result-match ghost metadata, text-encoded GPU launch arguments, and hidden
+VHDL process-body CFG edges still make the facts incomplete; no liveness consumer may
+guess through those cases. Dormant DCE also conservatively retains every newly modeled
+effectful family.
+
 Every pass has an explicit preservation contract. Current transforming adapters
 conservatively invalidate CFG, dominance, def/use, and liveness; non-transforming statuses preserve
 them. Finer preservation can be admitted only with a focused witness. Loop forest,
