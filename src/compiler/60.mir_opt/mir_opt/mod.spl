@@ -76,7 +76,11 @@ use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     OptimizerBackendKind
 }
 use compiler.backend.feature_caps.{X86Caps, TargetCapsKind}
-use compiler.mir_opt.optimization_passes.{OptimizationStats, optimize_write_coalesce, optimize_read_ahead_hoist, optimize_syscall_batch}
+use compiler.mir_opt.optimization_passes.{
+    OptimizationStats,
+    optimize_write_coalesce, optimize_read_ahead_hoist, optimize_syscall_batch,
+    count_write_coalesce, count_syscall_batch
+}
 use compiler.mir_opt._OptimizationPasses.io_passes.{elide_bulk_copy}
 
 # ============================================================================
@@ -249,6 +253,13 @@ struct PassFunctionOutcome:
     function: MirFunction
     record: PassRunRecord
     verifier: MirStructuralVerificationReceipt
+
+struct TypedFunctionPassOutcome:
+    function: MirFunction
+    candidates: i64
+    transformed: i64
+    rejected: i64
+    reason_code: text
 
 struct MirPassDescriptor:
     stable_name: text
@@ -551,9 +562,10 @@ fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerifi
 fn run_named_pass_with_record(pass_name: text, func: MirFunction) -> Result<PassFunctionOutcome, text>:
     """Run one function-scoped pass with structural before/after receipts.
 
-    Candidate counts are populated only when the serialized function changes;
-    native per-pass candidate/rejection statistics remain a separately tracked
-    requirement and are never fabricated here.
+    Active adapters must provide exact native candidate outcomes. Serialized
+    MIR is used only as an independent change cross-check; it never invents a
+    candidate count. Native rejected-reason statistics remain separately
+    tracked where an adapter has proof blockers.
     """
     val before_receipt = mir_structural_verification_receipt(func)
     if not before_receipt.valid:
@@ -574,20 +586,32 @@ fn run_named_pass_with_record(pass_name: text, func: MirFunction) -> Result<Pass
         case Function | FsDriver: pass_dn
 
     val before_text = serialize_mir_function(func)
-    val updated = run_typed_pass_on_function(found.kind, func)
+    val typed_result = run_active_typed_pass_with_outcome(found.kind, func)
+    if typed_result.is_err():
+        return Err(typed_result.err().unwrap())
+    val typed_outcome = typed_result.ok().unwrap()
+    val updated = typed_outcome.function
     val after_receipt = mir_structural_verification_receipt(updated)
     if not after_receipt.valid:
         return Err("invalid MIR after pass " + found.stable_name + ": " + after_receipt.errors.join("; "))
     var disposition = PassRunDisposition.Unchanged
-    if serialize_mir_function(updated) != before_text:
+    val serialized_changed = serialize_mir_function(updated) != before_text
+    if serialized_changed:
         disposition = PassRunDisposition.Transformed
+    if typed_outcome.transformed > 0 and not serialized_changed:
+        return Err("pass outcome mismatch for " + found.stable_name + ": transformed candidates produced unchanged MIR")
+    if typed_outcome.transformed == 0 and serialized_changed:
+        return Err("pass outcome mismatch for " + found.stable_name + ": MIR changed without a transformed candidate")
     var record = pass_run_record_new(pass_name, found.stable_name, found.status, found.expectation, found.scope, disposition)
     record.functions_seen = 1
+    record.candidates = typed_outcome.candidates
+    record.transformed = typed_outcome.transformed
+    record.rejected = typed_outcome.rejected
     record.instructions_before = before_receipt.instruction_count
     record.instructions_after = after_receipt.instruction_count
-    if disposition == PassRunDisposition.Transformed:
-        record.candidates = 1
-        record.transformed = 1
+    if typed_outcome.transformed > 0:
+        record = pass_run_record_add_reason(
+            record, typed_outcome.reason_code, typed_outcome.transformed)
     else:
         record = pass_run_record_add_reason(record, "no_change", 1)
     val record_errors = pass_run_record_integrity_errors(record)
@@ -1332,6 +1356,30 @@ fn run_typed_pass_on_function(kind: PassKind, func: MirFunction) -> MirFunction:
         case TypedByteCanon:
             var tbc = create_typed_byte_canon_pass()
             typed_byte_canon_run_on_function(tbc, func)
+
+fn run_active_typed_pass_with_outcome(kind: PassKind, func: MirFunction) -> Result<TypedFunctionPassOutcome, text>:
+    """Run only active function/FsDriver adapters with native exact counters.
+
+    A newly activated pass must add an outcome adapter here. Falling back to a
+    serialized changed/not-changed Boolean would fabricate candidate counts.
+    """
+    match kind:
+        case WriteCoalesce:
+            val candidates = count_write_coalesce(func)
+            var stats = OptimizationStats.create()
+            val updated = optimize_write_coalesce(func, stats)
+            Ok(TypedFunctionPassOutcome(
+                updated, candidates, candidates, 0,
+                "fs.two_stores_same_base"))
+        case SyscallBatch:
+            val candidates = count_syscall_batch(func)
+            var stats = OptimizationStats.create()
+            val updated = optimize_syscall_batch(func, stats)
+            Ok(TypedFunctionPassOutcome(
+                updated, candidates, candidates, 0,
+                "fs.two_calls_same_callee"))
+        case _:
+            Err("active pass lacks an exact function outcome adapter")
 
 fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirModule:
     """Run pipeline passes on all functions in a module.
