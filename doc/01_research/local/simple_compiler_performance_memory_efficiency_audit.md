@@ -2417,3 +2417,24 @@ runs, and guards width growth. Module names and each module-owned key set are
 sorted once and reused. Existing reverse-insertion catalog coverage remains the
 behavioral witness; execution timing, allocation, and RSS evidence is not
 claimed under the no-verify instruction.
+
+### Storage-layout overlap proof foundation
+
+`storage_layout_access_advisory_v1` retained an all-pairs typed-fact overlap
+scan after field membership and identity ordering had already been linearized.
+The scan compared unrelated regions, non-field facts, and same-field facts,
+giving `Theta(T^2)` predicate work for `T` typed storage facts.
+
+The replacement materializes compact numeric intervals only while an advisory
+is otherwise viable, stable-merge sorts them by region/start/end/field, and uses
+the two greatest endpoints owned by distinct fields. For the
+well-formed half-open ranges emitted by storage analysis, detection is
+`O(T log T)` time and `O(T)` scratch. A region-local exact fallback preserves
+the historical predicate for externally constructed malformed known ranges;
+identity rows retain their byte-for-byte lexical ordering. Direct summary
+fixtures cover adjacency, region separation, repeated fields, nesting,
+equal starts, unknown ranges, incomplete summaries, and input-order identity.
+
+Repository references currently show this advisory is not yet called by a
+production compiler pipeline; the change hardens the planned activation path
+and does not claim present build-time, RSS, or allocation improvement.
