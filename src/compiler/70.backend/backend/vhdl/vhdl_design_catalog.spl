@@ -52,16 +52,41 @@ struct VhdlDesignCatalog:
 
 fn vhdl_catalog_sorted_text(values: [text]) -> [text]:
     var result = values
-    var i = 0
-    while i < result.len():
-        var j = i + 1
-        while j < result.len():
-            if result[j] < result[i]:
-                val tmp = result[i]
-                result[i] = result[j]
-                result[j] = tmp
-            j = j + 1
-        i = i + 1
+    val count = result.len()
+    if count <= 1:
+        return result
+    var scratch = values
+    var width = 1
+    while width < count:
+        var run_start = 0
+        while run_start < count:
+            var middle = run_start + width
+            if middle > count:
+                middle = count
+            var run_end = middle + width
+            if run_end > count:
+                run_end = count
+            var left = run_start
+            var right = middle
+            var output = run_start
+            while output < run_end:
+                if right < run_end and (left >= middle or
+                    result[right] < result[left]):
+                    scratch[output] = result[right]
+                    right = right + 1
+                else:
+                    scratch[output] = result[left]
+                    left = left + 1
+                output = output + 1
+            run_start = run_end
+        var copy_index = 0
+        while copy_index < count:
+            result[copy_index] = scratch[copy_index]
+            copy_index = copy_index + 1
+        if width > count / 2:
+            width = count
+        else:
+            width = width * 2
     result
 
 fn vhdl_catalog_module_alias_key(module_name: text) -> text:
@@ -81,16 +106,41 @@ fn vhdl_catalog_metadata_index_record(mut rows: Dict<text, i64>,
 
 fn vhdl_catalog_sorted_symbols(values: [SymbolId]) -> [SymbolId]:
     var result = values
-    var i = 0
-    while i < result.len():
-        var j = i + 1
-        while j < result.len():
-            if result[j].id < result[i].id:
-                val tmp = result[i]
-                result[i] = result[j]
-                result[j] = tmp
-            j = j + 1
-        i = i + 1
+    val count = result.len()
+    if count <= 1:
+        return result
+    var scratch = values
+    var width = 1
+    while width < count:
+        var run_start = 0
+        while run_start < count:
+            var middle = run_start + width
+            if middle > count:
+                middle = count
+            var run_end = middle + width
+            if run_end > count:
+                run_end = count
+            var left = run_start
+            var right = middle
+            var output = run_start
+            while output < run_end:
+                if right < run_end and (left >= middle or
+                    result[right].id < result[left].id):
+                    scratch[output] = result[right]
+                    right = right + 1
+                else:
+                    scratch[output] = result[left]
+                    left = left + 1
+                output = output + 1
+            run_start = run_end
+        var copy_index = 0
+        while copy_index < count:
+            result[copy_index] = scratch[copy_index]
+            copy_index = copy_index + 1
+        if width > count / 2:
+            width = count
+        else:
+            width = width * 2
     result
 
 fn vhdl_catalog_symbol(symbol: SymbolId, rebase: Dict<i64, i64>) -> SymbolId:
@@ -640,7 +690,8 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
     # Types need stable design identities because every source module owns a
     # local SymbolTable. HIR retains the defining-module provenance that MIR's
     # raw SymbolId intentionally omits.
-    for module_name in vhdl_catalog_sorted_text(modules.keys()):
+    val ordered_module_names = vhdl_catalog_sorted_text(modules.keys())
+    for module_name in ordered_module_names:
         val module = modules[module_name]
         for symbol in vhdl_catalog_sorted_symbols(module.types.keys()):
             val type_def = module.types[symbol]
@@ -671,8 +722,12 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
         else:
             source_name
 
-    for module_name in vhdl_catalog_sorted_text(modules.keys()):
+    for module_name in ordered_module_names:
         val module = modules[module_name]
+        val ordered_function_symbols = vhdl_catalog_sorted_symbols(module.functions.keys())
+        val ordered_static_symbols = vhdl_catalog_sorted_symbols(module.statics.keys())
+        val ordered_constant_symbols = vhdl_catalog_sorted_symbols(module.constants.keys())
+        val ordered_type_symbols = vhdl_catalog_sorted_symbols(module.types.keys())
         var rebase: Dict<i64, i64> = {}
         for canonical_symbol in global_canonical_type_symbols.keys():
             rebase[canonical_symbol] = global_canonical_type_symbols[canonical_symbol]
@@ -692,27 +747,27 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
                         if rt_dict_contains(global_static_symbols, identity):
                             rebase[hir_symbol.id.id] = global_static_symbols[identity]
                     case _: ()
-        for symbol in vhdl_catalog_sorted_symbols(module.functions.keys()):
+        for symbol in ordered_function_symbols:
             if not rt_dict_contains(rebase, symbol.id):
                 rebase[symbol.id] = next_symbol
                 next_symbol = next_symbol + 1
-        for symbol in vhdl_catalog_sorted_symbols(module.statics.keys()):
+        for symbol in ordered_static_symbols:
             val static_ = module.statics[symbol]
             val identity = vhdl_catalog_static_identity(module_name, symbol.id,
                 static_.name, hir_modules)
             rebase[symbol.id] = global_static_symbols[identity]
-        for symbol in vhdl_catalog_sorted_symbols(module.constants.keys()):
+        for symbol in ordered_constant_symbols:
             if not rt_dict_contains(rebase, symbol.id):
                 rebase[symbol.id] = next_symbol
                 next_symbol = next_symbol + 1
-        for symbol in vhdl_catalog_sorted_symbols(module.types.keys()):
+        for symbol in ordered_type_symbols:
             val type_def = module.types[symbol]
             val identity = vhdl_catalog_type_identity(module_name, symbol.id,
                 type_def.name, hir_modules)
             rebase[symbol.id] = global_type_symbols[identity]
 
         val module_alias_key = vhdl_catalog_module_alias_key(module_name)
-        for symbol in vhdl_catalog_sorted_symbols(module.functions.keys()):
+        for symbol in ordered_function_symbols:
             var func = vhdl_catalog_function(module.functions[symbol], rebase)
             val metadata_exact_key = vhdl_catalog_metadata_key(
                 module_name, func.name)
@@ -790,17 +845,17 @@ fn vhdl_build_design_catalog_with_metadata(modules: Dict<text, MirModule>,
             all_functions[func.symbol] = func
             all_function_modules[func.symbol.id] = module_name
 
-        for symbol in vhdl_catalog_sorted_symbols(module.statics.keys()):
+        for symbol in ordered_static_symbols:
             val static_ = vhdl_catalog_static(module.statics[symbol], rebase)
             all_statics[static_.symbol] = static_
             all_static_modules[static_.symbol.id] = module_name
 
-        for symbol in vhdl_catalog_sorted_symbols(module.constants.keys()):
+        for symbol in ordered_constant_symbols:
             val constant = vhdl_catalog_constant(module.constants[symbol], rebase)
             all_constants[constant.symbol] = constant
             all_constant_modules[constant.symbol.id] = module_name
 
-        for symbol in vhdl_catalog_sorted_symbols(module.types.keys()):
+        for symbol in ordered_type_symbols:
             val identity = vhdl_catalog_type_identity(module_name, symbol.id,
                 module.types[symbol].name, hir_modules)
             var type_def = vhdl_catalog_type_def(module.types[symbol], rebase)
