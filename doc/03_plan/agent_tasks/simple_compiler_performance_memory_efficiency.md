@@ -170,3 +170,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Reuse lines/contexts in duplicate-typed-argument analysis, including per-signature calls.
 - Preserve standalone compatibility wrappers and registry result order.
 - Follow-up: index duplicate-typed call sites once and migrate remaining split-based rules.
+
+## Completed tool tranche: compiler-owned EasyFix line migration
+
+- Add canonical-line variants for star, wide-public, bare-bool, primitive, and script rules.
+- Reuse shared contexts for short-grammar analysis.
+- Add line-based file-scope allow handling for primitive APIs.
+- Preserve allocation-free compatibility path gates on excluded files.
+- Pin registry dispatch to every new view variant.
+- Follow-up: migrate stdlib contextual-keyword/deprecation/stub scanners.
