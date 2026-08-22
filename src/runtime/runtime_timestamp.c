@@ -132,7 +132,13 @@ int64_t rt_timestamp_diff_days(int64_t micros1, int64_t micros2) {
 #if defined(_MSC_VER)
 #define RT_TIME_THREAD_LOCAL __declspec(thread)
 #else
-#define RT_TIME_THREAD_LOCAL _Thread_local
+/* initial-exec TLS model: plain _Thread_local under -fPIC lowers to a
+   general-dynamic access through __tls_get_addr, which the exact Stage4 C
+   provider contract (STAGE4_C_TIME_UNDEFINED = clock_gettime only,
+   native_project/tools.rs) rejects as an unexpected undefined. initial-exec
+   uses the static TLS block -- always valid for a runtime archive linked into
+   an executable -- and keeps the provider's external surface auditable. */
+#define RT_TIME_THREAD_LOCAL _Thread_local __attribute__((tls_model("initial-exec")))
 #endif
 
 static RT_TIME_THREAD_LOCAL bool g_progress_initialized = false;

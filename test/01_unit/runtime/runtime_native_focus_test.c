@@ -125,7 +125,9 @@ int main(void) {
     assert(saved_stdout >= 0);
     assert(dup2(stdout_pipe[1], STDOUT_FILENO) == STDOUT_FILENO);
     close(stdout_pipe[1]);
-    assert(!rt_terminal_is_tty_handle(STDOUT_FILENO));
+    /* stdout is now a pipe: the real, declared probe (runtime.h) must say
+       "not a tty". rt_terminal_is_tty_handle never existed anywhere. */
+    assert(!rt_terminal_stdout_is_tty());
     assert(dup2(saved_stdout, STDOUT_FILENO) == STDOUT_FILENO);
     close(saved_stdout);
     close(stdout_pipe[0]);
@@ -411,7 +413,9 @@ int main(void) {
     SplArray* float_left = rt_array_new(1);
     SplArray* float_right = rt_array_new(1);
     assert(rt_array_push(float_left, rt_value_float(0)));
-    assert(rt_array_push(float_right, rt_value_float(INT64_MIN)));
+    /* +0.0 == -0.0. Written as INT64_MIN when rt_value_float took raw bits;
+       the declared ABI (runtime.h) takes a double, so spell the value. */
+    assert(rt_array_push(float_right, rt_value_float(-0.0)));
     assert(rt_native_eq((int64_t)(uintptr_t)float_left,
                         (int64_t)(uintptr_t)float_right));
     int64_t enum_left = rt_enum_new(7, 3, rt_value_int(42));

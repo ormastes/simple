@@ -38,6 +38,7 @@
 #include <windows.h>
 #endif
 #if !defined(_WIN32)
+#include <dirent.h>
 #include <netdb.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
@@ -494,6 +495,16 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_sdl2_create_window(const char* title,
 }
 #if defined(SIMPLE_CORE_C_STANDALONE)
 bool rt_is_interpreter_runtime(void) {
+    return false;
+}
+
+/* Core-C standalone archives back AOT-native binaries only; seed-JIT code
+   never runs under them. Paired with rt_is_interpreter_runtime above so the
+   standalone lane defines BOTH runtime-kind probes declared in runtime.h
+   (CORE_REQUIRED_RUNTIME_SYMBOLS lists both). runtime.c also defines this,
+   but runtime.c is not a core-C archive member (tools.rs runtime_inputs), so
+   without this the archive was one required ABI symbol short. */
+bool rt_is_jit_runtime(void) {
     return false;
 }
 
@@ -2460,10 +2471,10 @@ int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
         : rt_core_nil();
 }
 
-int64_t rt_cstring_to_text(const char* cstr) {
-    if (!cstr) return rt_string_new(NULL, 0);
-    return rt_string_new((const uint8_t*)cstr, (uint64_t)strlen(cstr));
-}
+/* rt_cstring_to_text is owned by runtime_string_ffi.c, which runtime_contracts.c
+ * (a member of every bundle that also compiles this file) #includes since
+ * b81cd5afd72. A second copy here made the Stage4 archive core define it twice
+ * ("Stage4 archive core defines `rt_cstring_to_text` 2 times"). */
 
 /* Interned boxing for compile-time string LITERALS only.
  *
@@ -3304,11 +3315,20 @@ static int rt_core_value_eq_inner(
     RtCoreEqPair* visited,
     size_t visited_len);
 
-static int rt_core_generic_int_eq(int64_t value, int64_t expected) {
+/* `expected` is a raw word from a bytes/u64-packed array, i.e. an UNSIGNED
+ * value that may have its top bit set (packed `-1` == 2^64-1). The generic
+ * side stores such a word as a heap uint (rt_core_value_u64_compact), so the
+ * compare must be unsigned on both sides. The old `expected >= 0` guard made
+ * every packed word >= 2^63 unequal to its own generic twin. */
+static int rt_core_generic_int_eq(int64_t value, int64_t expected_raw) {
+    uint64_t expected = (uint64_t)expected_raw;
     RtCoreUInt* u = rt_core_as_heap_uint(value);
-    int64_t signed_value = rt_core_is_int(value) ? rt_core_as_int(value) : -1;
-    return (rt_core_is_int(value) && expected >= 0 && signed_value >= 0 && signed_value == expected) ||
-        (u && expected >= 0 && u->value == (uint64_t)expected);
+    if (u) return u->value == expected;
+    if (rt_core_is_int(value)) {
+        int64_t signed_value = rt_core_as_int(value);
+        return signed_value >= 0 && (uint64_t)signed_value == expected;
+    }
+    return 0;
 }
 
 static int rt_core_array_eq(
@@ -10237,6 +10257,196 @@ int rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
     return rt_is_dir(path) ? 1 : 0;
 }
 
+/* ----------------------------------------------------------------
+ * std.io_runtime fs/shell externs that the core-C archive never defined.
+ *
+ * rt_dir_list / rt_dir_remove / rt_file_copy / rt_file_rename /
+ * rt_file_hash_sha256 / rt_shell_exec are declared in
+ * src/lib/nogc_sync_mut/io_runtime.spl and emitted by native codegen with the
+ * (ptr,len) text ABI (codegen/instr/calls.rs text_arg_indices; runtime_sffi.rs
+ * RuntimeFuncSpec rows) -- except rt_shell_exec, which is unlisted and so
+ * receives its `text` as a tagged runtime value. Until 2026-08-22 only the
+ * Rust runtime / interpreter defined them, so a core-C native link of anything
+ * importing io_runtime (e.g. simple_lsp_mcp) carried undefined symbols that the
+ * link tolerated -- the rt_unwrap_or_trap incident class. Semantics mirror
+ * runtime/src/value/sffi/file_io/{directory,file_ops}.rs and
+ * interpreter_extern/system.rs::rt_shell_exec.
+ * ---------------------------------------------------------------- */
+
+/* Entry NAMES (not full paths), `.`/`..` excluded. An unreadable directory
+ * yields an EMPTY array, matching runtime.c's copy and the `[text]`
+ * (non-optional) Simple signature; the Rust runtime's nil is the outlier.
+ * Order is whatever the OS yields. */
+int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return (int64_t)(uintptr_t)rt_array_new(0);
+#if defined(_WIN32)
+    char pattern[RT_TEXT_PATH_MAX + 4];
+    int n = snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    SplArray* out = rt_array_new(0);
+    if (n < 0 || (size_t)n >= sizeof(pattern)) return (int64_t)(uintptr_t)out;
+    WIN32_FIND_DATAA data;
+    HANDLE find = FindFirstFileA(pattern, &data);
+    if (find == INVALID_HANDLE_VALUE) return (int64_t)(uintptr_t)out;
+    do {
+        const char* name = data.cFileName;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        rt_array_push(out, rt_string_new((const uint8_t*)name, (uint64_t)strlen(name)));
+    } while (FindNextFileA(find, &data));
+    FindClose(find);
+    return (int64_t)(uintptr_t)out;
+#else
+    SplArray* out = rt_array_new(0);
+    DIR* dir = opendir(path);
+    if (!dir) return (int64_t)(uintptr_t)out;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        const char* name = entry->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        rt_array_push(out, rt_string_new((const uint8_t*)name, (uint64_t)strlen(name)));
+    }
+    closedir(dir);
+    return (int64_t)(uintptr_t)out;
+#endif
+}
+
+/* recursive=false: rmdir (fails on a non-empty directory, like
+ * std::fs::remove_dir); recursive=true: rt_dir_remove_all. */
+bool rt_dir_remove(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
+    if (recursive) return rt_dir_remove_all(path_ptr, path_len);
+#if defined(_WIN32)
+    return _rmdir(path) == 0;
+#else
+    return rmdir(path) == 0;
+#endif
+}
+
+bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
+                    const uint8_t* new_ptr, uint64_t new_len) {
+    char old_path[RT_TEXT_PATH_MAX];
+    char new_path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(old_ptr, old_len, old_path, sizeof(old_path))) return false;
+    if (!rt_text_arg_to_path(new_ptr, new_len, new_path, sizeof(new_path))) return false;
+    return rename(old_path, new_path) == 0;
+}
+
+/* Byte-for-byte copy via stdio; truncates/creates dst (std::fs::copy). */
+int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
+                 const uint8_t* dst_ptr, uint64_t dst_len) {
+    char src_path[RT_TEXT_PATH_MAX];
+    char dst_path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(src_ptr, src_len, src_path, sizeof(src_path))) return 0;
+    if (!rt_text_arg_to_path(dst_ptr, dst_len, dst_path, sizeof(dst_path))) return 0;
+    FILE* in = fopen(src_path, "rb");
+    if (!in) return 0;
+    FILE* out = fopen(dst_path, "wb");
+    if (!out) { fclose(in); return 0; }
+    uint8_t buf[65536];
+    int ok = 1;
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, got, out) != got) { ok = 0; break; }
+    }
+    if (ferror(in)) ok = 0;
+    if (fclose(out) != 0) ok = 0;
+    fclose(in);
+    return ok;
+}
+
+/* Lower-case hex SHA-256 of the file's bytes as a runtime string; nil when
+ * the file cannot be read (Rust: `format!("{:x}", digest)`). Streams the file
+ * through the same compressor rt_tls13_sha256 uses. */
+int64_t rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_core_nil();
+    FILE* in = fopen(path, "rb");
+    if (!in) return rt_core_nil();
+    uint32_t state[8] = {
+        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
+    };
+    uint8_t block[128];
+    size_t pending = 0;
+    uint64_t total = 0;
+    size_t got;
+    while ((got = fread(block + pending, 1, 64u - pending, in)) > 0) {
+        pending += got;
+        total += got;
+        if (pending == 64u) {
+            rt_sha256_compress(state, block);
+            pending = 0;
+        }
+    }
+    if (ferror(in)) { fclose(in); return rt_core_nil(); }
+    fclose(in);
+    memset(block + pending, 0, sizeof(block) - pending);
+    block[pending] = 0x80u;
+    size_t final_bytes = pending < 56u ? 64u : 128u;
+    uint64_t bit_length = total << 3;
+    for (int i = 0; i < 8; i++) {
+        block[final_bytes - 1u - (size_t)i] = (uint8_t)(bit_length >> (i * 8));
+    }
+    rt_sha256_compress(state, block);
+    if (final_bytes == 128u) rt_sha256_compress(state, block + 64);
+    char hex[65];
+    for (int i = 0; i < 8; i++) {
+        snprintf(hex + i * 8, 9, "%08x", state[i]);
+    }
+    return rt_string_new((const uint8_t*)hex, 64u);
+}
+
+/* Run `cmd` through the shell and return captured stdout as a runtime string
+ * (stderr passes through, exit status is discarded -- interpreter contract).
+ * `cmd` arrives as a tagged runtime value: rt_shell_exec is in no codegen
+ * text-ABI table, so the call site passes the value, not (ptr,len). Returns
+ * nil when the shell cannot be spawned. */
+int64_t rt_shell_exec(int64_t cmd_value) {
+    RtCoreString* cmd = rt_core_as_string(cmd_value);
+    if (!cmd) return rt_core_nil();
+    char* command = (char*)malloc((size_t)cmd->len + 1u);
+    if (!command) return rt_core_nil();
+    memcpy(command, cmd->data, (size_t)cmd->len);
+    command[cmd->len] = '\0';
+#if defined(_WIN32)
+    FILE* pipe = _popen(command, "r");
+#else
+    FILE* pipe = popen(command, "r");
+#endif
+    free(command);
+    if (!pipe) return rt_core_nil();
+    size_t cap = 4096, len = 0;
+    uint8_t* buf = (uint8_t*)malloc(cap);
+    if (!buf) {
+#if defined(_WIN32)
+        _pclose(pipe);
+#else
+        pclose(pipe);
+#endif
+        return rt_core_nil();
+    }
+    size_t got;
+    while ((got = fread(buf + len, 1, cap - len, pipe)) > 0) {
+        len += got;
+        if (len == cap) {
+            uint8_t* grown = (uint8_t*)realloc(buf, cap * 2);
+            if (!grown) { free(buf); buf = NULL; break; }
+            buf = grown;
+            cap *= 2;
+        }
+    }
+#if defined(_WIN32)
+    _pclose(pipe);
+#else
+    pclose(pipe);
+#endif
+    if (!buf) return rt_core_nil();
+    int64_t result = rt_string_new(buf, (uint64_t)len);
+    free(buf);
+    return result;
+}
+
 /* ================================================================
  * Process / Environment
  * ================================================================ */
@@ -10354,17 +10564,15 @@ void rt_sleep_nanos(int64_t ns) {
  * absolute here on purpose -- they are separately tracked in
  * scripts/check/runtime_symbol_lane_divergence_baseline.txt and are owned by
  * another lane; do not "fix" them as a side effect of this one. */
+/* Absolute CLOCK_MONOTONIC milliseconds, -1 on clock failure -- the same
+ * contract as the canonical runtime_time.c definition and what the core-C
+ * focus contract (runtime_native_focus_test.c) pins. The previous
+ * first-call-baseline form returned 0 on the first call, so a caller could
+ * not tell "clock works, t=0" from a dead clock, and the two C definitions of
+ * one ABI name disagreed. Callers (std diag deadlines) only take differences. */
 int64_t rt_time_now_monotonic_ms(void) {
-    static int64_t rt_monotonic_ms_baseline_ns = 0;
-    static int rt_monotonic_ms_baseline_set = 0;
     int64_t now_ns = rt_time_now_ns();
-    if (!rt_monotonic_ms_baseline_set) {
-        rt_monotonic_ms_baseline_ns = now_ns;
-        rt_monotonic_ms_baseline_set = 1;
-    }
-    int64_t diff_ns = now_ns - rt_monotonic_ms_baseline_ns;
-    if (diff_ns < 0) diff_ns = 0;
-    return diff_ns / 1000000LL;
+    return now_ns < 0 ? -1 : now_ns / 1000000LL;
 }
 
 void rt_sleep_ms(int64_t ms) {

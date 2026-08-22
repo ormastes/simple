@@ -199,6 +199,8 @@ bool     rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len);
 bool     rt_dir_remove_all_cpath(const char* path);
 /* -> RuntimeValue (I64) array of text, per runtime_sffi.rs:1888. */
 int64_t  rt_dir_list(const uint8_t* path_ptr, uint64_t path_len);
+/* (path_ptr, path_len, recursive) -> bool; recursive=false is a plain rmdir. */
+bool     rt_dir_remove(const uint8_t* path_ptr, uint64_t path_len, bool recursive);
 /* C-string worker behind it; NOT the symbol the compiler calls. */
 const char** rt_dir_list_cpath(const char* path, int64_t* out_count);
 void     rt_dir_list_free(const char** entries, int64_t count);
@@ -1016,6 +1018,12 @@ int         rt_file_append_text(const uint8_t* path, uint64_t path_len, const ui
 int         rt_file_delete(const char* path);
 int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
                          const uint8_t* dst_ptr, uint64_t dst_len);
+bool        rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
+                           const uint8_t* new_ptr, uint64_t new_len);
+/* Lower-case hex SHA-256 of the file as a runtime string; nil if unreadable. */
+int64_t     rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len);
+/* Tagged text cmd -> captured stdout as a runtime string; nil on spawn failure. */
+int64_t     rt_shell_exec(int64_t cmd_value);
 int         rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
                          const uint8_t* dst_ptr, uint64_t dst_len);
 int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len);

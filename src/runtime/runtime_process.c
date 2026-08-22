@@ -1977,9 +1977,26 @@ static void browser_renderer_preinit(int argc, char** argv, char** envp) {
     s_browser_renderer_preinit_active = true;
 }
 
+/* The Stage4 archive-core contract forbids constructor/destructor sections
+ * (native_project/tools.rs forbidden_archive_sections; `.preinit_array` is
+ * one), so the automatic registration is compiled out of the core-C
+ * standalone archive. That lane is fail-closed, not silently unjailed:
+ * rt_browser_renderer_sandbox_enter() refuses unless
+ * s_browser_renderer_preinit_active was set here, so a core-C-built renderer
+ * worker exits instead of running without its jail. Hosting the renderer on
+ * the core-C lane needs an explicit startup call instead of a constructor --
+ * recorded in doc/08_tracking/bug/
+ * core_c_lane_cannot_host_browser_renderer_preinit_2026-08-22.md. */
+#if !defined(SIMPLE_CORE_C_STANDALONE)
 __attribute__((section(".preinit_array"), used))
 static BrowserRendererPreinitFn const browser_renderer_preinit_entry =
     browser_renderer_preinit;
+#else
+/* Keep the function referenced so -Wunused-function stays clean and the
+   selfchecks that call it directly still link. */
+static BrowserRendererPreinitFn const browser_renderer_preinit_entry_unregistered
+    __attribute__((used)) = browser_renderer_preinit;
+#endif
 
 bool rt_browser_renderer_preinit_active_for_test(void) {
     return s_browser_renderer_preinit_active;

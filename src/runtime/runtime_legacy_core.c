@@ -359,6 +359,15 @@ void spl_println(const char* s) {
     fputc('\n', stdout);
 }
 
+/* stderr sibling of spl_println. rt_eprintln (runtime_native.c) calls this
+   since f858c7cf32e; runtime.c defines it too but is not a core-C archive
+   member, so the core-C lane must provide it here beside spl_print/spl_println
+   or every native link referencing eprint fails on spl_eprintln. */
+void spl_eprintln(const char* s) {
+    fputs(s ? s : "", stderr);
+    fputc('\n', stderr);
+}
+
 void spl_panic(const char* msg) {
     fprintf(stderr, "panic: %s\n", msg ? msg : "");
     exit(1);
