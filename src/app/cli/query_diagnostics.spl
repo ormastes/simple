@@ -270,17 +270,69 @@ fn _collect_check_output_diagnostics_json_clean(
 
 fn _extract_query_check_diagnostics(check_json: text) -> [text]:
     val key = "\"diagnostics\":["
-    val key_idx = _find_in_line_from(check_json, key, 0)
+    val key_idx = _find_query_diagnostics_key(check_json, key)
     if key_idx < 0:
         return []
-    val start = key_idx + key.len()
-    val end = _find_matching_json_array_end(check_json, start)
-    if end < start:
-        return []
-    val inner = check_json.substring(start, end).trim()
-    if inner == "":
-        return []
-    _split_top_level_json_objects(inner)
+    var result: [text] = []
+    var array_depth = 1
+    var object_depth = 0
+    var object_start = key_idx + key.len()
+    var in_string = false
+    var escaped = false
+    var i = object_start
+    while i < check_json.len():
+        val ch = check_json.byte_at(i)
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == 92:
+                escaped = true
+            elif ch == 34:
+                in_string = false
+            i = i + 1
+            continue
+        if ch == 34:
+            in_string = true
+        elif ch == 91:
+            array_depth = array_depth + 1
+        elif ch == 93:
+            array_depth = array_depth - 1
+            if array_depth == 0:
+                return result
+        elif ch == 123:
+            if object_depth == 0:
+                object_start = i
+            object_depth = object_depth + 1
+        elif ch == 125:
+            object_depth = object_depth - 1
+            if object_depth == 0:
+                result.push(check_json.substring(object_start, i + 1))
+        i = i + 1
+    # The legacy two-pass path discarded even completed objects when the outer
+    # diagnostics array had no matching close.
+    []
+
+fn _find_query_diagnostics_key(s: text, key: text) -> i64:
+    # Both lengths and byte_at indices use byte offsets. Unlike the generic
+    # substring search this remains allocation-free and valid when arbitrary
+    # Unicode precedes the compact ASCII key.
+    val key_len = key.len()
+    val source_len = s.len()
+    if key_len == 0:
+        return 0
+    var i = 0
+    while i + key_len <= source_len:
+        var matched = true
+        var j = 0
+        while j < key_len:
+            if s.byte_at(i + j) != key.byte_at(j):
+                matched = false
+                break
+            j = j + 1
+        if matched:
+            return i
+        i = i + 1
+    -1
 
 fn _find_matching_json_array_end(s: text, start: i64) -> i64:
     var depth = 1
@@ -288,21 +340,21 @@ fn _find_matching_json_array_end(s: text, start: i64) -> i64:
     var in_string = false
     var escaped = false
     while i < s.len():
-        val ch = s.substring(i, i + 1)
+        val ch = s.byte_at(i)
         if in_string:
             if escaped:
                 escaped = false
-            elif ch == "\\":
+            elif ch == 92:
                 escaped = true
-            elif ch == "\"":
+            elif ch == 34:
                 in_string = false
             i = i + 1
             continue
-        if ch == "\"":
+        if ch == 34:
             in_string = true
-        elif ch == "[":
+        elif ch == 91:
             depth = depth + 1
-        elif ch == "]":
+        elif ch == 93:
             depth = depth - 1
             if depth == 0:
                 return i
@@ -310,33 +362,38 @@ fn _find_matching_json_array_end(s: text, start: i64) -> i64:
     -1
 
 fn _split_top_level_json_objects(s: text) -> [text]:
+    _split_top_level_json_objects_range(s, 0, s.len())
+
+fn _split_top_level_json_objects_range(
+    s: text, range_start: i64, range_end: i64
+) -> [text]:
     var result: [text] = []
     var depth = 0
-    var start = 0
+    var start = range_start
     var in_string = false
     var escaped = false
-    var i = 0
-    while i < s.len():
-        val ch = s.substring(i, i + 1)
+    var i = range_start
+    while i < range_end:
+        val ch = s.byte_at(i)
         if in_string:
             if escaped:
                 escaped = false
-            elif ch == "\\":
+            elif ch == 92:
                 escaped = true
-            elif ch == "\"":
+            elif ch == 34:
                 in_string = false
             i = i + 1
             continue
-        if ch == "\"":
+        if ch == 34:
             in_string = true
-        elif ch == "{":
+        elif ch == 123:
             if depth == 0:
                 start = i
             depth = depth + 1
-        elif ch == "}":
+        elif ch == 125:
             depth = depth - 1
             if depth == 0:
-                result = result.push(s.substring(start, i + 1))
+                result.push(s.substring(start, i + 1))
         i = i + 1
     result
 
