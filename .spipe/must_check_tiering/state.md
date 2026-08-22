@@ -211,6 +211,23 @@ implementation-blocked-by-bootstrap-authority
   `module_surface_projected_type_name`. Strict bootstrap refused seed fallback.
   The session verification cap is exhausted, so no fourth bootstrap or Stage-2
   PASS is claimed. Evidence is in `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`.
+- verify: After rebasing onto the missing projection-owner fix, a fresh
+  source-bound four-core Stage 2 completed, passed sanity/receiver proofs, and
+  published an immutable admitted parent. The canonical planner-admission-v2
+  producer authorized the one-thread Stage 3 recovery lane.
+- blocker: Stage 3 parsed/promoted/released all 687 surfaces in 458,677 ms and
+  entered HIR, proving the former surface crash fixed. RSS then rose from
+  638,492 KiB during late parsing to 3,599,144 KiB at HIR 1/687 and 7,341 MiB;
+  host `earlyoom` sent SIGTERM at 13:08:44 UTC when available memory fell below
+  10%. Exit 143 is resource-unavailable, not PASS or a compiler diagnostic.
+  The existing Pure-Simple immortal-allocation bug record now carries this
+  measured evidence; Stage 3/4, optimizer, SPipe/docgen, deployment, and ledger
+  publication remain pending.
+- perf-review: The owned compiler edit removes an unreachable projection method
+  and unused import, adding no hot-path loop, allocation, copy, data-layout, or
+  dispatch work and preserving the existing Pure-Simple callable API. The
+  meaningful remaining regression is the measured Stage-3 HIR RSS blocker
+  above; no C/Rust substitution is accepted.
 - verify: Updated push/bootstrap/tiering self-tests passed; the real ref fixture
   remained within the ten-second budget. Full bootstrap remains blocked by the
   unchanged Stage-3 imported-type cascade after the third bounded cycle.
