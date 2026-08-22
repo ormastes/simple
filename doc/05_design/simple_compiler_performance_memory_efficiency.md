@@ -418,4 +418,7 @@ single-line string state; only an unquoted backslash followed by an identifier
 start or `(` becomes a candidate. Parsing may advance a consumed offset, and
 precomputed candidates before that offset are skipped. Discovery must not recurse
 or rescan a growing prefix per backslash. Candidate position storage is linear in
-eligible candidates and is released after the line.
+eligible candidates and is released after the line. Functional-update exclusion
+computes the first non-function-type arrow once only when the line has an eligible
+lambda candidate; candidate filtering compares only its numeric position and
+never rescans the line prefix.
