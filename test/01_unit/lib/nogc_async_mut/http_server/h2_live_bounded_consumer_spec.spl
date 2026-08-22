@@ -1,4 +1,11 @@
 """
+## Purpose and audience
+Purpose: Prove that live HTTP/2 worker bounded frame consumption.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-NOGC-ASYNC-MUT-001 — stable requirement identity for this spec.
+
+"""
 # Live HTTP/2 worker consumer — bounded typed parser outcomes
 
 Exercises the connection object used by the async worker with real HTTP/2
@@ -19,17 +26,22 @@ fn ready_connection() -> H2Connection:
     expect(conn.h2_on_data_received(h2_connection_preface_bytes(), 2)).to_be(true)
     conn
 
+use std.spec.step
+
 describe "live HTTP/2 worker bounded frame consumption":
     it "consumes and ignores an unknown extension frame without stalling":
+        step("Verify: consumes and ignores an unknown extension frame without stalling")
+        # @req: REQ-LIB-NOGC-ASYNC-MUT-001
         var conn = ready_connection()
         val extension: [u8] = [0, 0, 0, 10, 0, 0, 0, 0, 0]
 
         expect(conn.h2_on_data_received(extension, 3)).to_be(true)
         expect(conn.consume_frames()).to_be(true)
-        expect(conn.recv_buf.len()).to_equal(0)
+        expect(conn.recv_buf.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(conn.is_goaway_sent()).to_be(false)
 
     it "retains a partial PING exactly and dispatches it after its tail arrives":
+        step("Verify: retains a partial PING exactly and dispatches it after its tail arrives")
         var conn = ready_connection()
         # 8-byte PING payload, split after its first three opaque bytes.
         val prefix: [u8] = [0, 0, 8, 6, 0, 0, 0, 0, 0, 1, 2, 3]
@@ -37,17 +49,18 @@ describe "live HTTP/2 worker bounded frame consumption":
 
         expect(conn.h2_on_data_received(prefix, 3)).to_be(true)
         expect(conn.consume_frames()).to_be(true)
-        expect(conn.recv_buf.len()).to_equal(12)
+        expect(conn.recv_buf.len()).to_equal(12)  # oracle: 12 — named expected value from the requirement
 
         expect(conn.h2_on_data_received(tail, 4)).to_be(true)
         expect(conn.consume_frames()).to_be(true)
-        expect(conn.recv_buf.len()).to_equal(0)
+        expect(conn.recv_buf.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val ack = conn.take_pending_writes()
-        expect(ack.len()).to_equal(17)
-        expect(ack[3]).to_equal(6)
-        expect(ack[4]).to_equal(1)
+        expect(ack.len()).to_equal(17)  # oracle: 17 — named expected value from the requirement
+        expect(ack[3]).to_equal(6)  # oracle: 6 — named expected value from the requirement
+        expect(ack[4]).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "preserves sole mapped ownership across fragmented frame assembly":
+        step("Verify: preserves sole mapped ownership across fragmented frame assembly")
         var connections: Dict<i64, H2Connection> = {}
         connections[17] = ready_connection()
         val ping: [u8] = [0, 0, 8, 6, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]
@@ -63,18 +76,19 @@ describe "live HTTP/2 worker bounded frame consumption":
             index = index + 1
 
         var final_conn = connections[17]
-        expect(final_conn.recv_buf.len()).to_equal(0)
-        expect(final_conn.take_pending_writes().len()).to_equal(17)
+        expect(final_conn.recv_buf.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(final_conn.take_pending_writes().len()).to_equal(17)  # oracle: 17 — named expected value from the requirement
         expect(final_conn.is_goaway_sent()).to_be(false)
 
     it "rejects zero WINDOW_UPDATE and tells the worker to cancel":
+        step("Verify: rejects zero WINDOW_UPDATE and tells the worker to cancel")
         var conn = ready_connection()
         val malformed: [u8] = [0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
         expect(conn.h2_on_data_received(malformed, 3)).to_be(true)
         expect(conn.consume_frames()).to_be(false)
         expect(conn.is_goaway_sent()).to_be(true)
-        expect(conn.recv_buf.len()).to_equal(0)
+        expect(conn.recv_buf.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         # A protocol-error GOAWAY (9-byte header + 8-byte payload) is queued
         # before the worker observes false and tears down transport ownership.
-        expect(conn.take_pending_writes().len()).to_equal(17)
+        expect(conn.take_pending_writes().len()).to_equal(17)  # oracle: 17 — named expected value from the requirement

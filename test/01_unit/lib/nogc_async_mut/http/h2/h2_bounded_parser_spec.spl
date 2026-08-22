@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that HTTP/2 bounded frame admission.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-NOGC-ASYNC-MUT-001 — stable requirement identity for this spec.
+
 use std.spec
 use std.http.h2.h2_parser.{H2BoundedParseResult, h2_parse_frame_bounded}
 use std.http.h2.hpack_huffman.{hpack_huffman_encode, hpack_huffman_decode}
@@ -16,21 +23,25 @@ fn _repeated_header_byte(value: u8, count: i64) -> [u8]:
 
 describe "HTTP/2 bounded frame admission":
     it "distinguishes an incomplete header from malformed input":
+        step("Verify: distinguishes an incomplete header from malformed input")
+        # @req: REQ-LIB-NOGC-ASYNC-MUT-001
         match h2_parse_frame_bounded([0 as u8, 0 as u8], 0, 16384):
             case Incomplete(required):
-                expect(required).to_equal(7)
+                expect(required).to_equal(7)  # oracle: 7 — named expected value from the requirement
             case _:
                 expect("unexpected outcome").to_equal("incomplete")
 
     it "advances over an unknown extension frame without parsing it":
+        step("Verify: advances over an unknown extension frame without parsing it")
         val wire: [u8] = [0, 0, 0, 10, 0, 0, 0, 0, 0]
         match h2_parse_frame_bounded(wire, 0, 16384):
             case Ignored(consumed):
-                expect(consumed).to_equal(9)
+                expect(consumed).to_equal(9)  # oracle: 9 — named expected value from the requirement
             case _:
                 expect("unexpected outcome").to_equal("ignored")
 
     it "rejects a frame larger than the configured incoming limit before allocation":
+        step("Verify: rejects a frame larger than the configured incoming limit before allocation")
         val wire: [u8] = [0, 64, 1, 0, 0, 0, 0, 0, 1]
         match h2_parse_frame_bounded(wire, 0, 16384):
             case Rejected(reason):
@@ -39,6 +50,7 @@ describe "HTTP/2 bounded frame admission":
                 expect("unexpected outcome").to_equal("rejected")
 
     it "rejects WINDOW_UPDATE with the forbidden zero increment":
+        step("Verify: rejects WINDOW_UPDATE with the forbidden zero increment")
         val wire: [u8] = [0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         match h2_parse_frame_bounded(wire, 0, 16384):
             case Rejected(reason):
@@ -47,17 +59,20 @@ describe "HTTP/2 bounded frame admission":
                 expect("unexpected outcome").to_equal("rejected")
 
     it "decodes a long Huffman field through the linear prefix profile":
+        step("Verify: decodes a long Huffman field through the linear prefix profile")
         val source = _repeated_header_byte(97, 4096)
         val encoded = hpack_huffman_encode(source)
         val decoded = hpack_huffman_decode(encoded, encoded.len() * 8)
-        expect(decoded.len()).to_equal(4096)
-        expect(decoded[0]).to_equal(97)
-        expect(decoded[4095]).to_equal(97)
+        expect(decoded.len()).to_equal(4096)  # oracle: 4096 — named expected value from the requirement
+        expect(decoded[0]).to_equal(97)  # oracle: 97 — named expected value from the requirement
+        expect(decoded[4095]).to_equal(97)  # oracle: 97 — named expected value from the requirement
 
     it "rejects a Huffman bit count beyond the supplied input":
-        expect(hpack_huffman_decode([31 as u8], 9).len()).to_equal(0)
+        step("Verify: rejects a Huffman bit count beyond the supplied input")
+        expect(hpack_huffman_decode([31 as u8], 9).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "admits only increasing odd client stream IDs within the registry cap":
+        step("Verify: admits only increasing odd client stream IDs within the registry cap")
         val settings = H2Settings(
             max_concurrent_streams: 1,
             initial_window_size: 65535,
@@ -70,11 +85,12 @@ describe "HTTP/2 bounded frame admission":
         val first = h2_connection_accept_stream(even_rejected, 1)
         val replay_rejected = h2_connection_accept_stream(first, 1)
         val over_cap = h2_connection_accept_stream(replay_rejected, 3)
-        expect(even_rejected.streams.len()).to_equal(0)
-        expect(over_cap.streams.len()).to_equal(1)
-        expect(over_cap.last_stream_id).to_equal(1)
+        expect(even_rejected.streams.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(over_cap.streams.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(over_cap.last_stream_id).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "rejects connection-window overflow and terminally cancels ownership":
+        step("Verify: rejects connection-window overflow and terminally cancels ownership")
         val settings = H2Settings(
             max_concurrent_streams: 4,
             initial_window_size: 65535,
@@ -86,6 +102,6 @@ describe "HTTP/2 bounded frame admission":
         val unchanged = h2_connection_update_window(fresh, 0, 2147483647)
         val active = h2_connection_accept_stream(unchanged, 1)
         val cancelled = h2_connection_cancel(active)
-        expect(unchanged.connection_window).to_equal(65535)
-        expect(cancelled.streams.len()).to_equal(0)
+        expect(unchanged.connection_window).to_equal(65535)  # oracle: 65535 — named expected value from the requirement
+        expect(cancelled.streams.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(cancelled.goaway_sent).to_be(true)

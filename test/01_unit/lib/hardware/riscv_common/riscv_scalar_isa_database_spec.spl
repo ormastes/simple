@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that shared scalar RISC-V Gen2 ISA database.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-HARDWARE-001 — stable requirement identity for this spec.
+
 use std.spec.*
 use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarIsaEntry, RiscvScalarProviderSelection, RiscvScalarDecoderPlan,
     riscv_scalar_database_diagnostic, riscv_scalar_entries_for_xlen,
@@ -5,10 +12,14 @@ use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarIsaEntry, RiscvSca
     riscv_scalar_lookup, riscv_scalar_lookup_profile,
     riscv_scalar_elaborate_provider, riscv_scalar_zmmul_entries, riscv_scalar_decoder_plan}
 
+use std.spec.step
+
 describe "shared scalar RISC-V Gen2 ISA database":
     it "declares one valid non-runtime-dispatch seed table":
+        step("Verify: declares one valid non-runtime-dispatch seed table")
+        # @req: REQ-LIB-HARDWARE-001
         val entries = riscv_scalar_gen2_seed_entries()
-        expect(entries.len()).to_equal(75)
+        expect(entries.len()).to_equal(75)  # oracle: 75 — named expected value from the requirement
         expect(riscv_scalar_database_diagnostic(entries)).to_equal("")
         var fence_extension = ""
         for entry in entries:
@@ -16,21 +27,23 @@ describe "shared scalar RISC-V Gen2 ISA database":
         expect(fence_extension).to_equal("I")
 
     it "specializes RV32 and RV64 rows without runtime XLEN semantics":
+        step("Verify: specializes RV32 and RV64 rows without runtime XLEN semantics")
         val rv32 = riscv_scalar_entries_for_xlen(32)
         val rv64 = riscv_scalar_entries_for_xlen(64)
-        expect(rv32.len()).to_equal(55)
-        expect(rv64.len()).to_equal(72)
-        expect(riscv_scalar_entries_for_xlen(128).len()).to_equal(0)
+        expect(rv32.len()).to_equal(55)  # oracle: 55 — named expected value from the requirement
+        expect(rv64.len()).to_equal(72)  # oracle: 72 — named expected value from the requirement
+        expect(riscv_scalar_entries_for_xlen(128).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         var rv32_addw = 0
         var rv64_addw = 0
         for entry in rv32:
             if entry.id == "rv64.i.addw": rv32_addw = rv32_addw + 1
         for entry in rv64:
             if entry.id == "rv64.i.addw" and entry.writeback_rule == "rd=sign_extend_to_xlen": rv64_addw = rv64_addw + 1
-        expect(rv32_addw).to_equal(0)
-        expect(rv64_addw).to_equal(1)
+        expect(rv32_addw).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(rv64_addw).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "matches encoding rows only under their concrete XLEN applicability":
+        step("Verify: matches encoding rows only under their concrete XLEN applicability")
         var add = RiscvScalarIsaEntry(id: "", extension: "", encoding_mask: 0,
             encoding_value: 0, xlen_scope: "rv32-rv64", semantic_operation: "",
             execution_class: "", operand_width_bits: 0, writeback_rule: "",
@@ -44,6 +57,7 @@ describe "shared scalar RISC-V Gen2 ISA database":
         expect(addw.matches(0x00B5053B, 64)).to_equal(true)
 
     it "exposes deterministic concrete metadata lookup without an RTL selector":
+        step("Verify: exposes deterministic concrete metadata lookup without an RTL selector")
         val add = riscv_scalar_lookup(0x00B50533, 32)
         val addw = riscv_scalar_lookup(0x00B5053B, 64)
         val mulw = riscv_scalar_lookup(0x02B5053B, 64)
@@ -70,14 +84,14 @@ describe "shared scalar RISC-V Gen2 ISA database":
         if sraiw.is_ok() and sraw.is_ok():
             expect(sraiw.ok().unwrap().id).to_equal("rv64.i.sraiw")
             expect(sraw.ok().unwrap().id).to_equal("rv64.i.sraw")
-            expect(sraiw.ok().unwrap().operand_width_bits).to_equal(32)
+            expect(sraiw.ok().unwrap().operand_width_bits).to_equal(32)  # oracle: 32 — named expected value from the requirement
             expect(sraw.ok().unwrap().writeback_rule).to_equal("rd=sign_extend_to_xlen")
         else:
             expect(false).to_equal(true)
         if ld.is_ok() and lwu.is_ok() and sd.is_ok():
             expect(ld.ok().unwrap().id).to_equal("rv64.i.ld")
             expect(lwu.ok().unwrap().writeback_rule).to_equal("rd=zero_extend_to_xlen")
-            expect(lwu.ok().unwrap().operand_width_bits).to_equal(32)
+            expect(lwu.ok().unwrap().operand_width_bits).to_equal(32)  # oracle: 32 — named expected value from the requirement
             expect(sd.ok().unwrap().memory_effect).to_equal("store")
         else:
             expect(false).to_equal(true)
@@ -87,6 +101,7 @@ describe "shared scalar RISC-V Gen2 ISA database":
         expect(riscv_scalar_lookup(0x00000013, 128).unwrap_err()).to_contain("RISCV-ISA-E-LOOKUP-XLEN")
 
     it "derives exactly the extension rows declared by an ISA profile":
+        step("Verify: derives exactly the extension rows declared by an ISA profile")
         val rv32i = riscv_scalar_entries_for_isa_profile("rv32i")
         val rv64i = riscv_scalar_entries_for_isa_profile("rv64i_zca")
         val rv32im = riscv_scalar_entries_for_isa_profile("rv32im")
@@ -96,10 +111,10 @@ describe "shared scalar RISC-V Gen2 ISA database":
         expect(rv32im.is_ok()).to_equal(true)
         expect(rv64i_privileged.is_ok()).to_equal(true)
         if rv32i.is_ok() and rv64i.is_ok() and rv32im.is_ok() and rv64i_privileged.is_ok():
-            expect(rv32i.ok().unwrap().len()).to_equal(40)
-            expect(rv64i.ok().unwrap().len()).to_equal(52)
-            expect(rv32im.ok().unwrap().len()).to_equal(48)
-            expect(rv64i_privileged.ok().unwrap().len()).to_equal(59)
+            expect(rv32i.ok().unwrap().len()).to_equal(40)  # oracle: 40 — named expected value from the requirement
+            expect(rv64i.ok().unwrap().len()).to_equal(52)  # oracle: 52 — named expected value from the requirement
+            expect(rv32im.ok().unwrap().len()).to_equal(48)  # oracle: 48 — named expected value from the requirement
+            expect(rv64i_privileged.ok().unwrap().len()).to_equal(59)  # oracle: 59 — named expected value from the requirement
             var bare_has_csr = false
             for entry in rv32i.ok().unwrap():
                 if entry.extension == "Zicsr" or entry.extension == "Zifencei": bare_has_csr = true
@@ -123,6 +138,7 @@ describe "shared scalar RISC-V Gen2 ISA database":
             expect(false).to_equal(true)
 
     it "fails closed for malformed or duplicate metadata":
+        step("Verify: fails closed for malformed or duplicate metadata")
         val malformed = RiscvScalarIsaEntry(id: "rv.bad", extension: "I",
             encoding_mask: 0, encoding_value: 0, xlen_scope: "rv32-rv64",
             semantic_operation: "add", execution_class: "integer", operand_width_bits: 0,
@@ -140,6 +156,7 @@ describe "shared scalar RISC-V Gen2 ISA database":
         expect(riscv_scalar_database_diagnostic([duplicate, overlap])).to_equal("RISCV-ISA-E-OVERLAP: scalar ISA encodings must be unambiguous per concrete XLEN")
 
     it "selects a concrete M provider during elaboration, never at runtime":
+        step("Verify: selects a concrete M provider during elaboration, never at runtime")
         val rv32i = riscv_scalar_elaborate_provider("rv32i", "none")
         val rv64im = riscv_scalar_elaborate_provider("rv64im", "pipelined")
         expect(rv32i.is_ok()).to_equal(true)
@@ -147,9 +164,9 @@ describe "shared scalar RISC-V Gen2 ISA database":
         if rv32i.is_ok() and rv64im.is_ok():
             val base = rv32i.ok().unwrap()
             val product = rv64im.ok().unwrap()
-            expect(base.xlen).to_equal(32)
+            expect(base.xlen).to_equal(32)  # oracle: 32 — named expected value from the requirement
             expect(base.muldiv_provider).to_equal("none")
-            expect(product.xlen).to_equal(64)
+            expect(product.xlen).to_equal(64)  # oracle: 64 — named expected value from the requirement
             expect(product.muldiv_provider).to_equal("pipelined")
             val multiply = riscv_scalar_lookup_profile(0x02000033, "rv64im")
             val add = riscv_scalar_lookup_profile(0x00B50533, "rv64im")
@@ -177,11 +194,12 @@ describe "shared scalar RISC-V Gen2 ISA database":
         expect(riscv_scalar_elaborate_provider("rv64im", "dynamic").unwrap_err()).to_equal("RISCV-PROVIDER-E-MULDIV: scalar provider selection is unsupported")
 
     it "freezes a deterministic profile-specialized decoder plan before lowering":
+        step("Verify: freezes a deterministic profile-specialized decoder plan before lowering")
         val rv64 = riscv_scalar_decoder_plan("rv64i").unwrap()
         val second = riscv_scalar_decoder_plan("rv64i").unwrap()
         expect(rv64.diagnostic()).to_equal("")
-        expect(rv64.entries.len()).to_equal(52)
-        expect(rv64.structural_sha256().len()).to_equal(64)
+        expect(rv64.entries.len()).to_equal(52)  # oracle: 52 — named expected value from the requirement
+        expect(rv64.structural_sha256().len()).to_equal(64)  # oracle: 64 — named expected value from the requirement
         expect(rv64.structural_sha256()).to_equal(second.structural_sha256())
         expect(rv64.lookup(0x0005B503).unwrap().id).to_equal("rv64.i.ld")
         expect(rv64.lookup(0x00001073).unwrap_err()).to_equal(
@@ -196,18 +214,19 @@ describe "shared scalar RISC-V Gen2 ISA database":
             "RISCV-DECODER-E-ENTRIES: scalar decoder plan must retain the exact elaborated ISA entries")
 
     it "derives Zmmul from the shared M rows without admitting divide semantics":
+        step("Verify: derives Zmmul from the shared M rows without admitting divide semantics")
         val rows = riscv_scalar_zmmul_entries()
-        expect(rows.len()).to_equal(5)
+        expect(rows.len()).to_equal(5)  # oracle: 5 — named expected value from the requirement
         var rv64_mulw_count = 0
         for row in rows:
             expect(row.id.contains("div")).to_equal(false)
             expect(row.id.contains("rem")).to_equal(false)
             if row.id == "rv64.m.mulw": rv64_mulw_count = rv64_mulw_count + 1
-        expect(rv64_mulw_count).to_equal(1)
+        expect(rv64_mulw_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val rv32 = riscv_scalar_entries_for_isa_profile("rv32i_zmmul")
         expect(rv32.is_ok()).to_equal(true)
         if rv32.is_ok():
-            expect(rv32.ok().unwrap().len()).to_equal(44)
+            expect(rv32.ok().unwrap().len()).to_equal(44)  # oracle: 44 — named expected value from the requirement
         else:
             expect(false).to_equal(true)
         expect(riscv_scalar_lookup_profile(0x02000033, "rv32i_zmmul").unwrap().id).to_equal("rv.m.mul")

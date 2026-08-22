@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that chunked_body_end — chunk-size overflow.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-HTTP-SERVER-001 — stable requirement identity for this spec.
+
 # Chunked chunk-size integer-overflow rejection
 #
 # **Category:** HTTP Server Security
@@ -30,23 +37,31 @@ use std.nogc_async_mut.http.headers.{chunked_body_end, decode_chunked}
 use std.nogc_async_mut.http_server.proxy.{async_proxy_chunked_body_complete}
 use std.nogc_async_mut.http_server.parser.{HttpRequestParser}
 
+use std.spec.step
+
 describe "chunked_body_end — chunk-size overflow":
     it "rejects a 2^64 chunk-size instead of wrapping it to a last-chunk":
+        step("Verify: rejects a 2^64 chunk-size instead of wrapping it to a last-chunk")
+        # @req: REQ-LIB-HTTP-SERVER-001
         # Pre-fix this returned 24: the size wrapped to 0, the body ended here,
         # and "GET /admin ..." would have been read as a second request.
         expect(chunked_body_end("10000000000000000\r\nX\r\n\r\n")).to_equal(-2)
 
     it "rejects a 2^64+5 chunk-size instead of wrapping it to 5":
+        step("Verify: rejects a 2^64+5 chunk-size instead of wrapping it to 5")
         expect(chunked_body_end("10000000000000005\r\nABCDE\r\n0\r\n\r\n")).to_equal(-2)
 
     it "rejects a 16-hex-digit chunk-size that exceeds i64":
+        step("Verify: rejects a 16-hex-digit chunk-size that exceeds i64")
         expect(chunked_body_end("FFFFFFFFFFFFFFFF\r\nX\r\n0\r\n\r\n")).to_equal(-2)
 
     it "rejects an overflowing chunk-size carrying a chunk extension":
+        step("Verify: rejects an overflowing chunk-size carrying a chunk extension")
         expect(chunked_body_end("10000000000000000;a=b\r\nX\r\n\r\n")).to_equal(-2)
 
 describe "decode_chunked — chunk-size overflow":
     it "returns Err for an overflowing chunk-size":
+        step("Verify: returns Err for an overflowing chunk-size")
         match decode_chunked("10000000000000000\r\nX\r\n\r\n"):
             case Ok(_):
                 assert_true(false)
@@ -55,14 +70,17 @@ describe "decode_chunked — chunk-size overflow":
 
 describe "async proxy — chunk-size overflow":
     it "does not report a wrapped 2^64 chunk-size as a complete body":
+        step("Verify: does not report a wrapped 2^64 chunk-size as a complete body")
         # Pre-fix this returned true.
         assert_false(async_proxy_chunked_body_complete("10000000000000000\r\nGET /admin HTTP/1.1\r\n\r\n"))
 
     it "still reports a genuinely terminated stream as complete":
+        step("Verify: still reports a genuinely terminated stream as complete")
         assert_true(async_proxy_chunked_body_complete("5\r\nhello\r\n0\r\n\r\n"))
 
 describe "HttpRequestParser — the smuggled request is rejected, not queued":
     it "answers a framing error instead of ending the message at the wrapped size":
+        step("Verify: answers a framing error instead of ending the message at the wrapped size")
         # The security property lives in the CALLER: chunked_body_end returning
         # -2 must reach the new parser.spl branch and become a ParseError, not
         # leave the parser sitting in Body state waiting for more data. Pre-fix
@@ -76,6 +94,7 @@ describe "HttpRequestParser — the smuggled request is rejected, not queued":
         assert_false(p.is_complete())
 
     it "still completes a valid chunked request":
+        step("Verify: still completes a valid chunked request")
         var p = HttpRequestParser.new()
         val raw = "POST /a HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
         val r = p.feed(raw)
@@ -84,11 +103,14 @@ describe "HttpRequestParser — the smuggled request is rejected, not queued":
 
 describe "negative controls — valid sizes are untouched":
     it "accepts a normal terminated stream":
+        step("Verify: accepts a normal terminated stream")
         expect(chunked_body_end("5\r\nhello\r\n0\r\n\r\n")).to_equal(15)
 
     it "accepts a size padded with many leading zeros":
+        step("Verify: accepts a size padded with many leading zeros")
         val buf = "0000000000000000005\r\nhello\r\n0\r\n\r\n"
         expect(chunked_body_end(buf)).to_equal(buf.len())
 
     it "accepts the widest non-overflowing size and waits for its data":
+        step("Verify: accepts the widest non-overflowing size and waits for its data")
         expect(chunked_body_end("FFFFFFFFFFFFFFF\r\nX\r\n")).to_equal(-1)

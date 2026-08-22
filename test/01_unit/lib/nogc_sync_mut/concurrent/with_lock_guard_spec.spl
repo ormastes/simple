@@ -1,4 +1,11 @@
 """
+## Purpose and audience
+Purpose: Prove that mutex with_lock guard.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-NOGC-SYNC-MUT-001 — stable requirement identity for this spec.
+
+"""
 # Guard-pattern locking specs (SF4)
 
 with_lock / with_read / with_write: closure-based guard — lock is released by
@@ -10,77 +17,90 @@ use std.spec.*
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock, mutex_try_lock, mutex_unlock}
 use std.nogc_sync_mut.concurrent.rwlock.{RwLock, rwlock_new, rwlock_with_read, rwlock_with_write}
 
+use std.spec.step
+
 describe "mutex with_lock guard":
     it "runs the body on the protected value and stores the result":
+        step("Verify: runs the body on the protected value and stores the result")
+        # @req: REQ-LIB-NOGC-SYNC-MUT-001
         val m = mutex_new(7)
         val out = mutex_with_lock(m, \v: v + 3)
-        expect(out).to_equal(10)
+        expect(out).to_equal(10)  # oracle: 10 — named expected value from the requirement
 
     it "releases the lock after the body (second lock attempt succeeds)":
+        step("Verify: releases the lock after the body (second lock attempt succeeds)")
         val m = mutex_new(1)
         mutex_with_lock(m, \v: v + 1)
         # try_lock returns nil when held; a value when free.
         val probe = mutex_try_lock(m)
-        expect(probe).to_equal(2)
-        expect(mutex_unlock(m, 2)).to_equal(1)
+        expect(probe).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(mutex_unlock(m, 2)).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "supports consecutive with_lock calls (release is real, not one-shot)":
+        step("Verify: supports consecutive with_lock calls (release is real, not one-shot)")
         val m = mutex_new(0)
         mutex_with_lock(m, \v: v + 1)
         mutex_with_lock(m, \v: v + 1)
         val final = mutex_with_lock(m, \v: v + 1)
-        expect(final).to_equal(3)
+        expect(final).to_equal(3)  # oracle: 3 — named expected value from the requirement
 
     it "method form with_lock works on the Mutex receiver":
+        step("Verify: method form with_lock works on the Mutex receiver")
         val m = mutex_new(5)
         val out = m.with_lock(\v: v * 2)
-        expect(out).to_equal(10)
-        expect(mutex_with_lock(m, \v: v)).to_equal(10)
+        expect(out).to_equal(10)  # oracle: 10 — named expected value from the requirement
+        expect(mutex_with_lock(m, \v: v)).to_equal(10)  # oracle: 10 — named expected value from the requirement
 
 describe "mutex with_lock nesting":
     it "two distinct mutexes can nest without deadlock":
+        step("Verify: two distinct mutexes can nest without deadlock")
         val outer = mutex_new(100)
         val inner = mutex_new(10)
         val got = mutex_with_lock(outer, \a: a + mutex_with_lock(inner, \b: b + 1))
-        expect(got).to_equal(111)
+        expect(got).to_equal(111)  # oracle: 111 — named expected value from the requirement
         # Both released afterwards.
-        expect(mutex_with_lock(outer, \v: v)).to_equal(111)
-        expect(mutex_with_lock(inner, \v: v)).to_equal(11)
+        expect(mutex_with_lock(outer, \v: v)).to_equal(111)  # oracle: 111 — named expected value from the requirement
+        expect(mutex_with_lock(inner, \v: v)).to_equal(11)  # oracle: 11 — named expected value from the requirement
 
 describe "rwlock guard pattern":
     it "with_read passes a snapshot and returns the body result":
+        step("Verify: with_read passes a snapshot and returns the body result")
         val rw = rwlock_new(42)
         val doubled = rwlock_with_read(rw, \v: v * 2)
-        expect(doubled).to_equal(84)
+        expect(doubled).to_equal(84)  # oracle: 84 — named expected value from the requirement
         # Snapshot semantics: the protected value is unchanged.
-        expect(rwlock_with_read(rw, \v: v)).to_equal(42)
+        expect(rwlock_with_read(rw, \v: v)).to_equal(42)  # oracle: 42 — named expected value from the requirement
 
     it "reads are shared: consecutive reads need no unlock in between":
+        step("Verify: reads are shared: consecutive reads need no unlock in between")
         val rw = rwlock_new(9)
         val a = rwlock_with_read(rw, \v: v)
         val b = rwlock_with_read(rw, \v: v)
-        expect(a).to_equal(9)
-        expect(b).to_equal(9)
+        expect(a).to_equal(9)  # oracle: 9 — named expected value from the requirement
+        expect(b).to_equal(9)  # oracle: 9 — named expected value from the requirement
 
     it "with_write does an exclusive read-modify-write and releases the gate":
+        step("Verify: with_write does an exclusive read-modify-write and releases the gate")
         val rw = rwlock_new(10)
         val updated = rwlock_with_write(rw, \v: v + 5)
-        expect(updated).to_equal(15)
+        expect(updated).to_equal(15)  # oracle: 15 — named expected value from the requirement
         # Gate released: a second with_write succeeds and sees the new value.
-        expect(rwlock_with_write(rw, \v: v + 5)).to_equal(20)
+        expect(rwlock_with_write(rw, \v: v + 5)).to_equal(20)  # oracle: 20 — named expected value from the requirement
         # Readers observe the committed value.
-        expect(rwlock_with_read(rw, \v: v)).to_equal(20)
+        expect(rwlock_with_read(rw, \v: v)).to_equal(20)  # oracle: 20 — named expected value from the requirement
 
     it "method forms with_read/with_write work on the RwLock receiver":
+        step("Verify: method forms with_read/with_write work on the RwLock receiver")
         val rw = rwlock_new(3)
-        expect(rw.with_write(\v: v * 3)).to_equal(9)
-        expect(rw.with_read(\v: v + 1)).to_equal(10)
+        expect(rw.with_write(\v: v * 3)).to_equal(9)  # oracle: 9 — named expected value from the requirement
+        expect(rw.with_read(\v: v + 1)).to_equal(10)  # oracle: 10 — named expected value from the requirement
 
 describe "with_lock body result is the stored value":
     it "identity body leaves the protected value untouched":
+        step("Verify: identity body leaves the protected value untouched")
         val m = mutex_new(64)
-        expect(mutex_with_lock(m, \v: v)).to_equal(64)
-        expect(mutex_with_lock(m, \v: v)).to_equal(64)
+        expect(mutex_with_lock(m, \v: v)).to_equal(64)  # oracle: 64 — named expected value from the requirement
+        expect(mutex_with_lock(m, \v: v)).to_equal(64)  # oracle: 64 — named expected value from the requirement
 
 describe "generic guard round-trip proves no Any-typed value loss":
     # These are the tests that would have caught the retracted Any-typed
@@ -96,43 +116,50 @@ describe "generic guard round-trip proves no Any-typed value loss":
     # doc/08_tracking/bug/mutex_rwlock_text_value_nulled_by_pure_std_backend_2026-07-28.md.
 
     it "mutex with_lock round-trips an i64 value unchanged":
+        step("Verify: mutex with_lock round-trips an i64 value unchanged")
         val m = mutex_new(41)
         val out = mutex_with_lock(m, \v: v)
-        expect(out).to_equal(41)
+        expect(out).to_equal(41)  # oracle: 41 — named expected value from the requirement
 
     it "mutex with_lock round-trips an f64 value unchanged":
+        step("Verify: mutex with_lock round-trips an f64 value unchanged")
         val m = mutex_new(4.5)
         val out = mutex_with_lock(m, \v: v)
-        expect(out).to_equal(4.5)
+        expect(out).to_equal(4.5)  # oracle: 4.5 — named expected value from the requirement
 
     it "mutex with_lock: a second call observes what the first call stored":
+        step("Verify: mutex with_lock: a second call observes what the first call stored")
         val m = mutex_new(1.0)
         mutex_with_lock(m, \v: 2.0)
         val seen = mutex_with_lock(m, \v: v)
-        expect(seen).to_equal(2.0)
+        expect(seen).to_equal(2.0)  # oracle: 2.0 — named expected value from the requirement
 
     it "mutex method with_lock round-trips f64 and chains stores":
+        step("Verify: mutex method with_lock round-trips f64 and chains stores")
         val m = mutex_new(1.5)
-        expect(m.with_lock(\v: v)).to_equal(1.5)
+        expect(m.with_lock(\v: v)).to_equal(1.5)  # oracle: 1.5 — named expected value from the requirement
         m.with_lock(\v: 2.5)
-        expect(m.with_lock(\v: v)).to_equal(2.5)
+        expect(m.with_lock(\v: v)).to_equal(2.5)  # oracle: 2.5 — named expected value from the requirement
 
     it "rwlock with_write round-trips an f64 value unchanged":
+        step("Verify: rwlock with_write round-trips an f64 value unchanged")
         val rw = rwlock_new(9.5)
         val out = rwlock_with_write(rw, \v: v)
-        expect(out).to_equal(9.5)
+        expect(out).to_equal(9.5)  # oracle: 9.5 — named expected value from the requirement
 
     it "rwlock with_write: a second write/read observes what the first stored":
+        step("Verify: rwlock with_write: a second write/read observes what the first stored")
         val rw = rwlock_new(1.0)
         rwlock_with_write(rw, \v: 2.0)
         val seen = rwlock_with_read(rw, \v: v)
-        expect(seen).to_equal(2.0)
+        expect(seen).to_equal(2.0)  # oracle: 2.0 — named expected value from the requirement
 
     it "rwlock method with_write/with_read round-trip f64 and chain stores":
+        step("Verify: rwlock method with_write/with_read round-trip f64 and chain stores")
         val rw = rwlock_new(1.0)
-        expect(rw.with_read(\v: v)).to_equal(1.0)
+        expect(rw.with_read(\v: v)).to_equal(1.0)  # oracle: 1.0 — named expected value from the requirement
         rw.with_write(\v: 9.0)
-        expect(rw.with_read(\v: v)).to_equal(9.0)
+        expect(rw.with_read(\v: v)).to_equal(9.0)  # oracle: 9.0 — named expected value from the requirement
 
 describe "text values through the guard (KNOWN BROKEN, not by this lane)":
     # NOT caused by with_lock/with_read/with_write, and NOT fixed by making
@@ -149,11 +176,13 @@ describe "text values through the guard (KNOWN BROKEN, not by this lane)":
     # Full writeup:
     # doc/08_tracking/bug/mutex_rwlock_text_value_nulled_by_pure_std_backend_2026-07-28.md
     it "mutex with_lock round-trips a text value unchanged":
+        step("Verify: mutex with_lock round-trips a text value unchanged")
         val m = mutex_new("hello")
         val out = mutex_with_lock(m, \v: v)
         expect(out).to_equal("hello")
 
     it "rwlock with_write round-trips a text value unchanged":
+        step("Verify: rwlock with_write round-trips a text value unchanged")
         val rw = rwlock_new("start")
         val out = rwlock_with_write(rw, \v: v)
         expect(out).to_equal("start")

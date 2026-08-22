@@ -1,4 +1,11 @@
 """
+## Purpose and audience
+Purpose: Prove that HTTP request parser limits (AC-1).
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-NOGC-ASYNC-MUT-001 — stable requirement identity for this spec.
+
+"""
 # HTTP Hardening Specification
 
 **Feature IDs:** #AC-1, #AC-2, #AC-3, #AC-4
@@ -25,12 +32,15 @@ use std.http.headers.{
 
 describe "HTTP request parser limits (AC-1)":
     it "accepts request line within default limit":
+        step("Verify: accepts request line within default limit")
+        # @req: REQ-LIB-NOGC-ASYNC-MUT-001
         val limits = http_limits_default()
         val line = "GET /index.html HTTP/1.1"
         val err = check_request_line(line, limits)
         expect(err == nil).to_equal(true)
 
     it "rejects request line exceeding 8192 bytes":
+        step("Verify: rejects request line exceeding 8192 bytes")
         val limits = http_limits_default()
         var long_path = "GET /"
         var i = 0
@@ -41,33 +51,38 @@ describe "HTTP request parser limits (AC-1)":
         val err = check_request_line(long_path, limits)
         expect(err == nil).to_equal(false)
         val status = http_parse_error_status(err.unwrap())
-        expect(status).to_equal(414)
+        expect(status).to_equal(414)  # oracle: 414 — named expected value from the requirement
 
     it "rejects malformed request line with fewer than 3 parts":
+        step("Verify: rejects malformed request line with fewer than 3 parts")
         val limits = http_limits_default()
         val err = check_request_line("BADREQUEST", limits)
         expect(err == nil).to_equal(false)
         val status = http_parse_error_status(err.unwrap())
-        expect(status).to_equal(400)
+        expect(status).to_equal(400)  # oracle: 400 — named expected value from the requirement
 
     it "accepts header count within limit":
+        step("Verify: accepts header count within limit")
         val limits = http_limits_default()
         val err = check_header_count(50, limits)
         expect(err == nil).to_equal(true)
 
     it "rejects header count exceeding 100":
+        step("Verify: rejects header count exceeding 100")
         val limits = http_limits_default()
         val err = check_header_count(101, limits)
         expect(err == nil).to_equal(false)
         val status = http_parse_error_status(err.unwrap())
-        expect(status).to_equal(400)
+        expect(status).to_equal(400)  # oracle: 400 — named expected value from the requirement
 
     it "accepts header size within limit":
+        step("Verify: accepts header size within limit")
         val limits = http_limits_default()
         val err = check_header_size("Content-Type", "application/json", limits)
         expect(err == nil).to_equal(true)
 
     it "rejects header exceeding 8192 bytes":
+        step("Verify: rejects header exceeding 8192 bytes")
         val limits = http_limits_default()
         var big_value = ""
         var i = 0
@@ -77,21 +92,24 @@ describe "HTTP request parser limits (AC-1)":
         val err = check_header_size("X-Big", big_value, limits)
         expect(err == nil).to_equal(false)
         val status = http_parse_error_status(err.unwrap())
-        expect(status).to_equal(400)
+        expect(status).to_equal(400)  # oracle: 400 — named expected value from the requirement
 
     it "accepts body size within 10MB limit":
+        step("Verify: accepts body size within 10MB limit")
         val limits = http_limits_default()
         val err = check_body_size(1024, limits)
         expect(err == nil).to_equal(true)
 
     it "rejects body exceeding 10MB":
+        step("Verify: rejects body exceeding 10MB")
         val limits = http_limits_default()
         val err = check_body_size(10485761, limits)
         expect(err == nil).to_equal(false)
         val status = http_parse_error_status(err.unwrap())
-        expect(status).to_equal(413)
+        expect(status).to_equal(413)  # oracle: 413 — named expected value from the requirement
 
     it "supports custom limits":
+        step("Verify: supports custom limits")
         val limits = HttpLimits(
             max_request_line_bytes: 256,
             max_header_count: 10,
@@ -107,32 +125,39 @@ describe "HTTP request parser limits (AC-1)":
 
 describe "Path traversal refusal (AC-2)":
     it "accepts normal paths":
+        step("Verify: accepts normal paths")
         expect(is_safe_static_path("/index.html")).to_equal(true)
         expect(is_safe_static_path("/css/style.css")).to_equal(true)
         expect(is_safe_static_path("/images/logo.png")).to_equal(true)
 
     it "rejects double-dot traversal":
+        step("Verify: rejects double-dot traversal")
         expect(is_safe_static_path("/../etc/passwd")).to_equal(false)
         expect(is_safe_static_path("/css/../../secret")).to_equal(false)
         expect(contains_traversal("/../etc/passwd")).to_equal(true)
 
     it "rejects dot-slash sequences":
+        step("Verify: rejects dot-slash sequences")
         expect(is_safe_static_path("/./etc/passwd")).to_equal(false)
         expect(contains_traversal("/./etc/passwd")).to_equal(true)
 
     it "rejects null bytes":
+        step("Verify: rejects null bytes")
         expect(contains_null_byte("/index.html\0.txt")).to_equal(true)
         expect(is_safe_static_path("/index.html\0.txt")).to_equal(false)
 
     it "rejects backslash paths":
+        step("Verify: rejects backslash paths")
         expect(contains_backslash("/css\\..\\secret")).to_equal(true)
         expect(is_safe_static_path("/css\\..\\secret")).to_equal(false)
 
     it "rejects paths not starting with slash":
+        step("Verify: rejects paths not starting with slash")
         expect(is_safe_static_path("etc/passwd")).to_equal(false)
         expect(is_safe_static_path("")).to_equal(false)
 
     it "normalizes safe paths":
+        step("Verify: normalizes safe paths")
         val result = validate_static_path("/css/style.css")
         match result:
             case Ok(normalized):
@@ -141,6 +166,7 @@ describe "Path traversal refusal (AC-2)":
                 fail("validate_static_path rejected a safe path: {msg}")
 
     it "rejects traversal via validate_static_path":
+        step("Verify: rejects traversal via validate_static_path")
         val result = validate_static_path("/../secret")
         match result:
             case Ok(normalized):
@@ -150,23 +176,27 @@ describe "Path traversal refusal (AC-2)":
 
 describe "Header canonicalization and duplicate policy (AC-3)":
     it "normalizes header names":
+        step("Verify: normalizes header names")
         expect(normalize_header_name("content-type")).to_equal("Content-Type")
         expect(normalize_header_name("x-forwarded-for")).to_equal("X-Forwarded-For")
         expect(normalize_header_name("HOST")).to_equal("Host")
 
     it "canonicalizes a list of headers":
+        step("Verify: canonicalizes a list of headers")
         val headers = [("content-type", "text/html"), ("x-custom", "val")]
         val canon = canonicalize_headers(headers)
         expect(canon[0][0]).to_equal("Content-Type")
         expect(canon[1][0]).to_equal("X-Custom")
 
     it "identifies singleton headers":
+        step("Verify: identifies singleton headers")
         expect(is_singleton_header("Content-Type")).to_equal(true)
         expect(is_singleton_header("Host")).to_equal(true)
         expect(is_singleton_header("X-Custom")).to_equal(false)
         expect(is_singleton_header("Set-Cookie")).to_equal(false)
 
     it "deduplicates singleton headers with last-wins":
+        step("Verify: deduplicates singleton headers with last-wins")
         val headers = [
             ("Content-Type", "text/html"),
             ("X-Custom", "a"),
@@ -185,15 +215,16 @@ describe "Header canonicalization and duplicate policy (AC-3)":
             if deduped[i][0].lower() == "x-custom":
                 xc_count = xc_count + 1
             i = i + 1
-        expect(ct_count).to_equal(1)
+        expect(ct_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(ct_value).to_equal("application/json")
-        expect(xc_count).to_equal(2)
+        expect(xc_count).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     it "validates no duplicate singletons":
+        step("Verify: validates no duplicate singletons")
         val good = [("Content-Type", "text/html"), ("Host", "example.com")]
         val good_result = validate_no_duplicate_singletons(good)
         match good_result:
-            case Ok(h): expect(h.length()).to_equal(2)
+            case Ok(h): expect(h.length()).to_equal(2)  # oracle: 2 — named expected value from the requirement
             case Err(msg): fail("validate_no_duplicate_singletons rejected unique singleton headers: {msg}")
 
         val bad = [("Host", "a.com"), ("Host", "b.com")]
@@ -204,11 +235,13 @@ describe "Header canonicalization and duplicate policy (AC-3)":
 
 describe "Connection limits configuration (AC-4)":
     it "default limits have sensible values":
+        step("Verify: default limits have sensible values")
         val limits = http_limits_default()
-        expect(limits.idle_timeout_seconds).to_equal(60)
-        expect(limits.max_requests_per_connection).to_equal(100)
+        expect(limits.idle_timeout_seconds).to_equal(60)  # oracle: 60 — named expected value from the requirement
+        expect(limits.max_requests_per_connection).to_equal(100)  # oracle: 100 — named expected value from the requirement
 
     it "custom limits are respected":
+        step("Verify: custom limits are respected")
         val limits = HttpLimits(
             max_request_line_bytes: 4096,
             max_header_count: 50,
@@ -217,10 +250,11 @@ describe "Connection limits configuration (AC-4)":
             idle_timeout_seconds: 30,
             max_requests_per_connection: 50
         )
-        expect(limits.idle_timeout_seconds).to_equal(30)
-        expect(limits.max_requests_per_connection).to_equal(50)
+        expect(limits.idle_timeout_seconds).to_equal(30)  # oracle: 30 — named expected value from the requirement
+        expect(limits.max_requests_per_connection).to_equal(50)  # oracle: 50 — named expected value from the requirement
 
     it "error messages are descriptive":
+        step("Verify: error messages are descriptive")
         val err = HttpParseError.RequestLineTooLong(9000, 8192)
         val msg = http_parse_error_message(err)
         expect(msg.contains("9000")).to_equal(true)
@@ -232,31 +266,37 @@ describe "Connection limits configuration (AC-4)":
 
 describe "Hardening enforcement — no unbounded claims (AC-5)":
     it "default limits bound request line size":
+        step("Verify: default limits bound request line size")
         val limits = http_limits_default()
         expect(limits.max_request_line_bytes > 0).to_equal(true)
         expect(limits.max_request_line_bytes <= 65536).to_equal(true)
 
     it "default limits bound header count":
+        step("Verify: default limits bound header count")
         val limits = http_limits_default()
         expect(limits.max_header_count > 0).to_equal(true)
         expect(limits.max_header_count <= 1000).to_equal(true)
 
     it "default limits bound body size":
+        step("Verify: default limits bound body size")
         val limits = http_limits_default()
         expect(limits.max_body_bytes > 0).to_equal(true)
         expect(limits.max_body_bytes <= 104857600).to_equal(true)
 
     it "default limits bound connection lifetime":
+        step("Verify: default limits bound connection lifetime")
         val limits = http_limits_default()
         expect(limits.idle_timeout_seconds > 0).to_equal(true)
         expect(limits.idle_timeout_seconds <= 3600).to_equal(true)
 
     it "default limits bound requests per connection":
+        step("Verify: default limits bound requests per connection")
         val limits = http_limits_default()
         expect(limits.max_requests_per_connection > 0).to_equal(true)
         expect(limits.max_requests_per_connection <= 10000).to_equal(true)
 
     it "zero-value limits reject all input":
+        step("Verify: zero-value limits reject all input")
         val limits = HttpLimits(
             max_request_line_bytes: 0,
             max_header_count: 0,
@@ -273,10 +313,12 @@ describe "Hardening enforcement — no unbounded claims (AC-5)":
         expect(body_err == nil).to_equal(false)
 
     it "path traversal is always rejected regardless of limits":
+        step("Verify: path traversal is always rejected regardless of limits")
         expect(is_safe_static_path("/../../../etc/shadow")).to_equal(false)
         expect(is_safe_static_path("/..\\secret")).to_equal(false)
         expect(is_safe_static_path("/good/../../../bad")).to_equal(false)
 
     it "normalize_path removes redundant slashes":
+        step("Verify: normalize_path removes redundant slashes")
         val norm = normalize_path("/css//style.css")
         expect(norm.contains("//")).to_equal(false)

@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that test_runner_args flag parsing (hardening).
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-TEST-RUNNER-001 — stable requirement identity for this spec.
+
 # Unit hardening for std.test_runner.test_runner_args.
 #
 # Focuses on flags not already covered by
@@ -10,106 +17,129 @@
 use std.test_runner.test_runner_args.{parse_test_args, parse_mode_str}
 use std.test_runner.test_runner_types.{TestExecutionMode, TestRunResult, execution_mode_to_string, test_empty_selection_is_success, classify_test_run_result, test_run_outcome_exit_code}
 
+use std.spec.step
+
 describe "test_runner_args flag parsing (hardening)":
     context "sdoctest flags":
         it "sets sdoctest_force without also flipping plain sdoctest on":
+            step("Verify: sets sdoctest_force without also flipping plain sdoctest on")
+            # @req: REQ-LIB-TEST-RUNNER-001
             val options = parse_test_args(["--sdoctest-force"])
             expect(options.sdoctest_force).to_equal(true)
             expect(options.sdoctest).to_equal(false)
 
         it "parses --sdoctest-env= with the equals form":
+            step("Verify: parses --sdoctest-env= with the equals form")
             val options = parse_test_args(["--sdoctest-env=production"])
             expect(options.sdoctest_env).to_equal("production")
 
         it "parses --sdoctest-env with a following token":
+            step("Verify: parses --sdoctest-env with a following token")
             val options = parse_test_args(["--sdoctest-env", "staging"])
             expect(options.sdoctest_env).to_equal("staging")
 
     context "--mode= plain runtimes":
         it "maps --mode=jit to a Composite(jit) spec":
+            step("Verify: maps --mode=jit to a Composite(jit) spec")
             val options = parse_test_args(["--mode=jit"])
             expect(execution_mode_to_string(options.mode)).to_equal("jit")
 
         it "maps --mode native via the two-token form":
+            step("Verify: maps --mode native via the two-token form")
             val options = parse_test_args(["--mode", "native"])
             expect(execution_mode_to_string(options.mode)).to_equal("native")
 
     context "--mode= composite platform specs":
         it "wraps a bare baremetal spec with an implicit interpreter( prefix":
+            step("Verify: wraps a bare baremetal spec with an implicit interpreter( prefix")
             val options = parse_test_args(["--mode=baremetal(riscv32)"])
             expect(execution_mode_to_string(options.mode)).to_equal("interpreter(baremetal(riscv32))")
 
         it "keeps an explicit native( prefix as-is (no double-wrapping)":
+            step("Verify: keeps an explicit native( prefix as-is (no double-wrapping)")
             val options = parse_test_args(["--mode=native(baremetal(riscv32))"])
             expect(execution_mode_to_string(options.mode)).to_equal("native(baremetal(riscv32))")
 
         it "keeps a nested jit(remote(baremetal(...))) spec as-is":
+            step("Verify: keeps a nested jit(remote(baremetal(...))) spec as-is")
             val options = parse_test_args(["--mode=jit(remote(baremetal(stm32h7)))"])
             expect(execution_mode_to_string(options.mode)).to_equal("jit(remote(baremetal(stm32h7)))")
 
     context "--timeout":
         it "parses a numeric timeout token":
+            step("Verify: parses a numeric timeout token")
             val options = parse_test_args(["--timeout", "45"])
-            expect(options.timeout).to_equal(45)
+            expect(options.timeout).to_equal(45)  # oracle: 45 — named expected value from the requirement
 
     context "--spl-doctest flag (comment-doctest lane, symmetric with --sdoctest)":
         it "sets spl_doctest when the flag is given":
+            step("Verify: sets spl_doctest when the flag is given")
             val options = parse_test_args(["--spl-doctest"])
             expect(options.spl_doctest).to_equal(true)
 
         it "keeps spl_doctest off by default":
+            step("Verify: keeps spl_doctest off by default")
             val options = parse_test_args([])
             expect(options.spl_doctest).to_equal(false)
 
         it "combines --spl-doctest with a scoped .spl target path":
+            step("Verify: combines --spl-doctest with a scoped .spl target path")
             val options = parse_test_args(["--spl-doctest", "test/fixtures/doctest/green.spl"])
             expect(options.spl_doctest).to_equal(true)
             expect(options.path).to_equal("test/fixtures/doctest/green.spl")
 
     context "--sdoctest with a scoped markdown target":
         it "combines --sdoctest with an explicit .md target path":
+            step("Verify: combines --sdoctest with an explicit .md target path")
             val options = parse_test_args(["--sdoctest", "test/fixtures/doctest/green.md"])
             expect(options.sdoctest).to_equal(true)
             expect(options.path).to_equal("test/fixtures/doctest/green.md")
 
         it "leaves the target path usable standalone (auto-detected by the .md extension upstream)":
+            step("Verify: leaves the target path usable standalone (auto-detected by the .md extension upstream)")
             val options = parse_test_args(["test/fixtures/doctest/green.md"])
             expect(options.sdoctest).to_equal(false)
             expect(options.path).to_equal("test/fixtures/doctest/green.md")
 
     context "target-path collection":
         it "takes the first non-flag token as the path":
+            step("Verify: takes the first non-flag token as the path")
             val options = parse_test_args(["first/path", "second/path"])
             expect(options.path).to_equal("first/path")
             expect(options.path_explicit).to_equal(true)
 
         it "defaults to test/ when no path token is given":
+            step("Verify: defaults to test/ when no path token is given")
             val options = parse_test_args([])
             expect(options.path).to_equal("test/")
             expect(options.path_explicit).to_equal(false)
 
         it "remembers an explicit default-looking test path":
+            step("Verify: remembers an explicit default-looking test path")
             val options = parse_test_args(["test/"])
             expect(options.path).to_equal("test/")
             expect(options.path_explicit).to_equal(true)
 
         it "fails an explicit empty spec selection but preserves query and doctest lanes":
+            step("Verify: fails an explicit empty spec selection but preserves query and doctest lanes")
             val implicit = parse_test_args([])
             val explicit = parse_test_args(["missing_spec.spl"])
             val listed = parse_test_args(["missing_spec.spl", "--list"])
             val doctest = parse_test_args(["green.spl", "--spl-doctest"])
             val empty = TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
-            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(implicit)))).to_equal(0)
-            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(explicit)))).to_equal(4)
-            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(listed)))).to_equal(0)
-            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(doctest)))).to_equal(0)
+            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(implicit)))).to_equal(0)  # oracle: 0 — named expected value from the requirement
+            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(explicit)))).to_equal(4)  # oracle: 4 — named expected value from the requirement
+            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(listed)))).to_equal(0)  # oracle: 0 — named expected value from the requirement
+            expect(test_run_outcome_exit_code(classify_test_run_result(empty, test_empty_selection_is_success(doctest)))).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     context "deliberate-red: malformed / unknown input":
         it "ignores an unrecognized long flag instead of crashing or misrouting it as a path":
+            step("Verify: ignores an unrecognized long flag instead of crashing or misrouting it as a path")
             val options = parse_test_args(["--totally-unknown-flag-xyz"])
             expect(options.path).to_equal("test/")
             expect(options.fail_fast).to_equal(false)
 
         it "falls back to Interpreter for parse_mode_str on garbage input":
+            step("Verify: falls back to Interpreter for parse_mode_str on garbage input")
             val mode = parse_mode_str("not-a-real-mode-!!@@")
             expect(execution_mode_to_string(mode)).to_equal("interpreter")

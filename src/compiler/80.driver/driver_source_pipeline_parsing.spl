@@ -43,7 +43,6 @@ use compiler.driver.driver_orchestration.{driver_streaming_surface_enabled}
 use compiler.driver.driver_bootstrap.{bootstrap_entry_source_index}
 use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use std.io.{file_lock, file_unlock, file_exists, file_write}
 
 extern fn rt_exit(code: i64)
 extern fn rt_stdout_flush()
@@ -108,7 +107,7 @@ pub fn driver_parse_shard_active() -> bool:
 # A malformed spec owns EVERYTHING rather than nothing. A shard that silently
 # parses no files would look like a fast success and leave the cache empty,
 # which is the failure mode that is hardest to notice.
-fn _driver_parse_shard_owns_static(path: text) -> bool:
+fn _driver_parse_shard_owns(path: text) -> bool:
     val spec = _driver_parse_shard_spec()
     if spec == "":
         return true
@@ -120,71 +119,6 @@ fn _driver_parse_shard_owns_static(path: text) -> bool:
     if count <= 0 or index < 0 or index >= count:
         return true
     (_driver_parse_shard_hash(path) % count) == index
-
-# ----- Shared work queue (replaces the static split when the orchestrator
-# publishes SIMPLE_PARSE_SHARD_QUEUE) ------------------------------------------
-#
-# A static hash split has a TAIL: the 8-way stage build always ended with one
-# or two shards still parsing while the other six sat idle, because the split
-# is by module count and modules are not equal (fp7, 2026-08-21: shards
-# finished 73..94 modules apart and the last one gated the whole phase). With
-# a queue every shard walks the same source list and CLAIMS each module it
-# reaches; whoever claims first parses it, everyone else skips. Work stays
-# balanced to within one module.
-#
-# Claim = a marker file under the queue dir, created inside a single flock'd
-# critical section (rt_file_lock is flock(2) and exists in both the seed and
-# the C runtime; rt_dir_create returns true on EEXIST and rename(2) overwrites,
-# so neither is an atomic claim on its own). The section is a stat and a tiny
-# write, microseconds against a multi-second parse.
-#
-# Output is unchanged by construction: a claimed module is parsed by exactly
-# one shard into the same content-keyed cache entry the static split would
-# have produced, and any module that is never claimed (a shard died, the lock
-# timed out) is simply parsed by the real build. The partition is no longer
-# a pure function of the path -- WHICH shard parses a module now depends on
-# timing -- but the union still is, and only the union reaches the cache.
-#
-# Lock failure degrades to the static split for that module rather than to
-# "owns nothing" (same fail-closed reasoning as the malformed-spec case).
-
-var _driver_parse_shard_queue_memo: text = "@@unset@@"
-var _driver_parse_shard_claimed: i64 = 0
-
-fn _driver_parse_shard_queue_dir() -> text:
-    if _driver_parse_shard_queue_memo != "@@unset@@":
-        return _driver_parse_shard_queue_memo
-    _driver_parse_shard_queue_memo = rt_env_get("SIMPLE_PARSE_SHARD_QUEUE") ?? ""
-    _driver_parse_shard_queue_memo
-
-pub fn driver_parse_shard_claimed() -> i64:
-    _driver_parse_shard_claimed
-
-fn _driver_parse_shard_claim(queue_dir: text, path: text) -> bool:
-    # Path hash + length: the marker name must agree across processes (same
-    # reason the hash is spelled out above) and a collision only costs one
-    # module its shard slot -- the real build still parses it.
-    val marker = "{queue_dir}/{_driver_parse_shard_hash(path)}-{path.len()}.claim"
-    if file_exists(marker):
-        return false
-    val fd = file_lock("{queue_dir}/.lock", 30)
-    if fd < 0:
-        return _driver_parse_shard_owns_static(path)
-    var claimed = false
-    if not file_exists(marker):
-        claimed = file_write(marker, _driver_parse_shard_spec())
-    val _unlocked = file_unlock(fd)
-    if claimed:
-        _driver_parse_shard_claimed = _driver_parse_shard_claimed + 1
-    claimed
-
-fn _driver_parse_shard_owns(path: text) -> bool:
-    if _driver_parse_shard_spec() == "":
-        return true
-    val queue_dir = _driver_parse_shard_queue_dir()
-    if queue_dir == "":
-        return _driver_parse_shard_owns_static(path)
-    _driver_parse_shard_claim(queue_dir, path)
 
 fn _driver_publish_frontend_cache_scope():
     if (rt_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "":
@@ -555,12 +489,23 @@ impl CompilerDriver:
                 # blamed on src/app/io/sqlite_sffi.spl, the COMPLETED file).
                 # done is the count already finished, so `current` here is the
                 # unit being worked on, not one that is done.
-                log_build_progress("parse", "files", progress_parse_done,
-                    unique_entry_sources.len(), source.path,
-                    1, 6, 0, 0, "running")
+                # Ownership is decided BEFORE the in-flight receipt is
+                # emitted. Emitting it first made every shard child claim all
+                # 666 files as "current" while parsing only its own ~83, so a
+                # sharded build's merged log carried 8x666 receipts of which
+                # 8x583 named a file that process never opened -- and the dt
+                # stamp on those lines measured the gap between two skips, not
+                # any work. That is why a shard's real per-file cost could not
+                # be read off run7's log at all. A skipped file emits nothing;
+                # the counter still advances, so the next owned file's receipt
+                # reports the true position.
+                # doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
                 if not _driver_parse_shard_owns(source.path):
                     progress_parse_done = progress_parse_done + 1
                     continue
+                log_build_progress("parse", "files", progress_parse_done,
+                    unique_entry_sources.len(), source.path,
+                    1, 6, 0, 0, "running")
                 val entry_module = parse_full_frontend(
                     source.content,
                     source.path,
@@ -648,7 +593,7 @@ impl CompilerDriver:
                 # Shard children exist only to warm the cache. Everything after
                 # this point (surfaces, HIR, MIR, codegen, link) is the real
                 # build's job and must not be duplicated N times.
-                print "[parse-shard] done shard={rt_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()} claimed={driver_parse_shard_claimed()}"
+                print "[parse-shard] done shard={rt_env_get(\"SIMPLE_PARSE_SHARD\") ?? \"\"} parses={flat_parse_module_body_calls()}"
                 rt_stdout_flush()
                 rt_exit(0)
             var entry_surface_builder = ModuleSurfaceBuilder.new()

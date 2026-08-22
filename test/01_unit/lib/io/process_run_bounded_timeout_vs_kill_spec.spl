@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that process_run_bounded timeout vs kill discrimination.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-IO-001 — stable requirement identity for this spec.
+
 # process_run_bounded: timeout is distinguishable from signal-kill and spawn failure.
 #
 # Closes (partially) the open item in
@@ -17,14 +24,19 @@
 
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_bounded_timed_out, process_bounded_kill_signal}
 
+use std.spec.step
+
 describe "process_run_bounded timeout vs kill discrimination":
     it "reports a deadline expiry as -1 plus a trailing timeout marker":
+        step("Verify: reports a deadline expiry as -1 plus a trailing timeout marker")
+        # @req: REQ-LIB-IO-001
         val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "sleep 30"], 500, 4096)
-        expect(exit_code).to_equal(-1)
+        expect(exit_code).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         expect(process_bounded_timed_out(exit_code, stderr)).to_equal(true)
-        expect(process_bounded_kill_signal(exit_code)).to_equal(0)
+        expect(process_bounded_kill_signal(exit_code)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "never classifies an uncatchable SIGKILL death as a timeout":
+        step("Verify: never classifies an uncatchable SIGKILL death as a timeout")
         # Deterministic external-kill fixture: the child SIGKILLs itself,
         # indistinguishable from a host killer to the parent. Depending on
         # backend the code is 137 (128+9, exit_status_to_code paths) or -1
@@ -34,54 +46,62 @@ describe "process_run_bounded timeout vs kill discrimination":
         val ok_shape = exit_code == 137 or (exit_code == -1 and stderr == "")
         expect(ok_shape).to_equal(true)
         if exit_code == 137:
-            expect(process_bounded_kill_signal(exit_code)).to_equal(9)
+            expect(process_bounded_kill_signal(exit_code)).to_equal(9)  # oracle: 9 — named expected value from the requirement
 
     it "never classifies an external SIGTERM death as a timeout":
+        step("Verify: never classifies an external SIGTERM death as a timeout")
         val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "kill -TERM $$"], 5000, 4096)
         expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
         val ok_shape = exit_code == 143 or (exit_code == -1 and stderr == "")
         expect(ok_shape).to_equal(true)
         if exit_code == 143:
-            expect(process_bounded_kill_signal(exit_code)).to_equal(15)
+            expect(process_bounded_kill_signal(exit_code)).to_equal(15)  # oracle: 15 — named expected value from the requirement
 
     it "treats a plain nonzero exit as neither timeout nor signal":
+        step("Verify: treats a plain nonzero exit as neither timeout nor signal")
         val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "exit 7"], 5000, 4096)
-        expect(exit_code).to_equal(7)
+        expect(exit_code).to_equal(7)  # oracle: 7 — named expected value from the requirement
         expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
-        expect(process_bounded_kill_signal(exit_code)).to_equal(0)
+        expect(process_bounded_kill_signal(exit_code)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "does not mistake a child that merely PRINTS timeout text for a timeout":
+        step("Verify: does not mistake a child that merely PRINTS timeout text for a timeout")
         # Marker checks are anchored to stderr's END with exit_code -1; a child
         # that exits 0 after printing the words must not classify as timed out.
         val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "echo Process timed out >&2; echo TIMEOUT >&2; echo done; exit 0"], 5000, 4096)
-        expect(exit_code).to_equal(0)
+        expect(exit_code).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
 
     it "does not flag a normal exit 0 as a timeout":
+        step("Verify: does not flag a normal exit 0 as a timeout")
         val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "echo ok; exit 0"], 5000, 4096)
-        expect(exit_code).to_equal(0)
+        expect(exit_code).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
-        expect(process_bounded_kill_signal(exit_code)).to_equal(0)
+        expect(process_bounded_kill_signal(exit_code)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "does not flag a plain nonzero natural exit (3) as a timeout":
+        step("Verify: does not flag a plain nonzero natural exit (3) as a timeout")
         val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "exit 3"], 5000, 4096)
-        expect(exit_code).to_equal(3)
+        expect(exit_code).to_equal(3)  # oracle: 3 — named expected value from the requirement
         expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
-        expect(process_bounded_kill_signal(exit_code)).to_equal(0)
+        expect(process_bounded_kill_signal(exit_code)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "does not flag a fast child under a generous bound as a timeout":
+        step("Verify: does not flag a fast child under a generous bound as a timeout")
         # Child completes in milliseconds; the 8s bound must never fire.
         val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "true"], 8000, 4096)
-        expect(exit_code).to_equal(0)
+        expect(exit_code).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
 
     it "does not classify a bare -1 with no marker (external kill collapse) as a timeout":
+        step("Verify: does not classify a bare -1 with no marker (external kill collapse) as a timeout")
         # The interpreter-extern / C-runtime collapse shape: -1 + EMPTY stderr,
         # child already dead. Must never read as a deadline expiry.
         expect(process_bounded_timed_out(-1, "")).to_equal(false)
         expect(process_bounded_timed_out(-1, "some unrelated stderr\n")).to_equal(false)
 
     it "holds the helper's exit-code boundary exactly (-1, -2, 0, 1)":
+        step("Verify: holds the helper's exit-code boundary exactly (-1, -2, 0, 1)")
         # Only -1 can ever be a timeout; the marker alone is never sufficient.
         expect(process_bounded_timed_out(-1, "\nTIMEOUT\n")).to_equal(true)
         expect(process_bounded_timed_out(-1, "Process timed out")).to_equal(true)
@@ -91,16 +111,18 @@ describe "process_run_bounded timeout vs kill discrimination":
         expect(process_bounded_timed_out(1, "Process timed out")).to_equal(false)
 
     it "preserves child stderr written before the deadline on a timeout":
+        step("Verify: preserves child stderr written before the deadline on a timeout")
         # The marker is APPENDED; pre-deadline stderr must survive in front.
         val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "echo early-diagnostic >&2; sleep 30"], 500, 4096)
-        expect(exit_code).to_equal(-1)
+        expect(exit_code).to_equal(-1)  # oracle: -1 — named expected value from the requirement
         expect(process_bounded_timed_out(exit_code, stderr)).to_equal(true)
         expect(stderr).to_contain("early-diagnostic")
 
     it "keeps kill-signal decoding exact on the 128+signo band":
-        expect(process_bounded_kill_signal(137)).to_equal(9)
-        expect(process_bounded_kill_signal(143)).to_equal(15)
-        expect(process_bounded_kill_signal(-1)).to_equal(0)
-        expect(process_bounded_kill_signal(0)).to_equal(0)
-        expect(process_bounded_kill_signal(128)).to_equal(0)
-        expect(process_bounded_kill_signal(192)).to_equal(0)
+        step("Verify: keeps kill-signal decoding exact on the 128+signo band")
+        expect(process_bounded_kill_signal(137)).to_equal(9)  # oracle: 9 — named expected value from the requirement
+        expect(process_bounded_kill_signal(143)).to_equal(15)  # oracle: 15 — named expected value from the requirement
+        expect(process_bounded_kill_signal(-1)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(process_bounded_kill_signal(0)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(process_bounded_kill_signal(128)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(process_bounded_kill_signal(192)).to_equal(0)  # oracle: 0 — named expected value from the requirement

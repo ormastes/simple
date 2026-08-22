@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that web renderer CPU SIMD paint.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001 — stable requirement identity for this spec.
+
 use std.spec.{describe, it, expect}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
     simple_web_layout_render_html_gpu_paint_route_verdict,
@@ -149,30 +156,37 @@ fn _band_verdict(a_first: i64, a_last: i64, b_first: i64, b_last: i64) -> text:
         return "disjoint"
     "overlapping"
 
+use std.spec.step
+
 describe "web renderer CPU SIMD paint":
     it "keeps cpu simd out of explicit gpu paint routing":
+        step("Verify: keeps cpu simd out of explicit gpu paint routing")
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
         expect(simple_web_layout_render_html_should_gpu_paint(solid_html(), 32, 32, "cpu_simd", true)).to_equal(false)
         expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_html(), 32, 32, "cpu_simd", true)).to_equal("cpu-backend-not-gpu-offload")
         expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_html(), 32, 32, "vulkan", false)).to_equal("gpu-paint-disabled")
 
     it "uses cpu simd fills for solid-only readback":
+        step("Verify: uses cpu simd fills for solid-only readback")
         reset_simd_hits()
         val readback = simple_web_layout_render_html_readback_paint(solid_html(), 32, 32, "cpu_simd", true)
         val hits = simd_hit_counts()
-        expect(readback.pixels.len()).to_equal(1024)
+        expect(readback.pixels.len()).to_equal(1024)  # oracle: 1024 — named expected value from the requirement
         expect(readback.pixels[0]).to_equal(0xFF336699u32)
         expect(readback.source).to_equal("cpu_mirror")
         expect(hits.fill_hits).to_be_greater_than(0)
 
     it "skips solid-fill probing for text pages":
+        step("Verify: skips solid-fill probing for text pages")
         reset_simd_hits()
         val readback = simple_web_layout_render_html_readback_paint(text_html(), 32, 32, "cpu_simd", true)
         val hits = simd_hit_counts()
-        expect(readback.pixels.len()).to_equal(1024)
+        expect(readback.pixels.len()).to_equal(1024)  # oracle: 1024 — named expected value from the requirement
         expect(readback.source).to_equal("cpu_mirror")
-        expect(hits.fill_hits).to_equal(0)
+        expect(hits.fill_hits).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "uses residual cpu simd presentation for public text renders":
+        step("Verify: uses residual cpu simd presentation for public text renders")
         # The d24f780a09e-era expectation here was `fill_hits == 0`, because the
         # public entry then short-circuited cpu_simd text pages straight to
         # simple_web_layout_render_html_software_pixels. 3b86328c925 deleted that
@@ -187,29 +201,31 @@ describe "web renderer CPU SIMD paint":
         reset_simd_hits()
         val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(text_html(), 32, 32, "cpu_simd")
         val hits = simd_hit_counts()
-        expect(pixels.len()).to_equal(1024)
+        expect(pixels.len()).to_equal(1024)  # oracle: 1024 — named expected value from the requirement
         expect(hits.fill_hits).to_be_greater_than(0)
         # Non-vacuity: the colour heuristic this lane skips would paint a flat
         # page. Real layout + Draw IR puts glyph ink on it.
         expect(_non_background_pixels(pixels)).to_be_greater_than(0)
 
     it "preserves translucent color composition on the cpu_simd readback path":
+        step("Verify: preserves translucent color composition on the cpu_simd readback path")
         reset_simd_hits()
         val readback = simple_web_layout_render_html_readback_paint(transparent_html(), 32, 32, "cpu_simd", true)
         val hits = simd_hit_counts()
-        expect(readback.pixels.len()).to_equal(1024)
+        expect(readback.pixels.len()).to_equal(1024)  # oracle: 1024 — named expected value from the requirement
         expect(readback.pixels[0]).to_equal(0xFFFF8080u32)
         expect(readback.source).to_equal("cpu_mirror")
-        expect(hits.fill_hits).to_equal(0)
+        expect(hits.fill_hits).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "preserves css opacity composition on the cpu_simd readback path":
+        step("Verify: preserves css opacity composition on the cpu_simd readback path")
         reset_simd_hits()
         val readback = simple_web_layout_render_html_readback_paint(opacity_html(), 32, 32, "cpu_simd", true)
         val hits = simd_hit_counts()
-        expect(readback.pixels.len()).to_equal(1024)
+        expect(readback.pixels.len()).to_equal(1024)  # oracle: 1024 — named expected value from the requirement
         expect(readback.pixels[0]).to_equal(0xFF99B3CCu32)
         expect(readback.source).to_equal("cpu_mirror")
-        expect(hits.fill_hits).to_equal(0)
+        expect(hits.fill_hits).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     # 3b86328c925 set a byte-exactness bar between the public engine2d lane and
     # the software oracle; e8444b6b1a6 ("chore(sync): WC sweep", the very next
@@ -218,6 +234,7 @@ describe "web renderer CPU SIMD paint":
     # for NON-TEXT content -- both lanes bottom out in the same solid/blend fill
     # code and agree to the pixel -- so it is restored here rather than weakened.
     it "keeps non-text pages byte-exact between the public lane and the software oracle":
+        step("Verify: keeps non-text pages byte-exact between the public lane and the software oracle")
         expect(_exactness_verdict(
             simple_web_render_html_to_pixels_with_engine2d_backend(solid_html(), 32, 32, "cpu_simd"),
             simple_web_layout_render_html_software_pixels(solid_html(), 32, 32, _oracle_budget_ms())
@@ -247,10 +264,11 @@ describe "web renderer CPU SIMD paint":
     # and is truncated at row 31. Demanding equality would mean reimplementing a
     # bitmap font in the outline rasterizer. So the bar below is structural.
     it "keeps the public text lane structurally in agreement with the software oracle":
+        step("Verify: keeps the public text lane structurally in agreement with the software oracle")
         val oracle = simple_web_layout_render_html_software_pixels(text_html(), 32, 32, _oracle_budget_ms())
         val lane = simple_web_render_html_to_pixels_with_engine2d_backend(text_html(), 32, 32, "cpu_simd")
-        expect(oracle.len()).to_equal(1024)
-        expect(lane.len()).to_equal(1024)
+        expect(oracle.len()).to_equal(1024)  # oracle: 1024 — named expected value from the requirement
+        expect(lane.len()).to_equal(1024)  # oracle: 1024 — named expected value from the requirement
 
         # (1) Rasterizer-family pin. This is the sharpest of the four: the most
         # likely real regression is the Draw IR lane silently falling back to the

@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that GMB-1 mailbox protocol constants.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-TEST-RUNNER-001 — stable requirement identity for this spec.
+
 # GMB-1 GPU mailbox library — host-side, pure byte-buffer unit tests.
 #
 # Cross-checked against doc/04_architecture/hardware/ghdl_rv32_mailbox_protocol.md
@@ -23,20 +30,26 @@ use std.test_runner.gpu_mailbox.{
 
 describe "GMB-1 mailbox protocol constants":
     it "matches the GHDL RV32 mailbox trigger magic":
+        step("Verify: matches the GHDL RV32 mailbox trigger magic")
+        # @req: REQ-LIB-TEST-RUNNER-001
         expect(TRIGGER_MAGIC).to_equal(0x0000DEADu32)
 
     it "matches the GHDL RV32 mailbox timeout sentinel":
+        step("Verify: matches the GHDL RV32 mailbox timeout sentinel")
         expect(SENTINEL_TIMEOUT).to_equal(0xDEAD0000u32)
 
     it "matches the GHDL RV32 mailbox normal-exit sentinel mask":
+        step("Verify: matches the GHDL RV32 mailbox normal-exit sentinel mask")
         expect(SENTINEL_EXIT_MASK).to_equal(0xCAFE0000u32)
 
     it "matches the GHDL RV32 mailbox command codes":
+        step("Verify: matches the GHDL RV32 mailbox command codes")
         expect(CMD_PUTC).to_equal(0x01u32)
         expect(CMD_EXIT).to_equal(0x02u32)
         expect(CMD_RESULT).to_equal(0x03u32)
 
     it "matches the SGP blob magic and version from design §4.2":
+        step("Verify: matches the SGP blob magic and version from design §4.2")
         expect(SGP_MAGIC).to_equal(0x53474250u32)
         expect(SGP_VERSION).to_equal(1u32)
 
@@ -45,18 +58,21 @@ describe "decode_sentinel":
         step("decode 0xCAFE0000 | 7")
         val raw = SENTINEL_EXIT_MASK | 7u32
         expect(decode_sentinel(raw)).to_equal(SentinelState.Exit)
-        expect(sentinel_exit_code(raw)).to_equal(7)
+        expect(sentinel_exit_code(raw)).to_equal(7)  # oracle: 7 — named expected value from the requirement
 
     it "decodes exactly 0xDEAD0000 as a timeout":
+        step("Verify: decodes exactly 0xDEAD0000 as a timeout")
         expect(decode_sentinel(SENTINEL_TIMEOUT)).to_equal(SentinelState.Timeout)
-        expect(sentinel_exit_code(SENTINEL_TIMEOUT)).to_equal(0)
+        expect(sentinel_exit_code(SENTINEL_TIMEOUT)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "decodes 0 (reset value) and other values as still running":
+        step("Verify: decodes 0 (reset value) and other values as still running")
         expect(decode_sentinel(0u32)).to_equal(SentinelState.Running)
         expect(decode_sentinel(0x1234u32)).to_equal(SentinelState.Running)
 
 describe "MailboxArena byte access":
     it "round-trips u32 values written and read at arbitrary offsets":
+        step("Verify: round-trips u32 values written and read at arbitrary offsets")
         var arena = MailboxArena.new(64)
         arena.set_u32(0, 0xAABBCCDDu32)
         expect(arena.get_u32(0)).to_equal(0xAABBCCDDu32)
@@ -66,6 +82,7 @@ describe "MailboxArena byte access":
         expect(arena.get_u32(32)).to_equal(0u32)
 
     it "reads/writes the register block through named accessors":
+        step("Verify: reads/writes the register block through named accessors")
         var arena = MailboxArena.new(ARENA_SIZE)
         arena.fire_command(CMD_PUTC, 65u32, 0u32, 1u32)
         expect(arena.cmd()).to_equal(CMD_PUTC)
@@ -75,8 +92,9 @@ describe "MailboxArena byte access":
         expect(arena.trigger()).to_equal(TRIGGER_MAGIC)
 
     it "zero_bytes(size) produces an exact-length zero-filled buffer":
+        step("Verify: zero_bytes(size) produces an exact-length zero-filled buffer")
         val buf = zero_bytes(37)
-        expect(buf.len()).to_equal(37)
+        expect(buf.len()).to_equal(37)  # oracle: 37 — named expected value from the requirement
         var all_zero = true
         for b in buf:
             if b != 0u8:
@@ -85,41 +103,46 @@ describe "MailboxArena byte access":
 
 describe "service_trigger — interactive dispatch":
     it "does nothing when no trigger is pending":
+        step("Verify: does nothing when no trigger is pending")
         var arena = MailboxArena.new(ARENA_SIZE)
         val outcome = service_trigger(arena)
         assert_false(outcome.serviced)
 
     it "services CMD_PUTC by appending to the LOG ring and clearing TRIGGER":
+        step("Verify: services CMD_PUTC by appending to the LOG ring and clearing TRIGGER")
         var arena = MailboxArena.new(ARENA_SIZE)
         arena.init_log_ring(64)
         arena.fire_command(CMD_PUTC, 72u32, 0u32, 1u32)  # 'H'
         val outcome = service_trigger(arena)
         assert_true(outcome.serviced)
-        expect(outcome.putc_byte).to_equal(72)
+        expect(outcome.putc_byte).to_equal(72)  # oracle: 72 — named expected value from the requirement
         expect(arena.trigger()).to_equal(0u32)
-        expect(arena.log_head()).to_equal(1)
+        expect(arena.log_head()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "services CMD_EXIT by writing the normal-exit sentinel":
+        step("Verify: services CMD_EXIT by writing the normal-exit sentinel")
         var arena = MailboxArena.new(ARENA_SIZE)
         arena.fire_command(CMD_EXIT, 3u32, 0u32, 2u32)
         val outcome = service_trigger(arena)
         assert_true(outcome.serviced)
         assert_true(outcome.exited)
-        expect(outcome.exit_code).to_equal(3)
+        expect(outcome.exit_code).to_equal(3)  # oracle: 3 — named expected value from the requirement
         expect(arena.read_sentinel()).to_equal(SentinelState.Exit)
 
     it "services CMD_RESULT by appending a 12-byte record":
+        step("Verify: services CMD_RESULT by appending a 12-byte record")
         var arena = MailboxArena.new(ARENA_SIZE)
         arena.init_log_ring(32)
         arena.init_record_ring(8)
         arena.fire_command(CMD_RESULT, 1u32, 99u32, 5u32)  # pass=1 value=99
         val outcome = service_trigger(arena)
         assert_true(outcome.serviced)
-        expect(outcome.result_seq).to_equal(5)
+        expect(outcome.result_seq).to_equal(5)  # oracle: 5 — named expected value from the requirement
         expect(arena.trigger()).to_equal(0u32)
 
 describe "drain_log / drain_records — buffered mode round-trip":
     it "drains PUTC bytes appended directly (device-simulation) into text":
+        step("Verify: drains PUTC bytes appended directly (device-simulation) into text")
         var arena = MailboxArena.new(ARENA_SIZE)
         arena.init_log_ring(32)
         arena.append_log_byte(72u8)   # 'H'
@@ -127,21 +150,23 @@ describe "drain_log / drain_records — buffered mode round-trip":
         expect(drain_log(arena)).to_equal("Hi")
 
     it "drains records appended directly (device-simulation)":
+        step("Verify: drains records appended directly (device-simulation)")
         var arena = MailboxArena.new(ARENA_SIZE)
         arena.init_log_ring(16)
         arena.init_record_ring(4)
         arena.append_record(1u32, 1u32, 10)
         arena.append_record(2u32, 0u32, 20)
         val records = drain_records(arena)
-        expect(records.len()).to_equal(2)
-        expect(records[0].seq).to_equal(1)
+        expect(records.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(records[0].seq).to_equal(1)  # oracle: 1 — named expected value from the requirement
         assert_true(records[0].pass)
-        expect(records[0].value).to_equal(10)
-        expect(records[1].seq).to_equal(2)
+        expect(records[0].value).to_equal(10)  # oracle: 10 — named expected value from the requirement
+        expect(records[1].seq).to_equal(2)  # oracle: 2 — named expected value from the requirement
         assert_false(records[1].pass)
-        expect(records[1].value).to_equal(20)
+        expect(records[1].value).to_equal(20)  # oracle: 20 — named expected value from the requirement
 
     it "round-trips PUTC through service_trigger and drain_log together":
+        step("Verify: round-trips PUTC through service_trigger and drain_log together")
         var arena = MailboxArena.new(ARENA_SIZE)
         arena.init_log_ring(32)
         arena.fire_command(CMD_PUTC, 65u32, 0u32, 1u32)  # 'A'
@@ -152,6 +177,7 @@ describe "drain_log / drain_records — buffered mode round-trip":
 
 describe "write_sgp_header":
     it "writes a header readable via read_sgp_magic":
+        step("Verify: writes a header readable via read_sgp_magic")
         var arena = MailboxArena.new(ARENA_SIZE)
         write_sgp_header(arena, 0, 32, 64, 96, 32, 1000, 0)
         expect(read_sgp_magic(arena, 0)).to_equal(SGP_MAGIC)

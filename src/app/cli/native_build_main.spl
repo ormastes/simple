@@ -9,7 +9,6 @@ use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{file_write}
 use std.io_runtime.{getpid}
-use std.io_runtime.{dir_create_all, dir_remove_all}
 
 # Absolute path of the current bootstrap-stage compiler.
 fn self_exe() -> text:
@@ -314,34 +313,10 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
         return 0
     threads
 
-# Shared work queue for the shard children. Mirrors frontend_parse_cache_dir()
-# so the claim markers live next to the entries they guard, one private dir
-# per orchestrator pid, removed when the phase ends. With the queue published
-# the children claim modules dynamically instead of taking a static hash slice
-# (see driver_source_pipeline_parsing.spl, "Shared work queue"), which removes
-# the tail where the slowest slice gated the phase. SIMPLE_PARSE_SHARD_QUEUE=0
-# keeps the static split.
-fn parse_shard_queue_dir() -> text:
-    if (env_get("SIMPLE_PARSE_SHARD_QUEUE") ?? "") == "0":
-        return ""
-    var root = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
-    if root == "":
-        val lane = env_get("SIMPLE_CACHE_SCOPE") ?? ""
-        val lane_name = if lane == "": "default" else: lane
-        root = "build/bootstrap/native_cache/{lane_name}/frontend"
-    val dir = "{root}/queue-{getpid()}"
-    if not dir_create_all(dir):
-        return ""
-    dir
-
 fn run_parse_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
     var base = ["run", "src/app/cli/native_build_worker.spl"]
     for arg in args:
         base = base.push(arg)
-    val queue_dir = parse_shard_queue_dir()
-    val old_queue = env_get("SIMPLE_PARSE_SHARD_QUEUE") ?? ""
-    if queue_dir != "":
-        env_set("SIMPLE_PARSE_SHARD_QUEUE", queue_dir)
     var pids: [i64] = []
     var i: i64 = 0
     while i < count:
@@ -356,11 +331,7 @@ fn run_parse_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64)
         val code = rt_process_wait(pid, timeout_ms)
         if code == 0:
             done = done + 1
-    if queue_dir != "":
-        env_set("SIMPLE_PARSE_SHARD_QUEUE", old_queue)
-        val _removed = dir_remove_all(queue_dir)
-    val mode = if queue_dir != "": "queue" else: "static"
-    print "[parse-shard] {done}/{count} shard(s) completed split={mode}"
+    print "[parse-shard] {done}/{count} shard(s) completed"
 
 fn run_native_build_worker(args: [text]) -> i64:
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]

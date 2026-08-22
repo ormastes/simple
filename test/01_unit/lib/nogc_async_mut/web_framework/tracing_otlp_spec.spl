@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that web_framework tracing OTLP export.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-NOGC-ASYNC-MUT-001 — stable requirement identity for this spec.
+
 use std.spec
 use std.nogc_async_mut.web_framework.tracing.{TraceContext, TraceId, SpanId, TraceSpan, TraceExporter, ObserveContext, observe_context_new, observe_context_with_task, observe_context_with_actor, trace_id_to_hex, span_id_to_hex, observe_context_activate, observe_context_deactivate}
 use std.log.{SyslogRecord, LOG_INFO, log_context_clear, log_context_active}
@@ -34,9 +41,11 @@ the configured `service.name`.
 describe "web_framework tracing OTLP export":
 
     it "produces 32/16-char hex ids and round-trips the W3C traceparent header":
+        step("Verify: produces 32/16-char hex ids and round-trips the W3C traceparent header")
+        # @req: REQ-LIB-NOGC-ASYNC-MUT-001
         val ctx = TraceContext.new()
-        expect(trace_id_to_hex(ctx.trace_id).len()).to_equal(32)
-        expect(span_id_to_hex(ctx.span_id).len()).to_equal(16)
+        expect(trace_id_to_hex(ctx.trace_id).len()).to_equal(32)  # oracle: 32 — named expected value from the requirement
+        expect(span_id_to_hex(ctx.span_id).len()).to_equal(16)  # oracle: 16 — named expected value from the requirement
 
         val header = ctx.to_traceparent()
         match TraceContext.from_traceparent(header):
@@ -46,6 +55,7 @@ describe "web_framework tracing OTLP export":
                 fail("from_traceparent failed to round-trip a freshly generated traceparent header")
 
     it "carries parent/child linkage into OTLP parentSpanId":
+        step("Verify: carries parent/child linkage into OTLP parentSpanId")
         val parent_ctx = TraceContext.new()
         val child_ctx = parent_ctx.child_span()
         expect(trace_id_to_hex(child_ctx.trace_id)).to_equal(trace_id_to_hex(parent_ctx.trace_id))
@@ -74,6 +84,7 @@ describe "web_framework tracing OTLP export":
         expect(child_otlp.contains("\"code\":1")).to_equal(true)
 
     it "wraps buffered spans in a resourceSpans/scopeSpans/spans OTLP document":
+        step("Verify: wraps buffered spans in a resourceSpans/scopeSpans/spans OTLP document")
         val ctx = TraceContext.new()
         var span = TraceSpan.new(ctx, "handle_request")
         span.set_attribute("http.route", "/users")
@@ -97,6 +108,7 @@ describe "web_framework tracing OTLP export":
         expect(legacy.contains("\"resourceSpans\"")).to_equal(false)
 
     it "shares trace/span correlation ids via ObserveContext":
+        step("Verify: shares trace/span correlation ids via ObserveContext")
         val ctx = TraceContext.new()
         val oc = observe_context_new(ctx)
         match oc.task_id:
@@ -105,15 +117,15 @@ describe "web_framework tracing OTLP export":
 
         val oc_task = observe_context_with_task(oc, 42)
         match oc_task.task_id:
-            Some(tid): expect(tid).to_equal(42)
+            Some(tid): expect(tid).to_equal(42)  # oracle: 42 — named expected value from the requirement
             nil: fail("observe_context_with_task did not attach task_id")
 
         val oc_actor = observe_context_with_actor(oc_task, 7)
         match oc_actor.actor_id:
-            Some(aid): expect(aid).to_equal(7)
+            Some(aid): expect(aid).to_equal(7)  # oracle: 7 — named expected value from the requirement
             nil: fail("observe_context_with_actor did not attach actor_id")
         match oc_actor.task_id:
-            Some(tid): expect(tid).to_equal(42)
+            Some(tid): expect(tid).to_equal(42)  # oracle: 42 — named expected value from the requirement
             nil: fail("observe_context_with_actor dropped the previously attached task_id")
 
         expect(trace_id_to_hex(oc_actor.trace_ctx.trace_id)).to_equal(trace_id_to_hex(ctx.trace_id))
@@ -126,6 +138,7 @@ describe "web_framework tracing OTLP export":
     # ------------------------------------------------------------------
 
     it "activating an ObserveContext stamps its ids onto the next std.log record":
+        step("Verify: activating an ObserveContext stamps its ids onto the next std.log record")
         log_context_clear()
         val ctx = TraceContext.new()
         val oc = observe_context_with_actor(observe_context_with_task(observe_context_new(ctx), 42), 7)
@@ -134,20 +147,22 @@ describe "web_framework tracing OTLP export":
         val rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "correlated")
         expect(rec.trace_id_high).to_equal(ctx.trace_id.high)
         expect(rec.trace_id_low).to_equal(ctx.trace_id.low)
-        expect(rec.task_id).to_equal(42)
-        expect(rec.actor_id).to_equal(7)
+        expect(rec.task_id).to_equal(42)  # oracle: 42 — named expected value from the requirement
+        expect(rec.actor_id).to_equal(7)  # oracle: 7 — named expected value from the requirement
         observe_context_deactivate(snap)
 
     it "clearing the context leaves the next std.log record with absent/zero ids":
+        step("Verify: clearing the context leaves the next std.log record with absent/zero ids")
         log_context_clear()
         val rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "no context active")
-        expect(rec.trace_id_high).to_equal(0)
-        expect(rec.trace_id_low).to_equal(0)
-        expect(rec.task_id).to_equal(0)
-        expect(rec.actor_id).to_equal(0)
+        expect(rec.trace_id_high).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(rec.trace_id_low).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(rec.task_id).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(rec.actor_id).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(log_context_active()).to_equal(false)
 
     it "nested activate/deactivate restores the outer context (not cleared)":
+        step("Verify: nested activate/deactivate restores the outer context (not cleared)")
         log_context_clear()
         val outer_ctx = TraceContext.new()
         val outer_oc = observe_context_with_task(observe_context_new(outer_ctx), 100)
@@ -159,15 +174,15 @@ describe "web_framework tracing OTLP export":
 
         val inner_rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "inner scope")
         expect(inner_rec.trace_id_high).to_equal(inner_ctx.trace_id.high)
-        expect(inner_rec.actor_id).to_equal(9)
-        expect(inner_rec.task_id).to_equal(0)
+        expect(inner_rec.actor_id).to_equal(9)  # oracle: 9 — named expected value from the requirement
+        expect(inner_rec.task_id).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         observe_context_deactivate(inner_snap)
 
         val outer_rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "outer restored")
         expect(outer_rec.trace_id_high).to_equal(outer_ctx.trace_id.high)
-        expect(outer_rec.task_id).to_equal(100)
-        expect(outer_rec.actor_id).to_equal(0)
+        expect(outer_rec.task_id).to_equal(100)  # oracle: 100 — named expected value from the requirement
+        expect(outer_rec.actor_id).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         observe_context_deactivate(outer_snap)
         expect(log_context_active()).to_equal(false)

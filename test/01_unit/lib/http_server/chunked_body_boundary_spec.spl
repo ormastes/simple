@@ -1,3 +1,10 @@
+"""
+## Purpose and audience
+Purpose: Prove that chunked_body_end — boundary-aware detector.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-LIB-HTTP-SERVER-001 — stable requirement identity for this spec.
+
 # Chunked body-end boundary detection
 #
 # **Category:** HTTP Server Correctness
@@ -20,31 +27,41 @@ use std.nogc_async_mut.http.headers.{chunked_body_end}
 use std.nogc_async_mut.http_server.parser.{HttpRequestParser}
 use std.nogc_async_mut.http_server.proxy.{async_proxy_chunked_body_complete}
 
+use std.spec.step
+
 describe "chunked_body_end — boundary-aware detector":
     it "reports complete at full length for a simple terminated stream":
+        step("Verify: reports complete at full length for a simple terminated stream")
+        # @req: REQ-LIB-HTTP-SERVER-001
         expect(chunked_body_end("5\r\nhello\r\n0\r\n\r\n")).to_equal(15)
 
     it "does not match 0-CRLF-CRLF inside chunk data":
+        step("Verify: does not match 0-CRLF-CRLF inside chunk data")
         # 9-byte chunk whose DATA contains the 5 bytes "0\r\n\r\n"
         val enc = "9\r\nAB0\r\n\r\nCD\r\n0\r\n\r\n"
         expect(chunked_body_end(enc)).to_equal(enc.len())
 
     it "reports incomplete when the buffer ends mid-chunk on an embedded 0-CRLF-CRLF":
+        step("Verify: reports incomplete when the buffer ends mid-chunk on an embedded 0-CRLF-CRLF")
         # A flat scan would falsely claim the body ended here
         expect(chunked_body_end("9\r\nAB0\r\n\r\n")).to_equal(-1)
 
     it "reports incomplete mid chunk-size line":
+        step("Verify: reports incomplete mid chunk-size line")
         expect(chunked_body_end("5")).to_equal(-1)
 
     it "reports a framing error for a non-hex chunk-size line":
+        step("Verify: reports a framing error for a non-hex chunk-size line")
         expect(chunked_body_end("XYZ\r\nhello\r\n0\r\n\r\n")).to_equal(-2)
 
     it "strips chunk extensions before validating the size":
+        step("Verify: strips chunk extensions before validating the size")
         val enc = "5;name=value\r\nhello\r\n0\r\n\r\n"
         expect(chunked_body_end(enc)).to_equal(enc.len())
 
 describe "HttpRequestParser — chunked payload containing 0-CRLF-CRLF":
     it "receives the full body when a chunk payload embeds the terminator bytes":
+        step("Verify: receives the full body when a chunk payload embeds the terminator bytes")
         val parser = HttpRequestParser.new()
         val req = "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" +
                   "9\r\nAB0\r\n\r\nCD\r\n0\r\n\r\n"
@@ -55,6 +72,7 @@ describe "HttpRequestParser — chunked payload containing 0-CRLF-CRLF":
         expect(data.body).to_equal("AB0\r\n\r\nCD")
 
     it "waits for more data when fed a partial buffer ending on embedded terminator bytes":
+        step("Verify: waits for more data when fed a partial buffer ending on embedded terminator bytes")
         val parser = HttpRequestParser.new()
         val head = "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" +
                    "9\r\nAB0\r\n\r\n"
@@ -68,6 +86,7 @@ describe "HttpRequestParser — chunked payload containing 0-CRLF-CRLF":
         expect(data.body).to_equal("AB0\r\n\r\nCD")
 
     it "still detects the end of a genuinely terminated stream":
+        step("Verify: still detects the end of a genuinely terminated stream")
         val parser = HttpRequestParser.new()
         val req = "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" +
                   "5\r\nhello\r\n0\r\n\r\n"
@@ -78,6 +97,7 @@ describe "HttpRequestParser — chunked payload containing 0-CRLF-CRLF":
         expect(data.body).to_equal("hello")
 
     it "rejects an invalid chunk-size line as a framing error":
+        step("Verify: rejects an invalid chunk-size line as a framing error")
         val parser = HttpRequestParser.new()
         val req = "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" +
                   "XYZ\r\nhello\r\n0\r\n\r\n"
@@ -87,13 +107,17 @@ describe "HttpRequestParser — chunked payload containing 0-CRLF-CRLF":
 
 describe "async proxy — chunked body completion boundary walk":
     it "does not report complete on terminator bytes inside chunk data":
+        step("Verify: does not report complete on terminator bytes inside chunk data")
         assert_false(async_proxy_chunked_body_complete("9\r\nAB0\r\n\r\n"))
 
     it "reports complete once the real terminal chunk arrives":
+        step("Verify: reports complete once the real terminal chunk arrives")
         assert_true(async_proxy_chunked_body_complete("9\r\nAB0\r\n\r\nCD\r\n0\r\n\r\n"))
 
     it "reports complete for a simple terminated stream":
+        step("Verify: reports complete for a simple terminated stream")
         assert_true(async_proxy_chunked_body_complete("5\r\nhello\r\n0\r\n\r\n"))
 
     it "reports incomplete for a truncated stream":
+        step("Verify: reports incomplete for a truncated stream")
         assert_false(async_proxy_chunked_body_complete("5\r\nhel"))
