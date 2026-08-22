@@ -113,11 +113,22 @@ pub(crate) fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
             let offset = u64::from_le_bytes(elf_data[sh_offset + 24..sh_offset + 32].try_into().ok()?) as usize;
             let size = u64::from_le_bytes(elf_data[sh_offset + 32..sh_offset + 40].try_into().ok()?) as usize;
 
+            // Accept the SUFFIXED text sections too. An exact `".text"` match
+            // missed Cranelift objects, whose code lands in `.text.subsection`
+            // (and `-ffunction-sections`-style `.text.<symbol>` objects
+            // generally), so this manual relocation-aware path returned None on
+            // them and `extract_code_from_object` silently fell through — in the
+            // worst case all the way to the `mov eax, 0; ret` stub. An exact
+            // `.text` still wins over a suffixed one when both are present.
             match name {
                 ".text" => text_section = Some((offset, size)),
                 ".rela.text" => rela_text_section = Some((offset, size)),
                 ".symtab" => symtab_section = Some((offset, size, sh_link as usize)),
                 ".strtab" => strtab_offset = Some(offset),
+                n if n.starts_with(".rela.text.") && rela_text_section.is_none() => {
+                    rela_text_section = Some((offset, size))
+                }
+                n if n.starts_with(".text.") && text_section.is_none() => text_section = Some((offset, size)),
                 _ => {}
             }
 

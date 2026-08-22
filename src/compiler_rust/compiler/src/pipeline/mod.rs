@@ -234,7 +234,7 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(CompileError::Codegen(msg)) => {
-                assert!(msg.contains("LLVM backend"));
+                assert!(msg.contains("LLVM backend"), "unexpected codegen error: {msg}");
             }
             other => panic!("Expected codegen error, got {other:?}"),
         }

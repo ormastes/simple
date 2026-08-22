@@ -676,6 +676,30 @@ impl CompilerPipeline {
         target: Target,
         source_path: Option<&Path>,
     ) -> Result<Vec<u8>, CompileError> {
+        // Fail closed with a diagnostic that NAMES the cause. Without the
+        // `llvm` cargo feature, `BackendKind::select_for_target` has no 32-bit
+        // arm and falls through to Cranelift, which has no ISA for those
+        // targets and reports the opaque "Support for this target has not been
+        // implemented yet" — from which a caller cannot tell that the fix is to
+        // build with the `llvm` feature. Nothing that used to compile stops
+        // compiling: this is exactly the set Cranelift already rejected.
+        //
+        // The wording is the one `web_compiler.rs:176` already matches on, and
+        // which nothing in the tree ever emitted. WASM is deliberately NOT
+        // handled here: it has its own, more specific fail-closed message in
+        // `pipeline/codegen.rs:2826`, which this must not pre-empt.
+        #[cfg(not(feature = "llvm"))]
+        {
+            use simple_common::target::TargetArch;
+            let is_wasm = matches!(target.arch, TargetArch::Wasm32 | TargetArch::Wasm64);
+            if target.arch.is_32bit() && !is_wasm {
+                return Err(CompileError::Codegen(format!(
+                    "32-bit targets require the LLVM backend; rebuild the compiler with the \
+                     'llvm' cargo feature enabled (target arch: {:?})",
+                    target.arch
+                )));
+            }
+        }
         // Clear previous lint diagnostics
         self.lint_diagnostics.clear();
 
