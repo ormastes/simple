@@ -688,3 +688,32 @@ hash, error query, or retry. Five Rust provider tests, the GUI interpreter
 descriptor test, Simple check, and staging memory/call-shape audit pass. Winit
 is 13/30 contracted; owned production becomes 231 contracted and 7,576 rows
 missing both. Artifact signing and bound sanitizer/proof evidence remain open.
+Winit fullscreen declarations previously disagreed across lanes: Simple used a
+boolean ABI while the native provider exports integer status, and invalid state
+reads became `false`. Both engines and the wrapper now use integer status with
+negative typed absence for invalid fullscreen reads. Position mutation has an
+exact status contract and native coordinates are range-checked instead of
+truncated to `i32`. All three public wrappers use lexical FFI scopes.
+
+Each operation retains one provider call and adds no allocation, retained
+memory, copy, lookup, lock, hash, error query, or retry. Five provider tests,
+the GUI interpreter sentinel test, Simple check, and window-state call/memory-
+shape audit pass. Winit is 16/30 contracted; owned production becomes 234
+contracted and 7,573 rows missing both. During inventory verification, detached
+read-only census processes from earlier yielded sessions were explicitly
+terminated to avoid wasting host CPU/memory; no repository data was affected.
+
+Winit event admission previously declared a native wait symbol that the Rust
+provider did not export, and both poll/wait collapsed invalid or disconnected
+loops into ordinary `0` no-event/timeout. The provider now exports wait using
+one bounded native event pump; both lanes reserve `-1` for admission failure.
+Safe close polling returns `bool?`, and `WinitInput.is_valid` distinguishes
+provider loss while every positive event remains released exactly once.
+
+Poll and wait retain one pump and one queue pop per admission attempt. No busy
+loop, sleep, allocation, retained event, additional provider call, lookup,
+lock, hash, or retry was added. Five provider tests, GUI interpreter invalid-
+loop test, three Simple checks, the five-example wrapper spec, and event
+admission call/memory audit pass. Winit is 18/30 contracted; owned production
+becomes 236 contracted and 7,571 rows missing both. The remaining twelve event
+accessors still require lifetime/type contracts and signed artifact evidence.

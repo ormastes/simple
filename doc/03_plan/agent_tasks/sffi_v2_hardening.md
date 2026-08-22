@@ -146,3 +146,11 @@ passing placeholder.
     single conversion allocation/copy/present shape. Continue the remaining 17
     Winit declarations and eliminate duplicate untagged app/OS bindings before
     signed provider admission and artifact-bound runtime evidence.
+27. Winit fullscreen and position mutations now share integer status ABI across
+    native/interpreter/Simple, invalid fullscreen reads lift to absence, and
+    coordinates cannot truncate. Continue the remaining 14 event declarations,
+    duplicated raw bindings, signing, and artifact-bound verification receipts.
+28. Winit poll/wait now reserve negative admission failure, native wait exists
+    with one bounded pump, and safe APIs expose validity while retaining exact
+    event release and memory shape. Finish the remaining 12 accessor lifetime/
+    type contracts, then duplicate-binding migration and signed admission.

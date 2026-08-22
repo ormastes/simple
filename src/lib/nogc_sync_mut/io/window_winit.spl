@@ -27,7 +27,9 @@ extern fn rt_winit_window_staging_ptr(win: i64, w: i64, h: i64) -> i64
 extern fn rt_winit_window_present_staged(win: i64, w: i64, h: i64) -> i64
 @unsafe(reason: "raw pointer-copy status ABI; caller owns writable capacity for the full u32 array and zero sentinel reports null pointer or invalid array", capabilities: [ffi, raw_ptr])
 extern fn rt_write_u32s_to_raw(ptr: i64, pixels: [u32]) -> i64
+@unsafe(reason: "raw Winit event poll ABI; negative sentinel reports invalid loop/provider, zero means no event, positive handle is owned until release", capabilities: [ffi])
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+@unsafe(reason: "raw Winit event wait ABI; negative sentinel reports invalid loop/provider, zero means timeout, positive handle is owned until release", capabilities: [ffi])
 extern fn rt_winit_event_loop_wait_events(el: i64, timeout_ms: i64) -> i64
 extern fn rt_winit_event_get_type(ev: i64) -> i64
 extern fn rt_winit_event_key_keycode(ev: i64) -> i64
@@ -238,23 +240,29 @@ fn winit_event_text(event: i64) -> text:
 # Drain every pending event, freeing each one, and report whether a window-close
 # was requested. Freeing each event is mandatory: the runtime never reclaims
 # polled events on its own, so a non-draining poll leaks the global event map.
-fn winit_poll_close_requested(lp: WinitLoop) -> bool:
+fn winit_poll_close_requested(lp: WinitLoop) -> bool?:
     if not lp.is_valid:
-        return false
+        return nil
     var close_requested = false
-    var ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    var ev: i64 = -1
+    unsafe(capabilities: [ffi]):
+        ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     while ev > 0:
         if rt_winit_event_get_type(ev) == EVT_CLOSE:
             close_requested = true
         unsafe(capabilities: [ffi]):
             rt_winit_event_free(ev)
-        ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+        unsafe(capabilities: [ffi]):
+            ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    if ev < 0:
+        return nil
     close_requested
 
 # Input drained from one poll: a close request plus the key codes pressed this
 # frame (drains + frees every pending event, like winit_poll_close_requested).
 # Lets an app be interactive (scroll, keys) without touching raw rt_* externs.
 struct WinitInput:
+    is_valid: bool
     close: bool
     # Native window-focus receipts. `focus_kind` is the last raw winit event
     # kind observed in this poll (5 focused, 6 unfocused), or 0 when absent.
@@ -286,7 +294,7 @@ fn winit_input_empty() -> WinitInput:
     var cx: [f64] = []
     var cy: [f64] = []
     var event_kinds: [i64] = []
-    WinitInput(close: false, focus_events: 0, focus_kind: 0, focused: false,
+    WinitInput(is_valid: true, close: false, focus_events: 0, focus_kind: 0, focused: false,
                event_kinds: event_kinds, keys: keys, scroll_y: 0.0,
                mouse_x: 0.0, mouse_y: 0.0, mouse_moves: 0,
                click_buttons: cb, click_pressed: cp, click_x: cx, click_y: cy)
@@ -309,9 +317,13 @@ fn winit_poll_input_into(
     var click_x: [f64] = []
     var click_y: [f64] = []
     if not lp.is_valid:
-        return winit_input_empty()
-    var ev = rt_winit_event_loop_poll_events(lp.handle, 1)
-    while ev != 0:
+        var failed = winit_input_empty()
+        failed.is_valid = false
+        return failed
+    var ev: i64 = -1
+    unsafe(capabilities: [ffi]):
+        ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    while ev > 0:
         val kind = rt_winit_event_get_type(ev)
         # Decode before rt_winit_event_free: text accessors borrow this handle.
         val committed_text = if kind == EVT_TEXT:
@@ -352,8 +364,9 @@ fn winit_poll_input_into(
             scroll_y = scroll_y + rt_winit_event_wheel_y_milli(ev).to_f64() / 1000.0
         unsafe(capabilities: [ffi]):
             rt_winit_event_free(ev)
-        ev = rt_winit_event_loop_poll_events(lp.handle, 1)
-    WinitInput(close: close_requested, focus_events: focus_events,
+        unsafe(capabilities: [ffi]):
+            ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    WinitInput(is_valid: ev >= 0, close: close_requested, focus_events: focus_events,
                focus_kind: focus_kind, focused: focused,
                event_kinds: event_kinds, keys: keys, scroll_y: scroll_y,
                mouse_x: mouse_x, mouse_y: mouse_y, mouse_moves: mouse_moves,
@@ -382,9 +395,13 @@ fn winit_wait_input_into(
     var click_x: [f64] = []
     var click_y: [f64] = []
     if not lp.is_valid:
-        return winit_input_empty()
-    var ev = rt_winit_event_loop_wait_events(lp.handle, timeout_ms)
-    while ev != 0:
+        var failed = winit_input_empty()
+        failed.is_valid = false
+        return failed
+    var ev: i64 = -1
+    unsafe(capabilities: [ffi]):
+        ev = rt_winit_event_loop_wait_events(lp.handle, timeout_ms)
+    while ev > 0:
         val kind = rt_winit_event_get_type(ev)
         # Decode before rt_winit_event_free: text accessors borrow this handle.
         val committed_text = if kind == EVT_TEXT:
@@ -425,8 +442,9 @@ fn winit_wait_input_into(
             scroll_y = scroll_y + rt_winit_event_wheel_y_milli(ev).to_f64() / 1000.0
         unsafe(capabilities: [ffi]):
             rt_winit_event_free(ev)
-        ev = rt_winit_event_loop_poll_events(lp.handle, 1)
-    WinitInput(close: close_requested, focus_events: focus_events,
+        unsafe(capabilities: [ffi]):
+            ev = rt_winit_event_loop_poll_events(lp.handle, 1)
+    WinitInput(is_valid: ev >= 0, close: close_requested, focus_events: focus_events,
                focus_kind: focus_kind, focused: focused,
                event_kinds: event_kinds, keys: keys, scroll_y: scroll_y,
                mouse_x: mouse_x, mouse_y: mouse_y, mouse_moves: mouse_moves,

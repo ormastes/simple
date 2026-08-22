@@ -442,6 +442,12 @@ mod tests {
         ] {
             assert!(matches!(dispatch(name, &args).unwrap(), Value::Bool(false)));
         }
+        for name in ["rt_winit_event_loop_poll_events", "rt_winit_event_loop_wait_events"] {
+            assert!(matches!(
+                dispatch(name, &[Value::Int(i64::MAX), Value::Int(0)]).unwrap(),
+                Value::Int(-1)
+            ));
+        }
     }
 
     #[test]

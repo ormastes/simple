@@ -381,17 +381,19 @@ impl<'a> ApplicationHandler for Handler<'a> {
 
 /// Pump the event loop once (non-blocking, short timeout), servicing pending
 /// create requests and collecting window events.
-fn pump_once(timeout_ms: u64) {
+fn pump_once(timeout_ms: u64) -> bool {
     PUMP.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        if let Some(ps) = borrow.as_mut() {
-            let inner = &mut ps.inner;
-            let mut handler = Handler { inner };
-            let _ = ps
-                .event_loop
-                .pump_app_events(Some(Duration::from_millis(timeout_ms)), &mut handler);
-        }
-    });
+        let Some(ps) = borrow.as_mut() else {
+            return false;
+        };
+        let inner = &mut ps.inner;
+        let mut handler = Handler { inner };
+        let _ = ps
+            .event_loop
+            .pump_app_events(Some(Duration::from_millis(timeout_ms)), &mut handler);
+        true
+    })
 }
 
 // ---- macOS activation -------------------------------------------------------
@@ -616,14 +618,31 @@ pub extern "C" fn rt_winit_event_loop_new() -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_event_loop_poll_events(_el: i64, _max: i64) -> i64 {
-    pump_once(1);
+pub extern "C" fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64 {
+    if el != 1 || max <= 0 || !pump_once(1) {
+        return -1;
+    }
     PUMP.with(|cell| {
         let mut borrow = cell.borrow_mut();
         if let Some(ps) = borrow.as_mut() {
             ps.inner.pending_events.pop_front().unwrap_or(0)
         } else {
-            0
+            -1
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_event_loop_wait_events(el: i64, timeout_ms: i64) -> i64 {
+    if el != 1 || timeout_ms < 0 || !pump_once(timeout_ms as u64) {
+        return -1;
+    }
+    PUMP.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some(ps) = borrow.as_mut() {
+            ps.inner.pending_events.pop_front().unwrap_or(0)
+        } else {
+            -1
         }
     })
 }
@@ -1999,6 +2018,8 @@ mod sffi_contract_tests {
         assert_eq!(rt_winit_event_free(i64::MAX), 0);
         assert_eq!(rt_winit_window_free(i64::MAX), 0);
         assert_eq!(rt_winit_event_loop_free(i64::MAX), 0);
+        assert_eq!(rt_winit_event_loop_poll_events(i64::MAX, 1), -1);
+        assert_eq!(rt_winit_event_loop_wait_events(i64::MAX, 0), -1);
     }
 
     #[test]

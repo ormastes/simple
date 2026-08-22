@@ -125,7 +125,7 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                 }
             } else {
                 set_last_error(format!("invalid event loop handle: {event_loop_id}"));
-                Ok(int_value(0))
+                Ok(int_value(-1))
             }
         }
         "rt_winit_event_loop_wait_events" => {
@@ -142,12 +142,12 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                         #[cfg(target_os = "macos")]
                         std::thread::sleep(timeout);
-                        Ok(int_value(0))
+                        Ok(int_value(-1))
                     }
                 }
             } else {
                 set_last_error(format!("invalid event loop handle: {event_loop_id}"));
-                Ok(int_value(0))
+                Ok(int_value(-1))
             }
         }
         "rt_winit_window_new" => {
