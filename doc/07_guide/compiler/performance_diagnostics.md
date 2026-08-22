@@ -286,3 +286,8 @@ cannot distinguish decorators from attributes. It accepts the union of known nam
 emits at most one warning per line. Existing `unknown_decorator` and `unknown_attribute`
 settings remain aliases for compatibility; typed analysis may later provide precise
 category-specific diagnostics.
+
+Collection loop-invariant hoisting is disabled and contains no dormant header-rewrite
+body. The compatibility entrypoints return the original blocks. A future implementation
+must consume a real preheader plus dominance, alias/memory, effects, zero-trip, and
+speculatability proofs; analysis-only scalar predicates do not authorize movement.
