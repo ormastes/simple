@@ -291,3 +291,11 @@ attribute resolution. Existing source-directory/manifest-directory cache
 semantics and the ten-level lookup bound remain unchanged. These snapshots live for one command only;
 daemon reuse requires canonical-path freshness tokens and invalidation rather
 than promoting the cache to process-global state.
+
+### Raw-SFFI source-view ownership
+
+Raw-SFFI analysis owns one request-local, read-only-by-convention `CodeLine`
+snapshot carrying raw text, trimmed text, and physical line
+number, then projects separate call and declaration finding arrays. Category
+ordering remains a caller contract: SFFI009 precedes SFFI010. Standalone public
+string APIs remain compatibility adapters and do not share process-global state.
