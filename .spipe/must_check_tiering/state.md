@@ -111,6 +111,10 @@ implementation-blocked-by-bootstrap-authority
 - perf-fix: The dispatcher skips an exact canonical guard duplicated in
   `pre-push.local`, preventing the bounded must-check from running twice while
   continuing to chain any non-identical local hook.
+- bootstrap-cycle-1: The receipt-free Stage-2 trust-root lane failed in the
+  Rust authority build with E0433 because `dispatch_profile.rs` was again
+  undeclared. Restored exactly one owner and wired the existing millisecond
+  guard into the pushed-ref tier so this defect fails before Cargo/bootstrap.
 - artifacts: Added user-selected feature/NFR requirements and the missing
   executable `test/03_system/check/must_check_tiering_spec.spl`. Its manual is
   source-reviewed, but Stage-4 execution/docgen remains pending because this
