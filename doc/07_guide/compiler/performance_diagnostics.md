@@ -96,6 +96,14 @@ parsed-results function. This bridge removes the need for a second lint parse wh
 caller already owns the exact live revision; driver/LSP wiring and measured latency
 evidence remain pending.
 
+The query/LSP AST compatibility projection also uses the checked parser verdict. A
+parse failure emits deny-level `PARSE001` with `NOT LINTED` wording instead of returning
+a false clean result, the caller's prior parser-error state is restored, and the redundant
+pre-parse AST reset is gone because parser initialization owns that reset. Its legacy
+`COLL*` source-pattern records are always warnings and explicitly disclose that receiver
+type, effects, aliasing, and mutation version are unresolved. This containment does not
+make those findings typed or authorize fixes.
+
 ## Current safety containment
 
 - Unknown escape state remains escaping after finalization.
