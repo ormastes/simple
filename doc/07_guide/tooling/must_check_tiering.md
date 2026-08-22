@@ -36,6 +36,9 @@ its provenance file. The completion recorder validates all four phases and then
 runs every `automated` bootstrap-tier row in that same invocation. Thus an
 ad-hoc successful full bootstrap refreshes the same evidence read by the next
 push without a second manual must-check command.
+Each automated checker is bound to that canonical validated candidate through
+`SIMPLE_BINARY` plus the established `SIMPLE_BIN` compatibility name; a stale deployed binary or conflicting shell environment cannot
+become bootstrap evidence.
 
 ## Operator commands
 
@@ -59,6 +62,8 @@ PTY lifecycle evidence. `caret-local-llm-launch`
 remains TODO: Slang currently owns loader/readiness primitives but does not yet
 provide a generation endpoint that Caret can call. The independent
 `local_torch` provider is not accepted as Slang evidence.
+The existing interpreter/JIT/native engine differential is also an automated
+bootstrap row; it is intentionally absent from the interactive push tier.
 
 Do not hand-edit a TODO to `pass`; promotion must come from its bootstrap-owned
 checker or retained receipt validator. The push consumer opens and rehashes the

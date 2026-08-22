@@ -20,6 +20,11 @@ into an arbitrary shell-command executor.
 The bootstrap owner writes logs before the ledger and records repository-relative
 evidence references and hashes. This avoids a circular Git hash dependency
 while binding PASS evidence to the source/config/scripts/tests/docs it qualifies.
+After Stage 1-4 admission succeeds, the bootstrap owner canonicalizes the exact
+validated Stage 4 path and injects it as `SIMPLE_BINARY` and the established
+`SIMPLE_BIN` compatibility name for every automated
+gate. Ambient or deployed `SIMPLE_BINARY` values cannot redirect that evidence
+to a stale compiler.
 Ledger schema v3 also binds every result to a non-empty owner. A non-passing
 row must retain an actionable unblock condition; a passing row must use
 `unblock_condition=none`. The push consumer rejects unowned work, vacuous TODOs,
