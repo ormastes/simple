@@ -1,0 +1,77 @@
+"""
+# HIR `unresolved name` import-reachability guard (run13 lane)
+
+Stage1 HIR lowering emitted 60 `unresolved name` diagnostics across 24
+(module, symbol) pairs. Every one had the same shape: the symbol IS defined
+in the tree, but the CALLER could only reach it through a re-export edge
+that does not actually carry it --
+
+  * a plain `use X.*` in an intermediary (a plain glob import is NOT a
+    re-export, so nothing downstream of X ever sees X's own imports), or
+  * an `export use Y.{...}` barrel whose EXPLICIT brace list omits the
+    symbol, or
+  * a named-import brace list at the caller that omits the symbol, or
+  * a package `__init__` (`compiler.core.{...}`) standing in for the
+    defining module.
+
+The Rust seed resolves all of these leniently, which is why the tree
+accumulated them invisibly; pure-Simple HIR lowering enforces them and
+poisons the module. Sibling files that call the SAME symbols resolve fine
+precisely because they carry a direct import -- that controlled comparison
+is what pins the diagnosis.
+
+This spec is a static import-edge guard: for each repaired pair it asserts
+the caller can reach the symbol through an import that NAMES it. Every
+assertion below fails on the pre-fix tree.
+
+See doc/08_tracking/bug/hir_unresolved_name_import_reachability_2026-08-22.md
+"""
+
+# @cover src/compiler/20.hir/hir_lowering/module_surface.spl 5%
+# @cover src/compiler/20.hir/hir_lowering/module_surface_declarations.spl 5%
+
+use std.io_runtime.{read_file}
+
+fn imports_naming(path: text, symbol: text) -> bool:
+    """True when a `use` line in `path` explicitly names `symbol`."""
+    var found = false
+    for line in read_file(path).split("\n"):
+        val trimmed = line.trim()
+        if not (trimmed.starts_with("use ") or trimmed.starts_with("export use ")):
+            continue
+        if trimmed.contains(symbol):
+            found = true
+    found
+
+describe "HIR unresolved-name import reachability":
+
+    it "module_surface_declarations imports the parser TypeKind accessors directly":
+        val p = "src/compiler/20.hir/hir_lowering/module_surface_declarations.spl"
+        expect(imports_naming(p, "parser_type_kind_named_name")).to_be_true()
+        expect(imports_naming(p, "parser_type_kind_array_element_name")).to_be_true()
+
+    it "suspension_analysis imports expr_kind/stmt_kind directly":
+        val p = "src/compiler/10.frontend/desugar/suspension_analysis.spl"
+        expect(imports_naming(p, "expr_kind")).to_be_true()
+        expect(imports_naming(p, "stmt_kind")).to_be_true()
+
+    it "the module_surface barrel re-exports the symbols its consumers call":
+        val p = "src/compiler/20.hir/hir_lowering/module_surface.spl"
+        expect(imports_naming(p, "module_surface_export_origin_index_lookup")).to_be_true()
+        expect(imports_naming(p, "module_surfaces_frozen_alignment")).to_be_true()
+
+    it "module_state names make_core_decl in its ast_types import list":
+        val p = "src/compiler/10.frontend/core/_Ast/module_state.spl"
+        expect(imports_naming(p, "make_core_decl")).to_be_true()
+
+    it "module_declarations_bootstrap takes STMT_* from the defining module, not the package __init__":
+        val p = "src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl"
+        expect(read_file(p).contains("use compiler.core.ast_stmt.{STMT_EXPR")).to_be_true()
+
+    it "MIR callers import their helpers directly":
+        expect(imports_naming(
+            "src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl",
+            "bootstrap_mir_logical_module_name")).to_be_true()
+        expect(imports_naming(
+            "src/compiler/70.backend/backend/cranelift_codegen_adapter.spl",
+            "mir_operand_const_int")).to_be_true()
