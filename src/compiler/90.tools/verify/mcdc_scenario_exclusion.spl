@@ -16,6 +16,10 @@
 use std.common.structural.mcdc.contracts.{
     McdcNormalGateV1, mcdc_normal_gate_v1_passes
 }
+use compiler.tools.verify.mcdc_exclusion_evidence.{
+    MCDC_EXCLUSION_EVIDENCE_V1_BYTES, MCDC_EXCLUSION_EVIDENCE_MAX_ROWS,
+    McdcExclusionEvidenceStatusV1, validate_mcdc_exclusion_evidence_v1
+}
 
 val MCDC_EXCLUSION_PREFIX = "# @mcdc-exclude:"
 val MCDC_EXCLUSION_MAX_LINE_BYTES: i64 = 1024
@@ -476,6 +480,56 @@ fn bind_mcdc_scenario_exclusions_v1(
         audit: audit, binary_row_count: row_count,
         bound_count: bound_count, exact: exact)
 
+fn bind_mcdc_scenario_exclusions_with_evidence_v1(
+        source: text, rows: [u8], evidence_rows: [u8],
+        trusted_public_key: [u8], current_epoch: i64) -> McdcScenarioExclusionBindingV1:
+    val base = bind_mcdc_scenario_exclusions_v1(source, rows, current_epoch)
+    if not base.exact or evidence_rows.len() % MCDC_EXCLUSION_EVIDENCE_V1_BYTES != 0
+            or evidence_rows.len() / MCDC_EXCLUSION_EVIDENCE_V1_BYTES > MCDC_EXCLUSION_EVIDENCE_MAX_ROWS
+            or evidence_rows.len() / MCDC_EXCLUSION_EVIDENCE_V1_BYTES != base.bound_count:
+        return McdcScenarioExclusionBindingV1(audit: base.audit,
+            binary_row_count: base.binary_row_count,
+            bound_count: base.bound_count, exact: false)
+    var evidence_index = 0
+    var cursor: i64 = 0
+    while cursor <= source.len():
+        var line_end = source.index_of("\n", cursor)
+        if line_end < 0: line_end = source.len()
+        val next_cursor = line_end + 1
+        if mcdc_exclusion_line_is_directive_v1(source, cursor, line_end):
+            val parsed = parse_mcdc_scenario_exclusion_v1(
+                source.substring(cursor, line_end), current_epoch)
+            if parsed.status != McdcScenarioExclusionStatusV1.Accepted:
+                return McdcScenarioExclusionBindingV1(audit: base.audit,
+                    binary_row_count: base.binary_row_count,
+                    bound_count: base.bound_count, exact: false)
+            val start = evidence_index * MCDC_EXCLUSION_EVIDENCE_V1_BYTES
+            var row: [u8] = []
+            row.reserve(MCDC_EXCLUSION_EVIDENCE_V1_BYTES)
+            var i = 0
+            while i < MCDC_EXCLUSION_EVIDENCE_V1_BYTES:
+                row.push(evidence_rows[start + i])
+                i = i + 1
+            val receipt = validate_mcdc_exclusion_evidence_v1(row,
+                trusted_public_key, _mcdc_exclusion_kind_id(parsed.kind),
+                _mcdc_exclusion_fnv1a(parsed.scenario_id),
+                _mcdc_exclusion_fnv1a(parsed.code),
+                _mcdc_exclusion_fnv1a(parsed.capability_id),
+                _mcdc_exclusion_fnv1a(parsed.owner_id), parsed.decision_id,
+                parsed.source_digest, parsed.condition_mask,
+                parsed.condition_count, parsed.evidence_sha256,
+                parsed.observed_epoch, current_epoch)
+            if receipt.status != McdcExclusionEvidenceStatusV1.Accepted:
+                return McdcScenarioExclusionBindingV1(audit: base.audit,
+                    binary_row_count: base.binary_row_count,
+                    bound_count: evidence_index, exact: false)
+            evidence_index = evidence_index + 1
+        cursor = next_cursor
+        if line_end == source.len(): break
+    McdcScenarioExclusionBindingV1(audit: base.audit,
+        binary_row_count: base.binary_row_count,
+        bound_count: base.bound_count, exact: evidence_index == base.bound_count)
+
 fn mcdc_scenario_exclusion_audit_v1() -> McdcScenarioExclusionAuditV1:
     McdcScenarioExclusionAuditV1(
         directive_count: 0, accepted_count: 0, rejected_count: 0,
@@ -586,6 +640,7 @@ export mcdc_exclusion_line_is_directive_v1
 export mcdc_scenario_exclusion_audit_v1, mcdc_scenario_exclusion_audit_add_v1
 export scan_mcdc_scenario_exclusions_v1
 export bind_mcdc_scenario_exclusions_v1
+export bind_mcdc_scenario_exclusions_with_evidence_v1
 export mcdc_scenario_exclusion_normal_gate_v1
 export mcdc_audited_normal_gate_v1_passes
 export mcdc_bound_normal_gate_v1_passes

@@ -77,7 +77,7 @@ Each spec must prove green -> implementation sabotage red -> restored green. Arm
 | REQ-006, REQ-007, REQ-008 | `test/03_system/compiler/mcdc_instrumentation_modes_spec.spl` | 4 mode/admission cases | Policy and fail-closed admission; binary equivalence/dynload evidence pending |
 | REQ-009 through REQ-015 | `test/03_system/runtime/hal_provider_comparison_spec.spl` and `hal_mission_critical_policy_spec.spl` | 12 contract cases | Production contracts; live isolated workers and I/O matrix pending |
 | REQ-016, REQ-017 | `test/03_system/runtime/hal_environment_replay_spec.spl` | 4 trace cases | Host-fixture contracts; physical adapters pending |
-| REQ-018 | `test/03_system/compiler/mcdc_report_gate_spec.spl` | 3 governance cases | Accepted/rejected/stale classification covered; external freshness receipts pending |
+| REQ-018 | `test/03_system/compiler/mcdc_report_gate_spec.spl`, `mcdc_external_exclusion_evidence_spec.spl` | 6 governance cases | Five typed signed receipt shapes plus forged/stale/mismatched/locally-producible/cardinality rejection; execution awaits an admitted Pure Simple compiler |
 | REQ-019 | `test/03_system/runtime/hal_mission_critical_policy_spec.spl` | 3 rejection cases | New-code rejection covered; repository migration milestone pending |
 | NFR-001 through NFR-004 | `test/03_system/compiler/mcdc_instrumentation_modes_spec.spl` | 1 external gate case | `nothing-checked` is asserted on missing evidence; measurements pending |
 | NFR-005 through NFR-007 | runtime specs above | 8 bounded/error cases | Contract-level only; allocation/process receipts pending |

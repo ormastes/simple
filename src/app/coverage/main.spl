@@ -18,7 +18,7 @@ Commands:
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
-use app.io.mod.{file_exists, file_read, file_read_bytes}
+use app.io.mod.{file_exists, file_size, file_read, file_read_bytes}
 use std.common.string_core.{bytes_to_text}
 use std.nogc_sync_mut.io.coverage_mcdc.{
     MCDC_VECTOR_V1_BYTES, MCDC_EXCLUSION_V1_BYTES, MCDC_REPORT_V1_BYTES,
@@ -34,7 +34,7 @@ use compiler.tools.verify.mcdc_scenario_exclusion.{
     MCDC_EXCLUSION_MAX_LINE_BYTES,
     parse_mcdc_scenario_exclusion_v1, mcdc_scenario_exclusion_report_v1,
     mcdc_exclusion_line_is_directive_v1,
-    bind_mcdc_scenario_exclusions_v1,
+    bind_mcdc_scenario_exclusions_with_evidence_v1,
     mcdc_bound_normal_gate_v1_passes
 }
 
@@ -89,6 +89,8 @@ fn print_usage():
     print "            --events <file>         Sealed V1 vector rows (required)"
     print "            --exclusions <file>     Governed V1 exclusion rows (optional)"
     print "            --exclusion-source <f>  Source containing governed directives; repeatable"
+    print "            --exclusion-evidence <f> Signed fixed-width evidence receipts"
+    print "            --exclusion-trust-key <f> Trusted raw Ed25519 public key (32 bytes)"
     print "            --mode <mode>           normal|alpha|beta (default: normal)"
     print "            --current-epoch <n>     Exclusion freshness epoch"
     print "            --max-events <n>        Event bound (default: 65536)"
@@ -275,6 +277,8 @@ fn cmd_mcdc(args: [text]) -> i64:
     val manifest_path = get_arg(args, "--manifest", "")
     val events_path = get_arg(args, "--events", "")
     val exclusions_path = get_arg(args, "--exclusions", "")
+    val evidence_path = get_arg(args, "--exclusion-evidence", "")
+    val trust_key_path = get_arg(args, "--exclusion-trust-key", "")
     val exclusion_sources = get_all_args(args, "--exclusion-source")
     if manifest_path == "" or events_path == "":
         print "Error: mcdc requires --manifest and --events"
@@ -284,6 +288,29 @@ fn cmd_mcdc(args: [text]) -> i64:
         return 1
     if exclusions_path != "" and not file_exists(exclusions_path):
         print "Error: MC/DC exclusions file does not exist"
+        return 1
+    if evidence_path != "" and not file_exists(evidence_path):
+        print "Error: MC/DC exclusion evidence file does not exist"
+        return 1
+    if trust_key_path != "" and not file_exists(trust_key_path):
+        print "Error: MC/DC exclusion trust key does not exist"
+        return 1
+    if exclusions_path != "" and (evidence_path == "" or trust_key_path == ""):
+        print "Error: governed exclusions require signed evidence and a trust key"
+        return 1
+    # Size before read: adversarial evidence must not allocate an unbounded
+    # buffer merely to reach the bounded decoder.
+    val exclusion_file_bytes = if exclusions_path != "": file_size(exclusions_path) else: 0
+    val evidence_file_bytes = if evidence_path != "": file_size(evidence_path) else: 0
+    val trust_key_bytes = if trust_key_path != "": file_size(trust_key_path) else: 0
+    if exclusion_file_bytes < 0 or exclusion_file_bytes > 96256:
+        print "Error: MC/DC exclusions exceed the 256-row hard bound"
+        return 1
+    if evidence_file_bytes < 0 or evidence_file_bytes > 81920:
+        print "Error: MC/DC exclusion evidence exceeds the 256-row hard bound"
+        return 1
+    if trust_key_path != "" and trust_key_bytes != 32:
+        print "Error: MC/DC exclusion trust key must be exactly 32 bytes"
         return 1
     for source_path in exclusion_sources:
         if not file_exists(source_path):
@@ -320,8 +347,12 @@ fn cmd_mcdc(args: [text]) -> i64:
             print "Error: MC/DC exclusion source is empty or unreadable: {source_path}"
             return 1
         exclusion_source = exclusion_source + source_text + "\n"
-    val exclusion_binding = bind_mcdc_scenario_exclusions_v1(
-        exclusion_source, exclusions, current_epoch)
+    var evidence_rows: [u8] = []
+    var trust_key: [u8] = []
+    if evidence_path != "": evidence_rows = file_read_bytes(evidence_path)
+    if trust_key_path != "": trust_key = file_read_bytes(trust_key_path)
+    val exclusion_binding = bind_mcdc_scenario_exclusions_with_evidence_v1(
+        exclusion_source, exclusions, evidence_rows, trust_key, current_epoch)
     var exclusion_cursor: i64 = 0
     while exclusion_cursor <= exclusion_source.len():
         var line_end = exclusion_source.index_of("\n", exclusion_cursor)

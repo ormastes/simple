@@ -285,6 +285,21 @@ extra, duplicate, reordered, or tampered rows fail closed; a validated report
 count alone is insufficient. A blank or placeholder reason, malformed identity, missing SHA-256
 evidence, future/stale observation, future review, expired entry, or overlong
 review window is an error.
+
+Each accepted binary row additionally requires one external 320-byte `MCDEVR1`
+receipt. Its first 256 bytes are SHA-256-bound by the source directive and
+Ed25519-signed; the final 64 bytes are the signature. The configured raw
+32-byte trust key hashes to the receipt issuer identity, while a distinct
+executor identity records who performed the observation. Fixed fields bind the
+scenario, code, capability, owner, decision, source, condition mask/count, and
+observation epoch. Cause-specific proof slots are deliberately incompatible:
+capability probe/status, fixture inventory/absence count, required-versus-seen
+platform, safety policy/authority/clause, or nondeterminism source/sample/bound.
+An external-observation bit is mandatory and a locally-producible bit is a hard
+rejection. Reserved bytes must be zero. The verifier streams at most 256 rows,
+retaining only one 320-byte row, its 256-byte signed message, 64-byte signature,
+and bounded SHA workspace at a time; complexity is O(source bytes + receipts)
+and receipt storage is capped at 80 KiB.
 Consequently, exclusions reduce only the eligible denominator and never increase
 the covered numerator.
 
