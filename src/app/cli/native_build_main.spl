@@ -11,6 +11,7 @@ use std.io_runtime.{file_write}
 use std.io_runtime.{getpid}
 use std.io_runtime.{dir_create_all, dir_remove_all}
 use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
+use app.cli.native_build_shard_admission.{DEFAULT_SHARD_RSS_BUDGET_MB, DEFAULT_SHARD_ESTIMATED_RSS_MB, native_build_shard_worker_limit}
 
 # Absolute path of the current bootstrap-stage compiler.
 fn self_exe() -> text:
@@ -325,7 +326,29 @@ fn native_build_shard_threads(args: [text]) -> i64:
         i = i + 1
     if threads <= 1:
         return 0
-    threads
+    native_build_memory_admit_shards(threads)
+
+# Interpreted/bootstrap shard children load a compiler graph per process.  A
+# measured child is about 2.5 GiB RSS, so blindly translating --threads=8 into
+# eight concurrent processes can exhaust an otherwise healthy builder.  Keep
+# native/cached tooling unchanged; admission is orchestration-only and has no
+# generated-program or compiler hot-path cost.
+fn native_build_memory_admit_shards(requested: i64) -> i64:
+    val mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    val bootstrap = (env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    if not bootstrap and mode != "interpret" and mode != "interpreter":
+        return requested
+
+    var default_budget = DEFAULT_SHARD_RSS_BUDGET_MB
+    if (env_get("SIMPLE_BOOTSTRAP_LOW_MEMORY") ?? "") == "1":
+        default_budget = DEFAULT_SHARD_ESTIMATED_RSS_MB
+    val budget = (env_get("SIMPLE_SHARD_RSS_BUDGET_MB") ?? "{default_budget}").to_i64() ?? default_budget
+    val estimate = (env_get("SIMPLE_SHARD_ESTIMATED_RSS_MB") ?? "{DEFAULT_SHARD_ESTIMATED_RSS_MB}").to_i64() ?? DEFAULT_SHARD_ESTIMATED_RSS_MB
+    val hard_max = (env_get("SIMPLE_SHARD_MAX_WORKERS") ?? "0").to_i64() ?? 0
+    val admitted = native_build_shard_worker_limit(requested, budget, estimate, hard_max)
+    if admitted < requested:
+        print "[native-build] shard admission requested={requested} admitted={admitted} rss_budget_mb={budget} estimated_worker_rss_mb={estimate}"
+    admitted
 
 # Shared work queue for the shard children. Mirrors frontend_parse_cache_dir()
 # so the claim markers live next to the entries they guard, one private dir
