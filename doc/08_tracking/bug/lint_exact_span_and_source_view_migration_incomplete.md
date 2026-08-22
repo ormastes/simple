@@ -9,7 +9,8 @@ for collection-function and wildcard-export diagnostics, but the migration is in
 
 - Parsed warning producers still discard causal AST spans, so compatibility projections
   report a function declaration or first wildcard declaration instead of the expression.
-- GC-boundary query diagnostics still recover locations with per-finding line scans.
+- GC-boundary query diagnostics now reuse indexed imports and first-declaration lines;
+  exact parser spans are still not carried by the compatibility warning record.
 - Some text-only lint families retain their own scans until matching semantics can move
   into the shared typed fact collector.
 - Standalone lint still parses when no validated parsed revision is supplied; compiler and
