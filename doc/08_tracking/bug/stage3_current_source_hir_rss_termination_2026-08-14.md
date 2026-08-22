@@ -690,3 +690,24 @@ import-materialization fan-out in the allocation hot path; it does not yet
 prove whether the termination is caused by a cycle, repeated acyclic work, or
 an ownership lifetime defect. The row remains OPEN pending a visited/in-flight
 audit of those three functions and a canonical Stage 3 completion.
+
+### 2026-08-22 exact-tuple in-flight guard rejected by measurement
+
+A per-importer list guard was tested around the complete
+`register_imported_symbol` tuple, separate from the post-completion Dict memo.
+It preserved retry semantics and prevented an exact tuple from re-entering,
+but the canonical Stage 3 measurement disproved it as the memory fix. Module 0
+was unchanged at 38,061 cumulative promoted nodes / 1,218,955 bytes and about
+626 MiB RSS. On module 1, process RSS rose from 640,620 KiB before HIR to
+3,664,420 KiB shortly after entry and 8,135,496 KiB 44 seconds later, without
+finishing the module. The owned process was terminated deliberately to avoid
+host OOM.
+
+Therefore the repeating backtrace is not explained by an exact registration
+tuple cycle. It is repeated acyclic expansion or a cycle whose key changes on
+each hop (for example through aliases/local names). The proposed guard was
+reverted rather than retained as an unproven optimization. Next work must
+measure the number of distinct registration keys and key-length growth during
+module 1, plus successful/completed memo cardinality, before changing
+materialization semantics. No additional Stage 3 retry is allowed in this
+session under the three-cycle cap.
