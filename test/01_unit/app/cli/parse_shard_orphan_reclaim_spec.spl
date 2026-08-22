@@ -1,0 +1,66 @@
+use std.spec
+use std.io_runtime.{file_read, file_write, file_exists, dir_create_all, dir_remove_all, getpid}
+use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
+
+# doc/08_tracking/bug/parse_shard_orphaned_claims_after_shard_death_2026-08-22.md
+#
+# run11 (2026-08-21): parse shard 6/8 was killed by kill_simple_monitor after
+# claiming ~48 modules. The orchestrator printed "7/8 shard(s) completed" and
+# nothing else; the claims stayed, no cache entry existed for them, and every
+# downstream consumer re-parsed the same modules.
+fn fresh_queue(tag: text) -> text:
+    val dir = "build/test_tmp/parse_shard_orphan_{tag}_{getpid()}"
+    val _r = dir_remove_all(dir)
+    expect(dir_create_all(dir)).to_be_true()
+    dir
+
+describe "parse shard orphan reclaim":
+
+    it "releases exactly the claims owned by a dead shard (simulated death after claim)":
+        val dir = fresh_queue("dead")
+        expect(file_write("{dir}/111-20.claim", "6/8")).to_be_true()
+        expect(file_write("{dir}/222-31.claim", "6/8")).to_be_true()
+        expect(file_write("{dir}/333-18.claim", "1/8")).to_be_true()
+        expect(file_write("{dir}/.lock", "")).to_be_true()
+        val released = parse_shard_release_claims(dir, ["6/8"])
+        expect(released).to_equal(2)
+        expect(file_exists("{dir}/111-20.claim")).to_be_false()
+        expect(file_exists("{dir}/222-31.claim")).to_be_false()
+        expect(file_exists("{dir}/333-18.claim")).to_be_true()
+        expect(file_read("{dir}/333-18.claim")).to_equal("1/8")
+        expect(file_exists("{dir}/.lock")).to_be_true()
+        val _c = dir_remove_all(dir)
+
+    it "releases nothing when no shard died or the queue is unpublished":
+        val dir = fresh_queue("alive")
+        expect(file_write("{dir}/111-20.claim", "0/8")).to_be_true()
+        expect(parse_shard_release_claims(dir, [])).to_equal(0)
+        expect(parse_shard_release_claims("", ["0/8"])).to_equal(0)
+        expect(file_exists("{dir}/111-20.claim")).to_be_true()
+        val _c = dir_remove_all(dir)
+
+    it "releases claims of several dead shards in one pass":
+        val dir = fresh_queue("multi")
+        expect(file_write("{dir}/1-1.claim", "2/4")).to_be_true()
+        expect(file_write("{dir}/2-1.claim", "3/4")).to_be_true()
+        expect(file_write("{dir}/3-1.claim", "0/4")).to_be_true()
+        expect(parse_shard_release_claims(dir, ["2/4", "3/4"])).to_equal(2)
+        expect(file_exists("{dir}/3-1.claim")).to_be_true()
+        val _c = dir_remove_all(dir)
+
+    it "labels every rt_process_wait outcome so a dead shard is never silent":
+        expect(parse_shard_exit_label(0)).to_equal("exit=0")
+        expect(parse_shard_exit_label(1)).to_equal("exit=1")
+        expect(parse_shard_exit_label(-1).contains("SIGNAL")).to_be_true()
+        expect(parse_shard_exit_label(-2).contains("TIMEOUT")).to_be_true()
+
+    it "orchestrator logs each shard's exit and reclaims before declaring the phase done":
+        val src = file_read("src/app/cli/native_build_main.spl")
+        val log_at = src.index_of("FAILED \{parse_shard_exit_label(code)\}")
+        val reclaim_at = src.index_of("parse_shard_release_claims(queue_dir, dead_specs)")
+        val retry_at = src.index_of("spawn_parse_shards(base, failed, count")
+        val done_at = src.index_of("shard(s) completed split=\{mode\}")
+        expect(log_at > 0).to_be_true()
+        expect(reclaim_at > 0).to_be_true()
+        expect(retry_at > reclaim_at).to_be_true()
+        expect(done_at > retry_at).to_be_true()

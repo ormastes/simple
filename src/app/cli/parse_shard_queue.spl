@@ -1,0 +1,39 @@
+# Parse-shard work-queue helpers shared by the orchestrator (native_build_main)
+# and its specs. std-only on purpose: the orchestrator is a slim entry that
+# must not drag the compiler closure in.
+use std.io_runtime.{dir_list, file_read, file_delete}
+# Orphan reclaim (orchestrator side). A shard that dies AFTER claiming -- the
+# kill_simple_monitor CPU guard took parse shard 6/8 of run11 at age 901s --
+# leaves its markers in the queue with no cache entry behind them, and every
+# other shard has already skipped those modules as "someone else's". Nothing
+# ever parses them into the cache, so each downstream consumer (8 HIR shards,
+# then the real build) re-parses the same ~48 modules. Release = delete every
+# marker whose content is one of the dead shard specs, so a retry shard can
+# claim them. Returns the number of markers released.
+pub fn parse_shard_release_claims(queue_dir: text, dead_specs: [text]) -> i64:
+    if queue_dir == "" or dead_specs.len() == 0:
+        return 0
+    var released: i64 = 0
+    for name in dir_list(queue_dir):
+        if not name.ends_with(".claim"):
+            continue
+        val marker = "{queue_dir}/{name}"
+        val owner = file_read(marker)
+        var dead = false
+        for spec in dead_specs:
+            if owner == spec:
+                dead = true
+        if dead and file_delete(marker):
+            released = released + 1
+    released
+
+# Classify rt_process_wait's result for the receipt: 0 = ok, >0 = exit code,
+# -1 = killed by a signal (WIFEXITED false) or wait error, -2 = wait timeout.
+pub fn parse_shard_exit_label(code: i64) -> text:
+    if code == 0:
+        return "exit=0"
+    if code == -2:
+        return "TIMEOUT (orchestrator wait expired)"
+    if code == -1:
+        return "SIGNAL/abnormal (killed -- check kill_simple_monitor / dmesg OOM)"
+    "exit={code}"
