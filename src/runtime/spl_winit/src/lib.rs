@@ -629,11 +629,15 @@ pub extern "C" fn rt_winit_event_loop_poll_events(_el: i64, _max: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_event_loop_free(_el: i64) -> i64 {
+pub extern "C" fn rt_winit_event_loop_free(el: i64) -> i64 {
     PUMP.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
-    1
+        let mut state = cell.borrow_mut();
+        if el != 1 || state.is_none() {
+            return 0;
+        }
+        *state = None;
+        1
+    })
 }
 
 /// Create a window. `title_ptr` is a C-string pointer (from spl_str_ptr).
@@ -822,10 +826,11 @@ pub extern "C" fn rt_winit_window_free(win: i64) -> i64 {
         if let Some(ps) = borrow.as_mut() {
             if let Some(slot) = ps.inner.windows.remove(&win) {
                 ps.inner.id_map.remove(&slot.window.id());
+                return 1;
             }
         }
-    });
-    1
+        0
+    })
 }
 
 // Outer-position transport only. Display-mode policy and the decision about
@@ -1143,10 +1148,10 @@ pub extern "C" fn rt_winit_event_free(ev: i64) -> i64 {
     PUMP.with(|cell| {
         let mut borrow = cell.borrow_mut();
         if let Some(ps) = borrow.as_mut() {
-            ps.inner.stored_events.remove(&ev);
+            return ps.inner.stored_events.remove(&ev).is_some() as i64;
         }
-    });
-    1
+        0
+    })
 }
 
 fn with_event<T>(ev: i64, f: impl FnOnce(&StoredEvent) -> T) -> Option<T> {
@@ -1973,6 +1978,13 @@ mod sffi_contract_tests {
         assert_eq!(rt_winit_window_scale_factor_milli(i64::MAX), -1);
         assert_eq!(rt_winit_window_position_x(i64::MAX), i64::MIN);
         assert_eq!(rt_winit_window_position_y(i64::MAX), i64::MIN);
+    }
+
+    #[test]
+    fn stale_lifecycle_handles_report_failure() {
+        assert_eq!(rt_winit_event_free(i64::MAX), 0);
+        assert_eq!(rt_winit_window_free(i64::MAX), 0);
+        assert_eq!(rt_winit_event_loop_free(i64::MAX), 0);
     }
 
     #[test]

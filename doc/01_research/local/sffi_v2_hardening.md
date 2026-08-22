@@ -656,3 +656,19 @@ no allocation, retained memory, lock, hash, dynamic lookup, error query, or
 retry. The Simple check, Rust provider tests, GUI-feature interpreter sentinel
 test, and Winit call/memory-shape audit pass. Winit provider signing and bound
 runtime evidence remain absent, so the family is hardened but not verified.
+
+Winit lifecycle release functions previously reported success for every event,
+window, and loop handle, including stale handles, while the canonical Simple
+declarations discarded their results. Rust provider and GUI interpreter lanes
+now return failure when the owned object is absent. The canonical wrappers
+propagate loop/window release status, and event drains retain lexical unsafe
+scopes around the mandatory release call. Creation declarations now state their
+nonpositive failure sentinels. Winit reaches 10/30 contracted declarations.
+
+Release still performs the same single map removal/state transition; no extra
+provider call, allocation, retained memory, lock acquisition, hash pass,
+dynamic lookup, error query, or retry was added. Rust provider tests, the
+GUI-feature interpreter stale-handle test, Simple check, and lifecycle
+call/memory-shape audit pass. The owned-production census becomes 228 fully
+contracted rows and 7,579 rows missing both tag and contract (the other gap
+classes remain 255 and 347). Signed Winit admission/evidence remains absent.

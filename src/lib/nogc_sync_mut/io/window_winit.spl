@@ -17,7 +17,9 @@ use std.nogc_sync_mut.io.window_winit_input_event.{
 # ============================================================================
 # Tier 1: Raw extern declarations (winit_sffi runtime)
 # ============================================================================
+@unsafe(reason: "raw Winit event-loop creation ABI; nonpositive sentinel reports provider failure", capabilities: [ffi])
 extern fn rt_winit_event_loop_new() -> i64
+@unsafe(reason: "raw Winit owned-window creation ABI; nonpositive sentinel reports provider failure", capabilities: [ffi])
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
 extern fn rt_winit_window_staging_ptr(win: i64, w: i64, h: i64) -> i64
 extern fn rt_winit_window_present_staged(win: i64, w: i64, h: i64) -> i64
@@ -35,9 +37,12 @@ extern fn rt_winit_event_mouse_pressed(ev: i64) -> i64
 extern fn rt_winit_event_mouse_x_milli(ev: i64) -> i64
 extern fn rt_winit_event_mouse_y_milli(ev: i64) -> i64
 extern fn rt_winit_event_wheel_y_milli(ev: i64) -> i64
-extern fn rt_winit_event_free(ev: i64)
-extern fn rt_winit_window_free(win: i64)
-extern fn rt_winit_event_loop_free(el: i64)
+@unsafe(reason: "raw Winit owned-event release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_event_free(ev: i64) -> i64
+@unsafe(reason: "raw Winit owned-window release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_window_free(win: i64) -> i64
+@unsafe(reason: "raw Winit owned-loop release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_event_loop_free(el: i64) -> i64
 extern fn rt_winit_window_set_fullscreen(win: i64, on: bool) -> bool
 extern fn rt_winit_window_is_fullscreen(win: i64) -> bool
 @unsafe(reason: "raw Winit window width ABI; negative sentinel reports stale handle", capabilities: [ffi])
@@ -86,23 +91,37 @@ struct WinitWindowPosition:
 # Create the native event loop. Returns an invalid handle when no GUI runtime
 # is available (handle == 0).
 fn winit_loop_new() -> WinitLoop:
-    val h = rt_winit_event_loop_new()
+    var h: i64 = 0
+    unsafe(capabilities: [ffi]):
+        h = rt_winit_event_loop_new()
     WinitLoop(handle: h, is_valid: h > 0)
 
-fn winit_loop_free(lp: WinitLoop):
+fn winit_loop_free(lp: WinitLoop) -> bool:
     if lp.is_valid:
-        rt_winit_event_loop_free(lp.handle)
+        var released: i64 = 0
+        unsafe(capabilities: [ffi]):
+            released = rt_winit_event_loop_free(lp.handle)
+        released != 0
+    else:
+        false
 
 fn winit_window_new(lp: WinitLoop, w: i64, h: i64, title: text) -> WinitWindow:
     if not lp.is_valid:
         WinitWindow(handle: 0, is_valid: false)
     else:
-        val win = rt_winit_window_new(lp.handle, w, h, title)
+        var win: i64 = 0
+        unsafe(capabilities: [ffi]):
+            win = rt_winit_window_new(lp.handle, w, h, title)
         WinitWindow(handle: win, is_valid: win > 0)
 
-fn winit_window_free(win: WinitWindow):
+fn winit_window_free(win: WinitWindow) -> bool:
     if win.is_valid:
-        rt_winit_window_free(win.handle)
+        var released: i64 = 0
+        unsafe(capabilities: [ffi]):
+            released = rt_winit_window_free(win.handle)
+        released != 0
+    else:
+        false
 
 fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]) -> bool:
     if not win.is_valid:
@@ -214,7 +233,8 @@ fn winit_poll_close_requested(lp: WinitLoop) -> bool:
     while ev > 0:
         if rt_winit_event_get_type(ev) == EVT_CLOSE:
             close_requested = true
-        rt_winit_event_free(ev)
+        unsafe(capabilities: [ffi]):
+            rt_winit_event_free(ev)
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     close_requested
 
@@ -317,7 +337,8 @@ fn winit_poll_input_into(
             click_y = click_y.push(mouse_y)
         elif kind == EVT_MOUSE_WHEEL:
             scroll_y = scroll_y + rt_winit_event_wheel_y_milli(ev).to_f64() / 1000.0
-        rt_winit_event_free(ev)
+        unsafe(capabilities: [ffi]):
+            rt_winit_event_free(ev)
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     WinitInput(close: close_requested, focus_events: focus_events,
                focus_kind: focus_kind, focused: focused,
@@ -389,7 +410,8 @@ fn winit_wait_input_into(
             click_y = click_y.push(mouse_y)
         elif kind == EVT_MOUSE_WHEEL:
             scroll_y = scroll_y + rt_winit_event_wheel_y_milli(ev).to_f64() / 1000.0
-        rt_winit_event_free(ev)
+        unsafe(capabilities: [ffi]):
+            rt_winit_event_free(ev)
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     WinitInput(close: close_requested, focus_events: focus_events,
                focus_kind: focus_kind, focused: focused,

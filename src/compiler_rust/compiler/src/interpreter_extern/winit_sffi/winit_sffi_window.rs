@@ -79,6 +79,10 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
         }
         "rt_winit_event_loop_free" => {
             let id = get_i64(args, 0, name)?;
+            let Some(handle) = EVENT_LOOPS.lock().remove(&id) else {
+                set_last_error(format!("invalid event loop handle: {id}"));
+                return Ok(bool_value(false));
+            };
             // Clean up macOS pump state BEFORE removing the event loop handle
             // to avoid "tried to run event handler, but no handler was set" warning
             #[cfg(target_os = "macos")]
@@ -90,9 +94,7 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                     }
                 }
             });
-            if let Some(handle) = EVENT_LOOPS.lock().remove(&id) {
-                let _ = handle.command_tx.send(RuntimeCommand::Exit);
-            }
+            let _ = handle.command_tx.send(RuntimeCommand::Exit);
             {
                 let mut owners = WINDOW_OWNERS.lock();
                 let mut staging = STAGING_BUFFERS.lock();

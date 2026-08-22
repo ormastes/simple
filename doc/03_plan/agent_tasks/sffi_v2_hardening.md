@@ -137,3 +137,7 @@ passing placeholder.
     typed absence with unchanged read/memory shape. Continue the remaining 25
     Winit declarations, then prioritize the full owned-production census
     (255 tagged-contract gaps, 347 unsafe-tag gaps, 7,584 rows missing both).
+25. Winit event/window/loop release now rejects stale handles in Rust provider
+    and interpreter lanes; canonical wrappers propagate lifecycle status with
+    unchanged removal/call/memory shape. Continue the remaining 20 Winit raw
+    declarations, duplicated app/OS declarations, and signed artifact evidence.

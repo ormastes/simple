@@ -431,4 +431,16 @@ mod tests {
             assert!(matches!(dispatch(name, &args).unwrap(), Value::Int(i64::MIN)));
         }
     }
+
+    #[test]
+    fn stale_lifecycle_handles_report_failure() {
+        let args = [Value::Int(i64::MAX)];
+        for name in [
+            "rt_winit_event_free",
+            "rt_winit_window_free",
+            "rt_winit_event_loop_free",
+        ] {
+            assert!(matches!(dispatch(name, &args).unwrap(), Value::Bool(false)));
+        }
+    }
 }

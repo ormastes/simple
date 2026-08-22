@@ -37,8 +37,7 @@ pub(super) fn dispatch_events(name: &str, args: &[Value]) -> Result<Value, Compi
         }
         "rt_winit_event_free" => {
             let event_id = get_i64(args, 0, name)?;
-            EVENTS.lock().remove(&event_id);
-            Ok(bool_value(true))
+            Ok(bool_value(EVENTS.lock().remove(&event_id).is_some()))
         }
         "rt_winit_event_window_resized" => {
             let event_id = get_i64(args, 0, name)?;
