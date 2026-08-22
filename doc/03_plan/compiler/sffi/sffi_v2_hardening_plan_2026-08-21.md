@@ -1047,3 +1047,12 @@ for clone/matmul/reductions/creation. Keep one raw call per operation and do not
 add hot-path availability rechecks beyond those needed to distinguish provider
 absence from a contract violation. The C++ provider still needs a versioned
 status/out ABI and signed evidence; this wrapper change alone is not admission.
+
+Clone, matmul, dot, and inverse are the next completed dynamic Torch semantic
+family: the zero-handle APIs are removed, typed results reach every production
+consumer, and invalid/null handles cannot be lifted as tensors. Readiness tests
+pass 5/5; focused checks and lint pass. The hot path keeps one availability
+query and one raw operation call, with only input/output contract branches and
+no lookup, hashing, I/O, retry, or explicit allocation. Continue with tensor-
+returning dimension, activation, scalar, and creation functions, then scalar
+reductions whose valid numeric zero must be distinguished from provider error.

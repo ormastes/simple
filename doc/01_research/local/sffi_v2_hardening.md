@@ -1328,3 +1328,15 @@ lookup, allocation, hashing, or second FFI call. The readiness spec passes 4/4,
 all three changed source files check, and lint reports zero errors. The raw C++
 ABI still returns a zero sentinel and remains unsigned/unverified, so provider
 status/out migration is still required before the Torch boundary is safe.
+
+Dynamic Torch clone, matmul, dot, and inverse now return
+`Result<i64, text>` and no longer expose APIs that fabricate handle zero on
+provider absence, invalid input, or a null/sentinel provider return. All five
+production call sites match the result before constructing or copying a tensor;
+resource cleanup remains explicit on error. Each success path performs the same
+availability query and exactly one raw operation call as before, followed by a
+required positive-handle check. It adds no dynamic lookup, hash, I/O, retry,
+second provider call, or explicit allocation. The readiness spec passes 5/5,
+three source checks pass, and lint has zero errors. Static string-literal error
+reasons avoid inventing numeric boolean/status workarounds. The raw provider is
+still unsigned and exception/status-out hardening remains open.
