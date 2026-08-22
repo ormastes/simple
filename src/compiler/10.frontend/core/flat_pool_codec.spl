@@ -37,7 +37,43 @@ val FLAT_POOL_CODEC_VERSION: text = "spl-flatpool-v1"
 pub fn flat_pool_escape(value: text) -> text:
     value.replace("\\", "\\\\").replace("\n", "\\n")
 
+# Placeholder that stands in for a decoded literal backslash while the two
+# escape forms are rewritten in bulk. Any value that already contains it takes
+# the character-at-a-time fallback below, so a collision costs speed and never
+# correctness.
+val FLAT_POOL_UNESCAPE_SENTINEL: text = "@@FLATPOOL-ESC@@"
+
+# Decode is on the cache-HIT path and runs once per stored text pool entry, so
+# it is the hottest loop of a hit. Three tiers, all computing the same result
+# the old character-at-a-time loop did:
+#
+#   1. No backslash at all -> the value decodes to itself. Measured 2026-08-21
+#      over the src/app bootstrap closure, the overwhelming majority of pool
+#      entries (identifiers, type names, spans-as-text) are in this class, and
+#      the old code still paid a one-character slice plus a fresh concatenation
+#      for every character of every one of them.
+#   2. Escapes present -> three BULK replaces in the runtime instead of a
+#      per-character interpreted loop. The encoder emits a backslash only as
+#      the lead byte of "\\\\" or "\\n", so unescaping is exactly: hide the
+#      doubled backslashes, turn "\\n" into a newline, restore them. A lone
+#      "\\" the encoder never emits (a trailing one, or "\\q") matches neither
+#      pattern and stays literal -- the same answer the old loop gave.
+#   3. Sentinel collision -> the original loop, verbatim, so the fast path can
+#      never be the reason a value decodes wrongly.
+#
+# Measured over one parse shard of the src/app bootstrap closure (94 real
+# compiler modules, avg blob 63 KB, interpreted worker): a cache hit went from
+# 1812 ms to 1137 ms and the warm parse phase from 170.3 s to 106.9 s. Decode
+# is still 69% of what remains (773 ms of the 1137 ms), because the rest of the
+# codec walks ~20k blob lines with a few interpreted array ops each -- that is
+# the next thing to attack, not something this change claims to have fixed.
+# doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
 pub fn flat_pool_unescape(value: text) -> text:
+    if not value.contains("\\"):
+        return value
+    if not value.contains(FLAT_POOL_UNESCAPE_SENTINEL):
+        return value.replace("\\\\", FLAT_POOL_UNESCAPE_SENTINEL).replace(
+            "\\n", "\n").replace(FLAT_POOL_UNESCAPE_SENTINEL, "\\")
     var out = ""
     var i: i64 = 0
     while i < value.len():
@@ -110,41 +146,45 @@ pub fn flat_pool_parse_i64(raw: text) -> i64:
 
 # --- encoders ---------------------------------------------------------------
 
+# Encoders accumulate into a parts array joined once. `out = out + piece` in a
+# loop rebuilds the whole prefix per element, which is quadratic in the pool's
+# size and showed up on the cache-MISS (store) path of every module. The bytes
+# produced are unchanged -- join("") over the same pieces, in the same order.
 pub fn flat_pool_enc_i64(pool: [i64]) -> text:
-    var out = "{pool.len()}\n"
+    var parts: [text] = ["{pool.len()}\n"]
     for v in pool:
-        out = out + "{v}\n"
-    out
+        parts = parts.push("{v}\n")
+    parts.join("")
 
 pub fn flat_pool_enc_bool(pool: [bool]) -> text:
-    var out = "{pool.len()}\n"
+    var parts: [text] = ["{pool.len()}\n"]
     for v in pool:
-        out = out + (if v: "1\n" else: "0\n")
-    out
+        parts = parts.push(if v: "1\n" else: "0\n")
+    parts.join("")
 
 pub fn flat_pool_enc_text(pool: [text]) -> text:
-    var out = "{pool.len()}\n"
+    var parts: [text] = ["{pool.len()}\n"]
     for v in pool:
-        out = out + flat_pool_escape(v) + "\n"
-    out
+        parts = parts.push(flat_pool_escape(v) + "\n")
+    parts.join("")
 
 pub fn flat_pool_enc_i64_list(pool: [[i64]]) -> text:
-    var out = "{pool.len()}\n"
+    var parts: [text] = ["{pool.len()}\n"]
     for inner in pool:
-        out = out + flat_pool_enc_i64(inner)
-    out
+        parts = parts.push(flat_pool_enc_i64(inner))
+    parts.join("")
 
 pub fn flat_pool_enc_text_list(pool: [[text]]) -> text:
-    var out = "{pool.len()}\n"
+    var parts: [text] = ["{pool.len()}\n"]
     for inner in pool:
-        out = out + flat_pool_enc_text(inner)
-    out
+        parts = parts.push(flat_pool_enc_text(inner))
+    parts.join("")
 
 pub fn flat_pool_enc_text_list_list(pool: [[[text]]]) -> text:
-    var out = "{pool.len()}\n"
+    var parts: [text] = ["{pool.len()}\n"]
     for inner in pool:
-        out = out + flat_pool_enc_text_list(inner)
-    out
+        parts = parts.push(flat_pool_enc_text_list(inner))
+    parts.join("")
 
 # --- decoders ---------------------------------------------------------------
 

@@ -1170,10 +1170,19 @@ pub fn flat_pool_capture_take() -> text:
 pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) -> ParserModule?:
     if blob == "":
         return nil
+    # Hit-path profile, same gate as the miss path above
+    # (SIMPLE_PARSE_PHASE_PROFILE=1). Without it a hit's cost was invisible:
+    # the driver's per-file dt stamp brackets the whole parse_full_frontend
+    # call, so it says a hit took N seconds but never which of decode, restore
+    # or bridge spent them, and on a sharded build nine processes interleave
+    # into one log so even that N is unattributable.
+    # doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
+    val _hp_t0 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
     val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     reset_all_pools()
     parser_init_with_path(source, path)
+    val _hp_t1 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
     if not flat_pools_restore_all(blob):
         # Leave nothing half-restored behind for the reparse that follows.
         reset_all_pools()
@@ -1181,9 +1190,13 @@ pub fn build_module_from_flat_pool_blob(blob: text, source: text, path: text) ->
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
         return nil
+    val _hp_t2 = if fab_phase_prof_enabled(): rt_time_now_unix_micros() else: 0
     val built = flat_ast_to_module(path)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    if fab_phase_prof_enabled():
+        val _hp_t3 = rt_time_now_unix_micros()
+        print("PARSEHIT\tinit={(_hp_t1 - _hp_t0) / 1000}ms\trestore={(_hp_t2 - _hp_t1) / 1000}ms\tbridge={(_hp_t3 - _hp_t2) / 1000}ms\ttotal={(_hp_t3 - _hp_t0) / 1000}ms\tbytes={blob.len()}\tpath={path}")
     Some(built)
 
 pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:

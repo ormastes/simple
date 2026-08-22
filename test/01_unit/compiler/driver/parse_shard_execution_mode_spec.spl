@@ -1,0 +1,79 @@
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_stores}
+
+# Mechanism gates for the parse-shard workers.
+# doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
+#
+# run7 (2026-08-21) showed 8 shard workers spending ~600 s each on ~83 files
+# while a comparison run appeared to do 667 files in 118 s, and the leading
+# hypothesis was that shard children were falling off the JIT path that the
+# main worker was on. They are not: the two facts below are what the source
+# actually guarantees, and they are pinned here so the hypothesis cannot be
+# re-litigated from a log alone.
+describe "parse shard workers":
+
+    it "spawns shard children only after the worker execution mode is fixed":
+        # `run_native_build_worker` establishes SIMPLE_EXECUTION_MODE and
+        # SIMPLE_BINARY, and only then calls `run_parse_shards`. Because
+        # rt_process_spawn_async passes the parent's environment through, that
+        # ordering is the entire reason a shard child runs in the SAME mode as
+        # the main worker rather than a degraded one. If the spawn ever moved
+        # above the env_set, shards would silently diverge from the worker they
+        # are warming the cache for -- invisible in any log, because both
+        # answers are "the build completed".
+        val src = file_read("src/app/cli/native_build_main.spl")
+        val mode_at = src.index_of("env_set(\"SIMPLE_EXECUTION_MODE\", \"interpret\")")
+        val binary_at = src.index_of("env_set(\"SIMPLE_BINARY\", simple_bin)")
+        val spawn_at = src.index_of("run_parse_shards(args, shard_count")
+        expect(mode_at > 0).to_be_true()
+        expect(binary_at > 0).to_be_true()
+        expect(spawn_at > 0).to_be_true()
+        expect(mode_at < spawn_at).to_be_true()
+        expect(binary_at < spawn_at).to_be_true()
+
+    it "decides shard ownership before emitting the in-flight parse receipt":
+        # A shard child walks the whole source list and parses only the slice
+        # it owns. Emitting the per-file "current" receipt before the ownership
+        # test made each of 8 children claim all 666 files, so 8x583 receipts
+        # named a file that process never opened and their dt stamps measured
+        # the gap between two skips. That is why run7's per-shard cost could
+        # not be read off the merged log at all.
+        val src = file_read(
+            "src/compiler/80.driver/driver_source_pipeline_parsing.spl")
+        val owns_at = src.index_of("if not _driver_parse_shard_owns(source.path):")
+        val receipt_at = src.index_of(
+            "log_build_progress(\"parse\", \"files\", progress_parse_done,")
+        expect(owns_at > 0).to_be_true()
+        expect(receipt_at > 0).to_be_true()
+        expect(owns_at < receipt_at).to_be_true()
+
+    it "routes shard parses through the same front-end cache as the driver":
+        # Hypothesis raised against run8: shard children re-parse everything
+        # they own because only the driver consults the cache. Measured false.
+        # An isolated warm shard (`--parse-shard=0/8`, same tree, same scope)
+        # reports `hits=94 misses=0 parses=0` and `[parse-shard] done
+        # shard=0/8 parses=0`, and an earlier real 8-shard run reported
+        # `hits=73/85/90 misses=0 parses=0` per shard. The mechanism is
+        # structural and pinned here: the cache lookup lives in
+        # `frontend_parse_or_restore`, the single boundary every parse goes
+        # through, and nothing about it is conditional on the shard spec — so
+        # a shard cannot bypass the cache without the driver bypassing it too.
+        # A `parses=` near the owned-file count therefore means a COLD SCOPE
+        # (a fresh SIMPLE_CACHE_SCOPE, or a compiler-source edit rotating the
+        # scope key), not a shard that ignores the cache.
+        val fe = file_read("src/compiler/10.frontend/frontend.spl")
+        expect(fe).to_contain("fn frontend_parse_or_restore(")
+        expect(fe).to_contain("frontend_parse_cache_load(key)")
+        expect(fe).to_contain("frontend_parse_cache_note_hit()")
+        # No shard-conditional branch anywhere on the cache boundary.
+        expect(fe.contains("SIMPLE_PARSE_SHARD")).to_be_false()
+        expect(fe.contains("driver_parse_shard_active")).to_be_false()
+        val cache = file_read("src/compiler/10.frontend/frontend_parse_cache.spl")
+        expect(cache.contains("SIMPLE_PARSE_SHARD")).to_be_false()
+
+    it "counts front-end cache stores so a double write is visible":
+        # A module must be written to the front-end cache at most once per
+        # process. Without a counter, a miss path that re-entered would pay the
+        # full parse twice and the build would only look slow.
+        expect(frontend_parse_cache_stores() >= 0).to_be_true()

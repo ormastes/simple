@@ -489,12 +489,23 @@ impl CompilerDriver:
                 # blamed on src/app/io/sqlite_sffi.spl, the COMPLETED file).
                 # done is the count already finished, so `current` here is the
                 # unit being worked on, not one that is done.
-                log_build_progress("parse", "files", progress_parse_done,
-                    unique_entry_sources.len(), source.path,
-                    1, 6, 0, 0, "running")
+                # Ownership is decided BEFORE the in-flight receipt is
+                # emitted. Emitting it first made every shard child claim all
+                # 666 files as "current" while parsing only its own ~83, so a
+                # sharded build's merged log carried 8x666 receipts of which
+                # 8x583 named a file that process never opened -- and the dt
+                # stamp on those lines measured the gap between two skips, not
+                # any work. That is why a shard's real per-file cost could not
+                # be read off run7's log at all. A skipped file emits nothing;
+                # the counter still advances, so the next owned file's receipt
+                # reports the true position.
+                # doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
                 if not _driver_parse_shard_owns(source.path):
                     progress_parse_done = progress_parse_done + 1
                     continue
+                log_build_progress("parse", "files", progress_parse_done,
+                    unique_entry_sources.len(), source.path,
+                    1, 6, 0, 0, "running")
                 val entry_module = parse_full_frontend(
                     source.content,
                     source.path,

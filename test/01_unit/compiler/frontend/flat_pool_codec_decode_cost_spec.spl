@@ -1,0 +1,78 @@
+use std.spec
+use compiler.frontend.core.flat_pool_codec.*
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# Cost gate for the flat-AST pool codec's DECODE path.
+#
+# doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
+#
+# Decode runs once per stored text pool entry on every front-end cache HIT, so
+# it is the hottest loop of the thing the cache exists to make fast. Until
+# 2026-08-21 `flat_pool_unescape` took a one-character slice and rebuilt the
+# whole accumulator for EVERY character of EVERY value -- quadratic in the
+# value's length, and paid in full even for the overwhelming majority of pool
+# entries (identifiers, type names) that carry no escape at all. A hit on a
+# real compiler module therefore cost seconds instead of milliseconds, which
+# made the cache worth ~2x on the parse phase instead of ~100x.
+#
+# These bounds are deliberately loose -- an order of magnitude above the fixed
+# cost on an idle box -- because this host is shared and heavily loaded. They
+# are still mechanism-pinned: the pre-fix per-character shape exceeds them by
+# far more than load variance can explain (measured pre-fix: the plain-text
+# case alone ran tens of seconds).
+describe "flat pool codec decode cost":
+
+    it "decodes a large escape-free text pool in well under the pre-fix cost":
+        # 2000 values x 400 chars = 800k characters that the old loop walked
+        # one slice-and-concat at a time. An unescaped value decodes to itself,
+        # so the only correct amount of work here is a scan.
+        var chunk = "abcdefghij"
+        while chunk.len() < 400:
+            chunk = chunk + "abcdefghij"
+        var pool: [text] = []
+        while pool.len() < 2000:
+            pool = pool.push(chunk)
+        val blob = flat_pool_enc_text(pool)
+        val t0 = rt_time_now_unix_micros()
+        val decoded = flat_pool_dec_text(FlatPoolReader.new(blob))
+        val elapsed_ms = (rt_time_now_unix_micros() - t0) / 1000
+        expect(decoded.len()).to_equal(2000)
+        expect(decoded[0]).to_equal(chunk)
+        expect(decoded[1999]).to_equal(chunk)
+        expect(elapsed_ms < 5000).to_be_true()
+
+    it "decodes an escaped text pool in bulk, not one character at a time":
+        # Escapes miss the identity fast path, so this pins the OTHER half of the
+        # fix: the two escape forms are rewritten by three bulk runtime replaces
+        # rather than by an interpreted per-character loop.
+        var chunk = "alpha\nbeta\\gamma"
+        while chunk.len() < 400:
+            chunk = chunk + "alpha\nbeta\\gamma"
+        var pool: [text] = []
+        while pool.len() < 2000:
+            pool = pool.push(chunk)
+        val blob = flat_pool_enc_text(pool)
+        val t0 = rt_time_now_unix_micros()
+        val decoded = flat_pool_dec_text(FlatPoolReader.new(blob))
+        val elapsed_ms = (rt_time_now_unix_micros() - t0) / 1000
+        expect(decoded.len()).to_equal(2000)
+        # Fidelity first: a fast decode that loses an escape is worthless.
+        expect(decoded[0]).to_equal(chunk)
+        expect(decoded[1999]).to_equal(chunk)
+        expect(elapsed_ms < 5000).to_be_true()
+
+    it "returns an escape-free value unchanged, byte for byte":
+        # The fast path is only sound because the encoder emits a backslash
+        # ONLY as the lead byte of an escape. Pin that it is identity, not an
+        # approximation: a value that merely LOOKS escaped after decoding
+        # would be a silent miscompile.
+        expect(flat_pool_unescape("")).to_equal("")
+        expect(flat_pool_unescape("plain identifier")).to_equal("plain identifier")
+        expect(flat_pool_unescape("n not an escape")).to_equal("n not an escape")
+        # And the slow path still handles the adversarial shapes.
+        expect(flat_pool_unescape("a\\nb")).to_equal("a\nb")
+        expect(flat_pool_unescape("a\\\\b")).to_equal("a\\b")
+        expect(flat_pool_unescape("\\")).to_equal("\\")
+        expect(flat_pool_unescape("a\\qb")).to_equal("a\\qb")
+        expect(flat_pool_unescape("\\\\n")).to_equal("\\n")
