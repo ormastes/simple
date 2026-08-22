@@ -264,3 +264,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Read each source once and share it with optional SIMD analysis.
 - Keep `run_lint_file` as a one-file compatibility wrapper.
 - Pin diagnostic ordering/policy equivalence and measure batch wall time plus maximum RSS.
+## Completed tooling tranche: command-scoped lint registry reuse
+
+- Add `run_lint_file_with_linter` and retain the standalone compatibility wrapper.
+- Construct one `Linter` outside the repository file loop.
+- Reuse the most recent parsed project policy through a command-owned bounded cache.
+- Clone cached policy before file/CLI overrides to prevent cross-file mutation.
+- Pin registry construction and cache ownership with source contracts.
+- Follow-up: cache manifest discovery and critical policy, then share one source read with SIMD/fix paths.
