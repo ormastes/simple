@@ -1,0 +1,64 @@
+use std.spec.{describe, it, expect}
+use compiler.core.interpreter.value.{
+    val_reset, val_make_struct, val_make_int, val_make_array, val_get_array,
+    val_struct_upsert_field, val_struct_set_field_idx, val_struct_get_field,
+    val_get_int
+}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+# Lane note: this spec runs the PURE-SIMPLE core interpreter's value primitives
+# (src/compiler/10.frontend/core/interpreter/) as a library under whatever
+# `bin/simple` is executing; the timing term it pins is only visible when that
+# code runs under native/JIT value semantics (seed-interpreted execution is
+# dominated by the linear field scan and shows no delta). So the perf pin is a
+# SOURCE-SHAPE mechanism pin, and the behaviour block proves owner-mutation is
+# semantically identical to the alias-writeback it replaced.
+# Record: doc/08_tracking/bug/pure_interp_cow_alias_primitives_2026-08-22.md
+
+val INTERP = "src/compiler/10.frontend/core/interpreter/"
+
+fn src(rel: text) -> text:
+    rt_file_read_text(INTERP + rel) ?? ""
+
+describe "pure-Simple core interpreter mutates collections through the owner":
+    it "upsert appends to both parallel arrays and set_field_idx writes in place":
+        val_reset()
+        val d = val_make_struct("__dict", [], [])
+        val_struct_upsert_field(d, "a", val_make_int(1))
+        val_struct_upsert_field(d, "b", val_make_int(2))
+        val_struct_upsert_field(d, "a", val_make_int(3))
+        expect(val_get_int(val_struct_get_field(d, "a"))).to_equal(3)
+        expect(val_get_int(val_struct_get_field(d, "b"))).to_equal(2)
+        val_struct_set_field_idx(d, 1, val_make_int(9))
+        expect(val_get_int(val_struct_get_field(d, "b"))).to_equal(9)
+        # out-of-range index is a no-op, not a crash
+        val_struct_set_field_idx(d, 7, val_make_int(0))
+        expect(val_get_int(val_struct_get_field(d, "b"))).to_equal(9)
+
+    it "two structs never share a values array after owner mutation":
+        val_reset()
+        val a = val_make_struct("S", ["x"], [val_make_int(1)])
+        val b = val_make_struct("S", ["x"], [val_make_int(1)])
+        val_struct_set_field_idx(a, 0, val_make_int(5))
+        expect(val_get_int(val_struct_get_field(a, "x"))).to_equal(5)
+        expect(val_get_int(val_struct_get_field(b, "x"))).to_equal(1)
+
+    it "value.spl primitives do not write back through a temp alias":
+        val v = src("value.spl")
+        expect(v.contains("val_struct_fields[vid].push(field_name)")).to_equal(true)
+        expect(v.contains("val_struct_values[vid][idx] = new_val")).to_equal(true)
+        expect(v.contains("val_struct_values[vid] = values")).to_equal(false)
+        expect(v.contains("val_struct_fields[vid] = fields")).to_equal(false)
+
+    it "index-assign and push evaluators mutate val_arrays in place":
+        val access = src("eval_access.spl")
+        val assign = src("_EvalOps/access_literal_assign_eval.spl")
+        val call = src("_EvalOps/call_method_eval.spl")
+        expect(access.contains("val_arrays[base_val][idx] = new_val")).to_equal(true)
+        expect(access.contains("val_arrays[base_val] = elements")).to_equal(false)
+        expect(assign.contains("val_arrays[base_val][idx] = new_val")).to_equal(true)
+        expect(assign.contains("val_arrays[ix_base][ix_i] = ix_new")).to_equal(true)
+        expect(assign.contains("val_arrays[ix_base] = ix_elems")).to_equal(false)
+        expect(call.contains("val_arrays[receiver].push(new_elem)")).to_equal(true)
+        expect(call.contains("val_arrays[receiver] = new_elems")).to_equal(false)
