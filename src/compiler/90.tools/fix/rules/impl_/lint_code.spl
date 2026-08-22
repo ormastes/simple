@@ -21,6 +21,11 @@ struct DuplicateTypedArgSignature:
     has_decl_rewrite: bool
     can_rewrite_calls: bool
 
+struct IndexedDuplicateCallReplacement:
+    sig_index: i64
+    sequence: i64
+    replacement: Replacement
+
 # ============================================================================
 # Rule 2: unnamed_duplicate_typed_args
 # Detects fn signatures with duplicate types that lack distinct names.
@@ -33,9 +38,12 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
 
 fn check_unnamed_duplicate_typed_args_with_view(file: String, lines: [String], contexts: [LineContext]) -> [EasyFix]:
     val signatures = _collect_duplicate_typed_arg_signatures_from_contexts(contexts)
+    val indexed_calls = _collect_indexed_call_replacements(lines, file, signatures)
     var fixes: [EasyFix] = []
+    var call_cursor = 0
 
-    for sig in signatures:
+    for sig_index in 0..signatures.len():
+        val sig = signatures[sig_index]
         var replacements: [Replacement] = []
 
         if sig.has_decl_rewrite:
@@ -48,10 +56,9 @@ fn check_unnamed_duplicate_typed_args_with_view(file: String, lines: [String], c
                 new_text: sig.new_params_text
             ))
 
-        if sig.can_rewrite_calls and _is_unique_call_target(signatures, sig):
-            val call_replacements = _collect_call_replacements_for_signature_lines(lines, file, sig)
-            for rep in call_replacements:
-                replacements.push(rep)
+        while call_cursor < indexed_calls.len() and indexed_calls[call_cursor].sig_index == sig_index:
+            replacements.push(indexed_calls[call_cursor].replacement)
+            call_cursor = call_cursor + 1
 
         if not replacements.is_empty():
             val description = if sig.has_decl_rewrite:
@@ -68,6 +75,91 @@ fn check_unnamed_duplicate_typed_args_with_view(file: String, lines: [String], c
             fixes.push(fix)
 
     fixes
+
+fn _duplicate_call_key(name: text, arg_count: i64) -> text:
+    "{name}#{arg_count}"
+
+fn _collect_indexed_call_replacements(
+    lines: [text], file: text, signatures: [DuplicateTypedArgSignature]
+) -> [IndexedDuplicateCallReplacement]:
+    var key_counts: Dict<text, i64> = {}
+    var eligible_names: Dict<text, bool> = {}
+    for sig in signatures:
+        if not sig.can_rewrite_calls:
+            continue
+        val key = _duplicate_call_key(sig.name, sig.arg_count)
+        key_counts[key] = (key_counts[key] ?? 0) + 1
+        eligible_names[sig.name] = true
+
+    var target_by_key: Dict<text, i64> = {}
+    for sig_index in 0..signatures.len():
+        val sig = signatures[sig_index]
+        if not sig.can_rewrite_calls:
+            continue
+        val key = _duplicate_call_key(sig.name, sig.arg_count)
+        if key_counts[key] == 1:
+            target_by_key[key] = sig_index
+
+    var indexed: [IndexedDuplicateCallReplacement] = []
+    var sequence = 0
+    var line_num = 0
+    var byte_offset = 0
+    for line in lines:
+        line_num = line_num + 1
+        var i = 0
+        while i < line.len():
+            val ch = line.slice(i, i + 1)
+            if not _is_identifier_char(ch) or _is_digit_char(ch):
+                i = i + 1
+                continue
+            val token_start = i
+            i = i + 1
+            while i < line.len() and _is_identifier_char(line.slice(i, i + 1)):
+                i = i + 1
+            val name = line.slice(token_start, i)
+            if not eligible_names.has(name) or _is_definition_context(line, token_start):
+                continue
+            val open_paren = _find_call_open_paren(line, i)
+            if open_paren < 0:
+                continue
+            val close_paren = _find_matching_paren_on_line(line, open_paren)
+            if close_paren <= open_paren:
+                continue
+            val args = _split_top_level_csv(line.slice(open_paren + 1, close_paren))
+            if _args_have_named_entries(args):
+                i = close_paren + 1
+                continue
+            val key = _duplicate_call_key(name, args.len())
+            if not target_by_key.has(key):
+                i = close_paren + 1
+                continue
+            val sig_index = target_by_key[key]
+            val sig = signatures[sig_index]
+            var named_args: [text] = []
+            for arg_index in 0..args.len():
+                named_args.push("{sig.param_names[arg_index]}: {args[arg_index].trim()}")
+            indexed.push(IndexedDuplicateCallReplacement(
+                sig_index: sig_index,
+                sequence: sequence,
+                replacement: Replacement.create(
+                    file: file,
+                    start: byte_offset + open_paren + 1,
+                    end: byte_offset + close_paren,
+                    line: line_num,
+                    column: open_paren + 2,
+                    new_text: named_args.join(", ")
+                )
+            ))
+            sequence = sequence + 1
+            i = close_paren + 1
+        byte_offset = byte_offset + line.len() + 1
+    indexed.sort_by(\a, b:
+        if a.sig_index == b.sig_index:
+            a.sequence - b.sequence
+        else:
+            a.sig_index - b.sig_index
+    )
+    indexed
 
 fn _collect_duplicate_typed_arg_signatures(source: text) -> [DuplicateTypedArgSignature]:
     _collect_duplicate_typed_arg_signatures_from_contexts(line_contexts(source))
@@ -183,67 +275,6 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
         has_decl_rewrite: has_unnamed,
         can_rewrite_calls: stable_names
     ))
-
-fn _collect_call_replacements_for_signature(source: text, file: text, sig: DuplicateTypedArgSignature) -> [Replacement]:
-    _collect_call_replacements_for_signature_lines(source.split("\n"), file, sig)
-
-fn _collect_call_replacements_for_signature_lines(lines: [text], file: text, sig: DuplicateTypedArgSignature) -> [Replacement]:
-    var replacements: [Replacement] = []
-    var line_num = 0
-    var byte_offset = 0
-
-    for line in lines:
-        line_num = line_num + 1
-        val line_replacements = _collect_line_call_replacements(line, file, sig, line_num, byte_offset)
-        for rep in line_replacements:
-            replacements.push(rep)
-        byte_offset = byte_offset + line.len() + 1
-
-    replacements
-
-fn _collect_line_call_replacements(line: text, file: text, sig: DuplicateTypedArgSignature, line_num: i64, byte_offset: i64) -> [Replacement]:
-    var replacements: [Replacement] = []
-    var i = 0
-    while i < line.len():
-        if not _matches_identifier_at(line, i, sig.name):
-            i = i + 1
-            continue
-        if _is_definition_context(line, i):
-            i = i + sig.name.len()
-            continue
-        val open_paren = _find_call_open_paren(line, i + sig.name.len())
-        if open_paren < 0:
-            i = i + sig.name.len()
-            continue
-        val close_paren = _find_matching_paren_on_line(line, open_paren)
-        if close_paren <= open_paren:
-            i = i + sig.name.len()
-            continue
-        val args_str = line.slice(open_paren + 1, close_paren)
-        val args = _split_top_level_csv(args_str)
-        if args.len() != sig.arg_count or _args_have_named_entries(args):
-            i = close_paren + 1
-            continue
-        var named_args: [text] = []
-        for arg_index in 0..args.len():
-            named_args.push("{sig.param_names[arg_index]}: {args[arg_index].trim()}")
-        replacements.push(Replacement.create(
-            file: file,
-            start: byte_offset + open_paren + 1,
-            end: byte_offset + close_paren,
-            line: line_num,
-            column: open_paren + 2,
-            new_text: named_args.join(", ")
-        ))
-        i = close_paren + 1
-    replacements
-
-fn _is_unique_call_target(signatures: [DuplicateTypedArgSignature], sig: DuplicateTypedArgSignature) -> bool:
-    var matches = 0
-    for candidate in signatures:
-        if candidate.can_rewrite_calls and candidate.name == sig.name and candidate.arg_count == sig.arg_count:
-            matches = matches + 1
-    matches == 1
 
 fn _is_fn_sig(trimmed: text) -> bool:
     (trimmed.starts_with("fn ")
@@ -378,18 +409,6 @@ fn _type_name_to_identifier(text: text) -> text:
     if _is_digit_char(out.slice(0, 1)):
         return "arg_{out}"
     out
-
-fn _matches_identifier_at(line: text, start: i64, name: text) -> bool:
-    if start < 0 or start + name.len() > line.len():
-        return false
-    if line.slice(start, start + name.len()) != name:
-        return false
-    if start > 0 and _is_identifier_char(line.slice(start - 1, start)):
-        return false
-    val end = start + name.len()
-    if end < line.len() and _is_identifier_char(line.slice(end, end + 1)):
-        return false
-    true
 
 fn _is_definition_context(line: text, token_start: i64) -> bool:
     val before = line.slice(0, token_start).trim()
