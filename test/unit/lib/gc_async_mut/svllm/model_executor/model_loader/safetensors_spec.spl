@@ -1,22 +1,22 @@
 """
 ## Purpose and audience
-Pins the observable CLI behavior of this spec's target so maintainers and
-reviewers of the SVLLMSAFETENSORS area can rely on documented output and exit codes.
+Purpose: Prove that parse_safetensors_header — happy path (A2).
+Audience: compiler and tooling engineers who maintain this spec.
 ## Operator workflow
-Run via `bin/simple test <this file>`; read the per-scenario verdicts in the
-`Results:` summary. Every scenario asserts an externally visible outcome.
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
 ## Compatibility and limitations
-Covers the shipped command surface only; performance and stress behavior are
-out of scope.
+Covers the pinned behavior only; fixture data is local to this spec.
 # @manual: primary
-REQ-LIB-SVLLMSAFETENSORS-001
-doc/01_research/local/SVLLMSAFETENSORS.md
-doc/03_plan/sys_test/SVLLMSAFETENSORS.md
-doc/04_architecture/SVLLMSAFETENSORS.md
-doc/05_design/SVLLMSAFETENSORS.md
+REQ-LIB-GC-ASYNC-MUT-001
+doc/01_research/local/REQ-LIB-GC-ASYNC-MUT-001.md
+doc/03_plan/sys_test/REQ-LIB-GC-ASYNC-MUT-001.md
+doc/04_architecture/REQ-LIB-GC-ASYNC-MUT-001.md
+doc/05_design/REQ-LIB-GC-ASYNC-MUT-001.md
 """
-# @req: REQ-LIB-SVLLMSAFETENSORS-001
-# svllm safetensors — A2 real parser specs (fail until Phase 5 lands the parser)
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+# svllm safetensors — real parser specs
 #
 # Fixture strategy: a 162-byte tiny checkpoint built inline via push() calls,
 # well under the interpreter's multi-MiB buffer limit. Two tensors:
@@ -26,20 +26,24 @@ doc/05_design/SVLLMSAFETENSORS.md
 
 use std.gc_async_mut.svllm.model_executor.model_loader.safetensors.{SafetensorsHeader, SafetensorsTensorEntry, SafetensorsError, parse_safetensors_header}
 use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
+use std.common.base_encoding.{base_encoding_facade_text_to_bytes as text_to_bytes}
 
 # Helper: push the ASCII bytes of `s` into `buf`.
 fn push_ascii(buf: [u8], s: text) -> [u8]:
+    val bytes = text_to_bytes(s)
     var i = 0
-    while i < s.len():
-        buf.push(s.byte_at(i) as u8)
+    while i < bytes.len():
+        buf.push(bytes[i])
         i = i + 1
     buf
 
 # Helper: push a u64 as 8 little-endian bytes.
 fn push_u64_le(buf: [u8], v: i64) -> [u8]:
+    var remaining = v
     var i = 0
     while i < 8:
-        buf.push(((v >> (i * 8)) and 0xFF) as u8)
+        buf.push((remaining % 256) as u8)
+        remaining = remaining / 256
         i = i + 1
     buf
 
@@ -62,16 +66,17 @@ fn build_tiny_safetensors() -> [u8]:
     buf
 
 use std.spec.step
+
 describe "parse_safetensors_header — happy path (A2)":
     it "returns Ok for the tiny 2-tensor fixture":
-        # @req: REQ-LIB-SVLLMSAFETENSORS-001
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: returns Ok for the tiny 2-tensor fixture")
         val buf = build_tiny_safetensors()
         val r = parse_safetensors_header(buf)
         expect(r.is_ok()).to_equal(true)
 
     it "records the 8-byte header length prefix value":
-        # @req: REQ-LIB-SVLLMSAFETENSORS-001
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: records the 8-byte header length prefix value")
         val buf = build_tiny_safetensors()
         val r = parse_safetensors_header(buf)
@@ -79,45 +84,47 @@ describe "parse_safetensors_header — happy path (A2)":
         expect(h.header_byte_len).to_be_greater_than(100)
 
     it "extracts exactly two tensor entries":
-        # @req: REQ-LIB-SVLLMSAFETENSORS-001
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: extracts exactly two tensor entries")
         val buf = build_tiny_safetensors()
         val h = parse_safetensors_header(buf).unwrap()
-        expect(h.tensors.len()).to_equal(2) # oracle: pinned expected value documenting the asserted outcome
+        expect(h.tensors.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     it "first tensor is named 'w' with dtype F32":
-        # @req: REQ-LIB-SVLLMSAFETENSORS-001
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: first tensor is named 'w' with dtype F32")
         val buf = build_tiny_safetensors()
         val h = parse_safetensors_header(buf).unwrap()
         val w = h.tensors[0]
         expect(w.name).to_equal("w")
-        expect(w.dtype).to_equal(Dtype.F32)
+        expect(w.dtype).to_equal("F32")
+        expect(w.dtype_tag).to_equal(Dtype.F32)
 
     it "first tensor has shape [2,2] and data_offsets [0,16]":
-        # @req: REQ-LIB-SVLLMSAFETENSORS-001
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: first tensor has shape [2,2] and data_offsets [0,16]")
         val buf = build_tiny_safetensors()
         val h = parse_safetensors_header(buf).unwrap()
         val w = h.tensors[0]
-        expect(w.shape.len()).to_equal(2) # oracle: pinned expected value documenting the asserted outcome
-        expect(w.shape[0]).to_equal(2) # oracle: pinned expected value documenting the asserted outcome
-        expect(w.shape[1]).to_equal(2) # oracle: pinned expected value documenting the asserted outcome
-        expect(w.offset).to_equal(0) # oracle: pinned expected value documenting the asserted outcome
-        expect(w.length).to_equal(16) # oracle: pinned expected value documenting the asserted outcome
+        expect(w.shape.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(w.shape[0]).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(w.shape[1]).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(w.offset).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(w.length).to_equal(16)  # oracle: 16 — named expected value from the requirement
 
     it "second tensor is named 'b' with dtype I64":
-        # @req: REQ-LIB-SVLLMSAFETENSORS-001
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: second tensor is named 'b' with dtype I64")
         val buf = build_tiny_safetensors()
         val h = parse_safetensors_header(buf).unwrap()
         val b = h.tensors[1]
         expect(b.name).to_equal("b")
-        expect(b.dtype).to_equal(Dtype.I64)
+        expect(b.dtype).to_equal("I64")
+        expect(b.dtype_tag).to_equal(Dtype.I64)
 
 describe "parse_safetensors_header — error paths":
     it "rejects buffers shorter than 8 bytes as TruncatedHeader":
-        # @req: REQ-LIB-SVLLMSAFETENSORS-001
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: rejects buffers shorter than 8 bytes as TruncatedHeader")
         var buf: [u8] = []
         buf.push(0 as u8)
@@ -126,7 +133,7 @@ describe "parse_safetensors_header — error paths":
         expect(r.is_err()).to_equal(true)
 
     it "rejects a length prefix that overruns the buffer":
-        # @req: REQ-LIB-SVLLMSAFETENSORS-001
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: rejects a length prefix that overruns the buffer")
         # Prefix claims 999 bytes of JSON but buffer is only 8 bytes long.
         var buf: [u8] = []
@@ -135,7 +142,7 @@ describe "parse_safetensors_header — error paths":
         expect(r.is_err()).to_equal(true)
 
     it "rejects malformed JSON header as MalformedJson":
-        # @req: REQ-LIB-SVLLMSAFETENSORS-001
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: rejects malformed JSON header as MalformedJson")
         val bad = "not-a-json-object"
         var buf: [u8] = []
@@ -145,7 +152,7 @@ describe "parse_safetensors_header — error paths":
         expect(r.is_err()).to_equal(true)
 
     it "rejects unknown dtype strings":
-        # @req: REQ-LIB-SVLLMSAFETENSORS-001
+        # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: rejects unknown dtype strings")
         val j = "{\"x\":{\"dtype\":\"WEIRD\",\"shape\":[1],\"data_offsets\":[0,4]}}"
         var buf: [u8] = []
