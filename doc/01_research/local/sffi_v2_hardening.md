@@ -1909,5 +1909,14 @@ one checked call, cached lookup after initialization, and no explicit wrapper
 allocation for every operation. No provider or CUDA work changed.
 The focused readiness spec passes 15/15 under the configured bootstrap seed;
 this remains seed-only evidence. A checked-in authority baseline now fails the
-census if missing-authority calls rise above 20,505, so the migration is a
+census if missing-authority calls rise above 20,376, so the migration is a
 one-way source-safety ratchet with no runtime or hot-path cost.
+
+The complete dynamic Torch wrapper slice then placed all 69 availability
+probes and all 60 operation calls in minimal lexical FFI scopes. The source
+still contains exactly 129 raw calls; none were added, removed, cached, or
+duplicated. Global lexical authority rises to 487 and total explicit authority
+to 995, while missing authority falls to 20,376. `rt_torch` now has 137
+explicitly authorized calls and 890 remaining missing-authority calls. This is
+lexical unsafe minimization only; the foreign provider remains unsigned and
+unverified.

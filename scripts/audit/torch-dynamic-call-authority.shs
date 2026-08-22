@@ -1,0 +1,51 @@
+#!/bin/sh
+# Source-shape gate for the optional libtorch availability boundary.
+# This proves lexical authority and call count, not provider verification.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source_file="$root/src/lib/common/torch/dyn_sffi_ops.spl"
+
+calls=$(grep -Ec '^[[:space:]]+rt_torch_available\(\)$' "$source_file")
+test "$calls" -eq 69 || {
+    echo "Torch dynamic authority: availability call count changed: $calls" >&2
+    exit 1
+}
+
+scoped=$(awk '
+    /^[[:space:]]+rt_torch_available\(\)$/ {
+        calls++
+        if (previous ~ /unsafe\(capabilities: \[ffi\]\):/) scoped++
+    }
+    { previous=$0 }
+    END { print scoped + 0 }
+' "$source_file")
+test "$scoped" -eq "$calls" || {
+    echo "Torch dynamic authority: unscoped availability calls=$((calls - scoped))" >&2
+    exit 1
+}
+
+raw_calls=$(grep -Ec '^[[:space:]]+rt_torch_[A-Za-z0-9_]+\(' "$source_file")
+test "$raw_calls" -eq 129 || {
+    echo "Torch dynamic authority: raw call count changed: $raw_calls" >&2
+    exit 1
+}
+scoped_raw=$(awk '
+    /^[[:space:]]+rt_torch_[A-Za-z0-9_]+\(/ {
+        calls++
+        if (previous ~ /unsafe\(capabilities: \[ffi\]\):/) scoped++
+    }
+    { previous=$0 }
+    END { print scoped + 0 }
+' "$source_file")
+test "$scoped_raw" -eq "$raw_calls" || {
+    echo "Torch dynamic authority: unscoped raw calls=$((raw_calls - scoped_raw))" >&2
+    exit 1
+}
+
+if grep -Eq 'if (not )?rt_torch_available\(\)' "$source_file"; then
+    echo 'Torch dynamic authority: raw availability call escaped lexical scope' >&2
+    exit 1
+fi
+
+echo "Torch dynamic call authority: PASS raw_calls=$raw_calls availability_calls=$calls lexical_ffi_scopes=$scoped_raw added_provider_calls=0"
