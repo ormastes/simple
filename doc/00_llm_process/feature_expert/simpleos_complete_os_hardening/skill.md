@@ -94,3 +94,17 @@ bytes; and publishes by same-directory atomic no-clobber only after verification
 Never log secret bytes, overwrite an existing output, or treat generated test
 credentials as deployment provenance. Windows staging remains fail-closed until
 a no-reparse descriptor owner exists.
+
+## Second-medium server-data contract boundary (2026-08-22)
+
+The canonical architecture is
+`doc/04_architecture/os/storage/simpleos_server_data_namespace_owner.md`.
+Phase A owns only the scalar contract in
+`src/lib/common/contracts/os/server_data_namespace_v1.spl` and reserved syscall
+ordinals 116–119. Preserve the exact seven rights, five-state graph, and numeric
+caps. A lease-shaped record is never self-authenticating: later authorization
+must look it up by task ID, task generation, owner epoch, generation, and both
+nonce words. Do not add SDK call wrappers, dispatcher branches, device/media
+owners, or readiness claims until the unique owner and launcher grant boundary
+land atomically. Source parity is not QEMU, persistence, timing, allocation, or
+RSS evidence.

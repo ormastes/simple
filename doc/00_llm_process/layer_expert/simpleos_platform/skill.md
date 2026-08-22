@@ -51,3 +51,13 @@ contract. Missing, malformed, symlinked, unsafe-mode, changed, mismatched, or
 oversized inputs fail before publishing an image; pre-existing images are
 preserved. Windows intentionally rejects server-secret staging until an
 equivalent no-reparse descriptor boundary is implemented.
+
+## Server-data namespace Phase A contract (2026-08-22)
+
+Syscall ordinals 116–119 are reserved for the future server-data namespace but
+have no dispatcher or callable wrapper. `server_data_namespace_v1.spl` freezes
+pointer-free C-layout IDs, rights, receipts, states, caps, and pure transition
+decisions. Scalar receipts never authorize access: a future kernel owner must
+look up and match its stored task-generation, epoch, lease-generation, and
+128-bit nonce record. Do not advertise readiness before the distinct DBFS
+medium and sole transactional owner from the architecture plan exist.

@@ -106,3 +106,18 @@ The filesystem sync unblock contract is tracked in
   four-argument environment ABI and 33-check core-C capsule are green. Because
   it lacks `test`/`check` and recovery produced no deployable release runtime,
   it does not unblock the full acceptance runner.
+
+## Server-data namespace Phase A boundary (2026-08-22)
+
+`std.common.contracts.os.server_data_namespace_v1` freezes the pointer-free V1
+namespace, grant, lease, commit, and recovery records; the seven rights; the
+five-state transition graph; and the architecture limits. Its pure decision
+helpers validate shapes and compare a future kernel-table lookup result against
+presented identities; caller-provided records never authenticate themselves.
+They reject stale task/owner/lease generations, rights escalation, illegal
+transitions, and capacity overflow without owning mutable kernel state. Syscall
+ordinals 116–119 are renamed reservations only. The SDK
+labels them explicitly non-callable, and no shared or ISA dispatcher enables
+them. This is contract evidence, not a namespace, DBFS medium, syscall,
+service-readiness, persistence, QEMU, performance, or memory claim. Those
+claims remain blocked until Phases B–F and admitted-runtime evidence complete.

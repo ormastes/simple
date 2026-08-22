@@ -1,0 +1,315 @@
+"""Phase A contract and reserved-ABI checks for the server-data namespace."""
+
+use std.spec
+use std.common.contracts.os.server_data_namespace_v1.*
+use os.kernel.types.syscall_types.{SyscallId}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn _namespace(value: u64) -> ServerDataNamespaceIdV1:
+    ServerDataNamespaceIdV1(value: value)
+
+fn _lease(generation: u64, nonce_hi: u64, nonce_lo: u64) -> ServerDataLeaseIdV1:
+    ServerDataLeaseIdV1(generation: generation, nonce_hi: nonce_hi, nonce_lo: nonce_lo)
+
+fn _grant() -> ServerDataGrantV1:
+    ServerDataGrantV1(
+        namespace_id: _namespace(7u64),
+        task_id: 41u64,
+        task_generation: 9u64,
+        rights: SERVER_DATA_RIGHT_READ | SERVER_DATA_RIGHT_WRITE |
+            SERVER_DATA_RIGHT_SYNC | SERVER_DATA_RIGHT_ATOMIC_REPLACE,
+        subtree_hash: 73u64
+    )
+
+fn _receipt() -> ServerDataLeaseReceiptV1:
+    ServerDataLeaseReceiptV1(
+        lease: _lease(3u64, 101u64, 103u64),
+        grant: _grant(),
+        owner_epoch: 5u64,
+        state: server_data_namespace_state_code_v1(ServerDataNamespaceStateV1.Mounted)
+    )
+
+fn _expected_transition(current: i64, next: i64) -> bool:
+    (current == 0 and next == 1) or
+        (current == 1 and (next == 2 or next == 4)) or
+        (current == 2 and (next == 3 or next == 4)) or
+        (current == 3 and (next == 0 or next == 4))
+
+describe "server-data namespace Phase A contract":
+    it "accepts exactly the seven frozen rights and rejects escalation":
+        step("Validate fixed rights and limits")
+        expect(SERVER_DATA_RIGHTS_MASK_V1).to_equal(127u32)
+        expect(server_data_rights_valid_v1(SERVER_DATA_RIGHT_READ)).to_equal(true)
+        expect(server_data_rights_valid_v1(SERVER_DATA_RIGHT_WRITE)).to_equal(true)
+        expect(server_data_rights_valid_v1(SERVER_DATA_RIGHT_CREATE)).to_equal(true)
+        expect(server_data_rights_valid_v1(SERVER_DATA_RIGHT_REMOVE)).to_equal(true)
+        expect(server_data_rights_valid_v1(SERVER_DATA_RIGHT_RENAME)).to_equal(true)
+        expect(server_data_rights_valid_v1(SERVER_DATA_RIGHT_SYNC)).to_equal(true)
+        expect(server_data_rights_valid_v1(SERVER_DATA_RIGHT_ATOMIC_REPLACE)).to_equal(true)
+        expect(server_data_rights_valid_v1(SERVER_DATA_RIGHTS_MASK_V1)).to_equal(true)
+        expect(server_data_rights_valid_v1(0u32)).to_equal(false)
+        expect(server_data_rights_valid_v1(128u32)).to_equal(false)
+        expect(server_data_rights_valid_v1(4294967295u32)).to_equal(false)
+        expect(server_data_rights_include_v1(
+            SERVER_DATA_RIGHT_READ | SERVER_DATA_RIGHT_SYNC,
+            SERVER_DATA_RIGHT_SYNC
+        )).to_equal(true)
+        expect(server_data_rights_include_v1(
+            SERVER_DATA_RIGHT_READ,
+            SERVER_DATA_RIGHT_WRITE
+        )).to_equal(false)
+        expect(SERVER_DATA_MAX_LEASE_SLOTS_V1).to_equal(4096u64)
+        expect(SERVER_DATA_MAX_ACTIVE_OPERATIONS_V1).to_equal(1024u64)
+        expect(SERVER_DATA_MAX_PATH_BYTES_V1).to_equal(4096u64)
+        expect(SERVER_DATA_MAX_REPLACE_BYTES_V1).to_equal(16777216u64)
+        expect(SERVER_DATA_STREAM_CHUNK_BYTES_V1).to_equal(65536u64)
+        expect(SERVER_DATA_MAX_EXTENTS_V1).to_equal(4096u64)
+        expect(SERVER_DATA_MAX_JOURNAL_RECORDS_V1).to_equal(4112u64)
+        expect(SERVER_DATA_MAX_RECOVERY_SCRATCH_BYTES_V1).to_equal(1048576u64)
+        expect(SERVER_DATA_DRAIN_DEADLINE_MS_V1).to_equal(30000u64)
+
+    it "covers all twenty-five state pairs and permits only frozen edges":
+        step("Reject every invalid namespace transition")
+        val states = [
+            ServerDataNamespaceStateV1.Unavailable,
+            ServerDataNamespaceStateV1.Recovering,
+            ServerDataNamespaceStateV1.Mounted,
+            ServerDataNamespaceStateV1.Draining,
+            ServerDataNamespaceStateV1.Quarantined
+        ]
+        var current = 0
+        while current < states.len():
+            var next = 0
+            while next < states.len():
+                expect(server_data_state_transition_allowed_v1(
+                    states[current], states[next]
+                )).to_equal(_expected_transition(current, next))
+                next = next + 1
+            current = current + 1
+
+    it "rejects zero forged and stale grant and lease shapes":
+        step("Reject forged and stale namespace identities")
+        var grant = _grant()
+        expect(server_data_grant_validate_v1(grant).ok).to_equal(true)
+        grant.namespace_id = _namespace(0u64)
+        expect(server_data_grant_validate_v1(grant).error).to_equal(ServerDataContractErrorV1.InvalidNamespaceId)
+        grant = _grant()
+        grant.task_generation = 0u64
+        expect(server_data_grant_validate_v1(grant).error).to_equal(ServerDataContractErrorV1.InvalidTaskIdentity)
+        grant = _grant()
+        grant.subtree_hash = 0u64
+        expect(server_data_grant_validate_v1(grant).error).to_equal(ServerDataContractErrorV1.InvalidSubtree)
+        var receipt = _receipt()
+        receipt.lease = _lease(3u64, 0u64, 103u64)
+        expect(server_data_lease_receipt_validate_v1(receipt).error).to_equal(ServerDataContractErrorV1.InvalidLeaseId)
+        receipt = _receipt()
+        receipt.owner_epoch = 0u64
+        expect(server_data_lease_receipt_validate_v1(receipt).error).to_equal(ServerDataContractErrorV1.InvalidOwnerEpoch)
+        receipt = _receipt()
+        receipt.state = server_data_namespace_state_code_v1(ServerDataNamespaceStateV1.Draining)
+        expect(server_data_lease_receipt_validate_v1(receipt).error).to_equal(ServerDataContractErrorV1.InvalidState)
+        receipt = _receipt()
+        receipt.lease = _lease(0u64, 101u64, 103u64)
+        expect(server_data_lease_receipt_validate_v1(receipt).error).to_equal(ServerDataContractErrorV1.InvalidLeaseId)
+        receipt = _receipt()
+        receipt.lease = _lease(3u64, 101u64, 0u64)
+        expect(server_data_lease_receipt_validate_v1(receipt).error).to_equal(ServerDataContractErrorV1.InvalidLeaseId)
+
+    it "admits acquire only for an exact mounted grant below capacity":
+        step("Validate deterministic acquire decisions")
+        val grant = _grant()
+        val ok = server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 5u64, grant,
+            41u64, 9u64, _namespace(7u64), SERVER_DATA_RIGHT_READ,
+            73u64, 4095u64
+        )
+        expect(ok.ok).to_equal(true)
+        expect(server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Recovering, 5u64, grant,
+            41u64, 9u64, _namespace(7u64), SERVER_DATA_RIGHT_READ,
+            73u64, 0u64
+        ).error).to_equal(ServerDataContractErrorV1.InvalidState)
+        expect(server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 0u64, grant,
+            41u64, 9u64, _namespace(7u64), SERVER_DATA_RIGHT_READ,
+            73u64, 0u64
+        ).error).to_equal(ServerDataContractErrorV1.InvalidOwnerEpoch)
+        expect(server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 5u64, grant,
+            41u64, 8u64, _namespace(7u64), SERVER_DATA_RIGHT_READ,
+            73u64, 0u64
+        ).error).to_equal(ServerDataContractErrorV1.StaleGeneration)
+        expect(server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 5u64, grant,
+            42u64, 9u64, _namespace(7u64), SERVER_DATA_RIGHT_READ,
+            73u64, 0u64
+        ).error).to_equal(ServerDataContractErrorV1.IdentityMismatch)
+        expect(server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 5u64, grant,
+            41u64, 9u64, _namespace(8u64), SERVER_DATA_RIGHT_READ,
+            73u64, 0u64
+        ).error).to_equal(ServerDataContractErrorV1.IdentityMismatch)
+        expect(server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 5u64, grant,
+            41u64, 9u64, _namespace(7u64), SERVER_DATA_RIGHT_READ,
+            74u64, 0u64
+        ).error).to_equal(ServerDataContractErrorV1.IdentityMismatch)
+        expect(server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 5u64, grant,
+            41u64, 9u64, _namespace(7u64), SERVER_DATA_RIGHT_CREATE,
+            73u64, 0u64
+        ).error).to_equal(ServerDataContractErrorV1.InvalidRights)
+        expect(server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 5u64, grant,
+            41u64, 9u64, _namespace(7u64), 0u32,
+            73u64, 0u64
+        ).error).to_equal(ServerDataContractErrorV1.InvalidRights)
+        expect(server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 5u64, grant,
+            41u64, 9u64, _namespace(7u64), 128u32,
+            73u64, 0u64
+        ).error).to_equal(ServerDataContractErrorV1.InvalidRights)
+        expect(server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 5u64, grant,
+            41u64, 9u64, _namespace(7u64), SERVER_DATA_RIGHT_READ,
+            73u64, 4096u64
+        ).error).to_equal(ServerDataContractErrorV1.CapacityExceeded)
+        expect(server_data_acquire_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 5u64, grant,
+            41u64, 9u64, _namespace(7u64), SERVER_DATA_RIGHT_READ,
+            73u64, 4097u64
+        ).error).to_equal(ServerDataContractErrorV1.CapacityExceeded)
+
+    it "rejects forged revoke identities and active drain completion":
+        step("Validate deterministic revoke and drain decisions")
+        val receipt = _receipt()
+        expect(server_data_stored_lease_revoke_match_v1(
+            ServerDataNamespaceStateV1.Mounted, receipt,
+            41u64, 9u64, 5u64, _lease(3u64, 101u64, 103u64)
+        ).ok).to_equal(true)
+        expect(server_data_stored_lease_revoke_match_v1(
+            ServerDataNamespaceStateV1.Mounted, receipt,
+            41u64, 9u64, 4u64, _lease(3u64, 101u64, 103u64)
+        ).error).to_equal(ServerDataContractErrorV1.StaleGeneration)
+        expect(server_data_stored_lease_revoke_match_v1(
+            ServerDataNamespaceStateV1.Mounted, receipt,
+            41u64, 9u64, 5u64, _lease(3u64, 107u64, 103u64)
+        ).error).to_equal(ServerDataContractErrorV1.IdentityMismatch)
+        expect(server_data_stored_lease_revoke_match_v1(
+            ServerDataNamespaceStateV1.Mounted, receipt,
+            42u64, 9u64, 5u64, _lease(3u64, 101u64, 103u64)
+        ).error).to_equal(ServerDataContractErrorV1.IdentityMismatch)
+        expect(server_data_stored_lease_revoke_match_v1(
+            ServerDataNamespaceStateV1.Mounted, receipt,
+            41u64, 8u64, 5u64, _lease(3u64, 101u64, 103u64)
+        ).error).to_equal(ServerDataContractErrorV1.StaleGeneration)
+        expect(server_data_stored_lease_revoke_match_v1(
+            ServerDataNamespaceStateV1.Mounted, receipt,
+            41u64, 9u64, 5u64, _lease(2u64, 101u64, 103u64)
+        ).error).to_equal(ServerDataContractErrorV1.StaleGeneration)
+        expect(server_data_stored_lease_revoke_match_v1(
+            ServerDataNamespaceStateV1.Mounted, receipt,
+            41u64, 9u64, 5u64, _lease(3u64, 101u64, 107u64)
+        ).error).to_equal(ServerDataContractErrorV1.IdentityMismatch)
+        expect(server_data_stored_lease_revoke_match_v1(
+            ServerDataNamespaceStateV1.Recovering, receipt,
+            41u64, 9u64, 5u64, _lease(3u64, 101u64, 103u64)
+        ).error).to_equal(ServerDataContractErrorV1.InvalidState)
+        expect(server_data_drain_decide_v1(
+            ServerDataNamespaceStateV1.Draining, 1024u64, 4u64
+        ).error).to_equal(ServerDataContractErrorV1.OperationsActive)
+        expect(server_data_drain_decide_v1(
+            ServerDataNamespaceStateV1.Draining, 0u64, 4096u64
+        ).ok).to_equal(true)
+        expect(server_data_drain_decide_v1(
+            ServerDataNamespaceStateV1.Draining, 1025u64, 0u64
+        ).error).to_equal(ServerDataContractErrorV1.CapacityExceeded)
+        expect(server_data_drain_decide_v1(
+            ServerDataNamespaceStateV1.Draining, 0u64, 4097u64
+        ).error).to_equal(ServerDataContractErrorV1.CapacityExceeded)
+        expect(server_data_drain_decide_v1(
+            ServerDataNamespaceStateV1.Mounted, 0u64, 0u64
+        ).error).to_equal(ServerDataContractErrorV1.InvalidState)
+
+    it "validates commit receipt generations without inventing hash sentinels":
+        step("Validate fixed commit receipt shape")
+        val zero_hash = ServerDataCommitReceiptV1(
+            namespace_id: _namespace(7u64), mount_generation: 2u64,
+            durable_generation: 3u64, journal_lsn: 4u64, content_hash: 0u64
+        )
+        expect(server_data_commit_receipt_validate_v1(zero_hash).ok).to_equal(true)
+        var invalid = zero_hash
+        invalid.mount_generation = 0u64
+        expect(server_data_commit_receipt_validate_v1(invalid).error).to_equal(ServerDataContractErrorV1.InvalidCommitReceipt)
+        invalid = zero_hash
+        invalid.durable_generation = 0u64
+        expect(server_data_commit_receipt_validate_v1(invalid).error).to_equal(ServerDataContractErrorV1.InvalidCommitReceipt)
+        invalid = zero_hash
+        invalid.journal_lsn = 0u64
+        expect(server_data_commit_receipt_validate_v1(invalid).error).to_equal(ServerDataContractErrorV1.InvalidCommitReceipt)
+
+    it "validates healthy and quarantined recovery receipts fail closed":
+        step("Validate deterministic recovery decisions")
+        val healthy = ServerDataRecoveryReceiptV1(
+            namespace_id: _namespace(7u64), selected_generation: 8u64,
+            replayed_records: 4000u64, discarded_records: 112u64,
+            quarantined: false, reason_code: 0u32
+        )
+        expect(server_data_recovery_receipt_validate_v1(healthy).ok).to_equal(true)
+        var forged = healthy
+        forged.selected_generation = 0u64
+        expect(server_data_recovery_receipt_validate_v1(forged).ok).to_equal(false)
+        forged = healthy
+        forged.replayed_records = 4001u64
+        expect(server_data_recovery_receipt_validate_v1(forged).ok).to_equal(false)
+        forged = healthy
+        forged.replayed_records = 4000u64
+        forged.discarded_records = 113u64
+        expect(server_data_recovery_receipt_validate_v1(forged).ok).to_equal(false)
+        val quarantined = ServerDataRecoveryReceiptV1(
+            namespace_id: _namespace(7u64), selected_generation: 0u64,
+            replayed_records: 0u64, discarded_records: 0u64,
+            quarantined: true, reason_code: 1u32
+        )
+        expect(server_data_recovery_receipt_validate_v1(quarantined).ok).to_equal(true)
+        var unreasoned = quarantined
+        unreasoned.reason_code = 0u32
+        expect(server_data_recovery_receipt_validate_v1(unreasoned).ok).to_equal(false)
+
+    it "keeps 116 through 119 reserved and non-dispatched on every ISA":
+        step("Check reserved server-data ABI parity across x86 ARM and RV")
+        expect(SyscallId.ServerDataAcquireReserved as u64).to_equal(116u64)
+        expect(SyscallId.ServerDataRevokeReserved as u64).to_equal(117u64)
+        expect(SyscallId.ServerDataStatusSyncReserved as u64).to_equal(118u64)
+        expect(SyscallId.ServerDataAtomicReplaceReserved as u64).to_equal(119u64)
+        expect(SyscallId.DatasetCreate as u64).to_equal(120u64)
+        val ids = _source("src/os/kernel/types/syscall_types.spl")
+        val sdk = _source("src/os/sdk/include/simpleos.h")
+        expect(ids).to_contain("ServerDataAcquireReserved")
+        expect(ids).to_contain("syscall_id_server_data_acquire_reserved() -> u64:\n    116u64")
+        expect(ids).to_contain("syscall_id_server_data_atomic_replace_reserved() -> u64:\n    119u64")
+        expect(sdk).to_contain("SIMPLEOS_SYS_SERVER_DATA_ACQUIRE_RESERVED_V1       116u")
+        expect(sdk).to_contain("SIMPLEOS_SYS_SERVER_DATA_REVOKE_RESERVED_V1        117u")
+        expect(sdk).to_contain("SIMPLEOS_SYS_SERVER_DATA_STATUS_SYNC_RESERVED_V1   118u")
+        expect(sdk).to_contain("SIMPLEOS_SYS_SERVER_DATA_ATOMIC_REPLACE_RESERVED_V1 119u")
+        expect(sdk).to_contain("No dispatcher, SDK wrapper")
+        expect(sdk).to_contain("does not make the reserved syscalls callable or ready")
+        expect(sdk).to_contain("typedef struct simpleos_server_data_lease_receipt_v1")
+        expect(sdk).to_contain("typedef struct simpleos_server_data_recovery_receipt_v1")
+        expect(sdk).to_contain("sizeof(simpleos_server_data_lease_receipt_v1) == 80")
+        expect(sdk).to_contain("offsetof(simpleos_server_data_recovery_receipt_v1, reason_code) == 36")
+        val shared = _source("src/os/kernel/ipc/syscall.spl")
+        val x86 = _source("src/os/kernel/arch/x86_64/interrupt.spl")
+        val arm = _source("src/os/kernel/arch/arm64/user_entry.spl")
+        val rv = _source("src/os/kernel/arch/riscv64/syscall.spl")
+        expect(shared.index_of("ServerDataAcquireReserved")).to_equal(-1)
+        expect(x86.index_of("ServerDataAcquireReserved")).to_equal(-1)
+        expect(arm.index_of("ServerDataAcquireReserved")).to_equal(-1)
+        expect(rv.index_of("ServerDataAcquireReserved")).to_equal(-1)
+        expect(x86).to_contain("id: id")
+        expect(rv).to_contain("args.id")
+        expect(arm.index_of("116u64")).to_equal(-1)

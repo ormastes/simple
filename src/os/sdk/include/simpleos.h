@@ -28,6 +28,87 @@ extern "C" {
 #define SIMPLEOS_VERSION_MINOR 1
 #define SIMPLEOS_VERSION_PATCH 0
 
+/* ===== Reserved server-data ABI (not callable) =====
+ *
+ * These ordinals are frozen for ABI parity only.  No dispatcher, SDK wrapper,
+ * or readiness claim exists in Phase A.  Applications must not issue them.
+ */
+#define SIMPLEOS_SYS_SERVER_DATA_ACQUIRE_RESERVED_V1       116u
+#define SIMPLEOS_SYS_SERVER_DATA_REVOKE_RESERVED_V1        117u
+#define SIMPLEOS_SYS_SERVER_DATA_STATUS_SYNC_RESERVED_V1   118u
+#define SIMPLEOS_SYS_SERVER_DATA_ATOMIC_REPLACE_RESERVED_V1 119u
+
+/* Fixed-width layout declarations for offline ABI tooling.  Their presence
+ * does not make the reserved syscalls callable or ready. */
+typedef struct simpleos_server_data_namespace_id_v1 {
+    uint64_t value;
+} simpleos_server_data_namespace_id_v1;
+
+typedef struct simpleos_server_data_lease_id_v1 {
+    uint64_t generation;
+    uint64_t nonce_hi;
+    uint64_t nonce_lo;
+} simpleos_server_data_lease_id_v1;
+
+typedef struct simpleos_server_data_grant_v1 {
+    simpleos_server_data_namespace_id_v1 namespace_id;
+    uint64_t task_id;
+    uint64_t task_generation;
+    uint32_t rights;
+    uint32_t _reserved0;
+    uint64_t subtree_hash;
+} simpleos_server_data_grant_v1;
+
+typedef struct simpleos_server_data_lease_receipt_v1 {
+    simpleos_server_data_lease_id_v1 lease;
+    simpleos_server_data_grant_v1 grant;
+    uint64_t owner_epoch;
+    uint32_t state;
+    uint32_t _reserved0;
+} simpleos_server_data_lease_receipt_v1;
+
+typedef struct simpleos_server_data_commit_receipt_v1 {
+    simpleos_server_data_namespace_id_v1 namespace_id;
+    uint64_t mount_generation;
+    uint64_t durable_generation;
+    uint64_t journal_lsn;
+    uint64_t content_hash;
+} simpleos_server_data_commit_receipt_v1;
+
+typedef struct simpleos_server_data_recovery_receipt_v1 {
+    simpleos_server_data_namespace_id_v1 namespace_id;
+    uint64_t selected_generation;
+    uint64_t replayed_records;
+    uint64_t discarded_records;
+    uint8_t quarantined;
+    uint8_t _reserved0[3];
+    uint32_t reason_code;
+} simpleos_server_data_recovery_receipt_v1;
+
+#if defined(__cplusplus)
+static_assert(sizeof(simpleos_server_data_namespace_id_v1) == 8, "server-data namespace ID ABI");
+static_assert(sizeof(simpleos_server_data_lease_id_v1) == 24, "server-data lease ID ABI");
+static_assert(sizeof(simpleos_server_data_grant_v1) == 40, "server-data grant ABI");
+static_assert(sizeof(simpleos_server_data_lease_receipt_v1) == 80, "server-data lease receipt ABI");
+static_assert(sizeof(simpleos_server_data_commit_receipt_v1) == 40, "server-data commit receipt ABI");
+static_assert(sizeof(simpleos_server_data_recovery_receipt_v1) == 40, "server-data recovery receipt ABI");
+static_assert(offsetof(simpleos_server_data_grant_v1, subtree_hash) == 32, "server-data grant offsets");
+static_assert(offsetof(simpleos_server_data_lease_receipt_v1, owner_epoch) == 64, "server-data lease offsets");
+static_assert(offsetof(simpleos_server_data_lease_receipt_v1, state) == 72, "server-data lease state offset");
+static_assert(offsetof(simpleos_server_data_recovery_receipt_v1, reason_code) == 36, "server-data recovery offsets");
+#else
+_Static_assert(sizeof(simpleos_server_data_namespace_id_v1) == 8, "server-data namespace ID ABI");
+_Static_assert(sizeof(simpleos_server_data_lease_id_v1) == 24, "server-data lease ID ABI");
+_Static_assert(sizeof(simpleos_server_data_grant_v1) == 40, "server-data grant ABI");
+_Static_assert(sizeof(simpleos_server_data_lease_receipt_v1) == 80, "server-data lease receipt ABI");
+_Static_assert(sizeof(simpleos_server_data_commit_receipt_v1) == 40, "server-data commit receipt ABI");
+_Static_assert(sizeof(simpleos_server_data_recovery_receipt_v1) == 40, "server-data recovery receipt ABI");
+_Static_assert(offsetof(simpleos_server_data_grant_v1, subtree_hash) == 32, "server-data grant offsets");
+_Static_assert(offsetof(simpleos_server_data_lease_receipt_v1, owner_epoch) == 64, "server-data lease offsets");
+_Static_assert(offsetof(simpleos_server_data_lease_receipt_v1, state) == 72, "server-data lease state offset");
+_Static_assert(offsetof(simpleos_server_data_recovery_receipt_v1, reason_code) == 36, "server-data recovery offsets");
+#endif
+
 /* ===== Framebuffer API ===== */
 
 /**

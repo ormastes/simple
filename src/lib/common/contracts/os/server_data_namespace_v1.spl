@@ -1,0 +1,263 @@
+# Frozen pointer-free contract for the SimpleOS server-data namespace.
+#
+# Phase A deliberately contains no filesystem, device, syscall, entropy, or
+# task-table implementation.  These scalar values may cross an ABI boundary,
+# but only a future kernel owner may authenticate and act on them.
+
+pub enum ServerDataNamespaceStateV1:
+    Unavailable
+    Recovering
+    Mounted
+    Draining
+    Quarantined
+
+pub enum ServerDataContractErrorV1:
+    None
+    InvalidNamespaceId
+    InvalidLeaseId
+    InvalidTaskIdentity
+    InvalidOwnerEpoch
+    InvalidRights
+    InvalidSubtree
+    InvalidState
+    InvalidTransition
+    IdentityMismatch
+    StaleGeneration
+    CapacityExceeded
+    OperationsActive
+    InvalidCommitReceipt
+    InvalidRecoveryReceipt
+
+pub struct ServerDataContractCheckV1:
+    ok: bool
+    error: ServerDataContractErrorV1
+
+@repr("C")
+pub struct ServerDataNamespaceIdV1:
+    value: u64
+
+@repr("C")
+pub struct ServerDataLeaseIdV1:
+    generation: u64
+    nonce_hi: u64
+    nonce_lo: u64
+
+@repr("C")
+pub struct ServerDataGrantV1:
+    namespace_id: ServerDataNamespaceIdV1
+    task_id: u64
+    task_generation: u64
+    rights: u32
+    subtree_hash: u64
+
+@repr("C")
+pub struct ServerDataLeaseReceiptV1:
+    lease: ServerDataLeaseIdV1
+    grant: ServerDataGrantV1
+    owner_epoch: u64
+    state: u32
+
+@repr("C")
+pub struct ServerDataCommitReceiptV1:
+    namespace_id: ServerDataNamespaceIdV1
+    mount_generation: u64
+    durable_generation: u64
+    journal_lsn: u64
+    content_hash: u64
+
+@repr("C")
+pub struct ServerDataRecoveryReceiptV1:
+    namespace_id: ServerDataNamespaceIdV1
+    selected_generation: u64
+    replayed_records: u64
+    discarded_records: u64
+    quarantined: bool
+    reason_code: u32
+
+pub val SERVER_DATA_RIGHT_READ: u32 = 1u32
+pub val SERVER_DATA_RIGHT_WRITE: u32 = 2u32
+pub val SERVER_DATA_RIGHT_CREATE: u32 = 4u32
+pub val SERVER_DATA_RIGHT_REMOVE: u32 = 8u32
+pub val SERVER_DATA_RIGHT_RENAME: u32 = 16u32
+pub val SERVER_DATA_RIGHT_SYNC: u32 = 32u32
+pub val SERVER_DATA_RIGHT_ATOMIC_REPLACE: u32 = 64u32
+pub val SERVER_DATA_RIGHTS_MASK_V1: u32 = 127u32
+
+pub val SERVER_DATA_MAX_LEASE_SLOTS_V1: u64 = 4096u64
+pub val SERVER_DATA_MAX_ACTIVE_OPERATIONS_V1: u64 = 1024u64
+pub val SERVER_DATA_MAX_PATH_BYTES_V1: u64 = 4096u64
+pub val SERVER_DATA_MAX_REPLACE_BYTES_V1: u64 = 16777216u64
+pub val SERVER_DATA_STREAM_CHUNK_BYTES_V1: u64 = 65536u64
+pub val SERVER_DATA_MAX_EXTENTS_V1: u64 = 4096u64
+pub val SERVER_DATA_MAX_JOURNAL_RECORDS_V1: u64 = 4112u64
+pub val SERVER_DATA_MAX_RECOVERY_SCRATCH_BYTES_V1: u64 = 1048576u64
+pub val SERVER_DATA_DRAIN_DEADLINE_MS_V1: u64 = 30000u64
+
+pub val SERVER_DATA_RECOVERY_REASON_NONE_V1: u32 = 0u32
+
+pub fn server_data_namespace_state_code_v1(state: ServerDataNamespaceStateV1) -> u32:
+    match state:
+        ServerDataNamespaceStateV1.Unavailable: 0u32
+        ServerDataNamespaceStateV1.Recovering: 1u32
+        ServerDataNamespaceStateV1.Mounted: 2u32
+        ServerDataNamespaceStateV1.Draining: 3u32
+        ServerDataNamespaceStateV1.Quarantined: 4u32
+
+pub fn server_data_namespace_state_code_valid_v1(state: u32) -> bool:
+    state <= 4u32
+
+fn _server_data_ok_v1() -> ServerDataContractCheckV1:
+    ServerDataContractCheckV1(ok: true, error: ServerDataContractErrorV1.None)
+
+fn _server_data_reject_v1(error: ServerDataContractErrorV1) -> ServerDataContractCheckV1:
+    ServerDataContractCheckV1(ok: false, error: error)
+
+pub fn server_data_namespace_id_valid_v1(id: ServerDataNamespaceIdV1) -> bool:
+    id.value != 0u64
+
+pub fn server_data_lease_id_valid_v1(lease: ServerDataLeaseIdV1) -> bool:
+    lease.generation != 0u64 and lease.nonce_hi != 0u64 and lease.nonce_lo != 0u64
+
+pub fn server_data_rights_valid_v1(rights: u32) -> bool:
+    rights != 0u32 and (rights & SERVER_DATA_RIGHTS_MASK_V1) == rights
+
+pub fn server_data_rights_include_v1(held: u32, requested: u32) -> bool:
+    server_data_rights_valid_v1(held) and
+        server_data_rights_valid_v1(requested) and
+        (held & requested) == requested
+
+pub fn server_data_grant_validate_v1(grant: ServerDataGrantV1) -> ServerDataContractCheckV1:
+    if not server_data_namespace_id_valid_v1(grant.namespace_id):
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidNamespaceId)
+    if grant.task_id == 0u64 or grant.task_generation == 0u64:
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidTaskIdentity)
+    if not server_data_rights_valid_v1(grant.rights):
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidRights)
+    if grant.subtree_hash == 0u64:
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidSubtree)
+    _server_data_ok_v1()
+
+pub fn server_data_lease_receipt_validate_v1(receipt: ServerDataLeaseReceiptV1) -> ServerDataContractCheckV1:
+    val grant_check = server_data_grant_validate_v1(receipt.grant)
+    if not grant_check.ok:
+        return grant_check
+    if not server_data_lease_id_valid_v1(receipt.lease):
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidLeaseId)
+    if receipt.owner_epoch == 0u64:
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidOwnerEpoch)
+    # A lease receipt is minted only at the Mounted acquire linearization
+    # point.  Status/recovery evidence uses its own receipt type.
+    if receipt.state != server_data_namespace_state_code_v1(ServerDataNamespaceStateV1.Mounted):
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidState)
+    _server_data_ok_v1()
+
+pub fn server_data_state_transition_allowed_v1(
+    current: ServerDataNamespaceStateV1,
+    next: ServerDataNamespaceStateV1
+) -> bool:
+    match current:
+        ServerDataNamespaceStateV1.Unavailable:
+            next == ServerDataNamespaceStateV1.Recovering
+        ServerDataNamespaceStateV1.Recovering:
+            next == ServerDataNamespaceStateV1.Mounted or
+                next == ServerDataNamespaceStateV1.Quarantined
+        ServerDataNamespaceStateV1.Mounted:
+            next == ServerDataNamespaceStateV1.Draining or
+                next == ServerDataNamespaceStateV1.Quarantined
+        ServerDataNamespaceStateV1.Draining:
+            next == ServerDataNamespaceStateV1.Unavailable or
+                next == ServerDataNamespaceStateV1.Quarantined
+        ServerDataNamespaceStateV1.Quarantined: false
+
+pub fn server_data_acquire_decide_v1(
+    state: ServerDataNamespaceStateV1,
+    owner_epoch: u64,
+    grant: ServerDataGrantV1,
+    task_id: u64,
+    task_generation: u64,
+    namespace_id: ServerDataNamespaceIdV1,
+    requested_rights: u32,
+    subtree_hash: u64,
+    occupied_lease_slots: u64
+) -> ServerDataContractCheckV1:
+    val grant_check = server_data_grant_validate_v1(grant)
+    if not grant_check.ok:
+        return grant_check
+    if state != ServerDataNamespaceStateV1.Mounted:
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidState)
+    if owner_epoch == 0u64:
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidOwnerEpoch)
+    if occupied_lease_slots >= SERVER_DATA_MAX_LEASE_SLOTS_V1:
+        return _server_data_reject_v1(ServerDataContractErrorV1.CapacityExceeded)
+    if grant.task_id != task_id or grant.namespace_id.value != namespace_id.value or
+        grant.subtree_hash != subtree_hash:
+        return _server_data_reject_v1(ServerDataContractErrorV1.IdentityMismatch)
+    if grant.task_generation != task_generation:
+        return _server_data_reject_v1(ServerDataContractErrorV1.StaleGeneration)
+    if not server_data_rights_include_v1(grant.rights, requested_rights):
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidRights)
+    _server_data_ok_v1()
+
+pub fn server_data_stored_lease_revoke_match_v1(
+    state: ServerDataNamespaceStateV1,
+    stored_receipt: ServerDataLeaseReceiptV1,
+    task_id: u64,
+    task_generation: u64,
+    owner_epoch: u64,
+    lease: ServerDataLeaseIdV1
+) -> ServerDataContractCheckV1:
+    # `stored_receipt` must be the kernel-table result of an exact lookup.  A
+    # caller-presented scalar record is never authority and must not be passed
+    # to this pure identity-match helper as if it authenticated itself.
+    val receipt_check = server_data_lease_receipt_validate_v1(stored_receipt)
+    if not receipt_check.ok:
+        return receipt_check
+    if state != ServerDataNamespaceStateV1.Mounted and
+        state != ServerDataNamespaceStateV1.Draining:
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidState)
+    if stored_receipt.owner_epoch != owner_epoch or stored_receipt.lease.generation != lease.generation:
+        return _server_data_reject_v1(ServerDataContractErrorV1.StaleGeneration)
+    if stored_receipt.grant.task_generation != task_generation:
+        return _server_data_reject_v1(ServerDataContractErrorV1.StaleGeneration)
+    if stored_receipt.grant.task_id != task_id or
+        stored_receipt.lease.nonce_hi != lease.nonce_hi or stored_receipt.lease.nonce_lo != lease.nonce_lo:
+        return _server_data_reject_v1(ServerDataContractErrorV1.IdentityMismatch)
+    _server_data_ok_v1()
+
+pub fn server_data_drain_decide_v1(
+    state: ServerDataNamespaceStateV1,
+    active_operations: u64,
+    occupied_lease_slots: u64
+) -> ServerDataContractCheckV1:
+    if state != ServerDataNamespaceStateV1.Draining:
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidState)
+    if active_operations > SERVER_DATA_MAX_ACTIVE_OPERATIONS_V1 or
+        occupied_lease_slots > SERVER_DATA_MAX_LEASE_SLOTS_V1:
+        return _server_data_reject_v1(ServerDataContractErrorV1.CapacityExceeded)
+    if active_operations != 0u64:
+        return _server_data_reject_v1(ServerDataContractErrorV1.OperationsActive)
+    _server_data_ok_v1()
+
+pub fn server_data_commit_receipt_validate_v1(receipt: ServerDataCommitReceiptV1) -> ServerDataContractCheckV1:
+    if not server_data_namespace_id_valid_v1(receipt.namespace_id):
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidNamespaceId)
+    if receipt.mount_generation == 0u64 or receipt.durable_generation == 0u64 or
+        receipt.journal_lsn == 0u64:
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidCommitReceipt)
+    _server_data_ok_v1()
+
+pub fn server_data_recovery_receipt_validate_v1(receipt: ServerDataRecoveryReceiptV1) -> ServerDataContractCheckV1:
+    if not server_data_namespace_id_valid_v1(receipt.namespace_id):
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidNamespaceId)
+    if receipt.replayed_records > SERVER_DATA_MAX_JOURNAL_RECORDS_V1 or
+        receipt.discarded_records > SERVER_DATA_MAX_JOURNAL_RECORDS_V1 or
+        receipt.replayed_records > SERVER_DATA_MAX_JOURNAL_RECORDS_V1 - receipt.discarded_records:
+        return _server_data_reject_v1(ServerDataContractErrorV1.InvalidRecoveryReceipt)
+    if receipt.quarantined:
+        if receipt.reason_code == SERVER_DATA_RECOVERY_REASON_NONE_V1:
+            return _server_data_reject_v1(ServerDataContractErrorV1.InvalidRecoveryReceipt)
+    else:
+        if receipt.reason_code != SERVER_DATA_RECOVERY_REASON_NONE_V1 or
+            receipt.selected_generation == 0u64:
+            return _server_data_reject_v1(ServerDataContractErrorV1.InvalidRecoveryReceipt)
+    _server_data_ok_v1()
