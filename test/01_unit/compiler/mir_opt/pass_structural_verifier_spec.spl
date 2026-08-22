@@ -42,6 +42,11 @@ fn _pv_function_with_local_ids(blocks: [MirBlock], entry: i64, ids: [i64]) -> Mi
     var locals: [MirLocal] = []
     for id in ids:
         locals.push(MirLocal(_pv_local(id), Some("v{id}"), MirType.i64(), LocalKind.Temp, false))
+    _pv_function_with_locals(blocks, entry, locals)
+
+fn _pv_function_with_locals(
+    blocks: [MirBlock], entry: i64, locals: [MirLocal]
+) -> MirFunction:
     MirFunction(
         SymbolId(id: 193), "pass_verifier_fixture",
         MirSignature([], MirType.unit(), false), locals, blocks,
@@ -184,6 +189,41 @@ describe "MIR optimizer structural verifier":
                 _pv_block(1, MirTerminator.Ret(Some(_pv_copy(0))))
             ], 0, [0]))
         expect(receipt.valid).to_equal(true)
+
+    it "checks exact local opcode type contracts in the existing traversal":
+        step("Reject explicit destination and copy type disagreement")
+        val locals = [
+            MirLocal(_pv_local(0), Some("left"), MirType.i64(), LocalKind.Temp, false),
+            MirLocal(_pv_local(1), Some("right"), MirType.bool(), LocalKind.Temp, false),
+            MirLocal(_pv_local(2), Some("cast"), MirType.i64(), LocalKind.Temp, false)
+        ]
+        val receipt = mir_structural_verification_receipt(
+            _pv_function_with_locals([
+                _pv_block_with(0, [
+                    MirInst(MirInstKind.Const(_pv_local(0), MirConstValue.Int(1), MirType.bool()), nil),
+                    MirInst(MirInstKind.Copy(_pv_local(1), _pv_local(0)), nil),
+                    MirInst(MirInstKind.Cast(_pv_local(2), _pv_copy(1), MirType.bool()), nil)
+                ], MirTerminator.Ret(nil))
+            ], 0, locals))
+        expect(receipt.valid).to_equal(false)
+        expect(receipt.error_codes.contains("MIRV025")).to_equal(true)
+        expect(receipt.error_codes.contains("MIRV026")).to_equal(true)
+        expect(receipt.error_codes.contains("MIRV027")).to_equal(true)
+        expect(receipt.type_checked_instruction_count).to_equal(3)
+        expect(receipt.type_unchecked_instruction_count).to_equal(0)
+
+    it "reports partial opcode type coverage honestly":
+        step("Distinguish checked from unproved opcode typing")
+        val receipt = mir_structural_verification_receipt(
+            _pv_function_with_local_ids([
+                _pv_block_with(0, [
+                    MirInst(MirInstKind.Const(_pv_local(0), MirConstValue.Int(1), MirType.i64()), nil),
+                    MirInst(MirInstKind.DebugValue(_pv_local(0), "value"), nil)
+                ], MirTerminator.Ret(nil))
+            ], 0, [0]))
+        expect(receipt.valid).to_equal(true)
+        expect(receipt.type_checked_instruction_count).to_equal(1)
+        expect(receipt.type_unchecked_instruction_count).to_equal(1)
 
     it "validates high-fanout switch edges without a target buffer":
         step("Validate CFG edges in place")
