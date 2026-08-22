@@ -46,6 +46,21 @@ impl MirInstructionAccess:
     me use_local(local: LocalId):
         self.uses.push(local)
 
+    me use_operands(operands: [MirOperand]):
+        for operand in operands: self.use_operand(operand)
+
+    me use_place(place: MirPlace):
+        self.use_local(place.local)
+        for projection in place.projection:
+            match projection:
+                case Index(local): self.use_local(local)
+                case Deref | Field(_) | Downcast(_): pass_dn
+
+    me define_operand(operand: MirOperand):
+        match operand.kind:
+            case Copy(local) | Move(local): self.define(local)
+            case Const(_, _): self.covered = false
+
 struct PerfFacts:
     """Revision-local CFG facts shared by loop and optimization analyses.
 
@@ -110,6 +125,18 @@ fn perf_instruction_access(inst: MirInst) -> MirInstructionAccess:
         case Copy(dest, source) | Move(dest, source):
             access.define(dest)
             access.use_local(source)
+        case TransferOut(dest, source, _, _, _, _):
+            access.define(dest)
+            access.use_local(source)
+        case TransferIn(dest, _, _, _): access.define(dest)
+        case FreezeRegion(local) | Drop(local): access.use_local(local)
+        case AcquireSnapshot(dest, source):
+            access.define(dest)
+            access.use_local(source)
+        case CommitUpdates(dest, base, updates):
+            if dest.?: access.define(dest.unwrap())
+            access.use_local(base)
+            access.use_local(updates)
         case BinOp(dest, _, left, right) | CheckedBinOp(dest, _, left, right):
             access.define(dest)
             access.use_operand(left)
@@ -138,6 +165,9 @@ fn perf_instruction_access(inst: MirInst) -> MirInstructionAccess:
         case SetField(base, _, value):
             access.use_operand(base)
             access.use_operand(value)
+        case ResultMatchSemantic(scrutinee, destination, _, _, _, ok_payload, err_payload):
+            # Ghost payload roles are not yet specified as runtime defs/uses.
+            return MirInstructionAccess([], [], false)
         case Call(dest, function, args):
             if dest.?: access.define(dest.unwrap())
             access.use_operand(function)
@@ -148,10 +178,183 @@ fn perf_instruction_access(inst: MirInst) -> MirInstructionAccess:
             for arg in args: access.use_operand(arg)
         case Intrinsic(dest, _, args):
             if dest.?: access.define(dest.unwrap())
-            for arg in args: access.use_operand(arg)
+            access.use_operands(args)
+        case DecisionProbe(_, _, result, _, _, _) | ConditionProbe(_, _, _, _, result, _, _, _):
+            access.use_operand(result)
+        case SimdAddF32x4(dest, a, b) | SimdSubF32x4(dest, a, b) |
+             SimdMulF32x4(dest, a, b) | SimdDivF32x4(dest, a, b) |
+             SimdAddF32x8(dest, a, b) | SimdSubF32x8(dest, a, b) |
+             SimdMulF32x8(dest, a, b) | SimdDivF32x8(dest, a, b) |
+             SimdAddF64x4(dest, a, b) | SimdSubF64x4(dest, a, b) |
+             SimdMulF64x4(dest, a, b) | SimdDivF64x4(dest, a, b) |
+             SimdAddI32x4(dest, a, b) | SimdSubI32x4(dest, a, b) |
+             SimdMulI32x4(dest, a, b) | SimdXorI32x4(dest, a, b) |
+             SimdAndI32x4(dest, a, b) | SimdOrI32x4(dest, a, b) |
+             SimdShlI32x4(dest, a, b) | SimdShrI32x4(dest, a, b) |
+             SimdAddI32x8(dest, a, b) | SimdSubI32x8(dest, a, b) |
+             SimdMulI32x8(dest, a, b) | SimdXorI32x8(dest, a, b) |
+             SimdAndI32x8(dest, a, b) | SimdOrI32x8(dest, a, b) |
+             SimdShlI32x8(dest, a, b) | SimdShrI32x8(dest, a, b):
+            access.define(dest)
+            access.use_operand(a)
+            access.use_operand(b)
+        case SimdFmaF32x4(dest, a, b, c) | SimdFmaF32x8(dest, a, b, c) |
+             SimdFmaF64x4(dest, a, b, c):
+            access.define(dest)
+            access.use_operand(a)
+            access.use_operand(b)
+            access.use_operand(c)
+        case SimdHaddF32x4(dest, a) | SimdHmaxF32x4(dest, a) | SimdHminF32x4(dest, a):
+            access.define(dest)
+            access.use_operand(a)
+        case InlineAsm(_, _, inputs, outputs, _, _, _):
+            for input in inputs: access.use_operand(input.operand)
+            for output in outputs:
+                access.define_operand(output.operand)
+                # InOut operands are represented in both lists by lowering.
+        case PipeForward(dest, value, function):
+            access.define(dest)
+            access.use_operand(value)
+            access.use_operand(function)
+        case Compose(dest, f, g, _):
+            access.define(dest)
+            access.use_operand(f)
+            access.use_operand(g)
+        case Parallel(dest, functions):
+            access.define(dest)
+            access.use_operands(functions)
+        case LayerConnect(dest, layer1, layer2):
+            access.define(dest)
+            access.use_operand(layer1)
+            access.use_operand(layer2)
         case DebugValue(local, _): access.use_local(local)
         case Nop: pass_dn
-        case _: return MirInstructionAccess([], [], false)
+        case CreatePromise(dest, body, _):
+            access.define(dest)
+            access.use_local(body)
+        case Await(dest, promise):
+            access.define(dest)
+            access.use_operand(promise)
+        case Yield(value):
+            if value.?: access.use_operand(value.unwrap())
+        case Spawn(dest, handler, args):
+            access.define(dest)
+            access.use_operand(handler)
+            access.use_operands(args)
+        case Send(dest, target, message):
+            access.define(dest)
+            access.use_operand(target)
+            access.use_operand(message)
+        case Receive(dest, timeout):
+            access.define(dest)
+            if timeout.?: access.use_operand(timeout.unwrap())
+        case Ref(dest, _, place):
+            access.define(dest)
+            access.use_place(place)
+        case GpuKernelDef(_) | GpuBarrier(_) | GpuMemFence(_) |
+             HostGpuLaneEnd(_) | ScalableVecFence(_): pass_dn
+        case GpuLaunch(_) | VhdlProcess(_, _):
+            # Launch arguments are still encoded as text, while VHDL process
+            # bodies are hidden CFG edges. Neither can authorize liveness.
+            return MirInstructionAccess([], [], false)
+        case GpuGlobalId(dest, _) | GpuLocalId(dest, _) | GpuBlockId(dest, _) |
+             GpuBlockDim(dest, _) | GpuGridDim(dest, _) | GpuSharedAlloc(dest, _, _) |
+             MirWarpActivesMask(dest): access.define(dest)
+        case GpuAtomicOp(dest, _, pointer, value):
+            access.define(dest)
+            access.use_operand(pointer)
+            access.use_operand(value)
+        case GpuAtomicCas(dest, pointer, expected, desired):
+            access.define(dest)
+            access.use_operand(pointer)
+            access.use_operand(expected)
+            access.use_operand(desired)
+        case HostGpuLaneBegin(_, max_packet_bytes):
+            if max_packet_bytes.?: access.use_operand(max_packet_bytes.unwrap())
+        case VhdlSignalAssign(target, value, _) | VhdlVarAssign(target, value):
+            access.use_operand(target)
+            access.use_operand(value)
+        case VhdlPortMap(_, _, connections):
+            for connection in connections: access.use_operand(connection.1)
+        case VhdlResize(dest, operand, _, _) | VhdlSlice(dest, operand, _, _):
+            access.define(dest)
+            access.use_operand(operand)
+        case VhdlConcat(dest, parts):
+            access.define(dest)
+            access.use_operands(parts)
+        case MirSimdSplat(dest, value, _) | MirSimdLoad(dest, value, _, _) |
+             MirSimdUnop(dest, value, _) | MirSimdReduce(dest, value, _):
+            access.define(dest)
+            access.use_operand(value)
+        case MirSimdStore(value, pointer, _):
+            access.use_operand(value)
+            access.use_operand(pointer)
+        case MirSimdGather(dest, base, indices, _):
+            access.define(dest)
+            access.use_operand(base)
+            access.use_operand(indices)
+        case MirSimdScatter(value, base, indices):
+            access.use_operand(value)
+            access.use_operand(base)
+            access.use_operand(indices)
+        case MirSimdBinop(dest, lhs, rhs, _) | MirSimdShuffle(dest, lhs, rhs, _) |
+             MirSimdCmp(dest, lhs, rhs, _) | MirSimdMaskOp(dest, lhs, rhs, _) |
+             MaskFromCmp(dest, _, lhs, rhs):
+            access.define(dest)
+            access.use_operand(lhs)
+            access.use_operand(rhs)
+        case MirSimdTernop(dest, a, b, c, _):
+            access.define(dest)
+            access.use_operand(a)
+            access.use_operand(b)
+            access.use_operand(c)
+        case MirSimdPermute(dest, source, control):
+            access.define(dest)
+            access.use_operand(source)
+            access.use_operand(control)
+        case MirSimdSelect(dest, mask, t, f):
+            access.define(dest)
+            access.use_operand(mask)
+            access.use_operand(t)
+            access.use_operand(f)
+        case MirSimdScalableVsetvl(dest, requested, _):
+            access.define(dest)
+            access.use_operand(requested)
+        case MaskedAdd(dest, mask, a, b) | MaskedMul(dest, mask, a, b):
+            access.define(dest)
+            access.use_operand(mask)
+            access.use_operand(a)
+            access.use_operand(b)
+        case MaskedFma(dest, mask, a, b, c):
+            access.define(dest)
+            access.use_operand(mask)
+            access.use_operand(a)
+            access.use_operand(b)
+            access.use_operand(c)
+        case PredicatedAdd(dest, _, cmp_a, cmp_b, a, b) |
+             PredicatedMul(dest, _, cmp_a, cmp_b, a, b):
+            access.define(dest)
+            access.use_operand(cmp_a)
+            access.use_operand(cmp_b)
+            access.use_operand(a)
+            access.use_operand(b)
+        case PredicatedFma(dest, _, cmp_a, cmp_b, a, b, c):
+            access.define(dest)
+            access.use_operand(cmp_a)
+            access.use_operand(cmp_b)
+            access.use_operand(a)
+            access.use_operand(b)
+            access.use_operand(c)
+        case MirWarpShfl(dest, source, delta, mask, _):
+            access.define(dest)
+            access.use_operand(source)
+            access.use_operand(delta)
+            access.use_operand(mask)
+        case MirWarpReduce(dest, source, mask, _) | MirWarpBallot(dest, source, mask):
+            access.define(dest)
+            access.use_operand(source)
+            access.use_operand(mask)
+        case MirWarpSync(mask): access.use_operand(mask)
     access
 
 fn perf_terminator_access(terminator: MirTerminator) -> MirInstructionAccess:
