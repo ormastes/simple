@@ -135,8 +135,27 @@ fn _classify_token(word: text, col: i64, line: text, kw_list: [text], fn_names: 
 
     "variable"
 
-fn _collect_fn_return_types(content: text, fn_names: [text], fn_returns: [text]):
-    val lines = content.split("\n")
+struct QueryFunctionOutlineFacts:
+    return_types: Dict<text, text>
+    parameter_names: Dict<text, text>
+
+fn _query_function_param_names(signature_tail: text) -> text:
+    val inner = _extract_params_from(signature_tail)
+    if inner.trim() == "":
+        return ""
+    var names: [text] = []
+    for param in inner.split(","):
+        val trimmed = param.trim()
+        if trimmed == "":
+            continue
+        val name = _extract_ident_from(trimmed)
+        if name != "" and name != "self":
+            names.push(name)
+    names.join(",")
+
+fn _collect_fn_outline(lines: [text]) -> QueryFunctionOutlineFacts:
+    var return_types: Dict<text, text> = {}
+    var parameter_names: Dict<text, text> = {}
     for line in lines:
         val trimmed = line.trim()
         var rest = ""
@@ -151,10 +170,21 @@ fn _collect_fn_return_types(content: text, fn_names: [text], fn_returns: [text])
         if rest != "":
             val name = _extract_ident_from(rest)
             val ret = _extract_return_from(rest)
-            fn_names.push(name)
-            fn_returns.push(ret)
+            if name != "":
+                # Parameter lookup historically stopped at the first definition,
+                # even when that definition had no parameters.
+                if not parameter_names.contains_key(name):
+                    parameter_names[name] = _query_function_param_names(rest)
+                # Return lookup historically skipped empty matches and returned
+                # the first nonempty annotation for a duplicate textual name.
+                if ret != "" and not return_types.contains_key(name):
+                    return_types[name] = ret
+    QueryFunctionOutlineFacts(
+        return_types: return_types,
+        parameter_names: parameter_names
+    )
 
-fn _infer_type_from_rhs(rhs: text, fn_names: [text], fn_returns: [text]) -> text:
+fn _infer_type_from_rhs(rhs: text, fn_returns: Dict<text, text>) -> text:
     if rhs == "":
         return ""
 
@@ -192,12 +222,8 @@ fn _infer_type_from_rhs(rhs: text, fn_names: [text], fn_returns: [text]) -> text
     if rhs.contains("("):
         val call_name = _extract_call_name(rhs)
         if call_name != "":
-            var fi = 0
-            while fi < fn_names.len():
-                if fn_names[fi] == call_name:
-                    if fi < fn_returns.len() and fn_returns[fi] != "":
-                        return fn_returns[fi]
-                fi = fi + 1
+            if fn_returns.contains_key(call_name):
+                return fn_returns[call_name]
         return "inferred"
 
     ""
