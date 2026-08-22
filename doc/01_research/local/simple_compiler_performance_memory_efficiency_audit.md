@@ -1805,3 +1805,17 @@ list to the dictionary once, and releases builder-only indexes before later
 analyses. Construction is expected `O(E + T)` time and
 `O(E + T)` storage for `T` distinct targets. Duplicate edges, dangling targets,
 duplicate source identities, and predecessor ordering remain unchanged.
+
+### Linear short-lambda discovery
+
+The short-grammar EasyFix rule recursively searched for each backslash and then
+rescanned the entire preceding line twice to decide whether the candidate followed
+a comment or appeared inside a quoted string. A line of length `N` containing
+`K = O(N)` backslashes therefore took `O(N²)` character work and `O(K)` recursive
+stack depth. The rule now scans the line once, stops at the same first `#`, keeps
+the same simple quote-toggle state, and records only syntactically eligible
+backslash positions. Candidate parsing and replacement ordering are unchanged.
+Discovery is `O(N)` time with `O(K)` compact position storage and no recursive
+stack-growth hazard. Candidate-specific functional-update and short-grammar
+parsers retain their existing costs; a later tranche must index any remaining
+prefix-sensitive semantic guards before claiming an end-to-end linear rule.
