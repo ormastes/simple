@@ -24,7 +24,36 @@ grep -q -- '--install' "$INSTALL_UNIX"
 grep -q 'Move-Item' "$INSTALL_WINDOWS"
 
 fixture=$(mktemp -d)
-trap 'rm -rf "$fixture" "$fixture-hook-repo" "$fixture-hook-peer"' EXIT INT TERM
+rules_fixture=$(mktemp -d)
+trap 'rm -rf "$fixture" "$fixture-hook-repo" "$fixture-hook-peer" "$rules_fixture"' EXIT INT TERM
+
+# A --ref scan must parse policy from that commit, not a hostile/dirty working
+# rules.sdl. The dirty command would sleep and fail if the checker read it.
+mkdir -p "$rules_fixture/scripts/check"
+cp "$ROOT/scripts/check/check-rules-sdl.shs" "$rules_fixture/scripts/check/"
+printf '%s\n' proof > "$rules_fixture/proof"
+printf '%s\n' \
+    'rules:' \
+    '  count_gates:' \
+    '    - id: committed_policy' \
+    '      group: quick' \
+    '      cmd: git cat-file -s "$REF:proof"' \
+    '      min: 1' > "$rules_fixture/rules.sdl"
+git -C "$rules_fixture" init -q
+git -C "$rules_fixture" config user.name must-check-test
+git -C "$rules_fixture" config user.email must-check-test@example.invalid
+git -C "$rules_fixture" add .
+git -C "$rules_fixture" commit -qm committed-rules
+rules_ref=$(git -C "$rules_fixture" rev-parse HEAD)
+printf '%s\n' \
+    'rules:' \
+    '  count_gates:' \
+    '    - id: hostile_worktree_policy' \
+    '      group: quick' \
+    '      cmd: sleep 30; echo 0' \
+    '      min: 1' > "$rules_fixture/rules.sdl"
+(cd "$rules_fixture" && sh scripts/check/check-rules-sdl.shs --group quick --ref "$rules_ref") |
+    grep -q 'PASS — 1 gates checked'
 
 # Linked worktrees share one hooks directory. Installing from one worktree must
 # not bind that shared hook to the installer's absolute checkout path, because
