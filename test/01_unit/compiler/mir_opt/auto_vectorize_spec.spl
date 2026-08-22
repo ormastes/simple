@@ -37,10 +37,14 @@ use compiler.mir_opt.mir_opt.auto_vectorize.{
     supports_elementwise_rewrite,
     run_auto_vectorize
 }
-use compiler.mir_opt.auto_vectorize_analysis.{LoopBounds, detect_bounds_from_block, get_inst_uses}
+use compiler.mir_opt.auto_vectorize_analysis.{
+    LoopBounds, DefUseChain, detect_bounds_from_block, get_inst_uses,
+    detect_dependencies, analyze_loop_dependencies
+}
 use compiler.mir_opt.mir_opt.auto_vectorize_codegen.{VectorizeContext, create_alignment_check_block, create_peeling_block, create_vector_loop_block}
 use compiler.mir_opt.mir_opt.auto_vectorize.{rewrite_elementwise_add}
 use compiler.mir_opt.mir_opt.auto_vectorize_types.{VectorLoopInfo}
+use compiler.mir_opt.mir_opt.perf_facts.{perf_facts_build}
 
 # ============================================================================
 # Helpers — minimal MIR construction for tests
@@ -1184,3 +1188,32 @@ describe "AutoVectorize analysis — operand collection":
         expect(uses.len()).to_equal(33)
         expect(uses[0].id).to_equal(0)
         expect(uses[32].id).to_equal(32)
+
+    it "bounds dependency records instead of multiplying definitions by uses":
+        step("Bound vectorizer dependency analysis")
+        var defs: [i64] = []
+        var uses: [i64] = []
+        var index = 0
+        while index < 256:
+            defs.push(index * 2)
+            uses.push(index * 2 + 1)
+            index = index + 1
+        val dependencies = detect_dependencies(
+            [make_elementwise_block_add(), make_elementwise_block_sub()],
+            [DefUseChain(make_local(88), defs, uses)],
+            make_local(99)
+        )
+        expect(dependencies.len()).to_be_less_than(300)
+
+    it "rejects dependency analysis when shared def-use coverage is incomplete":
+        step("Reject incomplete shared vectorizer facts")
+        val body = make_elementwise_block_add()
+        val func = make_test_mir_function([body], false)
+        val facts = perf_facts_build(func)
+        val loop_info = VectorLoopInfo(
+            body.id, [body.id], make_block_id(2), make_local(4), 0, 16, 1
+        )
+        val result = analyze_loop_dependencies(loop_info, [body], facts)
+        expect(facts.def_use_complete).to_equal(false)
+        expect(result.analysis_complete).to_equal(false)
+        expect(result.vectorizable).to_equal(false)
