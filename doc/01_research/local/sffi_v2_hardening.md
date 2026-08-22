@@ -994,3 +994,15 @@ keeps the legacy empty fallback only in the compatibility API. The success hot
 path is unchanged; failure now uses the nil singleton rather than allocating an
 empty string, and the checked facade adds only the required null branch. The
 deployed bootstrap remains stale, so cross-lane verification is pending rebuild.
+
+An unused-boundary sweep then removed 66 production/bootstrap declarations of
+`rt_file_read_text` whose only occurrence was the declaration itself. No call,
+wrapper, or runtime path changed. This reduces the complete census from 12,614
+to 12,548 rows and untouched rows from 11,835 to 11,770; production is now
+6,231 rows with 5,653 untouched, bootstrap-library is 687 with 654 untouched,
+and tests remain 5,630 with 5,463 untouched. Verified-and-signed admissions
+remain zero, so all 12,548 rows remain fail-closed unsafe. Six affected compiler
+modules pass focused checks. A combined 60-file check was stopped after several
+minutes under the runaway guard; the static proof confirms every removed symbol
+had no call occurrence. Removing dead declarations adds no hot-path work and
+slightly reduces parsing and name-resolution input.

@@ -823,3 +823,12 @@ declarations, rebuild the deployed Simple tool and run one contract fixture in
 interpreter, JIT, native, and sealed-dynload lanes. Do not bulk-rename callers:
 migrate semantic owners to the checked facade and measure closure, latency, and
 RSS at each owner boundary.
+
+The first unused-boundary sweep removed 66 dead `rt_file_read_text`
+declarations without changing any call path. Continue this exact-occurrence
+cleanup for other `rt_file` symbols before tagging: deletion is safer and
+cheaper than granting unused declarations FFI authority. For live declarations,
+migrate callers to canonical checked owners; tag only irreducible raw bindings.
+The current gate is 12,548 declarations, 11,770 untouched, and zero signed
+admissions. Do not claim safety until provider evidence is admitted and the
+cross-lane nullable-read deployment gate passes.
