@@ -1502,3 +1502,13 @@ every candidate signature while retaining its existing candidate-by-line matchin
 Normal lint removes eight additional context/line arrays plus candidate-count-dependent
 line arrays; the remaining repeated candidate traversal is tracked for a future indexed
 call-site fact rather than being misreported as solved.
+
+## 2026-08-22 implementation addendum: remaining compiler EasyFix lines
+
+Six compiler-owned registry members still split the same source: star-import, wide-public,
+bare-bool, primitive-API, short-grammar, and script-language checks. They now consume the
+canonical line or context view. Primitive file-scope suppression also reads those lines,
+avoiding a hidden second split. Compatibility wrappers preserve pre-split path gates for
+facade and non-script files. Normal lint removes six line arrays plus the primitive allow
+array and redundant short-grammar context derivation. Stdlib-owned contextual-keyword,
+deprecated-if-let, and stub scanners remain the next cross-module view boundary.
