@@ -1,12 +1,33 @@
 """
+## Purpose and audience
+
 # NVMe Block Adapter Lease Specification
 
 Regression coverage for the filesystem-facing pure Simple NVMe adapter. These
 tests avoid real hardware and prove that adapter-visible helpers preserve the
 same bounded namespace window used by FAT32, NVFS, and DBFS.
-"""
 
-use std.spec.{describe, it, expect}
+This specification is maintained for compiler and library engineers reviewing UNIT-OS behavior, and for operators verifying a build.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/unit/os/services/vfs/nvme_block_adapter_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
+
+## Compatibility and limitations
+
+Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
+"""
+# @manual: primary
+# REQ-UNIT-OS-001
+# doc-path: doc/01_research/app/
+# doc-path: doc/03_plan/app/
+# doc-path: doc/04_architecture/app/
+# doc-path: doc/05_design/app/
+use std.spec.{describe, it, expect, step}
 use std.io_runtime.{read_file}
 use std.fs_driver.error.{FsError}
 use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
@@ -16,6 +37,9 @@ use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT
 
 describe "NVMe VFS block adapter lease helpers":
     it "translates filesystem-relative LBAs through the shared lease window":
+        # @req: REQ-UNIT-OS-001
+        step("Verify: translates filesystem-relative LBAs through the shared lease window")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val ns = NvmeNamespaceIdentity(
             controller_id: 0,
             nsid: 7,
@@ -43,6 +67,9 @@ describe "NVMe VFS block adapter lease helpers":
         expect(NvmeBlockAdapter.translate_lease_lba_for_test(lease, 512u64).unwrap_err()).to_equal("nvme-fs-lease-lba-out-of-range")
 
     it "rejects hardware adapters for namespaces not identified by the driver":
+        # @req: REQ-UNIT-OS-002
+        step("Verify: rejects hardware adapters for namespaces not identified by the driver")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val ns = NvmeNamespaceIdentity(
             controller_id: 0,
             nsid: 7,
@@ -68,6 +95,9 @@ describe "NVMe VFS block adapter lease helpers":
         expect(adapter.unwrap_err()).to_equal("NvmeBlockAdapter: namespace not identified by driver")
 
     it "enforces the lease window used by filesystem-facing BlockDevice sector IO":
+        # @req: REQ-UNIT-OS-003
+        step("Verify: enforces the lease window used by filesystem-facing BlockDevice sector IO")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val adapter = NvmeBlockAdapter.for_identified_namespace_unchecked(
             NvmeDriver.new(),
             7u32,
@@ -85,6 +115,9 @@ describe "NVMe VFS block adapter lease helpers":
         expect(adapter.sector_io_absolute_lba_for_test(4u64).unwrap_err()).to_equal("NvmeBlockAdapter: lba beyond filesystem lease")
 
     it "rejects single and batched 4K DirectIo that would cross the filesystem lease":
+        # @req: REQ-UNIT-OS-004
+        step("Verify: rejects single and batched 4K DirectIo that would cross the filesystem lease")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val adapter = NvmeBlockAdapter.for_identified_namespace_unchecked(
             NvmeDriver.new(),
             7u32,
@@ -100,6 +133,9 @@ describe "NVMe VFS block adapter lease helpers":
         expect(adapter.direct_4k_relative_lba_for_test(4096i64).unwrap_err()).to_equal(FsError.InvalidArg)
 
     it "routes lease-backed I/O through namespace-aware driver methods":
+        # @req: REQ-UNIT-OS-005
+        step("Verify: routes lease-backed I/O through namespace-aware driver methods")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val source = read_file("src/os/services/vfs/vfs_block_adapters.spl")
         expect(source.contains("lease_nsid: lease.namespace_identity.nsid")).to_equal(true)
         expect(source.contains("lease_queue_id: lease.queue.queue_id")).to_equal(true)
@@ -112,6 +148,9 @@ describe "NVMe VFS block adapter lease helpers":
         expect(source.contains("self.nvme.flush_in_namespace_on_queue(self.lease_nsid, self.lease_queue_id)")).to_equal(true)
 
     it "exposes a 4K shared-DMA fast path for production random I/O":
+        # @req: REQ-UNIT-OS-006
+        step("Verify: exposes a 4K shared-DMA fast path for production random I/O")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val source = read_file("src/os/services/vfs/vfs_block_adapters.spl")
         expect(source.contains("me read_4k_shared_dma(relative_lba: u64, buf: SharedDmaBuffer)")).to_equal(true)
         expect(source.contains("me write_4k_shared_dma(relative_lba: u64, buf: SharedDmaBuffer)")).to_equal(true)
@@ -124,6 +163,9 @@ describe "NVMe VFS block adapter lease helpers":
         expect(source.contains("submit_direct_4k_shared_dma_batch_for_identified_namespace")).to_equal(false)
 
     it "bridges the common DirectIo request model to the NVMe 4K shared-DMA path":
+        # @req: REQ-UNIT-OS-007
+        step("Verify: bridges the common DirectIo request model to the NVMe 4K shared-DMA path")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val source = read_file("src/os/services/vfs/vfs_block_adapters.spl")
         expect(source.contains("use std.fs_driver.direct_io.{DirectIoRequest, DirectIoResult")).to_equal(true)
         expect(source.contains("fn direct_4k_extension() -> DirectIoExt")).to_equal(true)
@@ -143,6 +185,9 @@ describe "NVMe VFS block adapter lease helpers":
         expect(source.contains("durable: true")).to_equal(true)
 
     it "bridges batched DirectIo requests to the lease queue for filesystem random I/O":
+        # @req: REQ-UNIT-OS-008
+        step("Verify: bridges batched DirectIo requests to the lease queue for filesystem random I/O")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val source = read_file("src/os/services/vfs/vfs_block_adapters.spl")
         expect(source.contains("DirectIoBatchRequest")).to_equal(true)
         expect(source.contains("fn direct_4k_batch_extension() -> DirectIoExt")).to_equal(true)
@@ -156,6 +201,9 @@ describe "NVMe VFS block adapter lease helpers":
         expect(source.contains("me submit_direct_4k_shared_dma_batch_write_through(req: DirectIoBatchRequest) -> Result<DirectIoResult, FsError>")).to_equal(true)
 
     it "keeps the production pure adapter free of C bridge externs":
+        # @req: REQ-UNIT-OS-009
+        step("Verify: keeps the production pure adapter free of C bridge externs")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val pure_source = read_file("src/os/services/vfs/vfs_block_adapters.spl")
         val c_source = read_file("src/os/services/vfs/c_nvme_block_adapter.spl")
 

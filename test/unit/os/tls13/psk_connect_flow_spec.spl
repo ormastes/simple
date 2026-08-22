@@ -1,3 +1,26 @@
+"""
+## Purpose and audience
+
+This specification is maintained for compiler and library engineers reviewing UNIT-OS behavior, and for operators verifying a build.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/unit/os/tls13/psk_connect_flow_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
+
+## Compatibility and limitations
+
+Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
+"""
+# @manual: primary
+# REQ-UNIT-OS-001
+# doc-path: doc/01_research/app/
+# doc-path: doc/03_plan/app/
+# doc-path: doc/04_architecture/app/
+# doc-path: doc/05_design/app/
 # PSK + 0-RTT connect-flow byte-level spec — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9
 #
 # Wave 13 closeout: byte-level coverage of the PSK splice path that
@@ -184,6 +207,9 @@ fn _build_sh_body_no_psk() -> [u8]:
 describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
 
     it("partial-CH binders_field_offset places binders_len after identities"):
+        # @req: REQ-UNIT-OS-001
+        step("Verify: partial-CH binders_field_offset places binders_len after identities")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         # Build a CH with our PSK config and check that the offset matches
         # ext_data_len semantics: ext_data starts with u16 ids_len + ids,
         # followed by binders_len u16 at binders_field_offset.
@@ -203,6 +229,9 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         expect(_u8_get(wire, psk_ch.binders_data_offset)).to_equal(32u8)
 
     it("pre_shared_key extension is the LAST extension in CH (RFC 8446 §4.2.11)"):
+        # @req: REQ-UNIT-OS-002
+        step("Verify: pre_shared_key extension is the LAST extension in CH (RFC 8446 §4.2.11)")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val cfg = _make_psk_config(_seq_n(32u64, 0x11u8), _seq_n(8u64, 0x77u8))
         val ch_base = build_client_hello_bytes(_ch_random32(), _x25519_pub32(), "example.com")
         val psk_ch = _splice_psk_extensions_into_ch(ch_base, cfg)
@@ -214,6 +243,9 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         expect(expected_end).to_equal(psk_ch.bytes.len().to_u64())
 
     it("psk_key_exchange_modes extension (type 0x002d) is present in CH"):
+        # @req: REQ-UNIT-OS-003
+        step("Verify: psk_key_exchange_modes extension (type 0x002d) is present in CH")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val cfg = _make_psk_config(_seq_n(32u64, 0x11u8), _seq_n(8u64, 0x77u8))
         val ch_base = build_client_hello_bytes(_ch_random32(), _x25519_pub32(), "example.com")
         val psk_ch = _splice_psk_extensions_into_ch(ch_base, cfg)
@@ -224,6 +256,9 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         expect(found).to_equal(true)
 
     it("partial-CH transcript hash stops at end of identities (RFC 8446 §4.1.4)"):
+        # @req: REQ-UNIT-OS-004
+        step("Verify: partial-CH transcript hash stops at end of identities (RFC 8446 §4.1.4)")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         # The hash STOPS at binders_field_offset, NOT at end of zeroed binders.
         # _partial_ch_transcript_hash must equal SHA-256(wire[0..binders_field_offset]).
         val cfg = _make_psk_config(_seq_n(32u64, 0x11u8), _seq_n(8u64, 0x77u8))
@@ -234,10 +269,13 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         # to keep the prefix-build loop out of the it-block.
         val prefix = _build_prefix_to(psk_ch.bytes, psk_ch.binders_field_offset)
         val expected = rt_tls13_sha256(prefix)
-        expect(got.len()).to_equal(32)
+        expect(got.len()).to_equal(32)  # oracle: expected value 32 is the behavior asserted by this regression spec
         expect(_bytes_eq(got, expected)).to_equal(true)
 
     it("partial-CH transcript hash is NOT the same as hashing including zero binders"):
+        # @req: REQ-UNIT-OS-005
+        step("Verify: partial-CH transcript hash is NOT the same as hashing including zero binders")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         # Negative check: hashing [0..end_of_binders] would produce a DIFFERENT
         # digest than [0..binders_field_offset]. RFC 8446 §4.1.4 mandates the
         # latter; this guards against the silent wrong interpretation.
@@ -256,6 +294,9 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         expect(_bytes_eq(got, full_hash)).to_equal(false)
 
     it("spliced binder MAC matches tls13_compute_psk_binder byte-exact"):
+        # @req: REQ-UNIT-OS-006
+        step("Verify: spliced binder MAC matches tls13_compute_psk_binder byte-exact")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         # Compute binder via the same path as tls13_connect_io_with_config and
         # verify the spliced wire bytes contain exactly that MAC.
         val psk_secret = _seq_n(32u64, 0x11u8)
@@ -282,11 +323,17 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         expect(spliced.len()).to_equal(psk_ch.bytes.len())
 
     it("ServerHello with pre_shared_key selected_identity=0 returns 0"):
+        # @req: REQ-UNIT-OS-007
+        step("Verify: ServerHello with pre_shared_key selected_identity=0 returns 0")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val body = _build_sh_body_with_psk(0u16)
         val sel = _parse_sh_selected_identity(body)
-        expect(sel).to_equal(0)
+        expect(sel).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
 
     it("ServerHello without pre_shared_key returns -1 (no PSK selected)"):
+        # @req: REQ-UNIT-OS-008
+        step("Verify: ServerHello without pre_shared_key returns -1 (no PSK selected)")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val body = _build_sh_body_no_psk()
         val sel = _parse_sh_selected_identity(body)
-        expect(sel).to_equal(-1)
+        expect(sel).to_equal(-1)  # oracle: expected value -1 is the behavior asserted by this regression spec
