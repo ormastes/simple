@@ -1,0 +1,73 @@
+"""
+## Purpose and audience
+Purpose: Prove optimizer boundaries reject malformed MIR and distinguish no-change runs.
+Audience: compiler and optimizer maintainers.
+"""
+# @req: REQ-003, REQ-004
+
+use std.spec.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirFunction, MirBlock}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.mir_opt.mir_opt.mod.{
+    PassRunDisposition, mir_structural_verification_receipt,
+    run_named_pass_with_record
+}
+
+fn _pv_block(id: i64, terminator: MirTerminator) -> MirBlock:
+    MirBlock(BlockId(id: id), Some("b{id}"), [], terminator)
+
+fn _pv_manifest() -> DriverManifestAttr:
+    DriverManifestAttr(DriverManifestAttrKind.Driver, 0, 0, [], "", "")
+
+fn _pv_function(blocks: [MirBlock], entry: i64) -> MirFunction:
+    MirFunction(
+        SymbolId(id: 193), "pass_verifier_fixture",
+        MirSignature([], MirType.unit(), false), [], blocks,
+        BlockId(id: entry), Span(0, 0, 1, 1), [], false, nil, {}, nil,
+        false, false, "", false, _pv_manifest(), false,
+        vhdl_hardware_metadata_default(), false
+    )
+
+describe "MIR optimizer structural verifier":
+    it "accepts a structurally closed function":
+        step("Verify MIR before optimizer dispatch")
+        val receipt = mir_structural_verification_receipt(_pv_function([
+            _pv_block(0, MirTerminator.Goto(BlockId(id: 1))),
+            _pv_block(1, MirTerminator.Ret(nil))
+        ], 0))
+        expect(receipt.valid).to_equal(true)
+        expect(receipt.block_count).to_equal(2)
+        expect(receipt.errors.len()).to_equal(0)
+
+    it "rejects duplicate identities and dangling CFG targets":
+        step("Reject malformed optimizer output")
+        val receipt = mir_structural_verification_receipt(_pv_function([
+            _pv_block(0, MirTerminator.Goto(BlockId(id: 99))),
+            _pv_block(0, MirTerminator.Ret(nil))
+        ], 0))
+        expect(receipt.valid).to_equal(false)
+        expect(receipt.errors.join("|")).to_contain("duplicate block identity")
+        expect(receipt.errors.join("|")).to_contain("targets missing block 99")
+
+    it "records an honest unchanged active function pass":
+        step("Record a verified optimizer outcome")
+        val result = run_named_pass_with_record("write_coalesce", _pv_function([
+            _pv_block(0, MirTerminator.Ret(nil))
+        ], 0))
+        expect(result.is_ok()).to_equal(true)
+        match result:
+            case Ok(outcome):
+                expect(outcome.verifier.valid).to_equal(true)
+                expect(outcome.record.functions_seen).to_equal(1)
+                expect(outcome.record.disposition).to_equal(PassRunDisposition.Unchanged)
+                expect(outcome.record.transformed).to_equal(0)
+                expect(outcome.record.reasons[0].code).to_equal("no_change")
+            case Err(message):
+                fail("unexpected verifier rejection: " + message)
+
+    it "rejects malformed MIR before executing a pass":
+        step("Fail closed before optimizer dispatch")
+        val result = run_named_pass_with_record("write_coalesce", _pv_function([], 0))
+        expect(result.is_err()).to_equal(true)
