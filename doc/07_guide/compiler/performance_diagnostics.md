@@ -52,14 +52,21 @@ semantic equivalence; those omissions remain explicit blockers for `--verify-eac
 
 `COLL*` findings belong to the `collection_performance` lint family. Moderate and strict
 profiles warn; robust and critical profiles may deny typed high-confidence findings.
-The AST compatibility analyzer caps itself at warning, marks findings uncertain, and
-never attaches a machine-applicable fix. Typed HIR or
+The AST compatibility analyzer carries an explicit `source-pattern` evidence tier,
+caps itself at warning even under `--deny-all`, marks findings uncertain, and never
+attaches a machine-applicable fix. Missing uncertainty text is not treated as proof;
+only an explicit `typed-proven` tier authorizes escalation. Typed HIR or
 CollectionPlan analysis may offer a fix only after receiver semantics, effects, aliasing,
 mutation version, ordering, and lifetime are proven.
 
-Human and JSON records preserve stable code, location, evidence, uncertainty, hint, and
+Human and JSON records preserve stable code, location, confidence, evidence, uncertainty, hint, and
 optional proof-gated fix. Unknown rule codes remain visible rather than silently
 suppressed.
+
+The standalone CLI and query/LSP source-pattern collection projections use the same
+confidence vocabulary. Query governance recognizes `COLL001` through `COLL019`, so
+`Allow` suppresses them, while robust/critical policy cannot upgrade those untyped
+findings to errors. Severity projection is metadata-only and adds no parse or scan.
 
 ## Shared facts
 
