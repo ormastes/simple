@@ -277,3 +277,6 @@ Batch lint owns one immutable source payload per file. It passes the payload to 
 ### Critical policy snapshot
 
 Command-scoped lint resolves `critical.dynamic_acquire` lazily once and retains the effective scalar mode rather than the complete configuration object. All files in one invocation observe one coherent policy snapshot. A subsequent command constructs a new session and reloads policy; long-lived daemon/LSP owners must use their separate digest-keyed invalidation contract.
+### Bounded manifest discovery
+
+The command session maps source directories and discovered manifest directories to the resolved `simple.sdn` path or an explicit miss. Each ancestor step consults the cache, allowing sibling trees to stop at a cached common ancestor. The cache retains at most 4096 directory entries; after the cap, discovery remains correct but uncached. A prepared source-path token prevents the downstream lint configuration layer from repeating discovery while still applying file-local attributes to a child configuration.
