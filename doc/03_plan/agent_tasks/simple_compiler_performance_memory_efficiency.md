@@ -566,3 +566,13 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve loop order, backedge order, duplicate-edge coalescing, bodies, and exits.
 - Remove dictionary-held growing-array extraction and copyback.
 - Pin ordered multiple latches with a duplicate-target terminator.
+
+## Completed tooling tranche: bounded fix assembly
+
+- Use comparator sorting for the common distinct-start replacement set.
+- Retain legacy selection ordering when equal starts make order observable.
+- Assemble valid non-overlapping edits from source chunks with one join.
+- Retain incremental behavior for negative, reversed, or out-of-range spans.
+- Pin multi-edit output, equal-start insertion order, and invalid-span skipping.
+- Follow-up: replace per-file dictionary array copyback with owned indexed buckets
+  and consolidate the three duplicated applicator implementations.
