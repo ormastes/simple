@@ -52,6 +52,31 @@ owner and is not a multi-writer object.
 
 The extractor writes strictly increasing instructions into a caller buffer and seals a digest. The executor validates capability, safety policy, capacity, and sequence before applying any instruction. Plan-Then-Commit performs the accepted plan once; ReplayOnly feeds recorded observations to shadow providers. A provider requesting an unrecorded or different interaction returns `InvalidRequest`/`Diverged`, never ambiently performs it.
 
+### Hosted bounded file write adapter
+
+`HostedPreparedFileWriteExecutorV1` admits one existing regular file beneath a
+trusted root before seal and pins its path as two scalar digest lanes. The
+canonical parent owns a value-semantic `HostedFileWriteCursorV1`; only its
+unconsumed state may commit sequence zero, and the returned consumed cursor is
+authoritative. The payload must be the complete caller-owned argument region,
+bounded to 64 KiB, so the commit path passes it directly to the canonical
+`app.io.file_write_bytes` facade without slicing, copying, formatting, or
+growing storage. The 17-byte caller-owned result binds success and both path
+digest lanes into the ordinary interaction receipt. The adapter rechecks the
+regular-file predicate around the write and verifies the final byte length.
+Replay uses `env_replay_exact_v1`, copies only the recorded 17-byte result, and
+performs no filesystem operation. Duplicate canonical-cursor consumption,
+changed capability/sequence, nonzero payload offsets, oversized payloads,
+replacement, short writes, and insufficient result storage fail closed.
+
+The parent is the sole cursor owner: stale cursor copies are invalid transport
+and must never be committed by an isolated provider. Preparation may allocate
+path metadata before the critical boundary; the execute and replay loops use
+only caller-owned buffers and fixed scalar state and report zero post-seal
+allocations. This hosted pathname adapter assumes a trusted fixture directory;
+hostile shared directories require a future descriptor-relative no-follow
+facade rather than weakening this contract.
+
 ### IRQ/MMIO/DMA environment adapter
 
 Producible hardware scenarios use `DeviceSandboxExecutorV1`; it is a software

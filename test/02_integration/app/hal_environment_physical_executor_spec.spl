@@ -2,11 +2,13 @@
 # @req REQ-011 REQ-016 REQ-017
 
 use std.spec.*
-use app.io.{cwd, getpid}
+use app.io.{cwd, file_read_bytes, file_remove, file_write_bytes, getpid}
 use app.test.hal_environment_executor.{
     HostedProcessPollEnvExecutorV1, hosted_prepare_environment_get_v1,
     hosted_prepare_file_read_v1, hosted_prepare_stream_read_v1,
-    hosted_prepare_clock_read_v1, hosted_prepare_random_fill_v1
+    hosted_prepare_clock_read_v1, hosted_prepare_random_fill_v1,
+    hosted_prepare_file_write_v1, hosted_file_write_cursor_v1,
+    hosted_file_write_execute_v1
 }
 use std.common.structural.environment_instruction.*
 
@@ -192,3 +194,38 @@ describe "hosted physical environment executor":
 
         expect(receipt.applied).to_be(false)
         expect(result[0]).to_equal(55u8)
+
+    it "commits one bounded file write and replays without a second write":
+        val path = "/tmp/simple_mcdc_env_write_" + "{getpid()}"
+        val initial: [u8] = [99u8]
+        val payload: [u8] = [11u8, 22u8, 33u8, 44u8]
+        expect(file_write_bytes(path, initial)).to_be(true)
+        val executor = hosted_prepare_file_write_v1(path, "/tmp", 13, 64)
+        val cursor = hosted_file_write_cursor_v1()
+        val operation = capture_instruction(
+            EnvOpcodeV1.FileWrite, 13, payload.len(), 17)
+        var result: [u8] = [0u8; 17]
+        var replayed: [u8] = [0u8; 17]
+
+        val step = hosted_file_write_execute_v1(
+            executor, cursor, capture_policy(EnvOpcodeV1.FileWrite, 13),
+            operation, payload, result)
+        val duplicate = hosted_file_write_execute_v1(
+            executor, step.cursor, capture_policy(EnvOpcodeV1.FileWrite, 13),
+            operation, payload, replayed)
+        val replay = env_replay_exact_v1(
+            operation, operation, step.receipt.observation,
+            payload, result, replayed)
+
+        expect(step.receipt.applied).to_be(true)
+        expect(step.receipt.physical_effect).to_be(true)
+        expect(step.receipt.allocation_count_after_seal).to_equal(0)
+        expect(file_read_bytes(path)).to_equal(payload)
+        expect(duplicate.receipt.applied).to_be(false)
+        expect(env_instruction_status_to_i64(
+            duplicate.receipt.observation.status)).to_equal(
+                env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged))
+        expect(replay.applied).to_be(true)
+        expect(replay.physical_effect).to_be(false)
+        expect(replayed).to_equal(result)
+        expect(file_remove(path)).to_be(true)

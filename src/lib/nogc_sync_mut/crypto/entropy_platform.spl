@@ -9,6 +9,21 @@ extern fn rt_entropy_hardware_ready() -> i64
 
 val ENTROPY_PLATFORM_MAX_REQUEST: u64 = 1048576u64
 
+fn entropy_platform_fill_exact(bytes: [u8]) -> bool:
+    """Fill caller-owned storage once from the hosted OS CSPRNG.
+
+    This is the allocation-free environment-instruction boundary.  The
+    runtime's result for this exact call is the authority: readiness probes do
+    not authorize a fill, partial fills are not accepted, and failure wipes the
+    caller region before returning.
+    """
+    if bytes.len() == 0u64 or bytes.len() > ENTROPY_PLATFORM_MAX_REQUEST:
+        return false
+    if rt_entropy_fill(bytes) != 1:
+        _entropy_platform_wipe(bytes)
+        return false
+    true
+
 fn _entropy_platform_wipe(bytes: [u8]):
     var i: u64 = 0u64
     while i < bytes.len():
@@ -30,8 +45,7 @@ fn entropy_platform_bytes(count: u64) -> Result<[u8], text>:
     if count > ENTROPY_PLATFORM_MAX_REQUEST:
         return Err("platform entropy request exceeds the owner limit")
     val bytes = _entropy_platform_zeroed(count)
-    if rt_entropy_fill(bytes) != 1:
-        _entropy_platform_wipe(bytes)
+    if not entropy_platform_fill_exact(bytes):
         return Err("production cryptographic entropy is unavailable")
     if bytes.len() != count:
         _entropy_platform_wipe(bytes)
@@ -42,5 +56,5 @@ fn entropy_platform_ready() -> bool:
     """Return the legacy diagnostic bit; never authorize entropy with it."""
     rt_entropy_hardware_ready() > 0
 
-export entropy_platform_bytes, entropy_platform_ready
+export entropy_platform_fill_exact, entropy_platform_bytes, entropy_platform_ready
 export ENTROPY_PLATFORM_MAX_REQUEST

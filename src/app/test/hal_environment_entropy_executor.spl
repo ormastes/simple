@@ -1,0 +1,114 @@
+# codex-impl
+# Single-capture secure entropy adapter. The parent owns the cursor and all
+# buffers; the hosted CSPRNG is invoked at most once for an admitted cursor.
+
+use std.nogc_sync_mut.crypto.entropy_platform.{entropy_platform_fill_exact}
+use std.common.structural.environment_instruction.*
+
+val HOSTED_SECURE_ENTROPY_MAX_BYTES_V1: i64 = 65536
+val HOSTED_SECURE_ENTROPY_ARGUMENT_BYTES_V1: i64 = 24
+
+struct HostedSecureEntropyAuthorityV1:
+    invocation_id: i64
+    capability_id: i64
+    authorization_hi: i64
+    authorization_lo: i64
+    max_bytes: i64
+    sealed: bool
+
+struct HostedSecureEntropyCursorV1:
+    invocation_id: i64
+    next_sequence: i64
+    consumed_count: i64
+    sealed: bool
+
+struct HostedSecureEntropyStepReceiptV1:
+    receipt: EnvExecutionReceiptV1
+    cursor: HostedSecureEntropyCursorV1
+
+fn hosted_secure_entropy_authority_v1_well_formed(
+        value: HostedSecureEntropyAuthorityV1) -> bool:
+    value.sealed and value.invocation_id > 0
+        and value.capability_id > 0 and value.capability_id < 63
+        and (value.authorization_hi != 0 or value.authorization_lo != 0)
+        and value.max_bytes > 0
+        and value.max_bytes <= HOSTED_SECURE_ENTROPY_MAX_BYTES_V1
+
+fn hosted_secure_entropy_cursor_v1(
+        authority: HostedSecureEntropyAuthorityV1) -> HostedSecureEntropyCursorV1:
+    HostedSecureEntropyCursorV1(invocation_id: authority.invocation_id,
+        next_sequence: 0, consumed_count: 0,
+        sealed: hosted_secure_entropy_authority_v1_well_formed(authority))
+
+fn _entropy_read_i64_le(bytes: [u8], offset: i64) -> i64:
+    var value = 0
+    var i = 0
+    while i < 8:
+        value = value | ((bytes[offset + i] as i64) << (i * 8))
+        i = i + 1
+    value
+
+fn _secure_entropy_rejected_v1(
+        instruction: EnvInstructionV1, cursor: HostedSecureEntropyCursorV1,
+        status: EnvInstructionStatusV1) -> HostedSecureEntropyStepReceiptV1:
+    HostedSecureEntropyStepReceiptV1(
+        receipt: env_execution_rejected_v1(instruction, status), cursor: cursor)
+
+fn hosted_secure_entropy_execute_v1(
+        authority: HostedSecureEntropyAuthorityV1,
+        cursor: HostedSecureEntropyCursorV1,
+        policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+        argument_bytes: [u8], result_bytes: [u8]) -> HostedSecureEntropyStepReceiptV1:
+    val validation = env_executor_validate_instruction(
+        policy, instruction, argument_bytes, result_bytes)
+    if env_instruction_status_to_i64(validation)
+            != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+        return _secure_entropy_rejected_v1(instruction, cursor, validation)
+    if not hosted_secure_entropy_authority_v1_well_formed(authority)
+            or not cursor.sealed
+            or cursor.invocation_id != authority.invocation_id
+            or cursor.next_sequence != 0 or cursor.consumed_count != 0
+            or instruction.invocation_id != authority.invocation_id
+            or instruction.sequence != cursor.next_sequence
+            or instruction.opcode != EnvOpcodeV1.RandomFill
+            or instruction.capability_id != authority.capability_id:
+        return _secure_entropy_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Diverged)
+    if instruction.argument_length != HOSTED_SECURE_ENTROPY_ARGUMENT_BYTES_V1:
+        return _secure_entropy_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.InvalidInstruction)
+    val argument = instruction.argument_offset
+    val requested = _entropy_read_i64_le(argument_bytes, argument)
+    val authorization_hi = _entropy_read_i64_le(argument_bytes, argument + 8)
+    val authorization_lo = _entropy_read_i64_le(argument_bytes, argument + 16)
+    if requested <= 0 or requested > authority.max_bytes
+            or requested != instruction.result_capacity
+            or instruction.result_offset != 0
+            or instruction.result_region_capacity != result_bytes.len():
+        return _secure_entropy_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Overflow)
+    if authorization_hi != authority.authorization_hi
+            or authorization_lo != authority.authorization_lo:
+        return _secure_entropy_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Diverged)
+    if not entropy_platform_fill_exact(result_bytes):
+        return _secure_entropy_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.UnsupportedCapability)
+    val receipt = env_execution_record_applied_v1(
+        instruction, argument_bytes, result_bytes, requested, true, 0)
+    val next = HostedSecureEntropyCursorV1(
+        invocation_id: cursor.invocation_id, next_sequence: 1,
+        consumed_count: 1, sealed: true)
+    HostedSecureEntropyStepReceiptV1(receipt: receipt, cursor: next)
+
+fn hosted_secure_entropy_complete_v1(
+        cursor: HostedSecureEntropyCursorV1) -> bool:
+    cursor.sealed and cursor.next_sequence == 1 and cursor.consumed_count == 1
+
+export HOSTED_SECURE_ENTROPY_MAX_BYTES_V1
+export HOSTED_SECURE_ENTROPY_ARGUMENT_BYTES_V1
+export HostedSecureEntropyAuthorityV1, HostedSecureEntropyCursorV1
+export HostedSecureEntropyStepReceiptV1
+export hosted_secure_entropy_authority_v1_well_formed
+export hosted_secure_entropy_cursor_v1, hosted_secure_entropy_execute_v1
+export hosted_secure_entropy_complete_v1

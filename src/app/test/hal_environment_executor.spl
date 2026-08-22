@@ -2,6 +2,7 @@
 # Hosted physical executor adapter. All process access stays behind app.io.
 
 use app.io.{env_get, file_is_regular_no_follow, file_read_bytes, file_size,
+            file_write_bytes,
             process_is_alive, random_randint, time_now_unix_micros}
 use std.common.structural.environment_instruction.*
 
@@ -24,6 +25,23 @@ class HostedPreparedCaptureExecutorV1:
     physical_effect: bool
     capture_valid: bool
     sealed: bool
+
+class HostedPreparedFileWriteExecutorV1:
+    path: text
+    path_digest_hi: i64
+    path_digest_lo: i64
+    max_payload_bytes: i64
+    capability_id: i64
+    prepared_size: i64
+    sealed: bool
+
+class HostedFileWriteCursorV1:
+    consumed: bool
+    sealed: bool
+
+class HostedFileWriteStepReceiptV1:
+    receipt: EnvExecutionReceiptV1
+    cursor: HostedFileWriteCursorV1
 
 fn _env_text_bytes(value: text) -> [u8]:
     var bytes: [u8] = [0u8; value.len()]
@@ -157,6 +175,96 @@ fn _env_read_i64_le(data: [u8], offset: i64) -> i64:
         i = i + 1
     value
 
+fn _env_text_digest_v1(value: text, reverse: bool) -> i64:
+    var digest = if reverse: 216613626 else: 146959810
+    var i = 0
+    while i < value.len():
+        val index = if reverse: value.len() - 1 - i else: i
+        digest = ((digest * 257 + value.char_code_at(index) + 17)
+                  % 2147483629) + 1
+        i = i + 1
+    digest
+
+fn _env_write_i64_le(data: [u8], offset: i64, value: i64):
+    var i = 0
+    while i < 8:
+        data[offset + i] = ((value >> (i * 8)) & 255) as u8
+        i = i + 1
+
+fn hosted_prepare_file_write_v1(path: text, allowed_root: text,
+                                capability_id: i64,
+                                max_payload_bytes: i64) -> HostedPreparedFileWriteExecutorV1:
+    val valid = capability_id > 0 and capability_id < 63
+        and max_payload_bytes >= 0
+        and max_payload_bytes <= HOSTED_ENV_CAPTURE_MAX_BYTES_V1
+        and _env_text_byte_safe(path)
+        and _env_path_safe_under_root(path, allowed_root)
+        and file_is_regular_no_follow(path)
+    HostedPreparedFileWriteExecutorV1(
+        path: path,
+        path_digest_hi: if valid: _env_text_digest_v1(path, false) else: 0,
+        path_digest_lo: if valid: _env_text_digest_v1(path, true) else: 0,
+        max_payload_bytes: if valid: max_payload_bytes else: 0,
+        capability_id: if valid: capability_id else: 0,
+        prepared_size: if valid: file_size(path) else: -1,
+        sealed: valid)
+
+fn hosted_file_write_cursor_v1() -> HostedFileWriteCursorV1:
+    HostedFileWriteCursorV1(consumed: false, sealed: true)
+
+fn _hosted_file_write_rejected_v1(
+        instruction: EnvInstructionV1, cursor: HostedFileWriteCursorV1,
+        status: EnvInstructionStatusV1) -> HostedFileWriteStepReceiptV1:
+    HostedFileWriteStepReceiptV1(
+        receipt: env_execution_rejected_v1(instruction, status), cursor: cursor)
+
+fn hosted_file_write_execute_v1(
+        executor: HostedPreparedFileWriteExecutorV1,
+        cursor: HostedFileWriteCursorV1,
+        policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+        payload_bytes: [u8], result_bytes: [u8]) -> HostedFileWriteStepReceiptV1:
+    val validation = env_executor_validate_instruction(
+        policy, instruction, payload_bytes, result_bytes)
+    if env_instruction_status_to_i64(validation)
+            != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+        return _hosted_file_write_rejected_v1(
+            instruction, cursor, validation)
+    if not executor.sealed or not cursor.sealed:
+        return _hosted_file_write_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.InvalidInstruction)
+    if cursor.consumed or instruction.sequence != 0
+            or instruction.opcode != EnvOpcodeV1.FileWrite
+            or instruction.capability_id != executor.capability_id:
+        return _hosted_file_write_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Diverged)
+    # The payload is the complete caller-owned argument region. No slice/copy is
+    # formed on the commit path.
+    if instruction.argument_offset != 0
+            or instruction.argument_length != payload_bytes.len()
+            or instruction.argument_capacity != payload_bytes.len()
+            or instruction.argument_length > executor.max_payload_bytes:
+        return _hosted_file_write_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Overflow)
+    if instruction.result_capacity < 17:
+        return _hosted_file_write_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Overflow)
+    # Preparation admits an existing regular file. Recheck immediately around
+    # the canonical facade call and fail closed on replacement or short write.
+    if not file_is_regular_no_follow(executor.path)
+            or not file_write_bytes(executor.path, payload_bytes)
+            or not file_is_regular_no_follow(executor.path)
+            or file_size(executor.path) != payload_bytes.len():
+        return _hosted_file_write_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.InvalidInstruction)
+    val offset = instruction.result_offset
+    result_bytes[offset] = 1u8
+    _env_write_i64_le(result_bytes, offset + 1, executor.path_digest_hi)
+    _env_write_i64_le(result_bytes, offset + 9, executor.path_digest_lo)
+    val receipt = env_execution_record_applied_v1(
+        instruction, payload_bytes, result_bytes, 17, true, 0)
+    HostedFileWriteStepReceiptV1(receipt: receipt,
+        cursor: HostedFileWriteCursorV1(consumed: true, sealed: true))
+
 impl EnvPhysicalExecutorPortV1 for HostedProcessPollEnvExecutorV1:
     fn execute(policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
                argument_bytes: [u8], result_bytes: [u8]) -> EnvExecutionReceiptV1:
@@ -245,3 +353,6 @@ export hosted_prepare_environment_get_v1
 export HOSTED_ENV_CAPTURE_MAX_BYTES_V1, HostedPreparedCaptureExecutorV1
 export hosted_prepare_file_read_v1, hosted_prepare_stream_read_v1
 export hosted_prepare_clock_read_v1, hosted_prepare_random_fill_v1
+export HostedPreparedFileWriteExecutorV1, HostedFileWriteCursorV1
+export HostedFileWriteStepReceiptV1, hosted_prepare_file_write_v1
+export hosted_file_write_cursor_v1, hosted_file_write_execute_v1
