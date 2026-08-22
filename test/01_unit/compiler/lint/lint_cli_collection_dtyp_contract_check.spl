@@ -1,4 +1,4 @@
-use compiler.tools.lint.main.{Linter, LintLevel, lint_cli_source}
+use compiler.tools.lint.main.{Linter, LintLevel, LintProfile, lint_cli_source}
 use compiler.semantics.lint.duplicate_typed_args.{check_duplicate_typed_args}
 use compiler.core.ast.{module_get_decls}
 use compiler.core.parser.{parser_has_errors, parser_set_had_error}
@@ -19,6 +19,8 @@ for result in linter.lint_source("/tmp/lint_collection_dtyp_generic.spl", source
 var coll_count = 0
 var coll_line = 0
 var coll_warn = false
+var coll_uncertain = false
+var coll_has_easy_fix = false
 var cli_dtyp_family_count = 0
 var cli_has_dtyp001 = false
 for result in lint_cli_source(linter, "/tmp/lint_collection_dtyp_cli.spl", source):
@@ -26,6 +28,8 @@ for result in lint_cli_source(linter, "/tmp/lint_collection_dtyp_cli.spl", sourc
         coll_count = coll_count + 1
         coll_line = result.line
         coll_warn = result.lint.level == LintLevel.Warn
+        coll_uncertain = result.lint.uncertainty.?
+        coll_has_easy_fix = result.lint.easy_fix.?
     if result.lint.code == "unnamed_duplicate_typed_args":
         cli_dtyp_family_count = cli_dtyp_family_count + 1
     if result.lint.code == "DTYP001":
@@ -45,7 +49,16 @@ val _ = lint_cli_source(linter, "/tmp/lint_collection_dtyp_parser_state.spl", so
 val parser_state_preserved = parser_has_errors()
 parser_set_had_error(false)
 
-if generic_has_coll or generic_dtyp_family_count != 1 or coll_count != 1 or coll_line != 4 or not coll_warn or cli_dtyp_family_count != 1 or cli_has_dtyp001 or semantic_dtyp_count != 2 or allowed_has_dtyp_family or not parser_state_preserved:
+# AST-only collection findings remain advisory even when the selected profile
+# would deny a future typed, proven collection-performance diagnostic.
+val robust_linter = Linter.new()
+robust_linter.config.set_profile(LintProfile.Robust)
+var robust_coll_warn = false
+for result in lint_cli_source(robust_linter, "/tmp/lint_collection_robust_ast_fallback.spl", source):
+    if result.lint.code == "COLL001":
+        robust_coll_warn = result.lint.level == LintLevel.Warn
+
+if generic_has_coll or generic_dtyp_family_count != 1 or coll_count != 1 or coll_line != 4 or not coll_warn or not coll_uncertain or coll_has_easy_fix or not robust_coll_warn or cli_dtyp_family_count != 1 or cli_has_dtyp001 or semantic_dtyp_count != 2 or allowed_has_dtyp_family or not parser_state_preserved:
     print "FAIL: COLL CLI ownership or duplicate-typed positional/named ownership regressed"
     rt_exit(1)
 
