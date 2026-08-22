@@ -420,8 +420,8 @@ describe "MIR Collection Optimization":
         expect(_co_count_rt_array_len(block)).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(opt.len_queries_reused).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
-    it "hoists invariant runtime collection metadata reads out of read-only loops":
-        step("Verify: hoists invariant runtime collection metadata reads out of read-only loops")
+    it "keeps invariant metadata reads in-loop until a true preheader proof exists":
+        step("Verify: fail-closed hoisting preserves zero-trip and trapping semantics")
         val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
         val len = MirInst(kind: MirInstKind.Call(_co_lid(10), _co_func("rt_array_len"), [_co_copy(1)]), span: nil)
         val body = _co_block_with(1, [len], MirTerminator.Goto(BlockId(id: 0)))
@@ -429,9 +429,9 @@ describe "MIR Collection Optimization":
         var opt = create_collection_opt_pass()
         val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
 
-        expect(_co_count_rt_array_len(optimized[0])).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(_co_count_rt_array_len(optimized[1])).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        expect(opt.calls_hoisted).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(_co_count_rt_array_len(optimized[0])).to_equal(0)
+        expect(_co_count_rt_array_len(optimized[1])).to_equal(1)
+        expect(opt.calls_hoisted).to_equal(0)
 
     it "keeps runtime collection metadata reads inside mutating loops":
         step("Verify: keeps runtime collection metadata reads inside mutating loops")
@@ -447,8 +447,8 @@ describe "MIR Collection Optimization":
         expect(_co_count_rt_array_len(optimized[1])).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(opt.calls_hoisted).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
-    it "hoists invariant scalar tag operations used by collection loops":
-        step("Verify: hoists invariant scalar tag operations used by collection loops")
+    it "keeps invariant scalar operations in-loop until speculatability is proven":
+        step("Verify: scalar hoisting fails closed")
         val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
         val tag = MirInst(kind: MirInstKind.BinOp(_co_lid(10), MirBinOp.Shl, _co_copy(2), _co_int(3)), span: nil)
         val mask = MirInst(kind: MirInstKind.BinOp(_co_lid(11), MirBinOp.BitOr, _co_copy(10), _co_int(1)), span: nil)
@@ -457,14 +457,14 @@ describe "MIR Collection Optimization":
         var opt = create_collection_opt_pass()
         val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
 
-        expect(_co_count_binop(optimized[0], MirBinOp.Shl)).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(_co_count_binop(optimized[0], MirBinOp.BitOr)).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(_co_count_binop(optimized[1], MirBinOp.Shl)).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        expect(_co_count_binop(optimized[1], MirBinOp.BitOr)).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        expect(opt.scalar_ops_hoisted).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(_co_count_binop(optimized[0], MirBinOp.Shl)).to_equal(0)
+        expect(_co_count_binop(optimized[0], MirBinOp.BitOr)).to_equal(0)
+        expect(_co_count_binop(optimized[1], MirBinOp.Shl)).to_equal(1)
+        expect(_co_count_binop(optimized[1], MirBinOp.BitOr)).to_equal(1)
+        expect(opt.scalar_ops_hoisted).to_equal(0)
 
-    it "hoists invariant scalar chains through bitcasts":
-        step("Verify: hoists invariant scalar chains through bitcasts")
+    it "keeps invariant bitcast chains in-loop until speculatability is proven":
+        step("Verify: bitcast-chain hoisting fails closed")
         val header = _co_block_with(0, [], MirTerminator.Goto(BlockId(id: 1)))
         val casted = MirInst(kind: MirInstKind.Bitcast(_co_lid(10), _co_copy(2), MirType.i64()), span: nil)
         val mask = MirInst(kind: MirInstKind.BinOp(_co_lid(11), MirBinOp.BitAnd, _co_copy(10), _co_int(255)), span: nil)
@@ -473,11 +473,11 @@ describe "MIR Collection Optimization":
         var opt = create_collection_opt_pass()
         val optimized = opt.hoist_pure_calls([header, body], _co_loop(0, [1]))
 
-        expect(_co_count_bitcast(optimized[0])).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(_co_count_binop(optimized[0], MirBinOp.BitAnd)).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(_co_count_bitcast(optimized[1])).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        expect(_co_count_binop(optimized[1], MirBinOp.BitAnd)).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        expect(opt.scalar_ops_hoisted).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(_co_count_bitcast(optimized[0])).to_equal(0)
+        expect(_co_count_binop(optimized[0], MirBinOp.BitAnd)).to_equal(0)
+        expect(_co_count_bitcast(optimized[1])).to_equal(1)
+        expect(_co_count_binop(optimized[1], MirBinOp.BitAnd)).to_equal(1)
+        expect(opt.scalar_ops_hoisted).to_equal(0)
 
     it "keeps scalar operations inside loops when they use loop-defined values":
         step("Verify: keeps scalar operations inside loops when they use loop-defined values")
