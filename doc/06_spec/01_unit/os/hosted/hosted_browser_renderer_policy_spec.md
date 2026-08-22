@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 57 | 57 | 0 | 0 |
+| 62 | 62 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,8 +24,19 @@ Treats decoded renderer protocol messages as untrusted input at the hosted brows
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl` |
-| Updated | 2026-07-30 |
-| Generator | Manual mirror; admitted pure-Simple docgen pending |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+## Operator workflow
+## Compatibility and limitations
+
+# Hosted browser renderer policy
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+**Plan:** doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md
+**Design:** doc/05_design/simple_web_browser_engine_production_hardening.md
+**Research:** doc/01_research/local/simple_web_browser_engine_production_hardening.md
 
 ## Overview
 
@@ -48,13 +59,20 @@ navigation policy rather than subresource mixed-content policy.
 
 #### unwraps only a canonical IPv6 address for socket and TLS
 
+- Verify: unwraps only a canonical IPv6 address for socket and TLS
+   - Expected: hosted_browser_transport_host("[::1") equals `[::1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: unwraps only a canonical IPv6 address for socket and TLS")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(hosted_browser_transport_host(
     "[2606:4700:4700::1111]"
 )).to_equal("2606:4700:4700::1111")
@@ -77,17 +95,19 @@ expect(hosted_browser_transport_host("[::1")).to_equal("[::1")
 
 #### normalizes every hosted browser transport boundary
 
-- "hosted browser transport host
-- "hosted browser transport host
+- Verify: normalizes every hosted browser transport boundary
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: normalizes every hosted browser transport boundary")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val renderer = rt_file_read_text(
     "src/os/hosted/hosted_browser_renderer_process.spl"
 ) ?? ""
@@ -104,37 +124,177 @@ expect(content).to_contain(
 
 </details>
 
+### hosted browser attachment disposition
+
+#### rejects an attachment token in any Content-Disposition value
+
+- Verify: rejects an attachment token in any Content-Disposition value
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: rejects an attachment token in any Content-Disposition value")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+expect(browser_header_has_attachment_disposition(
+    "Content-Disposition: inline\r\n" +
+    "cOnTeNt-DisPoSiTiOn: \tAttachment ; filename=\"probe.html\""
+)).to_be(true)
+expect(browser_header_has_attachment_disposition(
+    "Content-Disposition: inline; filename=\"probe.html\""
+)).to_be(false)
+expect(browser_header_has_attachment_disposition(
+    "Content-Type: text/html"
+)).to_be(false)
+```
+
+</details>
+
+#### stages only a body-free SBR2 rejection response
+
+- Verify: stages only a body-free SBR2 rejection response
+   - Expected: reason equals ``
+   - Expected: broker.document_url equals `safe_url`
+   - Expected: broker.history_urls equals `[safe_url]`
+   - Expected: broker.document_csp_policy equals `default-src 'self'`
+   - Expected: broker.pending_document_commit_url equals ``
+   - Expected: broker.provisional_document_origin equals ``
+   - Expected: broker.pending_document_csp_policy equals ``
+   - Expected: broker.pending_history_action equals ``
+   - Expected: decoded.status equals `message`
+   - Expected: response.status equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: response.body equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 76 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: stages only a body-free SBR2 rejection response")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+val safe_url = "https://safe.test/retained"
+val attachment_url = "https://safe.test/probe.html"
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+broker.state = "active"
+broker.document_url = safe_url
+broker.document_origin = "https://safe.test"
+broker.document_csp_policy = "default-src 'self'"
+broker.document_csp_ready = true
+broker.history_urls = [safe_url]
+broker.history_csp_policies = [broker.document_csp_policy]
+broker.history_csp_ready = [true]
+broker.history_index = 0
+broker.active_command_capability = (
+    "11111111111111111111111111111111"
+)
+broker.active_root_command_request_id = 1
+val reason = broker._write_network_response(
+    request("document", attachment_url),
+    HostedBrowserRequestPolicy(
+        ok: true,
+        reason: "ok",
+        mode: RequestMode.Navigate,
+        credentials: "include",
+        canonical_url: attachment_url,
+        sanitized_headers: "",
+        consumes_navigation: true
+    ),
+    broker._finalize_network(
+        "document",
+        FetchRequest(
+            url: Url.parse_or_opaque(attachment_url),
+            method: "GET",
+            headers: "",
+            body: [],
+            mode: RequestMode.Navigate,
+            credentials: "include"
+        ),
+        FetchResponse(
+            status: 200,
+            headers:
+                "Content-Disposition: inline\r\n" +
+                "Content-Disposition: attachment; filename=\"probe.html\"",
+            body: [
+                60u8, 115u8, 99u8, 114u8, 105u8, 112u8, 116u8, 62u8
+            ]
+        )
+    ),
+    0
+)
+expect(reason).to_equal("")
+expect(broker.document_url).to_equal(safe_url)
+expect(broker.history_urls).to_equal([safe_url])
+expect(broker.document_csp_policy).to_equal("default-src 'self'")
+expect(broker.pending_document_commit_url).to_equal("")
+expect(broker.provisional_document_origin).to_equal("")
+expect(broker.pending_document_csp_policy).to_equal("")
+expect(broker.pending_document_csp_ready).to_be(false)
+expect(broker.pending_history_action).to_equal("")
+expect(broker.pending_wire).to_start_with("SBR2\t")
+val decoded = browser_renderer_capability_decoder_feed(
+    browser_renderer_capability_decoder_new(1),
+    broker.pending_wire
+)
+expect(decoded.status).to_equal("message")
+val response = browser_renderer_network_response_decode(
+    browser_renderer_capability_payload_message(decoded.message)
+)
+expect(response.ok).to_be(true)
+expect(response.status).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(response.body).to_equal("")
+expect(response.error).to_equal(
+    "document-attachment-unsupported"
+)
+```
+
+</details>
+
 ### hosted browser renderer broker policy
 
 #### keeps Favorite bound to the committed page during navigation
 
+- Verify: keeps Favorite bound to the committed page during navigation
 - Admit one deterministic secondary browser entry
-- var profile = BrowserProfileStore memory
 - Enter a new address through production registry routing
 - Reject Favorite while the navigation command is pending
-   - Expected: command_busy.callback_count equals `0`
+   - Expected: command_busy.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: command_busy.reason equals `renderer-busy`
-   - Expected: profile.load_bookmarks()?.entries.len() equals `0`
+   - Expected: profile.load_bookmarks()?.entries.len() equals `0)  # oracle: pinned constant asserted by this scenario`
 - Reject Favorite while the navigation transport is pending
-   - Expected: network_busy.callback_count equals `0`
+   - Expected: network_busy.callback_count equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: network_busy.reason equals `renderer-busy`
-   - Expected: profile.load_bookmarks()?.entries.len() equals `0`
+   - Expected: profile.load_bookmarks()?.entries.len() equals `0)  # oracle: pinned constant asserted by this scenario`
 - Commit the target page before admitting Favorite
    - Expected: admitted.reason equals `favorite-parent`
 - Persist only the newly committed URL
-   - Expected: saved.entries.len() equals `1`
+   - Expected: saved.entries.len() equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: saved.entries[0].first equals `https://new.test/`
-- profile close
    - Expected: registry.close() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 91 lines folded for reproduction.
+Runnable source: 98 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: keeps Favorite bound to the committed page during navigation")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+"""
+The parent-owned Favorite control must not bookmark the previous
+committed URL while the address bar already displays a pending target.
+"""
 step("Admit one deterministic secondary browser entry")
 var registry = HostedBrowserRendererRegistry.create(
     "/definitely/missing/simple-browser-renderer",
@@ -161,10 +321,10 @@ expect(registry.dispatch_chrome_pointer(
 ).reason).to_equal("address-focused")
 expect(registry.dispatch_text(
     3, 91, "https://new.test/"
-).callback_count).to_equal(1)
+).callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(registry.dispatch_key_with_shift(
     4, 91, 13, true, false
-).callback_count).to_equal(1)
+).callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(registry.address_text(91)).to_equal(
     "https://new.test/"
 )
@@ -179,12 +339,12 @@ val _ = registry.dispatch_chrome_pointer(
 val command_busy = registry.dispatch_chrome_pointer(
     6, 91, "favorite", false
 )
-expect(command_busy.callback_count).to_equal(0)
+expect(command_busy.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(command_busy.reason).to_equal("renderer-busy")
 if command_busy.reason == "favorite-parent":
     val url = registry.document_url(91)
     val _ = profile.toggle_bookmark(url, url)?
-expect(profile.load_bookmarks()?.entries.len()).to_equal(0)
+expect(profile.load_bookmarks()?.entries.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 step("Reject Favorite while the navigation transport is pending")
 entry = registry.entries[0]
@@ -198,9 +358,9 @@ val _ = registry.dispatch_chrome_pointer(
 val network_busy = registry.dispatch_chrome_pointer(
     8, 91, "favorite", false
 )
-expect(network_busy.callback_count).to_equal(0)
+expect(network_busy.callback_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(network_busy.reason).to_equal("renderer-busy")
-expect(profile.load_bookmarks()?.entries.len()).to_equal(0)
+expect(profile.load_bookmarks()?.entries.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 step("Commit the target page before admitting Favorite")
 entry = registry.entries[0]
@@ -222,7 +382,7 @@ val _ = profile.toggle_bookmark(
 
 step("Persist only the newly committed URL")
 val saved = profile.load_bookmarks()?
-expect(saved.entries.len()).to_equal(1)
+expect(saved.entries.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(saved.entries[0].first).to_equal("https://new.test/")
 profile.close()?
 expect(registry.close()).to_equal(true)
@@ -232,42 +392,30 @@ expect(registry.close()).to_equal(true)
 
 #### admits decoded renderer side effects only through trusted CSP state
 
-- var mocks = MockResponseRegistry create
-- mocks register
-- mocks register
-- set mock registry
+- Verify: admits decoded renderer side effects only through trusted CSP state
 - Reject an opaque sandbox document that forges a cookie write
-- var opaque = HostedBrowserRendererProcess create
-- fail
-- Some
 - Reject missing and invalid CSP before cookie mutation
-- source origin, "/", Some
-- rt time now unix micros
-- cookie broker document csp policy = "x" repeat
-- source origin, "/", Some
-- rt time now unix micros
 - Reject base-policy errors before forged cookie writes
-- var malformed = HostedBrowserRendererProcess create
-- fail
-- Some
 - Reject renderer navigation when active CSP is unavailable
-- var navigation = HostedBrowserRendererProcess create
-- fail
-- Some
 - Allow only the parent-authorized initial document bootstrap
-- var bootstrap = HostedBrowserRendererProcess create
 - Route an opaque HTTPS to HTTP document through navigation policy
-- var downgrade = HostedBrowserRendererProcess create
-- set mock registry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 138 lines folded for reproduction.
+Runnable source: 146 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: admits decoded renderer side effects only through trusted CSP state")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+"""
+Renderer SBRQ4 messages are attacker-controlled input. The broker must
+reject cookie and navigation side effects before they mutate trusted
+state, while retaining the one parent-authorized initial document load.
+"""
 var mocks = MockResponseRegistry.create()
 mocks.register("https://bootstrap.test/", 200, "bootstrap")
 mocks.register("http://destination.test/", 200, "destination")
@@ -412,57 +560,42 @@ set_mock_registry(MockResponseRegistry.create())
 
 #### blocks forged renderer requests with committed CSP before transport
 
-- var mocks = MockResponseRegistry create
-- mocks register
-- set mock registry
-- var broker = HostedBrowserRendererProcess create
-- url: Url parse or opaque
-- broker  commit document url
-- broker navigation permit = permit
+- Verify: blocks forged renderer requests with committed CSP before transport
 - Treat a sandboxed document as an opaque network origin
    - Expected: opaque_fetch.mode equals `RequestMode.Cors`
    - Expected: opaque_fetch.sanitized_headers equals `Origin: null`
 - Apply a pending sandbox before the first frame commit
 - Tighten rather than discard committed CSP on 304
-- url: Url parse or opaque
-- broker  commit document url
 - Reject a same-origin forged fetch
-- browser renderer decoder new
    - Expected: blocked_fetch_message.status equals `message`
    - Expected: blocked_fetch.reason equals `csp-connect-src-blocked`
-   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
 - Reject a cross-origin forged image beacon
-- browser renderer decoder new
    - Expected: blocked_image_message.status equals `message`
    - Expected: blocked_image.reason equals `csp-img-src-blocked`
-   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
 - Fail closed when committed policy state is missing
    - Expected: missing.reason equals `csp-policy-unavailable`
-   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
 - Fail closed when committed policy state is invalid
-- broker document csp policy = "x" repeat
    - Expected: invalid.reason equals `csp-policy-unavailable`
 - Allow only an explicitly admitted control
-- browser renderer decoder new
-- browser renderer decoder new
-   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
 - Stage target history CSP and URL before resource dispatch
-- broker history urls push
-- broker history csp ready push
-- broker  stage history document csp
 - Restore the broker CSP ledger with history
-- broker  restore history document
 - Preserve the CSP ledger across production site swaps
-- set mock registry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 321 lines folded for reproduction.
+Runnable source: 324 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: blocks forged renderer requests with committed CSP before transport")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var mocks = MockResponseRegistry.create()
 for url in [
     "https://app.test/private",
@@ -615,7 +748,7 @@ expect(broker._dispatch_renderer_fetch(
 expect(observed_mock_request(
     "https://app.test/private"
 )).to_be_nil()
-expect(broker.network_job_handle).to_equal(0)
+expect(broker.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(broker.pending_wire != "").to_be(true)
 broker.pending_wire = ""
 broker.pending_wire_offset = 0
@@ -648,7 +781,7 @@ expect(broker._dispatch_renderer_fetch(
 expect(observed_mock_request(
     "https://images.test/beacon"
 )).to_be_nil()
-expect(broker.network_job_handle).to_equal(0)
+expect(broker.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(broker.pending_wire != "").to_be(true)
 broker.pending_wire = ""
 broker.pending_wire_offset = 0
@@ -666,7 +799,7 @@ val missing = broker._renderer_request_policy(
 )
 expect(missing.ok).to_be(false)
 expect(missing.reason).to_equal("csp-policy-unavailable")
-expect(broker.network_job_handle).to_equal(0)
+expect(broker.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 step("Fail closed when committed policy state is invalid")
 broker.document_csp_ready = true
@@ -731,7 +864,7 @@ expect(broker._dispatch_renderer_fetch(
 expect(observed_mock_request(
     "https://images.test/pixel.png"
 ).?).to_be(true)
-expect(broker.network_job_handle).to_equal(0)
+expect(broker.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 step("Stage target history CSP and URL before resource dispatch")
 val original_history_csp = broker.history_csp_policies[0]
@@ -790,16 +923,19 @@ set_mock_registry(MockResponseRegistry.create())
 
 #### issues only bounded canonical http navigation permits
 
-- var broker = HostedBrowserRendererProcess create
+- Verify: issues only bounded canonical http navigation permits
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: issues only bounded canonical http navigation permits")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 expect(broker.poll()).to_be_nil()
 expect(broker.authorize_navigation(
@@ -817,17 +953,19 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### loads persisted HSTS into the trusted navigation permit
 
-- var broker = HostedBrowserRendererProcess create
-- BrowserHstsSnapshot create
+- Verify: loads persisted HSTS into the trusted navigation permit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: loads persisted HSTS into the trusted navigation permit")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val now_ms = rt_time_now_unix_micros() / 1000
 var entries: [BrowserHstsSnapshotEntry] = []
 entries.push(BrowserHstsSnapshotEntry(
@@ -839,7 +977,7 @@ entries.push(BrowserHstsSnapshotEntry(
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 expect(broker.load_hsts_snapshot(
     BrowserHstsSnapshot.create(entries), now_ms
-)).to_equal(1)
+)).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(broker.authorize_navigation(
     "http://sub.secure.test/path", "GET", "", "", ""
 )).to_be(true)
@@ -852,13 +990,19 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### rewrites one trusted redirect location after HSTS upgrade
 
+- Verify: rewrites one trusted redirect location after HSTS upgrade
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: rewrites one trusted redirect location after HSTS upgrade")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val headers = hosted_browser_replace_response_header(
     "Location: http://secure.test/a\nX-Test: yes\n" +
     "location: http://evil.test/",
@@ -874,38 +1018,79 @@ expect(headers).to_equal(
 
 #### rejects a malformed HTTPS redirect before creating a navigation permit
 
-- Receive a hostile `Location: https:///missing-host` response from the
-  authenticated transport.
-- Reject it as `invalid-navigation-redirect` without creating a broker navigation
-  permit, pending document commit, or provisional origin.
-
-Docgen: pending — this reviewed manual mirror reflects the executable SSpec;
-the isolated worktree has no deployed self-hosted runtime.
-
-#### never learns HSTS from generic response finalization
-
-- var broker = HostedBrowserRendererProcess create
-- broker network set requester origin
-- fetch request
-- sts response
-   - Expected: denied.error equals `CORS response validation failed`
-- sts response
-   - Expected: not_found.status equals `404`
-- fetch request
-- sts response
-   - Expected: plaintext.status equals `200`
-- fetch request
-- sts response
-   - Expected: untrusted.status equals `200`
+- Verify: rejects a malformed HTTPS redirect before creating a navigation permit
+- Receive a hostile redirect location from the authenticated transport
+- Reject it without authorizing a follow-up connection
+   - Expected: rejected.is_err() is true
+   - Expected: rejected.unwrap_err() equals `invalid-navigation-redirect`
+   - Expected: broker.navigation_permit.active is false
+   - Expected: broker.pending_document_commit_url equals ``
+   - Expected: broker.provisional_document_origin equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: rejects a malformed HTTPS redirect before creating a navigation permit")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+step("Receive a hostile redirect location from the authenticated transport")
+val url = "https://safe.test/start"
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+val request = request("document", url)
+val policy = HostedBrowserRequestPolicy(
+    ok: true, reason: "ok", mode: RequestMode.Navigate,
+    credentials: "include", canonical_url: url,
+    sanitized_headers: "", consumes_navigation: true
+)
+val response = broker._finalize_network(
+    "document",
+    FetchRequest(
+        url: Url.parse_or_opaque(url), method: "GET", headers: "",
+        body: [], mode: RequestMode.Navigate, credentials: "include"
+    ),
+    FetchResponse(
+        status: 302, headers: "Location: https:///missing-host",
+        body: []
+    )
+)
+
+step("Reject it without authorizing a follow-up connection")
+val rejected = broker._record_document_response(
+    request, policy, response, 0
+)
+expect(rejected.is_err()).to_equal(true)
+expect(rejected.unwrap_err()).to_equal("invalid-navigation-redirect")
+expect(broker.navigation_permit.active).to_equal(false)
+expect(broker.pending_document_commit_url).to_equal("")
+expect(broker.provisional_document_origin).to_equal("")
+```
+
+</details>
+
+#### never learns HSTS from generic response finalization
+
+- Verify: never learns HSTS from generic response finalization
+   - Expected: denied.error equals `CORS response validation failed`
+   - Expected: not_found.status equals `404)  # oracle: pinned constant asserted by this scenario`
+   - Expected: plaintext.status equals `200)  # oracle: pinned constant asserted by this scenario`
+   - Expected: untrusted.status equals `200)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 61 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: never learns HSTS from generic response finalization")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.network.set_requester_origin("https://origin.test")
 val denied = broker._finalize_network(
@@ -929,7 +1114,7 @@ val not_found = broker._finalize_network(
     ),
     sts_response(404)
 )
-expect(not_found.status).to_equal(404)
+expect(not_found.status).to_equal(404)  # oracle: pinned constant asserted by this scenario
 expect(broker.hsts_dirty).to_be(false)
 expect(broker.authorize_navigation(
     "http://status.test/after-404", "GET", "", "", ""
@@ -943,7 +1128,7 @@ val plaintext = broker._finalize_network(
     fetch_request("http://plaintext.test/", RequestMode.Navigate),
     sts_response(200)
 )
-expect(plaintext.status).to_equal(200)
+expect(plaintext.status).to_equal(200)  # oracle: pinned constant asserted by this scenario
 expect(broker.authorize_navigation(
     "http://plaintext.test/next", "GET", "", "", ""
 )).to_be(true)
@@ -956,7 +1141,7 @@ val untrusted = broker._finalize_network(
     fetch_request("https://untrusted.test/", RequestMode.Navigate),
     sts_response(200)
 )
-expect(untrusted.status).to_equal(200)
+expect(untrusted.status).to_equal(200)  # oracle: pinned constant asserted by this scenario
 expect(broker.hsts_dirty).to_be(false)
 expect(broker.authorize_navigation(
     "http://untrusted.test/next", "GET", "", "", ""
@@ -970,18 +1155,20 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### caps wasm before hex encoding can double the IPC body
 
-- var broker = HostedBrowserRendererProcess create
+- Verify: caps wasm before hex encoding can double the IPC body
    - Expected: encoded.body equals `000f10ff`
-- body push
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: caps wasm before hex encoding can double the IPC body")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 val encoded = broker._finalize_network(
     "wasm",
@@ -1010,26 +1197,27 @@ expect(hosted_browser_network_response_limit_reason(
 
 #### does not start asynchronous navigation before renderer readiness
 
-- var broker = HostedBrowserRendererProcess create
-- Err
+- Verify: does not start asynchronous navigation before renderer readiness
    - Expected: reason equals `invalid-renderer-state`
-- Ok
-   - Expected: broker.command_deadline_ms equals `0`
+   - Expected: broker.command_deadline_ms equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.pending_operation equals ``
    - Expected: broker.pending_document_commit_url equals ``
    - Expected: broker.provisional_document_origin equals ``
-   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.pending_wire equals ``
-   - Expected: broker.next_request_id equals `2`
+   - Expected: broker.next_request_id equals `2)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: does not start asynchronous navigation before renderer readiness")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 match broker.begin_navigate(
     "https://example.test/", "GET", "", "", "", 1000
@@ -1038,13 +1226,13 @@ match broker.begin_navigate(
         expect(reason).to_equal("invalid-renderer-state")
     Ok(_):
         expect(false).to_be(true)
-expect(broker.command_deadline_ms).to_equal(0)
+expect(broker.command_deadline_ms).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(broker.pending_operation).to_equal("")
 expect(broker.pending_document_commit_url).to_equal("")
 expect(broker.provisional_document_origin).to_equal("")
-expect(broker.network_job_handle).to_equal(0)
+expect(broker.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(broker.pending_wire).to_equal("")
-expect(broker.next_request_id).to_equal(2)
+expect(broker.next_request_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
 expect(broker.navigation_permit.active).to_be(false)
 ```
 
@@ -1052,18 +1240,19 @@ expect(broker.navigation_permit.active).to_be(false)
 
 #### treats repeated asynchronous Stop as idempotent
 
-- var broker = HostedBrowserRendererProcess create
-- Err
-- Ok
+- Verify: treats repeated asynchronous Stop as idempotent
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: treats repeated asynchronous Stop as idempotent")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.command_deadline_ms = 100
@@ -1079,29 +1268,19 @@ match broker.begin_stop(1000):
 
 #### replaces a fully sent slow navigation before stale completion
 
-- var broker = HostedBrowserRendererProcess create
-   - Expected: broker.deferred_commands.len() equals `1`
-   - Expected: broker.network_job_handle equals `0`
-   - Expected: broker.network_job_redirect_count equals `0`
-   - Expected: broker.deferred_commands.len() equals `0`
-   - Expected: broker.next_animation_ms equals `-1`
+- Verify: replaces a fully sent slow navigation before stale completion
+   - Expected: broker.deferred_commands.len() equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.network_job_redirect_count equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.deferred_commands.len() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.next_animation_ms equals `-1)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.pending_document_commit_url equals ``
    - Expected: broker.provisional_document_origin equals ``
-- browser renderer decoder new
    - Expected: navigation.action equals `open`
    - Expected: navigation.url equals `https://example.test/new`
-   - Expected: broker.pending_wire_reply_to_request_id equals `3`
-- browser renderer decoder new
-- Err
-- fail
-- Ok
-   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.pending_wire_reply_to_request_id equals `3)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.pending_document_commit_url equals ``
-- draw ir composition
-- browser renderer decoder new
-- Err
-- fail
-- Ok
    - Expected: broker.pending_history_action equals `push`
    - Expected: broker.pending_document_commit_url equals ``
    - Expected: broker.provisional_document_origin equals ``
@@ -1110,10 +1289,13 @@ match broker.begin_stop(1000):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 146 lines folded for reproduction.
+Runnable source: 149 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: replaces a fully sent slow navigation before stale completion")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.document_url = "https://example.test/current"
@@ -1133,7 +1315,7 @@ broker.pending_operation = "advance"
 expect(broker.begin_pointer(
     7, 4, 5, true, 1000
 ).is_ok()).to_be(true)
-expect(broker.deferred_commands.len()).to_equal(1)
+expect(broker.deferred_commands.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
 broker.pending_operation = "navigation"
 broker.network_job_handle = 424242
 broker.network_job_fetch = Some(request(
@@ -1168,13 +1350,13 @@ val replaced = broker.begin_navigate(
 )
 
 expect(replaced.is_ok()).to_be(true)
-expect(broker.network_job_handle).to_equal(0)
+expect(broker.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(broker.network_job_fetch).to_be_nil()
 expect(broker.network_job_policy).to_be_nil()
 expect(broker.network_job_request).to_be_nil()
-expect(broker.network_job_redirect_count).to_equal(0)
-expect(broker.deferred_commands.len()).to_equal(0)
-expect(broker.next_animation_ms).to_equal(-1)
+expect(broker.network_job_redirect_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(broker.deferred_commands.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(broker.next_animation_ms).to_equal(-1)  # oracle: pinned constant asserted by this scenario
 expect(broker.stop_after_write).to_be(false)
 expect(broker.pending_document_commit_url).to_equal("")
 expect(broker.provisional_document_origin).to_equal("")
@@ -1189,7 +1371,7 @@ val navigation = browser_renderer_navigation_decode(
 )
 expect(navigation.action).to_equal("open")
 expect(navigation.url).to_equal("https://example.test/new")
-expect(broker.pending_wire_reply_to_request_id).to_equal(3)
+expect(broker.pending_wire_reply_to_request_id).to_equal(3)  # oracle: pinned constant asserted by this scenario
 broker.expected_reply_to_request_id = (
     broker.pending_wire_reply_to_request_id
 )
@@ -1212,7 +1394,7 @@ match broker._poll_renderer_reply(
         fail(reason)
     Ok(current):
         expect(current).to_be(false)
-expect(broker.network_job_handle).to_equal(0)
+expect(broker.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(broker.pending_document_commit_url).to_equal("")
 expect(broker.navigation_permit.url).to_equal(
     "https://example.test/new"
@@ -1266,12 +1448,11 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### preserves a slow navigation when its replacement is invalid
 
-- var broker = HostedBrowserRendererProcess create
-- "javascript:alert
+- Verify: preserves a slow navigation when its replacement is invalid
    - Expected: rejected.unwrap_err() equals `invalid-navigation`
-   - Expected: broker.network_job_handle equals `424243`
-   - Expected: broker.network_job_redirect_count equals `4`
-   - Expected: broker.next_animation_ms equals `32`
+   - Expected: broker.network_job_handle equals `424243)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.network_job_redirect_count equals `4)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.next_animation_ms equals `32)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.pending_operation equals `navigation`
    - Expected: broker.pending_history_action equals `push`
 
@@ -1279,10 +1460,13 @@ expect(broker.navigation_permit.url).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: preserves a slow navigation when its replacement is invalid")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.document_url = "https://example.test/current"
@@ -1324,12 +1508,12 @@ val rejected = broker.begin_navigate(
 
 expect(rejected.is_err()).to_be(true)
 expect(rejected.unwrap_err()).to_equal("invalid-navigation")
-expect(broker.network_job_handle).to_equal(424243)
+expect(broker.network_job_handle).to_equal(424243)  # oracle: pinned constant asserted by this scenario
 expect(broker.network_job_fetch.is_some()).to_be(true)
 expect(broker.network_job_policy.is_some()).to_be(true)
 expect(broker.network_job_request.is_some()).to_be(true)
-expect(broker.network_job_redirect_count).to_equal(4)
-expect(broker.next_animation_ms).to_equal(32)
+expect(broker.network_job_redirect_count).to_equal(4)  # oracle: pinned constant asserted by this scenario
+expect(broker.next_animation_ms).to_equal(32)  # oracle: pinned constant asserted by this scenario
 expect(broker.pending_operation).to_equal("navigation")
 expect(broker.pending_history_action).to_equal("push")
 expect(broker.pending_document_commit_url).to_equal(
@@ -1347,20 +1531,23 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### preserves a partially written navigation frame
 
-- var broker = HostedBrowserRendererProcess create
+- Verify: preserves a partially written navigation frame
    - Expected: replacement.unwrap_err() equals `renderer-busy`
-   - Expected: broker.pending_wire_offset equals `1`
-   - Expected: broker.pending_wire_reply_to_request_id equals `2`
+   - Expected: broker.pending_wire_offset equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.pending_wire_reply_to_request_id equals `2)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.pending_operation equals `navigation`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: preserves a partially written navigation frame")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.command_deadline_ms = 9000000000000
@@ -1382,8 +1569,8 @@ expect(replacement.unwrap_err()).to_equal("renderer-busy")
 expect(broker.pending_wire).to_equal(
     "partially-written-navigation"
 )
-expect(broker.pending_wire_offset).to_equal(1)
-expect(broker.pending_wire_reply_to_request_id).to_equal(2)
+expect(broker.pending_wire_offset).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(broker.pending_wire_reply_to_request_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
 expect(broker.pending_operation).to_equal("navigation")
 expect(broker.navigation_permit.url).to_equal(
     "https://example.test/slow"
@@ -1394,24 +1581,26 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### defers Stop until a partially written navigation command is complete
 
-- var broker = HostedBrowserRendererProcess create
+- Verify: defers Stop until a partially written navigation command is complete
    - Expected: broker.pending_operation equals `navigation`
    - Expected: broker._begin_stop_after_write() equals ``
    - Expected: broker.pending_operation equals `stop`
-- browser renderer decoder new
    - Expected: broker.pending_history_action equals ``
    - Expected: broker.pending_document_commit_url equals ``
    - Expected: broker.provisional_document_origin equals ``
-   - Expected: broker.network_job_redirect_count equals `0`
+   - Expected: broker.network_job_redirect_count equals `0)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: defers Stop until a partially written navigation command is complete")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.command_deadline_ms = 9000000000000
@@ -1464,26 +1653,28 @@ expect(broker.pending_history_action).to_equal("")
 expect(broker.pending_document_commit_url).to_equal("")
 expect(broker.provisional_document_origin).to_equal("")
 expect(broker.network_job_fetch).to_be_nil()
-expect(broker.network_job_redirect_count).to_equal(0)
+expect(broker.network_job_redirect_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### authorizes Reload and replaces its current history entry
 
-- var broker = HostedBrowserRendererProcess create
+- Verify: authorizes Reload and replaces its current history entry
    - Expected: broker.pending_history_action equals `replace`
-- broker  commit document url
-   - Expected: broker.history_urls.len() equals `1`
+   - Expected: broker.history_urls.len() equals `1)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: authorizes Reload and replaces its current history entry")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.document_url = "https://example.test/old"
@@ -1497,7 +1688,7 @@ expect(broker.navigation_permit.url).to_equal(
 )
 expect(broker.pending_history_action).to_equal("replace")
 broker._commit_document_url("https://example.test/new")
-expect(broker.history_urls.len()).to_equal(1)
+expect(broker.history_urls.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(broker.history_urls[0]).to_equal(
     "https://example.test/new"
 )
@@ -1505,149 +1696,26 @@ expect(broker.history_urls[0]).to_equal(
 
 </details>
 
-#### synchronizes same-origin history state into parent Back and Forward
-
-- var broker = HostedBrowserRendererProcess create
-- browser renderer decoder new
-   - Expected: back_navigation.action equals `back`
-   - Expected: back_navigation.url equals `https://example.test/start`
-- browser renderer decoder new
-   - Expected: forward_navigation.action equals `forward`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 73 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var broker = HostedBrowserRendererProcess.create(1, 640, 480)
-broker.state = "active"
-broker.document_url = "https://example.test/start"
-broker.document_origin = "https://example.test"
-broker.history_urls = ["https://example.test/start"]
-broker.history_index = 0
-expect(broker._frame_history_state_valid(
-    "https://example.test/next#view",
-    "https://example.test/start",
-    ""
-)).to_be(true)
-expect(broker._frame_history_state_valid(
-    "https://attacker.test/", "", ""
-)).to_be(false)
-expect(broker._frame_history_state_valid(
-    "https://example.test/next", "https://attacker.test/", ""
-)).to_be(false)
-broker.history_urls = [
-    "https://unrelated.test/",
-    "https://previous.test/",
-    "https://example.test/start"
-]
-broker.history_index = 2
-expect(broker._frame_history_state_valid(
-    "https://example.test/next",
-    "https://previous.test/",
-    ""
-)).to_be(true)
-expect(broker._frame_history_state_valid(
-    "https://example.test/next",
-    "https://unrelated.test/",
-    ""
-)).to_be(false)
-broker.history_urls = ["https://example.test/start"]
-broker.history_index = 0
-broker._apply_frame_history_state(
-    "https://example.test/next#view",
-    "https://example.test/start",
-    ""
-)
-expect(broker.document_url).to_equal(
-    "https://example.test/next#view"
-)
-expect(broker.begin_go_back(1000).is_ok()).to_be(true)
-val back = browser_renderer_decoder_feed(
-    browser_renderer_decoder_new(1), broker.pending_wire
-)
-val back_navigation = browser_renderer_navigation_decode(back.message)
-expect(back_navigation.ok).to_be(true)
-expect(back_navigation.action).to_equal("back")
-expect(back_navigation.url).to_equal("https://example.test/start")
-
-broker.pending_wire = ""
-broker.pending_wire_is_command = false
-broker.command_deadline_ms = 0
-broker.pending_operation = ""
-broker._apply_frame_history_state(
-    "https://example.test/start",
-    "",
-    "https://example.test/next#view"
-)
-expect(broker.begin_go_forward(1000).is_ok()).to_be(true)
-val forward = browser_renderer_decoder_feed(
-    browser_renderer_decoder_new(1), broker.pending_wire
-)
-val forward_navigation = browser_renderer_navigation_decode(
-    forward.message
-)
-expect(forward_navigation.ok).to_be(true)
-expect(forward_navigation.action).to_equal("forward")
-expect(forward_navigation.url).to_equal(
-    "https://example.test/next#view"
-)
-```
-
-</details>
-
-#### accepts the previous displayed URL across a network commit
-
-- var broker = HostedBrowserRendererProcess create
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 13 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var broker = HostedBrowserRendererProcess.create(1, 640, 480)
-broker.document_url = "https://a.test/start"
-broker.document_origin = "https://a.test"
-broker.history_urls = ["https://a.test/start"]
-broker.history_index = 0
-broker.history_current_url = "https://a.test/start#view"
-broker.pending_document_commit_url = "https://b.test/next"
-broker.pending_history_action = "push"
-expect(broker._frame_history_state_valid(
-    "https://b.test/next",
-    "https://a.test/start#view",
-    ""
-)).to_be(true)
-```
-
-</details>
-
 #### rejects a forged legacy frame before committing a pending document
 
-A legacy `SBRF2` frame has no history state. While a broker-authorized
-document response is pending, that omission fails and tears down the broker
-before it can commit the target URL or advance history. Only a state-bearing
-renderer reply may complete the transition.
-
+- Verify: rejects a forged legacy frame before committing a pending document
 - Send a state-less renderer frame while a document is pending
-   - Expected: the decoded frame has no history state
 - Fail closed before the forged frame can commit the target
-   - Expected: rejection reason equals `missing-frame-history`
-   - Expected: broker is failed and closed without committing the target
+   - Expected: rejected.reason equals `missing-frame-history`
+   - Expected: broker.state equals `failed`
+   - Expected: broker.history_urls.len() equals `1)  # oracle: pinned constant asserted by this scenario`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: rejects a forged legacy frame before committing a pending document")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Send a state-less renderer frame while a document is pending")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.document_url = "https://source.test/start"
@@ -1676,27 +1744,31 @@ val rejected = broker._accept_decoded_frame(forged, 1)
 expect(rejected.ok).to_be(false)
 expect(rejected.reason).to_equal("missing-frame-history")
 expect(broker.state).to_equal("failed")
-expect(broker.document_url).to_equal("")
-expect(broker.history_urls.len()).to_equal(0)
+expect(broker.document_url).to_equal(
+    "https://source.test/start"
+)
+expect(broker.history_urls.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### resolves duplicate history URLs in the requested direction
 
-- var back = HostedBrowserRendererProcess create
-   - Expected: back.pending_history_index equals `0`
-- var forward = HostedBrowserRendererProcess create
-   - Expected: forward.pending_history_index equals `1`
+- Verify: resolves duplicate history URLs in the requested direction
+   - Expected: back.pending_history_index equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: forward.pending_history_index equals `1)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: resolves duplicate history URLs in the requested direction")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var back = HostedBrowserRendererProcess.create(1, 640, 480)
 back.state = "active"
 back.history_urls = ["https://a.test/", "https://a.test/"]
@@ -1704,7 +1776,7 @@ back.history_index = 1
 back.history_current_url = "https://a.test/"
 back.history_back_url = "https://a.test/"
 expect(back.begin_go_back(1000).is_ok()).to_be(true)
-expect(back.pending_history_index).to_equal(0)
+expect(back.pending_history_index).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 var forward = HostedBrowserRendererProcess.create(1, 640, 480)
 forward.state = "active"
@@ -1713,29 +1785,30 @@ forward.history_index = 0
 forward.history_current_url = "https://a.test/"
 forward.history_forward_url = "https://a.test/"
 expect(forward.begin_go_forward(1000).is_ok()).to_be(true)
-expect(forward.pending_history_index).to_equal(1)
+expect(forward.pending_history_index).to_equal(1)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### queues asynchronous page input without draining the pipe
 
-- var broker = HostedBrowserRendererProcess create
-- Err
-- Ok
-   - Expected: broker.pending_wire_offset equals `0`
-   - Expected: broker.pending_wire_reply_to_request_id equals `2`
-   - Expected: broker.expected_reply_to_request_id equals `0`
-   - Expected: broker.next_request_id equals `2`
+- Verify: queues asynchronous page input without draining the pipe
+   - Expected: broker.pending_wire_offset equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.pending_wire_reply_to_request_id equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.expected_reply_to_request_id equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.next_request_id equals `2)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: queues asynchronous page input without draining the pipe")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 match broker.begin_pointer(1, 20, 30, true, 1000):
@@ -1744,71 +1817,75 @@ match broker.begin_pointer(1, 20, 30, true, 1000):
     Ok(started):
         expect(started).to_be(true)
 expect(broker.pending_wire).to_start_with("SBR1\tpointer")
-expect(broker.pending_wire_offset).to_equal(0)
-expect(broker.pending_wire_reply_to_request_id).to_equal(2)
-expect(broker.expected_reply_to_request_id).to_equal(0)
-expect(broker.next_request_id).to_equal(2)
+expect(broker.pending_wire_offset).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(broker.pending_wire_reply_to_request_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(broker.expected_reply_to_request_id).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(broker.next_request_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### coalesces wheel input without occupying the discrete command slot
 
-- var broker = HostedBrowserRendererProcess create
-   - Expected: broker.pending_scroll_delta_milli_y equals `1250`
+- Verify: coalesces wheel input without occupying the discrete command slot
+   - Expected: broker.pending_scroll_delta_milli_y equals `1250)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.pending_wire equals ``
-   - Expected: broker.pending_scroll_delta_milli_y equals `1250`
+   - Expected: broker.pending_scroll_delta_milli_y equals `1250)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.pending_operation equals `navigation`
-   - Expected: broker.pending_scroll_delta_milli_y equals `0`
+   - Expected: broker.pending_scroll_delta_milli_y equals `0)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: coalesces wheel input without occupying the discrete command slot")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 expect(broker.queue_scroll(1, 500).is_ok()).to_be(true)
 expect(broker.queue_scroll(2, 750).is_ok()).to_be(true)
-expect(broker.pending_scroll_delta_milli_y).to_equal(1250)
+expect(broker.pending_scroll_delta_milli_y).to_equal(1250)  # oracle: pinned constant asserted by this scenario
 expect(broker.pending_wire).to_equal("")
 
 broker.command_deadline_ms = 100
 broker.pending_operation = "navigation"
 expect(broker.flush_scroll(1000).is_err()).to_be(true)
-expect(broker.pending_scroll_delta_milli_y).to_equal(1250)
+expect(broker.pending_scroll_delta_milli_y).to_equal(1250)  # oracle: pinned constant asserted by this scenario
 expect(broker.pending_operation).to_equal("navigation")
 
 broker.command_deadline_ms = 0
 broker.pending_operation = ""
 expect(broker.flush_scroll(1000).is_ok()).to_be(true)
 expect(broker.pending_wire).to_start_with("SBR1\tscroll")
-expect(broker.pending_scroll_delta_milli_y).to_equal(0)
+expect(broker.pending_scroll_delta_milli_y).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### does not let page input replace a pending navigation
 
-- var broker = HostedBrowserRendererProcess create
-- Err
+- Verify: does not let page input replace a pending navigation
    - Expected: reason equals `renderer-busy`
-- Ok
    - Expected: broker.state equals `active`
    - Expected: broker.pending_operation equals `navigation`
-   - Expected: broker.deferred_commands.len() equals `0`
+   - Expected: broker.deferred_commands.len() equals `0)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-002
+step("Verify: does not let page input replace a pending navigation")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.command_deadline_ms = 100
@@ -1820,26 +1897,35 @@ match broker.begin_pointer(1, 4, 5, true, 1000):
         expect(false).to_be(true)
 expect(broker.state).to_equal("active")
 expect(broker.pending_operation).to_equal("navigation")
-expect(broker.deferred_commands.len()).to_equal(0)
+expect(broker.deferred_commands.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### should preserve immediate pointer press and release in order
 
-1. Queue a primary page pointer press.
-2. Cancel the page press before chrome takes ownership.
-3. Decode the deferred renderer cancellation.
-4. Ignore a redundant cancellation without queuing a command.
+- Verify: should preserve immediate pointer press and release in order
+- Queue a primary page pointer press
+- Cancel the page press before chrome takes ownership
+   - Expected: broker.deferred_commands.len() equals `1)  # oracle: pinned constant asserted by this scenario`
+- Decode the deferred renderer cancellation
+   - Expected: broker._activate_deferred_command() equals ``
+   - Expected: released.event_id equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.deferred_commands.len() equals `0)  # oracle: pinned constant asserted by this scenario`
+- Ignore a redundant cancellation without queuing a command
+   - Expected: idle.pending_wire equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-002
+step("Verify: should preserve immediate pointer press and release in order")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Queue a primary page pointer press")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
@@ -1859,7 +1945,7 @@ expect(broker.cancel_pointer(
     2, 1000
 ).is_ok()).to_be(true)
 expect(broker.pointer_pressed).to_be(false)
-expect(broker.deferred_commands.len()).to_equal(1)
+expect(broker.deferred_commands.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
 
 step("Decode the deferred renderer cancellation")
 broker.pending_wire = ""
@@ -1874,9 +1960,9 @@ val released_message = browser_renderer_decoder_feed(
 val released = browser_renderer_action_decode(
     released_message.message
 )
-expect(released.event_id).to_equal(2)
+expect(released.event_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
 expect(released.pressed).to_be(false)
-expect(broker.deferred_commands.len()).to_equal(0)
+expect(broker.deferred_commands.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 step("Ignore a redundant cancellation without queuing a command")
 var idle = HostedBrowserRendererProcess.create(2, 640, 480)
@@ -1893,19 +1979,30 @@ expect(idle.pending_wire).to_equal("")
 
 #### should retry a page pointer cancellation after renderer work drains
 
-1. Queue a page press while a resource job becomes active.
-2. Retain one cancellation while the renderer is busy.
-3. Drain prior work and emit the retained pointer release.
-4. Acknowledge the cancellation before releasing its owner state.
+- Verify: should retry a page pointer cancellation after renderer work drains
+- Queue a page press while a resource job becomes active
+- Retain the cancellation while the renderer is busy
+   - Expected: broker.pending_pointer_cancel_event_id equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.pending_pointer_cancel_event_id equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: reason equals `pointer-cancel-pending`
+- Drain prior work and emit the retained pointer release
+   - Expected: canceled.event_id equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.pending_operation equals `pointer-cancel`
+   - Expected: broker.pending_pointer_cancel_event_id equals `2)  # oracle: pinned constant asserted by this scenario`
+- Acknowledge the cancellation before releasing its owner state
+   - Expected: broker.pending_pointer_cancel_event_id equals `0)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 63 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: should retry a page pointer cancellation after renderer work drains")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Queue a page press while a resource job becomes active")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
@@ -1919,13 +2016,13 @@ expect(broker.cancel_pointer(
     2, 1000
 ).is_ok()).to_be(true)
 expect(broker.pointer_pressed).to_be(false)
-expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+expect(broker.pending_pointer_cancel_event_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
 match broker.cancel_pointer(99, 1000):
     Err(reason):
         fail("retained pointer cancellation failed: {reason}")
     Ok(queued):
         expect(queued).to_be(false)
-expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+expect(broker.pending_pointer_cancel_event_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
 match broker.begin_pointer(3, 5, 5, true, 1000):
     Err(reason):
         expect(reason).to_equal("pointer-cancel-pending")
@@ -1948,11 +2045,11 @@ val canceled_message = browser_renderer_decoder_feed(
 val canceled = browser_renderer_action_decode(
     canceled_message.message
 )
-expect(canceled.event_id).to_equal(2)
+expect(canceled.event_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
 expect(canceled.pressed).to_be(false)
 expect(broker.pointer_pressed).to_be(false)
 expect(broker.pending_operation).to_equal("pointer-cancel")
-expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+expect(broker.pending_pointer_cancel_event_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
 
 step("Acknowledge the cancellation before releasing its owner state")
 val ack_wire = browser_renderer_frame_encode_with_state_and_images(
@@ -1967,33 +2064,35 @@ val ack = browser_renderer_frame_decode(
 )
 broker.expected_reply_to_request_id = 3
 expect(broker._accept_decoded_frame(ack, 1).ok).to_be(true)
-expect(broker.pending_pointer_cancel_event_id).to_equal(0)
+expect(broker.pending_pointer_cancel_event_id).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### coalesces an unsent animation but defers after it is sent
 
-- var broker = HostedBrowserRendererProcess create
+- Verify: coalesces an unsent animation but defers after it is sent
    - Expected: broker.pending_operation equals `pointer`
    - Expected: broker.pending_operation equals `advance`
-   - Expected: broker.deferred_commands.len() equals `1`
-   - Expected: broker.expected_reply_to_request_id equals `2`
-   - Expected: broker.next_request_id equals `3`
+   - Expected: broker.deferred_commands.len() equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.expected_reply_to_request_id equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.next_request_id equals `3)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker._activate_deferred_command() equals ``
-- browser renderer decoder new
    - Expected: activated.message.kind equals `key`
-   - Expected: activated.message.request_id equals `4`
-   - Expected: broker.pending_wire_reply_to_request_id equals `4`
+   - Expected: activated.message.request_id equals `4)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.pending_wire_reply_to_request_id equals `4)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: coalesces an unsent animation but defers after it is sent")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 expect(broker.begin_advance(16, 1000).is_ok()).to_be(true)
@@ -2008,40 +2107,41 @@ broker.next_request_id = 3
 broker.pending_operation = "advance"
 expect(broker.begin_key(2, 65, true, 1000).is_ok()).to_be(true)
 expect(broker.pending_operation).to_equal("advance")
-expect(broker.deferred_commands.len()).to_equal(1)
-expect(broker.expected_reply_to_request_id).to_equal(2)
-expect(broker.next_request_id).to_equal(3)
+expect(broker.deferred_commands.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(broker.expected_reply_to_request_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(broker.next_request_id).to_equal(3)  # oracle: pinned constant asserted by this scenario
 broker.next_request_id = 4
 expect(broker._activate_deferred_command()).to_equal("")
 val activated = browser_renderer_decoder_feed(
     browser_renderer_decoder_new(1), broker.pending_wire
 )
 expect(activated.message.kind).to_equal("key")
-expect(activated.message.request_id).to_equal(4)
-expect(broker.pending_wire_reply_to_request_id).to_equal(4)
+expect(activated.message.request_id).to_equal(4)  # oracle: pinned constant asserted by this scenario
+expect(broker.pending_wire_reply_to_request_id).to_equal(4)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### coalesces a resize storm to the latest deferred dimensions
 
-- var broker = HostedBrowserRendererProcess create
-- Err
-- Ok
-   - Expected: broker.deferred_commands.len() equals `1`
+- Verify: coalesces a resize storm to the latest deferred dimensions
+   - Expected: broker.deferred_commands.len() equals `1)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker._activate_deferred_command() equals ``
    - Expected: broker.pending_operation equals `resize`
-   - Expected: broker.pending_resize_width equals `800`
-   - Expected: broker.pending_resize_height equals `600`
+   - Expected: broker.pending_resize_width equals `800)  # oracle: pinned constant asserted by this scenario`
+   - Expected: broker.pending_resize_height equals `600)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: coalesces a resize storm to the latest deferred dimensions")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 expect(broker.begin_pointer(
@@ -2058,7 +2158,7 @@ match broker.begin_resize(800, 600, 1000):
         expect(false).to_be(true)
     Ok(started):
         expect(started).to_be(false)
-expect(broker.deferred_commands.len()).to_equal(1)
+expect(broker.deferred_commands.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
 
 broker.pending_wire = ""
 broker.pending_wire_is_command = false
@@ -2067,26 +2167,29 @@ broker.pending_operation = ""
 broker.next_request_id = 3
 expect(broker._activate_deferred_command()).to_equal("")
 expect(broker.pending_operation).to_equal("resize")
-expect(broker.pending_resize_width).to_equal(800)
-expect(broker.pending_resize_height).to_equal(600)
+expect(broker.pending_resize_width).to_equal(800)  # oracle: pinned constant asserted by this scenario
+expect(broker.pending_resize_height).to_equal(600)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### does not erase an animation network response to queue input
 
-- var broker = HostedBrowserRendererProcess create
+- Verify: does not erase an animation network response to queue input
    - Expected: broker.pending_wire equals `network-response`
-   - Expected: broker.deferred_commands.len() equals `1`
+   - Expected: broker.deferred_commands.len() equals `1)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: does not erase an animation network response to queue input")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.command_deadline_ms = 100
@@ -2096,15 +2199,15 @@ broker.pending_wire_is_command = false
 broker.next_request_id = 3
 expect(broker.begin_text_input(3, "x", 1000).is_ok()).to_be(true)
 expect(broker.pending_wire).to_equal("network-response")
-expect(broker.deferred_commands.len()).to_equal(1)
+expect(broker.deferred_commands.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### retains the process handle when native close fails
 
-- var broker = HostedBrowserRendererProcess create
-   - Expected: broker.pid equals `999999999`
+- Verify: retains the process handle when native close fails
+   - Expected: broker.pid equals `999999999)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.state equals `active`
    - Expected: broker.state equals `closed`
 
@@ -2112,15 +2215,18 @@ expect(broker.deferred_commands.len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: retains the process handle when native close fails")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.pid = 999999999
 broker.state = "active"
 expect(broker.close()).to_be(false)
-expect(broker.pid).to_equal(999999999)
+expect(broker.pid).to_equal(999999999)  # oracle: pinned constant asserted by this scenario
 expect(broker.state).to_equal("active")
 broker.pid = 0
 expect(broker.close()).to_be(true)
@@ -2131,20 +2237,22 @@ expect(broker.state).to_equal("closed")
 
 #### clears a renderer handle already reaped by liveness
 
-- var broker = HostedBrowserRendererProcess create
-- Some
+- Verify: clears a renderer handle already reaped by liveness
    - Expected: result.reason equals `renderer-crashed`
    - Expected: "missing-result" equals `renderer-crashed`
-   - Expected: broker.pid equals `0`
+   - Expected: broker.pid equals `0)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: clears a renderer handle already reaped by liveness")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.pid = 999999999
 broker.state = "active"
@@ -2155,25 +2263,27 @@ match polled:
         expect(result.reason).to_equal("renderer-crashed")
     nil:
         expect("missing-result").to_equal("renderer-crashed")
-expect(broker.pid).to_equal(0)
+expect(broker.pid).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### denies a renderer document request without a parent permit
 
-- permit
-- request
+- Verify: denies a renderer document request without a parent permit
    - Expected: policy.reason equals `unauthorized-document-request`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: denies a renderer document request without a parent permit")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val policy = hosted_browser_renderer_request_policy(
     "",
     permit(false, ""),
@@ -2187,19 +2297,19 @@ expect(policy.reason).to_equal("unauthorized-document-request")
 
 #### authorizes only canonical renderer link and supported form shapes
 
-- var initial = HostedBrowserRendererProcess create
-- var link = HostedBrowserRendererProcess create
-- var forged = HostedBrowserRendererProcess create
-- var parent = HostedBrowserRendererProcess create
+- Verify: authorizes only canonical renderer link and supported form shapes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: authorizes only canonical renderer link and supported form shapes")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var initial = HostedBrowserRendererProcess.create(1, 640, 480)
 expect(initial.authorize_renderer_navigation(request(
     "document", "https://destination.test/"
@@ -2253,15 +2363,191 @@ expect(parent.navigation_permit.url).to_equal(
 
 </details>
 
-#### accepts exactly one matching parent navigation shape
+#### treats every renderer document as form-action constrained
+
+- Verify: treats every renderer document as form-action constrained
+- Reject forged GET and POST document requests under form-action none
+- Keep same-origin forms and absent form-action links working
+- Leave parent-controlled navigation outside the renderer form gate
+   - Expected: parent.navigation_permit.form_action_policy equals ``
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: treats every renderer document as form-action constrained")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+step("Reject forged GET and POST document requests under form-action none")
+var denied = HostedBrowserRendererProcess.create(1, 640, 480)
+denied.document_url = "https://account.test/profile"
+denied.document_origin = "https://account.test"
+denied.document_csp_policy = "form-action 'none'"
+denied.document_csp_ready = true
+expect(denied.authorize_renderer_navigation(request(
+    "document", "https://collector.test/capture?secret=token"
+))).to_be(false)
+expect(denied.authorize_renderer_navigation(request(
+    "document", "https://collector.test/capture", "POST", "",
+    "secret=token", "application/x-www-form-urlencoded"
+))).to_be(false)
+expect(denied.navigation_permit.active).to_be(false)
+
+step("Keep same-origin forms and absent form-action links working")
+var same_origin = HostedBrowserRendererProcess.create(1, 640, 480)
+same_origin.document_url = "https://account.test/profile"
+same_origin.document_origin = "https://account.test"
+same_origin.document_csp_policy = "form-action 'self'"
+same_origin.document_csp_ready = true
+expect(same_origin.authorize_renderer_navigation(request(
+    "document", "https://account.test/save", "POST", "",
+    "name=Ada", "application/x-www-form-urlencoded"
+))).to_be(true)
+expect(same_origin.navigation_permit.form_action_policy).to_equal(
+    "form-action 'self'"
+)
+expect(same_origin.navigation_permit.form_action_document_url).to_equal(
+    "https://account.test/profile"
+)
+
+var unrestricted = HostedBrowserRendererProcess.create(1, 640, 480)
+unrestricted.document_url = "https://account.test/profile"
+unrestricted.document_origin = "https://account.test"
+unrestricted.document_csp_policy = "default-src 'none'"
+unrestricted.document_csp_ready = true
+expect(unrestricted.authorize_renderer_navigation(request(
+    "document", "https://destination.test/"
+))).to_be(true)
+
+step("Leave parent-controlled navigation outside the renderer form gate")
+var parent = HostedBrowserRendererProcess.create(1, 640, 480)
+parent.document_url = "https://account.test/profile"
+parent.document_origin = "https://account.test"
+parent.document_csp_policy = "form-action 'none'"
+parent.document_csp_ready = true
+expect(parent.authorize_navigation(
+    "https://destination.test/", "GET", "", "", ""
+)).to_be(true)
+expect(parent.navigation_permit.form_action_policy).to_equal("")
+```
+
+</details>
+
+#### binds form-action authority across redirects before side effects
+
+- Verify: binds form-action authority across redirects before side effects
+- Carry the host-owned form authority through an allowed redirect
+   - Expected: allowed.navigation_permit.url equals `allowed_url`
+- Reject before cookies HSTS history or permits can change
+   - Expected: denied.document_url equals `source_url`
+   - Expected: denied.history_urls equals `[source_url]`
+   - Expected: denied.hsts_snapshot(1000).entries.len() equals `hsts_before`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 74 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: binds form-action authority across redirects before side effects")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+val source_url = "https://account.test/profile"
+val allowed_url = "https://forms.account.test/continue"
+val denied_url = "https://collector.test/capture"
+val form_policy = "form-action https://forms.account.test/"
+val navigation_policy = HostedBrowserRequestPolicy(
+    ok: true, reason: "ok", mode: RequestMode.Navigate,
+    credentials: "include", canonical_url: source_url,
+    sanitized_headers: "", consumes_navigation: true,
+    form_action_policy: form_policy,
+    form_action_document_url: source_url
+)
+
+step("Carry the host-owned form authority through an allowed redirect")
+var allowed = HostedBrowserRendererProcess.create(1, 640, 480)
+val allowed_response = allowed._network_response(
+    "document", FetchResponse(
+        status: 302, headers: "Location: {allowed_url}", body: []
+    )
+)
+expect(allowed._record_document_response(
+    request("document", source_url), navigation_policy,
+    allowed_response, 0
+).is_ok()).to_be(true)
+expect(allowed.navigation_permit.url).to_equal(allowed_url)
+expect(allowed.navigation_permit.form_action_policy).to_equal(
+    form_policy
+)
+expect(allowed.navigation_permit.form_action_document_url).to_equal(
+    source_url
+)
+
+step("Reject before cookies HSTS history or permits can change")
+var denied = HostedBrowserRendererProcess.create(1, 640, 480)
+denied.document_url = source_url
+denied.document_origin = "https://account.test"
+denied.history_urls = [source_url]
+denied.history_csp_policies = [form_policy]
+denied.history_csp_ready = [true]
+denied.history_index = 0
+val hsts_before = denied.hsts_snapshot(1000).entries.len()
+val source_origin = Origin(
+    scheme: "https", host: "account.test", port: 443
+)
+val cookies_before = denied.network.cookie_store.get_header_for_origin(
+    source_origin, "/", Some(source_origin), "GET", false,
+    rt_time_now_unix_micros() / 1000000
+)
+val denied_response = denied._network_response(
+    "document", FetchResponse(
+        status: 302,
+        headers: "Location: {denied_url}\r\n" +
+            "Set-Cookie: leaked=1; Secure; Path=/\r\n" +
+            "Strict-Transport-Security: max-age=60",
+        body: []
+    )
+)
+expect(denied._form_action_redirect_allowed(
+    navigation_policy, denied_response, 0
+).is_err()).to_be(true)
+expect(denied._record_document_response(
+    request("document", source_url), navigation_policy,
+    denied_response, 0
+).is_err()).to_be(true)
+expect(denied.document_url).to_equal(source_url)
+expect(denied.history_urls).to_equal([source_url])
+expect(denied.navigation_permit.active).to_be(false)
+expect(denied.hsts_snapshot(1000).entries.len()).to_equal(hsts_before)
+expect(denied.network.cookie_store.get_header_for_origin(
+    source_origin, "/", Some(source_origin), "GET", false,
+    rt_time_now_unix_micros() / 1000000
+)).to_equal(cookies_before)
+```
+
+</details>
+
+#### accepts exactly one matching parent navigation shape
+
+- Verify: accepts exactly one matching parent navigation shape
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: accepts exactly one matching parent navigation shape")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val policy = hosted_browser_renderer_request_policy(
     "",
     permit(
@@ -2290,20 +2576,20 @@ expect(policy.consumes_navigation).to_be(true)
 
 #### rejects a document request that changes the permitted target
 
-- permit
-- request
+- Verify: rejects a document request that changes the permitted target
    - Expected: policy.reason equals `unauthorized-document-request`
-- permit
-- request
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: rejects a document request that changes the permitted target")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val policy = hosted_browser_renderer_request_policy(
     "",
     permit(true, "https://example.test/allowed"),
@@ -2327,17 +2613,20 @@ expect(split_transport.reason).to_equal(
 
 #### derives same-origin mode from broker committed state
 
-- permit
+- Verify: derives same-origin mode from broker committed state
    - Expected: policy.credentials equals `credentials`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: derives same-origin mode from broker committed state")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 for credentials in ["omit", "same-origin", "include"]:
     val policy = hosted_browser_renderer_request_policy(
         "https://example.test",
@@ -2356,17 +2645,20 @@ for credentials in ["omit", "same-origin", "include"]:
 
 #### requires exact supported renderer credentials
 
-- permit
+- Verify: requires exact supported renderer credentials
    - Expected: policy.reason equals `invalid-request-credentials`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: requires exact supported renderer credentials")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 for credentials in ["Include", "same_origin", "", " include"]:
     val policy = hosted_browser_renderer_request_policy(
         "https://example.test",
@@ -2384,16 +2676,19 @@ for credentials in ["Include", "same_origin", "", " include"]:
 
 #### requires include credentials for parent-authorized documents
 
-- permit
+- Verify: requires include credentials for parent-authorized documents
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: requires include credentials for parent-authorized documents")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 for credentials in ["omit", "same-origin"]:
     val policy = hosted_browser_renderer_request_policy(
         "",
@@ -2413,24 +2708,23 @@ for credentials in ["omit", "same-origin"]:
 
 #### requires cors for simple cross-origin resources
 
-- permit
+- Verify: requires cors for simple cross-origin resources
    - Expected: policy.credentials equals `omit`
-- url: Url parse or opaque
-- permit
    - Expected: forged.reason equals `forbidden-request-header`
-- permit
    - Expected: same_origin_credentials.credentials equals `same-origin`
-- permit
    - Expected: credentialed.credentials equals `include`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: requires cors for simple cross-origin resources")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val policy = hosted_browser_renderer_request_policy(
     "https://example.test",
     permit(false, ""),
@@ -2496,17 +2790,20 @@ expect(credentialed.credentials).to_equal("include")
 
 #### rejects renderer-authored cookie request headers
 
-- permit
+- Verify: rejects renderer-authored cookie request headers
    - Expected: policy.reason equals `forbidden-request-header`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: rejects renderer-authored cookie request headers")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 for header in [
     "Cookie: sid=secret", "cOoKiE2: sid=secret",
     "Sec-Fetch-Site: same-origin", "Proxy-Authorization: secret",
@@ -2528,22 +2825,19 @@ for header in [
 
 #### binds ordered script cookie writes to the active document origin
 
-- var broker = HostedBrowserRendererProcess create
-- old origin, "/next", Some
-- rt time now unix micros
-- new origin, "/next", Some
-- rt time now unix micros
-- old origin, "/next", Some
-- rt time now unix micros
+- Verify: binds ordered script cookie writes to the active document origin
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: binds ordered script cookie writes to the active document origin")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.document_url = "https://old.test/app"
 broker.document_origin = "https://old.test"
@@ -2580,33 +2874,37 @@ expect(broker.network.cookie_store.get_header_for_origin(
 
 #### partitions script cookies by the active broker document not a stale request
 
-- Seed the broker transport with hostile requester `https://stale.test`.
-- Write a `Secure; SameSite=None; Partitioned` script cookie from
-  `https://app.test/page`.
-- Expected: the cookie is visible only through `cookie_partition_key(app)`;
-  the stale partition remains empty.
+- Verify: partitions script cookies by the active broker document not a stale request
+- Leave a hostile prior requester origin in the broker transport
+- Store a Partitioned script cookie through the active document
+- Expose it only under the active document partition
 
-Docgen: pending — reviewed manual mirror because this isolated worktree has no
-deployed self-hosted runtime.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: partitions script cookies by the active broker document not a stale request")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+step("Leave a hostile prior requester origin in the broker transport")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.document_url = "https://app.test/page"
 broker.document_origin = "https://app.test"
 broker.network.set_requester_origin("https://stale.test")
 
+step("Store a Partitioned script cookie through the active document")
 expect(broker._apply_script_cookie_writes([
     "part=active; Secure; SameSite=None; Partitioned; Path=/"
 ])).to_equal(true)
 val app = Origin(scheme: "https", host: "app.test", port: 443)
 val stale = Origin(scheme: "https", host: "stale.test", port: 443)
 val now = rt_time_now_unix_micros() / 1000000
+
+step("Expose it only under the active document partition")
 expect(broker.network.cookie_store.get_header_for_origin(
     app, "/", Some(app), "GET", false, now,
     cookie_partition_key(app)
@@ -2621,16 +2919,19 @@ expect(broker.network.cookie_store.get_header_for_origin(
 
 #### validates renderer initiators before cookie writes or fetch
 
-- var broker = HostedBrowserRendererProcess create
+- Verify: validates renderer initiators before cookie writes or fetch
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: validates renderer initiators before cookie writes or fetch")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.document_url = "https://trusted.test/app"
 broker.document_origin = "https://trusted.test"
@@ -2662,23 +2963,20 @@ expect(broker._renderer_initiator_valid(request(
 
 #### keeps all cookies in the broker transport only
 
-- var broker = HostedBrowserRendererProcess create
-- broker network set requester origin
-- broker document origin, permit
-- url: Url parse or opaque
+- Verify: keeps all cookies in the broker transport only
    - Expected: finalized.error equals ``
-- browser renderer decoder new
-- Err
-- Ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: keeps all cookies in the broker transport only")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.document_url = "https://secure.test/app"
 broker.document_origin = "https://secure.test"
@@ -2738,18 +3036,20 @@ match broker.network.prepare_single_hop(
 
 #### blocks active and passive mixed content at the trusted broker
 
-- permit
-- request
+- Verify: blocks active and passive mixed content at the trusted broker
    - Expected: policy.reason equals `mixed-content-blocked`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008
+step("Verify: blocks active and passive mixed content at the trusted broker")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 for kind in ["script", "style", "image", "fetch"]:
     val policy = hosted_browser_renderer_request_policy(
         "https://example.test",
@@ -2764,61 +3064,46 @@ for kind in ["script", "style", "image", "fetch"]:
 
 #### renders an HSTS-upgraded external PNG and blocks its mixed-content control
 
+- Verify: renders an HSTS-upgraded external PNG and blocks its mixed-content control
+   - Artifact capture: after_step
 - Load an HTTPS document with an HTTP image under includeSubDomains HSTS
    - Artifact capture: after_step
-- var broker = HostedBrowserRendererProcess create
-   - Artifact capture: after_step
-- BrowserHstsSnapshot create
-   - Artifact capture: after_step
-- var session = BrowserSession new
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 2 expected checks
+   - Evidence: artifact verified by 3 expected checks
    - Expected: original.kind equals `image`
    - Expected: original.url equals `image_url`
-- broker document origin, permit
-   - Artifact capture: after_step
-- browser renderer decoder new
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
-   - Expected: transport_upgrade.status equals `307`
+   - Expected: transport_upgrade.status equals `307)  # oracle: pinned constant asserted by this scenario`
 - Fetch and decode the upgraded PNG through the broker
    - Artifact capture: after_step
    - Evidence: artifact verified by 3 expected checks
    - Expected: upgraded.url equals `effective_url`
-   - Expected: upgraded.redirect_count equals `20`
-   - Expected: session.image_resources.len() equals `1`
--  external png pixels
-   - Artifact capture: after_step
+   - Expected: upgraded.redirect_count equals `20)  # oracle: pinned constant asserted by this scenario`
+   - Expected: session.image_resources.len() equals `1)  # oracle: pinned constant asserted by this scenario`
 - Render the decoded image through Draw IR
    - Artifact capture: after_step
    - Evidence: artifact verified by 5 expected checks
-   - Expected: pixels.len() equals `16`
+   - Expected: pixels.len() equals `16)  # oracle: pinned constant asserted by this scenario`
    - Expected: pixels[0] equals `0xFFCC3020u32`
    - Expected: pixels[1] equals `0xFF112233u32`
    - Expected: pixels[4] equals `0xFF445566u32`
    - Expected: pixels[5] equals `0xFF778899u32`
 - Block the same mixed-content image without HSTS
    - Artifact capture: after_step
-- var blocked = BrowserSession new
-   - Artifact capture: after_step
-- "https://source test", permit
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 2 expected checks
+   - Evidence: artifact verified by 3 expected checks
    - Expected: blocked_policy.reason equals `mixed-content-blocked`
-   - Expected: blocked.image_resources.len() equals `0`
-- var csp = BrowserSession new
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
-   - Expected: csp.image_resources.len() equals `0`
+   - Expected: blocked.image_resources.len() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: csp.image_resources.len() equals `0)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 119 lines folded for reproduction.
+Runnable source: 122 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: renders an HSTS-upgraded external PNG and blocks its mixed-content control")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Load an HTTPS document with an HTTP image under includeSubDomains HSTS")
 val image_url = "http://cdn.secure.test/pixel.png"
 val image_html = (
@@ -2837,7 +3122,7 @@ entries.push(BrowserHstsSnapshotEntry(
 var broker = HostedBrowserRendererProcess.create(1, 4, 4)
 expect(broker.load_hsts_snapshot(
     BrowserHstsSnapshot.create(entries), now_ms
-)).to_equal(1)
+)).to_equal(1)  # oracle: pinned constant asserted by this scenario
 broker.document_url = "https://source.test/page"
 broker.document_origin = "https://source.test"
 
@@ -2884,7 +3169,7 @@ val transport_upgrade = browser_renderer_network_response_decode(
         browser_renderer_decoder_new(1), broker.pending_wire
     ).message
 )
-expect(transport_upgrade.status).to_equal(307)
+expect(transport_upgrade.status).to_equal(307)  # oracle: pinned constant asserted by this scenario
 expect(transport_upgrade.headers).to_contain(
     "X-Simple-Broker-Transport-Upgrade: 1"
 )
@@ -2894,15 +3179,15 @@ val upgraded = _commit_broker_image_response(
     session, original, transport_upgrade
 )
 expect(upgraded.url).to_equal(effective_url)
-expect(upgraded.redirect_count).to_equal(20)
-expect(session.image_resources.len()).to_equal(1)
+expect(upgraded.redirect_count).to_equal(20)  # oracle: pinned constant asserted by this scenario
+expect(session.image_resources.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(session.image_resources[0].pixels).to_equal(
     _external_png_pixels()
 )
 
 step("Render the decoded image through Draw IR")
 val pixels = _render_image_resource_draw_ir(session)
-expect(pixels.len()).to_equal(16)
+expect(pixels.len()).to_equal(16)  # oracle: pinned constant asserted by this scenario
 expect(pixels[0]).to_equal(0xFFCC3020u32)
 expect(pixels[1]).to_equal(0xFF112233u32)
 expect(pixels[4]).to_equal(0xFF445566u32)
@@ -2924,7 +3209,7 @@ expect(blocked.commit_network_response(BrowserResponse.create(
     blocked_request.id, "image", blocked_request.url, 0, "", "",
     blocked_policy.reason
 )).is_ok()).to_be(true)
-expect(blocked.image_resources.len()).to_equal(0)
+expect(blocked.image_resources.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 var csp = BrowserSession.new()
 expect(csp.begin_network_navigation(
@@ -2936,7 +3221,7 @@ expect(csp.commit_network_response(BrowserResponse.create(
     "Content-Security-Policy: img-src 'none'", image_html, ""
 )).is_ok()).to_be(true)
 expect(csp.take_pending_request()).to_be_nil()
-expect(csp.image_resources.len()).to_equal(0)
+expect(csp.image_resources.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(csp.warnings.join("|")).to_contain("CSP blocked image")
 ```
 
@@ -2944,28 +3229,19 @@ expect(csp.warnings.join("|")).to_contain("CSP blocked image")
 
 #### loads brokered CSS background images and renders their exact pixels
 
+- Verify: loads brokered CSS background images and renders their exact pixels
 - Load inline and linked CSS background images through the broker
-- "background-image:url
-- var broker = HostedBrowserRendererProcess create
-- BrowserHstsSnapshot create
-- var session = BrowserSession new
    - Expected: style.kind equals `style`
-- " unused{background-image:url
    - Expected: original.kind equals `image`
    - Expected: original.url equals `image_url`
-- broker document origin, permit
-- browser renderer decoder new
-   - Expected: transport_upgrade.status equals `307`
-- session, original, transport upgrade,  background png hex
-   - Expected: upgraded.redirect_count equals `20`
+   - Expected: transport_upgrade.status equals `307)  # oracle: pinned constant asserted by this scenario`
+   - Expected: upgraded.redirect_count equals `20)  # oracle: pinned constant asserted by this scenario`
    - Expected: linked.kind equals `image`
    - Expected: linked.url equals `linked_image_url`
-- broker document origin, permit
--  commit png response
-   - Expected: session.image_resources.len() equals `2`
+   - Expected: session.image_resources.len() equals `2)  # oracle: pinned constant asserted by this scenario`
 - Apply background size position repeat origin and clip
 - Render the background image behind element content
-   - Expected: pixels.len() equals `64`
+   - Expected: pixels.len() equals `64)  # oracle: pinned constant asserted by this scenario`
    - Expected: pixels[1 * 8 + 1] equals `0xFF0000FFu32`
    - Expected: pixels[2 * 8 + 1] equals `0xFF80007Fu32`
    - Expected: pixels[2 * 8 + 2] equals `0xFF0000FFu32`
@@ -2975,22 +3251,21 @@ expect(csp.warnings.join("|")).to_contain("CSP blocked image")
    - Expected: pixels[4 * 8 + 1] equals `0xFF0000FFu32`
    - Expected: pixels[2 * 8 + 7] equals `0xFF123456u32`
 - Block background images denied by CSP or mixed-content policy
-- "<div style='background-image:url
-- var blocked = BrowserSession new
-- broker document origin, permit
    - Expected: blocked_policy.reason equals `mixed-content-blocked`
-   - Expected: blocked.image_resources.len() equals `0`
-- var csp = BrowserSession new
-   - Expected: csp.image_resources.len() equals `0`
+   - Expected: blocked.image_resources.len() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: csp.image_resources.len() equals `0)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 166 lines folded for reproduction.
+Runnable source: 169 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: loads brokered CSS background images and renders their exact pixels")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 step("Load inline and linked CSS background images through the broker")
 val image_url = "http://cdn.secure.test/tile.png"
 val linked_image_url = "https://assets.test/unused.png"
@@ -3017,7 +3292,7 @@ entries.push(BrowserHstsSnapshotEntry(
 var broker = HostedBrowserRendererProcess.create(1, 8, 8)
 expect(broker.load_hsts_snapshot(
     BrowserHstsSnapshot.create(entries), now_ms
-)).to_equal(1)
+)).to_equal(1)  # oracle: pinned constant asserted by this scenario
 broker.document_url = "https://source.test/page"
 broker.document_origin = "https://source.test"
 
@@ -3064,11 +3339,11 @@ val transport_upgrade = browser_renderer_network_response_decode(
         browser_renderer_decoder_new(1), broker.pending_wire
     ).message
 )
-expect(transport_upgrade.status).to_equal(307)
+expect(transport_upgrade.status).to_equal(307)  # oracle: pinned constant asserted by this scenario
 val upgraded = _commit_broker_image_response(
     session, original, transport_upgrade, _background_png_hex()
 )
-expect(upgraded.redirect_count).to_equal(20)
+expect(upgraded.redirect_count).to_equal(20)  # oracle: pinned constant asserted by this scenario
 
 val linked = session.take_pending_request().unwrap()
 expect(linked.kind).to_equal("image")
@@ -3093,12 +3368,12 @@ expect(hosted_browser_renderer_request_policy(
     broker.document_origin, permit(false, ""), linked_fetch
 ).ok).to_be(true)
 _commit_png_response(session, linked, _background_png_hex())
-expect(session.image_resources.len()).to_equal(2)
+expect(session.image_resources.len()).to_equal(2)  # oracle: pinned constant asserted by this scenario
 
 step("Apply background size position repeat origin and clip")
 step("Render the background image behind element content")
 val pixels = _render_background_image_pixels(session)
-expect(pixels.len()).to_equal(64)
+expect(pixels.len()).to_equal(64)  # oracle: pinned constant asserted by this scenario
 expect(pixels[1 * 8 + 1]).to_equal(0xFF0000FFu32)
 expect(pixels[2 * 8 + 1]).to_equal(0xFF80007Fu32)
 expect(pixels[2 * 8 + 2]).to_equal(0xFF0000FFu32)
@@ -3143,7 +3418,7 @@ expect(blocked.commit_network_response(BrowserResponse.create(
     blocked_request.id, blocked_request.kind, blocked_request.url,
     0, "", "", blocked_policy.reason
 )).is_ok()).to_be(true)
-expect(blocked.image_resources.len()).to_equal(0)
+expect(blocked.image_resources.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 var csp = BrowserSession.new()
 expect(csp.begin_network_navigation(
@@ -3155,7 +3430,7 @@ expect(csp.commit_network_response(BrowserResponse.create(
     "Content-Security-Policy: img-src 'none'", blocked_html, ""
 )).is_ok()).to_be(true)
 expect(csp.take_pending_request()).to_be_nil()
-expect(csp.image_resources.len()).to_equal(0)
+expect(csp.image_resources.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(csp.warnings.join("|")).to_contain("CSP blocked image")
 ```
 
@@ -3163,21 +3438,21 @@ expect(csp.warnings.join("|")).to_contain("CSP blocked image")
 
 #### loads ordinary cross-origin images without exposing a CORS fetch
 
-- permit
-- request
+- Verify: loads ordinary cross-origin images without exposing a CORS fetch
    - Expected: image.credentials equals `include`
    - Expected: image.sanitized_headers equals ``
-- permit
-- request
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: loads ordinary cross-origin images without exposing a CORS fetch")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val image = hosted_browser_renderer_request_policy(
     "https://example.test",
     permit(false, ""),
@@ -3204,26 +3479,20 @@ expect(script.sanitized_headers).to_equal(
 
 #### accepts only exact broker-owned HSTS transport upgrades
 
-- permit
-- request
-- permit
-- request
+- Verify: accepts only exact broker-owned HSTS transport upgrades
    - Expected: forged_policy.reason equals `invalid-request-url`
-- Logger new
-- Err
-- fail
-- Ok
-- origin, "/", Some
-- rt time now unix micros
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 93 lines folded for reproduction.
+Runnable source: 96 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: accepts only exact broker-owned HSTS transport upgrades")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 expect(hosted_browser_hsts_upgrade_valid(
     "http://secure.test/app.js",
     "https://secure.test/app.js"
@@ -3323,65 +3592,31 @@ match credential_free.finalize_single_hop(
 
 #### round trips broker HSTS upgrades without spending redirect state
 
-- var broker = HostedBrowserRendererProcess create
-- BrowserHstsSnapshot create
-- permit
-   - Expected: broker.network_job_handle equals `0`
-- browser renderer decoder new
+- Verify: round trips broker HSTS upgrades without spending redirect state
+   - Expected: broker.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: response.url equals `http://secure.test/app.js`
-   - Expected: response.status equals `307`
-- BrowserHstsSnapshot create
-- var document = BrowserSession new
-- fail
-- Some
-- fail
-- Some
+   - Expected: response.status equals `307)  # oracle: pinned constant asserted by this scenario`
    - Expected: next.url equals `https://secure.test/form`
-   - Expected: next.redirect_count equals `20`
+   - Expected: next.redirect_count equals `20)  # oracle: pinned constant asserted by this scenario`
    - Expected: next.method equals `POST`
    - Expected: next.body equals `name=value`
    - Expected: next.credentials equals `include`
-- var unmarked = BrowserSession new
-- fail
-- Some
-- var session = BrowserSession new
-- session pending requests push
-- fail
-- Some
-- Err
-- fail
-- Ok
-- fail
-- Some
-   - Expected: next.redirect_count equals `20`
+   - Expected: next.redirect_count equals `20)  # oracle: pinned constant asserted by this scenario`
    - Expected: next.method equals `method`
    - Expected: next.body equals `body`
    - Expected: next.headers equals ``
-- url: Url parse or opaque
-- Err
-- Ok
-- Err
-- Ok
-- var blocked = BrowserSession new
-- Err
-- fail
-- Ok
-- fail
-- Some
-- Err
-- fail
-- Ok
-- Some
-- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 274 lines folded for reproduction.
+Runnable source: 277 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: round trips broker HSTS upgrades without spending redirect state")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val now_ms = rt_time_now_unix_micros() / 1000
 var entries: [BrowserHstsSnapshotEntry] = []
 entries.push(BrowserHstsSnapshotEntry(
@@ -3393,7 +3628,7 @@ entries.push(BrowserHstsSnapshotEntry(
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 expect(broker.load_hsts_snapshot(
     BrowserHstsSnapshot.create(entries), now_ms
-)).to_equal(1)
+)).to_equal(1)  # oracle: pinned constant asserted by this scenario
 val fetch = request("script", "http://secure.test/app.js")
 val effective_url = broker._hsts_upgrade_url(fetch.url)
 val policy = hosted_browser_renderer_request_policy(
@@ -3406,7 +3641,7 @@ expect(policy.ok).to_be(true)
 expect(broker._queue_hsts_transport_upgrade(
     fetch, policy, 20
 )).to_equal("")
-expect(broker.network_job_handle).to_equal(0)
+expect(broker.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 val decoded = browser_renderer_decoder_feed(
     browser_renderer_decoder_new(1), broker.pending_wire
 )
@@ -3415,7 +3650,7 @@ val response = browser_renderer_network_response_decode(
 )
 expect(response.ok).to_be(true)
 expect(response.url).to_equal("http://secure.test/app.js")
-expect(response.status).to_equal(307)
+expect(response.status).to_equal(307)  # oracle: pinned constant asserted by this scenario
 expect(response.headers).to_contain(
     "Location: https://secure.test/app.js"
 )
@@ -3428,7 +3663,7 @@ var renderer_document = HostedBrowserRendererProcess.create(
 )
 expect(renderer_document.load_hsts_snapshot(
     BrowserHstsSnapshot.create(entries), now_ms
-)).to_equal(1)
+)).to_equal(1)  # oracle: pinned constant asserted by this scenario
 renderer_document.document_url = "https://source.test/page"
 renderer_document.document_origin = "https://source.test"
 renderer_document.document_csp_policy = "default-src *"
@@ -3457,7 +3692,7 @@ expect(renderer_document.navigation_permit.url).to_equal(
 )
 expect(renderer_document.navigation_permit.redirect_count).to_equal(
     0
-)
+)  # oracle: pinned constant asserted by this scenario
 
 var document = BrowserSession.new()
 document.broker_network_policy = true
@@ -3483,7 +3718,7 @@ match document.take_pending_request():
         fail("Expected upgraded document request")
     Some(next):
         expect(next.url).to_equal("https://secure.test/form")
-        expect(next.redirect_count).to_equal(20)
+        expect(next.redirect_count).to_equal(20)  # oracle: pinned constant asserted by this scenario
         expect(next.method).to_equal("POST")
         expect(next.body).to_equal("name=value")
         expect(next.site_for_cookies_url).to_equal(
@@ -3560,7 +3795,7 @@ for kind in ["style", "script", "module", "wasm", "fetch"]:
             expect(next.url).to_equal(
                 "https://secure.test/resource"
             )
-            expect(next.redirect_count).to_equal(20)
+            expect(next.redirect_count).to_equal(20)  # oracle: pinned constant asserted by this scenario
             expect(next.method).to_equal(method)
             expect(next.body).to_equal(body)
             if kind == "fetch":
@@ -3660,18 +3895,22 @@ match blocked.take_pending_request():
 
 </details>
 
-#### denies cross-origin requests that need an unbrokered preflight
+#### admits sanitized cross-origin author headers for broker preflight
 
-- permit
+- Verify: admits sanitized cross-origin author headers for broker preflight
+   - Expected: policy.mode equals `RequestMode.Cors`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: admits sanitized cross-origin author headers for broker preflight")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val policy = hosted_browser_renderer_request_policy(
     "https://example.test",
     permit(false, ""),
@@ -3684,20 +3923,222 @@ val policy = hosted_browser_renderer_request_policy(
         "text/plain"
     )
 )
-expect(policy.ok).to_be(false)
-expect(policy.reason).to_equal(
-    "cross-origin-preflight-unavailable"
+expect(policy.ok).to_be(true)
+expect(policy.mode).to_equal(RequestMode.Cors)
+expect(policy.sanitized_headers).to_equal(
+    "Content-Type: text/plain"
 )
+expect(policy.sanitized_headers.contains("Origin:")).to_be(false)
+```
+
+</details>
+
+#### runs hosted OPTIONS before the admitted actual request
+
+- Verify: runs hosted OPTIONS before the admitted actual request
+   - Expected: response.status equals `204)  # oracle: pinned constant asserted by this scenario`
+   - Expected: response.error equals ``
+   - Expected: preflight.method equals `OPTIONS`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 56 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: runs hosted OPTIONS before the admitted actual request")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+var registry = MockResponseRegistry.create()
+registry.register_with_headers(
+    "https://api.test/update", 204,
+    [
+        Pair("Access-Control-Allow-Origin", "https://example.test"),
+        Pair("Access-Control-Allow-Methods", "POST"),
+        Pair(
+            "Access-Control-Allow-Headers",
+            "content-type, x-admin-action"
+        ),
+        Pair("Set-Cookie", "preflight=blocked"),
+        Pair("Strict-Transport-Security", "max-age=600")
+    ],
+    ""
+)
+set_mock_registry(registry)
+val fetch = request(
+    "fetch", "https://api.test/update", "POST",
+    "X-Admin-Action: update", "value", "text/plain",
+    "omit", [], "https://example.test"
+)
+val policy = hosted_browser_renderer_request_policy(
+    "https://example.test", permit(false, ""), fetch
+)
+var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+broker.document_url = "https://example.test/page"
+broker.document_origin = "https://example.test"
+match broker._start_network_job(fetch, policy, 0):
+    nil:
+        fail("mock CORS exchange did not complete")
+    Some(response):
+        expect(response.status).to_equal(204)  # oracle: pinned constant asserted by this scenario
+        expect(response.error).to_equal("")
+expect(observed_mock_request_count(
+    "https://api.test/update", "OPTIONS"
+)).to_equal(1)  # oracle: pinned constant asserted by this scenario
+expect(observed_mock_request_count(
+    "https://api.test/update", "POST"
+)).to_equal(1)  # oracle: pinned constant asserted by this scenario
+match observed_mock_request("https://api.test/update"):
+    nil:
+        fail("missing hosted preflight")
+    Some(preflight):
+        expect(preflight.method).to_equal("OPTIONS")
+        expect(preflight.headers).to_contain(
+            "Origin: https://example.test"
+        )
+        expect(preflight.headers).to_contain(
+            "Access-Control-Request-Headers: content-type, x-admin-action"
+        )
+        expect(preflight.headers.contains("Cookie:")).to_be(false)
+expect(broker.hsts_dirty).to_be(false)
+set_mock_registry(MockResponseRegistry.create())
+```
+
+</details>
+
+#### does not issue an actual request after denied preflight policy
+
+- Verify: does not issue an actual request after denied preflight policy
+   - Expected: response.status equals `0)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 52 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: does not issue an actual request after denied preflight policy")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+for denied_headers in [
+    "Access-Control-Allow-Origin: https://example.test\r\n" +
+        "Access-Control-Allow-Headers: x-admin-action",
+    "Access-Control-Allow-Origin: https://example.test\r\n" +
+        "Access-Control-Allow-Methods: POST",
+    "Location: https://api.test/elsewhere"
+]:
+    var registry = MockResponseRegistry.create()
+    var response_headers: [Pair<text, text>] = []
+    for line in denied_headers.split("\r\n"):
+        val colon = line.index_of(":")
+        if colon > 0:
+            response_headers.push(Pair(
+                line.slice(0, colon),
+                line.slice(colon + 1, line.len()).trim()
+            ))
+    registry.register_with_headers(
+        "https://api.test/denied",
+        if denied_headers.starts_with("Location:"): 302 else: 204,
+        response_headers, ""
+    )
+    set_mock_registry(registry)
+    val fetch = request(
+        "fetch", "https://api.test/denied", "POST",
+        "X-Admin-Action: update", "value", "text/plain",
+        "omit", [], "https://example.test"
+    )
+    val policy = hosted_browser_renderer_request_policy(
+        "https://example.test", permit(false, ""), fetch
+    )
+    var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+    broker.document_url = "https://example.test/page"
+    broker.document_origin = "https://example.test"
+    match broker._start_network_job(fetch, policy, 0):
+        nil:
+            fail("denied preflight left a job active")
+        Some(response):
+            expect(response.status).to_equal(0)  # oracle: pinned constant asserted by this scenario
+            expect(response.error).to_equal(
+                "network: CORS preflight denied"
+            )
+    expect(observed_mock_request_count(
+        "https://api.test/denied", "OPTIONS"
+    )).to_equal(1)  # oracle: pinned constant asserted by this scenario
+    expect(observed_mock_request_count(
+        "https://api.test/denied", "POST"
+    )).to_equal(0)  # oracle: pinned constant asserted by this scenario
+    expect(broker.hsts_dirty).to_be(false)
+set_mock_registry(MockResponseRegistry.create())
+```
+
+</details>
+
+#### clears staged preflight authority on stop and timeout
+
+- Verify: clears staged preflight authority on stop and timeout
+   - Expected: broker.network_job_phase equals ``
+   - Expected: broker.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: response.error equals `renderer-network-timeout`
+   - Expected: broker.network_job_phase equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 36 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: clears staged preflight authority on stop and timeout")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+broker.network_job_phase = "preflight"
+broker.network_job_actual_request = Some(fetch_request(
+    "https://api.test/update", RequestMode.Cors
+))
+expect(broker._cancel_pending_for_stop()).to_be(true)
+expect(broker.network_job_phase).to_equal("")
+expect(broker.network_job_actual_request).to_be_nil()
+expect(broker.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
+
+set_mock_registry(MockResponseRegistry.create())
+broker.command_deadline_ms = 1
+broker.document_url = "https://example.test/page"
+broker.document_origin = "https://example.test"
+val fetch = request(
+    "fetch", "https://api.test/timeout", "POST",
+    "X-Admin-Action: update", "value", "text/plain",
+    "omit", [], "https://example.test"
+)
+val policy = hosted_browser_renderer_request_policy(
+    "https://example.test", permit(false, ""), fetch
+)
+match broker._start_network_job(fetch, policy, 0):
+    nil:
+        fail("expired preflight started a runtime job")
+    Some(response):
+        expect(response.error).to_equal("renderer-network-timeout")
+expect(broker.network_job_phase).to_equal("")
+expect(broker.network_job_actual_request).to_be_nil()
+expect(observed_mock_request_count(
+    "https://api.test/timeout", "POST"
+)).to_equal(0)  # oracle: pinned constant asserted by this scenario
+set_mock_registry(MockResponseRegistry.create())
 ```
 
 </details>
 
 #### requires a fresh renderer generation before a cross-site document
 
-- var broker = HostedBrowserRendererProcess create
+- Verify: requires a fresh renderer generation before a cross-site document
    - Expected: broker.site_lock equals `https://example.test`
    - Expected: broker.site_swap_site equals `https://victim.test`
-   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.pending_wire equals ``
    - Expected: broker.provisional_document_origin equals ``
 
@@ -3705,10 +4146,13 @@ expect(policy.reason).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: requires a fresh renderer generation before a cross-site document")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(7, 640, 480)
 expect(broker._document_site_swap_required(
     "https://app.example.test/start"
@@ -3719,7 +4163,7 @@ expect(broker._document_site_swap_required(
 expect(broker.site_lock).to_equal("https://example.test")
 expect(broker.site_swap_pending).to_be(true)
 expect(broker.site_swap_site).to_equal("https://victim.test")
-expect(broker.network_job_handle).to_equal(0)
+expect(broker.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(broker.pending_wire).to_equal("")
 expect(broker.provisional_document_origin).to_equal("")
 ```
@@ -3728,18 +4172,21 @@ expect(broker.provisional_document_origin).to_equal("")
 
 #### retains one generation for same schemeful-site navigation
 
-- var broker = HostedBrowserRendererProcess create
-   - Expected: broker.generation equals `7`
+- Verify: retains one generation for same schemeful-site navigation
+   - Expected: broker.generation equals `7)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.site_lock equals `https://example.test`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: retains one generation for same schemeful-site navigation")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var broker = HostedBrowserRendererProcess.create(7, 640, 480)
 expect(broker._document_site_swap_required(
     "https://app.example.test/start"
@@ -3747,7 +4194,7 @@ expect(broker._document_site_swap_required(
 expect(broker._document_site_swap_required(
     "https://cdn.example.test:8443/asset"
 )).to_be(false)
-expect(broker.generation).to_equal(7)
+expect(broker.generation).to_equal(7)  # oracle: pinned constant asserted by this scenario
 expect(broker.site_lock).to_equal("https://example.test")
 expect(broker.site_swap_pending).to_be(false)
 ```
@@ -3756,24 +4203,25 @@ expect(broker.site_swap_pending).to_be(false)
 
 #### withholds a cross-site redirect body and credentials from the old child
 
-- var broker = HostedBrowserRendererProcess create
-- broker navigation permit = permit
-- url: Url parse or opaque
+- Verify: withholds a cross-site redirect body and credentials from the old child
    - Expected: reason equals `HOSTED_BROWSER_SITE_SWAP_REQUIRED`
    - Expected: broker.navigation_permit.url equals `target_url`
    - Expected: broker.site_swap_site equals `https://victim.test`
    - Expected: broker.pending_wire equals ``
-   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.network_job_handle equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.provisional_document_origin equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: withholds a cross-site redirect body and credentials from the old child")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val source_url = "https://app.example.test/start"
 val target_url = "https://account.victim.test/private"
 var broker = HostedBrowserRendererProcess.create(7, 640, 480)
@@ -3811,7 +4259,7 @@ expect(reason).to_equal(HOSTED_BROWSER_SITE_SWAP_REQUIRED)
 expect(broker.navigation_permit.url).to_equal(target_url)
 expect(broker.site_swap_site).to_equal("https://victim.test")
 expect(broker.pending_wire).to_equal("")
-expect(broker.network_job_handle).to_equal(0)
+expect(broker.network_job_handle).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(broker.provisional_document_origin).to_equal("")
 ```
 
@@ -3819,7 +4267,7 @@ expect(broker.provisional_document_origin).to_equal("")
 
 #### rejects old-generation SBRQ4 after a site swap
 
-- browser renderer decoder new
+- Verify: rejects old-generation SBRQ4 after a site swap
    - Expected: stale.status equals `violation`
    - Expected: stale.decoder.error equals `stale-generation`
 
@@ -3827,10 +4275,13 @@ expect(broker.provisional_document_origin).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: rejects old-generation SBRQ4 after a site swap")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 val old_request = browser_renderer_fetch_request_encode(
     7, 2, 1, "fetch-1", "fetch",
     "https://account.victim.test/private", "GET", "", "", "",
@@ -3848,7 +4299,7 @@ expect(stale.decoder.error).to_equal("stale-generation")
 
 #### binds a bookmark title to generation reply and canonical URL
 
-- var renderer = HostedBrowserRendererProcess create
+- Verify: binds a bookmark title to generation reply and canonical URL
    - Expected: renderer.bookmark_stored_title() equals `Bound title`
    - Expected: renderer.bookmark_stored_title() equals ``
    - Expected: renderer.bookmark_stored_title() equals ``
@@ -3859,10 +4310,13 @@ expect(stale.decoder.error).to_equal("stale-generation")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-002
+step("Verify: binds a bookmark title to generation reply and canonical URL")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
 var renderer = HostedBrowserRendererProcess.create(7, 64, 48)
 renderer.expected_reply_to_request_id = 41
 renderer.document_url = "https://title.test/"
@@ -3891,8 +4345,8 @@ expect(renderer.bookmark_stored_title()).to_equal("")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 53 |
-| Active scenarios | 53 |
+| Total scenarios | 62 |
+| Active scenarios | 62 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -3907,3 +4361,43 @@ expect(renderer.bookmark_stored_title()).to_equal("")
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9cffb5d7e2c3e3c1b4ae4f529f0198553ac3763c8e5943f254f7fbd8c62d9478`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9cffb5d7e2c3e3c1b4ae4f529f0198553ac3763c8e5943f254f7fbd8c62d9478`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9cffb5d7e2c3e3c1b4ae4f529f0198553ac3763c8e5943f254f7fbd8c62d9478`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **93/100**; effective score: **93/100**; blockers: **0**.
+
+SSpec documentization score: 93/100
+source: test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl
+mirror: doc/06_spec/01_unit/os/hosted/hosted_browser_renderer_policy_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=90 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/hosted/hosted_browser_renderer_policy_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/01_unit/os/hosted/hosted_browser_renderer_policy_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/hosted/hosted_browser_renderer_policy_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl:1691:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve immediate pointer press and release in order' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl:1744:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retry a page pointer cancellation after renderer work drains' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

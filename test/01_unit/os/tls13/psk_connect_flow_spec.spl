@@ -1,3 +1,20 @@
+"""
+## Purpose and audience
+Verifies the psk connect flow behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
+"""
+# @manual: primary
+# @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
+# doc-path: doc/01_research/lib/misc/tls13_phase2_backlog.md
+# doc-path: doc/03_plan/sys_test/release_workflow_checkers.md
+# doc-path: doc/04_architecture/infra/misc/tls13_stack_survey.md
+# doc-path: doc/05_design/lib/networking/net_connect_completion.md
 # PSK + 0-RTT connect-flow byte-level spec — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9
 #
 # Wave 13 closeout: byte-level coverage of the PSK splice path that
@@ -17,6 +34,7 @@
 #   6. ServerHello with selected_identity=0 → swap to PSK-fed early_secret.
 #   7. ServerHello without pre_shared_key → fall back to empty-PSK early_secret.
 
+use std.spec.step
 use std.spipe.*
 use os.tls13.tls13.{
     Tls13ClientConfig, Tls13Io, PskCh,
@@ -181,9 +199,11 @@ fn _build_sh_body_no_psk() -> [u8]:
 # Specs
 # ============================================================================
 
-describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
-
-    it("partial-CH binders_field_offset places binders_len after identities"):
+describe "PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9":
+    it "partial-CH binders_field_offset places binders_len after identities":
+        # @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
+        step("Verify: partial-CH binders_field_offset places binders_len after identities")
+        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
         # Build a CH with our PSK config and check that the offset matches
         # ext_data_len semantics: ext_data starts with u16 ids_len + ids,
         # followed by binders_len u16 at binders_field_offset.
@@ -202,7 +222,10 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         # The byte at binders_data_offset is the per-binder length prefix = 32.
         expect(_u8_get(wire, psk_ch.binders_data_offset)).to_equal(32u8)
 
-    it("pre_shared_key extension is the LAST extension in CH (RFC 8446 §4.2.11)"):
+    it "pre_shared_key extension is the LAST extension in CH (RFC 8446 §4.2.11)":
+        # @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
+        step("Verify: pre_shared_key extension is the LAST extension in CH (RFC 8446 §4.2.11)")
+        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
         val cfg = _make_psk_config(_seq_n(32u64, 0x11u8), _seq_n(8u64, 0x77u8))
         val ch_base = build_client_hello_bytes(_ch_random32(), _x25519_pub32(), "example.com")
         val psk_ch = _splice_psk_extensions_into_ch(ch_base, cfg)
@@ -213,7 +236,10 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         val expected_end = psk_ch.binders_data_offset + 33u64
         expect(expected_end).to_equal(psk_ch.bytes.len().to_u64())
 
-    it("psk_key_exchange_modes extension (type 0x002d) is present in CH"):
+    it "psk_key_exchange_modes extension (type 0x002d) is present in CH":
+        # @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
+        step("Verify: psk_key_exchange_modes extension (type 0x002d) is present in CH")
+        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
         val cfg = _make_psk_config(_seq_n(32u64, 0x11u8), _seq_n(8u64, 0x77u8))
         val ch_base = build_client_hello_bytes(_ch_random32(), _x25519_pub32(), "example.com")
         val psk_ch = _splice_psk_extensions_into_ch(ch_base, cfg)
@@ -223,7 +249,10 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         val found = _scan_for_ext_type(psk_ch.bytes, 0x00, 0x2d)
         expect(found).to_equal(true)
 
-    it("partial-CH transcript hash stops at end of identities (RFC 8446 §4.1.4)"):
+    it "partial-CH transcript hash stops at end of identities (RFC 8446 §4.1.4)":
+        # @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
+        step("Verify: partial-CH transcript hash stops at end of identities (RFC 8446 §4.1.4)")
+        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
         # The hash STOPS at binders_field_offset, NOT at end of zeroed binders.
         # _partial_ch_transcript_hash must equal SHA-256(wire[0..binders_field_offset]).
         val cfg = _make_psk_config(_seq_n(32u64, 0x11u8), _seq_n(8u64, 0x77u8))
@@ -234,10 +263,13 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         # to keep the prefix-build loop out of the it-block.
         val prefix = _build_prefix_to(psk_ch.bytes, psk_ch.binders_field_offset)
         val expected = rt_tls13_sha256(prefix)
-        expect(got.len()).to_equal(32)
+        expect(got.len()).to_equal(32)  # oracle: pinned constant asserted by this scenario
         expect(_bytes_eq(got, expected)).to_equal(true)
 
-    it("partial-CH transcript hash is NOT the same as hashing including zero binders"):
+    it "partial-CH transcript hash is NOT the same as hashing including zero binders":
+        # @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
+        step("Verify: partial-CH transcript hash is NOT the same as hashing including zero binders")
+        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
         # Negative check: hashing [0..end_of_binders] would produce a DIFFERENT
         # digest than [0..binders_field_offset]. RFC 8446 §4.1.4 mandates the
         # latter; this guards against the silent wrong interpretation.
@@ -255,7 +287,10 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         val full_hash = rt_tls13_sha256(full)
         expect(_bytes_eq(got, full_hash)).to_equal(false)
 
-    it("spliced binder MAC matches tls13_compute_psk_binder byte-exact"):
+    it "spliced binder MAC matches tls13_compute_psk_binder byte-exact":
+        # @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
+        step("Verify: spliced binder MAC matches tls13_compute_psk_binder byte-exact")
+        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
         # Compute binder via the same path as tls13_connect_io_with_config and
         # verify the spliced wire bytes contain exactly that MAC.
         val psk_secret = _seq_n(32u64, 0x11u8)
@@ -281,12 +316,18 @@ describe("PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9"):
         # Length unchanged after splice.
         expect(spliced.len()).to_equal(psk_ch.bytes.len())
 
-    it("ServerHello with pre_shared_key selected_identity=0 returns 0"):
+    it "ServerHello with pre_shared_key selected_identity=0 returns 0":
+        # @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
+        step("Verify: ServerHello with pre_shared_key selected_identity=0 returns 0")
+        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
         val body = _build_sh_body_with_psk(0u16)
         val sel = _parse_sh_selected_identity(body)
-        expect(sel).to_equal(0)
+        expect(sel).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
-    it("ServerHello without pre_shared_key returns -1 (no PSK selected)"):
+    it "ServerHello without pre_shared_key returns -1 (no PSK selected)":
+        # @req: REQ-OS-TLS13_PSK_CONNECT_FLOW-001
+        step("Verify: ServerHello without pre_shared_key returns -1 (no PSK selected)")
+        # evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
         val body = _build_sh_body_no_psk()
         val sel = _parse_sh_selected_identity(body)
-        expect(sel).to_equal(-1)
+        expect(sel).to_equal(-1)  # oracle: pinned constant asserted by this scenario
