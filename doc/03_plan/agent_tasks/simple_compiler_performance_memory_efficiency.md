@@ -1,6 +1,20 @@
 <!-- codex-design -->
 # Agent Task Plan — Simple Compiler Performance and Memory Efficiency
 
+## Diagnostic JSON serialization follow-up
+
+- Merge owner: compiler performance/memory lane.
+- Review evidence: parallel warning-policy audit identified duplicated five-pass
+  whole-message escaping in both active query serializers.
+- Implementation: place the exact one-pass escaper in `query_rich_common` and
+  delegate both lint and compiler-diagnostic paths to it.
+- Compatibility: retain the five legacy escapes, Unicode, JSON envelopes,
+  diagnostic order and severity behavior.
+- Performance acceptance: unchanged messages allocate no replacement buffers;
+  escaped messages use one scan plus one final join rather than five full-text
+  replacements.
+- Verification status: intentionally not executed under the user's explicit
+  no-verify instruction; static diff and ownership review only.
 ## Authority
 
 Merge owner and final highest-capability reviewer: `/root`. Generated-manual review owner: `/root`. Sidecars may implement bounded disjoint lanes but cannot change frozen interfaces, accept exclusions, or mark done.
