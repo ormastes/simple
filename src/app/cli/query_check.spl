@@ -9,8 +9,10 @@ use std.io_runtime.{file_exists}
 use std.io_runtime.{dir_list}
 
 use app.cli.query_sanitize.{sanitize_path}
-use app.cli.query_helpers.{_extract_flag}
-use app.cli.query_lint.{_emit_source_lint_diagnostics, _diag_emit_or_collect, _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _find_in_line, _is_return_statement, _find_next_statement_in_block, _check_closure_capture_text, _check_ignored_return_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text}
+use app.cli.query_helpers.{_extract_flag, _count_indent}
+use app.cli.query_lint.{_emit_source_lint_diagnostics, _diag_emit_or_collect, _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _find_in_line, _is_return_statement, _check_closure_capture_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text}
+use app.cli.query_lint_checks.{_query_indent_successor_index}
+use app.cli.query_lint_checks.{_check_ignored_return_text_indexed}
 use compiler.driver.driver.{check_file}
 use compiler.driver.driver_types.{CompileResult}
 use std.report.emitter.lsp.{LspEmitter}
@@ -643,6 +645,7 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
     var count = 0
     var parts: [text] = []
     val emitter = LspEmitter.default_emitter()
+    val indent_successors = _query_indent_successor_index(lines)
 
     var li = 0
     while li < lines.len():
@@ -664,8 +667,10 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
 
         # UNREACH: After return
         if _is_return_statement(trimmed):
-            val next_unreachable = _find_next_statement_in_block(lines, li)
-            if next_unreachable > 0:
+            val successor = indent_successors.next_same_or_shallower[li]
+            if (successor >= 0 and
+                _count_indent(lines[successor]) == _count_indent(lines[li])):
+                val next_unreachable = successor + 1
                 parts.push("{\"severity\":2,\"code\":\"UNREACH001\",\"message\":\"unreachable code after return\",\"line\":{next_unreachable},\"col\":1,\"end_line\":{next_unreachable},\"end_col\":1,\"tags\":[1],\"source\":\"simple-lint\"}")
                 count = count + 1
 
@@ -679,7 +684,8 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
     _DIAG_COLLECTED = []
 
     val clos_count = _check_closure_capture_text(lines, file, "json", emitter)
-    val ret_count = _check_ignored_return_text(lines, file, "json", emitter)
+    val ret_count = _check_ignored_return_text_indexed(
+        lines, file, "json", indent_successors)
     val bool_count = _check_multiline_bool_text(lines, file, "json", emitter)
     val safe_count = _check_safety_text(lines, file, "json", emitter)
     val vis_count = _check_visibility_text(lines, file, "json", emitter)
