@@ -188,49 +188,111 @@ pub fn flat_pool_enc_text_list_list(pool: [[[text]]]) -> text:
 
 # --- decoders ---------------------------------------------------------------
 
+# The three scalar pool decoders below read the reader's line array
+# DIRECTLY with a local cursor instead of calling next()/next_i64()/
+# flat_pool_parse_i64() per element. A restore of a large compiler module
+# walks several hundred thousand lines (hir_codec.spl: 573k, 383k of them in
+# the expr pools) and under the interpreter each of those three method calls
+# costs more than the work they wrap: 300k i64 values decoded in 11.4 s the
+# old way and 2.6 s this way (same bytes, same values, same bounds check via
+# next_len()). doc/08_tracking/bug/frontend_cache_hit_restore_cost_2026-08-22.md
 pub fn flat_pool_dec_i64(r: FlatPoolReader) -> [i64]:
     val n = r.next_len()
+    val lines = r.lines
+    var p = r.pos
+    val end = p + n
     var out: [i64] = []
-    var i: i64 = 0
-    while i < n:
-        out = out.push(r.next_i64())
-        i = i + 1
+    while p < end:
+        val raw = lines[p]
+        out.push(if raw == "": 0 else: raw.to_i64())
+        p = p + 1
+    r.pos = end
     out
 
 pub fn flat_pool_dec_bool(r: FlatPoolReader) -> [bool]:
     val n = r.next_len()
+    val lines = r.lines
+    var p = r.pos
+    val end = p + n
     var out: [bool] = []
-    var i: i64 = 0
-    while i < n:
-        out = out.push(r.next_i64() == 1)
-        i = i + 1
+    while p < end:
+        out.push(lines[p] == "1")
+        p = p + 1
+    r.pos = end
     out
 
 pub fn flat_pool_dec_text(r: FlatPoolReader) -> [text]:
     val n = r.next_len()
+    val lines = r.lines
+    var p = r.pos
+    val end = p + n
     var out: [text] = []
-    var i: i64 = 0
-    while i < n:
-        out = out.push(flat_pool_unescape(r.next()))
-        i = i + 1
+    while p < end:
+        val raw = lines[p]
+        out.push(if raw.contains("\\"): flat_pool_unescape(raw) else: raw)
+        p = p + 1
+    r.pos = end
     out
 
+# List pools are one inner pool per AST node (expr_args, expr_stmts, ...), so
+# the per-inner-list overhead is paid tens of thousands of times per module;
+# the inner loops are inlined here for the same reason as the scalar decoders
+# above. A bad inner length (negative, or past the end of the blob) marks the
+# reader not-ok and stops, exactly as next_len() does.
 pub fn flat_pool_dec_i64_list(r: FlatPoolReader) -> [[i64]]:
     val n = r.next_len()
+    val lines = r.lines
+    val total = lines.len()
+    var p = r.pos
     var out: [[i64]] = []
     var i: i64 = 0
     while i < n:
-        out = out.push(flat_pool_dec_i64(r))
+        if p >= total:
+            r.ok = false
+            break
+        val raw_len = lines[p]
+        val m = if raw_len == "": 0 else: raw_len.to_i64()
+        p = p + 1
+        if (m < 0) or (m > (total - p)):
+            r.ok = false
+            break
+        val end = p + m
+        var inner: [i64] = []
+        while p < end:
+            val raw = lines[p]
+            inner.push(if raw == "": 0 else: raw.to_i64())
+            p = p + 1
+        out.push(inner)
         i = i + 1
+    r.pos = p
     out
 
 pub fn flat_pool_dec_text_list(r: FlatPoolReader) -> [[text]]:
     val n = r.next_len()
+    val lines = r.lines
+    val total = lines.len()
+    var p = r.pos
     var out: [[text]] = []
     var i: i64 = 0
     while i < n:
-        out = out.push(flat_pool_dec_text(r))
+        if p >= total:
+            r.ok = false
+            break
+        val raw_len = lines[p]
+        val m = if raw_len == "": 0 else: raw_len.to_i64()
+        p = p + 1
+        if (m < 0) or (m > (total - p)):
+            r.ok = false
+            break
+        val end = p + m
+        var inner: [text] = []
+        while p < end:
+            val raw = lines[p]
+            inner.push(if raw.contains("\\"): flat_pool_unescape(raw) else: raw)
+            p = p + 1
+        out.push(inner)
         i = i + 1
+    r.pos = p
     out
 
 pub fn flat_pool_dec_text_list_list(r: FlatPoolReader) -> [[[text]]]:

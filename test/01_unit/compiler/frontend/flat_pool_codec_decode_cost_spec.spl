@@ -76,3 +76,45 @@ describe "flat pool codec decode cost":
         expect(flat_pool_unescape("\\")).to_equal("\\")
         expect(flat_pool_unescape("a\\qb")).to_equal("a\\qb")
         expect(flat_pool_unescape("\\\\n")).to_equal("\\n")
+
+    it "decodes i64 and nested list pools without a per-element reader call":
+        # doc/08_tracking/bug/frontend_cache_hit_restore_cost_2026-08-22.md
+        # A real compiler module's entry is several hundred thousand lines
+        # (hir_codec.spl: 573k, 383k in the expr pools), and until 2026-08-22
+        # every one of them went through next() -> next_i64() ->
+        # flat_pool_parse_i64() plus a fresh inner decode call per AST node's
+        # list, which under the interpreter cost more than the decode itself:
+        # a cache HIT on hir_codec.spl restored in 24-31 s, i.e. most of a
+        # real parse, and 8 HIR shard children each paid it for all 687
+        # modules. Decoding 300k i64 values took 11.4 s the old way and 2.6 s
+        # with the cursor loop inlined; this bound sits well above the new
+        # cost on a loaded box and well below the old one.
+        var pool: [i64] = []
+        var lists: [[i64]] = []
+        var i: i64 = 0
+        while i < 300000:
+            pool = pool.push(i * 7 - 3)
+            if i < 60000:
+                lists = lists.push(if i % 3 == 0: [] else: [i, i + 1])
+            i = i + 1
+        val blob = flat_pool_enc_i64(pool) + flat_pool_enc_i64_list(lists)
+        val r = FlatPoolReader.new(blob)
+        val t0 = rt_time_now_unix_micros()
+        val decoded = flat_pool_dec_i64(r)
+        val decoded_lists = flat_pool_dec_i64_list(r)
+        val elapsed_ms = (rt_time_now_unix_micros() - t0) / 1000
+        expect(decoded.len()).to_equal(300000)
+        expect(decoded[299999]).to_equal(299999 * 7 - 3)
+        expect(decoded_lists.len()).to_equal(60000)
+        expect(decoded_lists[1]).to_equal([1, 2])
+        expect(decoded_lists[3].len()).to_equal(0)
+        expect(r.ok).to_be_true()
+        expect(elapsed_ms < 6000).to_be_true()
+
+    it "marks the reader not-ok on a truncated inner list instead of reading past the blob":
+        val blob = "2\n1\n7\n5\n"   # two lists; the second claims 5 items but has none
+        val r = FlatPoolReader.new(blob)
+        val lists = flat_pool_dec_i64_list(r)
+        expect(lists.len()).to_equal(1)
+        expect(lists[0]).to_equal([7])
+        expect(r.ok).to_equal(false)
