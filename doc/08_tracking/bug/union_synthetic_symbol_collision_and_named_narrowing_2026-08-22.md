@@ -2,26 +2,35 @@
 
 ## Status
 
-Open. Static audit on 2026-08-22; no compiler execution was permitted.
+Partially resolved by the module-owned SymbolTable registry and bare named-type
+lookup. Generic/qualified pattern grammar remains open. Static audit only; no
+compiler execution was permitted.
 
 ## Remaining correctness risks
 
-`union_synth_symbol_id` compresses canonical names into a 100,000,000-value
-range and `union_normalize_module` writes directly into `module.enums` by that
-ID. A collision can overwrite another synthesized enum. Fixing this requires a
-module-owned deterministic name-to-ID registry used by both enum registration
-and HIR narrowing; local probing in only one caller would make their IDs differ.
+`union_synth_symbol_id` remains the preferred-ID function for compatibility,
+but production synthesis and HIR narrowing now reserve through the same
+module-owned `SymbolTable` registry. Name-to-ID and reverse ID-to-name maps
+recompute the preferred ID from canonical identity and probe on collision;
+enum and variant IDs use the same owner and survive HIR codec round trips.
 
-Source narrowing currently maps primitive written names to canonical keys, but
-a named source type is returned as its spelling while resolved union members use
-symbol-ID/generic-argument structural keys. Named/generic narrowing therefore
-needs resolved type identity rather than another textual alias table.
+The registry prevents aliasing, but a genuine same-hash pair still receives
+its two probed IDs in encounter order. Encounter-independent artifacts require
+sorted preregistration before lowering embeds either ID. The exported legacy
+synthesis wrappers also remain compatibility-only and do not coordinate IDs
+across independent calls.
+
+Bare named source patterns now resolve their registered SymbolId before key
+lookup. The pattern grammar still carries only one identifier plus binder, so
+generic arguments and qualified/composite type syntax cannot reach HIR and
+remain unsupported.
 
 ## Completion conditions
 
-- One module-owned registry resolves canonical union names to collision-free IDs
-  deterministically and is consumed by synthesis and narrowing.
-- Existing enum IDs cannot be overwritten silently.
-- Named and generic type-test arms resolve through HIR type identity.
+- Generic and qualified type-test grammar carries a real frontend Type and HIR
+  pattern carries/resolves a HirType rather than spelling only.
+- Generic type-test arms resolve through complete structural HIR identity.
 - Collision and named/generic fixtures prove exact enum, variant, payload, and
   diagnostic behavior.
+- Sorted preregistration makes genuine same-hash assignment independent of
+  declaration and dictionary traversal order.
