@@ -702,6 +702,17 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   tracked in `doc/08_tracking/bug/query_error_matcher_generation_freshness_2026-08-22.md`.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed diagnostic tooling tranche: deterministic matcher generation
+
+- Added the canonical append-only 116-pattern Pure Simple manifest.
+- Added a bounded deterministic trie/failure/CSR/output-mask model builder.
+- Added one-join source rendering, non-mutating exact `check`, and changed-only
+  atomic `generate` modes without process, shell, C, or Rust delegation.
+- Added mirrored manifest alignment, cardinality, exact source freshness, and
+  injected-bound failure contracts.
+- Remaining follow-up: a separate canonical manifest for ordered rule priority.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed diagnostic tranche: shared query error-code ownership
 
 - Move the duplicated ordered classifier into cycle-free `query_error_codes`.
