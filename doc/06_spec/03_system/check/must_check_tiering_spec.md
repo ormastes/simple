@@ -38,9 +38,13 @@ freshness and wiring from the second. The installed payload is a stable
 worktree-resolving launcher, not an absolute symlink to whichever checkout ran
 setup last. Exact legacy guard or dispatcher payloads are replaced without
 being preserved recursively; unrelated local hooks remain chained.
+The Unix behavior is executable in the focused fixture. Native Windows
+linked-worktree installation remains the visible `windows-hook-installation`
+TODO and is not inferred from PowerShell source parity.
 
 Focused evidence: `sh test/01_unit/scripts/must_check_tiering_test.shs` produced
-`selftest=4s ref-path=0s installed-hook=1s` on 2026-08-22 after rebase.
+`selftest=5s ref-path=0s installed-hook=0s` on 2026-08-22 after adding the
+Windows TODO row.
 
 The executable scenario invokes the push self-test, bootstrap self-test, and
 the real bootstrap-produced-ledger to committed-ref push transition fixture.

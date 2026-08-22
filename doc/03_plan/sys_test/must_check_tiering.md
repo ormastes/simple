@@ -15,6 +15,11 @@
   the real pre-push ref-input consumer without manually fabricating PASS state.
 - Prove the push driver directly names no native-build, QEMU, full-test, or
   benchmark command and its focused self-test stays within ten seconds.
+- On a native Windows host, create two linked worktrees, run
+  `powershell -File scripts/setup/install-must-check-hooks.ps1 -Install` in the
+  first, then `-Check` and `sh scripts/check/check-hook-installation.shs` from
+  the second. Retain the hook hash and both verdicts; until then
+  `windows-hook-installation` remains TODO.
 
 Focused command: `sh test/01_unit/scripts/must_check_tiering_test.shs`.
 
@@ -25,6 +30,7 @@ Focused command: `sh test/01_unit/scripts/must_check_tiering_test.shs`.
 | REQ-MCT-001, REQ-MCT-003 | `test/03_system/check/must_check_tiering_spec.spl` | push validator | Source present; Stage-4 execution pending |
 | REQ-MCT-002, REQ-MCT-005 | `test/03_system/check/must_check_tiering_spec.spl` | bootstrap producer | Source present; Stage-4 execution pending |
 | REQ-MCT-004, REQ-MCT-006 | `test/03_system/check/must_check_tiering_spec.spl` | producer-to-consumer and installer | Shell fixture PASS; Stage-4 SSpec pending |
+| REQ-MCT-006 Windows | `scripts/setup/install-must-check-hooks.ps1` | linked-worktree install/check | TODO: native Windows host evidence required |
 
 The manual mirror is
 `doc/06_spec/03_system/check/must_check_tiering_spec.md`. Regenerate it with
