@@ -1,8 +1,8 @@
 <!-- codex-architecture -->
 # Server data namespace on a second persistent DBFS medium
 
-**Status:** Proposed implementation contract  
-**Scope:** x86_64, AArch64, and RV64 SimpleOS guests under QEMU  
+**Status:** Proposed implementation contract
+**Scope:** x86_64, AArch64, and RV64 SimpleOS guests under QEMU
 **Non-goals:** replacing pure Simple with C/Rust, making DBFS the boot/root medium, or exposing a raw block device to a server
 
 ## 1. Decision
