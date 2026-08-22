@@ -3,6 +3,7 @@ use std.fs.{read_file}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.*
 use compiler.mir_opt.mir_opt.storage_access_analysis.{
+    MirStorageAccessFactV1, MirStorageAccessSummaryV1,
     analyze_mir_storage_access_summary, mir_storage_region_binding_v1
 }
 use compiler.mir_opt.mir_opt.storage_layout_access_advisory.{
@@ -12,7 +13,7 @@ use compiler.mir_opt.mir_opt.storage_layout_access_advisory.{
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.common.parallel_policy.policy_schema.{ResolvedMemoryPolicyV1}
 use std.common.structural.parallel_commit.access_contracts.{
-    parallel_access_paths_conflict
+    ParallelAccessMode, parallel_access_path_v1, parallel_access_paths_conflict
 }
 use std.common.structural.storage_layout.planner.{storage_layout_plan_auto}
 use std.common.structural.storage_layout.storage_layout_contracts.{
@@ -73,6 +74,25 @@ fn advisory_layout_tag(function: MirFunction, simd_width: i64,
     storage_layout_kind_to_u8(
         storage_layout_plan_auto(
             advisory_for(function, simd_width, gpu, abi).request).layout)
+
+fn advisory_fact(region_id: i64, start: i64, end: i64,
+                 field_id: i64, known_range: bool = true,
+                 mode: ParallelAccessMode = ParallelAccessMode.Read
+) -> MirStorageAccessFactV1:
+    val path = parallel_access_path_v1(region_id, start, end, known_range,
+        "field:{field_id}", mode)
+    MirStorageAccessFactV1(path: path, has_field: true,
+        field_id: field_id, structural_record_load: false)
+
+fn advisory_summary(facts: [MirStorageAccessFactV1],
+                    complete: bool = true) -> MirStorageAccessSummaryV1:
+    MirStorageAccessSummaryV1(accesses: [], typed_facts: facts,
+        address_observed: false, unknown_access: false, complete: complete)
+
+fn advisory_from_facts(facts: [MirStorageAccessFactV1],
+                       complete: bool = true):
+    storage_layout_access_advisory_v1(advisory_summary(facts, complete),
+        9201, 3, 32, 16, 1, false, false, "access-policy-v1")
 
 describe "typed storage access layout advisory":
     it "advises SoA SIMD AoSoA explicit GPU grouping and pinned ABI":
@@ -155,6 +175,91 @@ describe "typed storage access layout advisory":
             storage_layout_plan_auto(coaccess.request).layout),
             storage_layout_kind_to_u8(StorageLayoutKind.AoS))
 
+    it "preserves half-open region and field overlap semantics":
+        val adjacent = advisory_from_facts([
+            advisory_fact(200, 0, 2, 4),
+            advisory_fact(200, 2, 4, 7)
+        ])
+        assert_true(adjacent.complete)
+        assert_true(adjacent.independent_field_access)
+
+        val separate_regions = advisory_from_facts([
+            advisory_fact(200, 0, 4, 4),
+            advisory_fact(201, 0, 4, 7)
+        ])
+        assert_true(separate_regions.complete)
+        assert_true(separate_regions.independent_field_access)
+
+        val repeated_field = advisory_from_facts([
+            advisory_fact(200, 0, 4, 4),
+            advisory_fact(200, 1, 3, 4),
+            advisory_fact(200, 5, 6, 7)
+        ])
+        assert_true(repeated_field.complete)
+        assert_true(repeated_field.independent_field_access)
+
+    it "rejects nested equal-start and incomplete overlap evidence":
+        val nested = advisory_from_facts([
+            advisory_fact(200, 0, 8, 4),
+            advisory_fact(200, 2, 4, 7)
+        ])
+        assert_false(nested.complete)
+
+        val equal_start = advisory_from_facts([
+            advisory_fact(200, 0, 4, 4),
+            advisory_fact(200, 0, 2, 7)
+        ])
+        assert_false(equal_start.complete)
+        assert_false(equal_start.independent_field_access)
+
+        val repeated_field_then_overlap = advisory_from_facts([
+            advisory_fact(200, 0, 100, 4),
+            advisory_fact(200, 1, 90, 4),
+            advisory_fact(200, 95, 110, 7)
+        ])
+        assert_false(repeated_field_then_overlap.complete)
+        assert_false(repeated_field_then_overlap.independent_field_access)
+
+        val unknown_range = advisory_from_facts([
+            advisory_fact(200, 0, 4, 4, false),
+            advisory_fact(200, 5, 6, 7)
+        ])
+        assert_false(unknown_range.complete)
+        assert_false(unknown_range.independent_field_access)
+
+        val incomplete = advisory_from_facts([
+            advisory_fact(200, 0, 1, 4),
+            advisory_fact(200, 2, 3, 7)
+        ], false)
+        assert_false(incomplete.complete)
+        assert_false(incomplete.independent_field_access)
+
+    it "preserves the legacy predicate for malformed known ranges":
+        val contained_inverted = advisory_from_facts([
+            advisory_fact(200, 0, 10, 4),
+            advisory_fact(200, 5, 3, 7)
+        ])
+        assert_false(contained_inverted.complete)
+
+        val separated_inverted = advisory_from_facts([
+            advisory_fact(200, 5, 3, 4),
+            advisory_fact(200, 6, 10, 7)
+        ])
+        assert_true(separated_inverted.complete)
+
+    it "keeps multi-row identity independent of fact order":
+        val forward = advisory_from_facts([
+            advisory_fact(200, 0, 1, 4),
+            advisory_fact(200, 3, 4, 7, true, ParallelAccessMode.Write),
+            advisory_fact(200, 6, 7, 4)
+        ])
+        val reverse = advisory_from_facts([
+            advisory_fact(200, 6, 7, 4),
+            advisory_fact(200, 3, 4, 7, true, ParallelAccessMode.Write),
+            advisory_fact(200, 0, 1, 4)
+        ])
+        assert_equal(forward.identity, reverse.identity)
+
     it "denies all-field and non-field record uses":
         val clean_summary = analyze_mir_storage_access_summary(
             advisory_function(false, false),
@@ -220,3 +325,6 @@ describe "typed storage access layout advisory":
         assert_true(source.contains("identity_rows.sort()"))
         assert_false(source.contains("for existing in field_ids"))
         assert_false(source.contains("while j < identity_rows.len()"))
+        assert_true(source.contains("fn storage_layout_sort_intervals("))
+        assert_true(source.contains("fn storage_layout_has_cross_field_overlap("))
+        assert_false(source.contains("while right < summary.typed_facts.len()"))

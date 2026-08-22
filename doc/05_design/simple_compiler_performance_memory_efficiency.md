@@ -912,3 +912,14 @@ COW copy. Equality consumes the left run, incomplete final runs are copied, and
 the width guard prevents overflow. Catalog construction stores one ordered
 module-name array and one function/static/constant/type key array per module for
 reuse across rebasing and conversion.
+
+### Storage-layout interval sweep
+
+Build interval rows only after completeness, field-count, schema, unknown-range,
+and unknown-region gates pass. Stable bottom-up merge uses one result and one
+scratch array and relational i64 comparisons. Stable left ties preserve equal
+rows. Within each region, retain the two maximum ends belonging to distinct
+fields; a valid current interval overlaps iff the maximum end from another
+field exceeds its start. For `end <= start`, compare the current row against
+prior rows in its region with both legacy inequalities. Stop on the first
+cross-field overlap because later work can only keep `complete` false.
