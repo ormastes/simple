@@ -58,6 +58,7 @@ pub mod pattern_case_naming;
 pub mod mock;
 pub mod module_resolver;
 pub mod monomorphize;
+pub mod native_build_sffi;
 pub mod optimizations;
 pub mod parallel;
 pub mod pattern_analysis;

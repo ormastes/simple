@@ -724,7 +724,10 @@ impl Lowerer {
     /// This is the codegen-side consumer whose absence made aliased imports
     /// lower to unresolved external symbols.
     pub(super) fn collect_flattened_import_aliases(&mut self, ast_module: &simple_parser::Module) {
-        use crate::interpreter::{decode_import_binding_marker, flatten_owner_mangled_name};
+        use crate::interpreter::{
+            decode_import_binding_marker, flatten_owner_mangled_name,
+            FLATTEN_MODULE_OWNER_ATTR_PREFIX,
+        };
 
         // Flattening merges every imported module's items into one namespace. An
         // imported free function whose bare name cannot survive that merge is
@@ -745,6 +748,8 @@ impl Lowerer {
         // compared to silently binding the wrong function. See
         // `doc/08_tracking/bug/flattened_lane_does_not_mangle_duplicate_function_names_2026-08-10.md`.
         let mut definition_counts: HashMap<&str, usize> = HashMap::new();
+        // (module owner, bare name) -> definition count. See the Function arm below.
+        let mut owner_definition_counts: HashMap<(&str, &str), usize> = HashMap::new();
         // Every name the flattened unit really DECLARES, function or value. The
         // alias branch in `lower_identifier` now runs ahead of the
         // callable/global lookups (see there for why), so an entry recorded here
@@ -757,6 +762,16 @@ impl Lowerer {
                 simple_parser::Node::Function(f) => {
                     *definition_counts.entry(f.name.as_str()).or_insert(0) += 1;
                     declared_names.insert(f.name.as_str());
+                    // `strip_flattened_import_nodes` tags every flattened
+                    // function with the module that declared it. Counting by
+                    // (owner, name) lets an alias be disambiguated by the module
+                    // the `use` actually names, even though only `main` is
+                    // owner-MANGLED and every other name stays bare.
+                    if let Some(owner) = f.attributes.iter().find_map(|a| {
+                        a.name.strip_prefix(FLATTEN_MODULE_OWNER_ATTR_PREFIX)
+                    }) {
+                        *owner_definition_counts.entry((owner, f.name.as_str())).or_insert(0) += 1;
+                    }
                 }
                 simple_parser::Node::Const(c) => {
                     declared_names.insert(c.name.as_str());
@@ -773,6 +788,28 @@ impl Lowerer {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Every import/re-export edge in the flattened unit, keyed by the module
+        // that WROTE it. `std.io_runtime` is a facade
+        // (`src/lib/io_runtime.spl`) that re-exports the real
+        // `src/lib/nogc_sync_mut/io_runtime.spl`, so a marker's `source_owner`
+        // frequently names the facade, not the module that actually declares the
+        // function. Following these edges is what turns the facade into the
+        // declaring module.
+        let mut reexport_edges: HashMap<(&str, &str), (&str, &str)> = HashMap::new();
+        for item in &ast_module.items {
+            if let simple_parser::Node::Const(marker) = item {
+                if let Some((importer, local_name, source_owner, source_name)) =
+                    decode_import_binding_marker(&marker.name)
+                {
+                    if local_name != "*" && source_name != "*" {
+                        reexport_edges
+                            .entry((importer, local_name))
+                            .or_insert((source_owner, source_name));
+                    }
+                }
             }
         }
 
@@ -804,6 +841,44 @@ impl Lowerer {
             } else if definition_counts.get(source_name).copied() == Some(1) {
                 // Unmangled and unique in the flattened unit: the bare name is
                 // the only candidate, so binding it is safe.
+                source_name.to_string()
+            } else if {
+                // Walk the re-export chain from the module the `use` names to
+                // the module that actually DECLARES the function, then check
+                // that the declaration is unique there. Bounded so a cyclic
+                // facade graph cannot hang lowering.
+                let mut owner = source_owner;
+                let mut sym = source_name;
+                let mut found = false;
+                for _ in 0..16 {
+                    if owner_definition_counts.get(&(owner, sym)).copied() == Some(1) {
+                        found = true;
+                        break;
+                    }
+                    match reexport_edges.get(&(owner, sym)) {
+                        Some(&(next_owner, next_sym)) => {
+                            owner = next_owner;
+                            sym = next_sym;
+                        }
+                        None => break,
+                    }
+                }
+                found
+            } {
+                // The bare name is ambiguous across the flattened unit (e.g.
+                // FOUR modules define `file_rename`), but exactly one of them is
+                // the module this `use` names, identified by the flattener's own
+                // module-owner tag. Bind the bare name.
+                //
+                // This is not a guess and it cannot bind "the wrong function"
+                // any more than the non-aliased form already does: a plain
+                // `use std.io_runtime.{file_rename}` -- which the tree already
+                // relies on (`src/lib/nogc_sync_mut/shell/file.spl:22`) --
+                // lowers to exactly this bare name today. Refusing only the
+                // ALIASED spelling made the two forms disagree and produced an
+                // unresolvable `Linkage::Import` (`runtime_file_rename`) that
+                // de-JITted the whole stage1 module. See
+                // `doc/08_tracking/bug/jit_unresolved_rt_native_build_and_runtime_file_rename_2026-08-22.md`.
                 source_name.to_string()
             } else {
                 // Absent or ambiguous. Do NOT guess -- leave the alias
