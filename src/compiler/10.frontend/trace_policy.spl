@@ -5,6 +5,9 @@
 # owner that machine-output scopes can nest without rewriting process env vars.
 
 var _frontend_trace_suppression_slot: [i64] = [0]
+var _frontend_compiler_trace_scope_slot: [i64] = [0, 0]
+
+extern fn rt_env_get(key: text) -> text
 
 fn _frontend_trace_slot_ensure():
     if (_frontend_trace_suppression_slot == nil or
@@ -21,4 +24,30 @@ fn frontend_trace_suppression_set(suppressed: bool) -> bool:
     _frontend_trace_suppression_slot[0] = if suppressed: 1 else: 0
     previous
 
+# Snapshot SIMPLE_COMPILER_TRACE once at the outer parse boundary. The packed
+# return value makes nested parses restore the caller's scope without allocating
+# a temporary object or rewriting the process environment.
+fn frontend_compiler_trace_scope_enter() -> i64:
+    val previous = (_frontend_compiler_trace_scope_slot[0] +
+        2 * _frontend_compiler_trace_scope_slot[1])
+    if _frontend_compiler_trace_scope_slot[0] != 0:
+        return previous
+    _frontend_compiler_trace_scope_slot[0] = 1
+    _frontend_compiler_trace_scope_slot[1] = if (
+        (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"): 1 else: 0
+    previous
+
+fn frontend_compiler_trace_scope_exit(snapshot: i64):
+    _frontend_compiler_trace_scope_slot[0] = snapshot % 2
+    _frontend_compiler_trace_scope_slot[1] = (snapshot / 2) % 2
+
+fn frontend_compiler_trace_enabled() -> bool:
+    val requested = if _frontend_compiler_trace_scope_slot[0] != 0:
+        _frontend_compiler_trace_scope_slot[1] != 0
+    else:
+        (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    requested and not frontend_trace_suppressed()
+
 export frontend_trace_suppressed, frontend_trace_suppression_set
+export frontend_compiler_trace_enabled
+export frontend_compiler_trace_scope_enter, frontend_compiler_trace_scope_exit
