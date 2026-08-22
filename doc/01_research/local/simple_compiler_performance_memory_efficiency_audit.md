@@ -1754,12 +1754,19 @@ removed so the warning has one implementation owner.
 ### Dependency-closed PerfFacts requests
 
 The no-liveness projection still built CFG, reverse postorder, dominators and
-def-use for every consumer. Production use was disjoint: loop detection needs
-CFG plus dominance, while vector dependency, storage access and typed storage
-views need def-use only. `PerfFactRequest` now exposes those capabilities with
+def-use for every consumer. Production needs are narrower: loop detection needs
+CFG plus dominance; storage-access analysis needs def-use only; vector dependency
+and typed-storage rewriting need CFG integrity plus def-use. `PerfFactRequest`
+now exposes those capabilities with
 closure rules (`dominators => cfg`, `liveness => cfg + def_use`) and diagnostics
 for implicit expansion. Loop detection no longer classifies instructions or
 allocates local buckets/def-use sites. Def-use clients no longer build edge maps,
 DFS/RPO state or iterative dominators. Legacy full/no-liveness/verifier builders
 retain compatibility. Unrequested families are empty and report incomplete, so
 missing work cannot accidentally authorize a transformation.
+
+Independent review caught two capability-integrity gaps before further work.
+Dominance now has an explicit `dominators_complete` bit and loop detection exits
+unless it is true. Vectorization and typed-storage rewriting use the CFG+def-use
+preset and reject duplicate/missing block identities before interpreting sites
+keyed by block ID. They still omit RPO/dominator and liveness work.
