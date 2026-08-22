@@ -16,7 +16,8 @@ use os.kernel.scheduler.process_execution_observation.{
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.kernel.arch.riscv64.process_stdout_capture.{
     Rv64ProcessStdoutResult, rv64_process_stdout_begin,
-    rv64_process_stdout_bind_child, rv64_process_stdout_finish
+    rv64_process_stdout_bind_child, rv64_process_stdout_seal_and_flush,
+    rv64_process_stdout_finish
 }
 use os.kernel.types.task_types.{TaskId}
 use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_status}
@@ -75,6 +76,12 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
     val child = TaskId(id: prepared.pid.to_u64())
     val exit_code = dispatch_fs_exec_user_handoff(Architecture.Riscv64, child.id, prepared.scheduler)
     var owner = prepared.scheduler
+    if not rv64_process_stdout_seal_and_flush(capture_session.unwrap()):
+        owner.exit_task_by_id(child, -10)
+        _ = owner.wait_for_collect(TaskId(id: 0), child, false)
+        _discard_execution_observation(child.id)
+        _ = rv64_process_stdout_finish(capture_session.unwrap(), -10)
+        return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
     owner.exit_task_by_id(child, exit_code.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0), child, false)
     val captured_result = rv64_process_stdout_finish(capture_session.unwrap(), exit_code)

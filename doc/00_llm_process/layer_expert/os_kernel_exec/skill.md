@@ -369,3 +369,16 @@ disjoint IPC/VFS, boot-owner, WM, and manual rows. The source now keeps the
 daemon accepting after WM admission and rejects later accepted sessions that
 do not complete and resume accept; this remains unexecuted. Only the primary
 RV64 owner runs the shared port-2222 live gate.
+
+## RV64 process-output owner update (2026-08-22)
+
+`process_stdout_capture.spl` remains the synchronous byte-admission and 4 KiB
+compatibility-prefix owner; `process_execution_observation.spl` remains the
+generation-bound 64 KiB canonical evidence owner. Forwarding uses fixed
+256-byte ordered batches, with an atomic seal/tail flush before the loader
+marks the child exited. Preserve the closed lock graph (capture -> scheduler
+only), immediate serial output, byte-wrapper behavior, prefix truncation, and
+consume-once evidence. The batching improvement is scheduler lock/dispatch
+count only; retained stdout grows by the fixed 256-byte pending buffer, so RSS
+and allocation claims remain blocked on the admitted-runtime campaign tracked
+by `PERF-SIMPLEOS-002`.

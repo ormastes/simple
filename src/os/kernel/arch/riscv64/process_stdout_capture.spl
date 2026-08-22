@@ -2,11 +2,12 @@
 use os.kernel.scheduler.process_execution_observation.{
     SchedulerExecutionObservationHandleV1,
     scheduler_execution_observation_handle_for_child_v1,
-    scheduler_execution_observe_stdout_byte_for_handle_v1
+    scheduler_execution_observe_stdout_batch_for_handle_v1
 }
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 
 val RV64_PROCESS_STDOUT_LIMIT: u64 = 4096
+val RV64_PROCESS_STDOUT_FORWARD_BATCH: i64 = 256
 
 pub(package) struct Rv64ProcessStdoutSessionV1:
     generation: u64
@@ -26,6 +27,13 @@ var _nonce: u64 = 0x5256363443415054u64
 var _bound_child: u64 = 0u64
 var _observation: SchedulerExecutionObservationHandleV1? = nil
 var _bytes: [u8] = []
+var _pending_observation_bytes: [u8] = [0u8; 256]
+var _pending_observation_len: i64 = 0
+var _sealed: bool = false
+var _observation_saturated: bool = false
+var _observation_failed: bool = false
+var _scheduler_commit_count: u64 = 0u64
+var _last_scheduler_commit_count: u64 = 0u64
 var _truncated: bool = false
 var _last = Rv64ProcessStdoutResult(bytes: [], exit_code: -1, truncated: false)
 
@@ -35,6 +43,30 @@ fn _unlock() -> bool:
     mutex_raw_unlock(_capture_mutex)
 fn _matches(session: Rv64ProcessStdoutSessionV1) -> bool:
     _active and session.generation == _generation and session.nonce == _nonce
+
+fn _flush_observation_locked() -> bool:
+    """Commit one fixed batch while the capture owner preserves byte order.
+
+    Lock graph proof: this is the sole capture->scheduler nested edge.  The
+    scheduler observation module neither imports nor calls this capture owner;
+    child binding completes and releases its scheduler lookup lock before it
+    acquires `_capture_mutex`.  Therefore no scheduler->capture edge exists.
+    """
+    if _observation_failed: return false
+    if _pending_observation_len == 0 or _observation_saturated or not _observation.?:
+        _pending_observation_len = 0
+        return true
+    val pending_count = _pending_observation_len
+    val accepted = scheduler_execution_observe_stdout_batch_for_handle_v1(
+        _observation.unwrap(), _pending_observation_bytes, pending_count)
+    _pending_observation_len = 0
+    _scheduler_commit_count = _scheduler_commit_count + 1u64
+    if accepted < 0:
+        _observation_failed = true
+        return false
+    if accepted < pending_count:
+        _observation_saturated = true
+    true
 
 fn rv64_process_stdout_begin() -> Rv64ProcessStdoutSessionV1?:
     if not _lock(): return nil
@@ -47,6 +79,11 @@ fn rv64_process_stdout_begin() -> Rv64ProcessStdoutSessionV1?:
     _bound_child = 0u64
     _observation = nil
     _bytes = []
+    _pending_observation_len = 0
+    _sealed = false
+    _observation_saturated = false
+    _observation_failed = false
+    _scheduler_commit_count = 0u64
     _truncated = false
     val session = Rv64ProcessStdoutSessionV1(generation: _generation, nonce: _nonce)
     if not _unlock(): return nil
@@ -69,18 +106,30 @@ fn rv64_process_stdout_bind_child(
 fn rv64_process_stdout_write_byte(child_id: u64, byte: u8) -> bool:
     if child_id == 0u64 or not _lock(): return false
     var accepted = false
-    var observation: SchedulerExecutionObservationHandleV1? = nil
-    if _active and _bound_child == child_id:
-        observation = _observation
+    if _active and not _sealed and _bound_child == child_id:
         if _bytes.len() < RV64_PROCESS_STDOUT_LIMIT:
             _bytes = rt_push_byte(_bytes, byte.to_i64())
         else:
             _truncated = true
+        if _observation.? and not _observation_saturated and not _observation_failed:
+            _pending_observation_bytes[_pending_observation_len] = byte
+            _pending_observation_len = _pending_observation_len + 1
+            if _pending_observation_len >= RV64_PROCESS_STDOUT_FORWARD_BATCH:
+                _ = _flush_observation_locked()
         accepted = true
     if not _unlock(): return false
-    if observation.?:
-        _ = scheduler_execution_observe_stdout_byte_for_handle_v1(observation.unwrap(), byte)
     accepted
+
+fn rv64_process_stdout_seal_and_flush(session: Rv64ProcessStdoutSessionV1) -> bool:
+    """Atomically close byte admission and commit the tail before child exit."""
+    if not _lock(): return false
+    if not _matches(session) or _sealed:
+        _unlock()
+        return false
+    _sealed = true
+    val flushed = _flush_observation_locked()
+    if not _unlock(): return false
+    flushed
 
 fn rv64_process_stdout_finish(
     session: Rv64ProcessStdoutSessionV1, exit_code: i64
@@ -89,13 +138,15 @@ fn rv64_process_stdout_finish(
     if not _matches(session):
         _unlock()
         return nil
+    val flushed = _flush_observation_locked()
     _active = false
     _bound_child = 0u64
     _observation = nil
+    _last_scheduler_commit_count = _scheduler_commit_count
     _last = Rv64ProcessStdoutResult(bytes: _bytes, exit_code: exit_code, truncated: _truncated)
     val result = _last
     if not _unlock(): return nil
-    Some(result)
+    if flushed: Some(result) else: nil
 
 fn rv64_process_stdout_last_result() -> Rv64ProcessStdoutResult?:
     if not _lock(): return nil
@@ -105,3 +156,9 @@ fn rv64_process_stdout_last_result() -> Rv64ProcessStdoutResult?:
     val result = _last
     if not _unlock(): return nil
     Some(result)
+
+pub(package) fn rv64_process_stdout_last_scheduler_commit_count_v1() -> u64:
+    if not _lock(): return 0xFFFFFFFFFFFFFFFFu64
+    val count = if _active: _scheduler_commit_count else: _last_scheduler_commit_count
+    if not _unlock(): return 0xFFFFFFFFFFFFFFFFu64
+    count

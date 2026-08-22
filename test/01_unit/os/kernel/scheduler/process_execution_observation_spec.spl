@@ -3,7 +3,8 @@ use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableI
 use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
 use os.kernel.arch.riscv64.process_stdout_capture.{
     rv64_process_stdout_begin, rv64_process_stdout_bind_child,
-    rv64_process_stdout_write_byte, rv64_process_stdout_finish
+    rv64_process_stdout_write_byte, rv64_process_stdout_seal_and_flush,
+    rv64_process_stdout_finish, rv64_process_stdout_last_scheduler_commit_count_v1
 }
 use os.kernel.scheduler.process_execution_observation.{
     scheduler_execution_observe_adoption_v1, scheduler_execution_observe_exit_v1,
@@ -11,6 +12,7 @@ use os.kernel.scheduler.process_execution_observation.{
     scheduler_execution_evidence_consume_once_v1,
     scheduler_execution_observe_adoption_handle_v1,
     scheduler_execution_observe_stdout_byte_for_handle_v1,
+    scheduler_execution_observe_stdout_batch_for_handle_v1,
     scheduler_execution_observe_stderr_byte_for_handle_v1,
     scheduler_execution_observe_exit_handle_v1,
     scheduler_execution_observe_reap_handle_v1,
@@ -70,20 +72,29 @@ describe "scheduler execution observation capacity":
     it "bounds stdout and stderr independently and reports each truncation":
         val handle = scheduler_execution_observe_adoption_handle_v1(404u64, 7u64, _handle()).unwrap()
         var i = 0
-        while i < 65536:
+        while i < 65535:
             expect(scheduler_execution_observe_stdout_byte_for_handle_v1(handle, 0x41u8)).to_equal(true)
             expect(scheduler_execution_observe_stderr_byte_for_handle_v1(handle, 0x42u8)).to_equal(true)
             i = i + 1
-        expect(scheduler_execution_observe_stdout_byte_for_handle_v1(handle, 0x58u8)).to_equal(false)
+        expect(scheduler_execution_observe_stdout_batch_for_handle_v1(
+            handle, [0x44u8], 2)).to_equal(-1)
+        expect(scheduler_execution_observe_stdout_batch_for_handle_v1(
+            handle, [0x43u8, 0x58u8, 0x59u8], 3)).to_equal(1)
+        expect(scheduler_execution_observe_stderr_byte_for_handle_v1(handle, 0x42u8)).to_equal(true)
         expect(scheduler_execution_observe_stderr_byte_for_handle_v1(handle, 0x59u8)).to_equal(false)
         expect(scheduler_execution_observe_exit_handle_v1(handle, 0)).to_equal(true)
+        expect(scheduler_execution_observe_stdout_batch_for_handle_v1(
+            handle, [0x60u8, 0x61u8], 2)).to_equal(-1)
         expect(scheduler_execution_observe_reap_handle_v1(handle)).to_equal(true)
         val evidence = scheduler_execution_evidence_consume_once_v1(
             scheduler_execution_deliver_reaped_handle_v1(handle).unwrap()).unwrap()
         expect(evidence.stdout_bytes.len()).to_equal(65536)
+        expect(evidence.stdout_bytes[65535]).to_equal(0x43u8)
         expect(evidence.stderr_bytes.len()).to_equal(65536)
         expect(evidence.stdout_truncated).to_equal(true)
         expect(evidence.stderr_truncated).to_equal(true)
+        expect(scheduler_execution_observe_stdout_batch_for_handle_v1(
+            handle, [0x62u8], 1)).to_equal(-1)
 
     it "forwards RV64 bytes beyond its local 4096-byte display prefix":
         val handle = scheduler_execution_observe_adoption_handle_v1(406u64, 7u64, _handle()).unwrap()
@@ -102,6 +113,31 @@ describe "scheduler execution observation capacity":
             scheduler_execution_deliver_reaped_handle_v1(handle).unwrap()).unwrap()
         expect(evidence.stdout_bytes.len()).to_equal(4097)
         expect(evidence.stdout_truncated).to_equal(false)
+        # 4097 bytes use sixteen full 256-byte commits plus one tail commit,
+        # rather than 4097 scheduler lock cycles.
+        expect(rv64_process_stdout_last_scheduler_commit_count_v1()).to_equal(17u64)
+
+    it "commits an ordered tail before exit and bounds scheduler lock cycles":
+        val handle = scheduler_execution_observe_adoption_handle_v1(407u64, 7u64, _handle()).unwrap()
+        val session = rv64_process_stdout_begin().unwrap()
+        expect(rv64_process_stdout_bind_child(session, 407u64, true)).to_equal(true)
+        var i = 0
+        while i < 513:
+            expect(rv64_process_stdout_write_byte(407u64, (i % 251).to_u8())).to_equal(true)
+            i = i + 1
+        expect(rv64_process_stdout_seal_and_flush(session)).to_equal(true)
+        expect(rv64_process_stdout_write_byte(407u64, 0xFFu8)).to_equal(false)
+        expect(scheduler_execution_observe_exit_handle_v1(handle, 0)).to_equal(true)
+        expect(rv64_process_stdout_finish(session, 0).is_some()).to_equal(true)
+        expect(rv64_process_stdout_last_scheduler_commit_count_v1()).to_equal(3u64)
+        expect(scheduler_execution_observe_reap_handle_v1(handle)).to_equal(true)
+        val evidence = scheduler_execution_evidence_consume_once_v1(
+            scheduler_execution_deliver_reaped_handle_v1(handle).unwrap()).unwrap()
+        expect(evidence.stdout_bytes.len()).to_equal(513)
+        var j = 0
+        while j < evidence.stdout_bytes.len():
+            expect(evidence.stdout_bytes[j]).to_equal((j % 251).to_u8())
+            j = j + 1
 
     it "reuses generation-safe slots for more than 256 sequential executions":
         var i = 1u64

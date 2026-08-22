@@ -141,15 +141,30 @@ pub(package) fn scheduler_execution_observation_handle_for_child_v1(child_id: u6
 pub(package) fn scheduler_execution_observe_stdout_byte_for_handle_v1(
     handle: SchedulerExecutionObservationHandleV1, byte: u8
 ) -> bool:
-    if not _lock(): return false
+    scheduler_execution_observe_stdout_batch_for_handle_v1(handle, [byte], 1) == 1
+
+pub(package) fn scheduler_execution_observe_stdout_batch_for_handle_v1(
+    handle: SchedulerExecutionObservationHandleV1, bytes: [u8], count: i64
+) -> i64:
+    """Append one ordered, bounded owner batch under a single scheduler lock.
+
+    Returns the number retained, zero when the stream is already full, and -1
+    when the handle/lifecycle/lock rejects the commit.  A batch crossing the
+    limit retains its prefix and marks the canonical evidence truncated.
+    """
+    if count < 0 or count > bytes.len() or not _lock(): return -1
     val index = _handle_index(handle)
-    var accepted = false
+    var accepted = -1
     if index >= 0 and not _observation_state.observations[index].exited:
-        if _observation_state.observations[index].stdout_bytes.len() < STDOUT_LIMIT:
-            _observation_state.observations[index].stdout_bytes.push(byte)
-            accepted = true
-        else: _observation_state.observations[index].stdout_truncated = true
-    if not _unlock(): return false
+        accepted = 0
+        var i = 0
+        while i < count and _observation_state.observations[index].stdout_bytes.len() < STDOUT_LIMIT:
+            _observation_state.observations[index].stdout_bytes.push(bytes[i])
+            accepted = accepted + 1
+            i = i + 1
+        if accepted < count:
+            _observation_state.observations[index].stdout_truncated = true
+    if not _unlock(): return -1
     accepted
 
 pub(package) fn scheduler_execution_observe_stderr_byte_for_handle_v1(
