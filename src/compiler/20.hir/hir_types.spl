@@ -251,6 +251,11 @@ class SymbolTable:
     # Persistent root owner reused by reset_module. The Scope row is a small
     # routing value; its symbol backing never crosses reset by value.
     root_scope_symbols: Dict<text, i64>
+    # Module-owned structural-union identity shared by lowering and the later
+    # synthesis pass. Reverse ownership makes preferred-hash collisions loud
+    # to the allocator instead of silently aliasing two enums/variants.
+    structural_union_symbols: Dict<text, i64>
+    structural_union_owners: Dict<i64, text>
 
 impl SymbolTable:
     static fn new() -> SymbolTable:
@@ -267,7 +272,9 @@ impl SymbolTable:
             qualified_types: {},
             exact_symbols: {},
             module_callables: {},
-            root_scope_symbols: root_scope_symbols
+            root_scope_symbols: root_scope_symbols,
+            structural_union_symbols: {},
+            structural_union_owners: {}
         )
         # Create root scope (direct mutation avoids copy-modify-reassign bug)
         table.scopes[0] = Scope(
@@ -293,6 +300,8 @@ impl SymbolTable:
         self.qualified_types = {}
         self.exact_symbols = {}
         self.module_callables = {}
+        self.structural_union_symbols = {}
+        self.structural_union_owners = {}
         self.current_scope = ScopeId(id: 0)
         self.next_symbol_id = 0
         self.next_scope_id = 1
@@ -357,7 +366,13 @@ impl SymbolTable:
                 # Bracket-index read: same stage4 lane hardening as `lookup`.
                 return SymbolId(id: self.scopes[self.current_scope.id].symbols[name])
 
-        val raw_id = self.next_symbol_id
+        var raw_id = self.next_symbol_id
+        # Zero overhead on the ordinary compact lane beyond one scalar compare;
+        # if normal allocation ever reaches reserved structural-union IDs, skip
+        # owners instead of aliasing them.
+        if raw_id >= 900000000:
+            while self.structural_union_owners.contains_key(raw_id):
+                raw_id = raw_id + 1
         val id = SymbolId(id: raw_id)
         self.next_symbol_id = raw_id + 1
 
