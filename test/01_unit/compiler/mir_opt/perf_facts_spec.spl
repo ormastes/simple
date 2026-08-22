@@ -10,19 +10,31 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirFunction, MirBlock}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
-use compiler.mir_opt.mir_opt.perf_facts.{perf_facts_build, perf_facts_successors, perf_facts_predecessors, perf_facts_dominates}
+use compiler.mir_opt.mir_opt.perf_facts.{
+    PerfFactKind, PerfFactPreservation,
+    perf_facts_build, perf_facts_successors, perf_facts_predecessors,
+    perf_facts_dominates, perf_facts_definitions, perf_facts_uses,
+    perf_fact_preservation_all, perf_fact_preservation_cfg_only,
+    perf_fact_preservation_integrity_errors, perf_facts_invalidated
+}
 use compiler.mir_opt.mir_opt.loop_detect.{LoopDetector}
 
 fn _pf_block(id: i64, term: MirTerminator) -> MirBlock:
     MirBlock(BlockId(id: id), Some("b{id}"), [], term)
 
+fn _pf_block_with(id: i64, instructions: [MirInst], term: MirTerminator) -> MirBlock:
+    MirBlock(BlockId(id: id), Some("b{id}"), instructions, term)
+
 fn _pf_manifest() -> DriverManifestAttr:
     DriverManifestAttr(DriverManifestAttrKind.Driver, 0, 0, [], "", "")
 
 fn _pf_function_with_blocks(blocks: [MirBlock]) -> MirFunction:
+    _pf_function_with_locals_blocks([], blocks)
+
+fn _pf_function_with_locals_blocks(locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
     MirFunction(
         SymbolId(id: 91), "perf_facts_fixture",
-        MirSignature([], MirType.unit(), false), [],
+        MirSignature([], MirType.unit(), false), locals,
         blocks,
         BlockId(id: 0), Span(0, 0, 1, 1), [], false, nil, {}, nil,
         false, false, "", false, _pf_manifest(), false,
@@ -55,7 +67,10 @@ describe "shared MIR PerfFacts":
 
     it "derives dominance from CFG rather than block storage order":
         step("Analyze blocks stored out of control-flow order")
-        val func = _pf_function_with_blocks([
+        val func = _pf_function_with_locals_blocks([
+            MirLocal(local0, Some("left"), MirType.i64(), LocalKind.Temp, false),
+            MirLocal(local1, Some("sum"), MirType.i64(), LocalKind.Temp, false)
+        ], [
             _pf_block(2, MirTerminator.Ret(nil)),
             _pf_block(0, MirTerminator.If(mir_operand_const_bool(true), BlockId(id: 1), BlockId(id: 2))),
             _pf_block(1, MirTerminator.Goto(BlockId(id: 2)))
@@ -79,3 +94,47 @@ describe "shared MIR PerfFacts":
         expect(detector.loops[0].exit_edges[0].from.id).to_equal(0)
         expect(detector.loops[0].exit_edges[0].to.id).to_equal(2)
         expect(detector.loops[0].trip_count).to_be_nil()
+
+    it "builds linear definition and use sites including terminators":
+        step("Reuse one function-local def-use index")
+        val local0 = LocalId(id: 0)
+        val local1 = LocalId(id: 1)
+        val func = _pf_function_with_locals_blocks([
+            MirLocal(local0, Some("left"), MirType.i64(), LocalKind.Temp, false),
+            MirLocal(local1, Some("sum"), MirType.i64(), LocalKind.Temp, false)
+        ], [
+            _pf_block_with(0, [
+                MirInst(MirInstKind.Const(local0, MirConstValue.Int(4), MirType.i64()), nil),
+                MirInst(MirInstKind.BinOp(local1, MirBinOp.Add,
+                    mir_operand_copy(local0), mir_operand_copy(local0)), nil)
+            ], MirTerminator.Ret(Some(mir_operand_copy(local1))))
+        ])
+        val facts = perf_facts_build(func)
+        expect(facts.def_use_complete).to_equal(true)
+        expect(perf_facts_definitions(facts, local0).len()).to_equal(1)
+        expect(perf_facts_definitions(facts, local1).len()).to_equal(1)
+        expect(perf_facts_uses(facts, local0).len()).to_equal(2)
+        expect(perf_facts_uses(facts, local1).len()).to_equal(1)
+        expect(perf_facts_uses(facts, local1)[0].is_terminator).to_equal(true)
+
+    it "fails def-use completeness closed for an unmodeled instruction":
+        step("Reject incomplete def-use coverage")
+        val func = _pf_function_with_locals_blocks([
+            MirLocal(LocalId(id: 0), Some("region"), MirType.i64(), LocalKind.Temp, false)
+        ], [
+            _pf_block_with(0, [
+                MirInst(MirInstKind.FreezeRegion(LocalId(id: 0)), nil)
+            ], MirTerminator.Ret(nil))
+        ])
+        val facts = perf_facts_build(func)
+        expect(facts.def_use_complete).to_equal(false)
+        expect(facts.uncovered_instruction_count).to_equal(1)
+
+    it "makes fact invalidation explicit and internally consistent":
+        step("Invalidate stale performance facts")
+        val cfg_only = perf_fact_preservation_cfg_only()
+        expect(perf_fact_preservation_integrity_errors(cfg_only).len()).to_equal(0)
+        expect(perf_facts_invalidated(cfg_only)).to_equal([PerfFactKind.DefUse])
+        expect(perf_facts_invalidated(perf_fact_preservation_all()).len()).to_equal(0)
+        val invalid = PerfFactPreservation(false, true, false)
+        expect(perf_fact_preservation_integrity_errors(invalid).len()).to_equal(1)
