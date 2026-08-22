@@ -1,0 +1,55 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-009 REQ-010 REQ-015 REQ-017 NFR-005 NFR-006
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io.hal_buffer_dispatch.*
+
+describe "mission-critical caller-owned HAL buffers":
+    it "reports typed overflow without truncation":
+        val exact = rt_hal_buffer_preflight_v3(32, 32)
+        val captured_overflow = rt_hal_buffer_preflight_v3(33, 33)
+        val output_overflow = rt_hal_buffer_preflight_v3(16, 15)
+        expect(exact.accepted).to_be(true)
+        expect(exact.overflow).to_equal(RtHalBufferOverflowV3.None)
+        expect(captured_overflow.accepted).to_be(false)
+        expect(captured_overflow.overflow).to_equal(
+            RtHalBufferOverflowV3.CapturedLength)
+        expect(output_overflow.accepted).to_be(false)
+        expect(output_overflow.overflow).to_equal(
+            RtHalBufferOverflowV3.OutputCapacity)
+
+    it "requires structured error fields and preserves exact status codes":
+        expect(rt_hal_buffer_error_v3_well_formed(0, 0, 0, 0)).to_be(true)
+        expect(rt_hal_buffer_error_v3_well_formed(0, 1, 7, 0)).to_be(false)
+        expect(rt_hal_buffer_error_v3_well_formed(3, 2, -5, 9)).to_be(true)
+        expect(rt_hal_buffer_error_v3_well_formed(3, 0, 0, 0)).to_be(false)
+        expect(rt_hal_buffer_status_v3(5)).to_equal(
+            RtHalBufferStatusV3.Diverged)
+
+    it "keeps old APIs and adds five separately tagged exact-buffer APIs":
+        val source = file_read(
+            "src/lib/nogc_sync_mut/io/hal_buffer_dispatch.spl")
+        val compatibility = file_read(
+            "src/lib/nogc_sync_mut/io/process_ops.spl")
+        val io_runtime = file_read("src/lib/nogc_sync_mut/io_runtime.spl")
+        expect(compatibility).to_contain("pub fn process_read_stdout(pid: i64) -> text:")
+        expect(io_runtime).to_contain("pub fn file_read_bytes(path: text) -> [u8]:")
+        expect(source).to_contain("operation: io.file.read.buffer_v3")
+        expect(source).to_contain("operation: io.stream.read.buffer_v3")
+        expect(source).to_contain("operation: io.stream.write.buffer_v3")
+        expect(source).to_contain("operation: io.environment.get.buffer_v3")
+        expect(source).to_contain("operation: io.random.fill.buffer_v3")
+
+    it "keeps the hot owner bounded and free of dynamic containers":
+        val source = file_read(
+            "src/lib/nogc_sync_mut/io/hal_buffer_dispatch.spl")
+        expect(source).to_contain("RT_HAL_BUFFER_MAX_BYTES_V3: i64 = 32")
+        expect(source).to_contain("rt_hal_automatic_extraction_owner_v1")
+        expect(source).to_contain("owner.extract(")
+        expect(source).to_contain("owner.seal()")
+        expect(source.contains(".push(")).to_equal(false)
+        expect(source.contains("Dict<")).to_equal(false)
+        expect(source.contains("var storage: [")).to_equal(false)
+        expect(source.contains("rt_env_get")).to_equal(false)
+        expect(source.contains("substring(")).to_equal(false)

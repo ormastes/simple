@@ -1,0 +1,270 @@
+# Mission-critical caller-owned HAL buffer APIs.
+#
+# These additive leaves preserve the established text/[u8] compatibility APIs.
+# A caller supplies both storage and capacity; the sealed V3 owner validates
+# the captured observation and commits at most 32 bytes without allocating or
+# retaining either pointer.  Every rejected call leaves output untouched.
+
+use std.common.structural.environment_instruction.*
+
+val RT_HAL_BUFFER_MAX_BYTES_V3: i64 = 32
+
+enum RtHalBufferStatusV3:
+    Ok
+    Invalid
+    State
+    Io
+    Protocol
+    Diverged
+
+enum RtHalBufferOverflowV3:
+    None
+    CapturedLength
+    OutputCapacity
+
+struct RtHalBufferPreflightV3:
+    accepted: bool
+    overflow: RtHalBufferOverflowV3
+    status: RtHalBufferStatusV3
+
+@unsafe(reason: "sealed V3 caller-owned HAL buffer comparison ABI", capabilities: [ffi])
+extern fn rt_hal_buffer_dispatch_compare_v3(
+    operation_id: i64, fixture_id: i64, captured_status: i32,
+    error_domain: i32, error_code: i64, error_detail: i64,
+    captured: *u8, captured_length: i64,
+    output: *mut u8, output_capacity: i64,
+    trace_identity_hi: i64, trace_identity_lo: i64,
+    trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32
+
+fn rt_hal_buffer_status_v3(code: i32) -> RtHalBufferStatusV3:
+    if code == 0: return RtHalBufferStatusV3.Ok
+    if code == 2: return RtHalBufferStatusV3.State
+    if code == 3: return RtHalBufferStatusV3.Io
+    if code == 4: return RtHalBufferStatusV3.Protocol
+    if code == 5: return RtHalBufferStatusV3.Diverged
+    RtHalBufferStatusV3.Invalid
+
+fn rt_hal_buffer_preflight_v3(captured_length: i64,
+                              output_capacity: i64) -> RtHalBufferPreflightV3:
+    if captured_length < 0 or captured_length > RT_HAL_BUFFER_MAX_BYTES_V3:
+        return RtHalBufferPreflightV3(false,
+            RtHalBufferOverflowV3.CapturedLength,
+            RtHalBufferStatusV3.Invalid)
+    if output_capacity <= 0
+            or output_capacity > RT_HAL_BUFFER_MAX_BYTES_V3
+            or captured_length > output_capacity:
+        return RtHalBufferPreflightV3(false,
+            RtHalBufferOverflowV3.OutputCapacity,
+            RtHalBufferStatusV3.Invalid)
+    RtHalBufferPreflightV3(true, RtHalBufferOverflowV3.None,
+                          RtHalBufferStatusV3.Ok)
+
+fn rt_hal_buffer_error_v3_well_formed(
+        captured_status: i32, error_domain: i32,
+        error_code: i64, error_detail: i64) -> bool:
+    if captured_status == 0:
+        return error_domain == 0 and error_code == 0 and error_detail == 0
+    captured_status > 0 and error_domain > 0 and error_code != 0
+
+fn _rt_hal_buffer_extract_v3(
+        operation_id: i64, opcode: EnvOpcodeV1, capability_id: i64,
+        fixture_id: i64, trace_cursor: i64, captured_length: i64,
+        output_capacity: i64) -> bool:
+    var owner = rt_hal_automatic_extraction_owner_v1(
+        operation_id, fixture_id, 1)
+    val extracted = owner.extract(rt_hal_automatic_access_metadata_v1(
+        operation_id, fixture_id, 0, opcode, capability_id, 0,
+        0, captured_length, captured_length, 0, output_capacity,
+        output_capacity))
+    owner.seal()
+    extracted.accepted and trace_cursor >= 0
+
+@unsafe(reason: "bounded caller-owned HAL buffer dispatch", capabilities: [ffi])
+fn _rt_hal_buffer_call_v3(
+        operation_id: i64, fixture_id: i64, captured_status: i32,
+        error_domain: i32, error_code: i64, error_detail: i64,
+        captured: *u8, captured_length: i64,
+        output: *mut u8, output_capacity: i64,
+        trace_identity_hi: i64, trace_identity_lo: i64,
+        trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    rt_hal_buffer_dispatch_compare_v3(operation_id, fixture_id,
+        captured_status, error_domain, error_code, error_detail,
+        captured, captured_length, output, output_capacity,
+        trace_identity_hi, trace_identity_lo, trace_cursor, trace_length,
+        trace_capacity)
+
+# Per-operation leaves deliberately share the exact frozen 14-argument ABI.
+# Their distinct names let MIR replace a call only after complete ABI proof.
+@inline
+fn _hal_file_read_buffer_v3_raw(fixture_id: i64, captured_status: i32,
+        error_domain: i32, error_code: i64, error_detail: i64,
+        captured: *u8, captured_length: i64, output: *mut u8,
+        output_capacity: i64, trace_identity_hi: i64,
+        trace_identity_lo: i64, trace_cursor: i64,
+        trace_length: i64, trace_capacity: i64) -> i32:
+    _rt_hal_buffer_call_v3(1001, fixture_id, captured_status, error_domain,
+        error_code, error_detail, captured, captured_length, output,
+        output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor,
+        trace_length, trace_capacity)
+
+@inline
+fn rt_hal_file_read_buffer_direct_v3(fixture_id: i64, captured_status: i32,
+        error_domain: i32, error_code: i64, error_detail: i64,
+        captured: *u8, captured_length: i64, output: *mut u8,
+        output_capacity: i64, trace_identity_hi: i64,
+        trace_identity_lo: i64, trace_cursor: i64,
+        trace_length: i64, trace_capacity: i64) -> i32:
+    _hal_file_read_buffer_v3_raw(fixture_id, captured_status, error_domain,
+        error_code, error_detail, captured, captured_length, output,
+        output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor,
+        trace_length, trace_capacity)
+
+@inline
+fn rt_hal_file_read_buffer_compare_v3(fixture_id: i64, captured_status: i32,
+        error_domain: i32, error_code: i64, error_detail: i64,
+        captured: *u8, captured_length: i64, output: *mut u8,
+        output_capacity: i64, trace_identity_hi: i64,
+        trace_identity_lo: i64, trace_cursor: i64,
+        trace_length: i64, trace_capacity: i64) -> i32:
+    _hal_file_read_buffer_v3_raw(fixture_id, captured_status, error_domain,
+        error_code, error_detail, captured, captured_length, output,
+        output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor,
+        trace_length, trace_capacity)
+
+@rt(hal, operation: io.file.read.buffer_v3, providers: pure+c+rust,
+    capabilities: 2, comparator: 3, normalizer: 2, effects: replay_only,
+    request_bytes: 32, result_bytes: 32, trace_operations: 1,
+    trace_bytes: 32, diff_rows: 3, report_bytes: 256, log_bytes: 256,
+    deadline_ticks: 1000, error_schema: 2, environment_schema: 1,
+    preferred: c)
+fn hal_file_read_buffer_v3(fixture_id: i64, captured_status: i32,
+        error_domain: i32, error_code: i64, error_detail: i64,
+        captured: *u8, captured_length: i64, output: *mut u8,
+        output_capacity: i64, trace_identity_hi: i64,
+        trace_identity_lo: i64, trace_cursor: i64,
+        trace_length: i64, trace_capacity: i64) -> i32:
+    val preflight = rt_hal_buffer_preflight_v3(
+        captured_length, output_capacity)
+    if not preflight.accepted or not rt_hal_buffer_error_v3_well_formed(
+            captured_status, error_domain, error_code, error_detail): return 1
+    if not _rt_hal_buffer_extract_v3(1001, EnvOpcodeV1.FileRead, 2,
+            fixture_id, trace_cursor, captured_length, output_capacity): return 1
+    _hal_file_read_buffer_v3_raw(fixture_id, captured_status, error_domain,
+        error_code, error_detail, captured, captured_length, output,
+        output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor,
+        trace_length, trace_capacity)
+
+# Stream, environment, and randomness use the same sealed owner.  Generating
+# these leaves keeps the operation constant at compile time and avoids a hot
+# lookup or indirect dispatch.
+@inline
+fn _hal_stream_read_buffer_v3_raw(fixture_id: i64, captured_status: i32,
+        error_domain: i32, error_code: i64, error_detail: i64,
+        captured: *u8, captured_length: i64, output: *mut u8,
+        output_capacity: i64, trace_identity_hi: i64,
+        trace_identity_lo: i64, trace_cursor: i64,
+        trace_length: i64, trace_capacity: i64) -> i32:
+    _rt_hal_buffer_call_v3(1004, fixture_id, captured_status, error_domain,
+        error_code, error_detail, captured, captured_length, output,
+        output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor,
+        trace_length, trace_capacity)
+
+@inline
+fn rt_hal_stream_read_buffer_direct_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    _hal_stream_read_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+@inline
+fn rt_hal_stream_read_buffer_compare_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    _hal_stream_read_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+
+@rt(hal, operation: io.stream.read.buffer_v3, providers: pure+c+rust,
+    capabilities: 5, comparator: 3, normalizer: 2, effects: replay_only,
+    request_bytes: 32, result_bytes: 32, trace_operations: 1,
+    trace_bytes: 32, diff_rows: 3, report_bytes: 256, log_bytes: 256,
+    deadline_ticks: 1000, error_schema: 2, environment_schema: 1,
+    preferred: c)
+fn hal_stream_read_buffer_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    val preflight = rt_hal_buffer_preflight_v3(captured_length, output_capacity)
+    if not preflight.accepted or not rt_hal_buffer_error_v3_well_formed(captured_status, error_domain, error_code, error_detail): return 1
+    if not _rt_hal_buffer_extract_v3(1004, EnvOpcodeV1.StreamRead, 5, fixture_id, trace_cursor, captured_length, output_capacity): return 1
+    _hal_stream_read_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+
+@inline
+fn _hal_stream_write_buffer_v3_raw(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    _rt_hal_buffer_call_v3(1005, fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+@inline
+fn rt_hal_stream_write_buffer_direct_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    _hal_stream_write_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+@inline
+fn rt_hal_stream_write_buffer_compare_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    _hal_stream_write_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+
+@rt(hal, operation: io.stream.write.buffer_v3, providers: pure+c+rust,
+    capabilities: 6, comparator: 3, normalizer: 2, effects: replay_only,
+    request_bytes: 32, result_bytes: 32, trace_operations: 1,
+    trace_bytes: 32, diff_rows: 3, report_bytes: 256, log_bytes: 256,
+    deadline_ticks: 1000, error_schema: 2, environment_schema: 1,
+    preferred: c)
+fn hal_stream_write_buffer_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    val preflight = rt_hal_buffer_preflight_v3(captured_length, output_capacity)
+    if not preflight.accepted or not rt_hal_buffer_error_v3_well_formed(captured_status, error_domain, error_code, error_detail): return 1
+    if not _rt_hal_buffer_extract_v3(1005, EnvOpcodeV1.StreamWrite, 6, fixture_id, trace_cursor, captured_length, output_capacity): return 1
+    _hal_stream_write_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+
+@inline
+fn _hal_environment_get_buffer_v3_raw(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    _rt_hal_buffer_call_v3(102, fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+@inline
+fn rt_hal_environment_get_buffer_direct_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    _hal_environment_get_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+@inline
+fn rt_hal_environment_get_buffer_compare_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    _hal_environment_get_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+
+@rt(hal, operation: io.environment.get.buffer_v3, providers: pure+c+rust,
+    capabilities: 10, comparator: 3, normalizer: 2, effects: replay_only,
+    request_bytes: 32, result_bytes: 32, trace_operations: 1,
+    trace_bytes: 32, diff_rows: 3, report_bytes: 256, log_bytes: 256,
+    deadline_ticks: 1000, error_schema: 2, environment_schema: 1,
+    preferred: c)
+fn hal_environment_get_buffer_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    val preflight = rt_hal_buffer_preflight_v3(captured_length, output_capacity)
+    if not preflight.accepted or not rt_hal_buffer_error_v3_well_formed(captured_status, error_domain, error_code, error_detail): return 1
+    if not _rt_hal_buffer_extract_v3(102, EnvOpcodeV1.EnvironmentGet, 10, fixture_id, trace_cursor, captured_length, output_capacity): return 1
+    _hal_environment_get_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+
+@inline
+fn _hal_random_fill_buffer_v3_raw(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    _rt_hal_buffer_call_v3(1011, fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+@inline
+fn rt_hal_random_fill_buffer_direct_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    _hal_random_fill_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+@inline
+fn rt_hal_random_fill_buffer_compare_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    _hal_random_fill_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+
+@rt(hal, operation: io.random.fill.buffer_v3, providers: pure+c+rust,
+    capabilities: 12, comparator: 3, normalizer: 2, effects: replay_only,
+    request_bytes: 32, result_bytes: 32, trace_operations: 1,
+    trace_bytes: 32, diff_rows: 3, report_bytes: 256, log_bytes: 256,
+    deadline_ticks: 1000, error_schema: 2, environment_schema: 1,
+    preferred: c)
+fn hal_random_fill_buffer_v3(fixture_id: i64, captured_status: i32, error_domain: i32, error_code: i64, error_detail: i64, captured: *u8, captured_length: i64, output: *mut u8, output_capacity: i64, trace_identity_hi: i64, trace_identity_lo: i64, trace_cursor: i64, trace_length: i64, trace_capacity: i64) -> i32:
+    val preflight = rt_hal_buffer_preflight_v3(captured_length, output_capacity)
+    if not preflight.accepted or not rt_hal_buffer_error_v3_well_formed(captured_status, error_domain, error_code, error_detail): return 1
+    if not _rt_hal_buffer_extract_v3(1011, EnvOpcodeV1.RandomFill, 12, fixture_id, trace_cursor, captured_length, output_capacity): return 1
+    _hal_random_fill_buffer_v3_raw(fixture_id, captured_status, error_domain, error_code, error_detail, captured, captured_length, output, output_capacity, trace_identity_hi, trace_identity_lo, trace_cursor, trace_length, trace_capacity)
+
+export RT_HAL_BUFFER_MAX_BYTES_V3
+export RtHalBufferStatusV3, RtHalBufferOverflowV3, RtHalBufferPreflightV3
+export rt_hal_buffer_status_v3, rt_hal_buffer_preflight_v3
+export rt_hal_buffer_error_v3_well_formed
+export _rt_hal_buffer_extract_v3, _rt_hal_buffer_call_v3
+export hal_file_read_buffer_v3, hal_stream_read_buffer_v3
+export hal_stream_write_buffer_v3, hal_environment_get_buffer_v3
+export hal_random_fill_buffer_v3
+export rt_hal_file_read_buffer_direct_v3, rt_hal_file_read_buffer_compare_v3
+export rt_hal_stream_read_buffer_direct_v3, rt_hal_stream_read_buffer_compare_v3
+export rt_hal_stream_write_buffer_direct_v3, rt_hal_stream_write_buffer_compare_v3
+export rt_hal_environment_get_buffer_direct_v3
+export rt_hal_environment_get_buffer_compare_v3
+export rt_hal_random_fill_buffer_direct_v3, rt_hal_random_fill_buffer_compare_v3
