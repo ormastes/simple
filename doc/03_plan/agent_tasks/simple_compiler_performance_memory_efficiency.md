@@ -215,3 +215,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Pin default-deny promotion and explicit-allow suppression behavior.
 - Keep mapping allocation-free and shared by text/JSON policy projection.
 - Follow-up: register intentional policy names for remaining advisory-only EasyFix codes.
+
+## Completed tool tranche: advisory EasyFix policy completeness
+
+- Register contextual, deprecated, struct, grammar, raw-unit, and SIMD policy names.
+- Add warning defaults and allocation-free known-name membership.
+- Map four short-grammar wire codes to one stable policy family.
+- Pin direct/family mappings and authored allow suppression behavior.
+- Follow-up: generate code/name/default parity from one machine-readable descriptor.
