@@ -1,0 +1,219 @@
+# codex-impl
+# Exact, bounded, allocation-free wire decoder for environment instructions.
+
+use std.common.structural.environment_instruction.contracts.*
+
+val ENV_WIRE_MAGIC_V1: i64 = 827738437
+val ENV_WIRE_HEADER_BYTES_V1: i64 = 32
+val ENV_WIRE_RECORD_BYTES_V1: i64 = 96
+val ENV_WIRE_MAX_FRAME_BYTES_V1: i64 = 1048576
+val ENV_WIRE_MAX_INSTRUCTIONS_V1: i64 = 4096
+
+val ENV_WIRE_ERROR_NONE_V1: i64 = 0
+val ENV_WIRE_ERROR_MALFORMED_V1: i64 = 1
+val ENV_WIRE_ERROR_VERSION_V1: i64 = 2
+val ENV_WIRE_ERROR_LENGTH_V1: i64 = 3
+val ENV_WIRE_ERROR_CAPACITY_V1: i64 = 4
+val ENV_WIRE_ERROR_OPCODE_V1: i64 = 5
+val ENV_WIRE_ERROR_SEQUENCE_V1: i64 = 6
+val ENV_WIRE_ERROR_TRAILING_V1: i64 = 7
+
+struct EnvWireEvidenceV1:
+    error_code: i64
+    byte_offset: i64
+    expected: i64
+    actual: i64
+    decoded_count: i64
+    status: EnvInstructionStatusV1
+    sealed: bool
+
+struct EnvWireCursorV1:
+    frame_length: i64
+    instruction_count: i64
+    instruction_capacity: i64
+    next_offset: i64
+    next_sequence: i64
+    invocation_id: i64
+    evidence: EnvWireEvidenceV1
+
+struct EnvWireDecodeStepV1:
+    cursor: EnvWireCursorV1
+    instruction: EnvInstructionV1
+    accepted: bool
+
+struct _EnvWireOpcodeV1:
+    opcode: EnvOpcodeV1
+    valid: bool
+
+fn _env_wire_opcode_v1(value: i64) -> _EnvWireOpcodeV1:
+    if value == 0: return _EnvWireOpcodeV1(EnvOpcodeV1.FileOpen, true)
+    if value == 1: return _EnvWireOpcodeV1(EnvOpcodeV1.FileRead, true)
+    if value == 2: return _EnvWireOpcodeV1(EnvOpcodeV1.FileWrite, true)
+    if value == 3: return _EnvWireOpcodeV1(EnvOpcodeV1.FileClose, true)
+    if value == 4: return _EnvWireOpcodeV1(EnvOpcodeV1.StreamRead, true)
+    if value == 5: return _EnvWireOpcodeV1(EnvOpcodeV1.StreamWrite, true)
+    if value == 6: return _EnvWireOpcodeV1(EnvOpcodeV1.ProcessSpawn, true)
+    if value == 7: return _EnvWireOpcodeV1(EnvOpcodeV1.ProcessPoll, true)
+    if value == 8: return _EnvWireOpcodeV1(EnvOpcodeV1.ProcessKill, true)
+    if value == 9: return _EnvWireOpcodeV1(EnvOpcodeV1.EnvironmentGet, true)
+    if value == 10: return _EnvWireOpcodeV1(EnvOpcodeV1.ClockRead, true)
+    if value == 11: return _EnvWireOpcodeV1(EnvOpcodeV1.RandomFill, true)
+    if value == 12: return _EnvWireOpcodeV1(EnvOpcodeV1.SocketOpen, true)
+    if value == 13: return _EnvWireOpcodeV1(EnvOpcodeV1.SocketSend, true)
+    if value == 14: return _EnvWireOpcodeV1(EnvOpcodeV1.SocketReceive, true)
+    if value == 15: return _EnvWireOpcodeV1(EnvOpcodeV1.SocketClose, true)
+    if value == 16: return _EnvWireOpcodeV1(EnvOpcodeV1.InterruptMask, true)
+    if value == 17: return _EnvWireOpcodeV1(EnvOpcodeV1.InterruptAcknowledge, true)
+    if value == 18: return _EnvWireOpcodeV1(EnvOpcodeV1.MmioRead, true)
+    if value == 19: return _EnvWireOpcodeV1(EnvOpcodeV1.MmioWrite, true)
+    if value == 20: return _EnvWireOpcodeV1(EnvOpcodeV1.DmaMap, true)
+    if value == 21: return _EnvWireOpcodeV1(EnvOpcodeV1.DmaSubmit, true)
+    if value == 22: return _EnvWireOpcodeV1(EnvOpcodeV1.DmaPoll, true)
+    if value == 23: return _EnvWireOpcodeV1(EnvOpcodeV1.DmaUnmap, true)
+    _EnvWireOpcodeV1(EnvOpcodeV1.FileOpen, false)
+
+fn _env_wire_read_i64_v1(bytes: [u8], offset: i64, limit: i64) -> i64:
+    if offset < 0 or offset > limit - 8 or limit > bytes.len(): return -1
+    # Wire scalars are non-negative signed i64 values. Reject the sign bit so
+    # hostile input cannot wrap any subsequent capacity calculation.
+    if bytes[offset + 7] >= 128u8: return -1
+    var result = 0
+    var factor = 1
+    var i = 0
+    while i < 8:
+        result = result + (bytes[offset + i] as i64) * factor
+        factor = factor * 256
+        i = i + 1
+    result
+
+fn _env_wire_failed_v1(frame_length: i64, instruction_count: i64,
+                       instruction_capacity: i64, next_offset: i64,
+                       next_sequence: i64, invocation_id: i64,
+                       error_code: i64, expected: i64, actual: i64,
+                       status: EnvInstructionStatusV1) -> EnvWireCursorV1:
+    EnvWireCursorV1(frame_length, instruction_count, instruction_capacity,
+        next_offset, next_sequence, invocation_id,
+        EnvWireEvidenceV1(error_code, next_offset, expected, actual,
+            next_sequence, status, true))
+
+fn env_wire_decoder_v1(bytes: [u8], caller_capacity: i64) -> EnvWireCursorV1:
+    val available = bytes.len()
+    if caller_capacity <= 0 or caller_capacity > ENV_WIRE_MAX_INSTRUCTIONS_V1:
+        return _env_wire_failed_v1(available, 0, caller_capacity, 0, 0, 0,
+            ENV_WIRE_ERROR_CAPACITY_V1, ENV_WIRE_MAX_INSTRUCTIONS_V1,
+            caller_capacity, EnvInstructionStatusV1.Overflow)
+    if available < ENV_WIRE_HEADER_BYTES_V1
+            or available > ENV_WIRE_MAX_FRAME_BYTES_V1:
+        return _env_wire_failed_v1(available, 0, caller_capacity, 0, 0, 0,
+            ENV_WIRE_ERROR_LENGTH_V1, ENV_WIRE_HEADER_BYTES_V1, available,
+            EnvInstructionStatusV1.Overflow)
+    val magic = _env_wire_read_i64_v1(bytes, 0, available)
+    val version = _env_wire_read_i64_v1(bytes, 8, available)
+    val frame_length = _env_wire_read_i64_v1(bytes, 16, available)
+    val count = _env_wire_read_i64_v1(bytes, 24, available)
+    if magic != ENV_WIRE_MAGIC_V1:
+        return _env_wire_failed_v1(available, count, caller_capacity, 0, 0, 0,
+            ENV_WIRE_ERROR_MALFORMED_V1, ENV_WIRE_MAGIC_V1, magic,
+            EnvInstructionStatusV1.InvalidInstruction)
+    if version != ENV_INSTRUCTION_SCHEMA_VERSION:
+        return _env_wire_failed_v1(available, count, caller_capacity, 8, 0, 0,
+            ENV_WIRE_ERROR_VERSION_V1, ENV_INSTRUCTION_SCHEMA_VERSION, version,
+            EnvInstructionStatusV1.InvalidInstruction)
+    if count < 0 or count > caller_capacity
+            or count > ENV_WIRE_MAX_INSTRUCTIONS_V1:
+        return _env_wire_failed_v1(available, count, caller_capacity, 24, 0, 0,
+            ENV_WIRE_ERROR_CAPACITY_V1, caller_capacity, count,
+            EnvInstructionStatusV1.Overflow)
+    val expected_length = ENV_WIRE_HEADER_BYTES_V1
+        + count * ENV_WIRE_RECORD_BYTES_V1
+    if frame_length != available or frame_length != expected_length:
+        return _env_wire_failed_v1(frame_length, count, caller_capacity, 16,
+            0, 0, ENV_WIRE_ERROR_LENGTH_V1, expected_length, available,
+            EnvInstructionStatusV1.InvalidInstruction)
+    EnvWireCursorV1(frame_length, count, caller_capacity,
+        ENV_WIRE_HEADER_BYTES_V1, 0, 0,
+        EnvWireEvidenceV1(ENV_WIRE_ERROR_NONE_V1, 0, count, count, 0,
+            EnvInstructionStatusV1.Planned, false))
+
+fn env_wire_decode_next_v1(value: EnvWireCursorV1,
+                           bytes: [u8]) -> EnvWireDecodeStepV1:
+    val empty = env_instruction_v1(1, 0, EnvOpcodeV1.FileOpen, 1, 0,
+        0, 0, 0, 0, 0, 0)
+    if value.evidence.sealed or value.next_sequence >= value.instruction_count:
+        val failed = _env_wire_failed_v1(value.frame_length,
+            value.instruction_count, value.instruction_capacity,
+            value.next_offset, value.next_sequence, value.invocation_id,
+            ENV_WIRE_ERROR_TRAILING_V1, value.instruction_count,
+            value.next_sequence + 1, EnvInstructionStatusV1.Diverged)
+        return EnvWireDecodeStepV1(failed, empty, false)
+    val o = value.next_offset
+    if o < ENV_WIRE_HEADER_BYTES_V1
+            or o > value.frame_length - ENV_WIRE_RECORD_BYTES_V1
+            or value.frame_length != bytes.len():
+        val failed = _env_wire_failed_v1(value.frame_length,
+            value.instruction_count, value.instruction_capacity, o,
+            value.next_sequence, value.invocation_id,
+            ENV_WIRE_ERROR_LENGTH_V1, value.frame_length, bytes.len(),
+            EnvInstructionStatusV1.InvalidInstruction)
+        return EnvWireDecodeStepV1(failed, empty, false)
+    val version = _env_wire_read_i64_v1(bytes, o, value.frame_length)
+    val invocation = _env_wire_read_i64_v1(bytes, o + 8, value.frame_length)
+    val sequence = _env_wire_read_i64_v1(bytes, o + 16, value.frame_length)
+    val decoded_opcode = _env_wire_opcode_v1(
+        _env_wire_read_i64_v1(bytes, o + 24, value.frame_length))
+    val instruction = EnvInstructionV1(version, invocation, sequence,
+        decoded_opcode.opcode,
+        _env_wire_read_i64_v1(bytes, o + 32, value.frame_length),
+        _env_wire_read_i64_v1(bytes, o + 40, value.frame_length),
+        _env_wire_read_i64_v1(bytes, o + 48, value.frame_length),
+        _env_wire_read_i64_v1(bytes, o + 56, value.frame_length),
+        _env_wire_read_i64_v1(bytes, o + 64, value.frame_length),
+        _env_wire_read_i64_v1(bytes, o + 72, value.frame_length),
+        _env_wire_read_i64_v1(bytes, o + 80, value.frame_length),
+        _env_wire_read_i64_v1(bytes, o + 88, value.frame_length))
+    val expected_invocation = if value.next_sequence == 0:
+        invocation
+    else:
+        value.invocation_id
+    if not decoded_opcode.valid or not env_instruction_v1_well_formed(instruction):
+        val code = if not decoded_opcode.valid:
+            ENV_WIRE_ERROR_OPCODE_V1
+        else:
+            ENV_WIRE_ERROR_MALFORMED_V1
+        val failed = _env_wire_failed_v1(value.frame_length,
+            value.instruction_count, value.instruction_capacity, o,
+            value.next_sequence, value.invocation_id, code, 0, 0,
+            EnvInstructionStatusV1.InvalidInstruction)
+        return EnvWireDecodeStepV1(failed, instruction, false)
+    if sequence != value.next_sequence or invocation != expected_invocation:
+        val failed = _env_wire_failed_v1(value.frame_length,
+            value.instruction_count, value.instruction_capacity, o,
+            value.next_sequence, value.invocation_id,
+            ENV_WIRE_ERROR_SEQUENCE_V1, value.next_sequence, sequence,
+            EnvInstructionStatusV1.Diverged)
+        return EnvWireDecodeStepV1(failed, instruction, false)
+    val next_sequence = value.next_sequence + 1
+    val done = next_sequence == value.instruction_count
+    val next = EnvWireCursorV1(value.frame_length, value.instruction_count,
+        value.instruction_capacity, o + ENV_WIRE_RECORD_BYTES_V1,
+        next_sequence, expected_invocation,
+        EnvWireEvidenceV1(ENV_WIRE_ERROR_NONE_V1, o,
+            value.instruction_count, next_sequence, next_sequence,
+            EnvInstructionStatusV1.Planned, done))
+    EnvWireDecodeStepV1(next, instruction, true)
+
+fn env_wire_decoder_complete_v1(value: EnvWireCursorV1) -> bool:
+    value.evidence.sealed and value.evidence.error_code == ENV_WIRE_ERROR_NONE_V1
+        and value.next_sequence == value.instruction_count
+        and value.next_offset == value.frame_length
+        and value.instruction_count <= value.instruction_capacity
+
+export ENV_WIRE_MAGIC_V1, ENV_WIRE_HEADER_BYTES_V1, ENV_WIRE_RECORD_BYTES_V1
+export ENV_WIRE_MAX_FRAME_BYTES_V1, ENV_WIRE_MAX_INSTRUCTIONS_V1
+export ENV_WIRE_ERROR_NONE_V1, ENV_WIRE_ERROR_MALFORMED_V1
+export ENV_WIRE_ERROR_VERSION_V1, ENV_WIRE_ERROR_LENGTH_V1
+export ENV_WIRE_ERROR_CAPACITY_V1, ENV_WIRE_ERROR_OPCODE_V1
+export ENV_WIRE_ERROR_SEQUENCE_V1, ENV_WIRE_ERROR_TRAILING_V1
+export EnvWireEvidenceV1, EnvWireCursorV1, EnvWireDecodeStepV1
+export env_wire_decoder_v1, env_wire_decode_next_v1
+export env_wire_decoder_complete_v1

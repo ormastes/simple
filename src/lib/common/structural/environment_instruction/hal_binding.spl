@@ -8,6 +8,7 @@
 use std.common.structural.environment_instruction.contracts.*
 use std.common.structural.environment_instruction.extraction.*
 use std.common.structural.environment_instruction.executor.*
+use std.common.structural.environment_instruction.wire_v1.*
 
 val RT_HAL_ENVIRONMENT_SCHEMA_V1: i64 = 1
 val RT_HAL_CLOCK_MONOTONIC_NANOS_OPERATION_V1: i64 = 101
@@ -152,6 +153,53 @@ struct RtHalEnvironmentReplayStepV1:
     receipt: EnvExecutionReceiptV1
     accepted: bool
 
+struct RtHalEnvironmentWireStepV1:
+    binding: RtHalEnvironmentBindingV1
+    decoder: EnvWireCursorV1
+    instruction: EnvInstructionV1
+    accepted: bool
+
+fn rt_hal_environment_decode_wire_next_v1(
+        binding: RtHalEnvironmentBindingV1, decoder: EnvWireCursorV1,
+        frame_bytes: [u8]) -> RtHalEnvironmentWireStepV1:
+    val decoded = env_wire_decode_next_v1(decoder, frame_bytes)
+    if not decoded.accepted
+            or not rt_hal_environment_opcode_admitted_v1(
+                binding.tagged_operation_id, decoded.instruction.opcode):
+        # Never feed a decoder failure back through normal extraction: its
+        # fallback opcode could otherwise match the tag and advance the plan.
+        val status = if decoded.cursor.evidence.status
+                == EnvInstructionStatusV1.Overflow:
+            EnvInstructionStatusV1.Overflow
+        else:
+            EnvInstructionStatusV1.InvalidInstruction
+        val failed_cursor = EnvExtractionCursorV1(
+            binding.extraction.invocation_id,
+            binding.extraction.instruction_capacity,
+            binding.extraction.next_sequence,
+            binding.extraction.instruction_count,
+            binding.extraction.plan_digest_hi,
+            binding.extraction.plan_digest_lo, status, true)
+        val failed_binding = RtHalEnvironmentBindingV1(
+            binding.tagged_operation_id, binding.environment_schema_id,
+            failed_cursor)
+        return RtHalEnvironmentWireStepV1(failed_binding, decoded.cursor,
+            decoded.instruction, false)
+    val extracted = env_extract_access_v1(binding.extraction,
+        EnvAccessEventV1(decoded.instruction.contract_version,
+            decoded.instruction.invocation_id, decoded.instruction.sequence,
+            decoded.instruction.opcode, decoded.instruction.capability_id,
+            decoded.instruction.flags, decoded.instruction.argument_offset,
+            decoded.instruction.argument_length,
+            decoded.instruction.argument_capacity,
+            decoded.instruction.result_offset,
+            decoded.instruction.result_capacity,
+            decoded.instruction.result_region_capacity))
+    val next_binding = RtHalEnvironmentBindingV1(binding.tagged_operation_id,
+        binding.environment_schema_id, extracted.cursor)
+    RtHalEnvironmentWireStepV1(next_binding, decoded.cursor,
+        decoded.instruction, extracted.accepted)
+
 fn rt_hal_environment_replay_exact_v1(
         value: EnvDeterministicReplayV1,
         recorded_instruction: EnvInstructionV1,
@@ -202,3 +250,4 @@ export RtHalEnvironmentPlanV1, rt_hal_environment_plan_v1
 export rt_hal_environment_plan_admitted_v1
 export rt_hal_environment_plan_replay_v1
 export RtHalEnvironmentReplayStepV1, rt_hal_environment_replay_exact_v1
+export RtHalEnvironmentWireStepV1, rt_hal_environment_decode_wire_next_v1

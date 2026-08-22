@@ -4,6 +4,7 @@
 use app.io.{env_get, file_is_regular_no_follow, file_read_bytes, file_size,
             file_write_bytes,
             process_is_alive, process_kill, process_spawn_async,
+            process_run_timeout,
             random_randint, time_now_unix_micros}
 use std.common.structural.environment_instruction.*
 
@@ -116,6 +117,17 @@ class HostedProcessCursorV1:
 class HostedProcessStepReceiptV1:
     receipt: EnvExecutionReceiptV1
     cursor: HostedProcessCursorV1
+
+class HostedPreparedProcessTimeoutExecutorV1:
+    command_digest_hi: i64
+    command_digest_lo: i64
+    stdout_digest: i64
+    stderr_digest: i64
+    exit_code: i64
+    timeout_ms: i64
+    capability_id: i64
+    timed_out: bool
+    sealed: bool
 
 fn _env_text_bytes(value: text) -> [u8]:
     var bytes: [u8] = [0u8; value.len()]
@@ -639,6 +651,70 @@ fn hosted_prepare_process_v1(command: text, arguments: [text],
         capability_id: if ready: capability_id else: 0,
         sealed: ready)
 
+fn hosted_prepare_process_timeout_v1(
+        command: text, arguments: [text], timeout_ms: i64,
+        capability_id: i64) -> HostedPreparedProcessTimeoutExecutorV1:
+    var valid = capability_id > 0 and capability_id < 63
+        and timeout_ms > 0 and timeout_ms <= 3600000
+        and command.len() > 0 and command.len() <= 1024
+        and arguments.len() <= 32 and _env_text_byte_safe(command)
+    var total_bytes = command.len()
+    var i = 0
+    while valid and i < arguments.len():
+        total_bytes = total_bytes + arguments[i].len()
+        valid = arguments[i].len() <= 1024 and total_bytes <= 8192
+            and _env_text_byte_safe(arguments[i])
+        i = i + 1
+    if not valid:
+        return HostedPreparedProcessTimeoutExecutorV1(
+            0, 0, 0, 0, -1, 0, 0, false, false)
+    # All text allocation and the physical effect occur before sealing. The
+    # executor below retains only fixed scalars and writes caller-owned bytes.
+    val (stdout, stderr, exit_code) = process_run_timeout(
+        command, arguments, timeout_ms)
+    val timed_out = exit_code == -1 and stderr.contains("[TIMEOUT:")
+    HostedPreparedProcessTimeoutExecutorV1(
+        _env_command_digest_v1(command, arguments, false),
+        _env_command_digest_v1(command, arguments, true),
+        _env_text_digest_v1(stdout, false), _env_text_digest_v1(stderr, false),
+        exit_code, timeout_ms, capability_id, timed_out, true)
+
+fn hosted_process_timeout_execute_v1(
+        executor: HostedPreparedProcessTimeoutExecutorV1,
+        policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+        argument_bytes: [u8], result_bytes: [u8]) -> EnvExecutionReceiptV1:
+    val validation = env_executor_validate_instruction(
+        policy, instruction, argument_bytes, result_bytes)
+    if validation != EnvInstructionStatusV1.Planned:
+        return env_execution_rejected_v1(instruction, validation)
+    if not executor.sealed or instruction.opcode != EnvOpcodeV1.ProcessSpawn
+            or instruction.capability_id != executor.capability_id
+            or instruction.argument_length != 16
+            or instruction.result_capacity < 32:
+        return env_execution_rejected_v1(
+            instruction, EnvInstructionStatusV1.InvalidInstruction)
+    val digest_hi = _env_read_i64_le(
+        argument_bytes, instruction.argument_offset)
+    val digest_lo = _env_read_i64_le(
+        argument_bytes, instruction.argument_offset + 8)
+    if digest_hi != executor.command_digest_hi
+            or digest_lo != executor.command_digest_lo:
+        return env_execution_rejected_v1(
+            instruction, EnvInstructionStatusV1.Diverged)
+    _env_write_i64_le(result_bytes, instruction.result_offset,
+                      executor.exit_code)
+    _env_write_i64_le(result_bytes, instruction.result_offset + 8,
+                      executor.stdout_digest)
+    _env_write_i64_le(result_bytes, instruction.result_offset + 16,
+                      executor.stderr_digest)
+    _env_write_i64_le(result_bytes, instruction.result_offset + 24,
+                      executor.timeout_ms)
+    if executor.timed_out:
+        return env_execution_timed_out_v1(
+            instruction, argument_bytes, result_bytes, 32)
+    env_execution_record_applied_v1(
+        instruction, argument_bytes, result_bytes, 32, true, 0)
+
 fn hosted_process_cursor_v1() -> HostedProcessCursorV1:
     HostedProcessCursorV1(next_sequence: 0, terminated: false, sealed: true)
 
@@ -784,3 +860,5 @@ export hosted_stream_write_cursor_v1, hosted_stream_write_execute_v1
 export HostedPreparedProcessExecutorV1, HostedProcessCursorV1
 export HostedProcessStepReceiptV1, hosted_prepare_process_v1
 export hosted_process_cursor_v1, hosted_process_execute_v1
+export HostedPreparedProcessTimeoutExecutorV1
+export hosted_prepare_process_timeout_v1, hosted_process_timeout_execute_v1

@@ -9,6 +9,7 @@ val ENV_EXEC_ERROR_CAPABILITY: i64 = 2
 val ENV_EXEC_ERROR_UNSAFE: i64 = 3
 val ENV_EXEC_ERROR_OVERFLOW: i64 = 4
 val ENV_EXEC_ERROR_DIVERGED: i64 = 5
+val ENV_EXEC_ERROR_TIMEOUT: i64 = 6
 
 struct EnvExecutorPolicyV1:
     allowed_opcode_mask: i64
@@ -85,6 +86,9 @@ fn _env_execution_status_code(status: EnvInstructionStatusV1) -> i64:
     if env_instruction_status_to_i64(status)
             == env_instruction_status_to_i64(EnvInstructionStatusV1.Diverged):
         return ENV_EXEC_ERROR_DIVERGED
+    if env_instruction_status_to_i64(status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Timeout):
+        return ENV_EXEC_ERROR_TIMEOUT
     ENV_EXEC_ERROR_INVALID
 
 fn _env_execution_digest_lane(state: i64, value: i64) -> i64:
@@ -161,6 +165,65 @@ fn env_execution_record_applied_v1(instruction: EnvInstructionV1,
         instruction.result_capacity, digest_hi, digest_lo),
         applied: true, physical_effect: physical_effect,
         allocation_count_after_seal: allocation_count_after_seal)
+
+fn env_execution_timed_out_v1(instruction: EnvInstructionV1,
+                              argument_bytes: [u8], result_bytes: [u8],
+                              result_length: i64) -> EnvExecutionReceiptV1:
+    if not env_instruction_v1_well_formed(instruction)
+            or instruction.argument_capacity > argument_bytes.len()
+            or instruction.result_region_capacity > result_bytes.len()
+            or result_length < 0 or result_length > instruction.result_capacity:
+        return env_execution_rejected_v1(
+            instruction, EnvInstructionStatusV1.InvalidInstruction)
+    val digest_hi = _env_execution_digest(
+        instruction, argument_bytes, result_bytes, result_length, false)
+    val digest_lo = _env_execution_digest(
+        instruction, argument_bytes, result_bytes, result_length, true)
+    EnvExecutionReceiptV1(observation: env_observation_v1(
+        instruction.invocation_id, instruction.sequence,
+        EnvInstructionStatusV1.Timeout, ENV_EXEC_ERROR_TIMEOUT, result_length,
+        instruction.result_capacity, digest_hi, digest_lo),
+        applied: false, physical_effect: true, allocation_count_after_seal: 0)
+
+fn env_replay_timeout_exact_v1(recorded_instruction: EnvInstructionV1,
+                               replay_instruction: EnvInstructionV1,
+                               recorded: EnvObservationV1,
+                               argument_bytes: [u8],
+                               recorded_result_bytes: [u8],
+                               replay_result_bytes: [u8]) -> EnvExecutionReceiptV1:
+    if not env_instructions_equivalent(recorded_instruction,
+                                       replay_instruction)
+            or recorded.status != EnvInstructionStatusV1.Timeout
+            or recorded.status_code != ENV_EXEC_ERROR_TIMEOUT
+            or recorded.invocation_id != recorded_instruction.invocation_id
+            or recorded.sequence != recorded_instruction.sequence
+            or recorded.bytes_length > replay_instruction.result_capacity
+            or recorded_instruction.argument_capacity > argument_bytes.len()
+            or recorded_instruction.result_region_capacity
+                > recorded_result_bytes.len()
+            or replay_instruction.result_region_capacity
+                > replay_result_bytes.len():
+        return env_execution_rejected_v1(
+            replay_instruction, EnvInstructionStatusV1.Diverged)
+    val digest_hi = _env_execution_digest(recorded_instruction,
+        argument_bytes, recorded_result_bytes, recorded.bytes_length, false)
+    val digest_lo = _env_execution_digest(recorded_instruction,
+        argument_bytes, recorded_result_bytes, recorded.bytes_length, true)
+    if digest_hi != recorded.interaction_digest_hi
+            or digest_lo != recorded.interaction_digest_lo:
+        return env_execution_rejected_v1(
+            replay_instruction, EnvInstructionStatusV1.Diverged)
+    var i = 0
+    while i < recorded.bytes_length:
+        replay_result_bytes[replay_instruction.result_offset + i] =
+            recorded_result_bytes[recorded_instruction.result_offset + i]
+        i = i + 1
+    EnvExecutionReceiptV1(observation: env_observation_v1(
+        replay_instruction.invocation_id, replay_instruction.sequence,
+        EnvInstructionStatusV1.Timeout, ENV_EXEC_ERROR_TIMEOUT,
+        recorded.bytes_length, replay_instruction.result_capacity,
+        recorded.interaction_digest_hi, recorded.interaction_digest_lo),
+        applied: false, physical_effect: false, allocation_count_after_seal: 0)
 
 trait EnvPhysicalExecutorPortV1:
     fn execute(policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
@@ -243,9 +306,11 @@ fn env_replay_exact_v1(recorded_instruction: EnvInstructionV1,
 
 export ENV_EXEC_ERROR_INVALID, ENV_EXEC_ERROR_CAPABILITY, ENV_EXEC_ERROR_UNSAFE
 export ENV_EXEC_ERROR_OVERFLOW, ENV_EXEC_ERROR_DIVERGED
+export ENV_EXEC_ERROR_TIMEOUT
 export EnvExecutorPolicyV1, EnvExecutionReceiptV1, EnvPhysicalExecutorPortV1
 export env_executor_policy_v1, env_executor_policy_v1_well_formed
 export env_opcode_mask_v1, env_capability_mask_v1
 export env_executor_validate_instruction
 export env_execution_rejected_v1, env_execution_record_applied_v1
+export env_execution_timed_out_v1, env_replay_timeout_exact_v1
 export EnvSandboxExecutorV1, env_replay_exact_v1
