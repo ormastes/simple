@@ -183,6 +183,20 @@ enum PassScope:
     Module     # pass needs the whole MirModule (may add/remove functions)
     FsDriver   # pass targets filesystem-driver IO patterns
 
+enum PassStatus:
+    """Operational truth for a registered optimization pass."""
+    Active
+    AnalysisOnly
+    RemarkOnly
+    Skeleton
+    Disabled(reason: text)
+
+enum PassExpectation:
+    """Whether CI must observe a transformation on a positive sentinel."""
+    MayTransform
+    MustTransformSentinel
+    NeverTransforms
+
 struct MirPassDescriptor:
     stable_name: text
     aliases: [text]
@@ -190,6 +204,8 @@ struct MirPassDescriptor:
     kind: PassKind
     scope: PassScope
     cost_class: text
+    status: PassStatus
+    expectation: PassExpectation
 
 struct MirPassBackendDecision:
     pass_name: text
@@ -221,10 +237,51 @@ fn mir_pipeline_provider_skip_llvm(name: text, hot_path: bool, reason: text) -> 
     )
 
 fn mir_pass_descriptor(stable_name: text, aliases: [text], provider: OptimizationRuleProvider, kind: PassKind, scope: PassScope) -> MirPassDescriptor:
-    MirPassDescriptor(stable_name: stable_name, aliases: aliases, provider: provider, kind: kind, scope: scope, cost_class: "medium")
+    mir_pass_descriptor_with_cost(stable_name, aliases, provider, kind, scope, "medium")
 
 fn mir_pass_descriptor_with_cost(stable_name: text, aliases: [text], provider: OptimizationRuleProvider, kind: PassKind, scope: PassScope, cost_class: text) -> MirPassDescriptor:
-    MirPassDescriptor(stable_name: stable_name, aliases: aliases, provider: provider, kind: kind, scope: scope, cost_class: cost_class)
+    MirPassDescriptor(
+        stable_name: stable_name,
+        aliases: aliases,
+        provider: provider,
+        kind: kind,
+        scope: scope,
+        cost_class: cost_class,
+        status: pass_status(kind),
+        expectation: pass_expectation(kind)
+    )
+
+fn pass_status(kind: PassKind) -> PassStatus:
+    match kind:
+        case DeadCodeElimination | ConstantFolding | CopyPropagation | CommonSubexprElim:
+            PassStatus.Skeleton
+        case LoopInvariantMotion | LoopUnroll | BoundsCheckElimination | StrengthReduction:
+            PassStatus.Disabled("legality proof incomplete")
+        case StringBuilderOpt | GeneratorStateMachine | TailCallOptimization | GlobalValueNumbering | TypedByteCanon:
+            PassStatus.Skeleton
+        case BodyOutlining:
+            PassStatus.Skeleton
+        case _:
+            PassStatus.Active
+
+fn pass_expectation(kind: PassKind) -> PassExpectation:
+    match pass_status(kind):
+        case Active: PassExpectation.MustTransformSentinel
+        case AnalysisOnly | RemarkOnly: PassExpectation.NeverTransforms
+        case Skeleton | Disabled(_): PassExpectation.NeverTransforms
+
+fn pass_status_allows_transform(status: PassStatus) -> bool:
+    match status:
+        case Active: true
+        case _: false
+
+fn pass_status_name(status: PassStatus) -> text:
+    match status:
+        case Active: "active"
+        case AnalysisOnly: "analysis-only"
+        case RemarkOnly: "remark-only"
+        case Skeleton: "skeleton"
+        case Disabled(reason): "disabled: " + reason
 
 fn mir_pass_descriptor_registry() -> [MirPassDescriptor]:
     [
@@ -260,6 +317,31 @@ fn mir_pass_provider_registry() -> [OptimizationRuleProvider]:
     for descriptor in mir_pass_descriptor_registry():
         providers.push(descriptor.provider)
     providers
+
+fn mir_pass_registry_integrity_errors() -> [text]:
+    """Fail-closed structural audit for registered transformation claims."""
+    var errors: [text] = []
+    var seen_names: [text] = []
+    for descriptor in mir_pass_descriptor_registry():
+        if seen_names.contains(descriptor.stable_name):
+            errors.push("duplicate pass name: " + descriptor.stable_name)
+        else:
+            seen_names.push(descriptor.stable_name)
+
+        val active = pass_status_allows_transform(descriptor.status)
+        match descriptor.expectation:
+            case NeverTransforms:
+                if active:
+                    errors.push("active pass cannot declare NeverTransforms: " + descriptor.stable_name)
+            case MayTransform | MustTransformSentinel:
+                if not active:
+                    errors.push("inactive pass cannot claim transformation: " + descriptor.stable_name)
+
+        for alias in descriptor.aliases:
+            val resolved = mir_pass_descriptor_for_name(alias)
+            if not resolved.? or resolved.unwrap().stable_name != descriptor.stable_name:
+                errors.push("broken pass alias: " + alias + " -> " + descriptor.stable_name)
+    errors
 
 fn mir_pass_descriptor_for_name(pass_name: text) -> MirPassDescriptor?:
     if pass_name == "dead_code_elimination" or pass_name == "dce":
@@ -499,7 +581,7 @@ fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
         4. Final cleanup (DCE again)
         """
         val ctx = target_opt_context_default()
-        OptimizationPipeline(level: level, passes: optimizationpipeline_pass_names_for_level(level), target_ctx: ctx)
+        OptimizationPipeline(level: level, passes: optimizationpipeline_effective_passes_for_level(level), target_ctx: ctx)
 
 
 # ============================================================================
@@ -515,6 +597,15 @@ fn optlevel_name(level: OptLevel) -> text:
 
 fn optimizationpipeline_passes_for_level(level: OptLevel) -> [text]:
     optimizationpipeline_pass_names_for_level(level)
+
+fn optimizationpipeline_effective_passes_for_level(level: OptLevel) -> [text]:
+    """Return only operational transforms from the requested canonical plan."""
+    var effective: [text] = []
+    for pass_name in optimizationpipeline_pass_names_for_level(level):
+        val descriptor = mir_pass_descriptor_for_name(pass_name)
+        if descriptor.? and pass_status_allows_transform(descriptor.unwrap().status):
+            effective.push(descriptor.unwrap().stable_name)
+    effective
 
 fn mir_pass_cost_rank(cost_class: text) -> i64:
     if cost_class == "free":
@@ -645,6 +736,11 @@ fn mir_pass_backend_decision(pass_name: text, backend_name: text, max_cost_class
     if not mir_pass_known_fast(pass_name):
         return MirPassBackendDecision(pass_name, backend_name, max_cost_class, "unknown", false, "unknown pass")
     val cost_class = mir_pass_cost_class(pass_name)
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, "missing descriptor")
+    if not pass_status_allows_transform(descriptor.unwrap().status):
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, pass_status_name(descriptor.unwrap().status))
     val backend_skip = mir_pass_backend_skip_reason_fast(pass_name, backend_name)
     if backend_skip.?:
         return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, backend_skip.unwrap())
@@ -658,8 +754,9 @@ fn optimizationpipeline_for_backend(level: OptLevel, backend_name: text) -> Opti
     var pass_i = 0
     while pass_i < passes.len():
         val pass_name: text = passes[pass_i]
-        if mir_pass_applies_to_backend(pass_name, backend_name):
-            filtered = filtered.push(pass_name)
+        val descriptor = mir_pass_descriptor_for_name(pass_name)
+        if descriptor.? and pass_status_allows_transform(descriptor.unwrap().status) and mir_pass_applies_to_backend(pass_name, backend_name):
+            filtered = filtered.push(descriptor.unwrap().stable_name)
         pass_i = pass_i + 1
     OptimizationPipeline(level: level, passes: filtered, target_ctx: target_opt_context_default())
 
@@ -672,8 +769,10 @@ fn optimizationpipeline_for_backend_budget(level: OptLevel, backend_name: text, 
     var pass_i = 0
     while pass_i < passes.len():
         val pass_name: text = passes[pass_i]
-        if mir_pass_applies_to_backend_budget(pass_name, backend_name, max_cost_class):
-            filtered = filtered.push(pass_name)
+        val decision = mir_pass_backend_decision(pass_name, backend_name, max_cost_class)
+        if decision.applies:
+            val descriptor = mir_pass_descriptor_for_name(pass_name)
+            filtered = filtered.push(descriptor.unwrap().stable_name)
         pass_i = pass_i + 1
     OptimizationPipeline(level: level, passes: filtered, target_ctx: target_opt_context_default())
 
@@ -710,7 +809,11 @@ fn optimizationpipeline_inventory_lines() -> [text]:
     for level in levels:
         val level_name = optlevel_name(level)
         for pass_name in optimizationpipeline_passes_for_level(level):
-            lines.push("  - [mir] {pass_name} ({level_name}, canonical-pipeline)")
+            val descriptor = mir_pass_descriptor_for_name(pass_name)
+            if descriptor.?:
+                lines.push("  - [mir] {descriptor.unwrap().stable_name} ({level_name}, requested, {pass_status_name(descriptor.unwrap().status)})")
+            else:
+                lines.push("  - [mir] {pass_name} ({level_name}, requested, unknown)")
     lines
 
 fn optimize_module(module: MirModule, level: OptLevel) -> MirModule:
@@ -796,6 +899,8 @@ fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
     """Dispatch optimization pass by name using typed PassKind."""
     val descriptor = mir_pass_descriptor_for_name(pass_name)
     if not descriptor.?:
+        return func
+    if not pass_status_allows_transform(descriptor.unwrap().status):
         return func
     run_typed_pass_on_function(descriptor.unwrap().kind, func)
 
@@ -890,6 +995,11 @@ fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirMo
     var optimized_module = module
     val ctx = pipeline.target_ctx
     for pass_name in pipeline.passes:
+        val descriptor = mir_pass_descriptor_for_name(pass_name)
+        if descriptor.? and not pass_status_allows_transform(descriptor.unwrap().status):
+            if mir_opt_trace_enabled():
+                print "[mir-opt] pass:inactive {pass_name}"
+            continue
         if mir_opt_bootstrap_enabled() and mir_opt_bootstrap_skip_pass(pass_name):
             if mir_opt_trace_enabled():
                 print "[mir-opt] pass:skip {pass_name}"
@@ -920,6 +1030,8 @@ fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
     """
     val descriptor = mir_pass_descriptor_for_name(pass_name)
     if not descriptor.?:
+        return module
+    if not pass_status_allows_transform(descriptor.unwrap().status):
         return module
     run_typed_pass_on_module(descriptor.unwrap().kind, module)
 
@@ -1054,13 +1166,13 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
 # Exports
 # ============================================================================
 
-export PassKind, PassScope
+export PassKind, PassScope, PassStatus, PassExpectation
 export MirPass, MirPassDescriptor, MirPassBackendDecision, MirPipelineBackendPlan
 export TargetOptContext, target_opt_context_default
 export OptLevel, optlevel_name
 export PassManager, passmanager_new, passmanager_run_on_module
 export PassStatistics, passstatistics_new
-export OptimizationPipeline, optimizationpipeline_for_level, optimizationpipeline_pass_names_for_level, optimizationpipeline_passes_for_level, optimizationpipeline_inventory_lines
+export OptimizationPipeline, optimizationpipeline_for_level, optimizationpipeline_pass_names_for_level, optimizationpipeline_passes_for_level, optimizationpipeline_effective_passes_for_level, optimizationpipeline_inventory_lines
 export optimizationpipeline_for_backend, optimizationpipeline_passes_for_backend, mir_pass_applies_to_backend
 export optimizationpipeline_for_backend_budget, optimizationpipeline_passes_for_backend_budget
 export optimizationpipeline_backend_plan_for_budget
@@ -1070,7 +1182,9 @@ export optimize_module, optimize_module_for_backend, optimize_module_for_backend
 export mir_bulk_ops_enabled, apply_bulk_recognizers
 export optimize_function
 export mir_pipeline_provider, mir_pass_descriptor, mir_pass_descriptor_with_cost, mir_pass_descriptor_registry, mir_pass_descriptor_for_name
+export pass_status, pass_expectation, pass_status_allows_transform, pass_status_name
 export mir_pass_provider_registry, mir_pass_provider_name, mir_pass_uses_pipeline_provider
+export mir_pass_registry_integrity_errors
 export run_named_pass, run_typed_pass_on_function
 export run_pass_on_module, run_typed_pass_on_module
 export pipeline_optimize
