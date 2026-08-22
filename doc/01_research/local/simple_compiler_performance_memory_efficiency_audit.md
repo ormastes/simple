@@ -1584,3 +1584,18 @@ updates both legacy aliases, while setting either legacy name updates the generi
 Typed HIR remains the future owner for decorator-versus-attribute classification. Normal
 cost falls from two full context scans to one and duplicate diagnostic/fix storage is
 removed.
+
+## 2026-08-22 implementation addendum: remove unsafe hoist bodies
+
+Collection hoisting was already fail-closed at both public compatibility entrypoints, but
+each unconditional return was followed by a complete unreachable header-insertion
+implementation and private legality helpers. Those bodies parsed and compiled despite
+never executing, duplicated roughly 190 lines, and made accidental resurrection of the
+known zero-trip/preheader defect a one-line edit.
+
+Both unreachable transforms and their private-only helpers are removed. The inert
+entrypoints remain and return the original blocks. Scalar-invariance predicates retained
+as analysis scaffolding do not move MIR. Re-enabling collection LICM now requires a new
+implementation built on a real preheader, dominance, MemorySSA/alias/effect facts, and
+non-trapping speculatability rather than uncommenting unsafe header insertion. This
+reduces compiler source/IR size and closes a correctness footgun without claiming LICM.
