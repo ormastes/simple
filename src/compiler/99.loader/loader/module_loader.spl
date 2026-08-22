@@ -56,6 +56,18 @@ export use .module_loader_semantic.{
     moduleloader_drop_semantic_cache_record,
     text_array_contains, text_array_push_unique, text_array_intersects
 }
+use compiler.loader.mcdc_aspect_binding.{
+    McdcAspectBindingState, McdcAspectBinding
+}
+use std.nogc_sync_mut.io.coverage_mcdc.{
+    MCDC_STATUS_OK
+}
+@unsafe(reason: "loader registers a validated executable symbol into a bounded runtime handle table", capabilities: [ffi, raw_ptr])
+extern fn rt_mcdc_dynamic_register_target_v1(target_address: u64,
+                                              owner_cookie: u64) -> u64
+@unsafe(reason: "loader retires its opaque target handle only after quiescence", capabilities: [ffi, raw_ptr])
+extern fn rt_mcdc_dynamic_unregister_target_v1(target_handle: u64,
+                                                owner_cookie: u64) -> i32
 
 # ============================================================================
 # Loaded Module
@@ -165,6 +177,10 @@ struct LazyModuleLoader:
     semantic_exports: Dict<text, [text]>
     # Public ABI/accessor semantic keys each module compiled against.
     semantic_dependencies: Dict<text, [text]>
+    # Loader-owned dynamic MC/DC bindings keyed by the module whose executable
+    # symbol supplies the vector target. No caller may free that module until
+    # unbind has published dormancy and all prior readers have settled.
+    mcdc_aspect_bindings: Dict<text, McdcAspectBinding>
 
 
 # ============================================================================
@@ -193,8 +209,48 @@ fn lazymoduleloader_new(config: LazyModuleLoaderConfig) -> LazyModuleLoader:
             global_symbols: {},
             config: config,
             semantic_exports: {},
-            semantic_dependencies: {}
+            semantic_dependencies: {},
+            mcdc_aspect_bindings: {}
         )
+
+fn moduleloader_bind_mcdc_aspect(self: LazyModuleLoader, path: text,
+                                 symbol_name: text,
+                                 generation: i64) -> Result<(), text>:
+    if symbol_name != "rt_mcdc_aspect_vector_v1":
+        return Err("MCDC-ASPECT-E-ABI: expected rt_mcdc_aspect_vector_v1")
+    if not self.modules.has(path):
+        return Err("MCDC-ASPECT-E-MODULE: module is not loaded: {path}")
+    val module = self.modules[path]
+    val abi_marker = "rt_mcdc_aspect_vector_v1__abi_u64_u32_u64_u64_u64_u8_i32_v1"
+    if not module.symbols.has(symbol_name):
+        return Err("MCDC-ASPECT-E-SYMBOL: symbol is not loaded: {symbol_name}")
+    if not module.symbols.has(abi_marker):
+        return Err("MCDC-ASPECT-E-ABI: exact callable ABI marker is absent")
+    val symbol = module.symbols[symbol_name]
+    val marker = module.symbols[abi_marker]
+    match symbol.ty:
+        case SymbolType.Function: ()
+        case _:
+            return Err("MCDC-ASPECT-E-ABI: vector target is not a function symbol")
+    match marker.ty:
+        case SymbolType.Constant | SymbolType.Data: ()
+        case _:
+            return Err("MCDC-ASPECT-E-ABI: callable ABI marker has the wrong symbol kind")
+    if symbol.address == 0:
+        return Err("MCDC-ASPECT-E-SYMBOL: symbol has a null address")
+    if marker.address == 0 or marker.size <= 0:
+        return Err("MCDC-ASPECT-E-ABI: callable ABI marker has no mapped payload")
+    val target_handle = rt_mcdc_dynamic_register_target_v1(
+        symbol.address as u64, generation as u64)
+    if target_handle == 0u64:
+        return Err("MCDC-ASPECT-E-REGISTRY: target registry is full or rejected the address")
+    var binding = self.mcdc_aspect_bindings[path] ?? McdcAspectBinding.dormant()
+    val bound = binding.bind(target_handle, generation)
+    if bound.is_ok():
+        self.mcdc_aspect_bindings[path] = binding
+    else:
+        _ = rt_mcdc_dynamic_unregister_target_v1(target_handle, generation as u64)
+    bound
 
 
 fn lazymoduleloader_with_defaults() -> LazyModuleLoader:
@@ -336,6 +392,13 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
                 print "[loader] relocation failed for {path}: {reloc_error}"
             moduleloader_unload(self, path)
             return LoadResult.Error(message: reloc_error)
+
+        if symbols.has("rt_mcdc_aspect_vector_v1"):
+            val mcdc_bound = moduleloader_bind_mcdc_aspect(
+                self, path, "rt_mcdc_aspect_vector_v1", module.version as i64)
+            if mcdc_bound.is_err():
+                moduleloader_unload(self, path)
+                return LoadResult.Error(message: mcdc_bound.unwrap_err())
 
         if self.config.verbose:
             print "[loader] Loaded {symbols.keys().len()} symbols from {path}"
@@ -514,6 +577,29 @@ fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
         # Promote candidate generation state.
         val gen_active = gen_candidate.promote()
         gen_lm = gen_lm.promote_candidate()
+
+        # Retire a dynamic MC/DC call target before any old executable symbol
+        # can be unmapped. A draining generation is retried by a later reload;
+        # this call never blocks or sleeps.
+        val retired_mcdc = moduleloader_retire_mcdc_aspect(self, path)
+        match retired_mcdc:
+            case Err(message):
+                self.modules[path] = old_module
+                moduleloader_unmap_internal_symbols(self, internal_symbols)
+                return LoadResult.Error(message: message)
+            case Ok(retired):
+                if not retired:
+                    self.modules[path] = old_module
+                    moduleloader_unmap_internal_symbols(self, internal_symbols)
+                    return LoadResult.Error(message: "MCDC-ASPECT-E-DRAINING: prior generation still has readers")
+
+        if candidate_symbols.has("rt_mcdc_aspect_vector_v1"):
+            val rebound = moduleloader_bind_mcdc_aspect(
+                self, path, "rt_mcdc_aspect_vector_v1", next_version as i64)
+            if rebound.is_err():
+                self.modules[path] = old_module
+                moduleloader_unmap_internal_symbols(self, internal_symbols)
+                return LoadResult.Error(message: rebound.unwrap_err())
 
         # Publish candidate symbols before retiring old executable records so
         # lookups never observe a missing symbol during successful replacement.
@@ -720,14 +806,47 @@ fn moduleloader_invalidate_semantic_change(self: LazyModuleLoader, changed_key: 
     # defeat lazy construction.
     if moduleloader_jit_service_created(self):
         _ = moduleloader_ensure_jit(self).invalidate_by_semantic_key(changed_key)
+    var completed: [text] = []
     for path in affected:
         if self.modules.has(path):
-            moduleloader_unload(self, path)
+            if moduleloader_unload(self, path):
+                completed = text_array_push_unique(completed, path)
         else:
             moduleloader_drop_semantic_cache_record(self, path)
-    affected
+            completed = text_array_push_unique(completed, path)
+    completed
 
-fn moduleloader_unload(self: LazyModuleLoader, path: text):
+fn moduleloader_retire_mcdc_aspect(self: LazyModuleLoader,
+                                   path: text) -> Result<bool, text>:
+    if not self.mcdc_aspect_bindings.has(path): return Ok(true)
+    var binding = self.mcdc_aspect_bindings[path]
+    match binding.state:
+        case McdcAspectBindingState.Active:
+            val unbound = binding.unbind()
+            if unbound.is_err(): return Err(unbound.unwrap_err())
+        case _: ()
+    match binding.state:
+        case McdcAspectBindingState.Settling:
+            val retired_handle = binding.target
+            val retired_generation = binding.generation
+            match binding.settle():
+                case Ok(done):
+                    if not done:
+                        self.mcdc_aspect_bindings[path] = binding
+                        return Ok(false)
+                    if rt_mcdc_dynamic_unregister_target_v1(
+                            retired_handle,
+                            retired_generation as u64) != MCDC_STATUS_OK:
+                        binding.target = retired_handle
+                        binding.state = McdcAspectBindingState.Settling
+                        self.mcdc_aspect_bindings[path] = binding
+                        return Ok(false)
+                case Err(message): return Err(message)
+        case _: ()
+    self.mcdc_aspect_bindings = self.mcdc_aspect_bindings.remove(path)
+    Ok(true)
+
+fn moduleloader_unload(self: LazyModuleLoader, path: text) -> bool:
     """Unload module and free all associated resources.
 
     Delegates exec page and SMF cache cleanup to ResourceLifecycleManager,
@@ -741,7 +860,10 @@ fn moduleloader_unload(self: LazyModuleLoader, path: text):
     7. Module cache entry
     """
     if not self.modules.has(path):
-        return
+        return true
+
+    val retired_mcdc = moduleloader_retire_mcdc_aspect(self, path)
+    if retired_mcdc.is_err() or not retired_mcdc.unwrap(): return false
 
     # A loaded module implies the lifecycle and JIT (exec-mapper host)
     # services already exist; ensure_* here is a cheap fetch.
@@ -780,6 +902,7 @@ fn moduleloader_unload(self: LazyModuleLoader, path: text):
     # 7. Remove module from cache.
     moduleloader_drop_semantic_cache_record(self, path)
     self.modules = self.modules.remove(path)
+    true
 
 # ============================================================================
 # Validated Loading (checks backend/options match)

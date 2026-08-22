@@ -43,6 +43,41 @@ typedef struct {
 
 static McdcCollectorV1 g_mcdc;
 static _Atomic int32_t g_mcdc_compiled_last_status = SIMPLE_MCDC_V1_OK;
+static _Atomic(SimpleMcdcDynamicTargetV1) g_mcdc_dynamic_target = NULL;
+static _Atomic uint64_t g_mcdc_dynamic_active_calls = 0;
+/* Even = stable reader epoch; odd = bind/unbind writer owns publication. */
+static _Atomic uint64_t g_mcdc_dynamic_epoch = 0;
+#define MCDC_DYNAMIC_COMPILED_HANDLE UINT64_C(1)
+#define MCDC_DYNAMIC_TARGET_CAPACITY 8u
+typedef struct {
+    uint64_t handle;
+    uint64_t owner_cookie;
+    SimpleMcdcDynamicTargetV1 target;
+} McdcDynamicTargetEntryV1;
+static McdcDynamicTargetEntryV1
+    g_mcdc_dynamic_targets[MCDC_DYNAMIC_TARGET_CAPACITY];
+static uint64_t g_mcdc_dynamic_next_handle = 2;
+static _Atomic uint64_t g_mcdc_dynamic_bound_handle = 0;
+
+static bool mcdc_dynamic_target_from_handle(
+        uint64_t handle, SimpleMcdcDynamicTargetV1 *target) {
+    if (!handle || handle > (uint64_t)UINTPTR_MAX || !target ||
+        sizeof(*target) > sizeof(uintptr_t)) return false;
+    const uintptr_t raw = (uintptr_t)handle;
+    *target = NULL;
+    memcpy(target, &raw, sizeof(*target));
+    return *target != NULL;
+}
+
+static SimpleMcdcDynamicTargetV1 mcdc_dynamic_registered_target(
+        uint64_t handle) {
+    if (handle == MCDC_DYNAMIC_COMPILED_HANDLE)
+        return rt_mcdc_record_compiled_vector_v1;
+    for (size_t i = 0; i < MCDC_DYNAMIC_TARGET_CAPACITY; ++i)
+        if (g_mcdc_dynamic_targets[i].handle == handle)
+            return g_mcdc_dynamic_targets[i].target;
+    return NULL;
+}
 
 static void mcdc_compiled_note_status(int32_t status) {
     if (status == SIMPLE_MCDC_V1_OK) return;
@@ -245,6 +280,175 @@ int32_t rt_mcdc_compiled_last_status_v1(void) {
                                 memory_order_relaxed);
 }
 
+uint64_t rt_mcdc_compiled_target_v1(void) {
+    return MCDC_DYNAMIC_COMPILED_HANDLE;
+}
+
+int32_t rt_mcdc_dynamic_bind_v1(uint64_t target_handle) {
+    mcdc_lock();
+    SimpleMcdcDynamicTargetV1 target = mcdc_dynamic_registered_target(target_handle);
+    if (!target) { mcdc_unlock(); return SIMPLE_MCDC_V1_INVALID; }
+    uint64_t epoch = atomic_load_explicit(&g_mcdc_dynamic_epoch,
+                                          memory_order_acquire);
+    if ((epoch & 1u) || !atomic_compare_exchange_strong_explicit(
+            &g_mcdc_dynamic_epoch, &epoch, epoch + 1,
+            memory_order_acq_rel, memory_order_relaxed))
+        { mcdc_unlock(); return SIMPLE_MCDC_V1_BUSY; }
+    if (atomic_load_explicit(&g_mcdc_dynamic_active_calls,
+                             memory_order_acquire) != 0 ||
+        atomic_load_explicit(&g_mcdc_dynamic_target,
+                             memory_order_relaxed) != NULL) {
+        atomic_store_explicit(&g_mcdc_dynamic_epoch, epoch + 2,
+                              memory_order_release);
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_BUSY;
+    }
+    atomic_store_explicit(&g_mcdc_dynamic_target, target, memory_order_relaxed);
+    atomic_store_explicit(&g_mcdc_dynamic_bound_handle, target_handle,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_mcdc_dynamic_epoch, epoch + 2,
+                          memory_order_release);
+    mcdc_unlock();
+    return SIMPLE_MCDC_V1_OK;
+}
+
+int32_t rt_mcdc_dynamic_unbind_v1(uint64_t target_handle) {
+    mcdc_lock();
+    SimpleMcdcDynamicTargetV1 target = mcdc_dynamic_registered_target(target_handle);
+    if (!target || atomic_load_explicit(&g_mcdc_dynamic_bound_handle,
+                                        memory_order_relaxed) != target_handle) {
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_INVALID;
+    }
+    uint64_t epoch = atomic_load_explicit(&g_mcdc_dynamic_epoch,
+                                          memory_order_acquire);
+    if ((epoch & 1u) || !atomic_compare_exchange_strong_explicit(
+            &g_mcdc_dynamic_epoch, &epoch, epoch + 1,
+            memory_order_acq_rel, memory_order_relaxed))
+        { mcdc_unlock(); return SIMPLE_MCDC_V1_BUSY; }
+    if (atomic_load_explicit(&g_mcdc_dynamic_target,
+                             memory_order_relaxed) != target) {
+        atomic_store_explicit(&g_mcdc_dynamic_epoch, epoch + 2,
+                              memory_order_release);
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_INVALID;
+    }
+    atomic_store_explicit(&g_mcdc_dynamic_target, NULL, memory_order_relaxed);
+    atomic_store_explicit(&g_mcdc_dynamic_bound_handle, 0,
+                          memory_order_relaxed);
+    if (atomic_load_explicit(&g_mcdc_dynamic_active_calls,
+                             memory_order_acquire) == 0) {
+        atomic_store_explicit(&g_mcdc_dynamic_epoch, epoch + 2,
+                              memory_order_release);
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_OK;
+    }
+    /* Keep the epoch odd until settle observes the last prior reader exit. */
+    mcdc_unlock();
+    return SIMPLE_MCDC_V1_DRAINING;
+}
+
+uint64_t rt_mcdc_dynamic_register_target_v1(uint64_t target_address,
+                                             uint64_t owner_cookie) {
+    SimpleMcdcDynamicTargetV1 target = NULL;
+    if (!owner_cookie || !mcdc_dynamic_target_from_handle(target_address, &target))
+        return 0;
+    mcdc_lock();
+    size_t free_index = MCDC_DYNAMIC_TARGET_CAPACITY;
+    for (size_t i = 0; i < MCDC_DYNAMIC_TARGET_CAPACITY; ++i) {
+        if (g_mcdc_dynamic_targets[i].handle == 0 &&
+            free_index == MCDC_DYNAMIC_TARGET_CAPACITY) free_index = i;
+    }
+    if (free_index == MCDC_DYNAMIC_TARGET_CAPACITY ||
+        g_mcdc_dynamic_next_handle == UINT64_MAX) {
+        mcdc_unlock();
+        return 0;
+    }
+    const uint64_t handle = g_mcdc_dynamic_next_handle++;
+    g_mcdc_dynamic_targets[free_index] = (McdcDynamicTargetEntryV1){
+        handle, owner_cookie, target
+    };
+    mcdc_unlock();
+    return handle;
+}
+
+int32_t rt_mcdc_dynamic_unregister_target_v1(uint64_t target_handle,
+                                              uint64_t owner_cookie) {
+    if (target_handle <= MCDC_DYNAMIC_COMPILED_HANDLE || !owner_cookie)
+        return SIMPLE_MCDC_V1_INVALID;
+    mcdc_lock();
+    if (atomic_load_explicit(&g_mcdc_dynamic_bound_handle,
+                             memory_order_acquire) == target_handle ||
+        (atomic_load_explicit(&g_mcdc_dynamic_epoch,
+                              memory_order_acquire) & 1u) ||
+        atomic_load_explicit(&g_mcdc_dynamic_active_calls,
+                             memory_order_acquire) != 0) {
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_BUSY;
+    }
+    for (size_t i = 0; i < MCDC_DYNAMIC_TARGET_CAPACITY; ++i) {
+        if (g_mcdc_dynamic_targets[i].handle == target_handle) {
+            if (g_mcdc_dynamic_targets[i].owner_cookie != owner_cookie) {
+                mcdc_unlock();
+                return SIMPLE_MCDC_V1_INVALID;
+            }
+            g_mcdc_dynamic_targets[i] = (McdcDynamicTargetEntryV1){0};
+            mcdc_unlock();
+            return SIMPLE_MCDC_V1_OK;
+        }
+    }
+    mcdc_unlock();
+    return SIMPLE_MCDC_V1_INVALID;
+}
+
+int32_t rt_mcdc_dynamic_settled_v1(void) {
+    uint64_t epoch = atomic_load_explicit(&g_mcdc_dynamic_epoch,
+                                          memory_order_acquire);
+    if (!(epoch & 1u))
+        return atomic_load_explicit(&g_mcdc_dynamic_target,
+                                    memory_order_acquire) == NULL
+            ? SIMPLE_MCDC_V1_OK : SIMPLE_MCDC_V1_BUSY;
+    if (atomic_load_explicit(&g_mcdc_dynamic_active_calls,
+                             memory_order_acquire) != 0)
+        return SIMPLE_MCDC_V1_BUSY;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_mcdc_dynamic_epoch, &epoch, epoch + 1,
+            memory_order_release, memory_order_relaxed))
+        return SIMPLE_MCDC_V1_BUSY;
+    return SIMPLE_MCDC_V1_OK;
+}
+
+int32_t rt_mcdc_dynamic_vector_patchpoint_v1(uint64_t decision_id,
+                                             uint32_t condition_count,
+                                             uint64_t source_digest,
+                                             uint64_t evaluated_mask,
+                                             uint64_t true_mask,
+                                             uint8_t outcome) {
+    const uint64_t epoch = atomic_load_explicit(&g_mcdc_dynamic_epoch,
+                                                memory_order_acquire);
+    if (epoch & 1u) return SIMPLE_MCDC_V1_OK;
+    atomic_fetch_add_explicit(&g_mcdc_dynamic_active_calls, 1,
+                              memory_order_acquire);
+    if (atomic_load_explicit(&g_mcdc_dynamic_epoch,
+                             memory_order_acquire) != epoch) {
+        atomic_fetch_sub_explicit(&g_mcdc_dynamic_active_calls, 1,
+                                  memory_order_release);
+        return SIMPLE_MCDC_V1_OK;
+    }
+    SimpleMcdcDynamicTargetV1 target = atomic_load_explicit(
+        &g_mcdc_dynamic_target, memory_order_relaxed);
+    if (!target) {
+        atomic_fetch_sub_explicit(&g_mcdc_dynamic_active_calls, 1,
+                                  memory_order_release);
+        return SIMPLE_MCDC_V1_OK;
+    }
+    const int32_t status = target(decision_id, condition_count, source_digest,
+                                  evaluated_mask, true_mask, outcome);
+    atomic_fetch_sub_explicit(&g_mcdc_dynamic_active_calls, 1,
+                              memory_order_release);
+    return status;
+}
+
 int32_t rt_mcdc_collector_seal_v1(uint64_t session_id) {
     mcdc_lock();
     if (!g_mcdc.initialized) { mcdc_unlock(); return SIMPLE_MCDC_V1_NOT_INITIALIZED; }
@@ -300,8 +504,18 @@ int32_t rt_mcdc_snapshot_v1(SimpleMcdcVectorV1 *output, uint64_t output_capacity
     return SIMPLE_MCDC_V1_OK;
 }
 
-void rt_mcdc_collector_reset_v1(void) {
+int32_t rt_mcdc_collector_reset_checked_v1(void) {
     mcdc_lock();
+    if (g_mcdc.interpreter_owner_id != 0 || g_mcdc.compiled_owner_id != 0 ||
+        atomic_load_explicit(&g_mcdc_dynamic_active_calls,
+                             memory_order_acquire) != 0 ||
+        atomic_load_explicit(&g_mcdc_dynamic_target,
+                             memory_order_acquire) != NULL ||
+        (atomic_load_explicit(&g_mcdc_dynamic_epoch,
+                              memory_order_acquire) & 1u)) {
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_BUSY;
+    }
     g_mcdc.events = NULL;
     g_mcdc.capacity = 0;
     g_mcdc.count = 0;
@@ -318,6 +532,11 @@ void rt_mcdc_collector_reset_v1(void) {
     g_mcdc.overflowed = false;
     g_mcdc.sealed = false;
     mcdc_unlock();
+    return SIMPLE_MCDC_V1_OK;
+}
+
+void rt_mcdc_collector_reset_v1(void) {
+    (void)rt_mcdc_collector_reset_checked_v1();
 }
 
 static bool mcdc_vector_valid(const SimpleMcdcVectorV1 *event) {

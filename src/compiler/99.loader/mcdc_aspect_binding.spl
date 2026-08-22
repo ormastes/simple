@@ -1,0 +1,70 @@
+# Canonical loader owner for the MC/DC dynamic aspect patchpoint.
+# Activation is setup-time only. The hot path is runtime-owned and performs
+# one atomic target load plus an idle branch; it never consults this object,
+# scans a registry, logs, or allocates.
+
+use std.nogc_sync_mut.io.coverage_mcdc.{
+    MCDC_STATUS_OK, MCDC_STATUS_DRAINING,
+    mcdc_dynamic_settled
+}
+
+@unsafe(reason: "loader-owned opaque MC/DC target handle publication", capabilities: [ffi, raw_ptr])
+extern fn rt_mcdc_dynamic_bind_v1(target_handle: u64) -> i32
+@unsafe(reason: "loader-owned opaque MC/DC target handle withdrawal", capabilities: [ffi, raw_ptr])
+extern fn rt_mcdc_dynamic_unbind_v1(target_handle: u64) -> i32
+
+enum McdcAspectBindingState:
+    Dormant
+    Active
+    Settling
+
+struct McdcAspectBinding:
+    state: McdcAspectBindingState
+    target: u64
+    generation: i64
+
+impl McdcAspectBinding:
+    static fn dormant() -> McdcAspectBinding:
+        McdcAspectBinding(
+            state: McdcAspectBindingState.Dormant,
+            target: 0u64,
+            generation: 0)
+
+    me bind(target: u64, generation: i64) -> Result<(), text>:
+        if target == 0u64:
+            return Err("MCDC-ASPECT-E-TARGET: null vector target")
+        if generation <= self.generation:
+            return Err("MCDC-ASPECT-E-GENERATION: generation must increase")
+        match self.state:
+            case McdcAspectBindingState.Dormant: ()
+            case _:
+                return Err("MCDC-ASPECT-E-STATE: patchpoint is not dormant")
+        val status = rt_mcdc_dynamic_bind_v1(target)
+        if status != MCDC_STATUS_OK:
+            return Err("MCDC-ASPECT-E-BIND: runtime status {status}")
+        self.target = target
+        self.generation = generation
+        self.state = McdcAspectBindingState.Active
+        Ok(())
+
+    me unbind() -> Result<bool, text>:
+        match self.state:
+            case McdcAspectBindingState.Active: ()
+            case _:
+                return Err("MCDC-ASPECT-E-STATE: patchpoint is not active")
+        val status = rt_mcdc_dynamic_unbind_v1(self.target)
+        if status != MCDC_STATUS_OK and status != MCDC_STATUS_DRAINING:
+            return Err("MCDC-ASPECT-E-UNBIND: runtime status {status}")
+        self.state = McdcAspectBindingState.Settling
+        Ok(status == MCDC_STATUS_OK)
+
+    me settle() -> Result<bool, text>:
+        match self.state:
+            case McdcAspectBindingState.Settling: ()
+            case _:
+                return Err("MCDC-ASPECT-E-STATE: patchpoint is not settling")
+        if not mcdc_dynamic_settled():
+            return Ok(false)
+        self.target = 0u64
+        self.state = McdcAspectBindingState.Dormant
+        Ok(true)

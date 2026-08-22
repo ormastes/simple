@@ -1942,14 +1942,14 @@ impl MirLowering:
         b.emit_store(mir_operand_copy(self.mcdc_true_mask_slot), mir_operand_copy(true_next))
         self.builder = b
 
-    me emit_mcdc_decision_probe(cond: HirExpr, result: LocalId):
+    me emit_mcdc_decision_probe(_cond: HirExpr, result: LocalId):
         if not self.mcdc_instrumentation_enabled(): return
         val runtime_id = self.mcdc_current_decision_runtime_id
         if runtime_id <= 0: return
         var b = self.builder
         val evaluated_mask = b.emit_load(mir_operand_copy(self.mcdc_evaluated_mask_slot), MirType.i64())
         val true_mask = b.emit_load(mir_operand_copy(self.mcdc_true_mask_slot), MirType.i64())
-        if self.mcdc_policy == "static":
+        if self.mcdc_policy == "static" or self.mcdc_policy == "dynamic":
             val u64_type = MirType(kind: MirTypeKind.U64)
             val u32_type = MirType(kind: MirTypeKind.U32)
             val u8_type = MirType(kind: MirTypeKind.U8)
@@ -1957,8 +1957,12 @@ impl MirLowering:
             val evaluated_u64 = b.emit_cast(mir_operand_copy(evaluated_mask), u64_type)
             val true_u64 = b.emit_cast(mir_operand_copy(true_mask), u64_type)
             val outcome_u8 = b.emit_cast(mir_operand_copy(result), u8_type)
+            val record_name = if self.mcdc_policy == "dynamic":
+                "rt_mcdc_dynamic_vector_patchpoint_v1"
+            else:
+                "rt_mcdc_record_compiled_vector_v1"
             val record_func = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_mcdc_record_compiled_vector_v1"),
+                MirConstValue.Str(record_name),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(
                     params: [u64_type, u32_type, u64_type, u64_type, u64_type, u8_type],
                     return_type: i32_type, is_variadic: false)))))
@@ -1971,22 +1975,6 @@ impl MirLowering:
             ], i32_type)
             self.builder = b
             return
-        val kind = if self.mcdc_policy == "dynamic":
-            MirInstKind.DynamicDecisionProbe(
-                runtime_id, self.mcdc_current_decision_semantic_id,
-                self.mcdc_source_digest,
-                self.mcdc_condition_count, mir_operand_copy(evaluated_mask), mir_operand_copy(true_mask),
-                mir_operand_copy(result), self.mcdc_authored_path,
-                cond.span.line, cond.span.col)
-        else:
-            MirInstKind.DecisionProbe(
-                runtime_id, self.mcdc_current_decision_semantic_id,
-                self.mcdc_source_digest,
-                self.mcdc_condition_count, mir_operand_copy(evaluated_mask), mir_operand_copy(true_mask),
-                mir_operand_copy(result), self.mcdc_authored_path,
-                cond.span.line, cond.span.col)
-        b.emit(MirInst(kind: kind, span: Some(cond.span)))
-        self.builder = b
 
     me lower_cond_expr(cond: HirExpr) -> LocalId:
         val lowered = self.lower_cond_expr_unprobed(cond)

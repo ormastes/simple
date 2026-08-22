@@ -17,7 +17,8 @@ enum {
     SIMPLE_MCDC_V1_SESSION_MISMATCH = 5,
     SIMPLE_MCDC_V1_NOT_SEALED = 6,
     SIMPLE_MCDC_V1_BUSY = 7,
-    SIMPLE_MCDC_V1_BUDGET_EXHAUSTED = 8
+    SIMPLE_MCDC_V1_BUDGET_EXHAUSTED = 8,
+    SIMPLE_MCDC_V1_DRAINING = 9
 };
 
 typedef struct {
@@ -102,6 +103,25 @@ int32_t rt_mcdc_record_compiled_vector_v1(uint64_t decision_id,
                                           uint64_t true_mask,
                                           uint8_t outcome);
 int32_t rt_mcdc_compiled_last_status_v1(void);
+typedef int32_t (*SimpleMcdcDynamicTargetV1)(
+    uint64_t decision_id, uint32_t condition_count, uint64_t source_digest,
+    uint64_t evaluated_mask, uint64_t true_mask, uint8_t outcome);
+/* Dynamic aspect patchpoint. Idle dispatch is one atomic load and branch;
+ * binding/unbinding is loader-owned and allocation free. */
+int32_t rt_mcdc_dynamic_vector_patchpoint_v1(uint64_t decision_id,
+                                             uint32_t condition_count,
+                                             uint64_t source_digest,
+                                             uint64_t evaluated_mask,
+                                             uint64_t true_mask,
+                                             uint8_t outcome);
+int32_t rt_mcdc_dynamic_bind_v1(uint64_t target_handle);
+int32_t rt_mcdc_dynamic_unbind_v1(uint64_t target_handle);
+int32_t rt_mcdc_dynamic_settled_v1(void);
+uint64_t rt_mcdc_compiled_target_v1(void);
+uint64_t rt_mcdc_dynamic_register_target_v1(uint64_t target_address,
+                                             uint64_t owner_cookie);
+int32_t rt_mcdc_dynamic_unregister_target_v1(uint64_t target_handle,
+                                              uint64_t owner_cookie);
 int32_t rt_mcdc_collector_seal_v1(uint64_t session_id);
 int32_t rt_mcdc_claim_interpreter_owner_v1(uint64_t session_id,
                                            uint64_t owner_id);
@@ -109,6 +129,7 @@ int32_t rt_mcdc_release_interpreter_owner_v1(uint64_t session_id,
                                              uint64_t owner_id);
 int32_t rt_mcdc_snapshot_v1(SimpleMcdcVectorV1 *output, uint64_t output_capacity,
                             SimpleMcdcSnapshotV1 *snapshot);
+int32_t rt_mcdc_collector_reset_checked_v1(void);
 int32_t rt_mcdc_analyze_unique_v1(const SimpleMcdcVectorV1 *events,
                                   uint64_t event_count,
                                   SimpleMcdcWitnessV1 *witnesses,
