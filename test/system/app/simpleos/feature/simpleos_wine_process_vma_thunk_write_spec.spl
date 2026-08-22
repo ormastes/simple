@@ -1,3 +1,26 @@
+"""
+## Purpose and audience
+
+This specification is maintained for compiler and library engineers reviewing SYSTEM-APP behavior, and for operators verifying a build.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/system/app/simpleos/feature/simpleos_wine_process_vma_thunk_write_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
+
+## Compatibility and limitations
+
+Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
+"""
+# @manual: primary
+# REQ-SYSTEM-APP-001
+# doc-path: doc/01_research/app/
+# doc-path: doc/03_plan/app/
+# doc-path: doc/04_architecture/app/
+# doc-path: doc/05_design/app/
 use common.pe_coff_header.{pe_rva_to_file_offset}
 use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
 use common.wine_peb_teb.{wine_peb_teb_apply_layout_byte_writes, wine_peb_teb_init_default, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
@@ -8,6 +31,7 @@ use common.wine_process_session.{
     wine_process_session_request_new
 }
 use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
+use std.spec.{step}
 
 fn _full_gates() -> text:
     "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
@@ -49,13 +73,17 @@ fn _ready_vm_writes():
 describe "SimpleOS Wine VMA thunk writes":
     describe "REQ-027: bounded process VMA thunk patch window":
         it "should patch known thunk slots through a bounded process VMA write window":
+            # @req: REQ-SYSTEM-APP-001
+                # @req: REQ-027
+            step("Verify: should patch known thunk slots through a bounded process VMA write window")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val result = wine_process_apply_known_kernel32_thunk_patches_in_vma(plan, wine_known_hello_exe_fixture_bytes(), 8)
             val get_std_handle_offset = pe_rva_to_file_offset(result.patched_image, 0x2060)
             val write_file_offset = pe_rva_to_file_offset(result.patched_image, 0x2068)
             val exit_process_offset = pe_rva_to_file_offset(result.patched_image, 0x2070)
             expect(result.ok).to_equal(true)
-            expect(result.patched_count).to_equal(3)
+            expect(result.patched_count).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
             expect(_read_u64_le(result.patched_image, get_std_handle_offset)).to_equal(0x120000 + 5)
             expect(_read_u64_le(result.patched_image, write_file_offset)).to_equal(0x120000 + 6)
             expect(_read_u64_le(result.patched_image, exit_process_offset)).to_equal(0x120000 + 7)
@@ -67,19 +95,25 @@ describe "SimpleOS Wine VMA thunk writes":
             expect(result.status).to_equal("vma-thunk-patches-applied")
 
         it "should reject VMA thunk writes before record planning passes":
+            # @req: REQ-SYSTEM-APP-002
+            step("Verify: should reject VMA thunk writes before record planning passes")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val result = wine_process_apply_known_kernel32_thunk_patches_in_vma(plan, wine_known_hello_exe_fixture_bytes(), 0)
             expect(result.ok).to_equal(false)
             expect(result.error).to_equal("invalid-symbol-limit")
-            expect(result.patched_image.len()).to_equal(0)
-            expect(result.mapped_base).to_equal(0)
-            expect(result.mapped_size).to_equal(0)
-            expect(result.patched_count).to_equal(0)
+            expect(result.patched_image.len()).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+            expect(result.mapped_base).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+            expect(result.mapped_size).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+            expect(result.patched_count).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
             expect(result.evidence).to_contain("vma-thunk-patches-blocked")
             expect(result.evidence).to_contain("no-vma-thunk-written")
             expect(result.evidence).to_contain("no-arbitrary-execution")
 
         it "should require PEB/TEB VM byte-write readback before VMA thunk writes":
+            # @req: REQ-SYSTEM-APP-003
+            step("Verify: should require PEB/TEB VM byte-write readback before VMA thunk writes")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val init = wine_peb_teb_init_default()
             val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
@@ -89,7 +123,7 @@ describe "SimpleOS Wine VMA thunk writes":
             val result = wine_process_apply_known_kernel32_thunk_patches_in_vma_with_peb_teb_vm_writes(plan, wine_known_hello_exe_fixture_bytes(), 0x400000, 0x400000, "native-module-open tls-callback", 8, vm_writes)
 
             expect(result.ok).to_equal(true)
-            expect(result.patched_count).to_equal(3)
+            expect(result.patched_count).to_equal(3)  # oracle: expected value 3 is the behavior asserted by this regression spec
             expect(result.evidence).to_contain("peb-teb-vm-writes-ready")
             expect(result.evidence).to_contain("tls-callback-dispatch-empty")
             expect(result.evidence).to_contain("process-vma-write-window")
@@ -97,15 +131,18 @@ describe "SimpleOS Wine VMA thunk writes":
             expect(result.status).to_equal("vma-thunk-patches-applied")
 
         it "should reject VM-gated VMA thunk writes before record planning passes without patched image":
+            # @req: REQ-SYSTEM-APP-004
+            step("Verify: should reject VM-gated VMA thunk writes before record planning passes without patched image")
+            # @capture: assertion outcomes retained in the spec Results output as evidence
             val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
             val result = wine_process_apply_known_kernel32_thunk_patches_in_vma_with_peb_teb_vm_writes(plan, wine_known_hello_exe_fixture_bytes(), 0x400000, 0x400000, "native-module-open tls-callback", 0, _ready_vm_writes())
 
             expect(result.ok).to_equal(false)
             expect(result.error).to_equal("invalid-symbol-limit")
-            expect(result.patched_image.len()).to_equal(0)
-            expect(result.mapped_base).to_equal(0)
-            expect(result.mapped_size).to_equal(0)
-            expect(result.patched_count).to_equal(0)
+            expect(result.patched_image.len()).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+            expect(result.mapped_base).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+            expect(result.mapped_size).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+            expect(result.patched_count).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
             expect(result.evidence).to_contain("peb-teb-vm-writes-ready")
             expect(result.evidence).to_contain("vma-thunk-patches-blocked")
             expect(result.evidence).to_contain("no-vma-thunk-written")
