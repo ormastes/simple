@@ -1,0 +1,65 @@
+"""
+## Purpose and audience
+Purpose: Prove that shared MIR performance facts build one reusable CFG view.
+Audience: compiler analysis and optimizer maintainers.
+"""
+# @req: REQ-013
+
+use std.spec.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirFunction, MirBlock}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.mir_opt.mir_opt.perf_facts.{perf_facts_build, perf_facts_successors, perf_facts_predecessors, perf_facts_dominates}
+
+fn _pf_block(id: i64, term: MirTerminator) -> MirBlock:
+    MirBlock(BlockId(id: id), Some("b{id}"), [], term)
+
+fn _pf_manifest() -> DriverManifestAttr:
+    DriverManifestAttr(DriverManifestAttrKind.Driver, 0, 0, [], "", "")
+
+fn _pf_function_with_blocks(blocks: [MirBlock]) -> MirFunction:
+    MirFunction(
+        SymbolId(id: 91), "perf_facts_fixture",
+        MirSignature([], MirType.unit(), false), [],
+        blocks,
+        BlockId(id: 0), Span(0, 0, 1, 1), [], false, nil, {}, nil,
+        false, false, "", false, _pf_manifest(), false,
+        vhdl_hardware_metadata_default(), false
+    )
+
+fn _pf_function() -> MirFunction:
+    _pf_function_with_blocks([
+        _pf_block(0, MirTerminator.If(mir_operand_const_bool(true), BlockId(id: 1), BlockId(id: 2))),
+        _pf_block(1, MirTerminator.Goto(BlockId(id: 2))),
+        _pf_block(2, MirTerminator.Ret(nil))
+    ])
+
+describe "shared MIR PerfFacts":
+    it "indexes successors, predecessors, and storage order in one build":
+        step("Analyze one function with shared performance facts")
+        val facts = perf_facts_build(_pf_function())
+        expect(facts.block_count).to_equal(3)
+        expect(facts.block_index[0]).to_equal(0)
+        expect(perf_facts_successors(facts, BlockId(id: 0)).len()).to_equal(2)
+        expect(perf_facts_predecessors(facts, BlockId(id: 2)).len()).to_equal(2)
+        expect(perf_facts_dominates(facts, BlockId(id: 0), BlockId(id: 2))).to_equal(true)
+        expect(perf_facts_dominates(facts, BlockId(id: 1), BlockId(id: 2))).to_equal(false)
+
+    it "returns empty adjacency for an unknown block without inventing facts":
+        step("Reject unavailable CFG facts")
+        val facts = perf_facts_build(_pf_function())
+        expect(perf_facts_successors(facts, BlockId(id: 99)).len()).to_equal(0)
+        expect(perf_facts_predecessors(facts, BlockId(id: 99)).len()).to_equal(0)
+
+    it "derives dominance from CFG rather than block storage order":
+        step("Analyze blocks stored out of control-flow order")
+        val func = _pf_function_with_blocks([
+            _pf_block(2, MirTerminator.Ret(nil)),
+            _pf_block(0, MirTerminator.If(mir_operand_const_bool(true), BlockId(id: 1), BlockId(id: 2))),
+            _pf_block(1, MirTerminator.Goto(BlockId(id: 2)))
+        ])
+        val facts = perf_facts_build(func)
+        expect(facts.reverse_postorder[0].id).to_equal(0)
+        expect(perf_facts_dominates(facts, BlockId(id: 0), BlockId(id: 2))).to_equal(true)
+        expect(perf_facts_dominates(facts, BlockId(id: 1), BlockId(id: 2))).to_equal(false)

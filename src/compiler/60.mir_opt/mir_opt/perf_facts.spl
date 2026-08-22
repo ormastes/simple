@@ -1,0 +1,170 @@
+# codex-impl
+# Shared, immutable performance-analysis facts built once per MIR function.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirFunction}
+
+struct PerfFacts:
+    """Revision-local CFG facts shared by loop and optimization analyses.
+
+    Later fact families extend this owner; they must declare invalidation rather
+    than rebuilding private CFG maps in individual passes.
+    """
+    successors: Dict<i64, [BlockId]>
+    predecessors: Dict<i64, [i64]>
+    block_index: Dict<i64, i64>
+    block_count: i64
+    reverse_postorder: [BlockId]
+    rpo_index: Dict<i64, i64>
+    immediate_dominator: Dict<i64, i64>
+
+fn perf_facts_reverse_postorder(entry: BlockId, successors: Dict<i64, [BlockId]>) -> [BlockId]:
+    # Iterative DFS with explicit frames avoids recursion depth and array-slice
+    # popping. `top` owns the live prefix of both reusable stacks.
+    var visited: Dict<i64, bool> = {}
+    var block_stack: [BlockId] = [entry]
+    var successor_index_stack: [i64] = [0]
+    var top = 1
+    var postorder: [BlockId] = []
+    visited[entry.id] = true
+
+    while top > 0:
+        val frame_index = top - 1
+        val block = block_stack[frame_index]
+        val block_successors = successors[block.id] ?? []
+        val successor_index = successor_index_stack[frame_index]
+        if successor_index < block_successors.len():
+            successor_index_stack[frame_index] = successor_index + 1
+            val successor = block_successors[successor_index]
+            if not visited.has(successor.id):
+                visited[successor.id] = true
+                if top < block_stack.len():
+                    block_stack[top] = successor
+                    successor_index_stack[top] = 0
+                else:
+                    block_stack.push(successor)
+                    successor_index_stack.push(0)
+                top = top + 1
+        else:
+            postorder.push(block)
+            top = top - 1
+
+    var result: [BlockId] = []
+    var index = postorder.len()
+    while index > 0:
+        index = index - 1
+        result.push(postorder[index])
+    result
+
+fn perf_facts_intersect_idom(first: i64, second: i64, idom: Dict<i64, i64>, rpo_index: Dict<i64, i64>) -> i64:
+    var left = first
+    var right = second
+    while left != right:
+        while (rpo_index[left] ?? -1) > (rpo_index[right] ?? -1):
+            left = idom[left]
+        while (rpo_index[right] ?? -1) > (rpo_index[left] ?? -1):
+            right = idom[right]
+    left
+
+fn perf_facts_immediate_dominators(entry: BlockId, rpo: [BlockId], rpo_index: Dict<i64, i64>, predecessors: Dict<i64, [i64]>) -> Dict<i64, i64>:
+    var idom: Dict<i64, i64> = {}
+    idom[entry.id] = entry.id
+    var changed = true
+    var iteration = 0
+    val iteration_limit = rpo.len() * rpo.len() + 1
+    while changed and iteration < iteration_limit:
+        iteration = iteration + 1
+        changed = false
+        var index = 1
+        while index < rpo.len():
+            val block_id = rpo[index].id
+            var candidate = -1
+            for predecessor in (predecessors[block_id] ?? []):
+                if idom.has(predecessor):
+                    if candidate < 0:
+                        candidate = predecessor
+                    else:
+                        candidate = perf_facts_intersect_idom(predecessor, candidate, idom, rpo_index)
+            if candidate >= 0 and (not idom.has(block_id) or idom[block_id] != candidate):
+                idom[block_id] = candidate
+                changed = true
+            index = index + 1
+    if changed:
+        # Malformed/non-converging fact construction authorizes no dominance
+        # dependent transformation.
+        return {}
+    idom
+
+fn perf_facts_terminator_successors(term: MirTerminator) -> [BlockId]:
+    val empty: [BlockId] = []
+    match term:
+        case Ret(_) | Unreachable | Abort(_): empty
+        case Goto(target): [target]
+        case If(_, then_, else_): [then_, else_]
+        case Switch(_, targets, default):
+            var result: [BlockId] = []
+            for target_case in targets:
+                result.push(target_case.target)
+            result.push(default)
+            result
+        case CallTerminator(_, _, _, normal, unwind):
+            match unwind:
+                case Some(unwind_target): [normal, unwind_target]
+                case nil: [normal]
+
+fn perf_facts_build(func: MirFunction) -> PerfFacts:
+    var successors: Dict<i64, [BlockId]> = {}
+    var predecessors: Dict<i64, [i64]> = {}
+    var block_index: Dict<i64, i64> = {}
+    var index = 0
+
+    for block in func.blocks:
+        block_index[block.id.id] = index
+        index = index + 1
+        val block_successors = perf_facts_terminator_successors(block.terminator)
+        successors[block.id.id] = block_successors
+        for successor in block_successors:
+            var incoming = predecessors[successor.id] ?? []
+            incoming.push(block.id.id)
+            predecessors[successor.id] = incoming
+
+    val rpo = perf_facts_reverse_postorder(func.entry_block, successors)
+    var rpo_index: Dict<i64, i64> = {}
+    var rpo_position = 0
+    for block in rpo:
+        rpo_index[block.id] = rpo_position
+        rpo_position = rpo_position + 1
+    val idom = perf_facts_immediate_dominators(func.entry_block, rpo, rpo_index, predecessors)
+
+    PerfFacts(
+        successors: successors,
+        predecessors: predecessors,
+        block_index: block_index,
+        block_count: func.blocks.len(),
+        reverse_postorder: rpo,
+        rpo_index: rpo_index,
+        immediate_dominator: idom
+    )
+
+fn perf_facts_successors(facts: PerfFacts, block: BlockId) -> [BlockId]:
+    facts.successors[block.id] ?? []
+
+fn perf_facts_predecessors(facts: PerfFacts, block: BlockId) -> [i64]:
+    facts.predecessors[block.id] ?? []
+
+fn perf_facts_dominates(facts: PerfFacts, dominator: BlockId, block: BlockId) -> bool:
+    if not facts.immediate_dominator.has(block.id) or not facts.immediate_dominator.has(dominator.id):
+        return false
+    var current = block.id
+    while true:
+        if current == dominator.id:
+            return true
+        val parent = facts.immediate_dominator[current]
+        if parent == current:
+            return false
+        current = parent
+
+export PerfFacts
+export perf_facts_build, perf_facts_terminator_successors
+export perf_facts_successors, perf_facts_predecessors
+export perf_facts_dominates
