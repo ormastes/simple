@@ -1160,3 +1160,16 @@ focused lint passes, SDL event/display audits pass, and rendering guards pass.
 Census/ratchet remain at 12,492 declaration rows with zero signed admissions;
 untouched rows fall to 11,710, contracted rows are 586, and Simple `rt_*`
 implementations fall to 572 rows (530 symbols) across 48 files.
+
+The general I/O debug façade also exposed eight dead or misleading compatibility
+functions: debug run returned unconditional zero, condition polling fabricated
+empty text, condition reporting discarded its input, four fault setters returned
+`true` despite the canonical ABI being unit-valued, and duplicate Vulkan/UPX
+capability probes bypassed their canonical owners. No repository consumer used
+these aliases. They are removed from the owner and both export layers rather
+than tagged unsafe or replaced with new state. This deletes a shell-spawning UPX
+probe and adds no branch, allocation, lookup, or synchronization. Four affected
+modules check, focused lint passes, debugger state passes 42/42, and the fault
+numeric guard passes 2/2. Census/ratchet remain at 12,492 declaration rows,
+11,710 untouched, 508 tagged, 586 contracted, and zero signed admissions; Simple
+implementations fall to 564 rows (522 symbols) across 48 files.

@@ -924,3 +924,13 @@ the real Rust winit provider's checked command path and the canonical SDL2
 presentation owner. Current census: 12,492 declarations, 11,710 untouched, 508
 tagged, 586 contracted, 572 Simple implementation rows, and zero signed
 admissions.
+
+Dead debug/fault/capability aliases are removed from the general I/O façade.
+The canonical fault SFFI remains unit-valued, and canonical Vulkan and UPX
+owners remain the only capability paths; do not reintroduce boolean success for
+configuration setters or shell-based probes in this façade. This deletion-only
+slice reduces Simple implementations to 564 rows (522 symbols) without adding
+hot-path work. Continue the owner-first queue with remaining constant-success,
+empty-on-error, and fabricated capability implementations. Current census is
+12,492 declarations, 11,710 untouched, 508 tagged, 586 contracted, and zero
+signed admissions.
