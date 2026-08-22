@@ -19,6 +19,11 @@
   the real pre-push ref-input consumer without manually fabricating PASS state.
 - Prove the push driver directly names no native-build, QEMU, full-test, or
   benchmark command and its focused self-test stays within ten seconds.
+- Prove identical ref updates execute the tree gate once, more than two unique
+  updates fail closed, and the push tree gate receives bounded `--push-tip`
+  mode while its exhaustive fixture campaign is bootstrap-owned.
+- Prove production ledger validation rejects absolute external evidence,
+  parent traversal, and aggregate evidence beyond 64 MiB before hashing.
 - On a native Windows host, create two linked worktrees, run
   `powershell -File scripts/setup/install-must-check-hooks.ps1 -Install` in the
   first, then `-Check` and `sh scripts/check/check-hook-installation.shs` from

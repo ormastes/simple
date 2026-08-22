@@ -7,6 +7,7 @@ BOOTSTRAP="$ROOT/scripts/check/check-bootstrap-must-pass.shs"
 HOOK="$ROOT/scripts/check/pre-push-conflict-tree-guard.shs"
 INSTALL_UNIX="$ROOT/scripts/setup/install-must-check-hooks.shs"
 INSTALL_WINDOWS="$ROOT/scripts/setup/install-must-check-hooks.ps1"
+ZERO=0000000000000000000000000000000000000000
 
 start=$(date +%s)
 sh "$PUSH" --self-test >/dev/null
@@ -89,6 +90,7 @@ for guard in check-no-conflict-tree-push check-tree-size-push check-no-conflict-
 done
 printf '%s\n' '#!/bin/sh' \
     '[ "$#" -eq 2 ] && [ "$1" = --push-tip ] && printf "%s\\n" "$2" | grep -q "\\.\\." || { echo "FAIL — tree guard was not invoked in bounded push-tip mode"; exit 1; }' \
+    "echo invoked >> '$fixture/tree-guard-invocations'" \
     'echo "PASS — fixture tree guard"' \
     > "$fixture/scripts/check/check-tree-size-push.shs"
 chmod +x "$fixture/scripts/check/check-tree-size-push.shs"
@@ -139,6 +141,21 @@ start=$(date +%s)
 printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" | MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null
 ref_elapsed=$(($(date +%s) - start))
 [ "$ref_elapsed" -le 10 ] || { echo "FAIL: push must-check ref path took ${ref_elapsed}s"; exit 1; }
+
+rm -f "$fixture/tree-guard-invocations"
+printf 'refs/heads/main %s refs/heads/main %s\nrefs/tags/same %s refs/tags/same %s\n' \
+    "$tip" "$base" "$tip" "$base" |
+    MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null
+[ "$(wc -l < "$fixture/tree-guard-invocations" | tr -d ' ')" -eq 1 ] || {
+    echo "FAIL: duplicate ref update reran the tree gate"
+    exit 1
+}
+printf 'refs/heads/a %s refs/heads/a %s\nrefs/heads/b %s refs/heads/b %s\nrefs/heads/c %s refs/heads/c %s\n' \
+    "$tip" "$base" "$tip" "$tip" "$tip" "$ZERO" 2>/dev/null |
+    MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null 2>&1 && {
+        echo "FAIL: more than two unique ref updates were accepted"
+        exit 1
+    }
 
 start=$(date +%s)
 (cd "$fixture" && printf 'refs/heads/main %s refs/heads/main %s\n' "$tip" "$base" | sh scripts/hooks/pre-push-worktree-launcher origin fixture >/dev/null)
