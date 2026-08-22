@@ -1613,3 +1613,6 @@ Repository lint now constructs one `Linter` before its file loop and passes it t
 ## 2026-08-22 implementation follow-up: one lint/SIMD source payload
 
 The repository CLI now reads each validated source through the error-aware lint reader once, passes that exact payload to the command-scoped linter, and reuses it for optional SIMD opportunity analysis. A valid empty file remains distinct from a read failure. Standalone `run_lint_file` and `run_lint_file_with_linter` retain their file-reading compatibility behavior, while `run_lint_source_with_linter` exposes source ownership for batch tools. Fix application still rereads immediately before writing so it does not apply replacements to an unvalidated stale payload.
+## 2026-08-22 implementation follow-up: critical policy session snapshot
+
+`check_dynamic_capability_acquire_spl` formerly loaded and parsed `config/critical_mode.sdn` once per source file, including the common disabled case that emits no finding. The command-owned `Linter` now lazily resolves only the effective dynamic-acquire mode on first use and reuses that scalar for the batch. This removes file-count-multiplied filesystem probes, source allocation, line splitting, and configuration-object allocation. The cache is scoped to one lint command, so it cannot become stale across long-lived daemon requests.
