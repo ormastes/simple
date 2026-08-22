@@ -6,6 +6,7 @@ Audience: compiler and optimizer maintainers.
 # @req: REQ-003, REQ-004
 
 use std.spec.*
+use std.fs.{read_file}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirFunction, MirBlock, MirInst}
 use compiler.common.diagnostics.span.{Span}
@@ -65,6 +66,37 @@ describe "MIR optimizer structural verifier":
         expect(receipt.valid).to_equal(false)
         expect(receipt.errors.join("|")).to_contain("duplicate block identity")
         expect(receipt.errors.join("|")).to_contain("targets missing block 99")
+
+    it "rejects undeclared instruction and terminator locals":
+        step("Reject malformed optimizer operands")
+        val receipt = mir_structural_verification_receipt(
+            _pv_function_with_local_ids([
+                _pv_block_with(0, [
+                    MirInst(MirInstKind.Copy(_pv_local(0), _pv_local(91)), nil)
+                ], MirTerminator.Ret(Some(_pv_copy(92))))
+            ], 0, [0]))
+        expect(receipt.valid).to_equal(false)
+        expect(receipt.errors.join("|")).to_contain("uses missing local 91")
+        expect(receipt.errors.join("|")).to_contain("terminator uses missing local 92")
+
+    it "uses indexed identity membership for large receipts":
+        step("Keep structural verification linear")
+        var ids: [i64] = []
+        var id = 0
+        while id < 512:
+            ids.push(id)
+            id = id + 1
+        val receipt = mir_structural_verification_receipt(
+            _pv_function_with_local_ids([
+                _pv_block(0, MirTerminator.Ret(nil))
+            ], 0, ids))
+        expect(receipt.valid).to_equal(true)
+        val source = read_file("src/compiler/60.mir_opt/mir_opt/mod.spl")
+        expect(source).to_contain("var local_ids: Dict<i64, bool> = {}")
+        expect(source).to_contain("perf_instruction_access(instruction)")
+        expect(source).to_contain("perf_terminator_access(block.terminator)")
+        expect(source).not.to_contain("local_ids.contains")
+        expect(source).not.to_contain("block_ids.contains")
 
     it "records an honest unchanged active function pass":
         step("Record a verified optimizer outcome")
