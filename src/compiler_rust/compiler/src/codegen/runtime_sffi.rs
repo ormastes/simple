@@ -363,6 +363,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_transient_array_scope_begin", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_array_scope_pause", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_heap_promote", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_transient_last_promoted_nodes", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_transient_last_promoted_bytes", &[], &[I64]),
     RuntimeFuncSpec::new("rt_transient_array_scope_end", &[], &[I8]),
     RuntimeFuncSpec::new("rt_array_extend_i64", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_len", &[I64], &[I64]),
