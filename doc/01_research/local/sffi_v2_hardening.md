@@ -1274,3 +1274,14 @@ catch barrier, 31 pointer-boundary rows, and zero verified/signed. Its ratchet
 passes. Source backing remains unsafe evidence only: `torch_sffi.cpp` requires
 versioned status/out adapters and a universal exception barrier before safe or
 critical admission.
+
+CUDA had three declaration owners for the same low-level ABI. The no-GC sync
+and GC async `ffi` modules are now explicit compile-time facades over the one
+no-GC sync `sffi` owner (through the existing no-GC async facade). This removes
+54 declaration rows without runtime forwarding. All 34 canonical declarations
+are explicitly FFI-unsafe; the generic tag deliberately makes no contract or
+verification claim. Four modules check and the owner lint is clean. The census
+is now 12,400 declarations, 679 tagged, 587 contracted, 11,449 untouched, and
+zero verified/signed. The raw availability ABI remains integer-valued for C ABI
+compatibility; semantic APIs continue to expose `bool`, so no boolean behavior
+was replaced by a numeric public workaround.

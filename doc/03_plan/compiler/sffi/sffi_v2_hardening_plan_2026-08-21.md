@@ -1008,3 +1008,11 @@ Torch into versioned C ABI families and translate every C++ exception to typed
 status at the shim. Do not add `noexcept` alone where it would merely terminate
 on an ordinary operational error, and do not translate exceptions into
 fabricated zero/false/empty success values.
+
+CUDA declaration ownership is consolidated: two duplicate `ffi` files are now
+static facades and the 34-entry `sffi` owner is fully unsafe-tagged. This
+deletes 54 repeated declaration rows and adds no runtime call, branch, lookup,
+allocation, or synchronization. Current census: 12,400 declarations, 679
+tagged, 587 contracted, 11,449 untouched, zero signed admissions. Next migrate
+CUDA handle/status families at this one owner; preserve the C-compatible raw
+integer ABI where required while keeping semantic capability APIs boolean.
