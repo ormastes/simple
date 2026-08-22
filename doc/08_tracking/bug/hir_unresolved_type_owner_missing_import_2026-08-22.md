@@ -558,7 +558,17 @@ where `-1` means "nothing was projected":
 - `10.frontend/parser_types_expr.spl` — `parser_type_kind_is_function`,
   `parser_type_kind_function_params`, `parser_type_kind_function_return`,
   discriminant-guarded like every other `parser_type_kind_*` accessor.
-- `module_callable_types.spl` — the guard is now `not has_return_type` only.
+- `module_callable_types.spl` — in **`declared_imported_surface_callable_type`
+  only** (`:360`, the IMPORTED-callable path), the guard is now
+  `not has_return_type`.
+  **A `type_params.len() > 0` bail deliberately STILL STANDS at `:143`, in the
+  sibling `declared_surface_callable_type`** (`:142`), which types the module's
+  OWN callables rather than imported ones and was never in this lane's scope.
+  The guard is therefore NOT gone file-wide or tree-wide, and a future
+  `grep 'type_params.len() > 0'` on this file will legitimately return both
+  sites (plus a third, `fn_decl.type_params.len() > 0` at `:91`) — do not read
+  those as an incomplete revert or an unapplied fix, and do not "finish the job"
+  by removing them. Only the imported path was measured, and only it changed.
   `imported_surface_type` / `imported_surface_type_projected` take a
   `bound_type_params: [text]` list; a `Named` (or array-element, or scalar
   fast-path) name that the CALLABLE binds projects to
