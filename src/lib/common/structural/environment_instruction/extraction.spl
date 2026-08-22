@@ -1,0 +1,241 @@
+# codex-impl
+# Fixed-state extraction and deterministic replay for typed environment access.
+
+use std.common.structural.environment_instruction.contracts.*
+
+val ENV_EXTRACTION_DIGEST_HI_SEED: i64 = 146959810
+val ENV_EXTRACTION_DIGEST_LO_SEED: i64 = 216613626
+val ENV_EXTRACTION_DIGEST_MODULUS: i64 = 2147483629
+
+struct EnvAccessEventV1:
+    contract_version: i64
+    invocation_id: i64
+    sequence: i64
+    opcode: EnvOpcodeV1
+    capability_id: i64
+    flags: i64
+    argument_offset: i64
+    argument_length: i64
+    argument_capacity: i64
+    result_offset: i64
+    result_capacity: i64
+    result_region_capacity: i64
+
+fn env_access_event_v1(invocation_id: i64, sequence: i64,
+                       opcode: EnvOpcodeV1, capability_id: i64, flags: i64,
+                       argument_offset: i64, argument_length: i64,
+                       argument_capacity: i64, result_offset: i64,
+                       result_capacity: i64,
+                       result_region_capacity: i64) -> EnvAccessEventV1:
+    EnvAccessEventV1(contract_version: ENV_INSTRUCTION_SCHEMA_VERSION,
+                     invocation_id: invocation_id, sequence: sequence,
+                     opcode: opcode, capability_id: capability_id, flags: flags,
+                     argument_offset: argument_offset,
+                     argument_length: argument_length,
+                     argument_capacity: argument_capacity,
+                     result_offset: result_offset,
+                     result_capacity: result_capacity,
+                     result_region_capacity: result_region_capacity)
+
+fn env_access_event_instruction(value: EnvAccessEventV1) -> EnvInstructionV1:
+    env_instruction_v1(value.invocation_id, value.sequence, value.opcode,
+        value.capability_id, value.flags, value.argument_offset,
+        value.argument_length, value.argument_capacity, value.result_offset,
+        value.result_capacity, value.result_region_capacity)
+
+fn env_access_event_v1_well_formed(value: EnvAccessEventV1) -> bool:
+    value.contract_version == ENV_INSTRUCTION_SCHEMA_VERSION
+        and env_instruction_v1_well_formed(env_access_event_instruction(value))
+
+fn env_instructions_equivalent(a: EnvInstructionV1,
+                               b: EnvInstructionV1) -> bool:
+    env_instruction_v1_well_formed(a) and env_instruction_v1_well_formed(b)
+        and a.contract_version == b.contract_version
+        and a.invocation_id == b.invocation_id
+        and a.sequence == b.sequence and a.opcode == b.opcode
+        and a.capability_id == b.capability_id and a.flags == b.flags
+        and a.argument_offset == b.argument_offset
+        and a.argument_length == b.argument_length
+        and a.argument_capacity == b.argument_capacity
+        and a.result_offset == b.result_offset
+        and a.result_capacity == b.result_capacity
+        and a.result_region_capacity == b.result_region_capacity
+
+struct EnvExtractionCursorV1:
+    invocation_id: i64
+    instruction_capacity: i64
+    next_sequence: i64
+    instruction_count: i64
+    plan_digest_hi: i64
+    plan_digest_lo: i64
+    status: EnvInstructionStatusV1
+    sealed: bool
+
+fn env_extraction_cursor_v1(invocation_id: i64,
+                            instruction_capacity: i64) -> EnvExtractionCursorV1:
+    EnvExtractionCursorV1(invocation_id: invocation_id,
+        instruction_capacity: instruction_capacity, next_sequence: 0,
+        instruction_count: 0, plan_digest_hi: ENV_EXTRACTION_DIGEST_HI_SEED,
+        plan_digest_lo: ENV_EXTRACTION_DIGEST_LO_SEED,
+        status: EnvInstructionStatusV1.Planned, sealed: false)
+
+fn env_extraction_cursor_v1_well_formed(value: EnvExtractionCursorV1) -> bool:
+    value.invocation_id > 0 and value.instruction_capacity > 0
+        and value.next_sequence >= 0
+        and value.instruction_count == value.next_sequence
+        and value.instruction_count <= value.instruction_capacity
+        and value.plan_digest_hi > 0 and value.plan_digest_lo > 0
+
+fn _env_digest_lane(state: i64, value: i64, salt: i64) -> i64:
+    ((state * 257 + (value % ENV_EXTRACTION_DIGEST_MODULUS) + salt)
+        % ENV_EXTRACTION_DIGEST_MODULUS) + 1
+
+fn _env_extraction_failure_status(value: EnvExtractionCursorV1) -> EnvInstructionStatusV1:
+    if value.instruction_count >= value.instruction_capacity:
+        return EnvInstructionStatusV1.Overflow
+    EnvInstructionStatusV1.InvalidInstruction
+
+fn _env_instruction_digest_hi(state: i64,
+                              value: EnvInstructionV1) -> i64:
+    var result = _env_digest_lane(state, value.invocation_id, 3)
+    result = _env_digest_lane(result, value.sequence, 5)
+    result = _env_digest_lane(result, env_opcode_to_i64(value.opcode), 7)
+    result = _env_digest_lane(result, value.capability_id, 11)
+    result = _env_digest_lane(result, value.flags, 13)
+    result = _env_digest_lane(result, value.argument_offset, 17)
+    result = _env_digest_lane(result, value.argument_length, 19)
+    result = _env_digest_lane(result, value.argument_capacity, 23)
+    result = _env_digest_lane(result, value.result_offset, 29)
+    result = _env_digest_lane(result, value.result_capacity, 31)
+    _env_digest_lane(result, value.result_region_capacity, 37)
+
+fn _env_instruction_digest_lo(state: i64,
+                              value: EnvInstructionV1) -> i64:
+    var result = _env_digest_lane(state, value.result_region_capacity, 41)
+    result = _env_digest_lane(result, value.result_capacity, 43)
+    result = _env_digest_lane(result, value.result_offset, 47)
+    result = _env_digest_lane(result, value.argument_capacity, 53)
+    result = _env_digest_lane(result, value.argument_length, 59)
+    result = _env_digest_lane(result, value.argument_offset, 61)
+    result = _env_digest_lane(result, value.flags, 67)
+    result = _env_digest_lane(result, value.capability_id, 71)
+    result = _env_digest_lane(result, env_opcode_to_i64(value.opcode), 73)
+    result = _env_digest_lane(result, value.sequence, 79)
+    _env_digest_lane(result, value.invocation_id, 83)
+
+struct EnvExtractionStepV1:
+    cursor: EnvExtractionCursorV1
+    instruction: EnvInstructionV1
+    accepted: bool
+
+fn env_extract_access_v1(value: EnvExtractionCursorV1,
+                         event: EnvAccessEventV1) -> EnvExtractionStepV1:
+    val instruction = env_access_event_instruction(event)
+    val accepted = env_extraction_cursor_v1_well_formed(value)
+        and not value.sealed
+        and env_access_event_v1_well_formed(event)
+        and event.invocation_id == value.invocation_id
+        and event.sequence == value.next_sequence
+        and value.instruction_count < value.instruction_capacity
+    if not accepted:
+        val failed = EnvExtractionCursorV1(invocation_id: value.invocation_id,
+            instruction_capacity: value.instruction_capacity,
+            next_sequence: value.next_sequence,
+            instruction_count: value.instruction_count,
+            plan_digest_hi: value.plan_digest_hi,
+            plan_digest_lo: value.plan_digest_lo,
+            status: _env_extraction_failure_status(value),
+            sealed: true)
+        return EnvExtractionStepV1(cursor: failed, instruction: instruction,
+                                   accepted: false)
+    val next = EnvExtractionCursorV1(invocation_id: value.invocation_id,
+        instruction_capacity: value.instruction_capacity,
+        next_sequence: value.next_sequence + 1,
+        instruction_count: value.instruction_count + 1,
+        plan_digest_hi: _env_instruction_digest_hi(value.plan_digest_hi, instruction),
+        plan_digest_lo: _env_instruction_digest_lo(value.plan_digest_lo, instruction),
+        status: EnvInstructionStatusV1.Planned, sealed: false)
+    EnvExtractionStepV1(cursor: next, instruction: instruction, accepted: true)
+
+fn env_extraction_cursor_seal(value: EnvExtractionCursorV1) -> EnvExtractionCursorV1:
+    val valid = env_extraction_cursor_v1_well_formed(value) and not value.sealed
+    EnvExtractionCursorV1(invocation_id: value.invocation_id,
+        instruction_capacity: value.instruction_capacity,
+        next_sequence: value.next_sequence,
+        instruction_count: value.instruction_count,
+        plan_digest_hi: value.plan_digest_hi,
+        plan_digest_lo: value.plan_digest_lo,
+        status: if valid: EnvInstructionStatusV1.Planned else: value.status,
+        sealed: true)
+
+fn env_extraction_trace_v1(value: EnvExtractionCursorV1) -> EnvTraceV1:
+    env_trace_v1(value.invocation_id, value.instruction_count,
+        value.instruction_capacity, 0, 0, value.plan_digest_hi,
+        value.plan_digest_lo, 0, 0, value.sealed)
+
+fn env_extraction_complete(value: EnvExtractionCursorV1) -> bool:
+    env_extraction_cursor_v1_well_formed(value) and value.sealed
+        and env_instruction_status_to_i64(value.status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Planned)
+
+struct EnvDeterministicReplayV1:
+    invocation_id: i64
+    instruction_count: i64
+    instruction_capacity: i64
+    plan_digest_hi: i64
+    plan_digest_lo: i64
+    cursor: EnvReplayCursorV1
+
+fn env_deterministic_replay_v1(plan: EnvTraceV1) -> EnvDeterministicReplayV1:
+    EnvDeterministicReplayV1(invocation_id: plan.invocation_id,
+        instruction_count: plan.instruction_count,
+        instruction_capacity: plan.instruction_capacity,
+        plan_digest_hi: plan.plan_digest_hi, plan_digest_lo: plan.plan_digest_lo,
+        cursor: env_replay_cursor_v1(plan.invocation_id, plan.instruction_capacity))
+
+fn env_deterministic_replay_accept(value: EnvDeterministicReplayV1,
+                                   recorded_instruction: EnvInstructionV1,
+                                   replay_instruction: EnvInstructionV1,
+                                   applied: EnvObservationV1,
+                                   replayed: EnvObservationV1) -> EnvDeterministicReplayV1:
+    if not env_instructions_equivalent(recorded_instruction,
+                                       replay_instruction):
+        val failed = env_replay_cursor_accept(value.cursor,
+            recorded_instruction, applied,
+            env_observation_v1(replayed.invocation_id, replayed.sequence,
+                EnvInstructionStatusV1.Diverged, 1, replayed.bytes_length,
+                replayed.bytes_capacity, replayed.interaction_digest_hi,
+                replayed.interaction_digest_lo))
+        return EnvDeterministicReplayV1(invocation_id: value.invocation_id,
+            instruction_count: value.instruction_count,
+            instruction_capacity: value.instruction_capacity,
+            plan_digest_hi: value.plan_digest_hi,
+            plan_digest_lo: value.plan_digest_lo, cursor: failed)
+    EnvDeterministicReplayV1(invocation_id: value.invocation_id,
+        instruction_count: value.instruction_count,
+        instruction_capacity: value.instruction_capacity,
+        plan_digest_hi: value.plan_digest_hi,
+        plan_digest_lo: value.plan_digest_lo,
+        cursor: env_replay_cursor_accept(value.cursor, recorded_instruction,
+                                         applied, replayed))
+
+fn env_deterministic_replay_seal(value: EnvDeterministicReplayV1,
+                                 replay_digest_hi: i64,
+                                 replay_digest_lo: i64) -> EnvTraceV1:
+    val sealed_cursor = env_replay_cursor_seal(value.cursor,
+                                               value.instruction_count)
+    env_trace_v1(value.invocation_id, value.instruction_count,
+        value.instruction_capacity, sealed_cursor.consumed_count,
+        sealed_cursor.consumed_count, value.plan_digest_hi,
+        value.plan_digest_lo, replay_digest_hi, replay_digest_lo,
+        sealed_cursor.sealed)
+
+export ENV_EXTRACTION_DIGEST_HI_SEED, ENV_EXTRACTION_DIGEST_LO_SEED
+export EnvAccessEventV1, env_access_event_v1, env_access_event_v1_well_formed
+export env_access_event_instruction, env_instructions_equivalent
+export EnvExtractionCursorV1, EnvExtractionStepV1
+export env_extraction_cursor_v1, env_extraction_cursor_v1_well_formed
+export env_extract_access_v1, env_extraction_cursor_seal
+export env_extraction_trace_v1, env_extraction_complete
+export EnvDeterministicReplayV1, env_deterministic_replay_v1
+export env_deterministic_replay_accept, env_deterministic_replay_seal

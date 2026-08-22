@@ -1,0 +1,89 @@
+# codex-impl
+# Parent-owned binding between isolated provider traces and environment replay.
+
+use std.common.structural.environment_instruction.*
+use std.common.structural.hal_provider.contracts.*
+
+struct HalEnvironmentPlanReceiptV1:
+    provider: HalProviderKind
+    invocation_id: i64
+    instruction_count: i64
+    instruction_capacity: i64
+    plan_digest_hi: i64
+    plan_digest_lo: i64
+    status: EnvInstructionStatusV1
+    sealed: bool
+
+fn hal_environment_plan_receipt_v1(provider: HalProviderKind,
+                                   extraction: EnvExtractionCursorV1) -> HalEnvironmentPlanReceiptV1:
+    HalEnvironmentPlanReceiptV1(provider: provider,
+        invocation_id: extraction.invocation_id,
+        instruction_count: extraction.instruction_count,
+        instruction_capacity: extraction.instruction_capacity,
+        plan_digest_hi: extraction.plan_digest_hi,
+        plan_digest_lo: extraction.plan_digest_lo, status: extraction.status,
+        sealed: extraction.sealed)
+
+fn hal_environment_plan_receipt_v1_well_formed(
+        value: HalEnvironmentPlanReceiptV1) -> bool:
+    value.invocation_id > 0 and value.instruction_count >= 0
+        and value.instruction_capacity > 0
+        and value.instruction_count <= value.instruction_capacity
+        and (value.plan_digest_hi != 0 or value.plan_digest_lo != 0)
+        and env_instruction_status_to_i64(value.status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Planned)
+        and value.sealed
+
+fn hal_environment_plan_admitted(value: HalEnvironmentPlanReceiptV1,
+                                 result: HalProviderResultV1) -> bool:
+    hal_environment_plan_receipt_v1_well_formed(value)
+        and hal_provider_result_v1_well_formed(result)
+        and value.provider == result.provider
+        and value.invocation_id == result.invocation_id
+        and value.instruction_count == result.trace_length
+        and value.instruction_capacity == result.trace_capacity
+        and value.plan_digest_hi == result.trace_digest_hi
+        and value.plan_digest_lo == result.trace_digest_lo
+
+fn hal_environment_plans_equivalent(a: HalEnvironmentPlanReceiptV1,
+                                     b: HalEnvironmentPlanReceiptV1) -> bool:
+    hal_environment_plan_receipt_v1_well_formed(a)
+        and hal_environment_plan_receipt_v1_well_formed(b)
+        and a.invocation_id == b.invocation_id
+        and hal_provider_kind_to_i64(a.provider)
+            != hal_provider_kind_to_i64(b.provider)
+        and a.instruction_count == b.instruction_count
+        and a.instruction_capacity == b.instruction_capacity
+        and a.plan_digest_hi == b.plan_digest_hi
+        and a.plan_digest_lo == b.plan_digest_lo
+
+struct HalEnvironmentReplayReceiptV1:
+    plan_provider: HalProviderKind
+    replay_provider: HalProviderKind
+    trace: EnvTraceV1
+
+fn hal_environment_replay_receipt_v1(plan_provider: HalProviderKind,
+                                     replay_provider: HalProviderKind,
+                                     trace: EnvTraceV1) -> HalEnvironmentReplayReceiptV1:
+    HalEnvironmentReplayReceiptV1(plan_provider: plan_provider,
+        replay_provider: replay_provider, trace: trace)
+
+fn hal_environment_replay_admitted(plan: HalEnvironmentPlanReceiptV1,
+                                   value: HalEnvironmentReplayReceiptV1) -> bool:
+    hal_environment_plan_receipt_v1_well_formed(plan)
+        and value.plan_provider == plan.provider
+        and hal_provider_kind_to_i64(value.replay_provider)
+            != hal_provider_kind_to_i64(value.plan_provider)
+        and value.trace.invocation_id == plan.invocation_id
+        and value.trace.instruction_count == plan.instruction_count
+        and value.trace.instruction_capacity == plan.instruction_capacity
+        and value.trace.plan_digest_hi == plan.plan_digest_hi
+        and value.trace.plan_digest_lo == plan.plan_digest_lo
+        and env_trace_v1_complete(value.trace)
+
+export HalEnvironmentPlanReceiptV1, HalEnvironmentReplayReceiptV1
+export hal_environment_plan_receipt_v1
+export hal_environment_plan_receipt_v1_well_formed
+export hal_environment_plan_admitted
+export hal_environment_plans_equivalent
+export hal_environment_replay_receipt_v1, hal_environment_replay_admitted

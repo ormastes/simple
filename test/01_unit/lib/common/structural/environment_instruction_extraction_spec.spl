@@ -1,0 +1,148 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-016 REQ-017
+
+use std.spec.*
+use std.common.structural.environment_instruction.*
+use std.common.structural.hal_provider.*
+
+fn access(invocation_id: i64, sequence: i64,
+          opcode: EnvOpcodeV1) -> EnvAccessEventV1:
+    env_access_event_v1(invocation_id, sequence, opcode, 21, 0,
+                        0, 16, 16, 16, 32, 48)
+
+fn applied(sequence: i64, digest_lo: i64) -> EnvObservationV1:
+    env_observation_v1(17, sequence, EnvInstructionStatusV1.Applied,
+                       0, 16, 32, 91, digest_lo)
+
+fn replayed(sequence: i64, digest_lo: i64) -> EnvObservationV1:
+    env_observation_v1(17, sequence, EnvInstructionStatusV1.Replayed,
+                       0, 16, 32, 91, digest_lo)
+
+fn result_for(provider: HalProviderKind,
+              trace: EnvTraceV1) -> HalProviderResultV1:
+    hal_provider_result_v1(provider, trace.invocation_id, HalStatusV1.Ok, 0,
+        70, 80, trace.plan_digest_hi, trace.plan_digest_lo,
+        8, 8, trace.instruction_count, trace.instruction_capacity,
+        HalOverflowKindV1.None, -1, 0, 5)
+
+describe "typed environment access extraction":
+    it "extracts ordered typed accesses into a sealed fixed-capacity plan":
+        var cursor = env_extraction_cursor_v1(17, 2)
+        val first = env_extract_access_v1(
+            cursor, access(17, 0, EnvOpcodeV1.FileRead))
+        cursor = first.cursor
+        val second = env_extract_access_v1(
+            cursor, access(17, 1, EnvOpcodeV1.ClockRead))
+        cursor = env_extraction_cursor_seal(second.cursor)
+        val trace = env_extraction_trace_v1(cursor)
+
+        expect(first.accepted).to_be(true)
+        expect(second.accepted).to_be(true)
+        expect(env_extraction_complete(cursor)).to_be(true)
+        expect(trace.instruction_count).to_equal(2)
+        expect(trace.instruction_capacity).to_equal(2)
+        expect(env_trace_v1_well_formed(trace)).to_be(true)
+
+    it "fails closed without mutating the accepted prefix on reorder and overflow":
+        val initial = env_extraction_cursor_v1(17, 1)
+        val reordered = env_extract_access_v1(
+            initial, access(17, 1, EnvOpcodeV1.FileRead))
+        val accepted = env_extract_access_v1(
+            initial, access(17, 0, EnvOpcodeV1.FileRead))
+        val overflow = env_extract_access_v1(
+            accepted.cursor, access(17, 1, EnvOpcodeV1.ClockRead))
+
+        expect(reordered.accepted).to_be(false)
+        expect(reordered.cursor.instruction_count).to_equal(0)
+        expect(env_instruction_status_to_i64(reordered.cursor.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.InvalidInstruction))
+        expect(overflow.accepted).to_be(false)
+        expect(overflow.cursor.instruction_count).to_equal(1)
+        expect(env_instruction_status_to_i64(overflow.cursor.status)).to_equal(
+            env_instruction_status_to_i64(EnvInstructionStatusV1.Overflow))
+
+        val failed_plan = hal_environment_plan_receipt_v1(
+            HalProviderKind.PureSimple, reordered.cursor)
+        val failed_trace = env_extraction_trace_v1(reordered.cursor)
+        expect(hal_environment_plan_admitted(
+            failed_plan,
+            result_for(HalProviderKind.PureSimple, failed_trace))).to_be(false)
+
+describe "parent-authoritative environment replay":
+    it "replays the sealed plan exactly and binds it to the provider result":
+        val extracted = env_extract_access_v1(
+            env_extraction_cursor_v1(17, 1),
+            access(17, 0, EnvOpcodeV1.RandomFill))
+        val sealed_extraction = env_extraction_cursor_seal(extracted.cursor)
+        val plan_trace = env_extraction_trace_v1(sealed_extraction)
+        val plan = hal_environment_plan_receipt_v1(
+            HalProviderKind.PureSimple, sealed_extraction)
+        val replay_state = env_deterministic_replay_accept(
+            env_deterministic_replay_v1(plan_trace), extracted.instruction,
+            extracted.instruction,
+            applied(0, 92), replayed(0, 92))
+        val replay_trace = env_deterministic_replay_seal(
+            replay_state, plan_trace.plan_digest_hi, plan_trace.plan_digest_lo)
+        val receipt = hal_environment_replay_receipt_v1(
+            HalProviderKind.PureSimple, HalProviderKind.C, replay_trace)
+
+        expect(hal_environment_plan_admitted(
+            plan, result_for(HalProviderKind.PureSimple, plan_trace))).to_be(true)
+        expect(env_trace_v1_complete(replay_trace)).to_be(true)
+        expect(hal_environment_replay_admitted(plan, receipt)).to_be(true)
+
+    it "rejects changed observations, mismatched trace digests, and same-lane replay":
+        val extracted = env_extract_access_v1(
+            env_extraction_cursor_v1(17, 1),
+            access(17, 0, EnvOpcodeV1.MmioRead))
+        val sealed_extraction = env_extraction_cursor_seal(extracted.cursor)
+        val plan_trace = env_extraction_trace_v1(sealed_extraction)
+        val plan = hal_environment_plan_receipt_v1(
+            HalProviderKind.PureSimple, sealed_extraction)
+        val changed_state = env_deterministic_replay_accept(
+            env_deterministic_replay_v1(plan_trace), extracted.instruction,
+            extracted.instruction,
+            applied(0, 92), replayed(0, 93))
+        val changed_trace = env_deterministic_replay_seal(
+            changed_state, plan_trace.plan_digest_hi, plan_trace.plan_digest_lo)
+        val same_lane = hal_environment_replay_receipt_v1(
+            HalProviderKind.PureSimple, HalProviderKind.PureSimple, changed_trace)
+        val wrong_result = hal_provider_result_v1(
+            HalProviderKind.PureSimple, 17, HalStatusV1.Ok, 0,
+            70, 80, plan_trace.plan_digest_hi, plan_trace.plan_digest_lo + 1,
+            8, 8, 1, 1, HalOverflowKindV1.None, -1, 0, 5)
+
+        expect(env_trace_v1_complete(changed_trace)).to_be(false)
+        expect(hal_environment_replay_admitted(plan, same_lane)).to_be(false)
+        expect(hal_environment_plan_admitted(plan, wrong_result)).to_be(false)
+
+    it "rejects a shadow provider that requests a different typed interaction":
+        val extracted = env_extract_access_v1(
+            env_extraction_cursor_v1(17, 1),
+            access(17, 0, EnvOpcodeV1.FileRead))
+        val sealed_extraction = env_extraction_cursor_seal(extracted.cursor)
+        val plan_trace = env_extraction_trace_v1(sealed_extraction)
+        val different = env_access_event_instruction(
+            access(17, 0, EnvOpcodeV1.FileWrite))
+        val replay_state = env_deterministic_replay_accept(
+            env_deterministic_replay_v1(plan_trace), extracted.instruction,
+            different, applied(0, 92), replayed(0, 92))
+        val replay_trace = env_deterministic_replay_seal(
+            replay_state, plan_trace.plan_digest_hi, plan_trace.plan_digest_lo)
+
+        expect(env_trace_v1_complete(replay_trace)).to_be(false)
+
+    it "compares provider plans by sealed typed trace identity":
+        val extracted = env_extract_access_v1(
+            env_extraction_cursor_v1(17, 1),
+            access(17, 0, EnvOpcodeV1.ProcessPoll))
+        val sealed_extraction = env_extraction_cursor_seal(extracted.cursor)
+        val pure = hal_environment_plan_receipt_v1(
+            HalProviderKind.PureSimple, sealed_extraction)
+        val rust = hal_environment_plan_receipt_v1(
+            HalProviderKind.Rust, sealed_extraction)
+        val same = hal_environment_plan_receipt_v1(
+            HalProviderKind.PureSimple, sealed_extraction)
+
+        expect(hal_environment_plans_equivalent(pure, rust)).to_be(true)
+        expect(hal_environment_plans_equivalent(pure, same)).to_be(false)
