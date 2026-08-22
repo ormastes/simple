@@ -8,8 +8,9 @@ still contain bounded nested work.
 
 ## Remaining candidates
 
-- Closure-capture analysis walks backward for every nested function and compares every
-  captured outer variable with every closure body line.
+- Closure-capture analysis still walks backward for every nested function. Its former
+  outer-variable by body-line Cartesian comparison is fixed: each body line extracts one
+  assignment target and performs an indexed membership lookup.
 - Match analysis uses linear arrays for duplicate-arm checks, variant membership, and
   enum inference, which can become quadratic on generated high-cardinality matches.
 - Unreachable-after-return recovery scans forward, although it normally stops at the
