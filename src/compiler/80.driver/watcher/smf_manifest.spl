@@ -39,6 +39,8 @@ struct SmfManifestEntry:
     # textual interface parts of the source). Additive (2026-08-18): old
     # manifests parse with "" (absent); readers must treat "" as no-evidence.
     iface_digest: text
+    # Appended in manifest v4; v1-v3 rows default to static-off.
+    mcdc_policy: text
 
 struct SmfManifest:
     version: i64
@@ -51,7 +53,7 @@ struct SmfManifest:
 
 fn smf_manifest_new() -> SmfManifest:
     SmfManifest(
-        version: 3,
+        version: 4,
         entries: {},
         updated_at: rt_time_now_unix_micros()
     )
@@ -68,7 +70,7 @@ fn smf_manifest_entry_new(
     profile: text,
     allowed_families: [text]
 ) -> SmfManifestEntry:
-    smf_manifest_entry_new_with_iface(source_path, smf_path, source_hash, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, "")
+    smf_manifest_entry_new_with_iface_and_mcdc(source_path, smf_path, source_hash, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, "", "off")
 
 fn smf_manifest_entry_new_with_iface(
     source_path: text,
@@ -83,6 +85,24 @@ fn smf_manifest_entry_new_with_iface(
     allowed_families: [text],
     iface_digest: text
 ) -> SmfManifestEntry:
+    smf_manifest_entry_new_with_iface_and_mcdc(
+        source_path, smf_path, source_hash, backend, opt_level, release,
+        debug_info, gc_off, profile, allowed_families, iface_digest, "off")
+
+fn smf_manifest_entry_new_with_iface_and_mcdc(
+    source_path: text,
+    smf_path: text,
+    source_hash: i64,
+    backend: text,
+    opt_level: i64,
+    release: bool,
+    debug_info: bool,
+    gc_off: bool,
+    profile: text,
+    allowed_families: [text],
+    iface_digest: text,
+    mcdc_policy: text
+) -> SmfManifestEntry:
     SmfManifestEntry(
         source_path: source_path,
         smf_path: smf_path,
@@ -95,7 +115,8 @@ fn smf_manifest_entry_new_with_iface(
         gc_off: gc_off,
         profile: profile,
         allowed_families: allowed_families,
-        iface_digest: iface_digest
+        iface_digest: iface_digest,
+        mcdc_policy: mcdc_policy
     )
 
 # ============================================================================
@@ -107,7 +128,7 @@ fn smf_manifest_update(manifest: SmfManifest, entry: SmfManifestEntry) -> SmfMan
     var entries = manifest.entries
     entries[entry.source_path] = entry
     SmfManifest(
-        version: manifest.version,
+        version: 4,
         entries: entries,
         updated_at: rt_time_now_unix_micros()
     )
@@ -118,7 +139,7 @@ fn smf_manifest_remove(manifest: SmfManifest, source_path: text) -> SmfManifest:
     if entries.has(source_path):
         entries.remove(source_path)
     SmfManifest(
-        version: manifest.version,
+        version: 4,
         entries: entries,
         updated_at: rt_time_now_unix_micros()
     )
@@ -207,11 +228,11 @@ fn smf_manifest_to_sdn(manifest: SmfManifest) -> text:
     ]
 
     if manifest.entries.keys().len() > 0:
-        lines.push("entries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, iface_digest|")
+        lines.push("entries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, iface_digest, mcdc_policy|")
         for key in manifest.entries.keys():
             val e = manifest.entries[key]
             val allowed_families = e.allowed_families.join(";")
-            lines.push("    \"{e.source_path}\", \"{e.smf_path}\", {e.source_hash}, {e.compiled_at}, \"{e.backend}\", {e.opt_level}, {bool_to_sdn_int(e.release)}, {bool_to_sdn_int(e.debug_info)}, {bool_to_sdn_int(e.gc_off)}, \"{e.profile}\", \"{allowed_families}\", \"{e.iface_digest}\"")
+            lines.push("    \"{e.source_path}\", \"{e.smf_path}\", {e.source_hash}, {e.compiled_at}, \"{e.backend}\", {e.opt_level}, {bool_to_sdn_int(e.release)}, {bool_to_sdn_int(e.debug_info)}, {bool_to_sdn_int(e.gc_off)}, \"{e.profile}\", \"{allowed_families}\", \"{e.iface_digest}\", \"{e.mcdc_policy}\"")
 
     lines.join("\n")
 
@@ -281,6 +302,10 @@ fn parse_manifest_entry_line(line: text) -> SmfManifestEntry?:
     if parts.len() > 11:
         val iface_raw = parts[11].trim()
         iface_digest = iface_raw.replace("\"", "")
+    var mcdc_policy = "off"
+    if parts.len() > 12:
+        val mcdc_raw = parts[12].trim()
+        mcdc_policy = mcdc_raw.replace("\"", "")
 
     Some(SmfManifestEntry(
         source_path: source_path,
@@ -294,7 +319,8 @@ fn parse_manifest_entry_line(line: text) -> SmfManifestEntry?:
         gc_off: gc_off,
         profile: profile,
         allowed_families: allowed_families,
-        iface_digest: iface_digest
+        iface_digest: iface_digest,
+        mcdc_policy: mcdc_policy
     ))
 
 # ============================================================================
@@ -349,6 +375,23 @@ fn update_smf_manifest_entry(
     profile: text,
     allowed_families: [text]
 ) -> bool:
+    update_smf_manifest_entry_with_mcdc(
+        source_path, smf_path, source_hash, backend, opt_level, release,
+        debug_info, gc_off, profile, allowed_families, "off")
+
+fn update_smf_manifest_entry_with_mcdc(
+    source_path: text,
+    smf_path: text,
+    source_hash: i64,
+    backend: text,
+    opt_level: i64,
+    release: bool,
+    debug_info: bool,
+    gc_off: bool,
+    profile: text,
+    allowed_families: [text],
+    mcdc_policy: text
+) -> bool:
     """Load manifest, update entry, save. Convenience for single-entry updates."""
     val manifest_path = smf_manifest_path_for_smf(smf_path)
     var manifest = load_smf_manifest(manifest_path)
@@ -356,7 +399,7 @@ fn update_smf_manifest_entry(
     # First real caller of action_key.interface_digest_of (2026-08-18).
     val src_text = if rt_file_exists(source_path): rt_file_read_text(source_path) ?? "" else: ""
     val iface = if src_text == "": "" else: interface_digest_of_source(src_text)
-    val entry = smf_manifest_entry_new_with_iface(
+    val entry = smf_manifest_entry_new_with_iface_and_mcdc(
         source_path,
         smf_path,
         source_hash,
@@ -367,7 +410,8 @@ fn update_smf_manifest_entry(
         gc_off,
         profile,
         allowed_families,
-        iface
+        iface,
+        mcdc_policy
     )
     manifest = smf_manifest_update(manifest, entry)
     save_smf_manifest(manifest, manifest_path)

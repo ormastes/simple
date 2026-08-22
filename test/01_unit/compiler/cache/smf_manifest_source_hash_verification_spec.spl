@@ -21,7 +21,10 @@ Fail-closed contract:
 
 use std.spec.*
 use compiler.driver.watcher.smf_manifest.{
-    SmfManifestEntry, smf_manifest_entry_new, smf_manifest_entry_matches_source
+    SmfManifestEntry, smf_manifest_entry_new,
+    smf_manifest_entry_new_with_iface_and_mcdc,
+    smf_manifest_entry_matches_source, smf_manifest_new,
+    smf_manifest_update, smf_manifest_to_sdn, smf_manifest_from_sdn
 }
 
 extern fn rt_hash_text(s: text) -> i64
@@ -61,3 +64,29 @@ describe "smf_manifest_entry_matches_source":
     it "rejects when the live source is unreadable (empty text)":
         val e = entry_with_hash(1234567)
         expect(smf_manifest_entry_matches_source(e, "")).to_equal(false)
+
+describe "SMF manifest MC/DC policy transport":
+    it "round trips a dynamic policy in manifest v4":
+        var manifest = smf_manifest_new()
+        val entry = smf_manifest_entry_new_with_iface_and_mcdc(
+            "src/dynamic.spl", "build/smf/dynamic.smf", 77,
+            "llvm", 2, true, false, false, "prod", [], "iface", "dynamic")
+        manifest = smf_manifest_update(manifest, entry)
+        val parsed = smf_manifest_from_sdn(smf_manifest_to_sdn(manifest))
+        expect(parsed.version).to_equal(4)
+        expect(parsed.entries["src/dynamic.spl"].mcdc_policy).to_equal("dynamic")
+
+    it "defaults legacy rows without a policy column to off":
+        val legacy = "smf_manifest:\n  version: 3\n  updated_at: 1\n\nentries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, iface_digest|\n    \"src/old.spl\", \"build/smf/old.smf\", 9, 1, \"llvm\", 2, 1, 0, 0, \"prod\", \"\", \"iface\""
+        val parsed = smf_manifest_from_sdn(legacy)
+        expect(parsed.entries["src/old.spl"].mcdc_policy).to_equal("off")
+
+    it "promotes a legacy manifest to v4 when mutated":
+        val legacy = "smf_manifest:\n  version: 3\n  updated_at: 1\n"
+        var parsed = smf_manifest_from_sdn(legacy)
+        val entry = smf_manifest_entry_new_with_iface_and_mcdc(
+            "src/new.spl", "build/smf/new.smf", 10,
+            "llvm", 2, true, false, false, "prod", [], "iface", "static")
+        parsed = smf_manifest_update(parsed, entry)
+        expect(parsed.version).to_equal(4)
+        expect(smf_manifest_to_sdn(parsed)).to_contain("version: 4")

@@ -13,9 +13,10 @@ use compiler.driver.cache.cache_validator.{
     validate_shb, validate_smf, source_to_cache_path
 }
 use compiler.driver.cache.compile_options_hash.{
-    CompileOptionsHash, compile_options_hash_zero
+    CompileOptionsHash, compile_options_hash_zero, compile_options_hash_compute_with_mcdc
 }
-use compiler.driver.driver_api_compile_single.{compile_to_smf_with_options}
+use compiler.common.config.{CompilerConfig, McdcPolicy}
+use compiler.driver.driver_api_compile_single.{compile_to_smf_with_options_and_mcdc}
 use compiler.driver.watcher.watcher_types.{
     WatcherConfig, WatcherRequest, WatcherRequestKind,
     watcher_config_default, watcher_request_new,
@@ -39,8 +40,6 @@ use std.nogc_sync_mut.io.file_ops.{file_modified_time}
 # hoisted modules imports back, so there is no cycle to avoid.
 use compiler.shb.shb_reader.{ShbReader}
 use compiler.shb.shb_types.{shb_module_interface_new}
-use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
-
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_hash_text(s: text) -> i64
@@ -93,6 +92,7 @@ fn request_smf(
     gc_off: bool,
     profile: text,
     allowed_families: [text],
+    mcdc_policy: text,
     config: WatcherConfig
 ) -> Result<text, text>:
     if not is_watcher_running(config.lock_path):
@@ -107,6 +107,7 @@ fn request_smf(
     wr.gc_off = gc_off
     wr.profile = profile
     wr.allowed_families = allowed_families
+    wr.mcdc_policy = mcdc_policy
     val dreq = watcher_request_to_daemon(wr)
     val dconfig = watcher_config_to_daemon(config)
 
@@ -156,8 +157,20 @@ fn get_or_generate_shb(source_path: text, config: WatcherConfig) -> ShbModuleInt
     iface
 
 fn get_or_generate_smf(source_path: text, output: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text]) -> Result<text, text>:
+    val compatibility_policy = CompilerConfig.from_env().mcdc_policy.to_text()
+    get_or_generate_smf_with_mcdc(
+        source_path, output, backend, opt_level, release, debug_info, gc_off,
+        profile, allowed_families, compatibility_policy)
 
-    val options_hash = compile_options_hash_compute(backend, opt_level, release, debug_info, gc_off, profile, allowed_families)
+fn get_or_generate_smf_with_mcdc(source_path: text, output: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text], mcdc_policy: text) -> Result<text, text>:
+    val parsed_policy = McdcPolicy.from_text(mcdc_policy)
+    if parsed_policy == McdcPolicy.Invalid:
+        return Err("MCDC-E-POLICY: MC/DC mode must be off, static, or dynamic")
+    val canonical_policy = parsed_policy.to_text()
+
+    val options_hash = compile_options_hash_compute_with_mcdc(
+        backend, opt_level, release, debug_info, gc_off, profile,
+        allowed_families, canonical_policy)
     val config = watcher_config_default()
 
     val check = check_smf_freshness(source_path, config.smf_dir, options_hash)
@@ -176,6 +189,7 @@ fn get_or_generate_smf(source_path: text, output: text, backend: text, opt_level
             gc_off,
             profile,
             allowed_families,
+            canonical_policy,
             config
         )
         if result.is_ok():
@@ -183,7 +197,9 @@ fn get_or_generate_smf(source_path: text, output: text, backend: text, opt_level
 
     # Inline fallback
     val smf_output = if output != "": output else: source_to_cache_path(source_path, config.smf_dir, ".smf")
-    compile_to_smf_with_options(source_path, smf_output, backend, opt_level, release, debug_info, gc_off, profile, allowed_families)
+    compile_to_smf_with_options_and_mcdc(
+        source_path, smf_output, backend, opt_level, release, debug_info,
+        gc_off, profile, allowed_families, canonical_policy)
 
 # ============================================================================
 # Watcher Lifecycle

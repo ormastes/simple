@@ -34,7 +34,7 @@ use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 # 20.hir/hir_lowering/_Items/module_import_registration.spl. There is no cycle
 # to avoid here -- cache/compile_options_hash.spl imports only std -- so the
 # import belongs at module scope.
-use compiler.driver.cache.compile_options_hash.{CompileOptionsHash, compile_options_hash_compute}
+use compiler.driver.cache.compile_options_hash.{CompileOptionsHash, compile_options_hash_compute_with_mcdc}
 use compiler.common.assurance.policy.{policy_from_env_value}
 use compiler.common.assurance.policy_schema.{ResolvedAssurancePolicyV1}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{
@@ -503,19 +503,23 @@ class CompileContext:
     static fn create(options: CompileOptions) -> CompileContext:
         # Load config
         var config: Dict<text, text> = {}
-        val compiler_config = CompilerConfig.from_env()
-        if compiler_config.coverage_enabled:
+        val mcdc_policy = if options.mcdc_policy == "":
+            CompilerConfig.from_env().mcdc_policy
+        else:
+            McdcPolicy.from_text(options.mcdc_policy)
+        if mcdc_policy.emits_manifest():
             config["coverage"] = "1"
-        if compiler_config.mcdc_policy.emits_manifest():
-            config["mcdc_policy"] = compiler_config.mcdc_policy.to_text()
-        if compiler_config.mcdc_policy.emits_direct_probes():
+            config["mcdc_policy"] = mcdc_policy.to_text()
+        if mcdc_policy.emits_direct_probes():
             config["mcdc_direct_probes"] = "1"
-        if compiler_config.mcdc_policy.emits_dynamic_patchpoints():
+        if mcdc_policy.emits_dynamic_patchpoints():
             config["mcdc_dynamic_patchpoints"] = "1"
-        if compiler_config.mcdc_policy.links_static_payload():
+        if mcdc_policy.links_static_payload():
             config["mcdc_static_payload"] = "1"
-        if compiler_config.mcdc_policy == McdcPolicy.Invalid:
+        if mcdc_policy == McdcPolicy.Invalid:
             config["mcdc_policy_invalid"] = "1"
+        var resolved_options = options
+        resolved_options.mcdc_policy = mcdc_policy.to_text()
 
         # Standalone native CLI transports its requested mode through the
         # stable text field because the enum field can be corrupted by the
@@ -584,7 +588,7 @@ class CompileContext:
             aop.add_log_aspect(LogAspect(level: 6), Pointcut(kind: PointcutKind.All, pattern: "*"))
 
         CompileContext(
-            options: options,
+            options: resolved_options,
             assurance_policy: policy_from_env_value(rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""),
             config: config,
             backend: backend,
@@ -1187,7 +1191,11 @@ class CompileContext:
 
 fn compute_options_hash(opts: CompileOptions) -> CompileOptionsHash:
     val opt_level = compileoptions_effective_mir_opt_level(opts)
-    compile_options_hash_compute(opts.backend, opt_level, opts.release, opts.debug_info, opts.gc_off, opts.profile, opts.allowed_families)
+    val raw_mcdc_policy = if opts.mcdc_policy == "": "off" else: opts.mcdc_policy
+    val mcdc_policy = McdcPolicy.from_text(raw_mcdc_policy).to_text()
+    compile_options_hash_compute_with_mcdc(
+        opts.backend, opt_level, opts.release, opts.debug_info, opts.gc_off,
+        opts.profile, opts.allowed_families, mcdc_policy)
 
 # ============================================================================
 # Exports
