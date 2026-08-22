@@ -65,7 +65,7 @@ suppressed.
 
 Fallback source locations are indexed once per source view. Standalone lint reuses that
 index for collection and wildcard-export findings, while query/LSP reuses its already split
-lines for callable and wildcard locations. These are compatibility locations, not typed
+lines for callable, wildcard, and GC-boundary import locations. These are compatibility locations, not typed
 proof: exact AST or HIR causal spans remain the target, and fallback recovery never
 authorizes a transform.
 
