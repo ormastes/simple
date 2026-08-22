@@ -122,3 +122,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve unknown-code, allow, warn, deny, typed-proven, and advisory-cap semantics.
 - Pin absence of paired keep/level calls in migrated owners.
 - Retain compatibility wrappers until query/LSP and remaining external callers migrate.
+
+## Active tool tranche: shared request-local source view
+
+- Add an explicit combined-lint entrypoint that retains the first line split.
+- Reuse that COW view for parsed source-location indexing.
+- Release on normal completion, non-Simple input, parse failure, and revision mismatch.
+- Ensure ordinary/long-lived lint calls retain neither lines nor last-file policy.
+- Follow-up: replace fallback location indexing with typed AST/HIR spans per producer.
