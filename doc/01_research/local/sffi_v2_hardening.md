@@ -1042,3 +1042,10 @@ unsafe blocks directly, so no helper call, allocation, lookup, hashing, or
 signature verification was added. The census is now 12,506 declarations,
 11,729 untouched, 503 unsafe-tagged, 583 contract-documented, and zero signed
 admissions; production is 6,196 declarations with 5,619 untouched.
+
+Plugin command, plugin registry, and wrapper-generator text reads now import
+`read_file_text` under their existing `file_read` name. This compile-time alias
+replaces each local one-line raw wrapper, so call depth remains one while the
+nullable contract is centralized. All three modules pass together. The census
+is now 12,503 declarations, 11,726 untouched, and zero signed admissions;
+production is 6,193 declarations with 5,616 untouched.

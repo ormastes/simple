@@ -853,3 +853,8 @@ the same owner-first migration for live existence predicates, but preserve
 specialized no-follow, sandbox, and loader admission semantics rather than
 rewriting them to the general boolean facade. Current gate: 12,506 declarations,
 11,729 untouched, zero signed admissions.
+
+The plugin and wrapper-generator owners now use compile-time aliases for the
+canonical text-read facade, removing three raw declarations without increasing
+call depth. Continue alias-based consolidation where local wrappers are exact
+pass-throughs; retain semantic adapters where error or ownership behavior differs.
