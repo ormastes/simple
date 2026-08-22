@@ -1599,3 +1599,6 @@ as analysis scaffolding do not move MIR. Re-enabling collection LICM now require
 implementation built on a real preheader, dominance, MemorySSA/alias/effect facts, and
 non-trapping speculatability rather than uncommenting unsafe header insertion. This
 reduces compiler source/IR size and closes a correctness footgun without claiming LICM.
+## 2026-08-22 follow-up: dormant trip-count recognizer removal
+
+The shared loop detector correctly returns an unknown trip count until SCEV-lite can prove initialization, signed step, direction, branch polarity, nowrap behavior, and finiteness. It nevertheless retained an unreachable comparison-bound recognizer after that return. The recognizer confused a loop bound with an exact iteration count and could be activated mechanically without the missing proofs. The unreachable body and its two private-only parsing helpers were removed. This reduces compiler source/parse memory and prevents unsafe strength-reduction, unrolling, vectorization, or reserve decisions from acquiring a plausible-looking but invalid trip count.

@@ -258,3 +258,6 @@ unconditional return are forbidden: they add parse/code memory and enable accide
 activation without proof gates. Collection hoisting remains identity until a replacement
 accepts explicit preheader, dominance, memory-version, effect, zero-trip, and
 speculatability evidence. Header insertion is never a substitute for hoisting.
+## Fail-closed trip-count ownership
+
+`LoopDetector` may identify natural-loop structure, but it must report `trip_count=nil` until the shared SCEV-lite owner proves the initial value, signed step, comparison direction and polarity, nowrap semantics, and finiteness. Disabled inference paths must not retain unreachable rewrite or recognizer bodies. Rehabilitation belongs in the shared fact service with positive, zero-trip, negative-step, overflow, and non-finite witnesses; it is not a one-line removal of a fail-closed return.
