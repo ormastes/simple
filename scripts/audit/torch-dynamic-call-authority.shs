@@ -49,3 +49,31 @@ if grep -Eq 'if (not )?rt_torch_available\(\)' "$source_file"; then
 fi
 
 echo "Torch dynamic call authority: PASS raw_calls=$raw_calls availability_calls=$calls lexical_ffi_scopes=$scoped_raw added_provider_calls=0"
+
+for entry in \
+    'src/lib/nogc_sync_mut/torch/backend.spl:66' \
+    'src/lib/nogc_async_mut/torch/backend.spl:66' \
+    'src/lib/gc_async_mut/torch/backend.spl:64'; do
+    relative=${entry%:*}
+    expected=${entry##*:}
+    backend="$root/$relative"
+    backend_calls=$(grep -Ec '^[[:space:]]+rt_torch_[A-Za-z0-9_]+\(' "$backend")
+    test "$backend_calls" -eq "$expected" || {
+        echo "Torch backend authority: call count changed: $relative=$backend_calls" >&2
+        exit 1
+    }
+    backend_scoped=$(awk '
+        /^[[:space:]]+rt_torch_[A-Za-z0-9_]+\(/ {
+            calls++
+            if (previous ~ /unsafe\(capabilities: \[ffi\]\):/) scoped++
+        }
+        { previous=$0 }
+        END { print scoped + 0 }
+    ' "$backend")
+    test "$backend_scoped" -eq "$backend_calls" || {
+        echo "Torch backend authority: unscoped calls: $relative=$((backend_calls - backend_scoped))" >&2
+        exit 1
+    }
+done
+
+echo 'Torch backend call authority: PASS raw_calls=196 lexical_ffi_scopes=196 added_provider_calls=0'

@@ -1909,7 +1909,7 @@ one checked call, cached lookup after initialization, and no explicit wrapper
 allocation for every operation. No provider or CUDA work changed.
 The focused readiness spec passes 15/15 under the configured bootstrap seed;
 this remains seed-only evidence. A checked-in authority baseline now fails the
-census if missing-authority calls rise above 20,376, so the migration is a
+census if missing-authority calls rise above 20,180, so the migration is a
 one-way source-safety ratchet with no runtime or hot-path cost.
 
 The complete dynamic Torch wrapper slice then placed all 69 availability
@@ -1920,3 +1920,12 @@ to 995, while missing authority falls to 20,376. `rt_torch` now has 137
 explicitly authorized calls and 890 remaining missing-authority calls. This is
 lexical unsafe minimization only; the foreign provider remains unsigned and
 unverified.
+
+The three direct Torch backend implementations are real runtime-family copies,
+not re-export facades. Their 66 nogc-sync, 66 nogc-async, and 64 gc-async raw
+calls now each have a minimal lexical FFI scope. Call counts and backend method
+signatures are unchanged, so this adds no provider dispatch, lookup,
+allocation, synchronization, or device work. Global explicit authority rises
+to 1,191 and missing authority falls to 20,180; `rt_torch` is now 333 explicit
+and 694 missing. Because these methods still expose raw integer handles, they
+remain unsafe-minimized rather than verified-safe APIs.
