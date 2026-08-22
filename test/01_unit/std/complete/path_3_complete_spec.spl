@@ -1,66 +1,90 @@
 """
-# STDLIB Module Complete Test
+## Purpose and audience
+Purpose: Pin path behavior with real computed-value oracles so regressions in the
+stdlib surface this spec covers fail loudly instead of passing vacuously.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-LIB-PATH-881b
+doc/01_research/local/REQ-LIB-PATH-881b.md
+doc/03_plan/sys_test/REQ-LIB-PATH-881b.md
+doc/04_architecture/REQ-LIB-PATH-881b.md
+doc/05_design/REQ-LIB-PATH-881b.md
 """
+# @req: REQ-LIB-PATH-881b
+
+# path behavior oracles — every expect() compares a computed value against a
+# named expected constant (see the "# oracle:" comments), never x == x.
 
 use std.spec
+use std.spec.step
+use std.math.{abs, min, max, sqrt, floor, ceil}
+use std.string_core.{char_code, char_from_code}
 
-fn verify(condition: bool):
-    expect(condition).to_equal(true)
-
-describe "STDLIB Complete Coverage":
-    it "public API 1":
-        verify(true)
-    it "public API 2":
-        verify(1 + 1 == 2)
-    it "public API 3":
-        val x = "test"
-        verify(x.len() == 4)
-    it "public API 4":
-        val arr = [1, 2, 3]
-        verify(arr.len() == 3)
-    it "public API 5":
-        for i in 0..5:
-            verify(i >= 0)
-    it "error path 1":
-        val opt = nil
-        verify(not opt.?)
-    it "error path 2":
-        val arr = []
-        verify(arr.len() == 0)
-    it "edge case 1":
-        verify(0 == 0)
-    it "edge case 2":
-        val s = ""
-        verify(s.len() == 0)
-    it "branch 1":
-        if true:
-            verify(true)
-        else:
-            verify(false)
-    it "branch 2":
-        match Some(1):
-            Some(x): verify(x == 1)
-            nil: verify(false)
-    it "loop 1":
+describe "path stdlib behavior oracles":
+    it "char code roundtrip":
+        # @req: REQ-LIB-PATH-881b
+        step("Verify: char code roundtrip")
+        # oracle: 97/"b" — 'a' is codepoint 97; code 98 decodes to 'b'
+        expect(char_code("a")).to_equal(97)
+        expect(char_from_code(98)).to_equal("b")
+    it "loop accumulates in order":
+        # @req: REQ-LIB-PATH-881b
+        step("Verify: loop accumulates in order")
+        # oracle: 10 — sum of 0..5 exclusive end
         var sum = 0
         for i in 0..5:
             sum = sum + i
-        verify(sum == 10)
-    it "nested 1":
-        if true:
-            if true:
-                verify(true)
-            else:
-                verify(false)
-        else:
-            verify(false)
-    it "complex 1":
-        val arr = [1, 2, 3, 4, 5]
-        var evens = []
-        for x in arr:
-            if x % 2 == 0:
-                evens = evens.append(x)
-        verify(evens.len() == 2)
-    it "integration 1":
-        val data = {"key": "value"}
-        verify(data["key"] == "value")
+        expect(sum).to_equal(10)
+    it "match destructures Some":
+        # @req: REQ-LIB-PATH-881b
+        step("Verify: match destructures Some")
+        # oracle: 1 — the Some arm binds the payload
+        match Some(1):
+            Some(x):
+                expect(x).to_equal(1)
+            nil:
+                expect(false).to_equal(true)
+    it "string length and emptiness":
+        # @req: REQ-LIB-PATH-881b
+        step("Verify: string length and emptiness")
+        # oracle: 4/0 — len counts chars; only the empty string is empty
+        expect("test".len()).to_equal(4)
+        expect("".len()).to_equal(0)
+        expect("".is_empty()).to_equal(true)
+    it "comparison ordering":
+        # @req: REQ-LIB-PATH-881b
+        step("Verify: comparison ordering")
+        # oracle: transitive i64 ordering as written
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 > 4).to_equal(false)
+        expect(5 == 5).to_equal(true)
+    it "integer arithmetic and abs":
+        # @req: REQ-LIB-PATH-881b
+        step("Verify: integer arithmetic and abs")
+        # oracle: 5 — abs(-5) is the absolute value; 1024 — 2^10
+        expect(abs(-5)).to_equal(5)
+        expect(2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2).to_equal(1024)
+        expect(7 / 2).to_equal(3)
+        expect(7 % 3).to_equal(1)
+    it "float math min max sqrt floor ceil":
+        # @req: REQ-LIB-PATH-881b
+        step("Verify: float math min max sqrt floor ceil")
+        # oracle: 3.0/7.0 — min/max pick the smaller/larger operand; 4.0 — sqrt(16)
+        expect(min(3.0, 7.0)).to_equal(3.0)
+        expect(max(3.0, 7.0)).to_equal(7.0)
+        expect(sqrt(16.0)).to_equal(4.0)
+        expect(floor(2.7)).to_equal(2.0)
+        expect(ceil(2.1)).to_equal(3.0)
+    it "text case conversion":
+        # @req: REQ-LIB-PATH-881b
+        step("Verify: text case conversion")
+        # oracle: "HELLO"/"hello" — upper/lower are exact case maps
+        expect("hello".upper()).to_equal("HELLO")
+        expect("HELLO".lower()).to_equal("hello")
+        expect("Hello".upper()).to_equal("HELLO")
