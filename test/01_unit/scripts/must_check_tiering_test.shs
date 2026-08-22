@@ -22,14 +22,60 @@ grep -q 'cmp -s "$LOCAL_HOOK" "$CANONICAL_GUARD"' "$ROOT/scripts/hooks/pre-push"
 grep -q -- '--install' "$INSTALL_UNIX"
 grep -q 'Move-Item' "$INSTALL_WINDOWS"
 
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture" "$fixture-hook-repo" "$fixture-hook-peer"' EXIT INT TERM
+
+# Linked worktrees share one hooks directory. Installing from one worktree must
+# not bind that shared hook to the installer's absolute checkout path, because
+# the sibling worktree's wiring verifier would then reject every normal push.
+hook_repo="$fixture-hook-repo"
+hook_peer="$fixture-hook-peer"
+mkdir -p "$hook_repo/scripts/setup" "$hook_repo/scripts/hooks" "$hook_repo/scripts/check"
+cp "$INSTALL_UNIX" "$hook_repo/scripts/setup/install-must-check-hooks.shs"
+cp "$ROOT/scripts/hooks/pre-push" "$hook_repo/scripts/hooks/pre-push"
+cp "$ROOT/scripts/hooks/pre-push-worktree-launcher" "$hook_repo/scripts/hooks/pre-push-worktree-launcher"
+cp "$ROOT/scripts/check/check-hook-installation.shs" "$hook_repo/scripts/check/check-hook-installation.shs"
+cp "$ROOT/scripts/check/pre-push-conflict-tree-guard.shs" "$hook_repo/scripts/check/pre-push-conflict-tree-guard.shs"
+cp "$PUSH" "$hook_repo/scripts/check/check-push-must-pass.shs"
+for guard in check-tree-size-push check-no-conflict-tree-push check-no-conflict-markers-push check-no-revert-push; do
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$hook_repo/scripts/check/$guard.shs"
+done
+chmod +x "$hook_repo/scripts/hooks/pre-push" "$hook_repo/scripts/check/"*.shs
+git -C "$hook_repo" init -q
+git -C "$hook_repo" config user.name must-check-test
+git -C "$hook_repo" config user.email must-check-test@example.invalid
+git -C "$hook_repo" add .
+git -C "$hook_repo" commit -qm hook-base
+git -C "$hook_repo" worktree add -q "$hook_peer" HEAD
+sh "$hook_repo/scripts/setup/install-must-check-hooks.shs" --install >/dev/null
+(cd "$hook_peer" && sh scripts/setup/install-must-check-hooks.shs --check >/dev/null)
+(cd "$hook_peer" && sh scripts/check/check-hook-installation.shs)
+shared_hooks=$(git -C "$hook_repo" rev-parse --git-path hooks)
+case "$shared_hooks" in /*) : ;; *) shared_hooks="$hook_repo/$shared_hooks" ;; esac
+[ ! -L "$shared_hooks/pre-push" ]
+cmp -s "$hook_repo/scripts/hooks/pre-push-worktree-launcher" "$shared_hooks/pre-push"
+
+# A legacy canonical dispatcher is replacement material, not a local hook: if
+# preserved it would call the dispatcher from inside itself forever.
+rm -f "$shared_hooks/pre-push.local"
+cp "$hook_repo/scripts/hooks/pre-push" "$shared_hooks/pre-push"
+(cd "$hook_peer" && sh scripts/setup/install-must-check-hooks.shs --install >/dev/null)
+[ ! -e "$shared_hooks/pre-push.local" ]
+cmp -s "$hook_peer/scripts/hooks/pre-push-worktree-launcher" "$shared_hooks/pre-push"
+
+# A genuinely unrelated hook is still preserved and chained.
+printf '%s\n' '#!/bin/sh' 'echo unrelated-local-hook' > "$shared_hooks/pre-push"
+chmod +x "$shared_hooks/pre-push"
+sh "$hook_repo/scripts/setup/install-must-check-hooks.shs" --install >/dev/null
+grep -q 'unrelated-local-hook' "$shared_hooks/pre-push.local"
+cmp -s "$hook_repo/scripts/hooks/pre-push-worktree-launcher" "$shared_hooks/pre-push"
+
 if grep -E 'native-build|qemu|benchmark|--whole' "$PUSH" >/dev/null; then
     echo "FAIL: push-tier driver directly names an expensive execution lane"
     exit 1
 fi
 
 # Exercise the real pre-push ref-input path in an isolated committed fixture.
-fixture=$(mktemp -d)
-trap 'rm -rf "$fixture"' EXIT INT TERM
 mkdir -p "$fixture/scripts/check" "$fixture/scripts/hooks" "$fixture/config/check" "$fixture/doc/08_tracking/check"
 cp "$PUSH" "$fixture/scripts/check/check-push-must-pass.shs"
 cp "$HOOK" "$fixture/scripts/check/pre-push-conflict-tree-guard.shs"
