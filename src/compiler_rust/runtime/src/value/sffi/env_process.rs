@@ -619,9 +619,15 @@ pub unsafe extern "C" fn rt_process_run(cmd_ptr: *const u8, cmd_len: u64, args: 
     if args_len > 0 {
         for i in 0..args_len {
             let arg_val = rt_array_get(args, i);
-            if let Some(arg_str) = extract_string(arg_val) {
-                command.arg(arg_str);
-            }
+            let Some(arg_str) = extract_string(arg_val) else {
+                let empty_str = rt_string_new(b"".as_ptr(), 0);
+                let tuple = rt_tuple_new(3);
+                rt_tuple_set(tuple, 0, empty_str);
+                rt_tuple_set(tuple, 1, empty_str);
+                rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
+                return tuple;
+            };
+            command.arg(arg_str);
         }
     }
 
@@ -712,9 +718,10 @@ pub unsafe extern "C" fn rt_process_spawn(cmd_ptr: *const u8, cmd_len: u64, args
     if args_len > 0 {
         for i in 0..args_len {
             let arg_val = rt_array_get(args, i);
-            if let Some(arg_str) = extract_string(arg_val) {
-                command.arg(arg_str);
-            }
+            let Some(arg_str) = extract_string(arg_val) else {
+                return -1;
+            };
+            command.arg(arg_str);
         }
     }
 
@@ -735,6 +742,23 @@ use std::sync::Mutex;
 lazy_static::lazy_static! {
     /// Global registry of spawned child processes, keyed by PID.
     static ref SPAWNED_CHILDREN: Mutex<HashMap<i64, std::process::Child>> = Mutex::new(HashMap::new());
+}
+
+fn publish_spawned_child(registry: &Mutex<HashMap<i64, std::process::Child>>, mut child: std::process::Child) -> i64 {
+    let pid = child.id() as i64;
+    match registry.lock() {
+        Ok(mut children) => {
+            children.insert(pid, child);
+            pid
+        }
+        Err(_) => {
+            // A positive PID is an ownership receipt. Never publish one when
+            // the runtime cannot retain the Child needed by wait/kill.
+            let _ = child.kill();
+            let _ = child.wait();
+            -1
+        }
+    }
 }
 
 /// Spawn a process asynchronously without waiting.
@@ -762,9 +786,10 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
     if args_len > 0 {
         for i in 0..args_len {
             let arg_val = rt_array_get(args, i);
-            if let Some(arg_str) = extract_string(arg_val) {
-                command.arg(arg_str);
-            }
+            let Some(arg_str) = extract_string(arg_val) else {
+                return -1;
+            };
+            command.arg(arg_str);
         }
     }
 
@@ -773,13 +798,7 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
     command.stderr(Stdio::inherit());
 
     match command.spawn() {
-        Ok(child) => {
-            let pid = child.id() as i64;
-            if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
-                map.insert(pid, child);
-            }
-            pid
-        }
+        Ok(child) => publish_spawned_child(&SPAWNED_CHILDREN, child),
         Err(_) => -1,
     }
 }
@@ -813,9 +832,10 @@ pub unsafe extern "C" fn rt_process_spawn_guarded(cmd_ptr: *const u8, cmd_len: u
     clear_simple_child_stack_env(&mut command);
     let args_len = rt_array_len(args);
     for i in 0..args_len {
-        if let Some(arg_str) = extract_string(rt_array_get(args, i)) {
-            command.arg(arg_str);
-        }
+        let Some(arg_str) = extract_string(rt_array_get(args, i)) else {
+            return -1;
+        };
+        command.arg(arg_str);
     }
     command
         .stdin(Stdio::null())
@@ -840,13 +860,7 @@ pub unsafe extern "C" fn rt_process_spawn_guarded(cmd_ptr: *const u8, cmd_len: u
         Ok(())
     });
     match command.spawn() {
-        Ok(child) => {
-            let pid = child.id() as i64;
-            if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
-                map.insert(pid, child);
-            }
-            pid
-        }
+        Ok(child) => publish_spawned_child(&SPAWNED_CHILDREN, child),
         Err(error) => {
             if std::env::var_os("SIMPLE_PROCESS_DEBUG").is_some() {
                 eprintln!("rt_process_spawn_guarded: {error}");
@@ -898,13 +912,7 @@ pub extern "C" fn rt_process_spawn_inherit() -> i64 {
     command.stdout(Stdio::inherit());
     command.stderr(Stdio::inherit());
     match command.spawn() {
-        Ok(child) => {
-            let pid = child.id() as i64;
-            if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
-                map.insert(pid, child);
-            }
-            pid
-        }
+        Ok(child) => publish_spawned_child(&SPAWNED_CHILDREN, child),
         Err(err) => {
             eprintln!("failed to spawn inherited-stdio process '{}': {err}", wrapper.display());
             -1
@@ -1613,6 +1621,38 @@ fn fill_terminal_size(_cols: &mut i32, _rows: &mut i32) {}
 mod tests {
     use super::*;
     use crate::value::collections::{rt_array_new, rt_array_push, rt_string_data, rt_string_len, rt_tuple_get};
+
+    #[cfg(unix)]
+    #[test]
+    fn spawned_child_publication_failure_reaps_child_and_returns_error() {
+        let registry = Mutex::new(HashMap::new());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = registry.lock().unwrap();
+            panic!("poison process registry");
+        }));
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("spawn sabotage child");
+        let pid = child.id() as libc::pid_t;
+
+        assert_eq!(publish_spawned_child(&registry, child), -1);
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "child must be reaped before failure is returned"
+        );
+    }
+
+    #[test]
+    fn async_spawn_rejects_non_text_arguments() {
+        unsafe {
+            let args = rt_array_new(1);
+            rt_array_push(args, RuntimeValue::from_int(7));
+            let command = if cfg!(windows) { "cmd.exe" } else { "/bin/true" };
+            assert_eq!(rt_process_spawn_async(command.as_ptr(), command.len() as u64, args), -1);
+        }
+    }
 
     // Helper to create string pointer for SFFI
     fn str_to_ptr(s: &str) -> (*const u8, u64) {

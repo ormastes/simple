@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+binding="$root/src/app/io/process_ops.spl"
+runtime="$root/src/compiler_rust/runtime/src/value/sffi/env_process.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/system.rs"
+
+symbols='rt_process_run rt_process_run_bounded rt_process_run_inherit rt_process_run_timeout rt_process_spawn_async rt_process_spawn_inherit rt_process_wait rt_process_is_running rt_process_kill'
+for symbol in $symbols; do
+    grep -B1 -F "extern fn $symbol" "$binding" |
+        grep -Eq 'sentinel|status'
+done
+
+# One lexical scope per raw process contract. The separate checked file-read
+# bridge accounts for the tenth FFI scope in this module.
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$binding")" -eq 10
+test "$(grep -c '^fn _process_.*_raw' "$binding")" -eq 9
+
+# Successful publication performs the existing single lock+insert. Failure
+# must kill and reap before returning -1; it must never publish an untracked PID.
+for source in "$runtime" "$interpreter"; do
+    grep -q 'fn publish_spawned_' "$source"
+    grep -q 'let _ = child.kill();' "$source"
+    grep -q 'let _ = child.wait();' "$source"
+done
+test "$(grep -c 'publish_spawned_child(&SPAWNED_CHILDREN, child)' "$runtime")" -eq 3
+test "$(grep -c 'publish_spawned_process(&SPAWNED_PROCESSES, child)' "$interpreter")" -eq 1
+! grep -q 'SPAWNED_CHILDREN.lock().*insert(pid, child)' "$runtime"
+! grep -q 'SPAWNED_PROCESSES.lock().unwrap().insert(pid, child)' "$interpreter"
+
+# Malformed arrays fail closed before spawn instead of silently omitting args.
+grep -q 'async_spawn_rejects_non_text_arguments' "$runtime"
+grep -q 'async_spawn_rejects_non_text_arguments' "$interpreter"
+grep -q 'rt_process_spawn_async: every argument must be a string' "$interpreter"
+
+# Keep the publication helper allocation-free and at one registry lock.
+for source in "$runtime" "$interpreter"; do
+    body=$(sed -n '/^fn publish_spawned_/,/^}/p' "$source")
+    test "$(printf '%s\n' "$body" | grep -c '\.lock()')" -eq 1
+    ! printf '%s\n' "$body" | grep -Eq 'Box::|Vec::|HashMap::|sleep\('
+done
+
+echo 'rt process contract: PASS'

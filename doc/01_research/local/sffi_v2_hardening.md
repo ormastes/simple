@@ -790,13 +790,13 @@ artifact-bound admission ledger. On 2026-08-22 it reports:
 | --- | ---: |
 | Simple `rt_*` declaration rows | 12,650 |
 | Distinct declared symbols | 3,177 |
-| Rows explicitly tagged unsafe | 465 |
-| Rows with a documented/typed contract | 551 |
+| Rows explicitly tagged unsafe | 474 |
+| Rows with a documented/typed contract | 560 |
 | Verified evidence rows | 0 |
 | Signature-verified rows | 0 |
 | Verified and signed rows | 0 |
 | Fail-closed unsafe rows | 12,650 |
-| Untouched rows (no unsafe tag, contract, or evidence) | 11,908 |
+| Untouched rows (no unsafe tag, contract, or evidence) | 11,899 |
 | Symbols with source-signature variants | 297 |
 
 Implementation-shaped owned definitions are: C 2,312 rows / 1,830 distinct
@@ -807,8 +807,8 @@ without a trusted admission receipt bound to the exact artifact, the tool keeps
 the row unsafe.
 
 The census now also emits a provider-family migration queue and has a checked-in
-one-way ratchet. The largest untouched families are `rt_file` (2,791 rows),
-`rt_process` (1,044), `rt_env` (469), `rt_time` (367), and `rt_cuda` (353).
+one-way ratchet. The largest untouched families are `rt_file` (2,795 rows),
+`rt_process` (1,035), `rt_env` (469), `rt_time` (367), and `rt_cuda` (353).
 The ratchet rejects increases in untouched or signature-variant counts and
 decreases in unsafe tags, documented contracts, or trusted admissions. It runs
 only during audit/build verification and adds no runtime lookup, hash, branch,
@@ -870,3 +870,18 @@ the stale baseline. A detached census of the exact parent established 12,651 /
 final rebase, an upstream declaration removal leaves 12,650 total and 11,908
 untouched. These figures preserve both upstream movement and this slice's
 improvement. Signed/verified admission remains zero.
+
+The first `rt_process` slice contracts the nine canonical process operations in
+`src/app/io/process_ops.spl` and confines their raw calls to nine minimal lexical
+FFI wrappers. Rust runtime and interpreter child publication now returns a
+positive PID only after the existing registry lock owns the `Child`; a poisoned
+registry kills and reaps the child before returning `-1`. Malformed argument
+arrays fail before spawn instead of silently dropping non-text elements.
+
+Successful publication still performs one lock and one map insertion, with no
+new allocation, lookup, retry, sleep, or retained state. Runtime sabotage and
+malformed-input tests pass, the interpreter crate passes `cargo check`, Simple
+check/lint and Rust Clippy pass with pre-existing warnings, and the optimizer
+reports no new wrapper allocation/dispatch concern. Nine rows become explicitly
+unsafe and contracted, reducing untouched rows to 11,899. Artifact-bound signed
+admission remains zero, so all 12,650 rows remain classified unsafe.

@@ -9,15 +9,24 @@ use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 # deployed seed rejects (rt_shell_output), killing every native-build.
 
 extern fn rt_stderr_write(s: text)
+@unsafe(reason: "raw process capture; exit_code -1 is the execution-failure sentinel", capabilities: [ffi])
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+@unsafe(reason: "raw bounded process capture; exit_code -1 is the failure sentinel and output is contract-bounded", capabilities: [ffi])
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+@unsafe(reason: "raw inherited-stdio process execution; -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_run_inherit(cmd: text, args: [text]) -> i64
+@unsafe(reason: "raw timeout process capture; exit_code -1 is the timeout or execution-failure sentinel", capabilities: [ffi])
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 use std.io_runtime.{env_get}
+@unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+@unsafe(reason: "raw inherited-stdio child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_inherit() -> i64
+@unsafe(reason: "raw owned-child wait; -2 is timeout and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+@unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool
+@unsafe(reason: "raw owned-child termination status; false sentinel means absent or termination failure", capabilities: [ffi])
 extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_file_read_text(path: text) -> text
 @unsafe(reason: "checked managed-text SFFI returns nil only for a foreign I/O contract failure", capabilities: [ffi])
@@ -29,6 +38,42 @@ use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{getpid}
 extern fn rt_stdout_flush()
 extern fn rt_stderr_flush()
+
+fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
+    unsafe(capabilities: [ffi]):
+        rt_process_run(cmd, args)
+
+fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    unsafe(capabilities: [ffi]):
+        rt_process_run_bounded(cmd, args, timeout_ms, max_output_bytes)
+
+fn _process_run_inherit_raw(cmd: text, args: [text]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_run_inherit(cmd, args)
+
+fn _process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    unsafe(capabilities: [ffi]):
+        rt_process_run_timeout(cmd, args, timeout_ms)
+
+fn _process_spawn_async_raw(cmd: text, args: [text]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_async(cmd, args)
+
+fn _process_spawn_inherit_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_inherit()
+
+fn _process_wait_raw(pid: i64, timeout_ms: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_wait(pid, timeout_ms)
+
+fn _process_is_running_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_is_running(pid)
+
+fn _process_kill_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_kill(pid)
 
 fn _read_text_at_checked(path: text, offset: i64, size: i64) -> Result<text, text>:
     var value: text? = nil
@@ -66,12 +111,12 @@ fn _resolve_process_cmd(cmd: text) -> text:
     var resolved_cmd = cmd
     if _is_windows_platform():
         if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
-            val check = rt_process_run("where", [cmd + ".exe"])
+            val check = _process_run_raw("where", [cmd + ".exe"])
             if check.2 == 0:
                 resolved_cmd = cmd + ".exe"
     else:
         if not cmd.contains("/"):
-            val check = rt_process_run("which", [cmd])
+            val check = _process_run_raw("which", [cmd])
             if check.2 == 0 and check.0.trim() != "":
                 resolved_cmd = check.0.trim()
     resolved_cmd
@@ -79,20 +124,20 @@ fn _resolve_process_cmd(cmd: text) -> text:
 fn process_run(cmd: text, args: [text]) -> (text, text, i64):
     val resolved_cmd = _resolve_process_cmd(cmd)
     proc_slot_acquire()
-    val result = rt_process_run(resolved_cmd, args)
+    val result = _process_run_raw(resolved_cmd, args)
     proc_slot_release()
     result
 
 fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
     val resolved_cmd = _resolve_process_cmd(cmd)
     proc_slot_acquire()
-    val (stdout, stderr, exit_code) = rt_process_run_bounded(resolved_cmd, args, timeout_ms, max_output_bytes)
+    val (stdout, stderr, exit_code) = _process_run_bounded_raw(resolved_cmd, args, timeout_ms, max_output_bytes)
     proc_slot_release()
     (stdout, stderr, exit_code)
 
 fn process_run_inherit(cmd: text, args: [text]) -> i64:
     # Foreground delegation: preserve the caller's stdin/stdout/stderr.
-    rt_process_run_inherit(cmd, args)
+    _process_run_inherit_raw(cmd, args)
 
 fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     # Unix timeout wrapper: use `timeout` plus temp files so orphaned
@@ -128,8 +173,8 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     val redirected_cmd = "exec {cmd_line} > '{stdout_file}' 2> '{stderr_file}'"
 
     proc_slot_acquire()
-    val pid = rt_process_spawn_async("/bin/sh", ["-c", redirected_cmd])
-    val wrapper_code = if pid <= 0: -1 else: rt_process_wait(pid, 0)
+    val pid = _process_spawn_async_raw("/bin/sh", ["-c", redirected_cmd])
+    val wrapper_code = if pid <= 0: -1 else: _process_wait_raw(pid, 0)
     proc_slot_release()
 
     var stdout = ""
@@ -151,7 +196,7 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
 fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
     # Preserve argv boundaries and avoid cmd.exe reinterpretation.
-    rt_process_run_timeout(cmd, args, effective_timeout)
+    _process_run_timeout_raw(cmd, args, effective_timeout)
 
 fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     # Platform-agnostic timeout wrapper.
@@ -229,7 +274,7 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     val redirected_cmd = "exec setsid -w sh -c \"echo \\$\\$ > '{pgid_file}'; exec {inner_cmd}\" > '{stdout_file}' 2> '{stderr_file}'"
 
     proc_slot_acquire()
-    val pid = rt_process_spawn_async("/bin/sh", ["-c", redirected_cmd])
+    val pid = _process_spawn_async_raw("/bin/sh", ["-c", redirected_cmd])
     if pid <= 0:
         proc_slot_release()
         return ("", "\n[ERROR: failed to spawn process '{cmd}']", -1)
@@ -244,7 +289,7 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var wrapper_code: i64 = -2
     var relay_error = ""
     while wrapper_code == -2:
-        wrapper_code = rt_process_wait(pid, 500)
+        wrapper_code = _process_wait_raw(pid, 500)
         # Read only the bytes appended since the last poll. Reading the WHOLE
         # file every poll and slicing off the tail (what this did before) is
         # O(n^2) in the child's total output: relaying a 3 MB build log cost
@@ -260,8 +305,8 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
                         stdout_relayed = stdout_relayed + chunk.len()
                 case Err(message):
                     relay_error = message
-                    rt_process_kill(pid)
-                    wrapper_code = rt_process_wait(pid, 5000)
+                    _process_kill_raw(pid)
+                    wrapper_code = _process_wait_raw(pid, 5000)
                     break
         val err_size = rt_file_size(stderr_file)
         if err_size > stderr_relayed:
@@ -273,8 +318,8 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
                         stderr_relayed = stderr_relayed + chunk_err.len()
                 case Err(message):
                     relay_error = message
-                    rt_process_kill(pid)
-                    wrapper_code = rt_process_wait(pid, 5000)
+                    _process_kill_raw(pid)
+                    wrapper_code = _process_wait_raw(pid, 5000)
                     break
     proc_slot_release()
     if wrapper_code != 0:
@@ -312,11 +357,10 @@ fn _process_kill_group(pgid_file: text):
     if pgid == "":
         return
     val debug = (env_get("SIMPLE_PROC_DEBUG") ?? "") == "1"
-    unsafe(capabilities: [ffi]):
-        val (_o1, e1, c1) = rt_process_run_timeout("pkill", ["-TERM", "-s", "{pgid}"], 2000)
-        val (_o2, e2, c2) = rt_process_run_timeout("sh", ["-c", "sleep 0.5; pkill -KILL -s {pgid} 2>/dev/null; true"], 5000)
-        if debug:
-            eprint("[proc-debug] kill-group pgid={pgid} term_code={c1} term_err={e1.trim()} kill_code={c2} kill_err={e2.trim()}")
+    val (_o1, e1, c1) = _process_run_timeout_raw("pkill", ["-TERM", "-s", "{pgid}"], 2000)
+    val (_o2, e2, c2) = _process_run_timeout_raw("sh", ["-c", "sleep 0.5; pkill -KILL -s {pgid} 2>/dev/null; true"], 5000)
+    if debug:
+        eprint("[proc-debug] kill-group pgid={pgid} term_code={c1} term_err={e1.trim()} kill_code={c2} kill_err={e2.trim()}")
 
 fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64, max_output_bytes: i64) -> ProcessResult:
     # Execute a process with resource limits enforced via ulimit.
@@ -370,9 +414,9 @@ fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_byt
 
     proc_slot_acquire()
     val (stdout, stderr, code) = if max_output_bytes > 0:
-        rt_process_run_bounded("/bin/sh", ["-c", wrapped_cmd], timeout_ms, max_output_bytes)
+        _process_run_bounded_raw("/bin/sh", ["-c", wrapped_cmd], timeout_ms, max_output_bytes)
     else:
-        rt_process_run("/bin/sh", ["-c", wrapped_cmd])
+        _process_run_raw("/bin/sh", ["-c", wrapped_cmd])
     proc_slot_release()
 
     var limit_exceeded = false
@@ -436,21 +480,21 @@ fn _shell_command_args(command: text) -> (text, [text]):
 fn shell(command: text) -> ProcessResult:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (stdout, stderr, code) = rt_process_run(shell_path, shell_args)
+    val (stdout, stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     ProcessResult(stdout: stdout, stderr: stderr, exit_code: code, limit_exceeded: false, limit_type: "")
 
 fn shell_bool(command: text) -> bool:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (_stdout, _stderr, code) = rt_process_run(shell_path, shell_args)
+    val (_stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     code == 0
 
 fn shell_output_default(command: text, default: text) -> text:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (stdout, _stderr, code) = rt_process_run(shell_path, shell_args)
+    val (stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     if code == 0:
         stdout
@@ -460,7 +504,7 @@ fn shell_output_default(command: text, default: text) -> text:
 fn shell_output_trimmed(command: text, default: text) -> text:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (stdout, _stderr, code) = rt_process_run(shell_path, shell_args)
+    val (stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     if code == 0:
         stdout.trim()
@@ -470,7 +514,7 @@ fn shell_output_trimmed(command: text, default: text) -> text:
 fn shell_lines(command: text) -> [text]:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (stdout, _stderr, code) = rt_process_run(shell_path, shell_args)
+    val (stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     if code == 0 and stdout.?:
         stdout.trim().split("\n")
@@ -497,7 +541,7 @@ fn _shell_signed_int_or(value: text, default: i64) -> i64:
 fn shell_int(command: text, default: i64) -> i64:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (stdout, _stderr, code) = rt_process_run(shell_path, shell_args)
+    val (stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     if code == 0:
         _shell_signed_int_or(stdout, default)
@@ -510,27 +554,27 @@ fn shell_int(command: text, default: i64) -> i64:
 
 fn process_spawn_async(cmd: text, args: [text]) -> i64:
     # Spawn a process asynchronously (non-blocking).
-    rt_process_spawn_async(cmd, args)
+    _process_spawn_async_raw(cmd, args)
 
 fn process_spawn_inherit() -> i64:
     # Spawn the canonical MCP wrapper as a transparent stdio child.
-    rt_process_spawn_inherit()
+    _process_spawn_inherit_raw()
 
 fn process_wait(pid: i64, timeout_ms: i64) -> i64:
     # Wait for a process to complete.
     if pid <= 0:
         return -1
-    rt_process_wait(pid, timeout_ms)
+    _process_wait_raw(pid, timeout_ms)
 
 fn process_is_running(pid: i64) -> bool:
     # Check if a process is still running.
-    rt_process_is_running(pid)
+    _process_is_running_raw(pid)
 
 fn process_kill(pid: i64) -> bool:
     # Terminate a running process.
     if pid <= 1:
         return false
-    rt_process_kill(pid)
+    _process_kill_raw(pid)
 
 # ============================================================================
 # Eprint (real stderr, fd 2)

@@ -242,6 +242,23 @@ lazy_static::lazy_static! {
     /// Map of spawned child processes by PID for rt_process_spawn_async/rt_process_wait
     static ref SPAWNED_PROCESSES: Mutex<HashMap<i64, std::process::Child>> = Mutex::new(HashMap::new());
 }
+
+fn publish_spawned_process(registry: &Mutex<HashMap<i64, std::process::Child>>, mut child: std::process::Child) -> i64 {
+    let pid = child.id() as i64;
+    match registry.lock() {
+        Ok(mut processes) => {
+            processes.insert(pid, child);
+            pid
+        }
+        Err(_) => {
+            // A positive PID promises that wait/kill owns this child. Reap it
+            // before returning the failure sentinel if publication fails.
+            let _ = child.kill();
+            let _ = child.wait();
+            -1
+        }
+    }
+}
 use simple_runtime::value::{
     rt_env_all as sffi_env_all, rt_env_cwd as sffi_env_cwd, rt_env_exists as sffi_env_exists,
     rt_env_get as sffi_env_get, rt_env_get_i64 as sffi_env_get_i64, rt_env_home as sffi_env_home,
@@ -592,11 +609,12 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
 
     let cmd_args: Vec<String> = match &args[1] {
         Value::Array(arr) => {
-            let mut v = Vec::new();
+            let mut v = Vec::with_capacity(arr.len());
             for item in arr.iter() {
-                if let Value::Str(s) = item {
-                    v.push(s.as_ref().clone());
-                }
+                let Value::Str(s) = item else {
+                    return Err(CompileError::runtime("rt_process_run: every argument must be a string"));
+                };
+                v.push(s.as_ref().clone());
             }
             v
         }
@@ -689,11 +707,14 @@ pub fn rt_process_execute(args: &[Value]) -> Result<Value, CompileError> {
 
     let cmd_args: Vec<String> = match &args[1] {
         Value::Array(arr) => {
-            let mut v = Vec::new();
+            let mut v = Vec::with_capacity(arr.len());
             for item in arr.iter() {
-                if let Value::Str(s) = item {
-                    v.push(s.as_ref().clone());
-                }
+                let Value::Str(s) = item else {
+                    return Err(CompileError::runtime(
+                        "rt_process_execute: every argument must be a string",
+                    ));
+                };
+                v.push(s.as_ref().clone());
             }
             v
         }
@@ -897,11 +918,14 @@ fn process_spawn(args: &[Value], guarded: bool) -> Result<Value, CompileError> {
 
     let cmd_args: Vec<String> = match &args[1] {
         Value::Array(arr) => {
-            let mut v = Vec::new();
+            let mut v = Vec::with_capacity(arr.len());
             for item in arr.iter() {
-                if let Value::Str(s) = item {
-                    v.push(s.as_ref().clone());
-                }
+                let Value::Str(s) = item else {
+                    return Err(CompileError::runtime(
+                        "rt_process_spawn_async: every argument must be a string",
+                    ));
+                };
+                v.push(s.as_ref().clone());
             }
             v
         }
@@ -955,12 +979,7 @@ fn process_spawn(args: &[Value], guarded: bool) -> Result<Value, CompileError> {
         }
     }
     match command.spawn() {
-        Ok(child) => {
-            let pid = child.id() as i64;
-            // Store the child process for later wait
-            SPAWNED_PROCESSES.lock().unwrap().insert(pid, child);
-            Ok(Value::Int(pid))
-        }
+        Ok(child) => Ok(Value::Int(publish_spawned_process(&SPAWNED_PROCESSES, child))),
         Err(error) => {
             if std::env::var_os("SIMPLE_PROCESS_DEBUG").is_some() {
                 eprintln!("rt_process_spawn_guarded: {error}");
@@ -1564,6 +1583,37 @@ pub fn rt_shell_exec_tuple(args: &[Value]) -> Result<Value, CompileError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[cfg(unix)]
+    #[test]
+    fn spawned_process_publication_failure_reaps_child_and_returns_error() {
+        let registry = Mutex::new(HashMap::new());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = registry.lock().unwrap();
+            panic!("poison process registry");
+        }));
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("spawn sabotage child");
+        let pid = child.id() as libc::pid_t;
+
+        assert_eq!(publish_spawned_process(&registry, child), -1);
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "child must be reaped before failure is returned"
+        );
+    }
+
+    #[test]
+    fn async_spawn_rejects_non_text_arguments() {
+        let result = rt_process_spawn_async(&[
+            Value::text(if cfg!(windows) { "cmd.exe" } else { "/bin/true" }.to_string()),
+            Value::Array(Arc::new(vec![Value::Int(7)])),
+        ]);
+        assert!(result.is_err());
+    }
 
     #[cfg(unix)]
     #[test]

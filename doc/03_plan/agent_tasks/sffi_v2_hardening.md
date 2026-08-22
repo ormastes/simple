@@ -176,7 +176,7 @@ passing placeholder.
     hosted compositor mouse coordinates and remaining hosted-entry bindings.
 33. The fail-closed `rt-safety-census.shs` now reports declaration/symbol totals,
     implementation languages, unsafe tags, contracts, trusted verified evidence,
-    signatures, and untouched rows. Reduce the current 11,908 untouched rows by
+    signatures, and untouched rows. Reduce the current 11,899 untouched rows by
     provider family; never lower the 12,650-row unsafe total without a trusted
     artifact-bound evidence+signature admission row.
 34. The census now emits a ranked provider-family queue and a build-time ratchet
@@ -198,3 +198,9 @@ passing placeholder.
     state removes parallel races with no heap or per-call mutex. Seven rows
     advance the ratchet. Continue duplicate clock declarations and timestamp
     arithmetic contracts before signed artifact admission.
+38. The canonical process facade now isolates nine raw contracts in minimal
+    lexical FFI wrappers. Rust runtime/interpreter child publication kills and
+    reaps on registry failure, malformed arguments fail before spawn, and the
+    successful path retains one lock+insert with no new allocation. Continue
+    the remaining 1,035 `rt_process` rows, then bind exact signed provider
+    evidence before any process row can leave the unsafe class.
