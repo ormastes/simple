@@ -72,3 +72,15 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   the verifier projection, and no definitions-by-uses Cartesian scans.
 - Remaining follow-up: opcode typing, ownership, loop-boundary proof, exact module-pass
   outcomes, and admitted runtime differential evidence.
+
+## Active hardening tranche: partial opcode typing
+
+- Reuse the structural instruction traversal and one local-type index; do not add a
+  second MIR walk or serialize type keys.
+- Admit only exact local contracts for `Const`, `Copy`/`Move`, and `Cast`/`Bitcast`.
+- Emit stable `MIRV025`-`MIRV027` codes and checked/unproved coverage counters at function
+  and module level.
+- Treat every other opcode as explicitly unproved until its full operand/result contract
+  is designed and tested.
+- Next type lanes: arithmetic/operator families, memory/pointer operations, aggregates,
+  calls/signatures, SIMD/GPU, and terminators.
