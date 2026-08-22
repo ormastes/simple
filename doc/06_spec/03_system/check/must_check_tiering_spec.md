@@ -18,6 +18,9 @@ Stage 4 binary plus provenance before writing any phase PASS. It then executes
 every automated bootstrap row, retaining its log under the source fingerprint;
 only an explicit final PASS line is accepted, so incidental earlier PASS text
 cannot hide a final failure.
+Every automated row receives the canonical validated Stage 4 candidate as
+`SIMPLE_BINARY` and `SIMPLE_BIN`; conflicting ambient values are overridden and cannot redirect
+evidence to a stale deployment.
 
 ## Validate the must-check ledger
 
@@ -48,7 +51,7 @@ Windows TODO row.
 
 The executable scenario invokes the push self-test, bootstrap self-test, and
 the real bootstrap-produced-ledger to committed-ref push transition fixture.
-Its assertions require explicit PASS markers and timing fields. This manual was
+Its assertions require explicit PASS markers, exact Stage 4 binding, and timing fields. This manual was
 reviewed against that source; regeneration remains pending until an admitted
 Stage-4 CLI is available in the worktree.
 
