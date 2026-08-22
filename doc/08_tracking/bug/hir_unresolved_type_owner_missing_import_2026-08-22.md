@@ -586,3 +586,56 @@ error names the callable's own type parameter `C`.
 Pre-existing red, NOT caused by this lane and verified by `git stash` at
 `624ee9947f6`: `imported_tuple_signature_dependency_spec.spl` is 2/2 RED on
 origin/main.
+
+### Follow-up (d) — MEASURED clearance (post19 vs run14), not predicted
+
+Full stage-1 `native-build --source src/app --entry-closure`. **Both runs reached
+`hir 688/688` and terminated `rc=1` at the same point**, so the two censuses are
+directly comparable. Both columns counted on the same basis (`[hir-fatal]`
+lines) — deliberately not mixed with the `error:` or anchored-`$` bases, which
+give different totals for the same run.
+
+| unresolved type | run14 (pre-fix) | post19 (post-fix) |
+|---|---|---|
+| **MirType** | **180** | **0** |
+| **HirPattern** | **24** | **0** |
+| AsmLocation | 15 | 15 |
+| AsmConstraintKind | 15 | 15 |
+| VhdlPortDirection | 6 | 6 |
+| HirModule | 6 | **8** |
+| **HirExpr** | **6** | **0** |
+| HirFunction | 3 | 3 |
+| CompiledModule | 3 | 1 |
+| **total** | **258** | **48** (-81%) |
+
+Poisoned modules: **56 -> 9** (-84%). None of the nine is a MirType victim; all
+eight of the run14 MirType victims (`backend_port`, `bitfield`, `target_presets`,
+`feature_caps_types`, `feature_caps_arch32`, `gpu_intrinsics`,
+`spec_const_registry`, `portable_numeric_capabilities`) lowered clean.
+
+**`HirModule` went UP, 6 -> 8.** Stated rather than buried: this is the
+run14-hypothesis-(e) effect finally showing up for real — modules that were
+previously poisoned before reaching that check now lower far enough to reach it.
+It is a sign of progress, not a regression, but it does mean per-type totals are
+NOT a monotone progress metric across runs and must not be read as one.
+
+Scope note: post19 was built from the tree carrying ONLY the array-of-tuple fix.
+The pointer/union arms landed afterwards and are NOT exercised by this
+measurement; they were found by probe and have no instance in the run14 census.
+
+### What is left, and it is NOT this mechanism
+
+The survivors (AsmLocation 15, AsmConstraintKind 15, VhdlPortDirection 6,
+HirModule 8, HirFunction 3, CompiledModule 1) are untouched by this lane,
+consistent with the two OTHER mechanisms identified in follow-up (c):
+
+- **Function-type params behind an early `nil`.** `declared_imported_surface_callable_type`
+  returns `nil` when `callable.type_params.len() > 0`, so a generic callable's
+  signature is never projected at all. The AsmLocation / AsmConstraintKind /
+  HirPattern population lives in the generated visitor/codec files, e.g.
+  `walk_ast_asm_location<C>(node: AsmLocation, ctx: C, f: fn(AstWalkNode, C) -> C) -> C`.
+- **Generic arguments dropped by the scalar branch.** `CompiledModule` reaches
+  importers as `Result<CraneliftCompiledModule, CodegenError>`.
+
+Each needs its own lane, its own reproduce spec, and its own measured census —
+not a predicate.
