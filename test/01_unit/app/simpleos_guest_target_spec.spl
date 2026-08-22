@@ -1,0 +1,126 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.backend.simpleos_guest_link.{simpleos_guest_link_target_matches, simpleos_guest_entry_target_matches, simpleos_guest_user_link_args}
+use compiler.backend.backend.llvm_native_link_hosted_support.{entry_point_c_target_args}
+use app.simpleos_tool.guest_target.{
+    simpleos_guest_target_for_arch_id,
+    simpleos_guest_target_valid,
+    SimpleOsGuestTarget,
+    SIMPLEOS_GUEST_ARCH_X86_64,
+    SIMPLEOS_GUEST_ARCH_AARCH64,
+    SIMPLEOS_GUEST_ARCH_RISCV64
+}
+
+describe "SimpleOS guest toolchain target selection":
+    it "maps each admitted 64-bit guest to one complete immutable descriptor":
+        val x86 = simpleos_guest_target_for_arch_id(SIMPLEOS_GUEST_ARCH_X86_64)
+        val arm = simpleos_guest_target_for_arch_id(SIMPLEOS_GUEST_ARCH_AARCH64)
+        val rv = simpleos_guest_target_for_arch_id(SIMPLEOS_GUEST_ARCH_RISCV64)
+        expect(x86.is_ok()).to_equal(true)
+        expect(arm.is_ok()).to_equal(true)
+        expect(rv.is_ok()).to_equal(true)
+        if x86.is_ok() and arm.is_ok() and rv.is_ok():
+            expect(x86.unwrap().arch).to_equal("x86_64")
+            expect(x86.unwrap().triple).to_equal("x86_64-unknown-simpleos")
+            expect(x86.unwrap().codegen_target.to_text()).to_equal("simpleos-x86_64")
+            expect(arm.unwrap().arch).to_equal("aarch64")
+            expect(arm.unwrap().triple).to_equal("aarch64-unknown-simpleos")
+            expect(arm.unwrap().codegen_target.to_text()).to_equal("aarch64")
+            expect(rv.unwrap().arch).to_equal("riscv64")
+            expect(rv.unwrap().triple).to_equal("riscv64gc-unknown-simpleos")
+            expect(rv.unwrap().compiler_triple).to_equal("riscv64-unknown-simpleos")
+            expect(rv.unwrap().codegen_target.to_text()).to_equal("riscv64")
+            expect(x86.unwrap().sysroot).to_equal("/usr")
+            expect(arm.unwrap().linker_script).to_equal("/SYSRT/SIMPLEOS.LD")
+            expect(rv.unwrap().c_compiler).to_equal("/usr/bin/clang")
+
+    it "fails closed for unknown and unsupported architecture ids":
+        val zero = simpleos_guest_target_for_arch_id(0)
+        val future = simpleos_guest_target_for_arch_id(4)
+        expect(zero.is_err()).to_equal(true)
+        expect(future.is_err()).to_equal(true)
+        if zero.is_err():
+            expect(zero.unwrap_err()).to_contain("unsupported SimpleOS guest architecture id")
+        if future.is_err():
+            expect(future.unwrap_err()).to_contain("architecture id: 4")
+
+    it "keeps installed filesystem paths identical across target descriptors":
+        val x86 = simpleos_guest_target_for_arch_id(SIMPLEOS_GUEST_ARCH_X86_64).unwrap()
+        val arm = simpleos_guest_target_for_arch_id(SIMPLEOS_GUEST_ARCH_AARCH64).unwrap()
+        val rv = simpleos_guest_target_for_arch_id(SIMPLEOS_GUEST_ARCH_RISCV64).unwrap()
+        expect(x86.runtime_path).to_equal(arm.runtime_path)
+        expect(arm.runtime_path).to_equal(rv.runtime_path)
+        expect(x86.crt0_path).to_equal(rv.crt0_path)
+        expect(x86.libc_path).to_equal(rv.libc_path)
+
+    it "rejects forged codegen targets triples and installed paths":
+        val forged_codegen = SimpleOsGuestTarget(
+            arch: "x86_64", triple: "x86_64-unknown-simpleos", compiler_triple: "x86_64-unknown-simpleos",
+            codegen_target: CodegenTarget.AArch64, sysroot: "/usr",
+            runtime_path: "/usr/lib/SIMPRT.A", crt0_path: "/usr/lib/CRT0.O",
+            libc_path: "/usr/lib/SOSLIB.A", linker_script: "/SYSRT/SIMPLEOS.LD",
+            c_compiler: "/usr/bin/clang")
+        val forged_path = SimpleOsGuestTarget(
+            arch: "riscv64", triple: "riscv64gc-unknown-simpleos", compiler_triple: "riscv64-unknown-simpleos",
+            codegen_target: CodegenTarget.Riscv64, sysroot: "/tmp/host",
+            runtime_path: "/usr/lib/SIMPRT.A", crt0_path: "/usr/lib/CRT0.O",
+            libc_path: "/usr/lib/SOSLIB.A", linker_script: "/SYSRT/SIMPLEOS.LD",
+            c_compiler: "/usr/bin/clang")
+        expect(simpleos_guest_target_valid(forged_codegen)).to_equal(false)
+        expect(simpleos_guest_target_valid(forged_path)).to_equal(false)
+
+    it "binds shared linker architecture to the exact configured triple":
+        expect(simpleos_guest_link_target_matches("x86_64", "x86_64-unknown-simpleos")).to_equal(true)
+        expect(simpleos_guest_link_target_matches("aarch64", "aarch64-unknown-simpleos")).to_equal(true)
+        expect(simpleos_guest_link_target_matches("riscv64", "riscv64gc-unknown-simpleos")).to_equal(true)
+        expect(simpleos_guest_link_target_matches("x86_64", "aarch64-unknown-simpleos")).to_equal(false)
+        expect(simpleos_guest_link_target_matches("riscv64", "riscv64-unknown-linux-gnu")).to_equal(false)
+        expect(simpleos_guest_entry_target_matches("riscv64", "riscv64-unknown-simpleos")).to_equal(true)
+        expect(simpleos_guest_entry_target_matches("riscv64", "riscv64gc-unknown-simpleos")).to_equal(false)
+
+    it "builds userland ARM and RV link arguments without kernel boot owners":
+        val arm = simpleos_guest_user_link_args(
+            "aarch64", "/usr/lib/CRT0.O", "/tmp/ENTRY.O", ["/tmp/USER.O"],
+            "/usr/lib/SIMPRT.A", "/usr/lib/SOSLIB.A", "/SYSRT/SIMPLEOS.LD", "/tmp/APP")
+        val rv = simpleos_guest_user_link_args(
+            "riscv64", "/usr/lib/CRT0.O", "/tmp/ENTRY.O", ["/tmp/USER.O"],
+            "/usr/lib/SIMPRT.A", "/usr/lib/SOSLIB.A", "/SYSRT/SIMPLEOS.LD", "/tmp/APP")
+        expect(arm).to_contain("/usr/lib/CRT0.O")
+        expect(arm).to_contain("/usr/lib/SIMPRT.A")
+        expect(arm).to_contain("/usr/lib/SOSLIB.A")
+        expect(arm).to_contain("/SYSRT/SIMPLEOS.LD")
+        expect(arm.contains("--entry=__simple_riscv_entry")).to_equal(false)
+        expect(rv).to_contain("elf64lriscv")
+        expect(rv).to_contain("--no-relax")
+        expect(rv.contains("boot_main")).to_equal(false)
+
+    it "binds ARM and RV guest entry compilation to the exact machine triple":
+        val arm = entry_point_c_target_args("aarch64-unknown-simpleos")
+        val rv = entry_point_c_target_args("riscv64-unknown-simpleos")
+        expect(arm).to_contain("--target=aarch64-unknown-simpleos")
+        expect(rv).to_contain("--target=riscv64-unknown-simpleos")
+        expect(arm).to_contain("-ffreestanding")
+        expect(rv).to_contain("-nostdlib")
+        expect(rv).to_contain("-march=rv64gc")
+        expect(rv).to_contain("-mabi=lp64d")
+        expect(arm.contains("-march=rv64gc")).to_equal(false)
+
+    it "uses target-local user-context checks without x86 or ARM trap overhead":
+        val x86 = file_read("src/os/libc/simpleos_syscall.S")
+        val arm = file_read("src/os/libc/simpleos_syscall_aarch64.S")
+        val rv = file_read("src/os/libc/simpleos_syscall_riscv64.S")
+        expect(x86).to_contain("movw %cs, %ax")
+        expect(x86).to_contain("cmpl $3, %eax")
+        expect(arm).to_contain("mrs     x0, CurrentEL")
+        expect(arm).to_contain("cset    x0, eq")
+        expect(rv).to_contain("li a7, 4")
+        expect(rv).to_contain("ecall")
+        expect(rv).to_contain("slt a0, zero, a0")
+
+    it "builds AArch64 and RV64 sysroots from canonical syscall sources":
+        val generic_sysroot = file_read("src/os/port/llvm/sysroot.shs")
+        val rv_sysroot = file_read("scripts/os/simpleos-sysroot-riscv64.shs")
+        expect(generic_sysroot).to_contain("$LIBC_DIR/simpleos_syscall_aarch64.S")
+        expect(rv_sysroot).to_contain("$LIBC_DIR/simpleos_syscall_riscv64.S")
+        expect(rv_sysroot.contains("cat > \"$LIBC_BUILD/simpleos_syscall_riscv64.S\"")).to_equal(false)

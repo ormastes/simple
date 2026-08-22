@@ -175,3 +175,14 @@ compiler, dependency, readelf and hash receipts; a host executable is not
 equivalent. Use
 `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md` and
 `doc/08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md`.
+
+## Guest-userland linker separation (2026-08-22)
+
+The SimpleOS guest linker now has explicit AArch64 and RV64 userland branches
+using the configured installed CRT, Simple runtime, libc, and user linker
+script; both return before existing kernel/freestanding routes. Entry objects
+are compiled with explicit `/usr/bin/clang --target`, freestanding/no-stdlib
+flags, and RV64 `-march=rv64gc -mabi=lp64d`. Preserve this separation: kernel
+entry injection (`boot_main`, privileged status setup, `wfi`) is never valid in
+a filesystem-launched user ELF. Static machine/ABI inspection does not replace
+fresh guest compile/link/run evidence.

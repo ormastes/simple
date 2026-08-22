@@ -34,3 +34,22 @@ simpleos_current_cs:
     movw %cs, %ax
     ret
 .size simpleos_current_cs, . - simpleos_current_cs
+
+.global simpleos_guest_arch_id
+.type simpleos_guest_arch_id, @function
+simpleos_guest_arch_id:
+    movl $1, %eax
+    ret
+.size simpleos_guest_arch_id, . - simpleos_guest_arch_id
+
+.global simpleos_user_context_ok
+.type simpleos_user_context_ok, @function
+simpleos_user_context_ok:
+    xorl %eax, %eax
+    movw %cs, %ax
+    andl $3, %eax
+    cmpl $3, %eax
+    sete %al
+    movzbl %al, %eax
+    ret
+.size simpleos_user_context_ok, . - simpleos_user_context_ok

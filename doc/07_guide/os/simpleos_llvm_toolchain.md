@@ -348,3 +348,16 @@ core-C capsule pass. It lacks the `test` and `check` CLI surfaces, however, and
 the production self-host recovery did not produce a deployable executable.
 It may be used only where the admission contract and supported command surface
 match; it is not evidence of a recovered release runtime or live guest LLVM.
+
+## Multi-architecture guest Simple tool (2026-08-22)
+
+The filesystem guest tool now selects one immutable target descriptor from the
+linked architecture identity and binds code generation, installed sysroot,
+entry compilation, and userland linking together for x86_64, AArch64, and
+RV64. ARM64/RV64 user links use `/usr/lib/CRT0.O`, `SIMPRT.A`, `SOSLIB.A`, and
+`/SYSRT/SIMPLEOS.LD`; they return before the separate kernel linker routes.
+RV64 entry compilation additionally binds `-march=rv64gc -mabi=lp64d`.
+Unknown or forged descriptors, environment/descriptor target mismatch, and
+bootstrap-seed builders fail closed. Static assembly/readelf evidence is not a
+guest hello-world PASS; the QEMU rows remain blocked until an admitted Stage-4
+runtime builds and executes the filesystem artifacts.

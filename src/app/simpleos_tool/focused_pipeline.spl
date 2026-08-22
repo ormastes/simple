@@ -9,28 +9,26 @@ use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
-use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_release_options}
+use compiler.backend.backend.backend_types.{compileoptions_release_options}
 use compiler.backend.backend.llvm_codegen_adapter.{llvm_compile_module_direct_compiled, llvm_translate_module_direct_ir}
-use compiler.backend.backend.llvm_native_link.{link_simpleos_x86_64_external}
+use compiler.backend.backend.simpleos_guest_link.{link_simpleos_guest_external_for_target}
+use app.simpleos_tool.guest_target.{SimpleOsGuestTarget, simpleos_guest_target_current, simpleos_guest_target_valid, simpleos_guest_target_configure, simpleos_guest_user_context}
 
 extern fn rt_file_read_text_rv(path: text) -> text
 use std.io_runtime.{file_write_bytes}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_delete}
-extern fn simpleos_current_cs() -> u64
-
-fn require_user_cpl(phase: text) -> bool:
-    val cs = simpleos_current_cs()
-    if cs != 0x2b or (cs & 3) != 3:
-        print "[simpleos-cpl] FAIL phase={phase} cs={cs} cpl={cs & 3}"
+fn require_user_context(phase: text, target: SimpleOsGuestTarget) -> bool:
+    if not simpleos_guest_user_context():
+        print "[simpleos-user-context] FAIL phase={phase} arch={target.arch}"
         return false
-    print "[simpleos-cpl] phase={phase} cs=0x2b cpl=3"
-    simpleos_current_cs() == 0x2b
+    print "[simpleos-user-context] phase={phase} arch={target.arch} status=ok"
+    true
 
-fn lower_standalone_file(path: text) -> Result<HirModule, text>:
+fn lower_standalone_file(path: text, target: SimpleOsGuestTarget) -> Result<HirModule, text>:
     val source = rt_file_read_text_rv(path)
-    if not require_user_cpl("post-read"):
-        return Err("filesystem syscall did not return to CPL3")
+    if not require_user_context("post-read", target):
+        return Err("filesystem syscall did not return to a valid user context")
     if source == "":
         return Err("cannot read source or source is empty: {path}")
     var parsed = parse_and_build_module(_pp_preprocess_conditionals(source), path)
@@ -43,7 +41,17 @@ fn lower_standalone_file(path: text) -> Result<HirModule, text>:
     Ok(hir)
 
 pub fn simpleos_interpret_file(path: text) -> i64:
-    val lowered = lower_standalone_file(path)
+    val selected = simpleos_guest_target_current()
+    if selected.is_err():
+        print "error: {selected.unwrap_err()}"
+        return 1
+    simpleos_interpret_file_for_target(path, selected.unwrap())
+
+pub fn simpleos_interpret_file_for_target(path: text, target: SimpleOsGuestTarget) -> i64:
+    if not simpleos_guest_target_valid(target):
+        print "error: invalid SimpleOS guest target descriptor"
+        return 1
+    val lowered = lower_standalone_file(path, target)
     if lowered.is_err():
         print "error: {lowered.unwrap_err()}"
         return 1
@@ -55,7 +63,17 @@ pub fn simpleos_interpret_file(path: text) -> i64:
             1
 
 pub fn simpleos_compile_native_file(path: text, output: text, emit_object: bool, emit_llvm: bool) -> i64:
-    val lowered = lower_standalone_file(path)
+    val selected = simpleos_guest_target_current()
+    if selected.is_err():
+        print "error: {selected.unwrap_err()}"
+        return 1
+    simpleos_compile_native_file_for_target(path, output, emit_object, emit_llvm, selected.unwrap())
+
+pub fn simpleos_compile_native_file_for_target(path: text, output: text, emit_object: bool, emit_llvm: bool, target: SimpleOsGuestTarget) -> i64:
+    if not simpleos_guest_target_configure(target):
+        print "error: failed to configure the SimpleOS native toolchain"
+        return 1
+    val lowered = lower_standalone_file(path, target)
     if lowered.is_err():
         print "[simpleos-compile] phase=hir-error"
         print "error: {lowered.unwrap_err()}"
@@ -73,7 +91,7 @@ pub fn simpleos_compile_native_file(path: text, output: text, emit_object: bool,
         return 1
 
     var options = compileoptions_release_options()
-    options.target = CodegenTarget.SimpleOS_X86_64
+    options.target = target.codegen_target
     if emit_llvm:
         print "[simpleos-compile] phase=mir-ok"
         val llvm_ir = llvm_translate_module_direct_ir(options, mir)
@@ -81,7 +99,7 @@ pub fn simpleos_compile_native_file(path: text, output: text, emit_object: bool,
         if not file_write(output, llvm_ir):
             print "error: cannot write LLVM IR: {output}"
             return 1
-        if not require_user_cpl("post-write"):
+        if not require_user_context("post-write", target):
             return 1
         return 0
     val compiled = llvm_compile_module_direct_compiled(options, mir)
@@ -93,11 +111,12 @@ pub fn simpleos_compile_native_file(path: text, output: text, emit_object: bool,
     if not file_write_bytes(object_path, compiled.unwrap().object_code):
         print "error: cannot write object: {object_path}"
         return 1
-    if not require_user_cpl("post-write"):
+    if not require_user_context("post-write", target):
         return 1
     if emit_object:
         return 0
-    val linked = link_simpleos_x86_64_external([object_path], output)
+    val linked = link_simpleos_guest_external_for_target(
+        target.arch, target.compiler_triple, [object_path], output)
     file_delete(object_path)
     match linked:
         case Ok(_): 0

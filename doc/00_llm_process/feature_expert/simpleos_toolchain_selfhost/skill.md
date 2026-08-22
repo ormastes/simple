@@ -481,6 +481,17 @@ page is worse than none.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
 
+## Guest target authority update (2026-08-22)
+
+`src/app/simpleos_tool/guest_target.spl` is the immutable architecture/triple,
+codegen, sysroot, and compiler authority for the filesystem guest tool. The
+pipeline validates it at both interpret and compile entrypoints and the linker
+rejects mutable-environment split brain. AArch64/RV64 link through explicit
+installed userland CRT/runtime/libc/script branches, never the kernel linkers;
+RV64 binds `rv64gc/lp64d`. Builder stamps bind non-seed admission identity.
+This is implementation/static evidence only: do not promote self-host or QEMU
+hello-world rows until the admitted Stage-4 runtime executes them.
+
 ## Restart12 Stage 4 prerequisite (2026-08-14)
 
 The RV64 ordered boot gate cannot run on the Rust seed or Stage 2 compiler.

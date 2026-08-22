@@ -39,6 +39,14 @@ COMPILER="$(simple_compiler_select --root "$REPO_ROOT" --builder-target "$TARGET
   echo "error: no Simple compiler passed the native-build capability probe for $TARGET" >&2
   exit 1
 }
+COMPILER="$(realpath "$COMPILER")"
+BUILDER_ADMISSION_RECEIPT="${SIMPLE_BUILD_COMPILER_ADMISSION_RECEIPT:-$(dirname -- "$COMPILER")/admission.env}"
+sh scripts/os/provision_simpleos_guest_simple_fs.shs --validate-builder \
+  "$COMPILER" "$BUILDER_ADMISSION_RECEIPT" >/dev/null || {
+  echo "error: selected compiler lacks canonical Stage2 admission authority" >&2
+  exit 1
+}
+receipt_value() { awk -F= -v key="$1" '$1 == key { n++; v=substr($0,length(key)+2) } END { if (n == 1) print v; else exit 1 }' "$BUILDER_ADMISSION_RECEIPT"; }
 
 # CC wrapper carries the merged libc + real Simple C runtime + simple-core
 # runtime archive (libsimpleos_all.a) through the -print-libgcc-file-name
@@ -90,6 +98,14 @@ runtime_bundle=simple-core
 runtime_archive=${TARGET_RUNTIME} (14 parts, cranelift --emit-archive --no-mangle)
 linker_script=${SYSROOT}/share/simpleos/simpleos.ld (base 0x50000000)
 compiler=${COMPILER}
+compiler_is_bootstrap_seed=false
+compiler_sha256=$(sha256sum "$COMPILER" | awk '{print $1}')
+builder_sha256=$(sha256sum "$COMPILER" | awk '{print $1}')
+builder_admission_receipt=$BUILDER_ADMISSION_RECEIPT
+builder_admission_receipt_sha256=$(sha256sum "$BUILDER_ADMISSION_RECEIPT" | awk '{print $1}')
+builder_admission_identity=$(receipt_value admission_identity)
+source_revision_sha256=$(receipt_value source_snapshot_sha256)
+artifact_sha256=$(sha256sum "$OUTPUT" | awk '{print $1}')
 built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 size=$(wc -c < "$OUTPUT")
 EOF

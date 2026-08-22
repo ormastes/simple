@@ -1,11 +1,89 @@
 # Bounded public facade for the focused SimpleOS guest compiler. The existing
-# native-link orchestrator remains the sole owner of architecture link details.
+# native-link orchestrator remains the x86 owner. ARM/RV guest-userland must not
+# enter its kernel boot routes, so this facade owns their installed-sysroot link.
 
-use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
+use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions, compile_entry_point_c}
+use app.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io_runtime.{env_get, file_delete, file_exists, process_run}
 
-fn link_simpleos_guest_external(arch: text, user_objects: [text], output: text) -> Result<text, text>:
+pub fn simpleos_guest_link_target_matches(arch: text, target: text) -> bool:
+    ((arch == "x86_64" and target == "x86_64-unknown-simpleos") or
+        (arch == "aarch64" and target == "aarch64-unknown-simpleos") or
+        (arch == "riscv64" and target == "riscv64gc-unknown-simpleos"))
+
+pub fn simpleos_guest_entry_target_matches(arch: text, target: text) -> bool:
+    ((arch == "x86_64" and target == "x86_64-unknown-simpleos") or
+        (arch == "aarch64" and target == "aarch64-unknown-simpleos") or
+        (arch == "riscv64" and target == "riscv64-unknown-simpleos"))
+
+pub fn simpleos_guest_user_link_args(
+    arch: text,
+    crt0: text,
+    entry_object: text,
+    user_objects: [text],
+    runtime: text,
+    libc: text,
+    linker_script: text,
+    output: text
+) -> [text]:
+    var args: [text] = []
+    if arch == "riscv64":
+        args.push("-m")
+        args.push("elf64lriscv")
+        args.push("--no-relax")
+    args.push("-T")
+    args.push(linker_script)
+    args.push("-nostdlib")
+    args.push("-static")
+    args.push("--gc-sections")
+    args.push("-o")
+    args.push(output)
+    args.push(crt0)
+    args.push(entry_object)
+    for object in user_objects:
+        args.push(object)
+    args.push("--start-group")
+    args.push(runtime)
+    args.push(libc)
+    args.push("--end-group")
+    args
+
+fn link_simpleos_guest_userland(arch: text, compiler_triple: text, user_objects: [text], output: text) -> Result<text, text>:
+    val crt0 = env_get("SIMPLE_CRT0_PATH") ?? ""
+    val runtime = env_get("SIMPLE_SIMPLE_CORE_PATH") ?? ""
+    val libc = env_get("SIMPLE_LIBC_PATH") ?? ""
+    val linker_script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
+    if (crt0 != "/usr/lib/CRT0.O" or runtime != "/usr/lib/SIMPRT.A" or
+        libc != "/usr/lib/SOSLIB.A" or linker_script != "/SYSRT/SIMPLEOS.LD"):
+        return Err("SimpleOS guest linker rejected non-canonical installed paths")
+    for path in [crt0, runtime, libc, linker_script]:
+        if not file_exists(path):
+            return Err("SimpleOS {arch} guest sysroot is incomplete: missing {path}")
+
+    val entry_result = compile_entry_point_c(
+        [], getpid(), false, 2, "/usr/bin/clang", compiler_triple)
+    val entry_object = match entry_result:
+        case Ok(path): path
+        case Err(error): return Err("SimpleOS {arch} guest entry compilation failed: {error}")
+    val args = simpleos_guest_user_link_args(
+        arch, crt0, entry_object, user_objects, runtime, libc, linker_script, output)
+    val linker = if file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
+    val (_stdout, stderr, code) = process_run(linker, args)
+    file_delete(entry_object)
+    if code != 0:
+        return Err("SimpleOS {arch} guest user executable link failed: {stderr}")
+    Ok(output)
+
+fn link_simpleos_guest_external_for_target(arch: text, compiler_triple: text, user_objects: [text], output: text) -> Result<text, text>:
     if arch != "x86_64" and arch != "aarch64" and arch != "riscv64":
         return Err("unsupported SimpleOS guest linker architecture: {arch}")
+    val configured_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if not simpleos_guest_link_target_matches(arch, configured_target):
+        return Err("SimpleOS guest linker target mismatch: arch={arch} target={configured_target}")
+    if not simpleos_guest_entry_target_matches(arch, compiler_triple):
+        return Err("SimpleOS guest entry target mismatch: arch={arch} target={compiler_triple}")
+    if arch == "aarch64" or arch == "riscv64":
+        return link_simpleos_guest_userland(arch, compiler_triple, user_objects, output)
     val options = NativeLinkOptions(
         debug: false,
         verbose: false,
@@ -16,4 +94,15 @@ fn link_simpleos_guest_external(arch: text, user_objects: [text], output: text) 
         stage4_compiler_hash: "")
     link_llvm_native(user_objects, output, options)
 
-export link_simpleos_guest_external
+fn link_simpleos_guest_external(arch: text, user_objects: [text], output: text) -> Result<text, text>:
+    val compiler_triple = if arch == "riscv64":
+        "riscv64-unknown-simpleos"
+    elif arch == "aarch64":
+        "aarch64-unknown-simpleos"
+    else:
+        "x86_64-unknown-simpleos"
+    link_simpleos_guest_external_for_target(arch, compiler_triple, user_objects, output)
+
+export link_simpleos_guest_external, simpleos_guest_link_target_matches
+export link_simpleos_guest_external_for_target, simpleos_guest_entry_target_matches
+export simpleos_guest_user_link_args

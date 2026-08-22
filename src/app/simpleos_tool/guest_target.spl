@@ -1,0 +1,108 @@
+# Immutable target decision for the filesystem-launched SimpleOS toolchain.
+# Architecture-specific assembly owns detection; the app selects once and
+# passes this value through lowering, code generation, and linking.
+
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use app.io.env_ops.{env_set}
+
+extern fn simpleos_guest_arch_id() -> i64
+extern fn simpleos_user_context_ok() -> i64
+
+pub const SIMPLEOS_GUEST_ARCH_X86_64: i64 = 1
+pub const SIMPLEOS_GUEST_ARCH_AARCH64: i64 = 2
+pub const SIMPLEOS_GUEST_ARCH_RISCV64: i64 = 3
+
+pub struct SimpleOsGuestTarget:
+    arch: text
+    triple: text
+    compiler_triple: text
+    codegen_target: CodegenTarget
+    sysroot: text
+    runtime_path: text
+    crt0_path: text
+    libc_path: text
+    linker_script: text
+    c_compiler: text
+
+pub fn simpleos_guest_target_for_arch_id(arch_id: i64) -> Result<SimpleOsGuestTarget, text>:
+    var arch = ""
+    var triple = ""
+    var compiler_triple = ""
+    var codegen_target = CodegenTarget.X86_64
+    if arch_id == SIMPLEOS_GUEST_ARCH_X86_64:
+        arch = "x86_64"
+        triple = "x86_64-unknown-simpleos"
+        compiler_triple = triple
+        codegen_target = CodegenTarget.SimpleOS_X86_64
+    elif arch_id == SIMPLEOS_GUEST_ARCH_AARCH64:
+        arch = "aarch64"
+        triple = "aarch64-unknown-simpleos"
+        compiler_triple = triple
+        codegen_target = CodegenTarget.AArch64
+    elif arch_id == SIMPLEOS_GUEST_ARCH_RISCV64:
+        arch = "riscv64"
+        triple = "riscv64gc-unknown-simpleos"
+        compiler_triple = "riscv64-unknown-simpleos"
+        codegen_target = CodegenTarget.Riscv64
+    else:
+        return Err("unsupported SimpleOS guest architecture id: {arch_id}")
+    Ok(SimpleOsGuestTarget(
+        arch: arch,
+        triple: triple,
+        compiler_triple: compiler_triple,
+        codegen_target: codegen_target,
+        sysroot: "/usr",
+        runtime_path: "/usr/lib/SIMPRT.A",
+        crt0_path: "/usr/lib/CRT0.O",
+        libc_path: "/usr/lib/SOSLIB.A",
+        linker_script: "/SYSRT/SIMPLEOS.LD",
+        c_compiler: "/usr/bin/clang"))
+
+pub fn simpleos_guest_target_current() -> Result<SimpleOsGuestTarget, text>:
+    simpleos_guest_target_for_arch_id(simpleos_guest_arch_id())
+
+pub fn simpleos_guest_target_valid(target: SimpleOsGuestTarget) -> bool:
+    val arch_id = if target.arch == "x86_64":
+        SIMPLEOS_GUEST_ARCH_X86_64
+    elif target.arch == "aarch64":
+        SIMPLEOS_GUEST_ARCH_AARCH64
+    elif target.arch == "riscv64":
+        SIMPLEOS_GUEST_ARCH_RISCV64
+    else:
+        0
+    val canonical = simpleos_guest_target_for_arch_id(arch_id)
+    if canonical.is_err():
+        return false
+    val expected = canonical.unwrap()
+    (target.triple == expected.triple and
+        target.compiler_triple == expected.compiler_triple and
+        target.codegen_target == expected.codegen_target and
+        target.sysroot == expected.sysroot and
+        target.runtime_path == expected.runtime_path and
+        target.crt0_path == expected.crt0_path and
+        target.libc_path == expected.libc_path and
+        target.linker_script == expected.linker_script and
+        target.c_compiler == expected.c_compiler)
+
+pub fn simpleos_guest_target_configure(target: SimpleOsGuestTarget) -> bool:
+    if not simpleos_guest_target_valid(target):
+        return false
+    (env_set("SIMPLE_NATIVE_BUILD_TARGET", target.triple) and
+        env_set("SIMPLE_TARGET", target.triple) and
+        env_set("SIMPLE_SYSROOT", target.sysroot) and
+        env_set("SIMPLE_SIMPLE_CORE_PATH", target.runtime_path) and
+        env_set("SIMPLE_CRT0_PATH", target.crt0_path) and
+        env_set("SIMPLE_LIBC_PATH", target.libc_path) and
+        env_set("SIMPLE_LINKER_SCRIPT", target.linker_script) and
+        env_set("SIMPLEOS_FOCUSED_HIR_DIAG", "1") and
+        env_set("SIMPLE_CC", target.c_compiler))
+
+pub fn simpleos_guest_user_context() -> bool:
+    simpleos_user_context_ok() == 1
+
+export SimpleOsGuestTarget, simpleos_guest_target_for_arch_id
+export simpleos_guest_target_current, simpleos_guest_target_valid
+export simpleos_guest_target_configure
+export simpleos_guest_user_context
+export SIMPLEOS_GUEST_ARCH_X86_64, SIMPLEOS_GUEST_ARCH_AARCH64
+export SIMPLEOS_GUEST_ARCH_RISCV64
