@@ -12,6 +12,8 @@ simple coverage mcdc \
   --events build/test.mcdc-events \
   --exclusions build/test.mcdc-exclusions \
   --exclusion-source test/flight_irq_spec.spl \
+  --exclusion-evidence build/test.mcdc-exclusion-evidence \
+  --exclusion-trust-key config/mcdc-evidence-ed25519.pub \
   --mode normal --current-epoch 1787356800
 ```
 
@@ -21,6 +23,16 @@ exclusion matches a manifest decision and fresh capability-unavailable reason,
 and every author directive passes the scenario-exclusion audit. Accepted source
 directives render as `EXCLUDED`; they never render as PASS or covered. Directive
 counts are audit facts and are not substituted for excluded-condition counts.
+When `--exclusions` is present, both external-evidence options are mandatory.
+The trust key is exactly 32 raw Ed25519 bytes. Evidence is an ordered stream of
+320-byte `MCDEVR1` rows (maximum 256): 256 signed bytes followed by a 64-byte
+signature. The source SHA-256 binds the signed bytes; the binary row and signed
+receipt independently bind the same decision/source/condition identities.
+Issuer identity is derived from the configured trust key, executor identity is
+separate, and the observation must be fresh. The five receipt proof layouts are
+cause-specific; forged, stale, mismatched, locally-producible, missing, extra,
+or reordered receipts fail the exact gate. File sizes are checked before reads,
+so evidence input cannot allocate beyond the 80 KiB hard bound.
 
 The wire rows are the ABI types in `runtime_mcdc_v1.h`. V1 remains compatible;
 new complete reports use the additive V2 surface:
