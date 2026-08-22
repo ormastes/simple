@@ -364,3 +364,12 @@ each class line only for accessor-shaped call occurrences. Exact-name conflicts
 are ambiguous and suppress rewriting. Replacement offsets come from the shared
 contexts; active registry paths never split source or build parallel start
 arrays. Compatibility source APIs may construct one local view.
+
+## Warning candidate and cursor contract
+
+Backward annotation/suppression scans run only after a rule has recognized a
+candidate declaration. Every rejected line advances its byte offset exactly
+once. Repeated token/delimiter searches use absolute forward cursors over the
+original text; they never allocate a suffix per match. Each warning entrypoint
+has one method owner so diagnostic construction and policy cannot diverge across
+duplicate declarations.
