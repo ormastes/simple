@@ -549,3 +549,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve complete liveness results, visit budgets, and oversized-input status.
 - Pin duplicate-local, uncovered-instruction, and dangling-edge empty-storage
   contracts.
+
+## Completed tooling tranche: unchanged diagnostic identity fast path
+
+- Compute CLI effective severity once per diagnostic.
+- Return the immutable result directly when severity is unchanged.
+- Rebuild only actual Warn-to-Deny transitions.
+- Preserve text/JSON bytes, ordering, counts, fixes, evidence, and uncertainty.
+- Follow-up: move policy projection before serialized output ownership entirely
+  when typed diagnostic transport replaces compatibility JSON.
