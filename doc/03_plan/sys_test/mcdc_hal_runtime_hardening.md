@@ -9,6 +9,19 @@
 4. `test/03_system/runtime/hal_environment_replay_spec.spl` — REQ-015-018; NFR-005-010.
 5. `test/03_system/runtime/hal_mission_critical_policy_spec.spl` — REQ-010-012, 019; NFR-005-006, 009.
 
+All five executable specs now exist at these paths. Their manual mirrors are:
+
+- `doc/06_spec/03_system/compiler/mcdc_instrumentation_modes_spec.md`
+- `doc/06_spec/03_system/compiler/mcdc_report_gate_spec.md`
+- `doc/06_spec/03_system/runtime/hal_provider_comparison_spec.md`
+- `doc/06_spec/03_system/runtime/hal_environment_replay_spec.md`
+- `doc/06_spec/03_system/runtime/hal_mission_critical_policy_spec.md`
+
+The mirrors are truthfully marked PENDING/BLOCKED until an admitted current-source
+pure-Simple compiler can execute SPipe and docgen. Their presence is not a PASS
+receipt and does not close live-binary, live-provider, physical-device, or NFR
+measurement rows.
+
 ## Manual flow vocabulary
 
 Primary steps: “Build the controlled fixture”; “Run the selected assurance mode”; “Capture the durable receipt”; “Compare the bounded oracle”; “Inject one contract violation”; “Verify fail-closed evidence”. Setup helpers use `@inline`; matrix and sabotage sections are folded. Captures are `binary`, `protocol`, `log`, and `artifact`, never screenshots or source-string searches.
@@ -54,3 +67,20 @@ Current Linux host must cover compiler manifests, supported execution modes, thr
 ## Sabotage requirement
 
 Each spec must prove green -> implementation sabotage red -> restored green. Arms target implementation: manifest IDs, probe emission, allocator call, slot publication, receipt validation, instruction order, provider isolation, comparison, and exclusion validation.
+
+## Traceability matrix and current evidence state
+
+| Requirement | Executable spec | Cases | Current evidence |
+|---|---|---:|---|
+| REQ-001, REQ-002 | `test/03_system/compiler/mcdc_instrumentation_modes_spec.spl` | 3 policy cases | Source-contract only; emitted manifests/vectors pending admitted compiler |
+| REQ-003, REQ-004, REQ-005 | `test/03_system/compiler/mcdc_report_gate_spec.spl` | 3 accounting cases | Production contract assertions; live report provenance pending |
+| REQ-006, REQ-007, REQ-008 | `test/03_system/compiler/mcdc_instrumentation_modes_spec.spl` | 4 mode/admission cases | Policy and fail-closed admission; binary equivalence/dynload evidence pending |
+| REQ-009 through REQ-015 | `test/03_system/runtime/hal_provider_comparison_spec.spl` and `hal_mission_critical_policy_spec.spl` | 12 contract cases | Production contracts; live isolated workers and I/O matrix pending |
+| REQ-016, REQ-017 | `test/03_system/runtime/hal_environment_replay_spec.spl` | 4 trace cases | Host-fixture contracts; physical adapters pending |
+| REQ-018 | `test/03_system/compiler/mcdc_report_gate_spec.spl` | 3 governance cases | Accepted/rejected/stale classification covered; external freshness receipts pending |
+| REQ-019 | `test/03_system/runtime/hal_mission_critical_policy_spec.spl` | 3 rejection cases | New-code rejection covered; repository migration milestone pending |
+| NFR-001 through NFR-004 | `test/03_system/compiler/mcdc_instrumentation_modes_spec.spl` | 1 external gate case | `nothing-checked` is asserted on missing evidence; measurements pending |
+| NFR-005 through NFR-007 | runtime specs above | 8 bounded/error cases | Contract-level only; allocation/process receipts pending |
+| NFR-008 | `test/03_system/compiler/mcdc_report_gate_spec.spl` | 6 cases | Exact gate and exclusions covered; live complete report pending |
+| NFR-009 | all five specs plus performance gate | 1 admission case | Retention contract exists; admitted raw receipts pending |
+| NFR-010 | provider/environment specs | 10 cases | Shared interfaces covered; non-current platform executors pending |

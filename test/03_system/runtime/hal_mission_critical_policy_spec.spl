@@ -1,0 +1,52 @@
+# codex-system-test
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-009 REQ-010 REQ-011 REQ-012 REQ-019 NFR-005 NFR-006 NFR-009
+# @evidence-class source-contract
+
+use std.spec.*
+use compiler.common.hal.rt_hal_contract.*
+use std.common.structural.hal_provider.*
+
+describe "mission-critical rt(hal) compile and memory policy":
+    it "should default an unqualified declaration to critical all-provider assurance":
+        step("Run the selected assurance mode")
+        val contract = parse_rt_hal_contract_v1("hal,operation.io.v1")
+        expect(contract.valid).to_be(true)
+        expect(contract.assurance_rank).to_equal(3)
+        expect(contract.providers_mask).to_equal(7)
+        expect(rt_hal_contract_requires_sealed_archive(contract)).to_be(true)
+
+    it "should accept explicit bounded configuration":
+        val contract = parse_rt_hal_contract_v1(
+            "hal,operation:file.read.v1,assurance:verified,providers:pure|c|rust,capabilities:15,request_bytes:256,result_bytes:512,trace_operations:16,trace_bytes:1024,diff_rows:8,report_bytes:1024,log_bytes:1024,deadline_ticks:1000,error_schema:1,environment_schema:1,preferred:pure")
+        expect(contract.valid).to_be(true)
+        expect(contract.assurance_rank).to_equal(4)
+        expect(contract.trace_bytes).to_equal(1024)
+        expect(contract.log_bytes).to_equal(1024)
+
+    it "should reject lower assurance without a reason":
+        val contract = parse_rt_hal_contract_v1(
+            "hal,operation:file.read.v1,assurance:strict")
+        expect(contract.valid).to_be(false)
+        expect(contract.diagnostic).to_contain("lower assurance requires")
+
+    it "should reject unknown obsolete fields and over-capacity storage":
+        val obsolete = parse_rt_hal_contract_v1(
+            "hal,operation:file.read.v1,legacy_backend:c")
+        val too_large = parse_rt_hal_contract_v1(
+            "hal,operation:file.read.v1,log_bytes:4194305")
+        expect(obsolete.valid).to_be(false)
+        expect(obsolete.diagnostic).to_contain("unknown @rt(hal) field")
+        expect(too_large.valid).to_be(false)
+
+    it "should reject any allocation after the initialization seal":
+        val operation = hal_operation_v1_default_critical(
+            101, 7, 0, 11, 12, HalSideEffectPolicy.PlanThenCommit,
+            hal_capacity_v1(128, 128, 16, 1024, 8, 1024, 1024, 2000),
+            13, 14, HalProviderKind.PureSimple)
+        val clean = hal_sealed_storage_v1(
+            128, 128, 16, 1024, 8, 1024, 1024, 0, true)
+        val allocated = hal_sealed_storage_v1(
+            128, 128, 16, 1024, 8, 1024, 1024, 1, true)
+        expect(hal_sealed_storage_v1_admits(clean, operation)).to_be(true)
+        expect(hal_sealed_storage_v1_admits(allocated, operation)).to_be(false)

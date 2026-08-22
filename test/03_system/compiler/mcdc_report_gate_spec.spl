@@ -1,0 +1,64 @@
+# codex-system-test
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-003 REQ-004 REQ-005 REQ-018 NFR-008 NFR-009
+# @evidence-class source-contract
+
+use std.spec.*
+use std.common.structural.mcdc.contracts.*
+use compiler.tools.verify.mcdc_scenario_exclusion.*
+
+fn report_summary(covered: i64 = 8) -> McdcCoverageSummaryV1:
+    mcdc_coverage_summary_v1(10, 2, covered)
+
+fn exclusion(line: text, epoch: i64 = 150) -> McdcScenarioExclusionExpressionV1:
+    parse_mcdc_scenario_exclusion_v1(line, epoch)
+
+fn exclusion_line(reason: text, expires: i64 = 200) -> text:
+    "# @mcdc-exclude: scenario=irq-board | kind=capability-unavailable | code=cap-irq-v1 | predicate=capability.unavailable | producible=false | reason=" + reason + " | evidence=sha256:1111111111111111111111111111111111111111111111111111111111111111 | observed=100 | owner=runtime-team | reviewed=100 | expires=" + expires.to_text()
+
+describe "MC/DC report and exact normal-mode gate":
+    describe "REQ-003 through REQ-005: proof accounting and exact gate":
+        it "should admit exact eligible coverage with governed exclusions":
+            step("Run the selected assurance mode")
+            val gate = mcdc_normal_gate_v1(
+                McdcReportModeV1.Normal, true, report_summary(), 2, 2, 0)
+            step("Compare the bounded oracle")
+            expect(mcdc_coverage_summary_v1_is_exact_100(report_summary())).to_be(true)
+            expect(mcdc_normal_gate_v1_passes(gate)).to_be(true)
+
+        it "should reject a below-100 or empty eligible denominator":
+            step("Inject one contract violation")
+            val incomplete = mcdc_normal_gate_v1(
+                McdcReportModeV1.Normal, true, report_summary(7), 2, 2, 0)
+            val empty = mcdc_coverage_summary_v1(2, 2, 0)
+            step("Verify fail-closed evidence")
+            expect(mcdc_normal_gate_v1_passes(incomplete)).to_be(false)
+            expect(mcdc_coverage_summary_v1_is_exact_100(empty)).to_be(false)
+
+        it "should reject missing exclusion validation and unexplained rows":
+            val unvalidated = mcdc_normal_gate_v1(
+                McdcReportModeV1.Normal, true, report_summary(), 2, 1, 0)
+            val unexplained = mcdc_normal_gate_v1(
+                McdcReportModeV1.Normal, true, report_summary(), 2, 2, 1)
+            expect(mcdc_normal_gate_v1_passes(unvalidated)).to_be(false)
+            expect(mcdc_normal_gate_v1_passes(unexplained)).to_be(false)
+
+    describe "REQ-018: reason-bearing governed exclusions":
+        it "should classify a fresh complete exclusion as excluded":
+            val row = exclusion(exclusion_line("fixture unavailable on current Linux host"))
+            expect(row.status).to_equal(McdcScenarioExclusionStatusV1.Accepted)
+            expect(mcdc_scenario_exclusion_report_v1(row)).to_start_with("EXCLUDED")
+
+        it "should reject blank generic and stale exclusion evidence":
+            val blank = exclusion(exclusion_line("none"))
+            val stale = exclusion(exclusion_line("fixture unavailable on current Linux host", 149))
+            expect(mcdc_scenario_exclusion_accepted_v1(blank)).to_be(false)
+            expect(stale.status).to_equal(McdcScenarioExclusionStatusV1.Stale)
+
+        it "should fail the audited gate when any directive is rejected":
+            val source = exclusion_line("fixture unavailable on current Linux host") + "\n" + exclusion_line("none")
+            val audit = scan_mcdc_scenario_exclusions_v1(source, 150)
+            val gate = mcdc_normal_gate_v1(
+                McdcReportModeV1.Normal, true, report_summary(), 1, 1, 0)
+            expect(audit.rejected_count).to_be_greater_than(0)
+            expect(mcdc_audited_normal_gate_v1_passes(gate, audit)).to_be(false)
