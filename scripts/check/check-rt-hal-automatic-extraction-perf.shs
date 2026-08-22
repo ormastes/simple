@@ -14,6 +14,12 @@ fail() { echo "rt-hal-automatic-extraction: FAIL reason=$1" >&2; exit 1; }
 [ -x "$simple" ] || fail selfhost-unavailable
 [ -x "$time_bin" ] || fail time-unavailable
 
+hook_source="$root/src/lib/common/structural/environment_instruction/automatic_hook.spl"
+hot=$(sed -n '/    me extract(metadata:/,/    me seal():/p' "$hook_source")
+if printf '%s\n' "$hot" | rg '\.push\(|Dict<|new |alloc\(|file_|env_get|process_' >/dev/null; then
+    fail hot-allocation-or-ambient-operation-site
+fi
+
 SIMPLE_LIB="$root/src" "$simple" native-build \
     --source "$root/src/lib" --source "$root/test/05_perf/mcdc" \
     --entry-closure \
@@ -24,11 +30,12 @@ SIMPLE_LIB="$root/src" "$simple" native-build \
 rss=$(sed -n '1p' "$work/rss")
 direct=$(sed -n 's/.*direct_ns=\([0-9][0-9]*\).*/\1/p' "$work/result")
 automatic=$(sed -n 's/.*automatic_ns=\([0-9][0-9]*\).*/\1/p' "$work/result")
+[ -n "$rss" ] && [ -n "$direct" ] && [ -n "$automatic" ] || \
+    fail missing-evidence
 case "$rss:$direct:$automatic" in *[!0-9:]*) fail invalid-evidence;; esac
 [ "$rss" -le "$rss_limit" ] || fail "rss-$rss-over-$rss_limit"
 # Integer comparison avoids adding float parsing to the evidence path.
 [ "$automatic" -le $((direct * ratio_limit)) ] || \
     fail "overhead-$automatic-over-$ratio_limit-times-$direct"
-grep -q 'hot_allocations=0' "$work/result" || fail allocation-receipt
 cat "$work/result"
-echo "peak_rss_kib=$rss ratio_limit=$ratio_limit status=PASS"
+echo "peak_rss_kib=$rss hot_explicit_allocation_sites=0 ratio_limit=$ratio_limit status=PASS"
