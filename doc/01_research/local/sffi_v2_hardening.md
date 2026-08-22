@@ -963,3 +963,13 @@ facades here would regress the parse-shard memory fix by pulling the compiler
 back half into the child. The resulting census is 12,614 declarations: 502
 unsafe-tagged, 583 contracted, and 11,836 untouched. Production signed evidence
 is still zero, so no declaration is yet claimed safe or verified.
+
+The census now separates the complete declaration population into mutually
+exclusive ownership scopes without excluding any row. Of 12,614 declarations,
+6,296 are production declarations (480 tagged, 399 contracted, 5,718 untouched),
+688 are bootstrap-library declarations (20 tagged, 17 contracted, 655
+untouched), and 5,630 are test declarations (2 tagged, 167 contracted, 5,463
+untouched). Every scope has zero signed admissions and remains fail-closed
+unsafe. The contract gate proves that scope totals equal the complete census
+and rejects unknown paths, preventing a production row from disappearing into
+an exclusion. This is audit-only and adds no runtime work.

@@ -800,3 +800,12 @@ Next:
    immutable typed function slots only after whole-provider validation.
 4. Continue reducing the 11,836 untouched rows by owner/facade family, starting
    with the 999 untouched `rt_process` declarations.
+
+Scope-aware prioritization is now available. The next owner sweep should use
+the 5,718 untouched production rows as its primary queue while independently
+ratcheting 655 bootstrap-library and 5,463 test rows. The complete 12,614-row
+total remains authoritative; scope is a prioritization dimension, not an
+exclusion or a safety claim. Current top untouched production families are
+`rt_file` (560), `rt_cuda` (256), `rt_torch` (205), `rt_env` (165), and
+`rt_vulkan` (156). Prefer canonical owners for file/environment families and
+explicit unsafe generated bindings for accelerator families.

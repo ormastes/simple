@@ -12,6 +12,7 @@ summary_out=${1:-/dev/stdout}
 declarations_out=${2:-${TMPDIR:-/tmp}/rt-safety-declarations.tsv}
 languages_out=${3:-${TMPDIR:-/tmp}/rt-safety-languages.tsv}
 families_out=${4:-${TMPDIR:-/tmp}/rt-safety-families.tsv}
+scopes_out=${5:-${TMPDIR:-/tmp}/rt-safety-scopes.tsv}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
 
@@ -194,8 +195,41 @@ awk -F '\t' 'BEGIN { OFS="\t" }
     sort -t "$(printf '\t')" -k8,8nr -k2,2nr -k1,1
 } >"$families_out"
 
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR == 1 { next }
+    {
+        if ($4 ~ /^test\//) scope="test"
+        else if ($4 ~ /^src\/compiler_rust\/lib\/std\//) scope="bootstrap_library"
+        else if ($4 ~ /^src\//) scope="production"
+        else scope="unknown"
+        rows[scope]++
+        symbol_key=scope SUBSEP $1
+        if (!(symbol_key in symbols)) { symbols[symbol_key]=1; symbol_count[scope]++ }
+        if ($6 == "tagged") tagged[scope]++
+        if ($7 != "missing") contracted[scope]++
+        if ($12 == "verified_and_signed") admitted[scope]++
+        else unsafe[scope]++
+        if ($6 == "missing" && $7 == "missing" && $8 == "missing") untouched[scope]++
+    }
+    END {
+        print "scope", "declaration_rows", "distinct_symbols", "unsafe_tagged_rows", \
+              "contract_documented_rows", "verified_and_signed_rows", \
+              "fail_closed_unsafe_rows", "untouched_rows"
+        for (scope in rows)
+            print scope, rows[scope], symbol_count[scope], tagged[scope] + 0, \
+                  contracted[scope] + 0, admitted[scope] + 0, \
+                  unsafe[scope] + 0, untouched[scope] + 0
+    }
+' "$declarations_out" | {
+    IFS= read -r header
+    printf '%s\n' "$header"
+    sort
+} >"$scopes_out"
+
 cat "$summary_out"
 printf '\nlanguage statistics\n'
 cat "$languages_out"
 printf '\ntop untouched families\n'
 head -n 21 "$families_out"
+printf '\ndeclaration scope statistics\n'
+cat "$scopes_out"
