@@ -1792,3 +1792,16 @@ count first. The config loader owns the dictionary and count together, resets bo
 at request boundaries, and increments the count only when it inserts an Allow or
 Deny override. This avoids relying on native dictionary length behavior and makes
 the default path constant-time before its required emit/collect operation.
+
+### Linear PerfFacts predecessor construction
+
+Shared CFG construction previously read each predecessor array from a dictionary,
+appended to the local value, then wrote it back for every edge. Under Simple's COW
+value semantics, a join with indegree `D` could copy lists of sizes `0..D-1`, for
+`O(D²)` CPU and transient copied elements; a graph can reach `O(E²)` in the worst
+case. PerfFacts now assigns each successor ID one owned nested-array bucket,
+appends edges there in MIR storage/terminator order, publishes each completed
+list to the dictionary once, and releases builder-only indexes before later
+analyses. Construction is expected `O(E + T)` time and
+`O(E + T)` storage for `T` distinct targets. Duplicate edges, dangling targets,
+duplicate source identities, and predecessor ordering remain unchanged.
