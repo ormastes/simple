@@ -241,3 +241,8 @@ the same diagnostic ordering and locations.
 The lint driver calls the EasyFix registry once. Individual registry rules are not
 re-invoked by the driver; this prevents duplicate source scans, diagnostics, replacement
 objects, and later fix-policy work.
+
+For spec files, the EasyFix registry derives line number, byte offset, trimmed text, and
+indent once per source line and shares those contexts across SPipe rules. Non-spec files
+do not allocate this context array. Compatibility calls outside the compiler may build a
+private view, but the normal lint path always supplies its existing canonical lines.
