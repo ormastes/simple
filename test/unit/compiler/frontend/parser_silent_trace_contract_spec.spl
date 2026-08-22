@@ -1,0 +1,92 @@
+use std.spec.*
+use std.io_runtime.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+extern fn rt_process_run_timeout(
+    cmd: text, args: [text], timeout_ms: i64
+) -> (text, text, i32)
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and file_exists(configured):
+        return configured
+    "/proc/self/exe"
+
+fn run_trace_probe(mode: text, trace_kind: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        simple_binary(),
+        ["run", "test/fixtures/compiler/parser_silent_trace_probe.spl",
+         "--", mode, trace_kind],
+        30000)
+
+fn run_lint_trace_probe(mode: text) -> (text, text, i32):
+    var args = ["run", "test/fixtures/compiler/query_lint_trace_probe.spl"]
+    if mode != "":
+        args.push("--")
+        args.push(mode)
+    rt_process_run_timeout(
+        simple_binary(), args, 30000)
+
+describe "silent parser trace channel":
+    it "suppresses AST reset stdout only inside silent parsing":
+        val silent = run_trace_probe("silent", "ast")
+        expect(silent.2).to_equal(0)
+        expect(silent.0).to_contain(
+            "RESULT mode=silent trace=ast failed=false")
+        expect(silent.0).not.to_contain("[parser_init_with_path]")
+        expect(silent.0).not.to_contain("[ast_reset]")
+
+        val ordinary = run_trace_probe("ordinary", "ast")
+        expect(ordinary.2).to_equal(0)
+        expect(ordinary.0).to_contain(
+            "RESULT mode=ordinary trace=ast failed=false")
+        expect(ordinary.0).to_contain("[parser_init_with_path]")
+        expect(ordinary.0).to_contain("[ast_reset]")
+
+    it "suppresses parser warning stdout only inside silent parsing":
+        val silent = run_trace_probe("silent", "compiler")
+        expect(silent.2).to_equal(0)
+        expect(silent.0).to_contain(
+            "RESULT mode=silent trace=compiler failed=false")
+        expect(silent.0).not.to_contain("[parser_warning]")
+
+        val ordinary = run_trace_probe("ordinary", "compiler")
+        expect(ordinary.2).to_equal(0)
+        expect(ordinary.0).to_contain(
+            "RESULT mode=ordinary trace=compiler failed=false")
+        expect(ordinary.0).to_contain("[parser_warning]")
+        expect(ordinary.0).to_contain("LOG001")
+
+    it "restores trace policy before a same-process ordinary parse":
+        val restored = run_trace_probe("restore", "ast")
+        expect(restored.2).to_equal(0)
+        expect(restored.0).to_contain(
+            "RESULT mode=restore trace=ast failed=false")
+        expect(restored.0).to_contain("[parser_init_with_path]")
+        expect(restored.0).to_contain("[ast_reset]")
+
+    it "keeps structured lint JSON stdout free of optional traces":
+        val result = run_lint_trace_probe("")
+        expect(result.2).to_equal(0)
+        val stdout = result.0.trim()
+        expect(stdout).to_start_with("{")
+        expect(stdout).to_end_with("}")
+        expect(stdout.contains("\n")).to_equal(false)
+        expect(stdout).to_contain("\"structuredContent\"")
+        expect(stdout).to_contain("\"source\":\"simple-lint\"")
+        expect(stdout).not.to_contain("[parser_init_with_path]")
+        expect(stdout).not.to_contain("[ast_reset]")
+        expect(stdout).not.to_contain("[parser_warning]")
+        expect(stdout).not.to_contain("[stmt_")
+        expect(stdout).not.to_contain("[expr_")
+        expect(stdout).not.to_contain("[debug:pass]")
+
+        val ordinary = run_lint_trace_probe("ordinary")
+        expect(ordinary.2).to_equal(0)
+        expect(ordinary.0).to_contain("[parser_init_with_path]")
+        expect(ordinary.0).to_contain("[ast_reset]")
+        expect(ordinary.0).to_contain("[parser_warning]")
+        expect(ordinary.0).to_contain("[stmt_")
+        expect(ordinary.0).to_contain("[expr_")
+        expect(ordinary.0).to_contain("[debug:pass]")
+        expect(ordinary.1).to_contain("[ast-expr]")
