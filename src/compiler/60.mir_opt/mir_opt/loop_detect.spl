@@ -105,31 +105,33 @@ impl LoopDetector:
 
         # Find natural-loop headers from dominance-proven backedges.
         var potential_headers: [BlockId] = []
-        var header_latches: Dict<i64, [BlockId]> = {}
+        var header_bucket_index: Dict<i64, i64> = {}
+        var header_latch_buckets: [[BlockId]] = []
+        var header_latch_seen: [Dict<i64, bool>] = []
 
         for block in func.blocks:
             val successors = perf_facts_successors(facts, block.id)
             for succ in successors:
                 if perf_facts_dominates(facts, succ, block.id):
-                    if not header_latches.has(succ.id):
-                        header_latches[succ.id] = []
-                        potential_headers = potential_headers.push(succ)
-                    var latches = header_latches[succ.id]
-                    var latch_recorded = false
-                    for latch in latches:
-                        if latch.id == block.id.id:
-                            latch_recorded = true
-                            break
-                    if not latch_recorded:
-                        latches.push(block.id)
-                    header_latches[succ.id] = latches
+                    if not header_bucket_index.has(succ.id):
+                        header_bucket_index[succ.id] = header_latch_buckets.len()
+                        potential_headers.push(succ)
+                        header_latch_buckets.push([])
+                        header_latch_seen.push({})
+                    val bucket = header_bucket_index[succ.id]
+                    if not header_latch_seen[bucket].has(block.id.id):
+                        header_latch_seen[bucket][block.id.id] = true
+                        header_latch_buckets[bucket].push(block.id)
 
         # Build one natural loop from all dominance-proven latches per header.
-        for header in potential_headers:
+        var header_position = 0
+        while header_position < potential_headers.len():
+            val header = potential_headers[header_position]
             val loop_info_opt = self.build_loop_info(
-                func, header, header_latches[header.id], facts)
+                func, header, header_latch_buckets[header_position], facts)
             if loop_info_opt.?:
-                self.loops = self.loops.push(loop_info_opt.unwrap())
+                self.loops.push(loop_info_opt.unwrap())
+            header_position = header_position + 1
 
     fn build_loop_info(func: MirFunction, header: BlockId, latches: [BlockId], facts: PerfFacts) -> LoopInfo?:
         """Build LoopInfo for the natural loop with the given header.
