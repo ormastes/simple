@@ -1622,3 +1622,6 @@ Per-file lint previously walked up to ten ancestors to discover `simple.sdn`, th
 ## 2026-08-22 implementation follow-up: bounded parsed-policy cache
 
 The first command-session stage cached only the most recently parsed `simple.sdn`; alternating files from multiple projects could still reparse the same manifests repeatedly. The `Linter` now indexes up to 256 unique manifest paths into flat `LintConfig` storage. Hits clone the stored configuration before applying CLI or file-local overrides. The flat index avoids struct-valued dictionary retrieval hazards; after saturation, new manifests are parsed without retention, preserving correctness with bounded memory.
+## 2026-08-22 implementation follow-up: shared manifest-free defaults
+
+Sources without a discovered `simple.sdn` still constructed `LintConfig.new()` per file, rebuilding the complete effective-default dictionary even though defaults are immutable. `Linter.new` now creates one manifest-free base policy for the command. Each file receives `child()`, which allocates only its mutable overrides while sharing the immutable defaults. Direct caller configuration remains separate, and profile changes replace the child's defaults rather than mutating the cached base.
