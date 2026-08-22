@@ -340,3 +340,12 @@ passing placeholder.
     Next migrate the same file's env/time/path/dir/process calls and six public
     primitive APIs without adding lookup, allocation, or provider dispatch.
     Signed runtime admission remains a separate gate.
+65. Retain the driver scalar authority slice: remove all three
+    `rt_string_len` calls, keep four env/five path/six clock calls lexical, and
+    reject invalid clock samples only in the opt-in trace path. Baseline is now
+    21,334 raw / 1,924 explicit / 19,410 missing calls.
+66. Add typed, allocation-conscious owners for the remaining driver directory
+    list and process-capture calls. Do not initialize an empty collection on the
+    successful directory path or add a forwarding lookup. Prefer fixing the
+    unsafe block-expression parser, then bind checked tuple/list contracts and
+    migrate the six public primitive APIs. Runtime signing remains separate.

@@ -20,17 +20,23 @@ use compiler.traits.trait_validation.{TraitError}
 extern fn rt_file_read_text(path: text) -> text
 @unsafe(reason: "raw source-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw environment lookup; empty text is the unset or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
-extern fn rt_string_len(value: text) -> i64
+@unsafe(reason: "raw process capture; nonzero code reports command or provider failure", capabilities: [ffi])
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+@unsafe(reason: "raw canonical-path lookup; empty text is the unresolved or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text
+@unsafe(reason: "raw directory listing; empty data conflates empty, inaccessible, and provider failure", capabilities: [ffi])
 extern fn rt_dir_list(path: text) -> [text]
 
 # Directories to skip during source collection
 val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
 
 fn _driver_source_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    var trace = ""
+    unsafe(capabilities: [ffi]):
+        trace = rt_env_get("SIMPLE_COMPILER_TRACE") ?? ""
+    trace == "1"
 
 # --- Entry-closure sub-step timing (default OFF) ------------------------------
 # `[build] source_closure` is attributed to no sub-step, so a 96 s preamble in
@@ -52,12 +58,15 @@ var _g_closure_n_imports: i64 = 0
 var _g_closure_n_resolve: i64 = 0
 var _g_closure_n_collect: i64 = 0
 
+@unsafe(reason: "raw monotonic clock; negative values are the provider-failure sentinel", capabilities: [ffi])
 extern fn rt_time_now_monotonic_ms() -> i64
 
 fn _driver_closure_timing_enabled() -> bool:
     if not _g_closure_timing_set:
-        _g_closure_timing_enabled = (
-            (rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING") ?? "") == "1")
+        var trace = ""
+        unsafe(capabilities: [ffi]):
+            trace = rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING") ?? ""
+        _g_closure_timing_enabled = trace == "1"
         _g_closure_timing_set = true
     _g_closure_timing_enabled
 
@@ -72,7 +81,7 @@ fn _driver_text_index_of(value: text, needle: text) -> i64:
         return 0
     if not value.contains(needle):
         return -1
-    rt_string_len(value.split(needle)[0])
+    value.split(needle)[0].len()
 
 pub fn _driver_should_skip_dir(name: text) -> bool:
     var i = 0
@@ -83,7 +92,9 @@ pub fn _driver_should_skip_dir(name: text) -> bool:
     false
 
 pub fn _driver_is_bootstrap_entry_source(path: text, module_name: text) -> bool:
-    val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    var native_entry = ""
+    unsafe(capabilities: [ffi]):
+        native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
     # Match the native-build entry by exact path or by tail segment, so a bare
     # or relative `--entry hello.spl` still matches the collected source path
     # `.../hello.spl` (and vice versa). Without this the entry module is stubbed
@@ -131,7 +142,9 @@ pub fn _driver_canonical_source_path(path: text) -> text:
 
 pub fn _driver_physical_source_key(path: text) -> text:
     """Return the platform-canonical source identity, with lexical fallback."""
-    val physical = rt_path_absolute(path)
+    var physical = ""
+    unsafe(capabilities: [ffi]):
+        physical = rt_path_absolute(path) ?? ""
     _driver_canonical_source_path(if physical != "": physical else: path)
 
 pub fn _driver_text_bucket_index(key: text, bucket_count: i64) -> i64:
@@ -200,8 +213,14 @@ pub fn _driver_module_name_collision(sources: [SourceFile]) -> text:
         if first_paths.contains_key(source.module_name):
             val first = first_paths[source.module_name]
             if first != path:
-                val first_physical = _driver_canonical_source_path(rt_path_absolute(first))
-                val path_physical = _driver_canonical_source_path(rt_path_absolute(path))
+                var first_absolute = ""
+                var path_absolute = ""
+                unsafe(capabilities: [ffi]):
+                    first_absolute = rt_path_absolute(first) ?? ""
+                unsafe(capabilities: [ffi]):
+                    path_absolute = rt_path_absolute(path) ?? ""
+                val first_physical = _driver_canonical_source_path(first_absolute)
+                val path_physical = _driver_canonical_source_path(path_absolute)
                 if first_physical != path_physical:
                     return "native module name collision after path sanitization: '{first}' and '{path}' both map to '{source.module_name}'; rename one file or directory"
         else:
@@ -223,7 +242,10 @@ fn _driver_entry_closure_mode() -> bool:
     regression that `driver.spl` documents at `entry_ctx.sources`. A third read
     in `driver.spl` (`nb_entry_closure`) suppresses the implicit whole-`src`
     bulk load in the same mode and must stay in agreement too."""
-    (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+    var enabled = ""
+    unsafe(capabilities: [ffi]):
+        enabled = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+    enabled == "1"
 
 fn _driver_module_name_segment_is_tier(seg: text) -> bool:
     """True for an all-digit dotted segment — the `10` in
@@ -301,10 +323,14 @@ fn _driver_physical_module_name(path: text, fallback: text) -> text:
     Falls back to the lexical name whenever the file cannot be proven to be a
     repo-relative `src/` or `examples/` source — out-of-tree entries keep their
     existing names."""
-    val resolved = rt_path_absolute(path) ?? ""
+    var resolved = ""
+    unsafe(capabilities: [ffi]):
+        resolved = rt_path_absolute(path) ?? ""
     if resolved == "":
         return fallback
-    val root = rt_path_absolute(".") ?? ""
+    var root = ""
+    unsafe(capabilities: [ffi]):
+        root = rt_path_absolute(".") ?? ""
     if root == "":
         return fallback
     if not resolved.starts_with(root + "/"):
@@ -418,7 +444,8 @@ pub fn _driver_entry_import_dirname(path: text) -> text:
 
 fn _driver_import_path_is_valid(path_text: text) -> bool:
     var i = 0
-    while i < rt_string_len(path_text):
+    val path_len = path_text.len()
+    while i < path_len:
         val byte = path_text.char_code_at(i)
         if not ((byte >= 97 and byte <= 122) or (byte >= 65 and byte <= 90) or (byte >= 48 and byte <= 57) or byte == 95 or byte == 46):
             return false
@@ -508,7 +535,7 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
         if lazy_import and not has_named_list:
             continue
 
-        var cut: i64 = rt_string_len(tail)
+        var cut: i64 = tail.len()
         for delimiter in [" ", "{", "(", "*", "#"]:
             val delimiter_at = _driver_text_index_of(tail, delimiter)
             if delimiter_at >= 0 and delimiter_at < cut:
@@ -545,9 +572,15 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
     and test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl."""
     if not _driver_closure_timing_enabled():
         return _driver_entry_import_module_paths_text_fallback(content)
-    val t0 = rt_time_now_monotonic_ms()
+    var t0: i64 = -1
+    unsafe(capabilities: [ffi]):
+        t0 = rt_time_now_monotonic_ms()
     val out = _driver_entry_import_module_paths_text_fallback(content)
-    _g_closure_ms_imports = _g_closure_ms_imports + (rt_time_now_monotonic_ms() - t0)
+    var t1: i64 = -1
+    unsafe(capabilities: [ffi]):
+        t1 = rt_time_now_monotonic_ms()
+    if t0 >= 0 and t1 >= t0:
+        _g_closure_ms_imports = _g_closure_ms_imports + (t1 - t0)
     _g_closure_n_imports = _g_closure_n_imports + 1
     out
 
@@ -1010,9 +1043,15 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     of the containing source module."""
     if not _driver_closure_timing_enabled():
         return _driver_resolve_entry_import_untimed(module_path, entry_dir)
-    val t0 = rt_time_now_monotonic_ms()
+    var t0: i64 = -1
+    unsafe(capabilities: [ffi]):
+        t0 = rt_time_now_monotonic_ms()
     val out = _driver_resolve_entry_import_untimed(module_path, entry_dir)
-    _g_closure_ms_resolve = _g_closure_ms_resolve + (rt_time_now_monotonic_ms() - t0)
+    var t1: i64 = -1
+    unsafe(capabilities: [ffi]):
+        t1 = rt_time_now_monotonic_ms()
+    if t0 >= 0 and t1 >= t0:
+        _g_closure_ms_resolve = _g_closure_ms_resolve + (t1 - t0)
     _g_closure_n_resolve = _g_closure_n_resolve + 1
     out
 
@@ -1032,9 +1071,15 @@ pub fn _driver_collect_entry_import_source(p: text) -> [SourceFile]:
     remain excluded from production closure builds."""
     if not _driver_closure_timing_enabled():
         return _driver_collect_entry_import_source_untimed(p)
-    val t0 = rt_time_now_monotonic_ms()
+    var t0: i64 = -1
+    unsafe(capabilities: [ffi]):
+        t0 = rt_time_now_monotonic_ms()
     val out = _driver_collect_entry_import_source_untimed(p)
-    _g_closure_ms_collect = _g_closure_ms_collect + (rt_time_now_monotonic_ms() - t0)
+    var t1: i64 = -1
+    unsafe(capabilities: [ffi]):
+        t1 = rt_time_now_monotonic_ms()
+    if t0 >= 0 and t1 >= t0:
+        _g_closure_ms_collect = _g_closure_ms_collect + (t1 - t0)
     _g_closure_n_collect = _g_closure_n_collect + 1
     if _g_closure_n_collect % 64 == 0:
         print driver_closure_timing_report()

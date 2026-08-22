@@ -1994,6 +1994,29 @@ is 9.77 seconds and 473,616 KiB peak RSS; it is not a self-hosted performance
 admission. Optimizer opportunities fall from 246 to 243 and the lint no longer
 reports `COLL006`; six unrelated public primitive-API errors remain.
 
+## Driver scalar runtime authority
+
+Three `rt_string_len` calls are removed from source loading: native text length
+replaces two one-shot calls and the import-path loop hoists length once before
+iteration. Four environment, five canonical-path, and six monotonic-clock calls
+now have minimal lexical FFI scopes. Provider-call counts for those operations
+are unchanged. The optional trace timers additionally ignore negative/falling
+clock samples instead of accumulating a fabricated duration; those validation
+branches execute only when closure timing is enabled.
+
+The source authority spec passes 3/3 and source-loading behavior passes 6/6.
+The measured source-spec invocation is 4.91 seconds at 174,184 KiB peak RSS
+under the bootstrap seed. Optimizer general allocation/collection findings stay
+at 14; the lexical statement form adds no lookup, collection, provider call, or
+explicit heap allocation. Census drops from 21,337 to 21,334 raw calls, raises
+lexical authority from 1,401 to 1,416, and lowers missing authority from 19,428
+to 19,410. This owner now has 38 authorized calls and two missing: one
+array-returning directory listing and one tuple-returning process capture.
+Those remain pending a typed owner because the expression-form unsafe parser
+gap would otherwise force a success-path collection initializer or wider
+function authority. Lint reports exactly those two raw-call warnings plus the
+six older public primitive-API errors. No artifact is signed or admitted.
+
 ## Driver source-loading file-call authority
 
 The largest remaining production `rt_file` caller,
