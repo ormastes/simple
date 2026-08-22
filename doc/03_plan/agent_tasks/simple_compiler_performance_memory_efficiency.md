@@ -688,6 +688,18 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add mirrored behavioral contracts for cycles, methods, and duplicates.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed query outline-index tranche
+
+- Build return-type and parameter-name facts together from the already-split
+  source lines.
+- Replace parallel-array linear call-site lookups with dictionaries while
+  preserving first-definition/first-nonempty-return behavior.
+- Make the former duplicate inlay module a narrow compatibility re-export.
+- Add direct duplicate-precedence and source-ownership contracts.
+- Deferred: cache parsed parameter vectors if profiling shows per-call splitting
+  is material.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed diagnostic runtime tranche: fixed-pattern automaton
 
 - Intern 116 fixed classifier literals into 1,160 sparse Aho-Corasick states.

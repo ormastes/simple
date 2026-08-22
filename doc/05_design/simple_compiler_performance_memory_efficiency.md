@@ -655,3 +655,16 @@ or end-of-string. After the leading `E` byte succeeds, create one five-byte
 candidate and validate bytes on that bounded value; this prevents repeated
 full-message `strlen` in raw-string representations. Bracketed code extraction
 remains earlier and retains its legacy permissiveness.
+
+### Query function-outline ownership
+
+`QueryFunctionOutlineFacts` is the single request-local index for inlay return
+and parameter hints. Its builder accepts the caller-owned line array and must
+not split source again. It records the first parameter declaration (including a
+present-empty value) and the first nonempty return annotation. Consumers must
+use `contains_key` so absence is distinct from an empty parameter list.
+
+The canonical query-token owner performs expected constant-time dictionary
+lookups. `query_inlay_hints.spl` remains only as a public compatibility
+re-export; it must not grow private parsing, I/O, or flag semantics. No global
+cache is introduced, so request lifetime and invalidation remain explicit.
