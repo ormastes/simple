@@ -22,6 +22,8 @@ and semantic-differential evidence. A pipeline-wide `--verify-each` claim requir
 applicable receipts, not merely the structural slice.
 The receipt exposes parallel stable `MIRVnnn` codes and human messages; cardinalities
 must match, and unclassified future failures use the explicit `MIRV999` sentinel.
+The module receipt visits sorted function symbol IDs, checks map-key identity, aggregates
+child proof surfaces and counts, and remains separate from module-pass execution evidence.
 
 ### Typed diagnostics
 
