@@ -1,315 +1,226 @@
-# Garbage-Collected Memory Management as the Default Strategy
+# gc_managed_default_spec
 
-> In Simple, all heap-allocated objects default to garbage-collected (GC) memory management unless an explicit capability annotation opts into a different strategy. This spec validates that type inference correctly assigns GC management to unqualified references, struct instantiations, and container types (lists and dicts). It also tests GC collection and cleanup behavior when objects become unreachable, interaction between GC and reference capabilities (mutable, immutable, shared references), and performance characteristics such as pause times and handling of large object graphs. All tests are currently skipped pending full GC runtime implementation.
-
-<!-- sdn-diagram:id=gc_managed_default_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=gc_managed_default_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-gc_managed_default_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=gc_managed_default_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Purpose: the default heap-management behavior (unqualified objects, containers, references) asserted in this spec. Audience: engineers reading this spec to confirm the runtime's default memory behavior still holds.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Garbage-Collected Memory Management as the Default Strategy
+# gc_managed_default_spec
 
-In Simple, all heap-allocated objects default to garbage-collected (GC) memory management unless an explicit capability annotation opts into a different strategy. This spec validates that type inference correctly assigns GC management to unqualified references, struct instantiations, and container types (lists and dicts). It also tests GC collection and cleanup behavior when objects become unreachable, interaction between GC and reference capabilities (mutable, immutable, shared references), and performance characteristics such as pause times and handling of large object graphs. All tests are currently skipped pending full GC runtime implementation.
+Purpose: the default heap-management behavior (unqualified objects, containers, references) asserted in this spec. Audience: engineers reading this spec to confirm the runtime's default memory behavior still holds.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | #RT-030 |
-| Category | Runtime |
-| Status | In Progress |
+| Category | Language Features |
+| Status | Active |
 | Source | `test/03_system/feature/usage/gc_managed_default_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-22 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+## Purpose and audience
 
-In Simple, all heap-allocated objects default to garbage-collected (GC) memory management
-unless an explicit capability annotation opts into a different strategy. This spec validates
-that type inference correctly assigns GC management to unqualified references, struct
-instantiations, and container types (lists and dicts). It also tests GC collection and
-cleanup behavior when objects become unreachable, interaction between GC and reference
-capabilities (mutable, immutable, shared references), and performance characteristics
-such as pause times and handling of large object graphs. All tests are currently skipped
-pending full GC runtime implementation.
+Purpose: the default heap-management behavior (unqualified objects, containers, references) asserted in this spec. Audience: engineers reading this spec to confirm the runtime's default memory behavior still holds.
 
-## Syntax
+## Operator workflow
 
-```simple
-# All of these default to GC-managed allocation:
-val point = Point(x: 1, y: 2)     # struct defaults to GC
-val items = [1, 2, 3]              # list defaults to GC-managed
-val lookup = {"key": "value"}      # dict defaults to GC-managed
+1. Run `bin/simple test test/03_system/feature/usage/gc_managed_default_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
 
-# Mutable GC references allow mutation with write barriers:
-var obj = Point(x: 0, y: 0)
-obj.x = 10                         # mutation tracked by GC
-```
+## Compatibility and limitations
 
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| GC-managed default | Objects without explicit capability annotations use garbage collection |
-| Type inference | The compiler infers GC management for unqualified references and containers |
-| Collection | Unreachable objects are reclaimed by the garbage collector automatically |
-| Finalization | Cleanup code runs when a GC-managed object is collected |
-| Write barriers | The GC tracks mutations to managed objects for correct generational collection |
-| Reference sharing | Multiple references to the same GC object are safe; the GC prevents use-after-free |
+Covers observable default-allocation behavior on the current runtime (value semantics with copy-on-write). Explicit collection/finalizer timing is out of scope.
 
 ## Scenarios
 
-### GC Managed Default Types
+### Garbage-Collected Memory Management as the Default Strategy
 
-#### when type is not explicitly constrained
+#### Default allocation
 
-#### infers GC type for unqualified reference
+#### allocates unqualified class instances without an explicit memory annotation
+
+- Construct GcBox with no capability annotation and read it back
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-skip
+# @req: REQ-SSPEC-LOCAL-001
+step("Construct GcBox with no capability annotation and read it back")
+val b = GcBox(payload: 41)
+assert_equal(b.payload, 41)
 ```
 
 </details>
 
-#### creates GC type for struct instantiation
+#### allocates lists of heap objects by default
+
+- Build a list of GcBox instances and reduce it
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-skip
+# @req: REQ-SSPEC-LOCAL-001
+step("Build a list of GcBox instances and reduce it")
+val boxes = [GcBox(payload: 1), GcBox(payload: 2), GcBox(payload: 3)]
+assert_equal(box_sum(boxes), 6)
 ```
 
 </details>
 
-#### when inferring container types
+#### allocates dicts holding class instances by default
 
-#### creates GC-managed list by default
+- Store GcBox instances in a dict and read one back
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-skip
+# @req: REQ-SSPEC-LOCAL-001
+step("Store GcBox instances in a dict and read one back")
+val d = {"a": GcBox(payload: 7), "b": GcBox(payload: 9)}
+match d.get("a"):
+    case Some(box): assert_equal(box.payload, 7)
+    case None: fail("key a missing")
 ```
 
 </details>
 
-#### creates GC-managed dict by default
+#### Reference behavior
+
+#### keeps an object usable through multiple references
+
+- Alias a box, read through both names
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-skip
+# @req: REQ-SSPEC-LOCAL-001
+step("Alias a box, read through both names")
+val first = GcBox(payload: 5)
+val second = first
+assert_equal(second.payload + first.payload, 10)
 ```
 
 </details>
 
-### GC Collection Behavior
+#### never exposes use-after-free within a scope
 
-#### when object becomes unreachable
+- Overwrite a list slot and confirm survivors stay intact
 
-#### collects unreachable GC objects
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-skip
+# @req: REQ-SSPEC-LOCAL-001
+step("Overwrite a list slot and confirm survivors stay intact")
+var items = [GcBox(payload: 10), GcBox(payload: 20)]
+items[0] = GcBox(payload: 30)
+assert_equal(box_sum(items), 50)
 ```
 
 </details>
 
-#### finalizes collected objects
+#### supports mutation of a mutable object
+
+- Mutate a var-held box field and observe the new value
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-skip
+# @req: REQ-SSPEC-LOCAL-001
+step("Mutate a var-held box field and observe the new value")
+var box = GcBox(payload: 1)
+box.payload = 12
+assert_equal(box.payload, 12)
 ```
 
 </details>
 
-#### when memory pressure exists
+#### Memory pressure
 
-#### triggers collection when needed
+#### survives allocating and discarding many short-lived objects
+
+- Allocate 5000 boxes across 20 batches, keep batch sums
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-skip
+# @req: REQ-SSPEC-LOCAL-001
+step("Allocate 5000 boxes across 20 batches, keep batch sums")
+var grand: i64 = 0
+var batch: usize = 0
+while batch < 20:
+    var boxes: [GcBox] = []
+    var i: usize = 0
+    while i < 250:
+        boxes.push(GcBox(payload: 2))
+        i = i + 1
+    grand = grand + box_sum(boxes)
+    batch = batch + 1
+assert_equal(grand, 10000)
 ```
 
 </details>
 
-#### frees memory from dead objects
+#### keeps live objects correct while churn allocates around them
+
+- Hold a live list while allocating throwaway batches
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-skip
-```
-
-</details>
-
-### GC with Reference Capabilities
-
-#### when using mutable GC references
-
-#### allows mutation of GC-managed objects
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-skip
-```
-
-</details>
-
-#### tracks mutations for write barriers
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-skip
-```
-
-</details>
-
-#### when sharing GC references
-
-#### allows multiple references to GC object
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-skip
-```
-
-</details>
-
-#### prevents use-after-free with GC
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-skip
-```
-
-</details>
-
-### GC Performance Characteristics
-
-#### maintains reasonable pause times
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-skip
-```
-
-</details>
-
-#### avoids collecting live objects
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-skip
-```
-
-</details>
-
-#### efficiently handles large object graphs
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-skip
+# @req: REQ-SSPEC-LOCAL-001
+step("Hold a live list while allocating throwaway batches")
+val live = [GcBox(payload: 100), GcBox(payload: 200)]
+var churn: usize = 0
+while churn < 100:
+    val throwaway = [GcBox(payload: 1)]
+    assert_equal(throwaway[0].payload, 1)
+    churn = churn + 1
+assert_equal(box_sum(live), 300)
 ```
 
 </details>
@@ -318,11 +229,51 @@ skip
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b133ef2ef9be86702d8bc89166eb5f5792eb226e0e22117e79edee1b00544d75`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b133ef2ef9be86702d8bc89166eb5f5792eb226e0e22117e79edee1b00544d75`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b133ef2ef9be86702d8bc89166eb5f5792eb226e0e22117e79edee1b00544d75`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/gc_managed_default_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/gc_managed_default_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/gc_managed_default_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/gc_managed_default_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/gc_managed_default_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allocates unqualified class instances without an explicit memory annotation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/gc_managed_default_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allocates lists of heap objects by default' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/gc_managed_default_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allocates dicts holding class instances by default' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->
