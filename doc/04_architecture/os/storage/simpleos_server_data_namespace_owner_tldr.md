@@ -1,0 +1,10 @@
+<!-- codex-architecture -->
+# Server data namespace owner — TLDR
+
+Attach a distinct persistent DBFS raw image as the second QEMU block medium on x86_64/AArch64/RV64 and mount it at `/srv/data`. One kernel `ServerDataNamespaceOwnerV1` owns its `BlockDevice`, `DbFsDriver`, mount identity, leases, commit/recovery state, and quarantine bit. Servers receive only task-generation + 128-bit-nonce leases scoped to granted subtrees.
+
+The owner mounts through `ServerDataMountTablePortV1`, performs streaming journaled `atomic_replace`, syncs before publication, revokes leases and closes exact-mount handles before unmount, and quarantines on ambiguous recovery or cleanup. ABI slots 116–119 become acquire, revoke, status/sync, and atomic-replace without renumbering later calls. Web and DB services receive distinct nondelegable grants; raw block, driver, mount, and device authority never cross into userspace.
+
+Hot paths are O(1) expected lease lookup and O(payload + changed pages) replace with one payload traversal, a reusable 64 KiB copy-in buffer, bounded 1 MiB recovery scratch, batched device dispatch, and no whole-payload duplicate. One object/transaction is capped at 16 MiB; the 64 MiB performance workload is four separately atomic objects. The owner caps leases at 4,096 and active pins at 1,024. Its only nested lock edge is DBFS commit owner → block queue; scheduler, namespace, and MountTable locks never nest. Drain waits on an R1-protected zero-pin predicate using an epoch-tagged sequence event: zero-pin completion release-publishes and signals, while the drainer acquire-checks and atomically `wait_while_sequence`, preventing lost wakeups. Verification uses the same persistent image across two QEMU boots on every architecture, deterministic crash injection at each journal boundary, in-guest byte readback, stale-lease rejection, timing, allocation, I/O/flush counts, and peak RSS.
+
+Next paths: `src/os/services/vfs/server_data_namespace_owner.spl`, `src/lib/common/contracts/os/server_data_namespace_v1.spl`, `src/os/kernel/ipc/syscall_server_data.spl`, and `test/03_system/os/qemu/simpleos_server_data_reboot_spec.spl`.
