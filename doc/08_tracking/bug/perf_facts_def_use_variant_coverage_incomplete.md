@@ -23,7 +23,10 @@ use information over specialized MIR.
 3. Cover normal instructions, terminators, inline-assembly operands, projections,
    ownership transfers, suspension, device operations, and verification metadata.
 4. Add declared-local validation and fixtures for every opcode family.
-5. Rewire vectorization and storage analyses to consume only complete shared facts.
+5. Rewire remaining storage and other consumers to consume only complete shared facts.
+
+The vectorizer loop dependency path now consumes shared facts and rejects
+`analysis_complete=false`; this portion of item 5 is complete.
 
 ## Unblock condition
 
