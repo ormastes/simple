@@ -404,8 +404,9 @@ implementation-blocked-by-bootstrap-authority
   all branches self-tested. The essential-tools producer now ends with the
   explicit PASS verdict required by the fail-closed ledger consumer.
 - push-performance-review: The canonical push chain remains behaviorally
-  bounded only for small outgoing ranges. Its tree guard rescans and sorts the
-  complete tree for every commit and materializes revision lists in shell
-  variables; the retained self-test is already documented at about four
-  minutes. Deduplicated streamed commit/tree inspection is tracked separately
-  and is not silently folded into this bootstrap identity repair.
+  bounded only for small outgoing ranges. The completed first slice adds a
+  push-only tip mode: it retains all final-tree structural checks, skips the
+  exhaustive fixture campaign, avoids revision-list materialization, and uses
+  a count-only parent reference. The same 12-commit range measured 25.79s
+  before and 1.29s after at 79,872 KiB peak RSS. Multi-ref deduplication and
+  evidence-file bounds remain tracked follow-up work.
