@@ -55,6 +55,9 @@ int main(void) {
     if (rt_hal_buffer_dispatch_direct_v3(1001, 1, 0, 0, 0, 0,
             input, 32, output, 32, 0, 2, 0, 1, 1) != 1) return 5;
     if (output[0] != 0xa5) return 6;
+    if (rt_hal_buffer_dispatch_direct_v3(1012, 1, 0, 0, 0, 0,
+            input, 32, output, 32, 1, 2, 0, 2, 2) != 1) return 21;
+    if (output[0] != 0xa5) return 22;
     if (rt_hal_buffer_dispatch_compare_v3(1001, 1, 0, 0, 0, 0,
             input, 32, output, 32, 1, 2, 0, 1, 1) != 1) return 7;
     if (output[0] != 0xa5) return 8;
@@ -70,11 +73,13 @@ int main(void) {
         rt_hal_buffer_dispatch_provider_v3() != 1) return 9;
     start = nanos();
     for (i = 0; i < 1000000; ++i)
-        if (rt_hal_buffer_dispatch_configured_v3(1001, 1, 0, 0, 0, 0,
+        if (rt_hal_buffer_dispatch_configured_v3(1012, 1, 0, 0, 0, 0,
                 input, 32, output, 32, 1, 2, 0, 1, 1) != 0)
             return 10;
     configured_elapsed = nanos() - start;
     if (fake_owner_calls != 0) return 11;
+    if (rt_hal_buffer_dispatch_configured_v3(1008, 1, 0, 0, 0, 0,
+            input, 32, output, 32, 1, 2, 0, 1, 1) != 1) return 23;
     if (rt_hal_buffer_dispatch_unbind_owner_v3() != 0) return 12;
     if (rt_hal_buffer_dispatch_bind_owner_v3(fake_owner, 0, 1) != 0) return 13;
     start = nanos();

@@ -7,6 +7,16 @@
 enum { HAL_BUFFER_STATUS_OK_V3 = 0, HAL_BUFFER_STATUS_INVALID_V3 = 1,
        HAL_BUFFER_STATUS_STATE_V3 = 2, HAL_BUFFER_STATUS_IO_V3 = 3 };
 
+enum {
+    HAL_BUFFER_OPERATION_ENVIRONMENT_GET_V3 = 102,
+    HAL_BUFFER_OPERATION_FILE_READ_V3 = 1001,
+    HAL_BUFFER_OPERATION_STREAM_READ_V3 = 1004,
+    HAL_BUFFER_OPERATION_STREAM_WRITE_V3 = 1005,
+    HAL_BUFFER_OPERATION_PROCESS_WAIT_V3 = 1007,
+    HAL_BUFFER_OPERATION_RANDOM_FILL_V3 = 1011,
+    HAL_BUFFER_OPERATION_SOCKET_CONNECT_TIMEOUT_V3 = 1012
+};
+
 /* Maintenance writes the immutable callback/config before publishing state=2.
  * Compare calls never allocate, spawn, lock, inspect the environment, or
  * retain either caller pointer. */
@@ -96,12 +106,18 @@ int32_t rt_hal_buffer_dispatch_direct_v3(
         uint8_t *output, int64_t output_capacity,
         int64_t trace_identity_hi, int64_t trace_identity_lo,
         int64_t trace_cursor, int64_t trace_length, int64_t trace_capacity) {
-    const int operation_known = operation_id == 102 || operation_id == 1001 ||
-        operation_id == 1004 || operation_id == 1005 ||
-        operation_id == 1007 || operation_id == 1008 || operation_id == 1011;
+    const int operation_known =
+        operation_id == HAL_BUFFER_OPERATION_ENVIRONMENT_GET_V3 ||
+        operation_id == HAL_BUFFER_OPERATION_FILE_READ_V3 ||
+        operation_id == HAL_BUFFER_OPERATION_STREAM_READ_V3 ||
+        operation_id == HAL_BUFFER_OPERATION_STREAM_WRITE_V3 ||
+        operation_id == HAL_BUFFER_OPERATION_PROCESS_WAIT_V3 ||
+        operation_id == HAL_BUFFER_OPERATION_RANDOM_FILL_V3 ||
+        operation_id == HAL_BUFFER_OPERATION_SOCKET_CONNECT_TIMEOUT_V3;
     if (!operation_known || fixture_id <= 0 ||
         trace_identity_hi == 0 || trace_identity_lo == 0 ||
         trace_cursor < 0 || trace_length <= trace_cursor ||
+        trace_length - trace_cursor != 1 ||
         trace_capacity < trace_length || trace_capacity > 4096 ||
         captured_length < 0 || captured_length > 32 ||
         output_capacity <= 0 || output_capacity > 32 ||
