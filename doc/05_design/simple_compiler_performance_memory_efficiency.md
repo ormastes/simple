@@ -286,3 +286,6 @@ Manifest discovery and manifest parsing use separate caches. Parsed policies are
 ### Manifest-free policy base
 
 The session owns one immutable moderate/default policy for files with no manifest. Per-file evaluation starts from `manifest_free_config.child()`: mutable override levels are copied/empty, while the effective-default dictionary is shared. Profile selection assigns a new defaults dictionary to the child and cannot alter the base. This removes rule-count-proportional default allocation per manifest-free file.
+## Storage-layout advisory cost boundary
+
+Advisory field deduplication uses indexed membership and an explicit count; it must not depend on `Dict.len()` or a growing array scan. Canonical identity rows use the standard deterministic text sort. The remaining pairwise overlap proof is semantically distinct: it rejects co-accessing different fields over intersecting logical ranges and stays quadratic until facts can be grouped by region and swept in stable interval order without losing fail-closed unknown-range behavior.
