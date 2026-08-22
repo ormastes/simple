@@ -682,3 +682,23 @@ This design removes cumulative quadratic prefix copying without changing the
 guard API or its fail-closed comparison. A future streaming comparator must be
 a separate proven design because it would alter ownership, early-exit, and
 diagnostic construction behavior.
+
+### CLOS001 textual scope index
+
+CLOS001 remains a compatibility heuristic rather than a typed capture proof.
+Its boundary index stores the latest declaration line at each indentation rank
+in a Fenwick prefix-maximum tree. A closure at indentation `d` queries ranks
+strictly below `d` before publishing its own header, exactly matching the old
+backward stop rule.
+
+Declaration counts are keyed by request-local group ID and identifier. Each
+group is identified by the resolved boundary and closure indentation and owns a
+monotonic scan cursor, so later sibling closures process only intervening lines.
+Diagnostics are still emitted immediately in closure order, body-line order,
+then duplicate-declaration multiplicity. The index must not reinterpret scope,
+deduplicate warnings, skip stale textual declarations, or use typed facts.
+
+The remaining nested-body overlap requires an offline design: index assignment
+points, answer declaration multiplicity range queries by target, then replay
+records in legacy closure/body order. Do not change that behavior merely to
+obtain a simpler lexical-scope model.
