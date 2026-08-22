@@ -1420,3 +1420,17 @@ that value rather than resolving again. The retained state is overwritten on the
 file, so invalidation is request-local and no process-global stale policy cache exists.
 Normal single-file CLI work reads/parses the target policy once instead of up to three
 times. Directory-to-policy discovery caching remains open.
+
+## 2026-08-22 implementation addendum: one-pass diagnostic policy
+
+Central lint filtering and parsed AST append called `should_keep_lint_result` and then
+`apply_config_level(_for_evidence)` for each retained diagnostic. Both independently
+mapped the lint code and fetched its configured level. With D diagnostics, this doubled
+policy dispatch and dictionary lookups after analysis had already completed.
+
+`LintPolicyDecision` now returns `(keep, level)` from one code mapping and one effective
+level lookup. The central source-lint result filter and all parsed append producers use
+it. Unknown codes retain their authored level, explicit `allow` suppresses, warn promotes
+allow-default rules, deny promotes proven findings, and unproved performance findings
+remain warning-capped. The decision allocates no arrays/dictionaries and reads no source.
+Compatibility wrappers remain for external callers pending staged migration.
