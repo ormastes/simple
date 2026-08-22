@@ -514,3 +514,21 @@ result matching standalone `query check`, sibling failures not changing other
 results, source reads bounded to one per file, and measured p50/p95 plus max RSS on
 the same 50- and 200-file fixtures. Target at least 50% wall reduction at 50 files,
 75% at 200 files, and peak RSS no more than 10% above the current baseline.
+
+## Variable-reassignment fact storage contract
+
+`analyze_var_reassign_blocks` owns four local scalar dictionaries: exact-local
+definition counts, alias parents, borrowed roots and escaped roots. Helpers that
+mutate these maps take explicit `mut Dict` parameters; reads first prove
+`contains_key`, then use a typed bracket value. No optional/truthy lookup may be
+used because local ID 0 is valid. Do not store arrays or class values inside these
+maps or return/rebind a dictionary per instruction.
+
+Raw block/instruction order remains authoritative. For each instruction: resolve
+the written destination's old alias root and apply borrow safety, increment the
+exact destination count, record Ref's old root, record all escape operands through
+old aliases, then update Copy/Move/Ref aliases or reset another writer to itself.
+Terminators observe post-block aliases. Alias resolution stops after the same 64
+transitions without compression. Borrow failure retains precedence over escape
+failure. Count summation and escaped membership are order-independent; public JIT
+facts continue to be emitted by `jit_var_optimization_fact_list` in fixed order.
