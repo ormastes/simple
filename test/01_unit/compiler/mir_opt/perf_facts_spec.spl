@@ -17,6 +17,7 @@ use compiler.mir_opt.mir_opt.perf_facts.{
     perf_facts_build, perf_facts_build_without_liveness,
     perf_facts_build_for_verification, perf_facts_build_requested,
     perf_fact_request_cfg_dominators, perf_fact_request_def_use,
+    perf_fact_request_cfg_def_use,
     perf_fact_request_with_dependencies, perf_fact_request_dependency_errors,
     perf_facts_successors, perf_facts_predecessors,
     perf_facts_dominates, perf_facts_definitions, perf_facts_uses,
@@ -384,6 +385,7 @@ describe "shared MIR PerfFacts":
             func, perf_fact_request_cfg_dominators())
         expect(facts.cfg_complete).to_equal(true)
         expect(facts.reverse_postorder.len()).to_equal(1)
+        expect(facts.dominators_complete).to_equal(true)
         expect(facts.def_use_complete).to_equal(false)
         expect(facts.locals.len()).to_equal(0)
         expect(facts.uncovered_instruction_count).to_equal(0)
@@ -406,6 +408,18 @@ describe "shared MIR PerfFacts":
         expect(facts.successors.len()).to_equal(0)
         expect(facts.reverse_postorder.len()).to_equal(0)
         expect(facts.immediate_dominator.len()).to_equal(0)
+        expect(facts.dominators_complete).to_equal(false)
+
+    it "rejects malformed block identity in CFG plus def-use consumers":
+        step("Fail vector and storage transforms closed on ambiguous block sites")
+        val facts = perf_facts_build_requested(
+            _pf_function_with_blocks([
+                _pf_block(0, MirTerminator.Ret(nil)),
+                _pf_block(0, MirTerminator.Ret(nil))
+            ]), perf_fact_request_cfg_def_use())
+        expect(facts.cfg_complete).to_equal(false)
+        expect(facts.duplicate_block_identity_count).to_equal(1)
+        expect(facts.dominators_complete).to_equal(false)
 
     it "uses exact capability presets in production analyses":
         step("Prevent unrelated fact families from returning to active paths")
@@ -413,12 +427,15 @@ describe "shared MIR PerfFacts":
             "src/compiler/60.mir_opt/mir_opt/loop_detect.spl")
         expect(loop_source).to_contain("perf_fact_request_cfg_dominators()")
         expect(loop_source).not.to_contain("perf_facts_build_without_liveness")
-        val def_use_files = [
+        val storage_source = read_file(
+            "src/compiler/60.mir_opt/mir_opt/storage_access_analysis.spl")
+        expect(storage_source).to_contain("perf_fact_request_def_use()")
+        val cfg_def_use_files = [
             "src/compiler/60.mir_opt/mir_opt/_AutoVectorize/recipe.spl",
-            "src/compiler/60.mir_opt/mir_opt/storage_access_analysis.spl",
             "src/compiler/60.mir_opt/mir_opt/typed_storage_view_producer.spl"
         ]
-        for file in def_use_files:
+        for file in cfg_def_use_files:
             val source = read_file(file)
-            expect(source).to_contain("perf_fact_request_def_use()")
+            expect(source).to_contain("perf_fact_request_cfg_def_use()")
+            expect(source).to_contain("cfg_complete")
             expect(source).not.to_contain("perf_facts_build_without_liveness")
