@@ -190,6 +190,15 @@ pub(super) fn eval_control_expr(
                         }
                     }
                     let mut arm_env = env.clone();
+                    // Dirty-only write-back (see copy_back_block_writes): the
+                    // old whole-env write-back iterated every VISIBLE entry,
+                    // module globals included, and copied each into this
+                    // frame's overlay. Every later call from the frame then
+                    // re-published all of them (sync_owned_captured_globals
+                    // walks the overlay), so each statement after a match
+                    // expression cost O(module globals). See bug
+                    // seed_match_expression_return_arm_statement_cost_cliff_2026-08-22.
+                    arm_env.clear_dirty();
                     for (name, value) in arm_bindings {
                         arm_env.insert(name, value);
                     }
@@ -271,12 +280,8 @@ pub(super) fn eval_control_expr(
                             }
                         }
                     }
-                    // Write back pre-existing variables from arm_env to env
-                    for (key, value) in &arm_env {
-                        if env.contains_key(key) {
-                            env.insert(key.clone(), value.clone());
-                        }
-                    }
+                    // Write back only what the arm actually wrote.
+                    crate::interpreter::block_exec::copy_back_block_writes(&arm_env, env);
                     return Ok(Some(result));
                 }
             }

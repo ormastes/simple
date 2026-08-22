@@ -1,0 +1,51 @@
+# Statements after a match EXPRESSION must not cost O(module globals).
+#
+# doc/08_tracking/bug/seed_match_expression_return_arm_statement_cost_cliff_2026-08-22.md:
+# in the seed interpreter, after `val kind = match ...:` (arms that `return`),
+# every later statement in the frame cost ~10 ms inside HIR lowering. Mechanism
+# (src/compiler_rust/compiler/src/interpreter/expr/control.rs, Expr::Match):
+# the arm env was written back by iterating every VISIBLE entry — module
+# globals included — into the frame overlay, so every later call from the
+# frame re-published all of them (sync_owned_captured_globals walks the
+# overlay). Fixed by a dirty-only write-back (copy_back_block_writes), the
+# same path the if-expression already used.
+#
+# Pinned as a ratio against the hoisted form on the same fixture so it holds on
+# a loaded box: pre-fix 300 globals measured 57x (2971 us vs 52 us per call);
+# post-fix within noise. Rust twin:
+# src/compiler_rust/compiler/tests/interpreter_match_expr_post_statement_cost.rs
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.src.time.{now_micros}
+use test.fixtures.interpreter_match_expr_post_statement_cost.shapes.{work_match, work_hoisted}
+
+val CALLS: i64 = 100
+
+fn time_calls(use_match: bool) -> i64:
+    val start = now_micros()
+    var s = 0
+    var i = 0
+    while i < CALLS:
+        if use_match:
+            s = s + work_match(5)
+        else:
+            s = s + work_hoisted(5)
+        i = i + 1
+    val elapsed = now_micros() - start
+    expect(s).to_equal(CALLS * 23)
+    return elapsed
+
+describe "match expression post-statement cost":
+    it "returning arms still return and the taken arm yields its value":
+        expect(work_match(1)).to_equal(-1)
+        expect(work_match(2)).to_equal(-2)
+        expect(work_match(5)).to_equal(23)
+
+    it "statements after a match expression cost no more than 3x the hoisted form":
+        # warm-up
+        time_calls(true)
+        time_calls(false)
+        val hoisted = time_calls(false)
+        val matched = time_calls(true)
+        val floor = if hoisted < 1000: 1000 else: hoisted
+        expect(matched <= floor * 3).to_be_true()
