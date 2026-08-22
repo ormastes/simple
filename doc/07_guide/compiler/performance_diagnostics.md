@@ -24,6 +24,8 @@ Each diagnostic resolves suppression and effective severity together; evidence-t
 therefore require one stable-code mapping and one configuration lookup.
 Combined source and parsed-AST lint phases share one request-local line view and release it
 after projection, avoiding duplicate source splitting without retaining editor contents.
+The same view feeds file attributes and migrated line-oriented rules; compatibility source
+wrappers remain for standalone callers.
 
 ## Optimizer truth
 
