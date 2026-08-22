@@ -585,3 +585,19 @@ copyback. An append-only queue with an integer cursor propagates reachability.
 Seedless cycles remain nonasserting, seeded cycles propagate, undefined callees
 are ignored, and source order does not affect membership. Expected cost is
 `O(source bytes + F + E)` time and `O(F + E)` graph memory.
+
+## Query diagnostic error-code ownership
+
+`app.cli.query_error_codes` is the sole owner of ordered message-to-code
+inference. Entry modules pass their exact codegen phrase, keeping legacy
+`FFI error` and active `SFFI error` behavior distinct. The owner must preserve
+case-sensitive substring semantics, first `[E... ]` precedence, leading `Edddd`
+handling, source-order priority, negative `function` guard, and exact error-kind
+fallbacks. Entry modules may expose compatibility wrappers but must not embed
+private copies of the rule cascade.
+
+The consolidation reduces compiler and generated-code footprint but does not
+claim linear runtime classification. The planned runtime representation is a
+build-generated immutable multi-pattern automaton plus ordered predicate records;
+it must allocate no rule registry per diagnostic and must evaluate overlapping
+rules in the current explicit priority order.
