@@ -240,3 +240,12 @@ represent one rewrite family. `short_grammar_method_ref`, `short_grammar_functio
 `short_grammar_placeholder`, and `short_grammar_ignored_param` map to
 `short_grammar_refactor`; contextual, deprecated, struct, raw-unit, and SIMD codes map
 directly. All default to warning until an explicit profile decision changes them.
+
+### Unknown-annotation fallback honesty
+
+Raw-source EasyFix dispatch emits one generic `unknown_annotation` diagnostic because
+`@name` alone does not prove decorator or attribute classification. Membership is the
+union of both known sets. The generic policy is canonical; legacy `unknown_decorator` and
+`unknown_attribute` settings alias it bidirectionally for compatibility. Only typed HIR
+may emit category-specific findings. The fallback performs one context traversal and
+allocates at most one fix per unknown line.
