@@ -298,3 +298,6 @@ Every callable strength-reduction surface—not only canonical dispatch—remain
 ## GVN rehabilitation contract
 
 Every GVN callable surface remains identity while status is `Skeleton`. Rehabilitation requires dominator-tree traversal, dominance-scoped leader tables, structural interned expression keys, opcode type/trap semantics, and MemorySSA-lite versions for loads/calls/stores. Leaders are invalidated or scoped at control merges; block storage order is never evidence. Positive witnesses must include dominating reuse, while sibling branches, intervening writes/unknown calls, traps, and alias ambiguity are mandatory negative cases.
+## Bounds-check elimination rehabilitation contract
+
+Every BCE entrypoint remains identity while status is `Disabled`. A future transform must attach each range fact to exact SSA/value versions and a dominance region, prove lower and upper bounds, loop initialization/step/polarity/nowrap/finiteness, zero-trip behavior, array-length stability, alias/mutation invalidation, and exceptional control flow. Proofs are structural facts, not global text keys; failure or timeout preserves the check. Direct block APIs can expose analysis remarks but cannot bypass canonical transform admission.
