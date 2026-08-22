@@ -1,3 +1,22 @@
+"""
+## Purpose and audience
+Purpose: Prove that DB server tier — connection lifecycle.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-DATABASE-DB-SERVER-001
+doc/01_research/database/REQ-DATABASE-DB-SERVER-001.md
+doc/03_plan/database/REQ-DATABASE-DB-SERVER-001.md
+doc/04_architecture/database/REQ-DATABASE-DB-SERVER-001.md
+doc/05_design/database/REQ-DATABASE-DB-SERVER-001.md
+"""
+# @req: REQ-DATABASE-DB-SERVER-001
+
+
 # @cover src/lib/nogc_sync_mut/database/server/server.spl 80%
 # @cover src/lib/nogc_sync_mut/database/server/txn.spl 80%
 # @cover src/lib/nogc_sync_mut/database/server/capability.spl 80%
@@ -83,17 +102,25 @@ fn make_server() -> DbServerCapsule:
 # @manual_section Connection lifecycle and request framing
 # ============================================================================
 
+use std.spec.step
+
 describe "DB server tier — connection lifecycle":
 
     it "rejects a known principal without its credential":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: rejects a known principal without its credential")
         var server = make_server()
         assert_contains(server.handle_message("OPEN as=alice"), "code=auth")
 
     it "rejects a known principal with the wrong credential":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: rejects a known principal with the wrong credential")
         var server = make_server()
         assert_contains(server.handle_message("OPEN as=alice credential=bob-secret"), "code=auth")
 
     it "stores only a fixed digest and returns an authenticated principal proof":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: stores only a fixed digest and returns an authenticated principal proof")
         val policy = make_policy()
         assert_equal(policy.credential_digests["alice"].chars().len(), 64)
         assert_false(policy.credential_digests["alice"] == "alice-secret")
@@ -102,6 +129,8 @@ describe "DB server tier — connection lifecycle":
         assert_equal((proof ?? AuthenticatedPrincipal(principal: "", capability: empty_capability(""))).principal, "alice")
 
     it "gives each client its own session id":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: gives each client its own session id")
         var server = make_server()
         val first = server.handle_message("OPEN as=alice credential=alice-secret")
         val second = server.handle_message("OPEN as=bob credential=bob-secret")
@@ -109,6 +138,8 @@ describe "DB server tier — connection lifecycle":
         assert_equal(second, "OK session=2")
 
     it "polls accept timeouts until explicit shutdown becomes observable":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: polls accept timeouts until explicit shutdown becomes observable")
         var owner = DbStopControl.new()
         val accept_owner = owner
         assert_false(accept_owner.is_stopped())
@@ -116,6 +147,8 @@ describe "DB server tier — connection lifecycle":
         assert_true(accept_owner.is_stopped())
 
     it "terminates the connection and cleans sessions after a write failure":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: terminates the connection and cleans sessions after a write failure")
         var server = make_server()
         val outcome = server.serve(MemoryTransport.with_failed_writes([
             "OPEN as=alice credential=alice-secret", "PING session=1"
@@ -124,17 +157,23 @@ describe "DB server tier — connection lifecycle":
         assert_equal(server.registry.open_session_count(), 0)
 
     it "refuses to work for a session that was never opened":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: refuses to work for a session that was never opened")
         var server = make_server()
         val reply = server.handle_message("BEGIN session=99")
         assert_contains(reply, "code=no_session")
 
     it "refuses to work for a session that has been closed":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: refuses to work for a session that has been closed")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         assert_equal(server.handle_message("CLOSE session=1"), "OK")
         assert_contains(server.handle_message("BEGIN session=1"), "code=no_session")
 
     it "discards an abandoned transaction when the connection closes":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: discards an abandoned transaction when the connection closes")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
@@ -145,6 +184,8 @@ describe "DB server tier — connection lifecycle":
         assert_nil(store_read(store, "users", "ghost"))
 
     it "answers every message on a connection driven by the transport port":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: answers every message on a connection driven by the transport port")
         var server = make_server()
         var channel = MemoryTransport.with_messages([
             "OPEN as=alice credential=alice-secret",
@@ -159,12 +200,16 @@ describe "DB server tier — connection lifecycle":
 describe "DB server tier — request framing is fail-closed":
 
     it "rejects an unknown operation instead of executing anything":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: rejects an unknown operation instead of executing anything")
         var server = make_server()
         val reply = server.handle_message("DROPTABLE session=1 tbl=users")
         assert_contains(reply, "code=malformed")
         assert_contains(reply, "unknown op")
 
     it "rejects an unterminated quote instead of crashing":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: rejects an unterminated quote instead of crashing")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
@@ -174,22 +219,32 @@ describe "DB server tier — request framing is fail-closed":
         assert_equal(server.handle_message("PING session=1"), "OK")
 
     it "rejects an argument with no equals sign":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: rejects an argument with no equals sign")
         val parsed = parse_request("PUT session=1 garbage")
         assert_true(parsed.is_err())
 
     it "rejects a duplicated argument rather than silently picking one":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: rejects a duplicated argument rather than silently picking one")
         val parsed = parse_request("PUT session=1 tbl=users tbl=audit id=u1")
         assert_true(parsed.is_err())
 
     it "rejects an empty request":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: rejects an empty request")
         assert_true(parse_request("   ").is_err())
 
     it "rejects a non-numeric session id":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: rejects a non-numeric session id")
         var server = make_server()
         val reply = server.handle_message("BEGIN session=notanumber")
         assert_contains(reply, "code=malformed")
 
     it "keeps quoted values containing spaces intact":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: keeps quoted values containing spaces intact")
         val parsed = parse_request('PUT session=1 tbl=users id=u1 name="ada lovelace"')
         match parsed:
             Ok(request):
@@ -198,6 +253,8 @@ describe "DB server tier — request framing is fail-closed":
                 assert_true(false)
 
     it "encodes response fields in a stable order":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: encodes response fields in a stable order")
         # Dict iteration order is not stable across processes; the wire form
         # must be.  Encoding the same response twice must match.
         val response = err_response("conflict", "boom")
@@ -211,6 +268,8 @@ describe "DB server tier — request framing is fail-closed":
 describe "DB server tier — transaction isolation between two sessions":
 
     it "hides one session's uncommitted write from the other session":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: hides one session's uncommitted write from the other session")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")   # session 1, read+write
         server.handle_message("OPEN as=bob credential=bob-secret")     # session 2, read-only
@@ -233,6 +292,8 @@ describe "DB server tier — transaction isolation between two sessions":
         assert_nil(store_read(store, "users", "u1"))
 
     it "shows the write to the other session once it is committed":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: shows the write to the other session once it is committed")
         # UNCONDITIONAL CONTROL for the test above.  This uses the exact same
         # peer read path.  If that path were simply incapable of observing a
         # row, this assertion would fail too — so the "not_found" above cannot
@@ -249,6 +310,8 @@ describe "DB server tier — transaction isolation between two sessions":
         )
 
     it "would go red if an uncommitted write reached the store":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: would go red if an uncommitted write reached the store")
         # DELIBERATE-RED CALIBRATION.  We inject the isolation violation by
         # hand — writing straight into the store while session 1's transaction
         # is still open — and assert that the isolation oracle now REPORTS the
@@ -284,6 +347,8 @@ describe "DB server tier — transaction isolation between two sessions":
         )
 
     it "discards a rolled-back transaction entirely":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: discards a rolled-back transaction entirely")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("OPEN as=bob credential=bob-secret")
@@ -297,6 +362,8 @@ describe "DB server tier — transaction isolation between two sessions":
         )
 
     it "keeps two concurrent transactions from seeing each other's writes":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: keeps two concurrent transactions from seeing each other's writes")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")   # session 1
         server.handle_message("OPEN as=alice credential=alice-secret")   # session 2, same principal
@@ -322,6 +389,8 @@ describe "DB server tier — transaction isolation between two sessions":
         )
 
     it "aborts a commit whose row was changed underneath it":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: aborts a commit whose row was changed underneath it")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("OPEN as=alice credential=alice-secret")
@@ -346,6 +415,8 @@ describe "DB server tier — transaction isolation between two sessions":
         )
 
     it "requires an open transaction before any write":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: requires an open transaction before any write")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         assert_contains(
@@ -356,12 +427,16 @@ describe "DB server tier — transaction isolation between two sessions":
         assert_contains(server.handle_message("ROLLBACK session=1"), "code=no_txn")
 
     it "refuses to nest transactions on one session":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: refuses to nest transactions on one session")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         assert_equal(server.handle_message("BEGIN session=1"), "OK")
         assert_contains(server.handle_message("BEGIN session=1"), "code=txn_open")
 
     it "makes a committed delete invisible":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: makes a committed delete invisible")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
@@ -379,6 +454,8 @@ describe "DB server tier — transaction isolation between two sessions":
 describe "DB server tier — capability-checked access is deny-wins":
 
     it "refuses a write from a read-only principal":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: refuses a write from a read-only principal")
         var server = make_server()
         server.handle_message("OPEN as=bob credential=bob-secret")
         server.handle_message("BEGIN session=1")
@@ -389,6 +466,8 @@ describe "DB server tier — capability-checked access is deny-wins":
         assert_nil(store_read(server.store, "users", "u1"))
 
     it "refuses every data reach from a principal with no grants":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: refuses every data reach from a principal with no grants")
         var server = make_server()
         server.handle_message("OPEN as=mallory credential=mallory-secret")
         server.handle_message("BEGIN session=1")
@@ -402,6 +481,8 @@ describe "DB server tier — capability-checked access is deny-wins":
         )
 
     it "refuses a table the principal was never granted":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: refuses a table the principal was never granted")
         var server = make_server()
         server.handle_message("OPEN as=bob credential=bob-secret")   # read on users only
         server.handle_message("BEGIN session=1")
@@ -411,6 +492,8 @@ describe "DB server tier — capability-checked access is deny-wins":
         )
 
     it "refuses an unregistered principal before data reach":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: refuses an unregistered principal before data reach")
         var server = make_server()
         assert_equal(
             server.handle_message("OPEN as=stranger credential=guess"),
@@ -419,6 +502,8 @@ describe "DB server tier — capability-checked access is deny-wins":
         assert_contains(server.handle_message("BEGIN session=1"), "code=no_session")
 
     it "refuses a data operation that names no table":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: refuses a data operation that names no table")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
@@ -427,17 +512,23 @@ describe "DB server tier — capability-checked access is deny-wins":
         assert_false(capability_allows(empty_capability("x"), "", "read"))
 
     it "does not let write access imply read access":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: does not let write access imply read access")
         val write_only = capability_with("w", [grant_key("users", "write")])
         assert_true(capability_allows(write_only, "users", "write"))
         assert_false(capability_allows(write_only, "users", "read"))
 
     it "maps each operation to the access it needs":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: maps each operation to the access it needs")
         assert_equal(op_access("GET"), "read")
         assert_equal(op_access("PUT"), "write")
         assert_equal(op_access("DEL"), "write")
         assert_equal(op_access("BEGIN"), "")
 
     it "does not let a session widen its own capability":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: does not let a session widen its own capability")
         # capability_grant returns a NEW value; the registered one is unchanged.
         var policy = make_policy()
         val bob = policy.lookup_or_empty("bob")
@@ -451,6 +542,8 @@ describe "DB server tier — capability-checked access is deny-wins":
 describe "DB server tier — bounded batch and range requests":
 
     it "accounts for multibyte UTF-8 values in encoded responses":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: accounts for multibyte UTF-8 values in encoded responses")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
@@ -458,12 +551,16 @@ describe "DB server tier — bounded batch and range requests":
         assert_equal(server.handle_message("BATCH_GET session=1 tbl=users ids=u1,u2 col=name"), "OK values=猫,猫")
 
     it "rejects an invalid commit identity before durability work":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: rejects an invalid commit identity before durability work")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         assert_contains(server.handle_message("COMMIT session=1 commit_id=bad/id"), "code=malformed")
 
     it "applies one capability and transaction boundary to a bounded batch":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: applies one capability and transaction boundary to a bounded batch")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
@@ -472,6 +569,8 @@ describe "DB server tier — bounded batch and range requests":
         assert_equal(server.handle_message("COMMIT session=1 commit_id=batch-1"), "OK applied=2")
 
     it "rejects an oversized batch before touching the transaction":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: rejects an oversized batch before touching the transaction")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
@@ -481,6 +580,8 @@ describe "DB server tier — bounded batch and range requests":
         assert_contains(server.handle_message("BATCH_PUT session=1 tbl=users ids={ids.join(',')} name=x"), "code=limit")
 
     it "returns a bounded ordered key range":
+        # @req: REQ-DATABASE-DB-SERVER-001
+        step("Verify: returns a bounded ordered key range")
         var server = make_server()
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
