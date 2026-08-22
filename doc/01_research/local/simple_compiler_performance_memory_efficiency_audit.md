@@ -1926,17 +1926,21 @@ same byte comparisons and locally owned append behavior.
 
 The active workspace command loops over discovered files and launches one
 `simple check` child for each text result. JSON launches `simple run ... query
-check` per file, and that child launches `simple check` again: `N` files therefore
-cost `N` child processes in text mode and `2N` in JSON mode, plus repeated compiler
-startup, configuration, frontend state and output parsing. The LSP/MCP tool already
-documents nested-check deadlock risk and disables this path by default.
+check` per file, and that child launches `simple check` again: `N` files cost
+`2N` explicit per-file processes plus a redundant query-program/module startup
+and wrapper serialization/parsing. The LSP/MCP tool already documents nested-check
+deadlock risk and disables this path by default.
 
-The safe replacement is not naive parallelism: parser, lexer, AST pools and lint
-collection still contain module-global mutable state. Introduce a serial in-process
-`WorkspaceDiagnosticSession` first. Freeze command configuration once, create a
-fresh compilation/diagnostic context per file, pass source directly to lint, tag
-results with discovery ordinals and preserve standalone per-file isolation. Move
-parser-owned globals into request/session state before bounded workers are enabled.
+A reviewed shortcut that moved lint parsing into the workspace parent was rejected.
+It could emit parser trace stdout into the public JSON envelope when
+`SIMPLE_TRACE_AST_RESET=1`, and restoring the four shared diagnostic globals did
+not restore private `_LINT_TIER_ACTIVE`. The safe replacement is therefore not
+naive process removal or parallelism. Introduce a serial in-process
+`WorkspaceDiagnosticSession` with structured, nonprinting results and an owner
+that can snapshot/restore the complete lint policy state. Freeze configuration
+once, create a fresh compile context per file, preserve discovery ordinals and
+standalone isolation, and move parser-owned globals into request/session state
+before bounded workers are enabled.
 
 ### Variable-reassignment analysis map audit
 
