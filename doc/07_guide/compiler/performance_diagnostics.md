@@ -77,6 +77,11 @@ extrema/adjacent relations rather than definitions-by-uses Cartesian enumeration
 These compile-time improvements do not change its `AnalysisOnly` status: alias, memory,
 effect, induction, target, and semantic differential proofs remain incomplete.
 
+Typed-storage production and storage-layout access summaries also consume the shared use
+index. A function is indexed once, rather than rescanned for every projection candidate;
+unknown opcode/local coverage rejects storage rewriting and prevents a partial use count
+from being interpreted as single-use ownership evidence.
+
 ## Current safety containment
 
 - Unknown escape state remains escaping after finalization.
