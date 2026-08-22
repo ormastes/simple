@@ -1,0 +1,644 @@
+# codex-impl
+# Fail-closed, bounded IRQ/MMIO/DMA model. This module never accesses host devices.
+
+use std.common.structural.environment_instruction.contracts.*
+use std.common.structural.environment_instruction.executor.*
+
+val DEVICE_ADAPTER_SCHEMA_VERSION: i64 = 1
+val DEVICE_MAX_TRANSFER_BYTES_V1: i64 = 65536
+val DEVICE_FLAG_READ_ONCE_V1: i64 = 1
+val DEVICE_FLAG_SIDE_EFFECT_V1: i64 = 2
+val DEVICE_FLAG_DMA_TO_DEVICE_V1: i64 = 4
+val DEVICE_FLAG_DMA_FROM_DEVICE_V1: i64 = 8
+
+struct DeviceCapabilityProofV1:
+    contract_version: i64
+    capability_id: i64
+    generation: i64
+    allowed_opcode_mask: i64
+    grant_digest_hi: i64
+    grant_digest_lo: i64
+    authority_digest_hi: i64
+    authority_digest_lo: i64
+    device_identity_hi: i64
+    device_identity_lo: i64
+    issued_epoch: i64
+    expiry_epoch: i64
+    sealed: bool
+
+struct DeviceAuthorityPinV1:
+    contract_version: i64
+    capability_id: i64
+    minimum_generation: i64
+    authority_digest_hi: i64
+    authority_digest_lo: i64
+    device_identity_hi: i64
+    device_identity_lo: i64
+    sealed: bool
+
+struct DeviceRangeGrantV1:
+    contract_version: i64
+    range_base: i64
+    range_length: i64
+    width_mask: i64
+    allow_read: bool
+    allow_write: bool
+    read_has_side_effect: bool
+    write_has_side_effect: bool
+    irq_first: i64
+    irq_count: i64
+    max_dma_bytes: i64
+    required_dma_alignment: i64
+    grant_digest_hi: i64
+    grant_digest_lo: i64
+    sealed: bool
+
+struct DeviceInstructionV1:
+    environment: EnvInstructionV1
+    address: i64
+    transfer_length: i64
+    access_width: i64
+    irq: i64
+    read_once_token: i64
+    capability_generation: i64
+    grant_digest_hi: i64
+    grant_digest_lo: i64
+
+fn device_capability_proof_v1(
+        capability_id: i64, generation: i64, allowed_opcode_mask: i64,
+        grant_digest_hi: i64, grant_digest_lo: i64,
+        authority_digest_hi: i64, authority_digest_lo: i64,
+        device_identity_hi: i64, device_identity_lo: i64,
+        issued_epoch: i64, expiry_epoch: i64) -> DeviceCapabilityProofV1:
+    DeviceCapabilityProofV1(DEVICE_ADAPTER_SCHEMA_VERSION, capability_id,
+        generation, allowed_opcode_mask, grant_digest_hi, grant_digest_lo,
+        authority_digest_hi, authority_digest_lo,
+        device_identity_hi, device_identity_lo,
+        issued_epoch, expiry_epoch, true)
+
+fn device_authority_pin_v1(
+        capability_id: i64, minimum_generation: i64,
+        authority_digest_hi: i64, authority_digest_lo: i64,
+        device_identity_hi: i64,
+        device_identity_lo: i64) -> DeviceAuthorityPinV1:
+    DeviceAuthorityPinV1(DEVICE_ADAPTER_SCHEMA_VERSION, capability_id,
+        minimum_generation, authority_digest_hi, authority_digest_lo,
+        device_identity_hi, device_identity_lo, true)
+
+fn device_range_grant_v1(
+        range_base: i64, range_length: i64, width_mask: i64,
+        allow_read: bool, allow_write: bool, read_has_side_effect: bool,
+        write_has_side_effect: bool, irq_first: i64, irq_count: i64,
+        max_dma_bytes: i64, required_dma_alignment: i64,
+        grant_digest_hi: i64, grant_digest_lo: i64) -> DeviceRangeGrantV1:
+    DeviceRangeGrantV1(DEVICE_ADAPTER_SCHEMA_VERSION, range_base, range_length,
+        width_mask, allow_read, allow_write, read_has_side_effect,
+        write_has_side_effect, irq_first, irq_count, max_dma_bytes,
+        required_dma_alignment, grant_digest_hi, grant_digest_lo, true)
+
+fn device_instruction_v1(environment: EnvInstructionV1, address: i64,
+                         transfer_length: i64, access_width: i64, irq: i64,
+                         read_once_token: i64, capability_generation: i64,
+                         grant_digest_hi: i64,
+                         grant_digest_lo: i64) -> DeviceInstructionV1:
+    DeviceInstructionV1(environment, address, transfer_length, access_width,
+        irq, read_once_token, capability_generation, grant_digest_hi,
+        grant_digest_lo)
+
+fn _device_digest_present(hi: i64, lo: i64) -> bool:
+    hi != 0 or lo != 0
+
+fn device_capability_proof_v1_well_formed(
+        value: DeviceCapabilityProofV1, current_epoch: i64) -> bool:
+    value.contract_version == DEVICE_ADAPTER_SCHEMA_VERSION
+        and value.capability_id > 0 and value.capability_id < 63
+        and value.generation > 0 and value.allowed_opcode_mask > 0
+        and _device_digest_present(value.grant_digest_hi, value.grant_digest_lo)
+        and _device_digest_present(value.authority_digest_hi,
+                                   value.authority_digest_lo)
+        and _device_digest_present(value.device_identity_hi,
+                                   value.device_identity_lo)
+        and value.issued_epoch >= 0 and value.issued_epoch <= current_epoch
+        and value.expiry_epoch > current_epoch and value.sealed
+
+fn device_authority_pin_v1_well_formed(value: DeviceAuthorityPinV1) -> bool:
+    value.contract_version == DEVICE_ADAPTER_SCHEMA_VERSION
+        and value.capability_id > 0 and value.capability_id < 63
+        and value.minimum_generation > 0
+        and _device_digest_present(value.authority_digest_hi,
+                                   value.authority_digest_lo)
+        and _device_digest_present(value.device_identity_hi,
+                                   value.device_identity_lo)
+        and value.sealed
+
+fn _device_alignment_valid(value: i64) -> bool:
+    value == 1 or value == 2 or value == 4 or value == 8
+        or value == 16 or value == 32 or value == 64 or value == 128
+        or value == 256 or value == 512 or value == 1024 or value == 2048
+        or value == 4096
+
+fn device_range_grant_v1_well_formed(value: DeviceRangeGrantV1) -> bool:
+    value.contract_version == DEVICE_ADAPTER_SCHEMA_VERSION
+        and value.range_base >= 0 and value.range_length > 0
+        and value.range_base <= 9223372036854775807 - value.range_length
+        and value.width_mask > 0 and (value.allow_read or value.allow_write)
+        and value.irq_first >= 0 and value.irq_count >= 0
+        and value.irq_count <= 63
+        and value.irq_first <= 9223372036854775807 - value.irq_count
+        and value.max_dma_bytes >= 0
+        and value.max_dma_bytes <= DEVICE_MAX_TRANSFER_BYTES_V1
+        and _device_alignment_valid(value.required_dma_alignment)
+        and _device_digest_present(value.grant_digest_hi, value.grant_digest_lo)
+        and value.sealed
+
+fn _device_width_mask(width: i64) -> i64:
+    if width == 1: return 1
+    if width == 2: return 2
+    if width == 4: return 4
+    if width == 8: return 8
+    0
+
+fn _device_range_contains(grant: DeviceRangeGrantV1,
+                          address: i64, length: i64) -> bool:
+    length > 0 and address >= grant.range_base
+        and address <= grant.range_base + grant.range_length - length
+
+fn _device_is_irq(opcode: EnvOpcodeV1) -> bool:
+    opcode == EnvOpcodeV1.InterruptMask
+        or opcode == EnvOpcodeV1.InterruptAcknowledge
+
+fn _device_is_mmio(opcode: EnvOpcodeV1) -> bool:
+    opcode == EnvOpcodeV1.MmioRead or opcode == EnvOpcodeV1.MmioWrite
+
+fn _device_is_dma(opcode: EnvOpcodeV1) -> bool:
+    opcode == EnvOpcodeV1.DmaMap or opcode == EnvOpcodeV1.DmaSubmit
+        or opcode == EnvOpcodeV1.DmaPoll or opcode == EnvOpcodeV1.DmaUnmap
+
+fn device_instruction_v1_equivalent(a: DeviceInstructionV1,
+                                    b: DeviceInstructionV1) -> bool:
+    a.address == b.address and a.transfer_length == b.transfer_length
+        and a.access_width == b.access_width and a.irq == b.irq
+        and a.read_once_token == b.read_once_token
+        and a.capability_generation == b.capability_generation
+        and a.grant_digest_hi == b.grant_digest_hi
+        and a.grant_digest_lo == b.grant_digest_lo
+        and a.environment.contract_version == b.environment.contract_version
+        and a.environment.invocation_id == b.environment.invocation_id
+        and a.environment.sequence == b.environment.sequence
+        and env_opcode_to_i64(a.environment.opcode)
+            == env_opcode_to_i64(b.environment.opcode)
+        and a.environment.capability_id == b.environment.capability_id
+        and a.environment.flags == b.environment.flags
+        and a.environment.argument_offset == b.environment.argument_offset
+        and a.environment.argument_length == b.environment.argument_length
+        and a.environment.argument_capacity == b.environment.argument_capacity
+        and a.environment.result_offset == b.environment.result_offset
+        and a.environment.result_capacity == b.environment.result_capacity
+        and a.environment.result_region_capacity
+            == b.environment.result_region_capacity
+
+struct DeviceExecutionReceiptV1:
+    observation: EnvObservationV1
+    device_digest_hi: i64
+    device_digest_lo: i64
+    applied: bool
+    physical_effect: bool
+    allocation_count_after_seal: i64
+
+fn _device_digest_lane(state: i64, value: i64) -> i64:
+    ((state * 263 + (value % 2147483587) + 29) % 2147483587) + 1
+
+fn _device_receipt_digest(
+        pin: DeviceAuthorityPinV1, proof: DeviceCapabilityProofV1,
+        grant: DeviceRangeGrantV1, instruction: DeviceInstructionV1,
+        observation: EnvObservationV1, reverse: bool) -> i64:
+    var digest = if reverse: 1879048201 else: 1073741827
+    digest = _device_digest_lane(digest, pin.contract_version)
+    digest = _device_digest_lane(digest, pin.capability_id)
+    digest = _device_digest_lane(digest, pin.minimum_generation)
+    digest = _device_digest_lane(digest, pin.authority_digest_hi)
+    digest = _device_digest_lane(digest, pin.authority_digest_lo)
+    digest = _device_digest_lane(digest, pin.device_identity_hi)
+    digest = _device_digest_lane(digest, pin.device_identity_lo)
+    digest = _device_digest_lane(digest, if pin.sealed: 1 else: 0)
+    digest = _device_digest_lane(digest, proof.contract_version)
+    digest = _device_digest_lane(digest, proof.generation)
+    digest = _device_digest_lane(digest, proof.capability_id)
+    digest = _device_digest_lane(digest, proof.allowed_opcode_mask)
+    digest = _device_digest_lane(digest, proof.grant_digest_hi)
+    digest = _device_digest_lane(digest, proof.grant_digest_lo)
+    digest = _device_digest_lane(digest, proof.authority_digest_hi)
+    digest = _device_digest_lane(digest, proof.authority_digest_lo)
+    digest = _device_digest_lane(digest, proof.device_identity_hi)
+    digest = _device_digest_lane(digest, proof.device_identity_lo)
+    digest = _device_digest_lane(digest, proof.issued_epoch)
+    digest = _device_digest_lane(digest, proof.expiry_epoch)
+    digest = _device_digest_lane(digest, if proof.sealed: 1 else: 0)
+    digest = _device_digest_lane(digest, grant.contract_version)
+    digest = _device_digest_lane(digest, grant.grant_digest_hi)
+    digest = _device_digest_lane(digest, grant.grant_digest_lo)
+    digest = _device_digest_lane(digest, grant.range_base)
+    digest = _device_digest_lane(digest, grant.range_length)
+    digest = _device_digest_lane(digest, grant.width_mask)
+    digest = _device_digest_lane(digest, if grant.allow_read: 1 else: 0)
+    digest = _device_digest_lane(digest, if grant.allow_write: 1 else: 0)
+    digest = _device_digest_lane(
+        digest, if grant.read_has_side_effect: 1 else: 0)
+    digest = _device_digest_lane(
+        digest, if grant.write_has_side_effect: 1 else: 0)
+    digest = _device_digest_lane(digest, grant.irq_first)
+    digest = _device_digest_lane(digest, grant.irq_count)
+    digest = _device_digest_lane(digest, grant.max_dma_bytes)
+    digest = _device_digest_lane(digest, grant.required_dma_alignment)
+    digest = _device_digest_lane(digest, if grant.sealed: 1 else: 0)
+    digest = _device_digest_lane(digest, instruction.environment.contract_version)
+    digest = _device_digest_lane(digest, instruction.environment.invocation_id)
+    digest = _device_digest_lane(digest, instruction.environment.sequence)
+    digest = _device_digest_lane(
+        digest, env_opcode_to_i64(instruction.environment.opcode))
+    digest = _device_digest_lane(digest, instruction.environment.capability_id)
+    digest = _device_digest_lane(digest, instruction.environment.flags)
+    digest = _device_digest_lane(digest, instruction.environment.argument_offset)
+    digest = _device_digest_lane(digest, instruction.environment.argument_length)
+    digest = _device_digest_lane(digest, instruction.environment.argument_capacity)
+    digest = _device_digest_lane(digest, instruction.environment.result_offset)
+    digest = _device_digest_lane(digest, instruction.environment.result_capacity)
+    digest = _device_digest_lane(
+        digest, instruction.environment.result_region_capacity)
+    digest = _device_digest_lane(digest, instruction.address)
+    digest = _device_digest_lane(digest, instruction.transfer_length)
+    digest = _device_digest_lane(digest, instruction.access_width)
+    digest = _device_digest_lane(digest, instruction.irq)
+    digest = _device_digest_lane(digest, instruction.read_once_token)
+    digest = _device_digest_lane(digest, instruction.capability_generation)
+    digest = _device_digest_lane(digest, instruction.grant_digest_hi)
+    digest = _device_digest_lane(digest, instruction.grant_digest_lo)
+    digest = _device_digest_lane(digest, observation.contract_version)
+    digest = _device_digest_lane(digest, observation.invocation_id)
+    digest = _device_digest_lane(digest, observation.sequence)
+    digest = _device_digest_lane(
+        digest, env_instruction_status_to_i64(observation.status))
+    digest = _device_digest_lane(digest, observation.status_code)
+    digest = _device_digest_lane(digest, observation.interaction_digest_hi)
+    digest = _device_digest_lane(digest, observation.interaction_digest_lo)
+    digest = _device_digest_lane(digest, observation.bytes_length)
+    digest = _device_digest_lane(digest, observation.bytes_capacity)
+    digest
+
+fn _device_execution_rejected(instruction: DeviceInstructionV1,
+                              status: EnvInstructionStatusV1) -> DeviceExecutionReceiptV1:
+    val receipt = env_execution_rejected_v1(instruction.environment, status)
+    DeviceExecutionReceiptV1(receipt.observation, 0, 0, false, false, 0)
+
+fn _device_execution_applied(
+        pin: DeviceAuthorityPinV1, proof: DeviceCapabilityProofV1,
+        grant: DeviceRangeGrantV1, instruction: DeviceInstructionV1,
+        argument_bytes: [u8], result_bytes: [u8],
+        result_length: i64) -> DeviceExecutionReceiptV1:
+    val receipt = env_execution_record_applied_v1(
+        instruction.environment, argument_bytes, result_bytes,
+        result_length, false, 0)
+    if not receipt.applied:
+        return DeviceExecutionReceiptV1(
+            receipt.observation, 0, 0, false, false, 0)
+    DeviceExecutionReceiptV1(receipt.observation,
+        _device_receipt_digest(pin, proof, grant, instruction,
+                               receipt.observation, false),
+        _device_receipt_digest(pin, proof, grant, instruction,
+                               receipt.observation, true),
+        true, false, 0)
+
+fn device_validate_instruction_v1(
+        pin: DeviceAuthorityPinV1, proof: DeviceCapabilityProofV1,
+        grant: DeviceRangeGrantV1,
+        instruction: DeviceInstructionV1, current_epoch: i64,
+        argument_bytes: [u8], result_bytes: [u8]) -> EnvInstructionStatusV1:
+    if not device_authority_pin_v1_well_formed(pin)
+            or not device_capability_proof_v1_well_formed(proof, current_epoch)
+            or not device_range_grant_v1_well_formed(grant)
+            or not env_instruction_v1_well_formed(instruction.environment):
+        return EnvInstructionStatusV1.InvalidInstruction
+    if pin.capability_id != proof.capability_id
+            or pin.authority_digest_hi != proof.authority_digest_hi
+            or pin.authority_digest_lo != proof.authority_digest_lo
+            or pin.device_identity_hi != proof.device_identity_hi
+            or pin.device_identity_lo != proof.device_identity_lo
+            or proof.generation < pin.minimum_generation
+            or proof.capability_id != instruction.environment.capability_id
+            or proof.generation != instruction.capability_generation
+            or proof.grant_digest_hi != grant.grant_digest_hi
+            or proof.grant_digest_lo != grant.grant_digest_lo
+            or instruction.grant_digest_hi != grant.grant_digest_hi
+            or instruction.grant_digest_lo != grant.grant_digest_lo:
+        return EnvInstructionStatusV1.UnsupportedCapability
+    val opcode_mask = env_opcode_mask_v1(instruction.environment.opcode)
+    if (proof.allowed_opcode_mask & opcode_mask) == 0:
+        return EnvInstructionStatusV1.UnsupportedCapability
+    if instruction.environment.argument_capacity > argument_bytes.len()
+            or instruction.environment.result_region_capacity > result_bytes.len():
+        return EnvInstructionStatusV1.Overflow
+    val opcode = instruction.environment.opcode
+    if not _device_is_irq(opcode) and not _device_is_mmio(opcode)
+            and not _device_is_dma(opcode):
+        return EnvInstructionStatusV1.UnsupportedCapability
+    if _device_is_irq(opcode):
+        if grant.irq_count <= 0 or instruction.irq < grant.irq_first
+                or instruction.irq >= grant.irq_first + grant.irq_count:
+            return EnvInstructionStatusV1.UnsafeInstruction
+        if instruction.address != 0 or instruction.transfer_length != 0
+                or instruction.access_width != 0:
+            return EnvInstructionStatusV1.InvalidInstruction
+        if instruction.environment.argument_length != 0
+                or instruction.environment.result_capacity != 0:
+            return EnvInstructionStatusV1.InvalidInstruction
+        if opcode == EnvOpcodeV1.InterruptMask
+                and (instruction.environment.flags != 0
+                    or instruction.read_once_token != 0):
+            return EnvInstructionStatusV1.InvalidInstruction
+        if opcode == EnvOpcodeV1.InterruptAcknowledge
+                and (instruction.environment.flags != DEVICE_FLAG_READ_ONCE_V1
+                    or instruction.read_once_token <= 0
+                    or instruction.read_once_token >= 63):
+            return EnvInstructionStatusV1.UnsafeInstruction
+        return EnvInstructionStatusV1.Planned
+    if not _device_range_contains(grant, instruction.address,
+                                  instruction.transfer_length):
+        return EnvInstructionStatusV1.UnsafeInstruction
+    if _device_is_mmio(opcode):
+        val width_mask = _device_width_mask(instruction.access_width)
+        if width_mask == 0 or (grant.width_mask & width_mask) == 0
+                or instruction.transfer_length != instruction.access_width
+                or instruction.address % instruction.access_width != 0:
+            return EnvInstructionStatusV1.UnsafeInstruction
+        if opcode == EnvOpcodeV1.MmioRead and not grant.allow_read:
+            return EnvInstructionStatusV1.UnsafeInstruction
+        if opcode == EnvOpcodeV1.MmioWrite and not grant.allow_write:
+            return EnvInstructionStatusV1.UnsafeInstruction
+        if opcode == EnvOpcodeV1.MmioRead
+                and (instruction.environment.argument_length != 0
+                    or instruction.environment.result_capacity
+                        < instruction.transfer_length):
+            return EnvInstructionStatusV1.InvalidInstruction
+        if opcode == EnvOpcodeV1.MmioWrite
+                and (instruction.environment.argument_length
+                        != instruction.transfer_length
+                    or instruction.environment.result_capacity != 0):
+            return EnvInstructionStatusV1.InvalidInstruction
+        if grant.read_has_side_effect and opcode == EnvOpcodeV1.MmioRead
+                and (instruction.environment.flags != DEVICE_FLAG_READ_ONCE_V1
+                    or instruction.read_once_token <= 0
+                    or instruction.read_once_token >= 63):
+            return EnvInstructionStatusV1.UnsafeInstruction
+        if not grant.read_has_side_effect and opcode == EnvOpcodeV1.MmioRead
+                and (instruction.environment.flags != 0
+                    or instruction.read_once_token != 0):
+            return EnvInstructionStatusV1.InvalidInstruction
+        if grant.write_has_side_effect and opcode == EnvOpcodeV1.MmioWrite
+                and instruction.environment.flags != DEVICE_FLAG_SIDE_EFFECT_V1:
+            return EnvInstructionStatusV1.UnsafeInstruction
+        if not grant.write_has_side_effect and opcode == EnvOpcodeV1.MmioWrite
+                and instruction.environment.flags != 0:
+            return EnvInstructionStatusV1.InvalidInstruction
+        if opcode == EnvOpcodeV1.MmioWrite and instruction.read_once_token != 0:
+            return EnvInstructionStatusV1.InvalidInstruction
+        return EnvInstructionStatusV1.Planned
+    if instruction.transfer_length <= 0
+            or instruction.transfer_length > grant.max_dma_bytes
+            or instruction.transfer_length > DEVICE_MAX_TRANSFER_BYTES_V1
+            or instruction.address % grant.required_dma_alignment != 0:
+        return EnvInstructionStatusV1.UnsafeInstruction
+    if opcode == EnvOpcodeV1.DmaSubmit
+            and (instruction.environment.flags != DEVICE_FLAG_DMA_TO_DEVICE_V1
+                or not grant.allow_write
+                or instruction.environment.argument_length
+                    != instruction.transfer_length
+                or instruction.environment.result_capacity != 0):
+        return EnvInstructionStatusV1.UnsafeInstruction
+    if opcode == EnvOpcodeV1.DmaPoll
+            and (instruction.environment.flags != DEVICE_FLAG_DMA_FROM_DEVICE_V1
+                or not grant.allow_read
+                or instruction.environment.argument_length != 0
+                or instruction.environment.result_capacity
+                    < instruction.transfer_length):
+        return EnvInstructionStatusV1.UnsafeInstruction
+    if (opcode == EnvOpcodeV1.DmaMap or opcode == EnvOpcodeV1.DmaUnmap)
+            and (instruction.environment.flags != 0
+                or instruction.environment.argument_length != 0
+                or instruction.environment.result_capacity != 0):
+        return EnvInstructionStatusV1.InvalidInstruction
+    if instruction.read_once_token != 0:
+        return EnvInstructionStatusV1.InvalidInstruction
+    EnvInstructionStatusV1.Planned
+
+class DeviceSandboxExecutorV1:
+    pin: DeviceAuthorityPinV1
+    proof: DeviceCapabilityProofV1
+    grant: DeviceRangeGrantV1
+    current_epoch: i64
+    next_sequence: i64
+    read_once_consumed_mask: i64
+    irq_masked_bits: i64
+    irq_pending_bits: i64
+    dma_mapped: bool
+    dma_mapped_address: i64
+    dma_mapped_length: i64
+    sealed: bool
+
+    me admit_pending_irq(irq: i64) -> bool:
+        if not self.sealed
+                or not device_authority_pin_v1_well_formed(self.pin)
+                or not device_capability_proof_v1_well_formed(
+                    self.proof, self.current_epoch)
+                or not device_range_grant_v1_well_formed(self.grant)
+                or self.pin.capability_id != self.proof.capability_id
+                or self.pin.authority_digest_hi != self.proof.authority_digest_hi
+                or self.pin.authority_digest_lo != self.proof.authority_digest_lo
+                or self.pin.device_identity_hi != self.proof.device_identity_hi
+                or self.pin.device_identity_lo != self.proof.device_identity_lo
+                or self.proof.generation < self.pin.minimum_generation
+                or self.proof.grant_digest_hi != self.grant.grant_digest_hi
+                or self.proof.grant_digest_lo != self.grant.grant_digest_lo
+                or (self.proof.allowed_opcode_mask
+                    & env_opcode_mask_v1(EnvOpcodeV1.InterruptAcknowledge)) == 0
+                or self.grant.irq_count <= 0
+                or irq < self.grant.irq_first
+                or irq >= self.grant.irq_first + self.grant.irq_count:
+            return false
+        val irq_bit = 1 << (irq - self.grant.irq_first)
+        if (self.irq_pending_bits & irq_bit) != 0:
+            return false
+        self.irq_pending_bits = self.irq_pending_bits | irq_bit
+        true
+
+    me execute(instruction: DeviceInstructionV1, argument_bytes: [u8],
+               result_bytes: [u8], device_bytes: [u8]) -> DeviceExecutionReceiptV1:
+        val status = device_validate_instruction_v1(
+            self.pin, self.proof, self.grant, instruction, self.current_epoch,
+            argument_bytes, result_bytes)
+        if env_instruction_status_to_i64(status)
+                != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+            return _device_execution_rejected(instruction, status)
+        if not self.sealed or instruction.environment.sequence != self.next_sequence
+                or self.next_sequence == 9223372036854775807:
+            return _device_execution_rejected(
+                instruction, EnvInstructionStatusV1.Diverged)
+        val offset = instruction.address - self.grant.range_base
+        if not _device_is_irq(instruction.environment.opcode)
+                and (offset < 0
+                    or offset > device_bytes.len() - instruction.transfer_length):
+            return _device_execution_rejected(
+                instruction, EnvInstructionStatusV1.Overflow)
+        val token_mask = if instruction.read_once_token > 0:
+            1 << instruction.read_once_token
+        else:
+            0
+        if token_mask != 0 and (self.read_once_consumed_mask & token_mask) != 0:
+            return _device_execution_rejected(
+                instruction, EnvInstructionStatusV1.Diverged)
+        var result_length = 0
+        val opcode = instruction.environment.opcode
+        if opcode == EnvOpcodeV1.InterruptMask:
+            self.irq_masked_bits = self.irq_masked_bits
+                | (1 << (instruction.irq - self.grant.irq_first))
+        elif opcode == EnvOpcodeV1.InterruptAcknowledge:
+            val irq_bit = 1 << (instruction.irq - self.grant.irq_first)
+            if (instruction.read_once_token - 1) % self.grant.irq_count
+                    != instruction.irq - self.grant.irq_first
+                    or (self.irq_pending_bits & irq_bit) == 0
+                    or (self.irq_masked_bits & irq_bit) == 0:
+                return _device_execution_rejected(
+                    instruction, EnvInstructionStatusV1.Diverged)
+            self.irq_pending_bits = self.irq_pending_bits ^ irq_bit
+            self.read_once_consumed_mask = self.read_once_consumed_mask | token_mask
+        elif opcode == EnvOpcodeV1.MmioRead or opcode == EnvOpcodeV1.DmaPoll:
+            if opcode == EnvOpcodeV1.DmaPoll and not self.dma_mapped:
+                return _device_execution_rejected(
+                    instruction, EnvInstructionStatusV1.UnsafeInstruction)
+            if opcode == EnvOpcodeV1.DmaPoll
+                    and (instruction.address < self.dma_mapped_address
+                        or instruction.transfer_length > self.dma_mapped_length
+                        or instruction.address > self.dma_mapped_address
+                            + self.dma_mapped_length
+                            - instruction.transfer_length):
+                return _device_execution_rejected(
+                    instruction, EnvInstructionStatusV1.UnsafeInstruction)
+            if instruction.transfer_length > instruction.environment.result_capacity:
+                return _device_execution_rejected(
+                    instruction, EnvInstructionStatusV1.Overflow)
+            var i = 0
+            while i < instruction.transfer_length:
+                result_bytes[instruction.environment.result_offset + i] =
+                    device_bytes[offset + i]
+                i = i + 1
+            result_length = instruction.transfer_length
+            if token_mask != 0:
+                self.read_once_consumed_mask = self.read_once_consumed_mask | token_mask
+        elif opcode == EnvOpcodeV1.MmioWrite or opcode == EnvOpcodeV1.DmaSubmit:
+            if opcode == EnvOpcodeV1.DmaSubmit and not self.dma_mapped:
+                return _device_execution_rejected(
+                    instruction, EnvInstructionStatusV1.UnsafeInstruction)
+            if opcode == EnvOpcodeV1.DmaSubmit
+                    and (instruction.address < self.dma_mapped_address
+                        or instruction.transfer_length > self.dma_mapped_length
+                        or instruction.address > self.dma_mapped_address
+                            + self.dma_mapped_length
+                            - instruction.transfer_length):
+                return _device_execution_rejected(
+                    instruction, EnvInstructionStatusV1.UnsafeInstruction)
+            if instruction.transfer_length > instruction.environment.argument_length:
+                return _device_execution_rejected(
+                    instruction, EnvInstructionStatusV1.Overflow)
+            var i = 0
+            while i < instruction.transfer_length:
+                device_bytes[offset + i] = argument_bytes[
+                    instruction.environment.argument_offset + i]
+                i = i + 1
+        elif opcode == EnvOpcodeV1.DmaMap:
+            if self.dma_mapped:
+                return _device_execution_rejected(
+                    instruction, EnvInstructionStatusV1.Diverged)
+            self.dma_mapped = true
+            self.dma_mapped_address = instruction.address
+            self.dma_mapped_length = instruction.transfer_length
+        elif opcode == EnvOpcodeV1.DmaUnmap:
+            if not self.dma_mapped
+                    or instruction.address != self.dma_mapped_address
+                    or instruction.transfer_length != self.dma_mapped_length:
+                return _device_execution_rejected(
+                    instruction, EnvInstructionStatusV1.Diverged)
+            self.dma_mapped = false
+            self.dma_mapped_address = 0
+            self.dma_mapped_length = 0
+        else:
+            return _device_execution_rejected(
+                instruction, EnvInstructionStatusV1.UnsupportedCapability)
+        self.next_sequence = self.next_sequence + 1
+        _device_execution_applied(self.pin, self.proof, self.grant, instruction,
+            argument_bytes, result_bytes, result_length)
+
+fn device_replay_exact_v1(
+        pin: DeviceAuthorityPinV1, proof: DeviceCapabilityProofV1,
+        grant: DeviceRangeGrantV1, current_epoch: i64,
+        recorded_instruction: DeviceInstructionV1,
+        replay_instruction: DeviceInstructionV1,
+        recorded: DeviceExecutionReceiptV1, argument_bytes: [u8],
+        recorded_result_bytes: [u8],
+        replay_result_bytes: [u8]) -> DeviceExecutionReceiptV1:
+    val replay_validation = device_validate_instruction_v1(
+        pin, proof, grant, replay_instruction, current_epoch,
+        argument_bytes, replay_result_bytes)
+    if env_instruction_status_to_i64(replay_validation)
+            != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned)
+            or not device_instruction_v1_equivalent(recorded_instruction,
+                                             replay_instruction)
+            or not recorded.applied
+            or recorded.device_digest_hi != _device_receipt_digest(
+                pin, proof, grant, recorded_instruction,
+                recorded.observation, false)
+            or recorded.device_digest_lo != _device_receipt_digest(
+                pin, proof, grant, recorded_instruction,
+                recorded.observation, true):
+        return _device_execution_rejected(
+            replay_instruction, EnvInstructionStatusV1.Diverged)
+    val replayed = env_replay_exact_v1(recorded_instruction.environment,
+        replay_instruction.environment, recorded.observation, argument_bytes,
+        recorded_result_bytes, replay_result_bytes)
+    if not replayed.applied:
+        return DeviceExecutionReceiptV1(
+            replayed.observation, 0, 0, false, false, 0)
+    DeviceExecutionReceiptV1(replayed.observation,
+        recorded.device_digest_hi, recorded.device_digest_lo,
+        true, false, 0)
+
+fn device_scenario_exclusion_admitted_v1(
+        value: ScenarioExclusionV1, current_epoch: i64,
+        reason_bytes: [u8]) -> bool:
+    if exclusion_kind_to_i64(value.kind)
+            != exclusion_kind_to_i64(ExclusionKindV1.CapabilityUnavailable)
+            or not scenario_exclusion_v1_well_formed(value, current_epoch)
+            or value.reason_length < 8 or value.reason_length > 256
+            or value.reason_capacity > reason_bytes.len():
+        return false
+    var meaningful = 0
+    var i = 0
+    while i < value.reason_length:
+        val byte = reason_bytes[value.reason_offset + i]
+        if byte < 32 or byte > 126:
+            return false
+        if byte != 32 and byte != 9:
+            meaningful = meaningful + 1
+        i = i + 1
+    meaningful >= 8
+
+export DEVICE_ADAPTER_SCHEMA_VERSION, DEVICE_MAX_TRANSFER_BYTES_V1
+export DEVICE_FLAG_READ_ONCE_V1, DEVICE_FLAG_SIDE_EFFECT_V1
+export DEVICE_FLAG_DMA_TO_DEVICE_V1, DEVICE_FLAG_DMA_FROM_DEVICE_V1
+export DeviceAuthorityPinV1, DeviceCapabilityProofV1
+export DeviceRangeGrantV1, DeviceInstructionV1, DeviceExecutionReceiptV1
+export device_authority_pin_v1, device_capability_proof_v1
+export device_range_grant_v1, device_instruction_v1
+export device_authority_pin_v1_well_formed
+export device_capability_proof_v1_well_formed
+export device_range_grant_v1_well_formed, device_instruction_v1_equivalent
+export device_validate_instruction_v1, DeviceSandboxExecutorV1
+export device_replay_exact_v1, device_scenario_exclusion_admitted_v1

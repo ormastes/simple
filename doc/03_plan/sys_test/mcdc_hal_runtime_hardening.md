@@ -28,6 +28,18 @@ Primary steps: “Build the controlled fixture”; “Run the selected assurance
 
 Matched builds retain normalized hot code, symbols, sections, link maps, >=30 randomized paired samples, nearest-rank p95, CPU affinity/noise metadata, RSS, allocation epochs, mappings, raw sample hashes, capacities, log/event high-water, child receipts, and isolation setup/IPC metrics. Any missing identity/raw sample/child, NaN, overflow, evidence loss, or post-seal allocation fails.
 
+## IRQ/MMIO/DMA device-adapter evidence
+
+The focused contract spec
+`test/01_unit/lib/common/structural/environment_device_adapter_spec.spl`
+must prove exact capability/grant binding; MMIO range, width, alignment, access,
+side-effect, and read-once rejection; ordered caller-buffer DMA map/submit/poll;
+exact replay with no second model interaction; and rejection of blank or stale
+hardware exclusions. A passing software-model scenario is not physical-device
+evidence. Real-board rows remain unavailable unless an environment owner can
+produce them safely; only a validated reason-bearing exclusion may remove such
+a row from the MC/DC denominator.
+
 The bounded executable gate is
 `scripts/check/check-mcdc-performance-gate.shs`; its operator contract and
 retained evidence fields are documented at

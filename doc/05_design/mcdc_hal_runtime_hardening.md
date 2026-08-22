@@ -52,6 +52,51 @@ owner and is not a multi-writer object.
 
 The extractor writes strictly increasing instructions into a caller buffer and seals a digest. The executor validates capability, safety policy, capacity, and sequence before applying any instruction. Plan-Then-Commit performs the accepted plan once; ReplayOnly feeds recorded observations to shadow providers. A provider requesting an unrecorded or different interaction returns `InvalidRequest`/`Diverged`, never ambiently performs it.
 
+### IRQ/MMIO/DMA environment adapter
+
+Producible hardware scenarios use `DeviceSandboxExecutorV1`; it is a software
+model and never maps `/dev/mem`, installs a host interrupt, pins host pages, or
+submits host DMA. The parent owns the model, argument, result, and replay byte
+regions. The sealed executor retains only scalar capability/lifecycle state.
+Its hot method performs bounded byte copies and reports zero post-seal
+allocations; no buffer is created or resized there.
+
+Every instruction carries a generation-bound `DeviceCapabilityProofV1` and the
+exact digest of one sealed `DeviceRangeGrantV1`. The environment composition
+owner supplies a separately pinned authority digest, minimum generation, and
+device identity; an instruction or provider cannot supply or replace that pin.
+Admission checks the opcode mask, proof lifetime, pinned authority, capability
+identity, grant digest, non-wrapping range,
+MMIO width/alignment and permissions, IRQ allowlist, DMA alignment and the
+64-KiB transfer ceiling before changing any caller buffer. Side-effecting MMIO
+writes require an explicit side-effect flag. Side-effecting reads and interrupt
+acknowledgements require a 1..62 read-once token; duplicate consumption fails
+as `Diverged`. DMA submit/poll additionally require explicit direction flags
+and an admitted map lifecycle. Map retains the exact address and length;
+submit/poll must remain inside it and unmap must name it exactly.
+Interrupt acknowledgement additionally requires a fixture-owned pending bit and
+a preceding mask transition. Its 1..62 token is bound to the granted IRQ by a
+bounded modulo partition and is consumed globally, permitting multiple planned
+events without an unbounded token table.
+
+Replay revalidates the proof and grant against the same pinned authority and
+device identity, compares every device-specific scalar including address,
+width, IRQ, token, generation, and grant digest, then delegates to the canonical
+exact byte/digest replay. It never consults or changes the model. Hardware that cannot
+be safely produced may be removed from the eligible denominator only through a
+fresh `CapabilityUnavailable` exclusion with 8..256 printable, nonblank reason
+bytes and the existing evidence/owner/review/expiry proof. It is reported as
+excluded, never executed or counted as covered.
+
+The applied receipt carries a second two-lane digest over the pinned authority
+and device identity, proof generation/lifetime/opcode mask, full grant policy,
+device instruction scalars, and canonical environment observation. Replay
+recomputes it, so replacing both caller-supplied instruction objects cannot
+reuse a receipt for another address or device. The public scalar constructors
+are composition/test vocabulary, not a host authority mint: production pins
+must originate in the trusted environment owner. Even a forged private model
+never gains a host-device effect through this adapter.
+
 ## Fixed-capacity behavior
 
 Every manifest declares required frame depth, event words, trace operations/bytes, request/result bytes, diff rows, deadlines, and log bytes. Initialization either supplies them completely or fails. At exact capacity, the final valid record succeeds. Capacity+1 sets sticky overflow with kind, first sequence, and count; no diagnostic allocation occurs. The combined default event/log capacity is <=4 MiB and may be configured downward.
