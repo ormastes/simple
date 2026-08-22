@@ -18,6 +18,9 @@ push commands and bootstrap evidence rows. A `todo` or `blocked` row
 is visible unfinished work and is never counted as pass. Only rows explicitly
 marked `push_blocking: true` block an interactive push; all four compiler phase
 rows are push-blocking.
+The bounded push tier also materializes the exact pushed ref for the Rust
+interpreter module-owner scan. This prevents an undeclared tracked module from
+wasting a full Rust authority/bootstrap attempt while avoiding a compiler run.
 
 ## Compiler phase admission
 
