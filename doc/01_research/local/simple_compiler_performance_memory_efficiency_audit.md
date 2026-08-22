@@ -1448,3 +1448,17 @@ Ordinary `lint_source` retains no view or resolved config. The combined path the
 performs one split and keeps at most one source line view pending; long-lived linters do
 not retain prior file contents after append. Exact AST spans remain the preferred future
 replacement for fallback source-location indexing.
+
+## 2026-08-22 implementation addendum: line-view consumers
+
+After the combined-path fix, normal `lint_source` still caused independent line arrays in
+file-attribute resolution and several line-oriented rule owners. These were semantic
+readers of the same immutable source, not owners requiring separate storage.
+
+The canonical `lines` view now feeds attribute resolution, parameter tags, raw-runtime
+fix positioning, stale Markdown diagrams, LLVM type-safety guards, accessor/parent-name
+analysis, freestanding patterns, and opt-in WM boundaries. Compatibility wrappers retain
+string entrypoints for external callers, while normal lint uses `*_lines` variants. This
+removes up to eight additional O(source bytes) splits/line-header arrays per applicable
+file without changing iteration order or text matching. EasyFix registry owners still
+contain independent splits and remain the next shared-view migration boundary.
