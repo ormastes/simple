@@ -28,7 +28,11 @@ struct DuplicateTypedArgSignature:
 # ============================================================================
 
 fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]:
-    val signatures = _collect_duplicate_typed_arg_signatures(source)
+    val lines = source.split("\n")
+    check_unnamed_duplicate_typed_args_with_view(file, lines, line_contexts_from_lines(lines))
+
+fn check_unnamed_duplicate_typed_args_with_view(file: String, lines: [String], contexts: [LineContext]) -> [EasyFix]:
+    val signatures = _collect_duplicate_typed_arg_signatures_from_contexts(contexts)
     var fixes: [EasyFix] = []
 
     for sig in signatures:
@@ -45,7 +49,7 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
             ))
 
         if sig.can_rewrite_calls and _is_unique_call_target(signatures, sig):
-            val call_replacements = _collect_call_replacements_for_signature(source, file, sig)
+            val call_replacements = _collect_call_replacements_for_signature_lines(lines, file, sig)
             for rep in call_replacements:
                 replacements.push(rep)
 
@@ -66,28 +70,18 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
     fixes
 
 fn _collect_duplicate_typed_arg_signatures(source: text) -> [DuplicateTypedArgSignature]:
+    _collect_duplicate_typed_arg_signatures_from_contexts(line_contexts(source))
+
+fn _collect_duplicate_typed_arg_signatures_from_contexts(contexts: [LineContext]) -> [DuplicateTypedArgSignature]:
     var signatures: [DuplicateTypedArgSignature] = []
-    val lines = source.split("\n")
-    var line_num = 0
-    var byte_offset = 0
-    for line in lines:
-        line_num = line_num + 1
-        val trimmed = line.trim()
-        val indent = line.len() - trimmed.len()
-        val ctx = LineContext(
-            line: line,
-            line_num: line_num,
-            byte_offset: byte_offset,
-            trimmed: trimmed,
-            indent: indent
-        )
+    for raw_ctx in contexts:
+        val ctx: LineContext = raw_ctx
         val sig = _parse_duplicate_typed_arg_signature(ctx)
         match sig:
             case Some(found):
                 signatures.push(found)
             case nil:
                 pass
-        byte_offset = byte_offset + line.len() + 1
     signatures
 
 fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSignature?:
@@ -191,8 +185,10 @@ fn _parse_duplicate_typed_arg_signature(ctx: LineContext) -> DuplicateTypedArgSi
     ))
 
 fn _collect_call_replacements_for_signature(source: text, file: text, sig: DuplicateTypedArgSignature) -> [Replacement]:
+    _collect_call_replacements_for_signature_lines(source.split("\n"), file, sig)
+
+fn _collect_call_replacements_for_signature_lines(lines: [text], file: text, sig: DuplicateTypedArgSignature) -> [Replacement]:
     var replacements: [Replacement] = []
-    val lines = source.split("\n")
     var line_num = 0
     var byte_offset = 0
 
@@ -432,8 +428,11 @@ fn _is_digit_char(ch: text) -> bool:
 # ============================================================================
 
 fn check_resource_leak(source: String, file: String) -> [EasyFix]:
+    check_resource_leak_with_contexts(file, line_contexts(source))
+
+fn check_resource_leak_with_contexts(file: String, contexts: [LineContext]) -> [EasyFix]:
     var fixes: [EasyFix] = []
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
 
         # Detect val x = open(...) or val x = connect(...) not inside with
@@ -478,8 +477,10 @@ fn check_resource_leak(source: String, file: String) -> [EasyFix]:
 # ============================================================================
 
 fn check_non_exhaustive_match(source: String, file: String) -> [EasyFix]:
+    check_non_exhaustive_match_with_lines(file, source.split("\n"))
+
+fn check_non_exhaustive_match_with_lines(file: String, lines: [String]) -> [EasyFix]:
     var fixes: [EasyFix] = []
-    val lines = source.split("\n")
     var line_num = 0
     var byte_offset = 0
     var in_match = false

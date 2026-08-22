@@ -181,3 +181,12 @@ only when the suffix admits SPipe rules, and passed immutably to each member. St
 rule and registry entrypoints remain compatibility boundaries and retain their early path
 gates. Subsequent rule families should join this view incrementally; no process-global
 source cache or unbounded retained context is permitted.
+
+### General EasyFix fact sharing
+
+The registry constructs exactly one general `LineContext` array from caller-owned lines.
+Code, annotation, deprecation, module-boundary, and SPipe members consume that immutable
+array or the canonical lines. Standalone wrappers construct equivalent private facts and
+remain behavior-compatible. Duplicate-typed call-site discovery reuses canonical lines
+for every signature, avoiding per-candidate arrays; its repeated traversal remains an
+explicit candidate for a name-indexed call-site table. No view survives registry return.
