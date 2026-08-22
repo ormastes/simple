@@ -1309,6 +1309,16 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_cuda_module_unload",
     "rt_cuda_launch_kernel",
     "rt_cuda_sync",
+    // Optional libtorch scalar status/out contracts. Interpreter resolution is
+    // cached once per symbol; native/JIT lanes retain typed direct-call ABIs.
+    "rt_torch_torchtensor_sum_checked",
+    "rt_torch_torchtensor_mean_checked",
+    "rt_torch_torchtensor_min_checked",
+    "rt_torch_torchtensor_max_checked",
+    "rt_torch_torchtensor_norm_checked",
+    "rt_torch_torchtensor_det_checked",
+    "rt_torch_torchtensor_std_checked",
+    "rt_torch_torchtensor_var_checked",
     // ROCm runtime. These names include canonical unsupported-host
     // implementations from runtime_rocm.c, so hosted dynamic artifacts must
     // retain them even on non-ROCm systems; otherwise dyld/ld.so aborts before
@@ -2491,6 +2501,10 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_rocm_init"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_engine2d_rocm_download_pixels"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_vulkan_discard_command"));
+        for reduction in ["sum", "mean", "min", "max", "norm", "det", "std", "var"] {
+            let symbol = format!("rt_torch_torchtensor_{reduction}_checked");
+            assert!(RUNTIME_SYMBOL_NAMES.contains(&symbol.as_str()));
+        }
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_memory_barrier"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_load_barrier"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_store_barrier"));

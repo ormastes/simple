@@ -9,7 +9,7 @@ libtorch is absent.
 Consumed by:
   - std.nogc_async_mut.linalg.backend_ops
     (dyn_torch_available, dyn_torch_tensor_matmul_result,
-     dyn_torch_tensor_dot_result, dyn_torch_tensor_sum,
+     dyn_torch_tensor_dot_result, dyn_torch_tensor_sum_result,
      dyn_torch_tensor_inverse_result,
      dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_free)
   - All torch variant shims via std.common.torch.dyn_sffi
@@ -19,23 +19,23 @@ use std.nogc_sync_mut.torch.sffi.{
     rt_torch_available, rt_torch_torchtensor_abs,
     rt_torch_torchtensor_add_scalar, rt_torch_torchtensor_argmax,
     rt_torch_torchtensor_argmin, rt_torch_torchtensor_clone,
-    rt_torch_torchtensor_contiguous, rt_torch_torchtensor_det,
+    rt_torch_torchtensor_contiguous, rt_torch_torchtensor_det_checked,
     rt_torch_torchtensor_dot, rt_torch_torchtensor_exp,
     rt_torch_torchtensor_free, rt_torch_torchtensor_gelu,
     rt_torch_torchtensor_inverse, rt_torch_torchtensor_leaky_relu,
     rt_torch_torchtensor_log, rt_torch_torchtensor_log_softmax,
-    rt_torch_torchtensor_matmul, rt_torch_torchtensor_max,
-    rt_torch_torchtensor_max_dim, rt_torch_torchtensor_mean,
-    rt_torch_torchtensor_mean_dim, rt_torch_torchtensor_min,
+    rt_torch_torchtensor_matmul, rt_torch_torchtensor_max_checked,
+    rt_torch_torchtensor_max_dim, rt_torch_torchtensor_mean_checked,
+    rt_torch_torchtensor_mean_dim, rt_torch_torchtensor_min_checked,
     rt_torch_torchtensor_min_dim, rt_torch_torchtensor_mul_scalar,
-    rt_torch_torchtensor_neg, rt_torch_torchtensor_norm,
+    rt_torch_torchtensor_neg, rt_torch_torchtensor_norm_checked,
     rt_torch_torchtensor_pow, rt_torch_torchtensor_relu,
     rt_torch_torchtensor_sigmoid, rt_torch_torchtensor_slice,
     rt_torch_torchtensor_softmax, rt_torch_torchtensor_sqrt,
-    rt_torch_torchtensor_squeeze_dim, rt_torch_torchtensor_std,
-    rt_torch_torchtensor_sum, rt_torch_torchtensor_sum_dim,
+    rt_torch_torchtensor_squeeze_dim, rt_torch_torchtensor_std_checked,
+    rt_torch_torchtensor_sum_checked, rt_torch_torchtensor_sum_dim,
     rt_torch_torchtensor_tanh, rt_torch_torchtensor_unsqueeze,
-    rt_torch_torchtensor_var
+    rt_torch_torchtensor_var_checked
 }
 
 # ============================================================================
@@ -100,11 +100,20 @@ fn dyn_torch_tensor_dot_result(a: i64, b: i64) -> Result<i64, text>:
         return Err("runtime_returned_null_handle")
     Ok(result)
 
-fn dyn_torch_tensor_sum(handle: i64) -> f64:
-    """Sum all elements of a tensor. Returns 0.0 on failure."""
-    if not rt_torch_available():
-        return 0.0
-    rt_torch_torchtensor_sum(handle)
+fn _dyn_torch_scalar_status(status: i32) -> text:
+    if status == -1: return "invalid_output_pointer"
+    if status == -2: return "invalid_handle"
+    if status == -4: return "unresolved_provider_symbol"
+    "provider_error"
+
+fn dyn_torch_tensor_sum_result(handle: i64) -> Result<f64, text>:
+    """Sum all elements without collapsing failure into numeric zero."""
+    if not rt_torch_available(): return Err("libtorch_unavailable")
+    if handle <= 0: return Err("invalid_handle")
+    var value: f64 = 0.0
+    val status = rt_torch_torchtensor_sum_checked(handle, &mut value)
+    if status != 0: return Err(_dyn_torch_scalar_status(status))
+    Ok(value)
 
 fn dyn_torch_tensor_sum_dim_result(handle: i64, dim: i64, keepdim: bool) -> Result<i64, text>:
     if not rt_torch_available(): return Err("libtorch_unavailable")
@@ -113,11 +122,14 @@ fn dyn_torch_tensor_sum_dim_result(handle: i64, dim: i64, keepdim: bool) -> Resu
     if result <= 0: return Err("runtime_returned_null_handle")
     Ok(result)
 
-fn dyn_torch_tensor_mean(handle: i64) -> f64:
-    """Mean of all elements. Returns 0.0 on failure."""
-    if not rt_torch_available():
-        return 0.0
-    rt_torch_torchtensor_mean(handle)
+fn dyn_torch_tensor_mean_result(handle: i64) -> Result<f64, text>:
+    """Mean all elements without collapsing failure into numeric zero."""
+    if not rt_torch_available(): return Err("libtorch_unavailable")
+    if handle <= 0: return Err("invalid_handle")
+    var value: f64 = 0.0
+    val status = rt_torch_torchtensor_mean_checked(handle, &mut value)
+    if status != 0: return Err(_dyn_torch_scalar_status(status))
+    Ok(value)
 
 fn dyn_torch_tensor_mean_dim_result(handle: i64, dim: i64, keepdim: bool) -> Result<i64, text>:
     if not rt_torch_available(): return Err("libtorch_unavailable")
@@ -148,41 +160,59 @@ fn dyn_torch_tensor_linalg_solve_result(a: i64, b: i64) -> DynTorchTensorResult:
         return _dyn_torch_tensor_result("error", "runtime_returned_null_handle", 0)
     _dyn_torch_tensor_result("ready", "ok", handle)
 
-fn dyn_torch_tensor_det(handle: i64) -> f64:
-    """Determinant of a square matrix. Returns 0.0 on failure."""
-    if not rt_torch_available():
-        return 0.0
-    rt_torch_torchtensor_det(handle)
+fn dyn_torch_tensor_det_result(handle: i64) -> Result<f64, text>:
+    """Compute determinant without collapsing failure into numeric zero."""
+    if not rt_torch_available(): return Err("libtorch_unavailable")
+    if handle <= 0: return Err("invalid_handle")
+    var value: f64 = 0.0
+    val status = rt_torch_torchtensor_det_checked(handle, &mut value)
+    if status != 0: return Err(_dyn_torch_scalar_status(status))
+    Ok(value)
 
-fn dyn_torch_tensor_norm(handle: i64) -> f64:
-    """L2 norm of tensor. Returns 0.0 on failure."""
-    if not rt_torch_available():
-        return 0.0
-    rt_torch_torchtensor_norm(handle)
+fn dyn_torch_tensor_norm_result(handle: i64) -> Result<f64, text>:
+    """Compute L2 norm without collapsing failure into numeric zero."""
+    if not rt_torch_available(): return Err("libtorch_unavailable")
+    if handle <= 0: return Err("invalid_handle")
+    var value: f64 = 0.0
+    val status = rt_torch_torchtensor_norm_checked(handle, &mut value)
+    if status != 0: return Err(_dyn_torch_scalar_status(status))
+    Ok(value)
 
-fn dyn_torch_tensor_std(handle: i64) -> f64:
-    """Standard deviation. Returns 0.0 on failure."""
-    if not rt_torch_available():
-        return 0.0
-    rt_torch_torchtensor_std(handle)
+fn dyn_torch_tensor_std_result(handle: i64) -> Result<f64, text>:
+    """Compute standard deviation without collapsing failure into zero."""
+    if not rt_torch_available(): return Err("libtorch_unavailable")
+    if handle <= 0: return Err("invalid_handle")
+    var value: f64 = 0.0
+    val status = rt_torch_torchtensor_std_checked(handle, &mut value)
+    if status != 0: return Err(_dyn_torch_scalar_status(status))
+    Ok(value)
 
-fn dyn_torch_tensor_var(handle: i64) -> f64:
-    """Variance. Returns 0.0 on failure."""
-    if not rt_torch_available():
-        return 0.0
-    rt_torch_torchtensor_var(handle)
+fn dyn_torch_tensor_var_result(handle: i64) -> Result<f64, text>:
+    """Compute variance without collapsing failure into numeric zero."""
+    if not rt_torch_available(): return Err("libtorch_unavailable")
+    if handle <= 0: return Err("invalid_handle")
+    var value: f64 = 0.0
+    val status = rt_torch_torchtensor_var_checked(handle, &mut value)
+    if status != 0: return Err(_dyn_torch_scalar_status(status))
+    Ok(value)
 
-fn dyn_torch_tensor_max(handle: i64) -> f64:
-    """Max element value. Returns 0.0 on failure."""
-    if not rt_torch_available():
-        return 0.0
-    rt_torch_torchtensor_max(handle)
+fn dyn_torch_tensor_max_result(handle: i64) -> Result<f64, text>:
+    """Compute maximum without collapsing failure into numeric zero."""
+    if not rt_torch_available(): return Err("libtorch_unavailable")
+    if handle <= 0: return Err("invalid_handle")
+    var value: f64 = 0.0
+    val status = rt_torch_torchtensor_max_checked(handle, &mut value)
+    if status != 0: return Err(_dyn_torch_scalar_status(status))
+    Ok(value)
 
-fn dyn_torch_tensor_min(handle: i64) -> f64:
-    """Min element value. Returns 0.0 on failure."""
-    if not rt_torch_available():
-        return 0.0
-    rt_torch_torchtensor_min(handle)
+fn dyn_torch_tensor_min_result(handle: i64) -> Result<f64, text>:
+    """Compute minimum without collapsing failure into numeric zero."""
+    if not rt_torch_available(): return Err("libtorch_unavailable")
+    if handle <= 0: return Err("invalid_handle")
+    var value: f64 = 0.0
+    val status = rt_torch_torchtensor_min_checked(handle, &mut value)
+    if status != 0: return Err(_dyn_torch_scalar_status(status))
+    Ok(value)
 
 fn dyn_torch_tensor_max_dim_result(handle: i64, dim: i64, keepdim: bool) -> Result<i64, text>:
     if not rt_torch_available(): return Err("libtorch_unavailable")
@@ -672,10 +702,10 @@ export DynTorchTensorResult, dyn_torch_available
 export dyn_torch_tensor_free, dyn_torch_tensor_clone_result
 export dyn_torch_tensor_matmul_result, dyn_torch_tensor_dot_result, dyn_torch_tensor_inverse_result
 export dyn_torch_tensor_linalg_solve_result
-export dyn_torch_tensor_sum, dyn_torch_tensor_sum_dim_result
-export dyn_torch_tensor_mean, dyn_torch_tensor_mean_dim_result
-export dyn_torch_tensor_det, dyn_torch_tensor_norm, dyn_torch_tensor_std, dyn_torch_tensor_var
-export dyn_torch_tensor_max, dyn_torch_tensor_min
+export dyn_torch_tensor_sum_result, dyn_torch_tensor_sum_dim_result
+export dyn_torch_tensor_mean_result, dyn_torch_tensor_mean_dim_result
+export dyn_torch_tensor_det_result, dyn_torch_tensor_norm_result, dyn_torch_tensor_std_result, dyn_torch_tensor_var_result
+export dyn_torch_tensor_max_result, dyn_torch_tensor_min_result
 export dyn_torch_tensor_max_dim_result, dyn_torch_tensor_min_dim_result
 export dyn_torch_tensor_argmax_result, dyn_torch_tensor_argmin_result
 export dyn_torch_tensor_add_scalar_result, dyn_torch_tensor_sub_scalar_result

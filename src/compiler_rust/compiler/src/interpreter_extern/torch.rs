@@ -89,6 +89,44 @@ unsafe fn lookup_torch_symbol(_name: &str) -> Option<usize> {
     None
 }
 
+#[cfg(not(feature = "pytorch"))]
+fn cached_torch_scalar_symbol(name: &str) -> Option<usize> {
+    static SUM: OnceLock<Option<usize>> = OnceLock::new();
+    static MEAN: OnceLock<Option<usize>> = OnceLock::new();
+    static MIN: OnceLock<Option<usize>> = OnceLock::new();
+    static MAX: OnceLock<Option<usize>> = OnceLock::new();
+    static NORM: OnceLock<Option<usize>> = OnceLock::new();
+    static DET: OnceLock<Option<usize>> = OnceLock::new();
+    static STD: OnceLock<Option<usize>> = OnceLock::new();
+    static VAR: OnceLock<Option<usize>> = OnceLock::new();
+    let slot = match name {
+        "rt_torch_torchtensor_sum_checked" => &SUM,
+        "rt_torch_torchtensor_mean_checked" => &MEAN,
+        "rt_torch_torchtensor_min_checked" => &MIN,
+        "rt_torch_torchtensor_max_checked" => &MAX,
+        "rt_torch_torchtensor_norm_checked" => &NORM,
+        "rt_torch_torchtensor_det_checked" => &DET,
+        "rt_torch_torchtensor_std_checked" => &STD,
+        "rt_torch_torchtensor_var_checked" => &VAR,
+        _ => return None,
+    };
+    *slot.get_or_init(|| unsafe { lookup_torch_symbol(name) })
+}
+
+#[cfg(not(feature = "pytorch"))]
+unsafe fn torch_call_i64_out_f64(symbol: &str, handle: i64, out: *mut f64) -> i32 {
+    let Some(fptr) = cached_torch_scalar_symbol(symbol) else {
+        return -4;
+    };
+    let func: unsafe extern "C" fn(i64, *mut f64) -> i32 = std::mem::transmute(fptr);
+    func(handle, out)
+}
+
+#[cfg(feature = "pytorch")]
+unsafe fn torch_call_i64_out_f64(_symbol: &str, _handle: i64, _out: *mut f64) -> i32 {
+    -4
+}
+
 #[cfg(feature = "pytorch")]
 fn torch_available_impl() -> bool {
     simple_runtime::value::rt_torch_available() != 0
@@ -599,6 +637,55 @@ pub fn rt_torch_torchtensor_sum(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Float(unsafe {
         torch_call_i64_f64("rt_torch_torchtensor_sum", args[0].as_int()?)
     }))
+}
+
+fn torch_scalar_checked(args: &[Value], symbol: &str) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{symbol} requires 2 arguments")));
+    }
+    let handle = args[0].as_int()?;
+    let borrow = match &args[1] {
+        Value::BorrowMut(value) => value,
+        _ => return Err(CompileError::runtime(format!("{symbol}: output must be &mut f64"))),
+    };
+    let mut output = std::mem::MaybeUninit::<f64>::uninit();
+    let status = unsafe { torch_call_i64_out_f64(symbol, handle, output.as_mut_ptr()) };
+    if status == 0 {
+        *borrow.inner_mut() = Value::Float(unsafe { output.assume_init() });
+    }
+    Ok(Value::Int(i64::from(status)))
+}
+
+pub fn rt_torch_torchtensor_sum_checked(args: &[Value]) -> Result<Value, CompileError> {
+    torch_scalar_checked(args, "rt_torch_torchtensor_sum_checked")
+}
+
+pub fn rt_torch_torchtensor_mean_checked(args: &[Value]) -> Result<Value, CompileError> {
+    torch_scalar_checked(args, "rt_torch_torchtensor_mean_checked")
+}
+
+pub fn rt_torch_torchtensor_min_checked(args: &[Value]) -> Result<Value, CompileError> {
+    torch_scalar_checked(args, "rt_torch_torchtensor_min_checked")
+}
+
+pub fn rt_torch_torchtensor_max_checked(args: &[Value]) -> Result<Value, CompileError> {
+    torch_scalar_checked(args, "rt_torch_torchtensor_max_checked")
+}
+
+pub fn rt_torch_torchtensor_norm_checked(args: &[Value]) -> Result<Value, CompileError> {
+    torch_scalar_checked(args, "rt_torch_torchtensor_norm_checked")
+}
+
+pub fn rt_torch_torchtensor_det_checked(args: &[Value]) -> Result<Value, CompileError> {
+    torch_scalar_checked(args, "rt_torch_torchtensor_det_checked")
+}
+
+pub fn rt_torch_torchtensor_std_checked(args: &[Value]) -> Result<Value, CompileError> {
+    torch_scalar_checked(args, "rt_torch_torchtensor_std_checked")
+}
+
+pub fn rt_torch_torchtensor_var_checked(args: &[Value]) -> Result<Value, CompileError> {
+    torch_scalar_checked(args, "rt_torch_torchtensor_var_checked")
 }
 
 pub fn rt_torch_torchtensor_ndim(args: &[Value]) -> Result<Value, CompileError> {

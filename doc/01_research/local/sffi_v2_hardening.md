@@ -1473,3 +1473,28 @@ symbols: 800 unsafe-tagged, 614 contract-documented, 342 unsafe-minimized,
 11,945 unsafe-unminimized, 11,215 untouched, and zero evidence-verified,
 signed, or admitted. Scalar Torch reductions still require a cross-lane
 status/out ABI; valid `0.0` must remain data, never an error workaround.
+
+Eight versioned-in-place checked Torch scalar entrypoints now use an explicit
+`i32` status plus `double*` output for sum, mean, min, max, norm, determinant,
+standard deviation, and variance. The C++ adapter validates the output pointer
+and tensor handle, catches every exception, and writes output only after the
+single reduction succeeds. It performs no error reporting, allocation, I/O,
+retry, or synchronization. Dynamic Simple callers use a native stack `f64` and
+return `Result<f64, text>`; valid zero and NaN remain data. Interpreter handlers
+use `MaybeUninit<f64>` and cache each typed symbol with `OnceLock`, eliminating
+the old per-call `CString`/`dlsym` path for these checked functions. JIT/native
+signature metadata records `(i64, pointer) -> i32`.
+
+The focused readiness spec passes 15/15, both live dynamic callers check, the
+C/C++ header parses in both modes, and the new static hot-path contract gate
+passes for all eight operations. The compiler crate check remains obstructed by
+the unrelated pre-existing missing `interpreter::dispatch_profile` module;
+the runtime-symbol ABI unit test passes. Legacy bare-`f64` exports and static
+Torch trait consumers remain explicitly unsafe compatibility surfaces and must
+still migrate before the family can be called safe or verified.
+
+The refreshed census is 12,295 declaration rows and 3,170 distinct symbols:
+808 unsafe-tagged, 622 contract-documented, 350 unsafe-minimized, 11,945
+unsafe-unminimized, 11,215 untouched, and zero evidence-verified, signed, or
+admitted. `rt_torch` has 162 unsafe rows, 35 minimized, zero untouched, and zero
+verified/signed; “zero untouched” means inventoried/tagged, not proven safe.

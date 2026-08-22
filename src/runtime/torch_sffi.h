@@ -14,6 +14,9 @@
 
 #ifdef __cplusplus
 extern "C" {
+#define SPL_TORCH_NOEXCEPT noexcept
+#else
+#define SPL_TORCH_NOEXCEPT
 #endif
 
 /* Library information */
@@ -66,6 +69,8 @@ int64_t     rt_torch_torchtensor_transpose(int64_t handle, int64_t dim0, int64_t
 int64_t     rt_torch_torchtensor_t(int64_t handle);
 double      rt_torch_torchtensor_norm(int64_t handle);
 double      rt_torch_torchtensor_det(int64_t handle);
+int32_t     rt_torch_torchtensor_norm_checked(int64_t handle, double* out) SPL_TORCH_NOEXCEPT;
+int32_t     rt_torch_torchtensor_det_checked(int64_t handle, double* out) SPL_TORCH_NOEXCEPT;
 int64_t     rt_torch_torchtensor_inverse(int64_t handle);
 int64_t     rt_torch_torchtensor_linalg_solve(int64_t handle, int64_t rhs);
 int64_t     rt_torch_torchtensor_svd(int64_t handle);
@@ -73,17 +78,23 @@ int64_t     rt_torch_torchtensor_eig(int64_t handle);
 
 /* Reductions */
 double      rt_torch_torchtensor_sum(int64_t handle);
+int32_t     rt_torch_torchtensor_sum_checked(int64_t handle, double* out) SPL_TORCH_NOEXCEPT;
 int64_t     rt_torch_torchtensor_sum_dim(int64_t handle, int64_t dim, bool keepdim);
 double      rt_torch_torchtensor_mean(int64_t handle);
+int32_t     rt_torch_torchtensor_mean_checked(int64_t handle, double* out) SPL_TORCH_NOEXCEPT;
 int64_t     rt_torch_torchtensor_mean_dim(int64_t handle, int64_t dim, bool keepdim);
 double      rt_torch_torchtensor_max(int64_t handle);
+int32_t     rt_torch_torchtensor_max_checked(int64_t handle, double* out) SPL_TORCH_NOEXCEPT;
 int64_t     rt_torch_torchtensor_max_dim(int64_t handle, int64_t dim, bool keepdim);
 double      rt_torch_torchtensor_min(int64_t handle);
+int32_t     rt_torch_torchtensor_min_checked(int64_t handle, double* out) SPL_TORCH_NOEXCEPT;
 int64_t     rt_torch_torchtensor_min_dim(int64_t handle, int64_t dim, bool keepdim);
 int64_t     rt_torch_torchtensor_argmax(int64_t handle, int64_t dim, bool keepdim);
 int64_t     rt_torch_torchtensor_argmin(int64_t handle, int64_t dim, bool keepdim);
 double      rt_torch_torchtensor_std(int64_t handle);
 double      rt_torch_torchtensor_var(int64_t handle);
+int32_t     rt_torch_torchtensor_std_checked(int64_t handle, double* out) SPL_TORCH_NOEXCEPT;
+int32_t     rt_torch_torchtensor_var_checked(int64_t handle, double* out) SPL_TORCH_NOEXCEPT;
 
 /* Shape manipulation */
 int64_t     rt_torch_torchtensor_ndim(int64_t handle);
@@ -155,5 +166,7 @@ void        rt_torch_cuda_empty_cache(void);
 #ifdef __cplusplus
 }
 #endif
+
+#undef SPL_TORCH_NOEXCEPT
 
 #endif /* TORCH_FFI_H */

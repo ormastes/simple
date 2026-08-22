@@ -59,6 +59,7 @@ fn interp_call_returns_f64(func_name: &str) -> bool {
         func_name,
         "rt_torch_torchtensor_sum"
             | "rt_torch_torchtensor_norm"
+            | "rt_torch_torchtensor_det"
             | "rt_torch_torchtensor_mean"
             | "rt_torch_torchtensor_max"
             | "rt_torch_torchtensor_min"

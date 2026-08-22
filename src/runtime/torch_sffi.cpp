@@ -80,6 +80,24 @@ static at::Tensor* find_defined_tensor(int64_t h) {
     return &it->second;
 }
 
+template <typename ScalarOp>
+static int32_t torch_scalar_checked(int64_t handle, double* out, ScalarOp&& op) noexcept {
+    if (out == nullptr) {
+        return -1;
+    }
+    at::Tensor* tensor = find_defined_tensor(handle);
+    if (tensor == nullptr) {
+        return -2;
+    }
+    try {
+        const double value = op(*tensor);
+        *out = value;
+        return 0;
+    } catch (...) {
+        return -3;
+    }
+}
+
 /* Retrieve a tensor by handle (panics on invalid handle) */
 static at::Tensor get_tensor(int64_t h) {
     auto it = g_tensors.find(h);
@@ -380,8 +398,20 @@ double rt_torch_torchtensor_norm(int64_t handle) {
     return get_tensor(handle).norm().item<double>();
 }
 
+int32_t rt_torch_torchtensor_norm_checked(int64_t handle, double* out) noexcept {
+    return torch_scalar_checked(handle, out, [](const at::Tensor& tensor) {
+        return tensor.norm().item<double>();
+    });
+}
+
 double rt_torch_torchtensor_det(int64_t handle) {
     return at::linalg_det(get_tensor(handle)).item<double>();
+}
+
+int32_t rt_torch_torchtensor_det_checked(int64_t handle, double* out) noexcept {
+    return torch_scalar_checked(handle, out, [](const at::Tensor& tensor) {
+        return at::linalg_det(tensor).item<double>();
+    });
 }
 
 int64_t rt_torch_torchtensor_inverse(int64_t handle) {
@@ -420,12 +450,24 @@ double rt_torch_torchtensor_sum(int64_t handle) {
     return get_tensor(handle).sum().item<double>();
 }
 
+int32_t rt_torch_torchtensor_sum_checked(int64_t handle, double* out) noexcept {
+    return torch_scalar_checked(handle, out, [](const at::Tensor& tensor) {
+        return tensor.sum().item<double>();
+    });
+}
+
 int64_t rt_torch_torchtensor_sum_dim(int64_t handle, int64_t dim, bool keepdim) {
     return store_tensor(get_tensor(handle).sum(dim, keepdim));
 }
 
 double rt_torch_torchtensor_mean(int64_t handle) {
     return get_tensor(handle).mean().item<double>();
+}
+
+int32_t rt_torch_torchtensor_mean_checked(int64_t handle, double* out) noexcept {
+    return torch_scalar_checked(handle, out, [](const at::Tensor& tensor) {
+        return tensor.mean().item<double>();
+    });
 }
 
 int64_t rt_torch_torchtensor_mean_dim(int64_t handle, int64_t dim, bool keepdim) {
@@ -436,6 +478,12 @@ double rt_torch_torchtensor_max(int64_t handle) {
     return get_tensor(handle).max().item<double>();
 }
 
+int32_t rt_torch_torchtensor_max_checked(int64_t handle, double* out) noexcept {
+    return torch_scalar_checked(handle, out, [](const at::Tensor& tensor) {
+        return tensor.max().item<double>();
+    });
+}
+
 int64_t rt_torch_torchtensor_max_dim(int64_t handle, int64_t dim, bool keepdim) {
     auto result = get_tensor(handle).max(dim, keepdim);
     return store_tensor(std::get<0>(result));
@@ -443,6 +491,12 @@ int64_t rt_torch_torchtensor_max_dim(int64_t handle, int64_t dim, bool keepdim) 
 
 double rt_torch_torchtensor_min(int64_t handle) {
     return get_tensor(handle).min().item<double>();
+}
+
+int32_t rt_torch_torchtensor_min_checked(int64_t handle, double* out) noexcept {
+    return torch_scalar_checked(handle, out, [](const at::Tensor& tensor) {
+        return tensor.min().item<double>();
+    });
 }
 
 int64_t rt_torch_torchtensor_min_dim(int64_t handle, int64_t dim, bool keepdim) {
@@ -468,8 +522,20 @@ double rt_torch_torchtensor_std(int64_t handle) {
     return get_tensor(handle).std().item<double>();
 }
 
+int32_t rt_torch_torchtensor_std_checked(int64_t handle, double* out) noexcept {
+    return torch_scalar_checked(handle, out, [](const at::Tensor& tensor) {
+        return tensor.std().item<double>();
+    });
+}
+
 double rt_torch_torchtensor_var(int64_t handle) {
     return get_tensor(handle).var().item<double>();
+}
+
+int32_t rt_torch_torchtensor_var_checked(int64_t handle, double* out) noexcept {
+    return torch_scalar_checked(handle, out, [](const at::Tensor& tensor) {
+        return tensor.var().item<double>();
+    });
 }
 
 /* ----------------------------------------------------------------------------

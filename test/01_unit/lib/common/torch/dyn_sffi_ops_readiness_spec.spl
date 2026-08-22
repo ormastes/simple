@@ -1,5 +1,5 @@
 use std.io_runtime.{read_file}
-use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_abs_result, dyn_torch_tensor_add_scalar_result, dyn_torch_tensor_arange_result, dyn_torch_tensor_argmax_result, dyn_torch_tensor_argmin_result, dyn_torch_tensor_clone_result, dyn_torch_tensor_contiguous_result, dyn_torch_tensor_div_scalar_result, dyn_torch_tensor_dot_result, dyn_torch_tensor_empty_1d_result, dyn_torch_tensor_exp_result, dyn_torch_tensor_eye_result, dyn_torch_tensor_full_4d_result, dyn_torch_tensor_gelu_result, dyn_torch_tensor_inverse_result, dyn_torch_tensor_leaky_relu_result, dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_linspace_result, dyn_torch_tensor_log_result, dyn_torch_tensor_log_softmax_result, dyn_torch_tensor_matmul_result, dyn_torch_tensor_max_dim_result, dyn_torch_tensor_mean_dim_result, dyn_torch_tensor_min_dim_result, dyn_torch_tensor_mul_scalar_result, dyn_torch_tensor_neg_result, dyn_torch_tensor_ones_2d_result, dyn_torch_tensor_pow_result, dyn_torch_tensor_rand_2d_result, dyn_torch_tensor_randn_4d_result, dyn_torch_tensor_relu_result, dyn_torch_tensor_sigmoid_result, dyn_torch_tensor_slice_result, dyn_torch_tensor_softmax_result, dyn_torch_tensor_sqrt_result, dyn_torch_tensor_squeeze_dim_result, dyn_torch_tensor_sub_scalar_result, dyn_torch_tensor_sum_dim_result, dyn_torch_tensor_tanh_result, dyn_torch_tensor_unsqueeze_result, dyn_torch_tensor_zeros_1d_result}
+use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_abs_result, dyn_torch_tensor_add_scalar_result, dyn_torch_tensor_arange_result, dyn_torch_tensor_argmax_result, dyn_torch_tensor_argmin_result, dyn_torch_tensor_clone_result, dyn_torch_tensor_contiguous_result, dyn_torch_tensor_det_result, dyn_torch_tensor_div_scalar_result, dyn_torch_tensor_dot_result, dyn_torch_tensor_empty_1d_result, dyn_torch_tensor_exp_result, dyn_torch_tensor_eye_result, dyn_torch_tensor_full_4d_result, dyn_torch_tensor_gelu_result, dyn_torch_tensor_inverse_result, dyn_torch_tensor_leaky_relu_result, dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_linspace_result, dyn_torch_tensor_log_result, dyn_torch_tensor_log_softmax_result, dyn_torch_tensor_matmul_result, dyn_torch_tensor_max_result, dyn_torch_tensor_max_dim_result, dyn_torch_tensor_mean_result, dyn_torch_tensor_mean_dim_result, dyn_torch_tensor_min_result, dyn_torch_tensor_min_dim_result, dyn_torch_tensor_mul_scalar_result, dyn_torch_tensor_neg_result, dyn_torch_tensor_norm_result, dyn_torch_tensor_ones_2d_result, dyn_torch_tensor_pow_result, dyn_torch_tensor_rand_2d_result, dyn_torch_tensor_randn_4d_result, dyn_torch_tensor_relu_result, dyn_torch_tensor_sigmoid_result, dyn_torch_tensor_slice_result, dyn_torch_tensor_softmax_result, dyn_torch_tensor_sqrt_result, dyn_torch_tensor_squeeze_dim_result, dyn_torch_tensor_std_result, dyn_torch_tensor_sub_scalar_result, dyn_torch_tensor_sum_result, dyn_torch_tensor_sum_dim_result, dyn_torch_tensor_tanh_result, dyn_torch_tensor_unsqueeze_result, dyn_torch_tensor_var_result, dyn_torch_tensor_zeros_1d_result}
 
 fn source_text() -> text:
     read_file("src/lib/common/torch/dyn_sffi_ops.spl") ?? ""
@@ -136,6 +136,31 @@ describe "dynamic torch SFFI readiness surface":
         expect(dyn_torch_tensor_max_dim_result(0, 0, false).is_err()).to_equal(true)
         expect(dyn_torch_tensor_argmin_result(0, 0, false).is_err()).to_equal(true)
         expect(dyn_torch_tensor_argmax_result(0, 0, false).is_err()).to_equal(true)
+
+    it "preserves scalar reduction failures without reserving numeric zero":
+        expect(dyn_torch_tensor_sum_result(0).is_err()).to_equal(true)
+        expect(dyn_torch_tensor_mean_result(0).is_err()).to_equal(true)
+        expect(dyn_torch_tensor_min_result(0).is_err()).to_equal(true)
+        expect(dyn_torch_tensor_max_result(0).is_err()).to_equal(true)
+        expect(dyn_torch_tensor_norm_result(0).is_err()).to_equal(true)
+        expect(dyn_torch_tensor_std_result(0).is_err()).to_equal(true)
+        expect(dyn_torch_tensor_var_result(0).is_err()).to_equal(true)
+        expect(dyn_torch_tensor_det_result(0).is_err()).to_equal(true)
+
+        val source = source_text()
+        expect(source.contains("Returns 0.0 on failure")).to_equal(false)
+        expect(source).to_contain("rt_torch_torchtensor_sum_checked(handle, &mut value)")
+        expect(source).to_contain("if status != 0: return Err(_dyn_torch_scalar_status(status))")
+
+    it "keeps the C++ scalar ABI one-call status-out and exception-safe":
+        val runtime = cpp_runtime_source()
+        val header = cpp_header_source()
+
+        expect(runtime).to_contain("static int32_t torch_scalar_checked")
+        expect(runtime).to_contain("const double value = op(*tensor)")
+        expect(runtime).to_contain("catch (...)")
+        expect(runtime).to_contain("rt_torch_torchtensor_sum_checked(int64_t handle, double* out) noexcept")
+        expect(header).to_contain("rt_torch_torchtensor_sum_checked(int64_t handle, double* out)")
 
     it "preserves fixed-dimension fill constructor failures as typed errors":
         expect(dyn_torch_tensor_zeros_1d_result(-1).is_err()).to_equal(true)

@@ -39,6 +39,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_host_gpu_")
         || name.starts_with("rt_vk_")
         || name.starts_with("rt_metal_")
+        || name.starts_with("rt_torch_")
         || name.starts_with("rt_cranelift_")
         || name.starts_with("rt_par_")
         || name.starts_with("rt_simd_")
@@ -1051,6 +1052,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_gpu_barrier", &[], &[]),      // () -> ()
     RuntimeFuncSpec::new("rt_gpu_mem_fence", &[I32], &[]), // scope -> ()
+    // Torch scalar reductions use status/out so every f64 bit pattern remains
+    // valid data. The output address is a native stack pointer encoded as I64.
+    RuntimeFuncSpec::new("rt_torch_torchtensor_sum_checked", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_torch_torchtensor_mean_checked", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_torch_torchtensor_min_checked", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_torch_torchtensor_max_checked", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_torch_torchtensor_norm_checked", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_torch_torchtensor_det_checked", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_torch_torchtensor_std_checked", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_torch_torchtensor_var_checked", &[I64, I64], &[I32]),
     // =========================================================================
     // GPU atomic operations (i64)
     // =========================================================================

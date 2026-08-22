@@ -2058,6 +2058,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_torch_torchtensor_shape", torch::rt_torch_torchtensor_shape);
     insert_simple!("rt_torch_torchtensor_sub", torch::rt_torch_torchtensor_sub);
     insert_simple!("rt_torch_torchtensor_sum", torch::rt_torch_torchtensor_sum);
+    insert_simple!("rt_torch_torchtensor_sum_checked", torch::rt_torch_torchtensor_sum_checked);
+    insert_simple!("rt_torch_torchtensor_mean_checked", torch::rt_torch_torchtensor_mean_checked);
+    insert_simple!("rt_torch_torchtensor_min_checked", torch::rt_torch_torchtensor_min_checked);
+    insert_simple!("rt_torch_torchtensor_max_checked", torch::rt_torch_torchtensor_max_checked);
+    insert_simple!("rt_torch_torchtensor_norm_checked", torch::rt_torch_torchtensor_norm_checked);
+    insert_simple!("rt_torch_torchtensor_det_checked", torch::rt_torch_torchtensor_det_checked);
+    insert_simple!("rt_torch_torchtensor_std_checked", torch::rt_torch_torchtensor_std_checked);
+    insert_simple!("rt_torch_torchtensor_var_checked", torch::rt_torch_torchtensor_var_checked);
     insert_simple!("rt_torch_to_cpu", torch::rt_torch_to_cpu);
     insert_simple!("rt_torch_to_cuda", torch::rt_torch_to_cuda);
     insert_simple!("rt_typed_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);

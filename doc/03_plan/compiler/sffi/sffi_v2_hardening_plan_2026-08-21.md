@@ -1162,3 +1162,15 @@ retain a stack output, one provider call, and no hot-path lookup or allocation.
 After that, migrate the five piped-process declarations in
 `src/lib/editor/services/debug_session_dap.spl` without claiming its empty-read
 sentinel is fully safe.
+
+The eight Torch scalar reductions now have collision-free status/out C++
+entrypoints and typed dynamic Simple results. C++ catches exceptions and writes
+the output only on success; native callers use a stack slot, and interpreter
+callers cache typed function pointers once. `torch-scalar-status-out-contract`
+ratchets the one-call/no-allocation/no-lookup shape. Readiness passes 15/15 and
+the census is 12,295 rows, 808 tagged, 622 contracted, 350 unsafe-minimized,
+11,215 untouched, and zero verified/signed. Do not remove the unsafe label yet:
+legacy bare scalar exports, static Torch trait consumers, provider signing, and
+evidence admission remain open. Next migrate the static scalar consumers or
+change their interfaces to typed results, then take the bounded piped-process
+family and implement signed provider admission separately.

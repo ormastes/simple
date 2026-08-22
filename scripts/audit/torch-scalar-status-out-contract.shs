@@ -1,0 +1,56 @@
+#!/bin/sh
+# Static regression gate for the eight collision-free Torch scalar reductions.
+# This proves source shape only; it is not provider verification or admission.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+header="$root/src/runtime/torch_sffi.h"
+runtime="$root/src/runtime/torch_sffi.cpp"
+raw="$root/src/lib/nogc_sync_mut/torch/sffi.spl"
+wrapper="$root/src/lib/common/torch/dyn_sffi_ops.spl"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/torch.rs"
+registry="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+specs="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+symbols="$root/src/compiler_rust/common/src/runtime_symbols.rs"
+
+for op in sum mean min max norm det std var; do
+    symbol="rt_torch_torchtensor_${op}_checked"
+
+    grep -Fq "int32_t     ${symbol}(int64_t handle, double* out)" "$header"
+    grep -Fq "int32_t ${symbol}(int64_t handle, double* out) noexcept" "$runtime"
+    grep -Fq "extern fn ${symbol}(handle: i64, out: *mut f64) -> i32" "$raw"
+    grep -Fq "fn dyn_torch_tensor_${op}_result(handle: i64) -> Result<f64, text>:" "$wrapper"
+    test "$(grep -Fc "${symbol}(handle, &mut value)" "$wrapper")" -eq 1
+    grep -Fq "pub fn ${symbol}(args: &[Value])" "$interpreter"
+    grep -Fq "insert_simple!(\"${symbol}\"" "$registry"
+    grep -Fq "RuntimeFuncSpec::new(\"${symbol}\", &[I64, I64], &[I32])" "$specs"
+    grep -Fq "\"${symbol}\"" "$symbols"
+done
+
+grep -Fq 'static int32_t torch_scalar_checked' "$runtime"
+grep -Fq 'const double value = op(*tensor);' "$runtime"
+grep -Fq 'catch (...)' "$runtime"
+grep -Fq '*out = value;' "$runtime"
+grep -Fq '*slot.get_or_init(|| unsafe { lookup_torch_symbol(name) })' "$interpreter"
+test "$(grep -Fc 'return torch_scalar_checked(handle, out,' "$runtime")" -eq 8
+
+helper_body=$(awk '
+    /static int32_t torch_scalar_checked/ { capture=1 }
+    capture { print }
+    capture && /^}/ { exit }
+' "$runtime")
+if printf '%s\n' "$helper_body" | grep -Eq 'safe_eprintln|safe_panic|fprintf|malloc|calloc|realloc|new '; then
+    echo 'Torch scalar checked helper gained reporting or allocation' >&2
+    exit 1
+fi
+if grep -Eq 'rt_alloc|dlsym|CString' "$wrapper"; then
+    echo 'Torch scalar Simple wrapper gained allocation or dynamic lookup' >&2
+    exit 1
+fi
+
+if grep -Eq 'fn dyn_torch_tensor_(sum|mean|min|max|norm|det|std|var)\(' "$wrapper"; then
+    echo 'legacy bare scalar wrapper remains' >&2
+    exit 1
+fi
+
+echo 'Torch scalar status/out contract: PASS operations=8 hot_path=one_call_no_alloc'
