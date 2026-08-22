@@ -668,3 +668,17 @@ The canonical query-token owner performs expected constant-time dictionary
 lookups. `query_inlay_hints.spl` remains only as a public compatibility
 re-export; it must not grow private parsing, I/O, or flag semantics. No global
 cache is introduced, so request lifetime and invalidation remain explicit.
+
+### Formatter lexical-equivalence materialization
+
+Fingerprint builders use append-only `[String]` fragments and one empty-string
+join. Fragments retain their own delimiters; join must not inject separators.
+The gap helper remains independently materialized so mutation/value-semantics
+assumptions about passing caller-owned arrays are unnecessary. Unknown skipped
+lexer payload returns one exact `raw` record, brace-interior whitespace returns
+one exact `gap` record, and comment-only gaps preserve ordered framed comments.
+
+This design removes cumulative quadratic prefix copying without changing the
+guard API or its fail-closed comparison. A future streaming comparator must be
+a separate proven design because it would alter ownership, early-exit, and
+diagnostic construction behavior.
