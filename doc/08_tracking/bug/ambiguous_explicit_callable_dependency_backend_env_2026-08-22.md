@@ -1,7 +1,7 @@
 # `ambiguous explicit callable dependency `Backend`` blocks HIR lowering of llvm_backend.spl
 
 - **Date:** 2026-08-22
-- **Status:** OPEN (root cause identified by source reading; competing route not yet observed live)
+- **Status:** SYMPTOM RESOLVED (run14, `75a66d615bd`) — LATENT DEFECT OPEN (the sweep still lets a glob veto an explicit import; no disagreeing candidate pair observed live yet)
 - **Area:** `src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl`
   (`materialize_imported_callable_explicit_dependency_inner`, lines ~548-634)
 - **Severity:** HIGH — fatal HIR lowering error in a stage1 build lane
@@ -171,12 +171,88 @@ This turns the blocked step into a passive one: a sharded stage-1 lane run with
 `compiler.backend.backend.env` and WHICH two candidates the sweep then found, without
 anyone paying for a single-process interpreted repro.
 
+## Iteration 4 (2026-08-22): run14 trace — the symptom is gone, the defect is not
+
+run14 (lane `a1174d1d99f3687a0`, worktree `/mnt/data/worktrees/stage1-clean16`, started
+17:14:59Z from `75a66d615bd`, which includes `ed4ca46f4c2`) ran with
+`SIMPLE_AMBIGDBG=1`. Measured in `stage1_build14.log` at HIR 522/688:
+
+**The diagnostic no longer occurs: `ambiguous explicit callable dependency` appears
+ZERO times in the whole log.** `llvm_backend.spl` is no longer among the `hir-fatal`
+sites; the 15 remaining fatals are a different class (`unresolved type: MirType` x8,
+`unresolved type: HirPattern` x2, ...).
+
+The trace says exactly why, and the site itself is already past:
+
+```
+[ambig-dep] router owner=compiler.backend.backend.env dep=Backend imports=4
+[ambig-dep] router-preresolved owner=compiler.backend.backend.env dep=Backend
+```
+
+`Backend` is now already bound in `compiler.backend.backend.env`'s qualified scope
+BEFORE the router's first step, so neither the facade chase nor the ambiguity sweep is
+consulted for it at all. That is the effect of the owner-side import-edge repairs landed
+between run13 and run14 (`1aa81cac8c6` "owner-side import gaps behind run13
+`unresolved type`/`unresolved name`" and `ead29e6df64` "repair import edges behind the
+run13 unresolved-name class"), not of any change in this lane. **This lane fixed
+nothing; it diagnosed and instrumented.**
+
+### The latent defect is unchanged, and the sweep is demonstrably live
+
+630 `sweep-enter` events, 9 `sweep-candidate` rows, and **0 `sweep-verdict
+ambiguous=true`**. Every observed multi-candidate case AGREED on its terminal, e.g. two
+glob routes reaching the same owner:
+
+```
+sweep-candidate route=glob owner=compiler.backend.linker.linker_context dep=AopWeaver import=2 target=compiler.tools.aop item=AopWeaver
+sweep-candidate route=glob owner=compiler.backend.linker.linker_context dep=AopWeaver import=3 target=compiler.tools.aop item=AopWeaver
+```
+
+So the named/glob merge is still there and still reachable; this run simply had no pair
+that disagreed. The fix stays designed-not-landed for the same reason as before: there
+is still no input that makes a spec red, and landing a behaviour change on a path with
+no failing witness is how a "fix" silently becomes a regression.
+
+### What the trace measured about the resolution path (52,024 router calls)
+
+| event | count | share |
+|---|---|---|
+| `router` (dependency resolution requested) | 52,024 | 100% |
+| `router-preresolved` (already bound) | 14,162 | 27% |
+| `router-step1-declared-bound` (facade chase bound it) | 2,026 | 4% |
+| `router-step1-missed` -> explicit sweep | 35,833 | 69% |
+| `router-step2-missed` -> package-sibling fallback | 35,833 | 69% |
+| `chase` (facade chase invoked) | 12,003 | — |
+| `chase-bail` total | 163,199 | — |
+
+`chase-bail` reasons, which settle the earlier structural question:
+
+| reason | count | share |
+|---|---|---|
+| `visited-memo` | 158,488 | **97.1%** |
+| `depth-cap` | 4,582 | 2.8% |
+| `export-origin-owner-unresolved` | 129 | 0.1% |
+| `route-arrays-misaligned` / `walk-state-misaligned` / `invalid-facade-index` | 0 | — |
+
+Two conclusions worth keeping:
+
+1. The reason the first-wins chase declines is overwhelmingly the **shared
+   `HirReexportWalkState` visited-memo** (`seen_depth <= depth` -> not-found), not the
+   depth cap and not a corrupt surface. That is the mechanism to examine if the sweep
+   ever needs to be reached deliberately.
+2. **69% of all dependency resolutions fall through BOTH the chase and the sweep** into
+   the package-sibling fallback. That is a resolution-shape finding for the hardening
+   plan in its own right and is not specific to this bug.
+
 ## Next steps
 
-1. Read the `[ambig-dep]` lines for `owner=compiler.backend.backend.env dep=Backend`
-   out of a sharded stage-1 lane log run with `SIMPLE_AMBIGDBG=1` (requested for run14),
-   and record the two competing `(target module, item)` pairs plus the `chase-bail`
-   reason step 1 did not bind.
+1. DONE (iteration 4): the symptom is gone at `75a66d615bd` and the trace shows why
+   (`router-preresolved`). No competing pair was observable because the sweep is no
+   longer consulted for `Backend`.
+2. Keep the ranking fix unlanded until a `sweep-verdict ambiguous=true` is observed in
+   any lane. The trace now makes that a passive watch: grep the build log for
+   `ambiguous=true`. If one appears, its `sweep-candidate` rows name the two competing
+   `(target, item)` pairs directly and the fixture can be built from them in one shot.
 2. Land the rank-based fix with a fixture built from the observed route shape, so the
    spec is red pre-fix.
 3. Re-check the `-2` memo: with the rank rule, `-2` should only ever cache a
