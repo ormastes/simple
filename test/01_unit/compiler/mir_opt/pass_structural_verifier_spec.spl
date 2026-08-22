@@ -8,12 +8,12 @@ Audience: compiler and optimizer maintainers.
 use std.spec.*
 use std.fs.{read_file}
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instructions.{MirFunction, MirBlock, MirInst}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.mir_opt.mir_opt.mod.{
     PassRunDisposition, mir_structural_verification_receipt,
-    run_named_pass_with_record
+    mir_module_structural_verification_receipt, run_named_pass_with_record
 }
 
 fn _pv_block(id: i64, terminator: MirTerminator) -> MirBlock:
@@ -164,6 +164,23 @@ describe "MIR optimizer structural verifier":
         expect(malformed.error_codes.contains("MIRV007")).to_equal(true)
         expect(malformed.error_codes.contains("MIRV008")).to_equal(true)
         expect(malformed.error_codes.contains("MIRV999")).to_equal(false)
+
+    it "aggregates deterministic module receipts and key mismatches":
+        step("Verify a module before module-pass dispatch")
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[SymbolId(id: 7)] = _pv_function([], 0)
+        functions[SymbolId(id: 193)] = _pv_function([
+            _pv_block(0, MirTerminator.Ret(nil))
+        ], 0)
+        val receipt = mir_module_structural_verification_receipt(MirModule(
+            "verifier_module", functions, {}, {}, {}))
+        expect(receipt.valid).to_equal(false)
+        expect(receipt.function_count).to_equal(2)
+        expect(receipt.block_count).to_equal(1)
+        expect(receipt.errors.len()).to_equal(receipt.error_codes.len())
+        expect(receipt.error_codes.contains("MIRVM001")).to_equal(true)
+        expect(receipt.error_codes.contains("MIRV011")).to_equal(true)
+        expect(receipt.errors[0]).to_contain("function map key 7")
 
     it "records an honest unchanged active function pass":
         step("Record a verified optimizer outcome")
