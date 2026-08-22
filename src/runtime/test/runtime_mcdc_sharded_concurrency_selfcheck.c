@@ -105,6 +105,49 @@ int main(void) {
        focused host must sustain at least 50k fully validated probes/second. */
     assert(duration < (uint64_t)event_count * UINT64_C(20000));
     assert(rt_mcdc_collector_reset_checked_v1() == SIMPLE_MCDC_V1_OK);
+
+    /* A skewed owner must consume the entire bounded collector, not overflow
+       after filling only its deterministic primary shard. */
+    SimpleMcdcVectorV1 skew_storage[16];
+    SimpleMcdcVectorV1 skew_output[16];
+    assert(rt_mcdc_collector_init_sharded_v1(
+               skew_storage, sizeof(skew_storage), 88, WORKERS) ==
+           SIMPLE_MCDC_V1_OK);
+    for (uint64_t i = 0; i < 16; ++i)
+        assert(rt_mcdc_record_vector_v1(88, 200, 1, 901, 1, i & 1u,
+                                        1, i, (uint8_t)(i & 1u)) ==
+               SIMPLE_MCDC_V1_OK);
+    assert(rt_mcdc_record_vector_v1(88, 200, 1, 901, 1, 0,
+                                    1, 16, 0) == SIMPLE_MCDC_V1_OVERFLOW);
+    assert(rt_mcdc_collector_seal_v1(88) == SIMPLE_MCDC_V1_OK);
+    assert(rt_mcdc_snapshot_v1(skew_output, 16, &snapshot) ==
+           SIMPLE_MCDC_V1_OK);
+    assert(snapshot.written == 16 && snapshot.overflowed &&
+           snapshot.overflow_count == 1);
+    assert(rt_mcdc_collector_reset_checked_v1() == SIMPLE_MCDC_V1_OK);
+
+    /* Reusing the same numeric owner creates a fresh epoch and sequence lane;
+       a delayed call from the retired epoch cannot consume this sequence. */
+    SimpleMcdcVectorV1 epoch_storage[4];
+    SimpleMcdcVectorV1 epoch_output[4];
+    assert(rt_mcdc_collector_init_sharded_v1(
+               epoch_storage, sizeof(epoch_storage), 99, 2) ==
+           SIMPLE_MCDC_V1_OK);
+    assert(rt_mcdc_configure_compiled_owner_v1(99, 7) == SIMPLE_MCDC_V1_OK);
+    assert(rt_mcdc_record_compiled_vector_v1(300, 1, 902, 1, 0, 0) ==
+           SIMPLE_MCDC_V1_OK);
+    assert(rt_mcdc_release_compiled_owner_v1(99, 7) == SIMPLE_MCDC_V1_OK);
+    assert(rt_mcdc_configure_compiled_owner_v1(99, 7) == SIMPLE_MCDC_V1_OK);
+    assert(rt_mcdc_record_compiled_vector_v1(300, 1, 902, 1, 1, 1) ==
+           SIMPLE_MCDC_V1_OK);
+    assert(rt_mcdc_release_compiled_owner_v1(99, 7) == SIMPLE_MCDC_V1_OK);
+    assert(rt_mcdc_collector_seal_v1(99) == SIMPLE_MCDC_V1_OK);
+    assert(rt_mcdc_snapshot_v1(epoch_output, 4, &snapshot) ==
+           SIMPLE_MCDC_V1_OK);
+    assert(snapshot.written == 2);
+    assert(epoch_output[0].owner_sequence == 0 &&
+           epoch_output[1].owner_sequence == 0);
+    assert(rt_mcdc_collector_reset_checked_v1() == SIMPLE_MCDC_V1_OK);
     free(snapshot_events);
     free(storage);
     return 0;

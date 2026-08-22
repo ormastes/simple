@@ -118,9 +118,10 @@ SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcManifestInfoV1) == 96, "SimpleMcdcMan
 int32_t rt_mcdc_collector_init_v1(void *storage, uint64_t storage_bytes,
                                   uint64_t session_id);
 /* Partition caller-owned storage into bounded independent producer shards.
- * owner_id deterministically selects one shard; recording performs no lock,
- * allocation, or cross-shard reservation.  A one-shard init is exactly the
- * legacy collector_init_v1 behavior. */
+ * owner_id selects a deterministic primary shard; a full primary probes each
+ * remaining shard once in ring order before reporting sticky overflow.  The
+ * record path performs no lock or allocation.  A one-shard init is exactly
+ * the legacy collector_init_v1 behavior. */
 int32_t rt_mcdc_collector_init_sharded_v1(void *storage,
                                          uint64_t storage_bytes,
                                          uint64_t session_id,

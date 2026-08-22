@@ -14,6 +14,8 @@
 #include "runtime_mcdc_v1.h"
 
 #define MCDC_COLLECTOR_MAX_SHARDS 64u
+#define MCDC_WRITER_GATE_CLOSED (UINT64_C(1) << 63)
+#define MCDC_WRITER_GATE_COUNT (MCDC_WRITER_GATE_CLOSED - 1u)
 enum {
     MCDC_COLLECTOR_UNINITIALIZED = 0,
     MCDC_COLLECTOR_ACTIVE = 1,
@@ -27,7 +29,9 @@ typedef struct {
     size_t offset;
     size_t capacity;
     _Atomic size_t next;
-    uint8_t reserved[64u - sizeof(size_t) * 3u];
+    _Atomic uint64_t active_writers;
+    _Atomic uint64_t compiled_writers;
+    uint8_t reserved[64u - sizeof(size_t) * 3u - sizeof(uint64_t) * 2u];
 } McdcCollectorShardV1;
 _Static_assert(sizeof(McdcCollectorShardV1) == 64u,
                "MC/DC collector shard cache-line ABI");
@@ -47,15 +51,16 @@ typedef struct {
 typedef struct {
     SimpleMcdcVectorV1 *events;
     size_t capacity;
-    uint32_t shard_count;
-    McdcCollectorShardV1 shards[MCDC_COLLECTOR_MAX_SHARDS];
+    _Atomic uint32_t shard_count;
+    _Alignas(64) McdcCollectorShardV1 shards[MCDC_COLLECTOR_MAX_SHARDS];
     _Atomic uint64_t overflow_first;
     _Atomic uint64_t overflow_count;
     _Atomic uint64_t session_id;
     uint64_t interpreter_owner_id;
     _Atomic uint64_t compiled_owner_id;
     _Atomic uint64_t compiled_owner_sequence;
-    _Atomic uint64_t active_writers;
+    _Atomic uint64_t compiled_owner_epoch;
+    _Atomic uint64_t generation;
     _Atomic uint32_t state;
 } McdcCollectorV1;
 
@@ -175,7 +180,14 @@ int32_t rt_mcdc_collector_init_sharded_v1(void *storage,
         mcdc_unlock();
         return SIMPLE_MCDC_V1_INVALID;
     }
-    g_mcdc.shard_count = shard_count;
+    const uint64_t generation = atomic_load_explicit(&g_mcdc.generation,
+                                                      memory_order_relaxed);
+    if (generation == UINT64_MAX) {
+        mcdc_unlock();
+        return SIMPLE_MCDC_V1_OVERFLOW;
+    }
+    atomic_store_explicit(&g_mcdc.shard_count, shard_count,
+                          memory_order_relaxed);
     const size_t base_capacity = g_mcdc.capacity / shard_count;
     const size_t remainder = g_mcdc.capacity % shard_count;
     size_t offset = 0;
@@ -185,6 +197,10 @@ int32_t rt_mcdc_collector_init_sharded_v1(void *storage,
         g_mcdc.shards[shard].capacity = capacity;
         atomic_store_explicit(&g_mcdc.shards[shard].next, 0,
                               memory_order_relaxed);
+        atomic_store_explicit(&g_mcdc.shards[shard].active_writers, 0,
+                              memory_order_relaxed);
+        atomic_store_explicit(&g_mcdc.shards[shard].compiled_writers,
+                              MCDC_WRITER_GATE_CLOSED, memory_order_relaxed);
         offset += capacity;
     }
     atomic_store_explicit(&g_mcdc.overflow_first, UINT64_MAX,
@@ -196,9 +212,10 @@ int32_t rt_mcdc_collector_init_sharded_v1(void *storage,
     atomic_store_explicit(&g_mcdc.compiled_owner_id, 0, memory_order_relaxed);
     atomic_store_explicit(&g_mcdc.compiled_owner_sequence, 0,
                           memory_order_relaxed);
-    atomic_store_explicit(&g_mcdc.active_writers, 0, memory_order_relaxed);
     atomic_store_explicit(&g_mcdc_compiled_last_status,
                           SIMPLE_MCDC_V1_OK, memory_order_relaxed);
+    atomic_store_explicit(&g_mcdc.generation, generation + 1,
+                          memory_order_release);
     atomic_store_explicit(&g_mcdc.state, MCDC_COLLECTOR_ACTIVE,
                           memory_order_release);
     mcdc_unlock();
@@ -226,73 +243,168 @@ static void mcdc_note_overflow_v1(uint64_t logical_sequence) {
                memory_order_relaxed, memory_order_relaxed)) {}
 }
 
-static size_t mcdc_reserve_shard_slot_v1(_Atomic size_t *next) {
+static bool mcdc_reserve_shard_slot_v1(_Atomic size_t *next,
+                                       size_t capacity, size_t *slot) {
     size_t current = atomic_load_explicit(next, memory_order_relaxed);
-    while (current != SIZE_MAX &&
+    while (current < capacity &&
            !atomic_compare_exchange_weak_explicit(
                next, &current, current + 1, memory_order_relaxed,
                memory_order_relaxed)) {}
-    return current;
+    if (current >= capacity) return false;
+    *slot = current;
+    return true;
 }
 
-static int32_t mcdc_writer_enter_v1(void) {
+static bool mcdc_gate_enter_v1(_Atomic uint64_t *gate) {
+    uint64_t active = atomic_load_explicit(gate, memory_order_relaxed);
+    while (!(active & MCDC_WRITER_GATE_CLOSED) &&
+           (active & MCDC_WRITER_GATE_COUNT) != MCDC_WRITER_GATE_COUNT &&
+           !atomic_compare_exchange_weak_explicit(
+               gate, &active, active + 1,
+               memory_order_acquire, memory_order_relaxed)) {}
+    return !(active & MCDC_WRITER_GATE_CLOSED) &&
+           (active & MCDC_WRITER_GATE_COUNT) != MCDC_WRITER_GATE_COUNT;
+}
+
+static void mcdc_gate_leave_v1(_Atomic uint64_t *gate) {
+    atomic_fetch_sub_explicit(gate, 1, memory_order_release);
+}
+
+static int32_t mcdc_writer_enter_v1(uint64_t generation, uint32_t shard) {
+    if (!mcdc_gate_enter_v1(&g_mcdc.shards[shard].active_writers)) {
+        const uint32_t state = atomic_load_explicit(&g_mcdc.state,
+                                                    memory_order_acquire);
+        if (state == MCDC_COLLECTOR_UNINITIALIZED)
+            return SIMPLE_MCDC_V1_NOT_INITIALIZED;
+        return state == MCDC_COLLECTOR_ACTIVE
+            ? SIMPLE_MCDC_V1_BUSY : SIMPLE_MCDC_V1_NOT_SEALED;
+    }
     const uint32_t state = atomic_load_explicit(&g_mcdc.state,
                                                 memory_order_acquire);
-    if (state == MCDC_COLLECTOR_UNINITIALIZED)
-        return SIMPLE_MCDC_V1_NOT_INITIALIZED;
-    if (state != MCDC_COLLECTOR_ACTIVE) return SIMPLE_MCDC_V1_NOT_SEALED;
-    uint64_t active = atomic_load_explicit(&g_mcdc.active_writers,
-                                           memory_order_relaxed);
-    while (active != UINT64_MAX &&
-           !atomic_compare_exchange_weak_explicit(
-               &g_mcdc.active_writers, &active, active + 1,
-               memory_order_acquire, memory_order_relaxed)) {}
-    if (active == UINT64_MAX) return SIMPLE_MCDC_V1_BUSY;
-    if (atomic_load_explicit(&g_mcdc.state, memory_order_acquire) !=
-        MCDC_COLLECTOR_ACTIVE) {
-        atomic_fetch_sub_explicit(&g_mcdc.active_writers, 1,
+    if (state != MCDC_COLLECTOR_ACTIVE ||
+        atomic_load_explicit(&g_mcdc.generation, memory_order_acquire) !=
+        generation) {
+        atomic_fetch_sub_explicit(&g_mcdc.shards[shard].active_writers, 1,
                                   memory_order_release);
-        return SIMPLE_MCDC_V1_NOT_SEALED;
+        return state == MCDC_COLLECTOR_UNINITIALIZED
+            ? SIMPLE_MCDC_V1_NOT_INITIALIZED : SIMPLE_MCDC_V1_NOT_SEALED;
     }
     return SIMPLE_MCDC_V1_OK;
+}
+
+static void mcdc_writer_leave_v1(uint32_t shard) {
+    mcdc_gate_leave_v1(&g_mcdc.shards[shard].active_writers);
+}
+
+static void mcdc_close_and_wait_writers_v1(bool compiled) {
+    const uint32_t shard_count = atomic_load_explicit(&g_mcdc.shard_count,
+                                                       memory_order_relaxed);
+    for (uint32_t shard = 0; shard < shard_count; ++shard) {
+        _Atomic uint64_t *gate = compiled
+            ? &g_mcdc.shards[shard].compiled_writers
+            : &g_mcdc.shards[shard].active_writers;
+        atomic_fetch_or_explicit(gate, MCDC_WRITER_GATE_CLOSED,
+                                 memory_order_acq_rel);
+    }
+    for (uint32_t shard = 0; shard < shard_count; ++shard) {
+        _Atomic uint64_t *gate = compiled
+            ? &g_mcdc.shards[shard].compiled_writers
+            : &g_mcdc.shards[shard].active_writers;
+        while ((atomic_load_explicit(gate, memory_order_acquire) &
+                MCDC_WRITER_GATE_COUNT) != 0) mcdc_yield();
+    }
 }
 
 static int32_t mcdc_record_vector_concurrent_v1(
         uint64_t session_id, uint64_t decision_id, uint32_t condition_count,
         uint64_t source_digest, uint64_t evaluated_mask, uint64_t true_mask,
-        uint64_t owner_id, uint64_t owner_sequence, uint8_t outcome) {
+        uint64_t owner_id, uint64_t owner_sequence, uint8_t outcome,
+        uint64_t compiled_epoch) {
     if (!session_id || !decision_id || !condition_count || condition_count > 62u ||
         !source_digest ||
         !owner_id || outcome > 1u) return SIMPLE_MCDC_V1_INVALID;
     const uint64_t admitted = (UINT64_C(1) << condition_count) - UINT64_C(1);
     if ((evaluated_mask & ~admitted) || (true_mask & ~evaluated_mask))
         return SIMPLE_MCDC_V1_INVALID;
-    const int32_t admission = mcdc_writer_enter_v1();
-    if (admission != SIMPLE_MCDC_V1_OK) return admission;
-    if (atomic_load_explicit(&g_mcdc.session_id, memory_order_relaxed) !=
-        session_id) {
-        atomic_fetch_sub_explicit(&g_mcdc.active_writers, 1,
-                                  memory_order_release);
-        return SIMPLE_MCDC_V1_SESSION_MISMATCH;
+    const uint64_t generation = atomic_load_explicit(&g_mcdc.generation,
+                                                      memory_order_acquire);
+    const uint32_t state = atomic_load_explicit(&g_mcdc.state,
+                                                memory_order_acquire);
+    if (state == MCDC_COLLECTOR_UNINITIALIZED)
+        return SIMPLE_MCDC_V1_NOT_INITIALIZED;
+    if (state != MCDC_COLLECTOR_ACTIVE) return SIMPLE_MCDC_V1_NOT_SEALED;
+    const uint32_t shard_count = atomic_load_explicit(&g_mcdc.shard_count,
+                                                       memory_order_relaxed);
+    if (!shard_count) return SIMPLE_MCDC_V1_NOT_INITIALIZED;
+    const uint32_t primary = (uint32_t)((owner_id - 1u) % shard_count);
+    uint64_t sequence = owner_sequence;
+    bool sequence_assigned = compiled_epoch == 0;
+    for (uint32_t attempt = 0; attempt < shard_count; ++attempt) {
+        const uint32_t shard = (primary + attempt) % shard_count;
+        const bool compiled_admitted = compiled_epoch != 0 &&
+            mcdc_gate_enter_v1(&g_mcdc.shards[shard].compiled_writers);
+        if (compiled_epoch != 0 && !compiled_admitted)
+            return SIMPLE_MCDC_V1_BUSY;
+        const int32_t admission = mcdc_writer_enter_v1(generation, shard);
+        if (admission != SIMPLE_MCDC_V1_OK) {
+            if (compiled_admitted)
+                mcdc_gate_leave_v1(&g_mcdc.shards[shard].compiled_writers);
+            return admission;
+        }
+        if (atomic_load_explicit(&g_mcdc.session_id, memory_order_relaxed) !=
+            session_id) {
+            mcdc_writer_leave_v1(shard);
+            if (compiled_admitted)
+                mcdc_gate_leave_v1(&g_mcdc.shards[shard].compiled_writers);
+            return SIMPLE_MCDC_V1_SESSION_MISMATCH;
+        }
+        if (compiled_epoch != 0 &&
+            atomic_load_explicit(&g_mcdc.compiled_owner_epoch,
+                                 memory_order_acquire) != compiled_epoch) {
+            mcdc_writer_leave_v1(shard);
+            mcdc_gate_leave_v1(&g_mcdc.shards[shard].compiled_writers);
+            return SIMPLE_MCDC_V1_BUSY;
+        }
+        if (!sequence_assigned) {
+            sequence = atomic_load_explicit(&g_mcdc.compiled_owner_sequence,
+                                            memory_order_relaxed);
+            while (sequence != UINT64_MAX &&
+                   !atomic_compare_exchange_weak_explicit(
+                       &g_mcdc.compiled_owner_sequence, &sequence, sequence + 1,
+                       memory_order_relaxed, memory_order_relaxed)) {}
+            if (sequence == UINT64_MAX) {
+                mcdc_note_overflow_v1(UINT64_MAX);
+                mcdc_writer_leave_v1(shard);
+                mcdc_gate_leave_v1(&g_mcdc.shards[shard].compiled_writers);
+                return SIMPLE_MCDC_V1_OVERFLOW;
+            }
+            sequence_assigned = true;
+        }
+        size_t local = 0;
+        if (mcdc_reserve_shard_slot_v1(&g_mcdc.shards[shard].next,
+                                       g_mcdc.shards[shard].capacity, &local)) {
+            g_mcdc.events[g_mcdc.shards[shard].offset + local] =
+                (SimpleMcdcVectorV1){
+                    decision_id, condition_count, 0u, source_digest,
+                    evaluated_mask, true_mask, owner_id, sequence, outcome, {0}
+                };
+            mcdc_writer_leave_v1(shard);
+            if (compiled_admitted)
+                mcdc_gate_leave_v1(&g_mcdc.shards[shard].compiled_writers);
+            return SIMPLE_MCDC_V1_OK;
+        }
+        if (attempt + 1 == shard_count) {
+            mcdc_note_overflow_v1((uint64_t)g_mcdc.capacity);
+            mcdc_writer_leave_v1(shard);
+            if (compiled_admitted)
+                mcdc_gate_leave_v1(&g_mcdc.shards[shard].compiled_writers);
+            return SIMPLE_MCDC_V1_OVERFLOW;
+        }
+        mcdc_writer_leave_v1(shard);
+        if (compiled_admitted)
+            mcdc_gate_leave_v1(&g_mcdc.shards[shard].compiled_writers);
     }
-    const uint32_t shard = (uint32_t)((owner_id - 1u) % g_mcdc.shard_count);
-    const size_t local = mcdc_reserve_shard_slot_v1(
-        &g_mcdc.shards[shard].next);
-    int32_t status = SIMPLE_MCDC_V1_OK;
-    if (local >= g_mcdc.shards[shard].capacity) {
-        const uint64_t logical = local > UINT64_MAX / g_mcdc.shard_count
-            ? UINT64_MAX
-            : (uint64_t)local * g_mcdc.shard_count + shard;
-        mcdc_note_overflow_v1(logical);
-        status = SIMPLE_MCDC_V1_OVERFLOW;
-    } else {
-        g_mcdc.events[g_mcdc.shards[shard].offset + local] = (SimpleMcdcVectorV1){
-        decision_id, condition_count, 0u, source_digest, evaluated_mask, true_mask,
-        owner_id, owner_sequence, outcome, {0}
-        };
-    }
-    atomic_fetch_sub_explicit(&g_mcdc.active_writers, 1, memory_order_release);
-    return status;
+    return SIMPLE_MCDC_V1_OVERFLOW;
 }
 
 int32_t rt_mcdc_record_vector_v1(uint64_t session_id, uint64_t decision_id,
@@ -303,7 +415,7 @@ int32_t rt_mcdc_record_vector_v1(uint64_t session_id, uint64_t decision_id,
                                  uint8_t outcome) {
     const int32_t status = mcdc_record_vector_concurrent_v1(
         session_id, decision_id, condition_count, source_digest,
-        evaluated_mask, true_mask, owner_id, owner_sequence, outcome);
+        evaluated_mask, true_mask, owner_id, owner_sequence, outcome, 0);
     return status;
 }
 
@@ -322,10 +434,25 @@ int32_t rt_mcdc_configure_compiled_owner_v1(uint64_t session_id,
                                   memory_order_relaxed) != 0)
         status = SIMPLE_MCDC_V1_BUSY;
     else {
-        atomic_store_explicit(&g_mcdc.compiled_owner_id, owner_id,
+        const uint64_t epoch = atomic_load_explicit(
+            &g_mcdc.compiled_owner_epoch, memory_order_relaxed);
+        if ((epoch & 1u) || epoch > UINT64_MAX - 2u) {
+            mcdc_unlock();
+            return SIMPLE_MCDC_V1_OVERFLOW;
+        }
+        atomic_store_explicit(&g_mcdc.compiled_owner_epoch, epoch + 1,
                               memory_order_release);
+        const uint32_t shard_count = atomic_load_explicit(
+            &g_mcdc.shard_count, memory_order_relaxed);
+        for (uint32_t shard = 0; shard < shard_count; ++shard)
+            atomic_store_explicit(&g_mcdc.shards[shard].compiled_writers, 0,
+                                  memory_order_relaxed);
         atomic_store_explicit(&g_mcdc.compiled_owner_sequence, 0,
                               memory_order_relaxed);
+        atomic_store_explicit(&g_mcdc.compiled_owner_id, owner_id,
+                              memory_order_relaxed);
+        atomic_store_explicit(&g_mcdc.compiled_owner_epoch, epoch + 2,
+                              memory_order_release);
         atomic_store_explicit(&g_mcdc_compiled_last_status,
                               SIMPLE_MCDC_V1_OK, memory_order_relaxed);
     }
@@ -346,10 +473,21 @@ int32_t rt_mcdc_release_compiled_owner_v1(uint64_t session_id,
                                   memory_order_acquire) != owner_id)
         status = SIMPLE_MCDC_V1_INVALID;
     else {
-        atomic_store_explicit(&g_mcdc.compiled_owner_id, 0,
+        const uint64_t epoch = atomic_load_explicit(
+            &g_mcdc.compiled_owner_epoch, memory_order_relaxed);
+        if ((epoch & 1u) || epoch > UINT64_MAX - 2u) {
+            mcdc_unlock();
+            return SIMPLE_MCDC_V1_OVERFLOW;
+        }
+        atomic_store_explicit(&g_mcdc.compiled_owner_epoch, epoch + 1,
                               memory_order_release);
+        atomic_store_explicit(&g_mcdc.compiled_owner_id, 0,
+                              memory_order_relaxed);
+        mcdc_close_and_wait_writers_v1(true);
         atomic_store_explicit(&g_mcdc.compiled_owner_sequence, 0,
                               memory_order_relaxed);
+        atomic_store_explicit(&g_mcdc.compiled_owner_epoch, epoch + 2,
+                              memory_order_release);
     }
     mcdc_unlock();
     return status;
@@ -361,26 +499,19 @@ int32_t rt_mcdc_record_compiled_vector_v1(uint64_t decision_id,
                                           uint64_t evaluated_mask,
                                           uint64_t true_mask,
                                           uint8_t outcome) {
-    const uint64_t owner_id = atomic_load_explicit(&g_mcdc.compiled_owner_id,
-                                                   memory_order_acquire);
+    const uint64_t epoch = atomic_load_explicit(&g_mcdc.compiled_owner_epoch,
+                                                memory_order_acquire);
+    const uint64_t owner_id = (epoch & 1u) ? 0 : atomic_load_explicit(
+        &g_mcdc.compiled_owner_id, memory_order_relaxed);
     int32_t status;
-    if (!owner_id) {
+    if (!owner_id || atomic_load_explicit(&g_mcdc.compiled_owner_epoch,
+                                          memory_order_acquire) != epoch) {
         status = SIMPLE_MCDC_V1_NOT_INITIALIZED;
     } else {
-        uint64_t sequence = atomic_load_explicit(&g_mcdc.compiled_owner_sequence,
-                                                 memory_order_relaxed);
-        while (sequence != UINT64_MAX &&
-               !atomic_compare_exchange_weak_explicit(
-                   &g_mcdc.compiled_owner_sequence, &sequence, sequence + 1,
-                   memory_order_relaxed, memory_order_relaxed)) {}
-        if (sequence == UINT64_MAX) {
-        status = SIMPLE_MCDC_V1_OVERFLOW;
-        } else {
         status = mcdc_record_vector_concurrent_v1(
             atomic_load_explicit(&g_mcdc.session_id, memory_order_relaxed),
             decision_id, condition_count, source_digest,
-            evaluated_mask, true_mask, owner_id, sequence, outcome);
-        }
+            evaluated_mask, true_mask, owner_id, 0, outcome, epoch);
     }
     mcdc_compiled_note_status(status);
     return status;
@@ -572,8 +703,7 @@ int32_t rt_mcdc_collector_seal_v1(uint64_t session_id) {
     if (state != MCDC_COLLECTOR_ACTIVE) { mcdc_unlock(); return SIMPLE_MCDC_V1_BUSY; }
     atomic_store_explicit(&g_mcdc.state, MCDC_COLLECTOR_SEALING,
                           memory_order_release);
-    while (atomic_load_explicit(&g_mcdc.active_writers,
-                                memory_order_acquire) != 0) mcdc_yield();
+    mcdc_close_and_wait_writers_v1(false);
     atomic_store_explicit(&g_mcdc.state, MCDC_COLLECTOR_SEALED,
                           memory_order_release);
     mcdc_unlock();
@@ -619,8 +749,10 @@ int32_t rt_mcdc_snapshot_v1(SimpleMcdcVectorV1 *output, uint64_t output_capacity
     }
     if (atomic_load_explicit(&g_mcdc.state, memory_order_acquire) !=
         MCDC_COLLECTOR_SEALED) { mcdc_unlock(); return SIMPLE_MCDC_V1_NOT_SEALED; }
+    const uint32_t shard_count = atomic_load_explicit(&g_mcdc.shard_count,
+                                                       memory_order_relaxed);
     size_t count = 0;
-    for (uint32_t shard = 0; shard < g_mcdc.shard_count; ++shard) {
+    for (uint32_t shard = 0; shard < shard_count; ++shard) {
         size_t used = atomic_load_explicit(&g_mcdc.shards[shard].next,
                                            memory_order_relaxed);
         if (used > g_mcdc.shards[shard].capacity)
@@ -632,7 +764,7 @@ int32_t rt_mcdc_snapshot_v1(SimpleMcdcVectorV1 *output, uint64_t output_capacity
         return SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL;
     }
     size_t written = 0;
-    for (uint32_t shard = 0; shard < g_mcdc.shard_count; ++shard) {
+    for (uint32_t shard = 0; shard < shard_count; ++shard) {
         size_t used = atomic_load_explicit(&g_mcdc.shards[shard].next,
                                            memory_order_relaxed);
         if (used > g_mcdc.shards[shard].capacity)
@@ -673,11 +805,10 @@ int32_t rt_mcdc_collector_reset_checked_v1(void) {
     }
     atomic_store_explicit(&g_mcdc.state, MCDC_COLLECTOR_SEALING,
                           memory_order_release);
-    while (atomic_load_explicit(&g_mcdc.active_writers,
-                                memory_order_acquire) != 0) mcdc_yield();
+    mcdc_close_and_wait_writers_v1(false);
     g_mcdc.events = NULL;
     g_mcdc.capacity = 0;
-    g_mcdc.shard_count = 0;
+    atomic_store_explicit(&g_mcdc.shard_count, 0, memory_order_relaxed);
     atomic_store_explicit(&g_mcdc.overflow_first, UINT64_MAX,
                           memory_order_relaxed);
     atomic_store_explicit(&g_mcdc.overflow_count, 0, memory_order_relaxed);
