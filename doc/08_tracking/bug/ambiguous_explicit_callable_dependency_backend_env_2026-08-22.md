@@ -140,11 +140,43 @@ zero `AMBIGDBG` traces) and was killed. The stage1 lane that produced the origin
 diagnostic is sharded and parallel; a single-process interpreted repro is not a
 practical substitute on this box.
 
+## Iteration 3 (2026-08-22): the probe is now a retained, level-gated log
+
+Rather than delete the investigation instrumentation (forbidden by
+`doc/07_guide/infra/logging/log_retention_policy.md` and `.claude/rules/code-style.md`)
+it is landed permanently, default OFF, behind `SIMPLE_AMBIGDBG=1`:
+
+- Sink and gate: `hir_ambig_dep_trace` / `hir_ambig_dep_trace_enabled` in
+  `src/compiler/20.hir/hir_lowering/hir_phase_profile.spl`. The env is read ONCE per
+  process and cached in `_hir_ambig_trace_state`, the same shape as
+  `hir_phase_profile_enabled`'s PROFOFF fast path, so every later call is one i64
+  compare. Every call site tests the gate BEFORE building its message, because string
+  interpolation is evaluated at the call site, not inside the sink.
+- Covered exits: the router and all three of its step guards
+  (`router`, `router-preresolved`, `router-step1-declared-bound`,
+  `router-step1-missed`, `router-step2-explicit-bound`, `router-step2-missed`);
+  the facade chase outcome (`chase mod=... wanted=... found=... target=... item=...`)
+  and each of its bailouts (`chase-bail reason=depth-cap | visited-memo |
+  route-arrays-misaligned | walk-state-misaligned | invalid-facade-index |
+  export-origin-owner-unresolved`); the terminal
+  `register-return reason=already-bound-other-owner`; and the sweep itself
+  (`sweep-enter`, one `sweep-candidate route=named|glob ... target=... item=...` per
+  candidate, and `sweep-verdict ... ambiguous=... selected_target=... selected_item=...`).
+- Default-off pinned by `test/01_unit/compiler/hir/ambig_dep_trace_default_off_spec.spl`
+  (2/2 green). Verified live: with `SIMPLE_AMBIGDBG=1` the fixture run emits
+  `router`/`chase`/`router-step1-declared-bound` lines; with it unset, nothing.
+
+This turns the blocked step into a passive one: a sharded stage-1 lane run with
+`SIMPLE_AMBIGDBG=1` records both WHY the first-wins chase declined for
+`compiler.backend.backend.env` and WHICH two candidates the sweep then found, without
+anyone paying for a single-process interpreted repro.
+
 ## Next steps
 
-1. Get the real-tree trace from a SHARDED stage1 lane (or an idle box) rather than a
-   single interpreted `compile`, and record the two competing `(target module, item)`
-   pairs plus the reason step 1's chase did not bind.
+1. Read the `[ambig-dep]` lines for `owner=compiler.backend.backend.env dep=Backend`
+   out of a sharded stage-1 lane log run with `SIMPLE_AMBIGDBG=1` (requested for run14),
+   and record the two competing `(target module, item)` pairs plus the `chase-bail`
+   reason step 1 did not bind.
 2. Land the rank-based fix with a fixture built from the observed route shape, so the
    spec is red pre-fix.
 3. Re-check the `-2` memo: with the rank rule, `-2` should only ever cache a

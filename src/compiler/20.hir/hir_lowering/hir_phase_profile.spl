@@ -246,3 +246,42 @@ fn hir_phase_profile_module_end(module_name: text):
         + " fields={_hir_prof_excl_ms[HIR_PROF_RIS_FIELDS]}ms"
         + " project={_hir_prof_excl_ms[HIR_PROF_RIS_PROJECT]}ms")
     rt_stdout_flush()
+
+# ============================================================================
+# AMBIGDBG -- import/dependency resolution route trace (SIMPLE_AMBIGDBG=1)
+# ============================================================================
+#
+# Retained probe log, default OFF, per doc/07_guide/infra/logging/
+# log_retention_policy.md and .claude/rules/code-style.md ("logs are NOT unused
+# code"). It exists because the resolution path that produces
+# `ambiguous explicit callable dependency` cannot be reached from any small
+# fixture: `register_imported_symbol_inner`'s re-export facade chase
+# (`find_reexport_source_walk`) scans the SAME named and wildcard import rows
+# the ambiguity sweep scans, but is FIRST-MATCH-WINS with no ambiguity notion,
+# so it binds first on every simple graph and the sweep is never consulted.
+# The sweep is reachable only where that chase fails to BIND -- the depth cap,
+# the shared visited-memo, a valid/complete bailout, or a terminal
+# `already_bound and not same_owner` return -- which are properties of a real
+# whole-tree graph. Every one of those exits is traced below, so a sharded
+# stage-1 lane run with SIMPLE_AMBIGDBG=1 records WHY the fast path declined
+# and WHICH candidates the sweep then found.
+# See doc/08_tracking/bug/ambiguous_explicit_callable_dependency_backend_env_2026-08-22.md
+var _hir_ambig_trace_state: i64 = 0
+
+fn hir_ambig_dep_trace_enabled() -> bool:
+    """Cached env verdict, same shape as hir_phase_profile_enabled's PROFOFF
+    fast path: the environment is read ONCE per process, every later call is a
+    single i64 compare.
+
+    Call sites MUST test this before building their message, because string
+    interpolation is evaluated at the CALL SITE, not inside the sink -- an
+    unguarded `hir_ambig_dep_trace("... {expr} ...")` would pay the full
+    formatting cost on a hot path even with tracing off."""
+    if _hir_ambig_trace_state == 0:
+        _hir_ambig_trace_state = if (rt_env_get("SIMPLE_AMBIGDBG") ?? "") == "1": 1 else: 2
+    _hir_ambig_trace_state == 1
+
+fn hir_ambig_dep_trace(message: text):
+    """Emit one trace line. Silent unless SIMPLE_AMBIGDBG=1."""
+    if not hir_ambig_dep_trace_enabled(): return
+    eprint("[ambig-dep] {message}")

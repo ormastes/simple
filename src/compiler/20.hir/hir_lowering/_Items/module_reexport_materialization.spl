@@ -1,5 +1,5 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
-use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_now, hir_phase_profile_add, hir_phase_profile_count_qtype, hir_phase_profile_count_explicit_scan, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_CALLABLE_DEPS, HIR_PROF_RIS_DECLARED_DEP, HIR_PROF_RIS_EXPLICIT_DEP, HIR_PROF_RIS_PAYLOAD, HIR_PROF_RIS_METHODS}
+use compiler.hir.hir_lowering.hir_phase_profile.{hir_ambig_dep_trace, hir_ambig_dep_trace_enabled, hir_phase_profile_now, hir_phase_profile_add, hir_phase_profile_count_qtype, hir_phase_profile_count_explicit_scan, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_CALLABLE_DEPS, HIR_PROF_RIS_DECLARED_DEP, HIR_PROF_RIS_EXPLICIT_DEP, HIR_PROF_RIS_PAYLOAD, HIR_PROF_RIS_METHODS}
 use compiler.hir.hir_lowering._Items.module_lowering.*
 # HIR Lowering - Item Lowering
 #
@@ -42,16 +42,24 @@ impl HirLowering:
     ) -> HirReexportSource:
         """Walk frozen physical routes without path normalization or splits."""
         if depth > 8:
+            if hir_ambig_dep_trace_enabled():
+                hir_ambig_dep_trace("chase-bail reason=depth-cap facade={facade_index} wanted={wanted} depth={depth}")
             state.complete = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if facade_index < 0 or facade_index >= self.module_surfaces.surfaces.len():
+            if hir_ambig_dep_trace_enabled():
+                hir_ambig_dep_trace("chase-bail reason=invalid-facade-index facade={facade_index} wanted={wanted} depth={depth}")
             state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if not module_surface_route_arrays_aligned(self.module_surfaces.surfaces[facade_index]):
+            if hir_ambig_dep_trace_enabled():
+                hir_ambig_dep_trace("chase-bail reason=route-arrays-misaligned facade={self.module_surfaces.surfaces[facade_index].module_name} wanted={wanted} depth={depth}")
             state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if (state.surface_indices.len() != state.wanted_names.len() or
             state.surface_indices.len() != state.depths.len()):
+            if hir_ambig_dep_trace_enabled():
+                hir_ambig_dep_trace("chase-bail reason=walk-state-misaligned wanted={wanted} depth={depth}")
             state.valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
 
@@ -61,6 +69,8 @@ impl HirLowering:
         if visit_entry >= 0:
             val seen_depth = state.depths[visit_entry]
             if seen_depth <= depth:
+                if hir_ambig_dep_trace_enabled():
+                    hir_ambig_dep_trace("chase-bail reason=visited-memo facade={self.module_surfaces.surfaces[facade_index].module_name} wanted={wanted} depth={depth} seen_depth={seen_depth}")
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             state.depths[visit_entry] = depth
         else:
@@ -78,6 +88,8 @@ impl HirLowering:
                 self.module_surfaces, origin_lookup.owner_module)
             if origin_index_value < 0 or
                origin_index_value >= self.module_surfaces.surfaces.len():
+                if hir_ambig_dep_trace_enabled():
+                    hir_ambig_dep_trace("chase-bail reason=export-origin-owner-unresolved facade={facade_mod.module_name} wanted={wanted} owner={origin_lookup.owner_module}")
                 state.valid = false
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             return HirReexportSource(
@@ -557,6 +569,8 @@ impl HirLowering:
             selected_target = self.explicit_dep_target_memo[memo_key]
             selected_item = self.explicit_dep_item_memo[memo_key]
         else:
+            if hir_ambig_dep_trace_enabled():
+                hir_ambig_dep_trace("sweep-enter owner={imported_mod.module_name} dep={dependency} imports={imported_mod.imports.len()}")
             self.explicit_dep_scan_count = self.explicit_dep_scan_count + 1
             hir_phase_profile_count_explicit_scan(imported_mod.imports.len())
             # Resolve only an explicit named import written by the callable
@@ -592,6 +606,8 @@ impl HirLowering:
                                 candidate_item = hop.item_name
                                 candidate_found = true
                         if candidate_found:
+                            if hir_ambig_dep_trace_enabled():
+                                hir_ambig_dep_trace("sweep-candidate route=named owner={imported_mod.module_name} dep={dependency} import={import_index} target={self.module_surfaces.surfaces[candidate_target].module_name} item={candidate_item}")
                             if selected_target >= 0 and
                                (selected_target != candidate_target or
                                 selected_item != candidate_item):
@@ -617,6 +633,8 @@ impl HirLowering:
                             candidate_item = hop.item_name
                             candidate_found = true
                     if candidate_found:
+                        if hir_ambig_dep_trace_enabled():
+                            hir_ambig_dep_trace("sweep-candidate route=glob owner={imported_mod.module_name} dep={dependency} import={import_index} target={self.module_surfaces.surfaces[candidate_target].module_name} item={candidate_item}")
                         if selected_target >= 0 and
                            (selected_target != candidate_target or
                             selected_item != candidate_item):
@@ -624,6 +642,9 @@ impl HirLowering:
                         selected_target = candidate_target
                         selected_item = candidate_item
                 import_index = import_index + 1
+            if hir_ambig_dep_trace_enabled():
+                val sweep_verdict_name = if selected_target >= 0: self.module_surfaces.surfaces[selected_target].module_name else: "<none>"
+                hir_ambig_dep_trace("sweep-verdict owner={imported_mod.module_name} dep={dependency} ambiguous={ambiguous} selected_target={sweep_verdict_name} selected_item={selected_item}")
             if ambiguous:
                 # -2 is the ambiguity sentinel, cached like any other fact so a
                 # later importer does not re-sweep to rediscover it. The
@@ -876,16 +897,28 @@ impl HirLowering:
         registration of a zero-import member (sugar_registry.spl, context.spl,
         modes.spl, value.spl) lowered that signature first and died with
         `unresolved type: Completion` blamed on the member being lowered."""
+        if hir_ambig_dep_trace_enabled():
+            hir_ambig_dep_trace("router owner={imported_mod.module_name} dep={dependency} imports={imported_mod.imports.len()}")
         if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
+            if hir_ambig_dep_trace_enabled():
+                hir_ambig_dep_trace("router-preresolved owner={imported_mod.module_name} dep={dependency}")
             return
         self.materialize_imported_callable_declared_dependency(
             imported_mod, imported_mod_name, dependency, import_span, materialize_enum)
         if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
+            if hir_ambig_dep_trace_enabled():
+                hir_ambig_dep_trace("router-step1-declared-bound owner={imported_mod.module_name} dep={dependency}")
             return
+        if hir_ambig_dep_trace_enabled():
+            hir_ambig_dep_trace("router-step1-missed owner={imported_mod.module_name} dep={dependency} (facade chase did not bind; entering explicit sweep)")
         self.materialize_imported_callable_explicit_dependency(
             imported_mod, dependency, import_span, materialize_enum)
         if self.qtype_raw_counted(imported_mod.module_name, dependency) >= 0:
+            if hir_ambig_dep_trace_enabled():
+                hir_ambig_dep_trace("router-step2-explicit-bound owner={imported_mod.module_name} dep={dependency}")
             return
+        if hir_ambig_dep_trace_enabled():
+            hir_ambig_dep_trace("router-step2-missed owner={imported_mod.module_name} dep={dependency} (entering package-sibling fallback)")
         self.materialize_imported_field_package_dependency(
             imported_mod.physical_index, hir_dependency_type_name(dependency), import_span, materialize_enum)
 
