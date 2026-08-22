@@ -38,7 +38,11 @@ only after dispatch owns verified change receipts.
 
 The first recorded execution boundary is `run_named_pass_with_record`. It rejects an
 invalid input or output when block/local identity, entry membership, or CFG targets are
-malformed, and distinguishes a serialized-MIR change from an unchanged run. This is a
+malformed. The active `write_coalesce` and `syscall_batch` function adapters report exact
+native candidate/transformed counts, stable witness reasons, and instruction deltas;
+the boundary rejects disagreement between those counts and serialized MIR change. It
+never substitutes `candidates=1` merely because a function changed, and a newly active
+function pass without an exact outcome adapter fails closed. This is a
 structural receipt, not yet proof of SSA dominance, type correctness, ownership, or
 semantic equivalence; those omissions remain explicit blockers for `--verify-each`.
 
