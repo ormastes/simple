@@ -1246,3 +1246,13 @@ each Simple source once and filters call names through an in-memory symbol
 hash. A complete backing census finishes in 34.09 seconds with 75,124 KiB peak
 RSS; the enclosing safety census finishes in 75.03 seconds with 75,560 KiB
 peak RSS. This is audit-time work only and adds no runtime/SFFI call overhead.
+
+Both HIR safety analyzers previously recognized only externs declared in the
+same module, so import/re-export could erase raw-call identity. They now treat
+every `rt_*` and `spl_*` callee as intrinsically FFI-unsafe, independent of the
+module-local extern table. The prefix check is compile-time, constant in the
+short prefix length, and precedes the old linear table scan; generated/runtime
+code receives no new branch, lookup, allocation, or wrapper. Rust tests pass
+4/4 and the self-hosted safety spec passes 7/7. The broad source check printed
+four successful 32-file passes but failed to terminate and was stopped, so it
+is not promoted to completed verification.

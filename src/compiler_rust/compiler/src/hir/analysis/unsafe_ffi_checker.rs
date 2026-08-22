@@ -44,6 +44,13 @@ pub fn unsafe_ffi_deny_enabled() -> bool {
     })
 }
 
+#[inline]
+fn is_raw_ffi_name(module: &HirModule, name: &str) -> bool {
+    // Imported raw providers are not present in this module's local extern
+    // table. Preserve their FFI identity without a registry or hash lookup.
+    name.starts_with("rt_") || name.starts_with("spl_") || module.extern_fn_names.contains(name)
+}
+
 fn check_stmts(
     module: &HirModule,
     function: &str,
@@ -133,7 +140,7 @@ fn check_expr(module: &HirModule, function: &str, expr: &HirExpr, in_unsafe: boo
         HirExprKind::Call { func, args } => {
             if !in_unsafe {
                 if let HirExprKind::Global(name) = &func.kind {
-                    if module.extern_fn_names.contains(name) {
+                    if is_raw_ffi_name(module, name) {
                         out.push(UnsafeFfiViolation {
                             function: function.to_owned(),
                             callee: name.clone(),
@@ -251,6 +258,22 @@ mod tests {
     fn accepts_raw_extern_call_inside_unsafe() {
         let module = lower(
             "extern fn rt_probe() -> i64\nfn run() -> i64:\n    unsafe(capabilities: [ffi]):\n        rt_probe()\n",
+        );
+        assert!(check_unsafe_ffi(&module).is_empty());
+    }
+
+    #[test]
+    fn rejects_imported_style_rt_call_without_local_extern_declaration() {
+        let module = lower("fn rt_imported_probe() -> i64:\n    1\nfn run() -> i64:\n    rt_imported_probe()\n");
+        let violations = check_unsafe_ffi(&module);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].callee, "rt_imported_probe");
+    }
+
+    #[test]
+    fn accepts_imported_style_rt_call_inside_unsafe() {
+        let module = lower(
+            "fn rt_imported_probe() -> i64:\n    1\nfn run() -> i64:\n    unsafe(capabilities: [ffi]):\n        rt_imported_probe()\n",
         );
         assert!(check_unsafe_ffi(&module).is_empty());
     }

@@ -984,3 +984,12 @@ is 34.09 seconds / 75,124 KiB peak RSS; the full safety census is 75.03 seconds
 / 75,560 KiB. Preserve this bounded audit shape while adding contract fields;
 never move census, evidence, signature, or symbol-resolution work into the
 foreign-call hot path.
+
+Raw `rt_*`/`spl_*` identity now survives module boundaries in both HIR safety
+passes: prefix classification requires lexical unsafe authority even when a
+callee is absent from the current module's extern table. Keep semantic safe
+APIs free of raw prefixes and minimize unsafe to the actual raw call. Focused
+gates pass (Rust 4/4, self-hosted 7/7); the broad compiler check repeatedly
+printed green batches but did not terminate, which remains tooling evidence to
+fix rather than a PASS. This rule changes compile-time analysis only and adds
+no foreign-call hot-path work.
