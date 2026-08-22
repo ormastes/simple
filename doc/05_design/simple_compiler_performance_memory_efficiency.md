@@ -629,3 +629,14 @@ concatenation. Rendering uses ordered fragments and one join. `check` renders in
 memory and performs one exact read without mutation; `generate` validates and
 renders fully before at most one changed-only atomic write. Missing evidence,
 invalid input, and capacity exhaustion fail closed.
+
+### Ordered predicate generation
+
+The build-only rule manifest uses postfix tokens (`Hit`, caller phrase, `Not`,
+`And`, `Or`) rather than recursive expression values. Explicit contiguous
+ordinals are the first-match ABI. Validation simulates stack depth, bounds every
+hit against the canonical pattern manifest, and fixes the sole dynamic phrase
+as a standalone predicate at ordinal 49. A precedence-aware renderer maintains
+the existing explicit early-return cascade, section order, negative guard,
+overlap shadowing, and fallback order. Runtime code must not import the rule
+manifest or allocate/iterate a generic rule registry.
