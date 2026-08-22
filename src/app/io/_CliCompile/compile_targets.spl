@@ -139,7 +139,7 @@ fn cli_native_build_option_error(args: [text]) -> text:
         if arg == "--help" or arg == "-h" or arg == "--list-optimizations":
             i = i + 1
             continue
-        if arg == "--entry-closure" or arg == "--low-memory" or arg == "--verbose" or arg == "-v" or arg == "--strip" or arg == "--emit-smf" or arg == "--emit-object" or arg == "--emit-archive" or arg == "--emit-shared" or arg == "--release" or arg == "--release-optimized" or arg == "--no-borrow-check" or arg == "--no-mangle" or arg == "--no-incremental" or arg == "--clean" or arg == "--fail-fast":
+        if arg == "--entry-closure" or arg == "--whole-source" or arg == "--low-memory" or arg == "--verbose" or arg == "-v" or arg == "--strip" or arg == "--emit-smf" or arg == "--emit-object" or arg == "--emit-archive" or arg == "--emit-shared" or arg == "--release" or arg == "--release-optimized" or arg == "--no-borrow-check" or arg == "--no-mangle" or arg == "--no-incremental" or arg == "--clean" or arg == "--fail-fast":
             i = i + 1
             continue
         if arg == "--log":
@@ -504,7 +504,8 @@ fn cli_native_build(args: [text]) -> i64:
             print "  --no-mangle          Preserve declared function symbol names"
             print "  --runtime-bundle <mode> Runtime lane: auto, simple-core, core-c-bootstrap"
             print "  --cpu <policy>       CPU policy: default, native, or x86-64-v1..v4"
-            print "  --entry-closure      Compile only modules reachable from --entry"
+            print "  --entry-closure      Compile only modules reachable from --entry (default)"
+            print "  --whole-source       Explicitly compile every .spl file under --source roots"
             print "  --threads <n>        Native build workers"
             print "  --jobs <n>, -j <n>   Alias for --threads"
             print "  --log <on|off>       Compile normal SimpleOS logging in or out"
@@ -593,6 +594,7 @@ fn cli_native_build(args: [text]) -> i64:
         var emit_shared = false
         var source_dirs: [text] = []
         var entry_closure = false
+        var whole_source = false
         var release = true
         var opt_level = cli_native_default_opt_level()
         var native_target = ""
@@ -619,6 +621,11 @@ fn cli_native_build(args: [text]) -> i64:
                 # the `--entry` prefix check below, or it is mis-read as `--entry`
                 # and eats the next token as the entry path.
                 entry_closure = true
+            elif a == "--whole-source":
+                # Bulk source discovery is intentionally opt-in. An explicit
+                # --entry with --source must stay a bounded import-closure build
+                # unless the caller names this potentially expensive mode.
+                whole_source = true
             elif cli_native_build_is_entry_arg(a):
                 if a.contains("="):
                     val eq_idx = a.index_of("=")
@@ -840,6 +847,10 @@ fn cli_native_build(args: [text]) -> i64:
             _cli_eprint("Error: invalid --mode '{build_mode}' (expected dynload or one-binary)")
             return 1
 
+        if entry_closure and whole_source:
+            _cli_eprint("Error: --entry-closure and --whole-source are mutually exclusive")
+            return 1
+
         val emit_mode_count = (if emit_object: 1 else: 0) +
             (if emit_archive: 1 else: 0) + (if emit_shared: 1 else: 0)
         if emit_mode_count > 1:
@@ -946,7 +957,11 @@ fn cli_native_build(args: [text]) -> i64:
             env_set("SIMPLE_NATIVE_CPU", native_cpu)
         # Keep the pre-closure flag clear. The driver must register logical
         # aliases for the physical closure inputs before it marks the walk done.
-        val effective_entry_closure = entry_closure or emit_object or emit_archive or emit_shared
+        # A named entry is focused by default, even when one or more --source
+        # roots are present. This prevents a local target from silently turning
+        # into a 12k-file app/lib/compiler/runtime scan. Legitimate monolithic
+        # builds retain their old behavior through explicit --whole-source.
+        val effective_entry_closure = not whole_source
         env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
         if runtime_bundle_explicit:
             env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", runtime_bundle)
@@ -959,15 +974,27 @@ fn cli_native_build(args: [text]) -> i64:
 
         val _nb_target_opt_ctx = target_opt_context_default()
 
+        # Resolve the closure once. Besides avoiding duplicate traversal when
+        # output modes evolve, this gives admission failure a single fail-closed
+        # exit before the compiler allocates its module graph.
+        val focused_inputs = if effective_entry_closure:
+            _native_build_entry_closure(entry_point, source_dirs)
+        else:
+            []
+        if effective_entry_closure and focused_inputs.len() == 0:
+            _cli_eprint("Error: native-build entry closure admission failed")
+            return 1
+
         val result = if emit_smf:
             # --emit-smf: produce native binary + SMF cache file
             use compiler.driver.driver_types (CompileOptions, CompileMode)
             use compiler.driver.driver (CompilerDriver)
             var options = driver_core_compile_options_default()
-            var native_inputs: [text] = []
+            # Reuse the admitted closure array; do not copy every path into a
+            # second growable vector on focused builds.
+            var native_inputs: [text] = focused_inputs
             if effective_entry_closure:
-                for cf in _native_build_entry_closure(entry_point, source_dirs):
-                    native_inputs = native_inputs.push(cf)
+                for cf in focused_inputs:
                     options = cli_native_build_add_bootstrap_input(options, cf)
             else:
                 for source_dir in source_dirs:
@@ -997,10 +1024,9 @@ fn cli_native_build(args: [text]) -> i64:
             driver_result
         else:
             var options = driver_core_compile_options_default()
-            var native_inputs: [text] = []
+            var native_inputs: [text] = focused_inputs
             if effective_entry_closure:
-                for cf in _native_build_entry_closure(entry_point, source_dirs):
-                    native_inputs = native_inputs.push(cf)
+                for cf in focused_inputs:
                     options = cli_native_build_add_bootstrap_input(options, cf)
             else:
                 for source_dir in source_dirs:
