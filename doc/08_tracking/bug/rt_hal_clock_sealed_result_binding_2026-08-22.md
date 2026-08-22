@@ -45,3 +45,26 @@ comparison. Either changes semantics or compares a different observation.
 Acceptance evidence must include same-fixture direct-versus-dispatch timing,
 peak RSS, post-seal allocation/spawn counters, and a sabotage test that changes
 one replayed observation and forces divergence.
+
+## Compiler binding prerequisite (2026-08-22 follow-up)
+
+The HIR contract pass now resolves the canonical manifest through the closed
+`rt_hal_static_binding_v1` table.  The clock row binds the existing direct leaf
+and sealed V2 scalar entry point and rejects any signature other than
+`fn() -> i64`.  `io.environment.get.v1` binds its normal direct leaf, but a
+multi-provider declaration fails closed with `E-RT-HAL-BIND-003` because the
+sealed ABI still has no bounded text result.  Unknown operation identities also
+fail closed; there is no reflective or environment-based fallback.
+
+This is intentionally a compiler validation/binding prerequisite, not a fake
+call rewrite.  Replacing a call to `time_now_nanos()` with the raw scalar leaf
+would bypass its negative-sentinel panic and change the public error contract.
+The compiler also has no immutable per-entry run-mode input at call lowering,
+so it cannot safely select normal versus alpha/beta there.  The remaining
+implementation must generate a same-signature wrapper after the mode owner and
+bounded result ABI are available, then attach that wrapper to resolved calls.
+
+Compile-time cost is O(manifest bytes) once per tagged declaration (bounded by
+2,048 bytes) plus O(1) closed-row selection and signature validation.  Runtime
+cost, allocation count, and dispatch overhead remain exactly unchanged because
+the new checks emit no hot-path instruction, collection, copy, or lookup.

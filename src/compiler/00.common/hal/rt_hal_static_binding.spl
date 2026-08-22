@@ -1,0 +1,94 @@
+# Closed compile-time binding table for @rt(hal) operations.
+#
+# This table is deliberately compiler-owned and bounded.  It is evaluated once
+# while lowering declarations; no runtime reflection, environment lookup, text
+# parsing, allocation, or indirect dispatch is introduced on the operation hot
+# path.
+
+enum RtHalResultAbiV1:
+    Unsupported
+    ScalarI64
+    Text
+
+struct RtHalStaticBindingV1:
+    known: bool
+    operation: text
+    direct_symbol: text
+    compare_symbol: text
+    result_abi: RtHalResultAbiV1
+    compare_supported: bool
+    diagnostic: text
+
+fn rt_hal_manifest_operation_v1(manifest: text) -> text:
+    val prefix = "rt-hal-v1|operation="
+    if not manifest.starts_with(prefix):
+        return ""
+    val tail = manifest.substring(prefix.len(), manifest.len())
+    val separator = tail.find("|")
+    if separator < 0:
+        return tail
+    tail.substring(0, separator)
+
+fn rt_hal_manifest_provider_mask_v1(manifest: text) -> i64:
+    val marker = "|providers="
+    val start = manifest.find(marker)
+    if start < 0:
+        return 0
+    val tail_start = start + marker.len()
+    val tail = manifest.substring(tail_start, manifest.len())
+    val separator = tail.find("|")
+    val raw = if separator < 0: tail else: tail.substring(0, separator)
+    var value: i64 = 0
+    for ch in raw:
+        if ch < "0" or ch > "9":
+            return 0
+        value = value * 10
+        if ch == "1": value = value + 1
+        elif ch == "2": value = value + 2
+        elif ch == "3": value = value + 3
+        elif ch == "4": value = value + 4
+        elif ch == "5": value = value + 5
+        elif ch == "6": value = value + 6
+        elif ch == "7": value = value + 7
+        elif ch == "8": value = value + 8
+        elif ch == "9": value = value + 9
+    value
+
+fn rt_hal_provider_mask_compares_v1(mask: i64) -> bool:
+    mask > 0 and (mask & (mask - 1)) != 0
+
+fn rt_hal_static_binding_v1(operation: text) -> RtHalStaticBindingV1:
+    if operation == "io.clock.monotonic_nanos.v1":
+        return RtHalStaticBindingV1(
+            true, operation, "hal_clock_monotonic_nanos_v1",
+            "rt_hal_sealed_invoke_clock_mode_v2",
+            RtHalResultAbiV1.ScalarI64, true, "")
+    if operation == "io.environment.get.v1":
+        return RtHalStaticBindingV1(
+            true, operation, "rt_env_get", "",
+            RtHalResultAbiV1.Text, false,
+            "E-RT-HAL-BIND-003: io.environment.get.v1 comparison requires a sealed bounded-text result ABI")
+    RtHalStaticBindingV1(
+        false, operation, "", "", RtHalResultAbiV1.Unsupported, false,
+        "E-RT-HAL-BIND-001: no closed compiler binding for @rt(hal) operation '" + operation + "'")
+
+fn rt_hal_binding_signature_diagnostic_v1(
+        binding: RtHalStaticBindingV1, parameter_count: i64,
+        returns_i64: bool, returns_text: bool) -> text:
+    if not binding.known:
+        return binding.diagnostic
+    match binding.result_abi:
+        case ScalarI64:
+            if parameter_count != 0 or not returns_i64:
+                return "E-RT-HAL-BIND-002: io.clock.monotonic_nanos.v1 requires fn() -> i64"
+        case Text:
+            if parameter_count != 1 or not returns_text:
+                return "E-RT-HAL-BIND-002: io.environment.get.v1 requires fn(text) -> text"
+        case Unsupported:
+            return binding.diagnostic
+    ""
+
+export RtHalResultAbiV1, RtHalStaticBindingV1
+export rt_hal_manifest_operation_v1, rt_hal_manifest_provider_mask_v1
+export rt_hal_provider_mask_compares_v1, rt_hal_static_binding_v1
+export rt_hal_binding_signature_diagnostic_v1

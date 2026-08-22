@@ -38,6 +38,11 @@ use compiler.semantics.rt_hal_assurance_closure.{
     rt_hal_assurance_nodes_from_hir_v1, rt_hal_assurance_closure_check_v1,
     rt_hal_assurance_format_v1
 }
+use compiler.common.hal.rt_hal_static_binding.{
+    rt_hal_manifest_operation_v1, rt_hal_manifest_provider_mask_v1,
+    rt_hal_provider_mask_compares_v1,
+    rt_hal_static_binding_v1, rt_hal_binding_signature_diagnostic_v1
+}
 use compiler.mono.verify.post_mono_verify.{
     post_mono_verify_modules,
     post_mono_report_total,
@@ -415,6 +420,42 @@ pub fn run_rt_hal_contract_pass(
                     out = out.push(invalid)
                     ctx.add_error(invalid)
                     errors_raised = errors_raised + 1
+                else:
+                    val operation = rt_hal_manifest_operation_v1(
+                        function_.func_attr.rt_hal_manifest)
+                    val binding = rt_hal_static_binding_v1(operation)
+                    var returns_i64 = false
+                    var returns_text = false
+                    match function_.return_type.kind:
+                        case HirTypeKind.Int(bits, signed):
+                            returns_i64 = bits == 64 and signed
+                        case HirTypeKind.Str:
+                            returns_text = true
+                        case _: ()
+                    val binding_diagnostic =
+                        rt_hal_binding_signature_diagnostic_v1(
+                            binding, function_.params.len(),
+                            returns_i64, returns_text)
+                    if binding_diagnostic != "":
+                        val invalid_binding = "[" + binding_diagnostic + "] " +
+                            module_name + "::" + function_.name
+                        out = out.push(invalid_binding)
+                        ctx.add_error(invalid_binding)
+                        errors_raised = errors_raised + 1
+                    # The sealed V2 clock result is scalar and therefore safe
+                    # to compare.  Text results have no frozen result ABI yet;
+                    # fail closed whenever the declaration requests multiple
+                    # providers instead of silently running an incomparable
+                    # shadow lane.
+                    val provider_mask = rt_hal_manifest_provider_mask_v1(
+                        function_.func_attr.rt_hal_manifest)
+                    if (binding.known and not binding.compare_supported
+                            and rt_hal_provider_mask_compares_v1(provider_mask)):
+                        val unsupported_compare = "[" + binding.diagnostic +
+                            "] " + module_name + "::" + function_.name
+                        out = out.push(unsupported_compare)
+                        ctx.add_error(unsupported_compare)
+                        errors_raised = errors_raised + 1
     val assurance_nodes = rt_hal_assurance_nodes_from_hir_v1(
         hir_modules, critical_profile)
     val assurance_findings = rt_hal_assurance_closure_check_v1(
