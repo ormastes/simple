@@ -1,0 +1,27 @@
+# @feature: compiler-performance-memory-efficiency
+# @req: REQ-011
+
+use std.spec.*
+use std.fs.{read_file}
+use app.cli.query_lint.{_collect_lint_diagnostics_json}
+
+describe "query lint closure assignment index":
+    it "matches one assigned outer variable without scanning every candidate":
+        var lines: [text] = ["fn outer():"]
+        var index = 0
+        while index < 64:
+            lines.push("    var outer_{index} = {index}")
+            index = index + 1
+        lines.push("    fn inner():")
+        lines.push("        outer_63 = 100")
+        val result = _collect_lint_diagnostics_json(
+            "/tmp/query_lint_closure_index.spl", lines.join("\n"))
+        val diagnostics = result.1.join("\n")
+        expect(result.0).to_be_greater_than(0)
+        expect(diagnostics).to_contain(
+            "closure modifies outer variable 'outer_63'")
+        val source = read_file("src/app/cli/query_lint_checks.spl")
+        expect(source).to_contain("val assigned = _closure_assignment_target(bt)")
+        expect(source).to_contain("outer_vars.has(assigned)")
+        expect(source).not.to_contain("for ovar in outer_vars:")
+        expect(source).not.to_contain("fn _is_assign_to_clos")

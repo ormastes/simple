@@ -79,6 +79,10 @@ reverse monotonic indentation stack. Candidate calls consume an indexed Boolean
 instead of rescanning their remaining source suffix, keeping deeply nested files
 linear in line count.
 
+The compatibility `CLOS001` producer indexes visible outer-variable names and extracts
+one leading assignment target per closure-body line. It therefore avoids comparing every
+body line with every captured name; lexical capture truth still belongs to typed HIR.
+
 The standalone CLI and query/LSP source-pattern collection projections use the same
 confidence vocabulary. Query governance recognizes `COLL001` through `COLL019`, so
 `Allow` suppresses them, while robust/critical policy cannot upgrade those untyped
