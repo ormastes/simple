@@ -172,3 +172,12 @@ sequence. It must not invoke individual registry members again. This preserves r
 order, prevents duplicate diagnostics/replacements, and bounds each registered rule to
 one execution per lint request. A future registry view API will share line/context facts
 among its members without changing this ownership boundary.
+
+### EasyFix source-view admission
+
+The registry exposes `check_all_rules_with_lines(source, file, lines)` for compiler/lint
+owners that already hold a canonical view. Spec-only context facts are constructed once,
+only when the suffix admits SPipe rules, and passed immutably to each member. Standalone
+rule and registry entrypoints remain compatibility boundaries and retain their early path
+gates. Subsequent rule families should join this view incrementally; no process-global
+source cache or unbounded retained context is permitted.
