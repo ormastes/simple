@@ -1909,7 +1909,7 @@ one checked call, cached lookup after initialization, and no explicit wrapper
 allocation for every operation. No provider or CUDA work changed.
 The focused readiness spec passes 15/15 under the configured bootstrap seed;
 this remains seed-only evidence. A checked-in authority baseline now fails the
-census if missing-authority calls rise above 20,180, so the migration is a
+census if missing-authority calls rise above 19,892, so the migration is a
 one-way source-safety ratchet with no runtime or hot-path cost.
 
 The complete dynamic Torch wrapper slice then placed all 69 availability
@@ -1929,3 +1929,12 @@ allocation, synchronization, or device work. Global explicit authority rises
 to 1,191 and missing authority falls to 20,180; `rt_torch` is now 333 explicit
 and 694 missing. Because these methods still expose raw integer handles, they
 remain unsafe-minimized rather than verified-safe APIs.
+
+The next runtime-family sweep covers `torch_training`, `optim`, `ops`, and
+`mod` across nogc-sync, nogc-async, and gc-async. All 290 source calls are now
+lexically scoped; two were already explicitly authorized by their surrounding
+function state, so the global missing count decreases by 288 to 19,892 and
+explicit authority rises to 1,479. `rt_torch` now has 621 explicit and 406
+missing calls. The gate locks all 486 direct runtime-family call sites at their
+existing counts, so this authority migration adds no provider calls or device
+work.
