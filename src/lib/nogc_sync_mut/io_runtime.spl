@@ -50,6 +50,7 @@ fn _io_runtime_process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64)
 
 @unsafe(reason: "raw nullable file read; nil is the invalid, unreadable, or runtime-failure sentinel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
+@unsafe(reason: "raw file-write status; false sentinel means the provider did not complete the write", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
 @unsafe(reason: "raw file-existence predicate; false sentinel includes missing, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
@@ -63,6 +64,7 @@ extern fn rt_env_set(key: text, value_str: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
+@unsafe(reason: "raw recursive-directory-create status; false sentinel means creation did not complete", capabilities: [ffi])
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_size(path: text) -> i64
 # NOT rt_cli_arg_count/rt_cli_arg_at: those externs are unregistered on the
@@ -161,7 +163,10 @@ pub fn read_file_text_result(path: text) -> Result<text, text>:
     file_read_result(path)
 
 pub fn file_write(path: text, content: text) -> bool:
-    if rt_file_write_text(path, content):
+    var wrote = false
+    unsafe(capabilities: [ffi]):
+        wrote = rt_file_write_text(path, content)
+    if wrote:
         return true
     # Writing into a nonexistent directory otherwise no-ops silently
     # (bug interp_examples_dir_f64_zero_and_write_noop_2026-07-03):
@@ -175,8 +180,10 @@ pub fn file_write(path: text, content: text) -> bool:
         parent_exists = rt_file_exists(parent)
     if parent_exists:
         return false
-    rt_dir_create_all(parent)
-    rt_file_write_text(path, content)
+    unsafe(capabilities: [ffi]):
+        rt_dir_create_all(parent)
+    unsafe(capabilities: [ffi]):
+        rt_file_write_text(path, content)
 
 pub fn write_file(path: text, content: text) -> bool:
     file_write(path, content)
@@ -315,15 +322,18 @@ pub fn thread_sleep(ms: i64):
 
 pub fn dir_create(path: text, recursive: bool) -> bool:
     if recursive:
-        rt_dir_create_all(path)
+        unsafe(capabilities: [ffi]):
+            rt_dir_create_all(path)
     else:
         rt_dir_create(path, false)
 
 pub fn dir_create_all(path: text) -> bool:
-    rt_dir_create_all(path)
+    unsafe(capabilities: [ffi]):
+        rt_dir_create_all(path)
 
 pub fn mkdir_p(path: text) -> bool:
-    rt_dir_create_all(path)
+    unsafe(capabilities: [ffi]):
+        rt_dir_create_all(path)
 
 pub fn is_dir(path: text) -> bool:
     shell_bool("test -d '{path}'")
@@ -441,4 +451,4 @@ export env_get, env_set, cwd, home, host_os, host_arch, platform_name, hash_text
 export getpid, process_kill, process_run, process_run_bounded, process_spawn_async, process_is_running
 export time_now_unix_micros, get_args, cli_arg_count, cli_arg_at, exit, thread_sleep
 export time_now_monotonic_ms, shell_exec, file_rename, process_run_timeout
-export rt_file_write_text, rt_file_read_text
+export rt_file_read_text

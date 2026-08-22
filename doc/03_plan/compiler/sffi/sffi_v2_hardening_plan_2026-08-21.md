@@ -858,3 +858,9 @@ The plugin and wrapper-generator owners now use compile-time aliases for the
 canonical text-read facade, removing three raw declarations without increasing
 call depth. Continue alias-based consolidation where local wrappers are exact
 pass-throughs; retain semantic adapters where error or ownership behavior differs.
+
+The canonical write and recursive-directory-create boundaries are now tagged,
+contracted, lexically contained, and no longer exported raw for production use.
+Next migrate the remaining raw read export consumers in tests to the canonical
+facade, then remove that export; do not alter source-content assertions while
+changing the transport owner.

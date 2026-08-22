@@ -1049,3 +1049,14 @@ replaces each local one-line raw wrapper, so call depth remains one while the
 nullable contract is centralized. All three modules pass together. The census
 is now 12,503 declarations, 11,726 untouched, and zero signed admissions;
 production is 6,193 declarations with 5,616 untouched.
+
+Canonical file-write and recursive-directory-create declarations now carry
+explicit false-sentinel contracts and every canonical call is lexically
+contained by `unsafe(ffi)`. Plugin registry and wrapper generator removed four
+raw declarations/pass-throughs in favor of direct facade imports. The audit
+chain migrated from the publicly exported raw write symbol, allowing that raw
+export to be deleted. Four affected modules pass together. The successful write
+path remains one typed foreign call and its existing status branch; directory
+creation/retry remains failure-only. The census is now 12,499 declarations,
+11,720 untouched, 505 unsafe-tagged, 585 contract-documented, and zero signed
+admissions; production is 6,189 declarations with 5,610 untouched.
