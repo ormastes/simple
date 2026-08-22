@@ -1625,3 +1625,6 @@ The first command-session stage cached only the most recently parsed `simple.sdn
 ## 2026-08-22 implementation follow-up: shared manifest-free defaults
 
 Sources without a discovered `simple.sdn` still constructed `LintConfig.new()` per file, rebuilding the complete effective-default dictionary even though defaults are immutable. `Linter.new` now creates one manifest-free base policy for the command. Each file receives `child()`, which allocates only its mutable overrides while sharing the immutable defaults. Direct caller configuration remains separate, and profile changes replace the child's defaults rather than mutating the cached base.
+## 2026-08-22 implementation follow-up: storage-layout advisory indexing
+
+The active storage-layout advisory deduplicated field IDs by scanning a growing array and deterministically ordered textual identity rows with a handwritten selection sort. Both were quadratic in typed access facts, in addition to the separate semantic overlap check. Field membership is now dictionary-indexed with an explicit count, eliminating the ID array and its repeated scans; identity rows use the standard deterministic sort, reducing ordering from `O(F²)` comparisons to the library sort complexity. The semantic overlap pair analysis remains unchanged and fail-closed pending a region-grouped interval-sweep design.
