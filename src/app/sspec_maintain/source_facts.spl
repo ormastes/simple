@@ -16,10 +16,14 @@ fn _is_standalone_assertion(line: text) -> bool:
 
 fn _is_real_assertion(line: text) -> bool:
     val lower = line.lower()
+    val trimmed = lower.trim()
     val assertion = lower.contains("expect(") or lower.contains("assert(") or
         lower.contains("expect_compile") or lower.contains("assert_compile") or
         lower.contains("check(") or lower.contains("check_msg(") or
-        _is_standalone_assertion(line)
+        _is_standalone_assertion(line) or
+        # Parenless statement forms: `expect test_initial_build()`,
+        # `expect not (x in y)`, bare `assert cond` (2026-08-22).
+        trimmed.starts_with("expect ") or trimmed.starts_with("assert ")
     if not assertion:
         return false
     if lower.contains("assert(true)") or lower.contains("assert(false)") or
@@ -36,6 +40,22 @@ fn _is_real_assertion(line: text) -> bool:
         if actual == expected:
             return false
     true
+
+fn _calls_skip(trimmed_lower: text) -> bool:
+    # A pending scaffold is a CALL to skip(...) — `test_env_gate_skip(` and
+    # other *_skip(name) helpers are real oracles, not skips (2026-08-22).
+    var rest = trimmed_lower
+    while rest != "":
+        val index = rest.index_of("skip(")
+        if index < 0:
+            return false
+        if index == 0:
+            return true
+        val before = rest[index - 1]
+        if before == " " or before == "\t" or before == "(" or before == "=":
+            return true
+        rest = rest.substring(index + 4)
+    false
 
 fn _is_pending(line: text) -> bool:
     # ORA-001 pending detection must fire only on a pending STATEMENT, not on
@@ -58,7 +78,7 @@ fn _is_pending(line: text) -> bool:
     # pending scaffold. skip(/fail("todo: are call forms and stay as-is.
     if lower == "pending" or lower.starts_with("pending("):
         return true
-    lower.contains("fail(\"todo:") or lower.contains("skip(")
+    lower.contains("fail(\"todo:") or _calls_skip(trimmed)
 
 fn _contains_requirement(line: text) -> bool:
     line.contains("REQ-") or line.contains("@req")
@@ -256,7 +276,9 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
                 line_lower.contains("expect_compile") or line_lower.contains("assert_compile") or
                 line_lower.contains("check(") or line_lower.contains("check_msg(") or
                 _calls_asserting_helper(line, asserting_helper_names) or
-                _is_standalone_assertion(line)):
+                _is_standalone_assertion(line) or
+                line_lower.trim().starts_with("expect ") or
+                line_lower.trim().starts_with("assert ")):
             assertions = assertions + 1
             if current_line > 0: scenario_assertions = scenario_assertions + 1
             val (actual, expected) = _assertion_parts(line)
