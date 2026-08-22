@@ -20,6 +20,10 @@ build attempts:
   945.43 s with 1,576,520 KiB maximum RSS. This is 11.2% faster than the
   1071.71 s baseline but 6.6% higher peak RSS than 1,478,536 KiB, so the
   performance/memory acceptance criterion remains failed.
+- Cycle 4, after failed-shard fixes, reached 8,000 cached objects but still
+  produced no candidate: 865.15 s and 1,447,228 KiB maximum RSS. Wall time is
+  19.3% below the original 1071.71 s baseline and peak RSS is 2.1% lower than
+  1,478,536 KiB, but both remain excessive and correctness is still blocked.
 - A focused Rust compiler regression-test build for array-lvalue lowering was
   blocked before test execution by the unrelated missing
   `crate::interpreter::dispatch_profile` owner after 99.41 s and 2,164,056 KiB
