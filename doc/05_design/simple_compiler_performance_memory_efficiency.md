@@ -647,3 +647,11 @@ fixed-width literal mask and fully parenthesize bitwise and comparison operators
 Never emit runtime shifts, eager per-pattern booleans, combined lo/hi probes, or
 an invalid-ID fallback. Manifest validation is the proof that generated IDs are
 in range; the public matcher helper remains available to other consumers.
+
+Leading explicit-code inference is a prefix contract, not an exact-length
+contract. Check `len >= 5`, uppercase byte `E`, then four ASCII digit bytes.
+Do not allocate one-byte substrings during rejection and do not require a colon
+or end-of-string. After the leading `E` byte succeeds, create one five-byte
+candidate and validate bytes on that bounded value; this prevents repeated
+full-message `strlen` in raw-string representations. Bracketed code extraction
+remains earlier and retains its legacy permissiveness.
