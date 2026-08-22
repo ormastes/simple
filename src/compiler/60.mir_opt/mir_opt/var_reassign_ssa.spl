@@ -871,13 +871,6 @@ fn ssa_operand_local_payload_valid(operand: MirOperand) -> bool:
                 case Const(_, _): true
         case _: false
 
-fn ssa_term_has_value_return(term: MirTerminator) -> bool:
-    # Presence is the only safe question here. Never unwrap or inspect the
-    # staged-native MirOperand payload of Ret(Some(...)).
-    match term:
-        case Ret(value): value != nil
-        case _: false
-
 fn ssa_operand_list_payloads_valid(operands: [MirOperand]) -> bool:
     for operand in operands:
         if not ssa_operand_local_payload_valid(operand):
@@ -914,7 +907,8 @@ fn ssa_inst_operand_payloads_valid(inst: MirInst) -> bool:
 
 fn ssa_term_operand_payloads_valid(term: MirTerminator) -> bool:
     match term:
-        case Ret(_): true
+        case Ret(value):
+            if value != nil: ssa_operand_local_payload_valid(value.unwrap()) else: true
         case If(cond, _, _): ssa_operand_local_payload_valid(cond)
         case Switch(value, _, _): ssa_operand_local_payload_valid(value)
         case CallTerminator(_, func, args, _, _):
@@ -1273,10 +1267,9 @@ fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
 fn ssa_collect_term_operand_locals(locals: [i64], term: MirTerminator) -> [i64]:
     var result = locals
     match term:
-        case Ret(_):
-            # Value returns are not admitted to the alloca lane. Ret(nil) has
-            # no operand use and must remain a no-op here.
-            pass_do_nothing
+        case Ret(value):
+            if value != nil:
+                result = ssa_operand_push_local(result, value.unwrap())
         case If(cond, _, _):
             result = ssa_operand_push_local(result, cond)
         case Switch(value, _, _):
@@ -1577,9 +1570,12 @@ fn ssa_alloca_rewrite_inst(inst: MirInst, slot_keys: [i64], slot_values: [i64], 
 
 fn ssa_alloca_rewrite_term(term: MirTerminator, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> ([MirInst], MirTerminator, i64):
     match term:
-        case Ret(_):
-            # Admission rejects Ret(Some(...)); Ret(nil) is preserved.
-            ([], term, next_temp)
+        case Ret(value):
+            if value != nil:
+                val r = ssa_alloca_rewrite_operand(value.unwrap(), slot_keys, slot_values, next_temp)
+                (r[1], MirTerminator.Ret(Some(r[0])), r[2])
+            else:
+                ([], term, next_temp)
         case If(cond, then_, else_):
             val r = ssa_alloca_rewrite_operand(cond, slot_keys, slot_values, next_temp)
             (r[1], MirTerminator.If(r[0], then_, else_), r[2])
@@ -1642,8 +1638,11 @@ fn ssa_alloca_transform_blocks(blocks: [MirBlock], mir_locals: [MirLocal], entry
     if not ssa_instructions_supported_for_alloca(blocks):
         return ssa_var_transform_reject("unsupported instruction", blocks, [])
     for block in blocks:
-        if ssa_term_has_value_return(block.terminator):
-            return ssa_var_transform_reject("unsupported value return terminator", blocks, [])
+        # Ret(Some(v)) is admitted when its operand payload is structurally
+        # valid (same gate as If/Switch). Refusing EVERY value-returning
+        # function left its multi-def locals (loop counters of the array
+        # value-copy loop, merge temps) as duplicate `%lN` SSA defs at llc.
+        # Bug llvm_text_backend_array_copy_loop_ssa_redefinition_2026-08-22.
         if not ssa_term_operand_payloads_valid(block.terminator):
             return ssa_var_transform_reject("invalid terminator operands", blocks, [])
 

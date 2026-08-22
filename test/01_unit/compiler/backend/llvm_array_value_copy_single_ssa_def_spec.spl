@@ -1,0 +1,97 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir_opt.{ssa_alloca_transform_blocks}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+# Bug llvm_text_backend_array_copy_loop_ssa_redefinition_2026-08-22: `val t = xs`
+# (array value copy) lowers to a per-element copy LOOP whose counter local is
+# written in the preheader AND the latch. The alloca SSA transform refused every
+# function with a `Ret(Some(..))` terminator, so in a value-returning function
+# nothing slotted that counter and the text LLVM backend emitted it twice
+# (llc: multiple definition of local value named 'lN'). The transform now admits
+# value returns through the same operand-payload gate as If/Switch and loads
+# the returned local at the ret.
+
+fn lower_source(src: text) -> MirModule:
+    val ast = parse_full_frontend(src, "copy.spl", "copy.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("copy.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
+fn find_function(mir: MirModule, name: text) -> MirFunction?:
+    for function in mir.functions.values():
+        if function.name == name:
+            return Some(function)
+    nil
+
+# Name of any `%lN` that is defined more than once in the emitted text, or "".
+fn first_duplicate_ssa_def(llvm: text) -> text:
+    var seen: [text] = []
+    for line in llvm.split("\n"):
+        val t = line.trim()
+        if not t.starts_with("%l"):
+            continue
+        val eq = t.index_of(" = ")
+        if eq < 0:
+            continue
+        val name = t.substring(0, eq)
+        if seen.contains(name):
+            return name
+        seen = seen.push(name)
+    ""
+
+fn count_value_returns(function: MirFunction) -> i64:
+    var n = 0
+    for block in function.blocks:
+        match block.terminator:
+            case MirTerminator.Ret(value):
+                if value != nil:
+                    n = n + 1
+            case _:
+                pass
+    n
+
+val copy_in_value_fn = "fn copy_len(src: [i64]) -> i64:\n    val t = src\n    t.len()\n"
+val copy_in_main = "fn main() -> i64:\n    var xs = [1, 2]\n    val t = xs\n    xs.push(9)\n    t.len() + xs.len()\n"
+val loop_ret_local = "fn total(n: i64) -> i64:\n    var acc = 0\n    var i = 0\n    while i < n:\n        acc = acc + i\n        i = i + 1\n    acc\n"
+
+describe "alloca SSA transform admits value-returning functions", tag: ["only-compiled"]:
+    it "applies to a value-returning function whose copy-loop counter is multi-def":
+        val mir = lower_source(copy_in_value_fn)
+        val f = find_function(mir, "copy_len").unwrap()
+        expect(count_value_returns(f)).to_be_greater_than(0)
+        val r = ssa_alloca_transform_blocks(f.blocks, f.locals, f.entry_block)
+        expect(r.applied).to_equal(true)
+
+    it "loads a reassigned local at the ret instead of leaving it unrewritten":
+        val mir = lower_source(loop_ret_local)
+        val f = find_function(mir, "total").unwrap()
+        val r = ssa_alloca_transform_blocks(f.blocks, f.locals, f.entry_block)
+        expect(r.applied).to_equal(true)
+        val llvm = MirToLlvm.create("test.copy.total", CodegenTarget.X86_64, nil).translate_module(mir)
+        expect(first_duplicate_ssa_def(llvm)).to_equal("")
+        expect(llvm.contains("= load i64, ptr")).to_equal(true)
+
+describe "array value copy emits a single SSA definition per local", tag: ["only-compiled"]:
+    it "copy inside a value-returning fn":
+        val mir = lower_source(copy_in_value_fn)
+        val llvm = MirToLlvm.create("test.copy.value_fn", CodegenTarget.X86_64, nil).translate_module(mir)
+        expect(first_duplicate_ssa_def(llvm)).to_equal("")
+
+    it "aliased copy then mutate original in main":
+        val mir = lower_source(copy_in_main)
+        val llvm = MirToLlvm.create("test.copy.main", CodegenTarget.X86_64, nil).translate_module(mir)
+        expect(first_duplicate_ssa_def(llvm)).to_equal("")
+
+    it "text and struct element arrays":
+        val src = "struct Pt:\n    x: i64\n\nfn go() -> i64:\n    val ss = [\"a\"]\n    val ts = ss\n    val ps = [Pt(x: 1)]\n    val tp = ps\n    ts.len() + tp.len()\n"
+        val mir = lower_source(src)
+        val llvm = MirToLlvm.create("test.copy.texts", CodegenTarget.X86_64, nil).translate_module(mir)
+        expect(first_duplicate_ssa_def(llvm)).to_equal("")
