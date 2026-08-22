@@ -31,6 +31,22 @@
 - Measure the same 50/200-file fixtures: cold/warm p50/p95, process count and max
   RSS; targets are >=50%/75% wall reduction and <=10% peak-RSS increase.
 
+## Variable-reassignment dictionary tranche
+
+- Replace analyzer-local count/alias parallel arrays and borrowed/escaped arrays
+  with scalar dictionaries; retain shared legacy count helpers used by SSA lowering.
+- Preserve raw scan order, exact-destination counts, old-root borrow/escape capture,
+  alias resets, the 64-hop guard, local ID 0 and reason precedence.
+- Remove unused non-alias escape collectors so they cannot be mistaken for the
+  active, broader escape model.
+- Pin copied-alias borrow followed by alias overwrite in both mirrored specs.
+- Pin 256 distinct locals, exact reassignment total, safe flags and exact JIT fact
+  ordering; do not derive output ordering from dictionary iteration.
+- Performance acceptance: expected `O(I*64 + L)` lookup work and `O(L)` retained
+  scalar state, with no growing parallel-array map/set in the active analyzer.
+- Verification status: intentionally not executed under the user's explicit
+  no-verify instruction; static diff and parallel semantic review only.
+
 ## ANSI-free query diagnostic follow-up
 
 - Merge owner: compiler performance/memory lane.
