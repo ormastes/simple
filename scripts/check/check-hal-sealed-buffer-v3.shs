@@ -6,23 +6,25 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/hal-sealed-buffer-v3.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 facade="$repo_root/src/app/hal_provider/hal_provider_sealed_facade_v1.c"
+bridge="$repo_root/src/runtime/runtime_hal_buffer_dispatch.c"
 session="$repo_root/src/app/hal_provider/hal_provider_sealed_session_v1.c"
 header="$repo_root/src/app/hal_provider/hal_provider_sealed_facade_v1.h"
 spec="$repo_root/src/app/hal_provider/test/hal_provider_sealed_facade_v1_selfcheck.c"
 
-rg 'rt_hal_buffer_dispatch_compare_v3' "$facade" "$header" >/dev/null
+rg 'rt_hal_buffer_dispatch_compare_v3' "$bridge" "$header" >/dev/null
 rg 'HALREQ2B\|2\|' "$facade" >/dev/null
 rg 'HALRES2B\|' "$session" "$spec" >/dev/null
 rg 'output_capacity > HAL_BUFFER_INLINE_CAP_V3' "$facade" >/dev/null
-hot=$(sed -n '/int32_t rt_hal_buffer_dispatch_compare_v3/,/^}/p' "$facade")
-if printf '%s\n' "$hot" |
+hot=$(sed -n '/int32_t rt_hal_buffer_dispatch_compare_v3/,/^}/p' "$bridge")
+hot_owner=$(sed -n '/static int32_t hal_buffer_dispatch_compare_owner_v3/,/^}/p' "$facade")
+if printf '%s\n%s\n' "$hot" "$hot_owner" |
     rg 'malloc\(|calloc\(|realloc\(|getenv\(|fork\(|posix_spawn\(' >/dev/null; then
     echo 'FAIL: sealed buffer hot leaf allocates, reads env, or spawns' >&2
     exit 1
 fi
 
 cc -std=c11 -O2 -Wall -Wextra -Werror -pthread \
-    "$session" "$facade" "$spec" -o "$work/hal-sealed-buffer-v3"
+    "$session" "$facade" "$bridge" "$spec" -o "$work/hal-sealed-buffer-v3"
 /usr/bin/time -f 'hal_sealed_buffer_v3_peak_rss_kib=%M elapsed_s=%e' \
     "$work/hal-sealed-buffer-v3"
 

@@ -1905,6 +1905,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_exit", &[I64], &[]),            // code -> ! (never returns)
     RuntimeFuncSpec::new("rt_time_now_unix", &[], &[I64]),
     RuntimeFuncSpec::new("rt_time_now_nanos", &[], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_hal_buffer_dispatch_compare_v3",
+        &[I64, I64, I32, I32, I64, I64, I64, I64, I64, I64,
+          I64, I64, I64, I64, I64],
+        &[I32],
+    ),
     RuntimeFuncSpec::new("rt_time_now_micros", &[], &[I64]),
     RuntimeFuncSpec::new("rt_time_now_monotonic_ms", &[], &[I64]),
     RuntimeFuncSpec::new("rt_time_now_unix_micros", &[], &[I64]),

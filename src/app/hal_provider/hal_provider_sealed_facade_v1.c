@@ -1,4 +1,5 @@
 #include "hal_provider_sealed_facade_v1.h"
+#include "../../runtime/runtime_hal_buffer_dispatch.h"
 #include "hal_provider_sealed_session_v1.h"
 
 #include <stdatomic.h>
@@ -559,7 +560,7 @@ static int32_t buffer_dispatch_invoke_v3(
     return slot->last_status;
 }
 
-int32_t rt_hal_buffer_dispatch_compare_v3(
+static int32_t hal_buffer_dispatch_compare_owner_v3(
         int64_t operation_id, int64_t fixture_id, int32_t captured_status,
         int32_t error_domain, int64_t error_code, int64_t error_detail,
         const uint8_t *captured, int64_t captured_length,
@@ -642,18 +643,33 @@ int32_t hal_buffer_dispatch_init_config_v3(
         const char *launcher, const char *pure_worker, const char *c_worker,
         const char *rust_worker, int32_t run_mode, int32_t preferred_provider,
         int64_t deadline_ms) {
-    return clock_dispatch_init_config_v2(launcher, pure_worker, c_worker,
-        rust_worker, run_mode, preferred_provider, deadline_ms);
+    int32_t status = clock_dispatch_init_config_v2(
+        launcher, pure_worker, c_worker, rust_worker, run_mode,
+        preferred_provider, deadline_ms);
+    if (status != HAL_SEALED_FACADE_STATUS_OK_V1) return status;
+    status = rt_hal_buffer_dispatch_bind_owner_v3(
+        hal_buffer_dispatch_compare_owner_v3, run_mode, preferred_provider);
+    if (status != HAL_SEALED_FACADE_STATUS_OK_V1)
+        (void)rt_hal_clock_dispatch_shutdown_v2();
+    return status;
 }
 
 int32_t rt_hal_buffer_dispatch_init_v3(int32_t run_mode,
                                        int32_t preferred_provider,
                                        int64_t deadline_ms) {
-    return rt_hal_clock_dispatch_init_v2(run_mode, preferred_provider,
-                                         deadline_ms);
+    int32_t status = rt_hal_clock_dispatch_init_v2(
+        run_mode, preferred_provider, deadline_ms);
+    if (status != HAL_SEALED_FACADE_STATUS_OK_V1) return status;
+    status = rt_hal_buffer_dispatch_bind_owner_v3(
+        hal_buffer_dispatch_compare_owner_v3, run_mode, preferred_provider);
+    if (status != HAL_SEALED_FACADE_STATUS_OK_V1)
+        (void)rt_hal_clock_dispatch_shutdown_v2();
+    return status;
 }
 
 int32_t rt_hal_buffer_dispatch_shutdown_v3(void) {
+    int32_t status = rt_hal_buffer_dispatch_unbind_owner_v3();
+    if (status != HAL_SEALED_FACADE_STATUS_OK_V1) return status;
     return rt_hal_clock_dispatch_shutdown_v2();
 }
 

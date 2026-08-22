@@ -20,6 +20,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_fork.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_hal_buffer_dispatch.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_pool.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_framebuffer.c");
@@ -228,6 +229,7 @@ fn compile_c_runtime_sources() {
     let mut c_sources = vec![
         "runtime_memory.c",
         "runtime_time.c",
+        "runtime_hal_buffer_dispatch.c",
         "runtime_timestamp.c",
         "runtime_db.c",
         "runtime_pool.c",
@@ -461,6 +463,7 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
     const LINKED_C_SOURCES: &[&str] = &[
         "runtime_memory.c",
         "runtime_time.c",
+        "runtime_hal_buffer_dispatch.c",
         "runtime_timestamp.c",
         "runtime_db.c",
         "runtime_pool.c",
