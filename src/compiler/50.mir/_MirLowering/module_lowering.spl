@@ -229,6 +229,9 @@ impl MirLowering:
         MirLowering.new_for_target(symbols, target_context)
 
     static fn new_for_target(symbols: SymbolTable, target_context: MirTargetContext) -> MirLowering:
+        MirLowering.new_for_target_with_mcdc(symbols, target_context, "off")
+
+    static fn new_for_target_with_mcdc(symbols: SymbolTable, target_context: MirTargetContext, mcdc_policy: text) -> MirLowering:
         val empty_loop_stack: [(BlockId, BlockId)] = []
         val empty_errors: [MirError] = []
         MirLowering(
@@ -302,6 +305,14 @@ impl MirLowering:
             global_const_exprs: {},
             array_global_mutation_warned: {},
             target_context: target_context,
+            mcdc_policy: mcdc_policy,
+            mcdc_authored_path: "",
+            mcdc_current_decision_runtime_id: 0,
+            mcdc_current_decision_semantic_id: "",
+            mcdc_evaluated_mask_slot: LocalId(id: -1),
+            mcdc_true_mask_slot: LocalId(id: -1),
+            mcdc_next_condition_ordinal: 0,
+            mcdc_condition_count: 0,
             resource_owned_locals: [],
             consumed_resource_locals: {}
         )
@@ -1026,6 +1037,13 @@ impl MirLowering:
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
         self.symbols = module.symbols
+        var mcdc_path = module.path.replace("\\", "/")
+        val source_at = mcdc_path.find("src/")
+        if source_at >= 0:
+            mcdc_path = mcdc_path.substring(source_at)
+        elif mcdc_path == "" or mcdc_path.starts_with("/") or mcdc_path.contains(":"):
+            mcdc_path = "generated/" + module.name.replace(".", "/") + ".spl"
+        self.mcdc_authored_path = mcdc_path
         var function_names: [text] = []
         for raw_func in module.functions.values():
             val func: HirFunction = raw_func

@@ -1861,7 +1861,115 @@ impl MirLowering:
 # Control Flow Lowering
 # ============================================================================
 
+    fn mcdc_instrumentation_enabled() -> bool:
+        self.mcdc_policy == "static" or self.mcdc_policy == "dynamic"
+
+    fn mcdc_compound_condition(cond: HirExpr) -> bool:
+        match cond.kind:
+            case HirExprKind.Binary(HirBinOp.And, _, _) |
+                 HirExprKind.Binary(HirBinOp.Or, _, _): true
+            case _: false
+
+    me mcdc_condition_leaf_count(cond: HirExpr) -> i64:
+        match cond.kind:
+            case HirExprKind.Binary(HirBinOp.And, left, right) |
+                 HirExprKind.Binary(HirBinOp.Or, left, right):
+                self.mcdc_condition_leaf_count(left) + self.mcdc_condition_leaf_count(right)
+            case _: 1
+
+    me mcdc_bool_result(local: LocalId) -> LocalId:
+        if val result_type = self.local_mir_type_of(local):
+            match result_type.kind:
+                case MirTypeKind.Bool: return local
+                case _: ()
+        var b = self.builder
+        val zero = b.emit_const_int(0)
+        val result = b.emit_binop(
+            MirBinOp.Ne, mir_operand_copy(local), mir_operand_copy(zero),
+            MirType.bool())
+        self.builder = b
+        result
+
+    me begin_mcdc_decision(cond: HirExpr):
+        val condition_count = self.mcdc_condition_leaf_count(cond)
+        if condition_count <= 0 or condition_count > 62:
+            self.error_fatal("MCDC-E-CONDITIONS: decision exceeds fixed 62-condition mask capacity", Some(cond.span))
+            self.mcdc_current_decision_runtime_id = 0
+            return
+        val decision_runtime_id = cond.span.start + 1
+        if decision_runtime_id <= 0 or decision_runtime_id > 4294967295:
+            self.error_fatal("MCDC-E-ID: decision source offset exceeds u32 identity", Some(cond.span))
+            self.mcdc_current_decision_runtime_id = 0
+            return
+        self.mcdc_current_decision_runtime_id = decision_runtime_id
+        self.mcdc_current_decision_semantic_id = self.mcdc_authored_path + ":" + cond.span.start.to_text() + ":decision"
+        self.mcdc_condition_count = condition_count
+        self.mcdc_next_condition_ordinal = 0
+        var b = self.builder
+        self.mcdc_evaluated_mask_slot = b.emit_entry_alloc(MirType.i64())
+        self.mcdc_true_mask_slot = b.emit_entry_alloc(MirType.i64())
+        val zero = b.emit_const_int(0)
+        b.emit_store(mir_operand_copy(self.mcdc_evaluated_mask_slot), mir_operand_copy(zero))
+        b.emit_store(mir_operand_copy(self.mcdc_true_mask_slot), mir_operand_copy(zero))
+        self.builder = b
+
+    me emit_mcdc_condition_probe(cond: HirExpr, result: LocalId):
+        if not self.mcdc_instrumentation_enabled(): return
+        if self.mcdc_current_decision_runtime_id <= 0: return
+        val ordinal = self.mcdc_next_condition_ordinal
+        if ordinal < 0 or ordinal >= self.mcdc_condition_count or ordinal >= 62:
+            self.error_fatal("MCDC-E-CONDITIONS: decision exceeds fixed 62-condition mask capacity", Some(cond.span))
+            return
+        self.mcdc_next_condition_ordinal = ordinal + 1
+        var b = self.builder
+        val evaluated = b.emit_load(mir_operand_copy(self.mcdc_evaluated_mask_slot), MirType.i64())
+        val true_bits = b.emit_load(mir_operand_copy(self.mcdc_true_mask_slot), MirType.i64())
+        val bit = b.emit_const_int(1 << ordinal)
+        val evaluated_next = b.emit_binop(MirBinOp.BitOr, mir_operand_copy(evaluated), mir_operand_copy(bit), MirType.i64())
+        var result_i64 = result
+        if val result_type = self.local_mir_type_of(result):
+            match result_type.kind:
+                case MirTypeKind.Bool:
+                    result_i64 = b.emit_cast(mir_operand_copy(result), MirType.i64())
+                case _: ()
+        val ordinal_local = b.emit_const_int(ordinal)
+        val shifted_true = b.emit_binop(MirBinOp.Shl, mir_operand_copy(result_i64), mir_operand_copy(ordinal_local), MirType.i64())
+        val true_next = b.emit_binop(MirBinOp.BitOr, mir_operand_copy(true_bits), mir_operand_copy(shifted_true), MirType.i64())
+        b.emit_store(mir_operand_copy(self.mcdc_evaluated_mask_slot), mir_operand_copy(evaluated_next))
+        b.emit_store(mir_operand_copy(self.mcdc_true_mask_slot), mir_operand_copy(true_next))
+        self.builder = b
+
+    me emit_mcdc_decision_probe(cond: HirExpr, result: LocalId):
+        if not self.mcdc_instrumentation_enabled(): return
+        val runtime_id = self.mcdc_current_decision_runtime_id
+        if runtime_id <= 0: return
+        var b = self.builder
+        val evaluated_mask = b.emit_load(mir_operand_copy(self.mcdc_evaluated_mask_slot), MirType.i64())
+        val true_mask = b.emit_load(mir_operand_copy(self.mcdc_true_mask_slot), MirType.i64())
+        val kind = if self.mcdc_policy == "dynamic":
+            MirInstKind.DynamicDecisionProbe(
+                runtime_id, self.mcdc_current_decision_semantic_id,
+                self.mcdc_condition_count, mir_operand_copy(evaluated_mask), mir_operand_copy(true_mask),
+                mir_operand_copy(result), self.mcdc_authored_path,
+                cond.span.line, cond.span.col)
+        else:
+            MirInstKind.DecisionProbe(
+                runtime_id, self.mcdc_current_decision_semantic_id,
+                self.mcdc_condition_count, mir_operand_copy(evaluated_mask), mir_operand_copy(true_mask),
+                mir_operand_copy(result), self.mcdc_authored_path,
+                cond.span.line, cond.span.col)
+        b.emit(MirInst(kind: kind, span: Some(cond.span)))
+        self.builder = b
+
     me lower_cond_expr(cond: HirExpr) -> LocalId:
+        val lowered = self.lower_cond_expr_unprobed(cond)
+        if not self.mcdc_instrumentation_enabled(): return lowered
+        val result = self.mcdc_bool_result(lowered)
+        if not self.mcdc_compound_condition(cond):
+            self.emit_mcdc_condition_probe(cond, result)
+        result
+
+    me lower_cond_expr_unprobed(cond: HirExpr) -> LocalId:
         """Lower an expression that sits in boolean/condition position.
 
         `.?` is an existence check whose VALUE is `T?` -- the payload when
@@ -1948,7 +2056,22 @@ impl MirLowering:
             val bad_cond = b_bad_cond.new_temp(MirType.unit())
             self.builder = b_bad_cond
             return bad_cond
+        val saved_decision_runtime_id = self.mcdc_current_decision_runtime_id
+        val saved_decision_semantic_id = self.mcdc_current_decision_semantic_id
+        val saved_evaluated_mask_slot = self.mcdc_evaluated_mask_slot
+        val saved_true_mask_slot = self.mcdc_true_mask_slot
+        val saved_next_condition_ordinal = self.mcdc_next_condition_ordinal
+        val saved_condition_count = self.mcdc_condition_count
+        if self.mcdc_instrumentation_enabled():
+            self.begin_mcdc_decision(cond)
         val cond_local = self.lower_cond_expr(cond)
+        self.emit_mcdc_decision_probe(cond, cond_local)
+        self.mcdc_current_decision_runtime_id = saved_decision_runtime_id
+        self.mcdc_current_decision_semantic_id = saved_decision_semantic_id
+        self.mcdc_evaluated_mask_slot = saved_evaluated_mask_slot
+        self.mcdc_true_mask_slot = saved_true_mask_slot
+        self.mcdc_next_condition_ordinal = saved_next_condition_ordinal
+        self.mcdc_condition_count = saved_condition_count
 
         # `if val v = option.?:` is parser-desugared to a raw binding followed
         # by `v != nil`. Float payload bits must stay in that raw i64 binding
@@ -2120,7 +2243,22 @@ impl MirLowering:
             # The current block is either the chain entry or the false edge of
             # the previous arm.  Lowering here preserves source-order and
             # short-circuit behavior for condition side effects.
+            val saved_decision_runtime_id = self.mcdc_current_decision_runtime_id
+            val saved_decision_semantic_id = self.mcdc_current_decision_semantic_id
+            val saved_evaluated_mask_slot = self.mcdc_evaluated_mask_slot
+            val saved_true_mask_slot = self.mcdc_true_mask_slot
+            val saved_next_condition_ordinal = self.mcdc_next_condition_ordinal
+            val saved_condition_count = self.mcdc_condition_count
+            if self.mcdc_instrumentation_enabled():
+                self.begin_mcdc_decision(arm.cond)
             val cond_local = self.lower_cond_expr(arm.cond)
+            self.emit_mcdc_decision_probe(arm.cond, cond_local)
+            self.mcdc_current_decision_runtime_id = saved_decision_runtime_id
+            self.mcdc_current_decision_semantic_id = saved_decision_semantic_id
+            self.mcdc_evaluated_mask_slot = saved_evaluated_mask_slot
+            self.mcdc_true_mask_slot = saved_true_mask_slot
+            self.mcdc_next_condition_ordinal = saved_next_condition_ordinal
+            self.mcdc_condition_count = saved_condition_count
 
             # Preserve `if val`'s raw optional-float binding contract for each
             # arm.  The condition compares the encoded value with nil; only
@@ -2285,7 +2423,22 @@ impl MirLowering:
 
         # Condition position: see lower_cond_expr -- a bare `while opt.?:`
         # would otherwise spin forever on the non-zero nil sentinel.
+        val saved_decision_runtime_id = self.mcdc_current_decision_runtime_id
+        val saved_decision_semantic_id = self.mcdc_current_decision_semantic_id
+        val saved_evaluated_mask_slot = self.mcdc_evaluated_mask_slot
+        val saved_true_mask_slot = self.mcdc_true_mask_slot
+        val saved_next_condition_ordinal = self.mcdc_next_condition_ordinal
+        val saved_condition_count = self.mcdc_condition_count
+        if self.mcdc_instrumentation_enabled():
+            self.begin_mcdc_decision(cond)
         val cond_local = self.lower_cond_expr(cond)
+        self.emit_mcdc_decision_probe(cond, cond_local)
+        self.mcdc_current_decision_runtime_id = saved_decision_runtime_id
+        self.mcdc_current_decision_semantic_id = saved_decision_semantic_id
+        self.mcdc_evaluated_mask_slot = saved_evaluated_mask_slot
+        self.mcdc_true_mask_slot = saved_true_mask_slot
+        self.mcdc_next_condition_ordinal = saved_next_condition_ordinal
+        self.mcdc_condition_count = saved_condition_count
         var b3 = self.builder
         b3.terminate_if(mir_operand_copy(cond_local), body_block, exit_block)
         b3.switch_to_block(body_block)

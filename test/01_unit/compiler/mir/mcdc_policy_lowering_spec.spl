@@ -1,0 +1,50 @@
+"""
+## MC/DC MIR policy lowering specification
+
+Proves static-off erasure and distinct static/direct versus dynamic/patchpoint
+opcodes while preserving short-circuit condition structure.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+
+fn lower_mcdc_policy(policy: text) -> text:
+    val source = "fn check(a: bool, b: bool) -> bool:\n    if a and b:\n        true\n    else:\n        false\n"
+    val parsed = parse_full_frontend(
+        source, "src/mcdc_fixture.spl", "src/mcdc_fixture.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("src/mcdc_fixture.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.mcdc_policy = policy
+    val mir = mir_lowering.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == "check" or function.name.ends_with(".check"):
+            return serialize_mir_function(function)
+    ""
+
+describe "MC/DC MIR policy lowering", tag: ["only-compiled"]:
+    it "emits no probe or patchpoint opcode in static-off mode":
+        val mir = lower_mcdc_policy("off")
+        expect(mir.contains("DecisionProbe")).to_equal(false)
+        expect(mir.contains("ConditionProbe")).to_equal(false)
+
+    it "emits one correlated direct decision vector in static mode":
+        val mir = lower_mcdc_policy("static")
+        expect(mir.split("\"DecisionProbe\"").len()).to_equal(2)
+        expect(mir.contains("ConditionProbe")).to_equal(false)
+        expect(mir).to_contain("\"condition_count\":2")
+        expect(mir).to_contain("\"evaluated_mask\"")
+        expect(mir).to_contain("\"true_mask\"")
+        expect(mir.contains("DynamicDecisionProbe")).to_equal(false)
+        expect(mir.contains("DynamicConditionProbe")).to_equal(false)
+
+    it "emits distinct dynamic patchpoint opcodes in dynamic mode":
+        val mir = lower_mcdc_policy("dynamic")
+        expect(mir.split("\"DynamicDecisionProbe\"").len()).to_equal(2)
+        expect(mir.contains("DynamicConditionProbe")).to_equal(false)
+        expect(mir).to_contain("\"condition_count\":2")
+        expect(mir).to_contain("logic_rhs")

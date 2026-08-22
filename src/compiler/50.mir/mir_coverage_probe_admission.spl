@@ -45,6 +45,18 @@ fn mir_coverage_probe_operand_is_bool_v1(result: MirOperand, locals: [MirLocal])
                 case Bool(_): type_.kind == MirTypeKind.Bool
                 case _: false
 
+fn mir_coverage_probe_operand_is_i64_v1(result: MirOperand, locals: [MirLocal]) -> bool:
+    match result.kind:
+        case Copy(local) | Move(local):
+            for candidate in locals:
+                if candidate.id.id == local.id:
+                    return candidate.type_.kind == MirTypeKind.I64
+            false
+        case Const(value, type_):
+            match value:
+                case Int(_): type_.kind == MirTypeKind.I64
+                case _: false
+
 fn mir_coverage_probe_common_diagnostic_v1(
     runtime_id: i64,
     semantic_id: text,
@@ -73,13 +85,21 @@ fn mir_coverage_probe_malformed_diagnostic_inst_v1(
     locals: [MirLocal]
 ) -> text:
     match kind:
-        case DecisionProbe(runtime_id, semantic_id, result, authored_path, line, column):
+        case DecisionProbe(runtime_id, semantic_id, condition_count, evaluated_mask, true_mask, result, authored_path, line, column) |
+             DynamicDecisionProbe(runtime_id, semantic_id, condition_count, evaluated_mask, true_mask, result, authored_path, line, column):
             val invalid = mir_coverage_probe_common_diagnostic_v1(
                 runtime_id, semantic_id, result, authored_path, line, column, locals
             )
             if invalid != "": return invalid
+            if condition_count <= 0 or condition_count > 62:
+                return "MIRCOV-PROBE-E-CONDITION-COUNT: condition_count must be in 1..62"
+            if not mir_coverage_probe_operand_is_i64_v1(evaluated_mask, locals):
+                return "MIRCOV-PROBE-E-EVALUATED-MASK: evaluated_mask must be an i64 MIR operand"
+            if not mir_coverage_probe_operand_is_i64_v1(true_mask, locals):
+                return "MIRCOV-PROBE-E-TRUE-MASK: true_mask must be an i64 MIR operand"
             ""
-        case ConditionProbe(runtime_id, semantic_id, parent_runtime_id, parent_semantic_id, result, authored_path, line, column):
+        case ConditionProbe(runtime_id, semantic_id, parent_runtime_id, parent_semantic_id, result, authored_path, line, column) |
+             DynamicConditionProbe(runtime_id, semantic_id, parent_runtime_id, parent_semantic_id, result, authored_path, line, column):
             val invalid = mir_coverage_probe_common_diagnostic_v1(
                 runtime_id, semantic_id, result, authored_path, line, column, locals
             )
@@ -98,10 +118,14 @@ fn mir_coverage_probe_admission_diagnostic_inst_v1(
     val malformed = mir_coverage_probe_malformed_diagnostic_inst_v1(kind, locals)
     if malformed != "": return malformed
     match kind:
-        case DecisionProbe(_, semantic_id, _, _, _, _):
+        case DecisionProbe(_, semantic_id, _, _, _, _, _, _, _):
             "MIRCOV-PROBE-E-UNLOWERED: DecisionProbe '{semantic_id}' requires admitted backend lowering"
         case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
             "MIRCOV-PROBE-E-UNLOWERED: ConditionProbe '{semantic_id}' requires admitted backend lowering"
+        case DynamicDecisionProbe(_, semantic_id, _, _, _, _, _, _, _):
+            "MIRCOV-PROBE-E-UNLOWERED: DynamicDecisionProbe '{semantic_id}' requires admitted patchpoint lowering"
+        case DynamicConditionProbe(_, semantic_id, _, _, _, _, _, _):
+            "MIRCOV-PROBE-E-UNLOWERED: DynamicConditionProbe '{semantic_id}' requires admitted patchpoint lowering"
         case _: ""
 
 fn mir_coverage_probe_admission_diagnostic_function_v1(func: MirFunction) -> text:
