@@ -280,3 +280,126 @@ describe("has_ optional sugar in a sibling callable signature", fn():
         expect(diagnostics).to_equal("")
     )
 )
+
+describe("bare export facade with no imports beside its declaring sibling", fn():
+    # 15.blocks/blocks.spl is module compiler.blocks.blocks: a facade with NO
+    # `use` lines that bare-exports `Completion`, declared by its directory
+    # sibling compiler.blocks.definition (the driver maps compiler.blocks.X
+    # to 15.blocks/blocks/X). Zero-import siblings sugar_registry.spl and
+    # context.spl were blamed with `unresolved type: Completion`.
+    val definition = "pkg.blocks.definition|struct Completion:\n    label: text\nstruct BlockDefinition:\n    name: text"
+    val facade = "pkg.blocks.blocks|export BlockDefinition\nexport Completion"
+    val pkg_init = "pkg.blocks.__init__|export use pkg.blocks.definition.\{BlockDefinition\}"
+    val context = "pkg.blocks.context|use pkg.common.span.\{Span\}\nstruct BlockContext:\n    span: Span"
+    val span = "pkg.common.span|struct Span:\n    line: i64"
+    val sibling = "pkg.blocks.sugar_registry|struct SugarRule:\n    name: text"
+
+    it("resolves for a zero-import sibling lowered first", fn():
+        val diagnostics = lower_route_chain_sequence([span, definition, facade, pkg_init, context, sibling], ["pkg.blocks.sugar_registry"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves for a zero-import sibling lowered after the facade", fn():
+        val diagnostics = lower_route_chain_sequence([span, definition, facade, pkg_init, context, sibling], ["pkg.blocks.blocks", "pkg.blocks.sugar_registry", "pkg.blocks.context"])
+        expect(diagnostics).to_equal("")
+    )
+
+    it("resolves for a consumer importing through the facade", fn():
+        val consumer = "pkg.consumer|use pkg.blocks.blocks.\{Completion\}\nfn pick(c: Completion) -> text:\n    c.label"
+        val diagnostics = lower_route_chain_sequence([span, definition, facade, pkg_init, context, sibling, consumer], ["pkg.consumer"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+describe("owner-local types in a sibling trait's method signatures", fn():
+    val definition = "pkg.blocks.definition|trait BlockDefinition:\n    fn name() -> text\n    fn completions(payload: text, cursor: i64) -> [Completion]:\n        []\nstruct Completion:\n    label: text"
+    val sibling = "pkg.blocks.sugar_registry|struct SugarRule:\n    name: text"
+
+    it("array-of-owner-local default trait method return, zero-import sibling", fn():
+        val diagnostics = lower_route_chain_sequence([definition, sibling], ["pkg.blocks.sugar_registry"])
+        expect(diagnostics).to_equal("")
+    )
+    it("same, after the owner was lowered first", fn():
+        val diagnostics = lower_route_chain_sequence([definition, sibling], ["pkg.blocks.definition", "pkg.blocks.sugar_registry"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+describe("sibling impl method whose return type is a directory-sibling type", fn():
+    # 15.blocks/blocks/builtin_blocks_data.spl: `struct SqlBlockDef(BlockDefinition)`
+    # + `impl SqlBlockDef: fn completions(...) -> [Completion]` with Completion
+    # reached by directory-sibling visibility only (no `use`). Zero-import
+    # package member sugar_registry.spl registers that sibling's methods and
+    # was blamed with `unresolved type: Completion` (stage1 closure 2026-08-22).
+    val definition = "pkg.blocks.definition|trait BlockDefinition:\n    fn name() -> text\nstruct Completion:\n    label: text\nexport BlockDefinition, Completion"
+    val data = "pkg.blocks.builtin_blocks_data|use pkg.blocks.definition.\{BlockDefinition\}\nstruct SqlBlockDef(BlockDefinition):\n    tag: text\nimpl SqlBlockDef:\n    fn name() -> text:\n        \"sql\"\n    fn completions(payload: text, cursor: i64) -> [Completion]:\n        []"
+    val sibling = "pkg.blocks.sugar_registry|struct SugarRule:\n    name: text"
+
+    it("zero-import sibling lowered first", fn():
+        val diagnostics = lower_route_chain_sequence([data, definition, sibling], ["pkg.blocks.sugar_registry"])
+        expect(diagnostics).to_equal("")
+    )
+    it("zero-import sibling lowered after the impl owner", fn():
+        val diagnostics = lower_route_chain_sequence([definition, data, sibling], ["pkg.blocks.builtin_blocks_data", "pkg.blocks.sugar_registry"])
+        expect(diagnostics).to_equal("")
+    )
+)
+
+fn lower_aliased_chain(entries: Array<Array<text>>, consumers: Array<text>) -> text:
+    # entries: [registry name, physical path, source]. Several names may share
+    # one path -- that is how the driver registers `compiler.blocks.value`
+    # as an alias of physical `compiler.15.blocks.blocks.value`.
+    val log = bare_export_logger()
+    var modules: Dict<text, Module> = {}
+    var sources: Array<SourceFile> = []
+    var source_by_name: Dict<text, text> = {}
+    for entry in entries:
+        val name = entry[0]
+        val path = entry[1]
+        val source = entry[2]
+        modules[name] = bare_export_module(source, path, log)
+        sources.push(SourceFile(path: path, content: source, module_name: name))
+        source_by_name[name] = source
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    if surfaces_result.is_err():
+        return "surfaces: " + surfaces_result.unwrap_err()
+    val surfaces = surfaces_result.unwrap()
+    var lowering = hirlowering_for_module(consumers[0], surfaces)
+    var joined = ""
+    for consumer_name in consumers:
+        lowering.begin_module(consumer_name)
+        val consumer = bare_export_module(source_by_name[consumer_name], consumer_name, log)
+        val hir = lowering.lower_module(consumer)
+        joined = ""
+        for message in lowering.diagnostic_messages:
+            joined = joined + message + "|"
+    joined
+
+describe("tier-aliased package: sibling impl method returning a directory-sibling type", fn():
+    # Real layout: src/compiler/15.blocks/blocks/{definition,builtin_blocks_data}.spl
+    # are registered under the physical name compiler.15.blocks.blocks.X AND the
+    # import spelling compiler.blocks.X; src/compiler/blocks/sugar_registry.spl is
+    # compiler.blocks.sugar_registry with NO imports. Through the alias the
+    # blocks/ files become package siblings of sugar_registry, and registering
+    # builtin_blocks_data's `fn completions(...) -> [Completion]` (Completion
+    # reached only by directory-sibling visibility) produced
+    # `unresolved type: Completion` blamed on sugar_registry.
+    val def_src = "trait BlockDefinition:\n    fn name() -> text\nstruct Completion:\n    label: text\nexport BlockDefinition, Completion"
+    val data_src = "use pkg.blocks.definition.\{BlockDefinition\}\nstruct SqlBlockDef(BlockDefinition):\n    tag: text\nimpl SqlBlockDef:\n    fn name() -> text:\n        \"sql\"\n    fn completions(payload: text, cursor: i64) -> [Completion]:\n        []"
+    val sugar_src = "struct SugarRule:\n    name: text"
+    # Registry order matters: the impl owner is registered BEFORE the type
+    # owner, as the driver's closure order does for builtin_blocks_data.
+    val entries = [
+        ["pkg.15.blocks.blocks.builtin_blocks_data", "src/pkg/15.blocks/blocks/builtin_blocks_data.spl", data_src],
+        ["pkg.blocks.builtin_blocks_data", "src/pkg/15.blocks/blocks/builtin_blocks_data.spl", data_src],
+        ["pkg.15.blocks.blocks.definition", "src/pkg/15.blocks/blocks/definition.spl", def_src],
+        ["pkg.blocks.definition", "src/pkg/15.blocks/blocks/definition.spl", def_src],
+        ["pkg.blocks.sugar_registry", "src/pkg/blocks/sugar_registry.spl", sugar_src]]
+
+    it("zero-import sibling lowered first", fn():
+        expect(lower_aliased_chain(entries, ["pkg.blocks.sugar_registry"])).to_equal("")
+    )
+    it("zero-import sibling lowered after the impl owner", fn():
+        expect(lower_aliased_chain(entries, ["pkg.blocks.builtin_blocks_data", "pkg.blocks.sugar_registry"])).to_equal("")
+    )
+)
