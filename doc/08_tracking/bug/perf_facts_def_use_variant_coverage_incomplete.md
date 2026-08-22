@@ -20,11 +20,10 @@ use information over specialized MIR.
 
 ## Required fix
 
-1. Give every new opcode an explicit def/use case enforced by a registry self-check.
-2. Replace text-encoded GPU launch arguments and model the VHDL process body as a CFG edge.
-3. Admit the verification-only result-match metadata contract.
-4. Add generated-registry and malformed-local fixtures for every opcode family.
-5. Rewire remaining compiler consumers to consume only complete shared facts.
+1. Replace text-encoded GPU launch arguments and model the VHDL process body as a CFG edge.
+2. Admit the verification-only result-match metadata contract.
+3. Add malformed-local fixtures for every nested opcode family.
+4. Rewire remaining compiler consumers to consume only complete shared facts.
 
 The vectorizer loop dependency path now consumes shared facts and rejects
 `analysis_complete=false`. Typed-storage production and storage access summaries use
@@ -38,3 +37,7 @@ consumers remain.
 
 Opcode-family coverage tests demonstrate zero uncovered instructions across the full MIR
 fixture corpus, and consumers reject injected unknown or undeclared-local cases.
+
+The generated-registry source contract now requires every `MirInstKind` to have a named
+access arm and rejects wildcard fallback. The three explicitly incomplete representations
+remain visible rather than satisfying the full unblock condition.
