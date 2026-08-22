@@ -100,61 +100,33 @@ impl LoopDetector:
 
         # Find natural-loop headers from dominance-proven backedges.
         var potential_headers: [BlockId] = []
-        var header_set = {}
+        var header_latches: Dict<i64, [BlockId]> = {}
 
         for block in func.blocks:
             val successors = perf_facts_successors(facts, block.id)
             for succ in successors:
                 if perf_facts_dominates(facts, succ, block.id):
-                    if not header_set.has(succ.id):
-                        header_set[succ.id] = true
+                    if not header_latches.has(succ.id):
+                        header_latches[succ.id] = []
                         potential_headers = potential_headers.push(succ)
+                    var latches = header_latches[succ.id]
+                    var latch_recorded = false
+                    for latch in latches:
+                        if latch.id == block.id.id:
+                            latch_recorded = true
+                            break
+                    if not latch_recorded:
+                        latches.push(block.id)
+                    header_latches[succ.id] = latches
 
-        # Build LoopInfo for each dominance-proven header. The cycle-region
-        # check remains as a second fail-closed guard (bug #160).
+        # Build one natural loop from all dominance-proven latches per header.
         for header in potential_headers:
-            val loop_info_opt = self.build_loop_info(func, header, facts)
+            val loop_info_opt = self.build_loop_info(
+                func, header, header_latches[header.id], facts)
             if loop_info_opt.?:
                 self.loops = self.loops.push(loop_info_opt.unwrap())
 
-    me reachable_from(facts: PerfFacts, start: BlockId) -> Dict<i64, bool>:
-        """Blocks reachable from `start` via one or more CFG edges. `start`
-        itself is marked only if it lies on a cycle."""
-        var visited: Dict<i64, bool> = {}
-        var stack: [BlockId] = []
-        for s in perf_facts_successors(facts, start):
-            stack = stack.push(s)
-        var next_index = 0
-        while next_index < stack.len():
-            val cur = stack[next_index]
-            next_index = next_index + 1
-            if visited.has(cur.id):
-                continue
-            visited[cur.id] = true
-            for s in perf_facts_successors(facts, cur):
-                if not visited.has(s.id):
-                    stack = stack.push(s)
-        visited
-
-    me can_reach_target(facts: PerfFacts, target: BlockId) -> Dict<i64, bool>:
-        """Blocks that can reach `target` via one or more CFG edges."""
-        var visited: Dict<i64, bool> = {}
-        var stack: [i64] = []
-        for p in perf_facts_predecessors(facts, target):
-            stack = stack.push(p)
-        var next_index = 0
-        while next_index < stack.len():
-            val cur = stack[next_index]
-            next_index = next_index + 1
-            if visited.has(cur):
-                continue
-            visited[cur] = true
-            for p in (facts.predecessors[cur] ?? []):
-                if not visited.has(p):
-                    stack = stack.push(p)
-        visited
-
-    fn build_loop_info(func: MirFunction, header: BlockId, facts: PerfFacts) -> LoopInfo?:
+    fn build_loop_info(func: MirFunction, header: BlockId, latches: [BlockId], facts: PerfFacts) -> LoopInfo?:
         """Build LoopInfo for the natural loop with the given header.
 
         Bug #160: the previous heuristic treated any block whose successor
@@ -165,55 +137,49 @@ impl LoopDetector:
         collection_opt's loop-invariant hoist wrongly moved a body instruction
         into a bogus header and produced a silent miscompile.
 
-        Correct natural loop: the header must have a genuine backedge (a
-        predecessor the header can actually reach, forming a cycle), and the
-        body is exactly the blocks that are both reachable FROM the header and
-        can reach BACK to the header. That excludes break/exit blocks and the
-        preheader, and includes every real loop-body block."""
-        val reach_fwd = self.reachable_from(facts, header)
-        val reach_bwd = self.can_reach_target(facts, header)
-
-        # A genuine backedge is an edge p -> header where the header can reach p
-        # (or p is the header itself, a self-loop). Absent one, this is not a
-        # real loop and must be dropped.
-        var backedges: [BlockId] = []
-        var has_real_backedge = false
-        for block in func.blocks:
-            val succs_bk = perf_facts_successors(facts, block.id)
-            for succ in succs_bk:
-                if succ.id == header.id:
-                    if block.id.id == header.id or reach_fwd.has(block.id.id):
-                        has_real_backedge = true
-                        backedges = backedges.push(block.id)
-        if not has_real_backedge:
+        Correct natural loop: start with the dominance-proven latch edges and
+        walk predecessors backwards to the header. Only blocks dominated by
+        the header may enter the set. An SCC intersection is too broad for
+        nested loops: an inner header can reach an outer latch and cycle back,
+        causing the inner loop to absorb outer-loop blocks."""
+        if latches.len() == 0:
             return nil
 
-        # Natural loop body: blocks (other than the header) that the header can
-        # reach and that can reach the header — i.e. the cycle region.
-        var body: [BlockId] = []
-        var body_set = {}
-        for block in func.blocks:
-            if block.id.id == header.id:
-                continue
-            if reach_fwd.has(block.id.id) and reach_bwd.has(block.id.id):
-                body_set[block.id.id] = true
-                body = body.push(block.id)
+        var loop_set: Dict<i64, bool> = {}
+        loop_set[header.id] = true
+        var worklist: [BlockId] = []
+        for latch in latches:
+            if latch.id != header.id:
+                worklist.push(latch)
 
-        # Build all_body set for O(1) membership checks
-        var all_body_set = {}
-        all_body_set[header.id] = true
-        for bid in body:
-            all_body_set[bid.id] = true
+        var next_index = 0
+        while next_index < worklist.len():
+            val current = worklist[next_index]
+            next_index = next_index + 1
+            if loop_set.has(current.id):
+                continue
+            if not perf_facts_dominates(facts, header, current):
+                continue
+            loop_set[current.id] = true
+            for predecessor in perf_facts_predecessors(facts, current):
+                if predecessor != header.id and not loop_set.has(predecessor):
+                    worklist.push(BlockId(id: predecessor))
+
+        # Preserve MIR block order for deterministic diagnostics and dumps.
+        var body: [BlockId] = []
+        for block in func.blocks:
+            if block.id.id != header.id and loop_set.has(block.id.id):
+                body.push(block.id)
 
         # Detect exit edges: edges from body blocks to non-body blocks
         var exit_edges: [EdgePair] = []
         val all_body = [header] + body
         for block in func.blocks:
-            if not all_body_set.has(block.id.id):
+            if not loop_set.has(block.id.id):
                 continue
             val successors = perf_facts_successors(facts, block.id)
             for succ in successors:
-                if not all_body_set.has(succ.id):
+                if not loop_set.has(succ.id):
                     exit_edges = exit_edges.push(EdgePair(from: block.id, to: succ))
 
         # Analyze iteration count from exit conditions
@@ -223,7 +189,7 @@ impl LoopDetector:
         Some(LoopInfo(
             header: header,
             body: body,
-            backedges: backedges,
+            backedges: latches,
             exit_edges: exit_edges,
             trip_count: trip_count
         ))
