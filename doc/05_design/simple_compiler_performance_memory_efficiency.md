@@ -481,3 +481,36 @@ path collects maximal unchanged spans plus fixed escape literals and joins once,
 so it performs linear work without full-message intermediate replacement copies.
 Callers retain their existing JSON envelope, diagnostic ordering and severity
 policy.
+
+## Query ANSI normalization contract
+
+The normal ANSI-free compiler-output path returns its input directly after a
+single escape-presence scan; it must not build a character-fragment array or join
+an identical output. If ESC is present, retain the legacy state machine rather
+than broadening terminal parsing: discard ESC and subsequent characters through
+the next lowercase `m`, repeat for later escapes, and discard the remaining suffix
+for an unterminated escape. Empty text, Unicode and all ANSI-free bytes are
+unchanged. A later shared-output design may remove duplicate normalization across
+lint gating and JSON collection, but must preserve their current call ordering and
+diagnostic semantics.
+
+## Workspace diagnostic session design
+
+Add compiler-tool owners under `compiler/90.tools/workspace_diagnostics` for an
+immutable `WorkspaceDiagnosticConfig`, ordinal/path/digest request, per-file
+result and serial `WorkspaceDiagnosticSession`. The app discovers files once,
+opens one session and submits each source without spawning a compiler. Every
+request receives a fresh compile context and freshly reset lint collection and
+severity state; mutable errors, warnings, modules, HIR, parser arenas or AST
+handles never cross file boundaries. Results retain discovery ordinals so current
+file order, compiler-before-lint order, clean-file omission, summary text/counts
+and exit status remain exact.
+
+Stage 1 is deliberately serial. Digest-keyed immutable source/config/import caches
+may follow after ownership is explicit. Bounded concurrency is forbidden until
+lexer/parser/AST globals are session-owned and permutation/contamination tests
+prove isolation. Acceptance requires zero per-file subprocesses, each session
+result matching standalone `query check`, sibling failures not changing other
+results, source reads bounded to one per file, and measured p50/p95 plus max RSS on
+the same 50- and 200-file fixtures. Target at least 50% wall reduction at 50 files,
+75% at 200 files, and peak RSS no more than 10% above the current baseline.
