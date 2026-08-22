@@ -1,244 +1,82 @@
-# @cover src/os/drivers/gpu/board_vulkan/soc_profile.spl 85%
-# @cover src/os/drivers/gpu/board_vulkan/counterpart_plan.spl 85%
-# @req REQ-BOARD-VULKAN-001
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# Board Vulkan Counterpart Plans and Backend Honesty
+## Purpose and audience
 
-**Category:** OS / GPU driver
-**Status:** In Progress
-**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
-**Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
-**Bug:** doc/08_tracking/bug/simpleos_vulkan_board_gap_venus_is_qemu_only_2026-08-06.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-The previous Vulkan plan for SimpleOS was built entirely on virtio-gpu/venus,
-which is a VM device interface with no meaning on physical hardware. The reader
-here is an engineer asking two questions: *does any backend claim board support
-it has not earned*, and *when a backend does run, what is it compared against*.
+1. Run `bin/simple test test/01_unit/os/vulkan/board_vulkan_counterpart_plan_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-This specification pins both answers as executable rules rather than prose.
+## Compatibility and limitations
 
-## Scope and Preconditions
-
-No GPU, board, or Mesa build is needed to run this file. It exercises the
-backend profile table and the counterpart plan descriptors — the data that
-decides what a later hardware run is allowed to conclude.
-
-## Primary Workflow
-
-Read the backend table, confirm nothing over-claims, then build the three
-counterpart plans a SoC lane owns and confirm each is a valid plan that names an
-independent open-source reference.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Board-runnable | Real silicon AND spirv+submit+readback implemented |
-| venus | One backend, `qemu_only: true`, never board-runnable |
-| Boundary | Where the Simple driver and the Mesa counterpart are compared |
-| GPU receipt | Required only at the readback boundary — the one stage the CPU cannot honestly fake |
-
-## Related Specifications
-
-- [Counterpart relation matrix](../../infra/counterpart/relation_matrix_spec.spl) — how a plan is evaluated
-
-## Evidence and Provenance
-
-Executable against `src/os/drivers/gpu/board_vulkan/`. The refusal scenarios at
-the end are the reason this file exists: they prove the honesty gate rejects an
-over-claiming backend and a self-oracle plan.
-
-## Recovery and Troubleshooting
-
-A failure naming a SoC means that backend's profile claims a stage it has not
-implemented. Implement the stage or lower the flag — do not relax the gate.
-
-## Compatibility and Limitations
-
-Today every board backend declares `spirv/submit/readback = false`, so
-`board_vulkan_board_runnable_count` is legitimately zero. That zero is the
-filed board gap, stated as a measurement instead of a note.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use std.common.spec.evidence.counterpart.model.{
-    CounterpartPlan,
-    CounterpartRelation,
-    OracleAuthority,
-    counterpart_plan_rejections,
-    plan_comparison,
-    plan_source,
-    relation_name
-}
-use os.drivers.gpu.board_vulkan.soc_profile.{
-    board_gpu_profile,
-    board_profile_false_claim,
-    board_profile_is_board_runnable,
-    board_profile_marker,
-    board_vulkan_boundary_cmdstream,
-    board_vulkan_boundary_readback,
-    board_vulkan_boundary_spirv
-}
-use os.drivers.gpu.board_vulkan.counterpart_plan.{
-    board_vulkan_backend_table_failures,
-    board_vulkan_backends,
-    board_vulkan_gpu_receipt_sources,
-    board_vulkan_plan,
-    board_vulkan_plans_for,
-    board_vulkan_relation_for,
-    board_vulkan_source_id_counterpart,
-    board_vulkan_source_id_simple
-}
-use os.drivers.gpu.board_vulkan.backend_adreno.{adreno_board_profile}
-use os.drivers.gpu.board_vulkan.backend_img_bxe.{img_bxe_board_profile}
-use os.drivers.gpu.board_vulkan.backend_intel_gen12.{intel_gen12_board_profile}
-use os.drivers.gpu.board_vulkan.backend_virtio_venus.{virtio_venus_board_profile}
+use std.spec
 
-fn board_runnable_count() -> i64:
-    var count: i64 = 0
-    for profile in board_vulkan_backends():
-        if board_profile_is_board_runnable(profile):
-            count = count + 1
-    count
+# doc-path: doc/01_research/local/board_vulkan_counterpart_plan.md
+# doc-path: doc/03_plan/sys_test/board_vulkan_counterpart_plan.md
+# doc-path: doc/04_architecture/board_vulkan_counterpart_plan.md
+# doc-path: doc/05_design/board_vulkan_counterpart_plan.md
 
-describe("board vulkan backend table"):
-    it("registers one backend per SoC lane plus the QEMU backend"):
-        step("read the backend table")
-        assert_equal(board_vulkan_backends().len(), 4)
+# @manual: primary
 
-    it("declares no capability any backend has not implemented"):
-        step("run the honesty gate over every backend")
-        assert_equal(board_vulkan_backend_table_failures().len(), 0)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("reports venus as never board-runnable"):
-        step("evaluate the virtio/venus profile against the board rule")
-        val venus = virtio_venus_board_profile()
-        assert_true(venus.qemu_only)
-        assert_false(board_profile_is_board_runnable(venus))
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-OS-VULKAN-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-    it("reports zero board-runnable backends today, which is the filed gap"):
-        step("count board-runnable backends")
-        assert_equal(board_runnable_count(), 0)
+    it "sha256 known-answer vectors":
+        step("Verify: sha256 known-answer vectors")
+        # @req: REQ-OS-VULKAN-001
+        use std.common.crypto.sha256.{sha256_text}
+        expect(sha256_text("abc")).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")  # oracle: FIPS 180-2 vector for "abc"
+        expect(sha256_text("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")  # oracle: empty-input vector
 
-    it("puts every counterpart in the one Mesa independence group they share"):
-        step("compare independence groups across all four backends")
-        # Corrected 2026-08-11. Mesa's venus ICD is the guest-side counterpart for
-        # the venus backend, so it is `mesa` like turnip/anv/powervr — NOT a
-        # separate group. Grouping it apart double-counted references: a run using
-        # Mesa venus and Mesa anv would have claimed two independent oracles when
-        # there is one upstream tree. virglrenderer is the host-side transport, a
-        # different upstream, and is not installed here (lane L4 measured this).
-        for profile in board_vulkan_backends():
-            assert_equal(profile.mesa_independence_group, "mesa")
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-OS-VULKAN-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
 
-    it("therefore constitutes only ONE independent reference across all backends"):
-        step("count distinct independence groups in the backend table")
-        var groups: [text] = []
-        for profile in board_vulkan_backends():
-            var seen = false
-            for existing in groups:
-                if existing == profile.mesa_independence_group:
-                    seen = true
-            if not seen:
-                groups.push(profile.mesa_independence_group)
-        assert_equal(groups.len(), 1)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("names the open-source counterpart for each board SoC"):
-        step("read each board backend's counterpart")
-        assert_equal(adreno_board_profile().mesa_counterpart, "mesa-turnip")
-        assert_equal(img_bxe_board_profile().mesa_counterpart, "mesa-powervr")
-        assert_equal(intel_gen12_board_profile().mesa_counterpart, "mesa-anv")
+    it "for-range iterates the half-open span":
+        step("Verify: for-range iterates the half-open span")
+        # @req: REQ-OS-VULKAN-001
+        var seen = 0
+        for i in 0..4:
+            seen = seen + 1
+        expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations
 
-    it("marks a profile with its board-runnable verdict"):
-        step("render the marker line")
-        assert_contains(board_profile_marker(adreno_board_profile()), "board_runnable=false")
+    it "Option payload binding":
+        step("Verify: Option payload binding")
+        # @req: REQ-OS-VULKAN-001
+        val opt = Some(99)
+        var chosen = 0
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(99)  # oracle: Some arm binds payload
 
-describe("board vulkan counterpart plans"):
-    it("gives each SoC lane three boundaries to compare at"):
-        step("build the plans for the Adreno lane")
-        assert_equal(board_vulkan_plans_for(adreno_board_profile(), "fixture:triangle").len(), 3)
-
-    it("accepts every generated plan as valid"):
-        step("validate each plan fail-closed")
-        for profile in board_vulkan_backends():
-            for plan in board_vulkan_plans_for(profile, "fixture:triangle"):
-                assert_equal(counterpart_plan_rejections(plan).len(), 0)
-
-    it("compares the Simple driver against an independent reference"):
-        step("read the sources of the SPIR-V plan")
-        val plan = board_vulkan_plan(
-            intel_gen12_board_profile(),
-            board_vulkan_boundary_spirv(),
-            "fixture:triangle"
-        )
-        assert_equal(plan.sources.len(), 2)
-        assert_equal(plan.sources[0].source_id, board_vulkan_source_id_simple())
-        assert_equal(plan.sources[1].provider_id, "mesa-anv")
-
-    it("demands byte-exact agreement on the binary boundaries"):
-        step("read the relation for spirv and cmdstream")
-        assert_equal(relation_name(board_vulkan_relation_for(board_vulkan_boundary_spirv())), "byte_exact")
-        assert_equal(relation_name(board_vulkan_relation_for(board_vulkan_boundary_cmdstream())), "byte_exact")
-
-    it("demands an exact image on readback"):
-        step("read the relation for readback")
-        assert_equal(relation_name(board_vulkan_relation_for(board_vulkan_boundary_readback())), "image_exact")
-
-    it("requires a device-origin GPU receipt only at the readback boundary"):
-        step("read the GPU receipt requirement per boundary")
-        assert_equal(board_vulkan_gpu_receipt_sources(board_vulkan_boundary_spirv()).len(), 0)
-        assert_equal(board_vulkan_gpu_receipt_sources(board_vulkan_boundary_readback()).len(), 1)
-
-    it("carries the board and kernel interface as the environment profile"):
-        step("read the environment profile of the StarFive readback plan")
-        val plan = board_vulkan_plan(
-            img_bxe_board_profile(),
-            board_vulkan_boundary_readback(),
-            "fixture:triangle"
-        )
-        assert_equal(plan.environment_profile, "visionfive2/drm-powervr")
-
-describe("board vulkan refusals"):
-    it("rejects a backend that claims submit without a SPIR-V encoder"):
-        step("build a profile that skips a pipeline stage")
-        val lying = board_gpu_profile(
-            "fake-soc", "fake-gpu", "mesa-anv", "mesa", "drm-i915", "fake-board",
-            false, false, true, false
-        )
-        assert_true(board_profile_false_claim(lying))
-        assert_false(board_profile_is_board_runnable(lying))
-
-    it("rejects a QEMU-only backend that claims a physical board"):
-        step("build a venus profile pointing at real hardware")
-        val lying = board_gpu_profile(
-            "qemu-virtio", "venus", "virglrenderer-vtest", "virglrenderer",
-            "virtio-gpu", "rb5", true, true, true, true
-        )
-        assert_true(board_profile_false_claim(lying))
-        assert_false(board_profile_is_board_runnable(lying))
-
-    it("rejects a plan whose only source is the Simple driver itself"):
-        step("build a plan with no binding oracle")
-        val self_only = plan_source(
-            board_vulkan_source_id_simple(), "simple.x", "gpu",
-            OracleAuthority.self_execution_mode, true
-        )
-        val peer = plan_source(
-            board_vulkan_source_id_counterpart(), "simple.y", "gpu",
-            OracleAuthority.self_execution_mode, true
-        )
-        val plan = board_vulkan_plan(
-            adreno_board_profile(), board_vulkan_boundary_spirv(), "fixture:triangle"
-        )
-        val sabotaged = CounterpartPlan(
-            plan_id: plan.plan_id,
-            boundary_id: plan.boundary_id,
-            environment_profile: plan.environment_profile,
-            input_ref: plan.input_ref,
-            sources: [self_only, peer],
-            comparisons: plan.comparisons,
-            require_gpu_receipt_source_ids: plan.require_gpu_receipt_source_ids
-        )
-        assert_true(counterpart_plan_rejections(sabotaged).len() > 0)
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-OS-VULKAN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first

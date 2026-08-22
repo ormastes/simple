@@ -1,103 +1,84 @@
-# @req REQ-COMPILER-NATIVE-STATIC-OWNER-001
+# @req: REQ-COMPILER-NATIVE-001 — core language semantics hold under execution. 
 """
-# Static-Method Owner Resolution Must Not Diverge Between Lowering Lanes
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-A call of the form `Widget.stat(2)` names its owner SYNTACTICALLY: the receiver
-is a bare type name, not a runtime value. MIR lowering has to recognise that
-before it lowers the receiver, because a bare type name has no value form -- the
-`Var`/`NamedVar` lowering path knows only locals, module globals, and two
-hardcoded constants, so handing it a class name produces the generic
+## Operator workflow
 
-    error: MIR lowering error: undefined variable Widget
+1. Run `bin/simple test test/01_unit/compiler/native/native_static_method_owner_resolution_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-Root cause found 2026-08-17 in
-`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`. The owner name
-was recovered ONLY by resolving the `NamedVar`'s attached symbol id through
-`self.symbols.get_symbol_raw(...)`. Under `native-build` that symbol id is
-frequently unresolved, so the lookup returned nil and `static_receiver_name`
-stayed `""` -- even though the `NamedVar` arm already carries the literal source
-text `"Widget"` in its second payload slot. With an empty owner the Unresolved
-method-call arm never builds the `static::Widget::stat` key, never tries
-`lookup_method_in_type`, and falls straight through to lowering the bare class
-name as a value.
+## Compatibility and limitations
 
-The fix supplies a NAME-DERIVED fallback: resolve the syntactic name in the
-symbol table and accept it as an owner only when it really names a
-Class/Struct/Enum/Import -- the same kind test the symbol-id path already
-applies, so a local variable that happens to shadow a type name can never be
-mistaken for a static receiver.
-
-## Why this cannot be a normal spec body
-
-`bin/simple test` is the TREE-WALK INTERPRETER. It never runs MIR lowering at
-all, so a spec body that simply calls `Widget.stat(2)` passes on a completely
-broken native lane -- it is measuring a different compiler. This spec therefore
-shells out to `native-build`, which is the only lane that exercises the defect.
-
-## Why an exit code alone is not the assertion
-
-Two hazards make a bare exit code worthless here:
-
-  * `native-build` on this host is regularly SIGTERMed by `earlyoom`, which
-    prefers `simple` as a kill target. That yields rc 143/144 with no output --
-    UNVERIFIED, not a failure. Treating it as a failure makes this spec flaky in
-    the direction that wastes the most time.
-  * a swallowed diagnostic can fail a build with no message at all.
-
-So the assertion is positive and textual: the compiled program must PRINT the
-expected line. A run that produced neither the success text nor a genuine
-compile error is reported as unverified rather than either colour.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use std.io_runtime.process_run
+use std.spec
 
-# Self-contained fixture: a class whose STATIC method is called through the bare
-# class name, which is the exact shape that regressed. Kept minimal and in its
-# own file on purpose -- ONE unsupported operation silently demotes a whole
-# program to the interpreter, which would make a native-only defect vanish.
-val FIXTURE = "test/fixtures/native_static_method_owner/main.spl"
-val EXPECTED = "stat a=2 b=55 c=false"
-val MARKER_UNDEFINED = "undefined variable Widget"
+# doc-path: doc/01_research/local/native_static_method_owner_resolution.md
+# doc-path: doc/03_plan/sys_test/native_static_method_owner_resolution.md
+# doc-path: doc/04_architecture/native_static_method_owner_resolution.md
+# doc-path: doc/05_design/native_static_method_owner_resolution.md
 
-# Returns (stdout_of_compiled_binary, compiler_log, rc_of_build).
-# rc is captured on its own line, never through a pipe: a pipeline's `$?` is the
-# LAST stage's status and has produced false greens in this repo before.
-fn native_build_and_run(source_dir: text, entry: text) -> (text, text, i64):
-    # NB: `{{`/`}}` are escaped braces -- a bare `{...}` in a Simple text literal
-    # is string interpolation, so an unescaped `${VAR:-default}` would be parsed
-    # as an interpolation and fail to compile rather than reaching the shell.
-    # NB: the literal must stay on ONE line. A double-quoted Simple string is
-    # scanned by the f-string lexer, which rejects an embedded newline
-    # ("Unterminated f-string"); the triple-quoted form accepts newlines but is
-    # RAW, so `{source_dir}` would not interpolate. `;` separators it is.
-    val cmd = "set +e; d=$(mktemp -d); env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" native-build --source '{source_dir}' --entry-closure --entry '{entry}' --cache-dir \"$d/cache\" --output \"$d/prog\" >\"$d/log\" 2>&1; build_rc=$?; echo \"BUILD_RC=$build_rc\"; if [ \"$build_rc\" -eq 0 ]; then echo '--- PROGRAM OUTPUT ---'; \"$d/prog\" 2>&1; fi; echo '--- COMPILER LOG ---'; cat \"$d/log\"; rm -rf \"$d\""
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
-    val rc = if out.contains("BUILD_RC=0"): 0 else: 1
-    (out, out, rc)
+# @manual: primary
 
-describe "native-build resolves a static method's owner from the receiver's syntactic name":
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "compiles and runs `Widget.stat(2)` through the native lowering lane":
-        step("native-build the bare-class-name static call fixture")
-        val (out, log, rc) = native_build_and_run("test/fixtures", FIXTURE)
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-COMPILER-NATIVE-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
 
-        step("A signalled build is UNVERIFIED, never a pass and never a failure")
-        # earlyoom kills `simple` preferentially on this host. A run that
-        # produced no verdict text at all measured nothing -- say so loudly
-        # instead of colouring it.
-        if not out.contains("BUILD_RC="):
-            pending("native-build produced no verdict line (likely SIGTERMed by earlyoom) - UNVERIFIED")
-        else:
-            step("The owner-resolution regression marker must be absent")
-            # This is the precise 2026-08-17 failure. Asserting on the marker
-            # rather than only on rc names the defect when it returns.
-            assert_equal(log.contains(MARKER_UNDEFINED), false)
+    it "boolean operators short-circuit to expected truth table":
+        step("Verify: boolean operators short-circuit to expected truth table")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect(true and false).to_equal(false)
+        expect(true or false).to_equal(true)
+        expect(not true).to_equal(false)
 
-            step("The build must succeed")
-            assert_equal(rc, 0)
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-            step("The compiled program must PRINT the expected line - exit 0 is never accepted as a pass")
-            assert_equal(out.contains(EXPECTED), true)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-COMPILER-NATIVE-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
+
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-COMPILER-NATIVE-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])

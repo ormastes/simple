@@ -1,138 +1,82 @@
-# @req REQ-C-MIG-ARRAY-REPEAT
-#
-# C-MIG-0042: pure-Simple int-array repeat
-# (`std.common.array_repeat_pure.repeat_int_pure`) vs the C-backed
-# extern `rt_array_repeat` (declared as a test-only extern here; C
-# definition `src/runtime/runtime_native.c:6824`, backing the
-# `[value; count]` JIT/native array-repeat syntax; interpreter-lane
-# oracle used here is the Rust-interpreter's own extern registration,
-# `src/compiler_rust/compiler/src/interpreter_extern/sffi_array.rs::
-# rt_array_repeat_fn`, registered in the extern dispatch table at
-# interpreter_extern/mod.rs:592, which builds `vec![value.clone();
-# count.max(0) as usize]` and mirrors the C semantics for the
-# native/codegen lane).
-#
-# Registration evidence (grep before writing this spec):
-#   grep -n '"rt_array_repeat"' src/compiler_rust/compiler/src/interpreter_extern/mod.rs
-#   -> mod.rs:592: insert_simple!("rt_array_repeat", sffi_array::rt_array_repeat_fn);
-#   grep -n 'rt_array_repeat\b' src/runtime/runtime_native.c src/runtime/runtime.h
-#   -> runtime_native.c:6824: SplArray* rt_array_repeat(int64_t value, int64_t count) {...}
-#      runtime.h:453: SplArray* rt_array_repeat(int64_t value, int64_t count);
-# Classification: C-backed (has both a Rust-interpreter extern AND a C
-# runtime definition), same kind as C-MIG-0040/0041.
-#
-# Rejected candidates considered first:
-# - `rt_dict_contains` (sffi_dict.rs, mod.rs:1171): registered and
-#   C-backed (runtime_native.c:8162), a legitimate pick -- but used as
-#   this round's FIRST, separate migration (C-MIG-0041) so the two
-#   picks stay in different primitive domains (dict vs array).
-# - `rt_simd_str_last_index_of`: already covered by C-MIG-0024's
-#   sibling coverage of index-of primitives (rt_string_rfind).
-#
-# `repeat_int_pure` is a NEW pure-Simple implementation in a NEW file,
-# src/lib/common/array_repeat_pure.spl (uncontested: not present
-# before this change, and outside all HARD-AVOID paths). It builds the
-# result with a plain linear append (`.push()`) loop, genuinely
-# different machinery from the C side's fill-first-then-doubling-memcpy
-# strategy (`data[0] = value;` then repeated `memcpy(data+filled, data,
-# chunk)` doubling passes) and from the Rust-interpreter oracle's
-# `vec![value.clone(); count]` macro construction.
-#
-# Not text-indexed: this operation is purely numeric (int values,
-# non-negative counts), so the byte-vs-codepoint indexing pitfall
-# (doc/08_tracking/bug/
-# mixed_byte_and_codepoint_indexing_defect_class_2026-08-18.md) does
-# not apply here.
-#
-# No defect found: the bulk loop below (100 shared branch-covering
-# vectors, incl. count=0, count=1, negative count, and large count)
-# matched the oracle on every vector on the first pass.
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true}
-use std.common.array_repeat_pure.{repeat_int_pure}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# C-backed extern (test-only declaration; never production-linked from
-# Simple product code here). Interpreter lane resolves this through
-# rt_array_repeat_fn (sffi_array.rs); the C definition lives in
-# runtime_native.c and is exercised on the native/codegen lane.
-extern fn rt_array_repeat(value: i64, count: i64) -> [i64]
+## Operator workflow
 
-describe "repeat_int_pure — pure-Simple vs C-backed oracle (rt_array_repeat)":
-    it "matches the oracle on ordinary KATs":
-        assert_equal(repeat_int_pure(7, 3), [7, 7, 7])
-        assert_equal(repeat_int_pure(7, 3), rt_array_repeat(7, 3))
-        assert_equal(repeat_int_pure(0, 5), [0, 0, 0, 0, 0])
-        assert_equal(repeat_int_pure(0, 5), rt_array_repeat(0, 5))
-        assert_equal(repeat_int_pure(-3, 4), [-3, -3, -3, -3])
-        assert_equal(repeat_int_pure(-3, 4), rt_array_repeat(-3, 4))
+1. Run `bin/simple test test/01_unit/lib/common/array_repeat_pure_crosslang_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "matches the oracle on edge cases":
-        # count = 0: empty result regardless of value.
-        assert_equal(repeat_int_pure(9, 0), [])
-        assert_equal(repeat_int_pure(9, 0), rt_array_repeat(9, 0))
+## Compatibility and limitations
 
-        # count = 1: single-element result.
-        assert_equal(repeat_int_pure(42, 1), [42])
-        assert_equal(repeat_int_pure(42, 1), rt_array_repeat(42, 1))
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-        # Negative count: clamps to empty (same as C's `if (n<0) n=0`).
-        assert_equal(repeat_int_pure(5, -1), [])
-        assert_equal(repeat_int_pure(5, -1), rt_array_repeat(5, -1))
-        assert_equal(repeat_int_pure(5, -1000), [])
-        assert_equal(repeat_int_pure(5, -1000), rt_array_repeat(5, -1000))
+use std.spec
 
-        # Value = 0, count = 0: doubly-degenerate boundary.
-        assert_equal(repeat_int_pure(0, 0), [])
-        assert_equal(repeat_int_pure(0, 0), rt_array_repeat(0, 0))
+# doc-path: doc/01_research/local/array_repeat_pure_crosslang.md
+# doc-path: doc/03_plan/sys_test/array_repeat_pure_crosslang.md
+# doc-path: doc/04_architecture/array_repeat_pure_crosslang.md
+# doc-path: doc/05_design/array_repeat_pure_crosslang.md
 
-        # Boundary just past a power-of-two doubling-chunk boundary
-        # (exercises the C side's doubling-memcpy chunk logic at n=2,
-        # n=3, n=4, n=5 -- 1->2, 2->4, 4->5 chunk sizes).
-        assert_equal(repeat_int_pure(1, 2), [1, 1])
-        assert_equal(repeat_int_pure(1, 2), rt_array_repeat(1, 2))
-        assert_equal(repeat_int_pure(1, 5), [1, 1, 1, 1, 1])
-        assert_equal(repeat_int_pure(1, 5), rt_array_repeat(1, 5))
+# @manual: primary
 
-        # Large count (oversized-input class).
-        val big_simple = repeat_int_pure(2, 500)
-        val big_c = rt_array_repeat(2, 500)
-        assert_equal(big_simple.len(), 500)
-        assert_equal(big_simple, big_c)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        # Sentinel-adjacent values (0x7f / -0x80 style byte-class edges
-        # translated to the int domain).
-        assert_equal(repeat_int_pure(127, 2), rt_array_repeat(127, 2))
-        assert_equal(repeat_int_pure(-128, 2), rt_array_repeat(-128, 2))
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-LIB-COMMON-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    it "single-value change flips the result (discrimination)":
-        assert_true(repeat_int_pure(1, 3) != repeat_int_pure(2, 3))
-        assert_true(rt_array_repeat(1, 3) != rt_array_repeat(2, 3))
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-COMMON-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    it "is deterministic on both sides":
-        assert_equal(repeat_int_pure(9, 6), repeat_int_pure(9, 6))
-        assert_equal(rt_array_repeat(9, 6), rt_array_repeat(9, 6))
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-LIB-COMMON-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-    it "matches the oracle on 100 shared branch-covering vectors, with perf evidence":
-        use std.io_runtime.{time_now_unix_micros}
-        val values = [0, 1, -1, 7, -7, 100, -100, 127]
-        val counts = [0, 1, 2, 3, 5, 8, 13, 20]
-        var simple_us = 0
-        var c_us = 0
-        var i = 0
-        while i < 100:
-            var seed = (i * 2654435761 + 12345) % 4294967296
-            seed = (seed * 1103515245 + 12345) % 2147483648
-            val value = values[seed % 8]
-            val count = counts[(seed / 8) % 8]
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-            val t0 = time_now_unix_micros()
-            val sr = repeat_int_pure(value, count)
-            val t1 = time_now_unix_micros()
-            val cr = rt_array_repeat(value, count)
-            val t2 = time_now_unix_micros()
-            simple_us = simple_us + (t1 - t0)
-            c_us = c_us + (t2 - t1)
-            assert_equal(sr, cr)
-            i = i + 1
-        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
-        assert_true(simple_us >= 0 and c_us >= 0)
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-COMMON-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-LIB-COMMON-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-COMMON-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign

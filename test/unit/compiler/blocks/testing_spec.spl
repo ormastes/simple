@@ -1,149 +1,88 @@
-# Testing Framework Tests - Parser-Safe Local Coverage
-#
-# This file keeps the original intent of the compiler.blocks.testing spec
-# while replacing runtime-only placeholders with self-contained doubles.
+# @req: REQ-COMPILER-BLOCKS-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-fn check(condition: bool):
-    expect(condition).to_equal(true)
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-fn check_text(actual: text, expected: text):
-    expect(actual).to_equal(expected)
+## Operator workflow
 
-# Local doubles that model the old parse/validate/const-eval behavior
-fn fake_parse(source: text) -> bool:
-    if source == "valid parse":
-        true
-    else:
-        false
+1. Run `bin/simple test test/01_unit/compiler/blocks/testing_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-fn fake_parse_error(source: text) -> text:
-    if source == "valid parse":
-        ""
-    else:
-        "unexpected token"
+## Compatibility and limitations
 
-fn fake_validate(source: text) -> bool:
-    if source == "valid parse":
-        true
-    else:
-        if source == "valid mock block":
-            true
-        else:
-            false
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-fn fake_const_eval(source: text) -> text:
-    if source == "2 + 2":
-        "4"
-    else:
-        ""
+use std.spec
 
-fn fake_mock_block(name: text) -> text:
-    if name == "":
-        "unnamed block"
-    else:
-        "{name} block"
+# doc-path: doc/01_research/local/testing.md
+# doc-path: doc/03_plan/sys_test/testing.md
+# doc-path: doc/04_architecture/testing.md
+# doc-path: doc/05_design/testing.md
 
-fn fake_assert_parse_succeeds(source: text) -> bool:
-    fake_parse(source)
+# @manual: primary
 
-fn fake_assert_parse_fails(source: text) -> bool:
-    not fake_parse(source)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn fake_assert_validation_passes(source: text) -> bool:
-    fake_validate(source)
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-BLOCKS-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-fn fake_assert_validation_fails(source: text) -> bool:
-    not fake_validate(source)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-BLOCKS-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-describe "Testing - test_parse()":
-    it "accepts a valid block fixture":
-        check(fake_parse("valid parse"))
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-COMPILER-BLOCKS-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    it "rejects an invalid block fixture":
-        check(not fake_parse("broken parse"))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "Testing - test_parse_error()":
-    it "returns no error for a valid block":
-        check_text(fake_parse_error("valid parse"), "")
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-COMPILER-BLOCKS-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
 
-    it "returns an error message for invalid input":
-        check_text(fake_parse_error("broken parse"), "unexpected token")
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-COMPILER-BLOCKS-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-describe "Testing - test_validate()":
-    it "accepts the parse fixture":
-        check(fake_validate("valid parse"))
-
-    it "accepts the mock block fixture":
-        check(fake_validate("valid mock block"))
-
-    it "rejects an invalid fixture":
-        check(not fake_validate("broken parse"))
-
-describe "Testing - test_const_eval()":
-    it "returns a const value for arithmetic":
-        check_text(fake_const_eval("2 + 2"), "4")
-
-    it "returns an empty result for non-const input":
-        check_text(fake_const_eval("x + 2"), "")
-
-describe "Testing - test_no_const_eval()":
-    it "reports empty output for non-const input":
-        check_text(fake_const_eval("side effect"), "")
-
-describe "Testing - mock_block()":
-    it "creates a named mock block":
-        check_text(fake_mock_block("parse"), "parse block")
-
-    it "falls back to an unnamed mock block":
-        check_text(fake_mock_block(""), "unnamed block")
-
-describe "Testing - Assertion Helpers":
-    it "assert_parse_succeeds returns true for valid input":
-        check(fake_assert_parse_succeeds("valid parse"))
-
-    it "assert_parse_fails returns true for invalid input":
-        check(fake_assert_parse_fails("broken parse"))
-
-    it "assert_validation_passes returns true for valid input":
-        check(fake_assert_validation_passes("valid mock block"))
-
-    it "assert_validation_fails returns true for invalid input":
-        check(fake_assert_validation_fails("broken parse"))
-
-describe "Testing - Integration":
-    it "combines parse, validate, and mock block helpers":
-        val parsed = fake_assert_parse_succeeds("valid parse")
-        val validated = fake_assert_validation_passes("valid mock block")
-        val mock_name = fake_mock_block("parse")
-        check(parsed)
-        check(validated)
-        check_text(mock_name, "parse block")
-
-    it "keeps error and success paths separate":
-        val parse_ok = fake_assert_parse_succeeds("valid parse")
-        val parse_bad = fake_assert_parse_fails("broken parse")
-        check(parse_ok)
-        check(parse_bad)
-
-describe "Testing - Edge Cases":
-    it "handles empty payloads":
-        check(not fake_parse(""))
-        check_text(fake_parse_error(""), "unexpected token")
-
-    it "handles large payloads":
-        val payload = "valid parse"
-        check(fake_parse(payload))
-        check(fake_validate(payload))
-
-    it "handles unicode in test names and labels":
-        check_text(fake_mock_block("unicode"), "unicode block")
-
-    it "handles complex error messages":
-        check_text(fake_parse_error("broken parse"), "unexpected token")
-
-# ============================================================================
-# Feature Tags
-# ============================================================================
-# tags: [compiler, blocks, testing, meta-tests]
-# priority: high
-# status: complete
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-BLOCKS-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right

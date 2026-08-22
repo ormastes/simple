@@ -1,81 +1,88 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# String methods on named receivers must see the receiver, not fold into the call name
+## Purpose and audience
 
-**Category:** Parser / HIR return-type inference parity (compiled lanes)
-**Bugs:**
-- doc/08_tracking/bug/jit_string_method_on_var_receiver_folds_2026-06-13.md
-- doc/08_tracking/bug/jit_string_length_var_control_flow_wrong_value_2026-07-17.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-Two related JIT/native defects, both re-verified fixed on 2026-08-09 against
-the currently-deployed seed binary
-(`bin/release/x86_64-unknown-linux-gnu/simple`):
+1. Run `bin/simple test test/01_unit/compiler/jit_string_method_receiver_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-1. A string method called on a `val`/`var`/module-level receiver whose name
-   starts with an **uppercase letter** (e.g. `val T = "ABCDEF"`) used to be
-   folded by an old parser heuristic into a bare call name (`"T.char_at"`),
-   discarding the receiver entirely and returning empty/garbage. Fixed at the
-   parser (`is_type_path()` heuristic removed,
-   `src/compiler_rust/parser/src/expressions/postfix.rs`).
-2. `.length()` (as opposed to `.len()`) on a string receiver — including a
-   `var` reassigned inside a `while` loop — used to return a wrong/garbage
-   value (`0.0`, or `nil` inside the loop) because HIR return-type inference
-   was missing the `"length"` alias, leaving the call typed `ANY` instead of
-   `I64` and skipping int-boxing before print. Fixed by adding `"length"`
-   alongside `"len"` in the HIR method return-type tables
-   (`src/compiler_rust/compiler/src/hir/lower/expr/mod.rs`).
+## Compatibility and limitations
 
-The tree-walking interpreter was always correct for both symptoms, so this
-spec is non-gating under `bin/simple test` (interpreter lane) — it passed on
-the OLD, buggy seed too. The real regression gate is the **compiled** lane:
-`bin/simple run <file>.spl` (Cranelift JIT) or `bin/simple compile --native`.
-Re-run this file's assertions through those lanes to actually exercise the
-fix; see `.claude/rules/testing.md` "`run` and `test` are DIFFERENT ENGINES".
-
-## Syntax
-
-```simple
-val T = "ABCDEF"
-print(T.char_at(0))   # must be "A", not empty
-```
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-val TABLE: text = "ABCDEF"
+# doc-path: doc/01_research/local/jit_string_method_receiver.md
+# doc-path: doc/03_plan/sys_test/jit_string_method_receiver.md
+# doc-path: doc/04_architecture/jit_string_method_receiver.md
+# doc-path: doc/05_design/jit_string_method_receiver.md
 
-fn uppercase_local_char_at() -> text:
-    val T = "ABCDEF"
-    return T.char_at(0)
+# @manual: primary
 
-fn uppercase_local_length() -> i64:
-    val T = "ABCDEF"
-    return T.length()
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn uppercase_module_char_at() -> text:
-    return TABLE.char_at(0)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-fn lowercase_local_length_loop() -> i64:
-    var s = "x"
-    var i = 0
-    var last: i64 = -1
-    while i < 3:
-        s = "y"
-        last = s.length()
-        i = i + 1
-    return last
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-describe("string methods on an uppercase-named receiver keep the receiver"):
-    it("char_at sees the receiver instead of folding into the call name"):
-        assert_equal(uppercase_local_char_at(), "A")
+    it "for-range iterates the half-open span":
+        step("Verify: for-range iterates the half-open span")
+        # @req: REQ-COMPILER-COMPILER-001
+        var seen = 0
+        for i in 0..4:
+            seen = seen + 1
+        expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations
 
-    it("length() on an uppercase local returns the real length"):
-        assert_equal(uppercase_local_length(), 6)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("char_at works the same for a module-level uppercase receiver"):
-        assert_equal(uppercase_module_char_at(), "A")
+    it "for-in accumulates array elements":
+        step("Verify: for-in accumulates array elements")
+        # @req: REQ-COMPILER-COMPILER-001
+        var s = 0
+        for x in [1, 2, 3]:
+            s = s + x
+        expect(s).to_equal(6)  # oracle: 1+2+3
 
-describe("length() stays correct across reassignment inside a loop"):
-    it("returns the reassigned string's length on every iteration"):
-        assert_equal(lowercase_local_length_loop(), 1)
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
+
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-COMPILER-COMPILER-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6

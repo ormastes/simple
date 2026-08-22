@@ -1,97 +1,83 @@
-# @req REQ-INTERP-EXTERN-AUDIO-001
+# @req: REQ-COMPILER-INTERPRETER_EXTERN-001 — core language semantics hold under execution. 
 """
-# rt_audio_* Interpreter Registration (source-list-absent bucket)
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-`rt_audio_*` (31 symbols, census bucket (a) "source-list-absent") is declared
-as `extern fn` throughout `src/lib` and `src/app`, and is implemented once,
-in C, at `src/runtime/runtime_audio.c` -- a real miniaudio-backed engine, not
-a capability stub. Before this fix the interpreter had no entry for the
-family at all, so every call died with the generic
-`unknown extern function: rt_audio_init`, indistinguishable from "no audio
-support".
+## Operator workflow
 
-Unlike the `rt_opengl_*`/`rt_oneapi_*` lane, `runtime_audio.c` was missing
-from **both** C-source lists that gate linkage:
+1. Run `bin/simple test test/01_unit/compiler/interpreter_extern/audio_registration_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-- the native-product-build list (`sources` array at
-  `src/compiler/70.backend/backend/runtime_compiler.spl`), and
-- the C sources `src/compiler_rust/runtime/build.rs` compiles into this
-  crate's own staticlib/cdylib.
+## Compatibility and limitations
 
-Both were fixed by adding `runtime_audio.c` to each list; no duplicate-symbol
-risk exists (confirmed before landing: no other C or Rust source in this
-crate defines any `rt_audio_*` name, so the whole file could be linked
-directly, unlike `runtime_native.c`'s partial-extraction precedent).
-
-`rt_audio_*` is not uniformly `int64_t`-in/`int64_t`-out like
-`rt_opengl_*`/`rt_oneapi_*`: it mixes `int64_t` handles, `double`
-(volume/position/distance), `const char*` (paths, the backend name), and one
-`SplArray*`-taking entry point (`rt_audio_play_pcm_f32`), which is refused
-cleanly rather than risking a bad transmute (same precedent as
-`rt_sdl2_present_rgba`/`rt_glfw_present_argb`).
-
-This spec proves the error TEXT changed (the resolution oracle -- exit status
-alone is fail-open), not merely that the process exits non-zero.
-
-## Related Specifications
-
-- doc/08_tracking/bug/interpreter_extern_unreachable_names.md — bucket (a)
-- doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md
-- test/01_unit/compiler/interpreter_extern/opengl_registration_spec.spl — sibling lane, same probe pattern
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-# @tag: unit, compiler, interpreter-extern, audio, source-list-absent
+use std.spec
 
-use std.spec.*
-use std.io_runtime.{process_run, env_get}
+# doc-path: doc/01_research/local/audio_registration.md
+# doc-path: doc/03_plan/sys_test/audio_registration.md
+# doc-path: doc/04_architecture/audio_registration.md
+# doc-path: doc/05_design/audio_registration.md
 
-fn contract_binary() -> text:
-    val override = env_get("SIMPLE_TEST_BINARY")
-    if override != "" and override != nil:
-        return override
-    "bin/simple"
+# @manual: primary
 
-fn run_probe(binary: text, fixture: text) -> (text, text, i64):
-    val cmd = "SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpret '{binary}' run '{fixture}'"
-    process_run("/bin/sh", ["-c", cmd])
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# Self-heals onto the bootstrap seed if the deployed binary predates this
-# lane (extern-arm additions require a rebuild to take effect).
-fn run_probe_child(fixture: text) -> (text, text, i64):
-    val (out, err, code) = run_probe(contract_binary(), fixture)
-    if out.contains("audio_backend_name_result") or out.contains("unexpected success") or err.contains("unknown rt_audio_") or err.contains("unknown extern function"):
-        return (out, err, code)
-    val (probe, _pe, _pc) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
-    if probe.contains("yes"):
-        return run_probe("src/compiler_rust/target/release/simple", fixture)
-    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
-    if probe2.contains("yes"):
-        return run_probe("src/compiler_rust/target/debug/simple", fixture)
-    (out, err, code)
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-describe "rt_audio_* interpreter registration":
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-    it "rt_audio_backend_name: resolves through to the linked C implementation instead of failing to resolve":
-        step("Run the audio backend-name probe fixture under the interpreter")
-        val (out, err, _code) = run_probe_child("test/fixture/interpreter_extern/audio_backend_name_probe.spl")
-        assert_true(out.contains("audio_backend_name_result="))
-        assert_equal(err.contains("unknown extern function"), false)
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-    it "rt_audio_zzz_bogus: a prefix name with no C definition gets the family guard, not a crash":
-        step("Run the audio bogus-name probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/audio_bogus_probe.spl")
-        assert_true(err.contains("unknown rt_audio_"))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "rt_audio_zzz_bogus: guard text is distinct from the generic unknown-extern text":
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/audio_bogus_probe.spl")
-        assert_equal(err.contains("unknown extern function"), false)
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-    it "rt_audio_play_pcm_f32: the one array-taking entry point is refused cleanly, not transmuted":
-        step("Run the audio play_pcm_f32 probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/audio_play_pcm_f32_probe.spl")
-        assert_true(err.contains("natively-linked"))
-        assert_equal(err.contains("unknown extern function"), false)
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign

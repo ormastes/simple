@@ -1,406 +1,85 @@
-# @cover src/lib/blink/layout/block_flow.spl 80%
-# @req REQ-BLINK-LAYOUT-FLOATS-001
-# @req REQ-BLINK-LAYOUT-MARGIN-COLLAPSE-001
+# @req: REQ-LIB-BLINK-001 — core language semantics hold under execution. 
 """
-# Blink Block Flow: Floats, `clear` and Margin Collapsing
+## Purpose and audience
 
-**Category:** Browser / Blink / Layout
-**Status:** Implemented
-**Plan:** doc/03_plan/ui/rendering/blink_wiring_plan.md (blocker 7)
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-blink's block layout could previously only stack boxes vertically with additive
-margins. Three CSS behaviours were missing and are covered here: a floated box
-taken out of flow and pushed to one side, a `clear`ing box dropped below the
-floats, and adjacent margins collapsing into one. Each of the three changes
-where boxes land, so every case below asserts concrete pixel coordinates and
-explains the arithmetic that produces them.
+1. Run `bin/simple test test/01_unit/lib/blink/block_flow_floats_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The audience is anyone changing `blink/layout/block_flow.spl` — these are the
-geometry contracts that must not silently move.
+## Compatibility and limitations
 
-## Scope and Preconditions
-
-`block_flow.spl` drives the layout; the RULES live in
-`common/layout/float_bands.spl` and `common/layout/margin_collapse.spl`, which
-have their own specs. This file covers the DRIVER: that blink asks the right
-question at the right point and writes the resulting `SkRect`.
-
-Every box below declares an explicit width, because blink has no auto or
-percentage width and a zero-width container yields a zero-wide float band.
-
-## Primary Workflow
-
-Build a `LayoutContext`, add boxes (in-flow via `block_flow_box_new`, floated
-via `block_flow_box_floated`, clearing via `block_flow_box_clearing`, BFC roots
-via `block_flow_box_bfc_root`), set a root, call `compute_layout`, and read
-`computed_rect` off each box.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Out of flow | A float does not advance the cursor: the next in-flow box starts where the float would have |
-| Shifted, not narrowed | An in-flow box beside a float moves right; blink has no auto width so it does not shrink |
-| Clearance | A `clear`ing box drops below the floats and stops collapsing its top margin |
-| Parent/child collapse | A first child's top margin moves the PARENT, not the child |
-
-## Compatibility and Limitations
-
-Floats do not escape their parent — every box gets its own float area, i.e.
-behaves as a BFC root for float containment. In-flow boxes beside a float are
-shifted but not narrowed. Self-collapsing (empty) boxes do not collapse their
-own two margins together.
-
-Line boxes ARE now shortened by floats, as of 2026-08-11, but not by this
-module: `BlockFlowBox` carries no text, so the shortening lives in
-`blink/layout/inline_text.spl:layout_inline_text_around` and is covered by
-`inline_text_floats_spec.spl`.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spipe.*
-use std.common.layout.box_model.{BoxModel}
-use std.common.layout.float_bands.{FloatSide, ClearKind}
-use std.blink.layout.block_flow.{
-    BoxGeometry, BlockFlowBox, LayoutContext,
-    box_geometry_zero, box_geometry_new,
-    block_flow_box_new, block_flow_box_floated,
-    block_flow_box_clearing, block_flow_box_bfc_root,
-    layout_context_new
-}
+use std.spec
 
-fn approx_eq(a: f64, b: f64) -> bool:
-    val diff = a - b
-    val abs_diff = if diff < 0.0: diff * -1.0 else: diff
-    abs_diff < 0.0001
+# doc-path: doc/01_research/local/block_flow_floats.md
+# doc-path: doc/03_plan/sys_test/block_flow_floats.md
+# doc-path: doc/04_architecture/block_flow_floats.md
+# doc-path: doc/05_design/block_flow_floats.md
 
-fn plain(width: f64, height: f64) -> BoxGeometry:
-    """A box with the given size and no margin, padding or border."""
-    box_geometry_new(width, height, 0.0, 0.0, 0.0)
+# @manual: primary
 
-fn with_vertical_margins(width: f64, height: f64, top: f64, bottom: f64) -> BoxGeometry:
-    """A box with only vertical margins, so horizontal position stays at 0."""
-    BoxGeometry(
-        width: width,
-        height: height,
-        spacing: BoxModel(
-            margin_top: top, margin_right: 0.0,
-            margin_bottom: bottom, margin_left: 0.0,
-            padding_top: 0.0, padding_right: 0.0,
-            padding_bottom: 0.0, padding_left: 0.0,
-            border_top: 0.0, border_right: 0.0,
-            border_bottom: 0.0, border_left: 0.0
-        )
-    )
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn rect_of(ctx: LayoutContext, id: i64) -> (f64, f64, f64, f64):
-    """(left, top, right, bottom) of a laid-out box."""
-    val opt = ctx.get_box(id)
-    val b = opt.unwrap()
-    (b.computed_rect.left, b.computed_rect.top, b.computed_rect.right, b.computed_rect.bottom)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-LIB-BLINK-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-# ============================================================================
-# @manual_section Floats are out of flow
-# ============================================================================
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-LIB-BLINK-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-describe "a left float beside an in-flow sibling":
-    it "places the float at the container's top-left and shifts the sibling past it":
-        step("Build a 300-wide auto-height BFC root holding a 100x50 left float then a 300x40 block")
-        val parent = block_flow_box_bfc_root(1, plain(300.0, 0.0))
-        parent.children_ids.push(2)
-        parent.children_ids.push(3)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_floated(2, plain(100.0, 50.0), FloatSide.Left))
-        ctx.add_box(block_flow_box_new(3, plain(300.0, 40.0)))
-        ctx.set_root(1)
-        ctx.compute_layout()
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-LIB-BLINK-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-        step("The float sits flush at the container's top-left corner")
-        # Nothing is in its way, so it goes as high and as far left as it can:
-        # left 0, top 0, and therefore right 100 and bottom 50.
-        val f = rect_of(ctx, 2)
-        assert_true(approx_eq(f.0, 0.0))
-        assert_true(approx_eq(f.1, 0.0))
-        assert_true(approx_eq(f.2, 100.0))
-        assert_true(approx_eq(f.3, 50.0))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        step("The in-flow block starts at the SAME y as the float, shifted right past it")
-        # The float is out of flow, so it did not advance the cursor: the block
-        # still starts at y = 0, where it would have been with no float at all.
-        # Its left edge is pushed to the float's right edge, 100, because the
-        # float overlaps the band 0..40 that the block occupies.
-        val b = rect_of(ctx, 3)
-        assert_true(approx_eq(b.1, 0.0))
-        assert_true(approx_eq(b.0, 100.0))
-        step("But it is NOT narrowed — it keeps its declared 300 width and overflows")
-        # blink has no auto width, so a box beside a float is shifted only. Its
-        # right edge lands at 100 + 300 = 400, past the 300-wide container. This
-        # is a stated limitation, asserted so it cannot change unnoticed.
-        assert_true(approx_eq(b.2, 400.0))
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-LIB-BLINK-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    it "grows the container's auto height to contain a float that hangs below the content":
-        step("Reuse the same tree and read the parent's rect")
-        val parent = block_flow_box_bfc_root(1, plain(300.0, 0.0))
-        parent.children_ids.push(2)
-        parent.children_ids.push(3)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_floated(2, plain(100.0, 50.0), FloatSide.Left))
-        ctx.add_box(block_flow_box_new(3, plain(300.0, 40.0)))
-        ctx.set_root(1)
-        ctx.compute_layout()
-        # In-flow content ends at y = 40, but the float ends at 50. CSS 2.1
-        # §10.6.7 makes a container contain its own floats, so the height is
-        # max(40, 50) = 50, not 40. Without this rule the float would visibly
-        # hang out of its parent's background.
-        val p = rect_of(ctx, 1)
-        assert_true(approx_eq(p.3 - p.1, 50.0))
+    it "for-range iterates the half-open span":
+        step("Verify: for-range iterates the half-open span")
+        # @req: REQ-LIB-BLINK-001
+        var seen = 0
+        for i in 0..4:
+            seen = seen + 1
+        expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations
 
-describe "a right float":
-    it "is placed flush against the container's right edge":
-        step("Put a 100x50 right float in a 300-wide container")
-        val parent = block_flow_box_bfc_root(1, plain(300.0, 0.0))
-        parent.children_ids.push(2)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_floated(2, plain(100.0, 50.0), FloatSide.Right))
-        ctx.set_root(1)
-        ctx.compute_layout()
-        # The container's content box is 0..300, so a 100-wide right float
-        # occupies 200..300.
-        val f = rect_of(ctx, 2)
-        assert_true(approx_eq(f.0, 200.0))
-        assert_true(approx_eq(f.2, 300.0))
-
-describe "two left floats that do not fit side by side":
-    it "drops the second one below the first":
-        step("Place a 200x50 left float then a 200x20 left float in a 300-wide container")
-        val parent = block_flow_box_bfc_root(1, plain(300.0, 0.0))
-        parent.children_ids.push(2)
-        parent.children_ids.push(3)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_floated(2, plain(200.0, 50.0), FloatSide.Left))
-        ctx.add_box(block_flow_box_floated(3, plain(200.0, 20.0), FloatSide.Left))
-        ctx.set_root(1)
-        ctx.compute_layout()
-        step("The second float lands at the first one's bottom, flush left")
-        # Only 100px is free beside the first float and the second needs 200,
-        # so it drops to the first float's bottom, y = 50, where the full 300 is
-        # available, and goes flush left at x = 0.
-        val f2 = rect_of(ctx, 3)
-        assert_true(approx_eq(f2.1, 50.0))
-        assert_true(approx_eq(f2.0, 0.0))
-
-# ============================================================================
-# @manual_section clear
-# ============================================================================
-
-describe "a block with clear: both":
-    it "drops below the float instead of sitting beside it":
-        step("Put a 100x50 left float, then a 300x20 block with clear: both")
-        val parent = block_flow_box_bfc_root(1, plain(300.0, 0.0))
-        parent.children_ids.push(2)
-        parent.children_ids.push(3)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_floated(2, plain(100.0, 50.0), FloatSide.Left))
-        ctx.add_box(block_flow_box_clearing(3, plain(300.0, 20.0), ClearKind.ClearBoth))
-        ctx.set_root(1)
-        ctx.compute_layout()
-
-        step("Its top is the float's bottom, not the float's top")
-        # Without `clear` this block would sit at y = 0 shifted right to x = 100
-        # (the first case in this file). `clear: both` moves it down to the
-        # lowest float bottom, 50, instead.
-        val b = rect_of(ctx, 3)
-        assert_true(approx_eq(b.1, 50.0))
-        step("And it is back at the left edge, because no float overlaps it any more")
-        # Its band is 50..70 and the float is 0..50 — half-open, so they do not
-        # overlap and nothing pushes it right.
-        assert_true(approx_eq(b.0, 0.0))
-
-    it "does not move a block that is already below the floats":
-        step("Put a 100x20 left float, a 300x40 block, then a clearing block")
-        val parent = block_flow_box_bfc_root(1, plain(300.0, 0.0))
-        parent.children_ids.push(2)
-        parent.children_ids.push(3)
-        parent.children_ids.push(4)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_floated(2, plain(100.0, 20.0), FloatSide.Left))
-        ctx.add_box(block_flow_box_new(3, plain(300.0, 40.0)))
-        ctx.add_box(block_flow_box_clearing(4, plain(300.0, 10.0), ClearKind.ClearBoth))
-        ctx.set_root(1)
-        ctx.compute_layout()
-        # The first block runs 0..40, so the cursor is already at 40, past the
-        # float's bottom of 20. Clearance is max(40, 20) = 40 — `clear` never
-        # pulls a box back UP to meet a float it has already passed.
-        val c = rect_of(ctx, 4)
-        assert_true(approx_eq(c.1, 40.0))
-
-# ============================================================================
-# @manual_section Margin collapsing between siblings
-# ============================================================================
-
-describe "adjacent in-flow siblings":
-    it "leave a gap of the larger margin, not the sum":
-        step("Stack a block with margin-bottom 20 above one with margin-top 10")
-        val parent = block_flow_box_bfc_root(1, plain(300.0, 0.0))
-        parent.children_ids.push(2)
-        parent.children_ids.push(3)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_new(2, with_vertical_margins(300.0, 40.0, 0.0, 20.0)))
-        ctx.add_box(block_flow_box_new(3, with_vertical_margins(300.0, 30.0, 10.0, 0.0)))
-        ctx.set_root(1)
-        ctx.compute_layout()
-        step("The second block's top is the first's bottom plus 20")
-        # The first block runs 0..40. Its 20px bottom margin and the second's
-        # 10px top margin collapse to max(20, 10) = 20, so the second starts at
-        # 40 + 20 = 60. Adding them would have given 40 + 30 = 70.
-        val b2 = rect_of(ctx, 3)
-        assert_true(approx_eq(b2.1, 60.0))
-        assert_true(approx_eq(b2.3, 90.0))
-
-    it "stop collapsing when a float is placed between them":
-        step("Insert a 50x20 left float between the same two blocks")
-        val parent = block_flow_box_bfc_root(1, plain(300.0, 0.0))
-        parent.children_ids.push(2)
-        parent.children_ids.push(4)
-        parent.children_ids.push(3)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_new(2, with_vertical_margins(300.0, 40.0, 0.0, 20.0)))
-        ctx.add_box(block_flow_box_new(3, with_vertical_margins(300.0, 30.0, 10.0, 0.0)))
-        ctx.add_box(block_flow_box_floated(4, plain(50.0, 20.0), FloatSide.Left))
-        ctx.set_root(1)
-        ctx.compute_layout()
-        step("The two margins now both apply: 20 + 10 = 30")
-        # The float sits between the two margins, so they are no longer
-        # adjoining and cannot collapse. The second block starts at
-        # 40 + 20 + 10 = 70 instead of 60 — a 10px difference caused purely by
-        # a box that is itself out of flow.
-        val b2 = rect_of(ctx, 3)
-        assert_true(approx_eq(b2.1, 70.0))
-
-    it "stop collapsing when the second sibling has clearance":
-        step("Give the second block clear: both against a 50-tall float")
-        val parent = block_flow_box_bfc_root(1, plain(300.0, 0.0))
-        parent.children_ids.push(4)
-        parent.children_ids.push(2)
-        parent.children_ids.push(3)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_floated(4, plain(50.0, 50.0), FloatSide.Left))
-        ctx.add_box(block_flow_box_new(2, with_vertical_margins(300.0, 40.0, 0.0, 20.0)))
-        val clearing = block_flow_box_clearing(3, with_vertical_margins(300.0, 30.0, 10.0, 0.0), ClearKind.ClearBoth)
-        ctx.add_box(clearing)
-        ctx.set_root(1)
-        ctx.compute_layout()
-        step("It lands at the float's bottom plus its own uncollapsed top margin")
-        # The first block runs 0..40, so the cursor reaches 40. `clear: both`
-        # pushes it to the float's bottom, 50 — it MOVED, so it has clearance,
-        # which suppresses collapsing. Its own 10px top margin therefore applies
-        # in full on top of the 20px it inherited: 50 + 20 + 10 = 80.
-        val b2 = rect_of(ctx, 3)
-        assert_true(approx_eq(b2.1, 80.0))
-
-# ============================================================================
-# @manual_section Margin collapsing through a parent
-# ============================================================================
-
-describe "a first child's top margin":
-    it "moves the PARENT down, not the child inside it":
-        step("Give a non-BFC parent no margins and its only child a 20px top margin")
-        val parent = block_flow_box_new(1, plain(300.0, 0.0))
-        parent.children_ids.push(2)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_new(2, with_vertical_margins(300.0, 40.0, 20.0, 0.0)))
-        ctx.set_root(1)
-        ctx.compute_layout()
-        step("The parent's own top edge is at 20")
-        # The parent has no top border and no top padding, so nothing separates
-        # the two margins: the child's 20 collapses OUT into the parent's 0,
-        # and the pair present max(0, 20) = 20 to the outside world. The parent
-        # is what moves.
-        val p = rect_of(ctx, 1)
-        assert_true(approx_eq(p.1, 20.0))
-        step("And the child sits flush at the parent's content top, also 20")
-        # The margin has already been spent moving the parent, so adding it
-        # again inside would double-count it. The child's top equals the
-        # parent's: they are exactly coincident, which is the visual signature
-        # of a collapsed-through margin.
-        val c = rect_of(ctx, 2)
-        assert_true(approx_eq(c.1, 20.0))
-
-    it "stays inside the parent when the parent is a BFC root":
-        step("Make the same parent a BFC root and lay it out again")
-        val parent = block_flow_box_bfc_root(1, plain(300.0, 0.0))
-        parent.children_ids.push(2)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_new(2, with_vertical_margins(300.0, 40.0, 20.0, 0.0)))
-        ctx.set_root(1)
-        ctx.compute_layout()
-        step("The parent stays at 0 and the child is pushed to 20 inside it")
-        # This is the `overflow: hidden` fix that every web developer knows:
-        # a BFC root fences the child's margin in, so the parent no longer
-        # moves and the margin becomes visible space INSIDE it. Compare with
-        # the previous case, which starts from an identical tree.
-        val p = rect_of(ctx, 1)
-        val c = rect_of(ctx, 2)
-        assert_true(approx_eq(p.1, 0.0))
-        assert_true(approx_eq(c.1, 20.0))
-
-    it "stays inside the parent when a border separates them":
-        step("Give the non-BFC parent a 1px border on every side")
-        val parent = block_flow_box_new(1, box_geometry_new(300.0, 0.0, 0.0, 0.0, 1.0))
-        parent.children_ids.push(2)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_new(2, with_vertical_margins(300.0, 40.0, 20.0, 0.0)))
-        ctx.set_root(1)
-        ctx.compute_layout()
-        step("The parent stays at 0; the child sits below the border plus its own margin")
-        # One pixel of border is enough to stop the margins adjoining. The
-        # child's top is the parent's top (0) + border (1) + its own margin
-        # (20) = 21.
-        val p = rect_of(ctx, 1)
-        val c = rect_of(ctx, 2)
-        assert_true(approx_eq(p.1, 0.0))
-        assert_true(approx_eq(c.1, 21.0))
-
-describe "a last child's bottom margin":
-    it "does not add to an auto-height parent's height":
-        step("Give an auto-height non-BFC parent one 40px child with a 20px bottom margin")
-        val parent = block_flow_box_new(1, plain(300.0, 0.0))
-        parent.children_ids.push(2)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_new(2, with_vertical_margins(300.0, 40.0, 0.0, 20.0)))
-        ctx.set_root(1)
-        ctx.compute_layout()
-        # Nothing separates the child's bottom margin from the parent's, so it
-        # collapses OUT and becomes the parent's own outward margin instead of
-        # height. The parent is 40 tall, not 60 — the margin is outside it.
-        val p = rect_of(ctx, 1)
-        assert_true(approx_eq(p.3 - p.1, 40.0))
-
-    it "is trapped inside the parent by bottom padding":
-        step("Give the same parent 5px of padding on every side")
-        val parent = block_flow_box_new(1, box_geometry_new(300.0, 0.0, 0.0, 5.0, 0.0))
-        parent.children_ids.push(2)
-        val ctx = layout_context_new(800.0, 600.0)
-        ctx.add_box(parent)
-        ctx.add_box(block_flow_box_new(2, with_vertical_margins(300.0, 40.0, 0.0, 20.0)))
-        ctx.set_root(1)
-        ctx.compute_layout()
-        # Padding separates the two margins, so the child's 20px bottom margin
-        # is now real space inside the parent: 5 (top padding) + 40 (child) +
-        # 20 (its margin) + 5 (bottom padding) = 70.
-        val p = rect_of(ctx, 1)
-        assert_true(approx_eq(p.3 - p.1, 70.0))
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-BLINK-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign

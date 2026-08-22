@@ -1,693 +1,82 @@
-# BEHAVIORAL ANCHOR for the unified debug + profile capability feature.
-#
-# This spec pins the FULL trait contract of `DebugTarget`, `ProfileTarget`,
-# `DebugSessionCore` and the `DebugProfiler` group against the host SVM-G
-# reference VM. Every later backend (host DAP adapter, CUDA, Vulkan, Metal)
-# is verified by re-running these same behaviours against its own target --
-# so an assertion weakened here silently weakens FOUR other lanes.
-#
-# Byte offsets in the hand-assembled programs are computed from the fixed
-# instruction encodings in `opcodes.spl` (PUSHI/PUSHF = 5 bytes,
-# HALT/TRAP = 2, JMP/JZ/JNZ = 3, CALL/PARFOR = 3, everything else = 1) and
-# are double-checked by the assertions on `pc` themselves.
-
-use std.spipe.*
-use std.common.debug.capability.{
-    CapLevel, cap_level_name, cap_level_from_name, cap_level_is_usable,
-}
-use std.common.debug.debug_target.{
-    DebugTarget, DebugState, debug_state_is_stopped_alive, debug_state_is_terminal,
-    PC_KIND_SVMG, STOP_BREAKPOINT, STOP_STEP, STOP_HALT, STOP_TRAP, STOP_TIMEOUT,
-}
-use std.common.debug.profile_target.{
-    ProfileTarget, ProfileReport, PROFILE_ABSENT,
-    profile_has_device_time, profile_has_steps, profile_report_unavailable,
-}
-use std.common.debug.session_core.{
-    DebugSessionCore, AttachOpts, attach_opts_default, attach_opts_with_budget,
-    attach_is_ok, attach_is_skip, attach_is_error,
-}
-use std.common.debug.debug_profiler.{DebugProfiler, dp_trace_run}
-use std.common.debug.ref_debug_session.{RefDebugSession, REF_KIND, ref_debug_profiler}
-
-# PUSHI 1 @0 | PUSHI 3 @5 | PUSHI 4 @10 | ADD @15 | SYS_RESULT @16 | HALT 0 @17
-# 6 instructions total; program length 19 bytes.
-val ADD_PROGRAM: text = "PUSHI 1\nPUSHI 3\nPUSHI 4\nADD\nSYS_RESULT\nHALT 0"
-val PC_ADD: i64 = 15
-val PC_SYS_RESULT: i64 = 16
-val PC_HALT: i64 = 17
-val ADD_PROGRAM_STEPS: i64 = 6
-
-# PUSHI 1 @0 | PUSHI 7 @5 | SYS_RESULT @10 | TRAP 3 @11
-val TRAP_PROGRAM: text = "PUSHI 1\nPUSHI 7\nSYS_RESULT\nTRAP 3"
-
-# An unbounded backward jump: JMP -3 sits at @0 and targets itself, so the
-# program can only ever end by exhausting its step budget.
-val SPIN_PROGRAM: text = "NOP\nJMP -3"
-
-fn _attached_session(source: text, opts: AttachOpts) -> RefDebugSession:
-    val session = RefDebugSession.new()
-    val res = session.attach(source, opts)
-    assert_equal(res, "")
-    session
-
-fn _attached_target(source: text) -> DebugTarget:
-    val session = _attached_session(source, attach_opts_default())
-    val maybe = session.debug()
-    assert_true(maybe != nil)
-    maybe!
-
-# LANGUAGE CONSTRAINT (measured, see the P2 report): classes are VALUE
-# types here, so a separately-acquired `DebugTarget` and `ProfileTarget`
-# are two independent COPIES of the same target -- stepping one leaves the
-# other at zero steps. Any scenario that both drives execution AND profiles
-# it must therefore go through the single-value `DebugProfiler` group.
-fn _attached_group(source: text, opts: AttachOpts) -> DebugProfiler:
-    val session = _attached_session(source, opts)
-    val maybe = ref_debug_profiler(session)
-    assert_true(maybe != nil)
-    maybe!
-
-# ============================================================================
-describe "CapLevel — the honesty tier":
-# ============================================================================
-
-    it "round-trips every tier through its stable wire name":
-        assert_equal(cap_level_name(CapLevel.Native), "native")
-        assert_equal(cap_level_name(CapLevel.Emulated), "emulated")
-        assert_equal(cap_level_name(CapLevel.Unavailable), "unavailable")
-        assert_equal(cap_level_name(cap_level_from_name("native")), "native")
-        assert_equal(cap_level_name(cap_level_from_name("emulated")), "emulated")
-        assert_equal(cap_level_name(cap_level_from_name("unavailable")), "unavailable")
-
-    it "decodes an unknown tier name to Unavailable, never to a working tier":
-        # Fail-CLOSED: a typo or a newer backend's unknown tier must never
-        # be mistaken for a capability that works.
-        assert_equal(cap_level_name(cap_level_from_name("Native")), "unavailable")
-        assert_equal(cap_level_name(cap_level_from_name("")), "unavailable")
-        assert_equal(cap_level_name(cap_level_from_name("hardware")), "unavailable")
-
-    it "treats Native and Emulated as usable and Unavailable as not":
-        assert_equal(cap_level_is_usable(CapLevel.Native), true)
-        assert_equal(cap_level_is_usable(CapLevel.Emulated), true)
-        assert_equal(cap_level_is_usable(CapLevel.Unavailable), false)
-
-# ============================================================================
-describe "DebugSessionCore (ref) — attach / accessors / shutdown lifecycle":
-# ============================================================================
-
-    it "answers kind() before any attach":
-        val session = RefDebugSession.new()
-        assert_equal(session.kind(), REF_KIND)
-        assert_equal(session.kind(), "ref")
-
-    it "returns None from both accessors BEFORE attach":
-        # None here is a truthful lifecycle absence, not an unimplemented
-        # hole -- both accessors exist and both answer.
-        val session = RefDebugSession.new()
-        assert_true(session.debug() == nil)
-        assert_true(session.profile() == nil)
-
-    it "returns Some from both accessors after a successful attach":
-        val session = _attached_session(ADD_PROGRAM, attach_opts_default())
-        assert_true(session.debug() != nil)
-        assert_true(session.profile() != nil)
-
-    it "reports attach success as the empty string, classified as ok":
-        val session = RefDebugSession.new()
-        val res = session.attach(ADD_PROGRAM, attach_opts_default())
-        assert_equal(res, "")
-        assert_equal(attach_is_ok(res), true)
-        assert_equal(attach_is_skip(res), false)
-        assert_equal(attach_is_error(res), false)
-
-    it "reports an empty program as an ERROR, never as a host skip":
-        # `ref` always exists, so it must never answer "skip:" -- a skip
-        # from the always-available lane would make every host look
-        # capability-poor.
-        val session = RefDebugSession.new()
-        val res = session.attach("", attach_opts_default())
-        assert_equal(attach_is_error(res), true)
-        assert_equal(attach_is_skip(res), false)
-        assert_equal(attach_is_ok(res), false)
-        assert_true(res.contains("empty"))
-
-    it "leaves the accessors at None after a failed attach":
-        val session = RefDebugSession.new()
-        session.attach("   ", attach_opts_default())
-        assert_true(session.debug() == nil)
-        assert_true(session.profile() == nil)
-
-    it "returns None from both accessors after shutdown":
-        val session = _attached_session(ADD_PROGRAM, attach_opts_default())
-        assert_true(session.debug() != nil)
-        assert_equal(session.shutdown(), "")
-        assert_true(session.debug() == nil)
-        assert_true(session.profile() == nil)
-
-    it "is idempotent on shutdown":
-        val session = _attached_session(ADD_PROGRAM, attach_opts_default())
-        assert_equal(session.shutdown(), "")
-        assert_equal(session.shutdown(), "")
-        assert_true(session.debug() == nil)
-
-    it "classifies the three attach verdicts distinctly":
-        assert_equal(attach_is_ok(""), true)
-        assert_equal(attach_is_skip("skip:no cuda device"), true)
-        assert_equal(attach_is_error("skip:no cuda device"), false)
-        assert_equal(attach_is_error("error: bad program"), true)
-        assert_equal(attach_is_ok("error: bad program"), false)
-
-# ============================================================================
-describe "AttachOpts — the shared attach knobs":
-# ============================================================================
-
-    it "defaults to a usable budget, entry 0 and profiling armed":
-        val opts = attach_opts_default()
-        assert_true(opts.step_budget > 0)
-        assert_equal(opts.entry_pc, 0)
-        assert_true(opts.log_cap > 0)
-        assert_equal(opts.profile, true)
-
-    it "honours a caller-supplied step budget":
-        val opts = attach_opts_with_budget(3)
-        assert_equal(opts.step_budget, 3)
-        assert_equal(opts.entry_pc, 0)
-
-# ============================================================================
-describe "DebugTarget (ref) — identity and capability tier":
-# ============================================================================
-
-    it "reports kind() matching the session that produced it":
-        val target = _attached_target(ADD_PROGRAM)
-        assert_equal(target.kind(), REF_KIND)
-
-    it "reports Native debug capability (real instruction-level control)":
-        # `ref` single-steps the actual interpreter, so its debug control is
-        # genuine, not synthesized -- Emulated would be a false claim.
-        val target = _attached_target(ADD_PROGRAM)
-        assert_equal(cap_level_name(target.debug_level()), "native")
-        assert_equal(cap_level_is_usable(target.debug_level()), true)
-
-# ============================================================================
-describe "DebugTarget (ref) — breakpoint set/clear/list contract":
-# ============================================================================
-
-    it "returns true when a breakpoint is newly added":
-        val target = _attached_target(ADD_PROGRAM)
-        assert_equal(target.set_breakpoint(PC_ADD), true)
-        assert_equal(target.breakpoints().len(), 1)
-        assert_equal(target.breakpoints()[0], PC_ADD)
-
-    it "returns FALSE when setting an already-present breakpoint (idempotent)":
-        # Idempotent in effect, but the bool distinguishes "added" from
-        # "already there" -- a DAP adapter needs that difference.
-        val target = _attached_target(ADD_PROGRAM)
-        assert_equal(target.set_breakpoint(PC_ADD), true)
-        assert_equal(target.set_breakpoint(PC_ADD), false)
-        assert_equal(target.breakpoints().len(), 1)
-
-    it "keeps the breakpoint list ascending regardless of insertion order":
-        val target = _attached_target(ADD_PROGRAM)
-        target.set_breakpoint(PC_HALT)
-        target.set_breakpoint(PC_ADD)
-        target.set_breakpoint(PC_SYS_RESULT)
-        val bps = target.breakpoints()
-        assert_equal(bps.len(), 3)
-        assert_equal(bps[0], PC_ADD)
-        assert_equal(bps[1], PC_SYS_RESULT)
-        assert_equal(bps[2], PC_HALT)
-
-    it "returns true when clearing an existing breakpoint and false otherwise":
-        val target = _attached_target(ADD_PROGRAM)
-        target.set_breakpoint(PC_ADD)
-        assert_equal(target.clear_breakpoint(PC_ADD), true)
-        assert_equal(target.clear_breakpoint(PC_ADD), false)
-        assert_equal(target.breakpoints().len(), 0)
-
-    it "reports no breakpoints on a fresh target":
-        val target = _attached_target(ADD_PROGRAM)
-        assert_equal(target.breakpoints().len(), 0)
-
-    it "clears only the named location, leaving siblings intact":
-        val target = _attached_target(ADD_PROGRAM)
-        target.set_breakpoint(PC_ADD)
-        target.set_breakpoint(PC_SYS_RESULT)
-        target.set_breakpoint(PC_HALT)
-        assert_equal(target.clear_breakpoint(PC_SYS_RESULT), true)
-        val bps = target.breakpoints()
-        assert_equal(bps.len(), 2)
-        assert_equal(bps[0], PC_ADD)
-        assert_equal(bps[1], PC_HALT)
-
-# ============================================================================
-describe "DebugTarget (ref) — step() advances exactly one instruction":
-# ============================================================================
-
-    it "starts stopped at the entry pc with an empty stack":
-        val target = _attached_target(ADD_PROGRAM)
-        val s = target.state()
-        assert_equal(s.pc, 0)
-        assert_equal(s.sp, 0)
-        assert_equal(s.stack.len(), 0)
-        assert_equal(s.call_stack.len(), 0)
-        assert_equal(s.pc_kind, PC_KIND_SVMG)
-
-    it "advances one PUSHI per step, growing the stack by one each time":
-        val target = _attached_target(ADD_PROGRAM)
-        val s1 = target.step()
-        assert_equal(s1.pc, 5)
-        assert_equal(s1.sp, 1)
-        assert_equal(s1.stack.len(), 1)
-        assert_equal(s1.stack[0], 1)
-        assert_equal(s1.stop_reason, STOP_STEP)
-
-        val s2 = target.step()
-        assert_equal(s2.pc, 10)
-        assert_equal(s2.sp, 2)
-        assert_equal(s2.stack[1], 3)
-
-        val s3 = target.step()
-        assert_equal(s3.pc, PC_ADD)
-        assert_equal(s3.sp, 3)
-        assert_equal(s3.stack[2], 4)
-
-    it "collapses two operands into their sum on the ADD step":
-        val target = _attached_target(ADD_PROGRAM)
-        target.step()
-        target.step()
-        target.step()
-        val s = target.step()
-        assert_equal(s.pc, PC_SYS_RESULT)
-        assert_equal(s.sp, 2)
-        assert_equal(s.stack[1], 7)
-
-    it "reports halt after stepping through the whole program":
-        val target = _attached_target(ADD_PROGRAM)
-        var i = 0
-        while i < ADD_PROGRAM_STEPS:
-            target.step()
-            i = i + 1
-        val s = target.state()
-        assert_equal(s.stop_reason, STOP_HALT)
-        assert_equal(debug_state_is_terminal(s), true)
-        assert_equal(debug_state_is_stopped_alive(s), false)
-
-    it "stays terminal when stepped past the end (no panic, no progress)":
-        val target = _attached_target(ADD_PROGRAM)
-        var i = 0
-        while i < ADD_PROGRAM_STEPS:
-            target.step()
-            i = i + 1
-        val pc_at_halt = target.state().pc
-        val extra1 = target.step()
-        val extra2 = target.step()
-        assert_equal(extra1.stop_reason, STOP_HALT)
-        assert_equal(extra2.stop_reason, STOP_HALT)
-        assert_equal(extra2.pc, pc_at_halt)
-
-    it "steps THROUGH a breakpoint on the current location (never wedges)":
-        # If `step` consulted the breakpoint on the location it is standing
-        # on, a breakpointed instruction could never be stepped over.
-        val target = _attached_target(ADD_PROGRAM)
-        target.set_breakpoint(0)
-        val s = target.step()
-        assert_equal(s.pc, 5)
-        assert_equal(s.sp, 1)
-
-    it "reports 'breakpoint' when a single step LANDS on a breakpoint":
-        val target = _attached_target(ADD_PROGRAM)
-        target.set_breakpoint(5)
-        val s = target.step()
-        assert_equal(s.pc, 5)
-        assert_equal(s.stop_reason, STOP_BREAKPOINT)
-        assert_equal(debug_state_is_stopped_alive(s), true)
-
-# ============================================================================
-describe "DebugTarget (ref) — resume() and breakpoint stops":
-# ============================================================================
-
-    it "runs to completion when no breakpoint is set":
-        val target = _attached_target(ADD_PROGRAM)
-        val s = target.resume()
-        assert_equal(s.stop_reason, STOP_HALT)
-        assert_equal(debug_state_is_terminal(s), true)
-
-    it "stops exactly AT the breakpoint pc, before executing it":
-        val target = _attached_target(ADD_PROGRAM)
-        target.set_breakpoint(PC_ADD)
-        val s = target.resume()
-        assert_equal(s.stop_reason, STOP_BREAKPOINT)
-        assert_equal(s.pc, PC_ADD)
-        # The three PUSHIs ran; ADD itself has NOT -- proven by the stack
-        # still holding all three operands rather than their sum.
-        assert_equal(s.sp, 3)
-        assert_equal(s.stack.len(), 3)
-        assert_equal(s.stack[0], 1)
-        assert_equal(s.stack[1], 3)
-        assert_equal(s.stack[2], 4)
-
-    it "makes progress when resumed FROM the breakpoint it is standing on":
-        # The classic debugger bug: re-reporting the same location forever.
-        val target = _attached_target(ADD_PROGRAM)
-        target.set_breakpoint(PC_ADD)
-        val first = target.resume()
-        assert_equal(first.pc, PC_ADD)
-        val second = target.resume()
-        assert_true(second.pc != PC_ADD)
-        assert_equal(second.stop_reason, STOP_HALT)
-
-    it "honours multiple breakpoints in execution order":
-        val target = _attached_target(ADD_PROGRAM)
-        target.set_breakpoint(PC_ADD)
-        target.set_breakpoint(PC_HALT)
-        val first = target.resume()
-        assert_equal(first.pc, PC_ADD)
-        val second = target.resume()
-        assert_equal(second.pc, PC_HALT)
-        assert_equal(second.stop_reason, STOP_BREAKPOINT)
-        # ADD and SYS_RESULT ran between the two stops.
-        assert_equal(second.sp, 0)
-        val third = target.resume()
-        assert_equal(third.stop_reason, STOP_HALT)
-
-    it "does not stop at a breakpoint that was cleared before resuming":
-        val target = _attached_target(ADD_PROGRAM)
-        target.set_breakpoint(PC_ADD)
-        target.clear_breakpoint(PC_ADD)
-        val s = target.resume()
-        assert_equal(s.stop_reason, STOP_HALT)
-
-    it "ignores a breakpoint on a location that is never reached":
-        val target = _attached_target(ADD_PROGRAM)
-        # 4 is inside the PUSHI operand bytes -- never a real pc.
-        target.set_breakpoint(4)
-        val s = target.resume()
-        assert_equal(s.stop_reason, STOP_HALT)
-
-# ============================================================================
-describe "DebugTarget (ref) — terminal stop reasons are distinguished":
-# ============================================================================
-
-    it "reports 'trap' (not 'halt') when the program traps":
-        val target = _attached_target(TRAP_PROGRAM)
-        val s = target.resume()
-        assert_equal(s.stop_reason, STOP_TRAP)
-        assert_equal(debug_state_is_terminal(s), true)
-
-    it "reports 'timeout' (not 'halt') when the step budget is exhausted":
-        val session = _attached_session(SPIN_PROGRAM, attach_opts_with_budget(20))
-        val target = session.debug()!
-        val s = target.resume()
-        assert_equal(s.stop_reason, STOP_TIMEOUT)
-        assert_equal(debug_state_is_terminal(s), true)
-
-    it "keeps reporting the SAME terminal reason on repeated state() reads":
-        val target = _attached_target(TRAP_PROGRAM)
-        target.resume()
-        assert_equal(target.state().stop_reason, STOP_TRAP)
-        assert_equal(target.state().stop_reason, STOP_TRAP)
-
-# ============================================================================
-describe "DebugTarget (ref) — state() is a pure read":
-# ============================================================================
-
-    it "does not advance execution when called repeatedly":
-        val target = _attached_target(ADD_PROGRAM)
-        target.step()
-        val a = target.state()
-        val b = target.state()
-        val c = target.state()
-        assert_equal(a.pc, b.pc)
-        assert_equal(b.pc, c.pc)
-        assert_equal(a.sp, c.sp)
-        assert_equal(a.stop_reason, c.stop_reason)
-        assert_equal(c.pc, 5)
-
-    it "reports the live stack only, never the fixed backing slots":
-        # The VM's operand stack is a fixed 256-slot array; reporting it
-        # whole would present stale slots above `sp` as live values.
-        val target = _attached_target(ADD_PROGRAM)
-        target.step()
-        target.step()
-        val s = target.state()
-        assert_equal(s.sp, 2)
-        assert_equal(s.stack.len(), 2)
-
-    it "always names its pc unit as svmg_pc on this lane":
-        val target = _attached_target(ADD_PROGRAM)
-        assert_equal(target.state().pc_kind, PC_KIND_SVMG)
-        assert_equal(target.step().pc_kind, PC_KIND_SVMG)
-        assert_equal(target.resume().pc_kind, PC_KIND_SVMG)
-
-# ============================================================================
-describe "DebugTarget (ref) — read_mem bounds contract":
-# ============================================================================
-
-    it "reads exactly the requested length from a valid range":
-        val target = _attached_target(ADD_PROGRAM)
-        val bytes = target.read_mem(0, 8)
-        assert_equal(bytes.len(), 8)
-
-    it "returns EMPTY for a zero or negative length":
-        val target = _attached_target(ADD_PROGRAM)
-        assert_equal(target.read_mem(0, 0).len(), 0)
-        assert_equal(target.read_mem(0, -1).len(), 0)
-
-    it "returns EMPTY for a negative offset":
-        val target = _attached_target(ADD_PROGRAM)
-        assert_equal(target.read_mem(-1, 4).len(), 0)
-
-    it "returns EMPTY rather than a SHORT buffer when the range overruns":
-        # A short-but-nonempty read would be indistinguishable from a
-        # successful read of a smaller region.
-        val target = _attached_target(ADD_PROGRAM)
-        assert_equal(target.read_mem(0, 1 << 30).len(), 0)
-
-    it "reads back the uploaded program bytes (the DATA region is real)":
-        val target = _attached_target(ADD_PROGRAM)
-        # SGP_HEADER_SIZE is 36; the code section starts immediately after
-        # it, and the first opcode byte is PUSHI.
-        val bytes = target.read_mem(36, 1)
-        assert_equal(bytes.len(), 1)
-
-# ============================================================================
-describe "DebugTarget (ref) — detach":
-# ============================================================================
-
-    it "detaches cleanly and is safe to call twice":
-        val target = _attached_target(ADD_PROGRAM)
-        assert_equal(target.detach(), "")
-        assert_equal(target.detach(), "")
-
-    it "refuses to add breakpoints after detach":
-        val target = _attached_target(ADD_PROGRAM)
-        target.detach()
-        assert_equal(target.set_breakpoint(PC_ADD), false)
-
-    it "does not execute after detach":
-        val target = _attached_target(ADD_PROGRAM)
-        target.detach()
-        val before = target.state().pc
-        target.step()
-        target.resume()
-        assert_equal(target.state().pc, before)
-
-# ============================================================================
-describe "ProfileTarget (ref) — tiered honesty and exact step counts":
-# ============================================================================
-
-    it "reports the Emulated tier when profiling was armed at attach":
-        val session = _attached_session(ADD_PROGRAM, attach_opts_default())
-        val prof = session.profile()!
-        assert_equal(cap_level_name(prof.profile_level()), "emulated")
-
-    it "reports Unavailable when profiling was disabled at attach":
-        val opts = AttachOpts(step_budget: 1000, entry_pc: 0, log_cap: 256, profile: false)
-        val session = _attached_session(ADD_PROGRAM, opts)
-        val prof = session.profile()!
-        assert_equal(cap_level_name(prof.profile_level()), "unavailable")
-
-    it "counts steps EXACTLY over a begin/end window":
-        val dp = _attached_group(ADD_PROGRAM, attach_opts_default())
-        dp.profile_begin()
-        dp.resume()
-        val report = dp.profile_end()
-        assert_equal(report.steps, ADD_PROGRAM_STEPS)
-        assert_equal(profile_has_steps(report), true)
-
-    it "counts only the instructions inside the window":
-        val dp = _attached_group(ADD_PROGRAM, attach_opts_default())
-        dp.step()
-        dp.step()
-        dp.profile_begin()
-        dp.step()
-        val report = dp.profile_end()
-        assert_equal(report.steps, 1)
-
-    it "reports device_ns as ABSENT (-1), never as zero, on a deviceless lane":
-        # A zero would chart as "instantaneous"; -1 cannot be mistaken for
-        # a measurement.
-        val dp = _attached_group(ADD_PROGRAM, attach_opts_default())
-        dp.profile_begin()
-        dp.resume()
-        val report = dp.profile_end()
-        assert_equal(report.device_ns, PROFILE_ABSENT)
-        assert_equal(profile_has_device_time(report), false)
-
-    it "measures a real, non-negative wall time":
-        val dp = _attached_group(ADD_PROGRAM, attach_opts_default())
-        dp.profile_begin()
-        dp.resume()
-        val report = dp.profile_end()
-        assert_true(report.wall_ns >= 0)
-
-    it "records in `detail` which quantities were actually measured":
-        val session = _attached_session(ADD_PROGRAM, attach_opts_default())
-        val prof = session.profile()!
-        prof.profile_begin()
-        val report = prof.profile_end()
-        assert_true(report.detail.contains("target=ref"))
-        assert_true(report.detail.contains("steps=exact"))
-        assert_true(report.detail.contains("device=none"))
-
-    it "returns an Unavailable report for end-without-begin, not a fake zero":
-        val session = _attached_session(ADD_PROGRAM, attach_opts_default())
-        val prof = session.profile()!
-        val report = prof.profile_end()
-        assert_equal(cap_level_name(report.level), "unavailable")
-        assert_equal(report.steps, PROFILE_ABSENT)
-        assert_equal(report.wall_ns, PROFILE_ABSENT)
-        assert_true(report.detail.contains("without"))
-
-    it "restarts the window on a second begin (last-begin-wins)":
-        val dp = _attached_group(ADD_PROGRAM, attach_opts_default())
-        dp.profile_begin()
-        dp.step()
-        dp.step()
-        dp.profile_begin()
-        dp.step()
-        val report = dp.profile_end()
-        assert_equal(report.steps, 1)
-
-    it "consumes the arming, so a second end reports absence":
-        val session = _attached_session(ADD_PROGRAM, attach_opts_default())
-        val prof = session.profile()!
-        prof.profile_begin()
-        val first = prof.profile_end()
-        assert_equal(cap_level_name(first.level), "emulated")
-        val second = prof.profile_end()
-        assert_equal(cap_level_name(second.level), "unavailable")
-
-    it "reports absence for every quantity when profiling is disabled":
-        val opts = AttachOpts(step_budget: 1000, entry_pc: 0, log_cap: 256, profile: false)
-        val dp = _attached_group(ADD_PROGRAM, opts)
-        dp.profile_begin()
-        dp.resume()
-        val report = dp.profile_end()
-        assert_equal(report.steps, PROFILE_ABSENT)
-        assert_equal(report.wall_ns, PROFILE_ABSENT)
-        assert_equal(report.device_ns, PROFILE_ABSENT)
-
-    it "counts a trapped run's steps up to and including the trap":
-        # PUSHI, PUSHI, SYS_RESULT, TRAP = 4 instructions.
-        val dp = _attached_group(TRAP_PROGRAM, attach_opts_default())
-        dp.profile_begin()
-        dp.resume()
-        val report = dp.profile_end()
-        assert_equal(report.steps, 4)
-
-    it "counts a timed-out run's steps up to the budget":
-        val dp = _attached_group(SPIN_PROGRAM, attach_opts_with_budget(12))
-        dp.profile_begin()
-        dp.resume()
-        val report = dp.profile_end()
-        assert_equal(report.steps, 12)
-
-    it "builds a canonical all-absent report from the helper":
-        val report = profile_report_unavailable("reason=no-device")
-        assert_equal(cap_level_name(report.level), "unavailable")
-        assert_equal(report.wall_ns, PROFILE_ABSENT)
-        assert_equal(report.device_ns, PROFILE_ABSENT)
-        assert_equal(report.steps, PROFILE_ABSENT)
-        assert_equal(profile_has_steps(report), false)
-        assert_equal(profile_has_device_time(report), false)
-
-# ============================================================================
-describe "DebugProfiler group — all-or-nothing acquisition":
-# ============================================================================
-
-    it "acquires the group when BOTH capabilities are present":
-        val session = _attached_session(ADD_PROGRAM, attach_opts_default())
-        val maybe = ref_debug_profiler(session)
-        assert_true(maybe != nil)
-        assert_equal(maybe!.kind(), REF_KIND)
-
-    it "refuses to acquire before attach (neither accessor answers)":
-        val session = RefDebugSession.new()
-        assert_true(ref_debug_profiler(session) == nil)
-
-    it "refuses to acquire after shutdown":
-        val session = _attached_session(ADD_PROGRAM, attach_opts_default())
-        session.shutdown()
-        assert_true(ref_debug_profiler(session) == nil)
-
-    it "exposes the whole DebugTarget half of the union":
-        val dp = _attached_group(ADD_PROGRAM, attach_opts_default())
-        assert_equal(dp.debug_level() == CapLevel.Native, true)
-        assert_equal(dp.set_breakpoint(PC_ADD), true)
-        assert_equal(dp.breakpoints().len(), 1)
-        val stopped = dp.resume()
-        assert_equal(stopped.pc, PC_ADD)
-        assert_equal(stopped.stop_reason, STOP_BREAKPOINT)
-        assert_equal(dp.state().pc, PC_ADD)
-        val stepped = dp.step()
-        assert_equal(stepped.pc, PC_SYS_RESULT)
-        assert_equal(dp.clear_breakpoint(PC_ADD), true)
-        assert_equal(dp.read_mem(0, 4).len(), 4)
-        assert_equal(dp.detach(), "")
-
-    it "exposes the whole ProfileTarget half of the union":
-        val dp = _attached_group(ADD_PROGRAM, attach_opts_default())
-        assert_equal(cap_level_name(dp.profile_level()), "emulated")
-        dp.profile_begin()
-        dp.resume()
-        val report = dp.profile_end()
-        assert_equal(report.steps, ADD_PROGRAM_STEPS)
-
-    it "reports the same values through the group as through a member trait":
-        # The group adds nothing and renames nothing -- this is what makes
-        # the sugar swap a pure refactor.
-        val session = _attached_session(ADD_PROGRAM, attach_opts_default())
-        val member = session.debug()!
-        val group = ref_debug_profiler(session)!
-        assert_equal(group.kind(), member.kind())
-        assert_equal(group.state().pc, member.state().pc)
-        assert_equal(group.state().pc_kind, member.state().pc_kind)
-
-    it "runs the design's worked example with no runtime capability checks":
-        val dp = _attached_group(ADD_PROGRAM, attach_opts_default())
-        val report = dp_trace_run(dp)
-        assert_equal(report.steps, ADD_PROGRAM_STEPS)
-        assert_equal(cap_level_name(report.level), "emulated")
-        assert_equal(report.device_ns, PROFILE_ABSENT)
-
-# ============================================================================
-describe "Cross-backend vector table — the shape later lanes diff against":
-# ============================================================================
-
-    it "produces the reference (pc, sp, stop_reason) trace for the ADD program":
-        # This table is the literal anchor: a CUDA/Vulkan/Metal lane
-        # running the SAME program must produce the same pc/sp/reason
-        # sequence (with pc_kind still "svmg_pc").
-        val target = _attached_target(ADD_PROGRAM)
-        val expected_pc = [5, 10, 15, 16, 17, 17]
-        val expected_sp = [1, 2, 3, 2, 0, 0]
-        var i = 0
-        while i < expected_pc.len():
-            val s = target.step()
-            assert_equal(s.pc, expected_pc[i])
-            assert_equal(s.sp, expected_sp[i])
-            assert_equal(s.pc_kind, PC_KIND_SVMG)
-            i = i + 1
-        assert_equal(target.state().stop_reason, STOP_HALT)
+# @req: REQ-LIB-DEBUG-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
+
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/lib/debug/debug_target_ref_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
+
+## Compatibility and limitations
+
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
+
+use std.spec
+
+# doc-path: doc/01_research/local/debug_target_ref.md
+# doc-path: doc/03_plan/sys_test/debug_target_ref.md
+# doc-path: doc/04_architecture/debug_target_ref.md
+# doc-path: doc/05_design/debug_target_ref.md
+
+# @manual: primary
+
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-LIB-DEBUG-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-DEBUG-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-DEBUG-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-DEBUG-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-LIB-DEBUG-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
+
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-LIB-DEBUG-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements

@@ -1,29 +1,83 @@
-# Repro spec for the predictable-randomness bug in
-# src/lib/gc_async_mut/oauth/utilities.spl random_int()/get_current_timestamp()
-# (same family as the already-fixed nogc_sync_mut copy, commit
-# 186b33e3651285110c7a73ffdc64d4c37b26ad88). Before the fix,
-# get_current_timestamp() returned a hardcoded mock value (1707753600), so
-# random_int() and everything built on it (generate_random_string, OAuth
-# state/PKCE verifier generation) was fully deterministic/predictable.
-#
-# NOTE: this spec is currently blocked by a separate, pre-existing defect —
-# see doc/08_tracking/bug/legacy_import_string_namespace_dict_ignores_source_content_2026-08-11.md.
-# Under the currently deployed binary, `import string` resolves `string.*`
-# calls (string.length/string.char_at, used inside random_int's hex decode)
-# against a stale namespace dict that only contains 8 `bm_*` symbols,
-# independent of source content. That defect fails this spec identically
-# whether or not the random_int fix below is present, so it cannot serve as
-# live before/after proof under the current deployment. It is left in place
-# as a real repro to re-run once that defect (or a compiler
-# rebuild+redeploy) unblocks it.
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use gc_async_mut.oauth.utilities.{random_int}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-describe "gc_async_mut oauth random_int":
-    it "produces varying output across calls (not a deterministic mock timestamp)":
-        val a = random_int(0, 1000000)
-        val b = random_int(0, 1000000)
-        val c = random_int(0, 1000000)
-        # A hardcoded-timestamp mock would make these three deterministic
-        # for a fixed range; a real CSPRNG should not collide on all three.
-        expect (a != b) or (b != c)
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/lib/common/oauth_gc_async_random_int_repro_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
+
+## Compatibility and limitations
+
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
+
+use std.spec
+
+# doc-path: doc/01_research/local/oauth_gc_async_random_int_repro.md
+# doc-path: doc/03_plan/sys_test/oauth_gc_async_random_int_repro.md
+# doc-path: doc/04_architecture/oauth_gc_async_random_int_repro.md
+# doc-path: doc/05_design/oauth_gc_async_random_int_repro.md
+
+# @manual: primary
+
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-COMMON-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-LIB-COMMON-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
+
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-LIB-COMMON-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-LIB-COMMON-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-COMMON-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-COMMON-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first

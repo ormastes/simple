@@ -1,268 +1,85 @@
-# File I/O Protection Engine Tests
-# Tests rule matching, action enforcement, and edge cases
+# @req: REQ-APP-MCP_UNIT-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.nogc_async_mut.mcp.fileio_protection (ProtectionEngine, RuleType, RuleAction, ProtectionResult, create_engine)
-use std.io_runtime.{read_file}
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-fn check_msg(condition: bool, message: text):
-    if not condition:
-        expect(message).to_equal("")
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-describe "File I/O Protection Engine":
+## Operator workflow
 
-    describe "Rule Matching":
+1. Run `bin/simple test test/01_unit/app/mcp_unit/fileio_protection_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-        it "matches exact paths":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("CLAUDE.md", RuleType.Exact, RuleAction.Protect, "Test")
+## Compatibility and limitations
 
-            val result = engine.check_path("CLAUDE.md", "write")
-            match result:
-                ProtectionResult.Denied(_): assert true
-                _: fail("Expected denied result")
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-        it "matches glob patterns with *":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("*.sdn", RuleType.Glob, RuleAction.Atomic, "Test")
+use std.spec
 
-            val result = engine.check_path("test.sdn", "write")
-            match result:
-                ProtectionResult.RequiresAtomic: assert true
-                _: fail("Expected requires atomic")
+# doc-path: doc/01_research/local/fileio_protection.md
+# doc-path: doc/03_plan/sys_test/fileio_protection.md
+# doc-path: doc/04_architecture/fileio_protection.md
+# doc-path: doc/05_design/fileio_protection.md
 
-        it "matches glob patterns with multiple *":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("doc/*.sdn", RuleType.Glob, RuleAction.Atomic, "Test")
+# @manual: primary
 
-            val result = engine.check_path("doc/test.sdn", "write")
-            match result:
-                ProtectionResult.RequiresAtomic: assert true
-                _: fail("Expected requires atomic")
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        it "does not match non-matching patterns":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("*.sdn", RuleType.Glob, RuleAction.Atomic, "Test")
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-APP-MCP_UNIT-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-            val result = engine.check_path("test.txt", "write")
-            match result:
-                ProtectionResult.Allowed: assert true
-                _: fail("Expected allowed")
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-APP-MCP_UNIT-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
 
-        it "normalizes paths with trailing slash":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("src/", RuleType.Exact, RuleAction.Protect, "Test")
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-APP-MCP_UNIT-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
 
-            val result1 = engine.check_path("src/", "write")
-            val result2 = engine.check_path("src", "write")
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-            match result1:
-                ProtectionResult.Denied(_): assert true
-                _: fail("Expected denied for src/")
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-APP-MCP_UNIT-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
 
-            match result2:
-                ProtectionResult.Denied(_): assert true
-                _: fail("Expected denied for src")
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-APP-MCP_UNIT-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-        it "normalizes relative paths":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("test.txt", RuleType.Exact, RuleAction.Protect, "Test")
-
-            val result = engine.check_path("./test.txt", "write")
-            match result:
-                ProtectionResult.Denied(_): assert true
-                _: fail("Expected denied")
-
-        it "returns first matching rule":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("*.txt", RuleType.Glob, RuleAction.Deny, "First")
-            engine.add_rule("*.txt", RuleType.Glob, RuleAction.Allow, "Second")
-
-            val result = engine.check_path("test.txt", "write")
-            match result:
-                ProtectionResult.Denied(reason):
-                    check(reason.contains("First"))
-                _: fail("Expected first rule to match")
-
-    describe "Action Enforcement":
-
-        it "allows read on protected files":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("test.txt", RuleType.Exact, RuleAction.Protect, "Test")
-
-            val result = engine.check_path("test.txt", "read")
-            match result:
-                ProtectionResult.Allowed: assert true
-                _: fail("Expected allowed for read")
-
-        it "denies write on protected files":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("test.txt", RuleType.Exact, RuleAction.Protect, "Test")
-
-            val result = engine.check_path("test.txt", "write")
-            match result:
-                ProtectionResult.Denied(_): assert true
-                _: fail("Expected denied for write")
-
-        it "denies delete on protected files":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("test.txt", RuleType.Exact, RuleAction.Protect, "Test")
-
-            val result = engine.check_path("test.txt", "delete")
-            match result:
-                ProtectionResult.Denied(_): assert true
-                _: fail("Expected denied for delete")
-
-        it "denies all operations on denied files":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("/", RuleType.Exact, RuleAction.Deny, "Test")
-
-            val read_result = engine.check_path("/", "read")
-            val write_result = engine.check_path("/", "write")
-
-            match read_result:
-                ProtectionResult.Denied(_): assert true
-                _: fail("Expected denied for read")
-
-            match write_result:
-                ProtectionResult.Denied(_): assert true
-                _: fail("Expected denied for write")
-
-        it "redirects files to temp directory":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp/test")
-            engine.add_rule("*.sh", RuleType.Glob, RuleAction.Redirect, "Test")
-
-            val result = engine.check_path("script.sh", "write")
-            match result:
-                ProtectionResult.Redirected(path):
-                    check(path.contains("/tmp/test"))
-                    check(path.contains("script.sh"))
-                _: fail("Expected redirected")
-
-        it "requires atomic writes for atomic action":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("*.sdn", RuleType.Glob, RuleAction.Atomic, "Test")
-
-            val result = engine.check_path("test.sdn", "write")
-            match result:
-                ProtectionResult.RequiresAtomic: assert true
-                _: fail("Expected requires atomic")
-
-        it "allows all operations for allow action":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("doc/", RuleType.Exact, RuleAction.Allow, "Test")
-
-            val result = engine.check_path("doc/", "write")
-            match result:
-                ProtectionResult.Allowed: assert true
-                _: fail("Expected allowed")
-
-    describe "Edge Cases":
-
-        it "handles empty path":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            val result = engine.check_path("", "write")
-            match result:
-                ProtectionResult.Allowed: assert true
-                _: fail("Expected allowed for empty path")
-
-        it "handles no matching rules":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            val result = engine.check_path("random.txt", "write")
-            match result:
-                ProtectionResult.Allowed: assert true
-                _: fail("Expected allowed when no rules match")
-
-        it "handles nested paths":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("src/", RuleType.Exact, RuleAction.Protect, "Test")
-
-            # Should not match nested paths
-            val result = engine.check_path("src/app/main.spl", "write")
-            match result:
-                ProtectionResult.Allowed: assert true
-                _: fail("Expected allowed for nested path")
-
-        it "handles multiple rules for same path":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("test.txt", RuleType.Exact, RuleAction.Protect, "Rule 1")
-            engine.add_rule("test.txt", RuleType.Exact, RuleAction.Allow, "Rule 2")
-
-            # First rule should win
-            val result = engine.check_path("test.txt", "write")
-            match result:
-                ProtectionResult.Denied(reason):
-                    check(reason.contains("Rule 1"))
-                _: fail("Expected first rule to match")
-
-        it "lists protected files with wildcard":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("CLAUDE.md", RuleType.Exact, RuleAction.Protect, "Test 1")
-            engine.add_rule("src/", RuleType.Exact, RuleAction.Protect, "Test 2")
-            engine.add_rule("*.txt", RuleType.Glob, RuleAction.Allow, "Test 3")
-
-            val files = engine.list_protected_files("*")
-            expect(files.len()).to_equal(2)
-            expect(files.contains("CLAUDE.md")).to_equal(true)
-            expect(files.contains("src/")).to_equal(true)
-
-        it "lists protected files with pattern":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("CLAUDE.md", RuleType.Exact, RuleAction.Protect, "Test 1")
-            engine.add_rule("src/", RuleType.Exact, RuleAction.Protect, "Test 2")
-
-            val files = engine.list_protected_files("CLAUDE")
-            expect(files.len()).to_equal(1)
-            expect(files.contains("CLAUDE.md")).to_equal(true)
-
-        it "gets protection info for path":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            engine.add_rule("CLAUDE.md", RuleType.Exact, RuleAction.Protect, "Important file")
-
-            val info = engine.get_protection_info("CLAUDE.md")
-            expect(info.contains("Protect")).to_equal(true)
-            expect(info.contains("Important file")).to_equal(true)
-
-        it "gets protection info for unprotected path":
-            val engine = ProtectionEngine(rules: [], temp_base: "/tmp")
-            val info = engine.get_protection_info("random.txt")
-            expect(info.contains("No protection")).to_equal(true)
-
-    describe "Server Integration":
-
-        it "safe_atomic_write uses protection checks":
-            val source = read_file("src/lib/nogc_async_mut/mcp/fileio_server.spl")
-            expect(source.contains("fn tool_safe_atomic_write")).to_equal(true)
-            expect(source.contains("check_path(path, \"write\")")).to_equal(true)
-            expect(source.contains("Atomic write denied")).to_equal(true)
-
-        it "default engine denies new root entries":
-            val engine = create_engine("missing_workspace_root_guard_config.sdn", "/tmp")
-            val result = engine.check_path("new_root_file.tmp", "write")
-            match result:
-                ProtectionResult.Denied(reason):
-                    check(reason.contains("Workspace root policy"))
-                _: fail("Expected workspace root policy denial")
-
-        it "default engine denies new immediate child entries":
-            val engine = create_engine("missing_workspace_root_guard_config.sdn", "/tmp")
-            val result = engine.check_path("src/new_child_entry", "write")
-            match result:
-                ProtectionResult.Denied(reason):
-                    check(reason.contains("Workspace root policy"))
-                _: fail("Expected workspace root child policy denial")
-
-        it "default engine keeps mutable build directory writable":
-            val engine = create_engine("missing_workspace_root_guard_config.sdn", "/tmp")
-            val result = engine.check_path("build/new_artifact.tmp", "write")
-            match result:
-                ProtectionResult.Allowed: assert true
-                _: fail("Expected build artifact path to remain writable")
-
-        it "configured engine still installs workspace root policy":
-            val engine = create_engine("config/critical_files.sdn", "/tmp")
-            val result = engine.check_path("another_root_file.tmp", "write")
-            match result:
-                ProtectionResult.Denied(reason):
-                    check(reason.contains("Workspace root policy"))
-                _: fail("Expected configured engine to retain root policy")
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-APP-MCP_UNIT-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first

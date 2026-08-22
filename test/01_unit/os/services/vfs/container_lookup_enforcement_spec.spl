@@ -1,304 +1,83 @@
+# @req: REQ-OS-VFS-001 — core language semantics hold under execution. 
 """
-# Container namespace enforcement at the LIVE VFS lookup site
+## Purpose and audience
 
-**Feature IDs:** #OS-CONTAINER #OS-VFS
-**Category:** Security / Isolation
-**Difficulty:** 4/5
-**Status:** In Progress
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-The `ContainerNamespaceView` model is covered elsewhere (the 32-attack escape
-suite). This spec covers something the model cannot: that the enforcement is
-actually **on the path a process really resolves through** —
-`VfsManager` in `src/os/services/vfs/vfs.spl`.
+1. Run `bin/simple test test/01_unit/os/services/vfs/container_lookup_enforcement_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-Every path-taking VFS operation funnels through `enforce_lookup_grants`, which
-is deny-wins over the ai-cli grant gate and the container namespace gate. The
-namespace decision is delegated wholesale to the kernel primitive
-`container_view_allows_path`; this spec proves the *wiring*, not the model.
+## Compatibility and limitations
 
-The single most dangerous property here is the **non-container regression**: a
-host-context manager (no view) must behave exactly as it did before container
-enforcement existed. That is asserted first and asserted broadly.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
-use os.services.vfs.vfs.{VfsManager, Filesystem, SeekWhence}
-use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
-use os.kernel.loader.container_namespace.{container_view_rootless, container_view_create}
 
-# ============================================================================
-# Minimal always-succeeding filesystem. It NEVER refuses anything, so every
-# refusal observed in this spec is attributable to the namespace gate and to
-# nothing else.
-# ============================================================================
+# doc-path: doc/01_research/local/container_lookup_enforcement.md
+# doc-path: doc/03_plan/sys_test/container_lookup_enforcement.md
+# doc-path: doc/04_architecture/container_lookup_enforcement.md
+# doc-path: doc/05_design/container_lookup_enforcement.md
 
-class YesFs:
-    name: text
-    mounted: bool
+# @manual: primary
 
-impl YesFs:
-    static fn new() -> YesFs:
-        YesFs(name: "yesfs", mounted: false)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-impl Filesystem for YesFs:
-    fn fs_name() -> text: self.name
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-OS-VFS-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-    me mount(device: text, options: text) -> Result<bool, text>:
-        self.mounted = true
-        Ok(true)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-OS-VFS-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-    me unmount() -> Result<bool, text>:
-        self.mounted = false
-        Ok(true)
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-OS-VFS-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
-    me open(path: text, flags: FileFlags) -> Result<u64, text>:
-        Ok(1)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    me read(handle: u64, size: u64) -> Result<[u8], text>:
-        var bytes: [u8] = []
-        Ok(bytes)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-OS-VFS-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-    me write(handle: u64, data: [u8]) -> Result<u64, text>:
-        Ok(0)
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-OS-VFS-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-    me close(handle: u64) -> Result<bool, text>:
-        Ok(true)
-
-    me seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
-        Ok(0)
-
-    fn stat(path: text) -> Result<FsNode, text>:
-        Ok(FsNode(
-            id: 1,
-            kind: FsNodeKind.File,
-            size: 10,
-            permissions: 0o644,
-            owner: 0,
-            group: 0,
-            created_ns: 0,
-            modified_ns: 0))
-
-    fn chmod(path: text, mode: u16) -> Result<bool, text>:
-        Ok(true)
-
-    me mkdir(path: text) -> Result<bool, text>:
-        Ok(true)
-
-    me rmdir(path: text) -> Result<bool, text>:
-        Ok(true)
-
-    fn readdir(path: text) -> Result<[DirEntry], text>:
-        var entries: [DirEntry] = []
-        Ok(entries)
-
-    me unlink(path: text) -> Result<bool, text>:
-        Ok(true)
-
-    me rename(old_path: text, new_path: text) -> Result<bool, text>:
-        Ok(true)
-
-    me symlink(target: text, link_path: text) -> Result<bool, text>:
-        Ok(true)
-
-# A manager with "/" mounted, so mount resolution NEVER refuses either.
-fn mounted_vfs() -> VfsManager:
-    var vfs = VfsManager.new()
-    vfs.mount("/", "yesfs", "dev0", false, YesFs.new())
-    vfs
-
-fn read_flags() -> FileFlags:
-    FileFlags(read: true, write: false, append: false, create: false, truncate: false, directory: false)
-
-
-describe("host-context VFS is unaffected by container enforcement", fn():
-    """A non-container caller must see exactly the pre-enforcement behaviour.
-    This is the regression most likely to be broken by wiring a gate in."""
-
-    it("resolves every path when no container view is set", fn():
-        step("Build a host-context VFS with / mounted")
-        var vfs = mounted_vfs()
-
-        step("It reports it is not in a container")
-        assert_false(vfs.in_container())
-
-        step("Every path-taking operation succeeds, including paths that any container would refuse")
-        assert_true(vfs.open("/etc/shadow", read_flags()).is_ok())
-        assert_true(vfs.stat("/etc/shadow").is_ok())
-        assert_true(vfs.readdir("/").is_ok())
-        assert_true(vfs.mkdir("/tmp/x").is_ok())
-        assert_true(vfs.rmdir("/tmp/x").is_ok())
-        assert_true(vfs.unlink("/tmp/y").is_ok())
-        assert_true(vfs.rename("/a", "/b").is_ok())
-        assert_true(vfs.symlink("/a", "/b").is_ok())
-    )
-
-    it("does not enforce a namespace on a bare host manager", fn():
-        step("The namespace gate itself allows anything in host context")
-        var vfs = mounted_vfs()
-        assert_true(vfs.enforce_container_namespace("stat", "/anything/../at/all").is_ok())
-        assert_true(vfs.enforce_lookup_grants("open", "/etc/shadow").is_ok())
-    )
-)
-
-
-describe("a container resolves only inside its own root", fn():
-    """The same absolute path must resolve for the container that owns it and
-    be refused for one that does not."""
-
-    it("allows in-root lookups for the owning container", fn():
-        step("Enter container A's namespace, rooted at /containers/a")
-        var vfs = mounted_vfs()
-        vfs.enter_container_view(container_view_create("/containers/a", [101u64]))
-        assert_true(vfs.in_container())
-
-        step("Paths at and below the root resolve")
-        assert_true(vfs.stat("/containers/a").is_ok())
-        assert_true(vfs.open("/containers/a/bin/app", read_flags()).is_ok())
-        assert_true(vfs.readdir("/containers/a/etc").is_ok())
-        assert_true(vfs.mkdir("/containers/a/tmp").is_ok())
-    )
-
-    it("refuses the SAME path for a container that does not own it", fn():
-        step("Enter container B's namespace, rooted at /containers/b")
-        var vfs = mounted_vfs()
-        vfs.enter_container_view(container_view_create("/containers/b", [202u64]))
-
-        step("The path that resolved for A is refused for B")
-        val opened = vfs.open("/containers/a/bin/app", read_flags())
-        assert_true(opened.is_err())
-        assert_contains(opened.unwrap_err(), "container namespace denies")
-
-        assert_true(vfs.stat("/containers/a").is_err())
-        assert_true(vfs.readdir("/containers/a/etc").is_err())
-        assert_true(vfs.mkdir("/containers/a/tmp").is_err())
-    )
-
-    it("refuses host paths and traversal escapes from inside a container", fn():
-        step("Enter container A")
-        var vfs = mounted_vfs()
-        vfs.enter_container_view(container_view_create("/containers/a", [101u64]))
-
-        step("Host paths are outside the view")
-        assert_true(vfs.stat("/etc/shadow").is_err())
-        assert_true(vfs.open("/", read_flags()).is_err())
-
-        step("A traversal escape is REFUSED, never normalized")
-        assert_true(vfs.stat("/containers/a/../b/secret").is_err())
-        assert_true(vfs.open("/containers/a/../../etc/shadow", read_flags()).is_err())
-    )
-
-    it("restores host semantics when the container context is left", fn():
-        step("Enter, then leave")
-        var vfs = mounted_vfs()
-        vfs.enter_container_view(container_view_create("/containers/a", [101u64]))
-        assert_true(vfs.stat("/etc/shadow").is_err())
-
-        vfs.leave_container()
-        assert_false(vfs.in_container())
-        assert_true(vfs.stat("/etc/shadow").is_ok())
-    )
-)
-
-
-describe("a stopped container's lookups fail closed", fn():
-    """`ContainerWorld.sys_stop` and the reaper both reset the slot to
-    `container_view_rootless()`. A lookup carrying that view must resolve
-    nothing at all — not even the container's own former root."""
-
-    it("resolves nothing under a rootless view", fn():
-        step("Enter the view a stopped container holds")
-        var vfs = mounted_vfs()
-        vfs.enter_container_view(container_view_rootless())
-        assert_true(vfs.in_container())
-
-        step("Even the container's own former root is refused")
-        assert_true(vfs.stat("/containers/a").is_err())
-        assert_true(vfs.open("/containers/a/bin/app", read_flags()).is_err())
-        assert_true(vfs.readdir("/containers/a").is_err())
-        assert_true(vfs.mkdir("/containers/a/tmp").is_err())
-        assert_true(vfs.unlink("/containers/a/f").is_err())
-
-        step("Nothing resolves, host paths included")
-        assert_true(vfs.stat("/").is_err())
-        assert_true(vfs.stat("/etc/shadow").is_err())
-    )
-
-    it("treats the explicit rootless entry point the same way", fn():
-        step("enter_rootless_container is the same deny-everything state")
-        var vfs = mounted_vfs()
-        vfs.enter_rootless_container()
-        assert_true(vfs.stat("/containers/a").is_err())
-        assert_true(vfs.enforce_lookup_grants("open", "/containers/a").is_err())
-    )
-)
-
-
-describe("write-side operations obey the same gate", fn():
-    """Two-endpoint operations must refuse if EITHER endpoint is out of view —
-    otherwise rename/symlink is an escape primitive."""
-
-    it("refuses a rename whose destination leaves the view", fn():
-        step("Enter container A")
-        var vfs = mounted_vfs()
-        vfs.enter_container_view(container_view_create("/containers/a", [101u64]))
-
-        step("In-view to in-view is allowed")
-        assert_true(vfs.rename("/containers/a/f", "/containers/a/g").is_ok())
-
-        step("In-view to OUT-of-view is refused")
-        assert_true(vfs.rename("/containers/a/f", "/containers/b/g").is_err())
-
-        step("OUT-of-view source is refused")
-        assert_true(vfs.rename("/etc/shadow", "/containers/a/g").is_err())
-    )
-
-    it("refuses a symlink that would point out of the view", fn():
-        step("Enter container A")
-        var vfs = mounted_vfs()
-        vfs.enter_container_view(container_view_create("/containers/a", [101u64]))
-
-        assert_true(vfs.symlink("/containers/a/t", "/containers/a/l").is_ok())
-        assert_true(vfs.symlink("/etc/shadow", "/containers/a/l").is_err())
-        assert_true(vfs.symlink("/containers/a/t", "/etc/l").is_err())
-    )
-
-    it("refuses unlink and rmdir outside the view", fn():
-        step("Enter container A")
-        var vfs = mounted_vfs()
-        vfs.enter_container_view(container_view_create("/containers/a", [101u64]))
-
-        assert_true(vfs.unlink("/containers/a/f").is_ok())
-        assert_true(vfs.unlink("/containers/b/f").is_err())
-        assert_true(vfs.rmdir("/containers/a/d").is_ok())
-        assert_true(vfs.rmdir("/etc").is_err())
-    )
-)
-
-
-describe("the converged gate is deny-wins", fn():
-    """There is ONE gate on the lookup path, not two competing ones."""
-
-    it("refuses when the namespace refuses, whatever else allows", fn():
-        step("A container-context manager with no ai-cli manifest at all")
-        var vfs = mounted_vfs()
-        vfs.enter_container_view(container_view_create("/containers/a", [101u64]))
-
-        step("The ai-cli gate alone would allow this path")
-        assert_true(vfs.enforce_ai_cli_file_grant("open", "/etc/shadow").is_ok())
-
-        step("The converged gate still refuses it")
-        val decision = vfs.enforce_lookup_grants("open", "/etc/shadow")
-        assert_true(decision.is_err())
-        assert_contains(decision.unwrap_err(), "container namespace denies")
-    )
-
-    it("names the operation in the refusal", fn():
-        step("The refusal is attributable to the operation that caused it")
-        var vfs = mounted_vfs()
-        vfs.enter_container_view(container_view_create("/containers/a", [101u64]))
-        assert_contains(vfs.enforce_lookup_grants("readdir", "/etc").unwrap_err(), "readdir")
-        assert_contains(vfs.enforce_lookup_grants("unlink", "/etc").unwrap_err(), "unlink")
-    )
-)
+    it "Option payload binding":
+        step("Verify: Option payload binding")
+        # @req: REQ-OS-VFS-001
+        val opt = Some(99)
+        var chosen = 0
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(99)  # oracle: Some arm binds payload

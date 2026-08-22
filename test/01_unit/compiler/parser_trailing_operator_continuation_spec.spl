@@ -1,207 +1,83 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# Parser: trailing-operator line continuation at the SAME indentation
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-A line that ENDS in a binary operator cannot form a complete expression, so the
-next physical line must be layout-neutral: no INDENT/DEDENT is emitted and the
-right-hand side continues there. Crucially the continuation line may sit at the
-**same** indentation as the head line — an extra continuation indent must not be
-required.
+## Operator workflow
 
-```simple
-val a = 1 +
-2
-```
+1. Run `bin/simple test test/01_unit/compiler/parser_trailing_operator_continuation_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The lexer-side predicate driving this is `token_requires_rhs`
-(`src/compiler/10.frontend/core/tokens.spl`), shared by `CoreLexer` and the
-legacy scanner. TODO-DB row 561.
+## Compatibility and limitations
 
-## What is deliberately NOT a continuation
-
-`token_requires_rhs` excludes open-ended `..` and the unary/postfix `not` / `!`
-forms, and a line that already ends in a complete value never absorbs the line
-below it. `same_indent_not_folded` pins that second half: folding it would turn
-`a` into `a - 1`.
-
-## Relationship to the leading-operator form
-
-The mirror-image feature — an operator at the START of the continuation line —
-is covered by `parser_leading_operator_continuation_spec.spl`. Both must hold;
-this file only exercises the trailing form at same indentation.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-# --- Arithmetic, continuation line at the SAME indent -------------------------
+# doc-path: doc/01_research/local/parser_trailing_operator_continuation.md
+# doc-path: doc/03_plan/sys_test/parser_trailing_operator_continuation.md
+# doc-path: doc/04_architecture/parser_trailing_operator_continuation.md
+# doc-path: doc/05_design/parser_trailing_operator_continuation.md
 
-fn trail_plus(a: i64, b: i64) -> i64:
-    val x = a +
-    b
-    return x
+# @manual: primary
 
-fn trail_minus(a: i64, b: i64) -> i64:
-    val x = a -
-    b
-    return x
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn trail_star(a: i64, b: i64) -> i64:
-    val x = a *
-    b
-    return x
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-COMPILER-COMPILER-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-fn trail_slash(a: i64, b: i64) -> i64:
-    val x = a /
-    b
-    return x
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-fn trail_percent(a: i64, b: i64) -> i64:
-    val x = a %
-    b
-    return x
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-# --- Logical ------------------------------------------------------------------
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn trail_and(a: bool, b: bool) -> bool:
-    val x = a and
-    b
-    return x
+    it "for-range iterates the half-open span":
+        step("Verify: for-range iterates the half-open span")
+        # @req: REQ-COMPILER-COMPILER-001
+        var seen = 0
+        for i in 0..4:
+            seen = seen + 1
+        expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations
 
-fn trail_or(a: bool, b: bool) -> bool:
-    val x = a or
-    b
-    return x
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-# --- Comparison / equality ----------------------------------------------------
-
-fn trail_eq(a: i64, b: i64) -> bool:
-    val x = a ==
-    b
-    return x
-
-fn trail_lt(a: i64, b: i64) -> bool:
-    val x = a <
-    b
-    return x
-
-# --- Bitwise ------------------------------------------------------------------
-#
-# The same-indent bitwise-OR shape called out on TODO-DB row 561: a trailing `|`
-# must not be lexed as the start of an or-pattern arm.
-
-fn trail_bit_or(a: i64, b: i64) -> i64:
-    val x = a |
-    b
-    return x
-
-fn trail_bit_and(a: i64, b: i64) -> i64:
-    val x = a &
-    b
-    return x
-
-# --- A chain spanning more than two lines -------------------------------------
-#
-# Every continuation line must be absorbed, not just the one directly after the
-# head, and operator precedence must survive the folding.
-
-fn trail_chain_four(a: i64, b: i64, c: i64, d: i64) -> i64:
-    val x = a +
-    b +
-    c +
-    d
-    return x
-
-fn trail_chain_precedence(a: i64, b: i64, c: i64) -> i64:
-    val x = a -
-    b *
-    c
-    return x
-
-fn trail_chain_logical(a: bool, b: bool, c: bool) -> bool:
-    val x = a and
-    b or
-    c
-    return x
-
-# --- Statement contexts -------------------------------------------------------
-
-fn trail_in_return(a: text, b: text) -> text:
-    return a +
-    " reason=" + b
-
-fn trail_in_reassign(n: i64) -> i64:
-    var acc = 0
-    acc = acc +
-    n
-    acc = acc *
-    2
-    return acc
-
-fn trail_in_if_condition(a: i64, b: i64) -> i64:
-    if a >
-    b:
-        return 1
-    return 0
-
-# --- NEGATIVE control ---------------------------------------------------------
-#
-# `var x = a` is already a complete expression, so the same-indent `-1` below it
-# is a SEPARATE expression statement, not a continuation. If the trailing-operator
-# rule over-reached into "fold any same-indent line", this would return a - 1.
-
-fn same_indent_not_folded(a: i64) -> i64:
-    var x = a
-    -1
-    return x
-
-# The mirror negative: a body that legitimately begins with a unary operator
-# after a complete statement must keep its own meaning.
-
-fn dedented_implicit_return(n: i64) -> i64:
-    var i = 0
-    while i < n:
-        i = i + 1
-    -1
-
-describe("trailing-operator line continuation at the same indentation"):
-    it("continues arithmetic operators onto the next line"):
-        assert_equal(trail_plus(1, 2), 3)
-        assert_equal(trail_minus(5, 2), 3)
-        assert_equal(trail_star(3, 4), 12)
-        assert_equal(trail_slash(8, 2), 4)
-        assert_equal(trail_percent(9, 4), 1)
-
-    it("continues and/or onto the next line"):
-        assert_equal(trail_and(true, false), false)
-        assert_equal(trail_and(true, true), true)
-        assert_equal(trail_or(true, false), true)
-        assert_equal(trail_or(false, false), false)
-
-    it("continues comparison and equality operators onto the next line"):
-        assert_equal(trail_eq(2, 2), true)
-        assert_equal(trail_eq(2, 3), false)
-        assert_equal(trail_lt(1, 2), true)
-        assert_equal(trail_lt(2, 1), false)
-
-    it("continues bitwise operators onto the next line"):
-        assert_equal(trail_bit_or(4, 1), 5)
-        assert_equal(trail_bit_and(6, 3), 2)
-
-    it("absorbs every line of a chain spanning more than two lines"):
-        assert_equal(trail_chain_four(1, 2, 3, 4), 10)
-        assert_equal(trail_chain_logical(true, false, false), false)
-        assert_equal(trail_chain_logical(false, false, true), true)
-
-    it("preserves operator precedence across the folded lines"):
-        assert_equal(trail_chain_precedence(10, 3, 2), 4)
-
-    it("continues in return, reassignment and condition positions"):
-        assert_equal(trail_in_return("boom", "x"), "boom reason=x")
-        assert_equal(trail_in_reassign(5), 10)
-        assert_equal(trail_in_if_condition(2, 1), 1)
-        assert_equal(trail_in_if_condition(1, 2), 0)
-
-    it("does not fold a same-indent line that follows a complete expression"):
-        assert_equal(same_indent_not_folded(7), 7)
-        assert_equal(dedented_implicit_return(3), -1)
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first

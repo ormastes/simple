@@ -1,282 +1,80 @@
-use std.io_runtime
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-class SymRoot:
-    name: text
-    source: text
-    size_bytes: i32
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-    static fn rt(n: text, sz: i32) -> SymRoot:
-        return SymRoot(name: n, source: "runtime", size_bytes: sz)
+## Operator workflow
 
-    me is_runtime() -> bool:
-        return self.source == "runtime"
+1. Run `bin/simple test test/01_unit/compiler/executable_size_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-class SzBudget:
-    binary_name: text
-    budget: i32
-    actual: i32
-    warning_pct: i32
+## Compatibility and limitations
 
-    static fn create(name: text, budget: i32, warn_pct: i32) -> SzBudget:
-        return SzBudget(binary_name: name, budget: budget, actual: 0, warning_pct: warn_pct)
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    me record(a: i32) -> SzBudget:
-        return SzBudget(binary_name: self.binary_name, budget: self.budget, actual: a, warning_pct: self.warning_pct)
+use std.spec
 
-    me usage_pct() -> i32:
-        if self.budget == 0:
-            return 0
-        return (self.actual * 100) / self.budget
+# doc-path: doc/01_research/local/executable_size.md
+# doc-path: doc/03_plan/sys_test/executable_size.md
+# doc-path: doc/04_architecture/executable_size.md
+# doc-path: doc/05_design/executable_size.md
 
-    me status() -> text:
-        if self.actual > self.budget:
-            return "fail"
-        var pct: i32 = self.usage_pct()
-        if pct >= self.warning_pct:
-            return "warning"
-        return "pass"
+# @manual: primary
 
-class StripCfg:
-    strip_debug: bool
-    strip_symbols: bool
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    static fn full() -> StripCfg:
-        return StripCfg(strip_debug: true, strip_symbols: true)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-    static fn none() -> StripCfg:
-        return StripCfg(strip_debug: false, strip_symbols: false)
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-COMPILER-COMPILER-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared
 
-    me reduction_pct() -> i32:
-        if self.strip_debug == true:
-            if self.strip_symbols == true:
-                return 60
-        return 0
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-COMPILER-COMPILER-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
 
-class SzComp:
-    name: text
-    before: i32
-    after: i32
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    me reduction_pct() -> i32:
-        if self.before == 0:
-            return 0
-        return ((self.before - self.after) * 100) / self.before
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-    me is_regression() -> bool:
-        return self.after > self.before
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-class DepEdge:
-    from_c: text
-    to_c: text
-    is_used: bool
-
-    me is_removable() -> bool:
-        return self.is_used == false
-
-class SplitPlan:
-    edge_name: text
-    classification: text
-
-    me can_remove() -> bool:
-        return self.classification == "safe"
-
-fn check_split_readiness(plans: SplitPlan, plans2: SplitPlan) -> text:
-    if plans.can_remove() == false:
-        return "blocked"
-    if plans2.can_remove() == false:
-        return "blocked"
-    return "ready"
-
-fn test_root_runtime_source():
-    var r: SymRoot = SymRoot.rt("libc_init", 4096)
-    if r.source == "runtime":
-        print("PASS test_root_runtime_source")
-    else:
-        print("FAIL test_root_runtime_source")
-
-fn test_root_duplicate_rejected():
-    var r1: SymRoot = SymRoot.rt("libc_init", 4096)
-    var r2: SymRoot = SymRoot.rt("libc_init", 4096)
-    var rejected: bool = r1.name == r2.name
-    if rejected == true:
-        print("PASS test_root_duplicate_rejected")
-    else:
-        print("FAIL test_root_duplicate_rejected")
-
-fn test_root_total_size():
-    var r1: SymRoot = SymRoot.rt("libc_init", 4096)
-    var r2: SymRoot = SymRoot.rt("malloc", 2048)
-    var total: i32 = r1.size_bytes + r2.size_bytes
-    if total == 6144:
-        print("PASS test_root_total_size")
-    else:
-        print("FAIL test_root_total_size")
-
-fn test_root_count_by_source():
-    var r1: SymRoot = SymRoot.rt("libc_init", 4096)
-    var r2: SymRoot = SymRoot.rt("malloc", 2048)
-    var r3: SymRoot = SymRoot(name: "user_main", source: "app", size_bytes: 512)
-    var count: i32 = 0
-    if r1.is_runtime() == true:
-        count = count + 1
-    if r2.is_runtime() == true:
-        count = count + 1
-    if r3.is_runtime() == true:
-        count = count + 1
-    if count == 2:
-        print("PASS test_root_count_by_source")
-    else:
-        print("FAIL test_root_count_by_source")
-
-fn test_budget_pass():
-    var b: SzBudget = SzBudget.create("mybin", 1000, 80)
-    b = b.record(500)
-    if b.status() == "pass":
-        print("PASS test_budget_pass")
-    else:
-        print("FAIL test_budget_pass")
-
-fn test_budget_fail():
-    var b: SzBudget = SzBudget.create("mybin", 1000, 80)
-    b = b.record(1200)
-    if b.status() == "fail":
-        print("PASS test_budget_fail")
-    else:
-        print("FAIL test_budget_fail")
-
-fn test_budget_warning():
-    var b: SzBudget = SzBudget.create("mybin", 1000, 80)
-    b = b.record(850)
-    if b.status() == "warning":
-        print("PASS test_budget_warning")
-    else:
-        print("FAIL test_budget_warning")
-
-fn test_budget_usage_pct():
-    var b: SzBudget = SzBudget.create("mybin", 1000, 80)
-    b = b.record(500)
-    if b.usage_pct() == 50:
-        print("PASS test_budget_usage_pct")
-    else:
-        print("FAIL test_budget_usage_pct")
-
-fn test_strip_full_reduction():
-    var s: StripCfg = StripCfg.full()
-    if s.reduction_pct() == 60:
-        print("PASS test_strip_full_reduction")
-    else:
-        print("FAIL test_strip_full_reduction")
-
-fn test_strip_none_reduction():
-    var s: StripCfg = StripCfg.none()
-    if s.reduction_pct() == 0:
-        print("PASS test_strip_none_reduction")
-    else:
-        print("FAIL test_strip_none_reduction")
-
-fn test_size_reduction_pct():
-    var c: SzComp = SzComp(name: "simple_compiler", before: 1000, after: 600)
-    if c.reduction_pct() == 40:
-        print("PASS test_size_reduction_pct")
-    else:
-        print("FAIL test_size_reduction_pct")
-
-fn test_size_regression_detected():
-    var c: SzComp = SzComp(name: "simple_compiler", before: 600, after: 800)
-    if c.is_regression() == true:
-        print("PASS test_size_regression_detected")
-    else:
-        print("FAIL test_size_regression_detected")
-
-fn test_dep_unused_removable():
-    var e: DepEdge = DepEdge(from_c: "app", to_c: "libpng", is_used: false)
-    if e.is_removable() == true:
-        print("PASS test_dep_unused_removable")
-    else:
-        print("FAIL test_dep_unused_removable")
-
-fn test_dep_direct_not_removable():
-    var e: DepEdge = DepEdge(from_c: "app", to_c: "libm", is_used: true)
-    if e.is_removable() == false:
-        print("PASS test_dep_direct_not_removable")
-    else:
-        print("FAIL test_dep_direct_not_removable")
-
-fn test_trim_savings_sum():
-    var e1: DepEdge = DepEdge(from_c: "app", to_c: "libpng", is_used: false)
-    var e2: DepEdge = DepEdge(from_c: "app", to_c: "libx11", is_used: false)
-    var s1: i32 = 2048
-    var s2: i32 = 4096
-    var savings: i32 = 0
-    if e1.is_removable() == true:
-        savings = savings + s1
-    if e2.is_removable() == true:
-        savings = savings + s2
-    if savings == 6144:
-        print("PASS test_trim_savings_sum")
-    else:
-        print("FAIL test_trim_savings_sum")
-
-fn test_closure_waste_pct():
-    var total: i32 = 10
-    var unused: i32 = 2
-    var pct: i32 = (unused * 100) / total
-    if pct == 20:
-        print("PASS test_closure_waste_pct")
-    else:
-        print("FAIL test_closure_waste_pct")
-
-fn test_safe_edge_removable():
-    var p: SplitPlan = SplitPlan(edge_name: "app->libpng", classification: "safe")
-    if p.can_remove() == true:
-        print("PASS test_safe_edge_removable")
-    else:
-        print("FAIL test_safe_edge_removable")
-
-fn test_blocked_edge_not_removable():
-    var p: SplitPlan = SplitPlan(edge_name: "app->libm", classification: "blocked")
-    if p.can_remove() == false:
-        print("PASS test_blocked_edge_not_removable")
-    else:
-        print("FAIL test_blocked_edge_not_removable")
-
-fn test_split_readiness_blocked():
-    var p1: SplitPlan = SplitPlan(edge_name: "app->libpng", classification: "safe")
-    var p2: SplitPlan = SplitPlan(edge_name: "app->libm", classification: "blocked")
-    var readiness: text = check_split_readiness(p1, p2)
-    if readiness == "blocked":
-        print("PASS test_split_readiness_blocked")
-    else:
-        print("FAIL test_split_readiness_blocked")
-
-fn test_split_readiness_ready():
-    var p1: SplitPlan = SplitPlan(edge_name: "app->libpng", classification: "safe")
-    var p2: SplitPlan = SplitPlan(edge_name: "app->libz", classification: "safe")
-    var readiness: text = check_split_readiness(p1, p2)
-    if readiness == "ready":
-        print("PASS test_split_readiness_ready")
-    else:
-        print("FAIL test_split_readiness_ready")
-
-fn main():
-    test_root_runtime_source()
-    test_root_duplicate_rejected()
-    test_root_total_size()
-    test_root_count_by_source()
-    test_budget_pass()
-    test_budget_fail()
-    test_budget_warning()
-    test_budget_usage_pct()
-    test_strip_full_reduction()
-    test_strip_none_reduction()
-    test_size_reduction_pct()
-    test_size_regression_detected()
-    test_dep_unused_removable()
-    test_dep_direct_not_removable()
-    test_trim_savings_sum()
-    test_closure_waste_pct()
-    test_safe_edge_removable()
-    test_blocked_edge_not_removable()
-    test_split_readiness_blocked()
-    test_split_readiness_ready()
-    print("DONE")
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")

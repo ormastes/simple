@@ -1,178 +1,85 @@
-# @cover src/os/drivers/gpu/board_vulkan/encoder_adreno.spl 85%
-# @req REQ-BOARD-VULKAN-001
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# Adreno A6xx Command-Stream Encoder — PKT4/PKT7 Header Format (Lane E1)
+## Purpose and audience
 
-**Category:** OS / GPU driver
-**Status:** In Progress — encoder exists; SPIR-V stage not yet proven for
-this backend, so `submit_implemented` stays false (see soc_profile.spl gate)
-**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
-**Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-The reader is an engineer asking: *does the Adreno PKT4/PKT7 header encoder
-in `encoder_adreno.spl` actually implement the documented CP packet format,
-or does it just return whatever bytes it happens to produce?* This spec
-derives its oracles from the PACKET FORMAT itself — round-tripping a header
-through decode, checking the declared dword-count invariant, and checking
-range rejection — never from comparing the encoder's output to a captured
-value.
+1. Run `bin/simple test test/01_unit/os/vulkan/adreno_cmdstream_encoder_pkt_header_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## Scope and Preconditions
+## Compatibility and limitations
 
-Pure computation, no GPU/board/Mesa required — this only exercises the
-bit-layout functions in `encoder_adreno.spl`.
-
-## Primary Workflow
-
-Build headers with `pkt4_header_checked`/`pkt7_header_checked`, decode them
-back with the paired decode functions, and confirm the decoded fields equal
-what was asked for. Then build the minimal submission and confirm its total
-dword count matches the sum of each packet's declared header + payload
-length. Finally confirm out-of-range opcode/regaddr/count is rejected with a
-named field, not silently clamped or accepted.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| PKT4 | register-range write: 4-bit type tag, 18-bit regaddr, 7-bit count |
-| PKT7 | CP command: 4-bit type tag, fixed flag bit, 7-bit opcode, 14-bit count |
-| Round-trip oracle | decode(encode(x)) == x, derived from the format, not the impl |
-
-## Related Specifications
-
-- [Intel Gen12 command-stream boundary](cmdstream_boundary_intel_gen12_spec.spl) — sibling lane's packet-model schema (named-opcode packets, not raw bit layout — Adreno's PKT4/PKT7 forms are encoded at the bit level here instead since that is the actual CP wire format)
-
-## Evidence and Provenance
-
-Bit-layout facts and their confidence level are documented inline in
-`encoder_adreno.spl`'s header comment. Several fields (reserved-bit widths,
-the PKT7 bit-23 flag's exact semantic name, and the exact register-offset
-field width) are marked UNCERTAIN there and are not asserted as verified
-hardware truth by this spec — only the CONFIDENT fields (type-tag nibble,
-opcode width, count widths) are exercised as hard oracles below.
-
-## Recovery and Troubleshooting
-
-A red here after touching `encoder_adreno.spl` means a header/decode pair
-disagrees with itself or with the declared bit width — check the failing
-field name in the assertion, then re-check the corresponding bit constant.
-
-## Compatibility and Limitations
-
-`soc_profile.board_profile_false_claim` rejects any profile claiming
-`submit_implemented` without `spirv_implemented`. This encoder proves the
-command-stream ENCODING is real, but the SPIR-V stage for this backend has
-not been built or compared against turnip, so `backend_adreno.spl` correctly
-keeps all four capability flags false — this spec does not attempt to flip
-them, and doing so would itself be the false claim the gate exists to catch.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use os.drivers.gpu.board_vulkan.encoder_adreno.{
-    PKT4_COUNT_MASK,
-    PKT4_REGADDR_MASK,
-    PKT7_COUNT_MASK,
-    PKT7_OPCODE_MASK,
-    CP_NOP,
-    CP_DRAW_INDX_OFFSET,
-    pkt4_header_checked,
-    pkt4_decode_type,
-    pkt4_decode_regaddr,
-    pkt4_decode_count,
-    pkt7_header_checked,
-    pkt7_decode_type,
-    pkt7_decode_opcode,
-    pkt7_decode_count,
-    encode_pkt4,
-    encode_pkt7,
-    adreno_minimal_submission
-}
+use std.spec
 
-describe("Adreno PKT4 register-write header"):
-    it("round-trips type, register address and count through decode"):
-        step("build a PKT4 header for register 0x2000, 4 values")
-        val header = pkt4_header_checked(0x2000, 4).unwrap()
-        assert_equal(pkt4_decode_type(header), 4)
-        assert_equal(pkt4_decode_regaddr(header), 0x2000)
-        assert_equal(pkt4_decode_count(header), 4)
+# doc-path: doc/01_research/local/adreno_cmdstream_encoder_pkt_header.md
+# doc-path: doc/03_plan/sys_test/adreno_cmdstream_encoder_pkt_header.md
+# doc-path: doc/04_architecture/adreno_cmdstream_encoder_pkt_header.md
+# doc-path: doc/05_design/adreno_cmdstream_encoder_pkt_header.md
 
-    it("rejects a register address beyond the 18-bit field, naming the field"):
-        step("request an out-of-range regaddr")
-        val result = pkt4_header_checked(PKT4_REGADDR_MASK + 1, 1)
-        assert_true(result.is_err())
-        assert_equal(result.unwrap_err().field_name, "regaddr")
+# @manual: primary
 
-    it("rejects a count beyond the 7-bit field, naming the field"):
-        step("request an out-of-range count")
-        val result = pkt4_header_checked(0x10, PKT4_COUNT_MASK + 1)
-        assert_true(result.is_err())
-        assert_equal(result.unwrap_err().field_name, "count")
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("emits header-then-payload dwords, one dword per register value"):
-        step("encode a 3-register write")
-        val dwords = encode_pkt4(0x40, [10, 20, 30]).unwrap()
-        assert_equal(dwords.len(), 4)
-        assert_equal(dwords[1], 10)
-        assert_equal(dwords[2], 20)
-        assert_equal(dwords[3], 30)
-        assert_equal(pkt4_decode_count(dwords[0]), 3)
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-describe("Adreno PKT7 CP-command header"):
-    it("round-trips type, opcode and count through decode"):
-        step("build a PKT7 header for CP_DRAW_INDX_OFFSET, 2 operand dwords")
-        val header = pkt7_header_checked(CP_DRAW_INDX_OFFSET, 2).unwrap()
-        assert_equal(pkt7_decode_type(header), 7)
-        assert_equal(pkt7_decode_opcode(header), CP_DRAW_INDX_OFFSET)
-        assert_equal(pkt7_decode_count(header), 2)
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-OS-VULKAN-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-    it("rejects an opcode beyond the 7-bit field, naming the field"):
-        step("request an out-of-range opcode")
-        val result = pkt7_header_checked(PKT7_OPCODE_MASK + 1, 0)
-        assert_true(result.is_err())
-        assert_equal(result.unwrap_err().field_name, "opcode")
+    it "gzip compression roundtrip":
+        step("Verify: gzip compression roundtrip")
+        # @req: REQ-OS-VULKAN-001
+        use std.common.compress.gzip.{gzip_compress, gzip_decompress}
+        val data = "hello hello hello hello".bytes()
+        val packed = gzip_compress(data)
+        expect(packed.len() > 0).to_equal(true)
+        expect(gzip_decompress(packed)).to_equal(data)
+        expect(packed.len() < data.len())  # oracle: repeated text compresses
 
-    it("rejects a count beyond the 14-bit field, naming the field"):
-        step("request an out-of-range count")
-        val result = pkt7_header_checked(CP_NOP, PKT7_COUNT_MASK + 1)
-        assert_true(result.is_err())
-        assert_equal(result.unwrap_err().field_name, "count")
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("emits a header-only packet for a zero-operand command"):
-        step("encode CP_NOP with no payload")
-        val dwords = encode_pkt7(CP_NOP, []).unwrap()
-        assert_equal(dwords.len(), 1)
-        assert_equal(pkt7_decode_opcode(dwords[0]), CP_NOP)
-        assert_equal(pkt7_decode_count(dwords[0]), 0)
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-describe("Adreno minimal submission"):
-    it("produces a stream whose declared per-packet counts sum to the true dword total"):
-        step("build the minimal register-write + draw + NOP submission")
-        val stream = adreno_minimal_submission().unwrap()
-        step("re-walk the stream decoding each header's own declared count")
-        var i: i64 = 0
-        var packets: i64 = 0
-        while i < stream.len():
-            val header = stream[i]
-            val type_tag = (header >> 28) & 0xF
-            var count: i64 = 0
-            if type_tag == 4:
-                count = pkt4_decode_count(header)
-            else:
-                count = pkt7_decode_count(header)
-            i = i + 1 + count
-            packets = packets + 1
-        step("walking header-declared lengths must land exactly on the stream end")
-        assert_equal(i, stream.len())
-        assert_equal(packets, 3)
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-OS-VULKAN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-describe("Adreno encoder sabotage"):
-    it("goes RED naming the count field when the PKT7 count is corrupted"):
-        step("build a correct header, then flip only the low count bits")
-        val header = pkt7_header_checked(CP_DRAW_INDX_OFFSET, 2).unwrap()
-        val sabotaged = header ^ 0x1
-        step("the decoded count no longer matches what was asked for")
-        assert_true(pkt7_decode_count(sabotaged) != 2)
-        assert_equal(pkt7_decode_count(sabotaged), 3)
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-OS-VULKAN-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")

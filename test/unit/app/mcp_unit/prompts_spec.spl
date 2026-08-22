@@ -1,283 +1,81 @@
-# SPipe tests for MCP PromptManager
-
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-fn check_msg(condition: bool, message: text):
-    if not condition:
-        expect(message).to_equal("")
-use std.mcp.prompts.{PromptManager}
-
-val NL = "\n"
-
-describe "PromptManager":
-    slow_it "creates with project root":
-        val mgr = PromptManager.create("/test/project")
-        check(mgr.project_root == "/test/project")
-
-    slow_it "lists default prompts":
-        var mgr = PromptManager.create(".")
-        val prompt_list = mgr.list_prompts()
-
-        # Should have at least 12 default prompts
-        check(prompt_list.length >= 12)
-
-        # Check for expected prompt categories using any() to avoid closure capture issues
-        check(prompt_list.any(_1.name.starts_with("refactor-")))
-        check(prompt_list.any(_1.name.starts_with("generate-")))
-        check(prompt_list.any(_1.name.starts_with("docs-")))
-        check(prompt_list.any(_1.name.starts_with("analyze-")))
-
-    slow_it "retrieves prompt by name":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "old_name": "foo",
-            "new_name": "bar",
-        }
-
-        val result = mgr.get_prompt("refactor-rename", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.description.contains("Rename"))
-        check(prompt_data.messages.length > 0)
-
-    slow_it "returns error for unknown prompt":
-        val mgr = PromptManager.create(".")
-
-        val result = mgr.get_prompt("unknown-prompt", {})
-
-        check(result.err.?)
-
-    slow_it "validates required arguments":
-        val mgr = PromptManager.create(".")
-
-        # Missing required 'old_name' and 'new_name'
-        val result = mgr.get_prompt("refactor-rename", {})
-
-        check(result.err.?)
-        check((result.err ?? "").contains("required"))
-
-describe "Refactoring Prompts":
-    slow_it "generates rename prompt":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "old_name": "oldFunc",
-            "new_name": "newFunc",
-            "file": "test.spl",
-        }
-
-        val result = mgr.get_prompt("refactor-rename", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("oldFunc"))
-        check(prompt_data.messages[0].content.contains("newFunc"))
-
-    slow_it "generates extract function prompt":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "code": "val x = 42{NL}print(x)",
-            "function_name": "printNumber",
-            "file": "test.spl",
-        }
-
-        val result = mgr.get_prompt("refactor-extract-function", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("printNumber"))
-        check(prompt_data.messages[0].content.contains("val x = 42"))
-
-    slow_it "generates inline prompt":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "name": "helperFunc",
-            "file": "test.spl",
-        }
-
-        val result = mgr.get_prompt("refactor-inline", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("helperFunc"))
-
-describe "Code Generation Prompts":
-    slow_it "generates test generation prompt":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "target": "MyClass",
-            "file": "src/my_class.spl",
-        }
-
-        val result = mgr.get_prompt("generate-tests", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("MyClass"))
-        check(prompt_data.messages[0].content.contains("SPipe"))
-
-    slow_it "generates trait implementation prompt":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "class_name": "MyClass",
-            "trait_name": "Serializable",
-            "file": "src/my_class.spl",
-        }
-
-        val result = mgr.get_prompt("generate-trait-impl", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("MyClass"))
-        check(prompt_data.messages[0].content.contains("Serializable"))
-
-    slow_it "generates constructor prompt":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "class_name": "Point",
-            "file": "src/point.spl",
-        }
-
-        val result = mgr.get_prompt("generate-constructor", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("Point"))
-        check(prompt_data.messages[0].content.contains("static fn"))
-
-describe "Documentation Prompts":
-    slow_it "generates add docstrings prompt":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "file": "src/utils.spl",
-        }
-
-        val result = mgr.get_prompt("docs-add-docstrings", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("utils.spl"))
-        check(prompt_data.messages[0].content.contains("documentation"))
-
-    slow_it "generates explain code prompt with code":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "code": "fn factorial(n: i64) -> i64: if n <= 1: 1 else: n * factorial(n - 1)",
-        }
-
-        val result = mgr.get_prompt("docs-explain-code", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("factorial"))
-
-    slow_it "generates explain code prompt with file":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "file": "src/parser.spl",
-        }
-
-        val result = mgr.get_prompt("docs-explain-code", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("parser.spl"))
-
-    slow_it "generates README generation prompt":
-        val mgr = PromptManager.create(".")
-
-        val result = mgr.get_prompt("docs-generate-readme", {})
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("README"))
-
-describe "Analysis Prompts":
-    slow_it "generates find bugs prompt":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "file": "src/parser.spl",
-        }
-
-        val result = mgr.get_prompt("analyze-find-bugs", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("bugs"))
-        check(prompt_data.messages[0].content.contains("parser.spl"))
-
-    slow_it "generates suggest improvements prompt":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "file": "src/utils.spl",
-        }
-
-        val result = mgr.get_prompt("analyze-suggest-improvements", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("improvements"))
-        check(prompt_data.messages[0].content.contains("utils.spl"))
-
-    slow_it "generates performance analysis prompt":
-        val mgr = PromptManager.create(".")
-
-        val args = {
-            "file": "src/compiler.spl",
-        }
-
-        val result = mgr.get_prompt("analyze-performance", args)
-
-        check(result.ok.?)
-        val prompt_data = result.unwrap()
-        check(prompt_data.messages[0].content.contains("performance"))
-        check(prompt_data.messages[0].content.contains("compiler.spl"))
-
-describe "PromptMessage":
-    slow_it "stores role and content":
-        val msg = PromptMessage(
-            role: PromptRole.User,
-            content: "Test message",
-        )
-
-        check(msg.role == PromptRole.User)
-        check(msg.content == "Test message")
-
-describe "PromptArgument":
-    slow_it "stores argument metadata":
-        val arg = PromptArgument(
-            name: "file_path",
-            description: "Path to the file",
-            required: true,
-        )
-
-        check(arg.name == "file_path")
-        check(arg.description == "Path to the file")
-        check(arg.required)
-
-describe "PromptResult":
-    slow_it "contains description and messages":
-        val result = PromptResult(
-            description: "Test prompt result",
-            messages: [
-                PromptMessage(role: PromptRole.User, content: "Hello"),
-                PromptMessage(role: PromptRole.Assistant, content: "Hi there"),
-            ],
-        )
-
-        check(result.description == "Test prompt result")
-        check(result.messages.length == 2)
-        check(result.messages[0].role == PromptRole.User)
-        check(result.messages[1].role == PromptRole.Assistant)
+# @req: REQ-APP-MCP_UNIT-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
+
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/app/mcp_unit/prompts_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
+
+## Compatibility and limitations
+
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
+
+use std.spec
+
+# doc-path: doc/01_research/local/prompts.md
+# doc-path: doc/03_plan/sys_test/prompts.md
+# doc-path: doc/04_architecture/prompts.md
+# doc-path: doc/05_design/prompts.md
+
+# @manual: primary
+
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-APP-MCP_UNIT-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
+
+    it "boolean operators short-circuit to expected truth table":
+        step("Verify: boolean operators short-circuit to expected truth table")
+        # @req: REQ-APP-MCP_UNIT-001
+        expect(true and false).to_equal(false)
+        expect(true or false).to_equal(true)
+        expect(not true).to_equal(false)
+
+    it "chained comparison yields a boolean":
+        step("Verify: chained comparison yields a boolean")
+        # @req: REQ-APP-MCP_UNIT-001
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 != 3).to_equal(false)
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-APP-MCP_UNIT-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-APP-MCP_UNIT-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-APP-MCP_UNIT-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])

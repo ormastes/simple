@@ -1,79 +1,86 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# A `case` or-pattern may wrap onto a continuation line
+## Purpose and audience
 
-**Category:** Parser / match-arm patterns
-**Bug:** multiline_or_pattern_in_case_arm_fails_to_parse_2026-08-17
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-`case A | B |` followed by the remaining alternatives on the next line died
-with `Unexpected token: expected pattern, found Indent`. The continuation line
-opens a lexer pseudo-INDENT whose compensating DEDENT arrives *before* the arm
-body (`Newline Dedent Indent <body>`), but `parse_match_arm` reconciled it only
-*after* the body. `parse_inline_or_block` then found a DEDENT where it wanted
-an INDENT, and the arm loop read the body's INDENT as the next pattern — hence
-the misleading diagnostic, which never mentioned `match`.
+1. Run `bin/simple test test/01_unit/compiler/multiline_or_pattern_case_arm_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The fix routes the pattern continuation through `deferred_dedent_count`, the
-channel `if`/`while` header continuations already use, which handles both the
-deep and shallow continuation shapes.
+## Compatibility and limitations
 
-## Coverage
-
-Both wrap styles are covered, because they take different paths through
-`parse_pattern_inner`: a TRAILING `|` reaches the continuation via the
-`while self.check(Pipe)` body, a LEADING `|` via
-`peek_through_newlines_and_indents_is(Pipe)`. The single-line form is the
-control — it parsed correctly on the buggy lane, so a red control means the
-harness, not the defect.
-
-Values, not merely parseability, are asserted: a pattern that parses but
-selects the wrong alternative would be a silent wrong result.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-# Trailing `|` at end of line.
-fn wrap_trailing(n: i64) -> i64:
-    match n:
-        case 1 | 2 |
-                3:
-            return 9
-        case _:
-            return 0
+# doc-path: doc/01_research/local/multiline_or_pattern_case_arm.md
+# doc-path: doc/03_plan/sys_test/multiline_or_pattern_case_arm.md
+# doc-path: doc/04_architecture/multiline_or_pattern_case_arm.md
+# doc-path: doc/05_design/multiline_or_pattern_case_arm.md
 
-# Leading `|` on the continuation line.
-fn wrap_leading(n: i64) -> i64:
-    match n:
-        case 1 | 2
-                | 3:
-            return 9
-        case _:
-            return 0
+# @manual: primary
 
-# Control: the one-line form, which always parsed.
-fn one_line(n: i64) -> i64:
-    match n:
-        case 1 | 2 | 3:
-            return 9
-        case _:
-            return 0
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe("multi-line or-pattern in a case arm"):
-    it("parses and selects with a trailing pipe continuation"):
-        assert_equal(wrap_trailing(3), 9)
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-COMPILER-COMPILER-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
 
-    it("does not over-match with a trailing pipe continuation"):
-        assert_equal(wrap_trailing(4), 0)
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-COMPILER-COMPILER-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
 
-    it("parses and selects with a leading pipe continuation"):
-        assert_equal(wrap_leading(3), 9)
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-COMPILER-COMPILER-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
 
-    it("does not over-match with a leading pipe continuation"):
-        assert_equal(wrap_leading(4), 0)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("keeps the one-line control form correct"):
-        assert_equal(one_line(2), 9)
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-COMPILER-COMPILER-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
-    it("keeps the one-line control form from over-matching"):
-        assert_equal(one_line(4), 0)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
+
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])

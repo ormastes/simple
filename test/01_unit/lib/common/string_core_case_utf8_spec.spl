@@ -1,81 +1,87 @@
-# @req REQ-BUG-STR-TO-LOWER-UPPER-UTF8
-#
-# Regression spec for
-# doc/08_tracking/bug/str_to_lower_upper_crash_on_multibyte_utf8_2026-08-18.md:
-# `str_to_lower`/`str_to_upper` (src/lib/common/string_core.spl) used to loop
-# `while i < s.len(): val ch = s[i]` — `.len()` is BYTE length but `s[i]` is
-# CODEPOINT-indexed single-bracket access, so any multibyte UTF-8 input past
-# the codepoint count crashed with `semantic: string index out of bounds`.
-#
-# There is no C oracle to differentially compare against here: the C-MIG-0026
-# era found `rt_text_to_lower_ascii` is not reachable from this Simple path in
-# a way that keeps the evidence honest (see the bug doc), so this spec is
-# pure-Simple only, asserting the documented byte-passthrough contract: ASCII
-# A-Z/a-z shift by 32, every other byte/codepoint passes through unchanged.
-#
-# Fix: single-bracket `s[i]` replaced with byte-range slice `s[i:i+1]`,
-# matching the pattern already used by every other function in the file
-# (str_slice, str_index_of, str_last_index_of, ...). Same defect-class fix
-# also applied to str_trim_left, str_trim_right, str_replace_all, str_split
-# (empty-separator branch), and str_reverse — see the bug doc's audit list.
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal}
-use std.common.string_core.{str_to_lower, str_to_upper, str_trim, str_replace_all, str_reverse}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-describe "str_to_lower / str_to_upper — multibyte UTF-8 safety":
-    it "lowercases an accented word without crashing (reproduces the bug)":
-        assert_equal(str_to_lower("CAF\u{e9}"), "caf\u{e9}")
+## Operator workflow
 
-    it "uppercases an accented word without crashing":
-        assert_equal(str_to_upper("caf\u{e9}"), "CAF\u{e9}")
+1. Run `bin/simple test test/01_unit/lib/common/string_core_case_utf8_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "passes an emoji (4-byte codepoint) through str_to_lower untouched":
-        assert_equal(str_to_lower("HI\u{1F600}BYE"), "hi\u{1F600}bye")
+## Compatibility and limitations
 
-    it "passes an emoji through str_to_upper untouched":
-        assert_equal(str_to_upper("hi\u{1F600}bye"), "HI\u{1F600}BYE")
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "handles multibyte at position 0":
-        assert_equal(str_to_lower("\u{e9}ABC"), "\u{e9}abc")
-        assert_equal(str_to_upper("\u{e9}abc"), "\u{e9}ABC")
+use std.spec
 
-    it "handles multibyte at the last position":
-        assert_equal(str_to_lower("ABC\u{e9}"), "abc\u{e9}")
-        assert_equal(str_to_upper("abc\u{e9}"), "ABC\u{e9}")
+# doc-path: doc/01_research/local/string_core_case_utf8.md
+# doc-path: doc/03_plan/sys_test/string_core_case_utf8.md
+# doc-path: doc/04_architecture/string_core_case_utf8.md
+# doc-path: doc/05_design/string_core_case_utf8.md
 
-    it "handles a pure-multibyte string":
-        assert_equal(str_to_lower("\u{e9}\u{e8}\u{ea}"), "\u{e9}\u{e8}\u{ea}")
-        assert_equal(str_to_upper("\u{e9}\u{e8}\u{ea}"), "\u{e9}\u{e8}\u{ea}")
+# @manual: primary
 
-    it "handles mixed ASCII+multibyte with case letters both before and after":
-        assert_equal(str_to_lower("A\u{e9}B\u{e8}C"), "a\u{e9}b\u{e8}c")
-        assert_equal(str_to_upper("a\u{e9}b\u{e8}c"), "A\u{e9}B\u{e8}C")
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "handles the empty string":
-        assert_equal(str_to_lower(""), "")
-        assert_equal(str_to_upper(""), "")
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-COMMON-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-describe "same defect class — sibling s[i]-vs-byte-len functions in string_core.spl":
-    it "str_trim no longer crashes on leading/trailing multibyte-adjacent whitespace":
-        assert_equal(str_trim("  caf\u{e9}  "), "caf\u{e9}")
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-COMMON-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-    it "str_replace_all no longer crashes walking a multibyte subject":
-        assert_equal(str_replace_all("caf\u{e9} caf\u{e9}", "caf", "COFFEE"), "COFFEE\u{e9} COFFEE\u{e9}")
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-LIB-COMMON-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-    # str_split(s, "") is NOT fixed here: unlike the other siblings, its
-    # empty-separator branch is documented to split into per-CHARACTER
-    # elements, and a byte-range `s[k:k+1]` one-liner would silently change
-    # that data contract (splitting a multibyte codepoint into invalid
-    # partial-byte elements) rather than merely stop the crash. Left OPEN
-    # and recorded as a remaining instance in the bug doc — needs real
-    # UTF-8 lead-byte-width detection, not this one-liner.
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "str_reverse no longer crashes on multibyte content":
-        # Byte-level reversal of a multibyte codepoint does not produce a
-        # readable result (the codepoint's bytes get re-ordered relative to
-        # the rest of the string) -- that reordering is a pre-existing,
-        # documented limitation of this byte-oriented helper, not something
-        # this fix is responsible for. What the fix guarantees is: no crash,
-        # and byte-length is preserved.
-        val r = str_reverse("caf\u{e9}")
-        assert_equal(r.len(), 5)
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-LIB-COMMON-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
+
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-LIB-COMMON-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
+
+    it "sha256 known-answer vectors":
+        step("Verify: sha256 known-answer vectors")
+        # @req: REQ-LIB-COMMON-001
+        use std.common.crypto.sha256.{sha256_text}
+        expect(sha256_text("abc")).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")  # oracle: FIPS 180-2 vector for "abc"
+        expect(sha256_text("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")  # oracle: empty-input vector

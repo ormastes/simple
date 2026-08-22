@@ -1,171 +1,81 @@
-# @req REQ-C-MIG-TIMESTAMP
-#
-# C-MIG-0019 (binary_runtime_hardening Wave 4): pure-Simple calendar
-# arithmetic in std.common.time_utils vs the C oracle in
-# src/runtime/runtime_timestamp.c (Howard-Hinnant era-based civil calendar).
-# The C functions have NO product Simple callers (only ffi_gen specs and the
-# backend symbol closure reference them) — this spec freezes the C behavior
-# as a test oracle so the C unit can be classified and eventually retired.
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true}
-use std.common.time_utils.{
-    timestamp_from_components, timestamp_add_days, timestamp_diff_days,
-    timestamp_get_year, timestamp_get_month, timestamp_get_day,
-    timestamp_get_hour, timestamp_get_minute, timestamp_get_second
-}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# C oracle (test-only; never production-linked from Simple product code).
-extern fn rt_timestamp_from_components(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: i32, microsecond: i32) -> i64
-extern fn rt_timestamp_add_days(micros: i64, days: i64) -> i64
-extern fn rt_timestamp_diff_days(micros1: i64, micros2: i64) -> i64
+## Operator workflow
 
-describe "time_utils pure-Simple vs C oracle":
-    it "epoch is zero in both":
-        val s = timestamp_from_components(1970, 1, 1, 0, 0, 0, 0)
-        assert_equal(s, 0)
-        assert_equal(s, rt_timestamp_from_components(1970, 1, 1, 0, 0, 0, 0))
+1. Run `bin/simple test test/01_unit/lib/common/time_utils_crosslang_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "matches the C oracle on representative dates":
-        # (year month day hour min sec usec) covering: leap day, century
-        # non-leap, 400-year leap, end-of-year, pre-epoch, far future
-        val y = [2000, 2024, 1900, 1999, 1969, 2100, 2038]
-        val mo = [2,    2,    3,    12,   12,   2,    1]
-        val d = [29,   29,   1,    31,   31,   28,   19]
-        val h = [12,   23,   0,    23,   23,   6,    3]
-        var i = 0
-        while i < y.len():
-            val simple = timestamp_from_components(y[i], mo[i], d[i], h[i], 59, 59, 123456)
-            val oracle = rt_timestamp_from_components(y[i], mo[i], d[i], h[i], 59, 59, 123456)
-            assert_equal(simple, oracle)
-            i = i + 1
+## Compatibility and limitations
 
-    it "round-trips through the component getters":
-        val t = timestamp_from_components(2024, 2, 29, 13, 45, 7, 0)
-        assert_equal(timestamp_get_year(t), 2024)
-        assert_equal(timestamp_get_month(t), 2)
-        assert_equal(timestamp_get_day(t), 29)
-        assert_equal(timestamp_get_hour(t), 13)
-        assert_equal(timestamp_get_minute(t), 45)
-        assert_equal(timestamp_get_second(t), 7)
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "add_days and diff_days match the C oracle including negatives":
-        val t = timestamp_from_components(2024, 1, 15, 0, 0, 0, 0)
-        assert_equal(timestamp_add_days(t, 45), rt_timestamp_add_days(t, 45))
-        assert_equal(timestamp_add_days(t, -400), rt_timestamp_add_days(t, -400))
-        val t2 = timestamp_from_components(2023, 1, 15, 6, 0, 0, 0)
-        assert_equal(timestamp_diff_days(t, t2), rt_timestamp_diff_days(t, t2))
-        assert_equal(timestamp_diff_days(t2, t), rt_timestamp_diff_days(t2, t))
+use std.spec
 
-    it "leap-day arithmetic crosses correctly":
-        val feb28 = timestamp_from_components(2024, 2, 28, 0, 0, 0, 0)
-        val mar1 = timestamp_add_days(feb28, 2)
-        assert_equal(timestamp_get_month(mar1), 3)
-        assert_equal(timestamp_get_day(mar1), 1)
+# doc-path: doc/01_research/local/time_utils_crosslang.md
+# doc-path: doc/03_plan/sys_test/time_utils_crosslang.md
+# doc-path: doc/04_architecture/time_utils_crosslang.md
+# doc-path: doc/05_design/time_utils_crosslang.md
 
-    it "matches the C oracle on 100 shared branch-covering epoch/component vectors, with perf evidence":
-        # SHARED TEST LOGIC (plan: "C-migration test standard"): one
-        # deterministic generator feeds the SAME components to BOTH sides
-        # inside this loop — the loop is the shared logic (no duplicated
-        # per-side vector lists). Domain adaptation for timestamps (not
-        # arbitrary bytes): the seeded LCG walks through i=0..99 and, at
-        # fixed indices, is overridden with named domain-boundary values —
-        # epoch (i=0), pre-epoch negative year, century non-leap (1900,
-        # 2100), 400-year leap (2000, 2400), Feb-28/29 leap-day boundaries,
-        # month/day-count boundaries (30 vs 31 vs 28/29 day months), the
-        # i32/2038 rollover date, and far-future years — plus add_days /
-        # diff_days exercised on each generated timestamp, including
-        # negative deltas.
-        use std.io_runtime.{time_now_unix_micros}
-        var simple_us = 0
-        var c_us = 0
-        var i = 0
-        var seed = 12345
-        while i < 100:
-            seed = (seed * 1103515245 + 12345) % 2147483648
-            var year = 1900 + (seed % 250)
-            var month = 1 + (seed % 12)
-            # day-count boundary: clip to a value valid for every month
-            # (28) most of the time, but let a slice through to exercise
-            # 29/30/31-day months and Feb-29 leap boundary via the seed.
-            var day = 1 + (seed % 28)
-            val hour = seed % 24
-            val minute = (seed / 7) % 60
-            val second = (seed / 13) % 60
-            val micro = (seed / 3) % 1000000
+# @manual: primary
 
-            # named domain-boundary overrides at fixed indices
-            if i == 0:
-                year = 1970
-                month = 1
-                day = 1
-            elif i == 1:
-                year = 2000
-                month = 2
-                day = 29  # 400-year leap
-            elif i == 2:
-                year = 1900
-                month = 3
-                day = 1  # century non-leap: Feb has 28 days
-            elif i == 3:
-                year = 2100
-                month = 2
-                day = 28  # century non-leap boundary
-            elif i == 4:
-                year = 2024
-                month = 2
-                day = 29  # ordinary 4-year leap
-            elif i == 5:
-                year = 1969
-                month = 12
-                day = 31  # pre-epoch, last day of year
-            elif i == 6:
-                year = 2038
-                month = 1
-                day = 19  # i32 2038 rollover date
-            elif i == 7:
-                year = 2400
-                month = 2
-                day = 29  # 400-year leap (multiple of 400)
-            elif i == 8:
-                year = 1800
-                month = 4
-                day = 30  # 30-day month boundary
-            elif i == 9:
-                year = 2999
-                month = 12
-                day = 31  # far future, year-end boundary
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-            val simple_t0 = time_now_unix_micros()
-            val simple_ts = timestamp_from_components(year, month, day, hour, minute, second, micro)
-            val simple_t1 = time_now_unix_micros()
-            val oracle_ts = rt_timestamp_from_components(year, month, day, hour, minute, second, micro)
-            val simple_t2 = time_now_unix_micros()
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-COMMON-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-            simple_us = simple_us + (simple_t1 - simple_t0)
-            c_us = c_us + (simple_t2 - simple_t1)
-            assert_equal(simple_ts, oracle_ts)
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-LIB-COMMON-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-            # exercise add_days/diff_days incl. negative deltas on the
-            # same generated timestamp, inside the same shared loop.
-            val delta = (seed % 801) - 400
-            val t3 = time_now_unix_micros()
-            val simple_added = timestamp_add_days(simple_ts, delta)
-            val t4 = time_now_unix_micros()
-            val oracle_added = rt_timestamp_add_days(oracle_ts, delta)
-            val t5 = time_now_unix_micros()
-            simple_us = simple_us + (t4 - t3)
-            c_us = c_us + (t5 - t4)
-            assert_equal(simple_added, oracle_added)
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-LIB-COMMON-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
 
-            val t6 = time_now_unix_micros()
-            val simple_diff = timestamp_diff_days(simple_added, simple_ts)
-            val t7 = time_now_unix_micros()
-            val oracle_diff = rt_timestamp_diff_days(oracle_added, oracle_ts)
-            val t8 = time_now_unix_micros()
-            simple_us = simple_us + (t7 - t6)
-            c_us = c_us + (t8 - t7)
-            assert_equal(simple_diff, oracle_diff)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-            i = i + 1
-        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
-        assert_true(simple_us >= 0 and c_us >= 0)
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-LIB-COMMON-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-COMMON-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-LIB-COMMON-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])

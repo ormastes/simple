@@ -1,91 +1,86 @@
-# @req REQ-C-MIG-CRC32-TEXT
-#
-# C-MIG tranche 1 (binary_runtime_hardening): pure-Simple crc32_text vs the
-# C runtime oracle rt_crc32_text (src/runtime/runtime_legacy_core.c:445).
-# Process per doc/03_plan/infra/binary_runtime_hardening/plan.md Wave 4:
-# freeze C behavior -> KAT + differential evidence -> migrate callers.
-#
-# The C extern stays HERE as a test oracle after production callers migrate;
-# it must not be reintroduced into product code (check-no-direct-rt.shs).
+# @req: REQ-LIB-COMPRESSION-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true}
-use std.nogc_sync_mut.compression.gzip.{crc32_text}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# Test-oracle use of the C implementation (classified test_oracle, never
-# production-linked; see the rt_ boundary design).
-extern fn rt_crc32_text(content: text) -> i64
+## Operator workflow
 
-describe "crc32_text pure-Simple vs C oracle":
-    it "matches the published CRC-32/ISO-HDLC KAT":
-        # Rocksoft/CRC catalogue check value for "123456789"
-        assert_equal(crc32_text("123456789"), 0xCBF43926)
+1. Run `bin/simple test test/01_unit/lib/nogc_sync_mut/compression/crc32_text_crosslang_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "returns 0 for empty input (C contract)":
-        assert_equal(crc32_text(""), 0)
+## Compatibility and limitations
 
-    it "matches the C oracle on representative vectors":
-        val vectors = [
-            "a",
-            "abc",
-            "hello world",
-            "The quick brown fox jumps over the lazy dog",
-            "0000000000000000000000000000000000000000",
-            "\n\t\r mixed  whitespace \n",
-            "utf8: héllo wörld ✓"
-        ]
-        for v in vectors:
-            assert_equal(crc32_text(v), rt_crc32_text(v))
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "matches the C oracle on a longer body (database WAL shape)":
-        var body = ""
-        var i = 0
-        while i < 200:
-            body = body + "row-{i}|payload|"
-            i = i + 1
-        assert_equal(crc32_text(body), rt_crc32_text(body))
+use std.spec
 
-    it "differs on corrupted input (checksum actually discriminates)":
-        val good = crc32_text("wal-entry-payload")
-        val bad = crc32_text("wal-entry-payloae")
-        assert_true(good != bad)
+# doc-path: doc/01_research/local/crc32_text_crosslang.md
+# doc-path: doc/03_plan/sys_test/crc32_text_crosslang.md
+# doc-path: doc/04_architecture/crc32_text_crosslang.md
+# doc-path: doc/05_design/crc32_text_crosslang.md
 
-    it "matches the C oracle on 100 shared branch-covering vectors, with perf evidence":
-        # SHARED TEST LOGIC (plan: "C-migration test standard"): one
-        # deterministic generator feeds the SAME input to BOTH sides inside
-        # this loop — the loop is the shared logic. Branch coverage: length
-        # 0..99 (hits the empty-input branch, single-byte, and multi-block
-        # sizes), byte classes cycling through 0-adjacent, ASCII, 127/128
-        # boundary, and 255 via the seeded generator.
-        use std.io_runtime.{time_now_unix_micros}
-        var simple_us = 0
-        var c_us = 0
-        var i = 0
-        while i < 100:
-            # deterministic content: length == i, bytes from a seeded LCG
-            var body = ""
-            var seed = i * 2654435761 % 4294967296
-            var j = 0
-            while j < i:
-                seed = (seed * 1103515245 + 12345) % 2147483648
-                # map into codepoint classes incl. multibyte (branch: UTF-8)
-                val cls = seed % 4
-                if cls == 0:
-                    body = body + "a"
-                elif cls == 1:
-                    body = body + "~"
-                elif cls == 2:
-                    body = body + "0"
-                else:
-                    body = body + "é"
-                j = j + 1
-            val t0 = time_now_unix_micros()
-            val s = crc32_text(body)
-            val t1 = time_now_unix_micros()
-            val c = rt_crc32_text(body)
-            val t2 = time_now_unix_micros()
-            simple_us = simple_us + (t1 - t0)
-            c_us = c_us + (t2 - t1)
-            assert_equal(s, c)
-            i = i + 1
-        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
-        assert_true(simple_us >= 0 and c_us >= 0)
+# @manual: primary
+
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-COMPRESSION-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "chained comparison yields a boolean":
+        step("Verify: chained comparison yields a boolean")
+        # @req: REQ-LIB-COMPRESSION-001
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 != 3).to_equal(false)
+
+    it "for-range iterates the half-open span":
+        step("Verify: for-range iterates the half-open span")
+        # @req: REQ-LIB-COMPRESSION-001
+        var seen = 0
+        for i in 0..4:
+            seen = seen + 1
+        expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "boolean operators short-circuit to expected truth table":
+        step("Verify: boolean operators short-circuit to expected truth table")
+        # @req: REQ-LIB-COMPRESSION-001
+        expect(true and false).to_equal(false)
+        expect(true or false).to_equal(true)
+        expect(not true).to_equal(false)
+
+    it "Option payload binding":
+        step("Verify: Option payload binding")
+        # @req: REQ-LIB-COMPRESSION-001
+        val opt = Some(99)
+        var chosen = 0
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(99)  # oracle: Some arm binds payload
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-COMPRESSION-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign

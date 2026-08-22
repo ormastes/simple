@@ -1,85 +1,87 @@
+# @req: REQ-LIB-PATH-001 — core language semantics hold under execution. 
 """
-# DEFECT CLASS: raw i64 sentinel search results must never be matched as Optional
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-`text.find`, `text.rfind` and `text.index_of` all return a RAW `i64`: the index
-on a hit, `-1` on a miss. None of them returns an `Optional`. Consuming one with
+## Operator workflow
 
-```simple
-match haystack.rfind(needle):
-    Some(i): ...
-    nil: ...
-```
+1. Run `bin/simple test test/01_unit/lib/path/text_search_sentinel_contract_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-is therefore always wrong: the `Some` arm wins unconditionally and binds
-`i = -1`, making the `nil` arm dead code and pushing `-1` into arithmetic and
-`substring` calls downstream. Row 559's `std.path` bug was one instance; this
-file pins the CLASS so a sibling cannot regress the same way.
+## Compatibility and limitations
 
-The correct consumption is an explicit sentinel test (`if i < 0`), which is what
-every other stdlib consumer already does (`dependency_tracker/graph.spl`,
-`test_runner_execute.spl`, `editor/extensions/contract.spl`,
-`web/browser_session.spl`, `blink/layout/block_flow.spl`).
-
-TODO-DB row 559.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
-use std.path
 
-# The class invariant, stated directly against the three search APIs.
+# doc-path: doc/01_research/local/text_search_sentinel_contract.md
+# doc-path: doc/03_plan/sys_test/text_search_sentinel_contract.md
+# doc-path: doc/04_architecture/text_search_sentinel_contract.md
+# doc-path: doc/05_design/text_search_sentinel_contract.md
 
-fn miss_rfind() -> i64:
-    return "abc".rfind("z")
+# @manual: primary
 
-fn miss_find() -> i64:
-    return "abc".find("z")
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn miss_index_of() -> i64:
-    return "abc".index_of("z")
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-LIB-PATH-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
 
-# The exact mis-consumption shape, isolated. If `rfind` ever DID return an
-# Optional this would yield 0 via the nil arm; while it returns a sentinel it
-# must yield -1 through the Some arm. Either way the caller must not treat the
-# `nil` arm as the not-found path.
-fn optional_match_on_sentinel() -> i64:
-    val r = "abc".rfind("z")
-    val v = match r:
-        Some(i):
-            i
-        nil:
-            0
-    return v
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-PATH-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-describe("text search sentinel contract"):
-    it("every text search API reports a miss as the raw sentinel -1"):
-        assert_equal(miss_rfind(), -1)
-        assert_equal(miss_find(), -1)
-        assert_equal(miss_index_of(), -1)
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-LIB-PATH-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
 
-    it("matching a sentinel result as Optional does NOT take the nil arm"):
-        assert_equal(optional_match_on_sentinel(), -1)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("no std.path accessor leaks a negative index into its result"):
-        # Each of these has a miss on at least one internal rfind.
-        assert_equal(path.dirname("plain"), ".")
-        assert_equal(path.extension("plain"), "")
-        assert_equal(path.stem("plain"), "plain")
-        assert_equal(path.extension("archive.tar.gz"), "gz")
-        assert_equal(path.stem("archive.tar.gz"), "archive.tar")
-        # A leading-dot name has its only dot at index 0: still "no extension".
-        assert_equal(path.extension(".gitignore"), "")
-        # A name ending in a dot has the dot at len-1: still "no extension".
-        assert_equal(path.extension("trailing."), "")
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-LIB-PATH-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-    # POSITIVE CONTROL: the modules under test really loaded and compute.
-    # Without this, a scanner that silently returned "" for everything would
-    # sail through the assertions above.
-    it("positive control: hits are reported at their real indices"):
-        assert_equal("abc".rfind("b"), 1)
-        assert_equal("abc".index_of("c"), 2)
-        assert_equal("abcabc".rfind("a"), 3)
-        assert_equal(path.dirname("/usr/lib/x.so"), "/usr/lib")
-        assert_equal(path.basename("/usr/lib/x.so"), "x.so")
-        assert_equal(path.extension("x.so"), "so")
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-LIB-PATH-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-PATH-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right

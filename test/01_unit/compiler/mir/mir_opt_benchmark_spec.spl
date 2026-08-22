@@ -1,239 +1,80 @@
-# MIR Optimization Performance Benchmarks
-#
-# Benchmarks to measure the effectiveness of MIR optimization passes.
-# Tests both compile-time cost and runtime improvement.
+# @req: REQ-COMPILER-MIR-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# ============================================================================
-# Benchmark Infrastructure
-# ============================================================================
+## Operator workflow
 
-struct BenchmarkResult:
-    # Result of a benchmark run.
-    name: text
-    before_instrs: i64      # Instruction count before optimization
-    after_instrs: i64       # Instruction count after optimization
-    reduction_pct: f64      # Percentage reduction
-    pass_time_ms: f64       # Time spent in optimization pass
+1. Run `bin/simple test test/01_unit/compiler/mir/mir_opt_benchmark_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-fn calculate_reduction(before: i64, after: i64) -> f64:
-    # Calculate percentage reduction.
-    if before == 0:
-        0.0
-    else:
-        (before - after).to_f64() / before.to_f64() * 100.0
+## Compatibility and limitations
 
-# ============================================================================
-# Dead Code Elimination Benchmarks
-# ============================================================================
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-describe "DCE benchmarks":
-    it "measures dead assignment elimination":
-        # Code pattern:
-        # val x = 1
-        # val y = 2
-        # val z = 3
-        # return x  # y, z are dead
-        #
-        # Expected: ~66% instruction reduction
-        pass
+use std.spec
 
-    it "measures unreachable code elimination":
-        # Code pattern:
-        # if true:
-        #     return 1
-        # return 2  # unreachable
-        #
-        # Expected: ~50% instruction reduction
-        pass
+# doc-path: doc/01_research/local/mir_opt_benchmark.md
+# doc-path: doc/03_plan/sys_test/mir_opt_benchmark.md
+# doc-path: doc/04_architecture/mir_opt_benchmark.md
+# doc-path: doc/05_design/mir_opt_benchmark.md
 
-    it "measures dead branch elimination":
-        # Code pattern:
-        # if false:
-        #     heavy_computation()
-        # return 1
-        #
-        # Expected: Branch and computation removed
-        pass
+# @manual: primary
 
-# ============================================================================
-# Copy Propagation Benchmarks
-# ============================================================================
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "Copy propagation benchmarks":
-    it "measures chain copy elimination":
-        # Code pattern:
-        # val a = input
-        # val b = a
-        # val c = b
-        # val d = c
-        # return d  # Optimized to: return input
-        #
-        # Expected: 3 copy instructions eliminated
-        pass
+    it "sha256 known-answer vectors":
+        step("Verify: sha256 known-answer vectors")
+        # @req: REQ-COMPILER-MIR-001
+        use std.common.crypto.sha256.{sha256_text}
+        expect(sha256_text("abc")).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")  # oracle: FIPS 180-2 vector for "abc"
+        expect(sha256_text("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")  # oracle: empty-input vector
 
-    it "measures copy through operations":
-        # Code pattern:
-        # val x = input
-        # val y = x + 1
-        # val z = y
-        # return z  # Optimized to: return (input + 1)
-        pass
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-COMPILER-MIR-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-# ============================================================================
-# Common Subexpression Elimination Benchmarks
-# ============================================================================
+    it "for-in accumulates array elements":
+        step("Verify: for-in accumulates array elements")
+        # @req: REQ-COMPILER-MIR-001
+        var s = 0
+        for x in [1, 2, 3]:
+            s = s + x
+        expect(s).to_equal(6)  # oracle: 1+2+3
 
-describe "CSE benchmarks":
-    it "measures duplicate computation elimination":
-        # Code pattern:
-        # val a = x * y
-        # val b = x * y
-        # val c = x * y
-        # return a + b + c  # Optimized to reuse single computation
-        #
-        # Expected: 2 multiplications eliminated
-        pass
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "measures nested CSE":
-        # Code pattern:
-        # val a = (x + y) * (x + y)
-        # val b = (x + y) + 1
-        # (x + y) computed once
-        pass
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-MIR-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-# ============================================================================
-# Function Inlining Benchmarks
-# ============================================================================
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-MIR-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-describe "Inlining benchmarks":
-    it "measures small function inlining":
-        # Code pattern:
-        # fn add(a, b): a + b
-        # val x = add(1, 2)
-        # val y = add(3, 4)
-        # val z = add(5, 6)
-        #
-        # Expected: 3 call instructions replaced with inline ops
-        pass
-
-    it "measures inlining with DCE benefit":
-        # Code pattern:
-        # fn get_flag(): false
-        # if get_flag():
-        #     heavy_computation()
-        #
-        # After inlining: if false: ... -> entire branch eliminated
-        pass
-
-# ============================================================================
-# Combined Optimization Benchmarks
-# ============================================================================
-
-describe "Combined optimization benchmarks":
-    it "measures full optimization pipeline":
-        # Complex code with all optimization opportunities:
-        # - Dead code
-        # - Copy chains
-        # - Common subexpressions
-        # - Small functions
-        #
-        # Expected: >50% total instruction reduction
-        pass
-
-    it "measures optimization levels":
-        # Same code with different optimization levels:
-        # - Level 0 (debug): No optimization
-        # - Level 1 (size): DCE + copy prop
-        # - Level 2 (speed): All passes
-        # - Level 3 (aggressive): Multiple iterations
-        pass
-
-# ============================================================================
-# Compile-Time Cost Benchmarks
-# ============================================================================
-
-describe "Compile-time benchmarks":
-    it "measures DCE pass time":
-        # Time to run DCE on medium-sized function
-        # Expected: <10ms
-        pass
-
-    it "measures copy propagation time":
-        # Time to run copy prop on medium-sized function
-        # Expected: <10ms
-        pass
-
-    it "measures CSE pass time":
-        # Time to run CSE on medium-sized function
-        # Expected: <20ms (more expensive)
-        pass
-
-    it "measures inlining pass time":
-        # Time to run inlining on module with many functions
-        # Expected: <50ms
-        pass
-
-    it "measures full pipeline time":
-        # Time to run all passes
-        # Expected: <100ms for medium module
-        pass
-
-# ============================================================================
-# Memory Usage Benchmarks
-# ============================================================================
-
-describe "Memory benchmarks":
-    it "measures instruction count reduction":
-        # Track total instruction count before/after
-        pass
-
-    it "measures basic block count reduction":
-        # Track basic block count (unreachable elimination)
-        pass
-
-    it "measures local variable count reduction":
-        # Track local variable count (dead var elimination)
-        pass
-
-# ============================================================================
-# Real-World Pattern Benchmarks
-# ============================================================================
-
-describe "Real-world pattern benchmarks":
-    it "measures loop unrolling benefit":
-        # Small constant loops can be unrolled
-        # for i in 0..4: sum = sum + arr[i]
-        pass
-
-    it "measures constant folding benefit":
-        # val x = 2 * 3 * 4  # Folded to 24 at compile time
-        pass
-
-    it "measures strength reduction":
-        # val x = y * 2  # Can become y << 1
-        # val z = y / 4  # Can become y >> 2
-        pass
-
-# ============================================================================
-# Regression Benchmarks
-# ============================================================================
-
-describe "Optimization regression tests":
-    it "verifies no infinite loops in optimization":
-        # Optimization should terminate
-        pass
-
-    it "verifies correctness preserved":
-        # Output of optimized code matches unoptimized
-        pass
-
-    it "verifies no code blowup":
-        # Optimization should not increase code size significantly
-        pass
-
-# ============================================================================
-# Exports
-# ============================================================================
-
-export describe, BenchmarkResult, calculate_reduction
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-COMPILER-MIR-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])

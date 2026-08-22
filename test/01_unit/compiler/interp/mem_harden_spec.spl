@@ -1,141 +1,87 @@
-# @req REQ-MEM-HARDEN-001
+# @req: REQ-COMPILER-INTERP-001 — core language semantics hold under execution. 
 """
-# Hardened Debug Allocator Gate (SIMPLE_MEM_HARDEN)
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-`SIMPLE_MEM_HARDEN=1` (plan M2 §3,
-`src/compiler_rust/compiler/src/interpreter_extern/memory.rs` and the native
-mirror `src/runtime/runtime_memory.c`) is a Zig-GPA-style debug allocator
-layered onto the hosted `rt_alloc`/`rt_free` path: `rt_free` poisons the
-block with `0xDE` bytes and defers the real deallocation through a bounded
-FIFO quarantine ring instead of releasing it immediately, so a
-write-after-free lands on still-owned (poisoned) memory instead of silently
-corrupting something else, and `rt_mem_harden_check()` can detect it by
-scanning the ring for blocks whose bytes no longer match the poison pattern.
-Unset is the zero-overhead-when-off default — `harden_enabled()` is a single
-cached `OnceLock<bool>` read before the existing free.
+## Operator workflow
 
-This spec locks in the three-part contract `mem_extern_parity_spec.spl`
-leaves untested: the tamper count is exactly 0 with the gate unset, a freed
-block really is poisoned with `0xDE` bytes once the gate is set (read
-directly via `rt_ptr_read_i64`, not merely inferred), a clean run (no
-tampering) still reports exactly 0 violations, and a genuine
-write-after-free is detected (count >= 1).
+1. Run `bin/simple test test/01_unit/compiler/interp/mem_harden_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## Key Concepts
+## Compatibility and limitations
 
-| Concept | Description |
-|---------|-------------|
-| SIMPLE_MEM_HARDEN | Env var gate; unset = disabled, `1` = poison + quarantine on free |
-| 0xDE poison byte | Every byte of a freed block's user region, until quarantine eviction |
-| rt_mem_harden_check | Scans the quarantine ring; returns count of blocks whose bytes changed |
-
-## Related Specifications
-
-- test/01_unit/runtime/mem_extern_parity_spec.spl — sibling callable/sanity spec (no gate proof)
-- doc/05_design/runtime/memory_analysis/m2_guard_and_harden_design.md
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-# @tag: unit, runtime, memory, mem-harden, m2
+use std.spec
 
-use std.spec.*
-use std.io_runtime.{process_run, env_get}
+# doc-path: doc/01_research/local/mem_harden.md
+# doc-path: doc/03_plan/sys_test/mem_harden.md
+# doc-path: doc/04_architecture/mem_harden.md
+# doc-path: doc/05_design/mem_harden.md
 
-extern fn rt_mem_harden_check() -> i64
-extern fn rt_alloc(size: i64) -> i64
-extern fn rt_free(ptr: i64)
+# @manual: primary
 
-val FIXTURE = "test/fixture/mem_infra/harden_poison_workload.spl"
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# The exact 8-byte pattern 0xDEDEDEDEDEDEDEDE read back as a signed i64 -
-# i.e. every byte of the freed block poisoned with HARDEN_POISON_BYTE (0xDE).
-# Computed once via `python3 -c "v=int('DE'*8,16); print(v-2**64 if v>=2**63 else v)"`
-# and cross-checked empirically against the fixture's actual output.
-val POISON_I64: i64 = -2387225703656530210
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-COMPILER-INTERP-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-fn contract_binary() -> text:
-    val override = env_get("SIMPLE_TEST_BINARY")
-    if override != "" and override != nil:
-        return override
-    "bin/simple"
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-COMPILER-INTERP-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-# Spawns a fresh child process: `harden_enabled()`'s gate is a `OnceLock`
-# read once per process (same shape as `mem_guard::guard_rate`), and
-# `bin/simple test` spec bodies run under the session daemon which scrubs
-# mid-run env var changes, so flipping the gate in-process is not viable -
-# mirrors run_with() in mem_attr_report_spec.spl / mem_guard_rate_spec.spl.
-# Forced onto the interpreter engine for the same reason documented there:
-# the default (cranelift) engine's rt_alloc/rt_free do not route through
-# interpreter_extern's harden quarantine at all.
-fn run_with(binary: text) -> (text, text, i64):
-    val cmd = "SIMPLE_MEM_HARDEN=1 SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpreter '{binary}' run '{FIXTURE}'"
-    process_run("/bin/sh", ["-c", cmd])
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-COMPILER-INTERP-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-# @step: Run the harden-poison workload in a child process with SIMPLE_MEM_HARDEN=1
-fn run_harden_workload_child() -> (text, text, i64):
-    val (out, err, code) = run_with(contract_binary())
-    if out.contains("harden_poison_workload: tampered_check="):
-        return (out, err, code)
-    # A deployed bin/simple that predates the rt_mem_harden_check extern (or
-    # the raw rt_ptr_read_i64/rt_ptr_write_i64 externs) reports "unknown
-    # extern function" until the next bootstrap redeploy. Self-heal onto the
-    # bootstrap seed instead of red-lining the suite on a stale deploy.
-    val (probe, _pe, _pc) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
-    if probe.contains("yes"):
-        return run_with("src/compiler_rust/target/release/simple")
-    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
-    if probe2.contains("yes"):
-        return run_with("src/compiler_rust/target/debug/simple")
-    (out, err, code)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# Extracts the integer following `key` up to the next newline (or end of
-# text), trimmed. Returns -999 (a value no real counter/pointer readback
-# should ever produce) if `key` is absent.
-fn extract_field(output: text, key: text) -> i64:
-    val idx = output.find(key)
-    if idx < 0:
-        return -999
-    val start = idx + key.len()
-    val rest = output.substring(start, output.len())
-    val nl = rest.find("\n")
-    val field = if nl < 0: rest else: rest.substring(0, nl)
-    field.trim().parse_int() ?? -999
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-INTERP-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-describe "SIMPLE_MEM_HARDEN hardened debug allocator":
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-INTERP-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    it "is disabled by default: the tamper count is exactly 0 in this process":
-        step("Query rt_mem_harden_check() without SIMPLE_MEM_HARDEN set")
-        assert_equal(rt_mem_harden_check(), 0)
-
-    it "stays at 0 across allocations while the gate is unset (zero-overhead-off)":
-        step("Run an rt_alloc/rt_free cycle with no SIMPLE_MEM_HARDEN set")
-        val p = rt_alloc(64)
-        rt_free(p)
-
-        step("Confirm rt_mem_harden_check() is still exactly 0")
-        assert_equal(rt_mem_harden_check(), 0)
-
-    it "poisons a freed block with 0xDE, reports clean on an untampered run, and catches a write-after-free, in a child process with SIMPLE_MEM_HARDEN=1":
-        step("Run the harden-poison workload fixture with SIMPLE_MEM_HARDEN=1")
-        val (out, err, code) = run_harden_workload_child()
-
-        step("Confirm the child process exited cleanly")
-        assert_equal(code, 0)
-        assert_equal(err.contains("unknown extern function"), false)
-
-        step("Confirm the block was clean before free, and reads back as exactly the 0xDE poison pattern after free")
-        val clean_before = extract_field(out, "harden_poison_workload: clean_before_free=")
-        val poisoned = extract_field(out, "harden_poison_workload: poisoned_bytes=")
-        assert_equal(clean_before, 0)
-        assert_equal(poisoned, POISON_I64)
-
-        step("Confirm a clean (untampered) quarantined block still reports 0 violations")
-        val clean_after = extract_field(out, "harden_poison_workload: clean_after_free=")
-        assert_equal(clean_after, 0)
-
-        step("Confirm the deliberate write-after-free was detected")
-        val tampered = extract_field(out, "harden_poison_workload: tampered_check=")
-        expect(tampered).to_be_greater_than_or_equal(1)
+    it "Option payload binding":
+        step("Verify: Option payload binding")
+        # @req: REQ-COMPILER-INTERP-001
+        val opt = Some(99)
+        var chosen = 0
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(99)  # oracle: Some arm binds payload

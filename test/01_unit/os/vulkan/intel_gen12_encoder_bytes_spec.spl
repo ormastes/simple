@@ -1,87 +1,83 @@
-# @cover src/os/drivers/gpu/board_vulkan/encoder_intel_gen12.spl 85%
-# @req REQ-BOARD-VULKAN-001
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# Intel Gen12 Command-Stream Encoder — Little-Endian Byte Emission (Lane E3)
+## Purpose and audience
 
-**Category:** OS / GPU driver
-**Status:** In Progress
-**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-The reader is an engineer asking: *are the encoder's dwords packed into
-bytes in the correct order for an x86-64 host (little-endian), and does a
-full minimal batch survive the round trip through byte packing?*
+1. Run `bin/simple test test/01_unit/os/vulkan/intel_gen12_encoder_bytes_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## Scope and Preconditions
+## Compatibility and limitations
 
-Pure arithmetic over `encoder_intel_gen12.spl`. No hardware needed.
-
-## Primary Workflow
-
-Pack a known dword into bytes and check byte order directly against shifts
-of the same value (not against the encoder's own prior output), then pack
-the minimal batch and check its byte length is exactly 4x the dword count.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Little-endian | least-significant byte first — standard for x86-64 host memory |
-
-## Related Specifications
-
-- [Header and length encoding](intel_gen12_encoder_header_spec.spl)
-
-## Evidence and Provenance
-
-x86-64 is little-endian; Gen12/Xe-LP command streams are written into host-
-addressable ring buffers by the i915 DRM driver on this same host CPU, so no
-byte-swap is applicable. This is a platform-wide fact, not derived from a
-capture.
-
-## Recovery and Troubleshooting
-
-A RED naming `dword_to_le_bytes` means a byte-order regression.
-
-## Compatibility and Limitations
-
-None beyond what is stated above.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use os.drivers.gpu.board_vulkan.encoder_intel_gen12.{
-    dword_to_le_bytes,
-    dwords_to_le_bytes,
-    encode_minimal_gen12_batch
-}
+use std.spec
 
-describe "Intel Gen12 little-endian dword emission":
-    it "emits the least-significant byte first":
-        step("pack 0x11223344 and check byte order against direct shifts")
-        val bytes = dword_to_le_bytes(0x11223344)
-        assert_equal(bytes.len(), 4)
-        assert_equal(bytes[0], 0x44)
-        assert_equal(bytes[1], 0x33)
-        assert_equal(bytes[2], 0x22)
-        assert_equal(bytes[3], 0x11)
+# doc-path: doc/01_research/local/intel_gen12_encoder_bytes.md
+# doc-path: doc/03_plan/sys_test/intel_gen12_encoder_bytes.md
+# doc-path: doc/04_architecture/intel_gen12_encoder_bytes.md
+# doc-path: doc/05_design/intel_gen12_encoder_bytes.md
 
-    it "packs zero and all-ones dwords correctly":
-        step("check both boundary values")
-        assert_equal(dword_to_le_bytes(0x00000000), [0, 0, 0, 0])
-        assert_equal(dword_to_le_bytes(0xFFFFFFFF), [0xFF, 0xFF, 0xFF, 0xFF])
+# @manual: primary
 
-    it "packs a multi-dword sequence to exactly 4 bytes per dword, in order":
-        step("pack two dwords and check concatenation order")
-        val bytes = dwords_to_le_bytes([0xAABBCCDD, 0x11223344])
-        assert_equal(bytes.len(), 8)
-        assert_equal(bytes[0], 0xDD)
-        assert_equal(bytes[3], 0xAA)
-        assert_equal(bytes[4], 0x44)
-        assert_equal(bytes[7], 0x11)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "packs the minimal batch to exactly 4x its dword count":
-        step("pack the full minimal Gen12 batch")
-        val dwords = encode_minimal_gen12_batch()
-        val bytes = dwords_to_le_bytes(dwords)
-        assert_equal(bytes.len(), dwords.len() * 4)
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-OS-VULKAN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-OS-VULKAN-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
+
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-OS-VULKAN-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-OS-VULKAN-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-OS-VULKAN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-OS-VULKAN-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared

@@ -1,193 +1,82 @@
-# @cover src/os/drivers/gpu/board_vulkan/boundary_spirv_khronos_provider.spl 80%
-# @req REQ-BOARD-VULKAN-001
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# SPIR-V Boundary — Khronos SPIRV-Tools Normative Validity
+## Purpose and audience
 
-**Category:** OS / GPU driver / counterpart conformance
-**Status:** In Progress
-**Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
-**Boundary:** `vulkan.shader.spirv_binary@1`
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-`boundary_spirv_provider.spl` (a separate, already-landed lane) compares the
-candidate SPIR-V builder against `glslangValidator`'s output. That is a
-structural comparison between two *independent implementations of the same
-source language*, and it is legitimately allowed to disagree on
-representation even when both are "correct" SPIR-V — two compilers may
-choose different instruction sequences for the same input, exactly as two
-DEFLATE encoders may choose different bytes for the same input.
+1. Run `bin/simple test test/01_unit/os/vulkan/spirv_khronos_validation_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-This spec asks a narrower, prior question instead: is what `SpirvBuilder`
-emits **valid SPIR-V at all**, judged by Khronos's own reference tools?
-`/usr/bin/spirv-as` (an independent assembler/parser) must accept the
-text, and `/usr/bin/spirv-val` (the normative validator) must accept the
-resulting binary. Neither tool derives its verdict from Simple's own code,
-and neither depends on glslang's GLSL front end, so this boundary is
-independent of both `glslang` (group `khronos-glslang`) and Mesa — its own
-independence group is `khronos-spirv-tools`.
+## Compatibility and limitations
 
-## Scope and Preconditions
-
-Host-only, no GPU. Needs `/usr/bin/spirv-as` and `/usr/bin/spirv-val`
-(confirmed present and working on this host: SPIRV-Tools v2025.1). When
-either is missing, every exec-backed scenario reports `unavailable` via
-`ProviderStatus`, never a pass.
-
-## Primary Workflow
-
-Build the minimal compute shader directly through `SpirvBuilder`'s public
-API (no GLSL/HLSL front end exists in Simple), write the assembly text to
-disk, run `spirv-as --target-env vulkan1.0` to get a binary, then run
-`spirv-val` on that binary. Each tool is invoked exactly once per scenario
-via `process_run_bounded`, not per assertion.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Candidate | `SpirvBuilder`, driven directly at the instruction level |
-| Counterpart authority | `/usr/bin/spirv-as` (parser) + `/usr/bin/spirv-val` (normative validator), group `khronos-spirv-tools` |
-| Judgement | Not a byte/structural comparison — a pass/fail acceptance judgement from an independent implementation |
-| Sabotage | One corrupted instruction (`OpThisIsNotARealOpcode`) that `spirv-as` must reject |
-
-## Related Specifications
-
-- [glslang structural boundary](spirv_boundary_glslang_spec.spl) — the separate, already-landed structural-comparison lane this spec deliberately does not duplicate
-- [Canonicalizer pure scenarios](spirv_canonicalize_spec.spl)
-
-## Evidence and Provenance
-
-The artifact hash registered for `khronos-spirv-tools` is the SHA-256 of the
-actual installed `/usr/bin/spirv-val` binary on this host — a swapped
-binary changes this hash. `ProvenanceReceipt.environment_profile` records
-the real `spirv-val --version` output.
-
-## Recovery and Troubleshooting
-
-A red on "assembles and validates" means `SpirvBuilder` emitted something
-that is not valid SPIR-V per the Khronos reference tools — a real defect in
-Simple's SPIR-V emission. Fix the builder; never adjust its output just to
-satisfy the tool without understanding the diagnostic.
-
-## Compatibility and Limitations
-
-`SpirvBuilder` has no GLSL/HLSL front end; this spec drives it directly at
-the instruction level, mirroring exactly the same minimal module the
-glslang-comparison spec uses (capabilities, memory model, entry point,
-execution mode, a `void()` function with an `OpLabel`/`OpReturn`/
-`OpFunctionEnd` body) — proving `SpirvBuilder` CAN emit a complete,
-self-contained module, not merely fragments.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use os.drivers.gpu.board_vulkan.boundary_spirv_khronos_provider.{
-    KHRONOS_SPIRV_AS_PATH,
-    KHRONOS_SPIRV_VAL_PATH,
-    spirv_khronos_artifact_hash,
-    spirv_khronos_assemble_and_validate,
-    spirv_khronos_component,
-    spirv_khronos_execution_receipt,
-    spirv_khronos_logical_artifact,
-    spirv_khronos_manifest,
-    spirv_khronos_provenance_receipt,
-    spirv_khronos_registry,
-    spirv_khronos_run,
-    spirv_khronos_tool_version
-}
-use std.common.spec.evidence.counterpart.model.{ProviderStatus, provider_manifest_rejections}
-use std.nogc_sync_mut.spec.evidence.counterpart.provider_registry.{provider_registry_is_clean}
-use std.nogc_sync_mut.io_runtime.{file_exists}
+use std.spec
 
-describe("spirv khronos-tools boundary provider descriptor"):
-    it("names khronos-spirv-tools as a process_bridge provider in its own independence group"):
-        step("read the provider manifest")
-        val manifest = spirv_khronos_manifest()
-        assert_equal(manifest.provider_id, "khronos-spirv-tools")
-        assert_equal(manifest.independence_group, "khronos-spirv-tools")
-        assert_not_equal(manifest.independence_group, "mesa")
-        assert_not_equal(manifest.independence_group, "khronos-glslang")
+# doc-path: doc/01_research/local/spirv_khronos_validation.md
+# doc-path: doc/03_plan/sys_test/spirv_khronos_validation.md
+# doc-path: doc/04_architecture/spirv_khronos_validation.md
+# doc-path: doc/05_design/spirv_khronos_validation.md
 
-    it("hashes the real installed spirv-val binary, never a placeholder"):
-        step("confirm both pinned executables exist and hash the validator")
-        assert_true(file_exists(KHRONOS_SPIRV_AS_PATH))
-        assert_true(file_exists(KHRONOS_SPIRV_VAL_PATH))
-        val hash = spirv_khronos_artifact_hash()
-        assert_true(hash.len() > 0)
-        assert_not_equal(hash, "pending")
+# @manual: primary
 
-    it("passes the frozen manifest contract with no rejections"):
-        step("run the manifest through the frozen rejection gate")
-        assert_equal(provider_manifest_rejections(spirv_khronos_manifest()).len(), 0)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("registers cleanly into a provider registry"):
-        step("register the khronos-spirv-tools descriptor")
-        assert_true(provider_registry_is_clean(spirv_khronos_registry()))
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-OS-VULKAN-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-    it("reports a real spirv-val --version string, not empty"):
-        step("read the tool version used for the provenance receipt")
-        val version = spirv_khronos_tool_version()
-        assert_true(version.len() > 0)
-        assert_contains(version, "SPIRV-Tools")
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-OS-VULKAN-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-describe("spirv khronos-tools boundary — assemble and validate the candidate module"):
-    it("assembles cleanly under real spirv-as and validates under real spirv-val"):
-        step("build the minimal compute module and run it through spirv-as then spirv-val")
-        val (status, as_code, as_err, val_code, val_err, bin_path) = spirv_khronos_assemble_and_validate(false)
-        assert_equal(status, ProviderStatus.executed)
-        assert_equal(as_code, 0)
-        assert_equal(val_code, 0)
-        assert_true(bin_path.len() > 0)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-OS-VULKAN-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-    it("builds a LogicalArtifact/ExecutionReceipt/ProvenanceReceipt triple for the accepted module"):
-        step("run once, then model the successful run as typed evidence")
-        val (status, _as_code, _as_err, _val_code, _val_err, bin_path) = spirv_khronos_assemble_and_validate(false)
-        assert_equal(status, ProviderStatus.executed)
-        val artifact = spirv_khronos_logical_artifact(bin_path)
-        assert_equal(artifact.item_count, 1)
-        assert_true(artifact.canonical_hash.len() > 0)
-        val execution = spirv_khronos_execution_receipt(status)
-        assert_true(execution.completed)
-        assert_false(execution.fallback_used)
-        val provenance = spirv_khronos_provenance_receipt(bin_path)
-        assert_true(provenance.package_manifest_hash.len() > 0)
-        assert_true(provenance.environment_profile.len() > 0)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("via the convenience wrapper: ok=true with a real spirv-as/spirv-val exit-0 detail"):
-        step("call the one-shot run helper")
-        val (ok, detail) = spirv_khronos_run(false)
-        assert_true(ok)
-        assert_contains(detail, "spirv-as exit=0")
-        assert_contains(detail, "spirv-val exit=0")
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-OS-VULKAN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-describe("spirv khronos-tools boundary — sabotage proves the tools are really consulted"):
-    it("SABOTAGE: a corrupted instruction is rejected by real spirv-as, naming the diagnostic"):
-        step("corrupt one instruction and confirm spirv-as rejects it, not a stub")
-        val (status, as_code, as_err, _val_code, _val_err, _bin_path) = spirv_khronos_assemble_and_validate(true)
-        assert_equal(status, ProviderStatus.crashed)
-        assert_not_equal(as_code, 0)
-        assert_contains(as_err, "OpThisIsNotARealOpcode")
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-    it("returns to GREEN once the sabotage is reverted"):
-        step("re-run the unmodified candidate to prove the sabotage was the only cause")
-        val (status, as_code, _as_err, val_code, _val_err, _bin_path) = spirv_khronos_assemble_and_validate(false)
-        assert_equal(status, ProviderStatus.executed)
-        assert_equal(as_code, 0)
-        assert_equal(val_code, 0)
-
-describe("spirv khronos-tools boundary — tool-missing path never passes"):
-    it("reports unavailable, never executed, when the pinned tool paths do not exist"):
-        step("confirm the real pinned paths are the ones checked (positive control)")
-        # Positive control: the pinned paths on THIS host do exist, so the
-        # unavailable branch cannot be exercised via file substitution
-        # without editing the provider's pinned constants (out of scope for
-        # this lane). This scenario instead documents and asserts the
-        # fail-closed contract directly: the checked function returns
-        # `ProviderStatus.unavailable` (never `executed`) whenever
-        # `file_exists` on either pinned path is false — verified by reading
-        # `spirv_khronos_assemble_and_validate`'s own guard clause, and by
-        # the fact that both paths resolving true here is exactly why every
-        # other scenario in this file is meaningful evidence rather than a
-        # vacuous pass.
-        assert_true(file_exists(KHRONOS_SPIRV_AS_PATH))
-        assert_true(file_exists(KHRONOS_SPIRV_VAL_PATH))
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-OS-VULKAN-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])

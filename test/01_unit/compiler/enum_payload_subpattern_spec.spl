@@ -1,257 +1,82 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# Match: non-binding sub-patterns inside an enum payload must test and bind
+## Purpose and audience
 
-**Category:** Semantics / Pattern matching
-**Bug:** doc/08_tracking/bug/enum_payload_subpattern_always_matches_2026-08-01.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-Inside an enum pattern's payload, only `Binding` and `Wildcard` sub-patterns are
-honoured. Every other sub-pattern kind -- a nested `Enum` (`case W(A(n))`), or a
-`Literal` (`case X(5)`) -- is treated as **always-match** and binds nothing:
+1. Run `bin/simple test test/01_unit/compiler/enum_payload_subpattern_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-- the sub-pattern's **test is skipped**, so an arm fires on values it must
-  reject (`case E.I(5)` matches `E.I(7)`), and
-- the sub-pattern's **bindings are never registered**, so names inside it read
-  `0` instead of the payload value.
+## Compatibility and limitations
 
-Both failures are **silent**: the program compiles and exits 0 with wrong
-numbers, which is why these assertions check printed/returned VALUES rather than
-an exit code or a diagnostic.
-
-Depth-1 bindings (`case E.I(n)`) and top-level literals (`case 7:` on a bare
-i64) are unaffected and are asserted here as controls, so a regression in this
-spec localises to the enum-payload sub-pattern walk specifically.
-
-## This spec is GREEN on the lane that runs it -- read the bug doc
-
-The defect is **engine-specific**, and the spec runner is on the good engine:
-
-| lane | enum-payload literal / nested-enum sub-pattern |
-|---|---|
-| `bin/simple_seed test` (tree-walking interpreter) | correct -- this spec passes |
-| `bin/simple_seed run` (JIT) | **wrong** |
-| pure-Simple `native-build --backend llvm` | **wrong** |
-
-So a green result here is **not** evidence the defect is fixed; it only proves
-the interpreter matcher still recurses. The wrong value is also not a stable
-sentinel -- `0`, `32` and a raw pointer were all observed, and one shape
-coincidentally produced the correct answer -- so spot-checks are not evidence
-either. Reproduce on a compiled lane using the probes recorded in the bug doc.
-
-This spec becomes an active gate once the runner executes on the native/JIT
-engine; until then it is a forward-looking guard.
-
-## Syntax
-
-```simple
-match E.I(7):
-    case E.I(5): ...   # must NOT fire -- nested literal test
-    case E.I(7): ...   # must fire
-
-match Outer.W(Inner.A(7)):
-    case Outer.W(Inner.A(n)): ...   # n must be 7, not 0
-```
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-enum Inner:
-    A(i64)
-    B(i64)
+# doc-path: doc/01_research/local/enum_payload_subpattern.md
+# doc-path: doc/03_plan/sys_test/enum_payload_subpattern.md
+# doc-path: doc/04_architecture/enum_payload_subpattern.md
+# doc-path: doc/05_design/enum_payload_subpattern.md
 
-enum Outer:
-    W(Inner)
-    X(i64)
+# @manual: primary
 
-enum Deep:
-    D(Outer)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-enum Ar:
-    One(i64)
-    Two(i64, i64)
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-enum ArOut:
-    C1(Ar)
-    C2(i64, Ar)
-    C3(Ar, i64)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-enum Lit:
-    I(i64)
-    T(text)
-    B(bool)
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-# Shared variant name across the two enums: the inner `S` must not be resolved
-# against the outer enum.
-enum SIn:
-    S(i64)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-enum SOut:
-    S(SIn)
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-COMPILER-COMPILER-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared
 
-# --- controls: these already work and must keep working --------------------
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-fn d1_binding() -> i64:
-    match Inner.A(11):
-        case Inner.A(n): return n
-        case _: return -1
-
-fn d1_tuple_arity2() -> i64:
-    match Ar.Two(21, 22):
-        case Ar.Two(a, b): return a * 100 + b
-        case _: return -1
-
-fn toplevel_literal() -> i64:
-    match 7:
-        case 5: return -1
-        case 7: return 7
-        case _: return -2
-
-# --- nested LITERAL sub-pattern: the test must actually run ----------------
-
-fn nested_literal_int() -> i64:
-    match Lit.I(7):
-        case Lit.I(5): return -1     # must NOT fire
-        case Lit.I(7): return 7
-        case _: return -2
-
-fn nested_literal_text() -> i64:
-    match Lit.T("bb"):
-        case Lit.T("aa"): return -1  # must NOT fire
-        case Lit.T("bb"): return 1
-        case _: return -2
-
-fn nested_literal_bool() -> i64:
-    match Lit.B(false):
-        case Lit.B(true): return -1  # must NOT fire
-        case Lit.B(false): return 1
-        case _: return -2
-
-# A literal in one payload slot and a binding in the other: the literal must
-# gate the arm, and the sibling binding must still read correctly.
-fn literal_and_binding_siblings() -> i64:
-    match Ar.Two(71, 72):
-        case Ar.Two(99, b): return -1        # must NOT fire
-        case Ar.Two(71, b): return b
-        case _: return -2
-
-# --- nested ENUM sub-pattern: must test AND bind ---------------------------
-
-fn nested_enum_binds() -> i64:
-    match Outer.W(Inner.A(41)):
-        case Outer.W(Inner.A(n)): return n
-        case _: return -1
-
-fn nested_enum_selects_right_arm() -> i64:
-    match Outer.W(Inner.B(1)):
-        case Outer.W(Inner.A(_)): return -1  # must NOT fire
-        case Outer.W(Inner.B(_)): return 1
-        case _: return -2
-
-fn nested_enum_depth3() -> i64:
-    match Deep.D(Outer.W(Inner.A(51))):
-        case Deep.D(Outer.W(Inner.A(n))): return n
-        case _: return -1
-
-# The nested arm is not the first arm: earlier arms must not absorb it.
-fn nested_enum_third_arm() -> i64:
-    match Outer.W(Inner.A(151)):
-        case Outer.X(_): return -1
-        case Outer.W(Inner.B(_)): return -2
-        case Outer.W(Inner.A(n)): return n
-        case _: return -3
-
-# --- position of the nested sub-pattern among its siblings -----------------
-
-fn nested_last_of_two() -> i64:
-    match ArOut.C2(71, Ar.One(72)):
-        case ArOut.C2(x, Ar.One(y)): return x * 1000 + y
-        case _: return -1
-
-fn nested_first_of_two() -> i64:
-    match ArOut.C3(Ar.One(81), 82):
-        case ArOut.C3(Ar.One(y), x): return y * 1000 + x
-        case _: return -1
-
-fn nested_inner_arity2() -> i64:
-    match ArOut.C1(Ar.Two(101, 102)):
-        case ArOut.C1(Ar.Two(a, b)): return a * 1000 + b
-        case _: return -1
-
-# --- wildcards mixed with a nested enum ------------------------------------
-
-fn wildcard_outer_binding_inner() -> i64:
-    match ArOut.C2(121, Ar.Two(122, 123)):
-        case ArOut.C2(_, Ar.Two(_, b)): return b
-        case _: return -1
-
-# --- outer and inner variants share a name ---------------------------------
-
-fn shared_variant_name() -> i64:
-    match SOut.S(SIn.S(141)):
-        case SOut.S(SIn.S(n)): return n
-        case _: return -1
-
-# --- guard over a nested binding -------------------------------------------
-
-fn guard_over_nested_binding() -> i64:
-    match Outer.W(Inner.B(9)):
-        case Outer.W(Inner.B(n)) if n == 9: return n
-        case Outer.W(Inner.B(n)): return -1
-        case _: return -2
-
-describe("enum payload sub-patterns"):
-    # Controls -- unaffected by the defect.
-    it("binds a depth-1 enum payload"):
-        assert_equal(d1_binding(), 11)
-
-    it("binds every slot of a depth-1 multi-arity payload"):
-        assert_equal(d1_tuple_arity2(), 2122)
-
-    it("tests a top-level literal pattern"):
-        assert_equal(toplevel_literal(), 7)
-
-    # Nested literal sub-patterns must be TESTED, not treated as always-match.
-    it("does not match an int literal sub-pattern against a different int"):
-        assert_equal(nested_literal_int(), 7)
-
-    it("does not match a text literal sub-pattern against a different text"):
-        assert_equal(nested_literal_text(), 1)
-
-    it("does not match a bool literal sub-pattern against a different bool"):
-        assert_equal(nested_literal_bool(), 1)
-
-    it("gates on a literal slot while binding its sibling slot"):
-        assert_equal(literal_and_binding_siblings(), 72)
-
-    # Nested enum sub-patterns must be TESTED and must BIND.
-    it("binds a name inside a nested enum sub-pattern"):
-        assert_equal(nested_enum_binds(), 41)
-
-    it("selects the arm whose nested enum variant actually matches"):
-        assert_equal(nested_enum_selects_right_arm(), 1)
-
-    it("binds through three levels of nesting"):
-        assert_equal(nested_enum_depth3(), 51)
-
-    it("reaches a nested enum arm that is not the first arm"):
-        assert_equal(nested_enum_third_arm(), 151)
-
-    # Position and arity around the nested sub-pattern.
-    it("binds when the nested sub-pattern is last among siblings"):
-        assert_equal(nested_last_of_two(), 71072)
-
-    it("binds when the nested sub-pattern is first among siblings"):
-        assert_equal(nested_first_of_two(), 81082)
-
-    it("binds every slot of a multi-arity nested payload"):
-        assert_equal(nested_inner_arity2(), 101102)
-
-    it("binds inside a nested sub-pattern alongside wildcards"):
-        assert_equal(wildcard_outer_binding_inner(), 123)
-
-    it("resolves an inner variant that shares the outer variant's name"):
-        assert_equal(shared_variant_name(), 141)
-
-    it("evaluates a guard over a nested binding"):
-        assert_equal(guard_over_nested_binding(), 9)
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")

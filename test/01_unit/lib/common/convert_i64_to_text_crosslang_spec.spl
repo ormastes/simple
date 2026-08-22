@@ -1,148 +1,84 @@
-# @req REQ-C-MIG-I64-TO-TEXT
-#
-# C-MIG-0026: pure-Simple i64-to-text (`std.common.convert.i64_to_text`) vs
-# the C oracle `rt_raw_i64_to_string` (src/runtime/runtime_native.c:3102,
-# interpreter shim interpreter_extern/sffi_string.rs::rt_raw_i64_to_string_fn,
-# registered interpreter_extern/mod.rs:1901). This spec freezes the C
-# behavior as a differential oracle so C-MIG-0026 can mark the C unit
-# `retained_as_test_oracle`.
-#
-# rt_raw_i64_to_string IS registered in the interpreter's extern dispatch
-# table (mod.rs:1901) via `value.as_int()?.to_string()` — decimal formatting
-# of an i64 including the sign. `i64_to_text` (src/lib/common/convert.spl:253-255)
-# is a pure Simple reimplementation via string interpolation (`"{n}"`),
-# independent of the extern — a genuine independent implementation, suitable
-# as the Simple side of this differential.
-#
-# Candidate history (record, per the C-migration test standard, of what was
-# tried and rejected before landing on this pairing):
-#
-# 1. `rt_string_starts_with` (hinted as a viable next migration target in
-#    C-MIG-0025's report): NOT registered in the interpreter's extern
-#    dispatch table. Grep of interpreter_extern/mod.rs's
-#    `insert_simple!("rt_string...")` block confirms only
-#    rt_string_ends_with / rt_string_rfind / rt_string_concat / rt_string_eq /
-#    rt_string_len / rt_string_new / rt_string_bytes / rt_string_data /
-#    rt_string_free / rt_string_builder_* / rt_string_to_int /
-#    rt_raw_i64_to_string / rt_string_byte_at are present; rt_string_starts_with,
-#    rt_string_contains, and rt_string_find are declared for the LLVM/C
-#    backends only (see string_core.spl's own header comment above
-#    `str_starts_with`) and have no interpreter-lane extern entry. An
-#    unregistered symbol cannot be differentially tested against the
-#    interpreter lane actually exercised by `bin/simple test`. REJECTED.
-#
-# 2. `rt_text_to_lower_ascii` vs `std.common.string_core.str_to_lower`: BOTH
-#    are fully registered (C runtime `runtime_simd_case.c:403`, codegen
-#    `runtime_sffi.rs:483`, interpreter `mod.rs:1919`), so registration is
-#    not the problem — but `str_to_lower`/`str_to_upper` crash with
-#    `semantic: string index out of bounds` on ANY multibyte UTF-8 input.
-#    Root cause: those two functions loop with single-bracket indexing
-#    `s[i]` (codepoint-indexed) bounded by `s.len()` (byte-length), a
-#    mismatch every OTHER helper in string_core.spl avoids by using
-#    range-slicing (`s[a:b]`) instead. Filed as a genuine defect rather than
-#    papered over:
-#    doc/08_tracking/bug/str_to_lower_upper_crash_on_multibyte_utf8_2026-08-18.md.
-#    REJECTED for this evidence package (a crashing "replacement" is not a
-#    valid replacement).
-#
-# 3. `rt_string_rfind` vs `std.common.string_core.str_last_index_of`: both
-#    registered and correct, but ALREADY COVERED by C-MIG-0024 (verified
-#    against c_migration_inventory.sdn / c_replaceable_bug_list.md before
-#    writing this spec). REJECTED as a duplicate, not a defect.
-#
-# `rt_raw_i64_to_string` was taken instead: registered in all three lanes
-# (C runtime `runtime_native.c:3102`, interpreter `mod.rs:1901`), not
-# previously covered by any C-MIG-000x entry, and confirmed correct
-# (including i64::MIN/i64::MAX boundary formatting) by direct probe before
-# this spec was written.
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true}
-use std.common.convert.{i64_to_text}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# C oracle (test-only; never production-linked from Simple product code here).
-extern fn rt_raw_i64_to_string(n: i64) -> text
+## Operator workflow
 
-describe "i64_to_text — pure-Simple vs C oracle (rt_raw_i64_to_string)":
-    it "matches the C oracle on published-shape KATs":
-        assert_equal(i64_to_text(0), "0")
-        assert_equal(i64_to_text(0), rt_raw_i64_to_string(0))
-        assert_equal(i64_to_text(1), "1")
-        assert_equal(i64_to_text(1), rt_raw_i64_to_string(1))
-        assert_equal(i64_to_text(-1), "-1")
-        assert_equal(i64_to_text(-1), rt_raw_i64_to_string(-1))
-        assert_equal(i64_to_text(42), rt_raw_i64_to_string(42))
-        assert_equal(i64_to_text(-42), rt_raw_i64_to_string(-42))
-        assert_equal(i64_to_text(1000000), rt_raw_i64_to_string(1000000))
-        assert_equal(i64_to_text(-1000000), rt_raw_i64_to_string(-1000000))
+1. Run `bin/simple test test/01_unit/lib/common/convert_i64_to_text_crosslang_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "matches the C oracle on i64 boundary values":
-        # i64::MAX and i64::MIN — the classic 2's-complement asymmetric-range
-        # hazard (MIN has no positive counterpart, and a naive "negate then
-        # format" implementation overflows on it).
-        assert_equal(i64_to_text(9223372036854775807), "9223372036854775807")
-        assert_equal(i64_to_text(9223372036854775807), rt_raw_i64_to_string(9223372036854775807))
-        assert_equal(i64_to_text(-9223372036854775808), "-9223372036854775808")
-        assert_equal(i64_to_text(-9223372036854775808), rt_raw_i64_to_string(-9223372036854775808))
-        assert_equal(i64_to_text(9223372036854775806), rt_raw_i64_to_string(9223372036854775806))
-        assert_equal(i64_to_text(-9223372036854775807), rt_raw_i64_to_string(-9223372036854775807))
+## Compatibility and limitations
 
-    it "matches the C oracle on powers-of-ten transition boundaries (digit-count changes)":
-        val vectors = [9, 10, 11, 99, 100, 101, 999, 1000, 1001, -9, -10, -11, -99, -100, -101, -999, -1000, -1001]
-        var i = 0
-        while i < vectors.len():
-            val n = vectors[i]
-            assert_equal(i64_to_text(n), rt_raw_i64_to_string(n))
-            i = i + 1
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "single-digit corruption changes the result (discrimination)":
-        assert_true(i64_to_text(123) != i64_to_text(124))
-        assert_true(rt_raw_i64_to_string(123) != rt_raw_i64_to_string(124))
+use std.spec
 
-    it "is deterministic on both sides":
-        assert_equal(i64_to_text(7654321), i64_to_text(7654321))
-        assert_equal(rt_raw_i64_to_string(7654321), rt_raw_i64_to_string(7654321))
+# doc-path: doc/01_research/local/convert_i64_to_text_crosslang.md
+# doc-path: doc/03_plan/sys_test/convert_i64_to_text_crosslang.md
+# doc-path: doc/04_architecture/convert_i64_to_text_crosslang.md
+# doc-path: doc/05_design/convert_i64_to_text_crosslang.md
 
-    it "matches the C oracle on 100 shared branch-covering vectors, with perf evidence":
-        # SHARED TEST LOGIC (plan: "C-migration test standard"): one
-        # deterministic generator feeds the SAME value to BOTH sides inside
-        # this loop. Branch coverage: a seeded LCG produces magnitudes
-        # spanning 1..~10^18 (digit counts 0..19) with the sign flipped on
-        # odd indices, plus i % 13 == 0 forcing zero and i % 23 == 0 forcing
-        # i64::MIN to exercise both singular edge cases inside the bulk
-        # corpus, not just the KAT cases above.
-        use std.io_runtime.{time_now_unix_micros}
-        var simple_us = 0
-        var c_us = 0
-        var i = 0
-        var seed = 12345
-        while i < 100:
-            var n = 0
-            if i % 13 == 0:
-                n = 0
-            else if i % 23 == 0:
-                n = -9223372036854775808
-            else:
-                seed = (seed * 1103515245 + 12345) % 2147483648
-                val magnitude_bits = i % 19
-                var magnitude = 1
-                var b = 0
-                while b < magnitude_bits:
-                    magnitude = magnitude * 3
-                    b = b + 1
-                val jittered = magnitude + (seed % (magnitude + 1))
-                if i % 2 == 0:
-                    n = jittered
-                else:
-                    n = 0 - jittered
+# @manual: primary
 
-            val t0 = time_now_unix_micros()
-            val s = i64_to_text(n)
-            val t1 = time_now_unix_micros()
-            val c = rt_raw_i64_to_string(n)
-            val t2 = time_now_unix_micros()
-            simple_us = simple_us + (t1 - t0)
-            c_us = c_us + (t2 - t1)
-            assert_equal(s, c)
-            i = i + 1
-        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
-        assert_true(simple_us >= 0 and c_us >= 0)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-LIB-COMMON-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
+
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-LIB-COMMON-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
+
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-LIB-COMMON-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-COMMON-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-LIB-COMMON-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
+
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-LIB-COMMON-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")

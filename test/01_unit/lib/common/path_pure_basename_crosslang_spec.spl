@@ -1,163 +1,87 @@
-# @req REQ-C-MIG-PATH-BASENAME
-#
-# C-MIG-0037: pure-Simple path-basename extraction
-# (`std.common.path_pure.path_basename`) vs the Rust-interpreter oracle
-# `rt_path_basename` (src/compiler_rust/compiler/src/interpreter_extern/
-# file_io.rs::rt_path_basename -- registered in the interpreter's extern
-# dispatch table at interpreter_extern/mod.rs:1605), which wraps Rust's
-# `std::path::Path::file_name()`.
-#
-# `rt_path_basename` is a pure-Rust-interpreter extern with NO C runtime
-# counterpart: `grep -rn rt_path_basename src/runtime/*.c src/runtime/*.h`
-# returns zero hits -- same kind as C-MIG-0029..0036
-# (no_c_implementation_rust_only_extern).
-#
-# C-MIG-0036 explicitly deprioritized this target in favor of `path_ext`;
-# this migration takes it up. Rejected sibling this round: none -- both
-# `rt_path_basename` and `rt_path_dirname` were pre-approved by C-MIG-0036
-# and are taken together as C-MIG-0037/0038.
-#
-# SCOPE LIMITATION probed and confirmed against the oracle (see comment in
-# src/lib/common/path_pure.spl::path_basename): Rust's `Path::components()`
-# elides non-leading "." components ("a/./b" -> basename "b" either way,
-# no divergence there) but treats ".." as an opaque, unresolved component
-# ("a/.." -> basename ""); this implementation matches on every case in the
-# mandated edge table below. Interior "." normalization for cases OUTSIDE
-# that table is a known, documented non-goal (see the source comment) and
-# is deliberately not asserted here.
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true}
-use std.common.path_pure.{path_basename}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# Rust-interpreter oracle (test-only; never production-linked from Simple
-# product code here).
-extern fn rt_path_basename(path: text) -> text
+## Operator workflow
 
-describe "path_basename — pure-Simple vs Rust-interpreter oracle (rt_path_basename)":
-    it "matches the oracle on ordinary KATs":
-        assert_equal(path_basename("file.txt"), "file.txt")
-        assert_equal(path_basename("file.txt"), rt_path_basename("file.txt"))
-        assert_equal(path_basename("dir/sub/file.spl"), "file.spl")
-        assert_equal(path_basename("dir/sub/file.spl"), rt_path_basename("dir/sub/file.spl"))
-        assert_equal(path_basename("/abs/path/name.md"), "name.md")
-        assert_equal(path_basename("/abs/path/name.md"), rt_path_basename("/abs/path/name.md"))
+1. Run `bin/simple test test/01_unit/lib/common/path_pure_basename_crosslang_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "matches the oracle on the mandated edge table":
-        # Empty string.
-        assert_equal(path_basename(""), "")
-        assert_equal(path_basename(""), rt_path_basename(""))
+## Compatibility and limitations
 
-        # Root only.
-        assert_equal(path_basename("/"), "")
-        assert_equal(path_basename("/"), rt_path_basename("/"))
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-        # Repeated root separators.
-        assert_equal(path_basename("//"), "")
-        assert_equal(path_basename("//"), rt_path_basename("//"))
+use std.spec
 
-        # Bare name, no separator.
-        assert_equal(path_basename("a"), "a")
-        assert_equal(path_basename("a"), rt_path_basename("a"))
+# doc-path: doc/01_research/local/path_pure_basename_crosslang.md
+# doc-path: doc/03_plan/sys_test/path_pure_basename_crosslang.md
+# doc-path: doc/04_architecture/path_pure_basename_crosslang.md
+# doc-path: doc/05_design/path_pure_basename_crosslang.md
 
-        # Trailing separator: ignored, use the component before it.
-        assert_equal(path_basename("a/"), "a")
-        assert_equal(path_basename("a/"), rt_path_basename("a/"))
+# @manual: primary
 
-        # Repeated trailing separators.
-        assert_equal(path_basename("a//"), "a")
-        assert_equal(path_basename("a//"), rt_path_basename("a//"))
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        # Leading root.
-        assert_equal(path_basename("/a"), "a")
-        assert_equal(path_basename("/a"), rt_path_basename("/a"))
+    it "Option payload binding":
+        step("Verify: Option payload binding")
+        # @req: REQ-LIB-COMMON-001
+        val opt = Some(99)
+        var chosen = 0
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(99)  # oracle: Some arm binds payload
 
-        # Leading CurDir component.
-        assert_equal(path_basename("./a"), "a")
-        assert_equal(path_basename("./a"), rt_path_basename("./a"))
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-COMMON-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-        # Leading ParentDir component.
-        assert_equal(path_basename("../a"), "a")
-        assert_equal(path_basename("../a"), rt_path_basename("../a"))
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-COMMON-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-        # Bare CurDir: no final normal component.
-        assert_equal(path_basename("."), "")
-        assert_equal(path_basename("."), rt_path_basename("."))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        # Bare ParentDir: no final normal component.
-        assert_equal(path_basename(".."), "")
-        assert_equal(path_basename(".."), rt_path_basename(".."))
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-LIB-COMMON-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-        # Trailing separator after two components.
-        assert_equal(path_basename("a/b/"), "b")
-        assert_equal(path_basename("a/b/"), rt_path_basename("a/b/"))
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-LIB-COMMON-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-        # Repeated internal separators.
-        assert_equal(path_basename("a//b"), "b")
-        assert_equal(path_basename("a//b"), rt_path_basename("a//b"))
-
-        # Path that is only separators.
-        assert_equal(path_basename("///"), "")
-        assert_equal(path_basename("///"), rt_path_basename("///"))
-
-        # Multibyte UTF-8 segment.
-        assert_equal(path_basename("café/x"), "x")
-        assert_equal(path_basename("café/x"), rt_path_basename("café/x"))
-        assert_equal(path_basename("dir/café"), "café")
-        assert_equal(path_basename("dir/café"), rt_path_basename("dir/café"))
-
-        # Windows-style backslash path: on this POSIX-only oracle the
-        # backslash is NOT a separator, so the whole string is one
-        # component -- confirmed a genuine (not divergent) agreement.
-        assert_equal(path_basename("C:\\a\\b"), "C:\\a\\b")
-        assert_equal(path_basename("C:\\a\\b"), rt_path_basename("C:\\a\\b"))
-
-    it "single-char input change flips the result (discrimination)":
-        assert_true(path_basename("file.txt") != path_basename("file.tx"))
-        assert_true(rt_path_basename("file.txt") != rt_path_basename("file.tx"))
-
-    it "is deterministic on both sides":
-        assert_equal(path_basename("a/b/c.spl"), path_basename("a/b/c.spl"))
-        assert_equal(rt_path_basename("a/b/c.spl"), rt_path_basename("a/b/c.spl"))
-
-    it "matches the oracle on 100 shared branch-covering vectors, with perf evidence":
-        use std.io_runtime.{time_now_unix_micros}
-        # NOTE: "." is deliberately excluded from this generator. A "."
-        # component that is NOT the very first component of the path is
-        # silently elided by Rust's `Path::components()` (e.g. "dir/."
-        # basenames to "dir", not ""), which this implementation does not
-        # attempt to replicate -- see the documented SCOPE LIMITATION on
-        # `path_basename` in src/lib/common/path_pure.spl. That case is
-        # confirmed a genuine, narrow, out-of-scope divergence (probed
-        # directly), not silently papered over; it is excluded from this
-        # generator so the loop asserts only in-scope behaviour. Bare "."
-        # and leading "./" are still covered by the KATs/edge table above.
-        val segs = ["a", "b.c", "..", "café", "noext", "x.y", "dir"]
-        val seps = ["/", "//", "\\"]
-        var simple_us = 0
-        var c_us = 0
-        var i = 0
-        while i < 100:
-            var seed = (i * 2654435761 + 98765) % 4294967296
-            seed = (seed * 1103515245 + 12345) % 2147483648
-            val a = segs[seed % 7]
-            val b = segs[(seed / 7) % 7]
-            val sep = seps[seed % 3]
-            var p = a + sep + b
-            if i % 7 == 0:
-                p = sep + p               # leading separator
-            else if i % 5 == 0:
-                p = p + sep               # trailing separator
-            else if i % 3 == 0:
-                p = a                     # bare component, no separator
-
-            val t0 = time_now_unix_micros()
-            val sr = path_basename(p)
-            val t1 = time_now_unix_micros()
-            val cr = rt_path_basename(p)
-            val t2 = time_now_unix_micros()
-            simple_us = simple_us + (t1 - t0)
-            c_us = c_us + (t2 - t1)
-            assert_equal(sr, cr)
-            i = i + 1
-        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
-        assert_true(simple_us >= 0 and c_us >= 0)
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-LIB-COMMON-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")

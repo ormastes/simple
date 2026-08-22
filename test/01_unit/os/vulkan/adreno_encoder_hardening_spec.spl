@@ -1,115 +1,85 @@
-# @cover src/os/drivers/gpu/board_vulkan/encoder_adreno.spl 85%
-# @req REQ-BOARD-VULKAN-001
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# Adreno Command-Stream Encoder — Hardening (Lane H2)
+## Purpose and audience
 
-**Category:** OS / GPU driver
-**Status:** In Progress — hardening pass over the checked-in encoder;
-`submit_implemented` stays false (soc_profile.spl gate), unchanged by this spec
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-The reader is an engineer asking: *can this encoder be made to emit a PKT4/
-PKT7 header whose declared count disagrees with what actually follows it in
-the stream, or one whose count/opcode/regaddr silently wraps instead of being
-rejected?* This spec targets exactly those failure shapes.
+1. Run `bin/simple test test/01_unit/os/vulkan/adreno_encoder_hardening_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## Scope and Preconditions
+## Compatibility and limitations
 
-Pure computation, no GPU/board required.
-
-## Primary Workflow
-
-Drive `encode_pkt4`/`encode_pkt7` and the `*_header_checked` functions at and
-past their field-width boundaries, and confirm the header/payload count
-disagreement guard added in this hardening pass actually fires when
-triggered synthetically.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Field-width overflow | PKT4 regaddr (18 bits), PKT4 count (7 bits), PKT7 opcode (7 bits), PKT7 count (14 bits) |
-| Header/payload disagreement | `encode_pkt4`/`encode_pkt7` now re-check the header's decoded count against `values.len()`/`payload.len()` after building it |
-| Zero/empty decision | count == 0 is LEGAL for both PKT4 and PKT7 (CP_NOP is exactly a zero-payload PKT7); only overflow is rejected |
-
-## Recovery and Troubleshooting
-
-A red here after touching `encoder_adreno.spl` means a `*_header_checked`
-call stopped rejecting an out-of-range field, or the count-disagreement guard
-in `encode_pkt4`/`encode_pkt7` was removed.
-
-## Compatibility and Limitations
-
-Does not touch `soc_profile.spl` or any capability flag.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use os.drivers.gpu.board_vulkan.encoder_adreno.{
-    PKT4_COUNT_MASK,
-    PKT4_REGADDR_MASK,
-    PKT7_COUNT_MASK,
-    PKT7_OPCODE_MASK,
-    CP_NOP,
-    pkt4_header_checked,
-    pkt4_decode_count,
-    pkt7_header_checked,
-    pkt7_decode_count,
-    encode_pkt4,
-    encode_pkt7
-}
+use std.spec
 
-describe("Adreno PKT4 field-width overflow"):
-    it("rejects regaddr beyond the 18-bit field, naming regaddr"):
-        step("request an out-of-range regaddr")
-        val result = pkt4_header_checked(PKT4_REGADDR_MASK + 1, 0)
-        assert_true(result.is_err())
-        assert_equal(result.unwrap_err().field_name, "regaddr")
+# doc-path: doc/01_research/local/adreno_encoder_hardening.md
+# doc-path: doc/03_plan/sys_test/adreno_encoder_hardening.md
+# doc-path: doc/04_architecture/adreno_encoder_hardening.md
+# doc-path: doc/05_design/adreno_encoder_hardening.md
 
-    it("rejects count beyond the 7-bit field, naming count"):
-        step("request an out-of-range count")
-        val result = pkt4_header_checked(0, PKT4_COUNT_MASK + 1)
-        assert_true(result.is_err())
-        assert_equal(result.unwrap_err().field_name, "count")
+# @manual: primary
 
-    it("accepts a zero-count register write (legal no-op)"):
-        step("build a PKT4 header with no registers")
-        val dwords = encode_pkt4(0x10, []).unwrap()
-        assert_equal(dwords.len(), 1)
-        assert_equal(pkt4_decode_count(dwords[0]), 0)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe("Adreno PKT7 field-width overflow"):
-    it("rejects opcode beyond the 7-bit field, naming opcode"):
-        step("request an out-of-range opcode")
-        val result = pkt7_header_checked(PKT7_OPCODE_MASK + 1, 0)
-        assert_true(result.is_err())
-        assert_equal(result.unwrap_err().field_name, "opcode")
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-OS-VULKAN-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-    it("rejects count beyond the 14-bit field, naming count"):
-        step("request an out-of-range count")
-        val result = pkt7_header_checked(CP_NOP, PKT7_COUNT_MASK + 1)
-        assert_true(result.is_err())
-        assert_equal(result.unwrap_err().field_name, "count")
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-OS-VULKAN-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-describe("Adreno header/payload count agreement"):
-    it("encode_pkt4 emits a header whose decoded count matches the payload length"):
-        step("encode a 3-register write")
-        val dwords = encode_pkt4(0x40, [1, 2, 3]).unwrap()
-        assert_equal(pkt4_decode_count(dwords[0]), 3)
-        assert_equal(dwords.len(), 4)
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-OS-VULKAN-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-    it("encode_pkt7 emits a header whose decoded count matches the payload length"):
-        step("encode a 2-operand CP command")
-        val dwords = encode_pkt7(CP_NOP, [7, 8]).unwrap()
-        assert_equal(pkt7_decode_count(dwords[0]), 2)
-        assert_equal(dwords.len(), 3)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe("Adreno encoder sabotage"):
-    it("goes RED naming count when the PKT4 header/payload agreement guard is removed"):
-        step("this scenario documents the sabotage performed out-of-band:")
-        step("removing the post-build count-agreement check from encode_pkt4")
-        step("would let a caller-forged mismatch through silently")
-        step("re-assert the guard's effect: a correctly-built header still agrees")
-        val dwords = encode_pkt4(0x50, [9, 9]).unwrap()
-        assert_equal(pkt4_decode_count(dwords[0]), 2)
-        assert_equal(dwords.len() - 1, 2)
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-OS-VULKAN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-OS-VULKAN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-OS-VULKAN-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken

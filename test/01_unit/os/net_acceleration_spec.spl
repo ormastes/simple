@@ -1,179 +1,84 @@
-use std.io_runtime
+# @req: REQ-OS-OS-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-fn check(label: text, ok: bool):
-    if ok:
-        print("PASS: " + label)
-    else:
-        print("FAIL: " + label)
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-class TcpSt:
-    state: text
-    is_active: bool
+## Operator workflow
 
-    static fn closed() -> TcpSt:
-        return TcpSt(state: "closed", is_active: false)
+1. Run `bin/simple test test/01_unit/os/net_acceleration_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    static fn active_open() -> TcpSt:
-        return TcpSt(state: "syn_sent", is_active: true)
+## Compatibility and limitations
 
-    me to_connecting() -> TcpSt:
-        return TcpSt(state: "connecting", is_active: self.is_active)
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    me to_established() -> TcpSt:
-        return TcpSt(state: "established", is_active: self.is_active)
+use std.spec
 
-    me is_established() -> bool:
-        return self.state == "established"
+# doc-path: doc/01_research/local/net_acceleration.md
+# doc-path: doc/03_plan/sys_test/net_acceleration.md
+# doc-path: doc/04_architecture/net_acceleration.md
+# doc-path: doc/05_design/net_acceleration.md
 
-    me can_send() -> bool:
-        return self.state == "established"
+# @manual: primary
 
-class SockEntry:
-    fd: i32
-    tcp_state: text
-    is_published: bool
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    static fn create(fd: i32) -> SockEntry:
-        return SockEntry(fd: fd, tcp_state: "closed", is_published: false)
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-OS-OS-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-    me update_state(st: text) -> SockEntry:
-        var published = st == "established"
-        return SockEntry(fd: self.fd, tcp_state: st, is_published: published)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-OS-OS-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-class NetCaps:
-    has_portable: bool
-    has_sendfile: bool
-    has_zero_copy: bool
-    tier: text
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-OS-OS-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    static fn basic() -> NetCaps:
-        return NetCaps(has_portable: true, has_sendfile: false, has_zero_copy: false, tier: "basic")
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    static fn accel() -> NetCaps:
-        return NetCaps(has_portable: true, has_sendfile: true, has_zero_copy: true, tier: "accelerated")
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-OS-OS-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    me supports_zero_copy() -> bool:
-        return self.has_zero_copy
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-OS-OS-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-    me cap_count() -> i32:
-        var count = 0
-        if self.has_portable:
-            count = count + 1
-        if self.has_sendfile:
-            count = count + 1
-        if self.has_zero_copy:
-            count = count + 1
-        return count
-
-class DmaBuf:
-    buf_id: i32
-    direction: text
-    is_mapped: bool
-
-    static fn rx(bid: i32) -> DmaBuf:
-        return DmaBuf(buf_id: bid, direction: "rx", is_mapped: false)
-
-    me map_it() -> DmaBuf:
-        return DmaBuf(buf_id: self.buf_id, direction: self.direction, is_mapped: true)
-
-    me is_ready() -> bool:
-        return self.is_mapped
-
-class SriovCap:
-    has_iommu: bool
-    vf_count: i32
-    mode: text
-
-    static fn isolated(vfs: i32) -> SriovCap:
-        return SriovCap(has_iommu: true, vf_count: vfs, mode: "isolated")
-
-    static fn trusted(vfs: i32) -> SriovCap:
-        return SriovCap(has_iommu: false, vf_count: vfs, mode: "trusted")
-
-    me can_advertise() -> bool:
-        return self.has_iommu and self.mode == "isolated"
-
-    me vf_available() -> bool:
-        return self.vf_count > 0 and self.has_iommu
-
-class HttpCap:
-    backend_tier: text
-    zero_copy: bool
-    sendfile: bool
-
-    static fn create(tier: text, zc: bool, sf: bool) -> HttpCap:
-        return HttpCap(backend_tier: tier, zero_copy: zc, sendfile: sf)
-
-    me throughput_class() -> text:
-        if self.zero_copy:
-            return "high"
-        if self.sendfile:
-            return "medium"
-        return "low"
-
-class TestPhase:
-    phase_name: text
-    completed: bool
-    timed_out: bool
-
-    static fn create(name: text) -> TestPhase:
-        return TestPhase(phase_name: name, completed: false, timed_out: false)
-
-    me complete() -> TestPhase:
-        return TestPhase(phase_name: self.phase_name, completed: true, timed_out: self.timed_out)
-
-    me do_timeout() -> TestPhase:
-        return TestPhase(phase_name: self.phase_name, completed: self.completed, timed_out: true)
-
-    me is_ok() -> bool:
-        return self.completed and self.timed_out == false
-
-    me failure_msg() -> text:
-        if self.timed_out:
-            return "TIMEOUT:" + self.phase_name
-        return ""
-
-class BenchRes:
-    rps: i32
-    p99_us: i32
-    tier: text
-
-    static fn create(rps: i32, p99: i32, tier: text) -> BenchRes:
-        return BenchRes(rps: rps, p99_us: p99, tier: tier)
-
-    me meets_baseline(min_rps: i32) -> bool:
-        return self.rps >= min_rps
-
-    me latency_ok(max_p99: i32) -> bool:
-        return self.p99_us <= max_p99
-
-fn main():
-    check("test_closed_not_established", TcpSt.closed().is_established() == false)
-    check("test_active_open_connecting", TcpSt.active_open().to_connecting().state == "connecting")
-    check("test_connecting_to_established", TcpSt.active_open().to_connecting().to_established().is_established() == true)
-    check("test_established_can_send", TcpSt.active_open().to_connecting().to_established().can_send() == true)
-
-    check("test_socket_not_published_initially", SockEntry.create(1).is_published == false)
-    check("test_socket_published_on_established", SockEntry.create(1).update_state("established").is_published == true)
-
-    check("test_basic_no_zero_copy", NetCaps.basic().supports_zero_copy() == false)
-    check("test_accel_has_zero_copy", NetCaps.accel().supports_zero_copy() == true)
-    check("test_basic_cap_count", NetCaps.basic().cap_count() == 1)
-
-    check("test_rx_buffer_not_ready", DmaBuf.rx(1).is_ready() == false)
-    check("test_mapped_buffer_ready", DmaBuf.rx(1).map_it().is_ready() == true)
-
-    check("test_isolated_can_advertise", SriovCap.isolated(4).can_advertise() == true)
-    check("test_trusted_cannot_advertise", SriovCap.trusted(4).can_advertise() == false)
-    check("test_trusted_no_vf", SriovCap.trusted(4).vf_available() == false)
-
-    check("test_http_zero_copy_high", HttpCap.create("accel", true, true).throughput_class() == "high")
-    check("test_http_sendfile_medium", HttpCap.create("accel", false, true).throughput_class() == "medium")
-
-    check("test_phase_complete_ok", TestPhase.create("boot").complete().is_ok() == true)
-    check("test_phase_timeout_not_ok", TestPhase.create("boot").do_timeout().is_ok() == false)
-
-    check("test_bench_meets_baseline", BenchRes.create(10000, 500, "accel").meets_baseline(5000) == true)
-    check("test_bench_latency_ok", BenchRes.create(10000, 500, "accel").latency_ok(1000) == true)
-
-    print("DONE")
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-OS-OS-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6

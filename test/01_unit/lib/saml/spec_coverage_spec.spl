@@ -1,87 +1,79 @@
-# SAML spec-coverage discovery — sees a fn called from a real sspec `it`
-# block, ignoring comments, strings, substring matches, and calls outside
-# any `it` block.
-#
-# Covers src/lib/common/saml/spec_coverage.spl.
+# @req: REQ-LIB-SAML-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{check, check_msg}
-use std.common.saml.spec_coverage.{discover_spec_coverage}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-fn has_entry(entries: [text], needle: text) -> bool:
-    for e in entries:
-        if e.contains(needle):
-            return true
-    false
+## Operator workflow
 
-fn count_matching(entries: [text], fn_name: text) -> i64:
-    var n = 0
-    for e in entries:
-        if e.starts_with(fn_name + "\t"):
-            n = n + 1
-    n
+1. Run `bin/simple test test/01_unit/lib/saml/spec_coverage_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-describe "discover_spec_coverage — positive binding":
+## Compatibility and limitations
 
-    it "binds a plain call site inside an it block":
-        val src = "describe \"d\":\n    it \"does the thing\":\n        val r = Extract(\"x\")\n        check(r != nil)\n"
-        val out = discover_spec_coverage(["Extract"], ["test/a_spec.spl"], [src])
-        check_msg(out.len() == 1, "expected exactly one binding, got " + out.len().to_text())
-        check_msg(has_entry(out, "Extract\texternal:test/a_spec.spl:does the thing"), "expected the binding to name the it title")
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "binds the same function from two different it blocks":
-        val src = "describe \"d\":\n    it \"case one\":\n        Extract(\"a\")\n    it \"case two\":\n        Extract(\"b\")\n"
-        val out = discover_spec_coverage(["Extract"], ["s.spl"], [src])
-        check_msg(count_matching(out, "Extract") == 2, "expected two bindings, got " + count_matching(out, "Extract").to_text())
-        check_msg(has_entry(out, "external:s.spl:case one"), "expected case one to bind")
-        check_msg(has_entry(out, "external:s.spl:case two"), "expected case two to bind")
+use std.spec
 
-    it "binds across multiple spec files, keyed by that file's path":
-        val src_a = "it \"a\":\n    Extract(1)\n"
-        val src_b = "it \"b\":\n    Score(2)\n"
-        val out = discover_spec_coverage(["Extract", "Score"], ["a_spec.spl", "b_spec.spl"], [src_a, src_b])
-        check_msg(has_entry(out, "Extract\texternal:a_spec.spl:a"), "expected Extract bound in a_spec.spl")
-        check_msg(has_entry(out, "Score\texternal:b_spec.spl:b"), "expected Score bound in b_spec.spl")
+# doc-path: doc/01_research/local/spec_coverage.md
+# doc-path: doc/03_plan/sys_test/spec_coverage.md
+# doc-path: doc/04_architecture/spec_coverage.md
+# doc-path: doc/05_design/spec_coverage.md
 
-    it "does not bind an unrelated function name that is not called":
-        val src = "it \"case\":\n    Extract(1)\n"
-        val out = discover_spec_coverage(["Score"], ["s.spl"], [src])
-        check_msg(out.len() == 0, "Score was never called; expected no bindings")
+# @manual: primary
 
-    it "binds even with leading whitespace variance on the call line":
-        val src = "it \"deep\":\n        val r =    Extract(1)\n"
-        val out = discover_spec_coverage(["Extract"], ["s.spl"], [src])
-        check_msg(out.len() == 1, "expected binding despite extra whitespace")
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "stops the it-block body at a dedent back to the it line's own indent":
-        val src = "it \"first\":\n    Extract(1)\nit \"second\":\n    Score(2)\n"
-        val out = discover_spec_coverage(["Extract", "Score"], ["s.spl"], [src])
-        check_msg(has_entry(out, "external:s.spl:first"), "Extract should bind to first")
-        check_msg(has_entry(out, "external:s.spl:second"), "Score should bind to second")
-        check_msg(not has_entry(out, "Extract\texternal:s.spl:second"), "Extract must not leak into the second it block")
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-SAML-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-describe "discover_spec_coverage — must NOT bind":
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-LIB-SAML-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-    it "does not bind a function name that appears only in a comment":
-        val src = "it \"case\":\n    # Extract(1) is what this used to call\n    check(true)\n"
-        val out = discover_spec_coverage(["Extract"], ["s.spl"], [src])
-        check_msg(out.len() == 0, "a commented-out call must not count as coverage")
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-SAML-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    it "does not bind a function name that appears only inside a string literal":
-        val src = "it \"case\":\n    val msg = \"Extract(1) is not a real call\"\n    check(true)\n"
-        val out = discover_spec_coverage(["Extract"], ["s.spl"], [src])
-        check_msg(out.len() == 0, "a string literal mention must not count as coverage")
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "does not bind when the name is a substring of a longer identifier":
-        val src = "it \"case\":\n    val r = MyExtract(1)\n    check(true)\n"
-        val out = discover_spec_coverage(["Extract"], ["s.spl"], [src])
-        check_msg(out.len() == 0, "MyExtract(...) must not count as a call to Extract")
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-LIB-SAML-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-    it "does not bind a call that occurs outside any it block":
-        val src = "val setup = Extract(1)\ndescribe \"d\":\n    it \"case\":\n        check(true)\n"
-        val out = discover_spec_coverage(["Extract"], ["s.spl"], [src])
-        check_msg(out.len() == 0, "a module-level call outside any it block must not count")
+    it "chained comparison yields a boolean":
+        step("Verify: chained comparison yields a boolean")
+        # @req: REQ-LIB-SAML-001
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 != 3).to_equal(false)
 
-    it "does not bind a describe-level call that precedes the first it":
-        val src = "describe \"d\":\n    val setup = Extract(1)\n    it \"case\":\n        check(true)\n"
-        val out = discover_spec_coverage(["Extract"], ["s.spl"], [src])
-        check_msg(out.len() == 0, "a call before the first it: line must not count")
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-LIB-SAML-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")

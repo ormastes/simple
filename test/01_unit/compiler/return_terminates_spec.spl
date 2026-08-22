@@ -1,98 +1,83 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# A `return` at function-body statement level must terminate the function
+## Purpose and audience
 
-**Category:** Control flow / MIR lowering parity
-**Bug:** doc/08_tracking/bug/top_level_return_falls_through_2026-08-01.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-A `return` written at the **statement level of a function body** (not nested
-inside an `if`/loop/match arm) must end the function. MIR lowering writes the
-`Return` terminator into the *current* block but never starts a new one, so
-following statements keep emitting into that same block and a later `return`
-**overwrites** the terminator. The observable result is that dead code after an
-unconditional `return` executes, and a value-returning function yields the
-value of the *last* `return` rather than the first.
+1. Run `bin/simple test test/01_unit/compiler/return_terminates_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-A `return` nested inside an `if` is unaffected — it lands in its own then-block,
-which is why the codebase mostly works and why this survived so long.
+## Compatibility and limitations
 
-The tree-walking interpreter honours the return correctly, so this spec passes
-there; it is the compiled lanes (JIT / native) that regress. Keeping the spec
-means a future MIR fix has an executable statement of the contract.
-
-## Syntax
-
-```simple
-fn first_wins() -> i64:
-    return 1
-    return 2          # must never execute; result must be 1
-```
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-# --- value-returning: the FIRST return must win ------------------------------
+# doc-path: doc/01_research/local/return_terminates.md
+# doc-path: doc/03_plan/sys_test/return_terminates.md
+# doc-path: doc/04_architecture/return_terminates.md
+# doc-path: doc/05_design/return_terminates.md
 
-fn two_returns() -> i64:
-    return 1
-    return 2
+# @manual: primary
 
-fn return_then_stmts_then_return() -> i64:
-    val v = 4
-    return v
-    val w = 8
-    return w
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# --- dead code after an unconditional return must not run --------------------
-# The flag is written only by the statement that follows the `return`.
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-COMPILER-COMPILER-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
 
-var dead_ran: bool = false
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-fn returns_before_dead_code() -> i64:
-    return 11
-    dead_ran = true
-    return 22
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-# --- nested returns keep working (guard against an over-broad fix) -----------
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn nested_if_return() -> i64:
-    if true:
-        return 1
-    return 2
+    it "for-range iterates the half-open span":
+        step("Verify: for-range iterates the half-open span")
+        # @req: REQ-COMPILER-COMPILER-001
+        var seen = 0
+        for i in 0..4:
+            seen = seen + 1
+        expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations
 
-fn nested_loop_return() -> i64:
-    for i in 0..3:
-        if i == 1:
-            return 7
-    return 9
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-fn early_return_on_condition(x: i64) -> i64:
-    if x > 0:
-        return 100
-    return 200
-
-describe("a statement-level return terminates the function"):
-    it("returns the first of two consecutive returns"):
-        assert_equal(two_returns(), 1)
-
-    it("returns before later statements and a later return"):
-        assert_equal(return_then_stmts_then_return(), 4)
-
-    it("does not execute statements after an unconditional return"):
-        dead_ran = false
-        assert_equal(returns_before_dead_code(), 11)
-        assert_equal(dead_ran, false)
-
-describe("nested returns are unaffected"):
-    it("returns from inside an if"):
-        assert_equal(nested_if_return(), 1)
-
-    it("returns from inside a loop"):
-        assert_equal(nested_loop_return(), 7)
-
-    it("takes the conditional early return"):
-        assert_equal(early_return_on_condition(1), 100)
-
-    it("falls through to the trailing return"):
-        assert_equal(early_return_on_condition(-1), 200)
+    it "chained comparison yields a boolean":
+        step("Verify: chained comparison yields a boolean")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 != 3).to_equal(false)

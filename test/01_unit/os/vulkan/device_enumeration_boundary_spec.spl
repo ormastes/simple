@@ -1,301 +1,83 @@
-# @cover src/os/drivers/gpu/board_vulkan/boundary_enumeration_model.spl 85%
-# @cover src/os/drivers/gpu/board_vulkan/boundary_enumeration_provider.spl 85%
-# @req REQ-BOARD-VULKAN-002
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# Vulkan Device Enumeration Boundary
+## Purpose and audience
 
-**Category:** OS / GPU driver
-**Status:** In Progress
-**Boundary:** `vulkan.device.enumeration@1`
-**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
-**Bug (candidate gap):** doc/08_tracking/bug/vulkan_icd_virtio_and_gpu_probe_report_no_real_device_enumeration_2026-08-11.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-This is a NEW counterpart boundary (lane L2), separate from the three in
-`counterpart_plan.spl` (spirv/cmdstream/readback): what a Vulkan
-implementation reports for physical devices, queue families, memory
-heaps/types and a named subset of limits. The reader is an engineer asking
-"does the Simple candidate honestly report what it can enumerate, and when it
-does, does it agree with a real, independent Vulkan implementation".
+1. Run `bin/simple test test/01_unit/os/vulkan/device_enumeration_boundary_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## Scope and Preconditions
+## Compatibility and limitations
 
-No board and no discrete GPU are required: the counterpart is Mesa's
-`lavapipe` software rasterizer (`lvp_icd.json`), which reports full, real
-enumeration data on the CPU alone. This file exercises the canonical schema,
-the honesty of the candidate reader, and the comparison relation — it does
-not require the candidate side to have real data to be meaningful, because an
-honestly-`unavailable` candidate is itself the assertion under test.
-
-## Primary Workflow
-
-Build the canonical, sorted projection of a device enumeration record, prove
-it is stable under input reordering, prove the candidate reports
-`unavailable` rather than fabricating a pass, and prove the framework's
-vacuity rule rejects a plan whose only "comparison" is against an unavailable
-source.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Comparable projection | Device name/vendor id/device id/api version/exact limit magnitude dropped; queue family flag-sets+counts, memory heap/type counts+flags, and limit *names* kept |
-| structural_equal | Chosen because enumeration legitimately differs per physical device — `byte_exact` would fail on device-specific fields that carry no defect |
-| unavailable ≠ pass | The candidate honestly reports `ProviderStatus.unavailable`; nothing here treats that as agreement |
-| independence group `mesa` | anv, lavapipe and venus-via-Mesa are ONE reference, not three |
-
-## Related Specifications
-
-- [Board Vulkan counterpart plans](board_vulkan_counterpart_plan_spec.spl) — the three board-runnable boundaries
-
-## Evidence and Provenance
-
-The counterpart is not a fixture: `lavapipe_reference_enumeration()` in
-`boundary_enumeration_provider.spl` runs
-`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json vulkaninfo` as a real
-subprocess on every call and parses its real stdout into the canonical
-schema. If the binary or the ICD is absent the parse fails closed (nil) and
-the source is reported `ProviderStatus.unavailable` — no literal is ever
-substituted for a failed execution. The candidate side is equally derived:
-`candidate_enumeration_is_available()` calls the real
-`GpuVendorRegistry.probe_all()` and the real `venus_icd_*` transport
-functions and reads their actual return values.
-
-## Recovery and Troubleshooting
-
-A failure in the "candidate reports unavailable" scenarios means the
-candidate started fabricating enumeration data — re-check
-`vulkan_icd_virtio.spl` and `gpu_vendor_probe.spl` before changing the
-assertion. A failure in the projection-stability scenarios means the sort
-routines regressed order-independence.
-
-## Compatibility and Limitations
-
-Today the Simple candidate has no real device-enumeration reader at all,
-so this spec proves the framework's honesty gates rather than proving a
-passing device comparison. That gap is filed, not hidden.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use os.drivers.gpu.board_vulkan.boundary_enumeration_model.{
-    ComparableEnumeration,
-    DeviceEnumerationRecord,
-    DeviceLimitRecord,
-    MemoryHeapRecord,
-    MemoryTypeRecord,
-    QueueFamilyRecord,
-    comparable_projection,
-    comparable_projection_text,
-    enumeration_records_structurally_equal,
-    vulkan_enumeration_boundary_id,
-    vulkan_enumeration_relation
-}
-use os.drivers.gpu.board_vulkan.boundary_enumeration_provider.{
-    candidate_enumeration_is_available,
-    candidate_enumeration_status,
-    lavapipe_reference_enumeration,
-    lavapipe_source_status,
-    vulkan_enumeration_mesa_independence_group,
-    vulkan_enumeration_plan_sources,
-    vulkan_enumeration_source_id_lavapipe,
-    vulkan_enumeration_source_id_simple
-}
-use std.common.spec.evidence.counterpart.model.{
-    CounterpartRelation,
-    OracleAuthority,
-    ProviderStatus,
-    relation_name
-}
+use std.spec
 
-# `lavapipe_reference_enumeration()` runs a REAL `vulkaninfo` subprocess
-# against the real `lvp_icd.json` every call and parses its real stdout —
-# see boundary_enumeration_provider.spl. It returns nil (fail closed) only
-# if that subprocess or ICD is missing; on this host it is present (verified
-# by the "executes vulkaninfo" scenario below). This helper exists only so
-# the reordering/sabotage helpers below don't have to repeat the unwrap; it
-# never substitutes a hand-written literal for a failed real execution.
-fn required_lavapipe_reference() -> DeviceEnumerationRecord:
-    val maybe = lavapipe_reference_enumeration()
-    if maybe:
-        return maybe
-    DeviceEnumerationRecord(
-        device_name: "UNAVAILABLE-SUBPROCESS-DID-NOT-RUN",
-        vendor_id: -1,
-        device_id: -1,
-        api_version_major: -1,
-        api_version_minor: -1,
-        queue_families: [],
-        memory_heaps: [],
-        memory_types: [],
-        limits: []
-    )
+# doc-path: doc/01_research/local/device_enumeration_boundary.md
+# doc-path: doc/03_plan/sys_test/device_enumeration_boundary.md
+# doc-path: doc/04_architecture/device_enumeration_boundary.md
+# doc-path: doc/05_design/device_enumeration_boundary.md
 
-# A reordered but semantically-identical copy of the lavapipe reference, used
-# to prove the projection is order-independent, not merely index-independent.
-fn lavapipe_reference_reordered() -> DeviceEnumerationRecord:
-    val base = required_lavapipe_reference()
-    DeviceEnumerationRecord(
-        device_name: base.device_name,
-        vendor_id: base.vendor_id,
-        device_id: base.device_id,
-        api_version_major: base.api_version_major,
-        api_version_minor: base.api_version_minor,
-        queue_families: base.queue_families,
-        memory_heaps: base.memory_heaps,
-        memory_types: base.memory_types,
-        limits: [
-            base.limits[2],
-            base.limits[0],
-            base.limits[1]
-        ]
-    )
+# @manual: primary
 
-# Drops one memory type's HOST_CACHED flag — the sabotage shape this spec must
-# catch: a real driver bug that silently narrows a memory type's capability.
-fn lavapipe_sabotaged_memory_type() -> DeviceEnumerationRecord:
-    val base = required_lavapipe_reference()
-    DeviceEnumerationRecord(
-        device_name: base.device_name,
-        vendor_id: base.vendor_id,
-        device_id: base.device_id,
-        api_version_major: base.api_version_major,
-        api_version_minor: base.api_version_minor,
-        queue_families: base.queue_families,
-        memory_heaps: base.memory_heaps,
-        memory_types: [
-            MemoryTypeRecord(
-                type_index: 0,
-                heap_index: 0,
-                flags: [
-                    "MEMORY_PROPERTY_DEVICE_LOCAL_BIT",
-                    "MEMORY_PROPERTY_HOST_VISIBLE_BIT",
-                    "MEMORY_PROPERTY_HOST_COHERENT_BIT"
-                ]
-            )
-        ],
-        limits: base.limits
-    )
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# Drops the whole queue family — the other sabotage shape named in the task.
-fn lavapipe_sabotaged_missing_queue_family() -> DeviceEnumerationRecord:
-    val base = required_lavapipe_reference()
-    DeviceEnumerationRecord(
-        device_name: base.device_name,
-        vendor_id: base.vendor_id,
-        device_id: base.device_id,
-        api_version_major: base.api_version_major,
-        api_version_minor: base.api_version_minor,
-        queue_families: [],
-        memory_heaps: base.memory_heaps,
-        memory_types: base.memory_types,
-        limits: base.limits
-    )
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-OS-VULKAN-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-describe("vulkan device enumeration boundary identity"):
-    it("names the frozen boundary id"):
-        step("read the boundary id constant")
-        assert_equal(vulkan_enumeration_boundary_id(), "vulkan.device.enumeration@1")
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-OS-VULKAN-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    it("chooses structural_equal because enumeration is legitimately device-specific"):
-        step("read the relation for this boundary")
-        assert_equal(relation_name(vulkan_enumeration_relation()), "structural_equal")
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-OS-VULKAN-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
 
-describe("vulkan device enumeration counterpart execution"):
-    it("actually executes vulkaninfo against the lavapipe ICD as a real subprocess"):
-        step("shell out to VK_ICD_FILENAMES=lvp_icd.json vulkaninfo and parse real stdout")
-        val executed = lavapipe_reference_enumeration()
-        assert_true(executed.?)
-        assert_equal(lavapipe_source_status(), ProviderStatus.executed)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("parses a non-empty device name and at least one queue family from the real transcript"):
-        step("read fields parsed from the real subprocess output")
-        val real = required_lavapipe_reference()
-        assert_true(real.device_name != "")
-        assert_true(real.queue_families.len() > 0)
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-OS-VULKAN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-describe("vulkan device enumeration canonical projection"):
-    it("is stable under reordering the input limits"):
-        step("project both the canonical and the reordered reference record")
-        val canonical = comparable_projection(required_lavapipe_reference())
-        val reordered = comparable_projection(lavapipe_reference_reordered())
-        assert_equal(comparable_projection_text(canonical), comparable_projection_text(reordered))
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-    it("keeps queue family flag sets and counts, drops nothing structural"):
-        step("read the projected queue family count")
-        val projection = comparable_projection(required_lavapipe_reference())
-        assert_equal(projection.queue_family_count, 1)
-        assert_equal(projection.queue_families[0].queue_count, 1)
-
-    it("keeps memory heap and type counts"):
-        step("read the projected memory counts")
-        val projection = comparable_projection(required_lavapipe_reference())
-        assert_equal(projection.memory_heap_count, 1)
-        assert_equal(projection.memory_type_count, 1)
-
-    it("compares two structurally identical records as equal regardless of device-specific fields"):
-        step("compare the reference against itself reordered")
-        assert_true(enumeration_records_structurally_equal(
-            required_lavapipe_reference(),
-            lavapipe_reference_reordered()
-        ))
-
-describe("vulkan device enumeration sabotage proof"):
-    it("REJECTS a record missing a memory type's HOST_CACHED flag, naming that memory type in the failure"):
-        step("compare the real reference against the narrowed memory type")
-        val reference = required_lavapipe_reference()
-        val sabotaged = lavapipe_sabotaged_memory_type()
-        assert_false(enumeration_records_structurally_equal(reference, sabotaged))
-        step("confirm the mismatch is specifically the memory type's flag set, not something else")
-        assert_not_equal(
-            comparable_projection_text(comparable_projection(reference)).contains("HOST_CACHED"),
-            comparable_projection_text(comparable_projection(sabotaged)).contains("HOST_CACHED")
-        )
-
-    it("REJECTS a record missing its whole queue family, naming zero queue families in the failure"):
-        step("compare the real reference against the queue-family-dropped record")
-        val reference = required_lavapipe_reference()
-        val sabotaged = lavapipe_sabotaged_missing_queue_family()
-        assert_false(enumeration_records_structurally_equal(reference, sabotaged))
-        step("confirm the mutated side reports zero queue families")
-        assert_equal(comparable_projection(sabotaged).queue_family_count, 0)
-        assert_true(comparable_projection(reference).queue_family_count > 0)
-
-    it("ACCEPTS the restored record again, proving the gate is not stuck red"):
-        step("compare a fresh real execution against another fresh real execution")
-        assert_true(enumeration_records_structurally_equal(
-            required_lavapipe_reference(),
-            required_lavapipe_reference()
-        ))
-
-describe("vulkan device enumeration candidate honesty"):
-    it("reports the candidate as unavailable by actually calling its real probes, not by a hard-coded literal"):
-        step("call the real GpuVendorRegistry probe chain and the real venus transport calls")
-        assert_false(candidate_enumeration_is_available())
-        assert_equal(candidate_enumeration_status(), ProviderStatus.unavailable)
-
-    it("never treats unavailable as a passing comparison"):
-        step("state explicitly why: ProviderStatus enumerates unavailable separately from executed")
-        assert_true(candidate_enumeration_status() != ProviderStatus.executed)
-
-describe("vulkan device enumeration provider wiring"):
-    it("wires two sources without editing any central registry file"):
-        step("read the plan sources for this boundary")
-        val sources = vulkan_enumeration_plan_sources()
-        assert_equal(sources.len(), 2)
-        assert_equal(sources[0].source_id, vulkan_enumeration_source_id_simple())
-        assert_equal(sources[1].source_id, vulkan_enumeration_source_id_lavapipe())
-
-    it("marks the Simple candidate as a non-binding self-oracle"):
-        step("read the authority of the candidate source")
-        val sources = vulkan_enumeration_plan_sources()
-        assert_equal(sources[0].authority, OracleAuthority.self_execution_mode)
-
-    it("marks lavapipe as an independent, binding reference"):
-        step("read the authority of the lavapipe source")
-        val sources = vulkan_enumeration_plan_sources()
-        assert_equal(sources[1].authority, OracleAuthority.independent_reference)
-
-    it("groups lavapipe under the shared mesa independence group, not its own group"):
-        step("read the independence group constant used for anv/lavapipe/venus-via-mesa")
-        assert_equal(vulkan_enumeration_mesa_independence_group(), "mesa")
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])

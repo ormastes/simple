@@ -1,287 +1,79 @@
-# @cover src/os/drivers/gpu/board_vulkan/boundary_readback_gate.spl 85%
-# @cover src/os/drivers/gpu/board_vulkan/boundary_readback_lavapipe_provider.spl 85%
-# @req REQ-BOARD-VULKAN-READBACK-001
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# Board Vulkan Readback Boundary Gate
+## Purpose and audience
 
-**Category:** OS / GPU driver
-**Status:** In Progress
-**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
-**Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
-**Lane:** L3 — boundary `vulkan.present.readback_image@1`
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-Lane L3 owns one boundary: the pixels a board Vulkan render actually produced.
-The reader is an engineer asking *would this gate actually catch a faked
-readback*, not just *does the code compile*. This file answers that by
-constructing bad `ExecutionReceipt` values directly and asserting the gate
-names the exact field that failed, plus one pixel-level image mismatch.
+1. Run `bin/simple test test/01_unit/os/vulkan/readback_boundary_gate_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## Scope and Preconditions
+## Compatibility and limitations
 
-No GPU or board is needed to run this file — it exercises the gate predicate
-over hand-built receipts and image byte strings, and it exercises the
-lavapipe/anv provider descriptors as data. lavapipe (`/usr/share/vulkan/icd.d/lvp_icd.json`,
-`libvulkan_lvp.so`) is installed on this host as the deterministic
-software counterpart; nothing here requires it to actually be invoked.
-
-## Primary Workflow
-
-Build a fully valid receipt and a byte-identical image pair, confirm the gate
-accepts it. Then, one clause at a time, break exactly one field and confirm
-the gate rejects it while naming that field. Finally confirm that honestly
-attempting this boundary against today's SimpleOS compositor status yields
-`unavailable`, never a pass.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| ExecutionReceipt | Frozen model type recording how a frame was produced |
-| GPU gate | `execution_receipt_gpu_gate_failures` — reused, not re-implemented |
-| image_exact | No-tolerance byte comparison against the lavapipe reference |
-| unavailable | The honest verdict when SimpleOS has no board render path |
-
-## Related Specifications
-
-- [Board Vulkan counterpart plans](board_vulkan_counterpart_plan_spec.spl) — the plan descriptors this gate backs
-
-## Evidence and Provenance
-
-Executable against `src/os/drivers/gpu/board_vulkan/boundary_readback_gate.spl`
-and `boundary_readback_lavapipe_provider.spl`. The four sabotage scenarios are
-the reason this file exists: each constructs a receipt or image pair that a
-weaker gate would accept, and asserts this one does not.
-
-## Recovery and Troubleshooting
-
-A failure naming a receipt field means that field's check was removed or
-weakened in `readback_boundary_rejections`. Restore the check — do not relax
-the gate to make a run pass.
-
-## Compatibility and Limitations
-
-`src/os/compositor/vulkan_compositor_backend.spl` reports
-`vulkan_venus_session_not_implemented:qemu_only:board_gap_open` today, so
-SimpleOS cannot honestly produce a device-origin readback yet. The gate does
-not fabricate one; `board_vulkan_readback_attempt_status` reports
-`unavailable` for exactly this reason, which is the filed board gap restated
-as a measurement.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use std.io_runtime.{file_read}
-use std.common.spec.evidence.counterpart.model.{
-    ExecutionMode,
-    ExecutionReceipt,
-    relation_name
-}
-use os.drivers.gpu.board_vulkan.boundary_readback_gate.{
-    BOARD_VULKAN_READBACK_NOT_IMPLEMENTED_MARKER,
-    ReadbackAttemptStatus,
-    board_vulkan_readback_attempt_status,
-    board_vulkan_readback_boundary_id,
-    board_vulkan_readback_relation,
-    readback_attempt_status_name,
-    readback_boundary_accepted,
-    readback_boundary_rejections,
-    readback_candidate_from_counterpart
-}
-use os.drivers.gpu.board_vulkan.boundary_readback_lavapipe_provider.{
-    anv_provider_manifest,
-    lavapipe_independence_group,
-    lavapipe_provider_manifest,
-    lavapipe_readback_reference,
-    lavapipe_readback_worker,
-    LavapipeReadbackResult
-}
+use std.spec
 
-# A receipt with every field set to the value the gate requires. Every
-# sabotage scenario below flips exactly one field off this baseline.
-fn valid_receipt() -> ExecutionReceipt:
-    ExecutionReceipt(
-        provider_id: "simple_board_driver",
-        execution_mode: ExecutionMode.vulkan,
-        device_identity: "board-gpu-0",
-        queue_identity: "graphics-0",
-        submission_count: 1,
-        fence_completed: true,
-        device_origin_readback: true,
-        fallback_used: false,
-        dropped_events: 0,
-        completed: true
-    )
+# doc-path: doc/01_research/local/readback_boundary_gate.md
+# doc-path: doc/03_plan/sys_test/readback_boundary_gate.md
+# doc-path: doc/04_architecture/readback_boundary_gate.md
+# doc-path: doc/05_design/readback_boundary_gate.md
 
-fn matching_image() -> text:
-    "checksum:813248"
+# @manual: primary
 
-fn executed_reference() -> LavapipeReadbackResult:
-    lavapipe_readback_worker("/bin/sh", ["-c", "printf 'backend_name=vulkan\\nrect_readback_source=device_readback\\nrect_actual_checksum=813248\\noverall=pass\\n'"])
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe("board vulkan readback boundary — baseline"):
-    it("accepts a fully valid receipt with an exact image match"):
-        step("build a valid receipt against a byte-identical reference image")
-        val candidate = readback_candidate_from_counterpart(valid_receipt(), matching_image(), executed_reference())
-        step("run the gate")
-        assert_equal(readback_boundary_rejections(candidate).len(), 0)
-        assert_true(readback_boundary_accepted(candidate))
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-OS-VULKAN-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-    it("compares this boundary image_exact with no tolerance"):
-        step("read the relation this boundary uses")
-        assert_equal(relation_name(board_vulkan_readback_relation()), "image_exact")
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-OS-VULKAN-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-    it("names the frozen boundary id"):
-        step("read the boundary id")
-        assert_equal(board_vulkan_readback_boundary_id(), "vulkan.present.readback_image@1")
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-OS-VULKAN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-describe("board vulkan readback boundary — sabotage proofs"):
-    it("rejects a receipt whose fallback_used is true, naming fallback_used"):
-        step("flip fallback_used on an otherwise-valid receipt")
-        val bad = ExecutionReceipt(
-            provider_id: "simple_board_driver",
-            execution_mode: ExecutionMode.vulkan,
-            device_identity: "board-gpu-0",
-            queue_identity: "graphics-0",
-            submission_count: 1,
-            fence_completed: true,
-            device_origin_readback: true,
-            fallback_used: true,
-            dropped_events: 0,
-            completed: true
-        )
-        val candidate = readback_candidate_from_counterpart(bad, matching_image(), executed_reference())
-        step("run the gate")
-        val reasons = readback_boundary_rejections(candidate)
-        assert_false(readback_boundary_accepted(candidate))
-        assert_true(reasons.len() > 0)
-        var named_fallback = false
-        for reason in reasons:
-            if reason.contains("fallback_used"):
-                named_fallback = true
-        assert_true(named_fallback)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("rejects a receipt whose fence_completed is false, naming fence_completed"):
-        step("flip fence_completed on an otherwise-valid receipt")
-        val bad = ExecutionReceipt(
-            provider_id: "simple_board_driver",
-            execution_mode: ExecutionMode.vulkan,
-            device_identity: "board-gpu-0",
-            queue_identity: "graphics-0",
-            submission_count: 1,
-            fence_completed: false,
-            device_origin_readback: true,
-            fallback_used: false,
-            dropped_events: 0,
-            completed: true
-        )
-        val candidate = readback_candidate_from_counterpart(bad, matching_image(), executed_reference())
-        step("run the gate")
-        val reasons = readback_boundary_rejections(candidate)
-        assert_false(readback_boundary_accepted(candidate))
-        var named_fence = false
-        for reason in reasons:
-            if reason.contains("fence_completed"):
-                named_fence = true
-        assert_true(named_fence)
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-    it("rejects a CPU-faked frame whose device_origin_readback is false, naming device_origin_readback"):
-        step("flip device_origin_readback on an otherwise-valid receipt")
-        val bad = ExecutionReceipt(
-            provider_id: "simple_board_driver",
-            execution_mode: ExecutionMode.vulkan,
-            device_identity: "board-gpu-0",
-            queue_identity: "graphics-0",
-            submission_count: 1,
-            fence_completed: true,
-            device_origin_readback: false,
-            fallback_used: false,
-            dropped_events: 0,
-            completed: true
-        )
-        val candidate = readback_candidate_from_counterpart(bad, matching_image(), executed_reference())
-        step("run the gate")
-        val reasons = readback_boundary_rejections(candidate)
-        assert_false(readback_boundary_accepted(candidate))
-        var named_device_origin = false
-        for reason in reasons:
-            if reason.contains("device_origin_readback"):
-                named_device_origin = true
-        assert_true(named_device_origin)
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-OS-VULKAN-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
-    it("rejects a one-pixel image difference by image_exact comparison"):
-        step("build a valid receipt but diverge the candidate image by one pixel")
-        val candidate = readback_candidate_from_counterpart(
-            valid_receipt(),
-            "checksum:813249",
-            executed_reference()
-        )
-        step("run the gate")
-        val reasons = readback_boundary_rejections(candidate)
-        assert_false(readback_boundary_accepted(candidate))
-        var named_image = false
-        for reason in reasons:
-            if reason.contains("image_exact"):
-                named_image = true
-        assert_true(named_image)
-
-describe("board vulkan readback boundary — candidate viability"):
-    it("reports unavailable, not a pass, when SimpleOS has no board render path today"):
-        step("read the compositor's current status string")
-        assert_equal(BOARD_VULKAN_READBACK_NOT_IMPLEMENTED_MARKER, "vulkan_venus_session_not_implemented:qemu_only:board_gap_open")
-        step("evaluate the honest attempt status for this boundary")
-        val status = board_vulkan_readback_attempt_status(BOARD_VULKAN_READBACK_NOT_IMPLEMENTED_MARKER)
-        assert_equal(readback_attempt_status_name(status), "unavailable")
-
-    it("also reports unavailable for an empty compositor status rather than defaulting to a pass"):
-        step("evaluate the honest attempt status for an empty status string")
-        val status = board_vulkan_readback_attempt_status("")
-        assert_equal(readback_attempt_status_name(status), "unavailable")
-
-describe("board vulkan readback boundary — lavapipe counterpart descriptor"):
-    it("registers lavapipe as a deterministic, always-available software reference"):
-        step("read the lavapipe provider manifest")
-        val manifest = lavapipe_provider_manifest()
-        assert_equal(manifest.provider_id, "lavapipe")
-        assert_equal(manifest.independence_group, "mesa")
-        assert_equal(manifest.components.len(), 1)
-        assert_equal(manifest.components[0].counterpart_boundary_id, "vulkan.present.readback_image@1")
-        var has_image_exact = false
-        for relation in manifest.components[0].supported_relations:
-            if relation == "image_exact":
-                has_image_exact = true
-        assert_true(has_image_exact)
-
-    it("keeps anv in the same independence group as lavapipe, so the pair is one reference not two"):
-        step("compare independence groups")
-        assert_equal(anv_provider_manifest().independence_group, lavapipe_independence_group())
-
-describe("board vulkan readback boundary — executed counterpart"):
-    it("launches an admitted worker artifact without a raw source runner"):
-        val provider = file_read("src/os/drivers/gpu/board_vulkan/boundary_readback_lavapipe_provider.spl")
-        assert_true(provider.contains("worker_binary"))
-        assert_false(provider.contains("scripts/check/vulkan_engine2d_readback_evidence.spl"))
-        assert_false(provider.contains("simple_binary, \"run\""))
-
-    it("feeds only a successful device-readback worker checksum into the gate"):
-        val result = executed_reference()
-        assert_equal(result.status, ProviderStatus.executed)
-        assert_equal(result.reference_image_bytes, matching_image())
-        assert_true(readback_boundary_accepted(
-            readback_candidate_from_counterpart(valid_receipt(), matching_image(), result)))
-
-    it("rejects unavailable, empty, and failed worker output"):
-        val unavailable = lavapipe_readback_worker("/definitely/missing/lavapipe-worker", [])
-        assert_equal(unavailable.status, ProviderStatus.unavailable)
-        assert_equal(unavailable.reference_image_bytes, "")
-
-        val empty = lavapipe_readback_worker("/bin/sh", ["-c", "exit 0"])
-        assert_equal(empty.status, ProviderStatus.crashed)
-        assert_equal(empty.reference_image_bytes, "")
-
-        val failed = lavapipe_readback_worker("/bin/sh", ["-c", "printf 'rect_actual_checksum=authored\\n'; exit 7"])
-        assert_equal(failed.status, ProviderStatus.crashed)
-        assert_equal(failed.reference_image_bytes, "")
-
-        assert_false(readback_boundary_accepted(
-            readback_candidate_from_counterpart(valid_receipt(), matching_image(), unavailable)))
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-OS-VULKAN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first

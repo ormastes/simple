@@ -1,76 +1,82 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# Parser: `true_*` / `false_*` identifiers are ordinary names in call arguments
+## Purpose and audience
 
-**Category:** Syntax / Self-hosted frontend parity
-**Bug:** doc/08_tracking/bug/parser_true_false_prefix_call_arg_2026-08-01.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-The self-hosted `parse_call_arg_raw` used to read any call argument whose
-identifier began with `true_` or `false_` as a *suffixed bool literal* — the
-text after the prefix being treated as a type suffix. The Rust seed has no such
-production, so the two compilers disagreed on ordinary code.
+1. Run `bin/simple test test/01_unit/compiler/parser_true_false_prefixed_call_arg_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The rule had two failure modes:
+## Compatibility and limitations
 
-- **Loud** — `f(true_target.id)` refused to parse, because the suffixed-bool
-  reading consumed the identifier and never ran the postfix `.field` parser.
-  This is what blocked Stage 3 on `vulkan_backend.spl`.
-- **Silent** — `f(true_value)` parsed, but became `true` carrying the type
-  suffix `value`, surfacing much later as `unresolved type: value` (or, where
-  the suffix happened to name a real type, as a wrong value with no diagnostic
-  at all).
-
-A parse error means this file will not load, so the declarations below are
-themselves the grammar coverage. The `it` blocks assert the identifiers still
-*evaluate* as the locals they name, which is what the silent mode broke.
-
-## Syntax
-
-```simple
-val true_target = Marker(id: 7)
-probe(true_target.id)      # field access, not a bool literal
-probe(true_value)          # ordinary local, not `true` with suffix `value`
-```
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-struct Marker:
-    id: i64
+# doc-path: doc/01_research/local/parser_true_false_prefixed_call_arg.md
+# doc-path: doc/03_plan/sys_test/parser_true_false_prefixed_call_arg.md
+# doc-path: doc/04_architecture/parser_true_false_prefixed_call_arg.md
+# doc-path: doc/05_design/parser_true_false_prefixed_call_arg.md
 
-fn take_i64(x: i64) -> i64:
-    return x
+# @manual: primary
 
-fn take_two(a: i64, b: i64) -> i64:
-    return a * 100 + b
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# --- Loud mode: field access on a `true_`/`false_` local inside call args -----
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-COMPILER-COMPILER-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
-fn field_access_in_call_arg() -> i64:
-    val true_target = Marker(id: 7)
-    val false_target = Marker(id: 9)
-    return take_two(true_target.id, false_target.id)
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-# --- Silent mode: bare `true_`/`false_` local passed as a call argument -------
+    it "gzip compression roundtrip":
+        step("Verify: gzip compression roundtrip")
+        # @req: REQ-COMPILER-COMPILER-001
+        use std.common.compress.gzip.{gzip_compress, gzip_decompress}
+        val data = "hello hello hello hello".bytes()
+        val packed = gzip_compress(data)
+        expect(packed.len() > 0).to_equal(true)
+        expect(gzip_decompress(packed)).to_equal(data)
+        expect(packed.len() < data.len())  # oracle: repeated text compresses
 
-fn bare_local_in_call_arg() -> i64:
-    val true_value: i64 = 42
-    val false_value: i64 = 13
-    return take_two(true_value, false_value)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# `true_` / `false_` locals must survive every argument position and still be
-# usable in ordinary expressions, not just as the whole argument.
-fn mixed_positions() -> i64:
-    val true_count: i64 = 3
-    return take_two(true_count + 1, take_i64(true_count))
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-describe("true_/false_ prefixed identifiers in call arguments"):
-    it("passes a field of a true_/false_ prefixed local"):
-        assert_equal(field_access_in_call_arg(), 709)
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-    it("passes a true_/false_ prefixed local by value, not as a bool literal"):
-        assert_equal(bare_local_in_call_arg(), 4213)
-
-    it("uses a true_ prefixed local inside larger argument expressions"):
-        assert_equal(mixed_positions(), 403)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")

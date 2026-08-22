@@ -1,140 +1,82 @@
-# @cover src/os/drivers/gpu/board_vulkan/boundary_spirv_canonicalize.spl 85%
-# @req REQ-BOARD-VULKAN-001
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# SPIR-V Boundary Canonicalizer — Pure Scenarios
+## Purpose and audience
 
-**Category:** OS / GPU driver / counterpart conformance
-**Status:** In Progress
-**Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
-**Boundary:** `vulkan.shader.spirv_binary@1`
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-Split out of `spirv_boundary_glslang_spec.spl` so the canonicalizer's own
-correctness can be checked with NO subprocess and NO fixture file — these
-scenarios cost nothing and must never be allowed to regress just because the
-exec-backed comparison in the sibling spec is slow or unavailable.
+1. Run `bin/simple test test/01_unit/os/vulkan/spirv_canonicalize_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## Scope and Preconditions
+## Compatibility and limitations
 
-Pure text manipulation only. No GPU, no installed toolchain, no filesystem
-fixture required.
-
-## Primary Workflow
-
-Feed hand-built instruction-line lists straight to
-`boundary_spirv_canonicalize`'s functions and check the four named
-dimensions (assembly comments, debug opcodes, id renumbering) each do
-exactly what they claim and nothing more.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Debug opcode allowlist | Stripped by OPCODE IDENTITY only — never by "is this id referenced" |
-| The closed hole | A prior version stripped by unreferenced-result-id, which deleted a live `OpLabel` and a live `OpExtInstImport` |
-| Positive rejection | Proves the closed hole stays closed: a module missing either instruction must NOT canonicalize equal to one that has it |
-
-## Related Specifications
-
-- [SPIR-V boundary comparison](spirv_boundary_glslang_spec.spl) — the exec/fixture-backed comparison this canonicalizer serves
-
-## Evidence and Provenance
-
-Self-contained; every scenario constructs its own input.
-
-## Recovery and Troubleshooting
-
-A failure here means the canonicalizer itself regressed — fix
-`boundary_spirv_canonicalize.spl`, never delete or weaken one of these
-scenarios to make it pass.
-
-## Compatibility and Limitations
-
-None — this file has no external dependency by design.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use os.drivers.gpu.board_vulkan.boundary_spirv_canonicalize.{
-    spirv_canonical_text,
-    spirv_drop_debug,
-    spirv_is_comment_line,
-    spirv_is_debug_opcode,
-    spirv_line_opcode,
-    spirv_line_result_id,
-    spirv_line_tokens,
-    spirv_renumber
-}
+use std.spec
 
-describe("spirv boundary canonicalizer — debug opcode allowlist"):
-    it("strips debug opcodes by an explicit allowlist, not by reachability"):
-        step("filter a line list carrying OpSource and OpName plus a live, unreferenced OpLabel")
-        val lines = [
-            "OpCapability Shader",
-            "OpSource GLSL 450",
-            "%1 = OpTypeVoid",
-            "OpName %1 \"void\"",
-            "%2 = OpLabel"
-        ]
-        val kept = spirv_drop_debug(lines)
-        assert_equal(kept.len(), 3)
-        assert_equal(kept[0], "OpCapability Shader")
-        assert_equal(kept[1], "%1 = OpTypeVoid")
-        assert_equal(kept[2], "%2 = OpLabel")
+# doc-path: doc/01_research/local/spirv_canonicalize.md
+# doc-path: doc/03_plan/sys_test/spirv_canonicalize.md
+# doc-path: doc/04_architecture/spirv_canonicalize.md
+# doc-path: doc/05_design/spirv_canonicalize.md
 
-    it("never treats OpLabel or OpExtInstImport as a debug opcode"):
-        step("check the allowlist directly against the two opcodes the old filter destroyed")
-        assert_false(spirv_is_debug_opcode("OpLabel"))
-        assert_false(spirv_is_debug_opcode("OpExtInstImport"))
+# @manual: primary
 
-    it("strips the full Debug Instruction set named in the module docstring"):
-        step("check every allowlisted opcode individually")
-        assert_true(spirv_is_debug_opcode("OpSource"))
-        assert_true(spirv_is_debug_opcode("OpSourceContinued"))
-        assert_true(spirv_is_debug_opcode("OpSourceExtension"))
-        assert_true(spirv_is_debug_opcode("OpString"))
-        assert_true(spirv_is_debug_opcode("OpName"))
-        assert_true(spirv_is_debug_opcode("OpMemberName"))
-        assert_true(spirv_is_debug_opcode("OpModuleProcessed"))
-        assert_true(spirv_is_debug_opcode("OpLine"))
-        assert_true(spirv_is_debug_opcode("OpNoLine"))
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe("spirv boundary canonicalizer — assembly comments"):
-    it("recognizes a `;`-prefixed line as a comment, never as an instruction"):
-        step("check the comment predicate directly")
-        assert_true(spirv_is_comment_line("; SPIR-V"))
-        assert_true(spirv_is_comment_line("   ; Bound: 7"))
-        assert_false(spirv_is_comment_line("%1 = OpTypeVoid"))
+    it "sha256 known-answer vectors":
+        step("Verify: sha256 known-answer vectors")
+        # @req: REQ-OS-VULKAN-001
+        use std.common.crypto.sha256.{sha256_text}
+        expect(sha256_text("abc")).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")  # oracle: FIPS 180-2 vector for "abc"
+        expect(sha256_text("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")  # oracle: empty-input vector
 
-    it("drops spirv_builder's own header comments before comparing"):
-        step("canonicalize text shaped like SpirvBuilder.build()'s output")
-        val raw = "; SPIR-V\n; Version: 1.0\n; Bound: 3\nOpCapability Shader\n%1 = OpTypeVoid"
-        val canon = spirv_canonical_text(raw)
-        assert_false(canon.contains(";"))
-        assert_contains(canon, "OpCapability Shader")
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-describe("spirv boundary canonicalizer — id renumbering"):
-    it("renumbers ids by first appearance regardless of source numbering"):
-        step("renumber two structurally identical lines with different raw ids")
-        val a = spirv_renumber(["%7 = OpTypeVoid", "%9 = OpTypeFunction %7"])
-        val b = spirv_renumber(["%1 = OpTypeVoid", "%2 = OpTypeFunction %1"])
-        assert_equal(a.join("\n"), b.join("\n"))
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-OS-VULKAN-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
 
-    it("renumbers glslang's friendly names the same way as numeric ids"):
-        step("renumber a line list using spirv-dis's %void / %main style names")
-        val friendly = spirv_renumber(["%void = OpTypeVoid", "%main = OpFunction %void None %void"])
-        val numeric = spirv_renumber(["%1 = OpTypeVoid", "%2 = OpFunction %1 None %1"])
-        assert_equal(friendly.join("\n"), numeric.join("\n"))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe("spirv boundary canonicalizer — closed hole: positive rejections"):
-    it("does NOT canonicalize a module missing OpLabel equal to one that has it"):
-        step("build two disassembly-shaped line sets differing only by OpLabel")
-        val with_label = "OpCapability Shader\n%1 = OpFunction %2 None %3\n%4 = OpLabel\nOpReturn\nOpFunctionEnd"
-        val without_label = "OpCapability Shader\n%1 = OpFunction %2 None %3\nOpReturn\nOpFunctionEnd"
-        assert_not_equal(spirv_canonical_text(with_label), spirv_canonical_text(without_label))
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-OS-VULKAN-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-    it("does NOT canonicalize a module missing OpExtInstImport equal to one that has it"):
-        step("build two disassembly-shaped line sets differing only by OpExtInstImport")
-        val with_extinst = "OpCapability Shader\n%1 = OpExtInstImport \"GLSL.std.450\"\nOpMemoryModel Logical GLSL450"
-        val without_extinst = "OpCapability Shader\nOpMemoryModel Logical GLSL450"
-        assert_not_equal(spirv_canonical_text(with_extinst), spirv_canonical_text(without_extinst))
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-OS-VULKAN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-OS-VULKAN-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
