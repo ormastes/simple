@@ -2,6 +2,7 @@
 # Extracted from mod.spl for modularity
 
 use common.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_day, timestamp_get_hour, timestamp_get_minute, timestamp_get_second}
+use std.nogc_sync_mut.io.hal_clock_dispatch.{hal_clock_monotonic_nanos_v1}
 
 # Raw clock providers reserve every negative value as a failure sentinel.
 # Successful calls return non-negative scalar timestamps and transfer no
@@ -9,8 +10,6 @@ use common.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_da
 # failing closed while retaining exactly one provider call.
 @unsafe(reason: "raw wall-clock provider; negative sentinel is failure", capabilities: [ffi])
 extern fn rt_time_now_unix_micros() -> i64
-@unsafe(reason: "raw monotonic-clock provider; negative sentinel is failure", capabilities: [ffi])
-extern fn rt_time_now_nanos() -> i64
 @unsafe(reason: "raw monotonic-clock provider; negative sentinel is failure", capabilities: [ffi])
 extern fn rt_time_now_micros() -> i64
 
@@ -21,10 +20,6 @@ extern fn rt_time_now_micros() -> i64
 @unsafe(reason: "private wall-clock scalar ABI boundary", capabilities: [ffi])
 fn _time_now_unix_micros_raw() -> i64:
     rt_time_now_unix_micros()
-
-@unsafe(reason: "private monotonic nanosecond scalar ABI boundary", capabilities: [ffi])
-fn _time_now_nanos_raw() -> i64:
-    rt_time_now_nanos()
 
 @unsafe(reason: "private monotonic microsecond scalar ABI boundary", capabilities: [ffi])
 fn _time_now_micros_raw() -> i64:
@@ -87,15 +82,16 @@ fn time_now_nanos() -> i64:
     """
     Get current monotonic time in nanoseconds.
 
-    Uses the production rt(hal) comparison declaration. Normal mode keeps the
-    established C/runtime provider as the sole lane; alpha and beta may compare
-    its captured scalar observation with isolated Pure-Simple and Rust replay
-    lanes. The fixed scalar envelope performs no hot-path allocation.
+    Uses the production rt(hal) declaration and its canonical direct-bound
+    clock leaf. Normal mode keeps the established C/runtime provider as the
+    sole physical clock authority. Sealed alpha/beta replay remains gated until
+    the provider result ABI can carry the same captured scalar observation.
+    The fixed scalar envelope performs no hot-path allocation.
 
     Uses CLOCK_MONOTONIC_RAW on Unix, QueryPerformanceCounter on Windows.
     Fails closed on provider error. Suitable for high-precision benchmarking.
     """
-    val value = _time_now_nanos_raw()
+    val value = hal_clock_monotonic_nanos_v1()
     if value < 0:
         panic("E-SFFI-TIME-002: monotonic nanosecond clock provider failed")
     value
