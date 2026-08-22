@@ -916,3 +916,11 @@ absence with `Option`, and represent operational failure with `Err`; do not add
 second-pass last-error queries or persistent error maps. The declaration gate
 is unchanged at 12,492 rows with zero signed admissions, while Simple `rt_*`
 implementations drop to 574 rows (532 distinct symbols).
+
+Dead SDL2 compatibility aliases for winit presentation/redraw and fabricated
+scale-factor APIs are removed; borrowed event destruction is unit-valued. Keep
+deleting unused compatibility boundaries before tagging them, while retaining
+the real Rust winit provider's checked command path and the canonical SDL2
+presentation owner. Current census: 12,492 declarations, 11,710 untouched, 508
+tagged, 586 contracted, 572 Simple implementation rows, and zero signed
+admissions.

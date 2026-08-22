@@ -1146,3 +1146,17 @@ check, focused lint passes, and the numeric/capability/string guard passes 4/4.
 Census and ratchet remain at 12,492 declarations, 11,711 untouched, 508 tagged,
 585 contracted, and zero verified/signed; Simple implementations are now 574
 rows and 532 distinct symbols across 48 files.
+
+The SDL2 window owner no longer contains/export two dead `rt_winit_*`
+compatibility aliases: present duplicated the canonical checked presentation
+path and redraw returned unconditional `true` without recording a request.
+Production callers already use semantic `window_present_rgba` and
+`window_request_redraw`; the real Rust winit provider retains its independent
+generation/owner validation and command send. Two unused scale-factor APIs that
+fabricated `1.0` were also removed, while borrowed SDL event destruction now
+has an explicit unit/no-release contract instead of boolean success. No runtime
+branch, call, allocation, or state was added. Four facade/owner modules check,
+focused lint passes, SDL event/display audits pass, and rendering guards pass.
+Census/ratchet remain at 12,492 declaration rows with zero signed admissions;
+untouched rows fall to 11,710, contracted rows are 586, and Simple `rt_*`
+implementations fall to 572 rows (530 symbols) across 48 files.
