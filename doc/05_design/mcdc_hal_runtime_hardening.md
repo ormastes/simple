@@ -35,6 +35,19 @@ Validation checks catalog route, content/index/signature hash, binary/manifest/A
 
 Workers are preinitialized before `Sealed`; there is no per-operation spawn. The parent drains all bounded result pipes fairly to avoid pipe deadlock, applies one deadline, cancels and reaps every child, validates complete consumption, sorts receipts, then normalizes/compares. Parent commit is a single transition and records the selected provider/plan plus every compared receipt hash.
 
+The landed native session owner is `hal_provider_sealed_session_v1`. It owns
+exactly three fixed Pure/C/Rust lane records and 512-byte input/output arrays.
+`prepare` starts the trusted launchers and waits for their sandboxed workers'
+readiness receipts; `seal` rechecks liveness; `enter_critical` closes the
+maintenance boundary. Each invocation broadcasts a generation/sequence/reset
+frame, validates all reset acknowledgements, then broadcasts one bounded
+request and retains results in provider-ordinal slots. No allocator or process
+creation symbol occurs on that path. A timeout or protocol failure makes the
+lane unhealthy and fails the whole invocation without committing partial
+sequence state. Kill, reap, and restart are permitted only after
+`leave_critical`, which also unseals the session. The session is a sole-parent
+owner and is not a multi-writer object.
+
 ## Environment plan and replay
 
 The extractor writes strictly increasing instructions into a caller buffer and seals a digest. The executor validates capability, safety policy, capacity, and sequence before applying any instruction. Plan-Then-Commit performs the accepted plan once; ReplayOnly feeds recorded observations to shadow providers. A provider requesting an unrecorded or different interaction returns `InvalidRequest`/`Diverged`, never ambiently performs it.
@@ -60,7 +73,13 @@ All APIs return `Result<T, E>` or closed status values. Unknown dispatch arms, s
 - Persistent isolated workers amortize startup; isolation setup costs remain separately reported.
 - Offline rendering turns binary receipts into intensive human logs.
 
+The focused native evidence compiles the owner under ASan/UBSan, performs 1,000
+sealed three-provider invocations, asserts zero hot spawn/allocation counters,
+caps the owner at 4 KiB, and rejects allocator imports in its object file. Host
+latency is retained as a measured value, not a portable threshold. Live
+bubblewrap execution remains fail-closed on hosts where user namespaces are
+unavailable; such a host result is not isolation evidence.
+
 ## Compatibility
 
 Existing `std.mcdc` analysis APIs become a facade over the canonical model. Global registration/growing evaluation APIs and Boolean `coverage` config warn only for exact untouched legacy fingerprints. Existing I/O APIs delegate to tagged operations during the migration; raw aliases and app-owned HAL paths are forbidden.
-

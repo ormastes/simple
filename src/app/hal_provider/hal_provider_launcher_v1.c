@@ -219,6 +219,101 @@ static int terminate_and_reap(pid_t child) {
     return waited == child;
 }
 
+static int read_line_timed(int fd, char *buffer, size_t cap,
+                           int64_t deadline_ms, size_t *size_out) {
+    size_t size = 0;
+    int64_t start = monotonic_ms();
+    if (start < 0) return 0;
+    while (size + 1 < cap) {
+        struct pollfd descriptor = {.fd = fd, .events = POLLIN | POLLHUP,
+                                    .revents = 0};
+        int64_t now = monotonic_ms();
+        int ready;
+        if (now < 0 || now - start >= deadline_ms) return 0;
+        ready = poll(&descriptor, 1, (int)(deadline_ms - (now - start)));
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) return 0;
+        {
+            ssize_t count = read(fd, buffer + size, 1);
+            if (count == 1) {
+                if (buffer[size++] == '\n') {
+                    buffer[size] = '\0';
+                    *size_out = size;
+                    return 1;
+                }
+            } else if (count < 0 && errno == EINTR) {
+                continue;
+            } else {
+                return 0;
+            }
+        }
+    }
+    return 0;
+}
+
+static int session_main(int argc, char **argv) {
+    char parent_line[HAL_LAUNCHER_REQUEST_CAP];
+    char worker_line[HAL_LAUNCHER_REQUEST_CAP];
+    char isolation[192];
+    int to_child[2] = {-1, -1}, from_child[2] = {-1, -1};
+    int64_t deadline_ms = 0, response_cap = 0;
+    pid_t child;
+    size_t parent_size = 0, worker_size = 0;
+    int status = 0;
+    if (argc < 5 || argc > HAL_LAUNCHER_ARG_CAP || argv[4][0] != '/' ||
+        !trusted_bwrap_image() ||
+        !parse_positive(argv[2], 3600000, &deadline_ms) ||
+        !parse_positive(argv[3], HAL_LAUNCHER_RESPONSE_CAP, &response_cap) ||
+        pipe2(to_child, O_CLOEXEC) != 0 || pipe2(from_child, O_CLOEXEC) != 0)
+        return 74;
+    child = fork();
+    if (child < 0) return 75;
+    if (child == 0) {
+        if (setpgid(0, 0) != 0) _exit(119);
+        worker_exec(to_child[0], from_child[1], &argv[4], argc - 4,
+                    deadline_ms);
+    }
+    if (setpgid(child, child) != 0 && errno != EACCES) {
+        terminate_and_reap(child); return 75;
+    }
+    close(to_child[0]); close(from_child[1]);
+    if (!read_line_timed(from_child[0], worker_line, sizeof(worker_line),
+                         deadline_ms, &worker_size) ||
+        worker_size != 11 || memcmp(worker_line, "HALWORKER1\n", 11) != 0) {
+        terminate_and_reap(child); return 76;
+    }
+    {
+        int count = snprintf(isolation, sizeof(isolation),
+            "HALSESSION1|%ld|0|0|0|1|1\n", (long)child);
+        if (count <= 0 || (size_t)count >= sizeof(isolation) ||
+            !write_all(STDOUT_FILENO, isolation, (size_t)count)) {
+            terminate_and_reap(child); return 77;
+        }
+    }
+    for (;;) {
+        if (!read_line_timed(STDIN_FILENO, parent_line, sizeof(parent_line),
+                             deadline_ms, &parent_size)) break;
+        if (parent_size < 12 || memcmp(parent_line, "HALRESET1|", 10) != 0 ||
+            !write_all(to_child[1], parent_line, parent_size) ||
+            !read_line_timed(from_child[0], worker_line, sizeof(worker_line),
+                             deadline_ms, &worker_size) ||
+            worker_size < 14 || memcmp(worker_line, "HALRESETOK1|", 12) != 0 ||
+            !write_all(STDOUT_FILENO, worker_line, worker_size)) break;
+        if (!read_line_timed(STDIN_FILENO, parent_line, sizeof(parent_line),
+                             deadline_ms, &parent_size) ||
+            parent_size < 9 || memcmp(parent_line, "HALREQ1|", 8) != 0 ||
+            !write_all(to_child[1], parent_line, parent_size) ||
+            !read_line_timed(from_child[0], worker_line,
+                             (size_t)response_cap + 1, deadline_ms,
+                             &worker_size) ||
+            worker_size < 9 || memcmp(worker_line, "HALRES1|", 8) != 0 ||
+            !write_all(STDOUT_FILENO, worker_line, worker_size)) break;
+    }
+    terminate_and_reap(child);
+    while (waitpid(child, &status, WNOHANG) < 0 && errno == EINTR) { }
+    return 78;
+}
+
 int main(int argc, char **argv) {
     char request[HAL_LAUNCHER_REQUEST_CAP];
     char response[HAL_LAUNCHER_RESPONSE_CAP + 1];
@@ -230,6 +325,8 @@ int main(int argc, char **argv) {
     pid_t child;
     int status = 0, reaped = 0;
 
+    if (argc >= 2 && strcmp(argv[1], "--session") == 0)
+        return session_main(argc, argv);
     if (argc < 4 || argc > HAL_LAUNCHER_ARG_CAP || argv[3][0] != '/' ||
         !trusted_bwrap_image() ||
         !parse_positive(argv[1], 3600000, &deadline_ms) ||

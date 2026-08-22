@@ -73,3 +73,26 @@ design-done-system-spec-red-phase-next
 - impl-mcdc-sharded-collector: Checkpoints `14a983cfffb4` and `f5a757a3a02e` replace the blocking global probe mutex with 64 cache-line-isolated deterministic owner shards, caller-owned storage, atomic lifecycle admission/drain, saturating overflow/writer admission, and deterministic shard-order snapshots. An eight-thread test captured 160,000 events with zero wrapped post-init allocations and exceeded the conservative 50k probes/s floor before final hardening. Host TSAN failed to start due an unexpected memory mapping; the final saturation patch is unexecuted under the verification cap.
 - impl-env-effect-adapters: Checkpoint `e0082f7fc81a` adds bounded regular-file capture, exact-handle prepared stream snapshots, and capture-once clock/random adapters with caller-owned result buffers and a 64 KiB hard limit. Replay is digest-verified and repeats no physical effect; traversal, changed-file, wrong-handle, and overflow paths fail closed. The direct environment/runtime guard passed. Writes, stream acquisition, secure entropy provenance, sockets, IRQ, MMIO, and DMA remain unavailable and fail closed.
 - impl-hal-trusted-launcher: Checkpoint `c5a` pins absolute root-owned launcher/provider identities, uses no-follow descriptor execution, fresh namespaces and minimal roots, clears environment/descriptors, applies fixed resource limits, monotonic deadlines, process-group descendant cancellation/reap, and 512-byte IPC. The namespace-unavailable fail-closed branch passed. This host could not create the required namespace, so latency/RSS evidence is explicitly unverified. Critical/Verified commit remains false because per-invocation spawn cannot meet the post-initialization allocation rule; preinitialized sealed sessions are required.
+## Sealed HAL provider sessions (2026-08-22)
+
+- Added `hal_provider_sealed_session_v1.{h,c}` as the sole-parent fixed-capacity
+  owner for three preinitialized provider workers. Prepare performs all fork/
+  exec work. Seal checks worker liveness. Critical invocation performs bounded
+  reset/request/result IPC only and commits sequence advancement only after all
+  three results arrive.
+- The trusted launcher now has a persistent `--session` mode. It still opens and
+  validates the root-owned worker by descriptor, clears the environment,
+  applies resource limits, and starts it inside the same bubblewrap isolation;
+  readiness is emitted only after the worker handshake.
+- Timeout/protocol failure marks a lane unhealthy. Shutdown/reap/restart is
+  rejected while sealed critical execution is active and becomes available
+  only after the explicit epoch exit unseals the owner.
+- Focused evidence: GCC C11 `-O2 -Wall -Wextra -Werror -pedantic` plus
+  ASan/UBSan passed 1,000 invocations; retained result was
+  `session_bytes=3256`, `mean_ns=380841`, `hot_spawn=0`, `hot_alloc=0`.
+  The compiled owner object imports none of malloc/calloc/realloc/free.
+- Honest gap: this container denies the live bubblewrap namespace transition;
+  the real launcher therefore failed closed before `HALSESSION1`. The isolated
+  live path needs execution on an admitted Linux host with bubblewrap user-
+  namespace support. The Simple coordinator facade has not yet been switched
+  from its lower-assurance text/process compatibility path to this native owner.
