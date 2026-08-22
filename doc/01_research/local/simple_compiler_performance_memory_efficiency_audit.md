@@ -2216,6 +2216,19 @@ trace lookups fall 8-to-1, compiled lookups 2-to-1, and target env/parse work
 2-to-1 per operation. Trace-only function count now uses dictionary length
 rather than materializing `keys()`. No runtime measurements are claimed.
 
+### VHDL trace-loop hoisting
+
+VHDL driver tracing read `SIMPLE_COMPILER_TRACE` once per metadata row plus
+three phase sites. Catalog tracing read it for metadata matches, every rebased
+function, and every candidate function. With `N` metadata rows, `F` functions,
+and `M` matches, one compile performed roughly `N + 2F + M + 3` environment and
+temporary-text operations. Each existing operation now snapshots the flag once
+after its initial validation, preserving no-read early-error paths and stderr
+messages. Combined lookup work is two per compile. The catalog empty check also
+uses `modules.len()` rather than materializing `modules.keys()`. Generated VHDL,
+catalog data, public APIs, and error behavior are unchanged; no runtime evidence
+is claimed.
+
 ### Leading explicit-code allocation audit
 
 The leading `Edddd` probe previously allocated a one-character prefix, a
