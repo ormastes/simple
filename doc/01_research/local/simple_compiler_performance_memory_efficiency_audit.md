@@ -1434,3 +1434,17 @@ it. Unknown codes retain their authored level, explicit `allow` suppresses, warn
 allow-default rules, deny promotes proven findings, and unproved performance findings
 remain warning-capped. The decision allocates no arrays/dictionaries and reads no source.
 Compatibility wrappers remain for external callers pending staged migration.
+
+## 2026-08-22 implementation addendum: shared lint source view
+
+The combined lint path split identical source into a line array in `lint_source` and then
+again in parsed AST append. Besides a second O(source bytes) traversal, both arrays and
+their line headers could overlap while the source-location index was constructed.
+
+`lint_source_for_parsed_append` now explicitly opts into retaining the first line view.
+Parsed append consumes that COW-owned array and calls `release_combined_lint_view` after
+success. Non-Simple input, parse failure, and stale parsed-revision exits also release it.
+Ordinary `lint_source` retains no view or resolved config. The combined path therefore
+performs one split and keeps at most one source line view pending; long-lived linters do
+not retain prior file contents after append. Exact AST spans remain the preferred future
+replacement for fallback source-location indexing.
