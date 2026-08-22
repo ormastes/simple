@@ -1,4 +1,7 @@
-"""Security spec — AES IV/key and web session IDs must use the OS CSPRNG.
+"""
+## Purpose and audience
+
+Security spec — AES IV/key and web session IDs must use the OS CSPRNG.
 
 Second sweep of the weak-randomness family (2026-08-17), sibling to
 `csprng_salt_iv_spec.spl`. Three more generators were expanding a
@@ -26,7 +29,27 @@ All three now draw from the OS CSPRNG via the `rt_random_i64` extern.
 The generalization each `it` block encodes: a CSPRNG-backed generator
 never repeats across successive calls, and never reproduces the exact
 byte stream of the seeded generator it replaced.
+
+This specification is maintained for compiler and library engineers reviewing SECURITY-PREDICTABLE_IV_KEY_SESSI behavior, and for operators verifying a build.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/07_security/predictable_iv_key_session_id_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
+
+## Compatibility and limitations
+
+Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
 """
+# @manual: primary
+# REQ-SECURITY-PREDICTABLE_IV_KEY_SESSI-001
+# doc-path: doc/01_research/app/
+# doc-path: doc/03_plan/app/
+# doc-path: doc/04_architecture/app/
+# doc-path: doc/05_design/app/
 use std.spec
 use lib.common.aes.utilities.{generate_aes_key, generate_iv, generate_nonce}
 use lib.nogc_sync_mut.web_framework.session.{generate_session_id}
@@ -41,12 +64,19 @@ val OLD_IV_LCG_1: i64 = 241
 describe "CSPRNG-backed AES key, IV and session-ID generation":
 
     it "generate_aes_key does not reproduce the old seed=42 LCG stream":
+        # @req: REQ-SECURITY-PREDICTABLE_IV_KEY_SESSI-001
+        step("Verify: generate_aes_key does not reproduce the old seed=42 LCG stream")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val k = generate_aes_key(16)
         val k0: i64 = k[0]
         val k1: i64 = k[1]
-        expect (k0 == OLD_AESKEY_LCG_0 and k1 == OLD_AESKEY_LCG_1) == false
+        expect(k0 == OLD_AESKEY_LCG_0 and k1 == OLD_AESKEY_LCG_1) == false
 
     it "generate_aes_key returns a different key on successive calls":
+        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
+        # @req: REQ-SECURITY-PREDICTABLE_IV_KEY_SESSI-002
+        step("Verify: generate_aes_key returns a different key on successive calls")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val a = generate_aes_key(16)
         val b = generate_aes_key(16)
         var same = 0
@@ -61,6 +91,10 @@ describe "CSPRNG-backed AES key, IV and session-ID generation":
         expect same < 16
 
     it "generate_aes_key yields in-range bytes of the requested size":
+        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
+        # @req: REQ-SECURITY-PREDICTABLE_IV_KEY_SESSI-003
+        step("Verify: generate_aes_key yields in-range bytes of the requested size")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val k = generate_aes_key(32)
         var bad = 0
         var i = 0
@@ -75,12 +109,19 @@ describe "CSPRNG-backed AES key, IV and session-ID generation":
         expect k.length() == 32
 
     it "generate_iv does not reproduce the old seed=123 LCG stream":
+        # @req: REQ-SECURITY-PREDICTABLE_IV_KEY_SESSI-004
+        step("Verify: generate_iv does not reproduce the old seed=123 LCG stream")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val iv = generate_iv()
         val v0: i64 = iv[0]
         val v1: i64 = iv[1]
-        expect (v0 == OLD_IV_LCG_0 and v1 == OLD_IV_LCG_1) == false
+        expect(v0 == OLD_IV_LCG_0 and v1 == OLD_IV_LCG_1) == false
 
     it "generate_iv returns a distinct IV on successive calls":
+        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
+        # @req: REQ-SECURITY-PREDICTABLE_IV_KEY_SESSI-005
+        step("Verify: generate_iv returns a distinct IV on successive calls")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         # This is the keystream-reuse guard: a repeated CTR/GCM IV under
         # the same key is a total confidentiality break.
         val a = generate_iv()
@@ -97,6 +138,10 @@ describe "CSPRNG-backed AES key, IV and session-ID generation":
         expect a.length() == 16
 
     it "generate_nonce returns a distinct nonce on successive calls":
+        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
+        # @req: REQ-SECURITY-PREDICTABLE_IV_KEY_SESSI-006
+        step("Verify: generate_nonce returns a distinct nonce on successive calls")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val a = generate_nonce()
         val b = generate_nonce()
         var same = 0
@@ -111,13 +156,20 @@ describe "CSPRNG-backed AES key, IV and session-ID generation":
         expect a.length() == 16
 
     it "generate_session_id returns a distinct id on successive calls":
+        # @req: REQ-SECURITY-PREDICTABLE_IV_KEY_SESSI-007
+        step("Verify: generate_session_id returns a distinct id on successive calls")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         # The old clock-derived id collided whenever two sessions were
         # created within the same tick; these two calls are back to back.
         val a = generate_session_id()
         val b = generate_session_id()
-        expect (a == b) == false
+        expect(a == b) == false
 
     it "generate_session_id yields 16 lowercase hex characters":
+        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
+        # @req: REQ-SECURITY-PREDICTABLE_IV_KEY_SESSI-008
+        step("Verify: generate_session_id yields 16 lowercase hex characters")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         val sid = generate_session_id()
         expect sid.length() == 16
         val digits = "0123456789abcdef"
@@ -131,6 +183,10 @@ describe "CSPRNG-backed AES key, IV and session-ID generation":
         expect bad == 0
 
     it "generate_session_id does not repeat across many draws":
+        # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
+        # @req: REQ-SECURITY-PREDICTABLE_IV_KEY_SESSI-009
+        step("Verify: generate_session_id does not repeat across many draws")
+        # @capture: assertion outcomes retained in the spec Results output as evidence
         # A clock-derived id repeats heavily in a tight loop; a CSPRNG-backed
         # 64-bit id effectively never does.
         val first = generate_session_id()
