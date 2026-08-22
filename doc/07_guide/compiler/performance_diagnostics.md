@@ -82,6 +82,12 @@ index. A function is indexed once, rather than rescanned for every projection ca
 unknown opcode/local coverage rejects storage rewriting and prevents a partial use count
 from being interpreted as single-use ownership evidence.
 
+The standalone lint compatibility path builds one fallback source-location index for
+function declarations and unique collection-fix lines. It no longer rescans the whole
+file for every COLL warning. This is a secondary improvement: repository measurements
+still place the dominant cost in `parse_module_silent_checked`, and the architectural
+fix remains reuse of the driver/LSP parsed and typed revision rather than another parser.
+
 ## Current safety containment
 
 - Unknown escape state remains escaping after finalization.
