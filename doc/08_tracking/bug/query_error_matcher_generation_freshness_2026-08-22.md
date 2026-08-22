@@ -1,6 +1,6 @@
 # Query error matcher generation freshness
 
-**Status:** Open tooling follow-up  
+**Status:** Table generation implemented; rule-priority follow-up open
 **Date:** 2026-08-22
 
 ## Evidence
@@ -29,3 +29,20 @@ Add a Pure Simple generator with a canonical declarative rule manifest. It must:
 
 Until this exists, any fixed classifier phrase change must update the table and
 both mirrored every-literal contracts in the same commit.
+
+## 2026-08-22 progress
+
+The canonical Pure Simple pattern manifest and deterministic bounded automaton
+model builder now exist. They validate ordered contiguous IDs, nonempty ASCII
+literals, the 128-bit mask capacity, and injected state/edge limits. Mirrored
+contracts tie the manifest to runtime hits and the committed table cardinalities.
+
+Exact fragment-based source rendering, byte-for-byte non-mutating `check`, and
+changed-only atomic `generate` are now implemented without subprocess or foreign
+generator ownership. Mirrored contracts cover exact committed source and an
+injected state-bound failure. Execution evidence remains intentionally absent
+under the user's no-verify instruction.
+
+Still open: a stale-output CLI negative fixture and canonical ownership and
+validation of the 80 ordered rule priorities. Table generation alone must not
+be represented as proof of rule-priority freshness.

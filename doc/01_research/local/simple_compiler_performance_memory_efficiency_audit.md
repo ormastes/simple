@@ -2036,3 +2036,19 @@ matches + rules)` with no per-diagnostic registry or message-copy allocation.
 The committed numeric table adds about 49.6 KB of source text for 12.6 KB of
 packed runtime data. A deterministic Pure Simple regeneration/freshness command
 remains required before pattern ownership can be considered self-maintaining.
+
+### Query matcher generator foundation
+
+The build path now has one append-only Pure Simple pattern manifest and a
+deterministic sparse Aho-Corasick model builder. It validates contiguous IDs,
+ASCII/nonempty literals, two-mask capacity, and injected state/edge limits
+before producing output. Trie storage is flat: one scalar transition dictionary
+plus parallel state arrays avoids nested collection copyback. CSR materialization
+walks states and all 128 ASCII bytes in numeric order, so dictionary iteration
+cannot affect output. Construction is `O(pattern bytes + 128*S + S*U)` time and
+`O(S+E+U)` storage, where `U` is the bounded number of distinct output masks.
+Deterministic fragment rendering and a Pure Simple CLI now complete table
+ownership. `check` renders in memory and exact-compares without writing;
+`generate` skips byte-identical output and otherwise performs one atomic write.
+Ordered classifier rules remain a separate priority-manifest contract, so table
+freshness must not be presented as proof of predicate-priority freshness.
