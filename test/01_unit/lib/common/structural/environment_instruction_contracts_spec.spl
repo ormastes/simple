@@ -27,6 +27,29 @@ describe "typed environment instruction contracts":
             expect(env_instruction_follows(first, duplicate)).to_be(false)
 
     describe "REQ-017: malformed and divergent interactions fail closed":
+        it "replays an applied observation exactly once without growing storage":
+            val planned = instruction(0)
+            val applied = env_observation_v1(
+                17, 0, EnvInstructionStatusV1.Applied, 0, 32, 64, 11, 12)
+            val replayed = env_observation_v1(
+                17, 0, EnvInstructionStatusV1.Replayed, 0, 32, 64, 11, 12)
+            val cursor = env_replay_cursor_accept(
+                env_replay_cursor_v1(17, 1), planned, applied, replayed)
+            val sealed = env_replay_cursor_seal(cursor, 1)
+            expect(env_replay_cursor_complete(sealed, 1)).to_be(true)
+
+        it "fails closed on reordered, changed, extra, or incomplete replay":
+            val planned = instruction(0)
+            val applied = env_observation_v1(
+                17, 0, EnvInstructionStatusV1.Applied, 0, 32, 64, 11, 12)
+            val changed = env_observation_v1(
+                17, 0, EnvInstructionStatusV1.Replayed, 0, 32, 64, 11, 13)
+            val divergence = env_replay_cursor_accept(
+                env_replay_cursor_v1(17, 1), planned, applied, changed)
+            val incomplete = env_replay_cursor_seal(env_replay_cursor_v1(17, 1), 1)
+            expect(env_replay_cursor_complete(divergence, 1)).to_be(false)
+            expect(env_replay_cursor_complete(incomplete, 1)).to_be(false)
+
         it "rejects an argument region that exceeds capacity":
             val invalid = env_instruction_v1(
                 17, 0, EnvOpcodeV1.FileRead, 21, 0,

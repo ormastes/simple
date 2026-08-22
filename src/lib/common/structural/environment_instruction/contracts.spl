@@ -242,6 +242,90 @@ fn env_observation_matches(instruction: EnvInstructionV1,
             == env_instruction_status_to_i64(EnvInstructionStatusV1.Replayed))
         and observation.bytes_length <= instruction.result_capacity
 
+fn env_replay_observations_equivalent(applied: EnvObservationV1,
+                                      replayed: EnvObservationV1) -> bool:
+    env_observation_v1_well_formed(applied)
+        and env_observation_v1_well_formed(replayed)
+        and applied.invocation_id == replayed.invocation_id
+        and applied.sequence == replayed.sequence
+        and env_instruction_status_to_i64(applied.status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Applied)
+        and env_instruction_status_to_i64(replayed.status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Replayed)
+        and applied.status_code == 0 and replayed.status_code == 0
+        and applied.bytes_length == replayed.bytes_length
+        and applied.interaction_digest_hi == replayed.interaction_digest_hi
+        and applied.interaction_digest_lo == replayed.interaction_digest_lo
+
+struct EnvReplayCursorV1:
+    invocation_id: i64
+    next_sequence: i64
+    instruction_capacity: i64
+    consumed_count: i64
+    status: EnvInstructionStatusV1
+    sealed: bool
+
+fn env_replay_cursor_v1(invocation_id: i64,
+                        instruction_capacity: i64) -> EnvReplayCursorV1:
+    EnvReplayCursorV1(invocation_id: invocation_id, next_sequence: 0,
+                      instruction_capacity: instruction_capacity,
+                      consumed_count: 0,
+                      status: EnvInstructionStatusV1.Planned, sealed: false)
+
+fn env_replay_cursor_v1_well_formed(value: EnvReplayCursorV1) -> bool:
+    value.invocation_id > 0 and value.next_sequence >= 0
+        and value.instruction_capacity > 0
+        and value.consumed_count >= 0
+        and value.consumed_count <= value.instruction_capacity
+        and value.next_sequence == value.consumed_count
+
+fn env_replay_cursor_accept(value: EnvReplayCursorV1,
+                            instruction: EnvInstructionV1,
+                            applied: EnvObservationV1,
+                            replayed: EnvObservationV1) -> EnvReplayCursorV1:
+    if not env_replay_cursor_v1_well_formed(value) or value.sealed:
+        return EnvReplayCursorV1(invocation_id: value.invocation_id,
+            next_sequence: value.next_sequence,
+            instruction_capacity: value.instruction_capacity,
+            consumed_count: value.consumed_count,
+            status: EnvInstructionStatusV1.Diverged, sealed: true)
+    val accepted = instruction.invocation_id == value.invocation_id
+        and instruction.sequence == value.next_sequence
+        and value.consumed_count < value.instruction_capacity
+        and env_observation_matches(instruction, applied)
+        and env_observation_matches(instruction, replayed)
+        and env_replay_observations_equivalent(applied, replayed)
+    if not accepted:
+        return EnvReplayCursorV1(invocation_id: value.invocation_id,
+            next_sequence: value.next_sequence,
+            instruction_capacity: value.instruction_capacity,
+            consumed_count: value.consumed_count,
+            status: EnvInstructionStatusV1.Diverged, sealed: true)
+    EnvReplayCursorV1(invocation_id: value.invocation_id,
+        next_sequence: value.next_sequence + 1,
+        instruction_capacity: value.instruction_capacity,
+        consumed_count: value.consumed_count + 1,
+        status: EnvInstructionStatusV1.Replayed, sealed: false)
+
+fn env_replay_cursor_seal(value: EnvReplayCursorV1,
+                          expected_count: i64) -> EnvReplayCursorV1:
+    val complete = env_replay_cursor_v1_well_formed(value)
+        and not value.sealed and expected_count >= 0
+        and value.consumed_count == expected_count
+    EnvReplayCursorV1(invocation_id: value.invocation_id,
+        next_sequence: value.next_sequence,
+        instruction_capacity: value.instruction_capacity,
+        consumed_count: value.consumed_count,
+        status: if complete: EnvInstructionStatusV1.Replayed else: EnvInstructionStatusV1.Diverged,
+        sealed: true)
+
+fn env_replay_cursor_complete(value: EnvReplayCursorV1,
+                              expected_count: i64) -> bool:
+    env_replay_cursor_v1_well_formed(value) and value.sealed
+        and value.consumed_count == expected_count
+        and env_instruction_status_to_i64(value.status)
+            == env_instruction_status_to_i64(EnvInstructionStatusV1.Replayed)
+
 struct ScenarioExclusionV1:
     contract_version: i64
     scenario_id: i64
@@ -293,5 +377,9 @@ export env_opcode_to_i64, env_instruction_status_to_i64, exclusion_kind_to_i64
 export env_instruction_v1, env_instruction_v1_well_formed, env_instruction_follows
 export env_observation_v1, env_observation_v1_well_formed
 export env_observation_matches
+export env_replay_observations_equivalent
+export EnvReplayCursorV1, env_replay_cursor_v1
+export env_replay_cursor_v1_well_formed, env_replay_cursor_accept
+export env_replay_cursor_seal, env_replay_cursor_complete
 export env_trace_v1, env_trace_v1_well_formed, env_trace_v1_complete
 export scenario_exclusion_v1, scenario_exclusion_v1_well_formed
