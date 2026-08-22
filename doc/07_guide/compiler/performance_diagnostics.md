@@ -16,6 +16,8 @@ transformation.
 Collection rules use the `collection_performance` configuration name. SDN entries and
 `@allow`/`@warn`/`@deny` attributes resolve lint names without rebuilding the registry per
 name, so large explicit configurations do not multiply registry allocation and scanning.
+Effective default levels are likewise built once per configuration/profile change rather
+than once per diagnostic; file-level policy lookup is allocation-free.
 
 ## Optimizer truth
 
