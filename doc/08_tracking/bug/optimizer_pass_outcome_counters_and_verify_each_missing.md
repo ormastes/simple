@@ -8,17 +8,20 @@ but this still blocks treating planning evidence as proof of full MIR correctnes
 ## Evidence
 
 The MIR pass registry can now describe status, expectation, backend selection, witness
-contracts, and deterministic requested-pipeline planning. The dispatcher does not yet
-return a common verified change receipt with candidate, transformed, rejected,
-instruction-delta, and rejection-reason counters. The repository also lacks one general
+contracts, and deterministic requested-pipeline planning. The function dispatcher now
+returns exact native candidate/transformed counts for the active `write_coalesce` and
+`syscall_batch` adapters, with stable positive-witness reasons and instruction deltas.
+It rejects an active function adapter that lacks exact outcome support rather than
+inferring a Boolean candidate from serialized MIR change. Module-pass outcomes and
+native rejected-candidate reasons remain unavailable. The repository also lacks one general
 post-pass verifier covering CFG targets, unique block/value identity, SSA dominance,
 types, ownership, and loop boundary invariants.
 
 `run_named_pass_with_record` now verifies non-empty functions, unique non-negative block
 and local identities, entry membership, and branch/unwind target membership before and
-after a function-scoped pass. It records instruction counts and an honest serialized-MIR
-change outcome. It deliberately does not invent native candidate or rejection counts,
-and it is not yet the pipeline-wide `--verify-each` gate.
+after a function-scoped pass. Its exact counter adapters cross-check native counts against
+serialized change and fail on disagreement. It is not yet the pipeline-wide
+`--verify-each` gate.
 
 Consequently `simple.opt-pipeline-report/v1` deliberately records
 `run_outcome: not-run` and null execution counters. Selection must not be interpreted as
@@ -26,8 +29,8 @@ execution.
 
 ## Required fix
 
-1. Make every pass adapter return a common `PassOutcome` without discarding its native
-   statistics.
+1. Extend the exact `PassOutcome` adapter contract to active module passes and future
+   rehabilitated passes without discarding native statistics.
 2. Populate `PassRunRecord` from the actual adapter result, with stable coalesced reason
    codes and injected timing.
 3. Extend the structural receipt with operand/local validity, SSA dominance, types,
