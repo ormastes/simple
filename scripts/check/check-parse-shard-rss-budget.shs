@@ -1,0 +1,36 @@
+#!/bin/sh
+# Parse-shard worker RSS budget (fail-closed).
+#
+# Runs ONE parse-shard child (shard 0 of 2) of the lint_entry closure through
+# the same entry native_build_main.spl spawns, under /usr/bin/time -v, and
+# fails when its max RSS exceeds the budget. Measured 2026-08-22 (seed,
+# interpret mode, cold parse cache): full worker entry 3.8 GB, slim entry
+# 0.53 GB. Budget = 3x the post-fix figure, so the pre-fix path fails.
+# doc/08_tracking/bug/memory_retention_compiler_and_interpreter_2026-08-21.md
+#
+# Verdict is the last stdout line: PASS (exit 0) / FAIL (exit 1) /
+# ERROR — nothing was checked (exit 2). Env: SIMPLE_BIN (default bin/simple),
+# BUDGET_KB (default 1650000), PERF_ENTRY (default src/app/cli/lint_entry.spl).
+cd "$(dirname "$0")/../.." || exit 2
+BIN=${SIMPLE_BIN:-bin/simple}
+BUDGET_KB=${BUDGET_KB:-1650000}
+ENTRY=${PERF_ENTRY:-src/app/cli/lint_entry.spl}
+TIMER=/usr/bin/time
+[ -x "$TIMER" ] || { echo "ERROR — nothing was checked ($TIMER missing)"; exit 2; }
+[ -x "$BIN" ] || { echo "ERROR — nothing was checked ($BIN not executable)"; exit 2; }
+SHARD_ENTRY=$(grep -o '"src/app/cli/[a-z_]*\.spl"' src/app/cli/native_build_main.spl | sed -n '/parse_shard_main\|native_build_worker/p' | head -1 | tr -d '"')
+[ -n "$SHARD_ENTRY" ] || { echo "ERROR — nothing was checked (no shard entry in native_build_main.spl)"; exit 2; }
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/parse-shard-rss.XXXXXX") || exit 2
+trap 'rm -rf "$WORK"' EXIT
+SIMPLE_NATIVE_BUILD_WORKER=1 SIMPLE_EXECUTION_MODE=interpret \
+SIMPLE_CACHE_SCOPE="rssbudget-$$" SIMPLE_BINARY="$(readlink -f "$BIN")" \
+  "$TIMER" -v "$BIN" run "$SHARD_ENTRY" "$ENTRY" -o "$WORK/out" --threads 2 --parse-shard=0/2 \
+  >"$WORK/log" 2>"$WORK/time"
+rc=$?
+KB=$(sed -n 's/.*Maximum resident set size (kbytes): *//p' "$WORK/time" | tail -1)
+[ -n "$KB" ] || { echo "ERROR — nothing was checked (no RSS line; rc=$rc)"; exit 2; }
+grep -q "parse-shard\] done\|\[frontend-cache\]" "$WORK/log" || { echo "ERROR — nothing was checked (shard did not reach its parse verdict; rc=$rc)"; exit 2; }
+if [ "$KB" -le "$BUDGET_KB" ]; then
+  echo "PASS — 1 shard checked ($SHARD_ENTRY), max RSS ${KB} KB <= budget ${BUDGET_KB} KB"; exit 0
+fi
+echo "FAIL — 1 shard checked ($SHARD_ENTRY), max RSS ${KB} KB > budget ${BUDGET_KB} KB"; exit 1

@@ -1,0 +1,65 @@
+# Slim parse-shard runner.
+#
+# A parse-shard child exists only to warm the front-end parse cache for the
+# modules it owns; it exits inside parse_all_committing_impl() (rt_exit(0) in
+# driver_source_pipeline_parsing.spl) and never reaches HIR/MIR/codegen. Until
+# this entry existed it still ran through cli_native_build -> compiler.driver.driver,
+# which evaluates the entire compiler closure on load: 665 modules and ~3.3 GB RSS
+# per shard for ~80 files of parsing (8 shards = ~27 GB). This runner builds the
+# same CompileOptions the native-build CLI builds for the driver's parse phase and
+# drives load_sources_impl + parse_all_committing_impl directly, importing only
+# the parse lane (measured 383 modules / 0.88 GB for the lane's closure probe).
+# See doc/08_tracking/bug/memory_retention_compiler_and_interpreter_2026-08-21.md.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{
+    CompileOptions, CompileMode, driver_core_compile_options_default,
+    compileoptions_normalize_mir_optimization, driver_output_format_both
+}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.driver.driver_source_pipeline_loading.*
+use compiler.driver.driver_source_pipeline_parsing.*
+
+# Same slot layout as cli_native_build_add_bootstrap_input (compile_targets.spl):
+# the driver reads bootstrap_input_0..5 and bootstrap_input_count.
+fn driver_options_add_bootstrap_input(options: CompileOptions, input_path: text) -> CompileOptions:
+    var result = options
+    val slot = result.bootstrap_input_count
+    if slot == 0:
+        result.bootstrap_input_0 = input_path
+    elif slot == 1:
+        result.bootstrap_input_1 = input_path
+    elif slot == 2:
+        result.bootstrap_input_2 = input_path
+    elif slot == 3:
+        result.bootstrap_input_3 = input_path
+    elif slot == 4:
+        result.bootstrap_input_4 = input_path
+    elif slot == 5:
+        result.bootstrap_input_5 = input_path
+    result.bootstrap_input_count = slot + 1
+    result
+
+# Runs phase 1 (load sources) and phase 2 (parse) only. In shard mode phase 2
+# exits the process itself; if it returns, the shard simply did not own any
+# module, and the caller treats that as success (sharding is best-effort).
+fn driver_run_parse_shard(input_files: [text], low_memory: bool) -> bool:
+    var options = driver_core_compile_options_default()
+    for input in input_files:
+        options = driver_options_add_bootstrap_input(options, input)
+    options.input_files = input_files
+    options.mode = CompileMode.Aot
+    options.cli_mode_text = "aot"
+    options.output_format = driver_output_format_both()
+    options.low_memory = low_memory
+    options = compileoptions_normalize_mir_optimization(options)
+    var driver = CompilerDriver(
+        ctx: CompileContext.create(options),
+        streaming_module_surfaces_owner: ModuleSurfacesByName.empty(),
+        streaming_surface_owner_ready: false,
+        streaming_entry_source_index_owner: -1)
+    val (loaded_ctx, load_ok) = driver.load_sources_impl()
+    driver.ctx = loaded_ctx
+    if not load_ok:
+        return false
+    driver.parse_all_committing_impl()

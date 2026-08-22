@@ -221,3 +221,60 @@ SIMPLE_MEM_TRACE=1 /usr/bin/time -v bin/simple lint src/compiler/80.driver/drive
 SIMPLE_MEM_TRACE=1 SIMPLE_EXECUTION_MODE=interpret /usr/bin/time -v \
   bin/simple lint src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
 ```
+
+## FIXED 2026-08-22: parse-shard workers no longer load the back half of the compiler
+
+The "structural, out of scope" reading above was too pessimistic. A shard does
+need to BE a compiler, but only the parse lane of one; it loaded all ~665
+modules because of three import edges, not because parsing needs them:
+
+1. `driver_source_pipeline_parsing.spl` imported
+   `driver_orchestration.{driver_streaming_surface_enabled}` and
+   `driver_bootstrap.{bootstrap_entry_source_index}`. Both homes import the
+   backends/MIR/LLVM/linker tier. The two predicates are now in the leaf
+   `src/compiler/80.driver/driver_phase_gates.spl`; the old homes `pub use`
+   them, so every caller is unchanged.
+2. `driver_source_pipeline_loading.spl` carried
+   `use lazy compiler.driver.watcher.watcher_client.{check_shb_freshness}` for a
+   nested `check_shb_cache` helper with **zero callers**. `use lazy` is eager in
+   the seed, and `watcher_client` imports `driver_api_compile_single` ->
+   `driver.spl` -> everything. Deleted (dead code).
+3. The shard entry itself was `native_build_worker.spl` -> `cli_native_build`,
+   whose module evaluates `compiler.driver.driver` on load. New slim entry
+   `src/app/cli/parse_shard_main.spl` -> `driver_parse_shard_entry.spl` builds
+   the same CompileOptions the CLI builds and runs load_sources_impl +
+   parse_all_committing_impl only. The `--entry-closure` walker moved verbatim
+   from compile_targets.spl to `src/app/io/_CliCompile/native_build_closure.spl`
+   so both entries share it. native_build_main.spl dispatches parse shards to
+   the slim entry. HIR shards still use the full worker (they need
+   lower_and_check_impl, which imports driver_bootstrap's MIR path).
+
+Module-evaluation closure of the parse lane (call probe, seed interpret mode):
+
+| lane | modules evaluated | RSS | wall |
+|---|---|---|---|
+| before (driver_source_pipeline_parsing) | 665 | 2.35 GB | 50 s |
+| after edges 1+2 | 383 | 0.88 GB | 22 s |
+
+Real shard 0 of 2 on the `lint_entry` closure (193 sources, cold cache), one
+process, `/usr/bin/time -v`:
+
+| entry | max RSS | wall |
+|---|---|---|
+| native_build_worker.spl (before) | 3.82 GB | 10 m 41 s |
+| parse_shard_main.spl (after) | 1.54 GB | 9 m 58 s |
+
+Remaining floor: `driver_types.spl` (CompileContext) imports `compiler.mir.*`,
+`backend_port`, `codegen` and the three backend impls because the context
+carries MIR/backend fields; that is the accepted floor for this change.
+
+Pinned by `test/01_unit/compiler/driver/parse_shard_slim_entry_spec.spl`
+(source-level, fast) and `scripts/check/check-parse-shard-rss-budget.shs`
+(fail-closed RSS budget on a real shard, budget = 3x post-fix; pre-fix FAILs).
+
+Both runs did identical work (`hits=0 misses=104 parses=104`); wall is the
+parse itself. End-to-end `native-build --threads 2 --entry-closure` on a
+3-file closure: the slim shards stored 3 entries and the HIR shard + main
+worker read them back as `hits=3 misses=0 parses=0`. (That build then fails in
+MIR on `std.text` — `unresolved method call: index_of/chars/merge` — identically
+with `SIMPLE_PARSE_SHARDING=0`, so it is pre-existing and unrelated.)

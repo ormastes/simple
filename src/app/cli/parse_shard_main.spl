@@ -1,0 +1,97 @@
+# Slim entrypoint for `native-build` parse-shard children.
+#
+# native_build_main.spl spawns `simple run src/app/cli/parse_shard_main.spl
+# <native-build args> --parse-shard=i/n` instead of native_build_worker.spl.
+# It recognises only the arguments that decide the SOURCE SET and the parse
+# settings, publishes the same process env the full CLI publishes before it
+# creates the driver, and hands off to driver_run_parse_shard, which never
+# loads the HIR/MIR/backend half of the compiler. A shard that cannot parse
+# its arguments exits non-zero and is ignored by the orchestrator: sharding is a
+# cache warm-up and can never change the build's output.
+use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
+use app.io.args_ops.{get_args}
+use app.io.env_ops.{env_get, env_set}
+use compiler.driver.driver_parse_shard_entry.{driver_run_parse_shard}
+
+extern fn rt_exit(code: i64)
+
+fn parse_shard_entry_args() -> [text]:
+    val raw_args = get_args()
+    var start_idx = 1
+    var i = 0
+    while i < raw_args.len():
+        if raw_args[i].ends_with("parse_shard_main.spl"):
+            start_idx = i + 1
+            break
+        i = i + 1
+    var args: [text] = []
+    i = start_idx
+    while i < raw_args.len():
+        args = args.push(raw_args[i])
+        i = i + 1
+    args
+
+# Flags that consume the next token in cli_native_build; the slim parser must
+# skip their values so one is never mistaken for the positional entry.
+fn parse_shard_value_flag(a: text) -> bool:
+    a == "--backend" or a == "--runtime-bundle" or a == "--runtime-path" or
+        a == "--linker-script" or a == "-o" or a == "--output" or a == "--mode" or
+        a == "--build-mode" or a == "--cache-dir" or a == "--target" or a == "--cpu" or
+        a == "--opt-level" or a == "--threads" or a == "--jobs" or a == "-j" or a == "--timeout"
+
+fn main() -> i64:
+    if (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") != "1":
+        print "error: parse_shard_main.spl is an internal entrypoint"
+        rt_exit(1)
+    val args = parse_shard_entry_args()
+    var entry_point = ""
+    var source_dirs: [text] = []
+    var entry_closure = false
+    var low_memory = false
+    var parse_shard = ""
+    var j = 0
+    while j < args.len():
+        val a = args[j]
+        if a == "--entry-closure":
+            entry_closure = true
+        elif a == "--emit-object" or a == "--emit-archive" or a == "--emit-shared":
+            entry_closure = true
+        elif a == "--low-memory":
+            low_memory = true
+        elif a.starts_with("--parse-shard="):
+            parse_shard = a.substring(14)
+        elif a == "--entry":
+            if j + 1 < args.len():
+                j = j + 1
+                entry_point = args[j]
+        elif a.starts_with("--entry="):
+            entry_point = a.substring(8)
+        elif a == "--source":
+            if j + 1 < args.len():
+                j = j + 1
+                source_dirs = source_dirs.push(args[j])
+        elif a.starts_with("--source="):
+            source_dirs = source_dirs.push(a.substring(9))
+        elif parse_shard_value_flag(a):
+            j = j + 1
+        elif not a.starts_with("-") and entry_point == "":
+            entry_point = a
+        j = j + 1
+    if entry_point == "" or parse_shard == "":
+        print "error: parse shard needs an entry and --parse-shard=i/n"
+        return 1
+    var inputs: [text] = []
+    if entry_closure:
+        for cf in _native_build_entry_closure(entry_point, source_dirs):
+            inputs = inputs.push(cf)
+    else:
+        for source_dir in source_dirs:
+            inputs = inputs.push(source_dir)
+        inputs = inputs.push(entry_point)
+    # Same env the full CLI publishes before it creates the driver
+    # (compile_targets.spl); the source walk and parse both read these.
+    env_set("SIMPLE_PARSE_SHARD", parse_shard)
+    env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_point)
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
+    if driver_run_parse_shard(inputs, low_memory): 0 else: 1

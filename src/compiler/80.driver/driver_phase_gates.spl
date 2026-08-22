@@ -1,0 +1,62 @@
+# Leaf-tier phase gates shared by the parse, HIR and orchestration lanes.
+#
+# These two predicates used to live in driver_orchestration.spl and
+# driver_bootstrap.spl. Both of those modules import the full back half of the
+# compiler (backends, MIR, LLVM, linker), so any module that needed one of
+# these cheap functions paid the whole compiler closure on load. A parse-shard
+# child evaluated ~665 modules / 3.3 GB RSS for ~80 files of parsing because
+# driver_source_pipeline_parsing.spl imported them
+# (doc/08_tracking/bug/memory_retention_compiler_and_interpreter_2026-08-21.md).
+# This module imports only the context/option types so the parse lane stays
+# off the back-half closure. The original homes re-export both names.
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{CompileMode, CompileOptions}
+use compiler.driver.driver_source_loading.{_driver_physical_source_key}
+use compiler.core.interpreter.hashmap.{hm_hash_text}
+
+extern fn rt_env_get(key: text) -> text
+
+fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:
+    (ctx.options.mode == CompileMode.Aot or ctx.options.cli_mode_text == "aot") and
+        not ctx.config.contains_key("coverage") and
+        (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+        (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1" and
+        ((rt_env_get("SIMPLE_STAGE3_STREAMING_SURFACES") ?? "") == "1" or
+         ((rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
+          (rt_env_get("SIMPLE_STAGE4_STREAMING_SURFACES") ?? "") == "1")) and
+        ctx.options.backend != "vhdl"
+
+
+fn bootstrap_last_fixed_input(options: CompileOptions) -> text:
+    match options.bootstrap_input_count:
+        case 1: options.bootstrap_input_0
+        case 2: options.bootstrap_input_1
+        case 3: options.bootstrap_input_2
+        case 4: options.bootstrap_input_3
+        case 5: options.bootstrap_input_4
+        case 6: options.bootstrap_input_5
+        case _: ""
+
+fn bootstrap_entry_source_index(ctx: CompileContext) -> i64:
+    # Entry precedence is explicit environment, positional fixed input,
+    # historical bootstrap_main default, then deterministic first source.
+    val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    val positional_entry = bootstrap_last_fixed_input(ctx.options)
+    val requested_entry = if native_entry != "": native_entry else: positional_entry
+    if requested_entry != "":
+        val requested_key = _driver_physical_source_key(requested_entry)
+        val requested_hash = hm_hash_text(requested_key)
+        val requested_len = requested_key.len()
+        var source_index = 0
+        while source_index < ctx.sources.len():
+            val source_key = _driver_physical_source_key(ctx.sources[source_index].path)
+            if source_key.len() == requested_len and hm_hash_text(source_key) == requested_hash:
+                return source_index
+            source_index = source_index + 1
+    var default_index = 0
+    while default_index < ctx.sources.len():
+        val source = ctx.sources[default_index]
+        if source.path.ends_with("app/cli/bootstrap_main.spl") or source.module_name.ends_with("app.cli.bootstrap_main"):
+            return default_index
+        default_index = default_index + 1
+    if ctx.sources.len() > 0: 0 else: -1
