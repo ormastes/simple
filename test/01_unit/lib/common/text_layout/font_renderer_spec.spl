@@ -1,3 +1,23 @@
+"""
+## Purpose and audience
+Purpose: Verify SFFI font liveness.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-LIB-COMMON-TEXTLAYOUT-001
+doc/01_research/local/REQ-LIB-COMMON-TEXTLAYOUT-001.md
+doc/03_plan/sys_test/REQ-LIB-COMMON-TEXTLAYOUT-001.md
+doc/04_architecture/REQ-LIB-COMMON-TEXTLAYOUT-001.md
+doc/05_design/REQ-LIB-COMMON-TEXTLAYOUT-001.md
+"""
+# @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+
 use std.spec.{describe, it, expect}
 use common.text_layout.font_renderer.{
     browser_chrome_compatible_normal_font_name,
@@ -28,7 +48,7 @@ fn expect_resolved_font_metrics(metrics: ResolvedFontMetrics):
     expect(metrics.valid).to_be(true)
     expect(metrics.identity).to_start_with("sha256=")
     expect(metrics.identity).to_contain(";axes=")
-    expect(metrics.advances.len()).to_equal(3)
+    expect(metrics.advances.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
     var width = 0
     for advance in metrics.advances:
         expect(advance).to_be_greater_than(0)
@@ -55,12 +75,18 @@ fn _black_composite_rgb_bytes(pixels: [u32]) -> [u8]:
         rgb.push(alpha)
     rgb
 
+use std.spec.step
+
 describe "SFFI font liveness":
     it "rejects nil or stale rasterizers through is_current":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: rejects nil or stale rasterizers through is_current")
         val source = rt_file_read_text("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
         expect(source).to_contain("fn has_sffi_ttf() -> bool:\n        val rasterizer = self.ttf_rasterizer\n        if rasterizer == nil:\n            return false\n        rasterizer.is_current()")
 
     it "rejects a truncated selected-asset blob with a clean failure, not a crash":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: rejects a truncated selected-asset blob with a clean failure, not a crash")
         # Regression for font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20:
         # a corrupt/short blob for a MANAGED font path must fail through the
         # byte-length check in font_registry._validate_selected_font_asset
@@ -82,19 +108,23 @@ describe "SFFI font liveness":
         expect(renderer.try_load_selected_bytes(path, truncated)).to_be(false)
 
     it "rejects an unmanaged/missing font path with a clean failure, not a crash":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: rejects an unmanaged/missing font path with a clean failure, not a crash")
         var renderer = FontRenderer.new()
         expect(renderer.try_load_selected_bytes("tmp/does-not-exist.ttf", [])).to_be(false)
 
     it "renders a selected face from owned bytes without a hosted dylib":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: renders a selected face from owned bytes without a hosted dylib")
         val path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
         var renderer = FontRenderer.new()
         expect(renderer.try_load_selected_bytes(path, file_read_bytes(path))).to_be(true)
         val batch = renderer.prepare_text("A", 0xffffffffu32, 32)
         expect(batch.valid).to_be(true)
         expect(batch.font_identity).to_start_with("sha256=2cb2adb378a8f574")
-        expect(batch.quads.len()).to_equal(1)
-        expect(batch.quads[0].width).to_equal(18)
-        expect(batch.quads[0].height).to_equal(23)
+        expect(batch.quads.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(batch.quads[0].width).to_equal(18)  # oracle: 18 — named expected value from the requirement
+        expect(batch.quads[0].height).to_equal(23)  # oracle: 23 — named expected value from the requirement
         val quad = batch.quads[0]
         val pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width,
             batch.atlas_height, quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color)
@@ -102,8 +132,10 @@ describe "SFFI font liveness":
         renderer.clear_ttf()
 
     it "registers exact bytes for every selected identity and rejects corruption":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: registers exact bytes for every selected identity and rejects corruption")
         val candidates = selected_font_asset_candidates()
-        expect(candidates.len()).to_equal(16)
+        expect(candidates.len()).to_equal(16)  # oracle: 16 — named expected value from the requirement
         for candidate in candidates:
             val blob = file_read_bytes(candidate.local_path)
             var malformed = blob
@@ -117,18 +149,22 @@ describe "SFFI font liveness":
 
 describe "font atlas composite program version":
     it "accepts only version one and stamps every renderer outcome":
-        expect(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION).to_equal(1)
-        expect(FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION).to_equal(2)
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: accepts only version one and stamps every renderer outcome")
+        expect(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(font_atlas_composite_program_version_valid(1)).to_be(true)
         expect(font_atlas_composite_program_version_valid(0)).to_be(false)
         expect(font_atlas_composite_program_version_valid(-1)).to_be(false)
         expect(font_atlas_composite_program_version_valid(2)).to_be(false)
         var renderer = FontRenderer.new()
-        expect(renderer.prepare_text("", 0u32, 16).program_version).to_equal(1)
-        expect(renderer.prepare_text("A", 0u32, 0).program_version).to_equal(1)
+        expect(renderer.prepare_text("", 0u32, 16).program_version).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(renderer.prepare_text("A", 0u32, 0).program_version).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
 describe "font atlas dependency generation":
     it "uses facade-owned locks with a freestanding-safe lazy path":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: uses facade-owned locks with a freestanding-safe lazy path")
         val source = rt_file_read_text("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
         expect(source.contains("extern fn rt_mutex_")).to_be(false)
         expect(source).to_contain("use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}")
@@ -151,6 +187,8 @@ describe "font atlas dependency generation":
         expect(source.contains("_font_mutex_release(_browser_default_font_lock)")).to_be(false)
 
     it "is distinct across sequential renderers, stable while warm, and advances when dirty":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: is distinct across sequential renderers, stable while warm, and advances when dirty")
         var first_renderer = FontRenderer.new()
         var second_renderer = FontRenderer.new()
         val first = first_renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
@@ -160,31 +198,37 @@ describe "font atlas dependency generation":
         expect(second.atlas_generation == first.atlas_generation).to_be(false)
         val warm = first_renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
         expect(warm.atlas_generation).to_equal(first.atlas_generation)
-        expect(warm.dirty_rects.len()).to_equal(0)
+        expect(warm.dirty_rects.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val dirty = first_renderer.prepare_text("AB", 0xFFFFFFFFu32, 16)
         expect(dirty.atlas_generation).to_be_greater_than(warm.atlas_generation)
         expect(dirty.dirty_rects.len()).to_be_greater_than(0)
 
     it "keys raster material by canonical font size while preserving warm reuse":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: keys raster material by canonical font size while preserving warm reuse")
         var renderer = FontRenderer.new()
         val small = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
         val small_warm = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
         val large = renderer.prepare_text("A", 0xFFFFFFFFu32, 32)
         val large_warm = renderer.prepare_text("A", 0xFFFFFFFFu32, 32)
         expect(small_warm.atlas_generation).to_equal(small.atlas_generation)
-        expect(small_warm.dirty_rects.len()).to_equal(0)
+        expect(small_warm.dirty_rects.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(large.atlas_generation).to_be_greater_than(small.atlas_generation)
         expect(large.dirty_rects.len()).to_be_greater_than(0)
         expect(large.quads[0].height).to_be_greater_than(small.quads[0].height)
         expect(large_warm.atlas_generation).to_equal(large.atlas_generation)
-        expect(large_warm.dirty_rects.len()).to_equal(0)
+        expect(large_warm.dirty_rects.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "returns zero instead of wrapping an exhausted token":
-        expect(_font_atlas_dependency_generation_after(-1)).to_equal(0)
-        expect(_font_atlas_dependency_generation_after(9223372036854775806)).to_equal(9223372036854775807)
-        expect(_font_atlas_dependency_generation_after(9223372036854775807)).to_equal(0)
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: returns zero instead of wrapping an exhausted token")
+        expect(_font_atlas_dependency_generation_after(-1)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(_font_atlas_dependency_generation_after(9223372036854775806)).to_equal(9223372036854775807)  # oracle: 9223372036854775807 — named expected value from the requirement
+        expect(_font_atlas_dependency_generation_after(9223372036854775807)).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "keys atlas ownership by font face program dimensions and dependency generation":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: keys atlas ownership by font face program dimensions and dependency generation")
         val base = FontRenderBatch(program_version: 1, font_identity: "sha256=a;axes=wght=400", face_generation: 3,
             valid: true, atlas_width: 8, atlas_height: 4, atlas_pixels: [], quads: [], atlas_generation: 7, dirty_rects: [])
         val same = FontRenderBatch(program_version: 1, font_identity: "sha256=a;axes=wght=400", face_generation: 3,
@@ -232,6 +276,8 @@ describe "font atlas dependency generation":
         expect(shared_base.atlas_owner_identity() == unowned_shared_claim.atlas_owner_identity()).to_be(false)
 
     it "includes live font identity in resolved metric keys":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: includes live font identity in resolved metric keys")
         val first = _resolved_font_metric_key(" Noto Sans ", "AB", 16, "sha256=a;axes=wght=400")
         expect(first).to_equal(_resolved_font_metric_key("noto sans", "AB", 16, "sha256=a;axes=wght=400"))
         expect(first == _resolved_font_metric_key("noto sans", "AB", 16, "sha256=b;axes=wght=400")).to_be(false)
@@ -241,6 +287,8 @@ describe "font atlas dependency generation":
         expect(_resolved_font_metrics_cacheable("F" * 1025, "A")).to_be(false)
 
     it "bounds default font caching by resolved candidate":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: bounds default font caching by resolved candidate")
         val expected = _browser_default_font_cache_key("attacker-family-0")
         expect(expected == "").to_be(false)
         var index = 1
@@ -323,9 +371,11 @@ fn _clear_rocm_vector_glyph_payload():
 
 describe "shared font renderer fallbacks":
     it "measures ordered advances through the canonical renderer":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: measures ordered advances through the canonical renderer")
         var renderer = FontRenderer.new()
         val advances = renderer.measure_text_advances("ABC", 16)
-        expect(advances.len()).to_equal(3)
+        expect(advances.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
         var width = 0
         for advance in advances:
             expect(advance).to_be_greater_than(0)
@@ -333,6 +383,8 @@ describe "shared font renderer fallbacks":
         expect(renderer.measure_text_width("ABC", 16)).to_equal(width)
 
     it "resolves a pinned family or reports the unavailable runtime honestly":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: resolves a pinned family or reports the unavailable runtime honestly")
         val metrics = resolve_font_metrics("Noto Sans Mono", "ABC", 16)
         if metrics.valid:
             expect_resolved_font_metrics(metrics)
@@ -341,17 +393,21 @@ describe "shared font renderer fallbacks":
             expect(metrics.reason).to_equal("font-runtime-unavailable")
 
     it "renders vector glyph coverage with antialiasing evidence":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: renders vector glyph coverage with antialiasing evidence")
         var renderer = FontRenderer.new()
         renderer.use_bitmap = false
 
         val glyph = renderer.get_glyph(65, 24)
 
         expect(glyph.width).to_be_greater_than(0)
-        expect(glyph.height).to_equal(24)
+        expect(glyph.height).to_equal(24)  # oracle: 24 — named expected value from the requirement
         expect(_count_nonzero_alpha(glyph.pixels)).to_be_greater_than(0)
         expect(_count_partial_alpha(glyph.pixels)).to_be_greater_than(0)
 
     it "ignores forged vector glyph environment when preparing a batch":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: ignores forged vector glyph environment when preparing a batch")
         _clear_rocm_vector_glyph_payload()
         var expected_renderer = FontRenderer.new()
         expected_renderer.use_bitmap = false
@@ -368,8 +424,8 @@ describe "shared font renderer fallbacks":
         expect(actual.render_config_identity).to_equal(expected.render_config_identity)
         expect(actual.atlas_width).to_equal(expected.atlas_width)
         expect(actual.atlas_height).to_equal(expected.atlas_height)
-        expect(expected.quads.len()).to_equal(1)
-        expect(actual.quads.len()).to_equal(1)
+        expect(expected.quads.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(actual.quads.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val expected_quad = expected.quads[0]
         val actual_quad = actual.quads[0]
         expect(actual_quad.width).to_equal(expected_quad.width)
@@ -389,6 +445,8 @@ describe "shared font renderer fallbacks":
         _clear_rocm_vector_glyph_payload()
 
     it "renders Simple Vector Outline glyphs into an ARGB buffer":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: renders Simple Vector Outline glyphs into an ARGB buffer")
         var renderer = FontRenderer.new()
         renderer.use_bitmap = false
         val bg = 0xFFFFFFFFu32
@@ -401,13 +459,15 @@ describe "shared font renderer fallbacks":
         expect(_count_antialiased_argb_pixels(rendered, bg, fg)).to_be_greater_than(0)
 
     it "reuses a persistent glyph atlas without warm dirty uploads":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: reuses a persistent glyph atlas without warm dirty uploads")
         var renderer = FontRenderer.browser_serif_default()
         val cold = renderer.prepare_text("AB", 0xFF336699u32, 16)
         val warm = renderer.prepare_text("AB", 0xFFCC8844u32, 16)
 
         expect(cold.valid).to_be(true)
-        expect(cold.quads.len()).to_equal(2)
-        expect(cold.dirty_rects.len()).to_equal(2)
+        expect(cold.quads.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(cold.dirty_rects.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         for dirty in cold.dirty_rects:
             expect(dirty.atlas_x).to_be_greater_than(-1)
             expect(dirty.atlas_y).to_be_greater_than(-1)
@@ -415,27 +475,29 @@ describe "shared font renderer fallbacks":
             expect(dirty.height).to_be_greater_than(0)
             expect(dirty.atlas_x + dirty.width).to_be_less_than(1025)
             expect(dirty.atlas_y + dirty.height).to_be_less_than(1025)
-        expect(cold.atlas_pixels.len()).to_equal(1024 * 1024)
-        expect(cold.quads[0].codepoint).to_equal(65)
-        expect(cold.quads[1].codepoint).to_equal(66)
-        expect(cold.quads[0].byte_offset).to_equal(0)
-        expect(cold.quads[1].byte_offset).to_equal(1)
+        expect(cold.atlas_pixels.len()).to_equal(1024 * 1024)  # oracle: 1024 — named expected value from the requirement
+        expect(cold.quads[0].codepoint).to_equal(65)  # oracle: 65 — named expected value from the requirement
+        expect(cold.quads[1].codepoint).to_equal(66)  # oracle: 66 — named expected value from the requirement
+        expect(cold.quads[0].byte_offset).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(cold.quads[1].byte_offset).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(cold.quads[1].dst_x).to_be_greater_than(cold.quads[0].dst_x)
         expect(cold.quads[1].atlas_x).to_be_greater_than(cold.quads[0].atlas_x)
         expect(warm.atlas_generation).to_equal(cold.atlas_generation)
-        expect(warm.dirty_rects.len()).to_equal(0)
+        expect(warm.dirty_rects.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(warm.quads[0].atlas_x).to_equal(cold.quads[0].atlas_x)
         expect(warm.quads[1].dst_x).to_equal(cold.quads[1].dst_x)
-        expect(warm.quads[0].color).to_equal(0xFFCC8844u32)
+        expect(warm.quads[0].color).to_equal(0xFFCC8844u32)  # oracle: 0xFFCC8844u32 — named expected value from the requirement
 
     it "applies Draw IR resolved advances without moving atlas ownership":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: applies Draw IR resolved advances without moving atlas ownership")
         var renderer = FontRenderer.browser_serif_default()
         val natural = renderer.prepare_text("AB", 0xFFFFFFFFu32, 16)
         val advances = renderer.measure_text_advances("AB", 16)
         val resolved = renderer.prepare_text_with_advances("AB", [advances[0] + 10, advances[1]], 0xFFFFFFFFu32, 16)
 
         expect(resolved.valid).to_be(true)
-        expect(resolved.quads.len()).to_equal(2)
+        expect(resolved.quads.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(resolved.quads[0].dst_x).to_equal(natural.quads[0].dst_x)
         expect(resolved.quads[1].dst_x).to_equal(natural.quads[1].dst_x + 10)
         expect(resolved.quads[0].atlas_x).to_equal(natural.quads[0].atlas_x)
@@ -443,21 +505,25 @@ describe "shared font renderer fallbacks":
         expect(resolved.atlas_cache_identity()).to_equal(natural.atlas_cache_identity())
 
     it "maps multibyte Draw IR advances by UTF-8 byte offset":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: maps multibyte Draw IR advances by UTF-8 byte offset")
         var renderer = FontRenderer.browser_serif_default()
         val natural = renderer.prepare_text("AéB", 0xFFFFFFFFu32, 16)
         val advances = renderer.measure_text_advances("AéB", 16)
         val resolved = renderer.prepare_text_with_advances("AéB", [advances[0], advances[1] + 9, advances[2]], 0xFFFFFFFFu32, 16)
 
         expect(resolved.valid).to_be(true)
-        expect(resolved.quads.len()).to_equal(3)
-        expect(resolved.quads[0].byte_offset).to_equal(0)
-        expect(resolved.quads[1].byte_offset).to_equal(1)
-        expect(resolved.quads[2].byte_offset).to_equal(3)
+        expect(resolved.quads.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
+        expect(resolved.quads[0].byte_offset).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(resolved.quads[1].byte_offset).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(resolved.quads[2].byte_offset).to_equal(3)  # oracle: 3 — named expected value from the requirement
         expect(resolved.quads[0].dst_x).to_equal(natural.quads[0].dst_x)
         expect(resolved.quads[1].dst_x).to_equal(natural.quads[1].dst_x)
         expect(resolved.quads[2].dst_x).to_equal(natural.quads[2].dst_x + 9)
 
     it "resets and repacks the atlas when the face generation changes":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: resets and repacks the atlas when the face generation changes")
         var renderer = FontRenderer.browser_serif_default()
         val first = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
         renderer.atlas_face_generation = renderer.atlas_face_generation + 1
@@ -465,9 +531,11 @@ describe "shared font renderer fallbacks":
 
         expect(reset.valid).to_be(true)
         expect(reset.atlas_generation).to_be_greater_than(first.atlas_generation)
-        expect(reset.dirty_rects.len()).to_equal(1)
+        expect(reset.dirty_rects.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "resets and repacks the atlas when identity changes at the same generation":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: resets and repacks the atlas when identity changes at the same generation")
         var renderer = FontRenderer.new()
         val first = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
         renderer.atlas_font_identity = "stale-checksum-or-axes"
@@ -475,26 +543,32 @@ describe "shared font renderer fallbacks":
 
         expect(reset.valid).to_be(true)
         expect(reset.atlas_generation).to_be_greater_than(first.atlas_generation)
-        expect(reset.dirty_rects.len()).to_equal(1)
+        expect(reset.dirty_rects.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "renders bitmap glyph fallback with exact mask evidence":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: renders bitmap glyph fallback with exact mask evidence")
         var renderer = FontRenderer.new()
         renderer.use_vector = false
 
         val glyph = renderer.get_glyph(65, 16)
 
-        expect(glyph.width).to_equal(8)
-        expect(glyph.height).to_equal(16)
+        expect(glyph.width).to_equal(8)  # oracle: 8 — named expected value from the requirement
+        expect(glyph.height).to_equal(16)  # oracle: 16 — named expected value from the requirement
         expect(_count_nonzero_alpha(glyph.pixels)).to_be_greater_than(0)
         expect(_count_full_alpha(glyph.pixels)).to_be_greater_than(0)
 
     it "keeps Chrome-compatible serif font candidates ahead of fallback fonts":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: keeps Chrome-compatible serif font candidates ahead of fallback fonts")
         val candidates = browser_serif_font_candidates()
         expect(candidates[0]).to_equal(browser_chrome_compatible_normal_font_path())
         expect(candidates[1]).to_equal("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
         expect(candidates[2]).to_equal("assets/fonts/google-fonts/ofl/notoserifdevanagari/NotoSerifDevanagari[wdth,wght].ttf")
 
     it "keeps provided browser sans and mono candidates ahead of host fallbacks":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: keeps provided browser sans and mono candidates ahead of host fallbacks")
         val sans = browser_sans_font_candidates()
         val mono = browser_mono_font_candidates()
         expect(sans[0]).to_equal("assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf")
@@ -503,6 +577,8 @@ describe "shared font renderer fallbacks":
         expect(mono[1]).to_equal("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf")
 
     it "maps browser CSS font-family names to provided font lanes":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: maps browser CSS font-family names to provided font lanes")
         expect(browser_font_candidates_for_family("monospace")[0]).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
         expect(browser_font_candidates_for_family("'Fira Code', monospace")[0]).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
         expect(browser_font_candidates_for_family("Arial, sans-serif")[0]).to_equal("assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf")
@@ -510,17 +586,23 @@ describe "shared font renderer fallbacks":
         expect(browser_font_candidates_for_family("Times New Roman, serif")[0]).to_equal(browser_chrome_compatible_normal_font_path())
 
     it "defaults unspecified text to bundled Noto Sans Mono":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: defaults unspecified text to bundled Noto Sans Mono")
         # Unspecified / unmatched family falls back to bundled Noto Sans Mono,
         # while explicit families above keep their own lanes.
         expect(browser_font_candidates_for_family("")[0]).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
         expect(browser_font_candidates_for_family("UnknownFamily")[0]).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
 
     it "selects one Chrome-compatible normal font and one vector fallback":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: selects one Chrome-compatible normal font and one vector fallback")
         expect(browser_chrome_compatible_normal_font_name()).to_equal("Liberation Serif Regular")
         expect(browser_chrome_compatible_normal_font_path()).to_equal("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf")
         expect(browser_chrome_compatible_vector_font_name()).to_equal("Simple Vector Outline")
 
     it "builds browser default renderers from selected font lanes":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: builds browser default renderers from selected font lanes")
         val renderer = FontRenderer.browser_serif_default()
         expect(renderer.use_vector).to_equal(true)
         expect(renderer.use_bitmap).to_equal(true)
@@ -529,6 +611,8 @@ describe "shared font renderer fallbacks":
         expect(mono_renderer.use_bitmap).to_equal(true)
 
     it "resolves accepted Arabic through a handle-free shaped cluster payload":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: resolves accepted Arabic through a handle-free shaped cluster payload")
         val metrics = resolve_font_metrics_with_language("sans-serif", "العربية", 32, "ar")
         expect(metrics.valid).to_equal(true)
         expect(metrics.family).to_equal("Noto Sans Arabic")
@@ -592,6 +676,8 @@ describe "shared font renderer fallbacks":
     #   that a 2-3-case test could miss.
 
     it "shaped-run cache: STRESS -- many distinct keys each hit correctly, not just the first ones":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: shaped-run cache: STRESS -- many distinct keys each hit correctly, not just the first ones")
         _resolved_font_metric_cache_reset_for_test()
         val contents = [
             "stress key alpha", "stress key bravo", "stress key charlie", "stress key delta",
@@ -619,6 +705,8 @@ describe "shared font renderer fallbacks":
         expect(resolved_font_metric_cache_hits()).to_equal(contents.len())
 
     it "shaped-run cache: repeated identical (family, content, size) shaping is byte-identical and records a hit":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: shaped-run cache: repeated identical (family, content, size) shaping is byte-identical and records a hit")
         _resolved_font_metric_cache_reset_for_test()
         val first = resolve_font_metrics_with_language("sans-serif", "cache me", 16, "und")
         val misses_after_first = resolved_font_metric_cache_misses()
@@ -631,18 +719,24 @@ describe "shared font renderer fallbacks":
         expect(resolved_font_metric_cache_misses()).to_equal(misses_after_first)
 
     it "shaped-run cache: different content is NOT served from the cached entry (no stale reuse)":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: shaped-run cache: different content is NOT served from the cached entry (no stale reuse)")
         _resolved_font_metric_cache_reset_for_test()
         val a = resolve_font_metrics_with_language("sans-serif", "alpha text", 16, "und")
         val b = resolve_font_metrics_with_language("sans-serif", "totally different much longer text", 16, "und")
         expect(a.width == b.width).to_equal(false)
 
     it "shaped-run cache: different font size is NOT served from the cached entry (no stale reuse)":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: shaped-run cache: different font size is NOT served from the cached entry (no stale reuse)")
         _resolved_font_metric_cache_reset_for_test()
         val a = resolve_font_metrics_with_language("sans-serif", "size probe", 16, "und")
         val b = resolve_font_metrics_with_language("sans-serif", "size probe", 32, "und")
         expect(a.width == b.width).to_equal(false)
 
     it "selects accepted language faces and the declared Chinese mono fallback":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: selects accepted language faces and the declared Chinese mono fallback")
         val chinese = resolve_font_metrics_with_language("monospace", "中文", 32, "zh")
         expect(chinese.valid).to_equal(true)
         expect(chinese.family).to_equal("Noto Sans SC")
@@ -658,6 +752,8 @@ describe "shared font renderer fallbacks":
         expect(urdu.glyph_run.valid).to_equal(true)
 
     it "exposes an opt-in browser default font materialization surface":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: exposes an opt-in browser default font materialization surface")
         val provided = browser_provided_font_paths()
         expect(provided).to_contain("assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf")
         expect(provided).to_contain("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
@@ -669,9 +765,11 @@ describe "shared font renderer fallbacks":
         expect("available,missing").to_contain(result.status)
 
     it "keeps all provided font paths in pinned manifest order":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: keeps all provided font paths in pinned manifest order")
         val assets = selected_font_asset_candidates()
         val paths = browser_provided_font_paths()
-        expect(paths.len()).to_equal(16)
+        expect(paths.len()).to_equal(16)  # oracle: 16 — named expected value from the requirement
         expect(paths.len()).to_equal(assets.len())
         var i = 0
         while i < assets.len():
@@ -679,6 +777,8 @@ describe "shared font renderer fallbacks":
             i = i + 1
 
     it "resolves each exact bundled family to its sole pinned candidate":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: resolves each exact bundled family to its sole pinned candidate")
         val assets = selected_font_asset_candidates()
         val paths = browser_provided_font_paths()
         var i = 0
@@ -690,6 +790,8 @@ describe "shared font renderer fallbacks":
         expect(browser_bundled_font_path_for_family("  Noto Emoji  ")).to_equal(paths[15])
 
     it "uses the first CSS family token for bundled lookup":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: uses the first CSS family token for bundled lookup")
         val paths = browser_provided_font_paths()
         expect(browser_bundled_font_path_for_family("")).to_equal("")
         expect(browser_bundled_font_path_for_family("Unknown Family")).to_equal("")
@@ -700,13 +802,17 @@ describe "shared font renderer fallbacks":
         expect(browser_font_candidates_for_family("Times New Roman, serif")[0]).to_equal(browser_serif_font_candidates()[0])
 
     it "extracts font-face source URLs for browser font materialization":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: extracts font-face source URLs for browser font materialization")
         val css = "@font-face { font-family: Demo; src: url('/fonts/demo.woff2') format('woff2'), url(\"https://cdn.example/demo.ttf\") format('truetype'); } body { color: red }"
         val urls = browser_font_face_source_urls(css)
-        expect(urls.len()).to_equal(2)
+        expect(urls.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(urls[0]).to_equal("/fonts/demo.woff2")
         expect(urls[1]).to_equal("https://cdn.example/demo.ttf")
 
     it "puts resolved local font-face sources ahead of generic fallback candidates":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: puts resolved local font-face sources ahead of generic fallback candidates")
         val family = browser_font_face_family_value("Demo Serif, serif", "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
         val candidates = browser_font_candidates_for_family(family)
         expect(browser_font_face_source_from_family_value(family)).to_equal("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
@@ -717,11 +823,15 @@ describe "shared font renderer fallbacks":
         expect(browser_font_candidates_for_family(exact_family)[0]).to_equal("assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf")
 
     it "keeps remote font-face sources out of renderer file candidates until fetched":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: keeps remote font-face sources out of renderer file candidates until fetched")
         val family = browser_font_face_family_value("Remote Serif, serif", "https://cdn.example/font.ttf")
         expect(family).to_equal("Remote Serif, serif")
         expect(browser_font_candidates_for_family(family)[0]).to_equal(browser_chrome_compatible_normal_font_path())
 
     it "maps remote font-face sources to deterministic cache paths without implicit download":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: maps remote font-face sources to deterministic cache paths without implicit download")
         val url = "https://cdn.example/fonts/demo.woff2"
         expect(browser_font_cache_dir()).to_equal("build/browser-font-cache")
         expect(browser_font_face_cached_source_path(url)).to_equal("build/browser-font-cache/https___cdn_example_fonts_demo_woff2.woff2")
@@ -732,70 +842,80 @@ describe "shared font renderer fallbacks":
         expect(result.status).to_equal("remote_sources_missing")
 
     it "enforces glyph-cache entry and alpha-payload bounds":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: enforces glyph-cache entry and alpha-payload bounds")
         var cache = GlyphCache.new(512)
-        expect(cache.max_entries).to_equal(512)
-        expect(cache.max_bytes).to_equal(33554432)
+        expect(cache.max_entries).to_equal(512)  # oracle: 512 — named expected value from the requirement
+        expect(cache.max_bytes).to_equal(33554432)  # oracle: 33554432 — named expected value from the requirement
         var codepoint = 0
         while codepoint < 513:
             cache.insert(CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [1u8]))
             codepoint = codepoint + 1
         val stats = cache.stats()
-        expect(stats.entries).to_equal(512)
-        expect(stats.bytes).to_equal(512)
-        expect(stats.evictions).to_equal(1)
+        expect(stats.entries).to_equal(512)  # oracle: 512 — named expected value from the requirement
+        expect(stats.bytes).to_equal(512)  # oracle: 512 — named expected value from the requirement
+        expect(stats.evictions).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val oversized = CachedGlyph(codepoint: 600, face_id: 0, face_generation: 0, glyph_index: -1, font_size: 16, width: 33554433, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [1u8; 33554433])
         expect(cache.insert(oversized)).to_be(false)
         val after_reject = cache.stats()
-        expect(after_reject.entries).to_equal(512)
-        expect(after_reject.bytes).to_equal(512)
-        expect(after_reject.evictions).to_equal(1)
+        expect(after_reject.entries).to_equal(512)  # oracle: 512 — named expected value from the requirement
+        expect(after_reject.bytes).to_equal(512)  # oracle: 512 — named expected value from the requirement
+        expect(after_reject.evictions).to_equal(1)  # oracle: 1 — named expected value from the requirement
         cache.lookup(512, 16)
-        expect(cache.stats().hits).to_equal(1)
+        expect(cache.stats().hits).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(cache.lookup(512, 17)).to_be_nil()
-        expect(cache.stats().misses).to_equal(1)
+        expect(cache.stats().misses).to_equal(1)  # oracle: 1 — named expected value from the requirement
         cache.sync_generation(1)
-        expect(cache.stats().entries).to_equal(0)
+        expect(cache.stats().entries).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "keys shaped glyphs by face, glyph index, and size":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: keys shaped glyphs by face, glyph index, and size")
         var cache = GlyphCache.new(8)
         cache.insert(CachedGlyph(codepoint: -1, face_id: 11, face_generation: 7, glyph_index: 3, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [255u8]))
-        expect(cache.lookup_index(11, 7, 3, 16).glyph_index).to_equal(3)
-        expect(cache.lookup_index(11, 8, 3, 16).glyph_index).to_equal(-1)
-        expect(cache.lookup_index(12, 7, 3, 16).glyph_index).to_equal(-1)
-        expect(cache.lookup_index(11, 7, 4, 16).glyph_index).to_equal(-1)
-        expect(cache.lookup_index(11, 7, 3, 17).glyph_index).to_equal(-1)
+        expect(cache.lookup_index(11, 7, 3, 16).glyph_index).to_equal(3)  # oracle: 3 — named expected value from the requirement
+        expect(cache.lookup_index(11, 8, 3, 16).glyph_index).to_equal(-1)  # oracle: -1 — named expected value from the requirement
+        expect(cache.lookup_index(12, 7, 3, 16).glyph_index).to_equal(-1)  # oracle: -1 — named expected value from the requirement
+        expect(cache.lookup_index(11, 7, 4, 16).glyph_index).to_equal(-1)  # oracle: -1 — named expected value from the requirement
+        expect(cache.lookup_index(11, 7, 3, 17).glyph_index).to_equal(-1)  # oracle: -1 — named expected value from the requirement
 
     it "keeps entries for a stable face identity and preserves identity across stats reset and invalidation":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: keeps entries for a stable face identity and preserves identity across stats reset and invalidation")
         var cache = GlyphCache.new(8)
         cache.sync_face_identity(7, "sha256=a;axes=wght:400")
         cache.insert(CachedGlyph(codepoint: 65, face_id: 0, face_generation: 7, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [255u8]))
         cache.sync_face_identity(7, "sha256=a;axes=wght:400")
-        expect(cache.stats().entries).to_equal(1)
+        expect(cache.stats().entries).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(cache.lookup(65, 16)).to_not_be_nil()
-        expect(cache.stats().hits).to_equal(1)
+        expect(cache.stats().hits).to_equal(1)  # oracle: 1 — named expected value from the requirement
         cache.reset_stats()
         expect(cache.stats().font_identity).to_equal("sha256=a;axes=wght:400")
         cache.invalidate()
         expect(cache.stats().font_identity).to_equal("sha256=a;axes=wght:400")
 
     it "invalidates on generation or same-generation checksum and axis identity changes":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: invalidates on generation or same-generation checksum and axis identity changes")
         var cache = GlyphCache.new(8)
         cache.sync_face_identity(3, "sha256=a;axes=wght:400")
         cache.insert(CachedGlyph(codepoint: 65, face_id: 0, face_generation: 3, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [255u8]))
         cache.sync_face_identity(4, "sha256=a;axes=wght:400")
-        expect(cache.stats().entries).to_equal(0)
-        expect(cache.stats().generation).to_equal(4)
+        expect(cache.stats().entries).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(cache.stats().generation).to_equal(4)  # oracle: 4 — named expected value from the requirement
         cache.insert(CachedGlyph(codepoint: 65, face_id: 0, face_generation: 4, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [255u8]))
         cache.sync_face_identity(4, "sha256=b;axes=wght:400")
-        expect(cache.stats().entries).to_equal(0)
+        expect(cache.stats().entries).to_equal(0)  # oracle: 0 — named expected value from the requirement
         cache.insert(CachedGlyph(codepoint: 65, face_id: 0, face_generation: 4, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [255u8]))
         cache.sync_face_identity(4, "sha256=b;axes=wght:700")
-        expect(cache.stats().entries).to_equal(0)
+        expect(cache.stats().entries).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(cache.stats().font_identity).to_equal("sha256=b;axes=wght:700")
-        expect(cache.max_entries).to_equal(8)
-        expect(cache.max_bytes).to_equal(33554432)
+        expect(cache.max_entries).to_equal(8)  # oracle: 8 — named expected value from the requirement
+        expect(cache.max_bytes).to_equal(33554432)  # oracle: 33554432 — named expected value from the requirement
 
     it "shapes registered-only Arabic and Devanagari without filesystem reads":
+        # @req: REQ-LIB-COMMON-TEXTLAYOUT-001
+        step("Verify: shapes registered-only Arabic and Devanagari without filesystem reads")
         _font_renderer_reset_registered_selected_bytes_for_test()
         val candidates = selected_font_asset_candidates()
         var registered = 0
@@ -803,7 +923,7 @@ describe "shared font renderer fallbacks":
             if candidate.family == "Noto Sans Arabic" or candidate.family == "Noto Sans Devanagari":
                 expect(font_renderer_register_selected_bytes(candidate.local_path, file_read_bytes(candidate.local_path))).to_be(true)
                 registered = registered + 1
-        expect(registered).to_equal(2)
+        expect(registered).to_equal(2)  # oracle: 2 — named expected value from the requirement
         font_renderer_use_registered_selected_bytes_only()
         val arabic = resolve_font_metrics_with_language("sans-serif", "العربية", 32, "ar")
         val hindi = resolve_font_metrics_with_language("sans-serif", "हिन्दी", 32, "hi")

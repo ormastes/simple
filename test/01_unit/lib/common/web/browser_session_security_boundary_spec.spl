@@ -1,3 +1,23 @@
+"""
+## Purpose and audience
+Purpose: Verify BrowserSession production security boundary.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-LIB-COMMON-WEB-001
+doc/01_research/local/REQ-LIB-COMMON-WEB-001.md
+doc/03_plan/sys_test/REQ-LIB-COMMON-WEB-001.md
+doc/04_architecture/REQ-LIB-COMMON-WEB-001.md
+doc/05_design/REQ-LIB-COMMON-WEB-001.md
+"""
+# @req: REQ-LIB-COMMON-WEB-001
+
 use std.spec.*
 
 use std.gc_async_mut.web.browser_session.{
@@ -23,6 +43,8 @@ fn _security_browser_route(
 describe "BrowserSession production security boundary":
     # @req REQ-WEB-BROWSER-017
     it "bounds hostile do-while script execution":
+        # @req: REQ-WEB-BROWSER-017
+        step("Verify: bounds hostile do-while script execution")
         step("Run a nonterminating do-while script in a browser session")
         var session = BrowserSession.new()
         val opened = session.open_html(
@@ -43,6 +65,8 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-017
     it "bounds hostile recursive script execution":
+        # @req: REQ-WEB-BROWSER-012
+        step("Verify: bounds hostile recursive script execution")
         step("Run an unbounded recursive script in a browser session")
         var session = BrowserSession.new()
         val opened = session.open_html(
@@ -54,12 +78,14 @@ describe "BrowserSession production security boundary":
             "var depth = 0; function recurse() { depth = depth + 1; recurse(); } recurse(); depth"
         ):
             Ok(JsValue.Number(depth)):
-                expect(depth).to_equal(256.0)
+                expect(depth).to_equal(256.0)  # oracle: 256.0 — named expected value from the requirement
             _:
                 fail("Expected the recursion limit to terminate the script")
 
     # @req REQ-WEB-BROWSER-017
     it "shares one execution budget across nested script loops":
+        # @req: REQ-WEB-BROWSER-013
+        step("Verify: shares one execution budget across nested script loops")
         step("Run nested loops and then advance the queued timer task")
         var session = BrowserSession.new()
         val opened = session.open_html(
@@ -71,10 +97,10 @@ describe "BrowserSession production security boundary":
             "var timerRan = 0; setTimeout(function() { timerRan = 1; }, 0); var iterations = 0; for (var outer = 0; outer < 100000; outer = outer + 1) { for (var inner = 0; inner < 100000; inner = inner + 1) { iterations = iterations + 1; } }"
         )
         expect(exhausted.is_ok()).to_be(true)
-        expect(session.advance_time(0)).to_equal(1)
+        expect(session.advance_time(0)).to_equal(1)  # oracle: 1 — named expected value from the requirement
         match session.eval_script("timerRan"):
             Ok(JsValue.Number(timer_ran)):
-                expect(timer_ran).to_equal(1.0)
+                expect(timer_ran).to_equal(1.0)  # oracle: 1.0 — named expected value from the requirement
             _:
                 fail("Expected timer execution to receive a fresh task budget")
         match session.eval_script("iterations"):
@@ -85,6 +111,8 @@ describe "BrowserSession production security boundary":
                 fail("Expected the shared execution budget to preserve runtime state")
 
     it "rejects direct file navigation before reading the host filesystem":
+        # @req: REQ-WEB-BROWSER-005
+        step("Verify: rejects direct file navigation before reading the host filesystem")
         step("Navigate directly to a local file URL")
         var session = BrowserSession.new()
         val result = session.begin_network_navigation("file:///etc/passwd", "GET", "", "", "")
@@ -93,6 +121,8 @@ describe "BrowserSession production security boundary":
         expect(session.has_pending_requests()).to_equal(false)
 
     it "rejects request-line injection in the central subresource pump":
+        # @req: REQ-WEB-BROWSER-011
+        step("Verify: rejects request-line injection in the central subresource pump")
         step("Queue a subresource URL containing an injected request line")
         var session = BrowserSession.new()
         session.open_html(
@@ -111,6 +141,8 @@ describe "BrowserSession production security boundary":
         )
 
     it "rejects direct file open and file home navigation":
+        # @req: REQ-LIB-COMMON-WEB-001
+        step("Verify: rejects direct file open and file home navigation")
         step("Open and assign a local file URL through browser navigation APIs")
         var session = BrowserSession.new()
         expect(session.open_url("file:///etc/hosts").is_err()).to_equal(true)
@@ -119,6 +151,8 @@ describe "BrowserSession production security boundary":
         expect(session.current_url).to_equal("about:blank")
 
     it "rejects executable and unknown top-level navigation schemes":
+        # @req: REQ-WEB-BROWSER-017
+        step("Verify: rejects executable and unknown top-level navigation schemes")
         step("Navigate to executable and inline-data URL schemes")
         var session = BrowserSession.new()
         expect(session.begin_network_navigation("javascript:alert(1)", "GET", "", "", "").is_err()).to_equal(true)
@@ -127,6 +161,8 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
     it "keeps storage and cookies bound to the active document after a cross-origin location write":
+        # @req: REQ-WEB-BROWSER-012
+        step("Verify: keeps storage and cookies bound to the active document after a cross-origin location write")
         step("Write cross-origin location, storage, and cookie state from the active document")
         var session = BrowserSession.new()
         val opened = session.open_html(
@@ -159,6 +195,8 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
     it "rejects cross-origin history state URLs without changing the document principal":
+        # @req: REQ-WEB-BROWSER-013
+        step("Verify: rejects cross-origin history state URLs without changing the document principal")
         step("Push a cross-origin URL into same-document history")
         var session = BrowserSession.new()
         val opened = session.open_html(
@@ -172,12 +210,14 @@ describe "BrowserSession production security boundary":
         expect(attacked.is_ok()).to_be(true)
         expect(session.current_url).to_equal("https://bank.test/app")
         expect(session.document_url).to_equal("https://bank.test/app")
-        expect(session.history.len()).to_equal(1)
+        expect(session.history.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(session.warnings).to_contain(
             "cross-origin history URL blocked: https://evil.test/planted"
         )
 
     it "blocks mixed-content and unvalidated cross-origin executable resources":
+        # @req: REQ-WEB-BROWSER-005
+        step("Verify: blocks mixed-content and unvalidated cross-origin executable resources")
         step("Open an HTTPS page containing mixed and cross-origin executable resources")
         var session = BrowserSession.new()
         val opened = session.open_html(
@@ -193,6 +233,8 @@ describe "BrowserSession production security boundary":
         expect(warnings).to_contain("module load error: cross-origin:")
 
     it "allows registered HTTPS resources without host filesystem access":
+        # @req: REQ-WEB-BROWSER-011
+        step("Verify: allows registered HTTPS resources without host filesystem access")
         step("Register and navigate to an in-memory HTTPS resource")
         var session = BrowserSession.new()
         session.register_resource("https://example.test/page", "<html><body>safe</body></html>")
@@ -201,6 +243,8 @@ describe "BrowserSession production security boundary":
         expect(session.current_url).to_equal("https://example.test/page")
 
     it "escapes page-controlled title text before rebuilding render HTML":
+        # @req: REQ-LIB-COMMON-WEB-001
+        step("Verify: escapes page-controlled title text before rebuilding render HTML")
         step("Render a document after assigning markup-shaped title text")
         var session = BrowserSession.new()
         session.open_html(
@@ -214,6 +258,8 @@ describe "BrowserSession production security boundary":
         expect(rendered).to_contain("&lt;/title&gt;&lt;style&gt;body{{display:none}}&lt;/style&gt;")
 
     it "rejects a response whose URL differs from its inflight request":
+        # @req: REQ-WEB-BROWSER-017
+        step("Verify: rejects a response whose URL differs from its inflight request")
         step("Commit a network response from a URL different from its request")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation("https://example.test/page", "GET", "", "", "")
@@ -233,7 +279,7 @@ describe "BrowserSession production security boundary":
                     Ok(_): fail("Expected mismatched response URL to be rejected")
                     Err(e): expect(e).to_contain("response URL mismatch")
                 expect(session.current_url).to_equal("about:blank")
-                expect(session.cookies.count()).to_equal(0)
+                expect(session.cookies.count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
                 val retry = session.commit_network_response(
                     BrowserResponse.create(
                         request_id: request.id,
@@ -251,6 +297,8 @@ describe "BrowserSession production security boundary":
                 fail("Expected pending HTTPS document request")
 
     it "blocks cross-origin page fetches before they reach the host network":
+        # @req: REQ-WEB-BROWSER-012
+        step("Verify: blocks cross-origin page fetches before they reach the host network")
         step("Issue repeated cross-origin fetches from page script")
         var session = BrowserSession.new()
         session.open_html(
@@ -266,7 +314,7 @@ describe "BrowserSession production security boundary":
                 "fetch('https://evil.test/private')"
             )
             repeat = repeat + 1
-        expect(session.warnings.len()).to_equal(1)
+        expect(session.warnings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         match session.eval_script("outcome"):
             Ok(value):
                 match value:
@@ -278,6 +326,8 @@ describe "BrowserSession production security boundary":
                 fail("Expected blocked cross-origin fetch to reject: {e}")
 
     it "admits only credentialless direct-host CORS fetches":
+        # @req: REQ-WEB-BROWSER-013
+        step("Verify: admits only credentialless direct-host CORS fetches")
         step("Enable the audited direct-host CORS policy for an HTTPS page")
         var session = BrowserSession.new()
         session.direct_hosted_cors_fetch_policy = true
@@ -312,6 +362,8 @@ describe "BrowserSession production security boundary":
         )
 
     it "preserves native fetch credentials through the BrowserSession queue":
+        # @req: REQ-WEB-BROWSER-005
+        step("Verify: preserves native fetch credentials through the BrowserSession queue")
         step("Enable the broker boundary so every credential mode is observable")
         var session = BrowserSession.new()
         session.broker_network_policy = true
@@ -342,16 +394,18 @@ describe "BrowserSession production security boundary":
                 expect(request.credentials).to_equal("same-origin")
 
     it "bounds and deduplicates retained browser warnings":
+        # @req: REQ-WEB-BROWSER-011
+        step("Verify: bounds and deduplicates retained browser warnings")
         step("Append duplicate, excessive, and oversized browser warnings")
         var session = BrowserSession.new()
         session._append_warning("duplicate")
         session._append_warning("duplicate")
-        expect(session.warnings.len()).to_equal(1)
+        expect(session.warnings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         var index = 0
         while index < 256:
             session._append_warning("blocked warning {index}")
             index = index + 1
-        expect(session.warnings.len()).to_equal(128)
+        expect(session.warnings.len()).to_equal(128)  # oracle: 128 — named expected value from the requirement
 
         var oversized_text = ""
         index = 0
@@ -361,9 +415,11 @@ describe "BrowserSession production security boundary":
             index = index + 1
         var oversized = BrowserSession.new()
         oversized._append_warning(oversized_text)
-        expect(oversized.warnings[0].len()).to_equal(4096)
+        expect(oversized.warnings[0].len()).to_equal(4096)  # oracle: 4096 — named expected value from the requirement
 
     it "bounds active-load warnings before finalization":
+        # @req: REQ-LIB-COMMON-WEB-001
+        step("Verify: bounds active-load warnings before finalization")
         step("Fail enough active subresource loads to exceed warning limits")
         var html = "<html><body>"
         var index = 0
@@ -398,13 +454,15 @@ describe "BrowserSession production security boundary":
 
         match session.active_load:
             Some(load):
-                expect(load.warnings.len()).to_equal(128)
+                expect(load.warnings.len()).to_equal(128)  # oracle: 128 — named expected value from the requirement
                 for warning in load.warnings:
                     expect(warning.len()).to_be_less_than(4097)
             nil:
                 fail("Expected the final script request to keep loading active")
 
     it "still exports same-origin page fetches":
+        # @req: REQ-WEB-BROWSER-017
+        step("Verify: still exports same-origin page fetches")
         step("Issue a relative same-origin fetch from page script")
         var session = BrowserSession.new()
         session.open_html(
@@ -420,6 +478,8 @@ describe "BrowserSession production security boundary":
                 fail("Expected same-origin fetch request")
 
     it "enforces document CSP before style script and fetch dispatch":
+        # @req: REQ-WEB-BROWSER-012
+        step("Verify: enforces document CSP before style script and fetch dispatch")
         step("Load a document whose CSP blocks style, script, and fetch dispatch")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
@@ -454,6 +514,8 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-012
     it "intersects bounded header sandbox capabilities and ignores meta sandbox":
+        # @req: REQ-WEB-BROWSER-013
+        step("Verify: intersects bounded header sandbox capabilities and ignores meta sandbox")
         step("Parse intersecting header sandboxes alongside a meta sandbox")
         val bare = browser_csp_header_sandbox("sandbox")
         val allow_scripts = browser_csp_header_sandbox(
@@ -485,6 +547,8 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
     it "blocks scripts under intersected header sandbox policies":
+        # @req: REQ-WEB-BROWSER-005
+        step("Verify: blocks scripts under intersected header sandbox policies")
         step("Load script content under intersected header sandbox policies")
         var session = BrowserSession.new()
         expect(session.begin_network_navigation(
@@ -527,6 +591,8 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
     it "allows scripts without restoring sandboxed origin storage or navigation":
+        # @req: REQ-WEB-BROWSER-011
+        step("Verify: allows scripts without restoring sandboxed origin storage or navigation")
         step("Run allowed script inside an opaque-origin sandbox")
         var session = BrowserSession.new()
         expect(session.begin_network_navigation(
@@ -573,6 +639,8 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-012
     it "blocks inline DOM handlers when sandbox does not allow scripts":
+        # @req: REQ-LIB-COMMON-WEB-001
+        step("Verify: blocks inline DOM handlers when sandbox does not allow scripts")
         step("Dispatch an inline DOM handler in a script-blocked sandbox")
         var session = BrowserSession.new()
         expect(session.begin_network_navigation(
@@ -591,7 +659,7 @@ describe "BrowserSession production security boundary":
             _security_browser_route(session, "go"),
             "click", true, true
         ).unwrap()
-        expect(dispatch.actions.len()).to_equal(0)
+        expect(dispatch.actions.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(session.render_html_document().contains(
             "data-fired=\"yes\""
         )).to_be(false)
@@ -601,6 +669,8 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
     it "carries an opaque cookie-free initiator on sandboxed fetch":
+        # @req: REQ-WEB-BROWSER-017
+        step("Verify: carries an opaque cookie-free initiator on sandboxed fetch")
         step("Issue a fetch from an opaque-origin sandbox with ambient cookies")
         var session = BrowserSession.new()
         expect(session.open_html(
@@ -628,10 +698,12 @@ describe "BrowserSession production security boundary":
         expect(fetch.site_for_cookies_url).to_equal("")
         expect(fetch.credentials).to_equal("omit")
         expect(fetch.headers.lower().contains("cookie:")).to_be(false)
-        expect(fetch.script_cookie_writes.len()).to_equal(0)
+        expect(fetch.script_cookie_writes.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     # @req REQ-WEB-BROWSER-012
     it "ignores meta sandbox while retaining its source directives":
+        # @req: REQ-WEB-BROWSER-012
+        step("Verify: ignores meta sandbox while retaining its source directives")
         step("Parse a meta CSP containing sandbox and source directives")
         var session = BrowserSession.new()
         expect(session.open_html(
@@ -649,6 +721,8 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-012
     it "rechecks CSP before following style and script redirects":
+        # @req: REQ-WEB-BROWSER-013
+        step("Verify: rechecks CSP before following style and script redirects")
         step("Redirect admitted style and script requests to CSP-blocked URLs")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
@@ -724,6 +798,8 @@ describe "BrowserSession production security boundary":
         )
 
     it "enforces CSP host-source paths before script dispatch":
+        # @req: REQ-WEB-BROWSER-005
+        step("Verify: enforces CSP host-source paths before script dispatch")
         step("Dispatch scripts against matching and nonmatching CSP host paths")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
@@ -838,6 +914,8 @@ describe "BrowserSession production security boundary":
         )).to_be(false)
 
     it "upgrades HSTS hosts and subdomains until max-age expires":
+        # @req: REQ-WEB-BROWSER-011
+        step("Verify: upgrades HSTS hosts and subdomains until max-age expires")
         step("Record HSTS and navigate through covered hosts before and after expiry")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
@@ -913,6 +991,8 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017
     it "ignores signed HSTS max-age but accepts zero clearing":
+        # @req: REQ-LIB-COMMON-WEB-001
+        step("Verify: ignores signed HSTS max-age but accepts zero clearing")
         step("Apply signed, clearing, and malformed HSTS max-age directives")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
@@ -992,6 +1072,8 @@ describe "BrowserSession production security boundary":
                 fail("Expected HTTP request after HSTS clearing")
 
     it "restores only valid unexpired HSTS state across sessions":
+        # @req: REQ-WEB-BROWSER-017
+        step("Verify: restores only valid unexpired HSTS state across sessions")
         step("Restore persisted HSTS entries with mixed validity and expiry")
         var entries: [BrowserHstsSnapshotEntry] = []
         entries.push(BrowserHstsSnapshotEntry(
@@ -1039,11 +1121,11 @@ describe "BrowserSession production security boundary":
         val accepted = session.load_hsts_snapshot(
             BrowserHstsSnapshot.create(entries), 100000
         )
-        expect(accepted).to_equal(1)
+        expect(accepted).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val saved = session.hsts_snapshot(100000)
-        expect(saved.entries.len()).to_equal(1)
+        expect(saved.entries.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(saved.entries[0].host).to_equal("secure.test")
-        expect(saved.entries[0].expires_at_unix_ms).to_equal(101000)
+        expect(saved.entries[0].expires_at_unix_ms).to_equal(101000)  # oracle: 101000 — named expected value from the requirement
 
         val upgraded = session.begin_network_navigation(
             "http://sub.secure.test/next", "GET", "", "", ""
@@ -1067,6 +1149,8 @@ describe "BrowserSession production security boundary":
                 fail("Expected request after restored HSTS expiry")
 
     it "rejects JavaScript fetches after the document request budget is spent":
+        # @req: REQ-WEB-BROWSER-012
+        step("Verify: rejects JavaScript fetches after the document request budget is spent")
         step("Issue JavaScript fetches after exhausting the document request budget")
         var session = BrowserSession.new()
         session.open_html("https://safe.test/app", "<html><body>safe</body></html>")
@@ -1089,6 +1173,8 @@ describe "BrowserSession production security boundary":
                 fail("Expected request-budget rejection to settle: {e}")
 
     it "keeps HttpOnly and transport cookie state outside page-visible JS":
+        # @req: REQ-WEB-BROWSER-013
+        step("Verify: keeps HttpOnly and transport cookie state outside page-visible JS")
         step("Store transport and HttpOnly cookies, then inspect page-visible state")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
@@ -1144,6 +1230,8 @@ describe "BrowserSession production security boundary":
                 fail("Expected sanitized same-origin fetch")
 
     it "rejects cookie source controls and delegates serialized byte limits":
+        # @req: REQ-WEB-BROWSER-005
+        step("Verify: rejects cookie source controls and delegates serialized byte limits")
         step("Set cookies containing source controls and boundary-sized serialized values")
         var session = BrowserSession.new()
         session.open_html(
@@ -1162,6 +1250,8 @@ describe "BrowserSession production security boundary":
         )).to_equal("long=accepted")
 
     it "defaults cookie Path to the response URL directory":
+        # @req: REQ-WEB-BROWSER-011
+        step("Verify: defaults cookie Path to the response URL directory")
         step("Store a response cookie without an explicit Path")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
@@ -1193,6 +1283,8 @@ describe "BrowserSession production security boundary":
         )).to_equal("")
 
     it "rejects a fetch redirect that crosses the page origin":
+        # @req: REQ-LIB-COMMON-WEB-001
+        step("Verify: rejects a fetch redirect that crosses the page origin")
         step("Redirect a same-origin page fetch across origins")
         var session = BrowserSession.new()
         session.open_html(
@@ -1226,6 +1318,8 @@ describe "BrowserSession production security boundary":
                 fail("Expected redirected fetch to reject: {e}")
 
     it "bounds recursive microtask work in one browser flush":
+        # @req: REQ-WEB-BROWSER-017
+        step("Verify: bounds recursive microtask work in one browser flush")
         step("Run a recursively replenished microtask queue")
         var session = BrowserSession.new()
         session.open_html(
@@ -1241,6 +1335,8 @@ describe "BrowserSession production security boundary":
         expect(session.current_title).to_equal("8000")
 
     it "strips forbidden and CR-injected request headers":
+        # @req: REQ-WEB-BROWSER-012
+        step("Verify: strips forbidden and CR-injected request headers")
         step("Issue a fetch with forbidden and CR-injected request headers")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
@@ -1256,6 +1352,8 @@ describe "BrowserSession production security boundary":
                 fail("Expected sanitized navigation request")
 
     it "leaves hosted cookie attachment to the broker":
+        # @req: REQ-WEB-BROWSER-013
+        step("Verify: leaves hosted cookie attachment to the broker")
         step("Export a hosted request while page cookies are present")
         var session = BrowserSession.new()
         session.broker_network_policy = true
@@ -1281,6 +1379,8 @@ describe "BrowserSession production security boundary":
             nil: fail("Expected include request")
 
     it "retains admitted hosted script cookie setters in order":
+        # @req: REQ-WEB-BROWSER-005
+        step("Verify: retains admitted hosted script cookie setters in order")
         step("Run multiple admitted hosted script cookie assignments")
         var session = BrowserSession.new()
         session.broker_network_policy = true
@@ -1297,13 +1397,15 @@ describe "BrowserSession production security boundary":
             "document.cookie = 'hidden=no; HttpOnly; Path=/'"
         )
         val writes = session.take_pending_script_cookie_writes()
-        expect(writes.len()).to_equal(2)
+        expect(writes.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(writes[0]).to_equal("first=one; Path=/")
         expect(writes[1]).to_equal("second=two; Path=/")
-        expect(session.take_pending_script_cookie_writes().len()).to_equal(0)
+        expect(session.take_pending_script_cookie_writes().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(session.document_cookie().contains("hidden=no")).to_be(false)
 
     it "keeps hosted cookie setters ordered around fetch calls":
+        # @req: REQ-WEB-BROWSER-011
+        step("Verify: keeps hosted cookie setters ordered around fetch calls")
         step("Set hosted cookies before and after a scripted fetch")
         var session = BrowserSession.new()
         session.broker_network_policy = true
@@ -1330,6 +1432,8 @@ describe "BrowserSession production security boundary":
             nil: fail("Expected second fetch request")
 
     it "surfaces hosted script cookie setter overflow":
+        # @req: REQ-LIB-COMMON-WEB-001
+        step("Verify: surfaces hosted script cookie setter overflow")
         step("Exceed the hosted script cookie setter queue limit")
         var session = BrowserSession.new()
         session.broker_network_policy = true
@@ -1343,7 +1447,7 @@ describe "BrowserSession production security boundary":
             )
             i = i + 1
         val writes = session.take_pending_script_cookie_writes()
-        expect(writes.len()).to_equal(32)
+        expect(writes.len()).to_equal(32)  # oracle: 32 — named expected value from the requirement
         expect(writes[0]).to_equal("queued0=yes; Path=/")
         expect(writes[31]).to_equal("queued31=yes; Path=/")
         expect(session.document_cookie().contains("queued31=yes")).to_be(true)
@@ -1351,6 +1455,8 @@ describe "BrowserSession production security boundary":
         expect(session.script_cookie_write_overflow).to_be(true)
 
     it "prevents script from replacing an HttpOnly cookie":
+        # @req: REQ-WEB-BROWSER-017
+        step("Verify: prevents script from replacing an HttpOnly cookie")
         step("Attempt to replace an HttpOnly cookie from page script")
         var session = BrowserSession.new()
         session.open_html("https://safe.test/", "<html><body>safe</body></html>")

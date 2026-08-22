@@ -1,7 +1,31 @@
+"""
+## Purpose and audience
+Purpose: Verify MIR Option variant order.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-COMPILER-MIR-001
+doc/01_research/local/REQ-COMPILER-MIR-001.md
+doc/03_plan/sys_test/REQ-COMPILER-MIR-001.md
+doc/04_architecture/REQ-COMPILER-MIR-001.md
+doc/05_design/REQ-COMPILER-MIR-001.md
+"""
+# @req: REQ-COMPILER-MIR-001
+
 extern fn rt_file_read_text(path: text) -> text
+
+use std.spec.step
 
 describe "MIR Option variant order":
     it "keeps normal and emergency registrations canonical":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: keeps normal and emergency registrations canonical")
         val module_source = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
         val call_source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
         val canonical = "self.enum_variant_index[\"Option\"] = [\"Some\", \"None\"]"
@@ -11,6 +35,8 @@ describe "MIR Option variant order":
         expect(call_source.contains("self.enum_variant_index[\"Option\"] = [\"None\", \"Some\"]")).to_equal(false)
 
     it "lowers typed Option try before Result decoding":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: lowers typed Option try before Result decoding")
         val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
         val option_pos = source.index_of("case HirTypeKind.Optional(inner):")
         val lower_pos = source.index_of("val res_local = self.lower_expr(base)")
@@ -24,12 +50,16 @@ describe "MIR Option variant order":
         expect(source.contains("native Option try operator requires the tagged Option ABI")).to_equal(false)
 
     it "unwraps the canonical Option handle before exists-check payload binding":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: unwraps the canonical Option handle before exists-check payload binding")
         val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
 
         expect(source).to_contain("var some_value = self.option_payload_or_self(base_local)")
         expect(source).to_contain("and not self.option_value_locals.contains(base_local.id)")
 
     it "unboxes the current function before lowering an explicit return":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: unboxes the current function before lowering an explicit return")
         val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
         val match_pos = source.index_of("match cur_builder.current_function:")
         val some_pos = source.index_of("case Some(active_fn):")
@@ -44,6 +74,8 @@ describe "MIR Option variant order":
         expect(source.contains("if val active_fn = self.builder.current_function:")).to_equal(false)
 
     it "bitcasts a float Option payload before rt_enum_new instead of numerically truncating it":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: bitcasts a float Option payload before rt_enum_new instead of numerically truncating it")
         # ROOT-FIX guard (hosted_native_option_try_unwrap_payload_leak_2026-07-19,
         # f64/f32 encode half): `ensure_option_handle` passed a float-typed
         # payload straight into rt_enum_new's i64-declared parameter, so the
@@ -61,6 +93,8 @@ describe "MIR Option variant order":
         expect(source).to_contain("val promoted = b.emit_cast(mir_operand_copy(payload_local), MirType.f64())")
 
     it "registers struct-name provenance on an exists-check result for later field access":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: registers struct-name provenance on an exists-check result for later field access")
         # ROOT-FIX guard (hosted_native_option_try_unwrap_payload_leak_2026-07-19,
         # struct-payload half): the ExistsCheck (`.?`) merged result local had
         # no struct_value_syms/HIR-type registration, so a later `v.x`/`v.y`
@@ -79,6 +113,8 @@ describe "MIR Option variant order":
         expect(source).to_contain("self.struct_value_syms[result_local.id] = result_struct_name")
 
     it "decodes float exists-check bindings only after the nil-sentinel test":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: decodes float exists-check bindings only after the nil-sentinel test")
         val dispatch = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
         val statements = rt_file_read_text("src/compiler/50.mir/mir_lowering_stmts.spl") ?? ""
         val calls = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
@@ -94,6 +130,8 @@ describe "MIR Option variant order":
         expect(calls).to_contain("val wide = b.emit_bitcast(mir_operand_copy(raw), MirType.f64())")
 
     it "registers struct-name provenance on a null-coalesce (??) result too":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: registers struct-name provenance on a null-coalesce (??) result too")
         # `.?`/ExistsCheck and `??`/NullCoalesce share the exact same
         # option_payload_or_self/decode_runtime_value/enum_payload_value
         # helpers (this file, adjacent case arms) and were PROVEN to share
@@ -113,6 +151,8 @@ describe "MIR Option variant order":
         expect(source).to_contain("val nc_right_fallback_sym = self.struct_value_syms.get(right_local.id)")
 
     it "preserves unresolved method Option return provenance":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: preserves unresolved method Option return provenance")
         val fixture = rt_file_read_text("test/fixtures/compiler/native_option_try_unresolved_method_loud.spl") ?? ""
         val method_source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
         val dispatch_source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
@@ -147,6 +187,8 @@ describe "MIR Option variant order":
         expect(call_source).to_contain("me receiver_declared_type(receiver: HirExpr) -> HirType?:")
 
     it "pins the uniform tagged ABI migration and exact behavioral gate":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: pins the uniform tagged ABI migration and exact behavioral gate")
         val fixture = rt_file_read_text("test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl") ?? ""
         val harness = rt_file_read_text("scripts/check/check-native-seed-parity.shs") ?? ""
         val lowering = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
