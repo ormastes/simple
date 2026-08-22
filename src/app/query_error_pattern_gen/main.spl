@@ -1,0 +1,84 @@
+use std.cli.cli_util.{get_cli_args}
+use app.io.mod.{cwd, file_exists, file_read_text, file_atomic_write}
+use app.query_error_pattern_gen.patterns.{query_error_pattern_specs}
+use app.query_error_pattern_gen.generator.{query_error_pattern_build_default}
+use app.query_error_pattern_gen.render.{query_error_pattern_render}
+
+fn _query_error_pattern_gen_help():
+    print "Usage: simple run src/app/query_error_pattern_gen/main.spl [check|generate|stats] [--root PATH] [--output PATH]"
+
+fn run_query_error_pattern_gen(args: [text]) -> i64:
+    var mode = "check"
+    var root = cwd()
+    var output = ""
+    var positional_seen = false
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        if arg == "--help" or arg == "-h":
+            if args.len() != 1:
+                print "ERROR query-error-pattern-gen: --help must be used alone"
+                return 2
+            _query_error_pattern_gen_help()
+            return 0
+        elif arg == "--root" or arg == "--output":
+            if index + 1 >= args.len():
+                print "ERROR query-error-pattern-gen: missing value for {arg}"
+                return 2
+            if arg == "--root":
+                root = args[index + 1]
+            else:
+                output = args[index + 1]
+            index = index + 1
+        elif arg.starts_with("--"):
+            print "ERROR query-error-pattern-gen: unknown option {arg}"
+            return 2
+        elif not positional_seen:
+            mode = arg
+            positional_seen = true
+        else:
+            print "ERROR query-error-pattern-gen: unexpected argument {arg}"
+            return 2
+        index = index + 1
+
+    if mode != "check" and mode != "generate" and mode != "stats":
+        print "ERROR query-error-pattern-gen: unknown mode {mode}"
+        return 2
+    if output == "":
+        output = root + "/src/app/cli/query_error_pattern_matcher.spl"
+
+    match query_error_pattern_build_default():
+        case Err(message):
+            print "ERROR query-error-pattern-gen: {message}"
+            return 2
+        case Ok(model):
+            val specs = query_error_pattern_specs()
+            if mode == "stats":
+                print "PASS query-error-pattern-gen: patterns={specs.len()} states={model.fail.len()} edges={model.edge_byte.len()} outputs={model.output_lo.len()}"
+                return 0
+
+            val rendered = query_error_pattern_render(model, specs.len())
+            if mode == "check":
+                if not file_exists(output):
+                    print "STALE query-error-pattern-gen: missing {output}"
+                    return 1
+                val existing = file_read_text(output)
+                if existing != rendered:
+                    print "STALE query-error-pattern-gen: generated output differs from {output}"
+                    return 1
+                print "PASS query-error-pattern-gen: {output} is current"
+                return 0
+
+            if file_exists(output) and file_read_text(output) == rendered:
+                print "PASS query-error-pattern-gen: {output} unchanged"
+                return 0
+            if not file_atomic_write(output, rendered):
+                print "ERROR query-error-pattern-gen: atomic write failed for {output}"
+                return 2
+            print "PASS query-error-pattern-gen: wrote {output}"
+            return 0
+
+fn main() -> i64:
+    run_query_error_pattern_gen(get_cli_args())
+
+export run_query_error_pattern_gen
