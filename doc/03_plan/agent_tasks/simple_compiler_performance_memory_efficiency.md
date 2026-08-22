@@ -47,6 +47,18 @@
 - Verification status: intentionally not executed under the user's explicit
   no-verify instruction; static diff and parallel semantic review only.
 
+## Bare-import rewriter assembly tranche
+
+- Replace the changed-file prefix concatenation loop with `new_lines.join("\n")`.
+- Preserve split-derived blank lines, trailing-newline shape, matched-line output,
+  atomic persistence and `-1/0/1` status behavior.
+- Remove the now-unused text import and pin the shared-join/absence-of-prefix-loop
+  contract in the existing atomic-rewriter spec.
+- Performance acceptance: changed-file reconstruction copies `O(S)` output bytes,
+  not `O(S*L)` cumulative prefixes; retained line storage remains unchanged.
+- Verification status: intentionally not executed under the user's explicit
+  no-verify instruction; static diff and parallel review only.
+
 ## ANSI-free query diagnostic follow-up
 
 - Merge owner: compiler performance/memory lane.
