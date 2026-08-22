@@ -4,7 +4,8 @@ use app.cli.query_diagnostics.{
     _split_structured_error, _extract_error_code, _strip_ansi,
     _clean_check_output, _should_run_lint_after_clean_output,
     _collect_check_output_diagnostics_json_clean,
-    _count_check_output_diagnostics_clean
+    _count_check_output_diagnostics_clean,
+    _extract_query_check_diagnostics
 }
 use app.cli.query_error_codes.{query_extract_error_code}
 use app.cli.query_rich_common.{
@@ -32,6 +33,33 @@ describe "query diagnostics helpers":
             "query_emit_mcp_diagnostics_wrapper")
         expect(check_source).not.to_contain("val diags_array")
         expect(diagnostics_source).not.to_contain("val diags_array")
+
+    it "extracts ordered duplicate diagnostic objects with one array byte scan":
+        val diagnostic =
+            "{\"severity\":1,\"message\":\"café } [ ] { \\\"quoted\\\"\"," +
+            "\"meta\":{\"nested\":true}}"
+        val wrapper =
+            "{\"content\":[],\"structuredContent\":{\"diagnostics\":[" +
+            diagnostic + "," + diagnostic + "],\"count\":2}}"
+        val extracted = _extract_query_check_diagnostics(wrapper)
+        expect(extracted.len()).to_equal(2)
+        expect(extracted[0]).to_equal(diagnostic)
+        expect(extracted[1]).to_equal(diagnostic)
+        expect(_extract_query_check_diagnostics(
+            "{\"diagnostics\":[]}").len()).to_equal(0)
+        expect(_extract_query_check_diagnostics(
+            "{\"diagnostics\":[" + diagnostic).len()).to_equal(0)
+        expect(_extract_query_check_diagnostics(
+            "{\"diagnostics\": [" + diagnostic + "]}").len()).to_equal(0)
+        val source = rt_file_read_text("src/app/cli/query_diagnostics.spl") ?? ""
+        expect(source).to_contain("_find_query_diagnostics_key(check_json, key)")
+        expect(source).to_contain("val ch = check_json.byte_at(i)")
+        expect(source).not.to_contain("val inner = check_json.substring")
+        expect(source).not.to_contain("substring(i, i + 1)")
+        expect(source).not.to_contain("result = result.push")
+        expect(_extract_query_check_diagnostics(
+            "{\"préface\":\"日本語\",\"diagnostics\":[" +
+            diagnostic + "]}")[0]).to_equal(diagnostic)
 
     it "returns plain output unchanged and preserves legacy ANSI stripping":
         val plain = "error: café\nwarning: plain"

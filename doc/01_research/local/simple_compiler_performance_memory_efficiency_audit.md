@@ -1910,6 +1910,18 @@ The text workspace count path checks the parser's exact line-admission predicate
 without allocating JSON objects solely to discard them. Raw text replay remains
 the original stdout followed by stderr.
 
+Workspace JSON extraction also formerly scanned the diagnostic array twice,
+allocated a one-byte substring per scanner iteration, copied and trimmed the
+entire array interior, and rebuilt the result array through assignment. The
+active extractor now scans the original wrapper once with byte-indexed string,
+escape, array-depth and object-depth state, appending only completed object
+slices. Its exact-key search also compares bytes directly, avoiding candidate
+substring allocation and mixed offsets when Unicode precedes the key. Missing
+outer closure still discards partial results; object ordering,
+duplicates, nested objects, quoted braces/brackets, exact compact key matching,
+and Unicode bytes remain unchanged. Compatibility finder/split helpers use the
+same byte comparisons and locally owned append behavior.
+
 ### Workspace diagnostics repeated-startup audit
 
 The active workspace command loops over discovered files and launches one

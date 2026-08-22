@@ -113,6 +113,18 @@
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed workspace diagnostic JSON scanner tranche
+
+- Replace two per-byte-substring scans and the full interior copy with one
+  byte-indexed scan over the original wrapper.
+- Track string escapes, nested arrays and nested objects without changing the
+  first exact compact-key or malformed-input contract.
+- Append exact object slices locally, preserving order and duplicates without
+  result-array reassignment.
+- Add mirrored nested/string/escape/Unicode, empty, unterminated, whitespace-key,
+  duplicate-order, and source-shape contracts.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Authority
 
 Merge owner and final highest-capability reviewer: `/root`. Generated-manual review owner: `/root`. Sidecars may implement bounded disjoint lanes but cannot change frozen interfaces, accept exclusions, or mark done.
