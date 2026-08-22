@@ -1616,3 +1616,6 @@ The repository CLI now reads each validated source through the error-aware lint 
 ## 2026-08-22 implementation follow-up: critical policy session snapshot
 
 `check_dynamic_capability_acquire_spl` formerly loaded and parsed `config/critical_mode.sdn` once per source file, including the common disabled case that emits no finding. The command-owned `Linter` now lazily resolves only the effective dynamic-acquire mode on first use and reuses that scalar for the batch. This removes file-count-multiplied filesystem probes, source allocation, line splitting, and configuration-object allocation. The cache is scoped to one lint command, so it cannot become stale across long-lived daemon requests.
+## 2026-08-22 implementation follow-up: bounded manifest discovery cache
+
+Per-file lint previously walked up to ten ancestors to discover `simple.sdn`, then `lint_source` repeated discovery while resolving file attributes. The command-owned `Linter` now caches directory-to-manifest outcomes, including misses, checks cached ancestors during traversal, and caps retained directory entries at 4096. A prepared-path marker tells `lint_source` that manifest resolution is already complete, so it only clones base policy and applies file attributes. This removes the second walk entirely and shares common-ancestor results across sibling directories while bounding batch memory.
