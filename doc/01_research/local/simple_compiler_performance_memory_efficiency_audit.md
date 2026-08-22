@@ -2458,3 +2458,27 @@ Ancestor path compression was reviewed but rejected from this tranche: without
 cached manifest-distance metadata, two valid cache hops can bypass the original
 ten-directory search limit. A future implementation must retain that distance
 and enforce the remaining budget at every cache hit.
+
+### Shared raw-SFFI lexical snapshot
+
+The production lint path already owns one canonical `content.split("\n")`
+array, but SFFI009 and SFFI010 each called `iter_code_lines(source)`. Raw-SFFI
+analysis therefore added two more full splits, two triple-quote scans, two
+sequential `CodeLine` allocation cycles, and duplicate trim storage.
+
+One request-local reference-backed snapshot now owns the identical
+docstring-filtered view. Call findings are produced and appended before the
+declaration kernel runs, preserving exact category order without retaining both
+finding arrays simultaneously. Compatibility string APIs build the same
+snapshot and run only their requested kernel. Snapshot helpers accept the class
+reference rather than copying `[CodeLine]` values. The pass also reuses stored
+trimmed text for extern-name extraction and computes body indentation once per
+nonblank in-body line.
+
+This removes one of two raw-SFFI source splits, one complete quote walk, one
+`CodeLine` allocation cycle, and duplicate trim/indent work from the normal
+lint path without depending on array-argument elision. Peak snapshot storage
+remains one `CodeLine` view. The remaining dominant kernel is body-lines times raw extern
+names with up to seven textual probes and temporary needle construction; a
+tokenized call-name set is the next bounded design. No timing, allocation, or
+RSS measurement is claimed under the no-verify instruction.

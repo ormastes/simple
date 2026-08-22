@@ -932,3 +932,12 @@ through the existing bounded `linter_find_project_sdn` path. Direct-library
 callers omit the argument and retain cwd discovery. Do not path-compress
 ancestors without recording manifest distance: a descendant cache hop must not
 extend the fixed ten-directory search horizon.
+
+### Raw-SFFI combined analysis
+
+`raw_sffi_code_snapshot` performs the unchanged path exclusion and owns one
+`CodeLine` array in a reference-backed request object. Call/declaration helpers
+receive that class reference, not the array value. The production linter runs
+the call kernel, appends its findings, then runs the declaration kernel so
+diagnostic arrays do not coexist at peak. Compatibility APIs build a snapshot
+and run only their requested kernel, avoiding accidental extra analysis.
