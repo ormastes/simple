@@ -272,3 +272,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Clone cached policy before file/CLI overrides to prevent cross-file mutation.
 - Pin registry construction and cache ownership with source contracts.
 - Follow-up: cache manifest discovery and critical policy, then share one source read with SIMD/fix paths.
+## Completed tooling tranche: one lint/SIMD source read
+
+- Add a source-owned command entrypoint while retaining file-reading compatibility wrappers.
+- Read each repository source once through the tagged lint reader.
+- Share the exact payload with ordinary lint and optional SIMD analysis.
+- Preserve valid-empty-file versus read-error behavior.
+- Keep fix application on a fresh validated disk read before mutation.
+- Follow-up: cache directory-to-manifest and critical-mode policy resolution.
