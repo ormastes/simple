@@ -38,6 +38,10 @@ Configuration-name membership must not allocate the complete registry for every 
 attribute entry. `all_lint_names` remains the enumeration surface; the hot parser path
 uses allocation-free `lint_name_is_known` dispatch. A parity fixture prevents drift.
 
+Effective default levels are immutable configuration state. Construct them once per root
+configuration/profile change and share them with child configs; never rebuild profile
+dictionaries from `get_level` per diagnostic. Overrides remain a separate small map.
+
 During compatibility migration, `LintDiag.evidence_tier` is the single severity
 input shared by CLI and query/LSP projections. `SourcePattern`,
 `ParsedStructural`, and `Incomplete` performance diagnostics are warning-capped;
