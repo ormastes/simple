@@ -16,6 +16,14 @@ fn issue_device(grant: DeviceRangeGrantV1,
         19, 7, 501, 502, 601, 602)
     authority.grant(grant, mask, 10, 20)
 
+fn production_executor(acquisition: RtHalDeviceAcquisitionV1,
+                       grant: DeviceRangeGrantV1) -> DeviceSandboxExecutorV1:
+    DeviceSandboxExecutorV1(pin: acquisition.pin, proof: acquisition.proof,
+        grant: grant, current_epoch: 15, next_sequence: 0,
+        read_once_consumed_mask: 0, irq_masked_bits: 0,
+        irq_pending_bits: 0, dma_mapped: false,
+        dma_mapped_address: 0, dma_mapped_length: 0, sealed: true)
+
 describe "mission-critical rt(hal) device capability API":
     it "issues generation-bound stable handles from one explicit authority":
         var authority = rt_hal_device_authority_owner_v1(
@@ -127,6 +135,91 @@ describe "mission-critical rt(hal) device capability API":
         expect(compared.commit_allowed).to_be(true)
         expect(compared.physical_effect).to_be(false)
         expect(compared.allocation_count).to_equal(0)
+
+    it "executes normal mode directly without constructing a compare owner":
+        val grant = full_device_grant(true)
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
+        val acquisition = issue_device(grant, mask)
+        val region = rt_hal_caller_owned_region_v1(13, 0, 4, 4, 707, 708)
+        var access = rt_hal_device_access_owner_v1(
+            acquisition, EnvOpcodeV1.MmioRead, 87)
+        val request = access.rt_hal_mmio_read_v1(4096, 4, region,
+            rt_hal_read_once_token_v1(acquisition.handle, 5))
+        var executor = production_executor(acquisition, grant)
+        var device: [u8] = [0u8; 4096]
+        device[0] = 1u8
+        device[1] = 3u8
+        device[2] = 5u8
+        device[3] = 7u8
+        var result: [u8] = [0u8; 4]
+        var direct = rt_hal_device_preferred_execution_owner_v1(executor)
+
+        val dispatched = direct.execute(
+            request, [], result, device, 903, 904)
+        expect(dispatched.status).to_equal(
+            RtHalDeviceDispatchStatusV1.Executed)
+        expect(dispatched.execution.applied).to_be(true)
+        expect(dispatched.execution.allocation_count_after_seal).to_equal(0)
+        expect(result).to_equal([1u8, 3u8, 5u8, 7u8])
+
+    it "executes and compares all three provider domains before commit":
+        val grant = full_device_grant(true)
+        val mask = env_opcode_mask_v1(EnvOpcodeV1.MmioRead)
+        val acquisition = issue_device(grant, mask)
+        val region = rt_hal_caller_owned_region_v1(14, 0, 4, 4, 709, 710)
+        var access = rt_hal_device_access_owner_v1(
+            acquisition, EnvOpcodeV1.MmioRead, 88)
+        val request = access.rt_hal_mmio_read_v1(4096, 4, region,
+            rt_hal_read_once_token_v1(acquisition.handle, 6))
+        var owner = rt_hal_device_comparison_owner_v1(
+            request, HalRunMode.AlphaCompare, HalProviderKind.PureSimple)
+        var pure_executor = production_executor(acquisition, grant)
+        var c_executor = production_executor(acquisition, grant)
+        var rust_executor = production_executor(acquisition, grant)
+        var pure_device: [u8] = [0u8; 4096]
+        var c_device: [u8] = [0u8; 4096]
+        var rust_device: [u8] = [0u8; 4096]
+        pure_device[0] = 11u8
+        c_device[0] = 11u8
+        rust_device[0] = 11u8
+        var pure_result: [u8] = [0u8; 4]
+        var c_result: [u8] = [0u8; 4]
+        var rust_result: [u8] = [0u8; 4]
+        val empty_payload = rt_hal_device_request_captured_payload_v1(
+            request, env_execution_rejected_v1(request.instruction.environment,
+                EnvInstructionStatusV1.Diverged).observation, 0, 0)
+
+        val pure = owner.execute_provider(HalProviderKind.PureSimple,
+            pure_executor, [], pure_result, pure_device,
+            empty_payload, [], 905, 906)
+        val c = owner.execute_provider(HalProviderKind.C,
+            c_executor, [], c_result, c_device,
+            pure.payload, pure_result, 905, 906)
+        val rust = owner.execute_provider(HalProviderKind.Rust,
+            rust_executor, [], rust_result, rust_device,
+            pure.payload, pure_result, 905, 906)
+        val compared = owner.receipt()
+
+        expect(pure.status).to_equal(RtHalDeviceDispatchStatusV1.Compared)
+        expect(c.status).to_equal(RtHalDeviceDispatchStatusV1.Compared)
+        expect(rust.status).to_equal(RtHalDeviceDispatchStatusV1.Compared)
+        expect(compared.status).to_equal(
+            HalDeviceCompareOwnerStatusV1.CommitReady)
+        expect(compared.commit_allowed).to_be(true)
+        expect(pure.execution.allocation_count_after_seal).to_equal(0)
+        expect(c.execution.allocation_count_after_seal).to_equal(0)
+        expect(rust.execution.allocation_count_after_seal).to_equal(0)
+
+        val duplicate = owner.execute_provider(HalProviderKind.Rust,
+            rust_executor, [], rust_result, rust_device,
+            pure.payload, pure_result, 905, 906)
+        val rejected = owner.receipt()
+        expect(duplicate.status).to_equal(
+            RtHalDeviceDispatchStatusV1.InvalidProviderOrder)
+        expect(duplicate.execution.applied).to_be(false)
+        expect(rejected.status).to_equal(
+            HalDeviceCompareOwnerStatusV1.InvalidSubmission)
+        expect(rejected.commit_allowed).to_be(false)
 
     it "replay remains copy-only with no physical effect":
         val grant = full_device_grant(true)

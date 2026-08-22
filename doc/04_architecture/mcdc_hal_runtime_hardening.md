@@ -124,3 +124,13 @@ independent read-once cursor, publishes once, and cannot receive a physical
 device handle. Alpha and beta always collect the exact Pure/C/Rust set; normal
 collects only the configured preferred slot. Commit policy is applied only
 after deterministic parent validation, with no payload copy or hot allocation.
+
+`RtHalDevicePreferredExecutionOwnerV1` is the production normal-mode route. It
+owns the mutable `DeviceSandboxExecutorV1` directly, so value copying cannot
+discard sequence, token, IRQ, or DMA lifecycle state, and it never constructs
+a comparison owner. `RtHalDeviceComparisonOwnerV1` is the alpha/beta route. It
+requires the preferred provider first, executes each fixed provider slot once,
+and submits the executor-produced observation to `HalDeviceCompareOwnerV1`.
+Duplicate/out-of-order publication or an executor whose sealed capability does
+not match the request fails before execution. Provider model/result buffers are
+scoped caller-owned loans and are never retained.

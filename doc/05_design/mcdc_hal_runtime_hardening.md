@@ -209,6 +209,16 @@ predicate, `producible=false`, fresh observation evidence, and 8..256 printable,
 nonblank reason bytes plus owner/review/expiry proof. It is reported as excluded,
 never executed or counted as covered.
 
+The additive safe device API routes planned requests through two production
+owners. Normal mode uses `RtHalDevicePreferredExecutionOwnerV1`, retaining the
+executor as canonical mutable state and avoiding comparison dispatch entirely.
+Alpha/beta use `RtHalDeviceComparisonOwnerV1`: the parent executes the preferred
+slot first, then Pure/C/Rust slots exactly once against independent caller-owned
+model/result arrays. The first authenticated payload is the recorded reference;
+later payloads are deterministically replay-compared before the parent may
+commit. A mismatched executor, duplicate provider, provider reordering, rejected
+execution, or payload difference seals the route and fails closed.
+
 The applied receipt carries a second two-lane digest over the pinned authority
 and device identity, proof generation/lifetime/opcode mask, full grant policy,
 device instruction scalars, and canonical environment observation. Replay

@@ -58,3 +58,23 @@ final parity run measured 44.084 ns/replay and 1,792 KiB peak RSS across
 10,000,000 iterations.
 The Simple optimizer remains unavailable for the same inadmissible compiler
 reason; no Rust-seed substitution or full build was used.
+
+## Production safe-API routing follow-up
+
+The safe IRQ/MMIO/DMA API no longer ends at a fabricated `Planned` receipt.
+Normal mode now invokes `DeviceSandboxExecutorV1` through a mutable preferred
+owner and does not construct or dispatch through `HalDeviceCompareOwnerV1`.
+Alpha/beta invoke three caller-supplied sandbox executors and submit their real
+observations through the fixed comparison owner. Executor/request identity,
+preferred-first ordering, one publication per provider, execution success, and
+exact payload equality all fail closed before commit. No executor, device array,
+argument array, result array, or recorded bytes are retained.
+
+Complexity remains O(1) for identity/order/slot policy and O(n) only for the
+device operation's required bounded copy plus exact comparison. The route adds
+no growing container, payload copy, process spawn, or allocation. The existing
+same-semantics comparison baseline remains 55.294 ns/provider and 1,536 KiB peak
+RSS with zero contract allocations. A source-current Pure Simple after-row and
+optimizer run could not be produced: the deployed runtime failed its bounded
+identity probe, and the Rust seed was not substituted. This is blocker evidence,
+not a new performance-pass claim.

@@ -33,4 +33,189 @@ fn rt_hal_device_request_captured_payload_v1(
         request.handle.identity_hi, request.handle.identity_lo,
         region, observation)
 
+enum RtHalDeviceDispatchStatusV1:
+    Executed
+    Compared
+    InvalidRequest
+    InvalidExecutor
+    InvalidProviderOrder
+    ExecutionRejected
+
+struct RtHalDeviceDispatchReceiptV1:
+    status: RtHalDeviceDispatchStatusV1
+    execution: DeviceExecutionReceiptV1
+    payload: HalCapturedDevicePayloadV1
+    comparison_status: HalPayloadReplayStatusV1
+
+fn _rt_hal_device_executor_matches_request_v1(
+        request: RtHalDeviceRequestV1,
+        executor: DeviceSandboxExecutorV1) -> bool:
+    request.status == RtHalDeviceStatusV1.Planned
+        and request.extraction.accepted
+        and rt_hal_device_handle_v1_well_formed(request.handle)
+        and executor.sealed
+        and executor.pin.capability_id == request.handle.capability_id
+        and executor.proof.capability_id == request.handle.capability_id
+        and executor.proof.generation == request.handle.generation
+        and executor.proof.grant_digest_hi == request.handle.grant_digest_hi
+        and executor.proof.grant_digest_lo == request.handle.grant_digest_lo
+        and executor.proof.authority_digest_hi
+            == request.handle.authority_digest_hi
+        and executor.proof.authority_digest_lo
+            == request.handle.authority_digest_lo
+        and executor.proof.device_identity_hi
+            == request.handle.device_identity_hi
+        and executor.proof.device_identity_lo
+            == request.handle.device_identity_lo
+
+fn _rt_hal_device_dispatch_receipt_v1(
+        status: RtHalDeviceDispatchStatusV1,
+        execution: DeviceExecutionReceiptV1,
+        request: RtHalDeviceRequestV1,
+        region_digest_hi: i64, region_digest_lo: i64,
+        comparison_status: HalPayloadReplayStatusV1)
+        -> RtHalDeviceDispatchReceiptV1:
+    val payload = rt_hal_device_request_captured_payload_v1(
+        request, execution.observation, region_digest_hi, region_digest_lo)
+    RtHalDeviceDispatchReceiptV1(
+        status, execution, payload, comparison_status)
+
+fn _rt_hal_device_rejected_execution_v1(
+        request: RtHalDeviceRequestV1,
+        status: EnvInstructionStatusV1) -> DeviceExecutionReceiptV1:
+    val rejected = env_execution_rejected_v1(
+        request.instruction.environment, status)
+    DeviceExecutionReceiptV1(
+        rejected.observation, 0, 0, false, false, 0)
+
+# Normal mode deliberately bypasses HalDeviceCompareOwnerV1. The executor is a
+# field of the mutable owner so sequence/token/DMA state cannot be discarded by
+# Simple's value semantics. Validation is O(1), and execute performs only the
+# operation's required bounded copy into caller-owned storage.
+class RtHalDevicePreferredExecutionOwnerV1:
+    executor: DeviceSandboxExecutorV1
+    sealed: bool
+
+    me execute(
+            request: RtHalDeviceRequestV1,
+            argument_bytes: [u8], result_bytes: [u8], device_bytes: [u8],
+            region_digest_hi: i64, region_digest_lo: i64)
+            -> RtHalDeviceDispatchReceiptV1:
+        if not self.sealed
+                or not _rt_hal_device_executor_matches_request_v1(
+                    request, self.executor):
+            self.sealed = false
+            val rejected = _rt_hal_device_rejected_execution_v1(
+                request, EnvInstructionStatusV1.UnsupportedCapability)
+            return _rt_hal_device_dispatch_receipt_v1(
+                RtHalDeviceDispatchStatusV1.InvalidExecutor, rejected, request,
+                region_digest_hi, region_digest_lo,
+                HalPayloadReplayStatusV1.InvalidPayload)
+        val executed = self.executor.execute(
+            request.instruction, argument_bytes, result_bytes, device_bytes)
+        val status = if executed.applied:
+            RtHalDeviceDispatchStatusV1.Executed
+        else:
+            RtHalDeviceDispatchStatusV1.ExecutionRejected
+        _rt_hal_device_dispatch_receipt_v1(status, executed, request,
+            region_digest_hi, region_digest_lo,
+            HalPayloadReplayStatusV1.InvalidPayload)
+
+fn rt_hal_device_preferred_execution_owner_v1(
+        executor: DeviceSandboxExecutorV1)
+        -> RtHalDevicePreferredExecutionOwnerV1:
+    RtHalDevicePreferredExecutionOwnerV1(executor, executor.sealed)
+
+# Comparison state is parent-owned. Provider executors and byte regions are
+# scoped loans supplied per call; neither is retained. The preferred provider
+# must publish first and becomes the immutable recorded reference supplied to
+# subsequent provider calls by the parent.
+class RtHalDeviceComparisonOwnerV1:
+    request: RtHalDeviceRequestV1
+    preferred_provider: HalProviderKind
+    comparison: HalDeviceCompareOwnerV1
+    sealed: bool
+
+    me execute_provider(
+            provider: HalProviderKind,
+            executor: DeviceSandboxExecutorV1,
+            argument_bytes: [u8], result_bytes: [u8], device_bytes: [u8],
+            recorded: HalCapturedDevicePayloadV1, recorded_bytes: [u8],
+            region_digest_hi: i64, region_digest_lo: i64)
+            -> RtHalDeviceDispatchReceiptV1:
+        val provider_bit = 1 << hal_provider_kind_to_i64(provider)
+        val preferred_bit = 1 << hal_provider_kind_to_i64(
+            self.preferred_provider)
+        if not self.sealed
+                or not _rt_hal_device_executor_matches_request_v1(
+                    self.request, executor):
+            self.sealed = false
+            val rejected = _rt_hal_device_rejected_execution_v1(
+                self.request, EnvInstructionStatusV1.UnsupportedCapability)
+            return _rt_hal_device_dispatch_receipt_v1(
+                RtHalDeviceDispatchStatusV1.InvalidExecutor, rejected,
+                self.request, region_digest_hi, region_digest_lo,
+                HalPayloadReplayStatusV1.InvalidPayload)
+        if (self.comparison.received_provider_mask & preferred_bit) == 0
+                and provider_bit != preferred_bit:
+            self.sealed = false
+            val rejected = _rt_hal_device_rejected_execution_v1(
+                self.request, EnvInstructionStatusV1.Diverged)
+            return _rt_hal_device_dispatch_receipt_v1(
+                RtHalDeviceDispatchStatusV1.InvalidProviderOrder, rejected,
+                self.request, region_digest_hi, region_digest_lo,
+                HalPayloadReplayStatusV1.InvalidPayload)
+        if (self.comparison.received_provider_mask & provider_bit) != 0:
+            self.sealed = false
+            val rejected = _rt_hal_device_rejected_execution_v1(
+                self.request, EnvInstructionStatusV1.Diverged)
+            return _rt_hal_device_dispatch_receipt_v1(
+                RtHalDeviceDispatchStatusV1.InvalidProviderOrder, rejected,
+                self.request, region_digest_hi, region_digest_lo,
+                HalPayloadReplayStatusV1.AlreadyConsumed)
+        val executed = executor.execute(self.request.instruction,
+            argument_bytes, result_bytes, device_bytes)
+        if not executed.applied:
+            self.sealed = false
+            return _rt_hal_device_dispatch_receipt_v1(
+                RtHalDeviceDispatchStatusV1.ExecutionRejected, executed,
+                self.request, region_digest_hi, region_digest_lo,
+                HalPayloadReplayStatusV1.InvalidPayload)
+        val candidate = rt_hal_device_request_captured_payload_v1(
+            self.request, executed.observation,
+            region_digest_hi, region_digest_lo)
+        val compared = if provider_bit == preferred_bit:
+            self.comparison.submit(provider, candidate, result_bytes,
+                candidate, result_bytes)
+        else:
+            self.comparison.submit(provider, recorded, recorded_bytes,
+                candidate, result_bytes)
+        RtHalDeviceDispatchReceiptV1(
+            RtHalDeviceDispatchStatusV1.Compared,
+            executed, candidate, compared)
+
+    me receipt() -> HalDeviceCompareReceiptV1:
+        val compared = self.comparison.receipt()
+        if self.sealed:
+            return compared
+        HalDeviceCompareReceiptV1(
+            HalDeviceCompareOwnerStatusV1.InvalidSubmission,
+            compared.expected_provider_mask, compared.received_provider_mask,
+            compared.equivalent_provider_mask, compared.difference_provider_mask,
+            compared.duplicate_provider_mask, false,
+            compared.selected_provider, false, 0)
+
+fn rt_hal_device_comparison_owner_v1(
+        request: RtHalDeviceRequestV1, mode: HalRunMode,
+        preferred_provider: HalProviderKind) -> RtHalDeviceComparisonOwnerV1:
+    val valid = request.status == RtHalDeviceStatusV1.Planned
+        and request.extraction.accepted and hal_run_mode_executes_all(mode)
+    RtHalDeviceComparisonOwnerV1(request, preferred_provider,
+        hal_device_compare_owner_v1(request.instruction.environment.invocation_id,
+            1, mode, preferred_provider), valid)
+
 export rt_hal_device_request_captured_payload_v1
+export RtHalDeviceDispatchStatusV1, RtHalDeviceDispatchReceiptV1
+export RtHalDevicePreferredExecutionOwnerV1
+export rt_hal_device_preferred_execution_owner_v1
+export RtHalDeviceComparisonOwnerV1, rt_hal_device_comparison_owner_v1
