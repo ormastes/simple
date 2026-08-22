@@ -198,6 +198,19 @@ implementation-blocked-by-bootstrap-authority
   PASS evidence. Bootstrap automation accepts only an explicit final PASS
   verdict, and Sdoctest bootstrap evidence requires independently nonzero green
   Markdown and source-comment lanes.
+- fix: The fresh Stage-2 build exposed a partially integrated callable-signature
+  projection: its consumer referenced `ModuleSurface.signature_names`, but the
+  fields, producer, registry helper, and live consumers never landed. Removed
+  that dead partial path and added a source contract rejecting undeclared scalar
+  signature consumers; the reference-semantic callable lookup remains the
+  coherent owner pending an atomic replacement.
+- blocker: The third and final cache-preserving Stage-2 cycle cleared the
+  undeclared `ModuleSurface.signature_names` HIR failure, then failed at link:
+  `module_surface_declarations` calls the missing global owners
+  `module_surface_projected_type_shape` and
+  `module_surface_projected_type_name`. Strict bootstrap refused seed fallback.
+  The session verification cap is exhausted, so no fourth bootstrap or Stage-2
+  PASS is claimed. Evidence is in `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`.
 - verify: Updated push/bootstrap/tiering self-tests passed; the real ref fixture
   remained within the ten-second budget. Full bootstrap remains blocked by the
   unchanged Stage-3 imported-type cascade after the third bounded cycle.
