@@ -305,6 +305,28 @@ the covered numerator.
 
 ## Performance implementation notes
 
+### Authoritative semantic decision census
+
+`compiler.mir.mcdc_decision_census` is the closed HIR-level census for
+REQ-001. Executable `if`/value-conditionals, every ordered `elif`, and `while`
+conditions receive form-qualified stable manifest identities. `and`, `or`, and
+`not` remain atoms/operators inside that owning decision, so the existing
+left-to-right short-circuit lowering records only evaluated atoms.
+
+HIR intentionally aliases statement `if` and value conditional/ternary into
+`HirExprKind.If`; their stable form is therefore `if-or-conditional`, rather
+than inventing a distinction erased by the authoritative semantic tree. Match
+guards and comprehension filters remain native-backend gaps and emit named
+`MCDC-BACKEND-INAPPLICABLE-*` diagnostics. They may affect an eligible
+denominator only after the existing signed `platform-inapplicable` evidence
+gate accepts them. Static assertions, preconditions, and postconditions are
+compile-time proof obligations erased before executable HIR and are catalogued
+as compile-time-only, not silently counted as runtime decisions.
+
+The census construction and instrumentation walk are O(HIR nodes). The catalog
+is eight constant rows; no runtime probe-path allocation, lookup, or dispatch is
+introduced. Static-off still bypasses decision construction entirely.
+
 - Per-thread fixed shards; one compact commit per decision evaluation.
 - Static tables sorted once; no hot-path registry construction.
 - Dense runtime slots with stable semantic IDs retained in manifests/receipts.

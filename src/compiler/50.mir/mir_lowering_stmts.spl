@@ -1976,7 +1976,7 @@ impl MirLowering:
         self.builder = b
         result
 
-    me begin_mcdc_decision(cond: HirExpr):
+    me begin_mcdc_decision(cond: HirExpr, semantic_form: text):
         val condition_count = self.mcdc_condition_leaf_count(cond)
         if condition_count <= 0 or condition_count > 62:
             self.error_fatal("MCDC-E-CONDITIONS: decision exceeds fixed 62-condition mask capacity", Some(cond.span))
@@ -1991,7 +1991,10 @@ impl MirLowering:
             self.mcdc_current_decision_runtime_id = 0
             return
         self.mcdc_current_decision_runtime_id = decision_runtime_id
-        self.mcdc_current_decision_semantic_id = self.mcdc_authored_path + ":" + self.mcdc_current_function_name + ":" + cond.span.start.to_text() + ":decision"
+        # `semantic_form` comes from the closed HIR census. Including it in the
+        # frozen identity prevents two syntactic owners at one remapped span
+        # from being silently coalesced, without another manifest-side array.
+        self.mcdc_current_decision_semantic_id = self.mcdc_authored_path + ":" + self.mcdc_current_function_name + ":" + cond.span.start.to_text() + ":" + semantic_form + ":decision"
         self.mcdc_condition_count = condition_count
         self.mcdc_next_condition_ordinal = 0
         self.mcdc_append_decision_program(cond)
@@ -2165,7 +2168,7 @@ impl MirLowering:
         val saved_next_condition_ordinal = self.mcdc_next_condition_ordinal
         val saved_condition_count = self.mcdc_condition_count
         if self.mcdc_instrumentation_enabled():
-            self.begin_mcdc_decision(cond)
+            self.begin_mcdc_decision(cond, "if-or-conditional")
         val cond_local = self.lower_cond_expr(cond)
         self.emit_mcdc_decision_probe(cond, cond_local)
         self.mcdc_current_decision_runtime_id = saved_decision_runtime_id
@@ -2352,7 +2355,8 @@ impl MirLowering:
             val saved_next_condition_ordinal = self.mcdc_next_condition_ordinal
             val saved_condition_count = self.mcdc_condition_count
             if self.mcdc_instrumentation_enabled():
-                self.begin_mcdc_decision(arm.cond)
+                val arm_semantic_form = if arm_index == 0: "if-or-conditional" else: "elif"
+                self.begin_mcdc_decision(arm.cond, arm_semantic_form)
             val cond_local = self.lower_cond_expr(arm.cond)
             self.emit_mcdc_decision_probe(arm.cond, cond_local)
             self.mcdc_current_decision_runtime_id = saved_decision_runtime_id
@@ -2532,7 +2536,7 @@ impl MirLowering:
         val saved_next_condition_ordinal = self.mcdc_next_condition_ordinal
         val saved_condition_count = self.mcdc_condition_count
         if self.mcdc_instrumentation_enabled():
-            self.begin_mcdc_decision(cond)
+            self.begin_mcdc_decision(cond, "while")
         val cond_local = self.lower_cond_expr(cond)
         self.emit_mcdc_decision_probe(cond, cond_local)
         self.mcdc_current_decision_runtime_id = saved_decision_runtime_id

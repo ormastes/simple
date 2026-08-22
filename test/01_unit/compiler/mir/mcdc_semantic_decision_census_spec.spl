@@ -1,0 +1,65 @@
+"""REQ-001 authoritative semantic decision-form census."""
+
+use std.spec.*
+use compiler.mir.mcdc_decision_census.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+
+fn census_manifest_ids(source: text) -> [text]:
+    val path = "src/mcdc_semantic_census_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.mcdc_policy = "static"
+    mir_lowering.mcdc_source_digest = 101
+    mir_lowering.lower_module(hir)
+    mir_lowering.mcdc_manifest_semantic_ids
+
+fn census_has(ids: [text], form: text) -> bool:
+    for id in ids:
+        if id.contains(":" + form + ":decision"): return true
+    false
+
+describe "MC/DC semantic decision census", tag: ["only-compiled"]:
+    it "is a closed, unique, reason-bearing catalog":
+        expect(mcdc_semantic_decision_census_v1_well_formed()).to_equal(true)
+        expect(mcdc_semantic_decision_census_v1().len()).to_equal(8)
+
+    it "enumerates statement if and value conditional through their shared HIR owner":
+        val ids = census_manifest_ids("fn choose(a: bool, b: bool) -> bool:\n    if a and b:\n        true\n    else:\n        false\n")
+        expect(census_has(ids, "if-or-conditional")).to_equal(true)
+        expect(census_has(ids, "while")).to_equal(false)
+
+    it "enumerates every elif arm independently":
+        val ids = census_manifest_ids("fn choose(a: bool, b: bool) -> i64:\n    if a:\n        1\n    elif b:\n        2\n    else:\n        3\n")
+        expect(census_has(ids, "elif")).to_equal(true)
+        expect(census_has(ids, "while")).to_equal(false)
+
+    it "enumerates while while retaining one short-circuit decision":
+        val ids = census_manifest_ids("fn spin(a: bool, b: bool):\n    while a and b:\n        break\n")
+        expect(census_has(ids, "while")).to_equal(true)
+        expect(ids.len()).to_equal(1)
+
+    it "names match guards and comprehension filters as governed backend gaps":
+        val rows = mcdc_semantic_decision_census_v1()
+        var governed = 0
+        for row in rows:
+            if row.disposition == McdcSemanticDecisionDispositionV1.BackendInapplicable:
+                expect(row.governed_code.starts_with("MCDC-BACKEND-INAPPLICABLE-")).to_equal(true)
+                expect(row.reason.contains("platform-inapplicable")).to_equal(true)
+                governed = governed + 1
+        expect(governed).to_equal(2)
+
+    it "classifies assertions and contracts as compile-time-only, never silent runtime decisions":
+        val rows = mcdc_semantic_decision_census_v1()
+        var compile_time = 0
+        for row in rows:
+            if row.disposition == McdcSemanticDecisionDispositionV1.CompileTimeOnly:
+                expect(row.governed_code).to_equal("")
+                expect(row.reason.contains("compile-time")).to_equal(true)
+                compile_time = compile_time + 1
+        expect(compile_time).to_equal(3)
