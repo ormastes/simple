@@ -216,3 +216,9 @@ passing placeholder.
     scopes and explicit failure contracts. Continue the remaining 1,011
     untouched `rt_process` rows, then implement exact signed artifact admission;
     declarations remain unsafe until both evidence checks succeed.
+41. Remove the eight-hook dead seed process declaration surface and keep it
+    absent with the owner audit. Five hot `io_runtime` process hooks now have
+    explicit contracts and minimal lexical scopes; owner-alias consolidation is
+    deferred by a documented JIT deoptimization bug, not silently accepted.
+    Continue the remaining 999 untouched process rows and fix alias lowering
+    before removing these direct declarations. Signed admission remains zero.

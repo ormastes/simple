@@ -17,7 +17,37 @@ use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 # Extern Function Declarations (runtime built-ins)
 # ============================================================================
 
+@unsafe(reason: "raw process capture; exit code -1 is the execution-failure sentinel", capabilities: [ffi])
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+@unsafe(reason: "raw owned-child spawn; positive PID is success and -1 is the failure sentinel", capabilities: [ffi])
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+@unsafe(reason: "raw owned-child liveness status; false is the stopped, absent, or failure sentinel", capabilities: [ffi])
+extern fn rt_process_is_running(pid: i64) -> bool
+@unsafe(reason: "raw owned-child termination status; false is the invalid, absent, or failure sentinel", capabilities: [ffi])
+extern fn rt_process_kill(pid: i64) -> bool
+@unsafe(reason: "raw timed process capture; exit code -1 is the failure-or-timeout sentinel", capabilities: [ffi])
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _io_runtime_process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
+    unsafe(capabilities: [ffi]):
+        rt_process_run(cmd, args)
+
+fn _io_runtime_process_spawn_async_raw(cmd: text, args: [text]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_async(cmd, args)
+
+fn _io_runtime_process_is_running_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_is_running(pid)
+
+fn _io_runtime_process_kill_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_kill(pid)
+
+fn _io_runtime_process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    unsafe(capabilities: [ffi]):
+        rt_process_run_timeout(cmd, args, timeout_ms)
+
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -40,9 +70,6 @@ extern fn rt_file_size(path: text) -> i64
 # registered on every lane (the CLI itself runs on it — see app.io.cli_ops).
 extern fn sys_get_args() -> [text]
 extern fn rt_exit(code: i64)
-extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
-extern fn rt_process_is_running(pid: i64) -> bool
-extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_dir_walk(path: text) -> [text]
 extern fn rt_dir_remove(path: text, recursive: bool) -> bool
@@ -56,7 +83,6 @@ extern fn rt_hash_text(s: text) -> i64
 extern fn rt_time_now_monotonic_ms() -> i64
 extern fn rt_shell_exec(cmd: text) -> text
 extern fn rt_file_rename(old_path: text, new_path: text) -> bool
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 # ============================================================================
 # Shell Result
@@ -79,18 +105,18 @@ type ShellResult = ProcessResult
 # ============================================================================
 
 pub fn shell(command: text) -> ProcessResult:
-    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    val (stdout, stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", command])
     ProcessResult(stdout: stdout, stderr: stderr, exit_code: code, limit_exceeded: false, limit_type: "")
 
 pub fn shell_output(command: text) -> text:
-    val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    val (stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", command])
     if code == 0:
         stdout.trim()
     else:
         ""
 
 pub fn shell_output_trimmed(command: text, default: text) -> text:
-    val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    val (stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", command])
     if code == 0:
         val trimmed = stdout.trim()
         if trimmed == "":
@@ -99,7 +125,7 @@ pub fn shell_output_trimmed(command: text, default: text) -> text:
     default
 
 pub fn shell_bool(command: text) -> bool:
-    val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    val (_stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", command])
     code == 0
 
 # ============================================================================
@@ -180,7 +206,7 @@ pub fn file_size_raw(path: text) -> i64:
 # workaround. Keep the established positional ABI and fix the checker. See
 # doc/08_tracking/bug/mcp_main_lazy_json_standalone_compile_process_run_tuple_ambiguity_2026-07-17.md
 pub fn process_run(cmd: text, args: [text]) -> (text, text, i64):
-    rt_process_run(cmd, args)
+    _io_runtime_process_run_raw(cmd, args)
 
 # ============================================================================
 # Environment
@@ -290,7 +316,7 @@ pub fn is_char_device(path: text) -> bool:
     rt_file_is_char_device(path)
 
 pub fn list_dir(path: text) -> [text]:
-    val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", "ls '{path}'"])
+    val (stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", "ls '{path}'"])
     if code != 0:
         return []
     val trimmed = stdout.trim()
@@ -320,15 +346,15 @@ pub fn dir_exists(path: text) -> bool:
     rt_dir_exists(path)
 
 pub fn process_spawn_async(cmd: text, args: [text]) -> i64:
-    rt_process_spawn_async(cmd, args)
+    _io_runtime_process_spawn_async_raw(cmd, args)
 
 pub fn process_is_running(pid: i64) -> bool:
-    rt_process_is_running(pid)
+    _io_runtime_process_is_running_raw(pid)
 
 pub fn process_kill(pid: i64) -> bool:
     if pid <= 1:
         return false
-    rt_process_kill(pid)
+    _io_runtime_process_kill_raw(pid)
 
 # ============================================================================
 # Platform Detection
@@ -361,7 +387,7 @@ pub fn file_rename(old_path: text, new_path: text) -> bool:
     rt_file_rename(old_path, new_path)
 
 pub fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    rt_process_run_timeout(cmd, args, timeout_ms)
+    _io_runtime_process_run_timeout_raw(cmd, args, timeout_ms)
 
 pub fn hash_text(s: text) -> i64:
     rt_hash_text(s)

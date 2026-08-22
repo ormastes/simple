@@ -918,3 +918,26 @@ declarations: C++ 211 definitions/211 symbols/1 file; C 2,313/1,831/87; Rust
 2,161/2,097/172; Simple 592/543/52. There are 494 unsafe-tagged rows, 575
 contracted rows, and 11,849 untouched rows. Signed and verified admissions are
 still zero, so all 12,619 declarations remain fail-closed unsafe.
+
+The next process sweep deletes the unimported seed-era
+`sys/sffi/process.spl`. Its eight declarations included three dead hooks, two
+genuinely missing hooks, and duplicates of live process owners; retaining or
+tagging them would preserve a false API surface. A static owner gate prevents
+that declaration file from returning.
+
+The widely used `io_runtime` process path exposed a separate performance
+constraint. Delegating its five duplicates through imported aliases makes the
+current JIT treat the aliases as unresolved externals and deoptimize the whole
+module to the interpreter, with its own 100–1000x warning. That consolidation
+was rejected and recorded as a compiler bug. The direct path remains JIT-capable
+and unchanged in allocation/dispatch shape; its five declarations now carry
+explicit sentinel contracts and one-call lexical FFI scopes. Module check, the
+three-case tuple/exit-code regression, optimizer analysis, and static process
+audit pass. Lint still reports the module's existing primitive-public-API debt.
+
+The census is now 12,611 declarations and 3,174 symbols: 499 unsafe-tagged, 580
+contracted, 11,836 untouched, and 296 signature-variant symbols. The
+`rt_process` family has 1,032 rows with 999 untouched. Language implementation
+statistics remain C++ 211/211/1, C 2,313/1,831/87, Rust 2,161/2,097/172, and
+Simple 592/543/52. There are still zero trusted signed/verified admissions, so
+all 12,611 declarations remain fail-closed unsafe.

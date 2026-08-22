@@ -6,12 +6,23 @@ binding="$root/src/app/io/process_ops.spl"
 lib_binding="$root/src/lib/nogc_sync_mut/io/process_ops.spl"
 runtime="$root/src/compiler_rust/runtime/src/value/sffi/env_process.rs"
 interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/system.rs"
+io_runtime="$root/src/lib/nogc_sync_mut/io_runtime.spl"
 
 symbols='rt_process_run rt_process_run_bounded rt_process_run_inherit rt_process_run_timeout rt_process_spawn_async rt_process_spawn_inherit rt_process_wait rt_process_is_running rt_process_kill'
 for symbol in $symbols; do
     grep -B1 -F "extern fn $symbol" "$binding" |
         grep -Eq 'sentinel|status'
 done
+
+# io_runtime stays direct because cross-module aliases currently de-JIT this
+# hot module. Keep each duplicate declaration explicit and locally confined.
+test "$(grep -c '^extern fn rt_process_' "$io_runtime")" -eq 5
+test "$(grep -c '^fn _io_runtime_process_.*_raw' "$io_runtime")" -eq 5
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$io_runtime")" -eq 5
+for symbol in rt_process_run rt_process_spawn_async rt_process_is_running rt_process_kill rt_process_run_timeout; do
+    grep -B1 -F "extern fn $symbol" "$io_runtime" | grep -Eq 'sentinel|status|failure'
+done
+! grep -q '_io_runtime_process_.*_owner' "$io_runtime"
 
 # One lexical scope per raw process contract. The separate checked file-read
 # bridge accounts for the tenth FFI scope in this module.
