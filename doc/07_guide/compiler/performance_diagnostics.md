@@ -63,6 +63,12 @@ Human and JSON records preserve stable code, location, confidence, evidence, unc
 optional proof-gated fix. Unknown rule codes remain visible rather than silently
 suppressed.
 
+Fallback source locations are indexed once per source view. Standalone lint reuses that
+index for collection and wildcard-export findings, while query/LSP reuses its already split
+lines for callable and wildcard locations. These are compatibility locations, not typed
+proof: exact AST or HIR causal spans remain the target, and fallback recovery never
+authorizes a transform.
+
 The standalone CLI and query/LSP source-pattern collection projections use the same
 confidence vocabulary. Query governance recognizes `COLL001` through `COLL019`, so
 `Allow` suppresses them, while robust/critical policy cannot upgrade those untyped
