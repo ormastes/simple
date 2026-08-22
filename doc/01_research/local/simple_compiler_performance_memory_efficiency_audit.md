@@ -1817,5 +1817,9 @@ the same simple quote-toggle state, and records only syntactically eligible
 backslash positions. Candidate parsing and replacement ordering are unchanged.
 Discovery is `O(N)` time with `O(K)` compact position storage and no recursive
 stack-growth hazard. Candidate-specific functional-update and short-grammar
-parsers retain their existing costs; a later tranche must index any remaining
-prefix-sensitive semantic guards before claiming an end-to-end linear rule.
+parsers initially retained their existing costs. Follow-up removed the largest
+remaining candidate multiplier: the first non-function-type `->` boundary is now
+classified once per line and compared with each lambda position in constant time,
+rather than rescanning from byte zero for every candidate. Individual candidate
+parsers retain their syntax-dependent costs, so this does not claim an
+end-to-end linear rewrite rule for every adversarial expression shape.
