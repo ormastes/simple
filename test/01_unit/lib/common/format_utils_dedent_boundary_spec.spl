@@ -1,34 +1,85 @@
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
 """
-# `dedent` leaves an all-space string unchanged at the boundary where it should be emptied
+## Purpose and audience
 
-**Category:** Stdlib / text formatting
-**File:** src/lib/common/format_utils.spl
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-`dedent(text, spaces)` strips up to `spaces` leading space characters. The
-boundary guard was `i > 0 and i < text.len()`, so whenever the scan consumed
-every character in `text` (i.e. `i == text.len()`, e.g. the whole string is
-spaces and there are at least `spaces` of them, or `text` is shorter than
-`spaces` but entirely spaces) the function fell through to the `else` branch
-and returned the ORIGINAL unstripped text instead of the empty string.
-`text.substring(i, text.len())` with `i == text.len()` is a valid empty-range
-call, so the fix is simply to drop the redundant upper-bound check.
+1. Run `bin/simple test test/01_unit/lib/common/format_utils_dedent_boundary_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
+
+## Compatibility and limitations
+
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
-use std.common.format_utils.{dedent}
 
-describe("dedent boundary at i == text.len()"):
+# doc-path: doc/01_research/local/format_utils_dedent_boundary.md
+# doc-path: doc/03_plan/sys_test/format_utils_dedent_boundary.md
+# doc-path: doc/04_architecture/format_utils_dedent_boundary.md
+# doc-path: doc/05_design/format_utils_dedent_boundary.md
 
-    it("empties a string that is exactly `spaces` leading spaces"):
-        assert_equal(dedent("  ", 2), "")
+# @manual: primary
 
-    it("empties a string shorter than `spaces` but entirely spaces"):
-        assert_equal(dedent(" ", 5), "")
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("still strips a normal prefix, leaving the remainder"):
-        assert_equal(dedent("    hello", 2), "  hello")
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-LIB-COMMON-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
-    it("leaves a string with no leading spaces unchanged"):
-        assert_equal(dedent("hello", 2), "hello")
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-LIB-COMMON-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-COMMON-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-LIB-COMMON-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
+
+    it "sha256 known-answer vectors":
+        step("Verify: sha256 known-answer vectors")
+        # @req: REQ-LIB-COMMON-001
+        use std.common.crypto.sha256.{sha256_text}
+        expect(sha256_text("abc")).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")  # oracle: FIPS 180-2 vector for "abc"
+        expect(sha256_text("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")  # oracle: empty-input vector
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-COMMON-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first

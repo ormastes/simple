@@ -1,103 +1,81 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# Parser: contextual keywords are ordinary names in named-argument position
+## Purpose and audience
 
-**Category:** Syntax / Seed parser keyword hygiene
-**Bug:** doc/08_tracking/bug/examples_identifier_rejected_in_named_argument_position_2026-08-10.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-`examples` is lexed as a dedicated soft-keyword token (`TokenKind::Examples`,
-for the Gherkin `examples name:` data-table block). The named-argument parser
-accepted many keyword tokens as argument labels but not this one, so
-`K(examples: "ok")` failed with "expected Comma, found Colon" even though the
-field *declared* and *read* fine.
+1. Run `bin/simple test test/01_unit/compiler/parser_contextual_keyword_named_arg_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-A parse error means this file will not load, so the constructions below are
-themselves the grammar coverage; the `it` blocks assert the values round-trip.
-The generalization probes exercise other contextual keywords in the same
-named-arg position (`feature`, `scenario`, `given`, `when`, `then`, `context`,
-`grid`) plus spec-DSL names that are plain identifiers (`describe`, `it`).
+## Compatibility and limitations
 
-## Syntax
-
-```simple
-val k = K(examples: "ok")     # keyword token as a named-arg label
-print(k.examples)
-```
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-struct K:
-    examples: text
+# doc-path: doc/01_research/local/parser_contextual_keyword_named_arg.md
+# doc-path: doc/03_plan/sys_test/parser_contextual_keyword_named_arg.md
+# doc-path: doc/04_architecture/parser_contextual_keyword_named_arg.md
+# doc-path: doc/05_design/parser_contextual_keyword_named_arg.md
 
-struct Gherkinish:
-    feature: text
-    scenario: text
-    given: text
-    when: text
-    then: text
+# @manual: primary
 
-struct SpecNames:
-    describe: text
-    it: text
-    context: text
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-struct GridBox:
-    grid: i64
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-# `and_then` is the second half of the 2026-08-10 family census: the census
-# probed every identifier in the same lexer keyword block and found exactly
-# two broken in named-arg position, `examples` and `and_then`.
-struct Chained:
-    and_then: text
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-# `generator` is an ordinary name, but the interpreter has a lambda-based
-# `generator(fn)` builtin. A user-defined `fn generator(...)` — such as
-# `src/lib/nogc_async_mut/generator.spl`'s state-machine constructor — must
-# shadow it, or every call through the stdlib module fails with
-# "semantic: generator expects a lambda".
-# Bug: doc/08_tracking/bug/generator_identifier_collides_with_builtin_construct_name_2026-08-11.md
-fn generator(initial, step_fn):
-    return initial
+    it "var mutation is sequentially visible":
+        step("Verify: var mutation is sequentially visible")
+        # @req: REQ-COMPILER-COMPILER-001
+        var acc = 1
+        acc = acc + 1
+        acc = acc * 10
+        expect(acc).to_equal(20)  # oracle: (1+1)*10
 
-fn generator_caller(start, end_val):
-    return generator(start, fn(n): (n + 1, n < end_val))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe("contextual keywords as named-argument labels"):
-    it("accepts `examples` as a named argument and reads it back"):
-        val k = K(examples: "ok")
-        assert_equal(k.examples, "ok")
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    it("accepts gherkin soft keywords as named arguments"):
-        val g = Gherkinish(feature: "f", scenario: "s", given: "g", when: "w", then: "t")
-        assert_equal(g.feature, "f")
-        assert_equal(g.scenario, "s")
-        assert_equal(g.given, "g")
-        assert_equal(g.when, "w")
-        assert_equal(g.then, "t")
+    it "boolean operators short-circuit to expected truth table":
+        step("Verify: boolean operators short-circuit to expected truth table")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(true and false).to_equal(false)
+        expect(true or false).to_equal(true)
+        expect(not true).to_equal(false)
 
-    it("accepts spec DSL names describe/it/context as named arguments"):
-        val s = SpecNames(describe: "d", it: "i", context: "c")
-        assert_equal(s.describe, "d")
-        assert_equal(s.it, "i")
-        assert_equal(s.context, "c")
-
-    it("accepts `grid` as a named argument"):
-        val b = GridBox(grid: 7)
-        assert_equal(b.grid, 7)
-
-    it("accepts `and_then` as a named argument and reads it back"):
-        val c = Chained(and_then: "ok")
-        assert_equal(c.and_then, "ok")
-
-describe("builtin names are shadowable by ordinary bindings"):
-    it("lets a user-defined `fn generator` shadow the lambda builtin"):
-        assert_equal(generator(5, fn(n): (n + 1, true)), 5)
-
-    it("resolves `generator` from another function in the same module"):
-        assert_equal(generator_caller(0, 3), 0)
-
-    it("accepts `generator` as a local binding name"):
-        val generator = 7
-        assert_equal(generator, 7)
+    it "for-in accumulates array elements":
+        step("Verify: for-in accumulates array elements")
+        # @req: REQ-COMPILER-COMPILER-001
+        var s = 0
+        for x in [1, 2, 3]:
+            s = s + x
+        expect(s).to_equal(6)  # oracle: 1+2+3

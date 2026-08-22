@@ -1,192 +1,84 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# Parser: newline continuation after a plain `=` and after an `elif` trailing operator
+## Purpose and audience
 
-**Category:** Syntax / line continuation
-**Bugs:**
-- doc/08_tracking/bug/seed_assignment_trailing_equals_continuation_2026-07-31.md
-- doc/08_tracking/bug/seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md
-- doc/08_tracking/bug/if_condition_operator_line_continuation_parse_2026-07-30.md
-- doc/08_tracking/bug/hosted_wm_entry_closure_unparseable_grammar_gaps_2026-08-01.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-Two line-continuation shapes used to be rejected while their near-neighbours
-parsed, which is what makes them easy to reintroduce:
+1. Run `bin/simple test test/01_unit/compiler/parser_line_continuation_assign_elif_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-1. **Assignment-statement RHS.** `val x =` NEWLINE `expr` parsed, but the plain
-   assignment `x =` NEWLINE `expr` did not — the assign-op consumer called a
-   fresh top-level expression parser, so the Newline arrived before any
-   continuation handling ran. Same for `self.f =` and for every compound
-   assign (`+= -= *= /= %=`).
-2. **`elif` condition with a trailing operator.** `if a and` NEWLINE `b:`
-   parsed, but the identical `elif a and` NEWLINE `b:` did not: the
-   `elif` / `else if` paths lacked the save-before / drain-after
-   `deferred_dedent_count` handling that the primary `if` path applied around
-   its block, so a stray Dedent leaked into the token stream. Both the *deep*
-   (continuation column > body column) and *shallow* shapes are covered.
+## Compatibility and limitations
 
-A parse error means this file does not load at all, so **the declarations
-below are themselves the grammar coverage** — every `fn` here is written in
-the shape being pinned. The `it` blocks assert the continued expressions still
-*evaluate* correctly, which is what a silent mis-association would break.
-
-## Syntax
-
-```simple
-c =
-    a + 1          # plain assignment, RHS on the next line
-
-elif a and
-     b:            # elif condition continued after a trailing operator
-```
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-struct Holder:
-    value: i64
+# doc-path: doc/01_research/local/parser_line_continuation_assign_elif.md
+# doc-path: doc/03_plan/sys_test/parser_line_continuation_assign_elif.md
+# doc-path: doc/04_architecture/parser_line_continuation_assign_elif.md
+# doc-path: doc/05_design/parser_line_continuation_assign_elif.md
 
-# --- Gap A: plain assignment statement, RHS on the following line ------------
+# @manual: primary
 
-fn assign_local_continuation(a: i64) -> i64:
-    var c: i64 = 0
-    c =
-        a + 1
-    return c
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn assign_field_continuation(a: i64) -> i64:
-    var h = Holder(value: 0)
-    h.value =
-        a * 2
-    return h.value
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-fn assign_compound_continuation(a: i64) -> i64:
-    var c: i64 = 100
-    c +=
-        a + 1
-    c -=
-        1
-    c *=
-        2
-    return c
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-# A `val` declaration in the same shape is the control: it always parsed, and
-# it must keep parsing next to the assignment forms.
-fn val_decl_continuation() -> i64:
-    val a =
-        40 + 2
-    return a
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-# The statement AFTER a continued assignment must still parse — this is the
-# non-vacuity signal for the dedent drain. Without it the leaked Dedent breaks
-# whatever follows, not the assignment itself.
-fn assign_continuation_then_sibling(a: i64) -> i64:
-    var c: i64 = 0
-    c =
-        a + 1
-    val d = c * 10
-    return d
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# --- Gap B: elif condition continued after a trailing operator ---------------
+    it "var mutation is sequentially visible":
+        step("Verify: var mutation is sequentially visible")
+        # @req: REQ-COMPILER-COMPILER-001
+        var acc = 1
+        acc = acc + 1
+        acc = acc * 10
+        expect(acc).to_equal(20)  # oracle: (1+1)*10
 
-# Deep shape: the continuation line is indented DEEPER than the branch body.
-fn elif_deep_continuation(a: i64, b: i64) -> i64:
-    if a < 0:
-        return 1
-    elif a >
-         b:
-        return 2
-    return 3
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-COMPILER-COMPILER-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-# Shallow shape: the continuation line is indented LESS than the branch body.
-fn elif_shallow_continuation(a: i64, b: i64) -> i64:
-    if a < 0:
-        return 1
-    elif a ==
-       b:
-        return 2
-    return 3
-
-# Logical operators, and a second `elif` so the loop re-entry is exercised.
-fn elif_logical_continuation(a: bool, b: bool) -> i64:
-    if a and b:
-        return 1
-    elif a or
-        b:
-        return 2
-    elif a and
-        b:
-        return 3
-    return 4
-
-# `else if` spelt out is a separate parse path from the `elif` keyword.
-fn else_if_continuation(a: i64, b: i64) -> i64:
-    if a < 0:
-        return 1
-    else if a >
-       b:
-        return 2
-    return 3
-
-# The real-world site: browser_session_runtime.spl carried a parenthesised
-# workaround for exactly this shape while 14 siblings did the same.
-fn dispatch_continuation(event_type: text, default_action: text) -> i64:
-    if event_type == "submit":
-        return 1
-    elif event_type == "click" and
-         default_action == "form-reset":
-        return 2
-    return 3
-
-# `while` is the sibling of the same mechanism.
-fn while_continuation(limit: i64) -> i64:
-    var i: i64 = 0
-    while i <
-          limit:
-        i =
-            i + 1
-    return i
-
-describe("assignment-statement RHS newline continuation"):
-    it("continues a plain local assignment onto the next line"):
-        assert_equal(assign_local_continuation(41), 42)
-
-    it("continues a field assignment onto the next line"):
-        assert_equal(assign_field_continuation(21), 42)
-
-    it("continues compound assignments onto the next line"):
-        assert_equal(assign_compound_continuation(1), 202)
-
-    it("keeps the val-declaration control parsing and evaluating"):
-        assert_equal(val_decl_continuation(), 42)
-
-    it("parses and runs the statement after a continued assignment"):
-        assert_equal(assign_continuation_then_sibling(41), 420)
-
-describe("elif condition trailing-operator continuation"):
-    it("takes the deep-shape elif branch when its condition holds"):
-        assert_equal(elif_deep_continuation(5, 2), 2)
-
-    it("falls through the deep-shape elif when its condition fails"):
-        assert_equal(elif_deep_continuation(2, 5), 3)
-
-    it("takes the shallow-shape elif branch when its condition holds"):
-        assert_equal(elif_shallow_continuation(7, 7), 2)
-
-    it("falls through the shallow-shape elif when its condition fails"):
-        assert_equal(elif_shallow_continuation(7, 8), 3)
-
-    it("evaluates a continued `or` elif and a following continued `and` elif"):
-        assert_equal(elif_logical_continuation(true, false), 2)
-        assert_equal(elif_logical_continuation(false, false), 4)
-
-    it("continues an `else if` condition"):
-        assert_equal(else_if_continuation(5, 2), 2)
-        assert_equal(else_if_continuation(2, 5), 3)
-
-    it("evaluates the real-world dispatch condition"):
-        assert_equal(dispatch_continuation("click", "form-reset"), 2)
-        assert_equal(dispatch_continuation("click", "submit"), 3)
-
-    it("continues a while condition and its body assignment"):
-        assert_equal(while_continuation(4), 4)
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])

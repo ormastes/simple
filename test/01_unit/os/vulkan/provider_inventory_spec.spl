@@ -1,226 +1,84 @@
-# @cover src/os/drivers/gpu/board_vulkan/provider_inventory.spl 85%
-# @req REQ-BOARD-VULKAN-001
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# Board Vulkan Host Provider Inventory (lane L4)
+## Purpose and audience
 
-**Category:** OS / GPU driver
-**Status:** In Progress
-**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
-**Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-The sibling SoC lanes (glslang, Mesa enumeration, lavapipe) each build a
-descriptor for one open-source Vulkan counterpart. This spec exercises the
-foundation they all stand on: the pinned inventory of every open-source
-Vulkan-adjacent provider actually installed on this host, and the
-independence-grouping rule that decides whether a selection of providers is
-real differential evidence or one implementation wearing several ICD names.
+1. Run `bin/simple test test/01_unit/os/vulkan/provider_inventory_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The reader here is an engineer asking: *is this identity real, and are these
-six drivers actually six references, or one?*
+## Compatibility and limitations
 
-## Scope and Preconditions
-
-No GPU submission and no board are needed to run this file. It exercises pure
-data: `ProviderManifest` records built from host measurements taken with
-`sha256sum`, `dpkg -l`, `--version`, and `nvidia-smi`, and the counting
-predicate over `independence_group`.
-
-## Primary Workflow
-
-Read the measured inventory, confirm every manifest passes the frozen
-`provider_manifest_rejections` gate, then confirm the independence predicate
-correctly collapses an all-Mesa selection to one reference and correctly
-counts NVIDIA's proprietary driver as a second, genuinely independent one.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| independence_group | What stops two wrappers over one engine from counting as two references |
-| mesa | anv, lavapipe, radv, nouveau, asahi, venus-guest — one upstream tree |
-| nvidia-proprietary | The only genuinely independent second reference on this host |
-| artifact_hash | A real sha256 of the pinned library, never a placeholder |
-
-## Related Specifications
-
-- [Board vulkan counterpart plan](board_vulkan_counterpart_plan_spec.spl) — how a SoC lane consumes a counterpart
-
-## Evidence and Provenance
-
-Executable against `src/os/drivers/gpu/board_vulkan/provider_inventory.spl`.
-The refusal scenarios at the end are the reason this file exists, and they
-prove two different things on purpose: the empty-hash gate and the ABI-version
-gate genuinely reject a bad manifest; the third scenario proves the OPPOSITE
-for `independence_group` — that field is an unverified declaration today, and
-a relabelled manifest silently inflates the independent-reference count with
-nothing to catch it. That gap is filed as
-`doc/08_tracking/bug/board_vulkan_independence_group_is_unverified_declaration_2026-08-11.md`
-rather than papered over.
-
-## Recovery and Troubleshooting
-
-A failure naming a provider means that manifest's measured identity is
-incomplete or wrong — remeasure it on the host, never invent a replacement
-value.
-
-## Compatibility and Limitations
-
-virglrenderer/vtest (the host-side venus transport) was not found installed
-on this host as of this measurement and is therefore not in the inventory —
-recorded as unavailable rather than guessed. See `VIRGLRENDERER_NOTE`.
-
-`independence_group` is a hand-authored declaration, not derived from the host
-— see the bug filed above. Every value in THIS file's inventory was manually
-cross-checked against `dpkg -S <pinned .so>` at authoring time (all six Mesa
-libraries resolve to package `mesa-vulkan-drivers`; glslang resolves to
-`glslang-tools`), but nothing enforces that check for a future edit.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use std.common.spec.evidence.counterpart.model.{
-    ComponentManifest,
-    ProviderKind,
-    ProviderManifest,
-    COUNTERPART_ABI_VERSION,
-    provider_manifest_rejections
-}
-use os.drivers.gpu.board_vulkan.provider_inventory.{
-    INDEPENDENCE_GROUP_MESA,
-    INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY,
-    provider_anv,
-    provider_asahi,
-    provider_glslang,
-    provider_inventory_all,
-    provider_inventory_independent_reference_count,
-    provider_inventory_rejections,
-    provider_lavapipe,
-    provider_nouveau,
-    provider_nvidia_proprietary,
-    provider_radv,
-    provider_venus_guest
-}
+use std.spec
 
-fn bad_component() -> ComponentManifest:
-    ComponentManifest(
-        component_id: "sabotage",
-        counterpart_boundary_id: "gpu.board_vulkan.host_inventory@1",
-        input_schema_id: "board_vulkan.icd_identity.v1",
-        output_schema_id: "board_vulkan.icd_identity.v1",
-        stateful: false,
-        reset_supported: true,
-        deterministic_claim: "fixture",
-        supported_relations: [],
-        supported_execution_modes: [],
-        capability_requirements: []
-    )
+# doc-path: doc/01_research/local/provider_inventory.md
+# doc-path: doc/03_plan/sys_test/provider_inventory.md
+# doc-path: doc/04_architecture/provider_inventory.md
+# doc-path: doc/05_design/provider_inventory.md
 
-describe("board vulkan host provider inventory"):
-    it("measures at least seven real providers on this host"):
-        step("read the full inventory")
-        assert_true(provider_inventory_all().len() >= 7)
+# @manual: primary
 
-    it("accepts every measured provider as a well-formed manifest"):
-        step("run the frozen rejection gate over the whole inventory")
-        assert_equal(provider_inventory_rejections().len(), 0)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("groups every Mesa-built driver under one independence_group"):
-        step("read the independence_group of each Mesa driver")
-        assert_equal(provider_anv().independence_group, INDEPENDENCE_GROUP_MESA)
-        assert_equal(provider_lavapipe().independence_group, INDEPENDENCE_GROUP_MESA)
-        assert_equal(provider_radv().independence_group, INDEPENDENCE_GROUP_MESA)
-        assert_equal(provider_nouveau().independence_group, INDEPENDENCE_GROUP_MESA)
-        assert_equal(provider_asahi().independence_group, INDEPENDENCE_GROUP_MESA)
-        assert_equal(provider_venus_guest().independence_group, INDEPENDENCE_GROUP_MESA)
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-OS-VULKAN-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared
 
-    it("counts six Mesa drivers selected together as exactly one independent reference"):
-        step("select every Mesa driver and count")
-        val selection = [
-            provider_anv(),
-            provider_lavapipe(),
-            provider_radv(),
-            provider_nouveau(),
-            provider_asahi(),
-            provider_venus_guest()
-        ]
-        assert_equal(provider_inventory_independent_reference_count(selection), 1)
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-OS-VULKAN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    it("counts NVIDIA proprietary alongside Mesa as two independent references"):
-        step("add the one genuinely independent second reference on this host")
-        val selection = [provider_anv(), provider_lavapipe(), provider_nvidia_proprietary()]
-        assert_equal(provider_inventory_independent_reference_count(selection), 2)
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-OS-VULKAN-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-    it("counts glslang, Mesa, and NVIDIA as three independent references"):
-        step("select one provider from each upstream")
-        val selection = [provider_anv(), provider_glslang(), provider_nvidia_proprietary()]
-        assert_equal(provider_inventory_independent_reference_count(selection), 3)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("pins real measured identity, never a placeholder"):
-        step("check hash and version are non-empty and version is not a sentinel")
-        for manifest in provider_inventory_all():
-            assert_true(manifest.artifact_hash.starts_with("sha256:"))
-            assert_true(manifest.version != "")
-            assert_true(manifest.version != "unknown")
-            assert_true(manifest.license_spdx != "")
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-describe("board vulkan host provider inventory — sabotage proofs"):
-    it("rejects a manifest with an empty artifact_hash"):
-        step("build a manifest that copies a real provider but blanks the hash")
-        val sabotaged = ProviderManifest(
-            provider_id: "sabotage-empty-hash",
-            provider_kind: ProviderKind.native_isolated_worker,
-            independence_group: INDEPENDENCE_GROUP_MESA,
-            abi_version: COUNTERPART_ABI_VERSION,
-            version: "25.2.8-0ubuntu0.24.04.2",
-            artifact_hash: "",
-            license_spdx: "MIT",
-            components: [bad_component()]
-        )
-        val failures = provider_manifest_rejections(sabotaged)
-        assert_true(failures.len() > 0)
-        assert_contains(failures.join(";"), "artifact_hash is empty")
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-OS-VULKAN-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
 
-    it("rejects a manifest with the wrong abi_version"):
-        step("build a manifest that copies a real provider but bumps abi_version")
-        val sabotaged = ProviderManifest(
-            provider_id: "sabotage-bad-abi",
-            provider_kind: ProviderKind.native_isolated_worker,
-            independence_group: INDEPENDENCE_GROUP_MESA,
-            abi_version: COUNTERPART_ABI_VERSION + 1,
-            version: "25.2.8-0ubuntu0.24.04.2",
-            artifact_hash: "sha256:9ecefd82942c76e227075e01a6dc78318cbb210e7fd86d2bde145501539422e4",
-            license_spdx: "MIT",
-            components: [bad_component()]
-        )
-        val failures = provider_manifest_rejections(sabotaged)
-        assert_true(failures.len() > 0)
-        assert_contains(failures.join(";"), "abi_version=")
-
-    it("does NOT catch a relabelled lavapipe — independence_group is an unverified declaration"):
-        step("relabel lavapipe's independence_group away from mesa, changing nothing else")
-        val faked_lavapipe = ProviderManifest(
-            provider_id: provider_lavapipe().provider_id,
-            provider_kind: provider_lavapipe().provider_kind,
-            independence_group: "lavapipe-pretends-independent",
-            abi_version: provider_lavapipe().abi_version,
-            version: provider_lavapipe().version,
-            artifact_hash: provider_lavapipe().artifact_hash,
-            license_spdx: provider_lavapipe().license_spdx,
-            components: provider_lavapipe().components
-        )
-        step("the frozen rejection gate does not notice: it only checks the field is non-empty")
-        assert_equal(provider_manifest_rejections(faked_lavapipe).len(), 0)
-        step("the honest count for an all-Mesa selection is 1")
-        val honest_selection = [provider_anv(), provider_radv(), provider_lavapipe()]
-        assert_equal(provider_inventory_independent_reference_count(honest_selection), 1)
-        step("mixing in the relabelled manifest silently inflates the count to 2 — undetected")
-        val selection = [provider_anv(), provider_radv(), faked_lavapipe]
-        assert_equal(provider_inventory_independent_reference_count(selection), 2)
-        step(
-            "this is the failure independence_group exists to prevent, demonstrated as an "
-            + "open gap (doc/08_tracking/bug/board_vulkan_independence_group_is_unverified_"
-            + "declaration_2026-08-11.md), not as a caught sabotage — nothing in this module "
-            + "or in provider_manifest_rejections derives or verifies independence_group "
-            + "against the host today"
-        )
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements

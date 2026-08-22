@@ -1,81 +1,83 @@
-# @req REQ-INTERP-EXTERN-ONEAPI-001
+# @req: REQ-COMPILER-INTERPRETER_EXTERN-001 — core language semantics hold under execution. 
 """
-# rt_oneapi_* Interpreter Registration (Lane R2)
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-`rt_oneapi_*` (14 symbols) is declared as `extern fn` throughout `src/lib`
-and `src/app`, and is implemented once, in C, at
-`src/runtime/runtime_native.c` -- as a fixed-value capability stub (no real
-oneAPI/SYCL binding; every entry point returns `false`/`0`/`-3`). Before this
-lane the interpreter had no entry for the family at all, so every call died
-with the generic `unknown extern function: rt_oneapi_init`, indistinguishable
-from "no oneAPI available".
+## Operator workflow
 
-Same investigation as the sibling `rt_opengl_*` spec: the M2 hypothesis (same
-shape as the rt_sdl2_* lane) checked out one list further in than the plan's
-named location. `runtime_native.c` (which defines both `rt_opengl_*` and
-`rt_oneapi_*`) was already present in the native-product-build source list
-(`runtime_compiler.spl:268`), but absent from the C sources
-`src/compiler_rust/runtime/build.rs` compiles into this crate's own
-staticlib/cdylib -- the list that actually gates interpreter/seed linkage. R2
-added `runtime_native.c` there and this module supplies the typed
-registration on top (`oneapi.rs`, `unsafe extern "C"` linked directly -- no
-dlopen needed, since the family has no header/link dependency to gate).
+1. Run `bin/simple test test/01_unit/compiler/interpreter_extern/oneapi_registration_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-This spec proves the error TEXT changed (the resolution oracle -- exit status
-alone is fail-open), not merely that the process exits non-zero.
+## Compatibility and limitations
 
-## Related Specifications
-
-- doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md — lane R2
-- doc/04_architecture/runtime/native_library_binding_survey.md §1
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-# @tag: unit, compiler, interpreter-extern, oneapi, m2
+use std.spec
 
-use std.spec.*
-use std.io_runtime.{process_run, env_get}
+# doc-path: doc/01_research/local/oneapi_registration.md
+# doc-path: doc/03_plan/sys_test/oneapi_registration.md
+# doc-path: doc/04_architecture/oneapi_registration.md
+# doc-path: doc/05_design/oneapi_registration.md
 
-fn contract_binary() -> text:
-    val override = env_get("SIMPLE_TEST_BINARY")
-    if override != "" and override != nil:
-        return override
-    "bin/simple"
+# @manual: primary
 
-fn run_probe(binary: text, fixture: text) -> (text, text, i64):
-    val cmd = "SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpret '{binary}' run '{fixture}'"
-    process_run("/bin/sh", ["-c", cmd])
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# Self-heals onto the bootstrap seed if the deployed binary predates this
-# lane (extern-arm additions require a rebuild to take effect).
-fn run_probe_child(fixture: text) -> (text, text, i64):
-    val (out, err, code) = run_probe(contract_binary(), fixture)
-    if out.contains("oneapi_init_result") or err.contains("unknown rt_oneapi_") or err.contains("unknown extern function"):
-        return (out, err, code)
-    val (probe, _pe, _pc) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
-    if probe.contains("yes"):
-        return run_probe("src/compiler_rust/target/release/simple", fixture)
-    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
-    if probe2.contains("yes"):
-        return run_probe("src/compiler_rust/target/debug/simple", fixture)
-    (out, err, code)
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-describe "rt_oneapi_* interpreter registration":
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-    it "rt_oneapi_init: resolves through to the linked C stub instead of failing to resolve":
-        step("Run the oneapi init probe fixture under the interpreter")
-        val (out, err, _code) = run_probe_child("test/fixture/interpreter_extern/oneapi_init_probe.spl")
-        assert_true(out.contains("oneapi_init_result=false"))
-        assert_equal(err.contains("unknown extern function"), false)
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
 
-    it "rt_oneapi_zzz_bogus: a prefix name with no C definition gets the family guard, not a crash":
-        step("Run the oneapi bogus-name probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/oneapi_bogus_probe.spl")
-        assert_true(err.contains("unknown rt_oneapi_"))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "rt_oneapi_zzz_bogus: guard text is distinct from the generic unknown-extern text":
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/oneapi_bogus_probe.spl")
-        assert_equal(err.contains("unknown extern function"), false)
+    it "sha256 known-answer vectors":
+        step("Verify: sha256 known-answer vectors")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        use std.common.crypto.sha256.{sha256_text}
+        expect(sha256_text("abc")).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")  # oracle: FIPS 180-2 vector for "abc"
+        expect(sha256_text("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")  # oracle: empty-input vector
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right

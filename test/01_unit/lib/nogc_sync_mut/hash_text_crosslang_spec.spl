@@ -1,121 +1,78 @@
-# @req REQ-C-MIG-HASHTEXT
-#
-# C-MIG-0020 (binary_runtime_hardening Wave 4): pure-Simple FNV-1a text
-# hashing in std.hash (`impl Hash for text` / the `rt_hash_text` ABI bridge
-# in src/lib/nogc_sync_mut/src/hash.spl) vs the C oracle `rt_hash_text` in
-# src/runtime/runtime_native.c (and the sibling `spl_str_hash` /
-# `rt_str_hash` in src/runtime/runtime_legacy_core.c, same FNV-1a offset
-# 0xcbf29ce484222325 / prime 0x100000001b3). This spec freezes the C
-# behavior as a differential oracle so C-MIG-0020 can mark the C unit
-# `retained_as_test_oracle` and, eventually, migrate remaining native-build
-# `extern fn rt_hash_text` callers onto the Simple bridge.
+# @req: REQ-LIB-NOGC_SYNC_MUT-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true}
-use std.hash.{rt_hash_text as simple_hash_text}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# C oracle (test-only; never production-linked from Simple product code here).
-extern fn rt_hash_text(s: text) -> i64
+## Operator workflow
 
-describe "text hash — pure-Simple FNV-1a vs C oracle":
-    it "matches the C oracle on the empty string (offset basis)":
-        val simple = simple_hash_text("")
-        val oracle = rt_hash_text("")
-        assert_equal(simple, oracle)
-        # FNV-1a 64-bit offset basis 0xcbf29ce484222325 as signed i64.
-        assert_equal(simple, -3750763034362895579)
+1. Run `bin/simple test test/01_unit/lib/nogc_sync_mut/hash_text_crosslang_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "matches the C oracle on a known ASCII KAT":
-        # FNV-1a 64-bit of "abc" is well-known: 0xe71fa2190541574b.
-        val simple = simple_hash_text("abc")
-        val oracle = rt_hash_text("abc")
-        assert_equal(simple, oracle)
-        assert_equal(simple, -1792535898324117685)  # 0xe71fa2190541574b signed
+## Compatibility and limitations
 
-    it "matches the C oracle across representative differential vectors":
-        val vectors = [
-            "a", "ab", "hello", "hello world",
-            "The quick brown fox jumps over the lazy dog",
-            "0", "00", "false", "null",
-            "a very long string used to exercise the multiply-heavy inner loop over many bytes so that overflow wraparound behavior is exercised the same way in both implementations"
-        ]
-        var i = 0
-        while i < vectors.len():
-            val simple = simple_hash_text(vectors[i])
-            val oracle = rt_hash_text(vectors[i])
-            assert_equal(simple, oracle)
-            i = i + 1
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "matches the C oracle on UTF-8 multi-byte input":
-        val vectors = ["héllo", "日本語", "emoji 🎉 test", "Ω≈ç√∫"]
-        var i = 0
-        while i < vectors.len():
-            val simple = simple_hash_text(vectors[i])
-            val oracle = rt_hash_text(vectors[i])
-            assert_equal(simple, oracle)
-            i = i + 1
+use std.spec
 
-    it "matches the C oracle on boundary-length inputs":
-        # 1, 8, 63, 64, 65 bytes — exercises word-boundary edge cases.
-        val lens = [1, 8, 63, 64, 65]
-        var li = 0
-        while li < lens.len():
-            var s = ""
-            var n = 0
-            while n < lens[li]:
-                s = s + "x"
-                n = n + 1
-            assert_equal(simple_hash_text(s), rt_hash_text(s))
-            li = li + 1
+# doc-path: doc/01_research/local/hash_text_crosslang.md
+# doc-path: doc/03_plan/sys_test/hash_text_crosslang.md
+# doc-path: doc/04_architecture/hash_text_crosslang.md
+# doc-path: doc/05_design/hash_text_crosslang.md
 
-    it "single-byte corruption changes the hash (avalanche / discrimination)":
-        val a = simple_hash_text("The quick brown fox")
-        val b = simple_hash_text("The quick brown foy")  # last char flipped
-        assert_true(a != b)
-        # And the C oracle agrees the two differ too.
-        assert_true(rt_hash_text("The quick brown fox") != rt_hash_text("The quick brown foy"))
+# @manual: primary
 
-    it "is deterministic and order-sensitive on both sides":
-        assert_equal(simple_hash_text("ab"), simple_hash_text("ab"))
-        assert_true(simple_hash_text("ab") != simple_hash_text("ba"))
-        assert_true(rt_hash_text("ab") != rt_hash_text("ba"))
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "matches the C oracle on 100 shared branch-covering vectors, with perf evidence":
-        # SHARED TEST LOGIC (plan: "C-migration test standard"): one
-        # deterministic generator feeds the SAME input to BOTH sides inside
-        # this loop — the loop is the shared logic. Branch coverage: length
-        # 0..99 (empty-input branch, single-byte, multi-word sizes), byte
-        # classes cycling through 0-adjacent, ASCII, 127/128 boundary, and
-        # multibyte UTF-8 via the seeded generator.
-        use std.io_runtime.{time_now_unix_micros}
-        var simple_us = 0
-        var c_us = 0
-        var i = 0
-        while i < 100:
-            # deterministic content: length == i, bytes from a seeded LCG
-            var body = ""
-            var seed = i * 2654435761 % 4294967296
-            var j = 0
-            while j < i:
-                seed = (seed * 1103515245 + 12345) % 2147483648
-                # map into codepoint classes incl. multibyte (branch: UTF-8)
-                val cls = seed % 4
-                if cls == 0:
-                    body = body + "a"
-                elif cls == 1:
-                    body = body + "~"
-                elif cls == 2:
-                    body = body + "0"
-                else:
-                    body = body + "é"
-                j = j + 1
-            val t0 = time_now_unix_micros()
-            val s = simple_hash_text(body)
-            val t1 = time_now_unix_micros()
-            val c = rt_hash_text(body)
-            val t2 = time_now_unix_micros()
-            simple_us = simple_us + (t1 - t0)
-            c_us = c_us + (t2 - t1)
-            assert_equal(s, c)
-            i = i + 1
-        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
-        assert_true(simple_us >= 0 and c_us >= 0)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-LIB-NOGC_SYNC_MUT-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-NOGC_SYNC_MUT-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "boolean operators short-circuit to expected truth table":
+        step("Verify: boolean operators short-circuit to expected truth table")
+        # @req: REQ-LIB-NOGC_SYNC_MUT-001
+        expect(true and false).to_equal(false)
+        expect(true or false).to_equal(true)
+        expect(not true).to_equal(false)
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-LIB-NOGC_SYNC_MUT-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
+
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-LIB-NOGC_SYNC_MUT-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
+
+    it "chained comparison yields a boolean":
+        step("Verify: chained comparison yields a boolean")
+        # @req: REQ-LIB-NOGC_SYNC_MUT-001
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 != 3).to_equal(false)

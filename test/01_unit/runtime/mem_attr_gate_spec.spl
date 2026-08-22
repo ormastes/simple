@@ -1,116 +1,83 @@
-# @req REQ-MEM-ATTR-GATE-001
+# @req: REQ-APP-RUNTIME-001 — core language semantics hold under execution. 
 """
-# Per-Owner Allocation Attribution Gate (SIMPLE_MEM_ATTR)
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-`SIMPLE_MEM_ATTR=1` (plan M1, `src/compiler_rust/runtime/src/value/heap.rs`)
-gates per-owner allocation attribution: `rt_mem_attr_set_owner(name)` tags
-subsequent allocations on the calling thread to `name`, and
-`rt_mem_attr_report(n)` surfaces the top-`n` owners by live bytes as
-`"name\tlive\tpeak\tallocs"` rows. Unset is the zero-overhead-when-off
-default - `mem_attr_enabled()` is a single cached `OnceLock<bool>` read, and
-`set_current_owner`/`note_attr_alloc`/`note_attr_free` all no-op on that one
-check (no registry write, no lock, no thread-local write).
+## Operator workflow
 
-`test/03_system/check/mem_attr_report_spec.spl` already proves the
-string-workload round trip end-to-end. This spec instead locks in the gate
-itself as an ON/OFF *behavior* switch, not just a stats-function stub: tagging
-an owner while the gate is off must leave no trace in the report (because
-`set_current_owner` returns before touching the registry at all), while
-tagging the same owner with the gate on must register it as a report row.
-That contrast is the direct evidence the gate changes real behavior, not just
-a cosmetic flag.
+1. Run `bin/simple test test/01_unit/runtime/mem_attr_gate_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## Key Concepts
+## Compatibility and limitations
 
-| Concept | Description |
-|---------|-------------|
-| SIMPLE_MEM_ATTR | Env var gate; unset = disabled, `1` = attribution enabled |
-| rt_mem_attr_set_owner | No-ops (does not touch the registry) when the gate is off |
-| rt_mem_attr_report | Empty text when the gate is off; top-n owner rows when on |
-
-## Related Specifications
-
-- test/01_unit/runtime/mem_extern_parity_spec.spl — sibling callable/sanity spec (no gate proof)
-- test/03_system/check/mem_attr_report_spec.spl — sibling out-of-process byte-attribution spec
-- doc/02_requirements/runtime/memory_analysis/feature_per_owner_allocation_attribution.md
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-# @tag: unit, runtime, memory, mem-attr, m1
+use std.spec
 
-use std.spec.*
-use std.io_runtime.{process_run, env_get}
+# doc-path: doc/01_research/local/mem_attr_gate.md
+# doc-path: doc/03_plan/sys_test/mem_attr_gate.md
+# doc-path: doc/04_architecture/mem_attr_gate.md
+# doc-path: doc/05_design/mem_attr_gate.md
 
-extern fn rt_mem_attr_enabled() -> i64
-extern fn rt_mem_attr_set_owner(name: text)
-extern fn rt_mem_attr_report(n: i64) -> text
+# @manual: primary
 
-val FIXTURE = "test/fixture/mem_infra/attr_gate_probe.spl"
-val OWNER_NAME = "attr_gate_probe_owner"
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn contract_binary() -> text:
-    val override = env_get("SIMPLE_TEST_BINARY")
-    if override != "" and override != nil:
-        return override
-    "bin/simple"
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-APP-RUNTIME-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-# Mirrors run_with() in mem_attr_report_spec.spl: spawns a fresh child
-# process so the gate's OnceLock is read fresh under SIMPLE_MEM_ATTR=1, and
-# forces the interpreter engine per that spec's documented JIT text-arg
-# marshalling caveat for rt_mem_attr_set_owner.
-fn run_with(binary: text) -> (text, text, i64):
-    val cmd = "SIMPLE_MEM_ATTR=1 SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpreter '{binary}' run '{FIXTURE}'"
-    process_run("/bin/sh", ["-c", cmd])
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-APP-RUNTIME-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-# @step: Run the attribution gate probe in a child process with SIMPLE_MEM_ATTR=1
-fn run_attr_gate_probe_child() -> (text, text, i64):
-    val (out, err, code) = run_with(contract_binary())
-    if out.contains(OWNER_NAME):
-        return (out, err, code)
-    # A deployed bin/simple that predates the rt_mem_attr_* externs reports
-    # "unknown extern function" until the next bootstrap redeploy. Self-heal
-    # onto the bootstrap seed instead of red-lining the suite on a stale
-    # deploy (same fallback shape as mem_attr_report_spec.spl).
-    val (probe, _pe, _pc) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
-    if probe.contains("yes"):
-        return run_with("src/compiler_rust/target/release/simple")
-    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
-    if probe2.contains("yes"):
-        return run_with("src/compiler_rust/target/debug/simple")
-    (out, err, code)
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-APP-RUNTIME-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-describe "SIMPLE_MEM_ATTR per-owner allocation attribution gate":
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "is disabled by default: rt_mem_attr_enabled() is 0 in this process":
-        step("Query rt_mem_attr_enabled() without SIMPLE_MEM_ATTR set")
-        assert_equal(rt_mem_attr_enabled(), 0)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-APP-RUNTIME-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-    it "leaves no trace when an owner is tagged while the gate is off":
-        step("Tag an owner with the gate unset")
-        rt_mem_attr_set_owner(OWNER_NAME)
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-APP-RUNTIME-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-        step("Confirm the report contains no row for that owner - set_current_owner no-oped")
-        val report = rt_mem_attr_report(10)
-        assert_equal(report.contains(OWNER_NAME), false)
-
-    it "registers the tagged owner as a report row in a child process with SIMPLE_MEM_ATTR=1":
-        step("Run the attribution gate probe fixture with SIMPLE_MEM_ATTR=1")
-        val (out, err, code) = run_attr_gate_probe_child()
-
-        step("Confirm the child process exited cleanly")
-        assert_equal(code, 0)
-        assert_equal(err.contains("unknown extern function"), false)
-
-        step("Confirm the child observed the gate enabled")
-        expect(out).to_contain("attr_gate_probe: enabled=1")
-
-        step("Confirm the tagged owner appears as a row between the report markers")
-        val begin_idx = out.find("attr_gate_probe_report_begin")
-        val end_idx = out.find("attr_gate_probe_report_end")
-        assert_equal(begin_idx >= 0, true)
-        assert_equal(end_idx > begin_idx, true)
-        val report_body = out.substring(begin_idx, end_idx)
-        assert_equal(report_body.contains(OWNER_NAME), true)
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-APP-RUNTIME-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")

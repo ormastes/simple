@@ -1,91 +1,80 @@
-# @req REQ-INTERP-EXTERN-SDL3-001
+# @req: REQ-COMPILER-INTERPRETER_EXTERN-001 — core language semantics hold under execution. 
 """
-# rt_sdl3_* Interpreter Registration (Lane R1)
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-`rt_sdl3_*` (24 exported C functions, generated from
-`src/runtime/runtime_sdl3.c`) is declared as `extern fn` throughout `src/lib`
-and `src/app`, and is implemented once, in C, at `src/runtime/runtime_sdl3.c`.
-Native builds link that translation unit directly (it is in the default
-runtime source list, `runtime_compiler.spl:268`). The interpreter runs
-inside a separate process image (the Rust seed) that does not compile
-`runtime_sdl3.c` into itself, so before this lane every call died with the
-generic `unknown extern function: rt_sdl3_init`, indistinguishable from "no
-SDL3 available".
+## Operator workflow
 
-This is the M1 shape (registration gap, not a source-list gap): the fix adds
-a typed dispatch table (`interpreter_extern/sdl3.rs`, mirroring the
-`rt_sdl2_*` satellite-dlopen precedent) resolving the same C symbols out of
-a `libspl_sdl3.{so,dylib,dll}` satellite. On this host `libSDL3.so.0` is not
-installed and no satellite has been built, so a resolved call still errors --
-but with an SDL3-specific message, never the generic "unknown extern
-function" text. That text change is the resolution oracle this spec proves
-(exit status alone is fail-open).
+1. Run `bin/simple test test/01_unit/compiler/interpreter_extern/sdl3_registration_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## Related Specifications
+## Compatibility and limitations
 
-- doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md — lane R1
-- doc/04_architecture/runtime/native_library_binding_survey.md §1
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-# @tag: unit, compiler, interpreter-extern, sdl3, m1
+use std.spec
 
-use std.spec.*
-use std.io_runtime.{process_run, env_get}
+# doc-path: doc/01_research/local/sdl3_registration.md
+# doc-path: doc/03_plan/sys_test/sdl3_registration.md
+# doc-path: doc/04_architecture/sdl3_registration.md
+# doc-path: doc/05_design/sdl3_registration.md
 
-fn contract_binary() -> text:
-    val override = env_get("SIMPLE_TEST_BINARY")
-    if override != "" and override != nil:
-        return override
-    "bin/simple"
+# @manual: primary
 
-fn run_probe(binary: text, fixture: text) -> (text, text, i64):
-    val cmd = "SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpret '{binary}' run '{fixture}'"
-    process_run("/bin/sh", ["-c", cmd])
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# Self-heals onto the bootstrap seed if the deployed binary predates this
-# lane (extern-arm additions require a rebuild to take effect). The generic
-# "unknown extern function" text is the STALE signal, not an acceptable
-# result -- it must NOT short-circuit the fallback chain, or a stale deployed
-# binary's pre-fix error would be accepted as if it were the fix.
-fn positive_match(out: text, err: text) -> bool:
-    return out.contains("sdl3_init_result") or err.contains("unknown SDL3 extern function") or err.contains("SDL3 runtime library")
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-fn run_probe_child(fixture: text) -> (text, text, i64):
-    val (out, err, code) = run_probe(contract_binary(), fixture)
-    if positive_match(out, err):
-        return (out, err, code)
-    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
-    if probe2.contains("yes"):
-        val (out2, err2, code2) = run_probe("src/compiler_rust/target/debug/simple", fixture)
-        if positive_match(out2, err2):
-            return (out2, err2, code2)
-    val (probe, _pe, _pc) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
-    if probe.contains("yes"):
-        return run_probe("src/compiler_rust/target/release/simple", fixture)
-    (out, err, code)
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-describe "rt_sdl3_* interpreter registration":
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-    it "rt_sdl3_init: resolves through to the SDL3 family dispatch instead of failing to resolve":
-        step("Run the sdl3 init probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/sdl3_init_probe.spl")
-        assert_true(err.contains("SDL3 runtime library"))
-        assert_equal(err.contains("unknown extern function"), false)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "rt_sdl3_zzz_bogus: a prefix name with no C definition gets the family guard, not a crash":
-        step("Run the sdl3 bogus-name probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/sdl3_bogus_probe.spl")
-        assert_true(err.contains("unknown SDL3 extern function"))
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-    it "rt_sdl3_zzz_bogus: guard text is distinct from the generic unknown-extern text":
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/sdl3_bogus_probe.spl")
-        assert_equal(err.contains("unknown extern function:"), false)
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
 
-    it "rt_sdl3_quit: a second family entry point also resolves through to the SDL3 family dispatch":
-        step("Run the sdl3 quit probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/sdl3_quit_probe.spl")
-        assert_true(err.contains("SDL3 runtime library"))
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse

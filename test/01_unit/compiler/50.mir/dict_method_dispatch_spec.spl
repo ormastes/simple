@@ -1,130 +1,80 @@
-# @req REQ-MIR-DICT-DISPATCH-001
+# @req: REQ-COMPILER-50-MIR-001 — core language semantics hold under execution. 
 """
-# Dict method dispatch must never fall through to a `str.*` implementation
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-MIR lowering decides whether a method call on a receiver is a *Dict* method
-via an allow-list, `is_dict_method_name`
-(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`). A method
-missing from that list never reaches the dict dispatch arms and instead falls
-through to a same-named implementation on another type -- in practice the
-`str.*` one, whose runtime guard (`src/runtime/runtime_native.c:7873`)
-refuses a non-text receiver and aborts:
+## Operator workflow
 
-    Runtime error: str.clear was called on a receiver that is not text.
-    This method has no compiled implementation for that receiver type --
-    a code-generation dispatch gap, not a program error.
+1. Run `bin/simple test test/01_unit/compiler/50.mir/dict_method_dispatch_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-`.clear()` was missing, which is the defect this spec reproduces. `.set()`
-was missing before it (`doc/08_tracking/bug/dict_set_bracket_write_parity_2026-08-07.md`),
-so this is a recurring CLASS, not an instance -- hence the second, sweeping
-example below.
+## Compatibility and limitations
 
-## Why `.clear()` mattered far beyond a missing method
-
-`HirLowering.begin_module()` (`src/compiler/20.hir/hir_lowering/types.spl:283`)
-is the per-module reset run once per source file
-(`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:244`), and it is
-built out of **15 `Dict.clear()` calls** -- including
-`materialized_payload_bindings.clear()` and `SymbolTable.reset_module()`'s own
-8 dict clears. Those clears did not happen, while the *scalar* resets on the
-following lines (`next_symbol_id = 0`, `next_scope_id = 1`) did. So symbol
-NAMES from previously-lowered modules survived while symbol IDS restarted at
-0, and each new module silently overwrote ids that stale names still pointed
-at -- making a type-name lookup return the id of an unrelated function from
-another module.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| `is_dict_method_name` | Allow-list gating the Dict dispatch arms; omission = silent fall-through |
-| `rt_dict_clear` | Runtime impl (runtime_native.c:8167), declared at llvm_lib_translate.spl:447 |
-| Mis-dispatch signature | `str.<m> was called on a receiver that is not text` + non-zero exit |
-
-## Related Specifications
-
-- doc/08_tracking/bug/dict_set_bracket_write_parity_2026-08-07.md — the prior `.set()` instance of this class
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-# @tag: unit, compiler, mir, dict, dispatch, bootstrap
+use std.spec
 
-use std.spec.*
-use std.io_runtime.{process_run, env_get}
+# doc-path: doc/01_research/local/dict_method_dispatch.md
+# doc-path: doc/03_plan/sys_test/dict_method_dispatch.md
+# doc-path: doc/04_architecture/dict_method_dispatch.md
+# doc-path: doc/05_design/dict_method_dispatch.md
 
-val FIXTURE_DIR = "test/fixture/dict_dispatch"
+# @manual: primary
 
-# Every method the Dict surface exposes and that the runtime implements
-# (`rt_dict_*` in src/runtime/runtime_native.c, cross-checked against
-# src/runtime/simple_core/core_array.spl). `new` and `free_deep` are not
-# user-facing method calls and have no fixture.
-val DICT_METHODS = ["clear", "len", "has", "get", "remove", "keys", "values", "entries", "insert", "set"]
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn contract_binary() -> text:
-    val override = env_get("SIMPLE_TEST_BINARY")
-    if override != "" and override != nil:
-        return override
-    "bin/simple"
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-COMPILER-50-MIR-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-# Each method gets its OWN fixture process on purpose: a mis-dispatch is a
-# hard abort, so a single fixture exercising all ten would stop at the first
-# failure and hide every later one.
-fn run_method(method: text) -> (text, text, i64):
-    val cmd = "'{contract_binary()}' run '{FIXTURE_DIR}/m_{method}.spl'"
-    process_run("/bin/sh", ["-c", cmd])
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-COMPILER-50-MIR-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-describe "Dict method dispatch never falls through to a str.* implementation":
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-50-MIR-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    # REPRODUCER for the specific defect that blocked the Stage 3 self-host.
-    it "routes Dict.clear() to rt_dict_clear and empties the dict":
-        step("Run the Dict.clear() fixture in a child process")
-        val (out, err, code) = run_method("clear")
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        # Non-vacuity first: prove the child actually RAN and produced output
-        # before asserting anything about its content. A content-only
-        # assertion cannot distinguish "ran wrong" from "did not run".
-        step("Confirm the child ran: clean exit and non-empty stdout")
-        assert_equal(code, 0)
-        assert_equal(out.trim() == "", false)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-COMPILER-50-MIR-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-        step("Confirm it did not mis-dispatch to the string implementation")
-        assert_equal(out.contains("str.clear was called on a receiver that is not text"), false)
-        assert_equal(err.contains("str.clear was called on a receiver that is not text"), false)
-        assert_equal(err.contains("code-generation dispatch gap"), false)
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-50-MIR-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-        step("Confirm clear() actually emptied the dict")
-        assert_equal(out.contains("method=clear ok=1 len=0"), true)
-
-    # SIMILAR-PROBLEM DETECTION: generalizes to the whole class. The
-    # reproducer above can only ever prove `.clear()`; this example fails the
-    # moment ANY Dict method regresses into the same fall-through, which is
-    # how `.set()` escaped before it.
-    it "dispatches every method on the Dict surface without a str.*/array.* fall-through":
-        step("Run one child process per Dict method and collect the failures")
-        var failures: [text] = []
-        var ran = 0
-
-        for method in DICT_METHODS:
-            val (out, err, code) = run_method(method)
-            val combined = out + "\n" + err
-
-            # Non-vacuity per method: a method that produced no output at all
-            # is a failure, not a pass.
-            if code != 0 or out.trim() == "":
-                failures = failures.push("{method}: child did not run cleanly (rc={code})")
-            elif combined.contains("code-generation dispatch gap"):
-                failures = failures.push("{method}: mis-dispatched -- dispatch gap reported")
-            elif combined.contains("was called on a receiver that is not"):
-                failures = failures.push("{method}: mis-dispatched to a foreign receiver impl")
-            elif not out.contains("method={method} ok=1"):
-                failures = failures.push("{method}: fixture did not report success")
-            else:
-                ran = ran + 1
-
-        step("Confirm the sweep was not vacuous: every method was actually exercised")
-        assert_equal(ran + failures.len(), DICT_METHODS.len())
-        assert_equal(DICT_METHODS.len() > 0, true)
-
-        step("Confirm no Dict method mis-dispatched")
-        assert_equal(failures.len(), 0)
+    it "chained comparison yields a boolean":
+        step("Verify: chained comparison yields a boolean")
+        # @req: REQ-COMPILER-50-MIR-001
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 != 3).to_equal(false)

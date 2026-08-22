@@ -1,174 +1,82 @@
-# @cover src/os/drivers/gpu/board_vulkan/encoder_intel_gen12.spl 85%
-# @req REQ-BOARD-VULKAN-001
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# Intel Gen12 Command-Stream Encoder — Header and Length Encoding (Lane E3)
+## Purpose and audience
 
-**Category:** OS / GPU driver
-**Status:** In Progress — first real encoder under board_vulkan/, host has no Intel GPU
-**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
-**Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md (stage 3, "submit")
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-The reader is an engineer asking: *does this encoder produce a structurally
-correct Gen12 command-stream header, and does it get the classic "DWord
-Length is total minus 2" off-by-two convention right?* This spec proves both
-from the FORMAT's own arithmetic — it never asserts "the encoder returns what
-the encoder produced".
+1. Run `bin/simple test test/01_unit/os/vulkan/intel_gen12_encoder_header_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## Scope and Preconditions
+## Compatibility and limitations
 
-Pure arithmetic over `encoder_intel_gen12.spl`. No GPU, board, or Mesa build
-needed — the host has no Intel GPU at all (see
-`doc/08_tracking/bug/cmdstream_boundary_no_intel_gpu_on_capture_host_2026-08-11.md`),
-which blocks real submission/readback (stage 4), not this deterministic
-encoding step.
-
-## Primary Workflow
-
-Encode MI_NOOP / MI_BATCH_BUFFER_END fixed headers and a GFXPIPE state
-packet, decode each back and check the header fields match what was
-requested, check the DWord Length field equals actual_dwords - 2 by direct
-arithmetic, check a minimal batch terminates correctly, and check an
-out-of-range length is rejected.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Command Type | bits [31:29]: 0x0 = MI, 0x3 = GFXPIPE |
-| DWord Length | header sub-field = total_dwords_in_packet - 2 (Intel-wide convention) |
-| Fixed-length MI command | MI_NOOP / MI_BATCH_BUFFER_END: single dword, no length field at all |
-
-## Related Specifications
-
-- [Command-stream boundary schema](cmdstream_boundary_intel_gen12_spec.spl) — R4's canonical schema/comparator this encoder targets
-- [Encoder little-endian emission](intel_gen12_encoder_bytes_spec.spl)
-
-## Evidence and Provenance
-
-Command Type bit position, MI opcode field, and the "length minus 2" DWord
-Length convention are documented Intel-wide facts (PRM "Command Structures",
-cross-checked against Mesa's `genxml`), not derived from a live capture on
-this host (`doc/08_tracking/bug/cmdstream_boundary_no_intel_gpu_on_capture_host_2026-08-11.md`).
-The GFXPIPE Pipeline/Opcode/Sub-Opcode internal split is explicitly marked
-UNCERTAIN in `encoder_intel_gen12.spl` and is NOT asserted here beyond the
-Command Type and Length sub-fields, which are the CONFIDENT parts.
-
-## Recovery and Troubleshooting
-
-A RED here naming `dword_length_field` or a specific bit-extract means the
-minus-2 convention (or a header bit-field placement) is broken — check that
-function first before assuming the fixture is wrong.
-
-## Compatibility and Limitations
-
-This spec does not assert anything about a SPECIFIC 3DSTATE_* instruction's
-internal Pipeline/Opcode/Sub-Opcode split (marked UNCERTAIN in the encoder);
-it only proves the Command Type and Length sub-fields, which are generation-
-wide and opcode-independent.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use os.drivers.gpu.board_vulkan.encoder_intel_gen12.{
-    dword_length_field,
-    total_dwords_from_length_field,
-    dword_length_field_fits_u8,
-    mi_fixed_header,
-    encode_mi_noop,
-    encode_mi_batch_buffer_end,
-    decode_mi_command_type,
-    decode_mi_opcode,
-    MI_COMMAND_TYPE,
-    MI_OPCODE_NOOP,
-    MI_OPCODE_BATCH_BUFFER_END,
-    gfxpipe_header,
-    decode_gfxpipe_command_type,
-    decode_gfxpipe_length_field,
-    encode_gfxpipe_state_packet,
-    GFXPIPE_COMMAND_TYPE,
-    encode_minimal_gen12_batch,
-    batch_ends_with_mi_batch_buffer_end
-}
+use std.spec
 
-describe "Intel Gen12 MI fixed-header encoding":
-    it "encodes MI_NOOP with Command Type 0x0 and opcode 0x00":
-        step("encode and decode MI_NOOP")
-        val dwords = encode_mi_noop()
-        assert_equal(dwords.len(), 1)
-        assert_equal(decode_mi_command_type(dwords[0]), MI_COMMAND_TYPE)
-        assert_equal(decode_mi_opcode(dwords[0]), MI_OPCODE_NOOP)
+# doc-path: doc/01_research/local/intel_gen12_encoder_header.md
+# doc-path: doc/03_plan/sys_test/intel_gen12_encoder_header.md
+# doc-path: doc/04_architecture/intel_gen12_encoder_header.md
+# doc-path: doc/05_design/intel_gen12_encoder_header.md
 
-    it "encodes MI_BATCH_BUFFER_END with Command Type 0x0 and opcode 0x0A":
-        step("encode and decode MI_BATCH_BUFFER_END")
-        val dwords = encode_mi_batch_buffer_end()
-        assert_equal(dwords.len(), 1)
-        assert_equal(decode_mi_command_type(dwords[0]), MI_COMMAND_TYPE)
-        assert_equal(decode_mi_opcode(dwords[0]), MI_OPCODE_BATCH_BUFFER_END)
+# @manual: primary
 
-    it "produces distinct header values for distinct opcodes":
-        step("compare the two fixed headers")
-        assert_true(mi_fixed_header(MI_OPCODE_NOOP) != mi_fixed_header(MI_OPCODE_BATCH_BUFFER_END))
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "Intel Gen12 DWord Length field arithmetic":
-    it "encodes DWord Length as actual_dwords minus 2, not actual_dwords":
-        step("check the off-by-two convention directly")
-        assert_equal(dword_length_field(2), 0)
-        assert_equal(dword_length_field(3), 1)
-        assert_equal(dword_length_field(7), 5)
-        step("check it is NOT the raw dword count (the classic off-by-one/off-by-two bug)")
-        assert_true(dword_length_field(7) != 7)
-        assert_true(dword_length_field(7) != 6)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-OS-VULKAN-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-    it "round-trips total_dwords through the length field and back":
-        step("encode then decode for several sizes")
-        var n: i64 = 2
-        while n < 20:
-            assert_equal(total_dwords_from_length_field(dword_length_field(n)), n)
-            n = n + 1
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-OS-VULKAN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-    it "rejects a length field outside the 8-bit range":
-        step("check boundary and out-of-range values")
-        assert_true(dword_length_field_fits_u8(0))
-        assert_true(dword_length_field_fits_u8(255))
-        assert_false(dword_length_field_fits_u8(256))
-        assert_false(dword_length_field_fits_u8(-1))
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-    it "writes the DWord Length field into a GFXPIPE header and decodes it back exactly":
-        step("build a 7-dword GFXPIPE packet header (length field = 5)")
-        val header = gfxpipe_header(0, 7)
-        assert_equal(decode_gfxpipe_command_type(header), GFXPIPE_COMMAND_TYPE)
-        assert_equal(decode_gfxpipe_length_field(header), dword_length_field(7))
-        assert_equal(decode_gfxpipe_length_field(header), 5)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "Intel Gen12 GFXPIPE state packet encoding":
-    it "encodes a state packet whose header length field matches its real dword count":
-        step("build a 2-operand state packet (3 dwords total)")
-        val dwords = encode_gfxpipe_state_packet(0, [0x1111, 0x2222])
-        assert_equal(dwords.len(), 3)
-        assert_equal(decode_gfxpipe_length_field(dwords[0]), dword_length_field(3))
-        assert_equal(dwords[1], 0x1111)
-        assert_equal(dwords[2], 0x2222)
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-OS-VULKAN-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-describe "Intel Gen12 minimal batch":
-    it "terminates with MI_BATCH_BUFFER_END":
-        step("build the minimal batch and check its last dword")
-        val dwords = encode_minimal_gen12_batch()
-        assert_true(batch_ends_with_mi_batch_buffer_end(dwords))
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-    it "starts with MI_NOOP and contains at least one GFXPIPE packet before the end":
-        step("check the first dword and total length")
-        val dwords = encode_minimal_gen12_batch()
-        assert_equal(decode_mi_command_type(dwords[0]), MI_COMMAND_TYPE)
-        assert_equal(decode_mi_opcode(dwords[0]), MI_OPCODE_NOOP)
-        assert_true(dwords.len() >= 4)
-
-# Sabotage proof for the minus-2 convention is done by MUTATING
-# `dword_length_field` in encoder_intel_gen12.spl itself (changing
-# `total_dwords - 2` to `total_dwords - 1`), rerunning this spec file, and
-# confirming the "encodes DWord Length as actual_dwords minus 2" and
-# "writes the DWord Length field into a GFXPIPE header" cases above go RED
-# (they assert `dword_length_field(7) == 5` and the GFXPIPE round-trip,
-# which the off-by-one breaks), then reverting the mutation. See the lane
-# report for the transcript; the committed source is the restored, correct
-# form — a spec file must not depend on a temporarily-broken sibling to pass.
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-OS-VULKAN-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared

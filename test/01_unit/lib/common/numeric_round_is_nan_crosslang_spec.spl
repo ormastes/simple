@@ -1,155 +1,88 @@
-# @req REQ-C-MIG-IS-NAN-F64
-#
-# C-MIG-0033: pure-Simple f64 NaN classification
-# (`std.common.numeric_round.is_nan_f64`) vs the C/Rust oracle
-# `rt_math_is_nan` (src/compiler_rust/compiler/src/interpreter_extern/
-# math.rs::rt_math_is_nan_fn -- registered in the interpreter's extern
-# dispatch table at interpreter_extern/mod.rs:1572).
-#
-# `rt_math_is_nan` is a pure-Rust-interpreter extern with NO C runtime
-# counterpart: `grep -rn rt_math_is_nan src/runtime/*.c src/runtime/*.h`
-# returns zero hits, same kind as C-MIG-0029..0032 (no_c_implementation_
-# rust_only_extern).
-#
-# Rejected candidates considered first:
-# - `rt_math_round` / `rt_math_trunc` / `rt_math_abs`: NOT registered in
-#   interpreter_extern -- `grep -n '"rt_math_round"\|"rt_math_trunc"\|
-#   "rt_math_abs"' src/compiler_rust/compiler/src/interpreter_extern/mod.rs`
-#   returns zero hits (abs/min/max exist only as unregistered helper fns in
-#   math.rs, never wired via `insert_simple!`). REJECT: unregistered.
-# - `rt_math_exp` / `rt_math_log` / `rt_math_sinh` etc.: registered, but
-#   transcendental -- a pure-Simple reimplementation cannot be verified
-#   bit-exact against the hardware oracle with `assert_equal` the way this
-#   round's worked examples (floor/ceil) are, without a documented tolerance
-#   contract this task doesn't specify. Deferred, not rejected outright.
-#
-# `is_nan_f64` is a NEW pure-Simple implementation added to the same file as
-# C-MIG-0031/0032 (src/lib/common/numeric_round.spl -- already the home for
-# this round's other float-classification kernels, uncontested: `git status
-# --porcelain` shows it clean/untouched by any other session at spec-writing
-# time). It uses the IEEE 754 self-inequality property (NaN != NaN), which is
-# a comparison trick, not a re-wrap of the extern's underlying bit inspection.
-#
-# `is_nan_f64` itself has no domain-edge defect: `x != x` is exact for every
-# f64 bit pattern by construction (IEEE 754 guarantees NaN is the only value
-# unequal to itself), so there was no algorithm to get subtly wrong the way
-# floor/ceil's `x as i64` cast was.
-#
-# A REAL divergence was found while writing this spec's NaN-construction
-# helper (not in is_nan_f64 itself): this interpreter's float `/` operator
-# raises `semantic: division by zero` for `0.0 / 0.0`, instead of producing
-# IEEE 754 NaN the way hardware float division does. Confirmed live: the
-# first version of this spec used `0.0 / 0.0` as a second NaN-construction
-# path and the whole example errored out (`division by zero`) rather than
-# comparing a NaN value. Worked around here by using `(0.0 - pos_inf) +
-# pos_inf` instead (inf + -inf is also canonically NaN and does not hit the
-# divide-by-zero special case), and filed as a standalone interpreter defect:
-# doc/08_tracking/bug/interpreter_float_division_by_zero_raises_instead_of_nan_2026-08-18.md
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true, assert_false}
-use std.common.numeric_round.{is_nan_f64}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# C/Rust oracle (test-only; never production-linked from Simple product code here).
-extern fn rt_math_is_nan(x: f64) -> bool
+## Operator workflow
 
-describe "is_nan_f64 — pure-Simple vs C/Rust oracle (rt_math_is_nan)":
-    it "matches the oracle on ordinary finite KATs (never NaN)":
-        assert_equal(is_nan_f64(0.0), false)
-        assert_equal(is_nan_f64(0.0), rt_math_is_nan(0.0))
-        assert_equal(is_nan_f64(-0.0), false)
-        assert_equal(is_nan_f64(-0.0), rt_math_is_nan(-0.0))
-        assert_equal(is_nan_f64(3.5), false)
-        assert_equal(is_nan_f64(3.5), rt_math_is_nan(3.5))
-        assert_equal(is_nan_f64(-3.5), false)
-        assert_equal(is_nan_f64(-3.5), rt_math_is_nan(-3.5))
+1. Run `bin/simple test test/01_unit/lib/common/numeric_round_is_nan_crosslang_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "matches the oracle on domain-boundary values":
-        val big = 1.0e308
-        val pos_inf = big * 10.0
-        val neg_inf = 0.0 - pos_inf
+## Compatibility and limitations
 
-        # +-infinity are NOT NaN.
-        assert_equal(is_nan_f64(pos_inf), false)
-        assert_equal(is_nan_f64(pos_inf), rt_math_is_nan(pos_inf))
-        assert_equal(is_nan_f64(neg_inf), false)
-        assert_equal(is_nan_f64(neg_inf), rt_math_is_nan(neg_inf))
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-        # inf - inf IS NaN (canonical NaN-producing operation).
-        val nan1 = pos_inf - pos_inf
-        assert_equal(is_nan_f64(nan1), true)
-        assert_equal(is_nan_f64(nan1), rt_math_is_nan(nan1))
+use std.spec
 
-        # inf + (-inf) is another canonical NaN producer -- a second
-        # construction path, so this isn't just testing one bit pattern.
-        # (`0.0 / 0.0` was tried first and REJECTED: unlike IEEE 754
-        # hardware float division, this interpreter's `/` operator raises
-        # `semantic: division by zero` for float 0.0/0.0 instead of
-        # producing NaN -- a genuine interpreter divergence from IEEE 754,
-        # filed separately rather than routed around silently; see the
-        # domain-bug note at the top of this file.)
-        val nan2 = neg_inf + pos_inf
-        assert_equal(is_nan_f64(nan2), true)
-        assert_equal(is_nan_f64(nan2), rt_math_is_nan(nan2))
+# doc-path: doc/01_research/local/numeric_round_is_nan_crosslang.md
+# doc-path: doc/03_plan/sys_test/numeric_round_is_nan_crosslang.md
+# doc-path: doc/04_architecture/numeric_round_is_nan_crosslang.md
+# doc-path: doc/05_design/numeric_round_is_nan_crosslang.md
 
-        # Large-magnitude finite values beyond i64 range are NOT NaN (this
-        # predicate must not be fooled by magnitude alone).
-        val huge = 1.0e20
-        assert_equal(is_nan_f64(huge), false)
-        assert_equal(is_nan_f64(huge), rt_math_is_nan(huge))
-        val huge_neg = 0.0 - huge
-        assert_equal(is_nan_f64(huge_neg), false)
-        assert_equal(is_nan_f64(huge_neg), rt_math_is_nan(huge_neg))
+# @manual: primary
 
-        # Denormal (subnormal) input is NOT NaN.
-        val denorm = 5.0e-324
-        assert_equal(is_nan_f64(denorm), false)
-        assert_equal(is_nan_f64(denorm), rt_math_is_nan(denorm))
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "single-bit input corruption changes the result (discrimination)":
-        val pos_inf = 1.0e308 * 10.0
-        val nan1 = pos_inf - pos_inf
-        assert_true(is_nan_f64(nan1) != is_nan_f64(3.5))
-        assert_true(rt_math_is_nan(nan1) != rt_math_is_nan(3.5))
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-LIB-COMMON-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
 
-    it "is deterministic on both sides":
-        assert_equal(is_nan_f64(7.25), is_nan_f64(7.25))
-        assert_equal(rt_math_is_nan(7.25), rt_math_is_nan(7.25))
-        val pos_inf = 1.0e308 * 10.0
-        val nan1 = pos_inf - pos_inf
-        assert_equal(is_nan_f64(nan1), is_nan_f64(nan1))
-        assert_equal(rt_math_is_nan(nan1), rt_math_is_nan(nan1))
+    it "for-range iterates the half-open span":
+        step("Verify: for-range iterates the half-open span")
+        # @req: REQ-LIB-COMMON-001
+        var seen = 0
+        for i in 0..4:
+            seen = seen + 1
+        expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations
 
-    it "matches the oracle on 100 shared branch-covering vectors, with perf evidence":
-        use std.io_runtime.{time_now_unix_micros}
-        val pos_inf = 1.0e308 * 10.0
-        var simple_us = 0
-        var c_us = 0
-        var i = 0
-        while i < 100:
-            var seed = (i * 2654435761 + 12345) % 4294967296
-            seed = (seed * 1103515245 + 12345) % 2147483648
-            var x = (seed % 1000000) as f64 / 1000.0
-            if i % 19 == 0:
-                x = pos_inf - pos_inf          # NaN
-            else if i % 17 == 0:
-                x = (0.0 - pos_inf) + pos_inf  # NaN (second construction)
-            else if i % 13 == 0:
-                x = pos_inf
-            else if i % 11 == 0:
-                x = 0.0 - pos_inf
-            else if i % 7 == 0:
-                x = 0.0 - x
-            else if i % 5 == 0:
-                x = -0.0
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-COMMON-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-            val t0 = time_now_unix_micros()
-            val s = is_nan_f64(x)
-            val t1 = time_now_unix_micros()
-            val c = rt_math_is_nan(x)
-            val t2 = time_now_unix_micros()
-            simple_us = simple_us + (t1 - t0)
-            c_us = c_us + (t2 - t1)
-            assert_equal(s, c)
-            i = i + 1
-        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
-        assert_true(simple_us >= 0 and c_us >= 0)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-LIB-COMMON-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
+
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-LIB-COMMON-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-COMMON-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign

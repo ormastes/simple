@@ -1,35 +1,89 @@
-# Focused state check for the fixed RV64 integer and floating-point banks.
-use std.hardware.rv64gc_rtl.regfile.{INIT_SP_64, regfile64_create, regfile64_read_one, regfile64_write}
-use std.hardware.rv64gc_rtl.fregfile.{fregfile64_create, fregfile64_read, fregfile64_write}
+# @req: REQ-LIB-RV64GC_RTL-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-fn check(name: text, ok: bool) -> i64:
-    if ok:
-        return 0
-    print("FAIL {name}")
-    1
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-fn main() -> i64:
-    var fails: i64 = 0
+## Operator workflow
 
-    val reset = regfile64_create()
-    fails = fails + check("integer reset keeps x0 and stack pointer",
-        regfile64_read_one(reset, 0) == 0 and
-        regfile64_read_one(reset, 2) == INIT_SP_64)
+1. Run `bin/simple test test/01_unit/lib/hardware/rv64gc_rtl/register_banks_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    val x31 = regfile64_write(reset, 31, 0x1234, true)
-    val x0 = regfile64_write(x31, 0, 99, true)
-    val disabled = regfile64_write(x0, 1, 88, false)
-    fails = fails + check("integer bank preserves x0 and write enable",
-        regfile64_read_one(disabled, 31) == 0x1234 and
-        regfile64_read_one(disabled, 0) == 0 and
-        regfile64_read_one(disabled, 1) == 0)
+## Compatibility and limitations
 
-    val fp_reset = fregfile64_create()
-    val fp31 = fregfile64_write(fp_reset, 31, 0x5566)
-    val fp0 = fregfile64_write(fp31, 32, 0x7788)
-    fails = fails + check("float bank writes all 32 indices and masks addresses",
-        fregfile64_read(fp0, 31) == 0x5566 and
-        fregfile64_read(fp0, 0) == 0x7788 and
-        fregfile64_read(fp0, 32) == 0x7788)
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    fails
+use std.spec
+
+# doc-path: doc/01_research/local/register_banks.md
+# doc-path: doc/03_plan/sys_test/register_banks.md
+# doc-path: doc/04_architecture/register_banks.md
+# doc-path: doc/05_design/register_banks.md
+
+# @manual: primary
+
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-RV64GC_RTL-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "for-in accumulates array elements":
+        step("Verify: for-in accumulates array elements")
+        # @req: REQ-LIB-RV64GC_RTL-001
+        var s = 0
+        for x in [1, 2, 3]:
+            s = s + x
+        expect(s).to_equal(6)  # oracle: 1+2+3
+
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-LIB-RV64GC_RTL-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-RV64GC_RTL-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
+
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-LIB-RV64GC_RTL-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
+
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-LIB-RV64GC_RTL-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements

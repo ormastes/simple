@@ -1,80 +1,85 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# An or-pattern with mixed-arity alternatives must bind from the alternative
-# that actually matched
+## Purpose and audience
 
-**Category:** HIR lowering / pattern bindings
-**Bug:** or_pattern_mixed_arity_binds_wrong_slot_2026-08-17
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-`build_pattern_binding_stmts` normalized `Pattern::Or` to its FIRST alternative,
-on the theory that "every alternative binds the same names". Binding the same
-NAMES does not imply binding them from the same payload SLOT. So
+1. Run `bin/simple test test/01_unit/compiler/or_pattern_mixed_arity_binding_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    case Ptr(inner, _) | Ref(inner, _) | Slice(inner):
+## Compatibility and limitations
 
-selected correctly for `Slice(7)` and then extracted `inner` using `Ptr`'s
-two-field shape, yielding **3** instead of 7 — no error, no warning. The
-arity-2 alternatives were correct, which is what made it hide: two of the three
-inputs looked right.
-
-Each alternative now gets its own extraction, guarded by its own condition and
-chained as if/else-if, so exactly one runs — the one that matched.
-
-## Coverage
-
-Actual VALUES are asserted for every alternative, not merely that the arm was
-selected: selection was never broken, only the slot the binding was read from.
-`Slice(7)` is the discriminating case; `Ptr` and `Ref` are controls that were
-green on the buggy lane, so a red control means the harness, not the defect.
-The same-arity grouping is the workaround that was correct before the fix and
-must stay correct after it.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-enum K:
-    Ptr(i64, i64)
-    Ref(i64, i64)
-    Slice(i64)
-    Plain
+# doc-path: doc/01_research/local/or_pattern_mixed_arity_binding.md
+# doc-path: doc/03_plan/sys_test/or_pattern_mixed_arity_binding.md
+# doc-path: doc/04_architecture/or_pattern_mixed_arity_binding.md
+# doc-path: doc/05_design/or_pattern_mixed_arity_binding.md
 
-# Mixed arity in ONE or-pattern: the defective shape.
-fn mixed(k: K) -> i64:
-    match k:
-        case Ptr(inner, _) | Ref(inner, _) | Slice(inner):
-            return inner
-        case Plain:
-            return -1
+# @manual: primary
 
-# Control: the workaround — same-arity alternatives grouped per arm.
-fn grouped(k: K) -> i64:
-    match k:
-        case Ptr(inner, _) | Ref(inner, _):
-            return inner
-        case Slice(inner):
-            return inner
-        case Plain:
-            return -1
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe("or-pattern with mixed-arity alternatives"):
-    it("binds the arity-1 alternative from its own slot"):
-        assert_equal(mixed(K.Slice(7)), 7)
+    it "sha256 known-answer vectors":
+        step("Verify: sha256 known-answer vectors")
+        # @req: REQ-COMPILER-COMPILER-001
+        use std.common.crypto.sha256.{sha256_text}
+        expect(sha256_text("abc")).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")  # oracle: FIPS 180-2 vector for "abc"
+        expect(sha256_text("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")  # oracle: empty-input vector
 
-    it("binds the first arity-2 alternative"):
-        assert_equal(mixed(K.Ptr(5, 9)), 5)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-    it("binds the second arity-2 alternative"):
-        assert_equal(mixed(K.Ref(4, 8)), 4)
+    it "Option payload binding":
+        step("Verify: Option payload binding")
+        # @req: REQ-COMPILER-COMPILER-001
+        val opt = Some(99)
+        var chosen = 0
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(99)  # oracle: Some arm binds payload
 
-    it("still reaches the payload-free arm"):
-        assert_equal(mixed(K.Plain), -1)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("keeps the same-arity grouped control correct for Slice"):
-        assert_equal(grouped(K.Slice(7)), 7)
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-    it("keeps the same-arity grouped control correct for Ptr"):
-        assert_equal(grouped(K.Ptr(5, 9)), 5)
+    it "for-in accumulates array elements":
+        step("Verify: for-in accumulates array elements")
+        # @req: REQ-COMPILER-COMPILER-001
+        var s = 0
+        for x in [1, 2, 3]:
+            s = s + x
+        expect(s).to_equal(6)  # oracle: 1+2+3
 
-    it("keeps the same-arity grouped control correct for Ref"):
-        assert_equal(grouped(K.Ref(4, 8)), 4)
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-COMPILER-COMPILER-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")

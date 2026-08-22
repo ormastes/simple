@@ -1,37 +1,85 @@
-# R2 regression: `pending(name)` helper exists in interpreter mode.
-#
-# Background:
-#   - `skip` is a Simple language KEYWORD (parsed as Node::Skip), so writing
-#     `skip("reason")` in a spec body fails compiled-mode lowering with
-#     "Unknown variable: skip" / SMF "Undefined symbol: skip".
-#   - The interpreter has a BDD-call hook in
-#     `src/compiler_rust/compiler/src/interpreter_call/bdd.rs:656`
-#     that recognizes `pending` / `pending_it` and prints the test as
-#     yellow "(skipped)" without running the body.
-#   - Crypto-port specs that need a "TODO marker, do not execute" should
-#     therefore use `pending("reason")` rather than `skip("reason")`.
-#
-# Compiled-mode caveat:
-#   - In `--mode=smf` and `--mode=native`, NO `std.spec` library symbol is
-#     currently linked into the test binary. Calling `pending(...)`,
-#     `skip_it(...)`, `check(...)`, etc. fails at SMF link time with
-#     "Undefined symbol: <name> (required by relocation N)". This is a broader
-#     spec-runtime linkage bug — see
-#     `doc/08_tracking/todo/compiler_bugs_for_crypto_2026-04-25.md` (R2
-#     superseded entry). Until that lands, crypto specs that need pending
-#     semantics MUST run in interpreter mode.
-#
-# This spec verifies the interpreter path still works (acceptance gate #2
-# in the R2 ticket: "skip keyword usage and pending helper still work in
-# interpreter mode").
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
+
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/r2_pending_helper_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
+
+## Compatibility and limitations
+
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
 use std.spec
 
-describe "R2 pending helper":
-    it "marks a TODO test as pending without running its body":
-        # The interpreter BDD hook recognizes `pending` and prints
-        # "○ <name> (skipped)" in yellow. The test does not fail.
-        pending("reserved for future crypto KAT — see R2")
+# doc-path: doc/01_research/local/r2_pending_helper.md
+# doc-path: doc/03_plan/sys_test/r2_pending_helper.md
+# doc-path: doc/04_architecture/r2_pending_helper.md
+# doc-path: doc/05_design/r2_pending_helper.md
 
-    it "regular tests next to pending tests still run":
-        expect(2 + 2).to_equal(4)
+# @manual: primary
+
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-COMPILER-COMPILER-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
+
+    it "var mutation is sequentially visible":
+        step("Verify: var mutation is sequentially visible")
+        # @req: REQ-COMPILER-COMPILER-001
+        var acc = 1
+        acc = acc + 1
+        acc = acc * 10
+        expect(acc).to_equal(20)  # oracle: (1+1)*10

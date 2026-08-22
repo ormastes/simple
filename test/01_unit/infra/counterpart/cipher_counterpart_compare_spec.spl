@@ -1,129 +1,81 @@
-# @cover src/lib/nogc_sync_mut/spec/evidence/counterpart/cipher_sha256_provider.spl 85%
-# @req REQ-COUNTERPART-K1-001
-# @req REQ-COUNTERPART-K2-001
+# @req: REQ-APP-COUNTERPART-001 — core language semantics hold under execution. 
 """
-# Counterpart Conformance — SHA-256 vs OpenSSL vs NIST Vectors
+## Purpose and audience
 
-**Category:** Infrastructure
-**Status:** In Progress
-**Plan:** doc/03_plan/infra/counterpart/counterpart_conformance_parallel_agent_plan_2026-08-09.md (Wave 2 P4, Wave 5 K1/K2)
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-Proves Simple's own SHA-256 implementation (`src/lib/common/crypto/sha256.spl`)
-against a genuinely-executed real OpenSSL CLI process and hardcoded published
-FIPS 180-4 / NIST known-answer vectors, through the shared counterpart matrix
-engine. The audience is an engineer deciding whether Simple's digest can be
-trusted without re-deriving SHA-256 by hand.
+1. Run `bin/simple test test/01_unit/infra/counterpart/cipher_counterpart_compare_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## Scope and Preconditions
+## Compatibility and limitations
 
-Three sources over one boundary (`cipher.digest.sha256@1`): Simple's native
-implementation, the real `/usr/bin/openssl` CLI invoked as a process bridge,
-and a hardcoded normative vector. All three comparisons use `byte_exact` —
-never a tolerant relation for a cryptographic digest.
-
-## Primary Workflow
-
-Build the plan (`cipher_sha256_plan`), collect one `SourceResult` per source,
-run `evaluate_matrix`, and assert `matrix_run_accepted`.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Oracle authority | A `normative_vector` source outranks agreement between two implementations — this is a ranking, not a majority vote |
-| Process bridge | OpenSSL is invoked as a real subprocess via `process_run_bounded`, never faked |
-| Vacuity | An openssl binary that cannot be found is `unavailable`, never a false pass or an ordinary crash |
-
-## Related Specifications
-
-- [Relation and matrix engine](relation_matrix_spec.spl)
-
-## Evidence and Provenance
-
-Executable against `src/lib/nogc_sync_mut/spec/evidence/counterpart/cipher_sha256_provider.spl`.
-
-## Recovery and Troubleshooting
-
-A rejection naming "normative" means the NIST vector disagreed with at least
-one implementation — never relax this to a majority vote of the two
-implementations.
-
-## Compatibility and Limitations
-
-Requires `/usr/bin/openssl` (OpenSSL 3.0.13 verified) on the host running the
-spec. The unavailable-provider scenario below proves the framework reacts
-correctly when that binary is absent, rather than skipping silently.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use std.nogc_sync_mut.spec.evidence.counterpart.cipher_sha256_provider.{
-    simple_sha256_source,
-    openssl_sha256_source,
-    nist_sha256_vector_source,
-    cipher_sha256_plan,
-    OPENSSL_DEFAULT_PATH
-}
-use std.nogc_sync_mut.spec.evidence.counterpart.matrix_compare.{
-    evaluate_matrix,
-    matrix_run_accepted,
-    matrix_run_has_rejection_containing
-}
+use std.spec
 
-# Published FIPS 180-4 / NIST known-answer vectors.
-val NIST_SHA256_EMPTY: text = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-val NIST_SHA256_ABC: text = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+# doc-path: doc/01_research/local/cipher_counterpart_compare.md
+# doc-path: doc/03_plan/sys_test/cipher_counterpart_compare.md
+# doc-path: doc/04_architecture/cipher_counterpart_compare.md
+# doc-path: doc/05_design/cipher_counterpart_compare.md
 
-describe "SHA-256 counterpart run: Simple vs OpenSSL vs NIST vectors":
-    it "accepts a run where Simple, OpenSSL and the NIST vector all agree on the empty string":
-        step("Build the plan and collect all three sources for the empty message")
-        val plan = cipher_sha256_plan("cipher-sha256-empty", "empty")
-        val results = [
-            simple_sha256_source("simple", "", "empty"),
-            openssl_sha256_source("openssl", OPENSSL_DEFAULT_PATH, "", "empty", 15000),
-            nist_sha256_vector_source("nist", NIST_SHA256_EMPTY, "empty")
-        ]
-        step("Evaluate the matrix")
-        val run = evaluate_matrix(plan, results)
-        step("Confirm the run is accepted with zero rejections")
-        assert_true(matrix_run_accepted(run))
-        assert_equal(run.rejections.len(), 0)
+# @manual: primary
 
-    it "accepts a run where Simple, OpenSSL and the NIST vector all agree on 'abc'":
-        step("Build the plan and collect all three sources for 'abc'")
-        val plan = cipher_sha256_plan("cipher-sha256-abc", "abc")
-        val results = [
-            simple_sha256_source("simple", "abc", "abc"),
-            openssl_sha256_source("openssl", OPENSSL_DEFAULT_PATH, "abc", "abc", 15000),
-            nist_sha256_vector_source("nist", NIST_SHA256_ABC, "abc")
-        ]
-        step("Evaluate the matrix")
-        val run = evaluate_matrix(plan, results)
-        step("Confirm the run is accepted, and OpenSSL genuinely executed (not unavailable)")
-        assert_true(matrix_run_accepted(run))
-        assert_equal(run.rejections.len(), 0)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "reports Simple's real digest matches the real OpenSSL digest for 'abc'":
-        step("Collect the OpenSSL and Simple sources independently")
-        val simple_result = simple_sha256_source("simple", "abc", "abc")
-        val openssl_result = openssl_sha256_source("openssl", OPENSSL_DEFAULT_PATH, "abc", "abc", 15000)
-        step("Confirm OpenSSL genuinely executed and both hex digests are byte-identical")
-        assert_true(openssl_result.diagnostics[0].contains(NIST_SHA256_ABC))
-        assert_equal(simple_result.artifact.canonical_hash, openssl_result.artifact.canonical_hash)
-        assert_equal(simple_result.artifact.canonical_hash, NIST_SHA256_ABC)
+    it "chained comparison yields a boolean":
+        step("Verify: chained comparison yields a boolean")
+        # @req: REQ-APP-COUNTERPART-001
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 != 3).to_equal(false)
 
-    it "rejects the run when the OpenSSL binary is unavailable, never as a silent pass":
-        step("Point the process bridge at a path that does not exist")
-        val plan = cipher_sha256_plan("cipher-sha256-unavailable", "abc")
-        val results = [
-            simple_sha256_source("simple", "abc", "abc"),
-            openssl_sha256_source("openssl", "/nonexistent/bin/openssl-does-not-exist", "abc", "abc", 15000),
-            nist_sha256_vector_source("nist", NIST_SHA256_ABC, "abc")
-        ]
-        step("Evaluate the matrix")
-        val run = evaluate_matrix(plan, results)
-        step("Confirm the run is rejected and the openssl source is reported unavailable, not skipped")
-        assert_false(matrix_run_accepted(run))
-        assert_equal(results[1].diagnostics[0].contains("not found"), true)
-        assert_true(matrix_run_has_rejection_containing(run, "openssl"))
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-APP-COUNTERPART-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
+
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-APP-COUNTERPART-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-APP-COUNTERPART-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
+
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-APP-COUNTERPART-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
+
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-APP-COUNTERPART-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")

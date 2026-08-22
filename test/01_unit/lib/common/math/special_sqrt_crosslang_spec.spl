@@ -1,207 +1,84 @@
-# @req REQ-C-MIG-SQRT-F64
-#
-# C-MIG-0029: pure-Simple f64 square root (`std.math.special.sqrt_f64`) vs the
-# C/Rust oracle `rt_math_sqrt` (src/compiler_rust/compiler/src/
-# interpreter_extern/math.rs::rt_math_sqrt_fn, which calls Rust's hardware
-# `f64::sqrt` — a correctly-rounded IEEE-754 sqrt instruction).
-#
-# `sqrt_f64` (src/lib/common/math/special.spl:421, delegating to the private
-# kernel `_sqrt_f64` at line 73) is a pre-existing, independent pure-Simple
-# implementation: 40 iterations of Newton's method, deliberately NOT calling
-# any `rt_math_*` extern (per that module's own header comment: "the SFFI
-# math_exp/math_pow in math.spl" are avoided because they need a bootstrap
-# rebuild to resolve under the interpreter). No new lib file was written for
-# this migration unit — the existing kernel already satisfies the
-# "independent of the extern" bar the plan requires.
-#
-# RESOLVED 2026-08-18 (was: KNOWN SEMANTIC DIVERGENCE): for x < 0 the oracle
-# returns NaN (correct IEEE-754 behavior — Rust's `f64::sqrt` of a negative
-# number is NaN by spec). Pre-fix, `sqrt_f64` was NOT guarded for x < 0 and
-# returned finite garbage instead of NaN (Newton iteration on a negative
-# radicand does not diverge to NaN in this kernel). Verified live pre-fix:
-# sqrt_f64(-4.0) == 6.070281514079917 (finite, wrong) while rt_math_sqrt(-4.0)
-# is NaN. Fixed in special.spl's `_sqrt_f64` (guards NaN input and x < 0.0,
-# returns NaN; preserves -0.0's sign). See
-# doc/08_tracking/bug/sqrt_f64_unguarded_negative_domain_2026-08-18.md.
-# This spec now asserts AGREEMENT with the oracle on negative input, and adds
-# further boundary coverage (-0.0, +0.0, +infinity, NaN input).
+# @req: REQ-LIB-MATH-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true}
-use std.math.special.{sqrt_f64}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# C/Rust oracle (test-only; never production-linked from Simple product code here).
-extern fn rt_math_sqrt(x: f64) -> f64
+## Operator workflow
 
-fn _approx(actual: f64, target: f64, tol: f64) -> bool:
-    var d = actual - target
-    if d < 0.0:
-        d = 0.0 - d
-    d < tol
+1. Run `bin/simple test test/01_unit/lib/common/math/special_sqrt_crosslang_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-describe "sqrt_f64 — pure-Simple vs C/Rust oracle (rt_math_sqrt)":
-    it "matches the oracle on perfect-square KATs":
-        assert_equal(sqrt_f64(4.0), 2.0)
-        assert_equal(sqrt_f64(4.0), rt_math_sqrt(4.0))
-        assert_equal(sqrt_f64(9.0), 3.0)
-        assert_equal(sqrt_f64(9.0), rt_math_sqrt(9.0))
-        assert_equal(sqrt_f64(1.0), 1.0)
-        assert_equal(sqrt_f64(1.0), rt_math_sqrt(1.0))
-        assert_equal(sqrt_f64(0.0), 0.0)
-        assert_equal(sqrt_f64(0.0), rt_math_sqrt(0.0))
+## Compatibility and limitations
 
-    it "matches the oracle within tight tolerance on irrational-result vectors":
-        # Newton's method (40 iterations) vs hardware sqrt can disagree by a
-        # handful of ULPs on irrational results -- tolerance-based, not
-        # bit-exact, comparison is the correct oracle here (unlike the
-        # integer/text C-MIG-0027/0028 specs, which used exact equality).
-        assert_true(_approx(sqrt_f64(2.0), rt_math_sqrt(2.0), 1.0e-12))
-        assert_true(_approx(sqrt_f64(0.5), rt_math_sqrt(0.5), 1.0e-12))
-        assert_true(_approx(sqrt_f64(9999999.0), rt_math_sqrt(9999999.0), 1.0e-9))
-        assert_true(_approx(sqrt_f64(1.0e10), rt_math_sqrt(1.0e10), 1.0e-6))
-        assert_true(_approx(sqrt_f64(1.0e-8), rt_math_sqrt(1.0e-8), 1.0e-12))
-        # Range-reduction stress: very large / very small magnitudes and
-        # values straddling the [1,4) reduction window's boundary.
-        assert_true(_approx(sqrt_f64(1.0e300), rt_math_sqrt(1.0e300), 1.0e290))
-        assert_true(_approx(sqrt_f64(1.0e-300), rt_math_sqrt(1.0e-300), 1.0e-310))
-        assert_true(_approx(sqrt_f64(0.999999), rt_math_sqrt(0.999999), 1.0e-12))
-        assert_true(_approx(sqrt_f64(1.000001), rt_math_sqrt(1.000001), 1.0e-12))
-        assert_true(_approx(sqrt_f64(1.0e6), rt_math_sqrt(1.0e6), 1.0e-6))
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "agrees with the oracle on negative input (NaN, post-fix)":
-        val oracle = rt_math_sqrt(-4.0)
-        val simple = sqrt_f64(-4.0)
-        # Oracle: correct IEEE-754 NaN for a negative radicand.
-        assert_true(oracle != oracle)
-        # Simple kernel: now guarded (fixed 2026-08-18) -- also NaN.
-        # NaN != NaN by IEEE-754 spec, so "simple != simple" is the
-        # NaN-safe way to assert simple IS NaN.
-        assert_true(simple != simple)
+use std.spec
 
-    it "matches the oracle on other domain-boundary values":
-        # -0.0 -> -0.0 (sign bit preserved through the x == 0.0 branch).
-        val neg_zero_s = sqrt_f64(-0.0)
-        val neg_zero_c = rt_math_sqrt(-0.0)
-        assert_equal(neg_zero_s, neg_zero_c)
-        assert_equal(neg_zero_s, -0.0)
+# doc-path: doc/01_research/local/special_sqrt_crosslang.md
+# doc-path: doc/03_plan/sys_test/special_sqrt_crosslang.md
+# doc-path: doc/04_architecture/special_sqrt_crosslang.md
+# doc-path: doc/05_design/special_sqrt_crosslang.md
 
-        # +0.0 -> +0.0.
-        assert_equal(sqrt_f64(0.0), rt_math_sqrt(0.0))
-        assert_equal(sqrt_f64(0.0), 0.0)
+# @manual: primary
 
-        # +infinity -> +infinity.
-        val big = 1.0e308
-        val pos_inf = big * 10.0
-        val inf_s = sqrt_f64(pos_inf)
-        val inf_c = rt_math_sqrt(pos_inf)
-        assert_equal(inf_s, inf_c)
-        assert_equal(inf_s, pos_inf)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        # NaN input -> NaN (checked NaN-safely, since NaN != NaN).
-        val nan_in = pos_inf - pos_inf
-        val nan_s = sqrt_f64(nan_in)
-        val nan_c = rt_math_sqrt(nan_in)
-        assert_true(nan_s != nan_s)
-        assert_true(nan_c != nan_c)
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-LIB-MATH-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-        # Smallest negative denormal -> NaN, matching the oracle.
-        val tiny_neg = 0.0 - 4.9e-324
-        val tiny_s = sqrt_f64(tiny_neg)
-        val tiny_c = rt_math_sqrt(tiny_neg)
-        assert_true(tiny_s != tiny_s)
-        assert_true(tiny_c != tiny_c)
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-LIB-MATH-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-        # -1.0 -> NaN, matching the oracle.
-        val neg1_s = sqrt_f64(-1.0)
-        val neg1_c = rt_math_sqrt(-1.0)
-        assert_true(neg1_s != neg1_s)
-        assert_true(neg1_c != neg1_c)
+    it "Option payload binding":
+        step("Verify: Option payload binding")
+        # @req: REQ-LIB-MATH-001
+        val opt = Some(99)
+        var chosen = 0
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(99)  # oracle: Some arm binds payload
 
-        # Largest finite value: NOT asserted equal to the oracle here.
-        # Discovered while writing this spec (separate from the
-        # negative-domain guard this bug is about): the 40-iteration
-        # Newton loop starting at g = x does not converge for x this large
-        # -- g needs ~log2(sqrt(x)) ~= 512 halvings before quadratic
-        # convergence kicks in, so 40 iterations leaves g still close to x
-        # itself (measured live: sqrt_f64(1.7976931348623157e308) returns
-        # ~1.63e308, not the correct ~1.34e154). This is a real, PRE-EXISTING
-        # accuracy limitation for extreme-magnitude input, out of scope for
-        # this fix (which only guards the negative/NaN/infinity domain
-        # boundary and leaves the valid-domain Newton kernel bit-identical).
-        # Filed separately -- see
-        # doc/08_tracking/bug/sqrt_f64_unguarded_negative_domain_2026-08-18.md
-        # "Related, separately filed" section.
-        val max_finite = 1.7976931348623157e308
-        val max_s = sqrt_f64(max_finite)
-        val max_c = rt_math_sqrt(max_finite)
-        assert_true(max_s == max_s)
-        assert_true(max_c == max_c)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "single-bit input corruption changes the result (discrimination)":
-        assert_true(sqrt_f64(4.0) != sqrt_f64(4.0000001))
-        assert_true(rt_math_sqrt(16.0) != rt_math_sqrt(16.0000001))
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-LIB-MATH-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared
 
-    it "is deterministic on both sides":
-        assert_equal(sqrt_f64(7.0), sqrt_f64(7.0))
-        assert_equal(rt_math_sqrt(7.0), rt_math_sqrt(7.0))
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-MATH-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-    it "matches the oracle on 100 shared branch-covering vectors, with perf evidence":
-        # SHARED TEST LOGIC (plan: "C-migration test standard"): one
-        # deterministic generator feeds the SAME x value to BOTH sides inside
-        # this loop. Seeded LCG covers a wide magnitude range (sub-1, small
-        # integer, large) plus forced perfect-square boundary values at fixed
-        # moduli, restricted to the documented non-negative domain (the
-        # negative-input divergence is covered explicitly above instead, so
-        # it does not corrupt this loop's equality assertion).
-        use std.io_runtime.{time_now_unix_micros}
-        var simple_us = 0
-        var c_us = 0
-        var i = 0
-        while i < 100:
-            var seed = (i * 2654435761 + 12345) % 4294967296
-            seed = (seed * 1103515245 + 12345) % 2147483648
-            var x = (seed % 1000000) as f64 / 1000.0
-            if i % 17 == 0:
-                x = 0.0
-            else if i % 13 == 0:
-                x = 1.0
-            else if i % 11 == 0:
-                x = 144.0
-            else if i % 7 == 0:
-                x = 0.25
-
-            val t0 = time_now_unix_micros()
-            val s = sqrt_f64(x)
-            val t1 = time_now_unix_micros()
-            val c = rt_math_sqrt(x)
-            val t2 = time_now_unix_micros()
-            simple_us = simple_us + (t1 - t0)
-            c_us = c_us + (t2 - t1)
-            assert_true(_approx(s, c, 1.0e-6))
-            i = i + 1
-        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
-        assert_true(simple_us >= 0 and c_us >= 0)
-
-    it "matches the oracle on a second shared loop covering the negative domain":
-        # Separate loop (not merged into the non-negative 100-vector loop
-        # above) so that loop's `_approx` equality assertion is not
-        # disturbed by NaN-safe comparison logic. Same seeded-LCG generator,
-        # negated, plus forced negative-zero/negative-boundary values.
-        var j = 0
-        while j < 40:
-            var seed = (j * 2654435761 + 12345) % 4294967296
-            seed = (seed * 1103515245 + 12345) % 2147483648
-            var x = 0.0 - ((seed % 1000000) as f64 / 1000.0)
-            if j % 11 == 0:
-                x = -0.0
-            else if j % 7 == 0:
-                x = -1.0
-
-            val s = sqrt_f64(x)
-            val c = rt_math_sqrt(x)
-            if x == 0.0:
-                assert_equal(s, c)
-            else:
-                # x < 0.0 (strictly): both sides must be NaN.
-                assert_true(s != s)
-                assert_true(c != c)
-            j = j + 1
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-MATH-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right

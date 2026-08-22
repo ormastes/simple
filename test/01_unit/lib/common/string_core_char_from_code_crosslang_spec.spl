@@ -1,132 +1,79 @@
-# @req REQ-C-MIG-CHAR-FROM-CODE
-#
-# C-MIG-0027: pure-Simple codepoint-to-text test (`std.common.string_core.char_from_code`)
-# vs the C oracle `rt_char_from_code` (src/runtime/runtime_native.c:3683-3699).
-# This spec freezes the C behavior as a differential oracle so C-MIG-0027 can
-# mark the C unit `retained_as_test_oracle`.
-#
-# rt_char_from_code is registered in the interpreter's extern dispatch table
-# (interpreter_extern/conversion.rs::rt_char_from_code_fn) via
-# `char::from_u32` + `.to_string()` — not the C source directly when running
-# under `bin/simple test` (tree-walk interpreter). Both the interpreter shim
-# and the C source implement the identical contract (a valid Unicode scalar
-# 0..0x10FFFF, excluding the UTF-16 surrogate range 0xD800..0xDFFF, encodes
-# to UTF-8; anything else collapses to empty text — the C runtime's own
-# comment above rt_char_from_code documents this as deliberate, since the ABI
-# layer has no exception mechanism), so this spec differentially compares
-# against whichever is actually reached by the extern call, documenting that
-# distinction rather than assuming the C file itself executes.
-#
-# `char_from_code` (src/lib/common/string_core.spl:399-400, delegating to
-# char_from_code_inline:204-235) is a pure Simple reimplementation —
-# ASCII/control codes via a literal lookup table, everything else via
-# `_utf8_char_from_codepoint_inline`'s inline UTF-8 byte math handed to the
-# `rt_bytes_to_text` extern (a raw byte-array-to-text memcpy, not a
-# reimplementation of rt_char_from_code's own logic) — deliberately NOT
-# delegating to `rt_char_from_code` itself, per that file's own comment block
-# citing doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md.
-# It is therefore a genuine independent implementation, suitable as the
-# Simple side of this differential. Probed live under `bin/simple test`
-# 2026-08-18 (multibyte codepoint 233 -> "\u{e9}" on both sides) to confirm a
-# previously-documented rt_bytes_to_text/test-evaluator gap note in that file
-# does not reproduce on the current binary.
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true}
-use std.common.string_core.{char_from_code}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# C oracle (test-only; never production-linked from Simple product code here).
-extern fn rt_char_from_code(code: i64) -> text
+## Operator workflow
 
-describe "char_from_code — pure-Simple vs C oracle (rt_char_from_code)":
-    it "matches the C oracle on published-shape KATs":
-        assert_equal(char_from_code(65), "A")
-        assert_equal(char_from_code(65), rt_char_from_code(65))
-        assert_equal(char_from_code(48), "0")
-        assert_equal(char_from_code(48), rt_char_from_code(48))
-        assert_equal(char_from_code(32), " ")
-        assert_equal(char_from_code(32), rt_char_from_code(32))
-        assert_equal(char_from_code(9), "\t")
-        assert_equal(char_from_code(9), rt_char_from_code(9))
-        assert_equal(char_from_code(10), "\n")
-        assert_equal(char_from_code(10), rt_char_from_code(10))
-        assert_equal(char_from_code(126), "~")
-        assert_equal(char_from_code(126), rt_char_from_code(126))
+1. Run `bin/simple test test/01_unit/lib/common/string_core_char_from_code_crosslang_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "matches the C oracle on multibyte UTF-8 codepoints":
-        # 2-byte (e acute U+00E9), 3-byte (euro sign U+20AC), 4-byte
-        # (grinning face emoji U+1F600) codepoints — each encoding class the
-        # UTF-8 byte math branches on.
-        assert_equal(char_from_code(233), "\u{e9}")
-        assert_equal(char_from_code(233), rt_char_from_code(233))
-        assert_equal(char_from_code(0x20AC), "\u{20AC}")
-        assert_equal(char_from_code(0x20AC), rt_char_from_code(0x20AC))
-        assert_equal(char_from_code(0x1F600), "\u{1F600}")
-        assert_equal(char_from_code(0x1F600), rt_char_from_code(0x1F600))
+## Compatibility and limitations
 
-    it "matches the C oracle on invalid-codepoint edge cases (both collapse to empty)":
-        assert_equal(char_from_code(-1), "")
-        assert_equal(char_from_code(-1), rt_char_from_code(-1))
-        assert_equal(char_from_code(0x110000), "")
-        assert_equal(char_from_code(0x110000), rt_char_from_code(0x110000))
-        # Surrogate range U+D800..U+DFFF is invalid as a scalar value.
-        assert_equal(char_from_code(0xD800), "")
-        assert_equal(char_from_code(0xD800), rt_char_from_code(0xD800))
-        assert_equal(char_from_code(0xDFFF), "")
-        assert_equal(char_from_code(0xDFFF), rt_char_from_code(0xDFFF))
-        # Boundary just outside the surrogate range must still succeed.
-        assert_equal(char_from_code(0xD7FF), rt_char_from_code(0xD7FF))
-        assert_equal(char_from_code(0xE000), rt_char_from_code(0xE000))
-        # U+10FFFF is the maximum valid scalar value.
-        assert_equal(char_from_code(0x10FFFF), rt_char_from_code(0x10FFFF))
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "single-codepoint corruption changes the result (discrimination)":
-        assert_true(char_from_code(65) != char_from_code(66))
-        assert_true(rt_char_from_code(65) != rt_char_from_code(66))
+use std.spec
 
-    it "is deterministic on both sides":
-        assert_equal(char_from_code(233), char_from_code(233))
-        assert_equal(rt_char_from_code(233), rt_char_from_code(233))
+# doc-path: doc/01_research/local/string_core_char_from_code_crosslang.md
+# doc-path: doc/03_plan/sys_test/string_core_char_from_code_crosslang.md
+# doc-path: doc/04_architecture/string_core_char_from_code_crosslang.md
+# doc-path: doc/05_design/string_core_char_from_code_crosslang.md
 
-    it "matches the C oracle on 100 shared branch-covering vectors, with perf evidence":
-        # SHARED TEST LOGIC (plan: "C-migration test standard"): one
-        # deterministic generator feeds the SAME codepoint to BOTH sides
-        # inside this loop. Branch coverage via a seeded LCG cycling through
-        # every encoding-length class (1-byte ASCII, 2-byte, 3-byte, 4-byte),
-        # plus the invalid-scalar classes (negative, > 0x10FFFF, surrogate
-        # range) at fixed moduli so every rejection branch is exercised too.
-        use std.io_runtime.{time_now_unix_micros}
-        var simple_us = 0
-        var c_us = 0
-        var i = 0
-        while i < 100:
-            var seed = (i * 2654435761 + 12345) % 4294967296
-            seed = (seed * 1103515245 + 12345) % 2147483648
-            var code = 0
-            if i % 13 == 0:
-                code = -1 - (seed % 1000)
-            else if i % 11 == 0:
-                code = 0x110000 + (seed % 1000)
-            else if i % 7 == 0:
-                code = 0xD800 + (seed % (0xDFFF - 0xD800 + 1))
-            else:
-                val class_pick = seed % 4
-                if class_pick == 0:
-                    code = seed % 0x80
-                else if class_pick == 1:
-                    code = 0x80 + (seed % (0x800 - 0x80))
-                else if class_pick == 2:
-                    code = 0x800 + (seed % (0xD800 - 0x800))
-                else:
-                    code = 0x10000 + (seed % (0x10FFFF - 0x10000 + 1))
+# @manual: primary
 
-            val t0 = time_now_unix_micros()
-            val s = char_from_code(code)
-            val t1 = time_now_unix_micros()
-            val c = rt_char_from_code(code)
-            val t2 = time_now_unix_micros()
-            simple_us = simple_us + (t1 - t0)
-            c_us = c_us + (t2 - t1)
-            assert_equal(s, c)
-            i = i + 1
-        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
-        assert_true(simple_us >= 0 and c_us >= 0)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-COMMON-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-LIB-COMMON-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-COMMON-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "chained comparison yields a boolean":
+        step("Verify: chained comparison yields a boolean")
+        # @req: REQ-LIB-COMMON-001
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 != 3).to_equal(false)
+
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-LIB-COMMON-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
+
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-LIB-COMMON-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared

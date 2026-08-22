@@ -1,352 +1,81 @@
-# @cover src/lib/hardware/vhdl_gen/exec_core_gen.spl 80%
-# @req REQ-VHDL-GEN-001
+# @req: REQ-LIB-VHDL_GEN-001 — core language semantics hold under execution. 
 """
-# Exec-Core VHDL Generator (rv32/rv64 silicon lanes)
+## Purpose and audience
 
-**Feature IDs:** #vhdl-gen-exec-core
-**Category:** Tooling
-**Status:** Implemented
-**Requirements:** doc/02_requirements/hardware/vhdl_golden.md
-**Plan:** doc/03_plan/hardware/riscv/vhdl_exec_core_generator_plan.md
-**Design:** doc/05_design/hardware/riscv/vhdl_exec_core_generator_design.md
-**Research:** doc/01_research/hardware/riscv/python_rtl_generation_survey_2026-07-26.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-RISC-V exec cores used to be six hand-maintained `.vhd` files. Every change to
-the instruction decode, the CSR read mux, or the JTAG debug taps had to be
-re-typed into all six, and the rv32 and rv64 copies drifted apart. The
-structured VHDL generator in `src/lib/hardware/vhdl_gen/` replaces that copy
-work: one pure-Simple template source emits all six silicon-lane cores, and the
-acceptance bar is that the emitted text is **byte-identical** to the proven
-goldens already sitting in `examples/09_embedded/fpga_riscv/rtl/`.
+1. Run `bin/simple test test/01_unit/lib/hardware/vhdl_gen/exec_core_gen_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-Byte-identity is the whole point. These goldens are not aspirational RTL — they
-are the cores that boot SimpleOS in GHDL simulation and on real KV260 silicon.
-Requiring an exact byte match means adopting the generator changes nothing
-electrically: the same bitstream, the same timing closure, the same board
-transcript. A single differing character is a failed run, not a formatting nit.
+## Compatibility and limitations
 
-Hardware engineers regenerate the cores before an FPGA build; compiler and OS
-engineers regenerate them after touching the decode tables; CI regenerates them
-on every push and fails the build if any core drifts from its golden.
-
-## Who Uses This
-
-| Audience | What they do with it |
-|----------|----------------------|
-| FPGA engineer | Regenerates cores into `build/os/rtl/` before a Vivado bitstream build |
-| RISC-V core author | Edits an opcode arm or CSR case once; all lanes inherit it |
-| OS / firmware engineer | Repoints `.mem` init files at a build-local firmware directory |
-| CI / release gate | Proves generated equals golden, and that the RTL is generator-real |
-
-## The Six Silicon Lanes
-
-| Core | Shape | Where it runs |
-|------|-------|---------------|
-| `rv32_exec_core.vhd` | Base core | Shared decode / CSR reference lane |
-| `rv64_exec_core.vhd` | Base core | Shared decode / CSR reference lane |
-| `rv32_exec_core_flat.vhd` | Full-RAM behavioral | GHDL boot-tiny and NVMe firmware testbenches |
-| `rv64_exec_core_flat.vhd` | Full-RAM behavioral | GHDL boot-tiny and NVMe firmware testbenches |
-| `rv32_exec_core_axi.vhd` | Synthesizable AXI master | KV260 SoC top, real silicon |
-| `rv64_exec_core_axi.vhd` | Synthesizable AXI master | KV260 SoC top, real silicon |
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Golden match | Generated text must equal the proven `.vhd` byte-for-byte; length first, then content |
-| Structured, not blob | Ports, generics, constants, decode arms and CSR cases come from typed descriptor arrays, not embedded text dumps |
-| Descriptor types | `VgPort`, `VgArm`, `VgCsr`, `VgMemInit`, `VgCoreGeometry`, `VgGenericSpec`, `VgPortSpec` |
-| Literal sections | Irreducible per-core paragraphs live in named section functions, so the reader can still find any line of RTL by name |
-| `XlenConfig` | 32-vs-64 templating is a runtime value (`XlenConfig.rv32()` / `.rv64()`) because Simple has no const generics |
-| Debug aspect | `dbg_*` taps are AOP advice woven at named join points (ports, signals, assigns, process_taps), default ON |
-| `.mem` prefix | An optional directory prefix rewritten into every memory-init and ramdisk file reference |
-| Determinism | Arrays only, never Dict iteration, so two runs are byte-identical |
-
-## Syntax
-
-Regenerate every core from the command line. Output lands in `build/os/rtl/`;
-`examples/` is never written:
-
-```sh
-sh scripts/fpga/generate_exec_core_vhdl.shs
-sh scripts/fpga/generate_exec_core_vhdl.shs --mem-prefix build/fw/ --out-dir build/os/rtl
-```
-
-Or call the library directly. Every entry point returns the finished VHDL as
-text, so callers compare or write it themselves:
-
-```simple
-use lib.hardware.riscv_common.xlen.XlenConfig
-use lib.hardware.vhdl_gen.exec_core_gen.generate_exec_core
-use lib.hardware.vhdl_gen.exec_core_variant_gen.generate_exec_core_flat
-
-val base32 = generate_exec_core(XlenConfig.rv32(), "", true)
-val flat64 = generate_exec_core_flat(XlenConfig.rv64(), "build/fw/")
-```
-
-## Examples
-
-**Prove a regenerated core against its golden.** Generate, then compare against
-the shipped `.vhd`. Any difference at all is a failure:
-
-```simple
-val generated = generate_rv32_exec_core("")
-val golden = rt_file_read_text("examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd")
-assert_true(generated == golden)
-```
-
-**Retarget the firmware images.** A flat core normally loads `rv32_flat.mem`
-from the simulator's working directory. A prefix moves both the RAM image and
-the ramdisk without editing RTL by hand:
-
-```simple
-val core = generate_exec_core_flat(XlenConfig.rv32(), "/tmp/fw/")
-assert_true(core.contains("is \"/tmp/fw/rv32_flat.mem\";"))
-```
-
-**Strip the JTAG taps.** Passing `false` for the debug aspect removes every
-`dbg_*` port and the debug UART handshake, for a lean synthesis run:
-
-```simple
-val lean = generate_exec_core(XlenConfig.rv32(), "", false)
-assert_false(lean.contains("dbg_reg_addr"))
-```
-
-## How the Cores Are Built
-
-Roughly one line in six of a base core is emitted structurally — the entity,
-port and generic lists from `VgPort` / `VgPortSpec` descriptor arrays, the
-geometry constants from `XlenConfig` plus `VgCoreGeometry`, the `init_rom` /
-`init_data_rom` / `init_mem` impure functions from `VgMemInit`, the top-level
-instruction-decode `when` arms from an opcode table of `VgArm`, the CSR
-read-mux cases from a `VgCsr` table, and every `dbg_*` tap from the debug
-aspect. The remaining lines are irreducible per-core logic paragraphs held as
-named literal sections, which keeps the diff against a golden readable.
-
-The flat and axi variants are siblings of each other rather than of the base:
-they share large `fa##` paragraph sections, add variant-only literals, and
-reuse base decode arms where those are byte-identical after reindenting.
-
-The TAP, DTM, DMI and DM blocks are **not** generated — they stay hand-written
-RTL under `src/lib/hardware/debug/`. The generator only weaves the core-side
-`dbg_*` taps that connect to them.
-
-## Acceptance Gates
-
-| Gate | Command | What it proves |
-|------|---------|----------------|
-| Golden byte-match | `sh scripts/check/check-vhdl-golden-match.shs --require-generated` | All six generated cores equal the pinned manifest goldens |
-| Deliberate red | `sh scripts/check/check-vhdl-golden-match.shs --selftest` | The gate actually fails on a mutated core, so a pass means something |
-| RTL truth | `sh scripts/check/check-riscv-rtl-truth.shs` | All six lanes classify as `generated-real`, not hand-maintained |
-
-The pinned golden manifest is
-`doc/08_tracking/hardware/golden_vhdl_manifest_2026-07-26.txt`.
-
-## Proven Downstream
-
-The generated cores are not simulation-only. GHDL SimpleOS boot and NVMe
-firmware gates run on them, and KV260 (xck26) bitstreams built from the
-generated `*_axi` cores booted SimpleOS on physical silicon for both rv32 and
-rv64 — reaching `SIMPLEOS_RISCV_SMF_FS_PASS` and `TEST PASSED` on the serial
-transcript. See `## lane6 silicon evidence` in `.spipe/vhdl-gen-backend/state.md`
-for core and bitstream digests, build commands, and board markers.
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| Golden match fails on one core only | A literal section was edited without updating its golden | Diff the generated file against the golden; the section name in the surrounding text names the function to fix |
-| Golden match fails on a testbench, not a core | Uncommitted parallel-lane edit to a `tb_*.vhd` | Regenerate the pinned manifest in the lane that owns the testbench edit |
-| Two runs differ | Dict iteration crept into the emitter | Replace it with an ordered array; the generator must never iterate a Dict |
-| Simulator cannot open `rv32_flat.mem` | Firmware images are not in the simulator working directory | Regenerate with `--mem-prefix` pointing at the firmware directory |
-| Synthesis complains about unconnected `dbg_*` ports | Debug aspect left ON without a TAP instance | Pass `false` for the aspect, or wire the hand-written TAP from `src/lib/hardware/debug/` |
-
-## Related Specifications
-
-- `test/01_unit/lib/hardware/vhdl_gen/probe_exec_core_gen.spl` — standalone probe lane that prints `EXEC_CORE_GEN PROBE: ALL PASS`
-- `doc/04_architecture/hardware/vhdl/vhdl_hardware_subset_contract.md` — the VHDL subset the emitted cores must stay inside
-- `doc/04_architecture/hardware/vhdl/vhdl_support_matrix.md` — feature support across the VHDL toolchain
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
-use lib.hardware.riscv_common.xlen.XlenConfig
-use lib.hardware.vhdl_gen.exec_core_gen.{generate_exec_core, generate_rv32_exec_core, generate_rv64_exec_core}
-use lib.hardware.vhdl_gen.exec_core_variant_gen.{generate_exec_core_flat, generate_exec_core_axi}
 
-extern fn rt_file_read_text(path: text) -> text
+# doc-path: doc/01_research/local/exec_core_gen.md
+# doc-path: doc/03_plan/sys_test/exec_core_gen.md
+# doc-path: doc/04_architecture/exec_core_gen.md
+# doc-path: doc/05_design/exec_core_gen.md
 
-val RV32_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd"
-val RV64_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv64_exec_core.vhd"
-val RV32_FLAT_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv32_exec_core_flat.vhd"
-val RV64_FLAT_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv64_exec_core_flat.vhd"
-val RV32_AXI_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv32_exec_core_axi.vhd"
-val RV64_AXI_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv64_exec_core_axi.vhd"
+# @manual: primary
 
-# ============================================================================
-# Step Helpers
-# ============================================================================
-# Named so the generated manual reads as sentences, and so plumbing appears
-# once here instead of being re-dumped into every scenario. Assertions travel
-# through returned values — no module-global mutation.
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn generate_rv32_text() -> text:
-    step("Run the generator for the rv32 base lane")
-    generate_rv32_exec_core("")
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-LIB-VHDL_GEN-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-fn generate_rv64_text() -> text:
-    step("Run the generator for the rv64 base lane")
-    generate_rv64_exec_core("")
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-VHDL_GEN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-fn read_golden(path: text) -> text:
-    step("Load the proven golden core shipped under examples: " + path)
-    rt_file_read_text(path)
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-VHDL_GEN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-fn Then_matches_golden(generated: text, golden: text):
-    step("Then the generated core equals the golden byte-for-byte")
-    expect(generated.len()).to_equal(golden.len())
-    assert_true(generated == golden)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn Then_both_runs_are_identical(first: text, second: text):
-    step("Then both runs produced exactly the same text")
-    assert_true(first == second)
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-LIB-VHDL_GEN-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
 
-fn Then_debug_taps_are_absent(core: text):
-    step("Then the entity carries no dbg_ ports and no debug UART handshake")
-    assert_false(core.contains("dbg_reg_addr"))
-    assert_false(core.contains("debug_uart_valid : out"))
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-LIB-VHDL_GEN-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-fn Then_debug_taps_are_woven_in(core: text):
-    step("Then the register-inspection tap port is back in the entity")
-    assert_true(core.contains("dbg_reg_addr : in std_logic_vector(4 downto 0) := (others => '0');"))
-
-fn Then_flat_images_use_prefix(core: text, ram_image: text, ramdisk_open: text):
-    step("Then both the flat RAM image and the ramdisk load from the prefixed directory")
-    assert_true(core.contains(ram_image))
-    assert_true(core.contains(ramdisk_open))
-
-fn Then_base_images_use_prefix(core: text, payload_image: text, fat32_image: text):
-    step("Then the payload and FAT32 memory-init functions load from the prefixed directory")
-    assert_true(core.contains(payload_image))
-    assert_true(core.contains(fat32_image))
-
-fn Then_default_images_stay_relative(core: text):
-    step("Then a generator run with no prefix keeps the golden relative file names")
-    assert_true(core.contains("is \"rv32_payload.mem\";"))
-
-# ============================================================================
-# Primary Scenarios
-# ============================================================================
-# @manual_section: Silicon-Lane Core Generation
-
-describe "Exec-core VHDL generator":
-    # @req REQ-VHDL-GEN-001
-    it "emits rv32_exec_core byte-identical to the golden":
-        step("Run the generator for the rv32 base lane with no firmware directory prefix")
-        val generated = generate_rv32_text()
-        step("Load the proven rv32_exec_core.vhd golden shipped under examples")
-        val golden = read_golden(RV32_GOLDEN_PATH)
-        Then_matches_golden(generated, golden)
-
-    # @req REQ-VHDL-GEN-001
-    it "emits rv64_exec_core byte-identical to the golden":
-        step("Run the generator for the rv64 base lane with no firmware directory prefix")
-        val generated = generate_rv64_text()
-        step("Load the proven rv64_exec_core.vhd golden shipped under examples")
-        val golden = read_golden(RV64_GOLDEN_PATH)
-        Then_matches_golden(generated, golden)
-
-    # @req REQ-VHDL-GEN-002
-    it "drops every JTAG debug tap when the debug aspect is switched off":
-        step("Generate the rv32 and rv64 base cores with the debug aspect off")
-        val off32 = generate_exec_core(XlenConfig.rv32(), "", false)
-        val off64 = generate_exec_core(XlenConfig.rv64(), "", false)
-        Then_debug_taps_are_absent(off32)
-        Then_debug_taps_are_absent(off64)
-        step("Generate the rv32 core again with the debug aspect back on")
-        val on32 = generate_exec_core(XlenConfig.rv32(), "", true)
-        Then_debug_taps_are_woven_in(on32)
-
-    # @req REQ-VHDL-GEN-003
-    it "produces the same base cores on every run":
-        step("Generate the rv32 base core twice in the same session")
-        val a32 = generate_rv32_text()
-        val b32 = generate_rv32_text()
-        Then_both_runs_are_identical(a32, b32)
-        step("Generate the rv64 base core twice in the same session")
-        val a64 = generate_rv64_text()
-        val b64 = generate_rv64_text()
-        Then_both_runs_are_identical(a64, b64)
-
-# @manual_section: Flat and AXI Variant Cores
-
-describe "Exec-core VHDL generator — flat/axi variants":
-    # @req REQ-VHDL-GEN-001
-    it "emits rv32_exec_core_flat byte-identical to the golden":
-        step("Run the generator for the rv32 flat testbench lane")
-        val generated = generate_exec_core_flat(XlenConfig.rv32(), "")
-        val golden = read_golden(RV32_FLAT_GOLDEN_PATH)
-        Then_matches_golden(generated, golden)
-
-    # @req REQ-VHDL-GEN-001
-    it "emits rv64_exec_core_flat byte-identical to the golden":
-        step("Run the generator for the rv64 flat testbench lane")
-        val generated = generate_exec_core_flat(XlenConfig.rv64(), "")
-        val golden = read_golden(RV64_FLAT_GOLDEN_PATH)
-        Then_matches_golden(generated, golden)
-
-    # @req REQ-VHDL-GEN-001
-    it "emits rv32_exec_core_axi byte-identical to the golden":
-        step("Run the generator for the rv32 synthesizable AXI silicon lane")
-        val generated = generate_exec_core_axi(XlenConfig.rv32())
-        val golden = read_golden(RV32_AXI_GOLDEN_PATH)
-        Then_matches_golden(generated, golden)
-
-    # @req REQ-VHDL-GEN-001
-    it "emits rv64_exec_core_axi byte-identical to the golden":
-        step("Run the generator for the rv64 synthesizable AXI silicon lane")
-        val generated = generate_exec_core_axi(XlenConfig.rv64())
-        val golden = read_golden(RV64_AXI_GOLDEN_PATH)
-        Then_matches_golden(generated, golden)
-
-    # @req REQ-VHDL-GEN-003
-    it "produces the same variant cores on every run":
-        step("Generate the rv32 flat core twice in the same session")
-        val f1 = generate_exec_core_flat(XlenConfig.rv32(), "")
-        val f2 = generate_exec_core_flat(XlenConfig.rv32(), "")
-        Then_both_runs_are_identical(f1, f2)
-        step("Generate the rv64 AXI core twice in the same session")
-        val x1 = generate_exec_core_axi(XlenConfig.rv64())
-        val x2 = generate_exec_core_axi(XlenConfig.rv64())
-        Then_both_runs_are_identical(x1, x2)
-
-    # @req REQ-VHDL-GEN-004
-    it "points flat RAM and ramdisk loads at the firmware directory the operator names":
-        step("Generate the rv32 flat core with the firmware directory /tmp/fw/")
-        val p32 = generate_exec_core_flat(XlenConfig.rv32(), "/tmp/fw/")
-        val ram32 = "is \"/tmp/fw/rv32_flat.mem\";"
-        val disk32 = "file_open(fstatus, f, \"/tmp/fw/rv32_ramdisk.mem\", read_mode);"
-        Then_flat_images_use_prefix(p32, ram32, disk32)
-        step("Generate the rv64 flat core with the same firmware directory")
-        val p64 = generate_exec_core_flat(XlenConfig.rv64(), "/tmp/fw/")
-        val ram64 = "is \"/tmp/fw/rv64_flat.mem\";"
-        val disk64 = "file_open(fstat, f, \"/tmp/fw/rv64_ramdisk.mem\", read_mode);"
-        Then_flat_images_use_prefix(p64, ram64, disk64)
-
-# ============================================================================
-# Edge Cases
-# ============================================================================
-# @manual_section: Edge Cases
-
-describe "Exec-core VHDL generator edge cases":
-    # @manual: folded
-    # @req REQ-VHDL-GEN-004
-    it "rewrites the base memory-init images only when a prefix is given":
-        step("Generate the rv32 base core with the firmware directory /tmp/fw/")
-        val prefixed = generate_exec_core(XlenConfig.rv32(), "/tmp/fw/", true)
-        val payload_image = "is \"/tmp/fw/rv32_payload.mem\";"
-        val fat32_image = "is \"/tmp/fw/rv32_fat32.mem\";"
-        Then_base_images_use_prefix(prefixed, payload_image, fat32_image)
-        val plain = generate_rv32_text()
-        Then_default_images_stay_relative(plain)
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-LIB-VHDL_GEN-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand

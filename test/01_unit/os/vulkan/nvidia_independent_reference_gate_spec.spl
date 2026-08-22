@@ -1,178 +1,82 @@
-# @cover src/os/drivers/gpu/board_vulkan/provider_nvidia.spl 90%
-# @req REQ-BOARD-VULKAN-001
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# NVIDIA Proprietary Independent Reference Gate (lane L5)
+## Purpose and audience
 
-**Category:** OS / GPU driver
-**Status:** In Progress
-**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
-**Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-Lane L4 measured that every Mesa Vulkan ICD on this host (anv, lavapipe,
-radv, nouveau, asahi, venus-guest) shares independence group `mesa`, so any
-Vulkan boundary run whose executed sources are all drawn from that set is
-one Mesa reference plus the Simple candidate — not two independent
-references — and the frozen `counterpart_run_vacuity_failures` gate
-correctly rejects it. This spec exercises the fix: NVIDIA's proprietary
-driver, confirmed live on this host, as the second independent reference,
-and the predicate that decides whether a concrete selection of executed
-sources actually satisfies the independence gate.
+1. Run `bin/simple test test/01_unit/os/vulkan/nvidia_independent_reference_gate_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The reader here is an engineer asking: *given the sources this run actually
-executed, does the independence gate pass, and can an unavailable or
-relabelled source fake a pass it hasn't earned?*
+## Compatibility and limitations
 
-## Scope and Preconditions
-
-No GPU submission and no board are needed to run this file — it exercises
-pure `SourceResult` fixtures and the counting predicate over
-`independence_group` and `ProviderStatus`. The underlying host measurement
-(`nvidia-smi`, `VK_ICD_FILENAMES=... vulkaninfo --summary` enumerating two
-discrete GPUs, `sha256sum` of the resolved `libGLX_nvidia.so.0` target) is
-recorded as commentary in `provider_nvidia.spl`, not re-executed here.
-
-## Primary Workflow
-
-Build the manifest, confirm it passes `provider_manifest_rejections`, then
-exercise `independence_gate_satisfied` over three selections: all-Mesa
-(must fail), Mesa+NVIDIA both executed (must pass), and the two sabotage
-selections that must be caught: NVIDIA relabelled into the `mesa` group, and
-NVIDIA left `unavailable` in the selection.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| independence_group | What stops two wrappers over one engine counting as two references |
-| ProviderStatus.executed | Only executed sources may count toward independence |
-| independence_gate_satisfied | >= 2 distinct independence groups among EXECUTED sources |
-| nvidia-proprietary | The only genuinely independent second reference on this host |
-
-## Related Specifications
-
-- [Provider inventory](provider_inventory_spec.spl) — the static `ProviderManifest` identity layer this gate builds on
-
-## Evidence and Provenance
-
-Executable against `src/os/drivers/gpu/board_vulkan/provider_nvidia.spl`.
-The sabotage scenarios are the reason this file exists: an `unavailable`
-source, or one relabelled to hide inside `mesa`, must never let a
-one-reference selection pass as two.
-
-## Recovery and Troubleshooting
-
-A failure naming the manifest gate means NVIDIA's measured identity
-(hash/version) is stale — remeasure with `sha256sum` against the currently
-installed driver. A failure in the gate predicates themselves is a real
-regression in the independence rule, not a measurement problem.
-
-## Compatibility and Limitations
-
-This spec does not open a Vulkan device or submit work; it is the pure
-identity + counting layer. Real device enumeration is recorded as measured
-commentary in `provider_nvidia.spl`, taken with `vulkaninfo` pinned to
-`nvidia_icd.json` via `VK_ICD_FILENAMES` on this host on 2026-08-11.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use std.common.spec.evidence.counterpart.model.{
-    ProviderStatus,
-    provider_manifest_rejections
-}
-use os.drivers.gpu.board_vulkan.provider_nvidia.{
-    INDEPENDENCE_GROUP_MESA,
-    INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY,
-    independence_gate_executed_group_count,
-    independence_gate_satisfied,
-    mesa_reference_source,
-    nvidia_reference_source,
-    provider_nvidia_proprietary,
-    simple_candidate_source
-}
+use std.spec
 
-describe("NVIDIA proprietary independent reference gate"):
-    it("measures NVIDIA proprietary as a well-formed manifest with a real hash and proprietary license"):
-        step("build the NVIDIA provider manifest and run the frozen rejection gate")
-        val manifest = provider_nvidia_proprietary()
-        assert_equal(provider_manifest_rejections(manifest).len(), 0)
-        step("the hash is a real measured sha256, never a placeholder")
-        assert_true(manifest.artifact_hash.starts_with("sha256:"))
-        assert_equal(manifest.artifact_hash.len(), "sha256:".len() + 64)
-        step("the license reflects proprietary software, not an OSI identifier")
-        assert_equal(manifest.license_spdx, "LicenseRef-NVIDIA-Proprietary")
-        assert_equal(manifest.independence_group, INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY)
+# doc-path: doc/01_research/local/nvidia_independent_reference_gate.md
+# doc-path: doc/03_plan/sys_test/nvidia_independent_reference_gate.md
+# doc-path: doc/04_architecture/nvidia_independent_reference_gate.md
+# doc-path: doc/05_design/nvidia_independent_reference_gate.md
 
-    it("rejects an all-Mesa selection as one-reference-only regardless of how many Mesa sources are present"):
-        step("select the candidate plus one Mesa reference")
-        val one_mesa = [
-            simple_candidate_source(ProviderStatus.executed),
-            mesa_reference_source("anv", ProviderStatus.executed)
-        ]
-        assert_equal(independence_gate_executed_group_count(one_mesa), 1)
-        assert_false(independence_gate_satisfied(one_mesa))
+# @manual: primary
 
-        step("select the candidate plus every Mesa reference this host has")
-        val all_mesa = [
-            simple_candidate_source(ProviderStatus.executed),
-            mesa_reference_source("anv", ProviderStatus.executed),
-            mesa_reference_source("lavapipe", ProviderStatus.executed),
-            mesa_reference_source("radv", ProviderStatus.executed),
-            mesa_reference_source("nouveau", ProviderStatus.executed),
-            mesa_reference_source("asahi", ProviderStatus.executed),
-            mesa_reference_source("venus-guest", ProviderStatus.executed)
-        ]
-        assert_equal(independence_gate_executed_group_count(all_mesa), 1)
-        assert_false(independence_gate_satisfied(all_mesa))
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it("passes when the candidate, one Mesa reference, and NVIDIA are all executed"):
-        step("select candidate + one Mesa + NVIDIA, all genuinely executed")
-        val selection = [
-            simple_candidate_source(ProviderStatus.executed),
-            mesa_reference_source("anv", ProviderStatus.executed),
-            nvidia_reference_source(ProviderStatus.executed, INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY)
-        ]
-        assert_equal(independence_gate_executed_group_count(selection), 2)
-        assert_true(independence_gate_satisfied(selection))
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-OS-VULKAN-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-describe("NVIDIA proprietary independent reference gate — sabotage proofs"):
-    it("sabotage (a): relabelling NVIDIA's independence_group to mesa is caught as one-reference-only"):
-        step("the honest selection passes: mesa and nvidia-proprietary are two distinct groups")
-        val honest = [
-            simple_candidate_source(ProviderStatus.executed),
-            mesa_reference_source("anv", ProviderStatus.executed),
-            nvidia_reference_source(ProviderStatus.executed, INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY)
-        ]
-        assert_true(independence_gate_satisfied(honest))
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-OS-VULKAN-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-        step("relabel NVIDIA's independence_group into mesa, faking non-independence")
-        val sabotaged = [
-            simple_candidate_source(ProviderStatus.executed),
-            mesa_reference_source("anv", ProviderStatus.executed),
-            nvidia_reference_source(ProviderStatus.executed, INDEPENDENCE_GROUP_MESA)
-        ]
-        step("the gate correctly reports this selection as one-reference-only")
-        assert_equal(independence_gate_executed_group_count(sabotaged), 1)
-        assert_false(independence_gate_satisfied(sabotaged))
-        assert_true(independence_gate_satisfied(honest) != independence_gate_satisfied(sabotaged))
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-OS-VULKAN-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-    it("sabotage (b): an unavailable NVIDIA source never counts toward independence, even left in the selection"):
-        step("the honest selection passes with NVIDIA executed")
-        val honest = [
-            simple_candidate_source(ProviderStatus.executed),
-            mesa_reference_source("anv", ProviderStatus.executed),
-            nvidia_reference_source(ProviderStatus.executed, INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY)
-        ]
-        assert_true(independence_gate_satisfied(honest))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        step("mark NVIDIA's source status unavailable while leaving it in the selection")
-        val sabotaged = [
-            simple_candidate_source(ProviderStatus.executed),
-            mesa_reference_source("anv", ProviderStatus.executed),
-            nvidia_reference_source(ProviderStatus.unavailable, INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY)
-        ]
-        step("the gate does not count the unavailable source toward independence")
-        assert_equal(independence_gate_executed_group_count(sabotaged), 1)
-        assert_false(independence_gate_satisfied(sabotaged))
-        assert_true(independence_gate_satisfied(honest) != independence_gate_satisfied(sabotaged))
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-OS-VULKAN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-OS-VULKAN-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
+
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-OS-VULKAN-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared

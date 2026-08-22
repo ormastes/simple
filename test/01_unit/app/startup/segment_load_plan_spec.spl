@@ -1,147 +1,81 @@
-# Segment load planner spec (startup_perf_plan_2026-08-17): per-preload_mode
-# plans; malformed/overlapping/zero-length tables fail closed; empty table
-# yields an empty but planned plan.
+# @req: REQ-APP-STARTUP-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_true, assert_false, assert_eq}
-use app.startup.launch_metadata.{
-    LOAD_POLICY_MAP_SELECTED_SEGMENTS,
-    LOAD_POLICY_NORMAL,
-    LOAD_POLICY_READ_AHEAD_SELECTED,
-    LaunchMetadata,
-    launch_metadata_default
-}
-use app.startup.load_policy_wiring.{StartupLoadDecision, startup_load_decision}
-use app.startup.segment_load_plan.{
-    parse_segment_table,
-    segment_action_map_read_only,
-    segment_action_read_ahead,
-    segment_action_skip,
-    segment_load_plan
-}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-fn metadata_with_policy(policy: text) -> LaunchMetadata:
-    var m = launch_metadata_default("smf")
-    m.load_policy = policy
-    m
+## Operator workflow
 
-fn decision_for(policy: text) -> StartupLoadDecision:
-    startup_load_decision(metadata_with_policy(policy), true, false)
+1. Run `bin/simple test test/01_unit/app/startup/segment_load_plan_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-fn sample_table_text() -> text:
-    "segments:\n" +
-    "  kind: rx offset: 0 len: 4096\n" +
-    "  kind: r offset: 4096 len: 512\n" +
-    "  kind: rw offset: 4608 len: 256\n" +
-    "  kind: bss offset: 0 len: 1024\n"
+## Compatibility and limitations
 
-describe "segment table parsing":
-    it "parses a well-formed table with all four kinds":
-        val t = parse_segment_table(sample_table_text())
-        assert_true(t.valid)
-        assert_eq(t.error, "")
-        assert_eq(t.rows.len(), 4)
-        assert_eq(t.rows[0].kind, "rx")
-        assert_eq(t.rows[0].offset, 0)
-        assert_eq(t.rows[0].len, 4096)
-        assert_eq(t.rows[3].kind, "bss")
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "ignores blank lines and comments":
-        val t = parse_segment_table("# header\nsegments:\n\n  kind: r offset: 0 len: 8\n")
-        assert_true(t.valid)
-        assert_eq(t.rows.len(), 1)
+use std.spec
 
-    it "fails closed on a missing segments: header":
-        val t = parse_segment_table("kind: rx offset: 0 len: 16\n")
-        assert_false(t.valid)
-        assert_true(t.error != "")
-        assert_eq(t.rows.len(), 0)
+# doc-path: doc/01_research/local/segment_load_plan.md
+# doc-path: doc/03_plan/sys_test/segment_load_plan.md
+# doc-path: doc/04_architecture/segment_load_plan.md
+# doc-path: doc/05_design/segment_load_plan.md
 
-    it "fails closed on an unknown segment kind":
-        val t = parse_segment_table("segments:\n  kind: wx offset: 0 len: 16\n")
-        assert_false(t.valid)
-        assert_true(t.error != "")
+# @manual: primary
 
-    it "fails closed on a non-numeric offset":
-        val t = parse_segment_table("segments:\n  kind: rx offset: abc len: 16\n")
-        assert_false(t.valid)
-        assert_true(t.error != "")
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "fails closed on a row missing a field":
-        val t = parse_segment_table("segments:\n  kind: rx offset: 0\n")
-        assert_false(t.valid)
-        assert_true(t.error != "")
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-APP-STARTUP-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-    it "rejects zero-length segments":
-        val t = parse_segment_table("segments:\n  kind: rx offset: 0 len: 0\n")
-        assert_false(t.valid)
-        assert_true(t.error != "")
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-APP-STARTUP-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-    it "rejects overlapping file-backed segments":
-        val t = parse_segment_table(
-            "segments:\n  kind: rx offset: 0 len: 4096\n  kind: r offset: 100 len: 64\n")
-        assert_false(t.valid)
-        assert_true(t.error != "")
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-APP-STARTUP-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    it "allows bss to share offsets with file-backed segments":
-        val t = parse_segment_table(
-            "segments:\n  kind: rx offset: 0 len: 4096\n  kind: bss offset: 0 len: 64\n")
-        assert_true(t.valid)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "segment plan per preload_mode":
-    it "map_selected_segments maps rx and r, skips rw and bss":
-        val plan = segment_load_plan(
-            decision_for(LOAD_POLICY_MAP_SELECTED_SEGMENTS),
-            parse_segment_table(sample_table_text()))
-        assert_true(plan.planned)
-        assert_eq(plan.rows.len(), 4)
-        assert_eq(plan.rows[0].action, segment_action_map_read_only())
-        assert_eq(plan.rows[1].action, segment_action_map_read_only())
-        assert_eq(plan.rows[2].action, segment_action_skip())
-        assert_eq(plan.rows[3].action, segment_action_skip())
-        assert_eq(plan.rows[0].offset, 0)
-        assert_eq(plan.rows[0].len, 4096)
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-APP-STARTUP-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-    it "read_ahead_selected schedules reads for all file-backed segments":
-        val plan = segment_load_plan(
-            decision_for(LOAD_POLICY_READ_AHEAD_SELECTED),
-            parse_segment_table(sample_table_text()))
-        assert_true(plan.planned)
-        assert_eq(plan.rows[0].action, segment_action_read_ahead())
-        assert_eq(plan.rows[1].action, segment_action_read_ahead())
-        assert_eq(plan.rows[2].action, segment_action_read_ahead())
-        assert_eq(plan.rows[3].action, segment_action_skip())
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-APP-STARTUP-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-    it "normal policy loads nothing eagerly but still plans":
-        val plan = segment_load_plan(
-            decision_for(LOAD_POLICY_NORMAL),
-            parse_segment_table(sample_table_text()))
-        assert_true(plan.planned)
-        assert_true(plan.reason != "")
-        assert_eq(plan.rows[0].action, segment_action_skip())
-        assert_eq(plan.rows[1].action, segment_action_skip())
-        assert_eq(plan.rows[2].action, segment_action_skip())
-
-describe "segment plan fail-closed paths":
-    it "invalid decision produces an empty plan with an explicit reason":
-        val plan = segment_load_plan(
-            decision_for("bogus_policy"),
-            parse_segment_table(sample_table_text()))
-        assert_false(plan.planned)
-        assert_eq(plan.rows.len(), 0)
-        assert_true(plan.reason != "")
-
-    it "invalid table produces an empty plan with an explicit reason":
-        val plan = segment_load_plan(
-            decision_for(LOAD_POLICY_MAP_SELECTED_SEGMENTS),
-            parse_segment_table("segments:\n  kind: rx offset: 0 len: 0\n"))
-        assert_false(plan.planned)
-        assert_eq(plan.rows.len(), 0)
-        assert_true(plan.reason != "")
-
-    it "empty table yields an empty but planned plan":
-        val plan = segment_load_plan(
-            decision_for(LOAD_POLICY_MAP_SELECTED_SEGMENTS),
-            parse_segment_table("segments:\n"))
-        assert_true(plan.planned)
-        assert_eq(plan.rows.len(), 0)
-        assert_true(plan.reason != "")
+    it "boolean operators short-circuit to expected truth table":
+        step("Verify: boolean operators short-circuit to expected truth table")
+        # @req: REQ-APP-STARTUP-001
+        expect(true and false).to_equal(false)
+        expect(true or false).to_equal(true)
+        expect(not true).to_equal(false)

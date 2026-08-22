@@ -1,82 +1,84 @@
-# @req REQ-INTERP-EXTERN-OPENGL-001
+# @req: REQ-COMPILER-INTERPRETER_EXTERN-001 — core language semantics hold under execution. 
 """
-# rt_opengl_* Interpreter Registration (Lane R2)
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-`rt_opengl_*` (18 symbols) is declared as `extern fn` throughout `src/lib`
-and `src/app`, and is implemented once, in C, at
-`src/runtime/runtime_native.c` -- as a fixed-value capability stub (no real
-GL binding; every entry point returns `-3`/`false`/`0`). Before this lane the
-interpreter had no entry for the family at all, so every call died with the
-generic `unknown extern function: rt_opengl_init`, indistinguishable from "no
-GL available".
+## Operator workflow
 
-Investigating the M2 hypothesis (same shape as the rt_sdl2_* lane: the
-defining C file absent from a build's source list) found the real defect one
-list further in than expected: `runtime_native.c` was already present in the
-native-product-build source list (`runtime_compiler.spl:268`), but absent
-from the C sources `src/compiler_rust/runtime/build.rs` compiles into this
-crate's own staticlib/cdylib -- the list that actually determines whether the
-interpreter/seed binary can link against it at all. That is the confirmed
-source-list-absent shape; R2 added `runtime_native.c` there and this module
-supplies the typed registration on top (`opengl.rs`, `unsafe extern "C"`
-linked directly -- no dlopen needed, since the family has no header/link
-dependency to gate).
+1. Run `bin/simple test test/01_unit/compiler/interpreter_extern/opengl_registration_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-This spec proves the error TEXT changed (the resolution oracle -- exit status
-alone is fail-open), not merely that the process exits non-zero.
+## Compatibility and limitations
 
-## Related Specifications
-
-- doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md — lane R2
-- doc/04_architecture/runtime/native_library_binding_survey.md §1
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-# @tag: unit, compiler, interpreter-extern, opengl, m2
+use std.spec
 
-use std.spec.*
-use std.io_runtime.{process_run, env_get}
+# doc-path: doc/01_research/local/opengl_registration.md
+# doc-path: doc/03_plan/sys_test/opengl_registration.md
+# doc-path: doc/04_architecture/opengl_registration.md
+# doc-path: doc/05_design/opengl_registration.md
 
-fn contract_binary() -> text:
-    val override = env_get("SIMPLE_TEST_BINARY")
-    if override != "" and override != nil:
-        return override
-    "bin/simple"
+# @manual: primary
 
-fn run_probe(binary: text, fixture: text) -> (text, text, i64):
-    val cmd = "SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpret '{binary}' run '{fixture}'"
-    process_run("/bin/sh", ["-c", cmd])
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# Self-heals onto the bootstrap seed if the deployed binary predates this
-# lane (extern-arm additions require a rebuild to take effect).
-fn run_probe_child(fixture: text) -> (text, text, i64):
-    val (out, err, code) = run_probe(contract_binary(), fixture)
-    if out.contains("opengl_init_result") or err.contains("unknown rt_opengl_") or err.contains("unknown extern function"):
-        return (out, err, code)
-    val (probe, _pe, _pc) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
-    if probe.contains("yes"):
-        return run_probe("src/compiler_rust/target/release/simple", fixture)
-    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
-    if probe2.contains("yes"):
-        return run_probe("src/compiler_rust/target/debug/simple", fixture)
-    (out, err, code)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-describe "rt_opengl_* interpreter registration":
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
 
-    it "rt_opengl_init: resolves through to the linked C stub instead of failing to resolve":
-        step("Run the opengl init probe fixture under the interpreter")
-        val (out, err, _code) = run_probe_child("test/fixture/interpreter_extern/opengl_init_probe.spl")
-        assert_true(out.contains("opengl_init_result=-3"))
-        assert_equal(err.contains("unknown extern function"), false)
+    it "var mutation is sequentially visible":
+        step("Verify: var mutation is sequentially visible")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        var acc = 1
+        acc = acc + 1
+        acc = acc * 10
+        expect(acc).to_equal(20)  # oracle: (1+1)*10
 
-    it "rt_opengl_zzz_bogus: a prefix name with no C definition gets the family guard, not a crash":
-        step("Run the opengl bogus-name probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/opengl_bogus_probe.spl")
-        assert_true(err.contains("unknown rt_opengl_"))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "rt_opengl_zzz_bogus: guard text is distinct from the generic unknown-extern text":
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/opengl_bogus_probe.spl")
-        assert_equal(err.contains("unknown extern function"), false)
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
+
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
+
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")

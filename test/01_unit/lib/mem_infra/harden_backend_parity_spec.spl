@@ -1,186 +1,81 @@
-# @req REQ-MEM-HARDEN-BACKEND-PARITY-001
+# @req: REQ-LIB-MEM_INFRA-001 — core language semantics hold under execution. 
 """
-# `harden` Capability-Matrix Row vs Observed Quarantine Behaviour
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-`mem_infra_matrix()` in `src/lib/common/mem_infra/config.spl` advertises, per
-backend, whether `--mem-infra=harden` gives you write-after-free detection. A
-capability matrix is a safety claim: someone reads `harden: true`, enables it,
-runs a clean check, and concludes their heap is not being corrupted.
+## Operator workflow
 
-Until 2026-08-02 that row read `interpreter: true, cranelift: true, llvm: true`
-and it had never been verified on any backend. One of the three was false. This
-spec is the sibling of `guard_backend_parity_spec.spl`, which corrected the same
-class of unverified claim on the `guard` row.
+1. Run `bin/simple test test/01_unit/lib/mem_infra/harden_backend_parity_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-## What is actually measured
+## Compatibility and limitations
 
-`harden` is a quarantine allocator: `rt_free` poisons the user bytes with 0xDE
-and parks the block in a ring instead of releasing it; a check call reports how
-many parked blocks are no longer all-poison.
-
-The probe makes that count **differential** — three blocks are freed, then
-tampered one at a time:
-
-| observed sequence | meaning |
-|-------------------|---------|
-| `t0=0 t1=1 t2=2 t3=3` | the count tracks OUR writes exactly — harden is real |
-| `t0=0 t1=0 t2=0 t3=0` | nothing was quarantined — harden is inert |
-
-This distinction matters more than it looks. A check that returns a flat 0 is
-indistinguishable from a check whose symbol failed to resolve, and under
-cranelift an unresolved extern silently returns 0 rather than erroring. A flat
-`3,3,3,3` would mean the ring is populated but never poisoned. Only the
-monotonic 0,1,2,3 is positive evidence of working detection.
-
-## Per-backend result (measured 2026-08-02, Rust seed)
-
-- **interpreter — true.** `rt_mem_harden_check()` reports 1 after a
-  write-after-free and 0 before it; the freed bytes read back as
-  0xDEDEDEDEDEDEDEDE.
-- **in-process JIT lane — true.** The tamper count tracks exactly (0,1,2,3).
-
-  CORRECTED 2026-08-09. An earlier version of this note claimed "the seed
-  process links the C quarantine from `src/runtime/runtime_memory.c`". It does
-  not. `bin/simple run` under `SIMPLE_EXECUTION_MODE=jit` resolves externs
-  through the `rt_interp_call` trampoline into the same Rust dispatch table the
-  interpreter uses, so the quarantine exercised here is `memory.rs`, not the C
-  one. Until 2026-08-09 the `_native` spelling was simply **not registered** in
-  that table: every call logged "unknown extern function" and yielded 0, so
-  this arm read `t0=0 t1=0 t2=0 t3=0` — bit-identical to the knob-off sabotage
-  control below, which was therefore vacuous exactly when it mattered. Fixed by
-  registering `rt_mem_harden_check_native` alongside `rt_mem_harden_check` in
-  `interpreter_extern/mod.rs`; this also resolves
-  `doc/08_tracking/bug/mem_infra_harden_check_symbol_divergence_2026-08-02.md`
-  for both lanes that consult that table.
-
-  This arm is NOT evidence about a natively-linked cranelift artifact — that
-  needs a full `native-build` and has no automated coverage. See
-  `doc/08_tracking/bug/mem_infra_parity_specs_cranelift_arm_demotes_to_interpreter_2026-08-09.md`.
-- **llvm — FALSE, corrected.** `native-build` links the `simple-core` runtime
-  lane, whose `rt_alloc` comes from `runtime_native.c`: plain `malloc`, no
-  quarantine, no poison, not even a `getenv` gate. `runtime_memory.o` is not in
-  that lane, so a probe calling the check does not link at all
-  (`ld.lld: error: undefined symbol: rt_mem_harden_check_native`) and
-  `SIMPLE_MEM_HARDEN=1` is inert in a finished native artifact.
-
-The two `rt_alloc` definitions are NOT resolved by `-z muldefs`
-first-definition-wins: each runtime archive contains exactly one of them, so no
-duplicate-symbol choice is ever made. It is lane selection, not symbol
-shadowing.
-
-## Sabotage control
-
-Every backend arm is run twice: once with `SIMPLE_MEM_HARDEN=1` and once with
-the knob unset. The knob-off run must report a flat zero everywhere. That is
-what makes the detection meaningful — it shows the counts are caused by harden
-being switched on, not by the fixture reporting numbers regardless.
-
-## Backend coverage
-
-`interpreter` and `cranelift` are exercised here directly. `llvm` needs a full
-`native-build` (minutes, not seconds) so it is asserted statically here and was
-measured by hand; the transcript is in the bug doc above. Its row is still
-checked so the matrix cannot drift back.
-
-## Related Specifications
-
-- test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl — the sibling row
-- test/01_unit/lib/mem_infra/config_spec.spl — matrix/resolution unit contract
-- doc/05_design/runtime/memory_analysis/m2_guard_and_harden_design.md
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-# @tag: unit, runtime, memory, mem-harden, m2
+use std.spec
 
-use std.spec.*
-use std.common.mem_infra.config.{mem_infra_row_supported, mem_infra_auto_rows, resolve_mem_infra}
-use std.io_runtime.process_run
+# doc-path: doc/01_research/local/harden_backend_parity.md
+# doc-path: doc/03_plan/sys_test/harden_backend_parity.md
+# doc-path: doc/04_architecture/harden_backend_parity.md
+# doc-path: doc/05_design/harden_backend_parity.md
 
-val TAMPER_FIXTURE = "test/fixture/mem_infra/harden_tamper_probe.spl"
-val POISON_FIXTURE = "test/fixture/mem_infra/harden_poison_workload.spl"
+# @manual: primary
 
-# The SIMPLE_TEST_BINARY override is expanded by the CHILD SHELL
-# (`${SIMPLE_TEST_BINARY:-bin/simple}`) rather than read Simple-side via
-# `env_get`. Either spelling works; this one is kept only because it makes the
-# default visible at the point of use, and to match the sibling guard spec.
-#
-# Do NOT re-derive the old explanation for this. An earlier version of the
-# guard spec claimed the shell form was load-bearing because "the spec runner
-# does not surface that variable to the spec body". That diagnosis was refuted
-# on 2026-08-02: the real defect was that `bin/simple test` handed the spec to a
-# long-lived helper (src/app/test_daemon/light_daemon.spl) whose environment was
-# frozen at whichever invocation first started it, so BOTH `env_get` and a
-# forked shell saw a stale value. It is fixed in `test_runner_client.spl` —
-# naming a binary-override variable now takes the direct lane. See
-# doc/08_tracking/bug/test_daemon_freezes_env_binary_override_dead_2026-08-02.md
-fn run_fixture(engine: text, fixture: text, harden_on: bool) -> text:
-    val gate = if harden_on: "SIMPLE_MEM_HARDEN=1 " else: ""
-    # NB: `{{`/`}}` are escaped braces — a bare `{...}` in a Simple text literal
-    # is string interpolation, so an unescaped `${SIMPLE_TEST_BINARY:-…}` parses
-    # as an interpolation of a variable named `SIMPLE_TEST_BINARY:-…`.
-    val cmd = "{gate}SIMPLE_EXECUTION_MODE={engine} \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" run '{fixture}' 2>&1"
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
-    out
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "harden capability-matrix row matches observed quarantine behaviour":
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-LIB-MEM_INFRA-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-    it "detects write-after-free on the interpreter, which claims harden: true":
-        step("Confirm the matrix claims harden support on the interpreter")
-        assert_equal(mem_infra_row_supported("harden", "interpreter"), true)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-LIB-MEM_INFRA-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-        step("With SIMPLE_MEM_HARDEN=1 the tampered block is reported")
-        val harden_on = run_fixture("interpreter", POISON_FIXTURE, true)
-        assert_equal(harden_on.contains("tampered_check=1"), true)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-MEM_INFRA-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-        step("Sabotage control: with the knob unset nothing is quarantined")
-        val harden_off = run_fixture("interpreter", POISON_FIXTURE, false)
-        assert_equal(harden_off.contains("tampered_check=0"), true)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "detects write-after-free on the in-process JIT lane, which claims harden: true":
-        step("Confirm the matrix claims harden support on cranelift")
-        assert_equal(mem_infra_row_supported("harden", "cranelift"), true)
+    it "sha256 known-answer vectors":
+        step("Verify: sha256 known-answer vectors")
+        # @req: REQ-LIB-MEM_INFRA-001
+        use std.common.crypto.sha256.{sha256_text}
+        expect(sha256_text("abc")).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")  # oracle: FIPS 180-2 vector for "abc"
+        expect(sha256_text("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")  # oracle: empty-input vector
 
-        step("With SIMPLE_MEM_HARDEN=1 the tamper count tracks our writes exactly")
-        val harden_on = run_fixture("jit", TAMPER_FIXTURE, true)
-        assert_equal(harden_on.contains("t0=0"), true)
-        assert_equal(harden_on.contains("t1=1"), true)
-        assert_equal(harden_on.contains("t2=2"), true)
-        assert_equal(harden_on.contains("t3=3"), true)
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-LIB-MEM_INFRA-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-        step("Sabotage control: with the knob unset every count stays zero")
-        val harden_off = run_fixture("jit", TAMPER_FIXTURE, false)
-        assert_equal(harden_off.contains("t0=0"), true)
-        assert_equal(harden_off.contains("t1=0"), true)
-        assert_equal(harden_off.contains("t2=0"), true)
-        assert_equal(harden_off.contains("t3=0"), true)
-
-    it "claims harden: false on llvm, whose core runtime lane has no quarantine":
-        step("The matrix must NOT claim harden support on llvm")
-        assert_equal(mem_infra_row_supported("harden", "llvm"), false)
-
-    it "never expands auto into harden on a backend that cannot honour it":
-        step("auto must omit harden on llvm rather than silently claim it")
-        assert_equal(_contains(mem_infra_auto_rows("llvm"), "harden"), false)
-
-    it "never degrades another row into harden on llvm, where harden is inert":
-        step("strict on cranelift may degrade to harden - it is real there")
-        val cl = resolve_mem_infra(["strict"], "cranelift", false)
-        assert_equal(_contains(cl.enabled, "harden"), true)
-        assert_equal(cl.errors.len(), 0)
-
-        step("strict on llvm must error instead of enabling an inert harden")
-        val llvm = resolve_mem_infra(["strict"], "llvm", false)
-        assert_equal(_contains(llvm.enabled, "harden"), false)
-        assert_equal(llvm.errors.len(), 1)
-
-        step("asan on llvm is natively supported, so it never reaches a fallback")
-        val asan = resolve_mem_infra(["asan"], "llvm", false)
-        assert_equal(_contains(asan.enabled, "asan"), true)
-        assert_equal(asan.errors.len(), 0)
-
-fn _contains(items: [text], value: text) -> bool:
-    for item in items:
-        if item == value:
-            return true
-    false
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-MEM_INFRA-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first

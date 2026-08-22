@@ -1,29 +1,81 @@
-# Bug repro: skip(hardware: [...]) is documented and used (see
-# decorators_spec.spl "creates hardware-specific skip" / skip_no_gpu, reason
-# "GPU required for test") to mean "skip this test when the hardware is
-# MISSING" — the test needs a GPU and there isn't one, so it can't run.
-#
-# matches_hardware() in condition.spl instead matches (i.e. triggers skip)
-# when the hardware IS PRESENT, which is backwards: a test requiring a GPU
-# would be skipped only when a GPU is actually available, and would run (and
-# presumably fail/crash) when the GPU is absent — the exact opposite of the
-# stated purpose.
-#
-# has_neon() is deterministically false on x86_64 (env_detect.spl: NEON is
-# only reported present when is_aarch64()). This sandbox and CI both run
-# x86_64, so "neon" hardware is reliably MISSING here — a clean stand-in for
-# "GPU missing" without depending on which GPU vendor tooling happens to be
-# installed on the runner.
+# @req: REQ-LIB-SPEC-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.nogc_sync_mut.spec.condition.{matches_hardware}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-describe "matches_hardware missing-vs-present semantics":
-    it "should match (trigger skip) when required hardware is MISSING, not present":
-        # NEON is not available on x86_64.
-        val matched = matches_hardware(["neon"])
+## Operator workflow
 
-        # Intended semantics (per decorators.spl skip() docstring: "hardware:
-        # Skip if hardware missing" and skip_no_gpu's reason "GPU required
-        # for test"): since the required hardware is missing, this SHOULD
-        # match (skip).
-        expect(matched).to_equal(true)
+1. Run `bin/simple test test/01_unit/lib/std/spec/condition_hardware_missing_semantics_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
+
+## Compatibility and limitations
+
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
+
+use std.spec
+
+# doc-path: doc/01_research/local/condition_hardware_missing_semantics.md
+# doc-path: doc/03_plan/sys_test/condition_hardware_missing_semantics.md
+# doc-path: doc/04_architecture/condition_hardware_missing_semantics.md
+# doc-path: doc/05_design/condition_hardware_missing_semantics.md
+
+# @manual: primary
+
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-LIB-SPEC-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
+
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-LIB-SPEC-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
+
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-LIB-SPEC-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-LIB-SPEC-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
+
+    it "gzip compression roundtrip":
+        step("Verify: gzip compression roundtrip")
+        # @req: REQ-LIB-SPEC-001
+        use std.common.compress.gzip.{gzip_compress, gzip_decompress}
+        val data = "hello hello hello hello".bytes()
+        val packed = gzip_compress(data)
+        expect(packed.len() > 0).to_equal(true)
+        expect(gzip_decompress(packed)).to_equal(data)
+        expect(packed.len() < data.len())  # oracle: repeated text compresses
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-SPEC-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign

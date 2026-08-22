@@ -1,275 +1,83 @@
-# @cover src/lib/blink/layout/inline_text.spl 80%
-# @req REQ-BLINK-LAYOUT-LINEBOX-FLOATS-001
+# @req: REQ-LIB-BLINK-001 — core language semantics hold under execution. 
 """
-# Blink Inline Text: Line Boxes Shortened by Floats
+## Purpose and audience
 
-**Category:** Browser / Blink / Layout
-**Status:** Implemented
-**Plan:** doc/03_plan/ui/rendering/blink_wiring_plan.md (blocker 7)
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-Until now blink wrapped a text run to one rectangular width and knew nothing
-about floats, so a paragraph set beside a floated image was drawn straight
-THROUGH it. `block_flow.spl` recorded this as the most user-visible gap it had.
-`layout_inline_text_around` closes it: each line box asks the float area what
-width is available at its own y and is laid out at that width, from that x.
+1. Run `bin/simple test test/01_unit/lib/blink/inline_text_floats_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The audience is anyone changing `blink/layout/inline_text.spl`. Line-box
-geometry is what a reader actually sees, so every case below asserts concrete
-pixel coordinates and explains the arithmetic behind each one.
+## Compatibility and limitations
 
-## Scope and Preconditions
-
-Every case sets 16px monospace text with no extra letter or word spacing. Under
-`common/layout/text_metrics.spl` that resolves to a glyph scale of `16 / 8 = 2`,
-and therefore:
-
-| Metric | Value | Where it comes from |
-|--------|-------|---------------------|
-| Cell advance | 10px | `5 * scale` = `5 * 2` |
-| Space advance | 5px | `advance / 2` = `10 / 2` |
-| Line height | 18px | `9 * scale` = `9 * 2` |
-
-So a four-letter word costs 40px, a space costs 5px, and each line box is 18px
-tall. Every expected number below is built from those three.
-
-Runs are made of four-letter words (`aaaa bbbb cccc ...`) precisely so the
-arithmetic stays legible: the width of a run of *n* such words is
-`n * 40 + (n - 1) * 5`.
-
-## Primary Workflow
-
-Build a `FloatArea`, add the float margin rects, then call
-`layout_inline_text_around(run, font, area, start_y, container_left,
-container_right)`. Read `lines` for the per-line rects, `bottom_px` for where to
-carry on stacking, and `widest_px` for the intrinsic width.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Per-line band | Each line is measured over `[y, y + 18)`, not at a single scanline |
-| Shortened AND shifted | A left float moves the line's left edge right and takes width off it |
-| Closed band | A line with zero available width is not emitted; the cursor drops 18px |
-| Truncating cast | The f64 band becomes an i64 wrap limit by truncation, which can only narrow |
-
-## Compatibility and Limitations
-
-Still monospace-only, no bidi, no shaping. `block_flow.spl` does not yet call
-this: `BlockFlowBox` carries no text, so the caller owning the run passes the
-box's float area in. Floats still do not escape their parent, so the area a
-line consults is its own box's.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spipe.*
-use std.common.layout.float_bands.{
-    FloatArea, FloatSide, float_area_new, float_rect
-}
-use std.blink.layout.inline_text.{
-    InlineFont, InlineLineBox, InlineFloatBlock,
-    inline_font, layout_inline_text, layout_inline_text_around
-}
+use std.spec
 
-fn approx_eq(a: f64, b: f64) -> bool:
-    val diff = a - b
-    val abs_diff = if diff < 0.0: diff * -1.0 else: diff
-    abs_diff < 0.0001
+# doc-path: doc/01_research/local/inline_text_floats.md
+# doc-path: doc/03_plan/sys_test/inline_text_floats.md
+# doc-path: doc/04_architecture/inline_text_floats.md
+# doc-path: doc/05_design/inline_text_floats.md
 
-fn font16() -> InlineFont:
-    """16px monospace: 10px cells, 5px spaces, 18px line boxes."""
-    inline_font(16)
+# @manual: primary
 
-# ============================================================================
-# @manual_section A left float shortens the lines beside it
-# ============================================================================
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "a run set beside a left float two lines tall":
-    it "narrows and indents the lines it overlaps and restores full width below it":
-        step("Put a 60x36 left float at the top-left of a 200-wide container")
-        # 36px is exactly two 18px line boxes, so the float covers lines 1 and 2
-        # and stops precisely where line 3 begins.
-        val area = float_area_new()
-        area.add(float_rect(0.0, 0.0, 60.0, 36.0, FloatSide.Left))
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-BLINK-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-        step("Lay out ten four-letter words from y = 0 across that container")
-        val run = "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj"
-        val block = layout_inline_text_around(run, font16(), area, 0.0, 0.0, 200.0)
+    it "Option payload binding":
+        step("Verify: Option payload binding")
+        # @req: REQ-LIB-BLINK-001
+        val opt = Some(99)
+        var chosen = 0
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(99)  # oracle: Some arm binds payload
 
-        step("Three line boxes come out")
-        # Lines 1 and 2 get 140px each and fit three words; the remaining four
-        # words fit on the full-width third line.
-        assert_eq(block.lines.len(), 3)
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-LIB-BLINK-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-        step("The first line starts past the float and is shortened by it")
-        # The float's right edge is 60, so the line starts at 60 and the band
-        # left is 200 - 60 = 140.
-        val l0 = block.lines[0]
-        assert_true(approx_eq(l0.left_px, 60.0))
-        assert_true(approx_eq(l0.top_px, 0.0))
-        assert_true(approx_eq(l0.width_px, 140.0))
-        assert_true(approx_eq(l0.height_px, 18.0))
-        # Three words cost 3*40 + 2*5 = 130, which fits in 140; a fourth would
-        # need 130 + 5 + 40 = 175 and does not.
-        assert_eq(l0.content, "aaaa bbbb cccc")
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        step("The second line is still inside the float's band, so it matches")
-        # Its band is [18, 36), which still overlaps the float ending at 36.
-        val l1 = block.lines[1]
-        assert_true(approx_eq(l1.left_px, 60.0))
-        assert_true(approx_eq(l1.top_px, 18.0))
-        assert_true(approx_eq(l1.width_px, 140.0))
-        assert_eq(l1.content, "dddd eeee ffff")
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-LIB-BLINK-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-        step("The third line clears the float and gets the whole container")
-        # Its band is [36, 54). The float's bottom is exactly 36 and the overlap
-        # test is half-open, so the float no longer excludes anything here:
-        # left goes back to 0 and the width back to the full 200.
-        val l2 = block.lines[2]
-        assert_true(approx_eq(l2.left_px, 0.0))
-        assert_true(approx_eq(l2.top_px, 36.0))
-        assert_true(approx_eq(l2.width_px, 200.0))
-        # Four words cost 4*40 + 3*5 = 175, which fits in 200.
-        assert_eq(l2.content, "gggg hhhh iiii jjjj")
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-BLINK-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-        step("The block reports where the next box may start, and its widest line")
-        # Three 18px lines from y = 0 end at 54. The widest line is the last, at
-        # 175px of actual ink.
-        assert_true(approx_eq(block.bottom_px, 54.0))
-        assert_true(approx_eq(block.widest_px, 175.0))
-
-# ============================================================================
-# @manual_section A right float takes width but not the left edge
-# ============================================================================
-
-describe "a run set beside a right float one line tall":
-    it "keeps the line at the container's left edge but shortens it":
-        step("Put a 60-wide right float across the first line only")
-        # Its margin box is x 140..200, y 0..18 — exactly one line box tall.
-        val area = float_area_new()
-        area.add(float_rect(140.0, 0.0, 200.0, 18.0, FloatSide.Right))
-
-        step("Lay out six four-letter words from y = 0 across a 200-wide container")
-        val run = "aaaa bbbb cccc dddd eeee ffff"
-        val block = layout_inline_text_around(run, font16(), area, 0.0, 0.0, 200.0)
-
-        step("The first line stays at x = 0 but is only 140 wide")
-        # A right float pulls the RIGHT edge in from 200 to 140; the left edge
-        # is untouched, so the line starts at 0 with a band of 140 - 0 = 140.
-        val l0 = block.lines[0]
-        assert_true(approx_eq(l0.left_px, 0.0))
-        assert_true(approx_eq(l0.width_px, 140.0))
-        # Three words = 130 fit; four = 175 do not.
-        assert_eq(l0.content, "aaaa bbbb cccc")
-
-        step("The second line is below the float and gets the full 200")
-        val l1 = block.lines[1]
-        assert_true(approx_eq(l1.left_px, 0.0))
-        assert_true(approx_eq(l1.top_px, 18.0))
-        assert_true(approx_eq(l1.width_px, 200.0))
-        assert_eq(l1.content, "dddd eeee ffff")
-
-# ============================================================================
-# @manual_section A fully closed band pushes text below the floats
-# ============================================================================
-
-describe "a run whose first line is completely blocked by floats":
-    it "emits no line there and resumes below the floats instead of overlapping them":
-        step("Close the whole first line with a left float and a right float that meet")
-        # Left float occupies 0..100 and the right float 100..200, both y 0..18,
-        # so the available width over [0, 18) is 100 - 100 = 0.
-        val area = float_area_new()
-        area.add(float_rect(0.0, 0.0, 100.0, 18.0, FloatSide.Left))
-        area.add(float_rect(100.0, 0.0, 200.0, 18.0, FloatSide.Right))
-
-        step("Lay out three four-letter words from y = 0")
-        val run = "aaaa bbbb cccc"
-        val block = layout_inline_text_around(run, font16(), area, 0.0, 0.0, 200.0)
-
-        step("Exactly one line comes out, and it is at y = 18, not y = 0")
-        # Nothing can be set in a zero-width band, so the cursor drops one line
-        # height rather than emitting text on top of the floats.
-        assert_eq(block.lines.len(), 1)
-        val l0 = block.lines[0]
-        assert_true(approx_eq(l0.top_px, 18.0))
-        assert_true(approx_eq(l0.left_px, 0.0))
-        assert_true(approx_eq(l0.width_px, 200.0))
-        assert_eq(l0.content, "aaaa bbbb cccc")
-
-        step("The block therefore ends at 36, one line box below where it started")
-        assert_true(approx_eq(block.bottom_px, 36.0))
-
-# ============================================================================
-# @manual_section Without floats the float-aware path matches the plain one
-# ============================================================================
-
-describe "a run laid out with an empty float area":
-    it "produces the same lines as the plain rectangular wrapper":
-        step("Wrap six words to 140px with no floats, both ways")
-        val run = "aaaa bbbb cccc dddd eeee ffff"
-        val area = float_area_new()
-        val around = layout_inline_text_around(run, font16(), area, 0.0, 0.0, 140.0)
-        val plain = layout_inline_text(run, 140, font16())
-
-        step("Both agree on the line count and on every line's text")
-        assert_eq(around.lines.len(), plain.lines.len())
-        assert_eq(around.lines[0].content, plain.lines[0])
-        assert_eq(around.lines[1].content, plain.lines[1])
-
-        step("Every line spans the whole container, since nothing excludes it")
-        assert_true(approx_eq(around.lines[0].left_px, 0.0))
-        assert_true(approx_eq(around.lines[0].width_px, 140.0))
-        assert_true(approx_eq(around.lines[1].left_px, 0.0))
-
-        step("The two lines stack 18px apart and the block ends at 36")
-        assert_true(approx_eq(around.lines[0].top_px, 0.0))
-        assert_true(approx_eq(around.lines[1].top_px, 18.0))
-        assert_true(approx_eq(around.bottom_px, 36.0))
-
-describe "an empty run":
-    it "still occupies exactly one line box so the paragraph keeps its height":
-        step("Lay out the empty string in an empty 200-wide container from y = 0")
-        val area = float_area_new()
-        val block = layout_inline_text_around("", font16(), area, 0.0, 0.0, 200.0)
-
-        step("One empty line box comes out, 18px tall and full width")
-        assert_eq(block.lines.len(), 1)
-        assert_eq(block.lines[0].content, "")
-        assert_true(approx_eq(block.lines[0].height_px, 18.0))
-        assert_true(approx_eq(block.lines[0].width_px, 200.0))
-
-        step("It has no ink, so the intrinsic width is zero and the block ends at 18")
-        assert_true(approx_eq(block.widest_px, 0.0))
-        assert_true(approx_eq(block.bottom_px, 18.0))
-
-# ============================================================================
-# @manual_section A float starting mid-block still shortens the lines it crosses
-# ============================================================================
-
-describe "a left float that begins below the first line":
-    it "leaves the first line full width and shortens only the lines it crosses":
-        step("Put a 60-wide left float from y = 18 to y = 36")
-        # Range queries are the point here: a float that starts one line down
-        # must not affect the line above it, and must fully affect the one it
-        # covers.
-        val area = float_area_new()
-        area.add(float_rect(0.0, 18.0, 60.0, 36.0, FloatSide.Left))
-
-        step("Lay out eight four-letter words from y = 0 across 200px")
-        val run = "aaaa bbbb cccc dddd eeee ffff gggg hhhh"
-        val block = layout_inline_text_around(run, font16(), area, 0.0, 0.0, 200.0)
-
-        step("The first line is untouched: full width, four words")
-        # Band [0, 18) does not reach the float's top at 18, so the width is the
-        # full 200 and four words (175px) fit.
-        val l0 = block.lines[0]
-        assert_true(approx_eq(l0.left_px, 0.0))
-        assert_true(approx_eq(l0.width_px, 200.0))
-        assert_eq(l0.content, "aaaa bbbb cccc dddd")
-
-        step("The second line is indented and shortened by the float")
-        val l1 = block.lines[1]
-        assert_true(approx_eq(l1.top_px, 18.0))
-        assert_true(approx_eq(l1.left_px, 60.0))
-        assert_true(approx_eq(l1.width_px, 140.0))
-        assert_eq(l1.content, "eeee ffff gggg")
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-BLINK-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right

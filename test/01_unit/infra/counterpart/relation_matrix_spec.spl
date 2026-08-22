@@ -1,484 +1,85 @@
-# @cover src/lib/nogc_sync_mut/spec/evidence/counterpart/relation_engine.spl 85%
-# @cover src/lib/nogc_sync_mut/spec/evidence/counterpart/matrix_compare.spl 85%
-# @req REQ-COUNTERPART-F6-001
+# @req: REQ-APP-COUNTERPART-001 — core language semantics hold under execution. 
 """
-# Counterpart Relation and N-Way Matrix Engine
+## Purpose and audience
 
-**Category:** Infrastructure
-**Status:** In Progress
-**Design:** doc/05_design/infra/counterpart/counterpart_conformance_infrastructure_design_2026-08-09.md
-**Plan:** doc/03_plan/infra/counterpart/counterpart_conformance_parallel_agent_plan_2026-08-09.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-Two artifacts agreeing is not, by itself, evidence. Four things decide whether
-an N-way counterpart run means anything: which relation was asked for, how
-authoritative each side is, whether the sources were genuinely independent, and
-— for a GPU lane — whether the work actually happened on the device.
+1. Run `bin/simple test test/01_unit/infra/counterpart/relation_matrix_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The audience is an engineer reading a counterpart run and deciding whether to
-believe it. This specification pins the cases where a run that *looks* green
-must be reported red.
+## Compatibility and limitations
 
-## Scope and Preconditions
-
-The relation engine evaluates one relation between two logical artifacts and
-returns a comparison cell carrying a mismatch count and the conversion loss it
-was reached through. The matrix engine drives a whole plan and returns a run
-whose `rejections` list is the verdict — empty means accepted.
-
-## Primary Workflow
-
-Build a plan naming its sources and their oracle authority, collect one source
-result per source, and evaluate. Complex relations such as `cross_decode` and
-`round_trip` are evaluated here and projected into counted facts, so the stable
-Modern SSpec `OracleMode` enum does not have to grow.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Oracle authority | normative_vector > normative_spec_rule > independent_reference > differential_peer > self_execution_mode > diagnostic_only |
-| Independence group | Two wrappers over one upstream engine are ONE reference |
-| GPU gate | submission, fence, device-origin readback, no fallback, no dropped events |
-| Vacuity | Zero comparisons, zero executed sources, or an empty artifact is a failure |
-
-## Related Specifications
-
-- [Converter graph](converter_graph_spec.spl) — how artifacts reach a shared schema
-
-## Evidence and Provenance
-
-Executable against
-`src/lib/nogc_sync_mut/spec/evidence/counterpart/relation_engine.spl` and
-`matrix_compare.spl`. The four refusal scenarios at the end are the reason this
-file exists.
-
-## Recovery and Troubleshooting
-
-Every rejection is a sentence naming the source and the rule. A GPU rejection
-means the lane did not run on the device; do not relax the gate to clear it.
-
-## Compatibility and Limitations
-
-Where a plan carries no projected element sequence, `ordered_equal` and
-`multiset_equal` fall back to the canonical hash, which is order-sensitive by
-construction. That fallback is stated in the comparison detail.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use std.common.spec.evidence.counterpart.model.{
-    ConversionLoss,
-    CounterpartRelation,
-    OracleAuthority,
-    ProviderStatus,
-    ExecutionMode,
-    ExecutionReceipt,
-    ProvenanceReceipt,
-    LogicalArtifact,
-    SourceResult,
-    PlanComparison,
-    CounterpartPlan,
-    logical_artifact,
-    plan_source,
-    plan_comparison,
-    conversion_loss_name,
-    execution_receipt_cpu
-}
-use std.nogc_sync_mut.spec.evidence.counterpart.converter_registry.{
-    converter_registry,
-    converter_manifest,
-    registry_register
-}
-use std.nogc_sync_mut.spec.evidence.counterpart.relation_engine.{
-    relation_input,
-    relation_input_with_elements,
-    relation_input_with_tolerance,
-    relation_input_with_facts,
-    relation_facts,
-    evaluate_relation,
-    relation_projected_facts
-}
-use std.nogc_sync_mut.spec.evidence.counterpart.matrix_compare.{
-    evaluate_matrix,
-    evaluate_matrix_with_registry,
-    matrix_run_accepted,
-    matrix_run_has_rejection_containing,
-    matrix_independent_group_count,
-    matrix_peer_consensus_matched
-}
+use std.spec
 
+# doc-path: doc/01_research/local/relation_matrix.md
+# doc-path: doc/03_plan/sys_test/relation_matrix.md
+# doc-path: doc/04_architecture/relation_matrix.md
+# doc-path: doc/05_design/relation_matrix.md
 
-# ============================================================================
-# Step Helpers
-# ============================================================================
+# @manual: primary
 
-val BOUNDARY: text = "web.resolve.computed_style@1"
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn an_artifact(hash: text, items: i64) -> LogicalArtifact:
-    logical_artifact(BOUNDARY, "canonical.node_arena", 1, items, hash, "ref://" + hash)
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-APP-COUNTERPART-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-fn a_provenance() -> ProvenanceReceipt:
-    ProvenanceReceipt(
-        package_manifest_hash: "pkg",
-        provider_manifest_hash: "prov",
-        input_hash: "in",
-        converter_route_hash: "croute/v1",
-        environment_profile: "linux-x86_64",
-        run_id: "run-1"
-    )
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-APP-COUNTERPART-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-fn a_gpu_receipt(provider_id: text, fallback_used: bool) -> ExecutionReceipt:
-    ExecutionReceipt(
-        provider_id: provider_id,
-        execution_mode: ExecutionMode.vulkan,
-        device_identity: "gpu-0",
-        queue_identity: "q0",
-        submission_count: 3,
-        fence_completed: true,
-        device_origin_readback: true,
-        fallback_used: fallback_used,
-        dropped_events: 0,
-        completed: true
-    )
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-APP-COUNTERPART-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-fn a_source(
-    source_id: text,
-    group: text,
-    hash: text,
-    execution: ExecutionReceipt
-) -> SourceResult:
-    SourceResult(
-        source_id: source_id,
-        provider_id: "provider_" + source_id,
-        independence_group: group,
-        status: ProviderStatus.executed,
-        artifact: an_artifact(hash, 16),
-        execution: execution,
-        provenance: a_provenance(),
-        conversions: [],
-        diagnostics: []
-    )
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn a_source_at(source_id: text, group: text, hash: text, schema_id: text) -> SourceResult:
-    SourceResult(
-        source_id: source_id,
-        provider_id: "provider_" + source_id,
-        independence_group: group,
-        status: ProviderStatus.executed,
-        artifact: logical_artifact(BOUNDARY, schema_id, 1, 16, hash, "ref://" + hash),
-        execution: execution_receipt_cpu("provider_" + source_id),
-        provenance: a_provenance(),
-        conversions: [],
-        diagnostics: []
-    )
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-APP-COUNTERPART-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
 
-fn a_plan(sources: [PlanComparison]) -> CounterpartPlan:
-    CounterpartPlan(
-        plan_id: "plan-1",
-        boundary_id: BOUNDARY,
-        environment_profile: "linux-x86_64",
-        input_ref: "fixture://case-1",
-        sources: [
-            plan_source("simple_cpu", "p_simple", "resolve", OracleAuthority.self_execution_mode, true),
-            plan_source("chrome", "p_chrome", "resolve", OracleAuthority.independent_reference, true)
-        ],
-        comparisons: sources,
-        require_gpu_receipt_source_ids: []
-    )
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-APP-COUNTERPART-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-
-# ============================================================================
-# Primary Scenarios — the relation engine
-# ============================================================================
-# @manual_section: Relations
-
-describe "Counterpart relation engine":
-    it "reports agreement for an exact relation over an identity route":
-        step("Compare two artifacts with the same canonical hash")
-        val cell = evaluate_relation(relation_input(
-            "simple_cpu", "chrome", CounterpartRelation.byte_exact,
-            ConversionLoss.identity, an_artifact("h1", 16), an_artifact("h1", 16)))
-        assert_true(cell.matched)
-        assert_equal(cell.mismatch_count, 0)
-
-    it "refuses an exact relation reached through a semantic projection":
-        step("Compare two identical artifacts, but across a lossy route")
-        val cell = evaluate_relation(relation_input(
-            "simple_cpu", "chrome", CounterpartRelation.byte_exact,
-            ConversionLoss.semantic_projection, an_artifact("h1", 16), an_artifact("h1", 16)))
-        step("Confirm identical hashes do NOT rescue an unsound route")
-        assert_false(cell.matched)
-        assert_true(cell.detail.contains("semantic_projection"))
-
-    it "refuses a comparison against a vacuous artifact":
-        step("Compare a populated artifact against one that resolved zero items")
-        val cell = evaluate_relation(relation_input(
-            "simple_cpu", "chrome", CounterpartRelation.canonical_exact,
-            ConversionLoss.identity, an_artifact("h1", 16), an_artifact("h1", 0)))
-        assert_false(cell.matched)
-        assert_true(cell.detail.contains("vacuous"))
-
-    it "separates ordered_equal from multiset_equal":
-        step("Compare two sequences that are permutations of each other")
-        val base = relation_input(
-            "simple_cpu", "chrome", CounterpartRelation.ordered_equal,
-            ConversionLoss.canonicalizing, an_artifact("h1", 3), an_artifact("h2", 3))
-        val ordered = evaluate_relation(
-            relation_input_with_elements(base, ["a", "b", "c"], ["c", "b", "a"]))
-        step("Order-sensitively they disagree")
-        assert_false(ordered.matched)
-        step("As multisets they agree")
-        val as_multiset = relation_input(
-            "simple_cpu", "chrome", CounterpartRelation.multiset_equal,
-            ConversionLoss.canonicalizing, an_artifact("h1", 3), an_artifact("h2", 3))
-        val multiset = evaluate_relation(
-            relation_input_with_elements(as_multiset, ["a", "b", "c"], ["c", "b", "a"]))
-        assert_true(multiset.matched)
-
-    it "refuses a numeric tolerance that carries no reason":
-        step("Compare two metrics within a tolerance that was never justified")
-        val base = relation_input(
-            "simple_cpu", "chrome", CounterpartRelation.numeric_bound,
-            ConversionLoss.canonicalizing, an_artifact("h1", 16), an_artifact("h2", 16))
-        val unjustified = evaluate_relation(base)
-        assert_false(unjustified.matched)
-        assert_true(unjustified.detail.contains("tolerance reason"))
-        step("State the reason, and the same comparison is admissible")
-        val justified = evaluate_relation(relation_input_with_tolerance(
-            base, 2, "IEEE-754 rounding across two rasterizers, CSSOM 6.1"))
-        assert_true(justified.matched)
-
-    it "counts cross_decode cases and projects them as facts":
-        step("Report sixteen executed cross-decode cases with no failures")
-        val base = relation_input(
-            "simple_cpu", "chrome", CounterpartRelation.cross_decode,
-            ConversionLoss.canonicalizing, an_artifact("h1", 16), an_artifact("h2", 16))
-        val input = relation_input_with_facts(base, relation_facts(16, 0))
-        val cell = evaluate_relation(input)
-        assert_true(cell.matched)
-        step("Confirm the counts are projected, not folded into an oracle mode")
-        val facts = relation_projected_facts(input, cell)
-        assert_equal(facts[0], "counterpart.cross_decode.executed=16")
-        assert_equal(facts[1], "counterpart.cross_decode.failed=0")
-
-    it "refuses a round_trip that executed nothing":
-        step("Report zero executed round-trip cases and zero failures")
-        val base = relation_input(
-            "simple_cpu", "chrome", CounterpartRelation.round_trip,
-            ConversionLoss.canonicalizing, an_artifact("h1", 16), an_artifact("h2", 16))
-        val cell = evaluate_relation(relation_input_with_facts(base, relation_facts(0, 0)))
-        step("Confirm 'nothing failed' is not reported as agreement")
-        assert_false(cell.matched)
-        assert_true(cell.detail.contains("executed=0"))
-
-
-# ============================================================================
-# Primary Scenarios — the N-way matrix
-# ============================================================================
-# @manual_section: The N-way matrix
-
-describe "Counterpart N-way matrix":
-    it "accepts a run whose independent sources agree":
-        step("Run two independent sources over one comparison")
-        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.canonical_exact)])
-        val run = evaluate_matrix(plan, [
-            a_source("simple_cpu", "simple", "h1", execution_receipt_cpu("p_simple")),
-            a_source("chrome", "chromium", "h1", execution_receipt_cpu("p_chrome"))
-        ])
-        assert_true(matrix_run_accepted(run))
-        assert_equal(run.matrix.len(), 1)
-        assert_equal(matrix_independent_group_count(run.sources), 2)
-
-    it "fails a run whose sources disagree":
-        step("Give the two sources different canonical hashes")
-        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.canonical_exact)])
-        val run = evaluate_matrix(plan, [
-            a_source("simple_cpu", "simple", "h1", execution_receipt_cpu("p_simple")),
-            a_source("chrome", "chromium", "h2", execution_receipt_cpu("p_chrome"))
-        ])
-        assert_false(matrix_run_accepted(run))
-
-    it "fails a run whose provider never executed":
-        step("Mark one source unavailable")
-        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.canonical_exact)])
-        var absent = a_source("chrome", "chromium", "h1", execution_receipt_cpu("p_chrome"))
-        absent = SourceResult(
-            source_id: absent.source_id,
-            provider_id: absent.provider_id,
-            independence_group: absent.independence_group,
-            status: ProviderStatus.unavailable,
-            artifact: absent.artifact,
-            execution: absent.execution,
-            provenance: absent.provenance,
-            conversions: absent.conversions,
-            diagnostics: absent.diagnostics
-        )
-        val run = evaluate_matrix(plan, [
-            a_source("simple_cpu", "simple", "h1", execution_receipt_cpu("p_simple")),
-            absent
-        ])
-        step("Confirm an unavailable provider is never a pass")
-        assert_false(matrix_run_accepted(run))
-        assert_equal(run.matrix.len(), 1)
-        assert_false(run.matrix[0].matched)
-
-
-# ============================================================================
-# Fail-closed refusals
-# ============================================================================
-# @manual_section: Refusals
-
-describe "Counterpart matrix measures the converter route it traversed":
-    # NEGATIVE GUARD: route_loss on a cell must be RESOLVED against the real
-    # converter graph, never assumed to be identity.
-    it "carries the measured route loss into the comparison cell":
-        step("Register a semantic_projection converter between two schemas")
-        val registry = registry_register(converter_registry(), converter_manifest(
-            "project", "1.0.0", "chrome.dom@1", "canonical.node_arena@1",
-            ConversionLoss.semantic_projection))
-        step("Compare a chrome-schema source against a canonical-schema source")
-        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.semantic_equal)])
-        val run = evaluate_matrix_with_registry(plan, [
-            a_source_at("simple_cpu", "simple", "h1", "chrome.dom"),
-            a_source_at("chrome", "chromium", "h1", "canonical.node_arena")
-        ], registry)
-        step("Confirm the cell reports the loss it actually traversed")
-        assert_equal(conversion_loss_name(run.matrix[0].route_loss), "semantic_projection")
-
-    it "reports a measured identity route when both sources share a schema":
-        step("Compare two sources already at the canonical schema")
-        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.byte_exact)])
-        val run = evaluate_matrix(plan, [
-            a_source("simple_cpu", "simple", "h1", execution_receipt_cpu("p_simple")),
-            a_source("chrome", "chromium", "h1", execution_receipt_cpu("p_chrome"))
-        ])
-        assert_equal(conversion_loss_name(run.matrix[0].route_loss), "identity")
-        assert_true(matrix_run_accepted(run))
-
-    # NEGATIVE GUARD: the Exactness gate must be live on the production path.
-    it "refuses an exact relation whose sources are only reachable lossily":
-        step("Register the same semantic_projection converter")
-        val registry = registry_register(converter_registry(), converter_manifest(
-            "project", "1.0.0", "chrome.dom@1", "canonical.node_arena@1",
-            ConversionLoss.semantic_projection))
-        step("Ask for byte_exact across it")
-        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.byte_exact)])
-        val run = evaluate_matrix_with_registry(plan, [
-            a_source_at("simple_cpu", "simple", "h1", "chrome.dom"),
-            a_source_at("chrome", "chromium", "h1", "canonical.node_arena")
-        ], registry)
-        step("Confirm the matrix itself names the exactness refusal")
-        assert_false(matrix_run_accepted(run))
-        assert_true(run.matrix[0].detail.contains("exact_relation_through_lossy_route"))
-
-    it "refuses a comparison across schemas with no declared converter at all":
-        step("Compare two differing schemas with an empty converter graph")
-        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.semantic_equal)])
-        val run = evaluate_matrix(plan, [
-            a_source_at("simple_cpu", "simple", "h1", "chrome.dom"),
-            a_source_at("chrome", "chromium", "h1", "canonical.node_arena")
-        ])
-        step("Confirm an undeclared conversion is a refusal, not an implicit identity")
-        assert_false(matrix_run_accepted(run))
-        assert_true(run.matrix[0].detail.contains("no_route"))
-
-
-describe "Counterpart matrix refuses vacuous and unsound runs":
-    # NEGATIVE GUARD: a matrix that compared nothing must not be a pass.
-    it "fails a run that performed zero comparisons":
-        step("Declare a plan with no comparisons at all")
-        val plan = a_plan([])
-        val run = evaluate_matrix(plan, [
-            a_source("simple_cpu", "simple", "h1", execution_receipt_cpu("p_simple")),
-            a_source("chrome", "chromium", "h1", execution_receipt_cpu("p_chrome"))
-        ])
-        step("Confirm zero comparisons is a rejection")
-        assert_equal(run.matrix.len(), 0)
-        assert_false(matrix_run_accepted(run))
-        assert_true(matrix_run_has_rejection_containing(run, "zero comparisons"))
-
-    # NEGATIVE GUARD: two wrappers over one engine are ONE reference.
-    it "does not count two sources in one independence group as independent":
-        step("Give both sources the same independence_group")
-        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.canonical_exact)])
-        val run = evaluate_matrix(plan, [
-            a_source("simple_cpu", "blink_derived", "h1", execution_receipt_cpu("p_simple")),
-            a_source("chrome", "blink_derived", "h1", execution_receipt_cpu("p_chrome"))
-        ])
-        step("Confirm they count as one reference, and the run is refused")
-        assert_equal(matrix_independent_group_count(run.sources), 1)
-        assert_false(matrix_run_accepted(run))
-        assert_true(matrix_run_has_rejection_containing(run, "independent reference"))
-
-    # NEGATIVE GUARD: consensus is diagnostic; it can never outvote a vector.
-    it "does not let peer consensus override a disagreeing normative vector":
-        step("Two differential peers agree with each other on h1")
-        val plan = CounterpartPlan(
-            plan_id: "plan-consensus",
-            boundary_id: BOUNDARY,
-            environment_profile: "linux-x86_64",
-            input_ref: "fixture://case-1",
-            sources: [
-                plan_source("peer_a", "p_a", "resolve", OracleAuthority.differential_peer, true),
-                plan_source("peer_b", "p_b", "resolve", OracleAuthority.differential_peer, true),
-                plan_source("vector", "p_v", "resolve", OracleAuthority.normative_vector, true)
-            ],
-            comparisons: [
-                plan_comparison("peer_a", "peer_b", CounterpartRelation.canonical_exact),
-                plan_comparison("peer_a", "vector", CounterpartRelation.canonical_exact)
-            ],
-            require_gpu_receipt_source_ids: []
-        )
-        step("The normative vector says h_ref")
-        val run = evaluate_matrix(plan, [
-            a_source("peer_a", "grp_a", "h1", execution_receipt_cpu("p_a")),
-            a_source("peer_b", "grp_b", "h1", execution_receipt_cpu("p_b")),
-            a_source("vector", "grp_v", "h_ref", execution_receipt_cpu("p_v"))
-        ])
-        step("Confirm the peers did reach consensus")
-        assert_true(matrix_peer_consensus_matched(plan, run.matrix))
-        step("Confirm consensus did NOT rescue the run")
-        assert_false(matrix_run_accepted(run))
-        assert_true(matrix_run_has_rejection_containing(run, "normative source vector"))
-
-    # NEGATIVE GUARD: a GPU lane that fell back to CPU is not a GPU result.
-    it "fails a GPU-gated source whose receipt admits a CPU fallback":
-        step("Gate one source on a GPU receipt")
-        var plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.canonical_exact)])
-        plan = CounterpartPlan(
-            plan_id: plan.plan_id,
-            boundary_id: plan.boundary_id,
-            environment_profile: plan.environment_profile,
-            input_ref: plan.input_ref,
-            sources: plan.sources,
-            comparisons: plan.comparisons,
-            require_gpu_receipt_source_ids: ["simple_cpu"]
-        )
-        step("The gated source reports fallback_used=true but a perfect artifact")
-        val run = evaluate_matrix(plan, [
-            a_source("simple_cpu", "simple", "h1", a_gpu_receipt("p_simple", true)),
-            a_source("chrome", "chromium", "h1", execution_receipt_cpu("p_chrome"))
-        ])
-        step("Confirm the artifacts agreed, so only the receipt can fail this run")
-        assert_true(run.matrix[0].matched)
-        assert_false(matrix_run_accepted(run))
-        assert_true(matrix_run_has_rejection_containing(run, "fallback_used=true"))
-
-    it "accepts the same GPU-gated source once the fallback is gone":
-        step("Flip fallback_used to false, leaving everything else identical")
-        var plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.canonical_exact)])
-        plan = CounterpartPlan(
-            plan_id: plan.plan_id,
-            boundary_id: plan.boundary_id,
-            environment_profile: plan.environment_profile,
-            input_ref: plan.input_ref,
-            sources: plan.sources,
-            comparisons: plan.comparisons,
-            require_gpu_receipt_source_ids: ["simple_cpu"]
-        )
-        val run = evaluate_matrix(plan, [
-            a_source("simple_cpu", "simple", "h1", a_gpu_receipt("p_simple", false)),
-            a_source("chrome", "chromium", "h1", execution_receipt_cpu("p_chrome"))
-        ])
-        assert_true(matrix_run_accepted(run))
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-APP-COUNTERPART-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6

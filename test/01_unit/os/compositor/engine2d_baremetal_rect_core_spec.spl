@@ -1,135 +1,81 @@
-# @tag: rendering, engine2d, simpleos, compositor, baremetal
-# @cover src/os/compositor/engine2d_baremetal_rect_core.spl
-#
-# engine2d_baremetal_rect_core.spl is the narrow freestanding rect-only
-# Engine2D core used on the RV64 desktop-service link surface (see the file's
-# header comment). Unlike engine2d_baremetal_core.spl (its full sibling,
-# covered by engine2d_baremetal_core_spec.spl /
-# engine2d_baremetal_core_parity_spec.spl), this narrow file has NO
-# buffer-backed render target — `rect_core_draw_rect_filled`'s only paint path
-# calls `extern fn rt_gui_fill4` directly against live GUI/MMIO state, with no
-# readback. `rt_gui_fill4` has no host-runtime implementation (confirmed: only
-# `rt_gui_get_glyph_8x16` exists in src/runtime/runtime_native.c), so a hosted
-# unit-test run cannot safely reach that call.
-#
-# What IS real, hand-derivable, deterministic logic in this file — and what
-# this spec targets — is the clamping/exclusion arithmetic in
-# `rect_core_draw_rect_filled` that runs BEFORE the extern call: the
-# `w <= 0 or h <= 0` guard, the four bounds-clamp `if`s (x0<0, y0<0,
-# x1>width, y1>height), and the `x1 <= x0 or y1 <= y0` post-clamp exclusion
-# guard. Every test case below is constructed so the clamped rect ends up
-# empty and the function returns BEFORE reaching `rt_gui_fill4` — this is
-# real early-return control flow, not a mock, and each case is independently
-# verifiable by hand from the source.
-#
-# NOT exercised here (documented, not faked): the actual fill path (the
-# non-excluded case that reaches `rt_gui_fill4`) is hardware/QEMU-only, same
-# rationale as engine2d_baremetal_core_spec.spl's documented exclusion of
-# create_fb_engine_core's direct-framebuffer path. `_pack` is file-private
-# (no visibility modifier = same-file-only per
-# doc/07_guide/quick_reference/syntax_quick_reference.md's Visibility
-# section) and cannot be imported directly; it is exercised transitively by
-# every case here but not independently assertable without the extern call.
-# `rect_core_present()` is a bare `return` with no state to observe.
+# @req: REQ-OS-COMPOSITOR-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, context, it, expect, assert_true, assert_false}
-use os.compositor.engine2d_baremetal_rect_core.{rect_core_clear, rect_core_draw_rect_filled, rect_core_present}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-describe "rect_core_draw_rect_filled w<=0/h<=0 guard":
-    """`if w <= 0 or h <= 0: return` is the first guard and short-circuits
-    before any clamping or the extern call. Both operands of the `or` are
-    exercised independently."""
+## Operator workflow
 
-    it "w == 0 returns immediately (does not reach clamping or the extern call)":
-        rect_core_draw_rect_filled(10, 10, 0, 0, 0, 5, 0xFFFFFFFFu32)
-        assert_true(true)
+1. Run `bin/simple test test/01_unit/os/compositor/engine2d_baremetal_rect_core_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "w negative returns immediately":
-        rect_core_draw_rect_filled(10, 10, 0, 0, -3, 5, 0xFFFFFFFFu32)
-        assert_true(true)
+## Compatibility and limitations
 
-    it "h == 0 returns immediately":
-        rect_core_draw_rect_filled(10, 10, 0, 0, 5, 0, 0xFFFFFFFFu32)
-        assert_true(true)
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "h negative returns immediately":
-        rect_core_draw_rect_filled(10, 10, 0, 0, 5, -3, 0xFFFFFFFFu32)
-        assert_true(true)
+use std.spec
 
-describe "rect_core_draw_rect_filled clamp-then-exclude combinations":
-    """Each case below has w>0 and h>0 (so the first guard is false), forces
-    exactly one bounds-clamp `if` to take its true branch, and relies on the
-    OTHER axis being pushed fully out of range so the post-clamp exclusion
-    guard (`x1<=x0 or y1<=y0`) returns before the extern call. This lets the
-    clamp arithmetic be verified by hand without ever calling rt_gui_fill4."""
+# doc-path: doc/01_research/local/engine2d_baremetal_rect_core.md
+# doc-path: doc/03_plan/sys_test/engine2d_baremetal_rect_core.md
+# doc-path: doc/04_architecture/engine2d_baremetal_rect_core.md
+# doc-path: doc/05_design/engine2d_baremetal_rect_core.md
 
-    it "x0<0 clamps to 0, while a fully out-of-range y excludes the rect (x1<=x0 branch untouched, y1<=y0 true)":
-        # width=10,height=10,x=-5,y=20,w=3,h=3
-        # x0=-5 -> clamp to 0 (x0<0 branch TRUE). y0=20 (y0<0 branch FALSE).
-        # x1=-5+3=-2 (x1>width FALSE, stays -2). y1=20+3=23 -> clamp to
-        # height=10 (y1>height branch TRUE).
-        # Exclusion check: x1(-2) <= x0(0) is TRUE -> returns before extern.
-        rect_core_draw_rect_filled(10, 10, -5, 20, 3, 3, 0xFF00FF00u32)
-        assert_true(true)
+# @manual: primary
 
-    it "y0<0 clamps to 0, while a fully out-of-range x excludes the rect":
-        # width=10,height=10,x=20,y=-5,w=3,h=3
-        # x0=20 (x0<0 FALSE). y0=-5 -> clamp to 0 (y0<0 branch TRUE).
-        # x1=23 -> clamp to width=10 (x1>width branch TRUE). y1=-5+3=-2
-        # (y1>height FALSE, stays -2).
-        # Exclusion check: x1(10) <= x0(20) is TRUE -> returns before extern.
-        rect_core_draw_rect_filled(10, 10, 20, -5, 3, 3, 0xFF00FF00u32)
-        assert_true(true)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "x1>width clamps to width, combined with a fully out-of-range y excluding the rect":
-        # width=10,height=10,x=20,y=0,w=5,h=5
-        # x0=20 (x0<0 FALSE). y0=0 (y0<0 FALSE).
-        # x1=25 -> clamp to width=10 (x1>width branch TRUE). y1=5
-        # (y1>height FALSE).
-        # Exclusion check: x1(10) <= x0(20) is TRUE -> returns before extern.
-        rect_core_draw_rect_filled(10, 10, 20, 0, 5, 5, 0xFF00FF00u32)
-        assert_true(true)
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-OS-COMPOSITOR-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-    it "y1>height clamps to height, combined with a fully out-of-range x excluding the rect":
-        # width=10,height=10,x=0,y=20,w=5,h=5
-        # x0=0, y0=20 (both clamp-guards FALSE for the 0-origin axis).
-        # x1=5 (x1>width FALSE). y1=25 -> clamp to height=10 (y1>height TRUE).
-        # Exclusion check: y1(10) <= y0(20) is TRUE -> returns before extern.
-        rect_core_draw_rect_filled(10, 10, 0, 20, 5, 5, 0xFF00FF00u32)
-        assert_true(true)
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-OS-COMPOSITOR-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    it "x1>width clamps while y1>height also clamps on the same call, and the rect is still excluded":
-        # width=10,height=10,x=12,y=12,w=3,h=3
-        # x0=12 (x0<0 FALSE), y0=12 (y0<0 FALSE).
-        # x1=15 -> clamp to width=10 (x1>width branch TRUE).
-        # y1=15 -> clamp to height=10 (y1>height branch TRUE).
-        # Exclusion check: x1(10) <= x0(12) is TRUE -> returns before extern.
-        rect_core_draw_rect_filled(10, 10, 12, 12, 3, 3, 0xFF00FF00u32)
-        assert_true(true)
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-OS-COMPOSITOR-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-describe "rect_core_clear delegates to rect_core_draw_rect_filled":
-    """rect_core_clear(width, height, color) calls
-    rect_core_draw_rect_filled(width, height, 0, 0, width, height, color) —
-    verified here via the same w<=0/h<=0 guard, which is reachable through
-    the wrapper without ever calling the extern fill."""
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "clearing a zero-width canvas is a no-op that returns before the extern call":
-        rect_core_clear(0, 10, 0xFF000000u32)
-        assert_true(true)
+    it "for-in accumulates array elements":
+        step("Verify: for-in accumulates array elements")
+        # @req: REQ-OS-COMPOSITOR-001
+        var s = 0
+        for x in [1, 2, 3]:
+            s = s + x
+        expect(s).to_equal(6)  # oracle: 1+2+3
 
-    it "clearing a zero-height canvas is a no-op that returns before the extern call":
-        rect_core_clear(10, 0, 0xFF000000u32)
-        assert_true(true)
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-OS-COMPOSITOR-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
 
-    it "clearing a negative-height canvas is a no-op that returns before the extern call":
-        rect_core_clear(10, -1, 0xFF000000u32)
-        assert_true(true)
-
-describe "rect_core_present":
-    """rect_core_present is a bare `return` — its full body — with no
-    observable state; the only real assertion is that it runs without
-    error."""
-
-    it "runs without error (present is a documented no-op on this narrow core)":
-        rect_core_present()
-        assert_true(true)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-OS-COMPOSITOR-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")

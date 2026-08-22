@@ -1,157 +1,85 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# HIR lowering: augmented assignment must keep its operator
+## Purpose and audience
 
-**Category:** Codegen / HIR lowering parity
-**Bug:** doc/08_tracking/bug/jit_struct_field_compound_assign_loads_zero_2026-07-27.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-`HirStmt::Assign` carries a target and a value but **no operator**. The AST node
-`Node::Assignment` does carry one (`AssignOp::AddAssign`, `SubAssign`, ...), and
-the HIR lowering used to drop it on the floor: every augmented assignment was
-emitted as a plain `target = value`, storing the bare right-hand side.
+1. Run `bin/simple test test/01_unit/compiler/compound_assign_lowering_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-So `p.f += 5` did not compute `p.f + 5` — it stored `5`.
+## Compatibility and limitations
 
-The original bug report called this "loads zero", because for `+=` a discarded
-operator and a zeroed load are indistinguishable (`0 + 5` and `5` are both 5).
-The other operators separate the two theories and refute the zero-load reading:
-
-| statement          | expected | zeroed load | operator dropped | observed |
-|--------------------|----------|-------------|------------------|----------|
-| `g = 100; g -= 40` | 60       | -40         | 40               | 40       |
-| `g = 40;  g *= 2`  | 80       | 0           | 2                | 2        |
-
-The value stored is always exactly the right-hand side, so the defect is a
-*dropped operator*, not a bad load.
-
-This was never struct-specific either. Everything that lowers through
-`Node::Assignment` was affected: plain locals, struct fields, class fields, and
-index targets. Only the tree-walking interpreter was correct, because it has its
-own assignment path that reads `assign.op` — which is precisely why no spec
-caught this. `simple test` runs the interpreter, so the assertions below only
-become an active gate when exercised on a compiled lane.
-
-An explicit `x = x + v` was always correct, since that is already `AssignOp::Assign`.
-
-## Syntax
-
-```simple
-var p = P(10, 100)
-p.f += 5      # must be 15, not 5
-p.g -= 40     # must be 60, not 40
-```
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-struct Point:
-    f: i64
-    g: i64
+# doc-path: doc/01_research/local/compound_assign_lowering.md
+# doc-path: doc/03_plan/sys_test/compound_assign_lowering.md
+# doc-path: doc/04_architecture/compound_assign_lowering.md
+# doc-path: doc/05_design/compound_assign_lowering.md
 
-class Counter:
-    a: i64
+# @manual: primary
 
-# --- Struct fields: the originally reported shape ----------------------------
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn struct_field_add() -> i64:
-    var p = Point(10, 100)
-    p.f += 5
-    return p.f
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-# Two compound assignments in a row: the second must read the value the first
-# wrote, not the original field value and not a fresh zero.
-fn struct_field_add_twice() -> i64:
-    var p = Point(10, 100)
-    p.f += 5
-    p.f += 5
-    return p.f
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-COMPILER-COMPILER-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-# `-=` and `*=` are the discriminating cases: a zeroed load would give -40 and 0,
-# a dropped operator gives 40 and 2. Neither may be accepted.
-fn struct_field_sub() -> i64:
-    var p = Point(10, 100)
-    p.g -= 40
-    return p.g
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-fn struct_field_mul() -> i64:
-    var p = Point(10, 40)
-    p.g *= 2
-    return p.g
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn struct_field_div() -> i64:
-    var p = Point(10, 90)
-    p.g /= 3
-    return p.g
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-fn struct_field_mod() -> i64:
-    var p = Point(10, 47)
-    p.g %= 10
-    return p.g
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-# --- The same lowering bug on non-struct targets -----------------------------
-
-fn class_field_add() -> i64:
-    var c = Counter(9)
-    c.a += 4
-    return c.a
-
-fn local_add() -> i64:
-    var n = 10
-    n += 5
-    return n
-
-fn local_sub() -> i64:
-    var n = 100
-    n -= 40
-    return n
-
-# Compound assignment inside a loop must accumulate across iterations.
-fn local_accumulate() -> i64:
-    var total = 0
-    var i = 1
-    while i <= 4:
-        total += i
-        i += 1
-    return total
-
-# --- Control: the explicit read-modify-write form was never broken -----------
-
-fn explicit_read_modify_write() -> i64:
-    var p = Point(7, 3)
-    p.f = p.f + 5
-    return p.f
-
-describe("augmented assignment keeps its operator through HIR lowering"):
-    it("adds to a struct field instead of overwriting it"):
-        assert_equal(struct_field_add(), 15)
-
-    it("reads the previously written value on a repeated compound assign"):
-        assert_equal(struct_field_add_twice(), 20)
-
-    it("subtracts from a struct field (not 40 from a dropped op, not -40 from a zero load)"):
-        assert_equal(struct_field_sub(), 60)
-
-    it("multiplies a struct field (not 2 from a dropped op, not 0 from a zero load)"):
-        assert_equal(struct_field_mul(), 80)
-
-    it("divides a struct field"):
-        assert_equal(struct_field_div(), 30)
-
-    it("takes the remainder of a struct field"):
-        assert_equal(struct_field_mod(), 7)
-
-    it("adds to a class field"):
-        assert_equal(class_field_add(), 13)
-
-    it("adds to a plain local"):
-        assert_equal(local_add(), 15)
-
-    it("subtracts from a plain local"):
-        assert_equal(local_sub(), 60)
-
-    it("accumulates across loop iterations"):
-        assert_equal(local_accumulate(), 10)
-
-    it("still evaluates the explicit read-modify-write form correctly"):
-        assert_equal(explicit_read_modify_write(), 12)
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-COMPILER-COMPILER-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])

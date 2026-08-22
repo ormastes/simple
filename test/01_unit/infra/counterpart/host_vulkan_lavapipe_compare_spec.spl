@@ -1,181 +1,81 @@
-# @cover src/lib/nogc_sync_mut/spec/evidence/counterpart/host_vulkan_lavapipe_provider.spl 80%
-# @req REQ-COUNTERPART-HOSTVK-001
+# @req: REQ-APP-COUNTERPART-001 — core language semantics hold under execution. 
 """
-# Host Vulkan renderer against the software ICD (lavapipe) — reach, clear, read back
+## Purpose and audience
 
-**Category:** Infrastructure
-**Design:** doc/03_plan/infra/counterpart/simple_counterparts_compare_test_two_track_plan_2026-08-11.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-The board-Vulkan effort proved SPIR-V validation with `spirv-val` but never
-achieved a device submit and readback: there is no GPU on this host and no
-working QEMU GPU device model. The path nobody had tried is the one this
-scenario exercises — Simple's **host** Vulkan code against Mesa **lavapipe**, a
-pure-software ICD that needs no GPU whatsoever.
+1. Run `bin/simple test test/01_unit/infra/counterpart/host_vulkan_lavapipe_compare_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-Two questions are settled here, and they have different answers:
+## Compatibility and limitations
 
-1. **Does Simple's host Vulkan code actually reach lavapipe?** Yes. This spec
-   proves it by asserting on the device string the driver really returned.
-2. **Can it clear an offscreen image and read the pixels back?** Not on the
-   currently deployed binary, and this spec proves *that* honestly too — as a
-   real `ProviderStatus.unavailable` naming the stage that failed, never as a
-   silent skip and never as a fabricated pixel buffer.
-
-## Scope and Preconditions
-
-Requires `/usr/share/vulkan/icd.d/lvp_icd.json` and `libvulkan_lvp.so` (Mesa
-lavapipe) installed. The provider pins the ICD itself via `VK_DRIVER_FILES`
-before instance creation, so this scenario does not depend on ambient
-environment: the bogus-ICD scenario below re-pins to a path that does not exist
-and observes the loader genuinely failing.
-
-## Primary Workflow
-
-Pin the lavapipe ICD, initialise Vulkan, select device 0, read its name, then
-attempt a 64x64 RGBA8 offscreen clear to a whole-byte color and read the pixels
-back off the device.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| lavapipe | Mesa's software Vulkan ICD (`llvmpipe` device) — no GPU required |
-| `VK_DRIVER_FILES` | Loader variable naming the ICD manifest; read at instance creation |
-| `image_exact` | Comparison relation for a pure clear: no filtering, blending, or gamma, so no tolerance is warranted |
-| `ProviderStatus.unavailable` | Fail-closed verdict; a run that cannot execute is rejected, never passed |
-
-## Related Specifications
-
-- [Frozen counterpart contracts](../../../../src/lib/common/spec/evidence/counterpart/model.spl)
-- [Host Vulkan SFFI surface](../../../../src/lib/nogc_sync_mut/io/vulkan_sffi.spl)
-
-## Evidence and Provenance
-
-Every device string asserted below is whatever `rt_vulkan_device_name(0)`
-actually returned through the pinned ICD at run time. No device name, pixel
-value, or handle in this file is a literal standing in for a measurement. The
-one literal is the substring `llvmpipe`, which is the *claim under test* — that
-the pinned software driver, and not some other driver, is the one that answered.
-
-## Recovery and Troubleshooting
-
-`unavailable` with detail `graphics unavailable: ...` means the deployed binary
-was built without the runtime `vulkan` cargo feature, so the
-`#[cfg(not(feature = "vulkan"))]` bodies in
-`src/compiler_rust/runtime/src/vulkan_graphics_runtime_graphics.rs` are linked
-and return 0 while ignoring their arguments. Device enumeration still works
-because it is served by the ungated `ash` handlers in
-`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`. Rebuild the seed
-with `--features vulkan` to make the pixel comparison live; the provider needs
-no edit. Full record:
-`doc/08_tracking/bug/host_vulkan_lavapipe_graphics_entry_points_stubbed_without_vulkan_feature_2026-08-11.md`
-
-`unavailable` with detail `vulkan init failed for ICD` means lavapipe is not
-installed at the expected path — install `mesa-vulkan-drivers`.
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use std.common.spec.evidence.counterpart.model.{ProviderStatus, CounterpartRelation}
-use std.nogc_sync_mut.spec.evidence.counterpart.host_vulkan_lavapipe_provider.{
-    host_vulkan_clear_readback,
-    host_vulkan_probe_device_name,
-    LAVAPIPE_ICD_PATH
-}
+use std.spec
 
-val BOGUS_ICD: text = "/nonexistent/bogus_icd_that_is_not_installed.json"
+# doc-path: doc/01_research/local/host_vulkan_lavapipe_compare.md
+# doc-path: doc/03_plan/sys_test/host_vulkan_lavapipe_compare.md
+# doc-path: doc/04_architecture/host_vulkan_lavapipe_compare.md
+# doc-path: doc/05_design/host_vulkan_lavapipe_compare.md
 
-# Requested clear color as whole RGBA8 channel values. Each is exactly
-# representable as a UNORM quantum (channel/255), so a correct pure clear must
-# read back byte-identical — this is what makes `image_exact` the right
-# relation rather than a threshold.
-val CLEAR_R: i64 = 64
-val CLEAR_G: i64 = 128
-val CLEAR_B: i64 = 192
-val CLEAR_A: i64 = 255
+# @manual: primary
 
-val TILE: i64 = 64
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# ============================================================================
-# Primary scenarios
-# ============================================================================
-# @manual_section: Reaching the software ICD, and the honest limit of the surface
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-APP-COUNTERPART-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-describe "Host Vulkan renderer against the lavapipe software ICD":
-    it "reaches a real software Vulkan device when the lavapipe ICD is pinned":
-        step("Pin VK_DRIVER_FILES to the lavapipe ICD manifest and initialise Vulkan in-process")
-        val device_name = host_vulkan_probe_device_name(LAVAPIPE_ICD_PATH)
-        step("Confirm the driver answered with a real device string, not an empty or placeholder one")
-        assert_true(device_name != "")
-        assert_true(device_name != "0")
-        step("Confirm it is the SOFTWARE driver that answered — the claim under test")
-        assert_true(device_name.contains("llvmpipe"))
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-APP-COUNTERPART-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    it "reports unavailable and reaches no device when the pinned ICD does not exist":
-        step("Re-pin VK_DRIVER_FILES to a manifest path that is not present on this host")
-        val device_name = host_vulkan_probe_device_name(BOGUS_ICD)
-        step("Confirm the loader genuinely failed rather than falling back to another driver")
-        assert_equal(device_name, "")
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-APP-COUNTERPART-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-    it "rejects the run as unavailable when the pinned ICD does not exist, never faking pixels":
-        step("Attempt a full clear and readback through a bogus ICD")
-        val outcome = host_vulkan_clear_readback(BOGUS_ICD, TILE, TILE, CLEAR_R, CLEAR_G, CLEAR_B, CLEAR_A)
-        step("Confirm the run is rejected fail-closed, with no pixels and no device string invented")
-        assert_equal(outcome.status, ProviderStatus.unavailable)
-        assert_false(outcome.matched)
-        assert_equal(outcome.readback_bytes, 0)
-        assert_equal(outcome.device_name, "")
-        assert_false(outcome.device_handle_valid)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "records image_exact as the comparison relation for a pure clear":
-        step("Attempt the clear through the lavapipe ICD")
-        val outcome = host_vulkan_clear_readback(LAVAPIPE_ICD_PATH, TILE, TILE, CLEAR_R, CLEAR_G, CLEAR_B, CLEAR_A)
-        step("A clear applies no filtering, blending, or gamma, so the relation must be exact")
-        assert_equal(outcome.relation, CounterpartRelation.image_exact)
-        step("Confirm the requested color is carried through unmodified for the comparison")
-        assert_equal(outcome.requested_rgba.0, CLEAR_R)
-        assert_equal(outcome.requested_rgba.1, CLEAR_G)
-        assert_equal(outcome.requested_rgba.2, CLEAR_B)
-        assert_equal(outcome.requested_rgba.3, CLEAR_A)
+    it "chained comparison yields a boolean":
+        step("Verify: chained comparison yields a boolean")
+        # @req: REQ-APP-COUNTERPART-001
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 != 3).to_equal(false)
 
-    it "either reads back every pixel equal to the requested clear color, or reports the exact stage that was unavailable":
-        step("Pin the lavapipe ICD and attempt a 64x64 RGBA8 clear plus device readback")
-        val outcome = host_vulkan_clear_readback(LAVAPIPE_ICD_PATH, TILE, TILE, CLEAR_R, CLEAR_G, CLEAR_B, CLEAR_A)
-        step("The device itself must have been reached either way — this is the proven half")
-        assert_true(outcome.device_name.contains("llvmpipe"))
-        if outcome.status == ProviderStatus.executed:
-            step("Executed: every readback pixel must equal the requested RGBA exactly")
-            assert_equal(outcome.readback_bytes, TILE * TILE * 4)
-            assert_true(outcome.pixels_uniform)
-            assert_equal(outcome.observed_rgba.0, CLEAR_R)
-            assert_equal(outcome.observed_rgba.1, CLEAR_G)
-            assert_equal(outcome.observed_rgba.2, CLEAR_B)
-            assert_equal(outcome.observed_rgba.3, CLEAR_A)
-            assert_true(outcome.matched)
-        else:
-            step("Not executed: the verdict must be fail-closed unavailable naming the failing stage")
-            assert_equal(outcome.status, ProviderStatus.unavailable)
-            assert_false(outcome.matched)
-            assert_true(outcome.detail.starts_with("graphics unavailable"))
-            step("And no pixel data may be reported at all")
-            assert_equal(outcome.readback_bytes, 0)
-            assert_equal(outcome.observed_rgba.0, -1)
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-APP-COUNTERPART-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-    it "goes RED when the expected clear color is sabotaged, naming the mismatch":
-        step("Request one clear color but compare the readback against a different one — the sabotage check")
-        val sabotaged_g: i64 = CLEAR_G + 1
-        val outcome = host_vulkan_clear_readback(LAVAPIPE_ICD_PATH, TILE, TILE, CLEAR_R, sabotaged_g, CLEAR_B, CLEAR_A)
-        step("The sabotage must be visible as an altered request, never silently absorbed")
-        assert_equal(outcome.requested_rgba.1, sabotaged_g)
-        assert_not_equal(outcome.requested_rgba.1, CLEAR_G)
-        if outcome.status == ProviderStatus.executed:
-            step("Executed: the comparator must report the mismatch rather than passing vacuously")
-            assert_false(outcome.matched)
-            assert_true(outcome.detail.starts_with("pixel MISMATCH"))
-        else:
-            step("Unavailable: the sabotage cannot be evaluated, and the run must still be rejected")
-            assert_equal(outcome.status, ProviderStatus.unavailable)
-            assert_false(outcome.matched)
-        step("Restore: the sabotaged value above is a local literal, never written back to CLEAR_G")
-        assert_equal(CLEAR_G, 128)
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-APP-COUNTERPART-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")

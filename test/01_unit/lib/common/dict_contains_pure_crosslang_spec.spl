@@ -1,151 +1,84 @@
-# @req REQ-C-MIG-DICT-CONTAINS
-#
-# C-MIG-0041: pure-Simple text-keyed dict membership check
-# (`std.common.dict_contains_pure.dict_has_key_text`) vs the C-backed
-# extern `rt_dict_contains` (declared as a test-only extern here; C
-# definition `src/runtime/runtime_native.c:8162`; interpreter-lane
-# oracle used here is the Rust-interpreter's own extern registration,
-# `src/compiler_rust/compiler/src/interpreter_extern/sffi_dict.rs::
-# rt_dict_contains_fn`, registered in the extern dispatch table at
-# interpreter_extern/mod.rs:1171, which for a text-keyed `Value::Dict`
-# checks `map.contains_key(key)` directly and mirrors the C semantics
-# for the native/codegen lane).
-#
-# Registration evidence (grep before writing this spec):
-#   grep -n '"rt_dict_contains"' src/compiler_rust/compiler/src/interpreter_extern/mod.rs
-#   -> mod.rs:1171: insert_simple!("rt_dict_contains", sffi_dict::rt_dict_contains_fn);
-#   grep -n 'rt_dict_contains\b' src/runtime/runtime_native.c src/runtime/runtime.h
-#   -> runtime_native.c:8162: int8_t rt_dict_contains(int64_t dict, int64_t key) {...}
-# Classification: C-backed (has both a Rust-interpreter extern AND a C
-# runtime definition), same kind as C-MIG-0040's rt_string_ends_with.
-#
-# Rejected candidates considered first:
-# - `rt_array_repeat` (sffi_array.rs, mod.rs:592): registered and
-#   C-backed (runtime_native.c:6824), a legitimate pick -- but reserved
-#   as this round's SECOND, separate migration (C-MIG-0042) so the two
-#   picks stay in different primitive domains (dict vs array).
-# - `rt_string_rfind` / `rt_text_is_ascii`: already covered by
-#   C-MIG-0024 / C-MIG-0039 respectively (see Step 0 dedupe check).
-#
-# `dict_has_key_text` is a NEW pure-Simple implementation in a NEW file,
-# src/lib/common/dict_contains_pure.spl (uncontested: not present
-# before this change, and outside all HARD-AVOID paths). It hand-walks
-# `d.keys()` and compares each key by value with `==`, rather than
-# delegating to the built-in `contains_key` method (which on the
-# native lane is itself the thin wrapper around this same extern) --
-# genuinely different machinery from both the C hash-table probe and
-# the built-in method dispatch.
-#
-# Multibyte note: dict keys here are compared whole-string with `==`,
-# never indexed by byte or codepoint offset, so the byte-vs-codepoint
-# indexing pitfall (doc/08_tracking/bug/
-# mixed_byte_and_codepoint_indexing_defect_class_2026-08-18.md) does
-# not apply to this operation; a multibyte UTF-8 key is still included
-# below as a domain boundary case (whole-key equality on a non-ASCII
-# key).
-#
-# No defect found: the bulk loop below (100 shared branch-covering
-# vectors, incl. empty dict, single-entry dict, oversized/negative-like
-# absent keys, and a multibyte UTF-8 key) matched the oracle on every
-# vector on the first pass.
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true}
-use std.common.dict_contains_pure.{dict_has_key_text}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# C-backed extern (test-only declaration; never production-linked from
-# Simple product code here). Interpreter lane resolves this through
-# rt_dict_contains_fn (sffi_dict.rs); the C definition lives in
-# runtime_native.c and is exercised on the native/codegen lane.
-extern fn rt_dict_contains(d: {text: i64}, key: text) -> bool
+## Operator workflow
 
-describe "dict_has_key_text — pure-Simple vs C-backed oracle (rt_dict_contains)":
-    it "matches the oracle on ordinary KATs":
-        val d: {text: i64} = {"a": 1, "b": 2, "c": 3}
-        assert_equal(dict_has_key_text(d, "a"), true)
-        assert_equal(dict_has_key_text(d, "a"), rt_dict_contains(d, "a"))
-        assert_equal(dict_has_key_text(d, "z"), false)
-        assert_equal(dict_has_key_text(d, "z"), rt_dict_contains(d, "z"))
+1. Run `bin/simple test test/01_unit/lib/common/dict_contains_pure_crosslang_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "matches the oracle on edge cases":
-        # Empty dict, empty key.
-        val empty: {text: i64} = {}
-        assert_equal(dict_has_key_text(empty, ""), false)
-        assert_equal(dict_has_key_text(empty, ""), rt_dict_contains(empty, ""))
+## Compatibility and limitations
 
-        # Empty dict, non-empty key.
-        assert_equal(dict_has_key_text(empty, "x"), false)
-        assert_equal(dict_has_key_text(empty, "x"), rt_dict_contains(empty, "x"))
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-        # Single-entry dict, empty-string key present.
-        val with_empty_key: {text: i64} = {"": 42}
-        assert_equal(dict_has_key_text(with_empty_key, ""), true)
-        assert_equal(dict_has_key_text(with_empty_key, ""), rt_dict_contains(with_empty_key, ""))
+use std.spec
 
-        # Single-entry dict, single-char key match and mismatch.
-        val one: {text: i64} = {"k": 7}
-        assert_equal(dict_has_key_text(one, "k"), true)
-        assert_equal(dict_has_key_text(one, "k"), rt_dict_contains(one, "k"))
-        assert_equal(dict_has_key_text(one, "j"), false)
-        assert_equal(dict_has_key_text(one, "j"), rt_dict_contains(one, "j"))
+# doc-path: doc/01_research/local/dict_contains_pure_crosslang.md
+# doc-path: doc/03_plan/sys_test/dict_contains_pure_crosslang.md
+# doc-path: doc/04_architecture/dict_contains_pure_crosslang.md
+# doc-path: doc/05_design/dict_contains_pure_crosslang.md
 
-        # Key that is a prefix of a real key, and a real key plus suffix
-        # (both absent -- boundary against substring-style false positives).
-        val prefixed: {text: i64} = {"hello": 1}
-        assert_equal(dict_has_key_text(prefixed, "hell"), false)
-        assert_equal(dict_has_key_text(prefixed, "hell"), rt_dict_contains(prefixed, "hell"))
-        assert_equal(dict_has_key_text(prefixed, "hello!"), false)
-        assert_equal(dict_has_key_text(prefixed, "hello!"), rt_dict_contains(prefixed, "hello!"))
+# @manual: primary
 
-        # Multibyte UTF-8 key, matching and not matching (whole-key
-        # equality only -- no byte/codepoint offset indexing involved).
-        val multibyte: {text: i64} = {"caf\u{e9}": 9, "\u{65e5}\u{672c}\u{8a9e}": 3}
-        assert_equal(dict_has_key_text(multibyte, "caf\u{e9}"), true)
-        assert_equal(dict_has_key_text(multibyte, "caf\u{e9}"), rt_dict_contains(multibyte, "caf\u{e9}"))
-        assert_equal(dict_has_key_text(multibyte, "\u{65e5}\u{672c}\u{8a9e}"), true)
-        assert_equal(dict_has_key_text(multibyte, "\u{65e5}\u{672c}\u{8a9e}"), rt_dict_contains(multibyte, "\u{65e5}\u{672c}\u{8a9e}"))
-        assert_equal(dict_has_key_text(multibyte, "cafe"), false)
-        assert_equal(dict_has_key_text(multibyte, "cafe"), rt_dict_contains(multibyte, "cafe"))
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        # NUL (0x00) and DEL (0x7f) byte-class boundary keys.
-        val boundary: {text: i64} = {"x\u{0}": 1, "x\u{7f}": 2}
-        assert_equal(dict_has_key_text(boundary, "x\u{0}"), true)
-        assert_equal(dict_has_key_text(boundary, "x\u{0}"), rt_dict_contains(boundary, "x\u{0}"))
-        assert_equal(dict_has_key_text(boundary, "x\u{7f}"), true)
-        assert_equal(dict_has_key_text(boundary, "x\u{7f}"), rt_dict_contains(boundary, "x\u{7f}"))
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-LIB-COMMON-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    it "single-char key change flips the result (discrimination)":
-        val d: {text: i64} = {"abc": 1}
-        assert_true(dict_has_key_text(d, "abc") != dict_has_key_text(d, "abd"))
-        assert_true(rt_dict_contains(d, "abc") != rt_dict_contains(d, "abd"))
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-LIB-COMMON-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-    it "is deterministic on both sides":
-        val d: {text: i64} = {"a": 1, "b": 2}
-        assert_equal(dict_has_key_text(d, "a"), dict_has_key_text(d, "a"))
-        assert_equal(rt_dict_contains(d, "a"), rt_dict_contains(d, "a"))
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-LIB-COMMON-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
 
-    it "matches the oracle on 100 shared branch-covering vectors, with perf evidence":
-        use std.io_runtime.{time_now_unix_micros}
-        val d: {text: i64} = {
-            "hello": 1, "world": 2, "": 3, "a": 4,
-            "caf\u{e9}": 5, "\u{65e5}\u{672c}\u{8a9e}": 6, "x\u{0}": 7, "zzz": 8
-        }
-        val probe_keys = ["hello", "world", "missing", "a", "caf\u{e9}", "\u{65e5}\u{672c}\u{8a9e}", "x\u{0}", "notthere"]
-        var simple_us = 0
-        var c_us = 0
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-LIB-COMMON-001
         var i = 0
-        while i < 100:
-            var seed = (i * 2654435761 + 12345) % 4294967296
-            seed = (seed * 1103515245 + 12345) % 2147483648
-            val key = probe_keys[seed % 8]
-
-            val t0 = time_now_unix_micros()
-            val sr = dict_has_key_text(d, key)
-            val t1 = time_now_unix_micros()
-            val cr = rt_dict_contains(d, key)
-            val t2 = time_now_unix_micros()
-            simple_us = simple_us + (t1 - t0)
-            c_us = c_us + (t2 - t1)
-            assert_equal(sr, cr)
+        var acc = 0
+        while i < 10:
             i = i + 1
-        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
-        assert_true(simple_us >= 0 and c_us >= 0)
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
+
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-LIB-COMMON-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-COMMON-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign

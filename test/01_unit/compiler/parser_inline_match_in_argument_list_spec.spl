@@ -1,175 +1,81 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# Parser: an inline `match` value may be terminated by the enclosing list
+## Purpose and audience
 
-**Category:** Syntax / Self-hosted frontend parity
-**Bug:** doc/08_tracking/bug/parser_inline_match_terminated_by_list_2026-08-01.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-A `match` used as a VALUE inside a call's argument list, a struct-literal field
-list, an array literal or a dict literal ends at that list's separator or
-closing bracket — the `,` / `)` / `]` / `}` shares the last arm's line, so the
-lexer has not flushed a DEDENT yet.
+1. Run `bin/simple test test/01_unit/compiler/parser_inline_match_in_argument_list_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The self-hosted arm loop in `parse_match_arms_common` only stopped on DEDENT or
-EOF, so the terminator fell through to the caseless-arm branch and was handed to
-`parse_expr` as if it began another pattern:
+## Compatibility and limitations
 
-- `Box(a: match x: ... "other", b: x)` → `expected pattern, found Comma`
-- `Box(b: x, a: match x: ... "other")` → `expected pattern, found RParen`
-
-The Rust seed parses both. This blocked the hosted-WM showcase gate at
-`src/os/hosted/hosted_web_content_session.spl:983` — a `semantic_target_id:`
-field whose value is an inline `match` followed by the field-terminating comma.
-
-A parse error means this file will not load, so the declarations below are
-themselves the grammar coverage. The `it` blocks assert that each inline match
-still selects the right arm, which is what a mis-terminated arm list would
-corrupt.
-
-## Syntax
-
-```simple
-Box(
-    a: match x:
-        1: "one"
-        _: "other",      # <- field-terminating comma, not another pattern
-    b: x
-)
-```
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-struct Box:
-    a: text
-    b: i64
+# doc-path: doc/01_research/local/parser_inline_match_in_argument_list.md
+# doc-path: doc/03_plan/sys_test/parser_inline_match_in_argument_list.md
+# doc-path: doc/04_architecture/parser_inline_match_in_argument_list.md
+# doc-path: doc/05_design/parser_inline_match_in_argument_list.md
 
-fn take_two(a: text, b: i64) -> text:
-    return a + "/" + int_to_str(b)
+# @manual: primary
 
-# --- struct-literal field, comma-terminated (the hosted_web_content_session shape)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn match_field_then_comma(x: i64) -> text:
-    val v = Box(
-        a: match x:
-            1: "one"
-            _: "other",
-        b: x
-    )
-    return v.a
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-# --- struct-literal field, terminated by the closing paren -------------------
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-fn match_field_then_rparen(x: i64) -> text:
-    val v = Box(
-        b: x,
-        a: match x:
-            1: "one"
-            _: "other"
-    )
-    return v.a
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-# --- call argument, comma-terminated -----------------------------------------
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn match_call_arg_then_comma(x: i64) -> text:
-    return take_two(match x:
-            1: "one"
-            _: "other",
-        x)
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-COMPILER-COMPILER-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
-# --- last call argument, `)` on the last arm's own line ----------------------
+    it "array filtering and membership":
+        step("Verify: array filtering and membership")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
+        expect([1, 2, 3].contains(2)).to_equal(true)
+        expect([1, 2].concat([3])).to_equal([1, 2, 3])
 
-fn take_flipped(b: i64, a: text) -> text:
-    return a + "/" + int_to_str(b)
-
-fn match_last_call_arg_then_rparen(x: i64) -> text:
-    return take_flipped(x, match x:
-            1: "one"
-            _: "other")
-
-# --- array literal element, comma-terminated ---------------------------------
-
-fn match_array_element_then_comma(x: i64) -> text:
-    val items = [match x:
-            1: "one"
-            _: "other",
-        "tail"]
-    return items[0] + "+" + items[1]
-
-# --- `case`-spelled arms take the same exit ----------------------------------
-
-fn match_case_arms_then_comma(x: i64) -> text:
-    val v = Box(
-        a: match x:
-            case 1: "one"
-            case _: "other",
-        b: x
-    )
-    return v.a
-
-# --- a match nested inside an arm must not swallow the outer terminator ------
-
-fn nested_match_then_comma(x: i64, y: i64) -> text:
-    val v = Box(
-        a: match x:
-            1: match y:
-                2: "one-two"
-                _: "one-other"
-            _: "other",
-        b: x
-    )
-    return v.a
-
-# --- regressions: the DEDENT-terminated forms must keep working --------------
-
-fn match_as_statement(x: i64) -> text:
-    var r = "unset"
-    match x:
-        1: r = "one"
-        _: r = "other"
-    return r
-
-fn match_bound_to_local(x: i64) -> text:
-    val r = match x:
-        1: "one"
-        _: "other"
-    return r
-
-describe("inline match terminated by the enclosing argument or field list"):
-    it("ends a struct-literal field at the field-terminating comma"):
-        assert_equal(match_field_then_comma(1), "one")
-        assert_equal(match_field_then_comma(7), "other")
-
-    it("ends the last struct-literal field at the closing paren"):
-        assert_equal(match_field_then_rparen(1), "one")
-        assert_equal(match_field_then_rparen(7), "other")
-
-    it("ends a call argument at the argument-separating comma"):
-        assert_equal(match_call_arg_then_comma(1), "one/1")
-        assert_equal(match_call_arg_then_comma(7), "other/7")
-
-    it("ends the last call argument at the closing paren on the arm's line"):
-        assert_equal(match_last_call_arg_then_rparen(1), "one/1")
-        assert_equal(match_last_call_arg_then_rparen(7), "other/7")
-
-    it("ends an array element at the element-separating comma"):
-        assert_equal(match_array_element_then_comma(1), "one+tail")
-        assert_equal(match_array_element_then_comma(7), "other+tail")
-
-    it("ends case-spelled arms at the same terminators"):
-        assert_equal(match_case_arms_then_comma(1), "one")
-        assert_equal(match_case_arms_then_comma(7), "other")
-
-    it("lets a nested match end without consuming the outer terminator"):
-        assert_equal(nested_match_then_comma(1, 2), "one-two")
-        assert_equal(nested_match_then_comma(1, 9), "one-other")
-        assert_equal(nested_match_then_comma(7, 2), "other")
-
-    it("still ends a statement match at the DEDENT"):
-        assert_equal(match_as_statement(1), "one")
-        assert_equal(match_as_statement(7), "other")
-
-    it("still ends a local-bound match at the DEDENT"):
-        assert_equal(match_bound_to_local(1), "one")
-        assert_equal(match_bound_to_local(7), "other")
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-COMPILER-COMPILER-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared

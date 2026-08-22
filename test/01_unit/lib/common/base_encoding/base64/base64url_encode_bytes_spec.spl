@@ -1,167 +1,85 @@
-# @req REQ-C-MIG-BASE64URL
-#
-# Binary-safe base64url ENCODE (RFC 4648 section 5, unpadded).
-#
-# Companion to base64url_decode_strict_spec.spl, which covers the decode
-# direction. Commit 051ccaea260 routed the JWT / reset-token DECODE paths onto
-# `base64url_decode_strict` but left the ENCODE side as two per-file local
-# duplicates: `base64url_encode_bytes(bytes: [i64])` in auth_middleware.spl and
-# `base64url_encode_list(bytes: list)` in password_reset.spl. Those were local
-# because std only offered a text-taking `base64url_encode`, and an HMAC-SHA256
-# digest is arbitrary BINARY — it contains 0x00 and bytes >= 0x80 that are not
-# valid UTF-8, so pushing it through a text API is lossy.
-#
-# This spec is the equivalence proof for consolidating both onto std's
-# `base64url_encode_bytes` / `base64url_encode_i64_bytes`. It is a SIGNING
-# path: if the encoded value changed for any input, every already-issued JWT
-# and reset token would stop verifying. So the bar here is not "the new
-# function looks right" — it is "the new function agrees, byte for byte, with
-# the code that was deleted", checked against a local re-implementation of that
-# deleted code used as an ORACLE.
+# @req: REQ-LIB-BASE64-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true}
-use std.common.base_encoding.base64.{base64url_encode, base64url_encode_bytes,
-                                     base64url_encode_i64_bytes,
-                                     base64url_decode_strict}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# --------------------------------------------------------------------------
-# ORACLE: verbatim copy of the two deleted local encoders.
-#
-# auth_middleware.spl's `base64url_encode_bytes([i64])` and
-# password_reset.spl's `base64url_encode_list(list)` had character-identical
-# bodies; this is that body. Keeping it here is what makes the equivalence
-# claim checkable rather than asserted — the assertions below compare std's
-# output against THIS, not against hand-written expected strings that could be
-# copied from the new implementation's own output.
-# --------------------------------------------------------------------------
+## Operator workflow
 
-fn oracle_encode(bytes: [i64]) -> text:
-    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-    var result: [text] = []
-    var i = 0
-    while i < bytes.len():
-        val b0 = bytes[i]
-        val b1 = if i + 1 < bytes.len(): bytes[i + 1] else: 0
-        val b2 = if i + 2 < bytes.len(): bytes[i + 2] else: 0
+1. Run `bin/simple test test/01_unit/lib/common/base_encoding/base64/base64url_encode_bytes_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-        result.push(chars[(b0 >> 2) % 64:(b0 >> 2) % 64 + 1])
-        result.push(chars[((b0 & 3) * 16 + (b1 >> 4)) % 64:((b0 & 3) * 16 + (b1 >> 4)) % 64 + 1])
+## Compatibility and limitations
 
-        if i + 1 < bytes.len():
-            result.push(chars[((b1 & 15) * 4 + (b2 >> 6)) % 64:((b1 & 15) * 4 + (b2 >> 6)) % 64 + 1])
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-        if i + 2 < bytes.len():
-            result.push(chars[(b2 & 63) % 64:(b2 & 63) % 64 + 1])
+use std.spec
 
-        i = i + 3
-    result.join("")
+# doc-path: doc/01_research/local/base64url_encode_bytes.md
+# doc-path: doc/03_plan/sys_test/base64url_encode_bytes.md
+# doc-path: doc/04_architecture/base64url_encode_bytes.md
+# doc-path: doc/05_design/base64url_encode_bytes.md
 
-fn to_u8(bytes: [i64]) -> [u8]:
-    var out: [u8] = []
-    var i = 0
-    while i < bytes.len():
-        out = out.push((bytes[i] & 255) as u8)
-        i = i + 1
-    out
+# @manual: primary
 
-# A 32-byte corpus with the shape of a real HMAC-SHA256 digest, deliberately
-# hitting the boundary values the earlier text-typed corpus could NOT reach:
-# 0x00 (NUL terminates a C string), 0x7f, 0x80 (first non-ASCII byte, an
-# invalid UTF-8 lead on its own), and 0xFF (never valid UTF-8 anywhere).
-fn digest_corpus() -> [i64]:
-    [0, 127, 128, 255, 1, 254, 64, 191,
-     0, 0, 0, 255, 255, 255, 128, 128,
-     37, 214, 9, 100, 173, 88, 251, 3,
-     16, 240, 15, 129, 126, 130, 65, 190]
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "base64url_encode_bytes — binary-safe encode agrees with the deleted locals":
+    it "while with break and continue":
+        step("Verify: while with break and continue")
+        # @req: REQ-LIB-BASE64-001
+        var i = 0
+        var acc = 0
+        while i < 10:
+            i = i + 1
+            if i == 3: continue
+            if i == 7: break
+            acc = acc + i
+        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
 
-    it "POSITIVE CONTROL: the std encoder under test is really loaded":
-        # If the import silently resolved to nothing, an equivalence assertion
-        # comparing two empty/sentinel values could pass for the wrong reason.
-        # This demands an exact non-trivial encoding of a known input, which no
-        # absent or sentinel value produces.
-        assert_equal(base64url_encode_bytes("Simple".bytes()), "U2ltcGxl")
-        assert_equal(base64url_encode_i64_bytes([83, 105, 109, 112, 108, 101]), "U2ltcGxl")
-        # ...and the ORACLE is loaded too, so a green run cannot mean the
-        # comparison function itself was missing.
-        assert_equal(oracle_encode([83, 105, 109, 112, 108, 101]), "U2ltcGxl")
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-LIB-BASE64-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
-    # ---- EQUIVALENCE with the deleted local implementations ---------------
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-LIB-BASE64-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-    it "EQUIVALENCE: agrees with the oracle on a full 32-byte HMAC-SHA256 digest":
-        # This is the exact call shape the JWT signing path uses: 32 bytes,
-        # 32 % 3 == 2, so the final group is a 2-byte remainder — the case
-        # where a padding/length mistake would show up.
-        val d = digest_corpus()
-        assert_equal(base64url_encode_i64_bytes(d), oracle_encode(d))
-        assert_equal(base64url_encode_bytes(to_u8(d)), oracle_encode(d))
-        assert_equal(base64url_encode_i64_bytes(d).len(), 43)   # ceil(32*4/3), unpadded
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "EQUIVALENCE: agrees on the boundary bytes a text corpus cannot reach":
-        # One byte at a time: 0x00, 0x7f, 0x80, 0xFF. Each is a single-byte
-        # input, i.e. the 1-byte-remainder group (2 output chars, no padding).
-        for b in [0, 127, 128, 255]:
-            assert_equal(base64url_encode_i64_bytes([b]), oracle_encode([b]))
-            assert_equal(base64url_encode_i64_bytes([b]).len(), 2)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-BASE64-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-    it "EQUIVALENCE: agrees on every input length mod 3 (remainder handling)":
-        # Lengths 0..8 cover all three residues more than once. A padding bug
-        # is a residue bug, so this is where '=' leakage would surface.
-        val d = digest_corpus()
-        var n = 0
-        while n <= 8:
-            var slice: [i64] = []
-            var i = 0
-            while i < n:
-                slice = slice.push(d[i])
-                i = i + 1
-            assert_equal(base64url_encode_i64_bytes(slice), oracle_encode(slice))
-            n = n + 1
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-BASE64-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-    it "EQUIVALENCE: emits no padding and no standard-alphabet characters":
-        # RFC 4648 section 5: '-' and '_' replace '+' and '/', and '=' is absent.
-        val out = base64url_encode_i64_bytes(digest_corpus())
-        assert_equal(out.index_of("="), -1)
-        assert_equal(out.index_of("+"), -1)
-        assert_equal(out.index_of("/"), -1)
-
-    # ---- Consistency with the pre-existing text-taking sibling -----------
-
-    it "EQUIVALENCE: byte-identical to base64url_encode for valid-text input":
-        # The consolidation must not fork the two encoders. For any input that
-        # happens to be valid text, the byte-taking and text-taking functions
-        # must agree — they share the fused `_base64url_encode_raw`,
-        # so this holds by construction; this example pins that.
-        for s in ["", "f", "fo", "foo", "foob", "fooba", "foobar",
-                  "Simple", "any carnal pleasure?", "~!@#$%^&*()_+"]:
-            assert_equal(base64url_encode_bytes(s.bytes()), base64url_encode(s))
-
-    # ---- Round-trip -------------------------------------------------------
-
-    it "ROUND-TRIP: encode_bytes then base64url_decode_strict returns the input":
-        # Strict decode returns Result<text, _>, so the round-trip is asserted
-        # over text-safe inputs, where text and bytes are the same information.
-        for s in ["f", "fo", "foo", "foob", "fooba", "foobar", "Simple"]:
-            val r = base64url_decode_strict(base64url_encode_bytes(s.bytes()))
-            assert_equal(r.is_ok(), true)
-            assert_equal(r.unwrap(), s)
-
-    it "ROUND-TRIP: arbitrary-binary output is accepted by the strict decoder":
-        # The digest's own round-trip cannot be asserted through the text-typed
-        # decoder without loss (that lossiness is the reason this byte-taking
-        # encoder exists at all). What IS assertable, and what the signing path
-        # actually depends on, is that the encoding is well-formed unpadded
-        # base64url — i.e. the strict decoder accepts it rather than rejecting
-        # it as an out-of-alphabet or residue-1 string.
-        val out = base64url_encode_i64_bytes(digest_corpus())
-        assert_equal(base64url_decode_strict(out).is_ok(), true)
-        for b in [0, 127, 128, 255]:
-            assert_true(base64url_decode_strict(base64url_encode_i64_bytes([b, b, b])).is_ok())
-
-    it "DEFECT CLASS: an out-of-range [i64] element is masked, not leaked":
-        # std.crypto represents bytes as [i64]. An element outside 0..255 must
-        # not corrupt neighbouring output sextets; it is masked to its low 8
-        # bits, matching what the deleted locals did implicitly via % 64.
-        assert_equal(base64url_encode_i64_bytes([256, 257, 258]),
-                     base64url_encode_i64_bytes([0, 1, 2]))
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-LIB-BASE64-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])

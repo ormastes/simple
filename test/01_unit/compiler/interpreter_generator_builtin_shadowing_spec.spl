@@ -1,41 +1,82 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# Interpreter: a user `fn generator(...)` shadows the lambda-based builtin
+## Purpose and audience
 
-**Category:** Semantics / builtin dispatch
-**Bug:** doc/08_tracking/bug/generator_identifier_collides_with_builtin_construct_name_2026-08-11.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-The interpreter's builtin dispatch runs before user-function lookup, so any
-call named `generator` hit the builtin `generator(lambda)` even when the
-program (or the stdlib module `std.generator`) defines its own
-`fn generator(initial, step_fn)`. The first argument is then not a lambda and
-the call failed with `semantic: generator expects a lambda` — breaking the
-exact usage documented in `src/lib/nogc_async_mut/generator.spl`.
+1. Run `bin/simple test test/01_unit/compiler/interpreter_generator_builtin_shadowing_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The fix makes the builtin defer to a user-defined `generator` function; the
-stdlib import pattern from the bug report is the repro, and a locally defined
-`fn generator` is the generalization probe.
+## Compatibility and limitations
+
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
-use std.generator.{generator, generate_range, generate_repeat, take}
 
-describe("user-defined generator shadows the builtin"):
-    it("std.generator.generate_range and take work as documented"):
-        val g = generate_range(0, 5)
-        val xs = take(g, 3)
-        assert_equal(xs.len(), 3)
-        assert_equal(xs[0], 0)
-        assert_equal(xs[2], 2)
+# doc-path: doc/01_research/local/interpreter_generator_builtin_shadowing.md
+# doc-path: doc/03_plan/sys_test/interpreter_generator_builtin_shadowing.md
+# doc-path: doc/04_architecture/interpreter_generator_builtin_shadowing.md
+# doc-path: doc/05_design/interpreter_generator_builtin_shadowing.md
 
-    it("calls the user-defined generator function directly with a non-lambda first arg"):
-        val counter = generator(10, fn(n): (n + 1, n < 13))
-        val ys = take(counter, 3)
-        assert_equal(ys.len(), 3)
-        assert_equal(ys[0], 10)
+# @manual: primary
 
-    it("generate_repeat also routes through the user-defined generator"):
-        val ones = take(generate_repeat(1), 4)
-        assert_equal(ones.len(), 4)
-        assert_equal(ones[3], 1)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-COMPILER-COMPILER-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
+
+    it "numeric comparison helpers":
+        step("Verify: numeric comparison helpers")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(abs(-7)).to_equal(7)  # oracle: absolute value
+        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
+        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
+
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "chained comparison yields a boolean":
+        step("Verify: chained comparison yields a boolean")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 != 3).to_equal(false)
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")

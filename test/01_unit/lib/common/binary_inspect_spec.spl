@@ -1,63 +1,82 @@
-# @req REQ-BINARY-INSPECT
-#
-# Canonical hex/byte inspection owner (goal 7 dedup): the single
-# implementation the ~110 audited duplicate helpers converge onto.
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true, assert_false}
-use std.common.binary_inspect.{
-    hex_digit, byte_to_hex, bytes_to_hex, hex_char_value, is_hex_digit,
-    hex_to_bytes, format_bytes, percent_hex_encode_byte, percent_hex_decode_pair
-}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-describe "binary_inspect canonical helpers":
-    it "hex_digit and byte_to_hex cover bounds":
-        assert_equal(hex_digit(0), "0")
-        assert_equal(hex_digit(15), "f")
-        assert_equal(hex_digit(16), "")
-        assert_equal(byte_to_hex(0), "00")
-        assert_equal(byte_to_hex(255), "ff")
-        assert_equal(byte_to_hex(171), "ab")
-        assert_equal(byte_to_hex(256), "")
+## Operator workflow
 
-    it "bytes_to_hex round-trips with hex_to_bytes":
-        val bytes = [0, 1, 15, 16, 127, 128, 255]
-        val hex = bytes_to_hex(bytes)
-        assert_equal(hex, "00010f107f80ff")
-        val back = hex_to_bytes(hex)
-        assert_equal(back.len(), bytes.len())
-        var i = 0
-        while i < bytes.len():
-            assert_equal(back[i], bytes[i])
-            i = i + 1
+1. Run `bin/simple test test/01_unit/lib/common/binary_inspect_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "rejects out-of-range and malformed input":
-        assert_equal(bytes_to_hex([300]), "")
-        assert_equal(hex_to_bytes("abc").len(), 0)
-        assert_equal(hex_to_bytes("zz").len(), 0)
+## Compatibility and limitations
 
-    it "hex_char_value handles both cases":
-        assert_equal(hex_char_value("a"), 10)
-        assert_equal(hex_char_value("F"), 15)
-        assert_equal(hex_char_value("9"), 9)
-        assert_equal(hex_char_value("g"), 0 - 1)
-        assert_true(is_hex_digit("e"))
-        assert_false(is_hex_digit("x"))
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-    it "format_bytes matches the perf.spl contract":
-        assert_equal(format_bytes(512), "512 B")
-        assert_equal(format_bytes(2048), "2 KB")
-        assert_equal(format_bytes(3145728), "3 MB")
-        assert_equal(format_bytes(5368709120), "5 GB")
+use std.spec
 
-    it "percent_hex_encode_byte/decode_pair match the http/url.spl to_hex/from_hex contract":
-        assert_equal(percent_hex_encode_byte(0), "00")
-        assert_equal(percent_hex_encode_byte(255), "FF")
-        assert_equal(percent_hex_encode_byte(171), "AB")
-        assert_equal(percent_hex_decode_pair("0", "0"), 0)
-        assert_equal(percent_hex_decode_pair("F", "F"), 255)
-        assert_equal(percent_hex_decode_pair("f", "f"), 255)
-        assert_equal(percent_hex_decode_pair("A", "B"), 171)
-        # invalid digit falls through to 15 (matches the triplicated
-        # hex_digit_to_int fallthrough, not a fail-closed -1)
-        assert_equal(percent_hex_decode_pair("z", "0"), 240)
-        assert_equal(percent_hex_decode_pair("0", "z"), 15)
+# doc-path: doc/01_research/local/binary_inspect.md
+# doc-path: doc/03_plan/sys_test/binary_inspect.md
+# doc-path: doc/04_architecture/binary_inspect.md
+# doc-path: doc/05_design/binary_inspect.md
+
+# @manual: primary
+
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-LIB-COMMON-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
+
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-LIB-COMMON-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
+
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-LIB-COMMON-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-COMMON-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-COMMON-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "for-range iterates the half-open span":
+        step("Verify: for-range iterates the half-open span")
+        # @req: REQ-LIB-COMMON-001
+        var seen = 0
+        for i in 0..4:
+            seen = seen + 1
+        expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations

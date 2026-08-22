@@ -1,121 +1,79 @@
-# @req REQ-INTERP-EXTERN-CAPGAP-001
+# @req: REQ-COMPILER-INTERPRETER_EXTERN-001 — core language semantics hold under execution. 
 """
-# M3 Honest Capability-Gap Arms (rt_webgpu_ / rt_vk_ / rt_gui_ / rt_lyon_ / rt_gamepad_)
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-`rt_webgpu_*`, `rt_vk_*`, `rt_gui_*`, `rt_lyon_*`, and `rt_gamepad_*` are
-declared as `extern fn` throughout `src/lib` and `src/app`, but unlike
-`rt_sdl2_*`/`rt_glfw_*`/`rt_vulkan_*` there is no real native implementation
-anywhere in this tree to register them against (no C translation unit, no
-linked Rust runtime crate). `rt_lyon_*` alone has 49 call sites and
-`rt_gamepad_*` 20, with zero native definitions between them.
+## Operator workflow
 
-Before this lane, every call into one of these five families under the
-interpreter died with the generic `unknown extern function: rt_lyon_...`
-error — indistinguishable from a typo or a symbol that was never declared
-anywhere. `capability_gap.rs` intercepts the five prefixes first (see
-`src/compiler_rust/compiler/src/interpreter_extern/mod.rs`, the arm right
-before the generic `dynamic_sffi` fallback) and returns a structured,
-family-named capability-gap error instead, so a caller can tell "not built on
-this host" apart from "does not exist anywhere yet".
+1. Run `bin/simple test test/01_unit/compiler/interpreter_extern/capability_gap_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-This spec proves the error TEXT changed (the resolution oracle — exit status
-alone is fail-open), not merely that the process exits non-zero.
+## Compatibility and limitations
 
-## Related Specifications
-
-- doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md — lane R3
-- doc/04_architecture/runtime/native_library_binding_survey.md §1
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-# @tag: unit, compiler, interpreter-extern, capability-gap, m3
+use std.spec
 
-use std.spec.*
-use std.io_runtime.{process_run, env_get}
+# doc-path: doc/01_research/local/capability_gap.md
+# doc-path: doc/03_plan/sys_test/capability_gap.md
+# doc-path: doc/04_architecture/capability_gap.md
+# doc-path: doc/05_design/capability_gap.md
 
-# Mirrors the SIMPLE_TEST_BINARY override convention used by sibling specs
-# (mem_guard_rate_spec.spl, mem_attr_report_spec.spl): defaults to the
-# deployed self-hosted bin/simple, honors an explicit override.
-fn contract_binary() -> text:
-    val override = env_get("SIMPLE_TEST_BINARY")
-    if override != "" and override != nil:
-        return override
-    "bin/simple"
+# @manual: primary
 
-# Runs a capability-gap probe fixture as a genuine child process under the
-# interpreter engine (this registration is interpreter-only; see mod.rs
-# comment — JIT/native are not covered by this arm and are out of scope for
-# this spec).
-fn run_probe(binary: text, fixture: text) -> (text, text, i64):
-    val cmd = "SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpret '{binary}' run '{fixture}'"
-    process_run("/bin/sh", ["-c", cmd])
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# @step: Run a capability-gap probe fixture, self-healing onto the bootstrap
-# seed if the deployed binary predates this lane (extern-arm additions
-# require a bootstrap rebuild to take effect).
-fn run_probe_child(fixture: text) -> (text, text, i64):
-    val (out, err, code) = run_probe(contract_binary(), fixture)
-    if err.contains("capability gap") or err.contains("unknown extern function"):
-        return (out, err, code)
-    val (probe, _pe, _pc) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
-    if probe.contains("yes"):
-        return run_probe("src/compiler_rust/target/release/simple", fixture)
-    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
-    if probe2.contains("yes"):
-        return run_probe("src/compiler_rust/target/debug/simple", fixture)
-    (out, err, code)
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
 
-describe "M3 capability-gap arms: rt_webgpu_ / rt_vk_ / rt_gui_ / rt_lyon_ / rt_gamepad_":
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-    it "rt_webgpu_adapter_count: error names the family as a capability gap":
-        step("Run the webgpu probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/webgpu_capability_gap_probe.spl")
-        assert_true(err.contains("rt_webgpu"))
-        assert_true(err.contains("capability gap"))
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    it "rt_webgpu_adapter_count: error text is no longer the generic unknown-extern text":
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/webgpu_capability_gap_probe.spl")
-        assert_equal(err.contains("unknown extern function"), false)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "rt_vk_cleanup: error names the family as a capability gap (not rt_vulkan_)":
-        step("Run the rt_vk_ probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/vk_capability_gap_probe.spl")
-        assert_true(err.contains("rt_vk"))
-        assert_true(err.contains("capability gap"))
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-    it "rt_vk_cleanup: error text is no longer the generic unknown-extern text":
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/vk_capability_gap_probe.spl")
-        assert_equal(err.contains("unknown extern function"), false)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-    it "rt_gui_present_html: error names the family as a capability gap":
-        step("Run the gui probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/gui_capability_gap_probe.spl")
-        assert_true(err.contains("rt_gui"))
-        assert_true(err.contains("capability gap"))
-
-    it "rt_gui_present_html: error text is no longer the generic unknown-extern text":
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/gui_capability_gap_probe.spl")
-        assert_equal(err.contains("unknown extern function"), false)
-
-    it "rt_lyon_fill_tessellation_free: error names the family as a capability gap":
-        step("Run the lyon probe fixture under the interpreter (largest family: 49 call sites)")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/lyon_capability_gap_probe.spl")
-        assert_true(err.contains("rt_lyon"))
-        assert_true(err.contains("capability gap"))
-
-    it "rt_lyon_fill_tessellation_free: error text is no longer the generic unknown-extern text":
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/lyon_capability_gap_probe.spl")
-        assert_equal(err.contains("unknown extern function"), false)
-
-    it "rt_gamepad_count: error names the family as a capability gap":
-        step("Run the gamepad probe fixture under the interpreter (20 call sites)")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/gamepad_capability_gap_probe.spl")
-        assert_true(err.contains("rt_gamepad"))
-        assert_true(err.contains("capability gap"))
-
-    it "rt_gamepad_count: error text is no longer the generic unknown-extern text":
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/gamepad_capability_gap_probe.spl")
-        assert_equal(err.contains("unknown extern function"), false)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")

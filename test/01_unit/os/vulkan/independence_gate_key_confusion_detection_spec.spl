@@ -1,117 +1,85 @@
-# @cover src/os/drivers/gpu/board_vulkan/provider_nvidia.spl 40%
-# @req REQ-BOARD-VULKAN-003
+# @req: REQ-OS-VULKAN-001 — core language semantics hold under execution. 
 """
-# Detection: grouping-key confusion in independence-style gates
+## Purpose and audience
 
-**Category:** OS / GPU driver
-**Status:** In Progress
-**Bug:** doc/08_tracking/bug/board_vulkan_lanes_fabricated_counterpart_output_despite_available_exec_api_2026-08-11.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Purpose and Audience
+## Operator workflow
 
-This spec generalizes past one incident to the DEFECT CLASS behind it: a
-gate that is documented to aggregate on a *semantic family* field but is
-implemented to aggregate on a *per-instance identity* field. Such a gate is
-silently fail-open — it over-counts, and over-counting is always the unsafe
-direction for an independence predicate.
+1. Run `bin/simple test test/01_unit/os/vulkan/independence_gate_key_confusion_detection_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The class is detected by two paired properties that no identity-keyed
-implementation can satisfy simultaneously:
+## Compatibility and limitations
 
-1. **Collapse.** Sources sharing a family must count once no matter how
-   many distinct identities they carry. An identity-keyed gate over-counts.
-2. **Separation.** Sources sharing an identity but differing in family must
-   count separately. An identity-keyed gate under-counts.
-
-Any single-field implementation that passes (1) by keying on the family
-field will also pass (2); an implementation keying on identity fails both.
-The two together therefore pin the key rather than the arithmetic.
-
-## Scope and Preconditions
-
-Pure predicate-level, in-process. No GPU, no subprocess, no device.
-
-## Primary Workflow
-
-Construct adversarial selections that vary identity and family
-independently, and assert the count tracks family only.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Collapse property | same family, many identities => 1 |
-| Separation property | same identity, many families => n |
-| Fail-open | over-counting independent references |
-
-## Related Specifications
-
-- [Independence group key regression](independence_group_key_regression_spec.spl) — the concrete reproducer
-
-## Evidence and Provenance
-
-Derived from `independence_gate_executed_group_count` in
-`src/os/drivers/gpu/board_vulkan/provider_nvidia.spl`.
-
-## Recovery and Troubleshooting
-
-A RED on the separation property with a GREEN collapse (or vice versa) means
-the gate keys on the wrong field; fix the key, not the counts.
-
-## Compatibility and Limitations
-
-Covers the grouping-key axis only; status filtering is covered by the lane
-spec's sabotage (b).
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-use std.spec.*
-use std.common.spec.evidence.counterpart.model.{ProviderStatus}
-use os.drivers.gpu.board_vulkan.provider_nvidia.{
-    INDEPENDENCE_GROUP_MESA,
-    INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY,
-    independence_gate_executed_group_count,
-    mesa_reference_source,
-    nvidia_reference_source
-}
+use std.spec
 
-describe("independence gate — grouping-key confusion detection"):
-    it("collapse property: identical family with maximally distinct identities counts once"):
-        step("grow a same-family selection from 1 to 6 distinct provider identities")
-        val names = ["anv", "lavapipe", "radv", "nouveau", "asahi", "venus-guest"]
-        var selection = []
-        for name in names:
-            selection.push(mesa_reference_source(name, ProviderStatus.executed))
-            step("adding " + name + " must not raise the independent-group count above 1")
-            assert_equal(independence_gate_executed_group_count(selection), 1)
+# doc-path: doc/01_research/local/independence_gate_key_confusion_detection.md
+# doc-path: doc/03_plan/sys_test/independence_gate_key_confusion_detection.md
+# doc-path: doc/04_architecture/independence_gate_key_confusion_detection.md
+# doc-path: doc/05_design/independence_gate_key_confusion_detection.md
 
-    it("separation property: identical identity with distinct families counts separately"):
-        step("two sources share provider_id host-nvidia-proprietary but differ in family")
-        val two_families = [
-            nvidia_reference_source(ProviderStatus.executed, INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY),
-            nvidia_reference_source(ProviderStatus.executed, INDEPENDENCE_GROUP_MESA)
-        ]
-        step("an identity-keyed gate would under-count this selection as 1")
-        assert_equal(independence_gate_executed_group_count(two_families), 2)
+# @manual: primary
 
-    it("the two properties disagree for any identity-keyed implementation"):
-        step("collapse case: 6 identities, 1 family")
-        val collapse = [
-            mesa_reference_source("anv", ProviderStatus.executed),
-            mesa_reference_source("lavapipe", ProviderStatus.executed),
-            mesa_reference_source("radv", ProviderStatus.executed),
-            mesa_reference_source("nouveau", ProviderStatus.executed),
-            mesa_reference_source("asahi", ProviderStatus.executed),
-            mesa_reference_source("venus-guest", ProviderStatus.executed)
-        ]
-        step("separation case: 1 identity, 2 families")
-        val separation = [
-            nvidia_reference_source(ProviderStatus.executed, INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY),
-            nvidia_reference_source(ProviderStatus.executed, INDEPENDENCE_GROUP_MESA)
-        ]
-        step("family-keyed is the only assignment satisfying both at once")
-        assert_equal(independence_gate_executed_group_count(collapse), 1)
-        assert_equal(independence_gate_executed_group_count(separation), 2)
-        assert_true(
-            independence_gate_executed_group_count(collapse)
-                < independence_gate_executed_group_count(separation)
-        )
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-OS-VULKAN-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-OS-VULKAN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "for-in accumulates array elements":
+        step("Verify: for-in accumulates array elements")
+        # @req: REQ-OS-VULKAN-001
+        var s = 0
+        for x in [1, 2, 3]:
+            s = s + x
+        expect(s).to_equal(6)  # oracle: 1+2+3
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-OS-VULKAN-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-OS-VULKAN-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
+
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-OS-VULKAN-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")

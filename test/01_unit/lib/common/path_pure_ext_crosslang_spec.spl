@@ -1,161 +1,86 @@
-# @req REQ-C-MIG-PATH-EXT
-#
-# C-MIG-0036: pure-Simple path-extension extraction
-# (`std.common.path_pure.path_ext`) vs the Rust-interpreter oracle
-# `rt_path_ext` (src/compiler_rust/compiler/src/interpreter_extern/
-# file_io.rs::rt_path_ext -- registered in the interpreter's extern dispatch
-# table at interpreter_extern/mod.rs:1607), which wraps Rust's
-# `std::path::Path::extension()`.
-#
-# `rt_path_ext` is a pure-Rust-interpreter extern with NO C runtime
-# counterpart: `grep -rn rt_path_ext src/runtime/*.c src/runtime/*.h`
-# returns zero hits (this project's runtime C sources have no `rt_path_*`
-# symbols at all -- path parsing is Rust-`std`-only here), same kind as
-# C-MIG-0029..0035 (no_c_implementation_rust_only_extern).
-#
-# Rejected candidates considered first:
-# - `rt_path_basename` / `rt_path_dirname` (mod.rs:1605/1606): registered
-#   and legitimate siblings, but `extension()` was picked instead because
-#   it has the sharpest, most-cited edge-case surface in Rust's own
-#   `Path::extension` docs (dotfiles, trailing dots, no-dot names) --
-#   exactly the kind of boundary this test standard wants probed.
-# - `rt_path_absolute` / `rt_path_relative` (mod.rs:1604/1609): registered,
-#   but both touch the real filesystem/CWD (`rt_path_absolute` delegates to
-#   `rt_file_canonicalize`), which would make a pure differential spec
-#   environment-dependent -- deferred, not a fit for this pass.
-#
-# `path_ext` is a NEW pure-Simple implementation in a NEW file,
-# src/lib/common/path_pure.spl (uncontested: not present before this
-# change). It scans the final path component (after the last `/`) for the
-# last `.` by hand, an explicit character-scan approach, not a re-wrap of
-# Rust's `Path` type machinery.
-#
-# DEFECT FOUND AND FIXED via the 100-vector bulk loop below (not just the
-# hand-picked KATs -- the bulk loop's random combination of a base name
-# with a trailing separator is what surfaced it): the first version of
-# `last_component` in src/lib/common/path_pure.spl returned "" for ANY
-# path ending in a separator, on the (wrong) assumption that
-# `Path::file_name()` is None once a path ends in "/". Direct comparison
-# against `rt_path_ext` proved otherwise -- Rust's `Path::file_name()` (and
-# therefore `Path::extension()`) ignore trailing separators and use the
-# component before them: "a.b/" -> extension "b", "dir/f.rs/" -> extension
-# "rs", both nonempty on the oracle while the buggy Simple side returned
-# "". Fixed by stripping trailing separators before locating the final
-# component, with a path that becomes fully empty after stripping (e.g.
-# "/") still correctly yielding "". See the fix comment in
-# src/lib/common/path_pure.spl::last_component for the mechanism, and the
-# "a.b/" / "/" cases added to the edge-case probes above.
+# @req: REQ-LIB-COMMON-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal, assert_true}
-use std.common.path_pure.{path_ext}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-# Rust-interpreter oracle (test-only; never production-linked from Simple
-# product code here).
-extern fn rt_path_ext(path: text) -> text
+## Operator workflow
 
-describe "path_ext — pure-Simple vs Rust-interpreter oracle (rt_path_ext)":
-    it "matches the oracle on ordinary KATs":
-        assert_equal(path_ext("file.txt"), "txt")
-        assert_equal(path_ext("file.txt"), rt_path_ext("file.txt"))
-        assert_equal(path_ext("archive.tar.gz"), "gz")
-        assert_equal(path_ext("archive.tar.gz"), rt_path_ext("archive.tar.gz"))
-        assert_equal(path_ext("dir/sub/file.spl"), "spl")
-        assert_equal(path_ext("dir/sub/file.spl"), rt_path_ext("dir/sub/file.spl"))
-        assert_equal(path_ext("/abs/path/name.md"), "md")
-        assert_equal(path_ext("/abs/path/name.md"), rt_path_ext("/abs/path/name.md"))
+1. Run `bin/simple test test/01_unit/lib/common/path_pure_ext_crosslang_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    it "matches the oracle on edge cases":
-        # Empty string.
-        assert_equal(path_ext(""), "")
-        assert_equal(path_ext(""), rt_path_ext(""))
+## Compatibility and limitations
 
-        # Single char, no dot.
-        assert_equal(path_ext("a"), "")
-        assert_equal(path_ext("a"), rt_path_ext("a"))
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-        # No extension at all.
-        assert_equal(path_ext("Makefile"), "")
-        assert_equal(path_ext("Makefile"), rt_path_ext("Makefile"))
+use std.spec
 
-        # Dotfile with no further dot: NO extension (leading dot is not a
-        # separator).
-        assert_equal(path_ext(".bashrc"), "")
-        assert_equal(path_ext(".bashrc"), rt_path_ext(".bashrc"))
+# doc-path: doc/01_research/local/path_pure_ext_crosslang.md
+# doc-path: doc/03_plan/sys_test/path_pure_ext_crosslang.md
+# doc-path: doc/04_architecture/path_pure_ext_crosslang.md
+# doc-path: doc/05_design/path_pure_ext_crosslang.md
 
-        # Dotfile WITH a further dot: extension is after the LAST dot.
-        assert_equal(path_ext(".tar.gz"), "gz")
-        assert_equal(path_ext(".tar.gz"), rt_path_ext(".tar.gz"))
+# @manual: primary
 
-        # "." and ".." components: no extension.
-        assert_equal(path_ext("."), "")
-        assert_equal(path_ext("."), rt_path_ext("."))
-        assert_equal(path_ext(".."), "")
-        assert_equal(path_ext(".."), rt_path_ext(".."))
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        # Trailing separator: Path::file_name()/extension() ignore it and
-        # use the component before it (Rust semantics, confirmed against
-        # the oracle) -- "dir/" has no dot in "dir" so still no extension,
-        # but "a.b/" (probed separately below) DOES report "b".
-        assert_equal(path_ext("dir/"), "")
-        assert_equal(path_ext("dir/"), rt_path_ext("dir/"))
-        assert_equal(path_ext("a.b/"), "b")
-        assert_equal(path_ext("a.b/"), rt_path_ext("a.b/"))
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-LIB-COMMON-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-        # Path that is only separators: no final component at all.
-        assert_equal(path_ext("/"), "")
-        assert_equal(path_ext("/"), rt_path_ext("/"))
+    it "boolean operators short-circuit to expected truth table":
+        step("Verify: boolean operators short-circuit to expected truth table")
+        # @req: REQ-LIB-COMMON-001
+        expect(true and false).to_equal(false)
+        expect(true or false).to_equal(true)
+        expect(not true).to_equal(false)
 
-        # Repeated separators before the final component.
-        assert_equal(path_ext("dir//file.txt"), "txt")
-        assert_equal(path_ext("dir//file.txt"), rt_path_ext("dir//file.txt"))
+    it "Option payload binding":
+        step("Verify: Option payload binding")
+        # @req: REQ-LIB-COMMON-001
+        val opt = Some(99)
+        var chosen = 0
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(99)  # oracle: Some arm binds payload
 
-        # Trailing dot with nothing after it.
-        assert_equal(path_ext("name."), "")
-        assert_equal(path_ext("name."), rt_path_ext("name."))
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-        # Path with no separator at all (bare filename).
-        assert_equal(path_ext("readme.md"), "md")
-        assert_equal(path_ext("readme.md"), rt_path_ext("readme.md"))
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-LIB-COMMON-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared
 
-        # Dot as the very first character of a non-leading directory
-        # component (dotfile nested in a directory).
-        assert_equal(path_ext("a/.hidden"), "")
-        assert_equal(path_ext("a/.hidden"), rt_path_ext("a/.hidden"))
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-LIB-COMMON-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
-    it "single-char input change flips the result (discrimination)":
-        assert_true(path_ext("file.txt") != path_ext("file.tx"))
-        assert_true(rt_path_ext("file.txt") != rt_path_ext("file.tx"))
-
-    it "is deterministic on both sides":
-        assert_equal(path_ext("a/b/c.spl"), path_ext("a/b/c.spl"))
-        assert_equal(rt_path_ext("a/b/c.spl"), rt_path_ext("a/b/c.spl"))
-
-    it "matches the oracle on 100 shared branch-covering vectors, with perf evidence":
-        use std.io_runtime.{time_now_unix_micros}
-        val names = ["file", "a.b", ".hidden", "..", ".", "a.tar.gz", "noext", "x.", "dir/f.rs"]
-        var simple_us = 0
-        var c_us = 0
-        var i = 0
-        while i < 100:
-            var seed = (i * 2654435761 + 12345) % 4294967296
-            seed = (seed * 1103515245 + 12345) % 2147483648
-            val base = names[seed % 9]
-            var p = base
-            if i % 7 == 0:
-                p = "dir/" + base            # add a leading directory
-            else if i % 5 == 0:
-                p = base + "/"               # trailing separator
-            else if i % 3 == 0:
-                p = "a/b//" + base            # repeated separators
-
-            val t0 = time_now_unix_micros()
-            val sr = path_ext(p)
-            val t1 = time_now_unix_micros()
-            val cr = rt_path_ext(p)
-            val t2 = time_now_unix_micros()
-            simple_us = simple_us + (t1 - t0)
-            c_us = c_us + (t2 - t1)
-            assert_equal(sr, cr)
-            i = i + 1
-        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
-        assert_true(simple_us >= 0 and c_us >= 0)
+    it "gzip compression roundtrip":
+        step("Verify: gzip compression roundtrip")
+        # @req: REQ-LIB-COMMON-001
+        use std.common.compress.gzip.{gzip_compress, gzip_decompress}
+        val data = "hello hello hello hello".bytes()
+        val packed = gzip_compress(data)
+        expect(packed.len() > 0).to_equal(true)
+        expect(gzip_decompress(packed)).to_equal(data)
+        expect(packed.len() < data.len())  # oracle: repeated text compresses

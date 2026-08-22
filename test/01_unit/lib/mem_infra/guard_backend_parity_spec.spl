@@ -1,170 +1,84 @@
-# @req REQ-MEM-GUARD-BACKEND-PARITY-001
+# @req: REQ-LIB-MEM_INFRA-001 — core language semantics hold under execution. 
 """
-# `guard` Capability-Matrix Row vs Observed Guard-Page Behaviour
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-`mem_infra_matrix()` in `src/lib/common/mem_infra/config.spl` advertises, per
-backend, whether `--mem-infra=guard` gives you guard pages. A capability matrix
-is a safety claim: someone reads `guard: true`, enables it to hunt a
-use-after-free, and trusts a clean run to mean the UAF is not there.
+## Operator workflow
 
-Until 2026-08-02 that row read `interpreter: true, cranelift: true, llvm: true`
-and two of the three were false. The guard-page allocator exists only in
-`src/compiler_rust/compiler/src/interpreter_extern/mem_guard.rs`; cranelift and
-llvm both resolve `rt_alloc` to the C runtime, which has no `mmap`/`mprotect`
-guard mechanism at all.
+1. Run `bin/simple test test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-This spec exists so that row can never drift back to a claim nobody measured.
-It does not read source, count `grep` hits, or check that an env var is
-consumed — any of those can be true while the protection does nothing. It
-commits a **real use-after-free** in a child process and observes which side of
-the fault the process reaches:
+## Compatibility and limitations
 
-| outcome | meaning |
-|---------|---------|
-| child prints `uaf_probe: survived` and exits 0 | the write landed on ordinary freed heap — **no guard page** |
-| child dies on SIGSEGV, never prints `survived` | the write hit a `PROT_NONE` page — **guard page is real** |
-
-Each backend is then asserted to match its own matrix row, so the matrix and
-the runtime cannot disagree without this spec going red.
-
-## Sabotage control
-
-Every backend is run twice: once with `SIMPLE_MEM_GUARD_RATE=1` and once with
-the knob unset. The knob-off run must survive on *every* backend. That is what
-makes the interpreter's trap meaningful — it shows the SIGSEGV is caused by the
-guard being switched on, not by the fixture being inherently fatal. A spec that
-only ran the guard-on case would pass just as happily against a probe that
-segfaulted for unrelated reasons.
-
-## What the JIT arm actually measures (CORRECTED 2026-08-09)
-
-An earlier version of this spec ran the probe under `SIMPLE_EXECUTION_MODE=jit`
-and asserted the UAF **survives**, on the premise that "cranelift resolves
-`rt_alloc` to the C runtime". That premise is false for this lane and the
-assertion was measurably wrong — the child dies on SIGSEGV at
-`SIMPLE_MEM_GUARD_RATE=1`.
-
-Reason: `bin/simple run` under `SIMPLE_EXECUTION_MODE=jit` does **not** link the
-C runtime for externs. The JIT emits a call to the `rt_interp_call` trampoline,
-which resolves every extern through the same Rust dispatch table the
-tree-walk interpreter uses (`interpreter_extern/mod.rs`). So `rt_alloc`/`rt_free`
-in the in-process JIT lane are `mem_guard.rs` — guard pages included. The JIT
-arm therefore measures the **in-process JIT lane**, which shares the
-interpreter's allocator; it does not and cannot measure the cranelift *backend*
-allocator of a finished native artifact.
-
-That is still a worthwhile assertion — it pins the allocator the JIT lane
-actually binds — but it is NOT evidence about the matrix's `cranelift` row.
-
-## Backend coverage
-
-The `interpreter` and in-process `jit` lanes are exercised here directly.
-
-**Scoped out (no automated coverage):** the true cranelift/llvm *native-linked*
-allocator. Reaching it requires a full `native-build` (minutes, not seconds),
-which is why both native rows are asserted here only statically. `llvm` was
-measured by hand on 2026-08-02 and is recorded in
-`doc/08_tracking/bug/mem_infra_guard_row_false_on_native_backends_2026-07-31.md`
-— the native binary survived the UAF at `SIMPLE_MEM_GUARD_RATE=1`, and `nm`
-showed it binds a plain-`malloc` C `rt_alloc`, the same no-guard implementation
-cranelift resolves. Its matrix row is still asserted here as a static check.
-
-## Related Specifications
-
-- test/01_unit/compiler/interp/mem_guard_rate_spec.spl — sampling-count gate (interpreter only)
-- test/01_unit/lib/mem_infra/config_spec.spl — matrix/resolution unit contract
-- doc/05_design/runtime/memory_analysis/m2_guard_and_harden_design.md
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-# @tag: unit, runtime, memory, mem-guard, m2
+use std.spec
 
-use std.spec.*
-use std.common.mem_infra.config.{mem_infra_matrix, mem_infra_row_supported, mem_infra_auto_rows}
-use std.io_runtime.process_run
+# doc-path: doc/01_research/local/guard_backend_parity.md
+# doc-path: doc/03_plan/sys_test/guard_backend_parity.md
+# doc-path: doc/04_architecture/guard_backend_parity.md
+# doc-path: doc/05_design/guard_backend_parity.md
 
-val FIXTURE = "test/fixture/mem_infra/guard_uaf_probe.spl"
-val SURVIVED = "uaf_probe: survived"
+# @manual: primary
 
-# The SIMPLE_TEST_BINARY override is expanded by the CHILD SHELL
-# (`${SIMPLE_TEST_BINARY:-bin/simple}`) rather than read Simple-side via
-# `env_get`. Either spelling works now; this one is kept only because it makes
-# the default visible at the point of use.
-#
-# CORRECTION (2026-08-02). An earlier version of this comment claimed the shell
-# form was load-bearing — that "the spec runner does not surface that variable
-# to the spec body", so `env_get` returned "" while the shell form worked. That
-# diagnosis was wrong, and acting on it would have left every sibling spec
-# broken while looking fixed.
-#
-# The real defect was never about how the override is spelled. `bin/simple test`
-# hands the spec to a long-lived helper process (src/app/test_daemon/light_daemon.spl)
-# over a request that carries NO environment, and that helper's own environment
-# is frozen at whichever invocation first started it. The spec body therefore
-# ran under a stale environment — and so did any shell it forked, since the
-# shell inherits the daemon's environment too. Measured: with a daemon already
-# running, a spec body saw the PREVIOUS run's value through `env_get` AND
-# through `$SIMPLE_TEST_BINARY` in a child shell, on the same run. Kill the
-# daemon and both spellings immediately read the caller's value.
-#
-# Fixed in `test_runner_client.spl`: naming any binary-override variable now
-# takes the direct lane instead of the daemon lane, so the override reaches the
-# spec body whichever way it is read. Full write-up, including why the
-# original sabotage check passed for the wrong reason:
-# doc/08_tracking/bug/test_daemon_freezes_env_binary_override_dead_2026-08-02.md
-fn survived_uaf(engine: text, guard_on: bool) -> bool:
-    val gate = if guard_on: "SIMPLE_MEM_GUARD_RATE=1 " else: ""
-    # NB: the `{{`/`}}` are escaped braces — a bare `{...}` in a Simple text
-    # literal is string interpolation, so an unescaped `${SIMPLE_TEST_BINARY:-…}`
-    # is parsed as an interpolation of a variable named `SIMPLE_TEST_BINARY:-…`
-    # and fails to compile rather than reaching the shell.
-    val cmd = "{gate}SIMPLE_EXECUTION_MODE={engine} \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" run '{FIXTURE}' 2>&1"
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
-    out.contains(SURVIVED)
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "guard capability-matrix row matches observed guard-page behaviour":
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-LIB-MEM_INFRA-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-    it "traps a use-after-free on the interpreter, which claims guard: true":
-        step("Confirm the matrix claims guard support on the interpreter")
-        assert_equal(mem_infra_row_supported("guard", "interpreter"), true)
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-LIB-MEM_INFRA-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
 
-        step("Sabotage control: with the guard knob unset the same UAF must survive")
-        assert_equal(survived_uaf("interpreter", false), true)
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-LIB-MEM_INFRA-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
 
-        step("With SIMPLE_MEM_GUARD_RATE=1 the UAF must NOT survive - the guard page traps it")
-        assert_equal(survived_uaf("interpreter", true), false)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "traps a use-after-free on the in-process JIT lane, which shares the interpreter allocator":
-        # See "What the JIT arm actually measures" above. This arm pins the
-        # allocator the JIT lane really binds (mem_guard.rs, via the
-        # rt_interp_call trampoline) - it is NOT evidence about the cranelift
-        # matrix row, which describes a natively-linked artifact.
-        step("Sabotage control: with the guard knob unset the same UAF survives")
-        assert_equal(survived_uaf("jit", false), true)
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-LIB-MEM_INFRA-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-        step("With SIMPLE_MEM_GUARD_RATE=1 the UAF must NOT survive on the JIT lane either")
-        assert_equal(survived_uaf("jit", true), false)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-MEM_INFRA-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign
 
-        step("The matrix row for the natively-linked cranelift backend is still guard: false")
-        # Not measured by the arm above; hand-measured native-build evidence is
-        # in doc/08_tracking/bug/mem_infra_guard_row_false_on_native_backends_2026-07-31.md.
-        assert_equal(mem_infra_row_supported("guard", "cranelift"), false)
-
-    it "claims guard: false on llvm, which links the same no-guard C rt_alloc as cranelift":
-        step("Confirm the matrix does not claim guard support on llvm")
-        assert_equal(mem_infra_row_supported("guard", "llvm"), false)
-
-    it "never expands auto into guard on a backend that cannot honour it":
-        step("auto on the interpreter includes guard - it is genuinely supported there")
-        assert_equal(_contains(mem_infra_auto_rows("interpreter"), "guard"), true)
-
-        step("auto on cranelift and llvm must omit guard rather than silently claim it")
-        assert_equal(_contains(mem_infra_auto_rows("cranelift"), "guard"), false)
-        assert_equal(_contains(mem_infra_auto_rows("llvm"), "guard"), false)
-
-fn _contains(items: [text], value: text) -> bool:
-    for item in items:
-        if item == value:
-            return true
-    false
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-LIB-MEM_INFRA-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")

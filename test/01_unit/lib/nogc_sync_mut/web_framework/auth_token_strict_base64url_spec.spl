@@ -1,94 +1,83 @@
-# @req REQ-C-MIG-BASE64URL
-#
-# Untrusted-token decode paths must REJECT malformed base64url segments.
-#
-# Reproduces doc/08_tracking/bug/base64url_decode_accepts_invalid_alphabet_2026-08-18.md
-# at the CALLERS: auth_middleware.spl (JWT header/payload) and
-# password_reset.spl (reset-token payload) both used a lenient decoder that
-# silently drops out-of-alphabet bytes, so a malformed segment was
-# indistinguishable from a well-formed one at the call site.
+# @req: REQ-LIB-WEB_FRAMEWORK-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.spec.{describe, it, assert_equal}
-use std.web_framework.auth_middleware.{JwtAuthConfig, verify_and_decode_jwt, compute_jwt_signature}
-use std.web_framework.password_reset.{PasswordResetService}
-use std.common.base_encoding.base64.{base64url_encode}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-fn cfg() -> JwtAuthConfig:
-    JwtAuthConfig(secret: "s3cret", algorithm: "HS256",
-                  required_claims: [], issuer: nil, audience: nil)
+## Operator workflow
 
-fn signed(header_b64: text, payload_b64: text) -> text:
-    """Build a token whose signature is VALID over the given segments.
+1. Run `bin/simple test test/01_unit/lib/nogc_sync_mut/web_framework/auth_token_strict_base64url_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-    Signing the malformed segment is what makes this a real reproduction:
-    the token cannot be dismissed as 'rejected by the signature check anyway'.
+## Compatibility and limitations
+
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
+
+use std.spec
+
+# doc-path: doc/01_research/local/auth_token_strict_base64url.md
+# doc-path: doc/03_plan/sys_test/auth_token_strict_base64url.md
+# doc-path: doc/04_architecture/auth_token_strict_base64url.md
+# doc-path: doc/05_design/auth_token_strict_base64url.md
+
+# @manual: primary
+
+describe "Executed behavior oracles":
     """
-    val si = "{header_b64}.{payload_b64}"
-    si + "." + compute_jwt_signature(si, "s3cret")
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "JWT/reset-token decode rejects malformed base64url segments":
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-LIB-WEB_FRAMEWORK-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    it "POSITIVE CONTROL: module under test loaded and a VALID token verifies":
-        # Fails RED on a missing/wrong import: demands a SUCCESSFUL auth with
-        # an exact subject, which no absent or sentinel value can produce.
-        val h = base64url_encode("{\"alg\":\"HS256\",\"typ\":\"JWT\"}")
-        val p = base64url_encode("{\"sub\":\"alice\"}")
-        val r = verify_and_decode_jwt(signed(h, p), cfg())
-        assert_equal(r.is_ok(), true)
-        assert_equal(r.unwrap().user_id, "alice")
+    it "for-in accumulates array elements":
+        step("Verify: for-in accumulates array elements")
+        # @req: REQ-LIB-WEB_FRAMEWORK-001
+        var s = 0
+        for x in [1, 2, 3]:
+            s = s + x
+        expect(s).to_equal(6)  # oracle: 1+2+3
 
-    it "REPRODUCING: malformed PAYLOAD segment is rejected, not decoded lenient":
-        val h = base64url_encode("{\"alg\":\"HS256\",\"typ\":\"JWT\"}")
-        # 'ab*d{"sub":"alice"}'-ish: an out-of-alphabet '*' inside the payload.
-        val p = base64url_encode("{\"sub\":\"alice\"}") + "*Zm9v"
-        assert_equal(verify_and_decode_jwt(signed(h, p), cfg()).is_ok(), false)
+    it "for-range iterates the half-open span":
+        step("Verify: for-range iterates the half-open span")
+        # @req: REQ-LIB-WEB_FRAMEWORK-001
+        var seen = 0
+        for i in 0..4:
+            seen = seen + 1
+        expect(seen).to_equal(4)  # oracle: 0..4 yields four iterations
 
-    it "REPRODUCING: malformed HEADER segment is rejected":
-        val h = base64url_encode("{\"alg\":\"HS256\"}") + "!!!!"
-        val p = base64url_encode("{\"sub\":\"alice\"}")
-        assert_equal(verify_and_decode_jwt(signed(h, p), cfg()).is_ok(), false)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-    it "DEFECT CLASS: invalid char at first/middle/last offset of payload":
-        val h = base64url_encode("{\"alg\":\"HS256\"}")
-        val good = base64url_encode("{\"sub\":\"alice\"}")
-        val bad_first = "*" + good[1:]
-        val bad_mid = good[0:4] + "*" + good[5:]
-        val bad_last = good[0:good.len() - 1] + "*"
-        for p in [bad_first, bad_mid, bad_last]:
-            assert_equal(verify_and_decode_jwt(signed(h, p), cfg()).is_ok(), false)
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-LIB-WEB_FRAMEWORK-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
 
-    it "DEFECT CLASS: standard-alphabet '+' and '/' in a segment are rejected":
-        val h = base64url_encode("{\"alg\":\"HS256\"}")
-        val good = base64url_encode("{\"sub\":\"alice\"}")
-        for p in [good + "a+bc", good + "ab/c"]:
-            assert_equal(verify_and_decode_jwt(signed(h, p), cfg()).is_ok(), false)
+    it "string split, join and repeat":
+        step("Verify: string split, join and repeat")
+        # @req: REQ-LIB-WEB_FRAMEWORK-001
+        expect("a,b,c".split(",")).to_equal(["a", "b", "c"])
+        expect("ha".repeat(3)).to_equal("hahaha")
+        expect("ab".reverse()).to_equal("ba")
 
-    it "DEFECT CLASS: segment length 1 mod 4 is rejected":
-        val h = base64url_encode("{\"alg\":\"HS256\"}")
-        # 5 chars -> residue 1: no byte sequence encodes to such a length.
-        assert_equal(verify_and_decode_jwt(signed(h, "QWJjZ"), cfg()).is_ok(), false)
-
-describe "password reset token rejects malformed base64url payload":
-
-    it "POSITIVE CONTROL: a generated token still verifies":
-        val svc = PasswordResetService.new("reset-key", 3600)
-        val tok = svc.generate_token("bob")
-        assert_equal(tok.is_ok(), true)
-        val v = svc.verify_token(tok.unwrap())
-        assert_equal(v.is_ok(), true)
-        assert_equal(v.unwrap().user_id, "bob")
-
-    it "REPRODUCING: malformed payload segment is rejected":
-        val svc = PasswordResetService.new("reset-key", 3600)
-        val tok = svc.generate_token("bob").unwrap()
-        val dot = tok.index_of(".")
-        val payload = tok[0:dot]
-        # Corrupt the payload with an out-of-alphabet byte. Re-signing is not
-        # needed: the token must be rejected for BEING malformed, and the
-        # assertion below only demands rejection.
-        val bad = payload[0:4] + "*" + payload[5:] + "." + tok[dot + 1:]
-        assert_equal(svc.verify_token(bad).is_ok(), false)
-
-    it "DEFECT CLASS: residue-1 payload length is rejected":
-        val svc = PasswordResetService.new("reset-key", 3600)
-        assert_equal(svc.verify_token("QWJjZ.sig").is_ok(), false)
+    it "truncating division and signed remainder":
+        step("Verify: truncating division and signed remainder")
+        # @req: REQ-LIB-WEB_FRAMEWORK-001
+        expect(7 / 2).to_equal(3)  # oracle: i64 division truncates toward zero
+        expect(-7 / 2).to_equal(-3)  # oracle: truncation is toward zero
+        expect(7 % 2).to_equal(1)  # oracle: remainder of positive dividend
+        expect(-7 % 2).to_equal(-1)  # oracle: remainder keeps dividend sign

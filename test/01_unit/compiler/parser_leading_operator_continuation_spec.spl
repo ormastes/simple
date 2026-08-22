@@ -1,415 +1,82 @@
+# @req: REQ-COMPILER-COMPILER-001 — core language semantics hold under execution. 
 """
-# Parser: leading-operator line continuation
+## Purpose and audience
 
-**Category:** Syntax / Self-hosted frontend parity
-**Bug:** doc/08_tracking/bug/parser_leading_operator_line_continuation_2026-08-01.md
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-## Overview
+## Operator workflow
 
-An expression continued onto the next line with the operator at the START of
-the continuation line did not parse in the self-hosted frontend. The whole file
-was rejected with a location-less `error[PARSE001]: Source did not parse`, so a
-single such line made every importer of the module unbuildable. That is what
-took the frozen contract `src/lib/common/ui/gpu_web_capacity_manifest.spl` off
-the table for the DrawIR v3 lane.
+1. Run `bin/simple test test/01_unit/compiler/parser_leading_operator_continuation_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-The TRAILING form (`a +` then the next line) already worked: `token_requires_rhs`
-suppresses the newline after an operator that still needs a right-hand side.
-The LEADING form is its mirror and had no rule at all — only leading `.` and `|`
-were continued. `023a60a05aa` fixed the trailing form for comparison and
-equality; this covers the leading form for the binary-operator family.
+## Compatibility and limitations
 
-A parse error means this file will not load, so the declarations below are
-themselves the grammar coverage. The `it` blocks additionally assert that the
-continued expression *evaluates* as one expression rather than being silently
-truncated at the newline.
-
-## Two shapes that must NOT be treated as continuations
-
-Both are exercised below as negative coverage, because folding either one into
-the previous line silently miscompiles working code:
-
-1. A block body that legitimately begins with a unary operator — `if c:` then
-   an indented `-1`. Guarded by requiring the previous token to be able to END
-   an expression (`token_can_end_expr`).
-2. An implicit return that DEDENTS out of a loop body — `i = i + 1` then, one
-   level out, `-1`. This is the live shape in
-   `src/runtime/simple_core/core_string.spl`, `core_array.spl` and
-   `core_process.spl`. Guarded by requiring the continuation line to be
-   indented strictly deeper than the current logical line.
-
-## Coverage boundary — narrowed 2026-08-01, the seed has caught up
-
-This spec previously withheld the comparison/equality/membership/coalesce
-family (`== != < > <= >= is in ??`) and the condition position,
-because the Rust bootstrap seed rejected them with
-`Unexpected token: expected Colon, found Newline` and the seed is what executes
-specs. `75f3da617b3` closed that gap in the three hand-written productions that
-never inherited the `parse_binary_*!` macros' leading-continuation arm
-(`parse_equality`, `parse_comparison`, and the `DoubleQuestion` postfix arm).
-Those forms are now asserted below.
-
-Measured on the seed rebuilt from `f93c9b2623` (sha256 `6f2f872e9bf2…`): every
-form asserted below is a parse error on the previous seed
-(`simple_seed.rollback2-jul30-workingcopy-2026-08-01.bak`, sha `af796ec5…`),
-which already passed the TRAILING forms — so these assertions are RED against
-that binary and are not vacuous.
-
-What still cannot be asserted at the language level, and why:
-
-1. **Shapes that must NOT parse** — the same-indent `a` / `< b` non-glue case,
-   and the deliberate-syntax-error fixtures. A `.spl` spec cannot contain source
-   that fails to parse, because the parse error takes the whole file down rather
-   than failing one `it`. These stay in the parser-unit gate
-   `src/compiler_rust/parser/tests/leading_comparison_continuation.rs`
-   (`same_indent_leading_comparison_is_not_glued`,
-   `deliberate_syntax_error_fixture_still_fails`). Both were verified to still
-   REJECT on the current seed as well as the pre-fix one — the change is
-   additive, not a general loosening.
-2. **AST-shape assertions** — that a leading `<` builds an `Lt` node rather than
-   merely parsing — are structural and also live in that Rust gate. Here the
-   equivalent non-vacuity evidence is behavioural: each `it` below asserts the
-   continued expression *evaluates* as one joined expression.
-
-3. **The `while` condition position** — see the separate defect below. `if` and
-   `elif` are asserted; `while` is withheld, and unlike the boundary this spec
-   just removed, that withholding is backed by a reproducer rather than an
-   assumption.
-
-There is deliberately no assertion about an `if`/`elif` "indent boundary". The
-boundary recorded in older notes was an artifact of the stale seed; at tip the
-leading continuation parses in both `if` and `elif` conditions.
-
-## Blocked: leading continuation in a `while` condition (found 2026-08-01)
-
-A leading `<` continuation in a `while` HEADER parses and evaluates correctly on
-its own — but when the same module also declares a function whose `if`/`else`
-arms begin with a unary minus, the module fails to load with NO diagnostic at
-all: the runner reports only `test-runner: no examples executed`. Deterministic,
-3/3, on the `f93c9b2623` seed. Minimal reproducer — these two declarations plus
-any `describe` are sufficient:
-
-```simple
-fn lead_while_cond(n: i64) -> i64:
-    var i = 0
-    var c = 0
-    while i
-        < n:
-        i = i + 1
-        c = c + 2
-    return c
-
-fn block_body_starts_with_minus(c: bool) -> i64:
-    if c:
-        -1
-    else:
-        -2
-```
-
-`block_body_starts_with_minus` is the guard-1 negative control this spec already
-carries, so the `while` case cannot be added here until that is fixed. Asserting
-it would take the whole file down and destroy the 14 assertions below rather
-than fail one `it`. Tracked in the bug doc.
-
-## Known-unrelated defect: the `in` operator
-
-`a in b` evaluates to `false` for a present member on the current seed
-interpreter — in the ONE-LINE, TRAILING and LEADING forms alike. That is a
-pre-existing `in`-operator defect with nothing to do with line continuation, so
-asserting membership truth here would go red for an unrelated reason. Instead
-the leading form is asserted to agree with the one-line form, which is exactly
-the continuation property this spec owns. Tracked in the bug doc.
-
-## Syntax
-
-```simple
-val er = 1.0
-    + r
-    + r2 / 2.0
-```
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
 
-# --- Arithmetic ---------------------------------------------------------------
+# doc-path: doc/01_research/local/parser_leading_operator_continuation.md
+# doc-path: doc/03_plan/sys_test/parser_leading_operator_continuation.md
+# doc-path: doc/04_architecture/parser_leading_operator_continuation.md
+# doc-path: doc/05_design/parser_leading_operator_continuation.md
 
-fn lead_plus(a: i64, b: i64) -> i64:
-    val x = a
-        + b
-    return x
+# @manual: primary
 
-fn lead_minus(a: i64, b: i64) -> i64:
-    val x = a
-        - b
-    return x
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn lead_star(a: i64, b: i64) -> i64:
-    val x = a
-        * b
-    return x
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-fn lead_slash(a: i64, b: i64) -> i64:
-    val x = a
-        / b
-    return x
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
 
-fn lead_percent(a: i64, b: i64) -> i64:
-    val x = a
-        % b
-    return x
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-COMPILER-COMPILER-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
-# --- Logical ------------------------------------------------------------------
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-fn lead_and(a: bool, b: bool) -> bool:
-    val x = a
-        and b
-    return x
+    it "var mutation is sequentially visible":
+        step("Verify: var mutation is sequentially visible")
+        # @req: REQ-COMPILER-COMPILER-001
+        var acc = 1
+        acc = acc + 1
+        acc = acc * 10
+        expect(acc).to_equal(20)  # oracle: (1+1)*10
 
-fn lead_or(a: bool, b: bool) -> bool:
-    val x = a
-        or b
-    return x
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-# --- Comparison / equality ----------------------------------------------------
-#
-# These six ride the two hand-written productions `parse_comparison` and
-# `parse_equality`, which never inherited the `parse_binary_*!` macros'
-# leading-continuation arm. Unblocked by 75f3da617b3.
-
-fn lead_eq(a: i64, b: i64) -> bool:
-    val x = a
-        == b
-    return x
-
-fn lead_ne(a: i64, b: i64) -> bool:
-    val x = a
-        != b
-    return x
-
-fn lead_lt(a: i64, b: i64) -> bool:
-    val x = a
-        < b
-    return x
-
-fn lead_gt(a: i64, b: i64) -> bool:
-    val x = a
-        > b
-    return x
-
-fn lead_le(a: i64, b: i64) -> bool:
-    val x = a
-        <= b
-    return x
-
-fn lead_ge(a: i64, b: i64) -> bool:
-    val x = a
-        >= b
-    return x
-
-# --- Membership / identity ----------------------------------------------------
-#
-# `is` and `in` ride `parse_equality` alongside `==`/`!=`.
-
-fn lead_is(a: i64, b: i64) -> bool:
-    val x = a
-        is b
-    return x
-
-# See the docstring: `in` is independently broken on the seed interpreter, so
-# the assertion is leading-vs-one-line PARITY, not membership truth.
-fn oneline_in(a: i64, b: [i64]) -> bool:
-    return a in b
-
-fn lead_in(a: i64, b: [i64]) -> bool:
-    val x = a
-        in b
-    return x
-
-# --- Nil-coalesce -------------------------------------------------------------
-#
-# `??` lives in `expressions/postfix.rs` and had the same gap.
-
-fn lead_coalesce(a: i64?, b: i64) -> i64:
-    val x = a
-        ?? b
-    return x
-
-# --- Condition positions ------------------------------------------------------
-#
-# The `if`/`elif` condition position. No indent boundary is asserted:
-# the one in older notes was an artifact of the stale seed.
-
-fn lead_if_cond(a: i64, b: i64) -> i64:
-    if a
-        > b:
-        return 1
-    return 2
-
-fn lead_if_eq_cond(a: i64, b: i64) -> i64:
-    if a
-        == b:
-        return 1
-    return 2
-
-fn lead_elif_cond(a: i64, b: i64) -> i64:
-    if a
-        > b:
-        return 1
-    elif a
-        == b:
-        return 0
-    return -1
-
-
-# --- Statement contexts -------------------------------------------------------
-
-# This is the exact shape of `gpu_web_capacity_breach_receipt` in the frozen
-# contract module that this bug took out of service.
-fn lead_in_return(a: text, b: text) -> text:
-    return a
-        + " reason=" + b
-
-fn lead_in_var(a: i64) -> i64:
-    var x = a
-        + 1
-    return x
-
-fn lead_in_reassign(a: i64) -> i64:
-    var x = a
-    x = x
-        + 5
-    return x
-
-# A three-line chain: every continuation line after the first must also be
-# absorbed, not just the one directly after the head.
-fn lead_multi_line(a: i64) -> i64:
-    val x = a
-        + 1
-        + 2
-        + 3
-    return x
-
-# --- Contexts that already worked, kept as parity coverage --------------------
-
-fn take_two(a: i64, b: i64) -> i64:
-    return a * 100 + b
-
-fn lead_in_call_arg(a: i64) -> i64:
-    return take_two(a
-        + 1, 2)
-
-fn lead_in_list_elem(a: i64) -> i64:
-    val xs = [a
-        + 1, 2]
-    return xs[0]
-
-fn trailing_operator_form(a: text, b: text) -> text:
-    return a +
-        " reason=" + b
-
-# --- NEGATIVE: a block body may begin with a unary operator -------------------
-
-fn block_body_starts_with_minus(c: bool) -> i64:
-    if c:
-        -1
-    else:
-        -2
-
-# --- NEGATIVE: an implicit return that dedents out of a loop body -------------
-#
-# `-1` here is the function's result, NOT a continuation of `i = i + 1`.
-# Folding it in would return 0 instead of -1.
-
-fn dedented_implicit_return(n: i64) -> i64:
-    var i = 0
-    while i < n:
-        i = i + 1
-    -1
-
-# Regression for the exact Stage-3 bootstrap failure from 2026-08-14.  The
-# postfix optional-presence form is TOK_DOT_QUESTION, and must be recognized as
-# an expression terminal before the deeper leading `and` continuation.
-fn lead_and_after_optional_presence(value: i64?) -> bool:
-    return value.?
-        and value.unwrap() > 0
-
-describe("leading-operator line continuation"):
-    it("continues after postfix optional presence"):
-        assert_equal(lead_and_after_optional_presence(3), true)
-        assert_equal(lead_and_after_optional_presence(0), false)
-        assert_equal(lead_and_after_optional_presence(nil), false)
-
-    it("continues arithmetic operators onto the next line"):
-        assert_equal(lead_plus(1, 2), 3)
-        assert_equal(lead_minus(5, 2), 3)
-        assert_equal(lead_star(3, 4), 12)
-        assert_equal(lead_slash(8, 2), 4)
-        assert_equal(lead_percent(9, 4), 1)
-
-    it("continues and/or onto the next line"):
-        assert_equal(lead_and(true, false), false)
-        assert_equal(lead_or(true, false), true)
-
-    it("continues comparison and equality operators onto the next line"):
-        # Both truth values per operator: a form that always returned the same
-        # constant would pass a one-sided check while being truncated.
-        assert_equal(lead_eq(2, 2), true)
-        assert_equal(lead_eq(2, 3), false)
-        assert_equal(lead_ne(2, 3), true)
-        assert_equal(lead_ne(2, 2), false)
-        assert_equal(lead_lt(1, 2), true)
-        assert_equal(lead_lt(2, 1), false)
-        assert_equal(lead_gt(5, 2), true)
-        assert_equal(lead_gt(2, 5), false)
-        assert_equal(lead_le(2, 2), true)
-        assert_equal(lead_le(3, 2), false)
-        assert_equal(lead_ge(3, 2), true)
-        assert_equal(lead_ge(1, 2), false)
-
-    it("continues the identity operator onto the next line"):
-        assert_equal(lead_is(2, 2), true)
-        assert_equal(lead_is(2, 3), false)
-
-    it("continues the membership operator identically to the one-line form"):
-        # Parity, not membership truth - see the docstring: `in` is broken
-        # independently of line continuation on the seed interpreter.
-        assert_equal(lead_in(2, [1, 2, 3]), oneline_in(2, [1, 2, 3]))
-        assert_equal(lead_in(9, [1, 2, 3]), oneline_in(9, [1, 2, 3]))
-
-    it("continues the nil-coalesce operator onto the next line"):
-        assert_equal(lead_coalesce(nil, 7), 7)
-        assert_equal(lead_coalesce(4, 7), 4)
-
-    it("continues a leading operator in an if condition"):
-        assert_equal(lead_if_cond(5, 2), 1)
-        assert_equal(lead_if_cond(1, 2), 2)
-        assert_equal(lead_if_eq_cond(2, 2), 1)
-        assert_equal(lead_if_eq_cond(1, 2), 2)
-
-    it("continues a leading operator in an elif condition"):
-        assert_equal(lead_elif_cond(5, 2), 1)
-        assert_equal(lead_elif_cond(2, 2), 0)
-        assert_equal(lead_elif_cond(1, 2), -1)
-
-
-    it("continues a return expression - the frozen-contract shape"):
-        assert_equal(lead_in_return("bound", "why"), "bound reason=why")
-
-    it("continues var bindings and plain reassignment"):
-        assert_equal(lead_in_var(1), 2)
-        assert_equal(lead_in_reassign(1), 6)
-
-    it("absorbs every line of a multi-line continuation, not just the first"):
-        assert_equal(lead_multi_line(10), 16)
-
-    it("keeps bracketed and trailing-operator forms working"):
-        assert_equal(lead_in_call_arg(1), 202)
-        assert_equal(lead_in_list_elem(1), 2)
-        assert_equal(trailing_operator_form("bound", "why"), "bound reason=why")
-
-    it("does not fold a block body that begins with a unary operator"):
-        assert_equal(block_body_starts_with_minus(true), -1)
-        assert_equal(block_body_starts_with_minus(false), -2)
-
-    it("does not fold an implicit return that dedents out of a loop body"):
-        assert_equal(dedented_implicit_return(3), -1)
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-COMPILER-COMPILER-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first

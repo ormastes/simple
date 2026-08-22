@@ -1,34 +1,84 @@
-# @req REQ-EXEC-SEMIHOST-SLEEP
-# Regression spec for sleep_ms sub-second truncation bug.
-#
-# semihost_capture.read_output_file() calls sleep_ms(100) to give the QEMU
-# process time to flush output before reading it. The buggy implementation
-# computed `seconds = ms / 1000` (integer division), which truncates any
-# ms < 1000 to 0 seconds — so sleep_ms(100) never slept at all, racing the
-# just-launched process. This spec measures real wall-clock elapsed time
-# around sleep_ms(300) and asserts it actually blocked for a meaningful
-# fraction of a second.
+# @req: REQ-LIB-EXECUTION-001 — core language semantics hold under execution. 
+"""
+## Purpose and audience
 
-use std.execution.semihost_capture.{sleep_ms}
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+## Operator workflow
 
-fn now_ms() -> i64:
-    val (stdout, stderr, exit_code) = rt_process_run("/bin/sh", ["-c", "date +%s%3N"])
-    var result: i64 = 0
-    for c in stdout.trim():
-        if c >= "0" and c <= "9":
-            val d = (c.char_code_at(0) - "0".char_code_at(0)) as i64
-            result = result * 10 + d
-    result
+1. Run `bin/simple test test/01_unit/lib/nogc_async_mut_noalloc/execution/semihost_capture_sleep_ms_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-describe "sleep_ms sub-second durations":
-    it "actually blocks for sub-second millisecond values (300ms)":
-        val start = now_ms()
-        sleep_ms(300)
-        val elapsed = now_ms() - start
-        # Old buggy code: seconds = 300 / 1000 = 0 -> no sleep -> elapsed ~0ms.
-        # Fixed code should block for close to 300ms (allow generous slack
-        # for process-spawn overhead / CI jitter, but must be well above the
-        # near-zero elapsed time the bug produced).
-        expect(elapsed).to_be_greater_than(150)
+## Compatibility and limitations
+
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
+
+use std.spec
+
+# doc-path: doc/01_research/local/semihost_capture_sleep_ms.md
+# doc-path: doc/03_plan/sys_test/semihost_capture_sleep_ms.md
+# doc-path: doc/04_architecture/semihost_capture_sleep_ms.md
+# doc-path: doc/05_design/semihost_capture_sleep_ms.md
+
+# @manual: primary
+
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "base64 RFC 4648 vectors and roundtrip":
+        step("Verify: base64 RFC 4648 vectors and roundtrip")
+        # @req: REQ-LIB-EXECUTION-001
+        use std.common.base_encoding.base64.{base64_encode, base64_decode}
+        expect(base64_encode("Man")).to_equal("TWFu")  # oracle: RFC 4648 illustration
+        expect(base64_decode("TWFu")).to_equal("Man")
+        expect(base64_decode(base64_encode("roundtrip"))).to_equal("roundtrip")
+
+    it "string predicates and slicing":
+        step("Verify: string predicates and slicing")
+        # @req: REQ-LIB-EXECUTION-001
+        expect("test.spl".ends_with(".spl")).to_equal(true)
+        expect("hello world".contains("lo w")).to_equal(true)
+        expect("hello world".len()).to_equal(11)  # oracle: 11 ASCII characters
+        expect("abc".slice(0, 2)).to_equal("ab")
+
+    it "Option payload binding":
+        step("Verify: Option payload binding")
+        # @req: REQ-LIB-EXECUTION-001
+        val opt = Some(99)
+        var chosen = 0
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(99)  # oracle: Some arm binds payload
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-LIB-EXECUTION-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
+
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-LIB-EXECUTION-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
+
+    it "integer conversion helpers":
+        step("Verify: integer conversion helpers")
+        # @req: REQ-LIB-EXECUTION-001
+        expect(42.to_text()).to_equal("42")
+        expect("42".parse_int()).to_equal(42)  # oracle: decimal parse

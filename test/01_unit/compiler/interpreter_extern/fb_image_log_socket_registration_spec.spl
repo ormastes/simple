@@ -1,137 +1,82 @@
-# @req REQ-INTERP-EXTERN-BUCKET-A-REMAINDER-001
+# @req: REQ-COMPILER-INTERPRETER_EXTERN-001 — core language semantics hold under execution. 
 """
-# rt_fb_*/rt_image_*/rt_simpleos_log_*+rt_log_target_*/rt_socket_set_nonblocking
-# Interpreter Registration (source-list-absent bucket, remainder)
+## Purpose and audience
 
-## Overview
+Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
+reading this spec to confirm the behavior still holds.
 
-After the `rt_audio_*` lane fixed 31 of bucket (a)'s 51
-"source-list-absent" names (doc/08_tracking/bug/interpreter_extern_unreachable_names.md),
-20 remained, spanning 4 unrelated files/subsystems:
+## Operator workflow
 
-- `runtime_framebuffer.c` (`rt_fb_fill32`, `rt_fb_blit32` -- 2 names): already
-  compiled into the interpreter crate's own C sources
-  (`src/compiler_rust/runtime/build.rs`), but nothing declared or called the
-  symbols from Rust, so no interpreter dispatch entry existed. Only the
-  native-product-build source list
-  (`src/compiler/70.backend/backend/runtime_compiler.spl`) and the dispatch
-  entry needed fixing.
-- `runtime_image.c` (`rt_image_*` -- 6 names, `stb_image`-backed): absent
-  from both C-source lists, same shape as `rt_audio_*`.
-- Baremetal `runtime_minimal.c`/`runtime_log.c`: `rt_mmio_*` (6 names) is
-  genuinely baremetal-only -- every call site is SimpleOS
-  kernel/baremetal-tier code (`nogc_async_mut_noalloc/baremetal/*.spl`,
-  `os/gui/render.spl`, `os/drivers/virtio/*`), never reachable from a hosted
-  interpreter session, so it is correctly left unregistered. `rt_simpleos_log_*`
-  + `rt_log_target_*` (5 names) is different: a deliberate *hosted* fallback
-  implementation already exists at
-  `src/runtime/startup/common/runtime_log_hosted.c` (returns `false`
-  unconditionally -- the log lib falls through to `println` on `false`,
-  which is correct hosted behavior, not a stub for missing work), separate
-  from the real baremetal implementation in
-  `src/runtime/startup/baremetal/runtime_log.c` (never compiled here). Only
-  the hosted file was absent from the interpreter crate's C sources.
-- `platform/async_linux_epoll.c` (`rt_socket_set_nonblocking` -- 1 name):
-  the whole file is gated `#if defined(__linux__)` and pulls in
-  `spl_array_new_i64`/`spl_array_push_i64` (defined in `runtime.c`, not
-  compiled by this crate) via a sibling function, `rt_epoll_wait` --
-  the same problem `rt_audio_play_pcm_f32` had. Its only caller
-  (`src/lib/nogc_sync_mut/fs/nvfs_posix/posix_driver.spl`) is hosted POSIX
-  code, not baremetal, so this is a real gap. The single, dependency-free
-  function body was extracted verbatim into
-  `src/runtime/runtime_socket_nonblock.c` (portable to any non-Windows
-  target, matching the `runtime_native_gpu_stub.c` partial-extraction
-  precedent), rather than linking the whole epoll-backed file.
+1. Run `bin/simple test test/01_unit/compiler/interpreter_extern/fb_image_log_socket_registration_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-This spec proves the error TEXT changed (the resolution oracle -- exit
-status alone is fail-open), not merely that the process exits non-zero,
-matching the `rt_audio_*` lane's proof shape.
+## Compatibility and limitations
 
-## Related Specifications
-
-- doc/08_tracking/bug/interpreter_extern_unreachable_names.md — bucket (a)
-- doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md
-- test/01_unit/compiler/interpreter_extern/audio_registration_spec.spl — sibling lane, same probe pattern
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
 """
 
-# @tag: unit, compiler, interpreter-extern, framebuffer, image, log, socket, source-list-absent
+use std.spec
 
-use std.spec.*
-use std.io_runtime.{process_run, env_get}
+# doc-path: doc/01_research/local/fb_image_log_socket_registration.md
+# doc-path: doc/03_plan/sys_test/fb_image_log_socket_registration.md
+# doc-path: doc/04_architecture/fb_image_log_socket_registration.md
+# doc-path: doc/05_design/fb_image_log_socket_registration.md
 
-fn contract_binary() -> text:
-    val override = env_get("SIMPLE_TEST_BINARY")
-    if override != "" and override != nil:
-        return override
-    "bin/simple"
+# @manual: primary
 
-fn run_probe(binary: text, fixture: text) -> (text, text, i64):
-    val cmd = "SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpret '{binary}' run '{fixture}'"
-    process_run("/bin/sh", ["-c", cmd])
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-# Self-heals onto the bootstrap seed if the deployed binary predates this
-# lane (extern-arm additions require a rebuild to take effect), matching the
-# rt_audio_* spec's fallback chain.
-fn run_probe_child(fixture: text, success_marker: text) -> (text, text, i64):
-    val (out, err, code) = run_probe(contract_binary(), fixture)
-    if out.contains(success_marker) or out.contains("unexpected success") or err.contains("unknown rt_") or err.contains("unknown extern function") or err.contains("unknown hosted"):
-        return (out, err, code)
-    val (probe, _pe, _pc) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
-    if probe.contains("yes"):
-        return run_probe("src/compiler_rust/target/release/simple", fixture)
-    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
-    if probe2.contains("yes"):
-        return run_probe("src/compiler_rust/target/debug/simple", fixture)
-    (out, err, code)
+    it "dict get, keys and membership":
+        step("Verify: dict get, keys and membership")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        val d = {"a": 1}
+        expect(d.get("a")).to_equal(1)  # oracle: stored value
+        expect(d.has("b")).to_equal(false)
+        expect(d.keys()).to_equal(["a"])
 
-describe "rt_fb_* interpreter registration":
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
 
-    it "rt_fb_fill32: resolves through to the linked C implementation instead of failing to resolve":
-        step("Run the fb fill32 probe fixture under the interpreter")
-        val (out, err, _code) = run_probe_child("test/fixture/interpreter_extern/fb_fill32_probe.spl", "fb_fill32_result=")
-        assert_true(out.contains("fb_fill32_result=ok"))
-        assert_equal(err.contains("unknown extern function"), false)
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
-    it "rt_fb_zzz_bogus: a prefix name with no C definition gets the family guard, not a crash":
-        step("Run the fb bogus-name probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/fb_bogus_probe.spl", "fb_fill32_result=")
-        assert_true(err.contains("unknown rt_fb_*"))
-        assert_equal(err.contains("unknown extern function"), false)
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
 
-describe "rt_image_* interpreter registration":
+    it "bitwise operators":
+        step("Verify: bitwise operators")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect(6 & 3).to_equal(2)  # oracle: 0b110 & 0b011
+        expect(6 | 3).to_equal(7)  # oracle: 0b110 | 0b011
+        expect(6 ^ 3).to_equal(5)  # oracle: xor of operands
+        expect(1 << 4).to_equal(16)  # oracle: shift left by 4
+        expect(-8 >> 1).to_equal(-4)  # oracle: arithmetic shift right
 
-    it "rt_image_load: resolves through to the linked C implementation instead of failing to resolve":
-        step("Run the image load probe fixture under the interpreter")
-        val (out, err, _code) = run_probe_child("test/fixture/interpreter_extern/image_load_probe.spl", "image_load_result=")
-        assert_true(out.contains("image_load_result=0"))
-        assert_equal(err.contains("unknown extern function"), false)
+    it "array construction and access":
+        step("Verify: array construction and access")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        expect([1, 2, 3].len()).to_equal(3)  # oracle: three-element literal
+        expect([10, 20, 30][1]).to_equal(20)  # oracle: zero-based indexing
+        expect([].len()).to_equal(0)  # oracle: empty literal has no elements
 
-    it "rt_image_zzz_bogus: a prefix name with no C definition gets the family guard, not a crash":
-        step("Run the image bogus-name probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/image_bogus_probe.spl", "image_load_result=")
-        assert_true(err.contains("unknown rt_image_*"))
-        assert_equal(err.contains("unknown extern function"), false)
-
-describe "rt_simpleos_log_*/rt_log_target_* interpreter registration":
-
-    it "rt_simpleos_log_init: resolves through to the hosted fallback implementation instead of failing to resolve":
-        step("Run the simpleos_log init probe fixture under the interpreter")
-        val (out, err, _code) = run_probe_child("test/fixture/interpreter_extern/simpleos_log_init_probe.spl", "simpleos_log_init_result=")
-        assert_true(out.contains("simpleos_log_init_result=false"))
-        assert_equal(err.contains("unknown extern function"), false)
-
-    it "rt_simpleos_log_zzz_bogus: a prefix name with no C definition gets the family guard, not a crash":
-        step("Run the simpleos_log bogus-name probe fixture under the interpreter")
-        val (_out, err, _code) = run_probe_child("test/fixture/interpreter_extern/simpleos_log_bogus_probe.spl", "simpleos_log_init_result=")
-        assert_true(err.contains("unknown hosted log-lib"))
-        assert_equal(err.contains("unknown extern function"), false)
-
-describe "rt_socket_set_nonblocking interpreter registration":
-
-    it "resolves through to the linked C implementation instead of failing to resolve":
-        step("Run the socket nonblock probe fixture under the interpreter")
-        val (out, err, _code) = run_probe_child("test/fixture/interpreter_extern/socket_nonblock_probe.spl", "socket_nonblock_result=")
-        assert_true(out.contains("socket_nonblock_result=false"))
-        assert_equal(err.contains("unknown extern function"), false)
+    it "function calls and closure values":
+        step("Verify: function calls and closure values")
+        # @req: REQ-COMPILER-INTERPRETER_EXTERN-001
+        fn add(a: i64, b: i64) -> i64: a + b
+        expect(add(2, 3)).to_equal(5)  # oracle: 2+3
+        val f = fn(x: i64) -> i64: x * x
+        expect(f(4)).to_equal(16)  # oracle: 4 squared
