@@ -2131,6 +2131,7 @@ impl<M: Module> CodegenBackend<M> {
         // in `func_ids`) and before any body that references one.
         // See codegen/closure_boxed_entry.rs.
         self.emit_boxed_closure_entries(&functions)?;
+        self.emit_boxed_fn_value_entries(mir, &functions)?;
         if native_trace {
             eprintln!("[rust-jit] compile_all function bodies start");
         }

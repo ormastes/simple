@@ -2517,6 +2517,7 @@ That combination provides maximum practical completeness without imposing dynami
 | 2026-08-22 | checks | `09e879ff838`, `775fb38377a`, `cb2aef31d8e` | must-check ledger ownership, must-pass evidence bound to measured stage2 | §20 (gates) | `check_push_must_pass_requires_unobtainable_bootstrap_fingerprint_2026-08-22.md` |
 | 2026-08-22 | audit | `f2761551931` | extern census made linear | §20 (tooling) | commit |
 | 2026-08-22 | docs | (this commit) | added §27 and §20 pointer | §20, §27 | — |
+| 2026-08-22 | stage1-in-JIT / fn-ref ports (seed JIT) | (this commit) | named-fn-as-value JIT-compiled via `name$boxed` thunk + zero-capture `rt_closure_new`; jit.rs guard narrowed to bodiless/extern names; dead uncompilable `declared_imported_surface_signature_type` removed (was the HIR-lowering gate). Stage1 STILL interprets: next gate `[CODEGEN-AMBIGUOUS-METHOD]` on `Any`/trait-object receivers (6 bodies: `BlockRegistry.register`, `register_block`, `with_block`, `objtaker_take_*`) | §20 | `doc/08_tracking/bug/jit_fn_ref_port_bails_whole_stage1_2026-08-22.md`, `tests/fn_ref_value_jit.rs`, perf-gate rows `FNREFJIT` |
 
 ### Phase 1 (stage1 bootstrap) state
 

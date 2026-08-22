@@ -103,7 +103,39 @@ impl<M: Module> CodegenBackend<M> {
         Ok(())
     }
 
+    /// Declare and define one `F$boxed` thunk per NAMED function that some
+    /// body in `mir` loads as a first-class value (`val g = add_one`,
+    /// `Port(tokenize_fn: my_tok)`). A named fn has no ctx slot, so the thunk
+    /// drops the closure handle and forwards only the user arguments; the
+    /// `GlobalLoad` site then wraps `F$boxed` in a zero-capture
+    /// `rt_closure_new` object, giving a bare function reference the SAME
+    /// representation as a lambda value. Must run AFTER `declare_functions`.
+    pub fn emit_boxed_fn_value_entries(
+        &mut self,
+        mir: &crate::mir::MirModule,
+        functions: &[MirFunction],
+    ) -> BackendResult<()> {
+        let trace = std::env::var("SIMPLE_NATIVE_BUILD_RUST_TRACE").ok().as_deref() == Some("1");
+        for name in named_fn_value_targets(mir) {
+            if trace {
+                eprintln!("[rust-jit] fn-value boxed entry for {name}");
+            }
+            let Some(func) = functions.iter().find(|f| f.name == name) else {
+                continue;
+            };
+            self.emit_boxed_entry_for(func, false)?;
+        }
+        Ok(())
+    }
+
     fn emit_one_boxed_entry(&mut self, lambda: &MirFunction) -> BackendResult<()> {
+        self.emit_boxed_entry_for(lambda, true)
+    }
+
+    /// `has_ctx`: the target's slot 0 is the closure ctx pointer (outlined
+    /// lambda) and receives the handle; otherwise (named fn) the handle is
+    /// dropped and every target param is a user param.
+    fn emit_boxed_entry_for(&mut self, lambda: &MirFunction, has_ctx: bool) -> BackendResult<()> {
         let raw_name = boxed_entry_name(&lambda.name);
         if self.func_ids.contains_key(&raw_name) {
             return Ok(());
@@ -117,7 +149,8 @@ impl<M: Module> CodegenBackend<M> {
         // The outlined lambda's params are [ctx, p1..pn]; the boxed entry has
         // the same arity but every slot is a tagged RuntimeValue (i64).
         let target_sig = build_mir_signature(lambda);
-        let user_params: Vec<TypeId> = lambda.params.iter().skip(1).map(|p| p.ty).collect();
+        let skip = usize::from(has_ctx);
+        let user_params: Vec<TypeId> = lambda.params.iter().skip(skip).map(|p| p.ty).collect();
         let ret_ty = lambda.return_type;
 
         let mut sig = Signature::new(platform_call_conv());
@@ -159,12 +192,12 @@ impl<M: Module> CodegenBackend<M> {
             let params: Vec<_> = b.block_params(entry).to_vec();
             let closure = params[0];
 
-            let mut call_args = vec![closure];
+            let mut call_args = if has_ctx { vec![closure] } else { Vec::new() };
             for (i, ty) in user_params.iter().enumerate() {
                 let tagged = params[i + 1];
                 // Cranelift type the target actually declares for this slot
-                // (index i + 1 — slot 0 is the ctx pointer).
-                let want = target_sig.params[i + 1].value_type;
+                // (offset by one when slot 0 is the ctx pointer).
+                let want = target_sig.params[i + skip].value_type;
                 call_args.push(unbox_arg(&mut b, &helpers, tagged, *ty, want));
             }
 
@@ -361,4 +394,38 @@ fn coerce(
         (types::F64, types::I64) => b.ins().bitcast(types::I64, MemFlags::new(), val),
         _ => val,
     }
+}
+
+/// Names of DEFINED (non-extern, with a body) functions that some function in
+/// `mir` loads as a first-class value through `GlobalLoad`. Mirrors the
+/// resolution in `cranelift_emitter::emit_global_load`: a name that is not a
+/// declared global variable but is a function. Extern fn names are excluded
+/// on both sides (they carry no body to wrap and remain guarded in jit.rs).
+pub fn named_fn_value_targets(mir: &crate::mir::MirModule) -> Vec<String> {
+    let global_names: std::collections::HashSet<&str> = mir
+        .globals
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .filter(|name| !mir.extern_fn_names.contains(*name))
+        .collect();
+    let defined: std::collections::HashSet<&str> = mir
+        .functions
+        .iter()
+        .filter(|f| !f.blocks.is_empty() && !mir.extern_fn_names.contains(&f.name))
+        .map(|f| f.name.as_str())
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    for func in &mir.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let crate::mir::MirInst::GlobalLoad { global_name, .. } = inst {
+                    let name = global_name.as_str();
+                    if !global_names.contains(name) && defined.contains(name) && !out.iter().any(|n| n == name) {
+                        out.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
 }

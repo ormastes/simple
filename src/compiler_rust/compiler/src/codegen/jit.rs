@@ -381,9 +381,15 @@ impl JitCompiler {
             .map(|(name, _, _)| name.as_str())
             .filter(|name| !mir.extern_fn_names.contains(*name))
             .collect();
+        // A DEFINED function (non-extern, with a body) loaded as a value is
+        // now JIT-able: `emit_boxed_fn_value_entries` gives it a `name$boxed`
+        // thunk and `emit_global_load` wraps that in a zero-capture
+        // `rt_closure_new`, so it is a real closure object. Only extern /
+        // bodiless names still have no representation and keep the refusal.
         let func_names: std::collections::HashSet<&str> = mir
             .functions
             .iter()
+            .filter(|f| f.blocks.is_empty())
             .map(|f| f.name.as_str())
             .chain(mir.extern_fn_names.iter().map(String::as_str))
             .collect();
