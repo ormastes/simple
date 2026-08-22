@@ -1,0 +1,54 @@
+"""
+## Purpose and audience
+Purpose: Prove that registered MIR passes expose truthful operational status.
+Audience: compiler and optimizer maintainers.
+"""
+# @req: REQ-001, REQ-002, REQ-003
+
+use std.spec.*
+use compiler.mir_opt.mir_opt.mod.{
+    PassKind, PassStatus, PassExpectation,
+    pass_status, pass_expectation, pass_status_allows_transform,
+    optimizationpipeline_passes_for_level,
+    optimizationpipeline_effective_passes_for_level,
+    optimizationpipeline_for_level,
+    mir_pass_registry_integrity_errors,
+    OptLevel
+}
+
+describe "MIR pass operational status":
+    it "keeps identity scalar adapters out of effective transformation dispatch":
+        step("Classify an identity adapter")
+        expect(pass_status(PassKind.DeadCodeElimination)).to_equal(PassStatus.Skeleton)
+        expect(pass_expectation(PassKind.DeadCodeElimination)).to_equal(PassExpectation.NeverTransforms)
+        expect(pass_status_allows_transform(pass_status(PassKind.DeadCodeElimination))).to_equal(false)
+
+    it "keeps proof-incomplete safety transforms disabled":
+        step("Classify a proof-incomplete bounds transform")
+        val status = pass_status(PassKind.BoundsCheckElimination)
+        expect(pass_status_allows_transform(status)).to_equal(false)
+        expect(pass_expectation(PassKind.BoundsCheckElimination)).to_equal(PassExpectation.NeverTransforms)
+
+    it "allows the active collection optimizer to dispatch":
+        step("Classify an active transform")
+        expect(pass_status(PassKind.CollectionOpt)).to_equal(PassStatus.Active)
+        expect(pass_expectation(PassKind.CollectionOpt)).to_equal(PassExpectation.MustTransformSentinel)
+        expect(pass_status_allows_transform(pass_status(PassKind.CollectionOpt))).to_equal(true)
+
+    it "retains the active narrow vector rewrite classification":
+        step("Classify the active vector transform")
+        expect(pass_status(PassKind.AutoVectorize)).to_equal(PassStatus.Active)
+        expect(pass_status_allows_transform(pass_status(PassKind.AutoVectorize))).to_equal(true)
+
+    it "distinguishes requested passes from the effective pipeline":
+        step("Load requested and effective optimizer plans")
+        val requested = optimizationpipeline_passes_for_level(OptLevel.Speed)
+        val effective = optimizationpipeline_effective_passes_for_level(OptLevel.Speed)
+        expect(requested.contains("dead_code_elimination")).to_equal(true)
+        expect(effective.contains("dead_code_elimination")).to_equal(false)
+        expect(effective.contains("collection_opt")).to_equal(true)
+        expect(optimizationpipeline_for_level(OptLevel.Speed).passes).to_equal(effective)
+
+    it "passes the structural optimizer registry self-check":
+        step("Reject dishonest active transforms")
+        expect(mir_pass_registry_integrity_errors().len()).to_equal(0)
