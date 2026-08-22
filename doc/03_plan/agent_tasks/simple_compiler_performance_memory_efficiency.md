@@ -139,6 +139,22 @@
 - Verification/optimizer/timing/RSS execution remains intentionally omitted
   under the user's no-verify instruction.
 
+## Completed lint manifest-discovery tranche
+
+- Confirmed prior work already provides one prepared config resolution and one
+  parsed-append reuse per file; did not duplicate that solution.
+- Disabled unused cwd manifest discovery/parsing only for target-scoped CLI
+  linter construction while preserving direct-library defaults.
+- Preserved the existing ancestor-cache and ten-level search semantics after
+  review rejected distance-free path compression as horizon-unsafe.
+- Added source contracts for constructor ownership and prepared resolution.
+- Parallel lanes reviewed precedence, error ordering, profile/file overrides,
+  cache freshness, filesystem probes, dictionary copies, and current coverage.
+- Next allocation boundary: immutable command-effective manifest/CLI bases plus
+  sparse file-attribute overlays to remove two override-dictionary copies/file.
+- Verification, optimizer, timing, allocation, and RSS execution intentionally
+  remain omitted under the user's no-verify instruction.
+
 ## Completed VHDL metadata-index tranche
 
 - Built collision-framed exact and eligible-alias row-index maps once.

@@ -923,3 +923,12 @@ fields; a valid current interval overlaps iff the maximum end from another
 field exceeds its start. For `end <= start`, compare the current row against
 prior rows in its region with both legacy inequalities. Stop on the first
 cross-field overlap because later work can only keep `complete` false.
+
+### Lint manifest construction ownership
+
+`Linter.new(discover_project_config=true)` preserves existing library behavior.
+Both target-scoped command entrypoints pass `false`, then resolve the target
+through the existing bounded `linter_find_project_sdn` path. Direct-library
+callers omit the argument and retain cwd discovery. Do not path-compress
+ancestors without recording manifest distance: a descendant cache hop must not
+extend the fixed ten-directory search horizon.
