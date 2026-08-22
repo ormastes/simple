@@ -238,6 +238,11 @@ target boolean to configuration and translator helpers. Public API boundaries
 remain stable; no process-global backend cache is introduced, so same-process
 calls can select different policies.
 
+VHDL driver and catalog diagnostics follow the same operation-local rule, but
+retain independent snapshots to avoid widening their API. Each snapshot occurs
+after initial entry/root validation and is immutable through metadata/function
+loops. Trace remains stderr-only and outside generated VHDL/catalog state.
+
 ## References
 
 - `doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`
