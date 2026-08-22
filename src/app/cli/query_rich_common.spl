@@ -94,6 +94,41 @@ fn query_file_read_rich(path: text) -> text:
     # the same text ownership at the parser boundary.
     file_mmap_read_text(path)
 
+# Escape JSON string content without repeatedly copying the whole value.  Keep
+# this deliberately aligned with the historical query serializers: only the
+# five characters below are escaped; Unicode and every other byte are retained.
+fn query_json_escape(value: text) -> text:
+    var needs_escape = false
+    for ch in value.chars():
+        if ch == "\\" or ch == "\"" or ch == "\n" or ch == "\r" or ch == "\t":
+            needs_escape = true
+            break
+    if not needs_escape:
+        return value
+
+    var parts: [text] = []
+    var span_start = 0
+    for (i, ch) in value.chars().enumerate():
+        var escaped = ""
+        if ch == "\\":
+            escaped = "\\\\"
+        elif ch == "\"":
+            escaped = "\\\""
+        elif ch == "\n":
+            escaped = "\\n"
+        elif ch == "\r":
+            escaped = "\\r"
+        elif ch == "\t":
+            escaped = "\\t"
+        if escaped != "":
+            if i > span_start:
+                parts.push(value.substring(span_start, i))
+            parts.push(escaped)
+            span_start = i + 1
+    if span_start < value.len():
+        parts.push(value.substring(span_start))
+    parts.join("")
+
 fn _find_in_line(line: text, pattern: text) -> i64:
     """Find the 0-based position of pattern in line. Returns 0 if not found."""
     var pos = 0
