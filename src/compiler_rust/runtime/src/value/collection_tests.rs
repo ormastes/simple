@@ -2274,6 +2274,7 @@ fn transient_heap_promotion_retains_reachable_cycle_only() {
     assert!(super::rt_transient_array_scope_begin());
     let kept_a = super::rt_array_new(1);
     let kept_b = super::rt_array_new(1);
+    let kept_c = super::rt_array_new(1);
     let reclaimed = super::rt_array_new(1);
     let reclaimed_tuple = super::rt_tuple_new(1);
     let reclaimed_dict = crate::value::dict::rt_dict_new(0);
@@ -2298,6 +2299,13 @@ fn transient_heap_promotion_retains_reachable_cycle_only() {
     unsafe { *raw_root = kept_a.0 };
     let root = RuntimeValue((raw_root as u64) | 1);
     assert!(super::rt_transient_heap_promote(root));
+    let first_nodes = super::rt_transient_last_promoted_nodes();
+    let first_bytes = super::rt_transient_last_promoted_bytes();
+    assert!(super::rt_transient_heap_promote(kept_c));
+    assert_eq!(super::rt_transient_last_promoted_nodes(), 1);
+    assert!(super::rt_transient_last_promoted_bytes() > 0);
+    assert_eq!(super::rt_transient_scope_promoted_nodes(), first_nodes + 1);
+    assert!(super::rt_transient_scope_promoted_bytes() > first_bytes);
     assert!(super::rt_transient_heap_promote(root));
     assert!(super::rt_transient_array_scope_end());
 
@@ -2316,6 +2324,7 @@ fn transient_heap_promotion_retains_reachable_cycle_only() {
     }
     super::rt_array_free(kept_a);
     super::rt_array_free(kept_b);
+    super::rt_array_free(kept_c);
 }
 
 /// `rt_find` is the receiver-polymorphic `find` the type-blind dispatch tables

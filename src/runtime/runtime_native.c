@@ -960,6 +960,10 @@ static _Thread_local RtCoreTransientRawAlloc* rt_core_transient_raw_allocs = NUL
 static _Thread_local size_t rt_core_transient_raw_alloc_cap = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_len = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_tombs = 0;
+static _Thread_local int64_t rt_core_transient_last_promoted_node_count = 0;
+static _Thread_local int64_t rt_core_transient_last_promoted_byte_count = 0;
+static _Thread_local int64_t rt_core_transient_scope_promoted_node_count = 0;
+static _Thread_local int64_t rt_core_transient_scope_promoted_byte_count = 0;
 static RtCoreMutex** rt_core_mutex_registry = NULL;
 static size_t rt_core_mutex_registry_len = 0;
 static size_t rt_core_mutex_registry_cap = 0;
@@ -1192,6 +1196,9 @@ int8_t rt_transient_array_scope_begin(void) {
     rt_core_transient_array_scope_id = next_id;
     rt_core_transient_array_scope_active = 1;
     rt_core_transient_array_scope_paused = 0;
+    rt_transient_promotion_stats_reset();
+    rt_core_transient_scope_promoted_node_count = 0;
+    rt_core_transient_scope_promoted_byte_count = 0;
     return 1;
 }
 
@@ -1930,15 +1937,25 @@ static int rt_core_transient_add(RtCoreTransientPlan* plan, int64_t value) {
     return rt_core_transient_plan_push(plan, node.ptr, node.kind, node.bytes) ? 1 : -1;
 }
 
-static int64_t rt_core_transient_last_promoted_node_count = 0;
-static int64_t rt_core_transient_last_promoted_byte_count = 0;
-
 int64_t rt_transient_last_promoted_nodes(void) {
     return rt_core_transient_last_promoted_node_count;
 }
 
 int64_t rt_transient_last_promoted_bytes(void) {
     return rt_core_transient_last_promoted_byte_count;
+}
+
+int64_t rt_transient_scope_promoted_nodes(void) {
+    return rt_core_transient_scope_promoted_node_count;
+}
+
+int64_t rt_transient_scope_promoted_bytes(void) {
+    return rt_core_transient_scope_promoted_byte_count;
+}
+
+void rt_transient_promotion_stats_reset(void) {
+    rt_core_transient_last_promoted_node_count = 0;
+    rt_core_transient_last_promoted_byte_count = 0;
 }
 
 static size_t rt_core_transient_node_bytes(RtCoreTransientNode node) {
@@ -1971,8 +1988,7 @@ static size_t rt_core_transient_node_bytes(RtCoreTransientNode node) {
 int8_t rt_transient_heap_promote(int64_t value) {
     if (!rt_core_transient_array_scope_active || !rt_core_transient_array_scope_paused) return 0;
     rt_core_heap_lifecycle_acquire();
-    rt_core_transient_last_promoted_node_count = 0;
-    rt_core_transient_last_promoted_byte_count = 0;
+    rt_transient_promotion_stats_reset();
     RtCoreTransientPlan plan = {0};
     RtCoreTransientNode root;
     int ok = rt_core_transient_classify(value, &root) == 1 &&
@@ -2050,6 +2066,16 @@ int8_t rt_transient_heap_promote(int64_t value) {
         }
         rt_core_transient_last_promoted_node_count = promoted_nodes;
         rt_core_transient_last_promoted_byte_count = promoted_bytes;
+        if (promoted_nodes > INT64_MAX - rt_core_transient_scope_promoted_node_count) {
+            rt_core_transient_scope_promoted_node_count = INT64_MAX;
+        } else {
+            rt_core_transient_scope_promoted_node_count += promoted_nodes;
+        }
+        if (promoted_bytes > INT64_MAX - rt_core_transient_scope_promoted_byte_count) {
+            rt_core_transient_scope_promoted_byte_count = INT64_MAX;
+        } else {
+            rt_core_transient_scope_promoted_byte_count += promoted_bytes;
+        }
     }
     free(plan.nodes);
     free(plan.seen);

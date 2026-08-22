@@ -90,8 +90,14 @@ int main(void) {
           "promotion reports exactly two raw carriers plus six heap nodes");
     check(rt_transient_last_promoted_bytes() > 8 * (int64_t)sizeof(int64_t),
           "promotion reports retained header and backing bytes");
+    check(rt_transient_scope_promoted_nodes() == 8,
+          "scope promotion statistics include the first retained graph");
     check(rt_transient_heap_promote(kept.dict) == 1,
           "a second promotion of the retained graph succeeds");
+    check(rt_transient_last_promoted_nodes() == 0,
+          "repeat promotion reports no newly retained nodes");
+    check(rt_transient_scope_promoted_nodes() == 8,
+          "repeat promotion preserves the cumulative scope node count");
     check(rt_transient_array_scope_end() == 1, "promoted scope ends");
     if (carriers_promoted) {
         rt_free(carrier_root);
@@ -110,6 +116,11 @@ int main(void) {
           "promoted nested array and boxed float survive");
 
     check(rt_transient_array_scope_begin() == 1, "follow-up scope begins");
+    check(rt_transient_last_promoted_nodes() == 0 &&
+              rt_transient_last_promoted_bytes() == 0 &&
+              rt_transient_scope_promoted_nodes() == 0 &&
+              rt_transient_scope_promoted_bytes() == 0,
+          "a new scope resets cumulative promotion statistics");
     check(rt_array_new(1) != NULL, "follow-up scoped allocation succeeds");
     check(rt_transient_array_scope_end() == 1, "follow-up scope ends");
     check(rt_heap_registry_count() == baseline + 6,

@@ -618,6 +618,19 @@ It is **not** a measurement of this bug's lane and must not be quoted as one.
 Both specs are source-TEXT contracts; passing them fences the fix's shape and
 proves nothing about RSS.
 
+### 2026-08-22 driver promotion-attribution instrumentation
+
+The streaming HIR driver now records two v1 memory-snapshot rows per source:
+`hir-promotion` attributes the initial canonical HIR graph, while
+`hir-promotion-total` records the transient scope's cumulative promoted nodes
+and bytes after diagnostic, flat-HIR-row, and frontend-registry owners have
+also promoted. Cache hits record zero for both rows because they open no
+transient scope. The receipt field schema is unchanged: the existing
+`retained_modules` and `validation_keys` columns continue to carry promoted
+nodes and bytes for promotion phases. This is attribution instrumentation, not
+a Stage-3 RSS fix or closure evidence; the bug remains open pending a canonical
+instrumented Stage-3 transaction.
+
 `stage3_hir_lowerer_reuse_contract_spec.spl` was found **RED on arrival** at
 `4 total, 3 passed, 1 failed`: the example "validates compatibility spellings
 through physical source identity" died with `semantic: variable source_idx not

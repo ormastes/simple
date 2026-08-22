@@ -54,13 +54,17 @@ extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
 extern fn rt_transient_last_promoted_nodes() -> i64
 extern fn rt_transient_last_promoted_bytes() -> i64
+extern fn rt_transient_scope_promoted_nodes() -> i64
+extern fn rt_transient_scope_promoted_bytes() -> i64
 extern fn rt_exit(code: i64)
 extern fn rt_stdout_flush()
 
 struct StreamingHirPromotion:
     module: HirModule
-    promoted_nodes: i64
-    promoted_bytes: i64
+    hir_promoted_nodes: i64
+    hir_promoted_bytes: i64
+    total_promoted_nodes: i64
+    total_promoted_bytes: i64
 
 impl CompilerDriver:
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<StreamingHirPromotion, text>:
@@ -99,13 +103,21 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
             return Err("frontend registry promotion failed during HIR reparse for {source.path}")
+        # The last-promotion counters above attribute the canonical HIR graph.
+        # Read the scope counters only after every escaping owner has promoted
+        # so diagnostics, the optional flat row, and frontend registries are
+        # included in the complete per-source attribution.
+        val total_promoted_nodes = rt_transient_scope_promoted_nodes()
+        val total_promoted_bytes = rt_transient_scope_promoted_bytes()
         if not driver_end_transient_parse_scope():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             return Err("transient parser scope end failed for {source.path}")
         Ok(StreamingHirPromotion(
             module: hir_module,
-            promoted_nodes: hir_promoted_nodes,
-            promoted_bytes: hir_promoted_bytes))
+            hir_promoted_nodes: hir_promoted_nodes,
+            hir_promoted_bytes: hir_promoted_bytes,
+            total_promoted_nodes: total_promoted_nodes,
+            total_promoted_bytes: total_promoted_bytes))
 
     me lower_and_check_streaming_surfaces_impl() -> (CompileContext, bool):
         if (not self.streaming_surface_owner_ready or
@@ -259,6 +271,16 @@ impl CompilerDriver:
                 if not hir_bootstrap_mode_gate:
                     for hir_cached_warning in hir_cache_last_warnings():
                         self.ctx.add_warning(hir_cached_warning)
+                # A cache hit opens no transient parse/HIR scope. Explicit zero
+                # rows keep per-source attribution complete without sampling a
+                # stale scope counter from the preceding source.
+                if (not driver_hir_promotion_snapshot(
+                        "hir-promotion", source_index, source.path, 0, 0) or
+                    not driver_hir_promotion_snapshot(
+                        "hir-promotion-total", source_index, source.path, 0, 0)):
+                    self.ctx.add_error("durable cached HIR promotion snapshot write failed")
+                    mem_snapshot_abort()
+                    return (self.ctx, false)
             else:
                 val lower_result = self.lower_streaming_surface_source(lowering, source, is_requested_bootstrap_entry)
                 if lower_result.is_err():
@@ -279,9 +301,15 @@ impl CompilerDriver:
                 val promoted_hir = lower_result.unwrap()
                 hir_module = promoted_hir.module
                 if not driver_hir_promotion_snapshot(
-                    source_index, source.path,
-                    promoted_hir.promoted_nodes, promoted_hir.promoted_bytes):
+                    "hir-promotion", source_index, source.path,
+                    promoted_hir.hir_promoted_nodes, promoted_hir.hir_promoted_bytes):
                     self.ctx.add_error("durable HIR promotion snapshot write failed")
+                    mem_snapshot_abort()
+                    return (self.ctx, false)
+                if not driver_hir_promotion_snapshot(
+                    "hir-promotion-total", source_index, source.path,
+                    promoted_hir.total_promoted_nodes, promoted_hir.total_promoted_bytes):
+                    self.ctx.add_error("durable total HIR promotion snapshot write failed")
                     mem_snapshot_abort()
                     return (self.ctx, false)
                 # Keep the aggregate diagnostic array inside its canonical
