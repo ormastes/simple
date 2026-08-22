@@ -113,6 +113,17 @@
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed shared parser-profile gate tranche
+
+- Reset the existing parser profiling tri-state once per parse boundary.
+- Exported its suppression-aware decision to split declaration parsing.
+- Removed per-method environment reads without changing enabled clocks, labels,
+  or output intervals.
+- Added mirrored source contracts for the shared owner and lazy zero sentinel.
+- Static model: `M` environment/key/value conversions become one per parse;
+  cache storage is unchanged and disabled clock/output work remains zero.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed FlatAstBridge trace-dispatch tranche
 
 - Scoped the existing compiler-trace snapshot across fresh and restored flat
