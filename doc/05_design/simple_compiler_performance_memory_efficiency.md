@@ -295,3 +295,6 @@ The current string-builder pass is a `Skeleton` identity and contains no dormant
 ## Strength-reduction rehabilitation contract
 
 Every callable strength-reduction surface—not only canonical dispatch—remains identity while status is `Disabled`. Rehabilitation must prove operand/result integer widths, signedness, non-negativity where required, overflow/trap semantics, shift legality, constant materialization, dominance and fresh-local allocation, and target profitability for each rewrite. Signed division/remainder and negative operands require dedicated differential witnesses. Provider metadata describes required facts but never authorizes a transform by itself.
+## GVN rehabilitation contract
+
+Every GVN callable surface remains identity while status is `Skeleton`. Rehabilitation requires dominator-tree traversal, dominance-scoped leader tables, structural interned expression keys, opcode type/trap semantics, and MemorySSA-lite versions for loads/calls/stores. Leaders are invalidated or scoped at control merges; block storage order is never evidence. Positive witnesses must include dominating reuse, while sibling branches, intervening writes/unknown calls, traps, and alias ambiguity are mandatory negative cases.
