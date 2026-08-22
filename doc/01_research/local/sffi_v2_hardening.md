@@ -1340,3 +1340,15 @@ second provider call, or explicit allocation. The readiness spec passes 5/5,
 three source checks pass, and lint has zero errors. Static string-literal error
 reasons avoid inventing numeric boolean/status workarounds. The raw provider is
 still unsigned and exception/status-out hardening remains open.
+
+Dynamic Torch now preserves failures for fourteen additional tensor-returning
+operations: add/sub/mul/div scalar, pow, relu, sigmoid, tanh, gelu, sqrt, exp,
+log, neg, and abs. Their old zero-handle APIs are removed and both the shared
+unary dispatcher and scalar dispatcher carry `Result<i64, text>` until the
+owning `BackendError` conversion. The five remaining trigonometric helpers are
+still legacy internally, but their caller rejects non-positive handles before
+lifting. The readiness spec passes 7/7, three focused source checks pass, and
+lint has zero errors. A mechanical call-shape audit confirms exactly one raw
+operation call and zero explicit allocations in each of the fourteen migrated
+wrappers. Required availability/input/output checks remain; no hashing, lookup,
+I/O, retry, or extra provider call was introduced.

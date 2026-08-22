@@ -1056,3 +1056,11 @@ query and one raw operation call, with only input/output contract branches and
 no lookup, hashing, I/O, retry, or explicit allocation. Continue with tensor-
 returning dimension, activation, scalar, and creation functions, then scalar
 reductions whose valid numeric zero must be distinguished from provider error.
+
+Fourteen dynamic Torch scalar/unary tensor operations now preserve failures as
+typed results through their shared production dispatchers. Readiness is 7/7;
+three focused checks and lint pass. Static call-shape inspection reports one raw
+operation call and no explicit allocation per migrated wrapper. Next migrate
+the five trigonometric helpers in `dyn_sffi_tensor_ops`, then shape/index and
+constructor handle families. Scalar reductions must use a status/value result
+because floating-point zero is valid data and cannot remain an error sentinel.
