@@ -1,0 +1,222 @@
+# @cover src/os/kernel/fw_cfg/directory_batch_parser_v1.spl 90%
+
+use std.spec.{describe, it, expect}
+use os.kernel.fw_cfg.directory_batch_parser_v1.{
+    FwCfgNamedLimitV1,
+    fw_cfg_parse_directory_batch_v1,
+    fw_cfg_validate_batch_requests_v1,
+}
+
+fn _put_be16(mut out: [u8], value: u16):
+    out.push(((value >> 8) & 0xFFu16).to_u8())
+    out.push((value & 0xFFu16).to_u8())
+
+fn _put_be32(mut out: [u8], value: u32):
+    out.push(((value >> 24) & 0xFFu32).to_u8())
+    out.push(((value >> 16) & 0xFFu32).to_u8())
+    out.push(((value >> 8) & 0xFFu32).to_u8())
+    out.push((value & 0xFFu32).to_u8())
+
+fn _append_entry(mut out: [u8], name: text, size: u32, selector: u16):
+    _put_be32(out, size)
+    _put_be16(out, selector)
+    _put_be16(out, 0u16)
+    val name_len = name.len()
+    var index: i64 = 0
+    while index < 56:
+        if index < name_len:
+            out.push(name.char_code_at(index).to_u8())
+        else:
+            out.push(0u8)
+        index = index + 1
+
+fn _directory(names: [text], sizes: [u32], selectors: [u16]) -> [u8]:
+    var out: [u8] = []
+    _put_be32(out, names.len().to_u32())
+    var index: i64 = 0
+    while index < names.len():
+        _append_entry(out, names[index], sizes[index], selectors[index])
+        index = index + 1
+    out
+
+fn _request(name: text, max_bytes: u64) -> FwCfgNamedLimitV1:
+    FwCfgNamedLimitV1(name: name, max_bytes: max_bytes)
+
+describe "shared QEMU fw_cfg directory batch parser":
+    it "returns matches in stable request order":
+        val directory = _directory(
+            ["opt/first", "opt/second", "opt/third"],
+            [11u32, 22u32, 33u32], [0x21u16, 0x22u16, 0x23u16]
+        )
+        val result = fw_cfg_parse_directory_batch_v1(directory, [
+            _request("opt/third", 33u64),
+            _request("opt/first", 11u64),
+            _request("opt/second", 22u64),
+        ])
+        expect(result.ok).to_equal(true)
+        expect(result.reason).to_equal("ok")
+        expect(result.matches.len()).to_equal(3)
+        expect(result.matches[0].selector).to_equal(0x23u16)
+        expect(result.matches[1].selector).to_equal(0x21u16)
+        expect(result.matches[2].selector).to_equal(0x22u16)
+
+    it "decodes exact big-endian entry framing and skips reserved bytes":
+        var directory: [u8] = []
+        _put_be32(directory, 1u32)
+        _append_entry(directory, "n", 0x01020304u32, 0x1234u16)
+        # Entry layout is size[0..4], selector[4..6], reserved[6..8], name[8..64].
+        # Directory offsets therefore place reserved at 10/11 and name at 12.
+        directory[10] = 0xA5u8
+        directory[11] = 0x5Au8
+        expect(directory[12]).to_equal(0x6Eu8)
+        val result = fw_cfg_parse_directory_batch_v1(
+            directory, [_request("n", 0x01020304u64)]
+        )
+        expect(result.ok).to_equal(true)
+        expect(result.matches[0].size).to_equal(0x01020304u32)
+        expect(result.matches[0].selector).to_equal(0x1234u16)
+
+    it "reports missing duplicate and oversized requests independently":
+        val directory = _directory(
+            ["opt/duplicate", "opt/large", "opt/duplicate"],
+            [1u32, 65u32, 2u32], [0x31u16, 0x32u16, 0x33u16]
+        )
+        val result = fw_cfg_parse_directory_batch_v1(directory, [
+            _request("opt/missing", 1u64),
+            _request("opt/duplicate", 8u64),
+            _request("opt/large", 64u64),
+        ])
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("request-failed")
+        expect(result.matches[0].reason).to_equal("file-not-found")
+        expect(result.matches[1].reason).to_equal("duplicate-name")
+        expect(result.matches[1].selector).to_equal(0u16)
+        expect(result.matches[1].size).to_equal(0u32)
+        expect(result.matches[2].reason).to_equal("file-exceeds-limit")
+        expect(result.matches[2].selector).to_equal(0x32u16)
+        expect(result.matches[2].size).to_equal(65u32)
+
+    it "requires the complete requested name and its NUL terminator":
+        var directory = _directory(
+            ["opt/file-extra", "opt/exact"], [1u32, 2u32],
+            [0x35u16, 0x36u16]
+        )
+        # Corrupt the byte immediately following opt/exact in entry two.
+        directory[4 + 64 + 8 + 9] = 0x58u8
+        val result = fw_cfg_parse_directory_batch_v1(directory, [
+            _request("opt/file", 1u64), _request("opt/exact", 2u64),
+        ])
+        expect(result.matches[0].reason).to_equal("file-not-found")
+        expect(result.matches[1].reason).to_equal("file-not-found")
+
+    it "accepts exactly sixteen unique requests and rejects seventeen":
+        var requests: [FwCfgNamedLimitV1] = []
+        var index: i64 = 0
+        while index < 16:
+            requests.push(_request("name-{index}", 1u64))
+            index = index + 1
+        val accepted = fw_cfg_parse_directory_batch_v1(
+            [0u8, 0u8, 0u8, 0u8], requests
+        )
+        expect(accepted.reason).to_equal("request-failed")
+        expect(accepted.matches.len()).to_equal(16)
+        requests.push(_request("name-16", 1u64))
+        val rejected = fw_cfg_parse_directory_batch_v1([], requests)
+        expect(rejected.reason).to_equal("invalid-request-count")
+        expect(rejected.matches.len()).to_equal(0)
+
+    it "accepts the exact aggregate payload cap and rejects cap plus one":
+        val exact = fw_cfg_validate_batch_requests_v1([
+            _request("opt/exact-cap", 268435456u64),
+        ])
+        val over = fw_cfg_validate_batch_requests_v1([
+            _request("opt/half-a", 134217728u64),
+            _request("opt/half-b", 134217729u64),
+        ])
+        expect(exact.ok).to_equal(true)
+        expect(exact.reason).to_equal("ok")
+        expect(over.ok).to_equal(false)
+        expect(over.reason).to_equal("aggregate-max-bytes-exceeds-limit")
+
+    it "rejects aggregate overflow across sixteen individually valid requests":
+        var requests: [FwCfgNamedLimitV1] = []
+        var index: i64 = 0
+        while index < 16:
+            val limit = if index == 15: 16777217u64 else: 16777216u64
+            requests.push(_request("aggregate-{index}", limit))
+            index = index + 1
+        val result = fw_cfg_validate_batch_requests_v1(requests)
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("aggregate-max-bytes-exceeds-limit")
+
+    it "rejects empty batches and duplicate request names before parsing":
+        val empty = fw_cfg_parse_directory_batch_v1([], [])
+        val duplicate = fw_cfg_parse_directory_batch_v1([], [
+            _request("opt/same", 1u64), _request("opt/same", 2u64),
+        ])
+        expect(empty.reason).to_equal("invalid-request-count")
+        expect(duplicate.reason).to_equal("duplicate-request-name")
+
+    it "validates request names and bounds once before directory access":
+        val empty_name = fw_cfg_parse_directory_batch_v1(
+            [], [_request("", 1u64)]
+        )
+        val non_ascii = fw_cfg_parse_directory_batch_v1(
+            [], [_request("é", 1u64)]
+        )
+        val embedded_nul = fw_cfg_parse_directory_batch_v1(
+            [], [_request("bad\0name", 1u64)]
+        )
+        val overlong = fw_cfg_parse_directory_batch_v1([], [_request(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1u64
+        )])
+        val unsafe_bound = fw_cfg_parse_directory_batch_v1(
+            [], [_request("opt/file", 268435457u64)]
+        )
+        expect(empty_name.reason).to_equal("invalid-name")
+        expect(non_ascii.reason).to_equal("invalid-name")
+        expect(embedded_nul.reason).to_equal("invalid-name")
+        expect(overlong.reason).to_equal("invalid-name")
+        expect(unsafe_bound.reason).to_equal("invalid-max-bytes")
+
+    it "preserves structural directory error behavior":
+        val truncated = fw_cfg_parse_directory_batch_v1(
+            [0u8, 0u8, 0u8], [_request("opt/file", 1u64)]
+        )
+        val malformed = fw_cfg_parse_directory_batch_v1(
+            [0u8, 0u8, 0u8, 1u8], [_request("opt/file", 1u64)]
+        )
+        val trailing = fw_cfg_parse_directory_batch_v1(
+            [0u8, 0u8, 0u8, 0u8, 0u8], [_request("opt/file", 1u64)]
+        )
+        expect(truncated.reason).to_equal("truncated-directory-header")
+        expect(malformed.reason).to_equal("malformed-directory-size")
+        expect(trailing.reason).to_equal("malformed-directory-size")
+
+    it "accepts the maximum 55-byte request name":
+        val name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val result = fw_cfg_parse_directory_batch_v1(
+            _directory([name], [1u32], [0x40u16]), [_request(name, 1u64)]
+        )
+        expect(name.len()).to_equal(55)
+        expect(result.ok).to_equal(true)
+
+    it "accepts an exact 4096-entry directory":
+        var directory: [u8] = []
+        _put_be32(directory, 4096u32)
+        var entry: i64 = 0
+        while entry < 4095:
+            _append_entry(directory, "unused", 1u32, 1u16)
+            entry = entry + 1
+        _append_entry(directory, "opt/last", 7u32, 0x44u16)
+        val result = fw_cfg_parse_directory_batch_v1(
+            directory, [_request("opt/last", 7u64)]
+        )
+        expect(result.ok).to_equal(true)
+        expect(result.matches[0].selector).to_equal(0x44u16)
+
+    it "rejects a 4097-entry count before requiring the body":
+        val result = fw_cfg_parse_directory_batch_v1(
+            [0u8, 0u8, 0x10u8, 1u8], [_request("opt/file", 1u64)]
+        )
+        expect(result.reason).to_equal("entry-count-exceeds-limit")

@@ -1,5 +1,59 @@
 use std.spec.{describe, it, expect}
-use os.kernel.arch.riscv64.fw_cfg_named_file_v1.{riscv64_fw_cfg_parse_directory_v1}
+use os.kernel.arch.riscv64.fw_cfg_named_file_v1.{
+    riscv64_fw_cfg_parse_directory_v1,
+    riscv64_fw_cfg_read_named_batch_with_transport_v1,
+}
+use os.kernel.fw_cfg.directory_batch_parser_v1.{FwCfgNamedLimitV1}
+
+var selected: u16 = 0u16
+var directory_selections: i64 = 0
+var entry_bytes: [u8] = []
+var fixture_mode: i64 = 0
+var transport_selects: i64 = 0
+var payload_selections: i64 = 0
+
+fn select_fixture(selector: u16):
+    transport_selects = transport_selects + 1
+    selected = selector
+    if selector == 0x0019u16:
+        directory_selections = directory_selections + 1
+    elif selector >= 0x30u16:
+        payload_selections = payload_selections + 1
+
+fn read_fixture(length: u64) -> [u8]:
+    if selected == 0u16:
+        if fixture_mode == 1:
+            return [0u8, 0u8, 0u8, 0u8]
+        return [81u8, 69u8, 77u8, 85u8]
+    if selected == 0x0019u16 and length == 4u64:
+        if fixture_mode == 2:
+            return [0u8]
+        return [0u8, 0u8, 0u8, 4u8]
+    if selected == 0x0019u16:
+        if fixture_mode == 3:
+            return [0u8]
+        return entry_bytes
+    if selected == 0x30u16:
+        if fixture_mode == 4:
+            return []
+        return "nonce-7".bytes()
+    if selected == 0x31u16:
+        return "/images/compiler.raw".bytes()
+    if selected == 0x32u16:
+        return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".bytes()
+    "file=/images/compiler.raw,if=none,id=cfsexecns1,format=raw".bytes()
+
+fn append_entry(size: u32, selector: u16, name: text):
+    for byte in fw_cfg_test_entry(size, selector, name):
+        entry_bytes.push(byte)
+
+fn cfs_requests() -> [FwCfgNamedLimitV1]:
+    [
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.nonce", max_bytes: 128u64),
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.image_path", max_bytes: 1024u64),
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.image_sha256", max_bytes: 64u64),
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.drive_arg", max_bytes: 1062u64),
+    ]
 
 fn fw_cfg_test_entry(size: u32, selector: u16, name: text) -> [u8]:
     var bytes: [u8] = []
@@ -21,6 +75,85 @@ fn fw_cfg_test_entry(size: u32, selector: u16, name: text) -> [u8]:
     bytes
 
 describe "RV64 QEMU fw_cfg named-file directory parser":
+    it "reads four payloads after one directory selection stream and scan":
+        entry_bytes = []
+        fixture_mode = 0
+        append_entry(7u32, 0x30u16, "opt/simpleos.cfs.nonce")
+        append_entry(20u32, 0x31u16, "opt/simpleos.cfs.image_path")
+        append_entry(64u32, 0x32u16, "opt/simpleos.cfs.image_sha256")
+        append_entry(58u32, 0x33u16, "opt/simpleos.cfs.drive_arg")
+        directory_selections = 0
+
+        val reads = riscv64_fw_cfg_read_named_batch_with_transport_v1(
+            cfs_requests(), select_fixture, read_fixture)
+
+        expect(directory_selections).to_equal(1)
+        expect(reads.len()).to_equal(4)
+        expect(reads[0].bytes).to_equal("nonce-7".bytes())
+        expect(reads[1].bytes).to_equal("/images/compiler.raw".bytes())
+        expect(reads[2].bytes.len()).to_equal(64)
+        expect(reads[3].bytes).to_equal(
+            "file=/images/compiler.raw,if=none,id=cfsexecns1,format=raw".bytes())
+
+    it "fails malformed transport frames before reading payload selectors":
+        entry_bytes = []
+        payload_selections = 0
+        fixture_mode = 1
+        val bad_signature = riscv64_fw_cfg_read_named_batch_with_transport_v1(
+            cfs_requests(), select_fixture, read_fixture)
+        fixture_mode = 2
+        val short_header = riscv64_fw_cfg_read_named_batch_with_transport_v1(
+            cfs_requests(), select_fixture, read_fixture)
+        fixture_mode = 3
+        val short_body = riscv64_fw_cfg_read_named_batch_with_transport_v1(
+            cfs_requests(), select_fixture, read_fixture)
+
+        expect(bad_signature[0].reason).to_equal("signature-mismatch")
+        expect(short_header[0].reason).to_equal("truncated-directory-header")
+        expect(short_body[0].reason).to_equal("malformed-directory-size")
+        expect(payload_selections).to_equal(0)
+
+    it "reports a truncated payload without accepting its bytes":
+        entry_bytes = []
+        append_entry(7u32, 0x30u16, "opt/simpleos.cfs.nonce")
+        append_entry(20u32, 0x31u16, "opt/simpleos.cfs.image_path")
+        append_entry(64u32, 0x32u16, "opt/simpleos.cfs.image_sha256")
+        append_entry(58u32, 0x33u16, "opt/simpleos.cfs.drive_arg")
+        fixture_mode = 4
+        val reads = riscv64_fw_cfg_read_named_batch_with_transport_v1(
+            cfs_requests(), select_fixture, read_fixture)
+        expect(reads[0].ok).to_equal(false)
+        expect(reads[0].bytes).to_equal([])
+        expect(reads[0].reason).to_equal("truncated-payload")
+
+    it "rejects invalid and duplicate requests before transport access":
+        transport_selects = 0
+        val invalid = riscv64_fw_cfg_read_named_batch_with_transport_v1(
+            [FwCfgNamedLimitV1(name: "", max_bytes: 1u64)],
+            select_fixture, read_fixture)
+        val duplicate = riscv64_fw_cfg_read_named_batch_with_transport_v1(
+            [
+                FwCfgNamedLimitV1(name: "opt/a", max_bytes: 1u64),
+                FwCfgNamedLimitV1(name: "opt/a", max_bytes: 1u64),
+            ], select_fixture, read_fixture)
+        expect(invalid[0].reason).to_equal("invalid-name")
+        expect(duplicate[0].reason).to_equal("duplicate-request-name")
+        expect(transport_selects).to_equal(0)
+
+    it "rejects aggregate retention above the cap before transport access":
+        transport_selects = 0
+        val reads = riscv64_fw_cfg_read_named_batch_with_transport_v1(
+            [
+                FwCfgNamedLimitV1(
+                    name: "opt/a", max_bytes: 268435456u64),
+                FwCfgNamedLimitV1(name: "opt/b", max_bytes: 1u64),
+            ], select_fixture, read_fixture)
+        expect(reads[0].reason).to_equal(
+            "aggregate-max-bytes-exceeds-limit")
+        expect(reads[1].reason).to_equal(
+            "aggregate-max-bytes-exceeds-limit")
+        expect(transport_selects).to_equal(0)
+
     it "returns the exact matching selector and size":
         var entries = fw_cfg_test_entry(3u32, 0x20u16, "opt/other")
         for byte in fw_cfg_test_entry(12u32, 0x31u16, "opt/simpleos.cfs"):

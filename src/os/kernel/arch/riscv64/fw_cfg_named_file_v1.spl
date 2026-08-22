@@ -12,6 +12,11 @@ use os.kernel.fw_cfg.directory_parser_v1.{
     fw_cfg_valid_exact_name_v1,
 }
 use os.kernel.fw_cfg.read_result_v1.{SimpleOsFwCfgReadV1}
+use os.kernel.fw_cfg.directory_batch_parser_v1.{
+    FwCfgNamedLimitV1,
+    fw_cfg_parse_directory_batch_v1,
+    fw_cfg_validate_batch_requests_v1,
+}
 
 pub class Riscv64FwCfgDirectoryEntryV1:
     ok: bool
@@ -71,6 +76,97 @@ fn _rv64_fw_cfg_read_be32_stream() -> u32:
         (_rv64_fw_cfg_read_byte().to_u32() << 8) |
         _rv64_fw_cfg_read_byte().to_u32()
 
+fn _rv64_fw_cfg_read_selected_bytes(length: u64) -> [u8]:
+    var bytes = [0u8; length.to_i64()]
+    var index: u64 = 0u64
+    while index < length:
+        bytes[index.to_i64()] = _rv64_fw_cfg_read_byte()
+        index = index + 1u64
+    bytes
+
+fn _rv64_fw_cfg_batch_failure(
+    count: i64, reason: text
+) -> [SimpleOsFwCfgReadV1]:
+    [_rv64_fw_cfg_read_failure(reason); count]
+
+pub fn riscv64_fw_cfg_read_named_batch_with_transport_v1(
+    requests: [FwCfgNamedLimitV1],
+    select_fn: fn(u16),
+    read_selected_fn: fn(u64) -> [u8],
+) -> [SimpleOsFwCfgReadV1]:
+    """Read a batch with one directory selection, stream, and parser scan."""
+    val request_count = requests.len()
+    val validated = fw_cfg_validate_batch_requests_v1(requests)
+    if not validated.ok:
+        return _rv64_fw_cfg_batch_failure(request_count, validated.reason)
+
+    select_fn(0u16)
+    val signature = read_selected_fn(4u64)
+    if signature.len() != 4 or signature[0] != 81u8 or
+       signature[1] != 69u8 or signature[2] != 77u8 or
+       signature[3] != 85u8:
+        return _rv64_fw_cfg_batch_failure(
+            request_count, "signature-mismatch")
+
+    select_fn(0x0019u16)
+    val count_bytes = read_selected_fn(4u64)
+    if count_bytes.len() != 4:
+        return _rv64_fw_cfg_batch_failure(
+            request_count, "truncated-directory-header")
+    val count = (count_bytes[0].to_u32() << 24) |
+        (count_bytes[1].to_u32() << 16) |
+        (count_bytes[2].to_u32() << 8) |
+        count_bytes[3].to_u32()
+    if count > fw_cfg_max_directory_entries_v1():
+        return _rv64_fw_cfg_batch_failure(
+            request_count, "entry-count-exceeds-limit")
+    val entries_length = count.to_u64() * 64u64
+    val entries = read_selected_fn(entries_length)
+    if entries.len().to_u64() != entries_length:
+        return _rv64_fw_cfg_batch_failure(
+            request_count, "malformed-directory-size")
+    # The injected transport returns an owned body, while the shared parser
+    # requires the count-prefixed wire image. This bounded copy (at most
+    # 4096*64 bytes) keeps one testable transport seam; production performs one
+    # directory selection/stream and never grows either buffer incrementally.
+    var directory = [0u8; 4 + entries.len()]
+    directory[0] = count_bytes[0]
+    directory[1] = count_bytes[1]
+    directory[2] = count_bytes[2]
+    directory[3] = count_bytes[3]
+    var directory_index: i64 = 0
+    while directory_index < entries.len():
+        directory[4 + directory_index] = entries[directory_index]
+        directory_index = directory_index + 1
+
+    val batch = fw_cfg_parse_directory_batch_v1(directory, requests)
+    if batch.matches.len() != request_count:
+        return _rv64_fw_cfg_batch_failure(request_count, batch.reason)
+    var reads = [_rv64_fw_cfg_read_failure("unresolved"); request_count]
+    var request_index: i64 = 0
+    while request_index < request_count:
+        val found = batch.matches[request_index]
+        if not found.ok:
+            reads[request_index] = _rv64_fw_cfg_read_failure(found.reason)
+        else:
+            select_fn(found.selector)
+            val payload = read_selected_fn(found.size.to_u64())
+            if payload.len().to_u64() != found.size.to_u64():
+                reads[request_index] =
+                    _rv64_fw_cfg_read_failure("truncated-payload")
+            else:
+                reads[request_index] = SimpleOsFwCfgReadV1(
+                    ok: true, bytes: payload, reason: "ok")
+        request_index = request_index + 1
+    reads
+
+pub fn riscv64_fw_cfg_read_named_batch_v1(
+    requests: [FwCfgNamedLimitV1]
+) -> [SimpleOsFwCfgReadV1]:
+    mmio_disable_test_mode()
+    riscv64_fw_cfg_read_named_batch_with_transport_v1(
+        requests, _rv64_fw_cfg_select, _rv64_fw_cfg_read_selected_bytes)
+
 pub fn riscv64_qemu_fw_cfg_read_named_file_v1(
     exact_name: text,
     max_bytes: i64
@@ -121,3 +217,5 @@ pub fn riscv64_qemu_fw_cfg_read_named_file_v1(
 export Riscv64FwCfgDirectoryEntryV1
 export riscv64_fw_cfg_parse_directory_v1
 export riscv64_qemu_fw_cfg_read_named_file_v1
+export riscv64_fw_cfg_read_named_batch_with_transport_v1
+export riscv64_fw_cfg_read_named_batch_v1

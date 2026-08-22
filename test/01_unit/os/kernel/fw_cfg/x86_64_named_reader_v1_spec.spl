@@ -1,7 +1,15 @@
 # @cover src/os/kernel/fw_cfg/x86_64_named_reader_v1.spl 80%
 
 use std.spec.{describe, it, expect}
-use os.kernel.fw_cfg.x86_64_named_reader_v1.{x86_64_fw_cfg_find_named_v1}
+use os.kernel.fw_cfg.directory_batch_parser_v1.{FwCfgNamedLimitV1}
+use os.kernel.fw_cfg.x86_64_named_reader_v1.{
+    x86_64_fw_cfg_find_named_v1,
+    x86_64_fw_cfg_read_named_batch_with_readers_v1,
+}
+
+var _directory_reads: i64 = 0
+var _signature_reads: i64 = 0
+var _directory_entries: [u8] = []
 
 fn _put_be16(out: [u8], value: u16):
     out.push(((value >> 8) & 0xFFu16).to_u8())
@@ -28,7 +36,122 @@ fn _directory(name: text, size: u64, selector: u16) -> [u8]:
         index = index + 1
     out
 
+fn _append_entry(out: [u8], name: text, size: u64, selector: u16):
+    val one = _directory(name, size, selector)
+    var index: i64 = 4
+    while index < one.len():
+        out.push(one[index])
+        index = index + 1
+
+fn _signature_test() -> [u8]:
+    _signature_reads = _signature_reads + 1
+    [0x51u8, 0x45u8, 0x4Du8, 0x55u8]
+
+fn _bad_signature_test() -> [u8]:
+    _signature_reads = _signature_reads + 1
+    [0u8, 0u8, 0u8, 0u8]
+
+fn _directory_test() -> [u8]:
+    _directory_reads = _directory_reads + 1
+    var directory: [u8] = [0u8, 0u8, 0u8, 4u8]
+    var index: i64 = 0
+    while index < _directory_entries.len():
+        directory.push(_directory_entries[index])
+        index = index + 1
+    directory
+
+fn _payload_test(selector: u16, _length: u64) -> [u8]:
+    if selector == 0x30u16:
+        return "nonce-7".bytes()
+    if selector == 0x31u16:
+        return "/images/compiler.raw".bytes()
+    if selector == 0x32u16:
+        return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".bytes()
+    "file=/images/compiler.raw,if=none,id=cfsexecns1,format=raw".bytes()
+
+fn _cfs_requests() -> [FwCfgNamedLimitV1]:
+    [
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.nonce", max_bytes: 128u64),
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.image_path", max_bytes: 1024u64),
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.image_sha256", max_bytes: 64u64),
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.drive_arg", max_bytes: 1062u64),
+    ]
+
 describe "x86_64 QEMU fw_cfg directory parser":
+    it "rejects invalid requests before transport access":
+        _signature_reads = 0
+        _directory_reads = 0
+        val invalid = [FwCfgNamedLimitV1(name: "", max_bytes: 1u64)]
+        val reads = x86_64_fw_cfg_read_named_batch_with_readers_v1(
+            invalid, _signature_test, _directory_test, _payload_test)
+        expect(_signature_reads).to_equal(0)
+        expect(_directory_reads).to_equal(0)
+        expect(reads[0].reason).to_equal("invalid-name")
+
+    it "rejects aggregate retention above the cap before transport access":
+        _signature_reads = 0
+        _directory_reads = 0
+        val oversized = [
+            FwCfgNamedLimitV1(name: "opt/one", max_bytes: 134217729u64),
+            FwCfgNamedLimitV1(name: "opt/two", max_bytes: 134217729u64),
+        ]
+        val reads = x86_64_fw_cfg_read_named_batch_with_readers_v1(
+            oversized, _signature_test, _directory_test, _payload_test)
+        expect(_signature_reads).to_equal(0)
+        expect(_directory_reads).to_equal(0)
+        expect(reads.len()).to_equal(2)
+        expect(reads[0].reason).to_equal("aggregate-max-bytes-exceeds-limit")
+        expect(reads[1].reason).to_equal("aggregate-max-bytes-exceeds-limit")
+
+    it "reports a device signature failure without reading the directory":
+        _signature_reads = 0
+        _directory_reads = 0
+        val reads = x86_64_fw_cfg_read_named_batch_with_readers_v1(
+            _cfs_requests(), _bad_signature_test, _directory_test, _payload_test)
+        expect(_signature_reads).to_equal(1)
+        expect(_directory_reads).to_equal(0)
+        expect(reads.len()).to_equal(4)
+        expect(reads[0].reason).to_equal("device-signature-invalid")
+        expect(reads[3].reason).to_equal("device-signature-invalid")
+
+    it "reads four named payloads after exactly one directory selection":
+        _directory_entries = []
+        _append_entry(_directory_entries, "opt/simpleos.cfs.nonce", 7u64, 0x30u16)
+        _append_entry(_directory_entries, "opt/simpleos.cfs.image_path", 20u64, 0x31u16)
+        _append_entry(_directory_entries, "opt/simpleos.cfs.image_sha256", 64u64, 0x32u16)
+        _append_entry(_directory_entries, "opt/simpleos.cfs.drive_arg", 58u64, 0x33u16)
+        _directory_reads = 0
+
+        val reads = x86_64_fw_cfg_read_named_batch_with_readers_v1(
+            _cfs_requests(), _signature_test, _directory_test, _payload_test)
+
+        expect(_directory_reads).to_equal(1)
+        expect(reads.len()).to_equal(4)
+        expect(reads[0].bytes).to_equal("nonce-7".bytes())
+        expect(reads[1].bytes).to_equal("/images/compiler.raw".bytes())
+        expect(reads[2].bytes).to_equal(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".bytes())
+        expect(reads[3].bytes).to_equal(
+            "file=/images/compiler.raw,if=none,id=cfsexecns1,format=raw".bytes())
+        expect(reads[3].reason).to_equal("ok")
+
+    it "preserves per-request lookup errors without rereading the directory":
+        _directory_entries = []
+        _append_entry(_directory_entries, "opt/simpleos.cfs.nonce", 129u64, 0x30u16)
+        _append_entry(_directory_entries, "opt/simpleos.cfs.image_path", 20u64, 0x31u16)
+        _append_entry(_directory_entries, "opt/simpleos.cfs.image_sha256", 64u64, 0x32u16)
+        _append_entry(_directory_entries, "opt/other", 1u64, 0x33u16)
+        _directory_reads = 0
+
+        val reads = x86_64_fw_cfg_read_named_batch_with_readers_v1(
+            _cfs_requests(), _signature_test, _directory_test, _payload_test)
+
+        expect(_directory_reads).to_equal(1)
+        expect(reads[0].reason).to_equal("file-exceeds-limit")
+        expect(reads[1].reason).to_equal("ok")
+        expect(reads[2].reason).to_equal("ok")
+        expect(reads[3].reason).to_equal("file-not-found")
+
     it "finds an exact named file and decodes big-endian metadata":
         val found = x86_64_fw_cfg_find_named_v1(
             _directory("opt/simpleos/guest-workflow", 37u64, 0x20u16),

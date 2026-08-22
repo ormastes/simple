@@ -1,5 +1,73 @@
 use std.spec.*
-use os.kernel.arch.arm64.fw_cfg_named_file.{arm64_fw_cfg_parse_directory_v1}
+use os.kernel.arch.arm64.fw_cfg_named_file.{
+    arm64_fw_cfg_parse_directory_v1,
+    arm64_fw_cfg_read_named_batch_with_transport_v1,
+}
+use os.kernel.fw_cfg.directory_batch_parser_v1.{FwCfgNamedLimitV1}
+
+var arm_selected: u16 = 0u16
+var arm_directory_selections: i64 = 0
+var arm_payload_selections: i64 = 0
+var arm_transport_selections: i64 = 0
+var arm_directory_header_reads: i64 = 0
+var arm_directory_body_length: u64 = 0u64
+var arm_fixture_mode: i64 = 0
+var arm_entries: [u8] = []
+
+fn arm_select_fixture(selector: u16):
+    arm_transport_selections = arm_transport_selections + 1
+    arm_selected = selector
+    if selector == 0x0019u16:
+        arm_directory_selections = arm_directory_selections + 1
+    elif selector >= 0x30u16:
+        arm_payload_selections = arm_payload_selections + 1
+
+fn arm_read_fixture(length: u64) -> [u8]:
+    if arm_selected == 0u16:
+        if arm_fixture_mode == 1:
+            return [0u8, 0u8, 0u8, 0u8]
+        return [81u8, 69u8, 77u8, 85u8]
+    if arm_selected == 0x0019u16 and length == 4u64:
+        arm_directory_header_reads = arm_directory_header_reads + 1
+        if arm_fixture_mode == 2:
+            return [0u8]
+        return [0u8, 0u8, 0u8, 4u8]
+    if arm_selected == 0x0019u16:
+        arm_directory_body_length = length
+        if arm_fixture_mode == 3:
+            return [0u8]
+        return arm_entries
+    if arm_selected == 0x30u16:
+        if arm_fixture_mode == 4:
+            return []
+        return "nonce-7".bytes()
+    if arm_selected == 0x31u16:
+        return "/images/compiler.raw".bytes()
+    if arm_selected == 0x32u16:
+        return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".bytes()
+    "file=/images/compiler.raw,if=none,id=cfsexecns1,format=raw".bytes()
+
+fn arm_cfs_requests() -> [FwCfgNamedLimitV1]:
+    [
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.nonce", max_bytes: 128u64),
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.image_path", max_bytes: 1024u64),
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.image_sha256", max_bytes: 64u64),
+        FwCfgNamedLimitV1(name: "opt/simpleos.cfs.drive_arg", max_bytes: 1062u64),
+    ]
+
+fn arm_append_entry(size: u32, selector: u16, name: text):
+    val framed = fw_cfg_directory_v1(size, selector, name)
+    var index: i64 = 4
+    while index < framed.len():
+        arm_entries.push(framed[index])
+        index = index + 1
+
+fn arm_prepare_entries():
+    arm_entries = []
+    arm_append_entry(7u32, 0x30u16, "opt/simpleos.cfs.nonce")
+    arm_append_entry(20u32, 0x31u16, "opt/simpleos.cfs.image_path")
+    arm_append_entry(64u32, 0x32u16, "opt/simpleos.cfs.image_sha256")
+    arm_append_entry(58u32, 0x33u16, "opt/simpleos.cfs.drive_arg")
 
 fn fw_cfg_directory_v1(size: u32, selector: u16, name: text) -> [u8]:
     var bytes: [u8] = [0u8, 0u8, 0u8, 1u8]
@@ -21,6 +89,75 @@ fn fw_cfg_directory_v1(size: u32, selector: u16, name: text) -> [u8]:
     bytes
 
 describe "ARM64 QEMU fw_cfg named-file directory parser":
+    it "reads exact payloads after one big-endian directory transaction":
+        arm_prepare_entries()
+        arm_fixture_mode = 0
+        arm_directory_selections = 0
+        arm_payload_selections = 0
+        arm_directory_header_reads = 0
+        arm_directory_body_length = 0u64
+        val reads = arm64_fw_cfg_read_named_batch_with_transport_v1(
+            arm_cfs_requests(), arm_select_fixture, arm_read_fixture
+        )
+
+        expect(arm_directory_selections).to_equal(1)
+        expect(arm_directory_header_reads).to_equal(1)
+        expect(arm_directory_body_length).to_equal(256u64)
+        expect(arm_payload_selections).to_equal(4)
+        expect(reads.len()).to_equal(4)
+        expect(reads[0].bytes).to_equal("nonce-7".bytes())
+        expect(reads[1].bytes).to_equal("/images/compiler.raw".bytes())
+        expect(reads[2].bytes).to_equal(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".bytes())
+        expect(reads[3].bytes).to_equal(
+            "file=/images/compiler.raw,if=none,id=cfsexecns1,format=raw".bytes())
+
+    it "rejects global framing failures before any payload selection":
+        arm_entries = []
+        arm_payload_selections = 0
+        arm_fixture_mode = 1
+        val bad_signature = arm64_fw_cfg_read_named_batch_with_transport_v1(
+            arm_cfs_requests(), arm_select_fixture, arm_read_fixture)
+        arm_fixture_mode = 2
+        val short_count = arm64_fw_cfg_read_named_batch_with_transport_v1(
+            arm_cfs_requests(), arm_select_fixture, arm_read_fixture)
+        arm_fixture_mode = 3
+        val short_directory = arm64_fw_cfg_read_named_batch_with_transport_v1(
+            arm_cfs_requests(), arm_select_fixture, arm_read_fixture)
+
+        expect(bad_signature.len()).to_equal(4)
+        expect(bad_signature[0].reason).to_equal("signature-mismatch")
+        expect(short_count[3].reason).to_equal("truncated-directory-header")
+        expect(short_directory[2].reason).to_equal("malformed-directory-size")
+        expect(bad_signature[0].bytes).to_equal([])
+        expect(short_count[1].bytes).to_equal([])
+        expect(short_directory[3].bytes).to_equal([])
+        expect(arm_payload_selections).to_equal(0)
+
+    it "rejects truncated payload bytes without accepting them":
+        arm_prepare_entries()
+        arm_fixture_mode = 4
+        val reads = arm64_fw_cfg_read_named_batch_with_transport_v1(
+            arm_cfs_requests(), arm_select_fixture, arm_read_fixture)
+
+        expect(reads.len()).to_equal(4)
+        expect(reads[0].ok).to_equal(false)
+        expect(reads[0].reason).to_equal("truncated-payload")
+        expect(reads[0].bytes).to_equal([])
+
+    it "rejects invalid aggregate requests before transport access":
+        arm_transport_selections = 0
+        val reads = arm64_fw_cfg_read_named_batch_with_transport_v1(
+            [
+                FwCfgNamedLimitV1(name: "opt/a", max_bytes: 268435456u64),
+                FwCfgNamedLimitV1(name: "opt/b", max_bytes: 1u64),
+            ], arm_select_fixture, arm_read_fixture)
+
+        expect(reads.len()).to_equal(2)
+        expect(reads[0].reason).to_equal("aggregate-max-bytes-exceeds-limit")
+        expect(reads[1].bytes).to_equal([])
+        expect(arm_transport_selections).to_equal(0)
+
     it "decodes big-endian size and selector for an exact name":
         val result = arm64_fw_cfg_parse_directory_v1(
             fw_cfg_directory_v1(0x01020304u32, 0x1234u16, "opt/simple/compiler"),

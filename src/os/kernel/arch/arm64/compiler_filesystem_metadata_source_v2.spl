@@ -1,6 +1,7 @@
 # ARM64 architecture-local source for compiler-filesystem fw_cfg metadata.
 
-use os.kernel.arch.arm64.fw_cfg_named_file.{arm64_fw_cfg_read_named_file_v1}
+use os.kernel.arch.arm64.fw_cfg_named_file.{arm64_fw_cfg_read_named_batch_v1}
+use os.kernel.fw_cfg.directory_batch_parser_v1.{FwCfgNamedLimitV1}
 use os.kernel.fw_cfg.read_result_v1.{SimpleOsFwCfgReadV1}
 use os.port.init.compiler_filesystem_metadata_v2.{
     SimpleOsCfsRawReadV2,
@@ -38,17 +39,40 @@ pub fn arm64_cfs_fw_cfg_field_plan_v2() -> [Arm64CfsFwCfgFieldV2]:
     ]
 
 pub fn arm64_cfs_read_fw_cfg_metadata_v2() -> SimpleOsCfsMetadataReadsV2:
-    """Read the four CFS metadata items through only the ARM64 fw_cfg reader."""
+    """Read all four CFS metadata items through one ARM64 directory scan."""
+    arm64_cfs_read_fw_cfg_metadata_with_batch_reader_v2(
+        arm64_fw_cfg_read_named_batch_v1
+    )
+
+pub fn arm64_cfs_read_fw_cfg_metadata_with_batch_reader_v2(
+    reader: fn([FwCfgNamedLimitV1]) -> [SimpleOsFwCfgReadV1],
+) -> SimpleOsCfsMetadataReadsV2:
+    """Inject the one-call batch transport for deterministic tests."""
     val fields = arm64_cfs_fw_cfg_field_plan_v2()
+    val requests: [FwCfgNamedLimitV1] = [
+        FwCfgNamedLimitV1(
+            name: fields[0].name, max_bytes: fields[0].max_bytes.to_u64()),
+        FwCfgNamedLimitV1(
+            name: fields[1].name, max_bytes: fields[1].max_bytes.to_u64()),
+        FwCfgNamedLimitV1(
+            name: fields[2].name, max_bytes: fields[2].max_bytes.to_u64()),
+        FwCfgNamedLimitV1(
+            name: fields[3].name, max_bytes: fields[3].max_bytes.to_u64()),
+    ]
+    val reads = reader(requests)
+    if reads.len() != 4:
+        val failed = SimpleOsCfsRawReadV2(
+            ok: false, bytes: [], reason: "invalid-batch-result-count"
+        )
+        return SimpleOsCfsMetadataReadsV2(
+            nonce: failed, image_path: failed,
+            image_sha256: failed, drive_arg: failed,
+        )
     SimpleOsCfsMetadataReadsV2(
-        nonce: _arm64_cfs_raw_read_v2(
-            arm64_fw_cfg_read_named_file_v1(fields[0].name, fields[0].max_bytes)),
-        image_path: _arm64_cfs_raw_read_v2(
-            arm64_fw_cfg_read_named_file_v1(fields[1].name, fields[1].max_bytes)),
-        image_sha256: _arm64_cfs_raw_read_v2(
-            arm64_fw_cfg_read_named_file_v1(fields[2].name, fields[2].max_bytes)),
-        drive_arg: _arm64_cfs_raw_read_v2(
-            arm64_fw_cfg_read_named_file_v1(fields[3].name, fields[3].max_bytes)),
+        nonce: _arm64_cfs_raw_read_v2(reads[0]),
+        image_path: _arm64_cfs_raw_read_v2(reads[1]),
+        image_sha256: _arm64_cfs_raw_read_v2(reads[2]),
+        drive_arg: _arm64_cfs_raw_read_v2(reads[3]),
     )
 
 pub fn arm64_cfs_collect_fw_cfg_reads_v2(
@@ -63,5 +87,6 @@ pub fn arm64_compiler_filesystem_metadata_source_v2() -> SimpleOsCfsMetadataResu
 
 export Arm64CfsFwCfgFieldV2
 export arm64_cfs_fw_cfg_field_plan_v2, arm64_cfs_read_fw_cfg_metadata_v2
+export arm64_cfs_read_fw_cfg_metadata_with_batch_reader_v2
 export arm64_cfs_collect_fw_cfg_reads_v2
 export arm64_compiler_filesystem_metadata_source_v2

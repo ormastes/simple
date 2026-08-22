@@ -3,8 +3,10 @@
 use std.spec.{describe, it, expect}
 use os.kernel.arch.riscv64.compiler_filesystem_fw_cfg_metadata_v2.{
     riscv64_compiler_filesystem_fw_cfg_metadata_with_reader_v2,
+    riscv64_compiler_filesystem_fw_cfg_metadata_with_batch_reader_v2,
     riscv64_compiler_filesystem_metadata_collect_reads_v2,
 }
+use os.kernel.fw_cfg.directory_batch_parser_v1.{FwCfgNamedLimitV1}
 use os.kernel.fw_cfg.read_result_v1.{SimpleOsFwCfgReadV1}
 use os.port.init.compiler_filesystem_metadata_v2.{SimpleOsCfsMetadataReadsV2}
 
@@ -28,7 +30,58 @@ fn valid_reader(name: text, max_bytes: i64) -> SimpleOsFwCfgReadV1:
 fn collect_recorded_reads() -> SimpleOsCfsMetadataReadsV2:
     riscv64_compiler_filesystem_fw_cfg_metadata_with_reader_v2(recording_reader)
 
+var batch_calls: i64 = 0
+var batch_names: [text] = []
+var batch_bounds: [u64] = []
+
+fn recording_batch_reader(
+    requests: [FwCfgNamedLimitV1]
+) -> [SimpleOsFwCfgReadV1]:
+    batch_calls = batch_calls + 1
+    var reads: [SimpleOsFwCfgReadV1] = []
+    var index: i64 = 0
+    while index < requests.len():
+        batch_names.push(requests[index].name)
+        batch_bounds.push(requests[index].max_bytes)
+        reads.push(SimpleOsFwCfgReadV1(
+            ok: true, bytes: [index.to_u8()], reason: "ok"))
+        index = index + 1
+    reads
+
+fn wrong_count_batch_reader(
+    _requests: [FwCfgNamedLimitV1]
+) -> [SimpleOsFwCfgReadV1]:
+    []
+
 describe "RV64 compiler-filesystem fw_cfg metadata source":
+    it "requests all four fixed-bound fields in one injected batch call":
+        batch_calls = 0
+        batch_names = []
+        batch_bounds = []
+        val metadata =
+            riscv64_compiler_filesystem_fw_cfg_metadata_with_batch_reader_v2(
+                recording_batch_reader)
+
+        expect(batch_calls).to_equal(1)
+        expect(batch_names).to_equal([
+            "opt/simpleos.cfs.nonce",
+            "opt/simpleos.cfs.image_path",
+            "opt/simpleos.cfs.image_sha256",
+            "opt/simpleos.cfs.drive_arg",
+        ])
+        expect(batch_bounds).to_equal([128u64, 1024u64, 64u64, 1062u64])
+        expect(metadata.nonce.bytes).to_equal([0u8])
+        expect(metadata.drive_arg.bytes).to_equal([3u8])
+
+    it "fails every field closed when a batch reader returns wrong cardinality":
+        val metadata =
+            riscv64_compiler_filesystem_fw_cfg_metadata_with_batch_reader_v2(
+                wrong_count_batch_reader)
+        expect(metadata.nonce.reason).to_equal("batch-result-count-invalid")
+        expect(metadata.image_path.ok).to_equal(false)
+        expect(metadata.image_sha256.ok).to_equal(false)
+        expect(metadata.drive_arg.ok).to_equal(false)
+
     it "requests only the four exact names with per-field bounds":
         val metadata = collect_recorded_reads()
 

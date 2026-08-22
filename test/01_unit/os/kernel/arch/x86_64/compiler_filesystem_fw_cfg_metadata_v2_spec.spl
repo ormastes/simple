@@ -2,8 +2,10 @@
 
 use std.spec.{describe, it, expect}
 use os.kernel.fw_cfg.read_result_v1.{SimpleOsFwCfgReadV1}
+use os.kernel.fw_cfg.directory_batch_parser_v1.{FwCfgNamedLimitV1}
 use os.kernel.arch.x86_64.compiler_filesystem_fw_cfg_metadata_v2.{
     x86_64_compiler_filesystem_fw_cfg_metadata_with_reader_v2,
+    x86_64_compiler_filesystem_fw_cfg_metadata_with_batch_reader_v2,
 }
 use os.port.init.compiler_filesystem_metadata_v2.{
     simpleos_cfs_collect_metadata_v2,
@@ -12,6 +14,7 @@ use os.port.init.compiler_filesystem_metadata_v2.{
 var observed_names: [text] = []
 var observed_bounds: [u64] = []
 var fixture_path: text = "/tmp/simpleos-cfs.img"
+var batch_calls: i64 = 0
 
 fn _record_read(name: text, max_bytes: u64) -> SimpleOsFwCfgReadV1:
     observed_names.push(name)
@@ -33,7 +36,29 @@ fn _metadata_read(name: text, max_bytes: u64) -> SimpleOsFwCfgReadV1:
         bytes: "file={fixture_path},if=none,id=cfsexecns1,format=raw".bytes(),
         reason: "ok")
 
+fn _metadata_batch(
+    requests: [FwCfgNamedLimitV1]
+) -> [SimpleOsFwCfgReadV1]:
+    batch_calls = batch_calls + 1
+    var reads: [SimpleOsFwCfgReadV1] = []
+    var index: i64 = 0
+    while index < requests.len():
+        reads.push(_metadata_read(
+            requests[index].name, requests[index].max_bytes))
+        index = index + 1
+    reads
+
 describe "x86_64 compiler-filesystem fw_cfg metadata source":
+    it "requests the production metadata set in one batch":
+        batch_calls = 0
+        val reads = x86_64_compiler_filesystem_fw_cfg_metadata_with_batch_reader_v2(
+            _metadata_batch)
+        expect(batch_calls).to_equal(1)
+        expect(reads.nonce.bytes).to_equal("nonce-7".bytes())
+        expect(reads.image_path.bytes).to_equal(fixture_path.bytes())
+        expect(reads.image_sha256.bytes.len()).to_equal(64)
+        expect(reads.drive_arg.reason).to_equal("ok")
+
     it "requests only the four closed names with their shared field bounds":
         observed_names = []
         observed_bounds = []

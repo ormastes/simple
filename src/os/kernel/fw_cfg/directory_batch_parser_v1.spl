@@ -1,0 +1,156 @@
+# Pure, bounded multi-name parser for the QEMU fw_cfg file directory.
+
+use os.kernel.fw_cfg.directory_parser_v1.{
+    FwCfgDirectoryMatchV1,
+    fw_cfg_max_directory_entries_v1,
+    fw_cfg_max_payload_bytes_v1,
+    fw_cfg_valid_exact_name_v1,
+}
+
+pub class FwCfgNamedLimitV1:
+    name: text
+    max_bytes: u64
+
+pub class FwCfgDirectoryBatchV1:
+    ok: bool
+    matches: [FwCfgDirectoryMatchV1]
+    reason: text
+
+pub fn fw_cfg_max_batch_requests_v1() -> i64: 16
+
+fn _reject_batch(reason: text) -> FwCfgDirectoryBatchV1:
+    FwCfgDirectoryBatchV1(ok: false, matches: [], reason: reason)
+
+pub fn fw_cfg_validate_batch_requests_v1(
+    requests: [FwCfgNamedLimitV1]
+) -> FwCfgDirectoryBatchV1:
+    """Validate batch names and aggregate retention without hardware access."""
+    val request_count = requests.len()
+    if request_count == 0 or request_count > fw_cfg_max_batch_requests_v1():
+        return _reject_batch("invalid-request-count")
+
+    val aggregate_cap = fw_cfg_max_payload_bytes_v1()
+    var aggregate_max_bytes: u64 = 0u64
+    var request_index: i64 = 0
+    while request_index < request_count:
+        val request = requests[request_index]
+        if not fw_cfg_valid_exact_name_v1(request.name):
+            return _reject_batch("invalid-name")
+        if request.max_bytes > aggregate_cap:
+            return _reject_batch("invalid-max-bytes")
+        # Subtraction-based checked addition rejects both arithmetic overflow
+        # and an aggregate retained-payload budget above the shared hard cap.
+        if request.max_bytes > aggregate_cap - aggregate_max_bytes:
+            return _reject_batch("aggregate-max-bytes-exceeds-limit")
+        aggregate_max_bytes = aggregate_max_bytes + request.max_bytes
+        var prior: i64 = 0
+        while prior < request_index:
+            if requests[prior].name == request.name:
+                return _reject_batch("duplicate-request-name")
+            prior = prior + 1
+        request_index = request_index + 1
+
+    FwCfgDirectoryBatchV1(ok: true, matches: [], reason: "ok")
+
+pub fn fw_cfg_parse_directory_batch_v1(
+    directory: [u8], requests: [FwCfgNamedLimitV1]
+) -> FwCfgDirectoryBatchV1:
+    """Resolve up to sixteen exact names in one bounded directory pass."""
+    # This same public preflight can be used by target readers before MMIO.
+    val validated = fw_cfg_validate_batch_requests_v1(requests)
+    if not validated.ok:
+        return validated
+
+    if directory.len() < 4:
+        return _reject_batch("truncated-directory-header")
+    # Decode directly from the caller-owned array. Passing `[u8]` through a
+    # helper would invoke value semantics and copy the whole directory.
+    val entry_count = (directory[0].to_u32() << 24) |
+        (directory[1].to_u32() << 16) |
+        (directory[2].to_u32() << 8) |
+        directory[3].to_u32()
+    if entry_count > fw_cfg_max_directory_entries_v1():
+        return _reject_batch("entry-count-exceeds-limit")
+    val required = 4 + entry_count.to_i64() * 64
+    if directory.len() != required:
+        return _reject_batch("malformed-directory-size")
+
+    # Structure-of-arrays accumulators avoid entry/name materialization. The
+    # source has one directory-entry loop; behavioral tests do not instrument
+    # or independently prove the traversal count. Requests are capped at 16.
+    var found: [bool] = [false; request_count]
+    var duplicate: [bool] = [false; request_count]
+    var selectors: [u16] = [0u16; request_count]
+    var sizes: [u32] = [0u32; request_count]
+
+    var entry: u32 = 0u32
+    while entry < entry_count:
+        val offset = 4 + entry.to_i64() * 64
+        request_index = 0
+        while request_index < request_count:
+            val wanted = requests[request_index].name
+            val wanted_len = wanted.len()
+            var name_index: i64 = 0
+            var matches_name = not duplicate[request_index]
+            while name_index < wanted_len and matches_name:
+                if directory[offset + 8 + name_index] != wanted.char_code_at(name_index).to_u8():
+                    matches_name = false
+                name_index = name_index + 1
+            if matches_name and directory[offset + 8 + wanted_len] == 0u8:
+                if found[request_index]:
+                    duplicate[request_index] = true
+                else:
+                    found[request_index] = true
+                    selectors[request_index] =
+                        (directory[offset + 4].to_u16() << 8) |
+                        directory[offset + 5].to_u16()
+                    sizes[request_index] =
+                        (directory[offset].to_u32() << 24) |
+                        (directory[offset + 1].to_u32() << 16) |
+                        (directory[offset + 2].to_u32() << 8) |
+                        directory[offset + 3].to_u32()
+            request_index = request_index + 1
+        entry = entry + 1u32
+
+    var matches: [FwCfgDirectoryMatchV1] = [FwCfgDirectoryMatchV1(
+        ok: false, selector: 0u16, size: 0u32, reason: "unresolved"
+    ); request_count]
+    var all_ok = true
+    request_index = 0
+    while request_index < request_count:
+        var match: FwCfgDirectoryMatchV1
+        if duplicate[request_index]:
+            match = FwCfgDirectoryMatchV1(
+                ok: false, selector: 0u16, size: 0u32,
+                reason: "duplicate-name"
+            )
+        elif not found[request_index]:
+            match = FwCfgDirectoryMatchV1(
+                ok: false, selector: 0u16, size: 0u32,
+                reason: "file-not-found"
+            )
+        elif sizes[request_index].to_u64() > requests[request_index].max_bytes:
+            match = FwCfgDirectoryMatchV1(
+                ok: false, selector: selectors[request_index],
+                size: sizes[request_index], reason: "file-exceeds-limit"
+            )
+        else:
+            match = FwCfgDirectoryMatchV1(
+                ok: true, selector: selectors[request_index],
+                size: sizes[request_index], reason: "ok"
+            )
+        if not match.ok:
+            all_ok = false
+        matches[request_index] = match
+        request_index = request_index + 1
+
+    FwCfgDirectoryBatchV1(
+        ok: all_ok, matches: matches,
+        reason: if all_ok: "ok" else: "request-failed"
+    )
+
+export FwCfgNamedLimitV1
+export FwCfgDirectoryBatchV1
+export fw_cfg_max_batch_requests_v1
+export fw_cfg_validate_batch_requests_v1
+export fw_cfg_parse_directory_batch_v1

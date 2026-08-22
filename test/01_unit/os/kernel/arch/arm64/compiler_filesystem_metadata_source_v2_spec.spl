@@ -1,7 +1,10 @@
 use os.kernel.arch.arm64.compiler_filesystem_metadata_source_v2.{
     arm64_cfs_fw_cfg_field_plan_v2,
     arm64_cfs_collect_fw_cfg_reads_v2,
+    arm64_cfs_read_fw_cfg_metadata_with_batch_reader_v2,
 }
+use os.kernel.fw_cfg.directory_batch_parser_v1.{FwCfgNamedLimitV1}
+use os.kernel.fw_cfg.read_result_v1.{SimpleOsFwCfgReadV1}
 use os.port.init.compiler_filesystem_metadata_v2.{
     SimpleOsCfsRawReadV2,
     SimpleOsCfsMetadataReadsV2,
@@ -9,6 +12,26 @@ use os.port.init.compiler_filesystem_metadata_v2.{
 
 fn metadata_read(value: text) -> SimpleOsCfsRawReadV2:
     SimpleOsCfsRawReadV2(ok: true, bytes: value.bytes(), reason: "ok")
+
+var batch_reader_calls: i64 = 0
+var batch_reader_request_count: i64 = 0
+
+fn injected_batch_reader(
+    requests: [FwCfgNamedLimitV1]
+) -> [SimpleOsFwCfgReadV1]:
+    batch_reader_calls = batch_reader_calls + 1
+    batch_reader_request_count = requests.len()
+    [
+        SimpleOsFwCfgReadV1(ok: true, bytes: "nonce".bytes(), reason: "ok"),
+        SimpleOsFwCfgReadV1(ok: true, bytes: "/cfs.img".bytes(), reason: "ok"),
+        SimpleOsFwCfgReadV1(ok: true, bytes: "hash".bytes(), reason: "ok"),
+        SimpleOsFwCfgReadV1(ok: true, bytes: "drive".bytes(), reason: "ok"),
+    ]
+
+fn short_batch_reader(
+    requests: [FwCfgNamedLimitV1]
+) -> [SimpleOsFwCfgReadV1]:
+    [SimpleOsFwCfgReadV1(ok: true, bytes: [], reason: "ok")]
 
 describe "ARM64 compiler-filesystem fw_cfg metadata source":
     it "plans only the four exact names with tight per-field bounds":
@@ -38,3 +61,27 @@ describe "ARM64 compiler-filesystem fw_cfg metadata source":
         expect(result.ok).to_equal(true)
         expect(result.metadata.nonce).to_equal("nonce-7")
         expect(result.metadata.image_path).to_equal(path)
+
+    it "invokes one injected batch read for all four fixed requests":
+        batch_reader_calls = 0
+        batch_reader_request_count = 0
+        val reads = arm64_cfs_read_fw_cfg_metadata_with_batch_reader_v2(
+            injected_batch_reader
+        )
+
+        expect(batch_reader_calls).to_equal(1)
+        expect(batch_reader_request_count).to_equal(4)
+        expect(reads.nonce.bytes).to_equal("nonce".bytes())
+        expect(reads.image_path.bytes).to_equal("/cfs.img".bytes())
+        expect(reads.image_sha256.bytes).to_equal("hash".bytes())
+        expect(reads.drive_arg.bytes).to_equal("drive".bytes())
+
+    it "fails every field closed when an injected batch has wrong cardinality":
+        val reads = arm64_cfs_read_fw_cfg_metadata_with_batch_reader_v2(
+            short_batch_reader
+        )
+
+        expect(reads.nonce.ok).to_equal(false)
+        expect(reads.image_path.ok).to_equal(false)
+        expect(reads.image_sha256.ok).to_equal(false)
+        expect(reads.drive_arg.reason).to_equal("invalid-batch-result-count")
