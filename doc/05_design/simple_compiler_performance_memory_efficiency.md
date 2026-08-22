@@ -18,7 +18,9 @@ The verifier is admitted incrementally by named proof surface. The current
 declared operand/local membership, signature-consistent ABI locals, entry membership, CFG
 target closure, single-definition SSA shape, and definition-before-use dominance. It must
 never be labeled a general MIR or semantic verifier.
-Later receipts add opcode type rules, ownership, loop-boundary,
+The current partial opcode-type slice covers `Const`, `Copy`/`Move`, and `Cast`/`Bitcast`
+and reports checked/unproved instruction counts. Later receipts add remaining opcode type
+rules, ownership, loop-boundary,
 and semantic-differential evidence. A pipeline-wide `--verify-each` claim requires all
 applicable receipts, not merely the structural slice.
 The receipt exposes parallel stable `MIRVnnn` codes and human messages; cardinalities
@@ -125,3 +127,7 @@ diagnostics until incremental receipts exist.
 SSA validation requests a verifier-specific `PerfFacts` projection. It retains CFG,
 def-use buckets, reverse postorder, and immediate dominators, but omits dense liveness
 USE/DEF/live-in/live-out matrices. Validation visits each definition and use bucket once.
+
+Opcode checks reuse the structural instruction traversal and an O(locals) declared-type
+dictionary. They compare `MirTypeKind` structurally rather than allocating serialized type
+keys. Receipt coverage counters make partial admission machine-visible.
