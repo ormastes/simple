@@ -678,3 +678,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Consolidate ordering and assembly in the stdlib EasyFix owner.
 - Delegate compiler FixToolApplicator and route lint fix through shared primitives.
 - Remove every private and equal-start quadratic sort/repeated-splice implementation.
+
+## Completed lint tranche: indexed SPIPE005 helper reachability
+
+- Return typed bare-call names instead of delimiter-backed strings.
+- Build local reverse-call buckets once and propagate through a queue.
+- Preserve duplicate textual-name union, forward references, cycle semantics,
+  and method-call exclusion.
+- Add mirrored behavioral contracts for cycles, methods, and duplicates.
+- Verification intentionally not run under the user's no-verify instruction.
