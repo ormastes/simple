@@ -838,3 +838,14 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Completed next: replace the remaining fixed probes with an immutable sparse
   multi-pattern matcher without constructing a registry per call.
 - Verification intentionally not run under the user's no-verify instruction.
+## Reviewed workspace JSON process tranche
+
+- Rejected the direct parent-lint shortcut after parallel review found trace
+  stdout could corrupt JSON and private lint-tier state could leak across calls.
+- First add a nonprinting structured lint API and lint-owned, cleanup-safe state
+  boundary; then add behavioral parity/isolation fixtures.
+- Retain `2N` explicit per-file process behavior until those safety gates exist;
+  the target remains a serial request-owned compiler session with zero children.
+- Track the blocker in
+  `doc/08_tracking/bug/workspace_diagnostics_nested_process_overhead_2026-08-22.md`.
+- Verification intentionally not run under the user's no-verify instruction.
