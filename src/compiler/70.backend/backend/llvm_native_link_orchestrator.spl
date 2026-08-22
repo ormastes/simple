@@ -489,6 +489,18 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             else:
                 file_delete(entry_obj_path)
             return Err(err)
+    # Stage4's projected C providers intentionally cover only their sealed
+    # ownership envelopes. The compiler/runtime distribution archive remains
+    # the canonical owner for SFFI math, path/range/string, mmap and lock
+    # helpers. Add it as a lazy static backfill (never force-load it): archive
+    # members are extracted only for still-unresolved calls, so disabled
+    # features add no resident code or startup allocation. The post-assembly
+    # unresolved-symbol scan remains the fail-closed nm/link preflight.
+    if stage4_requested and runtime_path != "":
+        val runtime_archive_name = if hosted_os == "windows" and not _is_mingw(): "simple_runtime.lib" else: "libsimple_runtime.a"
+        val runtime_backfill = runtime_path + "/" + runtime_archive_name
+        if file_exists(runtime_backfill) and file_size_raw(runtime_backfill) > 0 and not external_providers.contains(runtime_backfill):
+            external_providers = external_providers.push(runtime_backfill)
     val auto_hal_archive = match llvm_auto_sealed_hal_archive(user_objects):
         case Ok(path): path
         case Err(err):

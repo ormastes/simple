@@ -814,6 +814,11 @@ int64_t rt_host_gpu_queue_completed_count(void) { return rt_host_gpu_queue_compl
 int64_t rt_host_gpu_queue_in_flight_count(void) { return rt_host_gpu_queue_in_flight_depth; }
 int64_t rt_host_gpu_queue_last_status(void) { return rt_host_gpu_queue_last_status_code; }
 int64_t rt_host_gpu_queue_last_backend_handle(void) { return rt_host_gpu_queue_last_backend_handle_value; }
+
+/* Canonical interpreter query for the currently active hosted backend.
+ * The queue owner already maintains this value; expose it directly rather
+ * than allocating a wrapper object or duplicating backend state. */
+int64_t rt_host_gpu_active_backend_handle(void) { return rt_host_gpu_queue_last_backend_handle_value; }
 int64_t rt_host_gpu_queue_last_device_time_us(void) { return rt_host_gpu_queue_last_device_time_us_value; }
 int64_t rt_host_gpu_queue_last_payload_size(void) { return rt_host_gpu_queue_last_payload_size_value; }
 int64_t rt_host_gpu_queue_last_payload_hash(void) { return rt_host_gpu_queue_last_payload_hash_value; }
