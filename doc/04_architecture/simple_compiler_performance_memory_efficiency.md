@@ -109,6 +109,13 @@ OperationSummary           # time/resources/cardinality/effects/access/order/
 CostExpr                   # bounded canonical symbolic algebra + Unknown(reason)
 ```
 
+Compatibility diagnostics carry an explicit `LintEvidenceTier`:
+`LegacyCompatible`, `SourcePattern`, `ParsedStructural`, `TypedProven`, or
+`Incomplete`. Severity policy is an O(1) projection over that metadata. For
+performance families, source/parsed/incomplete evidence can never become a hard
+error merely because a profile or `--deny-all` requests escalation;
+`TypedProven` evidence may escalate. Absence of an uncertainty string is not proof.
+
 Warnings/errors describe likely actionable source defects. Passed/missed/analysis/failure records are opt-in optimizer remarks and do not affect ordinary lint exit status. Compiler-integrity findings fail compiler CI and cannot be suppressed by source attributes.
 
 ### `PerfFacts`
