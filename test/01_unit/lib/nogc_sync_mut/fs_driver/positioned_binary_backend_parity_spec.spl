@@ -1,0 +1,63 @@
+"""Byte-exact positioned-read parity for DBFS and both NVFS frontends."""
+
+use std.spec.*
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{FileHandle, OpenFlags, Path}
+
+fn _seed_dbfs(driver: DbFsDriver, path: text) -> FileHandle:
+    val handle = driver.open_path(Path(raw: path), OpenFlags.create_write()).unwrap()
+    driver.write_bytes_handle(handle, [0u8, 255u8, 17u8, 0u8, 128u8]).unwrap()
+    handle
+
+describe "positioned binary backend parity":
+    it "DBFS preserves binary bytes and clips reads at EOF":
+        val driver = DbFsDriver.new_hosted()
+        val handle = _seed_dbfs(driver, "/dbfs.bin")
+        expect(driver.pread_bytes_handle(handle, 1, 3).unwrap()).to_equal(
+            [255u8, 17u8, 0u8])
+        expect(driver.pread_bytes_handle(handle, 4, 8).unwrap()).to_equal([128u8])
+        expect(driver.pread_bytes_handle(handle, 5, 8).unwrap()).to_equal([])
+        expect(driver.pread_bytes_handle(handle, -1, 1).unwrap_err()).to_equal(
+            FsError.InvalidArg)
+        expect(driver.pread_bytes_handle(handle, 0, -1).unwrap_err()).to_equal(
+            FsError.InvalidArg)
+        expect(driver.pread_bytes_handle(
+            handle, 0x7FFFFFFFFFFFFFFF, 0).unwrap()).to_equal([])
+        expect(driver.pread_bytes_handle(
+            handle, 0x7FFFFFFFFFFFFFFF, 1).unwrap_err()).to_equal(
+                FsError.InvalidArg)
+
+    it "native NVFS exposes the same binary and EOF contract":
+        val driver = NvfsDriver.new("binary-native")
+        val handle = driver.open(Path(raw: "/native.bin"), OpenFlags.create_write()).unwrap()
+        driver.pwrite(handle, 0, [0u8, 255u8, 17u8, 0u8, 128u8]).unwrap()
+        expect(driver.pread_bytes_handle(handle, 1, 3).unwrap()).to_equal(
+            [255u8, 17u8, 0u8])
+        expect(driver.pread_bytes_handle(handle, 4, 8).unwrap()).to_equal([128u8])
+        expect(driver.pread_bytes_handle(handle, 5, 1).unwrap()).to_equal([])
+        expect(driver.pread_bytes_handle(handle, -1, 1).unwrap_err()).to_equal(
+            FsError.InvalidArg)
+        expect(driver.pread_bytes_handle(handle, 0, -1).unwrap_err()).to_equal(
+            FsError.InvalidArg)
+        expect(driver.pread_bytes_handle(
+            handle, 0x7FFFFFFFFFFFFFFF, 1).unwrap_err()).to_equal(
+                FsError.InvalidArg)
+
+    it "POSIX NVFS exposes the same binary and EOF contract":
+        val driver = NvfsPosixDriver.new("binary-posix")
+        val handle = driver.open(Path(raw: "/posix.bin"), OpenFlags.create_write()).unwrap()
+        driver.pwrite(handle, 0, [0u8, 255u8, 17u8, 0u8, 128u8]).unwrap()
+        expect(driver.pread_bytes_handle(handle, 1, 3).unwrap()).to_equal(
+            [255u8, 17u8, 0u8])
+        expect(driver.pread_bytes_handle(handle, 4, 8).unwrap()).to_equal([128u8])
+        expect(driver.pread_bytes_handle(handle, 5, 1).unwrap()).to_equal([])
+        expect(driver.pread_bytes_handle(handle, -1, 1).unwrap_err()).to_equal(
+            FsError.InvalidArg)
+        expect(driver.pread_bytes_handle(handle, 0, -1).unwrap_err()).to_equal(
+            FsError.InvalidArg)
+        expect(driver.pread_bytes_handle(
+            handle, 0x7FFFFFFFFFFFFFFF, 1).unwrap_err()).to_equal(
+                FsError.InvalidArg)

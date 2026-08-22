@@ -42,3 +42,21 @@ available.
 
 Do not enable the compiler-filesystem QEMU readiness gate with a cursor-backed,
 whole-file, or host-synthesized substitute.
+
+## 2026-08-22 DBFS/NVFS positioned-read progress
+
+`DbFsDriver.pread_bytes_handle` now exists and supplies byte-exact offset,
+short-EOF, zero-length, negative-range, and overflow behavior to the stdlib
+NVFS and NVFS-POSIX frontends.  This removes the missing-provider defect and
+avoids the old text conversion, NUL truncation, per-character concatenation,
+and EOF padding on binary reads.  The device implementation still must read a
+prefix through the current device-owner API before selecting the requested
+suffix; a future device read-at primitive is needed to make memory and I/O
+strictly O(request length) for large offsets.
+
+Caller-owned buffer reuse remains unproven and is deliberately not claimed:
+`FsDriver.read`/`pread` accept `[u8]` by value, while only concrete
+implementations annotate their local binding `mut`.  Existing value/CoW
+semantics do not establish that those writes reach the caller.  The stable
+snapshot API must therefore return owned bounded chunks until a language test
+and shared trait signature prove a mutable caller-visible ABI.

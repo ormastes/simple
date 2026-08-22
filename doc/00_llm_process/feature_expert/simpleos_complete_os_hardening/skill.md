@@ -157,3 +157,14 @@ Stable compiler-artifact VFS snapshots remain blocked by
 Do not build the readiness gate on current positioned I/O: FAT32 ignores the
 offset, per-chunk allocations remain in NVFS/DBFS, and positioned writes do not
 advance the MountTable content generation.
+
+## SSH plaintext wire ownership (2026-08-22)
+
+`SshSession.send_packet` must frame KEXINIT, ECDH reply, NEWKEYS, and every
+other plaintext payload through the Pure-Simple `ssh_packet_build` owner before
+calling the socket facade. Do not restore message-specific `fd == 200` runtime
+framing shortcuts: the live KEXINIT payload representation crossed that second
+boundary with byte zero observed as `0x54` instead of canonical `0x14`.
+Production evidence requires the `ssh_live_entry.spl` `SshDaemon` target and a
+real host OpenSSH authentication oracle; banner/probe reachability is not SSHD
+interoperability evidence.

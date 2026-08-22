@@ -1,0 +1,211 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableImageHandleV1}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+use os.services.vfs.vfs_init.{
+    _clear_vfs_rootfs_for_test, _mount_hosted_rootfs_for_test,
+    g_vfs_write_file_bytes
+}
+use os.kernel.loader.executable_launch_arguments_v1.{executable_launch_arguments_v1_validate}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionEvidenceV1, SchedulerExecutionEvidenceTokenV1,
+    scheduler_execution_observe_adoption_handle_with_launch_v1,
+    scheduler_execution_observe_stdout_batch_for_handle_v1,
+    scheduler_execution_observe_exit_handle_v1,
+    scheduler_execution_observe_reap_handle_v1,
+    scheduler_execution_compare_and_deliver_reaped_v2,
+    scheduler_execution_evidence_consume_once_v2
+}
+use os.kernel.loader.guest_toolchain_execution_contract.{GuestToolchainHelloExpectedV1}
+use os.kernel.loader.guest_toolchain_execution_authority.{
+    GuestToolchainHelloAuthorityErrorV1,
+    guest_toolchain_scheduler_chain_v1_validate,
+    guest_toolchain_hello_authority_initialize,
+    guest_toolchain_hello_issue_from_guest_filesystem_v1,
+    guest_toolchain_hello_consume_once_v1
+}
+
+fn expected() -> GuestToolchainHelloExpectedV1:
+    GuestToolchainHelloExpectedV1(
+        target_triple: "x86_64-unknown-simpleos", filesystem_name: "fat32",
+        llvm_path: "/usr/bin/llvm-ar", llvm_sha256: sha256_text("llvm"),
+        clang_path: "/usr/bin/clang", clang_sha256: sha256_text("clang"),
+        lld_path: "/usr/bin/ld.lld", lld_sha256: sha256_text("lld"),
+        source_path: "/work/hello.c", source_sha256: sha256_text("source"),
+        object_path: "/work/hello.o", object_sha256: sha256_text("object"),
+        executable_path: "/work/hello.elf", executable_sha256: sha256_text("elf"),
+        expected_stdout: "Hello World\n")
+
+fn evidence(path: text, argv: [text], image_hash: text, child: u64,
+            generation: u64, stdout: [u8]) -> SchedulerExecutionEvidenceV1:
+    SchedulerExecutionEvidenceV1(
+        child_id: child, generation: 1u64, parent_id: 7u64,
+        image_hash: image_hash, mount_id: 2u64, filesystem_name: "fat32",
+        mount_generation: 9u64,
+        file_generation: generation, command_observed: true,
+        executable_path: path, argv: argv, exit_code: 0,
+        stdout_bytes: stdout, stderr_bytes: [], stdout_truncated: false,
+        stderr_truncated: false)
+
+fn clang_evidence() -> SchedulerExecutionEvidenceV1:
+    val want = expected()
+    evidence(want.clang_path,
+        ["-c", want.source_path, "-o", want.object_path,
+         "--target", want.target_triple], want.clang_sha256, 101u64, 42u64, [])
+
+fn lld_evidence() -> SchedulerExecutionEvidenceV1:
+    val want = expected()
+    evidence(want.lld_path,
+        ["-T", "/sysrt/simpleos.ld", "/usr/lib/crt0.o", want.object_path,
+         "-L", "/usr/lib", "-lsimpleos_c", "-lsimpleos_runtime",
+         "-o", want.executable_path], want.lld_sha256, 102u64, 43u64, [])
+
+fn hello_evidence() -> SchedulerExecutionEvidenceV1:
+    val want = expected()
+    evidence(want.executable_path, [want.executable_path], want.executable_sha256,
+        103u64, 44u64, text_to_bytes_pure(want.expected_stdout))
+
+describe "guest toolchain scheduler authority boundary":
+    it "accepts exact scheduler-owned compile link and run commands":
+        expect(guest_toolchain_scheduler_chain_v1_validate(
+            expected(), clang_evidence(), lld_evidence(), hello_evidence())).to_be(true)
+
+    it "rejects substituted argv and legacy command-free evidence":
+        var clang = clang_evidence()
+        clang.argv = ["--version"]
+        expect(guest_toolchain_scheduler_chain_v1_validate(
+            expected(), clang, lld_evidence(), hello_evidence())).to_be(false)
+        clang = clang_evidence()
+        clang.command_observed = false
+        expect(guest_toolchain_scheduler_chain_v1_validate(
+            expected(), clang, lld_evidence(), hello_evidence())).to_be(false)
+
+    it "rejects hidden stderr truncation and a zero file generation":
+        var clang = clang_evidence()
+        clang.stderr_truncated = true
+        expect(guest_toolchain_scheduler_chain_v1_validate(
+            expected(), clang, lld_evidence(), hello_evidence())).to_be(false)
+        val lld = lld_evidence()
+        var hello = hello_evidence()
+        hello.file_generation = 0u64
+        expect(guest_toolchain_scheduler_chain_v1_validate(
+            expected(), clang_evidence(), lld, hello)).to_be(false)
+
+    it "rejects execution evidence from a different mount generation":
+        var hello = hello_evidence()
+        hello.mount_generation = 10u64
+        expect(guest_toolchain_scheduler_chain_v1_validate(
+            expected(), clang_evidence(), lld_evidence(), hello)).to_be(false)
+
+fn _image(hash: text, file_generation: u64) -> ExecutableImageHandleV1:
+    ExecutableImageHandleV1(
+        schema_version: 1, open_handle_id: file_generation + 100u64,
+        mount_id: 77u64, filesystem_name: "dbfs", mount_generation: 9u64,
+        file_id: file_generation + 100u64, file_generation: file_generation,
+        size_bytes: 4096u64, role: "main-image",
+        target: ManifestTarget(os: "simpleos", arch: "x86_64", abi: "sysv"),
+        verified_load_ranges: [], image_hash: hash,
+        admission_id: "guest-toolchain-test", trust_epoch: 5u64,
+        read_count: 0u64, read_bytes: 0u64, consumed: false)
+
+fn _token(child: u64, path: text, argv: [text], hash: text,
+          file_generation: u64, stdout: [u8]) -> SchedulerExecutionEvidenceTokenV1:
+    val launch = executable_launch_arguments_v1_validate(path, argv, []).unwrap()
+    val handle = scheduler_execution_observe_adoption_handle_with_launch_v1(
+        child, 700u64, _image(hash, file_generation), launch).unwrap()
+    if stdout.len() > 0:
+        expect(scheduler_execution_observe_stdout_batch_for_handle_v1(
+            handle, stdout, stdout.len())).to_equal(stdout.len())
+    expect(scheduler_execution_observe_exit_handle_v1(handle, 0)).to_equal(true)
+    expect(scheduler_execution_observe_reap_handle_v1(handle)).to_equal(true)
+    scheduler_execution_compare_and_deliver_reaped_v2(child, path, argv).token.unwrap()
+
+fn _mount_artifacts() -> GuestToolchainHelloExpectedV1:
+    _clear_vfs_rootfs_for_test()
+    expect(_mount_hosted_rootfs_for_test(
+        DriverInstance.DbFs(DbFsDriver.new_hosted()))).to_equal(true)
+    val llvm = text_to_bytes_pure("llvm-real")
+    val clang = text_to_bytes_pure("clang-real")
+    val lld = text_to_bytes_pure("lld-real")
+    val source = text_to_bytes_pure("int main(void){return 0;}")
+    val object = text_to_bytes_pure("object-real")
+    val executable = text_to_bytes_pure("elf-real")
+    for pair in [
+        ("/usr/bin/llvm-ar", llvm), ("/usr/bin/clang", clang),
+        ("/usr/bin/ld.lld", lld), ("/work/hello.c", source),
+        ("/work/hello.o", object), ("/work/hello.elf", executable),
+    ]:
+        expect(g_vfs_write_file_bytes(pair.0, pair.1)).to_equal(true)
+    GuestToolchainHelloExpectedV1(
+        target_triple: "x86_64-unknown-simpleos", filesystem_name: "dbfs",
+        llvm_path: "/usr/bin/llvm-ar", llvm_sha256: sha256_u8_hex(llvm),
+        clang_path: "/usr/bin/clang", clang_sha256: sha256_u8_hex(clang),
+        lld_path: "/usr/bin/ld.lld", lld_sha256: sha256_u8_hex(lld),
+        source_path: "/work/hello.c", source_sha256: sha256_u8_hex(source),
+        object_path: "/work/hello.o", object_sha256: sha256_u8_hex(object),
+        executable_path: "/work/hello.elf", executable_sha256: sha256_u8_hex(executable),
+        expected_stdout: "Hello World\n")
+
+fn _chain_tokens(want: GuestToolchainHelloExpectedV1, base: u64) ->
+    (SchedulerExecutionEvidenceTokenV1, SchedulerExecutionEvidenceTokenV1,
+     SchedulerExecutionEvidenceTokenV1):
+    val clang_argv = ["-c", want.source_path, "-o", want.object_path,
+                      "--target", want.target_triple]
+    val lld_argv = ["-T", "/sysrt/simpleos.ld", "/usr/lib/crt0.o", want.object_path,
+                    "-L", "/usr/lib", "-lsimpleos_c", "-lsimpleos_runtime",
+                    "-o", want.executable_path]
+    (_token(base, want.clang_path, clang_argv, want.clang_sha256, 3u64, []),
+     _token(base + 1u64, want.lld_path, lld_argv, want.lld_sha256, 8u64, []),
+     _token(base + 2u64, want.executable_path, [], want.executable_sha256, 2u64,
+            text_to_bytes_pure(want.expected_stdout)))
+
+describe "guest toolchain authority token lifecycle":
+    it "issues from real VFS artifacts and consumes the authorization once":
+        val want = _mount_artifacts()
+        val tokens = _chain_tokens(want, 8100u64)
+        val owner = guest_toolchain_hello_authority_initialize(0xA11CEu64).unwrap()
+        val issued = guest_toolchain_hello_issue_from_guest_filesystem_v1(
+            owner, want, tokens.0, tokens.1, tokens.2).unwrap()
+        val authorization = guest_toolchain_hello_consume_once_v1(owner, issued)
+        expect(authorization.is_ok()).to_equal(true)
+        expect(authorization.unwrap().execution_authorized).to_equal(true)
+        expect(guest_toolchain_hello_consume_once_v1(owner, issued).unwrap_err()).to_equal(
+            GuestToolchainHelloAuthorityErrorV1.AlreadyConsumed)
+        _clear_vfs_rootfs_for_test()
+
+    it "consumes remaining supplied tokens when one stage was already consumed":
+        val want = _mount_artifacts()
+        val tokens = _chain_tokens(want, 8200u64)
+        expect(scheduler_execution_evidence_consume_once_v2(tokens.1).is_some()).to_equal(true)
+        val owner = guest_toolchain_hello_authority_initialize(0xA11CEu64).unwrap()
+        expect(guest_toolchain_hello_issue_from_guest_filesystem_v1(
+            owner, want, tokens.0, tokens.1, tokens.2).unwrap_err()).to_equal(
+            GuestToolchainHelloAuthorityErrorV1.ExecutionEvidenceInvalid)
+        expect(scheduler_execution_evidence_consume_once_v2(tokens.0).is_some()).to_equal(false)
+        expect(scheduler_execution_evidence_consume_once_v2(tokens.2).is_some()).to_equal(false)
+        _clear_vfs_rootfs_for_test()
+
+    it "rejects a VFS digest mismatch after consuming the complete chain":
+        var want = _mount_artifacts()
+        val tokens = _chain_tokens(want, 8300u64)
+        want.object_sha256 = sha256_text("different-object")
+        val owner = guest_toolchain_hello_authority_initialize(0xA11CEu64).unwrap()
+        expect(guest_toolchain_hello_issue_from_guest_filesystem_v1(
+            owner, want, tokens.0, tokens.1, tokens.2).unwrap_err()).to_equal(
+            GuestToolchainHelloAuthorityErrorV1.ObjectDigestMismatch)
+        expect(scheduler_execution_evidence_consume_once_v2(tokens.0).is_some()).to_equal(false)
+        _clear_vfs_rootfs_for_test()
+
+    it "rejects a different mount identity or filesystem backend":
+        var hello = hello_evidence()
+        hello.mount_id = 3u64
+        expect(guest_toolchain_scheduler_chain_v1_validate(
+            expected(), clang_evidence(), lld_evidence(), hello)).to_be(false)
+        hello = hello_evidence()
+        hello.filesystem_name = "dbfs"
+        expect(guest_toolchain_scheduler_chain_v1_validate(
+            expected(), clang_evidence(), lld_evidence(), hello)).to_be(false)

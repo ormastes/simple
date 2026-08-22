@@ -218,3 +218,48 @@ deployment command therefore exits blocked until an authoritative receipt
 producer signs the candidate and the loader registry supplies a live
 consume-once authority token. No runtime or target build was performed in this
 structural-only repair.
+
+## 2026-08-22 scheduler command and generation authority repair
+
+The loader authority had not yet consumed the scheduler's command-aware V2
+evidence.  It accepted legacy command-free tokens, did not bind the observed
+argv for Clang, LLD, or the produced executable, and omitted stderr/truncation
+checks and per-file nonzero-generation checks.  Its stable mount-generation
+equality remains valid.  Separately, the public diagnostic contract treated
+generations from three distinct executable files as though their numeric
+values were one ordered sequence; each file generation is independently
+scoped and only needs to be nonzero.
+
+The Pure-Simple authority now consumes only V2 scheduler evidence, validates
+the exact `simpleos_smoke_init` compile/link/run argv, rejects any truncated or
+unexpected terminal stream, requires one stable mount generation, and requires
+each independently versioned executable file generation to be nonzero.
+Authenticated executable handles also carry the loader-resolved mount ID and
+canonical backend kind into scheduler evidence.  The kind is derived from the
+`DriverInstance` variant, never its caller-controlled display name.  The chain
+requires identical mount IDs plus the expected `fat32`, `dbfs`, or `nvfs`
+backend, so coincidentally equal
+generation counters from different mounts cannot authorize a mixed chain.
+The general executable-handle validator continues to admit canonical `ramfs`
+for existing trusted in-memory execution; the Clang authority itself remains
+restricted to its required FAT32/DBFS/NVFS filesystem set.
+The public diagnostic chain contract uses the same per-file validity rule.
+Focused coverage includes exact commands, argv substitution,
+legacy command-free evidence, hidden stderr truncation, independent nonzero
+file-generation values, and zero-generation rejection.
+
+The mint path now validates scheduler evidence before filesystem hashing and
+reuses the authenticated loader image digests for Clang, LLD, and the produced
+ELF.  It no longer re-reads those executable images after execution.  For the
+documented 131,052,368-byte Clang payload this avoids one explicit ~125 MiB
+full-file VFS read/buffer in this authority path; backend/value-semantics copy
+counts are not runtime-measured.  LLD and `hello.elf` avoid the same redundant
+read.  Remaining LLVM/source/object reads are bounded
+by their actual artifact sizes pending a backend-parity stable streaming
+snapshot API.
+
+This removes an OS-side false rejection and an authority gap.  It is not a
+guest execution receipt: `clang_static`, the admitted self-hosted Simple test
+runtime, and live QEMU compile/link/run evidence remain absent in this
+worktree.  Runtime timing/RSS and OptimizerPlugin output therefore remain
+blocked; no Rust seed or host compiler result is substituted.

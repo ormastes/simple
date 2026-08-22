@@ -1,0 +1,50 @@
+use std.spec.*
+use os.apps.sshd.sshd.{sshd_build_production_session_kexinit_for_test}
+use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_packet_build, ssh_packet_read}
+
+extern fn rt_bytes_u8_at(data: [u8], index: i64) -> i64
+extern fn rt_file_read_text(path: text) -> text
+
+fn _byte_at(data: [u8], index: u64) -> u8:
+    rt_bytes_u8_at(data, index.to_i64()).to_u8()
+
+fn _seed() -> [u8]:
+    [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+        0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+        0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+        0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+    ]
+
+describe "production SSHD KEX wire contract":
+    it "frames the production KEXINIT with canonical message byte zero":
+        val payload = sshd_build_production_session_kexinit_for_test(
+            true, _seed(), nil, nil, nil, nil, nil, nil)
+        val wire = ssh_packet_build(payload, 0)
+
+        expect(payload.len() > 17).to_be(true)
+        expect(_byte_at(payload, 0)).to_equal(20)
+        expect(ssh_get_u32(wire, 0).to_u64()).to_equal(wire.len() - 4)
+        expect(_byte_at(wire, 4) >= 4).to_be(true)
+        expect(_byte_at(wire, 5)).to_equal(20)
+
+        val parsed = ssh_packet_read(wire, 0)
+        expect(parsed.is_ok()).to_be(true)
+        expect(parsed.unwrap().packet.payload).to_equal(payload)
+
+    it "routes live plaintext through the Pure Simple packet owner":
+        val session = rt_file_read_text("src/os/apps/sshd/ssh_session.spl")
+        expect(session).to_contain("val packet = ssh_packet_build(payload, self.send_seq)")
+        expect(session.contains("rt_boot_tcp_send_plain_payload")).to_be(false)
+        expect(session.contains("socket_fd as i64 == 200 and msg_type")).to_be(false)
+
+    it "keeps the QEMU target and host oracle on the production daemon":
+        val target = rt_file_read_text("src/os/_QemuRunner/runner_targets.spl")
+        val entry = rt_file_read_text("examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl")
+        val gate = rt_file_read_text("src/os/ssh_qemu_contract.spl")
+        expect(target).to_contain("examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl")
+        expect(entry).to_contain("var daemon = SshDaemon.new(22)")
+        expect(entry).to_contain("match daemon.start()")
+        expect(gate).to_contain("openssh-good-start")
+        expect(gate).to_contain("auth ok user=root method=password")
+        expect(gate).to_contain("auth password fail branch")

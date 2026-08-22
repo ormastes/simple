@@ -1,12 +1,12 @@
 # SimpleOS SSH QEMU Gate Production SSHD Live Proof
 
-Status: Open — production daemon is wired, live OpenSSH proof still fails before KEX completes.
+Status: Fix implemented — awaiting live OpenSSH/QEMU verification.
 
 Date: 2026-06-06
 
 ## Status
 
-Open — production daemon is wired, live OpenSSH proof still fails before KEX completes.
+Fix implemented — awaiting live OpenSSH/QEMU verification.
 
 ## Summary
 
@@ -20,6 +20,21 @@ payload emitted on the wire is corrupt in the live lane. Current serial evidence
 `payload_len_raw=62` and the packet payload starts with `0x54` instead of SSH message
 `0x14`, after which OpenSSH closes and the daemon reports `bad KEXINIT` or
 `no KEXINIT received`.
+
+## 2026-08-22 Fix
+
+`SshSession.send_packet` now uses the canonical Pure-Simple
+`ssh_packet_build(payload, send_seq)` path for every plaintext packet, including
+KEXINIT, ECDH reply, and NEWKEYS. The old `fd == 200` message-specific path sent
+an unframed SPL payload across a second runtime framing boundary; that is the
+boundary which observed `0x54` in place of payload byte zero `0x14`.
+
+The replacement performs one bounded O(payload bytes) packet construction and
+one send, removes three live-only dispatch branches, and preserves the public
+session and transport APIs. Focused coverage checks the complete production
+KEXINIT through canonical packet parse/round-trip and verifies that the QEMU
+target starts `SshDaemon` while the host oracle drives OpenSSH authentication.
+Live QEMU evidence is still required before this report can be closed.
 
 ## Evidence
 

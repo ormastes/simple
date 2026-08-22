@@ -16,11 +16,24 @@ owner may claim sealed recovery or durable commit until construction of that
 specific DBFS instance returns an opaque owner-held port and all scalar
 recovery/commit operations are package-private or friend-limited behind it.
 
+The 2026-08-22 visibility follow-up also found that the compiler cannot yet
+enforce that boundary. `OutlineModule` retains `friends` and
+`internal_exports`, but `ParserModule` and `ModuleSurface` discard them before
+HIR import resolution. Imported field metadata likewise drops member
+visibility and declaring-owner identity. Phase 2 must carry those authorities
+through the frontend, resolve a re-export to its terminal declaration, and use
+one shared scope predicate for Public, Private, Package, Internal+friend, Up,
+and Peer. That predicate should consult one frozen indexed declaration table;
+repeated linear surface scans are not acceptable on the import hot path.
+
 ## Required acceptance evidence
 
 - Compile-negative tests prove external code cannot construct, inspect, or
   mutate the owner handle or one-shot capability and cannot import scalar
   persist/flush/locked entrypoints.
+- Positive and negative visibility tests cover friends, internal exports,
+  package/up/peer scopes, re-export aliases, fields, and constructors through
+  check, interpreter, and native compilation without fallback execution.
 - Behavioral tests cover forged owner/capability values, replay-first failure,
   copied-token races, slot reuse, unregister invalidation, stale generation,
   capacity and nonce exhaustion, and every recovery/write/flush failure.

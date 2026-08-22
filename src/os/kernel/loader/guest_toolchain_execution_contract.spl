@@ -4,6 +4,7 @@ use std.common.contracts.execution.simpleos_target_v1.{
     SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
     SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE
 }
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
 
 pub struct GuestToolchainHelloExpectedV1:
     target_triple: text
@@ -22,7 +23,10 @@ pub struct GuestToolchainHelloExpectedV1:
     executable_sha256: text
     expected_stdout: text
 
-fn _canonical_expected(expected: GuestToolchainHelloExpectedV1) -> bool:
+fn _digest_valid(value: text) -> bool:
+    hash256_hex_valid(value) and not hash256_is_zero(value)
+
+pub fn guest_toolchain_hello_expected_v1_validate(expected: GuestToolchainHelloExpectedV1) -> bool:
     (expected.target_triple == SIMPLEOS_TARGET_V1_X86_64_TRIPLE or
      expected.target_triple == SIMPLEOS_TARGET_V1_AARCH64_TRIPLE or
      expected.target_triple == SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE) and
@@ -31,10 +35,13 @@ fn _canonical_expected(expected: GuestToolchainHelloExpectedV1) -> bool:
         expected.clang_path == "/usr/bin/clang" and expected.lld_path == "/usr/bin/ld.lld" and
         expected.source_path == "/work/hello.c" and expected.object_path == "/work/hello.o" and
         expected.executable_path == "/work/hello.elf" and
-        expected.expected_stdout == "hello from SimpleOS LLVM\n"
+        expected.expected_stdout == "Hello World\n" and
+        _digest_valid(expected.llvm_sha256) and _digest_valid(expected.clang_sha256) and
+        _digest_valid(expected.lld_sha256) and _digest_valid(expected.source_sha256) and
+        _digest_valid(expected.object_sha256) and _digest_valid(expected.executable_sha256)
 
 pub fn guest_toolchain_hello_execution_chain_v1_validate(expected: GuestToolchainHelloExpectedV1, clang_result: ProcessExecutionResultV1, lld_result: ProcessExecutionResultV1, hello_result: ProcessExecutionResultV1) -> bool:
-    _canonical_expected(expected) and clang_result.stage == ProcessExecutionStageV1.ClangCompile and
+    guest_toolchain_hello_expected_v1_validate(expected) and clang_result.stage == ProcessExecutionStageV1.ClangCompile and
         lld_result.stage == ProcessExecutionStageV1.LldLink and hello_result.stage == ProcessExecutionStageV1.HelloRun and
         clang_result.executable_path == expected.clang_path and lld_result.executable_path == expected.lld_path and
         hello_result.executable_path == expected.executable_path and clang_result.executable_sha256 == expected.clang_sha256 and
@@ -48,10 +55,13 @@ pub fn guest_toolchain_hello_execution_chain_v1_validate(expected: GuestToolchai
         hello_result.captured_stdout == expected.expected_stdout and hello_result.captured_stderr == "" and
         clang_result.filesystem_name == expected.filesystem_name and lld_result.filesystem_name == expected.filesystem_name and
         hello_result.filesystem_name == expected.filesystem_name and clang_result.filesystem_generation != 0u64 and
-        clang_result.filesystem_generation == lld_result.filesystem_generation and
-        clang_result.filesystem_generation == hello_result.filesystem_generation and
+        # These are generations of three different filesystem objects.  They
+        # must each be live, but their numeric values are not ordered.
+        lld_result.filesystem_generation != 0u64 and
+        hello_result.filesystem_generation != 0u64 and
         clang_result.child_id != lld_result.child_id and clang_result.child_id != hello_result.child_id and
         lld_result.child_id != hello_result.child_id and clang_result.parent_id == lld_result.parent_id and
         clang_result.parent_id == hello_result.parent_id
 
-export GuestToolchainHelloExpectedV1, guest_toolchain_hello_execution_chain_v1_validate
+export GuestToolchainHelloExpectedV1, guest_toolchain_hello_expected_v1_validate
+export guest_toolchain_hello_execution_chain_v1_validate

@@ -45,7 +45,7 @@ pub fn ssh_encrypted_packet_frame_allowed(packet: [u8]) -> bool:
     packet.len() == plan.unwrap().total_frame_bytes
 
 # Pull in helpers and split impl blocks
-use os.apps.sshd.ssh_session_helpers.{RECV_BUF_SIZE, PlainPacketHeader, _SshTextField, ssh_session_u8_at, _slice_range, _zeroed_32_bytes, _copy_bytes_stable, _copy_prefix_stable, _publickey_only_auth_failure_payload, _build_plain_packet_header, _zero_padding_bytes, _copy_range_stable, _push_u32_be_stable, _build_channel_open_confirmation_stable, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable, _read_u32_stable, _read_text_field_fast, _parse_kexinit_fast, _is_ssh_userauth_service_request, _text_equals_bytes, _payload_text_field_equals_bytes, _payload_field_is_ssh_connection, _payload_field_is_none, _payload_field_is_password, _payload_field_is_publickey, _bytes_to_hex, _ed25519_public_key_from_seed, ssh_validate_kex_payload, ssh_validate_kex_ecdh_init_payload, ssh_validate_newkeys_payload}
+use os.apps.sshd.ssh_session_helpers.{RECV_BUF_SIZE, _SshTextField, ssh_session_u8_at, _slice_range, _zeroed_32_bytes, _copy_bytes_stable, _copy_prefix_stable, _publickey_only_auth_failure_payload, _copy_range_stable, _push_u32_be_stable, _build_channel_open_confirmation_stable, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable, _read_u32_stable, _read_text_field_fast, _parse_kexinit_fast, _is_ssh_userauth_service_request, _text_equals_bytes, _payload_text_field_equals_bytes, _payload_field_is_ssh_connection, _payload_field_is_none, _payload_field_is_password, _payload_field_is_publickey, _bytes_to_hex, _ed25519_public_key_from_seed, ssh_validate_kex_payload, ssh_validate_kex_ecdh_init_payload, ssh_validate_newkeys_payload}
 export use os.apps.sshd.ssh_session_kex.*
 export use os.apps.sshd.ssh_session_auth.*
 export use os.apps.sshd.ssh_session_channel.*
@@ -60,10 +60,8 @@ extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_boot_tcp_write_text(fd: i64, data: text) -> i64
-extern fn rt_boot_tcp_send_kexinit_fixed(fd: i64) -> i64
 extern fn rt_boot_tcp_send_kex_reply_fixed(fd: i64) -> i64
 extern fn rt_boot_tcp_send_newkeys_fixed(fd: i64) -> i64
-extern fn rt_boot_tcp_send_plain_payload(fd: i64, data: [u8]) -> i64
 extern fn serial_println(msg: text)
 
 # A bounded deferred capture must not be reported successful when SSH channel
@@ -544,31 +542,13 @@ impl SshSession:
             self.cipher.seq_s2c = (self.cipher.seq_s2c + 1) & 0xFFFFFFFF
         else:
             serial_println("[sshd-session] send_packet branch=plain")
-            if self.socket_fd as i64 == 200 and msg_type == 20u32:
-                val rc = rt_boot_tcp_send_plain_payload(self.socket_fd as i64, payload)
-                serial_println("[sshd-session] live plain kexinit rc={rc}")
-                self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
-                return
-            if self.socket_fd as i64 == 200 and msg_type == 31u32:
-                val rc = rt_boot_tcp_send_plain_payload(self.socket_fd as i64, payload)
-                serial_println("[sshd-session] live plain kex reply rc={rc}")
-                self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
-                return
-            if self.socket_fd as i64 == 200 and msg_type == 21u32:
-                val rc = rt_boot_tcp_send_plain_payload(self.socket_fd as i64, payload)
-                serial_println("[sshd-session] live plain newkeys rc={rc}")
-                self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
-                return
-            val header = _build_plain_packet_header(payload.len(), 8)
-            var packet = _copy_bytes_stable(header.header)
-            var i: u64 = 0
-            while i < payload.len():
-                packet = rt_push_byte(packet, ssh_session_u8_at(payload, i).to_i64())
-                i = i + 1
-            i = 0
-            while i < header.padding_len:
-                packet = rt_push_byte(packet, 0)
-                i = i + 1
+            # Frame every plaintext message in the Pure-Simple packet owner.
+            # The former fd=200 shortcut passed an SPL array across a second
+            # runtime framing boundary; on the live lane that boundary observed
+            # a corrupt first payload byte (0x54 instead of KEXINIT 0x14).
+            # A single canonical build also removes three message-specific
+            # dispatches and the duplicate byte-at-a-time framing loop.
+            val packet = ssh_packet_build(payload, self.send_seq)
             self.raw_send(packet)
         self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
 

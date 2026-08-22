@@ -181,6 +181,45 @@ impl DbFsDriver:
 
     # --- pread ---
 
+    fn _pread_bytes_handle_locked(
+        handle: FileHandle, offset: i64, length: i64
+    ) -> Result<[u8], FsError>:
+        """Read up to `length` binary bytes at `offset` without text conversion.
+
+        Positioned reads follow ordinary EOF semantics: an offset at or beyond
+        EOF returns an empty buffer, and a range crossing EOF returns only the
+        available suffix.  Validate the addition before asking a device-backed
+        owner for its prefix so an overflowing request cannot wrap.
+        """
+        if offset < 0 or length < 0 or offset > 0x7FFFFFFFFFFFFFFF - length:
+            return Err(FsError.InvalidArg)
+        val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
+        if fd_idx < 0:
+            return Err(FsError.NotFound)
+        if _dbfs_fds[fd_idx].closed:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        if length == 0:
+            return Ok([])
+
+        val inode = _dbfs_inodes[inode_idx]
+        if offset >= inode.size:
+            return Ok([])
+        val available = inode.size - offset
+        val count = if length < available: length else: available
+        val prefix = if self.arena_base >= 0:
+            self._read_inode_bytes_from_device_locked(inode.id, offset + count)?
+        else:
+            inode.content_bytes
+        var out: [u8] = []
+        var i: i64 = 0
+        while i < count and offset + i < prefix.len() as i64:
+            out.push(prefix[(offset + i) as i32])
+            i = i + 1
+        Ok(out)
+
     fn _pread_handle_locked(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
         """Read length chars starting at offset."""
         val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
@@ -516,6 +555,12 @@ impl DbFsDriver:
     fn pread_handle(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _namespace_finish(self._pread_handle_locked(handle, offset, length))
+
+    fn pread_bytes_handle(
+        handle: FileHandle, offset: i64, length: i64
+    ) -> Result<[u8], FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _namespace_finish(self._pread_bytes_handle_locked(handle, offset, length))
 
     fn write_handle(handle: FileHandle, content: text) -> Result<(), FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)

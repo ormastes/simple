@@ -10,12 +10,12 @@ use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 use os.services.vfs.vfs_init.{g_vfs_read_file_bytes}
 use os.kernel.scheduler.process_execution_observation.{
-    SchedulerExecutionEvidenceTokenV1, scheduler_execution_evidence_consume_once_v1
+    SchedulerExecutionEvidenceTokenV1, SchedulerExecutionEvidenceV1,
+    scheduler_execution_evidence_consume_once_v2
 }
-use os.services.process_execution_evidence.{ProcessExecutionStageV1, ProcessExecutionResultV1}
 use os.kernel.loader.guest_toolchain_execution_contract.{
     GuestToolchainHelloExpectedV1,
-    guest_toolchain_hello_execution_chain_v1_validate
+    guest_toolchain_hello_expected_v1_validate
 }
 
 pub const GUEST_TOOLCHAIN_HELLO_AUTHORITY_V1: i64 = 1
@@ -92,6 +92,78 @@ fn _read_digest(path: text) -> text:
         return ""
     sha256_u8_hex(bytes)
 
+fn _text_vector_equal(left: [text], right: [text]) -> bool:
+    if left.len() != right.len(): return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]: return false
+        i = i + 1
+    true
+
+fn _bytes_empty(bytes: [u8]) -> bool:
+    bytes.len() == 0
+
+pub fn guest_toolchain_scheduler_chain_v1_validate(
+    expected: GuestToolchainHelloExpectedV1,
+    clang_result: SchedulerExecutionEvidenceV1,
+    lld_result: SchedulerExecutionEvidenceV1,
+    hello_result: SchedulerExecutionEvidenceV1
+) -> bool:
+    """Validate scheduler-owned commands and bounded terminal streams.
+
+    This is diagnostic validation only.  Authority still requires consume-once
+    scheduler tokens and re-reads the non-executable artifacts from the guest
+    filesystem.
+    """
+    val clang_argv = ["-c", expected.source_path, "-o", expected.object_path,
+                      "--target", expected.target_triple]
+    val lld_argv = [
+        "-T", "/sysrt/simpleos.ld", "/usr/lib/crt0.o", expected.object_path,
+        "-L", "/usr/lib", "-lsimpleos_c", "-lsimpleos_runtime",
+        "-o", expected.executable_path,
+    ]
+    val hello_argv = [expected.executable_path]
+    guest_toolchain_hello_expected_v1_validate(expected) and
+        clang_result.command_observed and lld_result.command_observed and
+        hello_result.command_observed and
+        clang_result.executable_path == expected.clang_path and
+        lld_result.executable_path == expected.lld_path and
+        hello_result.executable_path == expected.executable_path and
+        _text_vector_equal(clang_result.argv, clang_argv) and
+        _text_vector_equal(lld_result.argv, lld_argv) and
+        _text_vector_equal(hello_result.argv, hello_argv) and
+        clang_result.image_hash == expected.clang_sha256 and
+        lld_result.image_hash == expected.lld_sha256 and
+        hello_result.image_hash == expected.executable_sha256 and
+        clang_result.mount_id != 0u64 and
+        clang_result.mount_id == lld_result.mount_id and
+        clang_result.mount_id == hello_result.mount_id and
+        clang_result.filesystem_name == expected.filesystem_name and
+        lld_result.filesystem_name == expected.filesystem_name and
+        hello_result.filesystem_name == expected.filesystem_name and
+        clang_result.exit_code == 0 and lld_result.exit_code == 0 and
+        hello_result.exit_code == 0 and
+        _bytes_empty(clang_result.stdout_bytes) and
+        _bytes_empty(clang_result.stderr_bytes) and
+        _bytes_empty(lld_result.stdout_bytes) and
+        _bytes_empty(lld_result.stderr_bytes) and
+        hello_result.stdout_bytes == text_to_bytes_pure(expected.expected_stdout) and
+        _bytes_empty(hello_result.stderr_bytes) and
+        not clang_result.stdout_truncated and not clang_result.stderr_truncated and
+        not lld_result.stdout_truncated and not lld_result.stderr_truncated and
+        not hello_result.stdout_truncated and not hello_result.stderr_truncated and
+        clang_result.parent_id == lld_result.parent_id and
+        clang_result.parent_id == hello_result.parent_id and
+        clang_result.child_id != lld_result.child_id and
+        clang_result.child_id != hello_result.child_id and
+        lld_result.child_id != hello_result.child_id and
+        clang_result.mount_generation != 0u64 and
+        clang_result.mount_generation == lld_result.mount_generation and
+        clang_result.mount_generation == hello_result.mount_generation and
+        clang_result.file_generation != 0u64 and
+        lld_result.file_generation != 0u64 and
+        hello_result.file_generation != 0u64
+
 pub fn guest_toolchain_hello_authority_initialize(
     nonce_seed: u64
 ) -> Result<GuestToolchainHelloAuthorityOwnerV1, GuestToolchainHelloAuthorityErrorV1>:
@@ -122,49 +194,37 @@ pub(package) fn guest_toolchain_hello_issue_from_guest_filesystem_v1(
     hello_token: SchedulerExecutionEvidenceTokenV1
 ) -> Result<GuestToolchainHelloAuthorityTokenV1, GuestToolchainHelloAuthorityErrorV1>:
     """Consume process results and re-read the completed chain in loader scope."""
-    val clang_consumed = scheduler_execution_evidence_consume_once_v1(clang_token)
-    if not clang_consumed.?:
+    if not guest_toolchain_hello_expected_v1_validate(expected):
         return Err(GuestToolchainHelloAuthorityErrorV1.ExecutionEvidenceInvalid)
-    val lld_consumed = scheduler_execution_evidence_consume_once_v1(lld_token)
-    if not lld_consumed.?:
-        return Err(GuestToolchainHelloAuthorityErrorV1.ExecutionEvidenceInvalid)
-    val hello_consumed = scheduler_execution_evidence_consume_once_v1(hello_token)
-    if not hello_consumed.?:
+    # Consume every supplied terminal token before returning.  A malformed
+    # middle token must not strand the remaining bounded scheduler row.
+    val clang_consumed = scheduler_execution_evidence_consume_once_v2(clang_token)
+    val lld_consumed = scheduler_execution_evidence_consume_once_v2(lld_token)
+    val hello_consumed = scheduler_execution_evidence_consume_once_v2(hello_token)
+    if not clang_consumed.? or not lld_consumed.? or not hello_consumed.?:
         return Err(GuestToolchainHelloAuthorityErrorV1.ExecutionEvidenceInvalid)
     val clang_result = clang_consumed.unwrap()
     val lld_result = lld_consumed.unwrap()
     val hello_result = hello_consumed.unwrap()
+    # Validate bounded scheduler evidence before any filesystem hashing.  The
+    # authenticated loader already hashed each executable snapshot when it was
+    # adopted, so re-reading the 125 MiB-class Clang image here would add a
+    # second large allocation and a post-execution read race without adding
+    # authority.
+    if not guest_toolchain_scheduler_chain_v1_validate(
+        expected, clang_result, lld_result, hello_result):
+        return Err(GuestToolchainHelloAuthorityErrorV1.ExecutionEvidenceInvalid)
     val llvm_digest = _read_digest(expected.llvm_path)
-    val clang_digest = _read_digest(expected.clang_path)
-    val lld_digest = _read_digest(expected.lld_path)
     val source_digest = _read_digest(expected.source_path)
     val object_digest = _read_digest(expected.object_path)
-    val executable_digest = _read_digest(expected.executable_path)
-    if llvm_digest == "" or clang_digest == "" or lld_digest == "" or
-       source_digest == "" or object_digest == "" or executable_digest == "":
+    if llvm_digest == "" or source_digest == "" or object_digest == "":
         return Err(GuestToolchainHelloAuthorityErrorV1.FilesystemEvidenceMissing)
-    if llvm_digest != expected.llvm_sha256 or clang_digest != expected.clang_sha256 or
-       lld_digest != expected.lld_sha256:
+    if llvm_digest != expected.llvm_sha256:
         return Err(GuestToolchainHelloAuthorityErrorV1.ArtifactDigestMismatch)
     if source_digest != expected.source_sha256:
         return Err(GuestToolchainHelloAuthorityErrorV1.SourceDigestMismatch)
     if object_digest != expected.object_sha256:
         return Err(GuestToolchainHelloAuthorityErrorV1.ObjectDigestMismatch)
-    if executable_digest != expected.executable_sha256:
-        return Err(GuestToolchainHelloAuthorityErrorV1.ExecutableDigestMismatch)
-    if clang_result.image_hash != clang_digest or lld_result.image_hash != lld_digest or
-       hello_result.image_hash != executable_digest or clang_result.exit_code != 0 or
-       lld_result.exit_code != 0 or hello_result.exit_code != 0 or
-       clang_result.parent_id != lld_result.parent_id or
-       clang_result.parent_id != hello_result.parent_id or
-       clang_result.child_id == lld_result.child_id or
-       clang_result.child_id == hello_result.child_id or
-       lld_result.child_id == hello_result.child_id or
-       clang_result.mount_generation != lld_result.mount_generation or
-       clang_result.mount_generation != hello_result.mount_generation or
-       clang_result.stdout_bytes.len() != 0 or lld_result.stdout_bytes.len() != 0 or
-       hello_result.stdout_bytes != text_to_bytes_pure(expected.expected_stdout):
-        return Err(GuestToolchainHelloAuthorityErrorV1.ExecutionEvidenceInvalid)
     if not _lock():
         return Err(GuestToolchainHelloAuthorityErrorV1.SerializationUnavailable)
     var issued: GuestToolchainHelloAuthorityTokenV1? = nil
@@ -188,13 +248,13 @@ pub(package) fn guest_toolchain_hello_issue_from_guest_filesystem_v1(
                         target_triple: expected.target_triple,
                         filesystem_name: expected.filesystem_name,
                         llvm_sha256: llvm_digest,
-                        clang_sha256: clang_digest,
-                        lld_sha256: lld_digest,
+                        clang_sha256: clang_result.image_hash,
+                        lld_sha256: lld_result.image_hash,
                         source_sha256: source_digest,
                         object_sha256: object_digest,
-                        executable_sha256: executable_digest,
+                        executable_sha256: hello_result.image_hash,
                         observed_stdout: expected.expected_stdout,
-                        filesystem_generation: hello_result.filesystem_generation,
+                        filesystem_generation: hello_result.file_generation,
                         clang_child_id: clang_result.child_id,
                         lld_child_id: lld_result.child_id,
                         hello_child_id: hello_result.child_id,
@@ -243,4 +303,5 @@ export GuestToolchainHelloAuthorityTokenV1, GuestToolchainHelloAuthorizationV1
 export GuestToolchainHelloAuthorityOwnerV1
 export guest_toolchain_hello_authority_initialize
 export guest_toolchain_hello_consume_once_v1
+export guest_toolchain_scheduler_chain_v1_validate
 export GUEST_TOOLCHAIN_HELLO_AUTHORITY_V1
