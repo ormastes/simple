@@ -16,7 +16,7 @@ use crate::module_resolver::ModuleResolver;
 use crate::monomorphize::monomorphize_module;
 
 use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_file, ModuleImports, NativeProjectBuilder};
-use super::imports::{build_suffix_index, build_use_map_from_ast};
+use super::imports::build_use_map_from_ast;
 use super::mangle::{mangle_mir, qualify_enum_runtime_names};
 use super::module_global_init::inject_freestanding_module_global_init;
 
@@ -652,7 +652,6 @@ pub(crate) fn compile_file_to_object(
     //
     // Gated on `--entry-closure` to avoid any risk to self-host bootstrap.
     if imports.populate_global_struct_defs {
-        use std::collections::{HashMap, HashSet};
         // A field name is ambiguous *only* when two structs disagree on its
         // index within the struct. Two structs that both put `name` at index
         // 0 produce the same byte offset (0), so picking either struct is
@@ -662,21 +661,11 @@ pub(crate) fn compile_file_to_object(
         // where `children` is at index 3 in one struct and index 7 in the
         // other; picking the wrong struct would silently load the wrong
         // memory location.
-        let mut field_indices: HashMap<String, HashSet<usize>> = HashMap::new();
-        for fields in imports.struct_defs.values() {
-            for (idx, (fname, _)) in fields.iter().enumerate() {
-                field_indices.entry(fname.clone()).or_default().insert(idx);
-            }
-        }
-        let ambiguous: HashSet<String> = field_indices
-            .into_iter()
-            .filter_map(|(name, indices)| if indices.len() > 1 { Some(name) } else { None })
-            .collect();
-        lowerer.set_global_struct_defs(std::sync::Arc::new((*imports.struct_defs).clone()));
-        lowerer.set_unique_global_struct_owners(std::sync::Arc::new((*imports.unique_struct_owners).clone()));
-        lowerer.set_struct_module_owners(std::sync::Arc::new((*imports.struct_module_owners).clone()));
-        lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new((*imports.duplicate_struct_defs).clone()));
-        lowerer.set_ambiguous_field_names(std::sync::Arc::new(ambiguous));
+        lowerer.set_global_struct_defs(std::sync::Arc::clone(&imports.struct_defs));
+        lowerer.set_unique_global_struct_owners(std::sync::Arc::clone(&imports.unique_struct_owners));
+        lowerer.set_struct_module_owners(std::sync::Arc::clone(&imports.struct_module_owners));
+        lowerer.set_duplicate_global_struct_defs(std::sync::Arc::clone(&imports.duplicate_struct_defs));
+        lowerer.set_ambiguous_field_names(std::sync::Arc::clone(&imports.ambiguous_field_names));
     } else {
         lowerer.set_global_struct_defs(std::sync::Arc::new(std::collections::HashMap::new()));
         lowerer.set_unique_global_struct_owners(std::sync::Arc::new(std::collections::HashMap::new()));
@@ -700,7 +689,7 @@ pub(crate) fn compile_file_to_object(
     // `expr/access.rs::lower_field_access` was emitting
     // `Global(EnumName)` with `ty=ANY`).
     if imports.populate_global_enum_defs {
-        lowerer.set_global_enum_defs(std::sync::Arc::new((*imports.enum_defs).clone()));
+        lowerer.set_global_enum_defs(std::sync::Arc::clone(&imports.enum_defs));
         lowerer.register_global_enums();
     }
     let mut hir = lowerer
@@ -854,7 +843,6 @@ pub(crate) fn compile_file_to_object(
 
             if !no_mangle {
                 let prefix = module_prefix.clone();
-                let global_suffix_index = build_suffix_index(imports.all_mangled.as_ref());
                 let unresolved = mangle_mir(
                     &mut mir,
                     &prefix,
@@ -862,7 +850,7 @@ pub(crate) fn compile_file_to_object(
                     imports.import_map.as_ref(),
                     imports.ambiguous_names.as_ref(),
                     &use_map,
-                    &global_suffix_index,
+                    imports.suffix_index.as_ref(),
                 );
                 if unresolved > 0 && std::env::var("SIMPLE_BOOTSTRAP").as_deref() != Ok("1") {
                     eprintln!(

@@ -304,6 +304,9 @@ pub(crate) struct ModuleImports {
     /// Used only for bounded field-name disambiguation when `struct_defs`
     /// lost information due to same-name collisions across modules.
     pub duplicate_struct_defs: DuplicateStructDefs,
+    /// Field names whose byte offsets disagree across project structs.
+    /// Derived once from `struct_defs` and shared by every compilation unit.
+    pub ambiguous_field_names: std::sync::Arc<std::collections::HashSet<String>>,
     /// Global enum definitions with payload field types.
     /// Shared across all compilation units. The HIR lowerer consumes this in
     /// `compile_file_to_object` to eagerly seed `module.types.name_to_id` and
@@ -313,6 +316,9 @@ pub(crate) struct ModuleImports {
     /// with `ty=ANY` because the enum reached the file via re-export but
     /// not via a direct `use` chain that triggered `preregister_imported_type_names`).
     pub enum_defs: EnumDefs,
+    /// Suffix lookup used by LLVM mangling. This is a project invariant, so
+    /// building it once avoids an O(files × global-functions) hot path.
+    pub suffix_index: std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
     /// Mangled enum owner to stable dotted runtime identity.
     pub enum_runtime_names: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Set of mangled names that correspond to module-level data (`val`/`var`/
@@ -345,6 +351,92 @@ pub(crate) struct ModuleImports {
     /// don't already have them; existing local definitions (registered in
     /// Pass 0 of `module_pass.rs::lower_module`) take precedence.
     pub populate_global_enum_defs: bool,
+}
+
+fn build_ambiguous_field_names(
+    struct_defs: &std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
+) -> std::collections::HashSet<String> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut field_indices: HashMap<&str, HashSet<usize>> = HashMap::new();
+    for fields in struct_defs.values() {
+        for (index, (name, _)) in fields.iter().enumerate() {
+            field_indices.entry(name.as_str()).or_default().insert(index);
+        }
+    }
+    field_indices
+        .into_iter()
+        .filter_map(|(name, indices)| (indices.len() > 1).then(|| name.to_string()))
+        .collect()
+}
+
+#[cfg(test)]
+mod shared_metadata_tests {
+    use super::build_ambiguous_field_names;
+    use simple_parser::Type;
+    use std::collections::HashMap;
+
+    #[test]
+    fn structural_metadata_marks_only_index_disagreements() {
+        let defs = HashMap::from([
+            (
+                "A".to_string(),
+                vec![
+                    ("name".to_string(), Type::Simple("str".to_string())),
+                    ("id".to_string(), Type::Simple("i64".to_string())),
+                ],
+            ),
+            (
+                "B".to_string(),
+                vec![
+                    ("name".to_string(), Type::Simple("str".to_string())),
+                    ("pad".to_string(), Type::Simple("i64".to_string())),
+                    ("id".to_string(), Type::Simple("i64".to_string())),
+                ],
+            ),
+            (
+                "C".to_string(),
+                vec![("name".to_string(), Type::Simple("str".to_string()))],
+            ),
+        ]);
+
+        let ambiguous = build_ambiguous_field_names(&defs);
+        assert_eq!(ambiguous.len(), 1);
+        assert!(ambiguous.contains("id"));
+        assert!(!ambiguous.contains("name"));
+    }
+
+    #[test]
+    fn structural_metadata_is_insertion_order_independent() {
+        let forward = HashMap::from([
+            (
+                "A".to_string(),
+                vec![("value".to_string(), Type::Simple("i64".to_string()))],
+            ),
+            (
+                "B".to_string(),
+                vec![
+                    ("pad".to_string(), Type::Simple("i64".to_string())),
+                    ("value".to_string(), Type::Simple("i64".to_string())),
+                ],
+            ),
+        ]);
+        let reverse = HashMap::from([
+            (
+                "B".to_string(),
+                vec![
+                    ("pad".to_string(), Type::Simple("i64".to_string())),
+                    ("value".to_string(), Type::Simple("i64".to_string())),
+                ],
+            ),
+            (
+                "A".to_string(),
+                vec![("value".to_string(), Type::Simple("i64".to_string()))],
+            ),
+        ]);
+
+        assert_eq!(build_ambiguous_field_names(&forward), build_ambiguous_field_names(&reverse));
+    }
 }
 
 /// Configuration for native project builds.
@@ -830,6 +922,8 @@ impl NativeProjectBuilder {
             return Err(collision.clone());
         }
         let imports = if !self.config.no_mangle {
+            let ambiguous_field_names = build_ambiguous_field_names(&result.struct_defs);
+            let suffix_index = build_suffix_index(&result.all_mangled);
             // Always fingerprinted when the object cache is live: a module's object
             // bytes depend on OTHER modules' declarations, so the cross-module
             // digest is a CORRECTNESS input to the cache key, not an opt-in extra.
@@ -880,7 +974,9 @@ impl NativeProjectBuilder {
                 unique_struct_owners: std::sync::Arc::new(result.unique_struct_owners),
                 struct_module_owners: std::sync::Arc::new(result.struct_module_owners),
                 duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
+                ambiguous_field_names: std::sync::Arc::new(ambiguous_field_names),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
+                suffix_index: std::sync::Arc::new(suffix_index),
                 enum_runtime_names: std::sync::Arc::new(result.enum_runtime_names),
                 data_exports: std::sync::Arc::new(result.data_exports),
                 fn_arities: std::sync::Arc::new(result.fn_arities),
@@ -901,7 +997,9 @@ impl NativeProjectBuilder {
                 unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
                 struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
                 duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+                ambiguous_field_names: std::sync::Arc::new(std::collections::HashSet::new()),
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+                suffix_index: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
