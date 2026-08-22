@@ -329,3 +329,35 @@ Measured at `d684064754b` (pre-fix): `2 examples, 1 failure`,
 `[array-tuple-dep-error] unresolved type: MirType`. Post-fix: `2 examples, 0 failures`.
 The control (`[MirType]`, bare array) is GREEN on both sides, proving the defect
 is SHAPE-specific rather than type-specific.
+
+### Follow-up (c) — the general bug: materialization and projection recurse over DIFFERENT constructor sets
+
+MirType was one instance. The generalisable defect is that the two walks over
+the same parser `Type` handle different sets of `TypeKind` constructors.
+Enumerated from the shipped source:
+
+| walk | constructors handled |
+|---|---|
+| MATERIALIZATION `parser_type_named_dependencies` | Named (+ generic args), Tuple, Array, Function, Optional, Reference, Atomic, Isolated, Union, Projection, Pointer |
+| PROJECTION `imported_surface_type` (before this lane) | Named (name only, **args dropped**), Tuple, Array (**by element NAME only**) |
+
+Every constructor in the first row and not the second is a candidate for the
+same failure. Probed each with the reproduce-spec shape rather than reasoning
+about it. Result:
+
+- **`*T` (Pointer)** — `fn f(x: *MirType)` → `unresolved type: MirType`. **LIVE**, 22 pointer params in owned `.spl`. **Fixed** in this lane.
+- **`A | B` (Union)** — `fn f(x: MirType | text)` → `unresolved type: MirType`. **LIVE**, 13 union positions in owned `.spl`. **Fixed** in this lane.
+- `T?` (Optional), `@T` (Atomic), `-T` (Weak), `[[T]]`, `[T?]`, `Dict<K, V>` — all measured **0 errors**. Not fixed, deliberately: an unproven "fix" here is exactly what this lane already had to revert once.
+- **`Weak`** is missing from BOTH walks — a symmetric gap, so it does not produce this failure, but it means a `-T`-wrapped cross-module dependency is never materialised either. Recorded, not fixed.
+
+Remaining known asymmetry, NOT fixed and NOT an error today: the scalar
+`type_name` branch calls `lower_named_kind(type_name, [], span)` — it **drops
+generic arguments**. `Dict<text, MirType>` projects as an argument-less `Dict`
+rather than erroring, so it degrades type FIDELITY silently instead of failing
+loudly. That is why the `Dict<text, MirType>` probe reads 0 errors above, and it
+should not be mistaken for "handled".
+
+The durable lesson for this class: **whenever a new constructor is added to
+`parser_type_named_dependencies`, the projection must gain the matching arm in
+the same change**, or a cross-module signature using it fails on an innocent
+third party with no diagnostic naming the owner.

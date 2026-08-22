@@ -237,6 +237,29 @@ impl HirLowering:
         # consult it. That asymmetry is why the owner-missing-import lane's
         # predicted MirType clearance never materialised.
         # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+        # POINTER (`*T`) and UNION (`A | B`) are projected ELEMENTWISE for the
+        # same reason the array and tuple arms are. Both are recursed by the
+        # MATERIALIZATION walk (`parser_type_named_dependencies`) and were not
+        # recursed here, so the binding it created was never consulted and the
+        # name died as a hard `unresolved type: X` blamed on an importer.
+        # Reproduced directly: `fn f(x: *MirType)` and `fn f(x: MirType | text)`
+        # both yield `unresolved type: MirType` against the importing module.
+        # Owned code carries 22 pointer params and 13 union positions, so this
+        # is live, not hypothetical.
+        if parser_type_kind_is_pointer(type_.kind):
+            val pointee = parser_type_kind_pointer_inner(type_.kind, type_)
+            return HirType(
+                kind: HirTypeKind.Ptr(
+                    self.imported_surface_type(pointee, imported_module_name),
+                    parser_type_kind_pointer_is_mutable(type_.kind)),
+                span: type_.span)
+        val union_members = parser_type_kind_union_members(type_.kind)
+        if union_members.len() > 0:
+            var projected_members: [HirType] = []
+            for member in union_members:
+                projected_members = projected_members.push(
+                    self.imported_surface_type(member, imported_module_name))
+            return HirType(kind: HirTypeKind.Union(projected_members), span: type_.span)
         if parser_type_kind_is_array(type_.kind):
             val nested_element = parser_type_kind_array_element(type_.kind, type_)
             return HirType(
