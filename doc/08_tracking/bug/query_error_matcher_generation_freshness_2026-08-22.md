@@ -1,6 +1,6 @@
 # Query error matcher generation freshness
 
-**Status:** Table generation implemented; rule-priority follow-up open
+**Status:** Generation implemented; execution evidence follow-up open
 **Date:** 2026-08-22
 
 ## Evidence
@@ -43,6 +43,13 @@ generator ownership. Mirrored contracts cover exact committed source and an
 injected state-bound failure. Execution evidence remains intentionally absent
 under the user's no-verify instruction.
 
-Still open: a stale-output CLI negative fixture and canonical ownership and
-validation of the 80 ordered rule priorities. Table generation alone must not
-be represented as proof of rule-priority freshness.
+The 80 ordered predicates and seven fallbacks now have canonical Pure Simple
+manifests. Postfix validation preserves Boolean arity and precedence, contiguous
+priority, pattern bounds, the negative guard, and the sole dynamic caller phrase
+at ordinal 49. The CLI exact-checks and atomically regenerates the marked rule
+and fallback blocks as well as the automaton file.
+
+Still open under the user's no-verify instruction: an executed stale-output CLI
+negative fixture and runtime parity evidence for the newly authored freshness
+contracts. Until that evidence is permitted, status must not be reported as
+verified or closed.
