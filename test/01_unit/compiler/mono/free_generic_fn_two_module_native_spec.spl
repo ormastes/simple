@@ -1,0 +1,191 @@
+# Free generic fn across two modules on the native (HIR -> 40.mono) path.
+#
+# Pre-fix (#158 Phase A gate): lowering module `lib` fataled with
+#   "generic functions are not supported on the native build path yet"
+# before 40.mono ever saw the template, and even with the gate open the pass
+# found `call_sites=0` for a cross-module call: the callee arrives as
+# NamedVar("lib.pick_second") (qualified display name), its SymbolId is
+# MODULE-LOCAL, and the pass kept one global id->name map. Measured on
+# 2026-08-22; end-to-end native run of this exact fixture printed `35 103 7`
+# (doc/08_tracking/bug/stage1_lexer_hir_fatals_eprint_and_generic_len_helper_2026-08-22.md).
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.parser_types.{Module}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction, HirStmt, HirStmtKind, HirExpr, HirExprKind}
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+
+val LIB_SRC = "struct Acc:\n" +
+    "    n: i64\n" +
+    "\n" +
+    "fn pick_second<C>(a: C, b: C) -> C:\n" +
+    "    val keep = b\n" +
+    "    keep\n" +
+    "\n" +
+    "fn same<C>(v: C) -> C:\n" +
+    "    pick_second(v, v)\n"
+
+val MAIN_SRC = "use lib.{Acc, pick_second, same}\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    val a = pick_second(5, 35)\n" +
+    "    val b = pick_second(Acc(n: 1), Acc(n: 103))\n" +
+    "    val c = same(7)\n" +
+    "    if a == 35 and b.n == 103 and c == 7:\n" +
+    "        return 0\n" +
+    "    1\n"
+
+# Exact shape of the generated hir_visitor.spl walkers as consumed by
+# 35.semantics/enum_contract/hir_match_coverage.spl: a free generic fold over
+# an accumulator `C`, called with an UNANNOTATED `val start = Scan(...)`
+# constructor let and a bare function reference.
+val WALK_LIB_SRC = "struct Node:\n" +
+    "    id: i64\n" +
+    "\n" +
+    "fn walk_node<C>(node: Node, acc: C, f: fn(Node, C) -> C) -> C:\n" +
+    "    f(node, acc)\n"
+
+val WALK_MAIN_SRC = "use walk_lib.{Node, walk_node}\n" +
+    "\n" +
+    "struct Scan:\n" +
+    "    seen: i64\n" +
+    "\n" +
+    "fn collect(node: Node, acc: Scan) -> Scan:\n" +
+    "    Scan(seen: acc.seen + node.id)\n" +
+    "\n" +
+    "fn scan(n: Node) -> i64:\n" +
+    "    val start = Scan(seen: 0)\n" +
+    "    val done = walk_node(n, start, collect)\n" +
+    "    done.seen\n"
+
+struct Lowered:
+    modules: Dict<text, HirModule>
+    errors: [text]
+
+fn lower_pair() -> Lowered:
+    lower_two("lib", LIB_SRC, "main", MAIN_SRC)
+
+fn lower_two(lib_name: text, lib_src: text, main_name: text, main_src: text) -> Lowered:
+    val log = Logger(level: 0)
+    val lib_parsed = parse_full_frontend(lib_src, lib_name + ".spl", lib_name, log)
+    val main_parsed = parse_full_frontend(main_src, main_name + ".spl", main_name, log)
+    var parsed: Dict<text, Module> = {}
+    parsed[lib_name] = lib_parsed
+    parsed[main_name] = main_parsed
+    val surfaces_result = module_surfaces_from_modules(parsed, [
+        SourceFile(path: lib_name + ".spl", content: lib_src, module_name: lib_name),
+        SourceFile(path: main_name + ".spl", content: main_src, module_name: main_name)])
+    if surfaces_result.is_err():
+        return Lowered(modules: {}, errors: ["surface build failed: " + surfaces_result.unwrap_err()])
+    val surfaces = surfaces_result.unwrap()
+    var hir: Dict<text, HirModule> = {}
+    var errors: [text] = []
+    for name in [lib_name, main_name]:
+        var hl = hirlowering_for_module(name, surfaces)
+        hir[name] = hl.lower_module(parsed[name])
+        for e in hl.errors:
+            errors.push(e.message)
+    Lowered(modules: hir, errors: errors)
+
+fn function_names(m: HirModule) -> [text]:
+    var out: [text] = []
+    for sym in m.functions.keys():
+        val f: HirFunction = m.functions[sym]
+        out.push(f.name)
+    out
+
+fn callee_names_in_main(m: HirModule) -> [text]:
+    var out: [text] = []
+    for sym in m.functions.keys():
+        val f: HirFunction = m.functions[sym]
+        if f.name != "main":
+            continue
+        for st in f.body.stmts:
+            val s: HirStmt = st
+            match s.kind:
+                case HirStmtKind.Let(_, _, init):
+                    val ie: HirExpr = init
+                    match ie.kind:
+                        case HirExprKind.Call(callee, _, _):
+                            val ce: HirExpr = callee
+                            match ce.kind:
+                                case HirExprKind.NamedVar(_, n):
+                                    out.push(n)
+                                case _:
+                                    pass
+                        case _:
+                            pass
+                case _:
+                    pass
+    out
+
+describe "free generic fn called from another module at two types":
+    it "lowers both modules with no Phase A generic-fn fatal":
+        val low = lower_pair()
+        var generic_fatals = 0
+        for m in low.errors:
+            if m.contains("generic functions are not supported"):
+                generic_fatals = generic_fatals + 1
+        expect(generic_fatals).to_equal(0)
+        expect(low.errors.len()).to_equal(0)
+
+    it "specializes pick_second at i64 and Acc, plus same$i64, with no unresolved call site":
+        val low = lower_pair()
+        val (mono, stats, diags) = run_monomorphization_with_diagnostics(low.modules)
+        expect(diags.len()).to_equal(0)
+        expect(stats.generic_functions_found).to_equal(2)
+        expect(stats.call_sites_found).to_equal(4)
+        expect(stats.specializations_created).to_equal(3)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        val lib_fns = function_names(mono["lib"])
+        expect(lib_fns.contains("pick_second$i64")).to_equal(true)
+        expect(lib_fns.contains("pick_second$Acc")).to_equal(true)
+        expect(lib_fns.contains("same$i64")).to_equal(true)
+        # consumed templates are dropped
+        expect(lib_fns.contains("pick_second")).to_equal(false)
+        expect(lib_fns.contains("same")).to_equal(false)
+
+    it "repoints main's call sites at the mangled names MIR resolves by":
+        # This harness lowers without the driver's entry-closure import
+        # qualification, so the callee display name is bare `pick_second`;
+        # under the driver it is `lib.pick_second` and the rewrite keeps that
+        # qualifier (mono_requalify). Assert on the function-name suffix.
+        val low = lower_pair()
+        val (mono, _stats, _diags) = run_monomorphization_with_diagnostics(low.modules)
+        val callees = callee_names_in_main(mono["main"])
+        var i64_hits = 0
+        var acc_hits = 0
+        var same_hits = 0
+        var template_hits = 0
+        for c in callees:
+            val ct: text = c
+            if ct.ends_with("pick_second$i64"):
+                i64_hits = i64_hits + 1
+            if ct.ends_with("pick_second$Acc"):
+                acc_hits = acc_hits + 1
+            if ct.ends_with("same$i64"):
+                same_hits = same_hits + 1
+            if ct.ends_with("pick_second") or ct.ends_with("same"):
+                template_hits = template_hits + 1
+        expect(i64_hits).to_equal(1)
+        expect(acc_hits).to_equal(1)
+        expect(same_hits).to_equal(1)
+        expect(template_hits).to_equal(0)
+
+describe "hir_visitor walker shape: fn-reference + unannotated constructor let":
+    it "infers C = Scan from the let and the function reference, 1 specialization":
+        val low = lower_two("walk_lib", WALK_LIB_SRC, "walk_main", WALK_MAIN_SRC)
+        expect(low.errors.len()).to_equal(0)
+        val (mono, stats, diags) = run_monomorphization_with_diagnostics(low.modules)
+        expect(diags.len()).to_equal(0)
+        expect(stats.call_sites_found).to_equal(1)
+        expect(stats.specializations_created).to_equal(1)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        val fns = function_names(mono["walk_lib"])
+        expect(fns.contains("walk_node$Scan")).to_equal(true)
+        expect(fns.contains("walk_node")).to_equal(false)

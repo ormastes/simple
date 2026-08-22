@@ -16,6 +16,7 @@ use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.monomorphize.type_subst.*
 use compiler.common.diagnostics.span.{Span}
+use std.io_runtime.{env_get}
 
 fn mono_arg_value(a: HirCallArg) -> HirExpr:
     """Typed-parameter accessor for HirCallArg.value (stage4 ANY-erasure
@@ -48,10 +49,29 @@ class MonomorphizationPass:
     spec_module: Dict<text, text>
     # Symbol id -> declared name, built while collecting (a call site names its
     # callee by SymbolId; the generic tables are keyed by name).
-    sym_names: Dict<i64, text>
+    # Keyed "<module>#<id>": SymbolIds are only unique PER MODULE, so a
+    # global i64 key let module B's symbol 5 resolve to module A's generic
+    # at id 5 (mis-specialization) -- measured on a 2-module fixture 2026-08-22.
+    sym_names: Dict<text, text>
     # Symbol id -> declared return type of every NON-generic function, used by
     # local argument-type inference.
-    fn_returns: Dict<i64, HirType>
+    fn_returns: Dict<text, HirType>
+    # Same key -> full `fn(params) -> ret` type of every NON-generic
+    # function, so a bare function REFERENCE passed as an argument
+    # (`walk(e, acc, collect)`) binds a `fn(..., C) -> C` parameter.
+    fn_sigs: Dict<text, HirType>
+    # Non-generic struct/class/enum NAME -> its Named type, so a constructor
+    # call `Acc(n: 1)` (lowered as Call(NamedVar("Acc"))) types as Acc. A
+    # name declared by two modules is ambiguous and is not recorded.
+    named_types: Dict<text, HirType>
+    named_ambiguous: Dict<text, bool>
+    # "<module>#<symbol id>" -> declared name of a struct/class/enum, so a
+    # specialization is mangled by the TYPE NAME, not a module-local symbol
+    # id that two modules can both hand out.
+    named_symbol_names: Dict<text, text>
+    # Module whose function bodies are being rewritten right now (scopes the
+    # two maps above).
+    current_module: text
     # Specializations whose bodies still have to be walked (FIFO worklist).
     spec_queue: [text]
     # Mangled name -> SymbolId allocated for the specialized function.
@@ -94,6 +114,11 @@ impl MonomorphizationPass:
             spec_template: {},
             spec_module: {},
             sym_names: {},
+            current_module: "",
+            fn_sigs: {},
+            named_types: {},
+            named_ambiguous: {},
+            named_symbol_names: {},
             fn_returns: {},
             spec_queue: [],
             spec_symbols: {},
@@ -147,6 +172,7 @@ impl MonomorphizationPass:
         var rewritten: Dict<text, Dict<SymbolId, HirFunction>> = {}
         for name in mod_keys:
             val module: HirModule = modules[name]
+            self.current_module = name
             var funcs: Dict<SymbolId, HirFunction> = {}
             for sym_id in sorted_symbol_keys(module.functions):
                 val func: HirFunction = module.functions[sym_id]
@@ -201,7 +227,7 @@ impl MonomorphizationPass:
             # Record the symbol -> name edge for call-site resolution, and keep
             # the fresh-symbol counter past every id already in use.
             val fsym: SymbolId = func.symbol
-            self.sym_names[fsym.id] = func.name
+            self.sym_names[mono_sym_key(module_name, fsym.id)] = func.name
             if fsym.id >= self.next_symbol:
                 self.next_symbol = fsym.id + 1
             if is_generic_function(func):
@@ -212,12 +238,19 @@ impl MonomorphizationPass:
                 self.monomorphizer.register_generic_function(func.name, func)
                 self.stats.generic_functions_found = self.stats.generic_functions_found + 1
             else:
-                self.fn_returns[fsym.id] = func.return_type
+                self.fn_returns[mono_sym_key(module_name, fsym.id)] = func.return_type
+                if not func.is_method:
+                    var ptys: [HirType] = []
+                    for p in func.params:
+                        val pp: HirParam = p
+                        ptys = ptys.push(pp.type_)
+                    self.fn_sigs[mono_sym_key(module_name, fsym.id)] = HirType(kind: HirTypeKind.Function(ptys, func.return_type, []), span: func.span)
 
         # Collect generic structs
         val structs = module.structs
         for sym_id in structs.keys():
             val s: HirStruct = structs[sym_id]
+            self.record_named_type(module_name, s.symbol, s.name, s.type_params.len() == 0)
             if is_generic_struct(s):
                 self.generic_structs[s.name] = s
                 self.monomorphizer.register_generic_struct(s.name, s)
@@ -227,6 +260,7 @@ impl MonomorphizationPass:
         val classes = module.classes
         for sym_id in classes.keys():
             val c: HirClass = classes[sym_id]
+            self.record_named_type(module_name, c.symbol, c.name, c.type_params.len() == 0)
             if is_generic_class(c):
                 self.generic_classes[c.name] = c
                 self.monomorphizer.register_generic_class(c.name, c)
@@ -247,6 +281,8 @@ impl MonomorphizationPass:
             val pt: HirParam = p
             val ps: SymbolId = pt.symbol
             self.env[ps.id] = pt.type_
+        if mono_diag_enabled():
+            eprint("[mono-diag] rewrite_function {func.name} stmts={func.body.stmts.len()}")
         self.collect_lets_block(func.body)
         var out = func
         out.body = self.rewrite_block(func.body)
@@ -262,8 +298,14 @@ impl MonomorphizationPass:
         while i < self.spec_queue.len():
             val mangled: text = self.spec_queue[i]
             val spec: HirFunction = self.specialized_functions[mangled]
+            self.current_module = self.spec_module[mangled]
             self.specialized_functions[mangled] = self.rewrite_function(spec)
             i = i + 1
+
+    me mangled_name(func_name: text, type_args: [HirType]) -> text:
+        if type_args.len() == 0:
+            return func_name
+        "{func_name}${self.mangle_type_args(type_args)}"
 
     me request_specialization(func_name: text, type_args: [HirType]) -> i64:
         """Specialize `func_name` at `type_args` (deduplicated) and return the
@@ -275,7 +317,7 @@ impl MonomorphizationPass:
                 self.diagnostics = self.diagnostics.push(
                     "E-MONO-030: instantiation of `{func_name}` exceeds depth {MONO_MAX_TYPE_DEPTH} (polymorphic recursion); not specialized")
                 return -1
-        val mangled = generate_mangled_name(func_name, type_args)
+        val mangled = self.mangled_name(func_name, type_args)
         if self.spec_symbols.has(mangled):
             return self.spec_symbols[mangled]
         val sym = self.next_symbol
@@ -283,14 +325,16 @@ impl MonomorphizationPass:
         self.spec_symbols[mangled] = sym
         val template: HirFunction = self.generic_functions[func_name]
         var specialized: HirFunction = specialize_function_with_types(template, type_args)
+        specialized.name = mangled
         specialized.symbol = SymbolId.new(sym)
         self.specialized_functions[mangled] = specialized
         # A specialization is a concrete callee from here on: its return
         # type feeds the inference of an ENCLOSING generic call (`wrap(wrap(v))`).
-        self.fn_returns[sym] = specialized.return_type
-        self.sym_names[sym] = specialized.name
+        val spec_mod: text = self.template_module[func_name]
+        self.fn_returns[mono_sym_key(spec_mod, sym)] = specialized.return_type
+        self.sym_names[mono_sym_key(spec_mod, sym)] = specialized.name
         self.spec_template[mangled] = func_name
-        self.spec_module[mangled] = self.template_module[func_name]
+        self.spec_module[mangled] = spec_mod
         self.spec_queue = self.spec_queue.push(mangled)
         self.stats.specializations_created = self.stats.specializations_created + 1
         # Mirror the request into the engine table (its own bookkeeping).
@@ -300,6 +344,89 @@ impl MonomorphizationPass:
             concrete_args = concrete_args.push(hir_type_to_concrete(tat2))
         self.monomorphizer.specialize_function_call(func_name, concrete_args)
         sym
+
+    me record_named_type(module_name: text, sym: SymbolId, name: text, concrete: bool):
+        self.named_symbol_names[mono_sym_key(module_name, sym.id)] = name
+        if not concrete:
+            return
+        if self.named_types.has(name) or self.named_ambiguous.has(name):
+            self.named_ambiguous[name] = true
+            return
+        self.named_types[name] = HirType(kind: HirTypeKind.Named(sym, []), span: Span.empty())
+
+    me fn_sig_of(sym_id: SymbolId) -> HirType?:
+        val s: SymbolId = sym_id
+        val k = mono_sym_key(self.current_module, s.id)
+        if self.fn_sigs.has(k):
+            val t: HirType = self.fn_sigs[k]
+            if hir_type_is_concrete(t):
+                return t
+        nil
+
+    me constructor_type(callee: HirExpr) -> HirType?:
+        """Type of a struct/class constructor call `Name(...)`, which HIR
+        lowers as a plain Call whose callee is NamedVar("Name")."""
+        match callee.kind:
+            case HirExprKind.NamedVar(sym_id, name):
+                if self.fn_return_of(sym_id) != nil:
+                    return nil
+                val n: text = mono_last_segment(name)
+                if self.named_ambiguous.has(n):
+                    return nil
+                if self.named_types.has(n):
+                    val t: HirType = self.named_types[n]
+                    return t
+                nil
+            case _:
+                nil
+
+    me named_type_name(sym: SymbolId, t: HirType) -> text:
+        """Declared name of a Named type: by the current module's symbol
+        first; a type inferred from a constructor of an IMPORTED struct
+        carries the declaring module's id, so fall back to the unique name
+        any module declares under that id. Ambiguous -> engine `T<id>`."""
+        val k = mono_sym_key(self.current_module, sym.id)
+        if self.named_symbol_names.has(k):
+            return self.named_symbol_names[k]
+        val suffix = "#{sym.id}"
+        var found = ""
+        var distinct = 0
+        for key in self.named_symbol_names.keys():
+            val kt: text = key
+            if not kt.ends_with(suffix):
+                continue
+            val n: text = self.named_symbol_names[kt]
+            if n != found:
+                distinct = distinct + 1
+                found = n
+        if distinct == 1:
+            return found
+        mangle_type(t)
+
+    me mangle_type_args(type_args: [HirType]) -> text:
+        """Engine mangling, except a `Named` leaf is spelled by its declared
+        name (resolved in the CALLER's module) instead of `T<symbol id>`."""
+        var parts: [text] = []
+        for ta in type_args:
+            val t: HirType = ta
+            parts = parts.push(self.mangle_one(t))
+        parts.join("_")
+
+    me mangle_one(t: HirType) -> text:
+        match t.kind:
+            case Named(sym, args):
+                val base = self.named_type_name(sym, t)
+                if args.len() > 0:
+                    return "{base}_{self.mangle_type_args(args)}"
+                base
+            case Array(elem, _):
+                "arr_{self.mangle_one(elem)}"
+            case Optional(inner):
+                "opt_{self.mangle_one(inner)}"
+            case Function(params, ret, _):
+                "fn_{self.mangle_type_args(params)}_{self.mangle_one(ret)}"
+            case _:
+                mangle_type(t)
 
     me callee_generic_name(callee: HirExpr) -> text:
         """Template name a call site's callee refers to, or "" when the callee
@@ -319,6 +446,17 @@ impl MonomorphizationPass:
                 val n: text = name
                 if self.generic_functions.has(n):
                     return n
+                # A cross-module import arrives as the qualified
+                # `<module>.<fn>` display name baked in by HIR lowering
+                # (expression_core.spl, `qualify_imported_function_symbol`).
+                # Resolve the last segment, but only when the qualifier and
+                # the template's module agree, so two modules with a
+                # same-named generic never alias.
+                val last = mono_last_segment(n)
+                if last != n and self.generic_functions.has(last):
+                    val qual = n.substring(0, n.len() - last.len() - 1)
+                    if mono_module_matches(qual, self.template_module[last]):
+                        return last
                 ""
             case _:
                 ""
@@ -331,8 +469,9 @@ impl MonomorphizationPass:
         unresolved callee is simply not specialized rather than mis-specialized.
         """
         val s: SymbolId = sym_id
-        if self.sym_names.has(s.id):
-            return self.sym_names[s.id]
+        val k = mono_sym_key(self.current_module, s.id)
+        if self.sym_names.has(k):
+            return self.sym_names[k]
         "sym_{s.id}"
 
     me infer_call_type_args(template: HirFunction, args: [HirCallArg]) -> [HirType]:
@@ -352,6 +491,9 @@ impl MonomorphizationPass:
             if at.has_name:
                 return []
             val arg_ty = self.infer_expr_type(mono_arg_value(at))
+            if mono_diag_enabled():
+                if arg_ty == nil:
+                    eprint("[mono-diag] infer `{template.name}` arg {i}: no local type for {mono_arg_value(at).kind}")
             if arg_ty != nil:
                 if not bind_type_params(pt.type_, arg_ty, bindings):
                     return []
@@ -392,9 +534,15 @@ impl MonomorphizationPass:
             case HirExprKind.UnitLit:
                 HirType(kind: HirTypeKind.Unit, span: sp)
             case HirExprKind.Var(sym_id):
-                self.env_type(sym_id)
+                val vt = self.env_type(sym_id)
+                if vt != nil:
+                    return vt
+                self.fn_sig_of(sym_id)
             case HirExprKind.NamedVar(sym_id, _):
-                self.env_type(sym_id)
+                val nt = self.env_type(sym_id)
+                if nt != nil:
+                    return nt
+                self.fn_sig_of(sym_id)
             case HirExprKind.Cast(_, target):
                 val ct: HirType = target
                 ct
@@ -436,6 +584,9 @@ impl MonomorphizationPass:
                 if type_args != nil:
                     if type_args.len() > 0:
                         return nil
+                val ctor = self.constructor_type(ce)
+                if ctor != nil:
+                    return ctor
                 self.callee_return_type(ce)
             case HirExprKind.Block(block):
                 val bt: HirBlock = block
@@ -470,8 +621,9 @@ impl MonomorphizationPass:
 
     me fn_return_of(sym_id: SymbolId) -> HirType?:
         val s: SymbolId = sym_id
-        if self.fn_returns.has(s.id):
-            val t: HirType = self.fn_returns[s.id]
+        val k = mono_sym_key(self.current_module, s.id)
+        if self.fn_returns.has(k):
+            val t: HirType = self.fn_returns[k]
             if hir_type_is_concrete(t):
                 return t
         nil
@@ -657,6 +809,8 @@ impl MonomorphizationPass:
         `Expr`/`Block` up as a TYPE and collides with the frontend AST."""
         if stmt == nil:
             return stmt
+        if mono_diag_enabled():
+            eprint("[mono-diag] stmt {stmt.kind}")
         var out = stmt
         match stmt.kind:
             case HirStmtKind.Let(sym, ty, init):
@@ -712,7 +866,13 @@ impl MonomorphizationPass:
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
             return HirExprKind.Call(new_callee, new_args, new_type_args)
-        new_callee = HirExpr(kind: HirExprKind.Var(SymbolId.new(target)),
+        # MIR resolves a direct callee by NAME (`lower_call`'s NamedVar arm
+        # uses the baked display name; its Var arm looks the id up in the
+        # CALLER's symbol table, where a fresh mono symbol does not exist).
+        # So the repointed callee is a NamedVar carrying the mangled name,
+        # re-qualified exactly as the original callee was.
+        val spec_name: text = self.mangled_name(gname, targs)
+        new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), mono_requalify(callee, spec_name)),
                              has_type_: callee.has_type_,
                              type_: callee.type_,
                              span: callee.span)
@@ -728,6 +888,8 @@ impl MonomorphizationPass:
         collection literal is rewritten like a top-level one."""
         if expr == nil:
             return expr
+        if mono_diag_enabled():
+            eprint("[mono-diag] expr line={expr.span.line}")
         var out = expr
         match expr.kind:
             case HirExprKind.Call(callee, args, type_args):
@@ -1320,3 +1482,40 @@ fn run_monomorphization_with_diagnostics(modules: Dict<text, HirModule>) -> (Dic
     var pass_ = MonomorphizationPass.create()
     val result = pass_.process_modules(modules)
     (result, pass_.get_stats(), pass_.diagnostics)
+
+# Level-gated probe (default off): SIMPLE_MONO_DIAG=1 traces every function,
+# statement and expression the pass visits and every argument it could not
+# type, so a "call_sites=0" receipt can be explained from a log.
+fn mono_diag_enabled() -> bool:
+    env_get("SIMPLE_MONO_DIAG") == "1"
+
+fn mono_sym_key(module_name: text, sym_id: i64) -> text:
+    "{module_name}#{sym_id}"
+
+fn mono_last_segment(name: text) -> text:
+    if not name.contains("."):
+        return name
+    val parts = name.split(".")
+    parts[parts.len() - 1]
+
+# `qual` is the caller's import spelling of the module (logical path from the
+# source root); the template module key may be spelled by the driver with a
+# longer prefix. Accept equality or a dotted-suffix relation either way.
+fn mono_module_matches(qual: text, template_mod: text) -> bool:
+    if qual == template_mod:
+        return true
+    if template_mod.ends_with(".{qual}"):
+        return true
+    qual.ends_with(".{template_mod}")
+
+# Keep the original callee's module qualifier, swap only the function name.
+fn mono_requalify(callee: HirExpr, spec_name: text) -> text:
+    match callee.kind:
+        case HirExprKind.NamedVar(_, name):
+            val n: text = name
+            val last = mono_last_segment(n)
+            if last == n:
+                return spec_name
+            n.substring(0, n.len() - last.len()) + spec_name
+        case _:
+            spec_name
