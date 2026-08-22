@@ -1365,3 +1365,15 @@ The verifier projection costs O(B + I + A + L) indexed storage plus bounded domi
 construction. It omits O(B*L) liveness matrices and definitions-by-uses Cartesian scans.
 Normal builds construct none of these facts because checked dispatch remains behind the
 cached verify-each gate. Opcode typing, ownership, and loop proof remain open.
+
+## 2026-08-22 implementation addendum: partial opcode typing
+
+The same structural instruction traversal now proves three exact local type contracts:
+`Const` destination versus its explicit MIR type, `Copy`/`Move` source versus destination,
+and `Cast`/`Bitcast` destination versus target. Stable `MIRV025`-`MIRV027` codes report
+violations. Function and module receipts separately count type-checked and type-unchecked
+instructions, preventing this subset from being mistaken for complete MIR typing.
+
+Declared types are indexed once by local ID and compared structurally as `MirTypeKind`;
+the verifier performs no per-check serialization and no second instruction scan. All
+remaining opcodes are counted as unproved. Ownership and loop-boundary proof remain open.
