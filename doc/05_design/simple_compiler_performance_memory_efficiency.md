@@ -283,3 +283,6 @@ The command session maps source directories and discovered manifest directories 
 ### Bounded parsed-policy storage
 
 Manifest discovery and manifest parsing use separate caches. Parsed policies are stored in a flat array and addressed by a `path -> i64` index, avoiding class/struct-valued dictionary access. At most 256 unique policies are retained per command. Every hit returns a child configuration; CLI and file attributes never mutate the cached base. New paths after saturation follow the ordinary parse path without retention.
+### Manifest-free policy base
+
+The session owns one immutable moderate/default policy for files with no manifest. Per-file evaluation starts from `manifest_free_config.child()`: mutable override levels are copied/empty, while the effective-default dictionary is shared. Profile selection assigns a new defaults dictionary to the child and cannot alter the base. This removes rule-count-proportional default allocation per manifest-free file.
