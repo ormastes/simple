@@ -1317,7 +1317,6 @@ int64_t  rt_sdl2_event_window_data2(void);
 
 /* Window properties */
 bool     rt_sdl2_set_window_resizable(int64_t handle, int64_t resizable);
-void     rt_sdl2_set_window_fullscreen(int64_t handle, int64_t fullscreen);
 bool     rt_sdl2_set_window_fullscreen_checked(int64_t handle, int64_t fullscreen);
 bool     rt_sdl2_set_window_size(int64_t handle, int64_t width, int64_t height);
 bool     rt_sdl2_set_window_position(int64_t handle, int64_t x, int64_t y);

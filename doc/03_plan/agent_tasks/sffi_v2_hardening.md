@@ -126,3 +126,9 @@ passing placeholder.
     changing native-call or memory shape. Continue through the last generic
     SDL2 declarations and compatibility adapters, then bind signed provider and
     sanitizer/proof evidence before declaring SDL2 verified.
+23. Eleven SDL2 display declarations now state exact sentinels/nullability;
+    monitor count and monitor descriptors lift failures to typed absence with
+    unchanged query and memory shape. The canonical SDL module is now 65/65
+    contracted after removing the unused unchecked fullscreen ABI and typing
+    error-text ownership. Next bind signed SDL artifact admission and sanitizer/
+    proof receipts while continuing the wider 255-declaration SFFI inventory.

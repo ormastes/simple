@@ -111,7 +111,6 @@ pub const SDL2_FNS: &[(&str, Ret, &str)] = &[
     ("rt_sdl2_set_cursor_visible", Ret::B, "i"),
     ("rt_sdl2_set_window_always_on_top", Ret::B, "ii"),
     ("rt_sdl2_set_window_bordered", Ret::B, "ii"),
-    ("rt_sdl2_set_window_fullscreen", Ret::V, "ii"),
     ("rt_sdl2_set_window_fullscreen_checked", Ret::B, "ii"),
     ("rt_sdl2_set_window_maximum_size", Ret::B, "iii"),
     ("rt_sdl2_set_window_minimum_size", Ret::B, "iii"),

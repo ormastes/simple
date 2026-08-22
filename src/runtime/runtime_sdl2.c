@@ -1112,12 +1112,6 @@ bool rt_sdl2_set_window_resizable(int64_t handle, int64_t resizable) {
     return true;
 }
 
-void rt_sdl2_set_window_fullscreen(int64_t handle, int64_t fullscreen) {
-    SDL_Window* win = sdl2_window_get(handle);
-    if (!win) return;
-    SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-}
-
 bool rt_sdl2_set_window_fullscreen_checked(int64_t handle, int64_t fullscreen) {
     SDL_Window* win = sdl2_window_get(handle);
     if (!win) return false;

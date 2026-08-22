@@ -617,3 +617,21 @@ pass. Inventory improves to 208 contracted and 268 uncontracted unsafe
 declarations. SDL's void property APIs can prove accepted inputs/live handles,
 not post-call compositor state; signed artifact admission and bound sanitizer
 or proof receipts are still absent, so this family is not fully verified.
+
+SDL2 display discovery had disjoint native failure sentinels but all eleven raw
+declarations still advertised only a generic ABI, the display-name declaration
+incorrectly claimed a non-null `text`, and monitor construction admitted numeric
+sentinels as ordinary geometry. The declarations now state exact nullability and
+sentinels. Monitor count returns `i64?`; monitor information returns `Monitor?`
+only after validating name, bounds, and DPI inside a lexical FFI scope.
+
+Count retains one native query and monitor information retains its existing six
+queries. No query, allocation, retained memory, lock, hash, lookup, error query,
+or retry was added. Optimized C, eight Rust bridge tests, four Simple checks,
+and the display contract/call-shape audit pass. The final generic error-text
+declaration now states nonnull borrowed ownership, and the unused unchecked
+void fullscreen ABI was removed from C, Rust dispatch, and Simple. Inventory
+improves to 220 contracted and 255 uncontracted unsafe declarations; the
+canonical SDL module itself is 65/65 contracted. The provider artifact and
+runtime evidence remain unsigned/unbound, so this is safe lifting of known
+sentinels rather than full verification.
