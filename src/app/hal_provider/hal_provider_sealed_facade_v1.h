@@ -14,6 +14,12 @@ enum {
 };
 
 enum {
+    HAL_SEALED_RUN_ALPHA_V1 = 0,
+    HAL_SEALED_RUN_BETA_V1 = 1,
+    HAL_SEALED_RUN_NORMAL_V1 = 2
+};
+
+enum {
     HAL_SEALED_RESULT_PROVIDER_V1 = 0,
     HAL_SEALED_RESULT_INVOCATION_V1 = 1,
     HAL_SEALED_RESULT_STATUS_V1 = 2,
@@ -39,6 +45,12 @@ int32_t rt_hal_sealed_invoke_v1(uint64_t handle, int64_t operation_id,
                                 int64_t invocation_id, int64_t fixture_id,
                                 int64_t input_offset, int64_t input_length,
                                 int64_t input_capacity, int64_t trace_capacity);
+int32_t rt_hal_sealed_invoke_mode_v1(
+    uint64_t handle, int32_t run_mode, int32_t preferred_provider,
+    int64_t operation_id, int64_t invocation_id, int64_t fixture_id,
+    int64_t input_offset, int64_t input_length, int64_t input_capacity,
+    int64_t trace_capacity);
+int32_t rt_hal_sealed_completed_mask_v1(uint64_t handle);
 int64_t rt_hal_sealed_result_field_v1(uint64_t handle, int32_t lane,
                                       int32_t field);
 int64_t rt_hal_sealed_sandbox_pid_v1(uint64_t handle, int32_t lane);

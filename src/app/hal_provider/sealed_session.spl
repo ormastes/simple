@@ -20,6 +20,13 @@ extern fn rt_hal_sealed_invoke_v1(
     input_offset: i64, input_length: i64, input_capacity: i64,
     trace_capacity: i64
 ) -> i32
+extern fn rt_hal_sealed_invoke_mode_v1(
+    handle: u64, run_mode: i32, preferred_provider: i32,
+    operation_id: i64, invocation_id: i64, fixture_id: i64,
+    input_offset: i64, input_length: i64, input_capacity: i64,
+    trace_capacity: i64
+) -> i32
+extern fn rt_hal_sealed_completed_mask_v1(handle: u64) -> i32
 extern fn rt_hal_sealed_result_field_v1(
     handle: u64, lane: i32, field: i32
 ) -> i64
@@ -51,7 +58,8 @@ fn hal_sealed_operation_admitted_v1(operation: HalOperationV1,
         and hal_assurance_to_i64(operation.assurance_floor)
             >= HAL_ASSURANCE_CRITICAL
         and operation.providers_mask == HAL_PROVIDER_MASK_ALL
-        and hal_run_mode_executes_all(mode)
+        and (hal_run_mode_executes_all(mode)
+            or mode == HalRunMode.NormalPreferred)
 
 @init_phase
 fn hal_sealed_coordinator_prepare_v1(deadline_ms: i64) -> HalSealedCoordinatorV1:
@@ -136,17 +144,22 @@ fn _hal_sealed_lane(handle: u64, lane: i32,
 fn _hal_sealed_receipt(handle: u64, operation: HalOperationV1,
                        request: HalProviderRequestV1, mode: HalRunMode,
                        native_status: i32) -> HalSealedInvocationReceiptV1:
-    val valid = native_status == HAL_SEALED_STATUS_OK_V1
-    val pure = _hal_sealed_lane(handle, 0, request.invocation_id, valid)
-    val c_lane = _hal_sealed_lane(handle, 1, request.invocation_id, valid)
-    val rust = _hal_sealed_lane(handle, 2, request.invocation_id, valid)
+    val completed = if native_status == HAL_SEALED_STATUS_OK_V1:
+        rt_hal_sealed_completed_mask_v1(handle).to_i64()
+    else:
+        0
+    val pure = _hal_sealed_lane(
+        handle, 0, request.invocation_id, (completed & 1) != 0)
+    val c_lane = _hal_sealed_lane(
+        handle, 1, request.invocation_id, (completed & 2) != 0)
+    val rust = _hal_sealed_lane(
+        handle, 2, request.invocation_id, (completed & 4) != 0)
     val comparison = hal_orchestrate_sealed_provider_receipts_v1(
         operation, request, mode, pure, c_lane, rust)
-    val complete = if valid: HAL_PROVIDER_MASK_ALL else: 0
     HalSealedInvocationReceiptV1(
         comparison: comparison, native_status: native_status,
-        completed_mask: complete, isolation_proven_mask: complete,
-        critical_ready: valid,
+        completed_mask: completed, isolation_proven_mask: completed,
+        critical_ready: native_status == HAL_SEALED_STATUS_OK_V1,
         hot_spawn_count: rt_hal_sealed_hot_spawn_count_v1(handle),
         hot_allocation_count: rt_hal_sealed_hot_allocation_count_v1(handle))
 
@@ -168,8 +181,10 @@ impl HalSealedCoordinatorV1:
                 and hal_sealed_operation_admitted_v1(operation, mode)
                 and hal_provider_request_v1_well_formed(request)
                 and request.operation_id == operation.operation_id):
-            status = rt_hal_sealed_invoke_v1(
-                self.handle, operation.operation_id, request.invocation_id,
+            status = rt_hal_sealed_invoke_mode_v1(
+                self.handle, hal_run_mode_to_i64(mode).to_i32(),
+                hal_provider_kind_to_i64(operation.preferred_provider).to_i32(),
+                operation.operation_id, request.invocation_id,
                 request.fixture_id, request.input_offset, request.input_length,
                 request.input_capacity, request.trace_capacity)
         _hal_sealed_receipt(

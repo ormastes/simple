@@ -159,19 +159,23 @@ int hal_sealed_session_leave_critical_v1(HalSealedSessionV1 *s) {
     return 1;
 }
 
-int hal_sealed_session_invoke_v1(HalSealedSessionV1 *s, uint64_t invocation,
-                                 const unsigned char *request, size_t request_size,
-                                 unsigned char result[3][HAL_SEALED_FRAME_CAP_V1],
-                                 size_t result_size[3]) {
+int hal_sealed_session_invoke_mask_v1(
+        HalSealedSessionV1 *s, uint64_t invocation, unsigned lane_mask,
+        const unsigned char *request, size_t request_size,
+        unsigned char result[3][HAL_SEALED_FRAME_CAP_V1],
+        size_t result_size[3]) {
     char reset[96], expected[96];
     int i, reset_size, expected_size;
     int64_t deadline;
-    if (!s || !s->sealed || !s->critical_entered || invocation == 0 || !request ||
+    if (!s || !s->sealed || !s->critical_entered || invocation == 0 ||
+        lane_mask == 0 || (lane_mask & ~7u) != 0 || !request ||
         request_size < 2 || request_size >= HAL_SEALED_FRAME_CAP_V1 ||
         request[request_size - 1] != '\n' || !result || !result_size) return 0;
     deadline = now_ms() + s->deadline_ms;
+    for (i = 0; i < 3; ++i) result_size[i] = 0;
     for (i = 0; i < 3; ++i) {
         HalSealedLaneV1 *l = &s->lane[i];
+        if ((lane_mask & (1u << i)) == 0) continue;
         if (!l->healthy) return 0;
         reset_size = snprintf(reset, sizeof(reset), "HALRESET1|%llu|%llu|%llu\n",
             (unsigned long long)l->generation,
@@ -185,6 +189,7 @@ int hal_sealed_session_invoke_v1(HalSealedSessionV1 *s, uint64_t invocation,
     for (i = 0; i < 3; ++i) {
         HalSealedLaneV1 *l = &s->lane[i];
         size_t n = 0;
+        if ((lane_mask & (1u << i)) == 0) continue;
         expected_size = snprintf(expected, sizeof(expected), "HALRESETOK1|%llu|%llu|%llu\n",
             (unsigned long long)l->generation,
             (unsigned long long)l->next_sequence,
@@ -194,20 +199,33 @@ int hal_sealed_session_invoke_v1(HalSealedSessionV1 *s, uint64_t invocation,
             l->healthy = 0; return 0;
         }
     }
-    for (i = 0; i < 3; ++i)
-        if (!write_full(s->lane[i].fd_in, request, request_size)) {
-            s->lane[i].healthy = 0; return 0;
-        }
     for (i = 0; i < 3; ++i) {
+        if ((lane_mask & (1u << i)) != 0) {
+            if (!write_full(s->lane[i].fd_in, request, request_size)) {
+                s->lane[i].healthy = 0; return 0;
+            }
+        }
+    }
+    for (i = 0; i < 3; ++i) {
+        if ((lane_mask & (1u << i)) == 0) continue;
         if (!read_line_deadline(s->lane[i].fd_out, result[i], HAL_SEALED_FRAME_CAP_V1,
                                 deadline, &result_size[i]) ||
             result_size[i] < 8 || memcmp(result[i], "HALRES1|", 8) != 0) {
             s->lane[i].healthy = 0; return 0;
         }
     }
-    for (i = 0; i < 3; ++i) s->lane[i].next_sequence++;
+    for (i = 0; i < 3; ++i)
+        if ((lane_mask & (1u << i)) != 0) s->lane[i].next_sequence++;
     s->completed_invocations++;
     return 1;
+}
+
+int hal_sealed_session_invoke_v1(HalSealedSessionV1 *s, uint64_t invocation,
+                                 const unsigned char *request, size_t request_size,
+                                 unsigned char result[3][HAL_SEALED_FRAME_CAP_V1],
+                                 size_t result_size[3]) {
+    return hal_sealed_session_invoke_mask_v1(
+        s, invocation, 7u, request, request_size, result, result_size);
 }
 
 int hal_sealed_session_restart_lane_v1(HalSealedSessionV1 *s, int lane,

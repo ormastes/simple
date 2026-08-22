@@ -50,6 +50,11 @@ int hal_sealed_session_invoke_v1(HalSealedSessionV1 *session,
                                  unsigned char result[HAL_SEALED_LANES_V1]
                                                      [HAL_SEALED_FRAME_CAP_V1],
                                  size_t result_size[HAL_SEALED_LANES_V1]);
+int hal_sealed_session_invoke_mask_v1(
+    HalSealedSessionV1 *session, uint64_t invocation, unsigned lane_mask,
+    const unsigned char *request, size_t request_size,
+    unsigned char result[HAL_SEALED_LANES_V1][HAL_SEALED_FRAME_CAP_V1],
+    size_t result_size[HAL_SEALED_LANES_V1]);
 int hal_sealed_session_restart_lane_v1(HalSealedSessionV1 *session, int lane,
                                        const HalSealedSessionConfigV1 *config);
 int hal_sealed_session_shutdown_v1(HalSealedSessionV1 *session);

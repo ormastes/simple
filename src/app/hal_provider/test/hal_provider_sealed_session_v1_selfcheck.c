@@ -67,6 +67,15 @@ int main(int argc, char **argv) {
         session.hot_allocation_count != 0 ||
         hal_sealed_session_restart_lane_v1(&session, 0, &config) ||
         hal_sealed_session_shutdown_v1(&session)) return 14;
+    if (!hal_sealed_session_invoke_mask_v1(
+            &session, 1001, 4u, request, sizeof(request) - 1,
+            result, result_size) || result_size[0] != 0 ||
+        result_size[1] != 0 || result_size[2] < 8 ||
+        session.lane[0].next_sequence != 1001 ||
+        session.lane[1].next_sequence != 1001 ||
+        session.lane[2].next_sequence != 1002 ||
+        session.hot_spawn_count != 0 || session.hot_allocation_count != 0)
+        return 17;
     if (!hal_sealed_session_leave_critical_v1(&session) ||
         !hal_sealed_session_shutdown_v1(&session)) return 16;
     printf("hal sealed session selfcheck: PASS invocations=1000 hot_spawn=0 "

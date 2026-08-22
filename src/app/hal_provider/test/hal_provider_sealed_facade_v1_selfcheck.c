@@ -60,6 +60,15 @@ int main(int argc, char **argv) {
         (finished.tv_nsec - started.tv_nsec);
     if (rt_hal_sealed_hot_spawn_count_v1(handle) != 0 ||
         rt_hal_sealed_hot_allocation_count_v1(handle) != 0) return 14;
+    if (rt_hal_sealed_invoke_mode_v1(
+            handle, HAL_SEALED_RUN_NORMAL_V1, 2, 101, 1001, 9,
+            0, 32, 64, 8) != HAL_SEALED_FACADE_STATUS_OK_V1 ||
+        rt_hal_sealed_completed_mask_v1(handle) != 4 ||
+        rt_hal_sealed_result_field_v1(handle, 0, 0) != INT64_MIN ||
+        rt_hal_sealed_result_field_v1(handle, 1, 0) != INT64_MIN ||
+        rt_hal_sealed_result_field_v1(handle, 2, 0) != 2 ||
+        rt_hal_sealed_hot_spawn_count_v1(handle) != 0 ||
+        rt_hal_sealed_hot_allocation_count_v1(handle) != 0) return 16;
     stale = handle;
     if (rt_hal_sealed_maintenance_shutdown_v1(handle) != 0 ||
         rt_hal_sealed_invoke_v1(stale, 101, 1001, 9, 0, 32, 64, 8) !=
