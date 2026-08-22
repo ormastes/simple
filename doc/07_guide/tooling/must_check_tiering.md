@@ -74,6 +74,9 @@ uses the bounded `--push-tip` path, deduplicates identical ref updates, and
 fails closed above two unique updates so operators split unusually broad
 pushes. Ledger evidence must be repository-contained and the consumer hashes at
 most 64 MiB total per validation.
+The quick rules gate also extracts `rules.sdl` from the exact pushed ref; local
+dirty policy cannot alter commands or floors, and `rules.sdl` is included in
+the bootstrap/push source fingerprint.
 
 Do not hand-edit a TODO to `pass`; promotion must come from its bootstrap-owned
 checker or retained receipt validator. The push consumer opens and rehashes the
