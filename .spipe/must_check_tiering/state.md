@@ -382,3 +382,18 @@ implementation-blocked-by-bootstrap-authority
   two-worktree install/check resume command. PowerShell source parity is not
   counted as native Windows PASS. The updated focused contract passed with
   `selftest=5s ref-path=0s installed-hook=0s` and reported the TODO visibly.
+- bootstrap-identity-fix: Reproduced that completion validated an exact Stage 4
+  candidate but launched automated gates without binding `SIMPLE_BINARY` or
+  the established `SIMPLE_BIN` compatibility name, so a
+  stale deployment could supply false evidence. The recorder now canonicalizes
+  the candidate only after all four phase proofs pass and overrides ambient
+  both identities for every automated row. The focused self-test passed its
+  third and final cycle with intentionally conflicting ambient paths; the bug
+  record is resolved. The existing interpreter/JIT/native engine differential
+  is now bootstrap-automated instead of an inert TODO.
+- latest-bootstrap-evidence: A source-matched four-core Stage 2 producer passed
+  in 1:11:20 with 2,794,780 KiB peak RSS and no swap. Canonical Stage 3 released
+  all 687 surfaces but grew from 11.4 GiB to a measured 26,419,744 KiB peak at
+  HIR import processing; the owned child was safely terminated with exit 143.
+  Stage 3/4, optimizer, SPipe/docgen execution, and ledger PASS publication
+  remain blocked on the tracked recursive HIR/SymbolTable promotion leak.

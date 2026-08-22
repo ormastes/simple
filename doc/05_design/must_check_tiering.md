@@ -12,6 +12,11 @@ distinct Stage 1–4 evidence references, and then executes every automated row.
 Gate logs are retained under the source fingerprint and accepted only when the
 last non-empty line is an explicit PASS verdict. Ledger replacement is atomic
 only after row evaluation completes.
+In completion mode, automated dispatch receives the canonical validated Stage 4
+candidate as both `SIMPLE_BINARY` and `SIMPLE_BIN`; these assignments override
+any ambient value. The
+self-test supplies a conflicting ambient path and requires its fake gate runner
+to observe the admitted candidate.
 
 Statuses are `pass`, `todo`, `blocked`, or `fail`. TODO and blocked are never
 aliases for PASS. Only explicitly push-blocking rows prevent an interactive
