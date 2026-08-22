@@ -169,8 +169,9 @@ fn try_bare_some_option_method(
 
 // Re-export the with-self-update functions
 pub(crate) use special::{
-    exec_function_with_self_return, find_and_exec_method_with_self, find_and_exec_method_with_self_owned,
-    lookup_class_method_index, lookup_impl_method_index,
+    evaluate_call_args, exec_function_with_self_return, find_and_exec_method_with_self,
+    find_and_exec_method_with_self_owned, find_and_exec_method_with_self_owned_values, lookup_class_method_index,
+    lookup_impl_method_index, object_method_exists,
 };
 
 fn use_bare_module_fallback(receiver_in_env: bool, receiver_is_class: bool, receiver_is_enum: bool) -> bool {

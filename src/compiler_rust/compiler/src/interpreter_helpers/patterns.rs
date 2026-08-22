@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::super::{
-    evaluate_expr, evaluate_method_call_with_self_update, find_and_exec_method_with_self,
-    find_and_exec_method_with_self_owned, lookup_class_method_index, lookup_impl_method_index, Enums, ImplMethods,
-    CONST_NAMES, MODULE_GLOBALS,
+    evaluate_call_args, evaluate_expr, evaluate_method_call_with_self_update, find_and_exec_method_with_self,
+    find_and_exec_method_with_self_owned_values, lookup_class_method_index, lookup_impl_method_index,
+    object_method_exists, Enums, ImplMethods, CONST_NAMES, MODULE_GLOBALS,
 };
 
 use super::args::{eval_arg, eval_arg_usize};
@@ -532,6 +532,57 @@ fn handle_method_call_with_self_update_inner(
         } = receiver.as_ref()
         {
             if let Expr::Identifier(parent_name) = parent_receiver.as_ref() {
+                // MECALL-OWNED (2026-08-22): `self.symbols.define(..)` shape. When the
+                // field holds an Object whose class has the method, move the field
+                // OUT of the parent (unique parent map => no clone at all; a shared
+                // parent map is shallow-copied, which is the value-semantics rule),
+                // run the method on the owned Arc, and store the updated self back.
+                // The generic path below cloned the field, so every dict write inside
+                // the callee deep-copied that dict (linear in the symbol table).
+                let owned_field_call = match env.get(parent_name) {
+                    Some(Value::Object { fields: parent_fields, .. }) => match parent_fields.get(field) {
+                        Some(Value::Object { class: field_class, .. }) => {
+                            object_method_exists(classes, impl_methods, field_class, method)
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if owned_field_call {
+                    let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
+                    let taken = match env.get_mut(parent_name) {
+                        Some(Value::Object { fields: parent_fields, .. }) => Arc::make_mut(parent_fields).remove(field),
+                        _ => None,
+                    };
+                    if let Some(Value::Object {
+                        class: field_class,
+                        fields: field_fields,
+                    }) = taken
+                    {
+                        let (result, updated_field) = match find_and_exec_method_with_self_owned_values(
+                            method,
+                            &arg_vals,
+                            args,
+                            &field_class,
+                            field_fields,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )? {
+                            Some(pair) => pair,
+                            None => unreachable!("object_method_exists checked before the field was taken"),
+                        };
+                        if let Some(Value::Object { fields: parent_fields, .. }) = env.get_mut(parent_name) {
+                            Arc::make_mut(parent_fields).insert(field.clone(), updated_field);
+                        }
+                        if let Some(updated_parent) = env.get(parent_name).cloned() {
+                            return Ok((result, Some((parent_name.clone(), updated_parent))));
+                        }
+                        return Ok((result, None));
+                    }
+                }
                 // Get parent object
                 if let Some(Value::Object {
                     class: parent_class,
@@ -755,27 +806,21 @@ fn handle_method_call_with_self_update_inner(
                         .unwrap_or(false);
 
                 if method_found {
-                    // Take ownership: Arc refcount drops to 1 → zero-copy mutations.
-                    // IMPORTANT: args must be evaluated in env while `self` is still
-                    // present. We remove `self` for the zero-copy optimisation, but
-                    // re-insert a clone so that arg expressions such as `me.field`
-                    // (which lower to `self.field`) can resolve during bind_args inside
-                    // exec_function_with_self_return. The clone costs one Arc refcount
-                    // bump for the duration of the call, which is acceptable correctness
-                    // over the alternative of "self not found" (bug 2026-06-11).
+                    // Take ownership: Arc refcount drops to 1 -> zero-copy mutations.
+                    // MECALL-OWNED (2026-08-22): the args are evaluated HERE, while
+                    // the receiver is still in env (so `me.field` args resolve), and
+                    // the receiver is then moved into the callee with NO clone left
+                    // behind. The previous shape re-inserted a clone for the benefit
+                    // of bind_args (bug 2026-06-11), which put the refcount back to 2
+                    // and made the first `self.dict[k] = v` of every `me` call deep-copy
+                    // the dict -- linear in the dict, per call. Losing the binding on
+                    // an Err is unobservable: TryError unwinds to the enclosing
+                    // function boundary and every other CompileError aborts.
+                    let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
                     if let Some(Value::Object { class, fields }) = env.remove(obj_name) {
-                        // Re-insert self so arg expressions that reference the caller's
-                        // self (e.g. `me.field` as a direct arg to a nested `me fn`)
-                        // can still resolve during argument evaluation.
-                        env.insert(
-                            obj_name.to_string(),
-                            Value::Object {
-                                class: class.clone(),
-                                fields: Arc::clone(&fields),
-                            },
-                        );
-                        match find_and_exec_method_with_self_owned(
+                        match find_and_exec_method_with_self_owned_values(
                             method,
+                            &arg_vals,
                             args,
                             &class,
                             fields,

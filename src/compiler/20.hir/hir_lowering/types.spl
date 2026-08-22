@@ -254,14 +254,17 @@ class HirLowering:
     # above; a spec pins that N importers of one surface cause exactly one
     # sweep per (surface, dependency) pair.
     explicit_dep_scan_count: i64
-    # Parallel scalar re-export caches keyed by physical surface index and
-    # wanted item. Registry aliases therefore share one cache entry and no
-    # concatenated facade-name key is allocated during traversal.
-    reexport_root_surface_indices: [i64]
-    reexport_root_wanted: [text]
-    reexport_root_found: [bool]
-    reexport_root_terminal_indices: [i64]
-    reexport_root_items: [text]
+    # REXMEMO (2026-08-21): root re-export memo, "{physical surface index}
+    # {wanted}" -> terminal surface index (-1 = complete, valid MISS) plus the
+    # terminal item name. Registry aliases share one entry because the key is
+    # the PHYSICAL index. The answer depends only on the frozen registry, so
+    # the memo is registry-pure: it survives `begin_module` and is dropped
+    # only when `module_surfaces.generation` changes (find_reexport_source).
+    # A depth-truncated or invalid walk is never recorded. Replaces the five
+    # parallel arrays d757f7d70d0 deleted: those were scanned linearly per
+    # query and capped at 512 rows; a Dict probe is O(1) and uncapped.
+    reexport_root_memo_index: {text: i64}
+    reexport_root_memo_item: {text: text}
     reexport_visit_surface_indices: [i64]
     reexport_visit_wanted: [text]
     reexport_visit_depths: [i64]
@@ -314,12 +317,9 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_explicit_dep_target_memo: {text: i64} = {}
     val empty_explicit_dep_item_memo: {text: text} = {}
     val empty_registered_import_memo: {text: bool} = {}
-    val empty_reexport_root_surface_indices: [i64] = []
+    val empty_reexport_root_memo_index: {text: i64} = {}
+    val empty_reexport_root_memo_item: {text: text} = {}
     val empty_imported_type_methods_in_progress: [text] = []
-    val empty_reexport_root_wanted: [text] = []
-    val empty_reexport_root_found: [bool] = []
-    val empty_reexport_root_terminal_indices: [i64] = []
-    val empty_reexport_root_items: [text] = []
     val empty_reexport_visit_surface_indices: [i64] = []
     val empty_reexport_visit_wanted: [text] = []
     val empty_reexport_visit_depths: [i64] = []
@@ -373,11 +373,8 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         registered_import_memo: empty_registered_import_memo,
         registered_import_memo_owner: "",
         registered_import_skip_count: 0,
-        reexport_root_surface_indices: empty_reexport_root_surface_indices,
-        reexport_root_wanted: empty_reexport_root_wanted,
-        reexport_root_found: empty_reexport_root_found,
-        reexport_root_terminal_indices: empty_reexport_root_terminal_indices,
-        reexport_root_items: empty_reexport_root_items,
+        reexport_root_memo_index: empty_reexport_root_memo_index,
+        reexport_root_memo_item: empty_reexport_root_memo_item,
         reexport_visit_surface_indices: empty_reexport_visit_surface_indices,
         reexport_visit_wanted: empty_reexport_visit_wanted,
         reexport_visit_depths: empty_reexport_visit_depths,

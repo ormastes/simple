@@ -13,6 +13,9 @@ use compiler.frontend.parser_types.{ParserImport}
 use compiler.frontend.parser_types_expr.{Type, TypeKind}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use compiler.hir.hir_lowering._Items.module_lowering.*
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurface,
     ModuleSurfaceBuilder,
@@ -48,6 +51,7 @@ fn reexport_registry(with_origin: bool, reverse_aliases: bool) -> ModuleSurfaces
     facade.content_hash = 11
     leaf.content_hash = 22
     facade.imports = [reexport_import("pkg.leaf")]
+    facade.import_item_offsets = [0, 0]
     if with_origin:
         val origins = module_surface_export_origin_index_empty()
         module_surface_export_origin_index_put(
@@ -67,6 +71,7 @@ fn declared_registry(with_declaration: bool) -> ModuleSurfacesByName:
     var facade = ModuleSurface.empty("declared.facade")
     var leaf = ModuleSurface.empty("declared.leaf")
     facade.imports = [reexport_import("declared.leaf")]
+    facade.import_item_offsets = [0, 0]
     if with_declaration:
         val callable_type = Type(kind: TypeKind.Infer, span: Span.empty())
         leaf.callables["Real"] = ModuleSurfaceCallable(
@@ -76,6 +81,8 @@ fn declared_registry(with_declaration: bool) -> ModuleSurfacesByName:
             is_async: false, is_static: false, is_public: true,
             is_method: false, is_mutable: false, is_const: false,
             is_kernel: false, is_extern: false, span: Span.empty())
+        leaf.callable_names = ["Real"]
+        leaf.callable_values = [leaf.callables["Real"]]
     freeze_registry(
         [facade, leaf],
         {"declared.facade": 0, "declared.leaf": 1},
@@ -85,6 +92,7 @@ fn relative_registry() -> ModuleSurfacesByName:
     var facade = ModuleSurface.empty("src/relative/facade.spl")
     var leaf = ModuleSurface.empty("src/relative/leaf.spl")
     facade.imports = [reexport_import(".leaf")]
+    facade.import_item_offsets = [0, 0]
     val origins = module_surface_export_origin_index_empty()
     module_surface_export_origin_index_put(
         origins, "Relative", "relative.leaf", "Relative", "explicit")
@@ -99,6 +107,7 @@ fn std_lib_conflict_registry() -> ModuleSurfacesByName:
     var std_provider = ModuleSurface.empty("std.provider")
     var lib_provider = ModuleSurface.empty("lib.provider")
     facade.imports = [reexport_import("std.provider")]
+    facade.import_item_offsets = [0, 0]
     val origins = module_surface_export_origin_index_empty()
     module_surface_export_origin_index_put(
         origins, "Conflict", "std.provider", "Conflict", "explicit")
@@ -112,7 +121,9 @@ fn cyclic_registry(with_hit: bool) -> ModuleSurfacesByName:
     var first = ModuleSurface.empty("cycle.first")
     var second = ModuleSurface.empty("cycle.second")
     first.imports = [reexport_import("cycle.second")]
+    first.import_item_offsets = [0, 0]
     second.imports = [reexport_import("cycle.first")]
+    second.import_item_offsets = [0, 0]
     if with_hit:
         val origins = module_surface_export_origin_index_empty()
         module_surface_export_origin_index_put(
@@ -145,6 +156,7 @@ fn depth_registry() -> ModuleSurfacesByName:
         surface.content_hash = index + 1
         if index < 10:
             surface.imports = [reexport_import("depth.{index + 1}")]
+            surface.import_item_offsets = [0, 0]
         surfaces = surfaces.push(surface)
         names[name] = index
         ordered_names = ordered_names.push(name)
@@ -167,9 +179,9 @@ describe "physical re-export cache":
         step("Verify: shares a positive result across aliases without another walk")
         val registry = reexport_registry(true, false)
         var lowering = hirlowering_for_module("consumer", registry)
-        val first = lowering.find_reexport_source(registry.surfaces[0], "pkg.facade", "Hit")
+        val first = lowering.find_reexport_source(0, "Hit")
         val calls_after_first = lowering.reexport_chase_calls
-        val second = lowering.find_reexport_source(registry.surfaces[0], "lib.pkg.facade", "Hit")
+        val second = lowering.find_reexport_source(0, "Hit")
         expect(first.found).to_equal(true)
         expect(first.module_index).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(second.found).to_equal(true)
@@ -182,8 +194,8 @@ describe "physical re-export cache":
         val reversed_registry = reexport_registry(true, true)
         var first_lowering = hirlowering_for_module("consumer", first_registry)
         var reversed_lowering = hirlowering_for_module("consumer", reversed_registry)
-        val first = first_lowering.find_reexport_source(first_registry.surfaces[0], "pkg.facade", "Hit")
-        val reversed = reversed_lowering.find_reexport_source(reversed_registry.surfaces[0], "lib.pkg.facade", "Hit")
+        val first = first_lowering.find_reexport_source(0, "Hit")
+        val reversed = reversed_lowering.find_reexport_source(0, "Hit")
         expect(first.module_name).to_equal(reversed.module_name)
         expect(first_registry.surfaces[1].preferred_registry_name).to_equal(
             reversed_registry.surfaces[1].preferred_registry_name)
@@ -199,7 +211,7 @@ describe "physical re-export cache":
         step("Verify: resolves relative routes from the physical path identity")
         val registry = relative_registry()
         var lowering = hirlowering_for_module("consumer", registry)
-        val result = lowering.find_reexport_source(registry.surfaces[0], "relative.facade", "Relative")
+        val result = lowering.find_reexport_source(0, "Relative")
         expect(registry.surfaces[0].logical_name).to_equal("relative.facade")
         expect(registry.surfaces[0].import_target_indices).to_equal([1])
         expect(result.found).to_equal(true)
@@ -209,7 +221,7 @@ describe "physical re-export cache":
         step("Verify: keeps literal std precedence when lib has a conflicting surface")
         val registry = std_lib_conflict_registry()
         var lowering = hirlowering_for_module("consumer", registry)
-        val result = lowering.find_reexport_source(registry.surfaces[0], "std.consumer", "Conflict")
+        val result = lowering.find_reexport_source(0, "Conflict")
         expect(registry.surfaces[0].import_target_indices).to_equal([1])
         expect(result.found).to_equal(true)
         expect(result.module_index).to_equal(1)  # oracle: 1 — named expected value from the requirement
@@ -218,10 +230,10 @@ describe "physical re-export cache":
         step("Verify: invalidates a root cache for a declaration-only replacement")
         val missing = declared_registry(false)
         var lowering = hirlowering_for_module("consumer", missing)
-        val miss = lowering.find_reexport_source(missing.surfaces[0], "declared.facade", "Real")
+        val miss = lowering.find_reexport_source(0, "Real")
         val declared = declared_registry(true)
         lowering.module_surfaces = declared
-        val hit = lowering.find_reexport_source(declared.surfaces[0], "declared.facade", "Real")
+        val hit = lowering.find_reexport_source(0, "Real")
         expect(miss.found).to_equal(false)
         expect(hit.found).to_equal(true)
 
@@ -229,16 +241,12 @@ describe "physical re-export cache":
         step("Verify: preserves warmed hit and miss roots across begin_module")
         val registry = reexport_registry(true, false)
         var lowering = hirlowering_for_module("first", registry)
-        val hit_before = lowering.find_reexport_source(
-            registry.surfaces[0], "pkg.facade", "Hit")
-        val miss_before = lowering.find_reexport_source(
-            registry.surfaces[0], "pkg.facade", "Missing")
+        val hit_before = lowering.find_reexport_source(0, "Hit")
+        val miss_before = lowering.find_reexport_source(0, "Missing")
         val calls_after_warm = lowering.reexport_chase_calls
         lowering.begin_module("second")
-        val hit_after = lowering.find_reexport_source(
-            registry.surfaces[0], "pkg.facade", "Hit")
-        val miss_after = lowering.find_reexport_source(
-            registry.surfaces[0], "pkg.facade", "Missing")
+        val hit_after = lowering.find_reexport_source(0, "Hit")
+        val miss_after = lowering.find_reexport_source(0, "Missing")
         expect(hit_before.found).to_equal(true)
         expect(miss_before.found).to_equal(false)
         expect(hit_after.found).to_equal(true)
@@ -250,7 +258,7 @@ describe "physical re-export cache":
         step("Verify: finds a real declaration behind a re-export")
         val registry = declared_registry(true)
         var lowering = hirlowering_for_module("consumer", registry)
-        val result = lowering.find_reexport_source(registry.surfaces[0], "declared.facade", "Real")
+        val result = lowering.find_reexport_source(0, "Real")
         expect(result.found).to_equal(true)
         expect(result.module_index).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(result.item_name).to_equal("Real")
@@ -259,7 +267,7 @@ describe "physical re-export cache":
         step("Verify: finds a hit behind a cycle")
         val registry = cyclic_registry(true)
         var lowering = hirlowering_for_module("consumer", registry)
-        val result = lowering.find_reexport_source(registry.surfaces[0], "cycle.first", "CycleHit")
+        val result = lowering.find_reexport_source(0, "CycleHit")
         expect(result.found).to_equal(true)
         expect(result.module_index).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
@@ -279,13 +287,13 @@ describe "physical re-export cache":
             registry.surfaces[1].export_origin_index, "Late", "pkg.leaf", "Late", "explicit")
         expect(origin_mutation.is_err()).to_equal(true)
 
-    it "rejects stale facade surfaces from another registry":
-        step("Verify: rejects stale facade surfaces from another registry")
+    it "rejects a facade index outside the current registry":
+        step("Verify: rejects a facade index outside the current registry")
         val current = reexport_registry(true, false)
-        val stale = relative_registry()
         var lowering = hirlowering_for_module("consumer", current)
-        val result = lowering.find_reexport_source(stale.surfaces[0], "pkg.facade", "Hit")
+        val result = lowering.find_reexport_source(current.surfaces.len(), "Hit")
         expect(result.found).to_equal(false)
+        expect(lowering.reexport_root_memo_index.len()).to_equal(0)
 
     it "fails closed for invalid alignment and terminal owners":
         step("Verify: fails closed for invalid alignment and terminal owners")
@@ -295,25 +303,26 @@ describe "physical re-export cache":
         surface.frozen = true
         surface.preferred_registry_name = "broken"
         surface.imports = [reexport_import("missing")]
+        surface.import_item_offsets = [0, 0]
         surface.export_origin_index.frozen = true
         var malformed = ModuleSurfacesByName(
             surfaces: [surface], index_by_name: {"broken": 0},
             ordered_names: ["broken"], ordered_indices: [0], generation: 1, frozen: true)
         var lowering = hirlowering_for_module("consumer", malformed)
-        val misaligned = lowering.find_reexport_source(malformed.surfaces[0], "broken", "Missing")
+        val misaligned = lowering.find_reexport_source(0, "Missing")
         expect(misaligned.found).to_equal(false)
         val bad_registry = unresolved_owner_registry()
         var bad_lowering = hirlowering_for_module("consumer", bad_registry)
-        val bad_result = bad_lowering.find_reexport_source(bad_registry.surfaces[0], "pkg.leaf", "Bad")
+        val bad_result = bad_lowering.find_reexport_source(0, "Bad")
         expect(bad_result.found).to_equal(false)
 
     it "does not cache a depth-truncated miss as a root result":
         step("Verify: does not cache a depth-truncated miss as a root result")
         val registry = depth_registry()
         var lowering = hirlowering_for_module("consumer", registry)
-        val first = lowering.find_reexport_source(registry.surfaces[0], "depth.0", "Missing")
+        val first = lowering.find_reexport_source(0, "Missing")
         val calls_after_first = lowering.reexport_chase_calls
-        val second = lowering.find_reexport_source(registry.surfaces[0], "depth.0", "Missing")
+        val second = lowering.find_reexport_source(0, "Missing")
         expect(first.found).to_equal(false)
         expect(second.found).to_equal(false)
         expect(lowering.reexport_chase_calls).to_be_greater_than(calls_after_first)
@@ -323,7 +332,7 @@ describe "physical re-export cache":
         val registry = reexport_registry(true, false)
         var lowering = hirlowering_for_module("consumer", registry)
         val generation = registry.generation
-        lowering.find_reexport_source(registry.surfaces[0], "pkg.facade", "Hit")
+        lowering.find_reexport_source(0, "Hit")
         val before_capacity = rt_heap_array_capacity_bytes()
         val before_aux = rt_heap_aux_live_bytes()
         val before_registry = rt_heap_registry_count()
@@ -331,33 +340,42 @@ describe "physical re-export cache":
         var iteration = 0
         while iteration < 1000:
             expect(lowering.module_surfaces.generation).to_equal(generation)
-            lowering.find_reexport_source(registry.surfaces[0], "lib.pkg.facade", "Hit")
+            lowering.find_reexport_source(0, "Hit")
             iteration = iteration + 1
         expect(rt_heap_array_capacity_bytes()).to_equal(before_capacity)
         expect(rt_heap_aux_live_bytes()).to_equal(before_aux)
         expect(rt_heap_registry_count()).to_equal(before_registry)
         expect(rt_heap_live_bytes()).to_equal(before_live)
 
-    it "saturates the root memo at 512 aligned entries":
-        step("Verify: saturates the root memo at 512 aligned entries")
+    it "keeps one memo row per (physical facade, wanted) and probes it in O(1)":
+        step("Verify: keeps one memo row per (physical facade, wanted) and probes it in O(1)")
+        # REXMEMO (2026-08-21). d757f7d70d0 deleted the root memo outright, so
+        # every `find_reexport_source` re-walked the facade's reachable import
+        # graph: a MISS visits all of it, once per name, per importer. On the
+        # 662-module closure `glob` went 69 s -> 195 s for the SAME 73 roots.
+        # The memo is a Dict keyed by PHYSICAL index + wanted (aliases share a
+        # row, no 512 cap, no linear scan), dropped only on a generation change.
+        # Counter, not wall clock: the hit count cannot move on the pre-fix code.
         val registry = reexport_registry(true, false)
         var lowering = hirlowering_for_module("consumer", registry)
         var index = 0
         while index < 600:
-            val result = lowering.find_reexport_source(
-                registry.surfaces[0], "pkg.facade", "Missing.{index}")
+            val result = lowering.find_reexport_source(0, "Missing.{index}")
             expect(result.found).to_equal(false)
             index = index + 1
-        expect(lowering.reexport_root_surface_indices.len()).to_equal(512)  # oracle: 512 — named expected value from the requirement
-        expect(lowering.reexport_root_wanted.len()).to_equal(512)  # oracle: 512 — named expected value from the requirement
-        expect(lowering.reexport_root_found.len()).to_equal(512)  # oracle: 512 — named expected value from the requirement
-        expect(lowering.reexport_root_terminal_indices.len()).to_equal(512)  # oracle: 512 — named expected value from the requirement
-        expect(lowering.reexport_root_items.len()).to_equal(512)  # oracle: 512 — named expected value from the requirement
-        expect(lowering.reexport_root_surface_indices.len()).to_equal(
-            lowering.reexport_root_wanted.len())
-        expect(lowering.reexport_root_wanted.len()).to_equal(
-            lowering.reexport_root_found.len())
-        expect(lowering.reexport_root_found.len()).to_equal(
-            lowering.reexport_root_terminal_indices.len())
-        expect(lowering.reexport_root_terminal_indices.len()).to_equal(
-            lowering.reexport_root_items.len())
+        expect(lowering.reexport_root_memo_index.len()).to_equal(600)
+        expect(lowering.reexport_root_memo_item.len()).to_equal(600)
+        expect(lowering.reexport_root_memo_index["0 Missing.7"]).to_equal(-1)
+        val hits_before = lowering.reexport_chase_memo_hits
+        val calls_before = lowering.reexport_chase_calls
+        lowering.find_reexport_source(0, "Missing.7")
+        lowering.find_reexport_source(0, "Hit")
+        lowering.find_reexport_source(0, "Hit")
+        expect(lowering.reexport_chase_memo_hits).to_equal(hits_before + 2)
+        expect(lowering.reexport_chase_calls).to_be_greater_than(calls_before)
+        expect(lowering.reexport_root_memo_index["0 Hit"]).to_equal(1)
+        expect(lowering.reexport_root_memo_item["0 Hit"]).to_equal("Hit")
+        # A new frozen registry (new generation) must drop every row.
+        lowering.module_surfaces = reexport_registry(true, false)
+        lowering.find_reexport_source(0, "Hit")
+        expect(lowering.reexport_root_memo_index.len()).to_equal(1)

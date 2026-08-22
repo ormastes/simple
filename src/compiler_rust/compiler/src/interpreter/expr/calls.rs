@@ -8,8 +8,8 @@ use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::Value;
 
 use super::super::{
-    evaluate_call, evaluate_method_call, exec_method_function, find_and_exec_method_with_self, ClassDef, Enums, Env,
-    FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MODULE_GLOBALS,
+    evaluate_call, evaluate_call_args, evaluate_method_call, exec_method_function, find_and_exec_method_with_self,
+    find_and_exec_method_with_self_owned_values, object_method_exists, ClassDef, Enums, Env, FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MODULE_GLOBALS,
 };
 
 /// Call a method whose receiver is a *place* — a variable followed by an
@@ -98,6 +98,44 @@ pub(super) fn eval_call_expr(
             // Check if receiver is an identifier - if so, we may need to update it
             // after calling a mutating (me) method
             if let Expr::Identifier(var_name) = receiver.as_ref() {
+                // MECALL-OWNED (2026-08-22): expression-context twin of the
+                // statement fast path in interpreter_helpers::patterns. When the
+                // variable holds an Object whose class has the method, evaluate
+                // the args with the receiver still bound, then MOVE the receiver
+                // into the callee so `self.dict[k] = v` mutates in place instead
+                // of deep-copying the dict on every call (value semantics are
+                // kept: a second owner still forces the copy-on-write clone).
+                let owned_call = match env.get(var_name) {
+                    Some(Value::Object { class, .. }) => object_method_exists(classes, impl_methods, class, method),
+                    _ => false,
+                };
+                if owned_call {
+                    let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
+                    if let Some(Value::Object { class, fields }) = env.remove(var_name) {
+                        let (result, new_self) = match find_and_exec_method_with_self_owned_values(
+                            method,
+                            &arg_vals,
+                            args,
+                            &class,
+                            fields,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )? {
+                            Some(pair) => pair,
+                            None => unreachable!("object_method_exists checked before the receiver was taken"),
+                        };
+                        env.insert(var_name.clone(), new_self.clone());
+                        if !env.is_local(var_name) && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(var_name)) {
+                            MODULE_GLOBALS.with(|cell| {
+                                cell.borrow_mut().insert(var_name.clone(), new_self);
+                            });
+                        }
+                        return Ok(Some(result));
+                    }
+                }
                 // Use the self-update variant to get both result and updated self
                 let (result, updated_self) = super::super::evaluate_method_call_with_self_update(
                     receiver,
@@ -146,6 +184,52 @@ pub(super) fn eval_call_expr(
                         impl_methods,
                     )? {
                         return Ok(Some(result));
+                    }
+                    // MECALL-OWNED (2026-08-22): `self.symbols.define(..)` in expression
+                    // context. Move the field Object out of the parent, run the method
+                    // on the owned Arc, store the updated self back. The generic path
+                    // below copies the field into a temp binding, so every dict write
+                    // inside the callee deep-copied that dict (linear in the table).
+                    let owned_field_call = match env.get(var_name) {
+                        Some(Value::Object { fields: parent_fields, .. }) => match parent_fields.get(field) {
+                            Some(Value::Object { class: field_class, .. }) => {
+                                object_method_exists(classes, impl_methods, field_class, method)
+                            }
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                    if owned_field_call {
+                        let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
+                        let taken = match env.get_mut(var_name) {
+                            Some(Value::Object { fields: parent_fields, .. }) => Arc::make_mut(parent_fields).remove(field),
+                            _ => None,
+                        };
+                        if let Some(Value::Object {
+                            class: field_class,
+                            fields: field_fields,
+                        }) = taken
+                        {
+                            let (result, updated_field) = match find_and_exec_method_with_self_owned_values(
+                                method,
+                                &arg_vals,
+                                args,
+                                &field_class,
+                                field_fields,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )? {
+                                Some(pair) => pair,
+                                None => unreachable!("object_method_exists checked before the field was taken"),
+                            };
+                            if let Some(Value::Object { fields: parent_fields, .. }) = env.get_mut(var_name) {
+                                Arc::make_mut(parent_fields).insert(field.clone(), updated_field);
+                            }
+                            return Ok(Some(result));
+                        }
                     }
                     // Evaluate the outer receiver to get its current value
                     let outer_val = evaluate_expr(outer_receiver, env, functions, classes, enums, impl_methods)?;

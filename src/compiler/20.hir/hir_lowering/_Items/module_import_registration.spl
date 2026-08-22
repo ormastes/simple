@@ -440,7 +440,7 @@ impl HirLowering:
             return
         if (hir_module_env_get("SIMPLE_HIR_REEXPORT_STATS") ?? "") != "1":
             return
-        eprint("[reexport-chase] calls={self.reexport_chase_calls} memo_hits={self.reexport_chase_memo_hits} memo={self.reexport_root_surface_indices.len()}\n")
+        eprint("[reexport-chase] calls={self.reexport_chase_calls} memo_hits={self.reexport_chase_memo_hits} memo={self.reexport_root_memo_index.len()}\n")
 
     me try_register_bootstrap_global_symbol(name: text, span: Span) -> bool:
         """Resolve one uniquely owned flat-global bootstrap declaration."""
@@ -602,6 +602,9 @@ impl HirLowering:
         if self.reexport_generation != generation:
             self.reexport_generation = generation
             self.reexport_registry_valid = module_surfaces_frozen_alignment(self.module_surfaces)
+            # REXMEMO: a new frozen registry can answer every root differently.
+            self.reexport_root_memo_index = {}
+            self.reexport_root_memo_item = {}
 
         self.reexport_walk_complete = true
         self.reexport_walk_valid = true
@@ -627,6 +630,29 @@ impl HirLowering:
             self.reexport_walk_valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
 
+        # REXMEMO (2026-08-21): the walk below reads only the frozen registry,
+        # so one answer per (physical facade, wanted) serves every importer in
+        # the closure. Without it each glob expansion re-walked the facade's
+        # whole reachable import graph per name (a MISS visits all of it), which
+        # is why `glob` grew superlinearly with the closure after d757f7d70d0
+        # deleted the array memo (69 s -> 195 s on driver.spl, same 73 roots).
+        # Bracket-index read after contains_key: Dict.get() on the self-hosted
+        # native path corrupts/mis-reports present values.
+        val memo_key = "{facade_index} {wanted}"
+        if self.reexport_root_memo_index.contains_key(memo_key):
+            self.reexport_chase_memo_hits = self.reexport_chase_memo_hits + 1
+            val terminal_index: i64 = self.reexport_root_memo_index[memo_key]
+            if terminal_index < 0:
+                return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+            if terminal_index >= self.module_surfaces.surfaces.len():
+                self.reexport_walk_valid = false
+                return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+            return HirReexportSource(
+                found: true,
+                module_index: terminal_index,
+                module_name: self.module_surfaces.surfaces[terminal_index].preferred_registry_name,
+                item_name: self.reexport_root_memo_item[memo_key])
+
         # Keep recursion state on a fresh explicit carrier. HirLowering fields
         # are shared by nested root queries and native cross-module frame sync
         # can restore an older visit snapshot after a nested call returns.
@@ -635,4 +661,12 @@ impl HirLowering:
             facade_index, wanted, 0, state)
         self.reexport_walk_complete = state.complete
         self.reexport_walk_valid = state.valid
+        if result.found:
+            self.reexport_root_memo_index[memo_key] = result.module_index
+            self.reexport_root_memo_item[memo_key] = result.item_name
+        elif state.complete and state.valid:
+            # Only a COMPLETE, valid miss is a fact about the registry; a
+            # depth-truncated or misaligned walk stays retryable.
+            self.reexport_root_memo_index[memo_key] = -1
+            self.reexport_root_memo_item[memo_key] = ""
         result
