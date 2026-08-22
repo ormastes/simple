@@ -451,6 +451,16 @@ array extraction, linear duplicate scan, or dictionary copyback. Incomplete CFG
 or dominance still produces no loops, and loop body/exit construction is
 unchanged.
 
+### MIR trace scope and cache generations
+
+The MIR trace owner stores `[depth, lowering_enabled, mirb_enabled, generation]`.
+Outermost entry samples `SIMPLE_COMPILER_TRACE`,
+`SIMPLE_COMPILER_PHASE_PROFILE`, `SIMPLE_BOOTSTRAP_DIAG`, and
+`SIMPLE_MIRB_TRACE`; nested entry changes only depth. Exit restores the previous
+depth token. General lowering and MIRB-only accessors preserve their prior
+distinct semantics, while the union accessor retains both. Local
+expression/method/optional caches refresh when their saved generation differs.
+
 ## Fix application fast-path contract
 
 Per-file replacements use a typed stable merge sort ordered by descending start.
