@@ -21,7 +21,8 @@ post-pass verifier covering SSA dominance, types, ownership, and loop boundary i
 `run_named_pass_with_record` now verifies non-empty functions, unique non-negative block
 and local identities, canonical instruction/terminator access coverage, declared-local
 membership for every modeled DEF/USE, entry membership, and branch/unwind target membership
-before and after a function-scoped pass. Identity membership uses dictionaries instead of
+plus signature-consistent argument/return ABI locals before and after a function-scoped pass.
+Identity membership uses dictionaries instead of
 quadratic growing-array searches. Its exact counter adapters cross-check native counts
 against serialized change and fail on disagreement. It is not yet the pipeline-wide
 `--verify-each` gate.
@@ -35,8 +36,8 @@ execution.
 1. Extend the exact `PassOutcome` adapter contract to active module passes and future
    rehabilitated passes without discarding native statistics.
 2. Extend actual adapter results with stable rejected-reason codes and injected timing.
-3. Extend the structural receipt beyond deployed operand/local validity into SSA dominance,
-   types, ownership, and loop boundaries, then require it after every changed function/module
+3. Extend the structural receipt beyond deployed operand/local and ABI-local type validity
+   into opcode type rules, SSA dominance, ownership, and loop boundaries, then require it after every changed function/module
    pass in test and `--verify-each` modes.
 4. Reject transformed records without candidates, impossible instruction counts,
    missing verifier receipts, or missing active witness contracts.
