@@ -1903,8 +1903,12 @@ escape scan now returns the original text directly when ESC is absent, eliminati
 that common-case auxiliary allocation. ANSI-bearing input still uses the original
 state machine exactly: ESC begins suppression, lowercase `m` ends it, and an
 unterminated sequence drops the remaining suffix. Sharing the already-normalized
-combined output across the decision and JSON parser remains a larger internal API
-follow-up.
+combined output is now implemented at both active command boundaries. Single-file
+JSON and failing workspace text each combine and normalize stdout/stderr once,
+then pass the immutable cleaned text to lint policy and diagnostic parsing/counting.
+The text workspace count path checks the parser's exact line-admission predicate
+without allocating JSON objects solely to discard them. Raw text replay remains
+the original stdout followed by stderr.
 
 ### Workspace diagnostics repeated-startup audit
 
