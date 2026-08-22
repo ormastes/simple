@@ -308,9 +308,15 @@ mod tests {
         let value = Value::array(vec![Value::Int(7), Value::Bool(true)]);
         let runtime = value_to_runtime(&value);
 
-        assert_eq!(simple_runtime::value::rt_tuple_len(runtime), 2);
-        assert_eq!(simple_runtime::value::rt_tuple_get(runtime, 0).as_int(), 7);
-        assert_eq!(simple_runtime::value::rt_tuple_get(runtime, 1), RuntimeValue::TRUE);
+        // An ARRAY marshals to a runtime ARRAY, so it is read with the array
+        // accessors, not the tuple ones. `value_to_runtime` deliberately splits
+        // the two (see the `Value::Tuple` arm comment above) so a tuple is
+        // byte-identical to a natively constructed tuple;
+        // `test_value_to_runtime_tuple_is_runtime_tuple` below covers that side.
+        // The tuple accessors used here reported -1 on an array.
+        assert_eq!(simple_runtime::value::rt_array_len(runtime), 2);
+        assert_eq!(simple_runtime::value::rt_array_get(runtime, 0).as_int(), 7);
+        assert_eq!(simple_runtime::value::rt_array_get(runtime, 1), RuntimeValue::TRUE);
     }
 
     #[test]

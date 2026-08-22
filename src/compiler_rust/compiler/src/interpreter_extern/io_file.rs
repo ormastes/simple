@@ -451,13 +451,15 @@ mod tests {
             Value::Int(4)
         );
         let chunk = rt_io_file_read(&[Value::Int(fd), Value::Int(3)]).unwrap();
-        match chunk {
-            Value::Array(arr) => {
-                let bytes: Vec<u8> = arr.iter().map(byte_of).collect();
-                assert_eq!(bytes, b"efg");
-            }
-            other => panic!("expected array, got {other:?}"),
-        }
+        // Byte-sequence assertion, not a container-variant match: since
+        // 69bd3215708 ("perf: optimize compiler loader and packed byte paths")
+        // `rt_io_file_read` returns the packed `Value::ByteArray`.
+        // `try_array_bytes` accepts either representation and is what the
+        // extern boundary itself reads with.
+        let bytes: Vec<u8> = chunk
+            .try_array_bytes()
+            .unwrap_or_else(|| panic!("expected bytes, got {chunk:?}"));
+        assert_eq!(bytes, b"efg");
         assert_eq!(
             rt_io_file_seek(&[Value::Int(fd), Value::Int(0), Value::Int(1)]).unwrap(),
             Value::Int(7)

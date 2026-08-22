@@ -39,8 +39,9 @@ fn extract_bytes(args: &[Value], index: usize) -> Option<Vec<u8>> {
     args.get(index)?.try_array_bytes()
 }
 
-/// Wrap raw bytes in a `Value::Array(Arc<Vec<Value::Int(byte)>>)` shape
-/// so Simple code sees a genuine `[u8]`.
+/// Wrap raw bytes in the packed `Value::ByteArray` byte-sequence shape
+/// (69bd3215708 "perf: optimize compiler loader and packed byte paths"), which
+/// Simple code still sees as a genuine `[u8]`.
 fn bytes_to_value(bytes: &[u8]) -> Value {
     Value::byte_array(bytes.to_vec())
 }
@@ -520,16 +521,15 @@ mod tests {
     fn ed25519_sign_matches_pkcs8_v1_fixture_signature() {
         let args = [bytes_to_value(ED25519_PKCS8_V1), bytes_to_value(MSG)];
         let result = rt_ed25519_sign(&args).expect("signing should not error");
-        let Value::Array(bytes) = result else {
-            panic!("unexpected result: {result:?}");
-        };
-        let sig: Vec<u8> = bytes
-            .iter()
-            .map(|value| match value {
-                Value::Int(i) => *i as u8,
-                other => panic!("unexpected byte value: {other:?}"),
-            })
-            .collect();
+        // Read the byte SEQUENCE, not one container variant: since
+        // 69bd3215708 ("perf: optimize compiler loader and packed byte paths")
+        // byte-producing externs return the packed `Value::ByteArray` rather
+        // than `Value::Array(Vec<Value::Int>)`. `try_array_bytes` is the
+        // representation-agnostic accessor the extern boundary itself uses,
+        // so this stays an exact-bytes assertion.
+        let sig: Vec<u8> = result
+            .try_array_bytes()
+            .unwrap_or_else(|| panic!("unexpected result: {result:?}"));
         assert_eq!(sig, ED25519_SIG_HELLO);
         let key = UnparsedPublicKey::new(&ED25519, ED25519_PUBKEY);
         key.verify(MSG, &sig).expect("fixture signature should verify");
@@ -539,16 +539,10 @@ mod tests {
     fn ed25519_sign_preserves_u8_literals_in_message_arrays() {
         let args = [bytes_to_value(ED25519_PKCS8_V1), bytes_to_value_with_first_u8(MSG)];
         let result = rt_ed25519_sign(&args).expect("signing should not error");
-        let Value::Array(bytes) = result else {
-            panic!("unexpected result: {result:?}");
-        };
-        let sig: Vec<u8> = bytes
-            .iter()
-            .map(|value| match value {
-                Value::Int(i) => *i as u8,
-                other => panic!("unexpected byte value: {other:?}"),
-            })
-            .collect();
+        // Same packed-byte contract as above (69bd3215708).
+        let sig: Vec<u8> = result
+            .try_array_bytes()
+            .unwrap_or_else(|| panic!("unexpected result: {result:?}"));
         assert_eq!(sig, ED25519_SIG_HELLO);
     }
 

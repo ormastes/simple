@@ -3237,7 +3237,13 @@ mod tests {
             // multi-byte suffix: byte-wise tail compare must not split a
             // codepoint or report a false hit
             ("héllo…", "…", true),
-            ("héllo…", "o…", false),
+            // "héllo…" really does end with "o…" (h é l l o …), and both the C
+            // runtime's memcmp tail test (runtime_native.c:3666) and this
+            // handler say so. The row previously asserted `false`, which no
+            // implementation of the documented byte-wise contract could satisfy.
+            ("héllo…", "o…", true),
+            // The genuine no-false-hit case: the tail is "o…", not "é…".
+            ("héllo…", "é…", false),
         ];
 
         for &(subject, suffix, expected) in cases {

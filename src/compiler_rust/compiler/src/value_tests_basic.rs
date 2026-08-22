@@ -327,7 +327,14 @@ fn test_value_matches_type_int() {
 #[test]
 fn test_value_matches_type_float() {
     assert!(Value::Float(3.15).matches_type("f64"));
-    assert!(Value::Float(3.15).matches_type("f32"));
+    // `matches_type` exists for union-arm discrimination, so it separates the
+    // two float representations: "f32" matches `Value::Float32`, not
+    // `Value::Float`. The single-precision arm was introduced with the
+    // `Value::Float32` variant; "float"/"Float" still matches either.
+    assert!(!Value::Float(3.15).matches_type("f32"));
+    assert!(Value::Float32(3.15).matches_type("f32"));
+    assert!(!Value::Float32(3.15).matches_type("f64"));
+    assert!(Value::Float32(3.15).matches_type("float"));
     assert!(Value::Float(3.15).matches_type("float"));
     assert!(Value::Float(3.15).matches_type("Float"));
     assert!(!Value::Float(3.15).matches_type("int"));
