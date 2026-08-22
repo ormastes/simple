@@ -164,3 +164,8 @@ passing placeholder.
     before allocation/pointer lift while preserving presentation call/memory
     shape. Continue the hosted-entry, compositor-input, Chromium, and game
     duplicate bindings, then implement signed provider admission.
+31. Seven Chromium Winit duplicates now propagate admission/access/release
+    failures with exact lexical unsafe contracts and unchanged calls/memory.
+    Hosted compositor input is confirmed ABI-incompatible across lanes; add one
+    generated typed snapshot/status-out thunk rather than regressing its hot path
+    with extra scalar calls/locks, then migrate hosted-entry and game bindings.

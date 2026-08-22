@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+owner=src/app/ui.chromium/app.spl
+
+symbols='rt_winit_event_loop_new rt_winit_window_new rt_winit_event_loop_poll_events rt_winit_event_get_type rt_winit_event_free rt_winit_window_free rt_winit_event_loop_free'
+for symbol in $symbols; do
+    grep -B1 -F "extern fn $symbol" "$owner" | grep -q 'sentinel'
+done
+
+grep -q 'while ev > 0:' "$owner"
+grep -q 'if ev < 0:' "$owner"
+grep -q 'if event_type < 0:' "$owner"
+grep -q 'if released == 0:' "$owner"
+grep -q 'me shutdown() -> bool:' "$owner"
+grep -q 'presentation_ok and shutdown_ok' "$owner"
+
+# Admission and release remain direct and allocation-free. Each next-event
+# admission occurs only after the current positive event is released.
+test "$(grep -c 'ev = rt_winit_event_loop_poll_events' "$owner")" -eq 2
+test "$(grep -c 'rt_winit_event_free(ev)' "$owner")" -eq 2
+if grep -E 'dlsym|HashMap|Mutex|retry' "$owner" >/dev/null; then
+    echo 'Chromium Winit owner contains forbidden hot-path machinery' >&2
+    exit 1
+fi
+
+echo 'chromium Winit contract audit: PASS'

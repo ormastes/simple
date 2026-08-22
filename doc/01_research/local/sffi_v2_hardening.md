@@ -750,3 +750,19 @@ Native provider tests, the GUI interpreter test, two Simple checks, lint, and a
 source call/memory-shape audit pass. The broader WM seam spec remains red only
 for its documented pre-existing missing FreeBSD implementation; it passed the
 other ten examples. Signed artifact admission remains outstanding.
+
+The duplicate `hosted_input_backend.spl` lane declares tuple-return keyboard
+and mouse accessors that exist only in the synthetic interpreter dispatcher;
+the native Winit provider exports scalar accessors instead. Replacing each
+tuple with multiple scalar calls would add provider dispatches and interpreter
+locks on a hot input path. This lane therefore requires a generated typed
+snapshot/status-out thunk shared by native and interpreter, not a compatibility
+rewrite that trades ABI correctness for a performance regression.
+
+The Chromium shell's seven scalar Winit duplicates can be hardened without
+that tradeoff. They now carry ownership/sentinel contracts and minimal lexical
+FFI scopes; negative admission, stale event-kind, release failure, and teardown
+failure propagate through the existing boolean run result. Each admitted event
+is still decoded once and released once before the next poll. No call,
+allocation, lookup, lock, hash, or retry was added. Simple check/lint, the
+19-example Chromium interaction spec, and the call/memory-shape audit pass.
