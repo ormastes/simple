@@ -11,8 +11,10 @@ flat=src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
 hir=src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl
 cocoa=src/os/compositor/hosted_backend_cocoa.spl
 sdl2=src/os/compositor/hosted_backend_sdl2.spl
+sffi_io=src/lib/nogc_sync_mut/sffi/io.spl
+sffi_system=src/lib/nogc_sync_mut/sffi/system.spl
 
-for owner in "$decl_fn" "$decl_use" "$stmt" "$flat" "$hir" "$cocoa" "$sdl2"; do
+for owner in "$decl_fn" "$decl_use" "$stmt" "$flat" "$hir" "$cocoa" "$sdl2" "$sffi_io" "$sffi_system"; do
     test -f "$owner" || {
         echo "unsafe capability ownership: missing owner $owner" >&2
         exit 1
@@ -59,19 +61,36 @@ grep -Fq 'unsafe_hir_body.unsafe_caps = caps' "$hir" || {
     exit 1
 }
 
-# Exact production regressors from the strict stage-3 failure: both hosted
-# backends place FFI capability blocks inside class/impl function bodies. Keep
-# these assertions local and allocation-free; no generated tree or build cache
-# scan belongs in this preflight.
-for backend in "$cocoa" "$sdl2"; do
-    grep -Fq 'unsafe(capabilities: [ffi]):' "$backend" || {
-        echo "unsafe capability ownership: hosted regressor missing from $backend" >&2
+# Exact production regressors from the strict stage-3 failure use private
+# function-level capability leaves. That form is understood by the admitted
+# Stage-2 builder while public methods remain safe. Lexical capability blocks
+# here would reintroduce an escaped `ffi` GlobalLoad for that builder.
+for owner in "$cocoa" "$sdl2" "$sffi_io" "$sffi_system"; do
+    if grep -Fq 'unsafe(capabilities: [ffi]):' "$owner"; then
+        echo "unsafe capability ownership: bootstrap-incompatible lexical scope in $owner" >&2
         exit 1
-    }
-    grep -Fq 'capabilities: [ffi])' "$backend" || {
-        echo "unsafe capability ownership: hosted extern metadata missing from $backend" >&2
+    fi
+    grep -Fq '@unsafe(reason: "private ' "$owner" || {
+        echo "unsafe capability ownership: private function boundary missing from $owner" >&2
         exit 1
     }
 done
+
+grep -Fq 'fn _cocoa_layer_present(' "$cocoa" || {
+    echo "unsafe capability ownership: Cocoa presentation boundary missing" >&2
+    exit 1
+}
+grep -Fq 'fn _sdl2_present_rgba(' "$sdl2" || {
+    echo "unsafe capability ownership: SDL2 presentation boundary missing" >&2
+    exit 1
+}
+grep -Fq 'fn _file_read_lines_raw(' "$sffi_io" || {
+    echo "unsafe capability ownership: nullable I/O boundary missing" >&2
+    exit 1
+}
+grep -Fq 'fn _sffi_system_process_run_raw(' "$sffi_system" || {
+    echo "unsafe capability ownership: process boundary missing" >&2
+    exit 1
+}
 
 echo "unsafe capability metadata ownership: PASS"

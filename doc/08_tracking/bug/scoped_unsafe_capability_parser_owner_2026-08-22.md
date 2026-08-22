@@ -41,3 +41,29 @@ this worktree has no admitted `bin/simple`; the retained Stage-2 executable is
 a native-build-only CLI and rejects `test`. Its attempt is retained in
 `build/native_probe/mcdc_source_matched_cycle3/sffi-focused/spec-stage2.log`.
 Run the spec once with the next source-matched admitted Pure-Simple CLI.
+
+## Admitted Stage-2 compatibility probe
+
+A bounded combined entry closure was compiled with the admitted Pure-Simple
+Stage-2 builder (`aea4cbf8...`) against these four current-source owners:
+
+- `nogc_sync_mut/sffi/io.spl`
+- `nogc_sync_mut/sffi/system.spl`
+- `os/compositor/hosted_backend_cocoa.spl`
+- `os/compositor/hosted_backend_sdl2.spl`
+
+The first probe reproduced the old builder's lexical-scope defect in exactly
+those four owners: 26 bodies failed on an escaped `ffi` identifier. It took
+1.01 seconds and 164,916 KiB maximum RSS. To retain bootstrap compatibility,
+the lexical scopes were replaced by private function-level `@unsafe` leaves.
+Public APIs remain safe; their guards, result handling, and ownership state are
+unchanged. The leaves forward existing values directly and add no allocation,
+collection, buffer, or scan.
+
+The one permitted retry compiled all four owners with zero body failures and
+zero stub fallback in 11.58 seconds at 164,660 KiB maximum RSS. It then failed
+closed at the independent final-link audit because this narrow source/runtime
+set lacks 45 runtime providers (including SDL2 and legacy I/O symbols). This is
+positive evidence for the scoped compiler question, but not an executable or a
+full Stage-4 acceptance result. Logs and `/usr/bin/time -v` receipts are under
+`build/native_probe/mcdc_cycle3_sffi_hosted/`.

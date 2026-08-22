@@ -25,6 +25,28 @@ extern fn rt_sdl2_present_rgba(window_handle: i64, pixels: [i64], width: i64, he
 @unsafe(reason: "SDL2 generation-checked resize status ABI; false sentinel means invalid handle or size", capabilities: [ffi])
 extern fn rt_sdl2_set_window_size(handle: i64, width: i64, height: i64) -> bool
 
+# Bootstrap-compatible private capability boundary. Public backend methods stay
+# safe; these leaves add no allocation and preserve the exact runtime ABI.
+@unsafe(reason: "private SDL2 initialization ABI boundary", capabilities: [ffi])
+fn _sdl2_init() -> i64:
+    rt_sdl2_init()
+
+@unsafe(reason: "private SDL2 window creation ABI boundary", capabilities: [ffi])
+fn _sdl2_create_window(title: text, width: i64, height: i64) -> i64:
+    rt_sdl2_create_window(title, width, height)
+
+@unsafe(reason: "private SDL2 window release ABI boundary", capabilities: [ffi])
+fn _sdl2_destroy_window(handle: i64) -> bool:
+    rt_sdl2_destroy_window(handle)
+
+@unsafe(reason: "private SDL2 presentation ABI boundary", capabilities: [ffi])
+fn _sdl2_present_rgba(handle: i64, pixels: [i64], width: i64, height: i64) -> bool:
+    rt_sdl2_present_rgba(handle, pixels, width, height)
+
+@unsafe(reason: "private SDL2 resize ABI boundary", capabilities: [ffi])
+fn _sdl2_set_window_size(handle: i64, width: i64, height: i64) -> bool:
+    rt_sdl2_set_window_size(handle, width, height)
+
 var _sdl2_initialized: bool = false
 
 class HostedSdl2Backend:
@@ -50,14 +72,12 @@ class HostedSdl2Backend:
             return nil
         if not _sdl2_initialized:
             var ok: i64 = 0
-            unsafe(capabilities: [ffi]):
-                ok = rt_sdl2_init()
+            ok = _sdl2_init()
             if ok == 0:
                 return nil
             _sdl2_initialized = true
         var handle: i64 = 0
-        unsafe(capabilities: [ffi]):
-            handle = rt_sdl2_create_window(title, w.to_i64(), h.to_i64())
+        handle = _sdl2_create_window(title, w.to_i64(), h.to_i64())
         if handle == 0:
             return nil
         val total = w * h
@@ -116,8 +136,7 @@ class HostedSdl2Backend:
         buf
 
     me present():
-        unsafe(capabilities: [ffi]):
-            rt_sdl2_present_rgba(self.window_handle, self._packed_pixels(), self.w.to_i64(), self.h.to_i64())
+        _sdl2_present_rgba(self.window_handle, self._packed_pixels(), self.w.to_i64(), self.h.to_i64())
 
     me present_rect(x: i32, y: i32, w: i32, h: i32):
         self.present()
@@ -137,8 +156,7 @@ class HostedSdl2Backend:
         if self.window_handle == 0:
             return false
         var resized = false
-        unsafe(capabilities: [ffi]):
-            resized = rt_sdl2_set_window_size(self.window_handle, w.to_i64(), h.to_i64())
+        resized = _sdl2_set_window_size(self.window_handle, w.to_i64(), h.to_i64())
         if not resized:
             return false
         self.w = w
@@ -150,8 +168,7 @@ class HostedSdl2Backend:
     me free():
         if self.window_handle != 0:
             var destroyed = false
-            unsafe(capabilities: [ffi]):
-                destroyed = rt_sdl2_destroy_window(self.window_handle)
+            destroyed = _sdl2_destroy_window(self.window_handle)
             self.window_handle = 0
 
 impl CompositorBackend for HostedSdl2Backend:
@@ -209,8 +226,7 @@ impl CompositorBackend for HostedSdl2Backend:
             row = row + 1
 
     me present():
-        unsafe(capabilities: [ffi]):
-            rt_sdl2_present_rgba(self.window_handle, self._packed_pixels(), self.w.to_i64(), self.h.to_i64())
+        _sdl2_present_rgba(self.window_handle, self._packed_pixels(), self.w.to_i64(), self.h.to_i64())
 
     me present_rect(x: i32, y: i32, w: i32, h: i32):
         self.present()
