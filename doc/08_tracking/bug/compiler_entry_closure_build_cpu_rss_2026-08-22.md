@@ -31,6 +31,19 @@ build attempts:
   core and generated HIR codec; one SMF executable-memory body, one browser
   color body, and one legacy complex indexed lvalue also remained. The hard
   three-cycle cap prohibits another full retry in this session.
+- The two Cycle 5 timeouts were an invocation defect, not evidence that either
+  unit exceeded every bounded budget.  The admitted builder embeds a 60-second
+  per-file default and advertises `--timeout <secs>`; the Cycle 5 command omitted
+  that option.  One isolated-cache focused probe per affected unit with
+  `--timeout 600` crossed the old boundary and reached linking without a timeout
+  or failed-file verdict:
+  - frontend core: 226.63 s, 203,768 KiB maximum RSS;
+  - generated HIR codec: 34.06 s, 178,772 KiB maximum RSS.
+  Receipts are retained under `build/native_probe/mcdc_timeout_fix/`.  Both
+  focused link steps then failed on missing runtime symbols, which is outside
+  the per-unit compiler-timeout category.  The next cache-preserving recovery
+  invocation must pass `--timeout 600`; this remains fail-closed at ten minutes
+  per unit and must not be replaced with an unbounded timeout.
 - A focused Rust compiler regression-test build for array-lvalue lowering was
   blocked before test execution by the unrelated missing
   `crate::interpreter::dispatch_profile` owner after 99.41 s and 2,164,056 KiB
@@ -56,6 +69,10 @@ admitted source-matched compiler.
    1071.71 s / 1,478,536 KiB baseline and investigate any regression.
 5. Do not deploy unless the candidate passes the four-word environment ABI
    admission probe and contains no code-generation stub fallback.
+6. When the admitted builder is used, pass `--timeout 600` explicitly and retain
+   per-unit timeout verdicts.  Its embedded 60-second default is below the
+   measured 226.63-second frontend-core cost; omitting the option recreates a
+   known false timeout rather than a meaningful performance gate.
 
 ## Performance and memory intent
 
