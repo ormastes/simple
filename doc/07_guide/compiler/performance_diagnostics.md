@@ -261,3 +261,8 @@ lines, so suppression does not add a hidden full-source array.
 context type. Compiler helpers re-export it rather than defining another representation.
 Contextual-keyword, deprecated syntax, stub, and compiler rules therefore share one
 request-scoped context array with identical byte-offset semantics.
+
+Duplicate-typed-argument fixes index unique function-name/arity targets and scan source
+call sites once. Ambiguous overloads remain untouched. Replacements retain declaration
+grouping and source order; memory grows with candidates and emitted replacements rather
+than candidate count multiplied by source lines.
