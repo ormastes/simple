@@ -955,3 +955,12 @@ complexity. Compiler/lib/MCP/LSP-MCP source checks pass; do not claim release
 verification until the missing native MCP artifact, core SMF/executable smoke
 mismatch, bootstrap-seed signal provider gap, and MCP stdio integration failure
 are resolved and rerun by their owning lanes.
+
+The first `rt_file` consolidation replaces duplicate `ffi.io` declarations
+with an explicit static façade over `sffi.io` and moves crypto fixtures to
+semantic byte APIs. Keep the canonical owner as the only place for subsequent
+null/status/ownership contracts; do not re-add raw aliases to the compatibility
+path. Current census: 12,453 declarations, 11,670 untouched, 510 tagged, 585
+contracted, and zero signed admissions. Continue with the remaining direct
+`rt_file_*` declarations ranked by production fan-out, preferring semantic
+facades over repeated unsafe annotations.

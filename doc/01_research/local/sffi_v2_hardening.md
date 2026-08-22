@@ -1206,3 +1206,16 @@ source checks pass. Broader release evidence remains red independently: the
 MCP stdio integration did not complete under the bootstrap seed, core compile
 smoke produced SMF rather than the expected executable result, and the native
 MCP smoke lacks `bin/simple_mcp_server`. None is promoted to verified evidence.
+
+The `std.nogc_sync_mut.ffi.io` and `.sffi.io` modules were duplicate foreign
+declaration owners (232 and 262 lines) with already-divergent text-read and
+file-lock contracts. `ffi.io` is now a 22-line explicit compile-time façade
+over the more complete `sffi.io` owner. Remaining crypto-system fixtures import
+the semantic byte read/write APIs rather than raw `rt_file_*` names. This adds
+no runtime wrapper, branch, allocation, lookup, or synchronization; it removes
+one declaration/validation surface and 211 net lines. The façade checks and
+lints, both helper modules check, and the two canonical crypto/signature system
+specs pass through the interpreter. Census/ratchet pass at 12,453 declarations,
+11,670 untouched, 510 tagged, 585 contracted, and zero signed admissions.
+The lower tag count is intentional deletion of duplicate unsafe declarations,
+not loss of protection; canonical owner tags remain.
