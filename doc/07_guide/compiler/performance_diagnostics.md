@@ -69,6 +69,11 @@ lines for callable, wildcard, and GC-boundary import locations. These are compat
 proof: exact AST or HIR causal spans remain the target, and fallback recovery never
 authorizes a transform.
 
+The compatibility `UNUSED001` producer partitions functions once and builds one
+function-local identifier-frequency table. It deliberately retains text semantics
+(including words in comments and strings) until typed HIR use-def facts own the rule,
+but it does not rescan the entire function for every declaration.
+
 The standalone CLI and query/LSP source-pattern collection projections use the same
 confidence vocabulary. Query governance recognizes `COLL001` through `COLL019`, so
 `Allow` suppresses them, while robust/critical policy cannot upgrade those untyped

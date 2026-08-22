@@ -455,113 +455,107 @@ fn _check_hash_bracket_attribute(trimmed: text, line_num: i64, file: text, forma
 fn _check_unused_vars_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for unused variable detection.
 
-    Scans for val/var declarations with _ prefix convention NOT used,
-    and checks if the declared name appears elsewhere in the function body.
+    Builds one identifier-frequency table per function, then compares every
+    declaration against that table. The declaration line is excluded exactly
+    as in the compatibility implementation, without rescanning the function
+    for every declaration.
     """
     var count = 0
-    var unused_i = 0
-    while unused_i < lines.len():
-        val scan = lint_scan_line(lines, unused_i)
-        val trimmed = scan.trimmed
-
-        # Look for val/var declarations (not _-prefixed names)
-        var decl_name = ""
-        if trimmed.starts_with("val "):
-            decl_name = _extract_decl_name(trimmed.substring(4))
-        elif trimmed.starts_with("var "):
-            decl_name = _extract_decl_name(trimmed.substring(4))
-
-        if decl_name != "" and not decl_name.starts_with("_"):
-            # Find the enclosing function boundaries
-            val fn_range = _find_enclosing_fn_range(lines, unused_i)
-            if fn_range.0 >= 0:
-                # Check if decl_name is referenced elsewhere in the function
-                var referenced = false
-                var ri = fn_range.0
-                while ri <= fn_range.1 and ri < lines.len():
-                    if ri != unused_i:
-                        val rline = lines[ri]
-                        if _word_occurs_in(rline, decl_name):
-                            referenced = true
-                            break
-                    ri = ri + 1
-                if not referenced:
-                    val line_num = scan.line_num
-                    if format == "json":
-                        val col = _find_in_line(trimmed, decl_name) + 1
-                        val end_col = col + decl_name.len()
-                        _diag_emit_or_collect("{\"severity\":2,\"code\":\"UNUSED001\",\"message\":\"variable '{decl_name}' is declared but never used\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{end_col},\"tags\":[1],\"source\":\"simple-lint\"}")
-                    else:
-                        print "{file}:{line_num}: warning[UNUSED001]: variable '{decl_name}' is declared but never used"
-                    count = count + 1
-        unused_i = unused_i + 1
+    var line_index = 0
+    while line_index < lines.len():
+        val trimmed = lines[line_index].trim()
+        if not _query_unused_function_header(trimmed):
+            line_index = line_index + 1
+            continue
+        val function_end = _query_unused_function_end(lines, line_index)
+        count = count + _emit_unused_in_function(
+            lines, line_index, function_end, file, format)
+        line_index = function_end + 1
     count
 
-fn _find_enclosing_fn_range(lines: [text], target_idx: i64) -> (i64, i64):
-    """Find the start and end line indices of the enclosing function body.
-    Returns (-1, -1) if not inside a function.
-    """
-    val target_indent = _count_indent(lines[target_idx])
-    # Find function header above
-    var fn_start = -1
-    var si = target_idx - 1
-    while si >= 0:
-        val sline = lines[si]
-        val st = sline.trim()
-        if (st.starts_with("fn ") or st.starts_with("me ") or
-            st.starts_with("static fn ")):
-            fn_start = si
-            break
-        # If we hit a line at indent 0 that is not blank and not a comment, stop
-        val sindent = _count_indent(sline)
-        if sindent == 0 and st != "" and not st.starts_with("#"):
-            if (not st.starts_with("fn ") and not st.starts_with("me ") and
-                not st.starts_with("static fn ")):
-                break
-        si = si - 1
-    if fn_start < 0:
-        return (-1, -1)
+fn _query_unused_function_header(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or trimmed.starts_with("me ") or
+        trimmed.starts_with("static fn ")
 
-    # Find function end (where indent returns to 0 or less than body)
-    var fn_end = fn_start
-    var ei = fn_start + 1
-    while ei < lines.len():
-        val eline = lines[ei]
-        val et = eline.trim()
-        if et == "":
-            ei = ei + 1
-            continue
-        val eindent = _count_indent(eline)
-        if eindent == 0:
+fn _query_unused_function_end(lines: [text], function_start: i64) -> i64:
+    var function_end = function_start
+    var line_index = function_start + 1
+    while line_index < lines.len():
+        val trimmed = lines[line_index].trim()
+        if trimmed != "" and _count_indent(lines[line_index]) == 0:
             break
-        fn_end = ei
-        ei = ei + 1
-    (fn_start, fn_end)
+        if trimmed != "": function_end = line_index
+        line_index = line_index + 1
+    function_end
 
-fn _word_occurs_in(line: text, word: text) -> bool:
-    """Check if a word occurs as a whole word in a line."""
-    if line.len() < word.len():
-        return false
+struct QueryUnusedDeclaration:
+    name: text
+    line_index: i64
+    declaration_occurrences: i64
+
+fn _query_word_char(character: text) -> bool:
+    (character >= "a" and character <= "z") or
+        (character >= "A" and character <= "Z") or
+        (character >= "0" and character <= "9") or character == "_"
+
+fn _query_word_count(line: text, target: text) -> i64:
+    var count = 0
     var pos = 0
-    while pos <= line.len() - word.len():
-        val candidate = line.substring(pos, pos + word.len())
-        if candidate == word:
-            var left_ok = true
-            var right_ok = true
-            if pos > 0:
-                val lch = line.substring(pos - 1, pos)
-                val lw = (lch >= "a" and lch <= "z") or (lch >= "A" and lch <= "Z") or (lch >= "0" and lch <= "9") or lch == "_"
-                if lw:
-                    left_ok = false
-            if pos + word.len() < line.len():
-                val rch = line.substring(pos + word.len(), pos + word.len() + 1)
-                val rw = (rch >= "a" and rch <= "z") or (rch >= "A" and rch <= "Z") or (rch >= "0" and rch <= "9") or rch == "_"
-                if rw:
-                    right_ok = false
-            if left_ok and right_ok:
-                return true
-        pos = pos + 1
-    false
+    while pos < line.len():
+        if not _query_word_char(line.substring(pos, pos + 1)):
+            pos = pos + 1
+            continue
+        val start = pos
+        while pos < line.len() and _query_word_char(line.substring(pos, pos + 1)):
+            pos = pos + 1
+        if line.substring(start, pos) == target: count = count + 1
+    count
+
+fn _emit_unused_in_function(
+    lines: [text], function_start: i64, function_end: i64,
+    file: text, format: text
+) -> i64:
+    var word_counts: Dict<text, i64> = {}
+    var declarations: [QueryUnusedDeclaration] = []
+    var line_index = function_start
+    while line_index <= function_end:
+        val line = lines[line_index]
+        val trimmed = line.trim()
+        var word_pos = 0
+        while word_pos < line.len():
+            if not _query_word_char(line.substring(word_pos, word_pos + 1)):
+                word_pos = word_pos + 1
+                continue
+            val word_start = word_pos
+            while (word_pos < line.len() and
+                _query_word_char(line.substring(word_pos, word_pos + 1))):
+                word_pos = word_pos + 1
+            val word = line.substring(word_start, word_pos)
+            word_counts[word] = (word_counts[word] ?? 0) + 1
+        var name = ""
+        if trimmed.starts_with("val "):
+            name = _extract_decl_name(trimmed.substring(4))
+        elif trimmed.starts_with("var "):
+            name = _extract_decl_name(trimmed.substring(4))
+        if name != "" and not name.starts_with("_"):
+            declarations.push(QueryUnusedDeclaration(
+                name, line_index, _query_word_count(line, name)))
+        line_index = line_index + 1
+
+    var count = 0
+    for declaration in declarations:
+        if (word_counts[declaration.name] ?? 0) > declaration.declaration_occurrences:
+            continue
+        val line_num = declaration.line_index + 1
+        val trimmed = lines[declaration.line_index].trim()
+        if format == "json":
+            val col = _find_in_line(trimmed, declaration.name) + 1
+            val end_col = col + declaration.name.len()
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"UNUSED001\",\"message\":\"variable '{declaration.name}' is declared but never used\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{end_col},\"tags\":[1],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: warning[UNUSED001]: variable '{declaration.name}' is declared but never used"
+        count = count + 1
+    count
 
 struct QueryAstLintLocationIndex:
     callable_lines: Dict<text, i64>
