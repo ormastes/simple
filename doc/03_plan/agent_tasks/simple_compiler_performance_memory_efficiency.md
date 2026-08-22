@@ -104,3 +104,13 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve collection evidence-tier warning caps and all allow/warn/deny behavior.
 - Follow-up: cache project SDN parsing by path/revision and combine duplicate policy
   lookups only after output parity is pinned.
+
+## Active tool tranche: request-local project policy reuse
+
+- Bind file-parsed configuration to its exact `simple.sdn` source path.
+- Skip reread/reparse when the base config already came from the discovered path.
+- Retain only the immediately linted path/config for parsed AST rule append.
+- Fail back to ordinary resolution on path mismatch; do not add a global cache without
+  explicit revision invalidation and bounds.
+- Follow-up: bounded directory-to-manifest cache keyed by canonical directory plus
+  manifest size/mtime or digest for long-lived LSP/MCP sessions.

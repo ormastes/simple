@@ -1405,3 +1405,18 @@ once for a new configuration, recomputed only when the profile changes, and shar
 child configurations. `get_level` performs O(1) override/default lookups and allocates
 nothing. Explicit overrides, profile semantics, evidence-tier capping, and suppression
 behavior are unchanged. Project SDN discovery/caching remains a separate open tool lane.
+
+## 2026-08-22 implementation addendum: request-local lint policy reuse
+
+The standalone path loaded target `simple.sdn`, `lint_source` discovered and parsed it
+again, and parsed AST rule append resolved it a third time. This multiplied parent-path
+probes, file reads, source splitting, default/profile construction, and override copying
+for the same file revision.
+
+Parsed `LintConfig` now carries its exact `source_path`. Resolution reuses an already
+loaded base policy when the discovered path matches. `Linter` also retains the exact
+resolved config for only its immediately processed path, and parsed-rule append consumes
+that value rather than resolving again. The retained state is overwritten on the next
+file, so invalidation is request-local and no process-global stale policy cache exists.
+Normal single-file CLI work reads/parses the target policy once instead of up to three
+times. Directory-to-policy discovery caching remains open.

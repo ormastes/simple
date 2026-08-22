@@ -18,6 +18,8 @@ Collection rules use the `collection_performance` configuration name. SDN entrie
 name, so large explicit configurations do not multiply registry allocation and scanning.
 Effective default levels are likewise built once per configuration/profile change rather
 than once per diagnostic; file-level policy lookup is allocation-free.
+Within one lint request, the target `simple.sdn` is parsed once and its resolved policy is
+reused by source and parsed-AST rule projections. A path mismatch forces fresh resolution.
 
 ## Optimizer truth
 
