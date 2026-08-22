@@ -271,3 +271,6 @@ Repository lint should construct one `LintSession` per command. The session owns
 ### Staged lint-session delivery
 
 The first implementation stage reuses one command-owned `Linter` and a bounded last-project parsed-policy cache. It deliberately does not introduce a process-global cache. This immediately removes `O(files * rules)` descriptor construction and repeated adjacent manifest parsing while keeping configuration children isolated. The next stage adds bounded directory/manifest indexes and a source payload shared by lint, SIMD, and fix rendering; daemon/LSP caching remains digest-keyed and separate.
+### Source payload ownership
+
+Batch lint owns one immutable source payload per file. It passes the payload to ordinary lint and read-only sibling analyses such as SIMD opportunity detection. The reader returns a tagged success/error result so an unreadable file cannot be confused with valid empty source. Mutating fix application is intentionally outside this reuse contract: it must reread or otherwise validate a content digest immediately before atomic replacement.
