@@ -350,3 +350,9 @@ passing placeholder.
     is 21,334 raw / 1,926 explicit / 19,408 missing. Next add checked list/tuple
     ABIs and migrate the six public primitive APIs; runtime signing remains a
     separate gate.
+67. Retain all 20 incremental-cache file operations under direct lexical FFI
+    scopes with unchanged fingerprint/write/delete call cardinality. Focused
+    behavior is 7/7 plus 2/2 identity, and the baseline is 21,334 raw / 1,946
+    explicit / 19,388 missing calls. Next scope or type the same owner's
+    env/dir/time/PID/CLI/hash families, then address its three public primitive
+    APIs. Do not claim signing from source authority.

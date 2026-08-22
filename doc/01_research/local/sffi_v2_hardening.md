@@ -2031,6 +2031,25 @@ raw / 1,926 explicit / 19,408 missing, with all 40 calls in this owner lexical.
 This closes call authority only, not the list/tuple ABI ambiguity or signed
 artifact admission.
 
+## Incremental-cache file authority
+
+All 20 raw file operations in `driver_build/incremental.spl` now have minimal
+lexical FFI authority and explicit declaration contracts. Compiler-source and
+runtime-provider fingerprint loops retain exactly one size and one SHA-256 call
+per artifact. Manifest creation retains one write, one digest, and one delete;
+no facade, lookup, retry, or extra provider call was introduced. Nullable text,
+negative size, false write/delete/existence, and empty digest remain explicit
+unsafe sentinels rather than being relabeled verified.
+
+Missing/non-UTF-8 cache behavior passes 7/7 and producer identity passes 2/2.
+The seed-only observation is 5.04 seconds at 173,128 KiB peak RSS. Optimizer
+reports 15 general patterns, all existing loop/preallocation opportunities.
+Census holds 21,334 raw calls, raises lexical authority from 1,418 to 1,438,
+and lowers missing authority from 19,408 to 19,388; all 20 file calls in this
+owner are lexical. Lint has no remaining raw-file warning here, but the owner's
+env/dir/time/PID/CLI/hash calls and three public primitive APIs remain open.
+The runtime artifact is still unsigned and evidence-unadmitted.
+
 ## Driver source-loading file-call authority
 
 The largest remaining production `rt_file` caller,
