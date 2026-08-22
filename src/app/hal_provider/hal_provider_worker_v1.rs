@@ -18,6 +18,9 @@ struct Request { f: [u64; 8] }
 #[derive(Copy, Clone)]
 struct RequestV2 { f: [u64; 11] }
 
+#[derive(Copy, Clone)]
+struct BytesRequestV2 { f: [i64; 19] }
+
 fn write_all(p: &[u8]) -> bool {
     let mut at = 0;
     while at < p.len() {
@@ -52,6 +55,26 @@ fn number(p: &[u8], at: &mut usize, terminal: bool) -> Option<u64> {
     Some(value)
 }
 
+fn signed_number(p: &[u8], at: &mut usize, terminal: bool) -> Option<i64> {
+    let negative = *at < p.len() && p[*at] == b'-';
+    if negative { *at += 1; }
+    let mut magnitude = 0u64;
+    let mut digits = 0;
+    let limit = if negative { 1u64 << 63 } else { i64::MAX as u64 };
+    while *at < p.len() && p[*at].is_ascii_digit() {
+        let digit = (p[*at] - b'0') as u64;
+        magnitude = magnitude.checked_mul(10)?.checked_add(digit)?;
+        if magnitude > limit { return None; }
+        *at += 1; digits += 1;
+    }
+    let stop = if terminal { b'\n' } else { b'|' };
+    if digits == 0 || *at >= p.len() || p[*at] != stop { return None; }
+    *at += 1;
+    if negative {
+        Some(if magnitude == 1u64 << 63 { i64::MIN } else { -(magnitude as i64) })
+    } else { Some(magnitude as i64) }
+}
+
 fn request(p: &[u8]) -> Option<Request> {
     if !p.starts_with(b"HALREQ1|") { return None; }
     let mut at = 8;
@@ -76,6 +99,34 @@ fn request_v2(p: &[u8]) -> Option<RequestV2> {
         return None;
     }
     Some(RequestV2 { f })
+}
+
+fn bytes_request_v2(p: &[u8]) -> Option<BytesRequestV2> {
+    if !p.starts_with(b"HALREQ2B|") { return None; }
+    let mut at = 9;
+    let mut f = [0i64; 19];
+    for i in 0..19 { f[i] = signed_number(p, &mut at, i == 18)?; }
+    let admitted = f[1] == 102 || f[1] == 1001 || f[1] == 1004;
+    let error_valid = if f[4] == 0 {
+        f[5] == 0 && f[6] == 0 && f[7] == 0
+    } else {
+        f[5] > 0 && f[5] <= 4 && f[6] > 0
+    };
+    if at != p.len() || f[0] != 2 || !admitted || f[2] <= 0 || f[3] <= 0 ||
+       f[4] < 0 || f[4] > 7 || f[5] < 0 || f[6] < 0 || f[7] < 0 ||
+       !error_valid || f[8] < 0 || f[9] <= 0 || f[9] > 32 || f[8] > f[9] ||
+       (f[14] == 0 && f[15] == 0) || f[16] > f[17] || f[17] > f[18] ||
+       f[14] < 0 || f[15] < 0 || f[16] < 0 || f[17] < 0 ||
+       f[18] <= 0 || f[18] > 65_536 { return None; }
+    for i in 0..4 {
+        let remaining = (f[8] as u64).saturating_sub(i as u64 * 8).min(8);
+        let word = f[10 + i] as u64;
+        if (remaining == 0 && word != 0) ||
+           (remaining > 0 && remaining < 8 && word >> (remaining * 8) != 0) {
+            return None;
+        }
+    }
+    Some(BytesRequestV2 { f })
 }
 
 fn reset(p: &[u8]) -> Option<[u64; 3]> {
@@ -137,12 +188,29 @@ fn result_v2(r: &RequestV2) -> bool {
     write_all(&out[..at])
 }
 
+fn bytes_result_v2(r: &BytesRequestV2) -> bool {
+    let mut out = [0u8; CAP]; let mut at = 0;
+    let fields = [PROVIDER, r.f[2] as i64, r.f[4] as i64,
+        r.f[5] as i64, r.f[6] as i64, r.f[7] as i64, 2, 0,
+        r.f[8], r.f[9], r.f[10], r.f[11], r.f[12], r.f[13], r.f[14],
+        r.f[15], r.f[16], r.f[17], r.f[18], 0, -1, 0, 152];
+    if !text(&mut out, &mut at, b"HALRES2B|") { return false; }
+    for (i, v) in fields.iter().enumerate() {
+        if !integer(&mut out, &mut at, *v) || at == CAP { return false; }
+        out[at] = if i == 22 { b'\n' } else { b'|' }; at += 1;
+    }
+    write_all(&out[..at])
+}
+
 fn dispatch(p: &[u8], expected_invocation: u64) -> bool {
     if let Some(v1) = request(p) {
         return (expected_invocation == 0 || v1.f[2] == expected_invocation) && result(&v1);
     }
     if let Some(v2) = request_v2(p) {
         return (expected_invocation == 0 || v2.f[2] == expected_invocation) && result_v2(&v2);
+    }
+    if let Some(v2) = bytes_request_v2(p) {
+        return (expected_invocation == 0 || v2.f[2] as u64 == expected_invocation) && bytes_result_v2(&v2);
     }
     false
 }

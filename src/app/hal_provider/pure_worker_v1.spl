@@ -34,6 +34,27 @@ struct PureHalRequestV2:
     trace_length: i64
     trace_capacity: i64
 
+struct PureHalBytesRequestV2:
+    contract: i64
+    operation: i64
+    invocation: i64
+    fixture: i64
+    status: i64
+    error_domain: i64
+    error_code: i64
+    error_detail: i64
+    payload_length: i64
+    payload_capacity: i64
+    word0: i64
+    word1: i64
+    word2: i64
+    word3: i64
+    trace_hi: i64
+    trace_lo: i64
+    trace_cursor: i64
+    trace_length: i64
+    trace_capacity: i64
+
 fn _parse_u64(value: text) -> (bool, i64):
     if value == "" or value.len() > 19:
         return (false, 0)
@@ -49,6 +70,16 @@ fn _parse_u64(value: text) -> (bool, i64):
         result = result * 10 + digit
         index = index + 1
     (true, result)
+
+fn _parse_i64(value: text) -> (bool, i64):
+    if value == "-9223372036854775808":
+        return (true, -9223372036854775807 - 1)
+    if value.starts_with("-"):
+        val magnitude = _parse_u64(value.substring(1, value.len()))
+        if not magnitude.0:
+            return (false, 0)
+        return (true, -magnitude.1)
+    _parse_u64(value)
 
 fn _request(line: text) -> (bool, PureHalRequestV1):
     val invalid = PureHalRequestV1(contract: 0, operation: 0, invocation: 0,
@@ -120,6 +151,85 @@ fn _request_v2(line: text) -> (bool, PureHalRequestV2):
         and request.trace_capacity > 0 and request.trace_capacity <= 65536
     (valid, request)
 
+fn _bytes_request_v2(line: text) -> (bool, PureHalBytesRequestV2):
+    val invalid = PureHalBytesRequestV2(contract: 0, operation: 0,
+        invocation: 0, fixture: 0, status: 0, error_domain: 0,
+        error_code: 0, error_detail: 0, payload_length: 0,
+        payload_capacity: 0, word0: 0, word1: 0, word2: 0, word3: 0,
+        trace_hi: 0, trace_lo: 0, trace_cursor: 0, trace_length: 0,
+        trace_capacity: 0)
+    if line.len() >= FRAME_CAP or not line.starts_with("HALREQ2B|"):
+        return (false, invalid)
+    val fields = line.split("|")
+    if fields.len() != 20:
+        return (false, invalid)
+    val f0 = _parse_u64(fields[1])
+    val f1 = _parse_u64(fields[2])
+    val f2 = _parse_u64(fields[3])
+    val f3 = _parse_u64(fields[4])
+    val f4 = _parse_u64(fields[5])
+    val f5 = _parse_u64(fields[6])
+    val f6 = _parse_u64(fields[7])
+    val f7 = _parse_u64(fields[8])
+    val f8 = _parse_u64(fields[9])
+    val f9 = _parse_u64(fields[10])
+    val f10 = _parse_i64(fields[11])
+    val f11 = _parse_i64(fields[12])
+    val f12 = _parse_i64(fields[13])
+    val f13 = _parse_i64(fields[14])
+    val f14 = _parse_u64(fields[15])
+    val f15 = _parse_u64(fields[16])
+    val f16 = _parse_u64(fields[17])
+    val f17 = _parse_u64(fields[18])
+    val f18 = _parse_u64(fields[19])
+    if (not f0.0 or not f1.0 or not f2.0 or not f3.0 or not f4.0
+            or not f5.0 or not f6.0 or not f7.0 or not f8.0 or not f9.0
+            or not f10.0 or not f11.0 or not f12.0 or not f13.0
+            or not f14.0 or not f15.0 or not f16.0 or not f17.0
+            or not f18.0):
+        return (false, invalid)
+    val request = PureHalBytesRequestV2(contract: f0.1, operation: f1.1,
+        invocation: f2.1, fixture: f3.1, status: f4.1,
+        error_domain: f5.1, error_code: f6.1, error_detail: f7.1,
+        payload_length: f8.1, payload_capacity: f9.1,
+        word0: f10.1, word1: f11.1, word2: f12.1, word3: f13.1,
+        trace_hi: f14.1, trace_lo: f15.1, trace_cursor: f16.1,
+        trace_length: f17.1, trace_capacity: f18.1)
+    val admitted = request.operation == 102 or request.operation == 1001
+        or request.operation == 1004
+    val error_valid = if request.status == 0:
+        request.error_domain == 0 and request.error_code == 0
+            and request.error_detail == 0
+    else:
+        request.error_domain > 0 and request.error_domain <= 4
+            and request.error_code > 0
+    val valid = request.contract == 2 and admitted
+        and request.invocation > 0 and request.fixture > 0
+        and request.status >= 0 and request.status <= 7 and error_valid
+        and request.payload_length >= 0 and request.payload_capacity > 0
+        and request.payload_capacity <= 32
+        and request.payload_length <= request.payload_capacity
+        and (request.trace_hi != 0 or request.trace_lo != 0)
+        and request.trace_cursor >= 0
+        and request.trace_cursor <= request.trace_length
+        and request.trace_length <= request.trace_capacity
+        and request.trace_capacity > 0 and request.trace_capacity <= 65536
+        and _canonical_word(request.word0,
+            if request.payload_length > 8: 8 else: request.payload_length)
+        and _canonical_word(request.word1,
+            if request.payload_length > 16: 8 else: request.payload_length - 8)
+        and _canonical_word(request.word2,
+            if request.payload_length > 24: 8 else: request.payload_length - 16)
+        and _canonical_word(request.word3, request.payload_length - 24)
+    (valid, request)
+
+fn _canonical_word(word: i64, used_bytes: i64) -> bool:
+    if used_bytes <= 0:
+        return word == 0
+    if used_bytes >= 8:
+        return true
+    (word >> (used_bytes * 8)) == 0
+
 fn _mix(hash: i64, value: i64) -> i64:
     # A small positive modulus keeps every intermediate inside i64 while
     # preserving exact cross-language behavior without overflow assumptions.
@@ -153,6 +263,9 @@ fn _result(request: PureHalRequestV1) -> text:
 fn _result_v2(request: PureHalRequestV2) -> text:
     "HALRES2|{PROVIDER_PURE}|{request.invocation}|0|0|0|0|1|{request.captured_scalar}|8|{request.result_capacity}|{request.trace_hi}|{request.trace_lo}|{request.trace_cursor}|{request.trace_length}|{request.trace_capacity}|0|-1|0|88"
 
+fn _bytes_result_v2(request: PureHalBytesRequestV2) -> text:
+    "HALRES2B|{PROVIDER_PURE}|{request.invocation}|{request.status}|{request.error_domain}|{request.error_code}|{request.error_detail}|2|0|{request.payload_length}|{request.payload_capacity}|{request.word0}|{request.word1}|{request.word2}|{request.word3}|{request.trace_hi}|{request.trace_lo}|{request.trace_cursor}|{request.trace_length}|{request.trace_capacity}|0|-1|0|152"
+
 fn _dispatch(line: text, expected_invocation: i64) -> (bool, text):
     val v1 = _request(line)
     if v1.0:
@@ -162,6 +275,11 @@ fn _dispatch(line: text, expected_invocation: i64) -> (bool, text):
     if v2.0:
         return (expected_invocation == 0 or v2.1.invocation == expected_invocation,
                 _result_v2(v2.1))
+    val bytes_v2 = _bytes_request_v2(line)
+    if bytes_v2.0:
+        return (expected_invocation == 0
+                or bytes_v2.1.invocation == expected_invocation,
+                _bytes_result_v2(bytes_v2.1))
     (false, "")
 
 fn _parse_reset(line: text) -> (bool, i64, i64, i64):

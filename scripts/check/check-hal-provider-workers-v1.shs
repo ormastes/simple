@@ -10,7 +10,9 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 
 request='HALREQ1|1|101|7|9|0|32|64|8'
 request_v2='HALREQ2|2|101|7|9|987654321|8|41|42|1|1|8'
+request_v2_bytes='HALREQ2B|2|102|7|9|0|0|0|0|8|32|7593683861953069392|0|0|0|41|42|1|1|8'
 printf '%s\n' "$request" > "$work/request"
+printf '%s\n' "$request_v2_bytes" > "$work/request-v2-bytes"
 session_input='HALRESET1|41|1|7
 HALREQ1|1|101|7|9|0|32|64|8
 HALRESET1|41|2|8
@@ -31,6 +33,39 @@ printf '%s\n' "$c_result_v2" | rg '^HALRES2\|1\|7\|0\|0\|0\|0\|1\|987654321\|8\|
     echo 'FAIL: C V2 did not preserve the captured scalar/trace cursor' >&2; exit 1
 }
 
+for operation in 102 1001 1004; do
+    bytes_request=$(printf '%s\n' "$request_v2_bytes" | sed "s/HALREQ2B|2|102|/HALREQ2B|2|$operation|/")
+    c_bytes=$(printf '%s\n' "$bytes_request" | "$work/bin/hal-provider-c-v1")
+    rust_bytes=$(printf '%s\n' "$bytes_request" | "$work/bin/hal-provider-rust-v1")
+    c_normal_bytes=$(printf '%s\n' "$c_bytes" | sed 's/^HALRES2B|1|/HALRES2B|X|/')
+    rust_normal_bytes=$(printf '%s\n' "$rust_bytes" | sed 's/^HALRES2B|2|/HALRES2B|X|/')
+    [ "$c_normal_bytes" = "$rust_normal_bytes" ] || {
+        echo "FAIL: C/Rust exact-byte receipts differ for operation $operation" >&2; exit 1
+    }
+    printf '%s\n' "$c_bytes" | rg '^HALRES2B\|1\|7\|0\|0\|0\|0\|2\|0\|8\|32\|7593683861953069392\|0\|0\|0\|41\|42\|1\|1\|8\|0\|-1\|0\|152$' >/dev/null || {
+        echo "FAIL: C exact-byte/trace receipt changed for operation $operation" >&2; exit 1
+    }
+done
+
+error_request='HALREQ2B|2|102|8|9|3|2|17|23|0|32|0|0|0|0|41|42|2|2|8'
+c_error=$(printf '%s\n' "$error_request" | "$work/bin/hal-provider-c-v1")
+rust_error=$(printf '%s\n' "$error_request" | "$work/bin/hal-provider-rust-v1")
+[ "$(printf '%s\n' "$c_error" | sed 's/^HALRES2B|1|/HALRES2B|X|/')" = "$(printf '%s\n' "$rust_error" | sed 's/^HALRES2B|2|/HALRES2B|X|/')" ] || {
+    echo 'FAIL: C/Rust structured-error receipts differ' >&2; exit 1
+}
+printf '%s\n' "$c_error" | rg '^HALRES2B\|1\|8\|3\|2\|17\|23\|2\|0\|0\|32\|0\|0\|0\|0\|41\|42\|2\|2\|8\|0\|-1\|0\|152$' >/dev/null || {
+    echo 'FAIL: structured error/trace was not preserved' >&2; exit 1
+}
+binary_request='HALREQ2B|2|1001|9|9|0|0|0|0|8|32|-70363229389192960|0|0|0|41|42|3|3|8'
+c_binary=$(printf '%s\n' "$binary_request" | "$work/bin/hal-provider-c-v1")
+rust_binary=$(printf '%s\n' "$binary_request" | "$work/bin/hal-provider-rust-v1")
+[ "$(printf '%s\n' "$c_binary" | sed 's/^HALRES2B|1|/HALRES2B|X|/')" = "$(printf '%s\n' "$rust_binary" | sed 's/^HALRES2B|2|/HALRES2B|X|/')" ] || {
+    echo 'FAIL: C/Rust high-bit binary payload receipts differ' >&2; exit 1
+}
+printf '%s\n' "$c_binary" | rg '\|-70363229389192960\|0\|0\|0\|41\|42\|3\|3\|8\|' >/dev/null || {
+    echo 'FAIL: high-bit binary bytes were not preserved exactly' >&2; exit 1
+}
+
 for provider in c rust; do
     output=$(printf '%b\n' "$session_input" | "$work/bin/hal-provider-$provider-v1" session)
     [ "$(printf '%s\n' "$output" | wc -l)" -eq 5 ] || { echo "FAIL: $provider session emitted an unbounded row count" >&2; exit 1; }
@@ -45,6 +80,15 @@ for provider in c rust; do
     fi
     if printf 'HALREQ2|2|101|7|9|987654321|8|0|0|1|1|8\n' | "$work/bin/hal-provider-$provider-v1" >/dev/null 2>&1; then
         echo "FAIL: $provider admitted V2 without trace identity" >&2; exit 1
+    fi
+    if printf 'HALREQ2B|2|102|7|9|0|0|0|0|33|32|0|0|0|0|41|42|1|1|8\n' | "$work/bin/hal-provider-$provider-v1" >/dev/null 2>&1; then
+        echo "FAIL: $provider admitted exact-byte overflow" >&2; exit 1
+    fi
+    if printf 'HALREQ2B|2|102|7|9|0|0|0|0|1|32|257|0|0|0|41|42|1|1|8\n' | "$work/bin/hal-provider-$provider-v1" >/dev/null 2>&1; then
+        echo "FAIL: $provider admitted noncanonical byte padding" >&2; exit 1
+    fi
+    if printf 'HALREQ2B|2|999|7|9|0|0|0|0|8|32|7593683861953069392|0|0|0|41|42|1|1|8\n' | "$work/bin/hal-provider-$provider-v1" >/dev/null 2>&1; then
+        echo "FAIL: $provider admitted an unproducible byte operation" >&2; exit 1
     fi
     if printf 'HALRESET1|1|2|7\n' | "$work/bin/hal-provider-$provider-v1" session >/dev/null 2>&1; then
         echo "FAIL: $provider admitted a noninitial session sequence" >&2; exit 1
@@ -77,9 +121,17 @@ if [ -x /usr/bin/time ]; then
         rss_v2=$(sed -n '1p' "$work/$provider.v2.rss")
         case "$rss_v2" in (*[!0-9]*|'') echo "FAIL: invalid $provider V2 RSS" >&2; exit 1;; esac
         [ "$rss_v2" -le 16384 ] || { echo "FAIL: $provider V2 RSS ${rss_v2}KiB exceeds 16384KiB" >&2; exit 1; }
+        /usr/bin/time -f '%M' -o "$work/$provider.v2-bytes.rss" \
+            "$work/bin/hal-provider-$provider-v1" < "$work/request-v2-bytes" >/dev/null
+        rss_v2_bytes=$(sed -n '1p' "$work/$provider.v2-bytes.rss")
+        case "$rss_v2_bytes" in (*[!0-9]*|'') echo "FAIL: invalid $provider byte V2 RSS" >&2; exit 1;; esac
+        [ "$rss_v2_bytes" -le 16384 ] || { echo "FAIL: $provider byte V2 RSS ${rss_v2_bytes}KiB exceeds 16384KiB" >&2; exit 1; }
     done
 else
     echo 'FAIL: /usr/bin/time is required for RSS evidence' >&2; exit 1
 fi
 
-echo "PASS: real C/Rust HAL providers agree; v2_scalar=987654321 v2_trace_cursor=1 ipc_cap=512 session_rows=5 direct_heap_calls=0 c_v1_rss_kib=$(cat "$work/c.rss") c_v2_rss_kib=$(cat "$work/c.v2.rss") rust_v1_rss_kib=$(cat "$work/rust.rss") rust_v2_rss_kib=$(cat "$work/rust.v2.rss")"
+rg -F 'HALREQ2B|' "$repo_root/src/app/hal_provider/pure_worker_v1.spl" >/dev/null
+rg -F '_canonical_word' "$repo_root/src/app/hal_provider/pure_worker_v1.spl" >/dev/null
+
+echo "PASS: real C/Rust HAL providers agree; v2_scalar=987654321 v2_exact_bytes=8 v2_binary_high_bit=true v2_error=2:17:23 v2_trace_cursor=1 operations=EnvironmentGet,FileRead,StreamRead ipc_cap=512 session_rows=5 direct_heap_calls=0 c_v1_rss_kib=$(cat "$work/c.rss") c_v2_rss_kib=$(cat "$work/c.v2.rss") c_v2_bytes_rss_kib=$(cat "$work/c.v2-bytes.rss") rust_v1_rss_kib=$(cat "$work/rust.rss") rust_v2_rss_kib=$(cat "$work/rust.v2.rss") rust_v2_bytes_rss_kib=$(cat "$work/rust.v2-bytes.rss")"

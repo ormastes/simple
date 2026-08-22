@@ -18,7 +18,7 @@
 #endif
 
 enum { HAL_FRAME_CAP_V1 = 512, HAL_REQUEST_FIELDS_V1 = 8,
-       HAL_REQUEST_FIELDS_V2 = 11 };
+       HAL_REQUEST_FIELDS_V2 = 11, HAL_REQUEST_BYTES_FIELDS_V2 = 19 };
 
 typedef struct {
     uint64_t contract, operation, invocation, fixture;
@@ -30,6 +30,14 @@ typedef struct {
     uint64_t result_capacity, trace_hi, trace_lo, trace_cursor;
     uint64_t trace_length, trace_capacity;
 } HalRequestV2;
+
+typedef struct {
+    uint64_t contract, operation, invocation, fixture;
+    uint64_t status, error_domain, error_code, error_detail;
+    uint64_t payload_length, payload_capacity;
+    int64_t word[4];
+    uint64_t trace_hi, trace_lo, trace_cursor, trace_length, trace_capacity;
+} HalBytesRequestV2;
 
 static int write_all(const unsigned char *p, size_t n) {
     size_t at = 0;
@@ -73,6 +81,27 @@ static int u64_field(const unsigned char *p, size_t n, size_t *at,
     return 1;
 }
 
+static int i64_field(const unsigned char *p, size_t n, size_t *at,
+                     int64_t *out, int terminal) {
+    uint64_t magnitude = 0;
+    int negative = 0, digits = 0;
+    if (*at < n && p[*at] == '-') { negative = 1; (*at)++; }
+    while (*at < n && p[*at] >= '0' && p[*at] <= '9') {
+        unsigned d = (unsigned)(p[*at] - '0');
+        uint64_t limit = negative ? UINT64_C(9223372036854775808)
+                                  : UINT64_C(9223372036854775807);
+        if (magnitude > (limit - d) / 10) return 0;
+        magnitude = magnitude * 10 + d; (*at)++; digits++;
+    }
+    if (!digits || *at >= n || p[*at] != (terminal ? '\n' : '|')) return 0;
+    (*at)++;
+    if (negative)
+        *out = magnitude == UINT64_C(9223372036854775808)
+            ? INT64_MIN : -(int64_t)magnitude;
+    else *out = (int64_t)magnitude;
+    return 1;
+}
+
 static int parse_request(const unsigned char *p, size_t n, HalRequestV1 *r) {
     uint64_t *field = &r->contract;
     size_t at = 8;
@@ -106,6 +135,61 @@ static int parse_request_v2(const unsigned char *p, size_t n, HalRequestV2 *r) {
         r->trace_cursor <= r->trace_length &&
         r->trace_length <= r->trace_capacity && r->trace_capacity > 0 &&
         r->trace_capacity <= UINT64_C(65536);
+}
+
+static int admitted_bytes_operation(uint64_t operation) {
+    /* EnvironmentGet plus typed FileRead and StreamRead. */
+    return operation == UINT64_C(102) || operation == UINT64_C(1001) ||
+           operation == UINT64_C(1004);
+}
+
+static int canonical_word(uint64_t word, uint64_t used) {
+    if (used == 0) return word == 0;
+    if (used >= 8) return 1;
+    return (word >> (unsigned)(used * 8)) == 0;
+}
+
+static int parse_bytes_request_v2(const unsigned char *p, size_t n,
+                                  HalBytesRequestV2 *r) {
+    size_t at = 9;
+    int i;
+    uint64_t remaining;
+    if (!prefix(p, n, "HALREQ2B|", 9)) return 0;
+    if (!u64_field(p, n, &at, &r->contract, 0) ||
+        !u64_field(p, n, &at, &r->operation, 0) ||
+        !u64_field(p, n, &at, &r->invocation, 0) ||
+        !u64_field(p, n, &at, &r->fixture, 0) ||
+        !u64_field(p, n, &at, &r->status, 0) ||
+        !u64_field(p, n, &at, &r->error_domain, 0) ||
+        !u64_field(p, n, &at, &r->error_code, 0) ||
+        !u64_field(p, n, &at, &r->error_detail, 0) ||
+        !u64_field(p, n, &at, &r->payload_length, 0) ||
+        !u64_field(p, n, &at, &r->payload_capacity, 0)) return 0;
+    for (i = 0; i < 4; ++i)
+        if (!i64_field(p, n, &at, &r->word[i], 0)) return 0;
+    if (!u64_field(p, n, &at, &r->trace_hi, 0) ||
+        !u64_field(p, n, &at, &r->trace_lo, 0) ||
+        !u64_field(p, n, &at, &r->trace_cursor, 0) ||
+        !u64_field(p, n, &at, &r->trace_length, 0) ||
+        !u64_field(p, n, &at, &r->trace_capacity, 1)) return 0;
+    if (at != n || r->contract != 2 || !admitted_bytes_operation(r->operation) ||
+        r->invocation == 0 || r->fixture == 0 || r->status > 7 ||
+        r->payload_capacity == 0 || r->payload_capacity > 32 ||
+        r->payload_length > r->payload_capacity ||
+        (r->trace_hi == 0 && r->trace_lo == 0) ||
+        r->trace_cursor > r->trace_length ||
+        r->trace_length > r->trace_capacity || r->trace_capacity == 0 ||
+        r->trace_capacity > UINT64_C(65536)) return 0;
+    if ((r->status == 0 && (r->error_domain != 0 || r->error_code != 0 ||
+                            r->error_detail != 0)) ||
+        (r->status != 0 && (r->error_domain == 0 || r->error_domain > 4 ||
+                            r->error_code == 0))) return 0;
+    for (i = 0; i < 4; ++i) {
+        remaining = r->payload_length > (uint64_t)i * 8
+            ? r->payload_length - (uint64_t)i * 8 : 0;
+        if (!canonical_word((uint64_t)r->word[i], remaining > 8 ? 8 : remaining)) return 0;
+    }
+    return 1;
 }
 
 static int parse_reset(const unsigned char *p, size_t n, uint64_t out[3]) {
@@ -198,16 +282,45 @@ static int result_v2(const HalRequestV2 *r) {
     return write_all(out, at);
 }
 
+static int bytes_result_v2(const HalBytesRequestV2 *r) {
+    unsigned char out[HAL_FRAME_CAP_V1];
+    size_t at = 0;
+    int64_t fields[23] = {
+        HAL_PROVIDER_KIND, (int64_t)r->invocation, (int64_t)r->status,
+        (int64_t)r->error_domain, (int64_t)r->error_code,
+        (int64_t)r->error_detail, 2, 0,
+        (int64_t)r->payload_length, (int64_t)r->payload_capacity,
+        r->word[0], r->word[1], r->word[2], r->word[3],
+        (int64_t)r->trace_hi, (int64_t)r->trace_lo,
+        (int64_t)r->trace_cursor, (int64_t)r->trace_length,
+        (int64_t)r->trace_capacity, 0, -1, 0,
+        HAL_REQUEST_BYTES_FIELDS_V2 * 8
+    };
+    int i;
+    if (!append_text(out, sizeof(out), &at, "HALRES2B|")) return 0;
+    for (i = 0; i < 23; ++i) {
+        if (!append_i64(out, sizeof(out), &at, fields[i]) || at >= sizeof(out))
+            return 0;
+        out[at++] = i == 22 ? '\n' : '|';
+    }
+    return write_all(out, at);
+}
+
 static int dispatch_request(const unsigned char *line, size_t n,
                             uint64_t expected_invocation) {
     HalRequestV1 v1;
     HalRequestV2 v2;
+    HalBytesRequestV2 bytes_v2;
     if (parse_request(line, n, &v1))
         return (expected_invocation == 0 || v1.invocation == expected_invocation)
             && result(&v1);
     if (parse_request_v2(line, n, &v2))
         return (expected_invocation == 0 || v2.invocation == expected_invocation)
             && result_v2(&v2);
+    if (parse_bytes_request_v2(line, n, &bytes_v2))
+        return (expected_invocation == 0 ||
+                bytes_v2.invocation == expected_invocation)
+            && bytes_result_v2(&bytes_v2);
     return 0;
 }
 
