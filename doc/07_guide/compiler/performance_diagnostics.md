@@ -77,7 +77,9 @@ but it does not rescan the entire function for every declaration.
 The compatibility `RET001` producer computes last-statement facts once with a
 reverse monotonic indentation stack. Candidate calls consume an indexed Boolean
 instead of rescanning their remaining source suffix, keeping deeply nested files
-linear in line count.
+linear in line count. The same caller-owned fact record supplies the exact next
+same-or-shallower source line to `UNREACH001`, so return diagnostics do not rebuild
+or rescan indentation facts per rule.
 
 The compatibility `CLOS001` producer indexes visible outer-variable names and extracts
 one leading assignment target per closure-body line. It therefore avoids comparing every
