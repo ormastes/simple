@@ -687,3 +687,15 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   and method-call exclusion.
 - Add mirrored behavioral contracts for cycles, methods, and duplicates.
 - Verification intentionally not run under the user's no-verify instruction.
+
+## Completed diagnostic tranche: shared query error-code ownership
+
+- Move the duplicated ordered classifier into cycle-free `query_error_codes`.
+- Parameterize the legacy `FFI error` / active `SFFI error` distinction.
+- Preserve malformed explicit codes, case sensitivity, overlap order, and exact
+  error-kind fallbacks with mirrored contracts.
+- Replace 473 entry-local lines with one 242-line owner plus four wrapper lines
+  (net 227-line reduction).
+- Follow-up: generate an immutable multi-pattern matcher for the remaining 136
+  per-diagnostic substring probes without constructing a registry per call.
+- Verification intentionally not run under the user's no-verify instruction.
