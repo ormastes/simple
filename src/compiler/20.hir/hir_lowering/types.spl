@@ -244,26 +244,42 @@ class HirLowering:
     # same field/method subtree. driver.spl issued 8,284 registrations for a
     # far smaller distinct set; that re-descent is what made field_dep cost
     # 377 s of a 427 s module (hir_phase_per_module_cost_2026-08-21.md).
-    # The key is marked BEFORE the body runs, so it doubles as the
-    # re-entrancy guard a cyclic field/alias chase needs.
     registered_import_memo: {text: bool}
     # Importer that `registered_import_memo` describes ("" = none yet).
     registered_import_memo_owner: text
     # Registrations skipped by the memo. Observable mechanism counter: a spec
     # pins that repeating one (module, name, local, enum) query registers once.
     registered_import_skip_count: i64
+    # IMPLIDX (2026-08-22): impl positions per (frozen surface, implemented
+    # type name). `register_imported_type_methods_inner` swept EVERY impl of
+    # the declaring module per imported composite/enum, copying each impl row
+    # (and its methods Dict) under value semantics -- 93 ms of a 120 ms
+    # registration on a 100-impl module, O(impls) per symbol and O(impls^2)
+    # per module. The index is a pure function of the frozen registry
+    # (`{generation} {physical_index}` -> built; `... {type name}` -> rows),
+    # so it is phase-invariant and shared across importers, like
+    # `explicit_dep_target_memo`. `impl_index_build_count` counts surfaces
+    # indexed (one sweep each); `impl_rows_visited` counts impl rows read by
+    # method registration after indexing, so a spec can pin both bounds.
+    impl_index_built: {text: bool}
+    impl_index_positions: {text: [i64]}
+    impl_index_build_count: i64
+    impl_rows_visited: i64
     # Sweeps actually performed. Observable mechanism counter for the memo
     # above; a spec pins that N importers of one surface cause exactly one
     # sweep per (surface, dependency) pair.
     explicit_dep_scan_count: i64
-    # Parallel scalar re-export caches keyed by physical surface index and
-    # wanted item. Registry aliases therefore share one cache entry and no
-    # concatenated facade-name key is allocated during traversal.
-    reexport_root_surface_indices: [i64]
-    reexport_root_wanted: [text]
-    reexport_root_found: [bool]
-    reexport_root_terminal_indices: [i64]
-    reexport_root_items: [text]
+    # REXMEMO (2026-08-21): root re-export memo, "{physical surface index}
+    # {wanted}" -> terminal surface index (-1 = complete, valid MISS) plus the
+    # terminal item name. Registry aliases share one entry because the key is
+    # the PHYSICAL index. The answer depends only on the frozen registry, so
+    # the memo is registry-pure: it survives `begin_module` and is dropped
+    # only when `module_surfaces.generation` changes (find_reexport_source).
+    # A depth-truncated or invalid walk is never recorded. Replaces the five
+    # parallel arrays d757f7d70d0 deleted: those were scanned linearly per
+    # query and capped at 512 rows; a Dict probe is O(1) and uncapped.
+    reexport_root_memo_index: {text: i64}
+    reexport_root_memo_item: {text: text}
     reexport_visit_surface_indices: [i64]
     reexport_visit_wanted: [text]
     reexport_visit_depths: [i64]
@@ -316,12 +332,11 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_explicit_dep_target_memo: {text: i64} = {}
     val empty_explicit_dep_item_memo: {text: text} = {}
     val empty_registered_import_memo: {text: bool} = {}
-    val empty_reexport_root_surface_indices: [i64] = []
+    val empty_impl_index_built: {text: bool} = {}
+    val empty_impl_index_positions: {text: [i64]} = {}
+    val empty_reexport_root_memo_index: {text: i64} = {}
+    val empty_reexport_root_memo_item: {text: text} = {}
     val empty_imported_type_methods_in_progress: [text] = []
-    val empty_reexport_root_wanted: [text] = []
-    val empty_reexport_root_found: [bool] = []
-    val empty_reexport_root_terminal_indices: [i64] = []
-    val empty_reexport_root_items: [text] = []
     val empty_reexport_visit_surface_indices: [i64] = []
     val empty_reexport_visit_wanted: [text] = []
     val empty_reexport_visit_depths: [i64] = []
@@ -375,11 +390,12 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         registered_import_memo: empty_registered_import_memo,
         registered_import_memo_owner: "",
         registered_import_skip_count: 0,
-        reexport_root_surface_indices: empty_reexport_root_surface_indices,
-        reexport_root_wanted: empty_reexport_root_wanted,
-        reexport_root_found: empty_reexport_root_found,
-        reexport_root_terminal_indices: empty_reexport_root_terminal_indices,
-        reexport_root_items: empty_reexport_root_items,
+        impl_index_built: empty_impl_index_built,
+        impl_index_positions: empty_impl_index_positions,
+        impl_index_build_count: 0,
+        impl_rows_visited: 0,
+        reexport_root_memo_index: empty_reexport_root_memo_index,
+        reexport_root_memo_item: empty_reexport_root_memo_item,
         reexport_visit_surface_indices: empty_reexport_visit_surface_indices,
         reexport_visit_wanted: empty_reexport_visit_wanted,
         reexport_visit_depths: empty_reexport_visit_depths,
@@ -870,6 +886,13 @@ impl HirLowering:
                     if name == "Any" or (name == "Option" and hir_args.len() == 0):
                         self.recovered("unresolved type: {name}", span)
                     else:
+                        # Level-gated origin probe (default off). The hard
+                        # `unresolved type: X` is attributed to the module
+                        # being lowered, which is NOT necessarily the file the
+                        # annotation came from; the span carries the real file.
+                        if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1" or
+                           hir_type_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") == "1":
+                            eprint("[hir-unresolved-type-origin] name={name} lowering_module={self.module_filename} span_file={span.file} span_line={span.line} span_col={span.col}")
                         self.error("unresolved type: {name}", span)
                     HirTypeKind.Error
 
