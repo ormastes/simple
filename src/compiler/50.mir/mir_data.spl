@@ -30,6 +30,43 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
 
+# One immutable trace-policy snapshot per outer MIR lowering. The lowering
+# pipeline is process-global/serial today; nested lowering inherits the parent
+# decision and restores its depth without rewriting environment variables.
+var _mir_trace_scope_slot: [i64] = [0, 0, 0, 0]
+
+pub fn mir_trace_scope_enter() -> i64:
+    val previous_depth = _mir_trace_scope_slot[0]
+    if previous_depth == 0:
+        val compiler_trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+        val phase_trace = (rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1"
+        val bootstrap_diag = (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1"
+        _mir_trace_scope_slot[1] = if (
+            compiler_trace or phase_trace or bootstrap_diag): 1 else: 0
+        _mir_trace_scope_slot[2] = if (
+            (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"): 1 else: 0
+        _mir_trace_scope_slot[3] = _mir_trace_scope_slot[3] + 1
+    _mir_trace_scope_slot[0] = previous_depth + 1
+    previous_depth
+
+pub fn mir_trace_scope_exit(previous_depth: i64):
+    _mir_trace_scope_slot[0] = previous_depth
+
+pub fn mir_trace_generation() -> i64:
+    _mir_trace_scope_slot[3]
+
+pub fn mir_lowering_trace_enabled() -> bool:
+    if _mir_trace_scope_slot[0] > 0:
+        return _mir_trace_scope_slot[1] != 0
+    ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
+     (rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1" or
+     (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1")
+
+pub fn mir_builder_trace_enabled() -> bool:
+    if _mir_trace_scope_slot[0] > 0:
+        return _mir_trace_scope_slot[2] != 0
+    (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+
 pub fn mir_trace_enabled() -> bool:
     """Shared MIR-lowering trace gate. Default OFF.
 
@@ -38,13 +75,7 @@ pub fn mir_trace_enabled() -> bool:
     so one switch turns every MIR-lowering receipt back on. Callers on hot
     paths must read this ONCE and cache it (see emit_call_value below), never
     per receipt."""
-    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
-        return true
-    if (rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1":
-        return true
-    if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-        return true
-    (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+    mir_lowering_trace_enabled() or mir_builder_trace_enabled()
 
 # ============================================================================
 # MIR Builder
@@ -146,7 +177,7 @@ impl MirBuilder:
         # prologue instructions) still carries a real, in-function location
         # instead of nil.
         self.current_span = Some(span)
-        if (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1":
+        if mir_builder_trace_enabled():
             print "MIRB begin {name} post-reset blocks={self.blocks.len()} locals={self.locals.len()}"
 
         # Create entry block
@@ -220,7 +251,7 @@ impl MirBuilder:
         fn_.locals = self.locals
         fn_.blocks = self.blocks
         self.current_function = nil
-        if (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1":
+        if mir_builder_trace_enabled():
             var first_insts = -1
             if fn_.blocks.len() > 0:
                 first_insts = fn_.blocks[0].instructions.len()
@@ -555,7 +586,7 @@ impl MirBuilder:
         # lines 113/186). These probes were unconditional, which on a hot path
         # (every non-unit call emit) floods stderr for the whole build; they are
         # retained, not deleted, per the log-retention policy. (2026-08-08)
-        val mirb_trace = (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+        val mirb_trace = mir_builder_trace_enabled()
         if mirb_trace:
             eprint("[mir-call-value] new-temp-before next={self.next_local_id}\n")
         val dest = self.new_temp(return_type)
