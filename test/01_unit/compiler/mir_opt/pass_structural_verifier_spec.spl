@@ -7,7 +7,7 @@ Audience: compiler and optimizer maintainers.
 
 use std.spec.*
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instructions.{MirFunction, MirBlock}
+use compiler.mir.mir_instructions.{MirFunction, MirBlock, MirInst}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.mir_opt.mir_opt.mod.{
@@ -18,13 +18,28 @@ use compiler.mir_opt.mir_opt.mod.{
 fn _pv_block(id: i64, terminator: MirTerminator) -> MirBlock:
     MirBlock(BlockId(id: id), Some("b{id}"), [], terminator)
 
+fn _pv_block_with(id: i64, instructions: [MirInst], terminator: MirTerminator) -> MirBlock:
+    MirBlock(BlockId(id: id), Some("b{id}"), instructions, terminator)
+
+fn _pv_local(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn _pv_copy(id: i64) -> MirOperand:
+    mir_operand_copy(_pv_local(id))
+
 fn _pv_manifest() -> DriverManifestAttr:
     DriverManifestAttr(DriverManifestAttrKind.Driver, 0, 0, [], "", "")
 
 fn _pv_function(blocks: [MirBlock], entry: i64) -> MirFunction:
+    _pv_function_with_local_ids(blocks, entry, [])
+
+fn _pv_function_with_local_ids(blocks: [MirBlock], entry: i64, ids: [i64]) -> MirFunction:
+    var locals: [MirLocal] = []
+    for id in ids:
+        locals.push(MirLocal(_pv_local(id), Some("v{id}"), MirType.i64(), LocalKind.Temp, false))
     MirFunction(
         SymbolId(id: 193), "pass_verifier_fixture",
-        MirSignature([], MirType.unit(), false), [], blocks,
+        MirSignature([], MirType.unit(), false), locals, blocks,
         BlockId(id: entry), Span(0, 0, 1, 1), [], false, nil, {}, nil,
         false, false, "", false, _pv_manifest(), false,
         vhdl_hardware_metadata_default(), false
@@ -62,7 +77,10 @@ describe "MIR optimizer structural verifier":
                 expect(outcome.verifier.valid).to_equal(true)
                 expect(outcome.record.functions_seen).to_equal(1)
                 expect(outcome.record.disposition).to_equal(PassRunDisposition.Unchanged)
+                expect(outcome.record.candidates).to_equal(0)
                 expect(outcome.record.transformed).to_equal(0)
+                expect(outcome.record.rejected).to_equal(0)
+                expect(outcome.record.instructions_before).to_equal(outcome.record.instructions_after)
                 expect(outcome.record.reasons[0].code).to_equal("no_change")
             case Err(message):
                 fail("unexpected verifier rejection: " + message)
@@ -71,3 +89,50 @@ describe "MIR optimizer structural verifier":
         step("Fail closed before optimizer dispatch")
         val result = run_named_pass_with_record("write_coalesce", _pv_function([], 0))
         expect(result.is_err()).to_equal(true)
+
+    it "records every write-coalesce candidate instead of a changed Boolean":
+        step("Record exact active-pass candidate counts")
+        val instructions = [
+            MirInst(MirInstKind.GetElementPtr(_pv_local(10), _pv_copy(0), [_pv_copy(1)]), nil),
+            MirInst(MirInstKind.Store(_pv_copy(10), _pv_copy(5)), nil),
+            MirInst(MirInstKind.GetElementPtr(_pv_local(11), _pv_copy(0), [_pv_copy(2)]), nil),
+            MirInst(MirInstKind.Store(_pv_copy(11), _pv_copy(6)), nil),
+            MirInst(MirInstKind.GetElementPtr(_pv_local(20), _pv_copy(9), [_pv_copy(1)]), nil),
+            MirInst(MirInstKind.Store(_pv_copy(20), _pv_copy(5)), nil),
+            MirInst(MirInstKind.GetElementPtr(_pv_local(21), _pv_copy(9), [_pv_copy(2)]), nil),
+            MirInst(MirInstKind.Store(_pv_copy(21), _pv_copy(6)), nil)
+        ]
+        val result = run_named_pass_with_record("write_coalesce", _pv_function_with_local_ids([
+            _pv_block_with(0, instructions, MirTerminator.Ret(nil))
+        ], 0, [0, 1, 2, 5, 6, 9, 10, 11, 20, 21]))
+        expect(result.is_ok()).to_equal(true)
+        val outcome = result.ok().unwrap()
+        expect(outcome.record.disposition).to_equal(PassRunDisposition.Transformed)
+        expect(outcome.record.candidates).to_equal(2)
+        expect(outcome.record.transformed).to_equal(2)
+        expect(outcome.record.rejected).to_equal(0)
+        expect(outcome.record.instructions_after - outcome.record.instructions_before).to_equal(2)
+        expect(outcome.record.reasons[0].code).to_equal("fs.two_stores_same_base")
+        expect(outcome.record.reasons[0].count).to_equal(2)
+
+    it "records every syscall-batch candidate instead of a changed Boolean":
+        step("Record exact syscall batching outcomes")
+        val instructions = [
+            MirInst(MirInstKind.Call(nil, _pv_copy(0), [_pv_copy(1)]), nil),
+            MirInst(MirInstKind.Call(nil, _pv_copy(0), [_pv_copy(2)]), nil),
+            MirInst(MirInstKind.Nop, nil),
+            MirInst(MirInstKind.Call(nil, _pv_copy(9), [_pv_copy(1)]), nil),
+            MirInst(MirInstKind.Call(nil, _pv_copy(9), [_pv_copy(2)]), nil)
+        ]
+        val result = run_named_pass_with_record("syscall_batch", _pv_function_with_local_ids([
+            _pv_block_with(0, instructions, MirTerminator.Ret(nil))
+        ], 0, [0, 1, 2, 9]))
+        expect(result.is_ok()).to_equal(true)
+        val outcome = result.ok().unwrap()
+        expect(outcome.record.disposition).to_equal(PassRunDisposition.Transformed)
+        expect(outcome.record.candidates).to_equal(2)
+        expect(outcome.record.transformed).to_equal(2)
+        expect(outcome.record.rejected).to_equal(0)
+        expect(outcome.record.instructions_after - outcome.record.instructions_before).to_equal(2)
+        expect(outcome.record.reasons[0].code).to_equal("fs.two_calls_same_callee")
+        expect(outcome.record.reasons[0].count).to_equal(2)
