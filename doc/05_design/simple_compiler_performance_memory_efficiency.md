@@ -468,3 +468,14 @@ extracts and writes back a growing dictionary-held array.
 its public compatibility class as a delegate; lint fix uses the shared ordering
 and assembly primitives after collecting its one-file replacements. Compiler
 modules must not fork private sorting or splice loops.
+
+## Query JSON escaping contract
+
+Warning and error serializers use `query_json_escape` from the shared query
+owner. It must preserve the legacy byte result: escape only backslash, quote,
+line feed, carriage return and tab; retain every other character; and return an
+empty input unchanged. The no-escape path returns the original text. The escape
+path collects maximal unchanged spans plus fixed escape literals and joins once,
+so it performs linear work without full-message intermediate replacement copies.
+Callers retain their existing JSON envelope, diagnostic ordering and severity
+policy.
