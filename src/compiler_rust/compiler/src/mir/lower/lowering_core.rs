@@ -1406,16 +1406,15 @@ impl<'a> MirLowerer<'a> {
                     .push(MirInst::BoxFloat { dest: boxed, value });
                 boxed
             }),
-            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 => {
-                self.with_func(|func, current_block| {
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 => self
+                .with_func(|func, current_block| {
                     let boxed = func.new_vreg();
                     func.block_mut(current_block)
                         .unwrap()
                         .instructions
                         .push(MirInst::BoxInt { dest: boxed, value });
                     boxed
-                })
-            }
+                }),
             _ => Ok(value),
         }
     }
@@ -1453,16 +1452,15 @@ impl<'a> MirLowerer<'a> {
                     .push(MirInst::UnboxFloat { dest, value });
                 dest
             }),
-            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 => {
-                self.with_func(|func, current_block| {
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 => self
+                .with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     func.block_mut(current_block)
                         .unwrap()
                         .instructions
                         .push(MirInst::UnboxInt { dest, value });
                     dest
-                })
-            }
+                }),
             _ => Ok(value),
         }
     }
@@ -1572,6 +1570,14 @@ impl<'a> MirLowerer<'a> {
 
     /// Lower HIR module to MIR module (main entry point)
     pub fn lower_module(mut self, hir: &'a HirModule) -> MirLowerResult<MirModule> {
+        if crate::hir::analysis::unsafe_ffi_deny_enabled() {
+            if let Some(violation) = crate::hir::analysis::check_unsafe_ffi(hir).first() {
+                return Err(MirLowerError::Unsupported(format!(
+                    "E-SFFI-002: raw extern call '{}' in '{}' requires lexical unsafe(ffi)",
+                    violation.callee, violation.function
+                )));
+            }
+        }
         self.di_config = crate::di::merge_di_config_with_hir_graphs(self.di_config.take(), &hir.inject_graphs)
             .map_err(MirLowerError::Unsupported)?;
 

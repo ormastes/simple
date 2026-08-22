@@ -820,3 +820,12 @@ an unrelated existing JIT struct-field test failed because `rt_struct_alloc`
 was unresolved and the module correctly refused a potential null jump. This is
 not counted as a Winit pass or silently discarded; the focused Winit evidence
 is the two named passing tests plus the provider and static contract audits.
+
+Rust-seed lexical enforcement no longer drops raw extern authorization at MIR.
+A HIR-only checker now traverses nested statements and expressions while
+preserving `UnsafeBlock` scope, and the central HIR-to-MIR entry rejects an
+unscoped module-local extern call as `E-SFFI-002` in critical/verified profiles.
+The profile decision is process-cached and emitted target code is unchanged;
+there is no application hot-path or memory cost. Focused tests pass 2/2. This
+does not yet close raw-pointer or inline-assembly enforcement, nor does it turn
+any unsigned provider into verified evidence.

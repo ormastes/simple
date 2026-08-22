@@ -7,7 +7,23 @@
   MIR; the Rust seed does not yet have the pure compiler's in_unsafe safety pass"
 - **Date:** 2026-08-18
 - **Status of this document:** SOURCE-VERIFIED, **NOT EXECUTION-VERIFIED**. Nothing here was
-  run. See "Deferred verification" at the bottom for the exact commands.
+run. See "Deferred verification" at the bottom for the exact commands.
+
+## 2026-08-22 implementation update
+
+The SFFI portion is now implemented and execution-verified. The Rust seed HIR
+pass `hir::analysis::unsafe_ffi_checker` walks every function before MIR can
+erase `UnsafeBlock`, identifies direct module-local extern calls, and requires
+their call site to be lexically enclosed. `MirLowerer::lower_module` denies the
+first violation as `E-SFFI-002` for the same `critical`/`verified` profiles as
+the pure compiler. Profile resolution is cached once per compiler process and
+the pass changes no emitted code, so it adds no target-runtime branch, lookup,
+allocation, or memory.
+
+Focused Rust tests prove an outside call is found and the same call inside
+`unsafe(capabilities: [ffi])` is accepted (2 passed). The TODO remains open
+because raw-pointer and inline-assembly seed enforcement are separate remaining
+parts of row 557.
 
 ## Verdict
 

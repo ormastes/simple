@@ -183,3 +183,8 @@ passing placeholder.
     freezes the fail-closed baseline. Migrate `rt_file`, `rt_process`, `rt_env`,
     `rt_time`, then `rt_cuda`; each improvement must reduce untouched rows or
     add exact trusted admission without adding any runtime census dependency.
+35. Rust-seed HIR now retains lexical `unsafe(ffi)` authority through a checked
+    pre-MIR pass and denies unscoped extern calls in critical/verified profiles,
+    with a process-cached policy lookup and unchanged target code. Extend the
+    same seed pass to raw pointers/inline assembly, then migrate the ranked
+    `rt_time` provider declarations and wrappers without adding call overhead.
