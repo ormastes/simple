@@ -1770,3 +1770,14 @@ Dominance now has an explicit `dominators_complete` bit and loop detection exits
 unless it is true. Vectorization and typed-storage rewriting use the CFG+def-use
 preset and reject duplicate/missing block identities before interpreting sites
 keyed by block ID. They still omit RPO/dominator and liveness work.
+
+### Wide-public export deduplication
+
+The canonical `wide_public` text rule retained every unique export name in an
+array and called a private linear `list_has` for each parsed name. A module with
+`E` distinct exports therefore performed `0 + ... + E-1` name comparisons.
+The rule now uses a dictionary-backed membership set and an explicit scalar
+count, avoiding unreliable dictionary-length behavior while reducing expected
+CPU to linear in parsed export names. Exact textual identity, case sensitivity,
+duplicate suppression, exclusions and diagnostic counts are unchanged; no name
+iteration order is observable.
