@@ -1081,3 +1081,11 @@ shortens the success call path by removing an unwrap wrapper and preserves the
 copy routine's existing single buffer allocation/free. Next remove fabricated
 handles from reshape/permute/cat/stack/binary/to-float and fixed-dimension
 constructors, then address scalar reductions separately.
+
+Contiguous/squeeze/unsqueeze/slice now carry typed results through
+`TorchNDArray`; the zero-handle APIs are removed and intermediate slice
+ownership is released before error propagation. Readiness passes 8/8, focused
+checks and lint pass. Continue with reshape/permute/cat/stack/binary/to-float
+inside `dyn_sffi_tensor_ops`, then fixed-dimension constructors and scalar
+reductions. Preserve one raw call per logical operation and explicit cleanup
+for every intermediate tensor.

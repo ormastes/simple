@@ -1373,3 +1373,12 @@ wrapper from each success path; it does not add a provider call, allocation,
 lookup, hash, retry, or I/O. The status spec remains 4/4, all three production
 modules check, and lint has zero errors. Empty arrays can again be legitimate
 data only when accompanied by `ready`, rather than doubling as bridge failure.
+
+Dynamic Torch contiguous, squeeze, unsqueeze, and slice now return typed
+results and no longer expose zero-handle compatibility APIs. `TorchNDArray`
+propagates provider reasons, and two-stage 2-D slicing frees the intermediate
+row handle before matching the second result. Readiness passes 8/8, both source
+checks pass, and lint has zero errors. Each operation keeps one availability
+query and one raw operation call; the second 2-D slice remains intrinsically a
+second operation, with no retry, synchronization, lookup, hash, or allocation
+added by validation.

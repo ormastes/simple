@@ -1,5 +1,5 @@
 use std.ndarray.*
-use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_add_scalar_result, dyn_torch_tensor_arange, dyn_torch_tensor_argmax, dyn_torch_tensor_argmin, dyn_torch_tensor_clone_result, dyn_torch_tensor_contiguous, dyn_torch_tensor_det, dyn_torch_tensor_div_scalar_result, dyn_torch_tensor_eye, dyn_torch_tensor_free, dyn_torch_tensor_inverse_result, dyn_torch_tensor_leaky_relu, dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_linspace, dyn_torch_tensor_log_softmax, dyn_torch_tensor_matmul_result, dyn_torch_tensor_max, dyn_torch_tensor_max_dim, dyn_torch_tensor_mean, dyn_torch_tensor_mean_dim, dyn_torch_tensor_min, dyn_torch_tensor_min_dim, dyn_torch_tensor_mul_scalar_result, dyn_torch_tensor_norm, dyn_torch_tensor_pow_result, dyn_torch_tensor_slice, dyn_torch_tensor_softmax, dyn_torch_tensor_squeeze_dim, dyn_torch_tensor_std, dyn_torch_tensor_sub_scalar_result, dyn_torch_tensor_sum, dyn_torch_tensor_sum_dim, dyn_torch_tensor_unsqueeze, dyn_torch_tensor_var}
+use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_add_scalar_result, dyn_torch_tensor_arange, dyn_torch_tensor_argmax, dyn_torch_tensor_argmin, dyn_torch_tensor_clone_result, dyn_torch_tensor_contiguous_result, dyn_torch_tensor_det, dyn_torch_tensor_div_scalar_result, dyn_torch_tensor_eye, dyn_torch_tensor_free, dyn_torch_tensor_inverse_result, dyn_torch_tensor_leaky_relu, dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_linspace, dyn_torch_tensor_log_softmax, dyn_torch_tensor_matmul_result, dyn_torch_tensor_max, dyn_torch_tensor_max_dim, dyn_torch_tensor_mean, dyn_torch_tensor_mean_dim, dyn_torch_tensor_min, dyn_torch_tensor_min_dim, dyn_torch_tensor_mul_scalar_result, dyn_torch_tensor_norm, dyn_torch_tensor_pow_result, dyn_torch_tensor_slice_result, dyn_torch_tensor_softmax, dyn_torch_tensor_squeeze_dim_result, dyn_torch_tensor_std, dyn_torch_tensor_sub_scalar_result, dyn_torch_tensor_sum, dyn_torch_tensor_sum_dim, dyn_torch_tensor_unsqueeze_result, dyn_torch_tensor_var}
 use std.common.torch.dyn_sffi_tensor_ops.{dyn_torch_tensor_atan2_result, dyn_torch_tensor_binary_op, dyn_torch_tensor_cat_2, dyn_torch_tensor_cat_3, dyn_torch_tensor_cat_4, dyn_torch_tensor_copy_values_result, dyn_torch_tensor_from_values_1d_result, dyn_torch_tensor_from_values_2d_result, dyn_torch_tensor_permute_2d, dyn_torch_tensor_permute_3d, dyn_torch_tensor_permute_4d, dyn_torch_tensor_reshape_1d, dyn_torch_tensor_reshape_2d, dyn_torch_tensor_reshape_3d, dyn_torch_tensor_reshape_4d, dyn_torch_tensor_stack_2, dyn_torch_tensor_stack_3, dyn_torch_tensor_stack_4, dyn_torch_tensor_to_float}
 use std.linalg.linalg_core.{BackendError, torch_positive_slice_length, float64_values_to_f64, float64_matrix_to_f64}
 use std.linalg.torch_ndarray_helpers.{torch_arange_count, torch_fill_handle_f64, torch_create_handle_f64, torch_unary_handle_f64}
@@ -256,9 +256,9 @@ class TorchNDArray:
             normalized = self.shape.dims.len() + 1 + normalized
         if normalized < 0 or normalized > self.shape.dims.len():
             return Err(BackendError.BackendExecutionFailed("pytorch tensor owner unsqueeze received invalid axis"))
-        val handle = dyn_torch_tensor_unsqueeze(self.handle, normalized)
-        if handle <= 0:
-            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_unsqueeze"))
+        val handle = match dyn_torch_tensor_unsqueeze_result(self.handle, normalized):
+            case Ok(value): value
+            case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch unsqueeze failed: " + reason))
         var out_shape = Shape.new([Index.new(1), self.shape.dims[0]])
         if normalized == 1:
             out_shape = Shape.new([self.shape.dims[0], Index.new(1)])
@@ -279,9 +279,9 @@ class TorchNDArray:
             return Err(BackendError.BackendExecutionFailed("pytorch tensor owner squeeze received invalid axis"))
         if self.shape.dims[normalized].value != 1:
             return Err(BackendError.BackendExecutionFailed("pytorch tensor owner squeeze axis must have size one"))
-        val handle = dyn_torch_tensor_squeeze_dim(self.handle, normalized)
-        if handle <= 0:
-            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_squeeze_dim"))
+        val handle = match dyn_torch_tensor_squeeze_dim_result(self.handle, normalized):
+            case Ok(value): value
+            case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch squeeze failed: " + reason))
         var out_len = self.shape.dims[1].value
         if normalized == 1:
             out_len = self.shape.dims[0].value
@@ -381,9 +381,9 @@ class TorchNDArray:
     fn contiguous_f64() -> Result<TorchNDArray, BackendError>:
         if self.dtype != DType.F64:
             return Err(BackendError.BackendExecutionFailed("pytorch tensor owner contiguous requires Float64 input"))
-        val handle = dyn_torch_tensor_contiguous(self.handle)
-        if handle <= 0:
-            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_contiguous"))
+        val handle = match dyn_torch_tensor_contiguous_result(self.handle):
+            case Ok(value): value
+            case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch contiguous failed: " + reason))
         Ok(TorchNDArray(
             handle: handle,
             shape: self.shape,
@@ -410,9 +410,9 @@ class TorchNDArray:
         if stop < start:
             return Err(BackendError.BackendExecutionFailed("pytorch tensor owner slice stop is before start"))
         val length = torch_positive_slice_length(start, stop, spec.step.value)
-        val handle = dyn_torch_tensor_slice(self.handle, 0, start, stop, spec.step.value)
-        if handle <= 0:
-            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_slice"))
+        val handle = match dyn_torch_tensor_slice_result(self.handle, 0, start, stop, spec.step.value):
+            case Ok(value): value
+            case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch 1-D slice failed: " + reason))
         Ok(TorchNDArray(
             handle: handle,
             shape: Shape.new([Index.new(length)]),
@@ -437,13 +437,14 @@ class TorchNDArray:
             return Err(BackendError.BackendExecutionFailed("pytorch tensor owner column slice received invalid bounds"))
         val row_count = torch_positive_slice_length(row_start, row_stop, rows.step.value)
         val col_count = torch_positive_slice_length(col_start, col_stop, cols.step.value)
-        val row_handle = dyn_torch_tensor_slice(self.handle, 0, row_start, row_stop, rows.step.value)
-        if row_handle <= 0:
-            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_slice"))
-        val handle = dyn_torch_tensor_slice(row_handle, 1, col_start, col_stop, cols.step.value)
+        val row_handle = match dyn_torch_tensor_slice_result(self.handle, 0, row_start, row_stop, rows.step.value):
+            case Ok(value): value
+            case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch row slice failed: " + reason))
+        val column_result = dyn_torch_tensor_slice_result(row_handle, 1, col_start, col_stop, cols.step.value)
         dyn_torch_tensor_free(row_handle)
-        if handle <= 0:
-            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_slice"))
+        val handle = match column_result:
+            case Ok(value): value
+            case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch column slice failed: " + reason))
         Ok(TorchNDArray(
             handle: handle,
             shape: Shape.new([Index.new(row_count), Index.new(col_count)]),
