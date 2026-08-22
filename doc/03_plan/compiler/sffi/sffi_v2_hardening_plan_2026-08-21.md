@@ -993,3 +993,18 @@ gates pass (Rust 4/4, self-hosted 7/7); the broad compiler check repeatedly
 printed green batches but did not terminate, which remains tooling evidence to
 fix rather than a PASS. This rule changes compile-time analysis only and adds
 no foreign-call hot-path work.
+
+The canonical Torch declaration owner is fully tagged (135/135) without adding
+per-call wrappers; global tagged rows rise to 645 and untouched rows fall to
+11,537, while verified/signed remains zero. Do not call this safe: only one
+Torch declaration has even a source-level contract classification. Migrate the
+high-level Tensor API to checked nonzero handles and status/out provider shims
+before allowing safe exports.
+
+Owned C++ backing discovery now includes `.cc`/`.cpp`/`.cxx`. The new boundary
+census/ratchet establishes the starting gate: 211 definitions, 209 missing an
+exception barrier, 31 pointer-boundary rows, zero verified/signed. Next split
+Torch into versioned C ABI families and translate every C++ exception to typed
+status at the shim. Do not add `noexcept` alone where it would merely terminate
+on an ordinary operational error, and do not translate exceptions into
+fabricated zero/false/empty success values.

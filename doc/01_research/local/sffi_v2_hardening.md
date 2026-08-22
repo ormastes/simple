@@ -1256,3 +1256,21 @@ code receives no new branch, lookup, allocation, or wrapper. Rust tests pass
 4/4 and the self-hosted safety spec passes 7/7. The broad source check printed
 four successful 32-file passes but failed to terminate and was stopped, so it
 is not promoted to completed verification.
+
+The canonical Torch raw owner now tags all 135 declarations as FFI-unsafe;
+compatibility families re-export this owner rather than duplicating authority.
+The two raw aliases carry function-level unsafe authority and retain their
+single direct call, so no handle initialization, sentinel workaround, lookup,
+allocation, or extra branch was added. Focused check and lint pass. The global
+census is 12,454 declarations, 645 tagged, 587 contracted, 11,537 untouched,
+and zero verified/signed admissions. The unchanged contract count is
+intentional: an unsafe tag is not a null/status/ownership contract.
+
+Backing classification previously ignored `.cc`/`.cpp`/`.cxx`, falsely calling
+live Torch functions missing. It now finds 105 Torch declarations backed by
+owned C++ source, 24 interpreter-backed, and 6 deployed-binary-backed. A new
+C++ boundary census reports 211 definitions, 209 without `noexcept` or a local
+catch barrier, 31 pointer-boundary rows, and zero verified/signed. Its ratchet
+passes. Source backing remains unsafe evidence only: `torch_sffi.cpp` requires
+versioned status/out adapters and a universal exception barrier before safe or
+critical admission.
