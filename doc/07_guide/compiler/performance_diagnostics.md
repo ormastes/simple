@@ -237,3 +237,7 @@ Lint source is split into lines once per request. Traceability, SPipe-quality, t
 file-policy, and other line-oriented checks share that immutable view; rule owners must
 not create private full-source line arrays. This bounds transient memory while preserving
 the same diagnostic ordering and locations.
+
+The lint driver calls the EasyFix registry once. Individual registry rules are not
+re-invoked by the driver; this prevents duplicate source scans, diagnostics, replacement
+objects, and later fix-policy work.

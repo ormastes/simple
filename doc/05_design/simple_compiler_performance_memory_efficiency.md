@@ -164,3 +164,11 @@ created by `lint_source`. These owners must not split `content` again or retain 
 beyond the request. Their cost remains one aggregate O(source lines) scan across the
 rules, with no rule-local full-source arrays. Whole-text input is reserved for predicates
 that cannot be expressed without cross-line context.
+
+### Single-owner EasyFix dispatch
+
+`lint_source` invokes the EasyFix registry exactly once and consumes only that returned
+sequence. It must not invoke individual registry members again. This preserves registry
+order, prevents duplicate diagnostics/replacements, and bounds each registered rule to
+one execution per lint request. A future registry view API will share line/context facts
+among its members without changing this ownership boundary.
