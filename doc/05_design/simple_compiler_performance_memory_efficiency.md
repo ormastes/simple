@@ -301,3 +301,6 @@ Every GVN callable surface remains identity while status is `Skeleton`. Rehabili
 ## Bounds-check elimination rehabilitation contract
 
 Every BCE entrypoint remains identity while status is `Disabled`. A future transform must attach each range fact to exact SSA/value versions and a dominance region, prove lower and upper bounds, loop initialization/step/polarity/nowrap/finiteness, zero-trip behavior, array-length stability, alias/mutation invalidation, and exceptional control flow. Proofs are structural facts, not global text keys; failure or timeout preserves the check. Direct block APIs can expose analysis remarks but cannot bypass canonical transform admission.
+## General loop-transform rehabilitation contract
+
+LICM, full/partial unrolling, and combined loop optimization remain identity at every callable surface while disabled. LICM requires canonical preheaders, dominance/post-dominance, MemorySSA-lite, alias/effect invalidation, speculatability/trap and zero-trip proof. Unrolling additionally requires exact induction/trip semantics, SSA renaming, exit/continue/break/unwind preservation, ownership/destruction order, code-size/register-pressure profitability, and target validation. Combined passes route only through status-aware dispatch; they never chain class methods around it.
