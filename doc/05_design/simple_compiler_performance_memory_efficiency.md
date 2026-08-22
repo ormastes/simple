@@ -207,3 +207,13 @@ declare a parallel structural copy. The registry builds one view from canonical 
 passes the same context array to compiler and stdlib rule owners. View-taking variants
 preserve compatibility wrappers, rule order, byte offsets, and replacement ordering.
 The view is request-scoped and must never enter a process-global cache.
+
+### Indexed duplicate-typed call sites
+
+Build a unique target dictionary keyed by function name and arity. Ambiguous targets are
+excluded before source scanning. A single lexical line pass admits identifier tokens by
+name, parses only candidate calls, and emits flat `(signature_index, sequence,
+replacement)` records. Sort by signature and sequence to retain legacy grouping and
+source order without nested mutable/COW replacement buckets. The bounded cost is
+O(source + signatures + replacements log replacements), memory O(signatures +
+replacements); future typed call resolution may replace the lexical index.
