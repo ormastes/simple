@@ -113,6 +113,16 @@
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed LLVM adapter policy-hoisting tranche
+
+- Snapshot compiler trace and bare-metal target mode once per direct compile.
+- Feed one target decision to configuration and translator construction.
+- Preserve the public IR translation API through a private policy-taking helper.
+- Replace trace-only `functions.keys().len()` with direct dictionary length.
+- Update bare-metal contracts and add mirrored trace/target contracts.
+- Static model: trace env reads 8-to-1 or 2-to-1; target env+parse 2-to-1.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed MIR trace-scope tranche
 
 - Added a nesting-safe dependency-leaf trace snapshot in `mir_data`.
