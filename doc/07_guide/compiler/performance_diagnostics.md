@@ -22,6 +22,8 @@ Within one lint request, the target `simple.sdn` is parsed once and its resolved
 reused by source and parsed-AST rule projections. A path mismatch forces fresh resolution.
 Each diagnostic resolves suppression and effective severity together; evidence-tier caps
 therefore require one stable-code mapping and one configuration lookup.
+Combined source and parsed-AST lint phases share one request-local line view and release it
+after projection, avoiding duplicate source splitting without retaining editor contents.
 
 ## Optimizer truth
 
