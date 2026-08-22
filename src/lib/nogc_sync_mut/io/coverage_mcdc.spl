@@ -6,7 +6,11 @@ val MCDC_VECTOR_V1_BYTES: i64 = 64
 val MCDC_SNAPSHOT_V1_BYTES: i64 = 40
 val MCDC_WITNESS_V1_BYTES: i64 = 56
 val MCDC_ANALYSIS_V1_BYTES: i64 = 48
+val MCDC_DECISION_EXPR_V1_BYTES: i64 = 32
+val MCDC_EXPR_TOKEN_V1_BYTES: i64 = 8
+val MCDC_MANIFEST_INFO_V1_BYTES: i64 = 96
 val MCDC_STATUS_OK: i32 = 0
+val MCDC_STATUS_INVALID: i32 = 2
 val MCDC_STATUS_BUSY: i32 = 7
 val MCDC_STATUS_DRAINING: i32 = 9
 
@@ -50,6 +54,15 @@ extern fn rt_mcdc_analyze_unique_v1(events: i64, event_count: u64,
                                     witnesses: i64, witness_capacity: u64,
                                     pair_budget: u64,
                                     analysis: i64) -> i32
+extern fn rt_array_data_ptr(bytes: [u8]) -> i64
+extern fn rt_mcdc_analyze_masking_mcdp_v1(
+    events: i64, event_count: u64,
+    manifest_bytes: i64, manifest_byte_count: u64,
+    program_workspace: i64, program_capacity: u64,
+    token_workspace: i64, token_capacity: u64,
+    witnesses: i64, witness_capacity: u64,
+    proof_budget: u64, analysis: i64, manifest_info: i64
+) -> i32
 extern fn rt_mcdc_sort_vectors_v1(events: i64, event_count: u64) -> i32
 extern fn rt_mcdc_collector_reset_v1()
 extern fn rt_mcdc_collector_reset_checked_v1() -> i32
@@ -109,6 +122,26 @@ fn mcdc_runtime_analyze_unique(events: i64, event_count: u64,
     rt_mcdc_analyze_unique_v1(
         events, event_count, witnesses, witness_capacity, pair_budget, analysis)
 
+fn mcdc_runtime_analyze_manifest(
+    events: i64, event_count: u64, manifest: [u8],
+    program_workspace: i64, program_capacity: u64,
+    token_workspace: i64, token_capacity: u64,
+    witnesses: i64, witness_capacity: u64,
+    proof_budget: u64, analysis: i64, manifest_info: i64
+) -> i32:
+    """Analyze one preloaded MCDP manifest with caller-owned aligned storage.
+
+    Loading the native/SMF artifact and allocating the workspaces happen before
+    this boundary.  The runtime bridge validates and decodes directly into the
+    supplied program/token regions and performs no allocation.
+    """
+    if manifest.len() == 0:
+        return MCDC_STATUS_INVALID
+    rt_mcdc_analyze_masking_mcdp_v1(
+        events, event_count, rt_array_data_ptr(manifest), manifest.len() as u64,
+        program_workspace, program_capacity, token_workspace, token_capacity,
+        witnesses, witness_capacity, proof_budget, analysis, manifest_info)
+
 fn mcdc_runtime_sort_vectors(events: i64, event_count: u64) -> i32:
     rt_mcdc_sort_vectors_v1(events, event_count)
 
@@ -120,11 +153,14 @@ fn mcdc_runtime_reset_checked() -> i32:
 
 export MCDC_VECTOR_V1_BYTES, MCDC_SNAPSHOT_V1_BYTES
 export MCDC_WITNESS_V1_BYTES, MCDC_ANALYSIS_V1_BYTES
-export MCDC_STATUS_OK, MCDC_STATUS_BUSY, MCDC_STATUS_DRAINING
+export MCDC_DECISION_EXPR_V1_BYTES, MCDC_EXPR_TOKEN_V1_BYTES
+export MCDC_MANIFEST_INFO_V1_BYTES
+export MCDC_STATUS_OK, MCDC_STATUS_INVALID, MCDC_STATUS_BUSY, MCDC_STATUS_DRAINING
 export mcdc_runtime_init, mcdc_runtime_record, mcdc_runtime_seal
 export mcdc_runtime_snapshot, mcdc_runtime_reset
 export mcdc_runtime_reset_checked
 export mcdc_runtime_analyze_unique
+export mcdc_runtime_analyze_manifest
 export mcdc_runtime_sort_vectors
 export mcdc_compiled_owner_configure, mcdc_compiled_owner_release
 export mcdc_compiled_record, mcdc_compiled_last_status

@@ -1,0 +1,48 @@
+# Native non-SMF MC/DC manifest publication owner.
+
+use compiler.driver.driver_types.{CompileContext}
+
+extern fn rt_file_write_bytes(path: text, content: [u8]) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_rename(old_path: text, new_path: text) -> bool
+
+pub fn driver_native_mcdc_manifest_path_v1(output: text) -> text:
+    output + ".mcdp"
+
+pub fn driver_native_write_mcdc_transport_v1(
+    ctx: CompileContext, output: text
+) -> text:
+    """Publish the frozen MCDP companion for a non-SMF native artifact.
+
+    The writer runs once after the native artifact has linked. Static-off
+    performs no manifest serialization and removes any stale companion left by
+    a previous instrumented build of the same output. Enabled modes publish by
+    rename so readers never admit a partial manifest. The returned empty text
+    is success; otherwise the caller must reject the native build.
+    """
+    val path = driver_native_mcdc_manifest_path_v1(output)
+    val temp_path = path + ".tmp"
+    if ctx.options.mcdc_policy == "off":
+        if rt_file_exists(temp_path) and not rt_file_delete(temp_path):
+            return "MCDC-E-NATIVE-STALE: cannot remove {temp_path}"
+        if rt_file_exists(path) and not rt_file_delete(path):
+            return "MCDC-E-NATIVE-STALE: cannot remove {path}"
+        return ""
+    val wire = ctx.mcdc_manifest_wire_v1()
+    if wire.len() == 0:
+        return "MCDC-E-MANIFEST: frozen Boolean program wire payload unavailable"
+    if rt_file_exists(temp_path) and not rt_file_delete(temp_path):
+        return "MCDC-E-NATIVE-WRITE: cannot replace {temp_path}"
+    if not rt_file_write_bytes(temp_path, wire):
+        return "MCDC-E-NATIVE-WRITE: cannot write {temp_path}"
+    if rt_file_exists(path) and not rt_file_delete(path):
+        val _ = rt_file_delete(temp_path)
+        return "MCDC-E-NATIVE-WRITE: cannot replace {path}"
+    if not rt_file_rename(temp_path, path):
+        val _ = rt_file_delete(temp_path)
+        return "MCDC-E-NATIVE-WRITE: cannot publish {path}"
+    ""
+
+export driver_native_mcdc_manifest_path_v1
+export driver_native_write_mcdc_transport_v1

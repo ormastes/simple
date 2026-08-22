@@ -1,0 +1,52 @@
+use std.spec.*
+use std.io_runtime.{file_exists, file_write_bytes, file_delete}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_native_mcdc_transport.{
+    driver_native_mcdc_manifest_path_v1,
+    driver_native_write_mcdc_transport_v1
+}
+use compiler.loader.native_mcdc_manifest.{native_mcdc_manifest_bytes_v1}
+
+fn native_manifest_fixture(policy: text) -> CompileContext:
+    val options = driver_core_compile_options_default()
+    options.mcdc_policy = policy
+    val ctx = CompileContext.create(options)
+    if policy != "off":
+        ctx.mcdc_manifest_semantic_ids = ["src/a.spl:f:10:decision"]
+        ctx.mcdc_manifest_decision_ids = [11]
+        ctx.mcdc_manifest_source_digests = [100]
+        ctx.mcdc_manifest_condition_counts = [2]
+        ctx.mcdc_manifest_token_offsets = [0]
+        ctx.mcdc_manifest_token_counts = [3]
+        ctx.mcdc_manifest_token_opcodes = [1, 1, 3]
+        ctx.mcdc_manifest_token_conditions = [0, 1, 0]
+        val _ = ctx.freeze_mcdc_manifest_v1()
+    ctx
+
+describe "native non-SMF MCDP transport":
+    it "publishes and reloads the exact frozen manifest":
+        val artifact = "build/test-native-mcdc-transport.bin"
+        val companion = driver_native_mcdc_manifest_path_v1(artifact)
+        val _ = file_delete(companion)
+        val ctx = native_manifest_fixture("static")
+        expect(driver_native_write_mcdc_transport_v1(ctx, artifact)).to_equal("")
+        val loaded = native_mcdc_manifest_bytes_v1(artifact)
+        expect(loaded.is_ok()).to_equal(true)
+        expect(loaded.unwrap()).to_equal(ctx.mcdc_manifest_wire_v1())
+        val _ = file_delete(companion)
+
+    it "static-off serializes no payload and removes a stale companion":
+        val artifact = "build/test-native-mcdc-static-off.bin"
+        val companion = driver_native_mcdc_manifest_path_v1(artifact)
+        expect(file_write_bytes(companion, [77u8, 67u8, 68u8, 80u8])).to_equal(true)
+        val ctx = native_manifest_fixture("off")
+        expect(driver_native_write_mcdc_transport_v1(ctx, artifact)).to_equal("")
+        expect(file_exists(companion)).to_equal(false)
+
+    it "loader rejects malformed companions before runtime analysis":
+        val artifact = "build/test-native-mcdc-malformed.bin"
+        val companion = driver_native_mcdc_manifest_path_v1(artifact)
+        expect(file_write_bytes(companion, [77u8, 67u8, 68u8, 80u8])).to_equal(true)
+        expect(native_mcdc_manifest_bytes_v1(artifact).is_err()).to_equal(true)
+        val _ = file_delete(companion)
