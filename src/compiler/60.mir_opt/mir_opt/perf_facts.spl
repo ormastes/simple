@@ -16,6 +16,12 @@ struct PerfFactPreservation:
     def_use: bool
     liveness: bool
 
+struct PerfFactRequest:
+    cfg: bool
+    dominators: bool
+    def_use: bool
+    liveness: bool
+
 struct MirDefUseSite:
     block: BlockId
     instruction_index: i64
@@ -94,6 +100,38 @@ struct PerfFacts:
 
 fn perf_fact_preservation_all() -> PerfFactPreservation:
     PerfFactPreservation(true, true, true, true)
+
+fn perf_fact_request_all() -> PerfFactRequest:
+    PerfFactRequest(true, true, true, true)
+
+fn perf_fact_request_cfg_dominators() -> PerfFactRequest:
+    PerfFactRequest(true, true, false, false)
+
+fn perf_fact_request_def_use() -> PerfFactRequest:
+    PerfFactRequest(false, false, true, false)
+
+fn perf_fact_request_verification() -> PerfFactRequest:
+    PerfFactRequest(true, true, true, false)
+
+fn perf_fact_request_with_dependencies(request: PerfFactRequest) -> PerfFactRequest:
+    var cfg = request.cfg
+    var def_use = request.def_use
+    if request.dominators:
+        cfg = true
+    if request.liveness:
+        cfg = true
+        def_use = true
+    PerfFactRequest(cfg, request.dominators, def_use, request.liveness)
+
+fn perf_fact_request_dependency_errors(request: PerfFactRequest) -> [text]:
+    var errors: [text] = []
+    if request.dominators and not request.cfg:
+        errors.push("dominators require CFG")
+    if request.liveness and not request.cfg:
+        errors.push("liveness requires CFG")
+    if request.liveness and not request.def_use:
+        errors.push("liveness requires def-use")
+    errors
 
 fn perf_fact_preservation_none() -> PerfFactPreservation:
     PerfFactPreservation(false, false, false, false)
@@ -542,14 +580,15 @@ fn perf_facts_terminator_successors(term: MirTerminator) -> [BlockId]:
                 case Some(unwind_target): [normal, unwind_target]
                 case nil: [normal]
 
-fn perf_facts_build_internal(func: MirFunction, include_liveness: bool) -> PerfFacts:
+fn perf_facts_build_internal(func: MirFunction, raw_request: PerfFactRequest) -> PerfFacts:
+    val request = perf_fact_request_with_dependencies(raw_request)
     var successors: Dict<i64, [BlockId]> = {}
     var predecessors: Dict<i64, [i64]> = {}
     var block_index: Dict<i64, i64> = {}
     var local_index: Dict<i64, i64> = {}
     var definition_buckets: [[MirDefUseSite]] = []
     var use_buckets: [[MirDefUseSite]] = []
-    var def_use_complete = true
+    var def_use_complete = request.def_use
     var uncovered_instruction_count = 0
     var invalid_local_reference_count = 0
     var duplicate_block_identity_count = 0
@@ -558,20 +597,21 @@ fn perf_facts_build_internal(func: MirFunction, include_liveness: bool) -> PerfF
 
     var local_position = 0
     var declared_locals: [LocalId] = []
-    for local in func.locals:
-        if local_index.has(local.id.id):
-            def_use_complete = false
-            invalid_local_reference_count = invalid_local_reference_count + 1
-        else:
-            local_index[local.id.id] = local_position
-            declared_locals.push(local.id)
-            definition_buckets.push([])
-            use_buckets.push([])
-            local_position = local_position + 1
+    if request.def_use:
+        for local in func.locals:
+            if local_index.has(local.id.id):
+                def_use_complete = false
+                invalid_local_reference_count = invalid_local_reference_count + 1
+            else:
+                local_index[local.id.id] = local_position
+                declared_locals.push(local.id)
+                definition_buckets.push([])
+                use_buckets.push([])
+                local_position = local_position + 1
 
     val local_count = declared_locals.len()
     val fact_cell_count = func.blocks.len() * local_count
-    val liveness_cells_admitted = include_liveness and fact_cell_count <= 4000000
+    val liveness_cells_admitted = request.liveness and fact_cell_count <= 4000000
     var block_definition_bits: [bool] = []
     var block_use_bits: [bool] = []
     var fact_cell = 0
@@ -581,27 +621,51 @@ fn perf_facts_build_internal(func: MirFunction, include_liveness: bool) -> PerfF
         fact_cell = fact_cell + 1
 
     for block in func.blocks:
-        if block_index.has(block.id.id):
-            duplicate_block_identity_count = duplicate_block_identity_count + 1
-        else:
-            block_index[block.id.id] = index
+        if request.cfg:
+            if block_index.has(block.id.id):
+                duplicate_block_identity_count = duplicate_block_identity_count + 1
+            else:
+                block_index[block.id.id] = index
+            val block_successors = perf_facts_terminator_successors(block.terminator)
+            successors[block.id.id] = block_successors
+            for successor in block_successors:
+                var incoming = predecessors[successor.id] ?? []
+                incoming.push(block.id.id)
+                predecessors[successor.id] = incoming
         index = index + 1
-        val block_successors = perf_facts_terminator_successors(block.terminator)
-        successors[block.id.id] = block_successors
-        for successor in block_successors:
-            var incoming = predecessors[successor.id] ?? []
-            incoming.push(block.id.id)
-            predecessors[successor.id] = incoming
-        var instruction_index = 0
-        for instruction in block.instructions:
-            val access = perf_instruction_access(instruction)
-            if not access.covered:
-                def_use_complete = false
-                uncovered_instruction_count = uncovered_instruction_count + 1
-            for local in access.uses:
+        if request.def_use:
+            var instruction_index = 0
+            for instruction in block.instructions:
+                val access = perf_instruction_access(instruction)
+                if not access.covered:
+                    def_use_complete = false
+                    uncovered_instruction_count = uncovered_instruction_count + 1
+                for local in access.uses:
+                    if local_index.has(local.id):
+                        val position = local_index[local.id]
+                        use_buckets[position].push(MirDefUseSite(block.id, instruction_index, local, false))
+                        if liveness_cells_admitted:
+                            val bit = (index - 1) * local_count + position
+                            if not block_definition_bits[bit]:
+                                block_use_bits[bit] = true
+                    else:
+                        def_use_complete = false
+                        invalid_local_reference_count = invalid_local_reference_count + 1
+                for local in access.defs:
+                    if local_index.has(local.id):
+                        val position = local_index[local.id]
+                        definition_buckets[position].push(MirDefUseSite(block.id, instruction_index, local, false))
+                        if liveness_cells_admitted:
+                            block_definition_bits[(index - 1) * local_count + position] = true
+                    else:
+                        def_use_complete = false
+                        invalid_local_reference_count = invalid_local_reference_count + 1
+                instruction_index = instruction_index + 1
+            val terminator_access = perf_terminator_access(block.terminator)
+            for local in terminator_access.uses:
                 if local_index.has(local.id):
                     val position = local_index[local.id]
-                    use_buckets[position].push(MirDefUseSite(block.id, instruction_index, local, false))
+                    use_buckets[position].push(MirDefUseSite(block.id, -1, local, true))
                     if liveness_cells_admitted:
                         val bit = (index - 1) * local_count + position
                         if not block_definition_bits[bit]:
@@ -609,70 +673,48 @@ fn perf_facts_build_internal(func: MirFunction, include_liveness: bool) -> PerfF
                 else:
                     def_use_complete = false
                     invalid_local_reference_count = invalid_local_reference_count + 1
-            for local in access.defs:
+            var unwind_edge_definition = -1
+            match block.terminator:
+                case CallTerminator(dest, _, _, _, unwind):
+                    if dest.? and unwind.?: unwind_edge_definition = dest.unwrap().id
+                case _: pass_dn
+            for local in terminator_access.defs:
                 if local_index.has(local.id):
                     val position = local_index[local.id]
-                    definition_buckets[position].push(MirDefUseSite(block.id, instruction_index, local, false))
-                    if liveness_cells_admitted:
+                    definition_buckets[position].push(MirDefUseSite(block.id, -1, local, true))
+                    if liveness_cells_admitted and local.id != unwind_edge_definition:
                         block_definition_bits[(index - 1) * local_count + position] = true
                 else:
                     def_use_complete = false
                     invalid_local_reference_count = invalid_local_reference_count + 1
-            instruction_index = instruction_index + 1
-        val terminator_access = perf_terminator_access(block.terminator)
-        for local in terminator_access.uses:
-            if local_index.has(local.id):
-                val position = local_index[local.id]
-                use_buckets[position].push(MirDefUseSite(block.id, -1, local, true))
-                if liveness_cells_admitted:
-                    val bit = (index - 1) * local_count + position
-                    if not block_definition_bits[bit]:
-                        block_use_bits[bit] = true
-            else:
-                def_use_complete = false
-                invalid_local_reference_count = invalid_local_reference_count + 1
-        var unwind_edge_definition = -1
-        match block.terminator:
-            case CallTerminator(dest, _, _, _, unwind):
-                if dest.? and unwind.?: unwind_edge_definition = dest.unwrap().id
-            case _: pass_dn
-        for local in terminator_access.defs:
-            if local_index.has(local.id):
-                val position = local_index[local.id]
-                definition_buckets[position].push(MirDefUseSite(block.id, -1, local, true))
-                # A call result exists on the normal edge only. With an unwind
-                # edge, a block-level kill would be unsound for the unwind path;
-                # omit it until edge-specific liveness is represented.
-                if liveness_cells_admitted and local.id != unwind_edge_definition:
-                    block_definition_bits[(index - 1) * local_count + position] = true
-            else:
-                def_use_complete = false
-                invalid_local_reference_count = invalid_local_reference_count + 1
 
-    var cfg_complete = duplicate_block_identity_count == 0
-    if not block_index.has(func.entry_block.id):
-        cfg_complete = false
-        invalid_block_reference_count = invalid_block_reference_count + 1
-    for block in func.blocks:
-        for successor in (successors[block.id.id] ?? []):
-            if not block_index.has(successor.id):
-                cfg_complete = false
-                invalid_block_reference_count = invalid_block_reference_count + 1
+    var cfg_complete = false
+    if request.cfg:
+        cfg_complete = duplicate_block_identity_count == 0
+        if not block_index.has(func.entry_block.id):
+            cfg_complete = false
+            invalid_block_reference_count = invalid_block_reference_count + 1
+        for block in func.blocks:
+            for successor in (successors[block.id.id] ?? []):
+                if not block_index.has(successor.id):
+                    cfg_complete = false
+                    invalid_block_reference_count = invalid_block_reference_count + 1
 
-    val rpo = if cfg_complete:
+    val rpo = if request.dominators and cfg_complete:
         perf_facts_reverse_postorder(func.entry_block, successors)
     else:
         []
     var rpo_index: Dict<i64, i64> = {}
-    var rpo_position = 0
-    for block in rpo:
-        rpo_index[block.id] = rpo_position
-        rpo_position = rpo_position + 1
-    val idom = if cfg_complete:
+    if request.dominators:
+        var rpo_position = 0
+        for block in rpo:
+            rpo_index[block.id] = rpo_position
+            rpo_position = rpo_position + 1
+    val idom = if request.dominators and cfg_complete:
         perf_facts_immediate_dominators(func.entry_block, rpo, rpo_index, predecessors)
     else:
         {}
-    val liveness = if include_liveness:
+    val liveness = if request.liveness:
         perf_facts_build_liveness(
             func, successors, predecessors, block_index, local_count,
             block_definition_bits, block_use_bits,
@@ -708,11 +750,14 @@ fn perf_facts_build_internal(func: MirFunction, include_liveness: bool) -> PerfF
     )
 
 fn perf_facts_build(func: MirFunction) -> PerfFacts:
-    perf_facts_build_internal(func, true)
+    perf_facts_build_internal(func, perf_fact_request_all())
+
+fn perf_facts_build_requested(func: MirFunction, request: PerfFactRequest) -> PerfFacts:
+    perf_facts_build_internal(func, request)
 
 fn perf_facts_build_without_liveness(func: MirFunction) -> PerfFacts:
     """Build CFG, dominance, and def-use without dense liveness matrices."""
-    perf_facts_build_internal(func, false)
+    perf_facts_build_internal(func, perf_fact_request_verification())
 
 fn perf_facts_build_for_verification(func: MirFunction) -> PerfFacts:
     """Compatibility alias for verifier callers that do not need liveness."""
@@ -760,12 +805,17 @@ fn perf_facts_is_live_out(facts: PerfFacts, block: BlockId, local: LocalId) -> b
     val local_count = facts.locals.len()
     facts.live_out_bits[facts.block_index[block.id] * local_count + facts.local_index[local.id]]
 
-export PerfFactKind, PerfFactPreservation, MirDefUseSite, MirInstructionAccess, PerfFacts
+export PerfFactKind, PerfFactPreservation, PerfFactRequest
+export MirDefUseSite, MirInstructionAccess, PerfFacts
 export perf_instruction_access, perf_terminator_access
 export perf_fact_preservation_all, perf_fact_preservation_none, perf_fact_preservation_cfg_only
 export perf_fact_preservation_integrity_errors, perf_facts_invalidated
+export perf_fact_request_all, perf_fact_request_cfg_dominators
+export perf_fact_request_def_use, perf_fact_request_verification
+export perf_fact_request_with_dependencies, perf_fact_request_dependency_errors
 export perf_facts_build, perf_facts_build_without_liveness
-export perf_facts_build_for_verification, perf_facts_terminator_successors
+export perf_facts_build_for_verification, perf_facts_build_requested
+export perf_facts_terminator_successors
 export perf_facts_successors, perf_facts_predecessors
 export perf_facts_dominates, perf_facts_definitions, perf_facts_uses
 export perf_facts_is_live_in, perf_facts_is_live_out
