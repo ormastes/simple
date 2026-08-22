@@ -7,6 +7,7 @@ use compiler.mir.mir_data.{MirInst, MirInstKind, MirTerminator, MirOperand, MirO
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir.mir_types.{MirConstValue}
 use compiler.mir_opt.mir_opt.auto_vectorize_types.{VectorLoopInfo, ArrayAccess}
+use compiler.mir_opt.mir_opt.perf_facts.{PerfFacts, perf_facts_definitions, perf_facts_uses}
 
 # ============================================================================
 # Dependency Types and Structures
@@ -49,6 +50,7 @@ struct DependencyAnalysisResult:
     array_accesses: [ArrayAccess]
     has_aliasing: bool
     loop_carried_count: i64
+    analysis_complete: bool
 
 # ============================================================================
 # GEP Info (base array + index pair for array access detection)
@@ -83,45 +85,31 @@ struct LoopBounds:
 # Def-Use Chain Construction
 # ============================================================================
 
-fn build_def_use_chains(body_blocks: [MirBlock]) -> [DefUseChain]:
+fn build_def_use_chains(facts: PerfFacts, body_blocks: [MirBlock]) -> [DefUseChain]?:
     """
-    Build def-use chains for all locals used in the loop body.
-    Returns a chain for each local that's defined or used.
+    Project complete shared function-level facts into one loop body.
     """
-    var chains_map: {i64: DefUseChain} = {}
-    var inst_index = 0
-
+    if not facts.def_use_complete: return nil
+    var block_offsets: Dict<i64, i64> = {}
+    var body_members: Dict<i64, bool> = {}
+    var next_offset = 0
     for block in body_blocks:
-        for inst in block.instructions:
-            # Check what this instruction defines
-            val def_local = get_inst_def(inst)
-            if def_local.?:
-                val local = def_local.unwrap()
-                val local_id = local.id
-                if not chains_map.has(local_id):
-                    chains_map[local_id] = DefUseChain(local: local, defs: [], uses: [])
-                var chain = chains_map[local_id]
-                chain.defs.push(inst_index)
-                chains_map[local_id] = chain
-
-            # Check what this instruction uses
-            val use_locals = get_inst_uses(inst)
-            for local in use_locals:
-                val local_id = local.id
-                if not chains_map.has(local_id):
-                    chains_map[local_id] = DefUseChain(local: local, defs: [], uses: [])
-                var chain = chains_map[local_id]
-                chain.uses.push(inst_index)
-                chains_map[local_id] = chain
-
-            inst_index = inst_index + 1
-
-    # Convert map to list
+        block_offsets[block.id.id] = next_offset
+        body_members[block.id.id] = true
+        next_offset = next_offset + block.instructions.len()
     var chains: [DefUseChain] = []
-    # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-    for key in chains_map.keys():
-        chains.push(chains_map[key])
-    chains
+    for local in facts.locals:
+        var defs: [i64] = []
+        var uses: [i64] = []
+        for site in perf_facts_definitions(facts, local):
+            if not site.is_terminator and body_members.has(site.block.id):
+                defs.push(block_offsets[site.block.id] + site.instruction_index)
+        for site in perf_facts_uses(facts, local):
+            if not site.is_terminator and body_members.has(site.block.id):
+                uses.push(block_offsets[site.block.id] + site.instruction_index)
+        if not defs.is_empty() or not uses.is_empty():
+            chains.push(DefUseChain(local, defs, uses))
+    Some(chains)
 
 # ============================================================================
 # Instruction Def/Use Extraction
@@ -234,33 +222,30 @@ fn detect_dependencies(body_blocks: [MirBlock], chains: [DefUseChain], induction
         if chain.local.id == induction.id:
             pass_do_nothing
         else:
-            # Check for RAW (Read-After-Write) dependencies
-            for def_idx in chain.defs:
-                for use_idx in chain.uses:
-                    if use_idx > def_idx:
-                        # Use comes after def - potential RAW dependency
-                        val is_carried = is_loop_carried_dependency(def_idx, use_idx, body_blocks)
-                        deps.push(Dependency(
-                            from_inst: def_idx,
-                            to_inst: use_idx,
-                            dep_type: DependencyType.RAW,
-                            local: chain.local,
-                            is_loop_carried: is_carried
-                        ))
-
-            # Check for WAR (Write-After-Read) dependencies
-            for use_idx in chain.uses:
+            # A nearest-order summary is enough for the current legality
+            # question and avoids definitions × uses Cartesian enumeration.
+            # Arrays need not be sorted: compute extrema in one pass.
+            if not chain.defs.is_empty() and not chain.uses.is_empty():
+                var min_def = chain.defs[0]
+                var max_def = chain.defs[0]
                 for def_idx in chain.defs:
-                    if def_idx > use_idx:
-                        # Def comes after use - potential WAR dependency
-                        val is_carried = is_loop_carried_dependency(use_idx, def_idx, body_blocks)
-                        deps.push(Dependency(
-                            from_inst: use_idx,
-                            to_inst: def_idx,
-                            dep_type: DependencyType.WAR,
-                            local: chain.local,
-                            is_loop_carried: is_carried
-                        ))
+                    if def_idx < min_def: min_def = def_idx
+                    if def_idx > max_def: max_def = def_idx
+                var min_use = chain.uses[0]
+                var max_use = chain.uses[0]
+                for use_idx in chain.uses:
+                    if use_idx < min_use: min_use = use_idx
+                    if use_idx > max_use: max_use = use_idx
+                if min_def < max_use:
+                    deps.push(Dependency(
+                        min_def, max_use, DependencyType.RAW, chain.local,
+                        is_loop_carried_dependency(min_def, max_use, body_blocks)
+                    ))
+                if min_use < max_def:
+                    deps.push(Dependency(
+                        min_use, max_def, DependencyType.WAR, chain.local,
+                        is_loop_carried_dependency(min_use, max_def, body_blocks)
+                    ))
 
             # Check for WAW (Write-After-Write) dependencies
             if chain.defs.len() >= 2:
@@ -342,16 +327,17 @@ fn are_indices_independent(idx1: LocalId, idx2: LocalId, induction: LocalId) -> 
     # Different index expressions might alias
     false
 
-fn has_loop_carried_deps(body: [MirBlock], induction: LocalId) -> bool:
+fn has_loop_carried_deps(body: [MirBlock], induction: LocalId, facts: PerfFacts) -> bool:
     """
     Check if loop has dependencies between iterations (other than induction var).
     Returns true if non-vectorizable dependencies exist.
     """
     # Build def-use chains
-    val chains = build_def_use_chains(body)
+    val chains = build_def_use_chains(facts, body)
+    if not chains.?: return true
 
     # Detect all dependencies
-    val deps = detect_dependencies(body, chains, induction)
+    val deps = detect_dependencies(body, chains.unwrap(), induction)
 
     # Check if any loop-carried dependency exists
     for dep in deps:
@@ -364,13 +350,16 @@ fn has_loop_carried_deps(body: [MirBlock], induction: LocalId) -> bool:
 # Complete Dependency Analysis
 # ============================================================================
 
-fn analyze_loop_dependencies(loop_info: VectorLoopInfo, body_blocks: [MirBlock]) -> DependencyAnalysisResult:
+fn analyze_loop_dependencies(loop_info: VectorLoopInfo, body_blocks: [MirBlock], facts: PerfFacts) -> DependencyAnalysisResult:
     """
     Complete dependency analysis for a loop.
     Returns detailed results including vectorizability.
     """
     # Build def-use chains
-    val chains = build_def_use_chains(body_blocks)
+    val chains_result = build_def_use_chains(facts, body_blocks)
+    if not chains_result.?:
+        return DependencyAnalysisResult(false, [], [], [], false, 0, false)
+    val chains = chains_result.unwrap()
 
     # Detect dependencies
     val deps = detect_dependencies(body_blocks, chains, loop_info.induction_var)
@@ -400,7 +389,8 @@ fn analyze_loop_dependencies(loop_info: VectorLoopInfo, body_blocks: [MirBlock])
         def_use_chains: chains,
         array_accesses: all_accesses,
         has_aliasing: has_aliasing,
-        loop_carried_count: loop_carried_count
+        loop_carried_count: loop_carried_count,
+        analysis_complete: true
     )
 
 # ============================================================================
