@@ -375,3 +375,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Pin absence of rewrite construction with a source contract.
 - Record removed text hashing, dictionary churn, array cloning, and dead compiler source as compile-time/memory improvements without claiming runtime benefit.
 - Follow-up: activate Copy-only local propagation first; then shared-semantics constant folding; rehabilitate CSE only with structural keys, ownership, kills, effects/traps, and MemorySSA-lite; defer DCE until observability and sparse-liveness budgets are proved.
+
+## Completed tooling tranche: command-scoped lint CLI policy
+
+- Parse deny/warn, output, fix, WM-lane, and profile options once per repository command.
+- Pass a constant-size `LintCliPolicy` into each source invocation rather than the positional target array.
+- Preserve standalone args wrappers and manifest → CLI → file-header precedence.
+- Pin absence of per-file argument membership/profile scans with a source contract.
+- Reduce explicit N-file policy work from quadratic argument comparisons to one linear command parse plus O(1) per file; retain only constant-size policy state.
+- Follow-up: replace source-sized retained line arrays only after an explicit borrowing/ownership design.
