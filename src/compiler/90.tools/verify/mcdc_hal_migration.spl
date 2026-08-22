@@ -1,0 +1,125 @@
+# Bounded migration policy for REQ-019.
+#
+# The repository scanner is intentionally separate from this policy core so
+# unit tests can prove promotion and baseline freshness without shelling out.
+
+val MCDC_HAL_MIGRATION_SCHEMA_V1 = "mcdc-hal-migration-v1"
+
+struct MigrationFindingV1:
+    rule: text
+    path: text
+    line: i64
+    symbol: text
+    signature: text
+
+    fn fingerprint() -> text:
+        self.rule + "|" + self.path + "|" + self.line.to_string() + "|" + self.symbol + "|" + self.signature
+
+struct MigrationBaselineV1:
+    fingerprint: text
+    owner: text
+    fix: text
+    deadline: text
+
+struct MigrationDiagnosticV1:
+    severity: text
+    code: text
+    fingerprint: text
+    message: text
+
+struct MigrationEvaluationV1:
+    diagnostics: [MigrationDiagnosticV1]
+    warning_count: i64
+    error_count: i64
+
+    fn passed() -> bool:
+        self.error_count == 0
+
+fn _migration_emit(
+    diagnostics: [MigrationDiagnosticV1], severity: text, code: text,
+    fingerprint: text, message: text
+) -> [MigrationDiagnosticV1]:
+    diagnostics.push(MigrationDiagnosticV1(
+        severity: severity, code: code, fingerprint: fingerprint, message: message
+    ))
+
+fn evaluate_mcdc_hal_migration_v1(
+    findings: [MigrationFindingV1], baseline: [MigrationBaselineV1],
+    changed_paths: [text], promoted: bool, max_findings: i64
+) -> MigrationEvaluationV1:
+    var diagnostics: [MigrationDiagnosticV1] = []
+    var warnings = 0
+    var errors = 0
+
+    if max_findings <= 0 or findings.len() > max_findings or baseline.len() > max_findings:
+        diagnostics = _migration_emit(diagnostics, "error", "MHM000", "",
+            "bounded migration inventory exceeded; split the migration or raise the reviewed cap")
+        return MigrationEvaluationV1(diagnostics, 0, 1)
+
+    # Exact-index maps keep the bounded policy pass O(findings + baseline +
+    # changed_paths). This checker runs during every merge gate; repeated
+    # linear membership over the reviewed 2048-row ceiling is not acceptable.
+    var baseline_index: Dict<text, i64> = {}
+    var baseline_pos = 0
+    for entry in baseline:
+        if entry.fingerprint == "" or entry.owner.trim() == "" or entry.fix.trim() == "" or entry.deadline.trim() == "":
+            diagnostics = _migration_emit(diagnostics, "error", "MHM001", entry.fingerprint,
+                "malformed legacy baseline entry; owner, fix, and deadline are mandatory")
+            errors = errors + 1
+        if baseline_index.contains_key(entry.fingerprint):
+            diagnostics = _migration_emit(diagnostics, "error", "MHM002", entry.fingerprint,
+                "duplicate legacy baseline fingerprint")
+            errors = errors + 1
+        else:
+            baseline_index[entry.fingerprint] = baseline_pos
+        baseline_pos = baseline_pos + 1
+
+    var changed_set: Dict<text, bool> = {}
+    for path in changed_paths:
+        changed_set[path] = true
+
+    var finding_seen: Dict<text, bool> = {}
+    for finding in findings:
+        val fingerprint = finding.fingerprint()
+        if finding_seen.contains_key(fingerprint):
+            diagnostics = _migration_emit(diagnostics, "error", "MHM003", fingerprint,
+                "duplicate scanner finding")
+            errors = errors + 1
+            continue
+        finding_seen[fingerprint] = true
+        val baselined = baseline_index.contains_key(fingerprint)
+        val changed = changed_set.contains_key(finding.path)
+        if promoted:
+            diagnostics = _migration_emit(diagnostics, "error", "MHM019", fingerprint,
+                "repository-wide migration epoch forbids this finding")
+            errors = errors + 1
+        elif changed:
+            diagnostics = _migration_emit(diagnostics, "error", "MHM010", fingerprint,
+                "new or changed runtime/HAL violation must be fixed before merge")
+            errors = errors + 1
+        elif not baselined:
+            diagnostics = _migration_emit(diagnostics, "error", "MHM010", fingerprint,
+                "unreviewed runtime/HAL violation must be fixed before merge")
+            errors = errors + 1
+        else:
+            val legacy = baseline[baseline_index[fingerprint]]
+            diagnostics = _migration_emit(diagnostics, "warning", "MHM011", fingerprint,
+                "legacy migration debt; owner=" + legacy.owner + "; fix=" + legacy.fix + "; deadline=" + legacy.deadline)
+            warnings = warnings + 1
+
+    for entry in baseline:
+        if not finding_seen.contains_key(entry.fingerprint):
+            diagnostics = _migration_emit(diagnostics, "error", "MHM012", entry.fingerprint,
+                "stale or moved baseline fingerprint; remove the entry or review the changed finding")
+            errors = errors + 1
+
+    if promoted and baseline.len() > 0:
+        diagnostics = _migration_emit(diagnostics, "error", "MHM020", "",
+            "migration epoch requires an empty legacy baseline")
+        errors = errors + 1
+
+    MigrationEvaluationV1(diagnostics, warnings, errors)
+
+export MCDC_HAL_MIGRATION_SCHEMA_V1
+export MigrationFindingV1, MigrationBaselineV1, MigrationDiagnosticV1, MigrationEvaluationV1
+export evaluate_mcdc_hal_migration_v1

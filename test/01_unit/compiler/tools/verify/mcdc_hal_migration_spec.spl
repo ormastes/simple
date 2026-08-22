@@ -1,0 +1,69 @@
+# @req REQ-019 NFR-005 NFR-009
+
+use std.spec
+use compiler.tools.verify.mcdc_hal_migration.*
+
+fn finding() -> MigrationFindingV1:
+    MigrationFindingV1("missing-assurance", "src/hal/legacy.spl", 7,
+        "rt_legacy", "extern fn rt_legacy() -> i64")
+
+fn baseline_for(value: MigrationFindingV1) -> MigrationBaselineV1:
+    MigrationBaselineV1(value.fingerprint(), "runtime-assurance",
+        "replace raw alias with @rt(hal) operation", "1.0.0")
+
+describe "REQ-019 MC/DC and rt(hal) migration policy":
+    it "warns only for an exact untouched owned legacy fingerprint":
+        val value = finding()
+        val result = evaluate_mcdc_hal_migration_v1([value], [baseline_for(value)], [], false, 16)
+        expect(result.passed()).to_be(true)
+        expect(result.warning_count).to_equal(1)
+        expect(result.diagnostics[0].message).to_contain("owner=runtime-assurance")
+        expect(result.diagnostics[0].message).to_contain("fix=replace raw alias")
+        expect(result.diagnostics[0].message).to_contain("deadline=1.0.0")
+
+    it "rejects every changed path even when its exact fingerprint survives":
+        val value = finding()
+        val exact = evaluate_mcdc_hal_migration_v1(
+            [value], [baseline_for(value)], [value.path], false, 16)
+        val changed_value = MigrationFindingV1(value.rule, value.path, value.line,
+            value.symbol, "extern fn rt_legacy(capacity: i64) -> i64")
+        val changed = evaluate_mcdc_hal_migration_v1(
+            [changed_value], [baseline_for(value)], [value.path], false, 16)
+        expect(exact.warning_count).to_equal(0)
+        expect(exact.error_count).to_equal(1)
+        expect(exact.diagnostics[0].code).to_equal("MHM010")
+        expect(changed.error_count).to_equal(2)
+        expect(changed.diagnostics[0].code).to_equal("MHM010")
+
+    it "matches bounded inventories without order-dependent linear lookups":
+        val first = finding()
+        val second = MigrationFindingV1("forbidden-allocation", "src/hal/other.spl", 9,
+            "critical_path", "values.push(item)")
+        val result = evaluate_mcdc_hal_migration_v1(
+            [second, first], [baseline_for(first)], [second.path, second.path], false, 16)
+        expect(result.warning_count).to_equal(1)
+        expect(result.error_count).to_equal(1)
+        expect(result.diagnostics[0].code).to_equal("MHM010")
+
+    it "rejects stale malformed and duplicate baseline debt":
+        val value = finding()
+        val stale = MigrationBaselineV1("old|fingerprint", "owner", "fix", "1.0.0")
+        val malformed = MigrationBaselineV1(value.fingerprint(), "", "", "")
+        val result = evaluate_mcdc_hal_migration_v1(
+            [value], [stale, malformed, malformed], [], false, 16)
+        expect(result.error_count).to_be_greater_than(2)
+        expect(result.passed()).to_be(false)
+
+    it "promotes every finding and any remaining baseline at the release epoch":
+        val value = finding()
+        val result = evaluate_mcdc_hal_migration_v1(
+            [value], [baseline_for(value)], [], true, 16)
+        expect(result.error_count).to_equal(2)
+        expect(result.diagnostics[0].code).to_equal("MHM019")
+        expect(result.diagnostics[1].code).to_equal("MHM020")
+
+    it "fails closed when bounded finding storage is exceeded":
+        val value = finding()
+        val result = evaluate_mcdc_hal_migration_v1([value, value], [], [], false, 1)
+        expect(result.error_count).to_equal(1)
+        expect(result.diagnostics[0].code).to_equal("MHM000")

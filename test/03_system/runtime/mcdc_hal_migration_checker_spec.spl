@@ -1,0 +1,50 @@
+# @req REQ-019 NFR-005 NFR-009
+
+use std.spec
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn run_checker(root: text, epoch: text, changed_file: text) -> (text, text, i64):
+    rt_process_run("bin/simple", ["run", "scripts/audit/mcdc_hal_migration_check.spl", "--",
+        "--repo", root, "--config", "migration.sdn", "--epoch", epoch,
+        "--changed-file", changed_file])
+
+describe "REQ-019 repository migration checker":
+    it "ratchets exact legacy warnings to changed-code and release errors":
+        val root = "/tmp/simple_mcdc_hal_migration_checker_spec"
+        val cleanup = rt_process_run("/bin/sh", ["-c", "rm -rf " + root + " && mkdir -p " + root + "/src"])
+        expect(cleanup.2).to_equal(0)
+        expect(rt_file_write_text(root + "/src/legacy.spl", "extern fn rt_old() -> i64\n")).to_be(true)
+        expect(rt_file_write_text(root + "/baseline.sdn",
+            "schema=mcdc-hal-migration-v1\n" +
+            "missing-assurance|src/legacy.spl|1|rt_old|extern fn rt_old() -> i64\towner-a\treplace with canonical @rt(hal) operation\t1.0.0\n")).to_be(true)
+        expect(rt_file_write_text(root + "/shims.sdn", "schema=mcdc-hal-migration-v1\n")).to_be(true)
+        expect(rt_file_write_text(root + "/unchanged.txt", "")).to_be(true)
+        expect(rt_file_write_text(root + "/changed.txt", "src/legacy.spl\n")).to_be(true)
+        expect(rt_file_write_text(root + "/migration.sdn",
+            "schema=mcdc-hal-migration-v1\ncurrent_epoch=1.0.0-RC\nenforcement_epoch=1.0.0\n" +
+            "base_ref=main@origin\nbaseline=baseline.sdn\nshim_inventory=shims.sdn\n" +
+            "max_files=8\nmax_file_bytes=4096\nmax_total_bytes=8192\nmax_findings=8\nroot=src\n")).to_be(true)
+
+        val legacy = run_checker(root, "1.0.0-RC", root + "/unchanged.txt")
+        expect(legacy.2).to_equal(0)
+        expect(legacy.0).to_contain("WARNING MHM011")
+        expect(legacy.0).to_contain("files_per_second=")
+        expect(legacy.0).to_contain("inventory_processes=1")
+
+        val exact_changed = run_checker(root, "1.0.0-RC", root + "/changed.txt")
+        expect(exact_changed.2).to_equal(1)
+        expect(exact_changed.0).to_contain("ERROR MHM010")
+        expect(exact_changed.0).to_contain("new or changed runtime/HAL violation")
+
+        expect(rt_file_write_text(root + "/src/legacy.spl",
+            "# signature moved\nextern fn rt_old() -> i64\n")).to_be(true)
+        val changed = run_checker(root, "1.0.0-RC", root + "/changed.txt")
+        expect(changed.2).to_equal(1)
+        expect(changed.0).to_contain("ERROR MHM010")
+
+        val promoted = run_checker(root, "1.0.0", root + "/unchanged.txt")
+        expect(promoted.2).to_equal(1)
+        expect(promoted.0).to_contain("ERROR MHM019")
+        expect(promoted.0).to_contain("ERROR MHM020")
