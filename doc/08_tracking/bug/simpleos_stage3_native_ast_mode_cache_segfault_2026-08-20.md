@@ -1418,3 +1418,26 @@ dual glob targets. This correction is intentionally unclaimed because the
 session's three-cycle cap is exhausted. A fresh admitted Stage-3 session must
 prove both that source-1 stays clear and that the MIR payload family disappears.
 No ARM64 artifact or QEMU rendering evidence is claimed.
+
+## Exact glob-target verification cycles (2026-08-22)
+
+Three fresh admitted cycles evaluated the exact glob-target correction. In
+every cycle Stage 2 passed compiler sanity and the struct-receiver/runtime
+capability gate. Cycle 1 proved useful semantic progress: the source-12/21 MIR
+payload family (`LocalId`, `MirConstValue`, `MirExecutionDomain`, and
+`MirTransferMode`) disappeared. Stage 3 nevertheless exited 139 after the
+source-1 `HirImpl`, `HirStaticAssert`, `HirAopAdvice`, `HirDiBinding`,
+`HirArchRule`, and `HirMockDecl` family returned.
+
+Cycle 2 replaced the mutable aggregate scan carrier with scalar locals. The
+same source-1 family remained and Stage 3 again exited 139, disproving frame
+shape as the root cause. Cycle 3 made import-registration memoization
+completion-aware so failed or facade attempts stayed retryable. It also left
+the same source-1 family and exited 139, disproving that memo hypothesis. Both
+unproven changes were removed. Only stale test calls were repaired to pass the
+scalar physical index required by the already-landed registration API.
+
+The three-cycle cap is exhausted. The exact glob-target change remains useful
+for MIR payload resolution but does not yet provide a trusted Stage 3. No ARM64
+SimpleOS artifact was built and no QEMU 2D, web, GUI, or window-manager result
+is claimed.
