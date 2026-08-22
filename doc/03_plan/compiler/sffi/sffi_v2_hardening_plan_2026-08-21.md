@@ -1111,3 +1111,12 @@ Readiness passes 9/9, focused checks and lint pass, and index intermediates are
 freed before conversion error propagation. Next migrate fixed-dimension
 constructors, softmax/leaky-relu, and scalar reductions using status/value
 results so legitimate floating-point zero remains distinguishable from error.
+
+Zeros, ones, and full fixed-dimension constructors now preserve typed provider
+errors for ranks 1-4. Their production dispatcher no longer repeats the
+availability probe, so the successful path remains one availability query and
+one direct raw constructor call with constant-time dimension/handle checks.
+Readiness passes 10/10 and focused checks pass. Next migrate empty/rand/randn,
+then eye/arange/linspace, softmax/leaky-relu, and scalar status/value results.
+Signed and evidence-verified admission remains pending; these raw declarations
+remain explicitly `unsafe(ffi)`.

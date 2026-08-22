@@ -1411,3 +1411,12 @@ to-float conversion. Readiness passes 9/9, both source checks pass, and lint has
 zero errors. Each simple reduction retains one raw call; arg reductions retain
 their intrinsic reduction plus conversion calls, without retries, lookups,
 hashing, I/O, synchronization, or added allocations.
+
+Dynamic Torch fixed-dimension zeros, ones, and full constructors for ranks 1-4
+now return typed results instead of fabricating handle zero. The tensor owner
+matches the result directly and no longer performs a duplicate availability
+query before the wrapper. Readiness passes 10/10 and both production modules
+check. Each selected path retains one availability query, dimension checks,
+one direct raw constructor call, and one handle check; it adds no allocation,
+lookup, hash, I/O, retry, or synchronization. The raw provider remains tagged
+unsafe and is not signed or evidence-verified.
