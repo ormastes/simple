@@ -447,3 +447,16 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Follow-up: separate `perf_facts_build_without_liveness` for production
   consumers that do not need dense liveness; rehabilitate DCE only with sparse
   liveness and exhaustive opcode semantics.
+
+## Completed compiler/tooling tranche: scoped facts and linear diagnostics
+
+- Add a named no-liveness PerfFacts builder and retain the verifier API as a
+  compatibility alias.
+- Migrate loop detection, auto-vectorization analysis, storage-access analysis,
+  and typed-storage-view production away from dense liveness.
+- Pin empty matrices/zero worklist behavior and the four production call sites.
+- Replace human and JSON diagnostic evidence append loops with one join while
+  preserving exact output ordering.
+- Follow-up: introduce integrity-checked `PerfFactRequest` projections, and
+  migrate the accessor-field lint from repeated source splits and
+  `O(methods^2 + lines*methods)` scans to canonical source views and indexes.
