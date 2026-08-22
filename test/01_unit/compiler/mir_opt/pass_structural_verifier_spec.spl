@@ -28,6 +28,9 @@ fn _pv_local(id: i64) -> LocalId:
 fn _pv_copy(id: i64) -> MirOperand:
     mir_operand_copy(_pv_local(id))
 
+fn _pv_const(value: i64) -> MirOperand:
+    MirOperand(MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
+
 fn _pv_manifest() -> DriverManifestAttr:
     DriverManifestAttr(DriverManifestAttrKind.Driver, 0, 0, [], "", "")
 
@@ -108,6 +111,27 @@ describe "MIR optimizer structural verifier":
         expect(source).to_contain("perf_terminator_access(block.terminator)")
         expect(source).not.to_contain("local_ids.contains")
         expect(source).not.to_contain("block_ids.contains")
+
+    it "validates high-fanout switch edges without a target buffer":
+        step("Validate CFG edges in place")
+        var cases: [SwitchCase] = []
+        var blocks: [MirBlock] = []
+        var target = 1
+        while target <= 128:
+            cases.push(SwitchCase(value: target, target: BlockId(id: target)))
+            blocks.push(_pv_block(target, MirTerminator.Ret(nil)))
+            target = target + 1
+        blocks.push(_pv_block(129, MirTerminator.Ret(nil)))
+        var all_blocks: [MirBlock] = [
+            _pv_block(0, MirTerminator.Switch(_pv_const(0), cases, BlockId(id: 129)))
+        ]
+        for block in blocks: all_blocks.push(block)
+        val receipt = mir_structural_verification_receipt(
+            _pv_function(all_blocks, 0))
+        expect(receipt.valid).to_equal(true)
+        val source = read_file("src/compiler/60.mir_opt/mir_opt/mod.spl")
+        expect(source).not.to_contain("var targets: [BlockId] = []")
+        expect(source).to_contain("block_ids.has(switch_case.target.id)")
 
     it "rejects missing, duplicate, and mistyped ABI locals":
         step("Verify function ABI locals")
