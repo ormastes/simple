@@ -14,9 +14,10 @@ This design implements REQ-001..REQ-025 and NFR-001..NFR-015 as one staged progr
 Compiler self-rules include identity/empty active wrapper, missing/unchanged sentinel, invalid contract, dishonest effective listing, duplicate identity, missing run evidence, unenforced required fact, missing verifier receipt, and nondeterministic report order.
 
 The verifier is admitted incrementally by named proof surface. The initial
-`MirStructuralVerificationReceipt` proves block/local identity, entry membership, and
-CFG target closure only. It must never be labeled a general MIR or semantic verifier.
-Later receipts add operand/local validity, SSA dominance, type, ownership, loop-boundary,
+`MirStructuralVerificationReceipt` proves block/local identity, canonical access coverage,
+declared operand/local membership, entry membership, and CFG target closure only. It must
+never be labeled a general MIR or semantic verifier.
+Later receipts add SSA dominance, type, ownership, loop-boundary,
 and semantic-differential evidence. A pipeline-wide `--verify-each` claim requires all
 applicable receipts, not merely the structural slice.
 
