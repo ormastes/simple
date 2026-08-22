@@ -39,6 +39,11 @@ push without a second manual must-check command.
 Each automated checker is bound to that canonical validated candidate through
 `SIMPLE_BINARY` plus the established `SIMPLE_BIN` compatibility name; a stale deployed binary or conflicting shell environment cannot
 become bootstrap evidence.
+Legacy focused checkers may retain an explicit diagnostic binary argument, but
+must resolve the automated `SIMPLE_BINARY`/`SIMPLE_BIN` identity before any
+legacy Stage 2 fallback. Every successful producer must also end in a standalone
+`PASS` verdict; an exit status of zero or an intermediate marker alone is not
+accepted by the ledger.
 
 ## Operator commands
 
