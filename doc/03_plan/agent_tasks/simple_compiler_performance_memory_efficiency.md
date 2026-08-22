@@ -232,3 +232,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Preserve legacy standalone rule entrypoints for compatibility.
 - Pin known decorator/attribute suppression and unknown single-result behavior.
 - Follow-up: move category-specific classification to typed HIR.
+
+## Completed compiler tranche: remove unsafe hoist bodies
+
+- Confirm both collection-hoist entrypoints are fail-closed identities.
+- Delete unreachable header-insertion implementations and private-only helpers.
+- Retain independently useful scalar/invariance analysis predicates without transforms.
+- Pin absence of dormant rewrite markers/header insertion with source contracts.
+- Keep real preheader/effect/alias/speculatability requirements explicit.
+- Follow-up: implement LICM only on shared canonical loop and memory facts.
