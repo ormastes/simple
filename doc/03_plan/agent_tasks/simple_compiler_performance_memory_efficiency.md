@@ -392,3 +392,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Replace simulated copy-to-move fixtures and their manual with honest fail-closed contracts.
 - Record eliminated MIR-array rebuilding, chain traversal, dead parsing/compilation, and source footprint as compiler performance/memory improvements.
 - Follow-up: implement exhaustive block-local Copy-only propagation with near-linear roots, ownership exclusion for Move, exact receipts, verification, and semantic differential witnesses.
+
+## Completed compiler tranche: isolate legacy optimizer function state
+
+- Reset constant, type, definition, use-count, and expression maps at every function entry, including the `None_` early return.
+- Preserve cumulative statistics and configured optimization level.
+- Add mirrored regressions proving all retained entries are released and statistics remain cumulative.
+- Count prevention of cross-function `LocalId` contamination as correctness and release of retained MIR/dictionary state as memory hardening.
+- Follow-up: remove the semantic HIR constant-fold no-op traversal; keep semantic constant evaluation and canonical MIR folding distinct.
