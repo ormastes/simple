@@ -1,0 +1,37 @@
+use std.spec.*
+use std.io_runtime.{file_read, time_now_unix_micros}
+use compiler.driver.aot_output_aggregation.{aot_join_text_fragments}
+
+fn make_fragments(count: i64, fragment: text) -> [text]:
+    var fragments: [text] = []
+    var i = 0
+    while i < count:
+        fragments.push(fragment)
+        i = i + 1
+    fragments
+
+describe "AOT output aggregation scaling":
+    it "joins N and 2N module outputs with bounded linear scaling":
+        val source = file_read("src/compiler/80.driver/driver_aot_codegen_outputs.spl")
+        expect(source.contains("all_c_source = all_c_source + module.assembly")).to_be(false)
+        expect(source.contains("all_ptx = all_ptx +")).to_be(false)
+        expect(source.contains("all_source = all_source +")).to_be(false)
+        expect(source).to_contain("aot_join_text_fragments(c_fragments)")
+        expect(source).to_contain("aot_join_wat_fragments(wat_fragments)")
+
+        val fragment = [for _ in 0..4096: "x"].join("")
+        val small = make_fragments(128, fragment)
+        val large = make_fragments(256, fragment)
+        val small_start = time_now_unix_micros()
+        val small_output = aot_join_text_fragments(small)
+        val small_us = time_now_unix_micros() - small_start
+        val large_start = time_now_unix_micros()
+        val large_output = aot_join_text_fragments(large)
+        val large_us = time_now_unix_micros() - large_start
+
+        print "aot_output_aggregation small_us={small_us} large_us={large_us} small_bytes={small_output.len()} large_bytes={large_output.len()}"
+        expect(small_output.len()).to_equal(524288)
+        expect(large_output.len()).to_equal(1048576)
+        expect(small_output[0:8]).to_equal("xxxxxxxx")
+        expect(large_output[large_output.len() - 8:]).to_equal("xxxxxxxx")
+        expect(large_us).to_be_less_than(small_us * 3 + 5000)
