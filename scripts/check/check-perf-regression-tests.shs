@@ -200,6 +200,26 @@ must_contain     "EXCL exclusive slot time"                       "$ROOT/src/com
 must_contain     "seed: decision coverage checks enabled first"   "$ROOT/src/compiler_rust/compiler/src/interpreter_control.rs" 'record_decision_coverage_here('
 must_not_contain "seed: no eager coverage file per decision"      "$ROOT/src/compiler_rust/compiler/src/interpreter_control.rs" 'record_decision_coverage_sffi(&current_coverage_file(),'
 
+# --- QTYPEIDX (2026-08-22). SymbolTable.lookup_qualified_type_raw was a linear
+# scan over three parallel arrays with two text comparisons per row, and
+# materialize_imported_callable_dependency issues up to three probes per named
+# type per imported callable per importing module. 84% of probes MISS, and a
+# miss always pays the full table length: 1,496,719 probes / 1,251,806 misses in
+# stage1 run12, ~3.4ms per probe, making `callable_deps` (5,241,657 ms) the
+# largest exclusive term in the whole HIR phase. The Dict was already maintained
+# in lockstep by the only writer and is the only form the codec serializes, so
+# the fix reads it instead. The `#` key must stay: `.` was not injective
+# (("a.b","c") and ("a","b.c") collide).
+# Record: doc/08_tracking/bug/hir_qualified_type_lookup_linear_scan_2026-08-22.md
+QTYPES="$ROOT/src/compiler/20.hir/hir_types.spl"
+QTYPESPEC="$ROOT/test/01_unit/compiler/hir/qualified_type_lookup_scaling_spec.spl"
+must_contain     "QTYPEIDX injective index key"                   "$QTYPES" 'module_name + "#" + member_name'
+must_contain     "QTYPEIDX type lookup is a Dict probe"           "$QTYPES" 'if self.qualified_types.contains_key(key):'
+must_contain     "QTYPEIDX function lookup is a Dict probe"       "$QTYPES" 'if self.qualified_functions.contains_key(key):'
+must_not_contain "QTYPEIDX no parallel-array type scan"           "$QTYPES" 'self.qualified_type_module_names'
+must_not_contain "QTYPEIDX no parallel-array function scan"       "$QTYPES" 'self.qualified_function_names'
+must_contain     "QTYPEIDX scaling spec pins the 3x ratio"        "$QTYPESPEC" 'val budget = (small_ms + 1) * 3'
+
 # --- HIRCODECCHUNK (2026-08-22). The HIR per-module cliffs in stage1 run12 were
 # not lowering at all: `[build] hir` completion minus the `[hir-prof]` lowering
 # total left 1,535 s unaccounted on zca_rows (lowering was 7.8 s), and that gap

@@ -1,0 +1,103 @@
+"""
+## Purpose and audience
+Purpose: Pin `SymbolTable.lookup_qualified_type_raw` as O(1) in the number of
+qualified bindings, so HIR import lowering cannot regress to the parallel-array
+linear scan that made `callable_deps` the largest exclusive term in the whole
+HIR phase profile.
+Audience: compiler engineers touching `src/compiler/20.hir/hir_types.spl`.
+"""
+# @req: REQ-HIR-QTYPEIDX-001 — qualified symbol lookup is O(1) in table size.
+
+"""
+# HIR qualified type lookup scaling Specification
+
+**Feature IDs:** #HIR-QTYPEIDX-001
+**Category:** Compiler / HIR
+**Difficulty:** 3/5
+**Status:** Complete
+**Research:** doc/08_tracking/bug/hir_qualified_type_lookup_linear_scan_2026-08-22.md
+
+## Overview
+`materialize_imported_callable_dependency` issues up to three
+`lookup_qualified_type_raw` probes per named type per imported callable per
+importing module. When that lookup was a linear scan over three parallel arrays
+(two text comparisons per row), and 65% of the probes were MISSES -- which
+always pay the full table length -- HIR import lowering cost
+O(modules x callables x deps x bindings). Measured on one stage-1 build:
+1,496,719 probes, 1,251,806 misses, `callable_deps` exclusive 5,241,657ms.
+
+This spec is a MECHANISM pin, not a wall-clock budget: it measures the same
+number of MISS probes against a small table and a 40x larger one and requires
+the cost ratio to stay under 3x. Under the linear scan the ratio tracks the
+size ratio (~40x); under the Dict index it is ~1x.
+"""
+
+use compiler.hir.hir_types.{SymbolTable, SymbolId}
+use std.nogc_sync_mut.io_runtime.{rt_time_now_monotonic_ms}
+
+fn fill(table: SymbolTable, count: i64):
+    var index = 0
+    while index < count:
+        table.bind_qualified_type("mod.pkg.m{index}", "Type{index}", SymbolId(id: index))
+        index = index + 1
+
+fn miss_probe_ms(table: SymbolTable, probes: i64) -> i64:
+    val started = rt_time_now_monotonic_ms()
+    var index = 0
+    var found = 0
+    while index < probes:
+        if table.lookup_qualified_type_raw("mod.pkg.absent", "Absent{index}") >= 0:
+            found = found + 1
+        index = index + 1
+    rt_time_now_monotonic_ms() - started
+
+describe "HIR qualified type lookup scaling":
+    it "keeps a miss lookup independent of the number of qualified bindings":
+        val probes = 4000
+
+        var small = SymbolTable.new()
+        fill(small, 100)
+        val small_ms = miss_probe_ms(small, probes)
+
+        var large = SymbolTable.new()
+        fill(large, 4000)
+        val large_ms = miss_probe_ms(large, probes)
+
+        # 40x more bindings must not cost materially more per probe. Compare in
+        # integer arithmetic with a +1 floor so a sub-millisecond small side
+        # cannot divide by zero.
+        val budget = (small_ms + 1) * 3
+        expect(large_ms <= budget).to_be(true)
+
+    it "still answers hits and misses correctly at scale":
+        var table = SymbolTable.new()
+        fill(table, 2000)
+        expect(table.lookup_qualified_type_raw("mod.pkg.m0", "Type0")).to_equal(0)
+        expect(table.lookup_qualified_type_raw("mod.pkg.m1999", "Type1999")).to_equal(1999)
+        expect(table.lookup_qualified_type_raw("mod.pkg.m1999", "Type0")).to_equal(-1)
+        expect(table.lookup_qualified_type_raw("nope", "Type0")).to_equal(-1)
+
+    it "keys the index injectively so a dotted split cannot alias":
+        # ("a.b", "c") and ("a", "b.c") both join to "a.b.c" under a `.`
+        # separator; the `#` key keeps them distinct.
+        var table = SymbolTable.new()
+        table.bind_qualified_type("a.b", "c", SymbolId(id: 11))
+        table.bind_qualified_type("a", "b.c", SymbolId(id: 22))
+        expect(table.lookup_qualified_type_raw("a.b", "c")).to_equal(11)
+        expect(table.lookup_qualified_type_raw("a", "b.c")).to_equal(22)
+
+    it "binds qualified functions through the same O(1) index":
+        var table = SymbolTable.new()
+        var index = 0
+        while index < 2000:
+            table.bind_qualified_function("mod.m{index}", "fn{index}", SymbolId(id: index))
+            index = index + 1
+        expect(table.lookup_qualified_function_raw("mod.m0", "fn0")).to_equal(0)
+        expect(table.lookup_qualified_function_raw("mod.m1999", "fn1999")).to_equal(1999)
+        expect(table.lookup_qualified_function_raw("mod.m1999", "fn0")).to_equal(-1)
+
+    it "keeps the first binding when a pair is bound twice":
+        var table = SymbolTable.new()
+        table.bind_qualified_type("m", "T", SymbolId(id: 7))
+        table.bind_qualified_type("m", "T", SymbolId(id: 9))
+        expect(table.lookup_qualified_type_raw("m", "T")).to_equal(7)

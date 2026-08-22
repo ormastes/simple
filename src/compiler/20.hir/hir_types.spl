@@ -209,6 +209,13 @@ enum ScopeKind:
     Class
     Impl
 
+fn qualified_symbol_key(module_name: text, member_name: text) -> text:
+    """QTYPEIDX (2026-08-22): injective index key for a (module, member) pair.
+
+    `#` cannot occur in a module path or a member name, so unlike the `.`
+    join this cannot alias ("a.b", "c") onto ("a", "b.c")."""
+    module_name + "#" + member_name
+
 class SymbolTable:
     """Symbol table for name resolution."""
     symbols: Dict<i64, HirSymbol>
@@ -220,11 +227,6 @@ class SymbolTable:
     gpu_function_backend_orders: Dict<text, text>
     qualified_functions: Dict<text, i64>
     qualified_types: Dict<text, i64>
-    qualified_function_names: [text]
-    qualified_function_ids: [i64]
-    qualified_type_module_names: [text]
-    qualified_type_member_names: [text]
-    qualified_type_ids: [i64]
     exact_symbols: Dict<text, i64>
     # MODCALLIDX (2026-08-21): "{defining_module}#{name}" -> raw symbol id for
     # every symbol that carries a defining_module, plus the same row under the
@@ -251,11 +253,6 @@ impl SymbolTable:
             gpu_function_backend_orders: {},
             qualified_functions: {},
             qualified_types: {},
-            qualified_function_names: [],
-            qualified_function_ids: [],
-            qualified_type_module_names: [],
-            qualified_type_member_names: [],
-            qualified_type_ids: [],
             exact_symbols: {},
             module_callables: {},
             root_scope_symbols: root_scope_symbols
@@ -282,11 +279,6 @@ impl SymbolTable:
         self.gpu_function_backend_orders = {}
         self.qualified_functions = {}
         self.qualified_types = {}
-        self.qualified_function_names = []
-        self.qualified_function_ids = []
-        self.qualified_type_module_names = []
-        self.qualified_type_member_names = []
-        self.qualified_type_ids = []
         self.exact_symbols = {}
         self.module_callables = {}
         self.current_scope = ScopeId(id: 0)
@@ -386,14 +378,11 @@ impl SymbolTable:
         id
 
     me bind_qualified_function(module_name: text, member_name: text, id: SymbolId):
-        val key = module_name + "." + member_name
-        var index = 0
-        while index < self.qualified_function_names.len():
-            if self.qualified_function_names[index] == key:
-                return
-            index = index + 1
-        self.qualified_function_names = self.qualified_function_names.push(key)
-        self.qualified_function_ids = self.qualified_function_ids.push(id.id)
+        # QTYPEIDX (2026-08-22): first binding wins, same as the append-only
+        # scan this replaces. See lookup_qualified_type_raw for the key shape.
+        val key = qualified_symbol_key(module_name, member_name)
+        if self.qualified_functions.contains_key(key):
+            return
         self.qualified_functions[key] = id.id
 
     fn lookup_qualified_function(module_name: text, member_name: text) -> SymbolId?:
@@ -404,27 +393,18 @@ impl SymbolTable:
 
     fn lookup_qualified_function_raw(module_name: text, member_name: text) -> i64:
         """Native-safe scalar qualified-function lookup, including id zero."""
-        val key = module_name + "." + member_name
-        var index = 0
-        while index < self.qualified_function_names.len() and
-              index < self.qualified_function_ids.len():
-            if self.qualified_function_names[index] == key:
-                return self.qualified_function_ids[index]
-            index = index + 1
+        val key = qualified_symbol_key(module_name, member_name)
+        if self.qualified_functions.contains_key(key):
+            return self.qualified_functions[key]
         -1
 
     me bind_qualified_type(module_name: text, member_name: text, id: SymbolId):
-        var index = 0
-        while index < self.qualified_type_module_names.len() and
-              index < self.qualified_type_member_names.len():
-            if self.qualified_type_module_names[index] == module_name and
-               self.qualified_type_member_names[index] == member_name:
-                return
-            index = index + 1
-        self.qualified_type_module_names = self.qualified_type_module_names.push(module_name)
-        self.qualified_type_member_names = self.qualified_type_member_names.push(member_name)
-        self.qualified_type_ids = self.qualified_type_ids.push(id.id)
-        val key = module_name + "." + member_name
+        # QTYPEIDX (2026-08-22): first binding wins, matching the append-only
+        # parallel-array scan this replaces (which returned early on a hit and
+        # therefore never overwrote an existing row).
+        val key = qualified_symbol_key(module_name, member_name)
+        if self.qualified_types.contains_key(key):
+            return
         self.qualified_types[key] = id.id
 
     fn lookup_qualified_type(module_name: text, member_name: text) -> SymbolId?:
@@ -438,16 +418,29 @@ impl SymbolTable:
 
         Keep the hot lowering boundary scalar: staged native code can corrupt
         a value-type ``SymbolId`` carried inside ``Optional`` even though the
-        exact dictionary entry is valid.
+        exact dictionary entry is valid. The return stays a raw ``i64``; only
+        the CONTAINER changed.
+
+        QTYPEIDX (2026-08-22): O(1) Dict probe. This used to linear-scan three
+        parallel arrays with two text comparisons per row, so every query cost
+        O(qualified bindings) -- and 65% of queries are MISSES, which always
+        pay the full length. `materialize_imported_callable_dependency` issues
+        up to three of these per named type per imported callable per importing
+        module, so HIR import lowering paid O(modules x callables x deps x
+        bindings): 1,496,719 queries / 1,251,806 misses across one stage-1
+        build, and `callable_deps` alone (5,241,657ms) was the single largest
+        exclusive term in the whole HIR phase profile, ~3.4ms per query.
+
+        The Dict was already maintained in lockstep by `bind_qualified_type`
+        (its only writer) and is the ONLY form the HIR codec serializes -- the
+        arrays were dropped on every round trip -- so the Dict was already the
+        more authoritative store. The `#` separator makes the key injective:
+        `.` allowed ("a.b", "c") and ("a", "b.c") to collide.
+        doc/08_tracking/bug/hir_qualified_type_lookup_linear_scan_2026-08-22.md
         """
-        var index = 0
-        while index < self.qualified_type_module_names.len() and
-              index < self.qualified_type_member_names.len() and
-              index < self.qualified_type_ids.len():
-            if self.qualified_type_module_names[index] == module_name and
-               self.qualified_type_member_names[index] == member_name:
-                return self.qualified_type_ids[index]
-            index = index + 1
+        val key = qualified_symbol_key(module_name, member_name)
+        if self.qualified_types.contains_key(key):
+            return self.qualified_types[key]
         -1
 
     me push_scope(kind: ScopeKind) -> ScopeId:

@@ -58,11 +58,27 @@ describe "module surface callable projection":
         expect(declarations.contains("composites[composite_name]")).to_be(false)
 
     it "uses scalar qualified symbol indexes for staged lookup":
+        # QTYPEIDX (2026-08-22): this row used to freeze the parallel-array
+        # form. That form made every qualified lookup O(bindings) with two text
+        # comparisons per row, and 84% of the probes are MISSES, which always
+        # pay the full length -- `callable_deps` became the largest exclusive
+        # term in the whole HIR phase. The ban was on the `.has(key)` guard
+        # shape, which is still banned below; the index itself is now the
+        # `contains_key` Dict shape every other 2026-08-21 index on this path
+        # already uses (PKGDEP, PKGIDX, IMPLIDX, MODCALLIDX). The lookups still
+        # return a raw scalar `i64`, which is the actual staged-native contract.
+        # doc/08_tracking/bug/hir_qualified_type_lookup_linear_scan_2026-08-22.md
         val symbols = rt_file_read_text("src/compiler/20.hir/hir_types.spl") ?? ""
-        expect(symbols).to_contain("qualified_type_names: [text]")
-        expect(symbols).to_contain("qualified_type_ids: [i64]")
-        expect(symbols).to_contain("qualified_function_names: [text]")
-        expect(symbols).to_contain("qualified_function_ids: [i64]")
+        expect(symbols).to_contain("qualified_types: Dict<text, i64>")
+        expect(symbols).to_contain("qualified_functions: Dict<text, i64>")
+        expect(symbols).to_contain("fn lookup_qualified_type_raw(module_name: text, member_name: text) -> i64:")
+        expect(symbols).to_contain("fn lookup_qualified_function_raw(module_name: text, member_name: text) -> i64:")
+        # The index key must stay injective: `.` aliases ("a.b","c") onto
+        # ("a","b.c"); `#` cannot occur in a module path or a member name.
+        expect(symbols).to_contain("module_name + \"#\" + member_name")
+        # No return to the linear parallel-array scan.
+        expect(symbols.contains("qualified_type_module_names")).to_be(false)
+        expect(symbols.contains("qualified_function_names")).to_be(false)
         expect(symbols.contains("if self.qualified_types.has(key):")).to_be(false)
         expect(symbols.contains("if self.qualified_functions.has(key):")).to_be(false)
 
