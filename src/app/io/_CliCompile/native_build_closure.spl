@@ -14,8 +14,18 @@ use compiler.driver.driver_source_loading.{
     _driver_text_bucket_set_has, _driver_text_bucket_set_add
 }
 use std.io_runtime.{read_file_text}
+@unsafe(reason: "raw file probe; false is the absent-or-I/O-failure sentinel", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw path expansion; empty text is the invalid-or-expansion-failure sentinel", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text
+
+fn _nb_file_exists_raw(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
+
+fn _nb_path_absolute_raw(path: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_path_absolute(path)
 
 fn _cli_eprint(message: text):
     eprint(message)
@@ -44,11 +54,11 @@ fn _nb_resolve_relative(mp: text, importer_file: text) -> text:
         up = up + 1
     val rel = mp.substring(dots).replace(".", "/")
     val base = if base_dir == "": rel else: "{base_dir}/{rel}"
-    if rt_file_exists("{base}.spl"):
+    if _nb_file_exists_raw("{base}.spl"):
         return "{base}.spl"
-    if rt_file_exists("{base}/mod.spl"):
+    if _nb_file_exists_raw("{base}/mod.spl"):
         return "{base}/mod.spl"
-    if rt_file_exists("{base}/__init__.spl"):
+    if _nb_file_exists_raw("{base}/__init__.spl"):
         return "{base}/__init__.spl"
     ""
 
@@ -89,13 +99,13 @@ fn _nb_resolve_under_root(root: text, segs: [text]) -> text:
         return ""
     val rel = _nb_join_segments(segs)
     val p1 = "{root}/{rel}.spl"
-    if rt_file_exists(p1):
+    if _nb_file_exists_raw(p1):
         return p1
     val p2 = "{root}/{rel}/mod.spl"
-    if rt_file_exists(p2):
+    if _nb_file_exists_raw(p2):
         return p2
     val p3 = "{root}/{rel}/__init__.spl"
-    if rt_file_exists(p3):
+    if _nb_file_exists_raw(p3):
         return p3
     ""
 
@@ -108,9 +118,9 @@ fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> t
     if segs.len() > 0:
         val resolved = _driver_resolve_entry_import(module_path, entry_dir)
         if resolved != "":
-            val resolved_abs = rt_path_absolute(resolved).replace("\\", "/")
+            val resolved_abs = _nb_path_absolute_raw(resolved).replace("\\", "/")
             for root in source_dirs:
-                val root_abs = _nb_trim_trailing_slashes(rt_path_absolute(root).replace("\\", "/"))
+                val root_abs = _nb_trim_trailing_slashes(_nb_path_absolute_raw(root).replace("\\", "/"))
                 val root_prefix = if root_abs.ends_with("/"): root_abs else: root_abs + "/"
                 if resolved_abs.starts_with(root_prefix):
                     return resolved
@@ -183,7 +193,7 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
         if trace_timing:
             timing_file_start_us = time_now_unix_micros()
         result = result.push(f)
-        if not rt_file_exists(f):
+        if not _nb_file_exists_raw(f):
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure entry missing {f}")
             continue
@@ -239,4 +249,3 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             val elapsed_us = time_now_unix_micros() - timing_file_start_us
             _cli_eprint("[native-build] closure timing n={result.len()} queued={queue.len()} elapsed_us={elapsed_us} imports={module_paths.len()} content_len={content.len()} file={f}")
     result
-

@@ -33,6 +33,8 @@ command -v sha256sum >/dev/null 2>&1 || {
     exit 1
 }
 
+export LC_ALL=C
+
 # Canonical v1 is UTF-8-compatible printable TSV with LF only, a final LF,
 # fixed singleton fields, then sorted unique symbol rows.
 if LC_ALL=C grep -q "$(printf '\r')" "$manifest" ||
@@ -90,6 +92,25 @@ awk -F '\t' -v allowed="$allowed" '
     exit 1
 }
 
+awk -F '\t' '
+    BEGIN {
+        fixed[1]="schema"; fixed[2]="provider_id"; fixed[3]="target";
+        fixed[4]="signer_key_id"; fixed[5]="artifact_sha256";
+        fixed[6]="canonical_source_tree_sha256";
+        fixed[7]="exact_build_input_sha256";
+        fixed[8]="compiler_artifact_sha256";
+        fixed[9]="abi_registry_sha256";
+        fixed[10]="verification_report_sha256";
+        fixed[11]="evidence_verified"; fixed[12]="symbol_count"
+    }
+    NR <= 12 && $1 != fixed[NR] { exit 1 }
+    NR > 12 && $1 != "symbol" { exit 1 }
+    END { if (NR < 13) exit 1 }
+' "$manifest" || {
+    echo 'sffi evidence admission: manifest fields are not in canonical order' >&2
+    exit 1
+}
+
 symbols=$(mktemp)
 trap 'rm -f "$symbols" "${output}.part.$$"' EXIT INT TERM
 awk -F '\t' '$1 == "symbol" { print $2 "\t" $3 }' "$manifest" >"$symbols"
@@ -126,8 +147,40 @@ check_hash "$compiler_hash" "$compiler"
 check_hash "$abi_hash" "$abi_registry"
 check_hash "$report_hash" "$verification_report"
 
+# A signed digest is useful only when it names a structured, passing report
+# bound to this exact provider artifact and ABI registry.
+if grep -q "$(printf '\r')" "$verification_report" ||
+   test "$(tail -c 1 "$verification_report" | od -An -tu1 | tr -d ' ')" != 10; then
+    echo 'sffi evidence admission: verification report is not canonical LF text' >&2
+    exit 1
+fi
+awk -F '\t' -v provider="$provider_id" -v artifact="$artifact_hash" \
+    -v abi="$abi_hash" '
+    NR == 1 { good = (NF == 2 && $1 == "schema" && $2 == "simple.sffi-verification-report.v1") }
+    NR == 2 { good = good && NF == 2 && $1 == "provider_id" && $2 == provider }
+    NR == 3 { good = good && NF == 2 && $1 == "artifact_sha256" && $2 == artifact }
+    NR == 4 { good = good && NF == 2 && $1 == "abi_registry_sha256" && $2 == abi }
+    NR == 5 { good = good && NF == 2 && $1 == "result" && $2 == "pass" }
+    NR > 5 { good = 0 }
+    END { exit !(NR == 5 && good) }
+' "$verification_report" || {
+    echo 'sffi evidence admission: verification report is stale, malformed, or not passing' >&2
+    exit 1
+}
+
 # Trust roots are outside the signed manifest. Each canonical row scopes one
 # key ID to one provider ID and names a PEM public key provisioned by policy.
+if grep -q "$(printf '\r')" "$trust_store" ||
+   test "$(tail -c 1 "$trust_store" | od -An -tu1 | tr -d ' ')" != 10 ||
+   ! awk -F '\t' '
+       BEGIN { previous="" }
+       NF != 3 || $1 == "" || $2 == "" || $3 == "" ||
+           (previous != "" && $0 <= previous) { exit 1 }
+       { previous=$0 }
+   ' "$trust_store"; then
+    echo 'sffi evidence admission: trust store is not canonical sorted TSV' >&2
+    exit 1
+fi
 trust_matches=$(awk -F '\t' -v key="$signer_key_id" -v provider="$provider_id" '
     NF == 3 && $1 == key && $2 == provider { count++; path=$3 }
     END { if (count == 1) print path }

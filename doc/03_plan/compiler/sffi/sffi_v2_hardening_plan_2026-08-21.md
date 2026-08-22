@@ -771,3 +771,32 @@ instead of allocating a `Vec` per call. A live join-point positive control
 executed mapped unadvised and advised targets from the same call site. The
 compiled hot path remains a null comparison plus one direct indirect call;
 there is no registry lookup, allocation, lock, hash, or generic marshalling.
+
+## Signed evidence admission checkpoint — 2026-08-22
+
+Completed:
+
+- Replace caller-trusted admission booleans with provider-scoped Ed25519
+  verification against an independently provisioned trust store.
+- Bind admissions to exact artifact, canonical source snapshot, build input,
+  compiler, ABI registry, structured passing verification report, symbol, and
+  source-signature hashes.
+- Reject noncanonical manifests/trust stores, stale or failed reports, tampered
+  artifacts, duplicate trust entries, untrusted keys, and substituted
+  signatures through a permanent contract test.
+- Keep all digest/signature work in the one-time audit/admission path; runtime
+  SFFI calls are unchanged.
+- Remove one unnecessary parse-shard raw exit and contract/tag the three
+  remaining slim-lane raw boundaries without reintroducing the 3.3 GB broad
+  compiler closure.
+
+Next:
+
+1. Define production provider evidence packages and provision non-test trust
+   anchors; the normal census must remain at zero admissions until this exists.
+2. Generate ABI registry rows from compiler-owned resolved signatures rather
+   than handwritten manifests.
+3. Add target/binary-format identity checks to loader admission and publish
+   immutable typed function slots only after whole-provider validation.
+4. Continue reducing the 11,836 untouched rows by owner/facade family, starting
+   with the 999 untouched `rt_process` declarations.

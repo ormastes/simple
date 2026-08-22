@@ -14,16 +14,21 @@ use compiler.common.driver_core_types.{CompileMode, CompileOptions}
 use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw environment lookup; nil is the unset-or-runtime-failure sentinel", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+
+fn driver_env_get_raw(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
 
 fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:
     (ctx.options.mode == CompileMode.Aot or ctx.options.cli_mode_text == "aot") and
         not ctx.config.contains_key("coverage") and
-        (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
-        (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1" and
-        ((rt_env_get("SIMPLE_STAGE3_STREAMING_SURFACES") ?? "") == "1" or
-         ((rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
-          (rt_env_get("SIMPLE_STAGE4_STREAMING_SURFACES") ?? "") == "1")) and
+        (driver_env_get_raw("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+        (driver_env_get_raw("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1" and
+        ((driver_env_get_raw("SIMPLE_STAGE3_STREAMING_SURFACES") ?? "") == "1" or
+         ((driver_env_get_raw("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
+          (driver_env_get_raw("SIMPLE_STAGE4_STREAMING_SURFACES") ?? "") == "1")) and
         ctx.options.backend != "vhdl"
 
 
@@ -40,7 +45,7 @@ fn bootstrap_last_fixed_input(options: CompileOptions) -> text:
 fn bootstrap_entry_source_index(ctx: CompileContext) -> i64:
     # Entry precedence is explicit environment, positional fixed input,
     # historical bootstrap_main default, then deterministic first source.
-    val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    val native_entry = driver_env_get_raw("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
     val positional_entry = bootstrap_last_fixed_input(ctx.options)
     val requested_entry = if native_entry != "": native_entry else: positional_entry
     if requested_entry != "":

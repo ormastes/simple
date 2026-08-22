@@ -941,3 +941,25 @@ contracted, 11,836 untouched, and 296 signature-variant symbols. The
 statistics remain C++ 211/211/1, C 2,313/1,831/87, Rust 2,161/2,097/172, and
 Simple 592/543/52. There are still zero trusted signed/verified admissions, so
 all 12,611 declarations remain fail-closed unsafe.
+
+The signed-admission slice removes the caller-authored
+`RT_VERIFIED_ADMISSION_TRUSTED=1` assertion. Admission now recomputes the exact
+provider, canonical-source snapshot, build-input, compiler, ABI-registry, and
+verification-report SHA-256 identities; validates a canonical passing report;
+and verifies a raw Ed25519 signature with a provider-scoped key from a separate
+canonical trust store. Each admitted row is bound to both the runtime symbol
+and its exact source-signature hash, so one ABI variant cannot promote another.
+Canonical-order, stale-report, artifact-tamper, substituted-signature,
+untrusted-key, and duplicate-trust sabotage tests pass. All work occurs once in
+the audit/admission lane; no runtime call path gained hashing, lookup, locking,
+allocation, or signature verification.
+
+The upstream slim parse-shard change exposed four new untouched declarations.
+The unnecessary raw exit was removed in favor of returning the existing error
+code. The remaining file probe, path expansion, and nullable environment lookup
+retain their slim dependency closure but now carry explicit sentinel contracts
+and minimal lexical `unsafe(ffi)` wrappers. Importing the broad semantic
+facades here would regress the parse-shard memory fix by pulling the compiler
+back half into the child. The resulting census is 12,614 declarations: 502
+unsafe-tagged, 583 contracted, and 11,836 untouched. Production signed evidence
+is still zero, so no declaration is yet claimed safe or verified.
