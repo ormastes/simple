@@ -48,18 +48,6 @@ pub fn executable_launch_arguments_v1_errno(
         case ExecutableLaunchArgumentsErrorV1.InvalidEnvpEmbeddedNul: -22
         case _: -7
 
-fn _launch_arguments_copy_text(value: text) -> text:
-    # Copy through an independently-owned byte array. Text is immutable, but
-    # making the transfer explicit prevents a future mutable/raw-text caller
-    # representation from silently weakening this ownership boundary.
-    val raw = value.bytes()
-    var copied: [u8] = []
-    var i: i64 = 0
-    while i < raw.len():
-        copied.push(raw[i])
-        i = i + 1
-    rt_string_from_byte_array(copied)
-
 fn _launch_arguments_copy_vector(
     values: [text],
     vector_limit: i64,
@@ -72,9 +60,15 @@ fn _launch_arguments_copy_vector(
     var i: i64 = 0
     while i < values.len():
         val value = values[i]
-        if value.contains("\0"):
-            return Err(nul_error)
-        val raw_len = value.bytes().len()
+        # Materialize UTF-8 exactly once. NUL validation, byte accounting, and
+        # the loader-owned copy all consume this same bounded byte buffer.
+        val raw = value.bytes()
+        val raw_len = raw.len()
+        var scan_index: i64 = 0
+        while scan_index < raw_len:
+            if raw[scan_index] == 0x00u8:
+                return Err(nul_error)
+            scan_index = scan_index + 1
         # The bound includes the C terminator, so a 4096-byte payload is too
         # large. Checking before +1 also makes the addition overflow-proof.
         if raw_len < 0:
@@ -85,7 +79,14 @@ fn _launch_arguments_copy_vector(
         if total > vector_limit - c_string_bytes:
             return Err(vector_error)
         total = total + c_string_bytes
-        copied.push(_launch_arguments_copy_text(value))
+        # Copy in this scope so passing a value-semantics [u8] buffer through a
+        # helper cannot introduce another full-buffer copy.
+        var owned_bytes: [u8] = []
+        var copy_index: i64 = 0
+        while copy_index < raw_len:
+            owned_bytes.push(raw[copy_index])
+            copy_index = copy_index + 1
+        copied.push(rt_string_from_byte_array(owned_bytes))
         i = i + 1
     Ok((copied, total))
 
@@ -95,32 +96,52 @@ pub fn executable_launch_arguments_v1_validate(
     envp: [text]
 ) -> Result<ExecutableLaunchArgumentsV1, ExecutableLaunchArgumentsErrorV1>:
     """Validate and deep-copy launch strings without granting execution authority."""
-    if path.len() == 0:
+    # Keep one materialized path buffer through validation and ownership
+    # transfer, avoiding a second UTF-8 conversion at construction time.
+    val path_raw = path.bytes()
+    if path_raw.len() == 0:
         return Err(ExecutableLaunchArgumentsErrorV1.InvalidEmptyPath)
-    if path.contains("\0"):
-        return Err(ExecutableLaunchArgumentsErrorV1.InvalidPathEmbeddedNul)
-    val path_bytes = path.bytes().len()
+    val path_bytes = path_raw.len()
+    var path_scan_index: i64 = 0
+    while path_scan_index < path_bytes:
+        if path_raw[path_scan_index] == 0x00u8:
+            return Err(ExecutableLaunchArgumentsErrorV1.InvalidPathEmbeddedNul)
+        path_scan_index = path_scan_index + 1
     if path_bytes < 0:
         return Err(ExecutableLaunchArgumentsErrorV1.SizeOverflow)
     if path_bytes >= EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_C_STRING_BYTES:
         return Err(ExecutableLaunchArgumentsErrorV1.PathStringTooLarge)
 
-    var effective_argv: [text] = argv
-    if effective_argv.len() == 0:
-        effective_argv = [path]
-    if effective_argv.len() > EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_ARGV:
+    if argv.len() > EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_ARGV:
         return Err(ExecutableLaunchArgumentsErrorV1.TooManyArgvEntries)
     if envp.len() > EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_ENVP:
         return Err(ExecutableLaunchArgumentsErrorV1.TooManyEnvpEntries)
 
-    val argv_result = _launch_arguments_copy_vector(
-        effective_argv,
-        EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_VECTOR_BYTES,
-        ExecutableLaunchArgumentsErrorV1.InvalidArgvEmbeddedNul,
-        ExecutableLaunchArgumentsErrorV1.ArgvStringTooLarge,
-        ExecutableLaunchArgumentsErrorV1.ArgvBytesTooLarge)
-    if argv_result.is_err():
-        return Err(argv_result.unwrap_err())
+    var argv_copy_values: [text] = []
+    var argv_copy_bytes: i64 = 0
+    if argv.len() == 0:
+        # The synthesized argv[0] is independently owned, but can be copied
+        # from the already validated path bytes without materializing them a
+        # second time.
+        var argv_zero_bytes: [u8] = []
+        var argv_zero_index: i64 = 0
+        while argv_zero_index < path_bytes:
+            argv_zero_bytes.push(path_raw[argv_zero_index])
+            argv_zero_index = argv_zero_index + 1
+        argv_copy_values.push(rt_string_from_byte_array(argv_zero_bytes))
+        argv_copy_bytes = path_bytes + 1
+    else:
+        val argv_result = _launch_arguments_copy_vector(
+            argv,
+            EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_VECTOR_BYTES,
+            ExecutableLaunchArgumentsErrorV1.InvalidArgvEmbeddedNul,
+            ExecutableLaunchArgumentsErrorV1.ArgvStringTooLarge,
+            ExecutableLaunchArgumentsErrorV1.ArgvBytesTooLarge)
+        if argv_result.is_err():
+            return Err(argv_result.unwrap_err())
+        val argv_copy = argv_result.unwrap()
+        argv_copy_values = argv_copy.0
+        argv_copy_bytes = argv_copy.1
     val envp_result = _launch_arguments_copy_vector(
         envp,
         EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_VECTOR_BYTES,
@@ -130,23 +151,29 @@ pub fn executable_launch_arguments_v1_validate(
     if envp_result.is_err():
         return Err(envp_result.unwrap_err())
 
-    val argv_copy = argv_result.unwrap()
     val envp_copy = envp_result.unwrap()
     # Charge the separately supplied executable path as well as both vectors.
     # Each addition is guarded by subtraction so no intermediate can overflow.
     val path_c_string_bytes = path_bytes + 1
     if (path_c_string_bytes >
-        EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_COMBINED_BYTES - argv_copy.1):
+        EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_COMBINED_BYTES - argv_copy_bytes):
         return Err(ExecutableLaunchArgumentsErrorV1.CombinedBytesTooLarge)
-    val path_and_argv_bytes = path_c_string_bytes + argv_copy.1
+    val path_and_argv_bytes = path_c_string_bytes + argv_copy_bytes
     if (envp_copy.1 >
         EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_COMBINED_BYTES - path_and_argv_bytes):
         return Err(ExecutableLaunchArgumentsErrorV1.CombinedBytesTooLarge)
     val combined = path_and_argv_bytes + envp_copy.1
+    # Keep the path ownership copy local: [u8] uses value semantics, so a
+    # raw-buffer helper boundary may itself duplicate the entire array.
+    var owned_path_bytes: [u8] = []
+    var path_copy_index: i64 = 0
+    while path_copy_index < path_bytes:
+        owned_path_bytes.push(path_raw[path_copy_index])
+        path_copy_index = path_copy_index + 1
     Ok(ExecutableLaunchArgumentsV1(
-        path: _launch_arguments_copy_text(path),
-        argv: argv_copy.0,
+        path: rt_string_from_byte_array(owned_path_bytes),
+        argv: argv_copy_values,
         envp: envp_copy.0,
-        argv_bytes: argv_copy.1,
+        argv_bytes: argv_copy_bytes,
         envp_bytes: envp_copy.1,
         combined_bytes: combined))
