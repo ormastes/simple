@@ -1057,6 +1057,22 @@ pub(super) fn eval_call_expr(
                                 ) {
                                     Ok(result) => Ok(result),
                                     Err(_) => {
+                                        if crate::interpreter::field_access_debug_enabled() {
+                                            let stack = crate::interpreter::debug_call_stack_snapshot();
+                                            let stack_tail = stack
+                                                .iter()
+                                                .rev()
+                                                .take(12)
+                                                .rev()
+                                                .cloned()
+                                                .collect::<Vec<_>>()
+                                                .join(" -> ");
+                                            eprintln!(
+                                                "[field-access-error] field={field} recv_type=Option recv={} expr={:?} stack={stack_tail}",
+                                                recv_val.to_debug_string().chars().take(500).collect::<String>(),
+                                                receiver
+                                            );
+                                        }
                                         let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FIELD).with_help(
                                             "available properties: is_some, is_none; or use method() syntax",
                                         );
@@ -1087,6 +1103,22 @@ pub(super) fn eval_call_expr(
                                 ) {
                                     Ok(result) => Ok(result),
                                     Err(_) => {
+                                        if crate::interpreter::field_access_debug_enabled() {
+                                            let stack = crate::interpreter::debug_call_stack_snapshot();
+                                            let stack_tail = stack
+                                                .iter()
+                                                .rev()
+                                                .take(12)
+                                                .rev()
+                                                .cloned()
+                                                .collect::<Vec<_>>()
+                                                .join(" -> ");
+                                            eprintln!(
+                                                "[field-access-error] field={field} recv_type=Result recv={} expr={:?} stack={stack_tail}",
+                                                recv_val.to_debug_string().chars().take(500).collect::<String>(),
+                                                receiver
+                                            );
+                                        }
                                         let ctx = ErrorContext::new()
                                             .with_code(codes::UNDEFINED_FIELD)
                                             .with_help("available properties: is_ok, is_err; or use method() syntax");

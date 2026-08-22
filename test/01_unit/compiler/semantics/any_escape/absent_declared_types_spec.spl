@@ -1,0 +1,60 @@
+# Reproduce spec for the ANY-escape pass trapping on ABSENT declared types.
+#
+# Every predicate call site in 35.semantics/any_escape/checker.spl passed a
+# `type_` / `return_type` slot straight into any_type_is_any /
+# any_type_mentions_any, both of which open with `match t.kind`. When the slot
+# is absent the interpreter trapped with either
+#   "undefined field 'kind': cannot access field on value of type 'nil'"   (bare nil)
+# or
+#   "undefined field: unknown property or method 'kind' on Option"         (wrapped)
+# -- both span-less, and both aborting any --entry-closure native-build whose
+# closure reached such a declaration (bin/simple_mcp_server, bin/simple_lsp_mcp_server).
+#
+# `any_expr_is_any` was the last one: it gated on `e.has_type_`, documented as
+# "the authoritative presence bit", but has_type_ can be true while type_ is
+# absent. Localized with SIMPLE_DEBUG_FIELD_ACCESS=1, which reported
+# recv=Option::None on the any_expr_is_any -> any_type_is_any frame.
+#
+# Each example below is a declaration shape whose type slot is absent at one of
+# the fixed call sites: inferred let, closure param, function param, function
+# return, class field, and module-level global.
+
+var inferred_global = 41
+
+class HolderWithInferredField:
+    var tally = 7
+
+    me bump(step) -> i64:
+        self.tally + step
+
+fn returns_without_annotation(seed: i64):
+    seed * 2
+
+fn takes_untyped_param(value) -> i64:
+    val doubled = value + value
+    doubled
+
+fn applies_closure(base: i64) -> i64:
+    val add_untyped = |extra| base + extra
+    add_untyped(3)
+
+describe "any-escape pass tolerates absent declared types":
+    it "checks an inferred let binding":
+        val inferred_local = 5 + 6
+        expect(inferred_local).to_equal(11)
+
+    it "checks a function with an untyped parameter":
+        expect(takes_untyped_param(4)).to_equal(8)
+
+    it "checks a function with no declared return type":
+        expect(returns_without_annotation(6)).to_equal(12)
+
+    it "checks a closure with an untyped parameter":
+        expect(applies_closure(10)).to_equal(13)
+
+    it "checks a class field with an inferred type":
+        val holder = HolderWithInferredField()
+        expect(holder.bump(5)).to_equal(12)
+
+    it "checks a module-level global with an inferred type":
+        expect(inferred_global + 1).to_equal(42)

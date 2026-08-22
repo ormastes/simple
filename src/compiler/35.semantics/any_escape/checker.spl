@@ -147,8 +147,14 @@ fn any_expr_is_any(self: AnyEscapeState, e: HirExpr) -> bool:
     and the tracked-symbol set for a bare variable reference whose node type
     was never filled in.
     """
-    if e.has_type_ and any_type_is_any(e.type_):
-        return true
+    # `has_type_` is documented as the presence bit, but it can be true while
+    # `type_` is still absent -- reading it then trapped with "unknown property
+    # or method 'kind' on Option". Unwrap with if-val so presence is decided by
+    # the slot itself. Same semantics: only an ACTUAL `Any` type returns true.
+    if e.has_type_:
+        if val resolved_type = e.type_:
+            if any_type_is_any(resolved_type):
+                return true
     match e.kind:
         case Var(symbol): symbol != nil and any_state_tracks(self, symbol.id)
         case NamedVar(symbol, name): symbol != nil and any_state_tracks(self, symbol.id)
@@ -287,8 +293,9 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
                     any_emit_002(self, profile, AnyEscapeKind.EscapeCapture,
                                  "a closure captures an erased value", e.span)
             for p in params:
-                if any_type_is_any(p.type_):
-                    any_emit_001(self, profile, "closure parameter `{p.name}` is typed `Any`", p.span)
+                if val param_type = p.type_:
+                    if any_type_is_any(param_type):
+                        any_emit_001(self, profile, "closure parameter `{p.name}` is typed `Any`", p.span)
             any_check_expr(self, profile, body)
 
         case Binary(op, left, right):
@@ -647,24 +654,26 @@ fn any_check_function(self: AnyEscapeState, profile: AnyEscapeProfile, f: HirFun
     # A public signature that mentions Any is an origin AND a guaranteed
     # escape: the value crosses the function boundary by definition.
     for p in f.params:
-        if any_type_is_any(p.type_):
-            # A function that itself carries `type_erasure` IS the
-            # representation boundary (§8.6 `checked_downcast(value: Any)`),
-            # so an `Any` parameter on it is the contract, not a violation.
-            if not self.te_granted:
-                any_emit_001(self, profile, "parameter `{p.name}` is typed `Any`", p.span)
-            if p.symbol != nil:
-                self.any_symbols = self.any_symbols.push(p.symbol.id)
-        elif any_type_mentions_any(p.type_):
-            any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
-                         "parameter `{p.name}` carries erased values in a container type", p.span)
+        if val param_type = p.type_:
+            if any_type_is_any(param_type):
+                # A function that itself carries `type_erasure` IS the
+                # representation boundary (§8.6 `checked_downcast(value: Any)`),
+                # so an `Any` parameter on it is the contract, not a violation.
+                if not self.te_granted:
+                    any_emit_001(self, profile, "parameter `{p.name}` is typed `Any`", p.span)
+                if p.symbol != nil:
+                    self.any_symbols = self.any_symbols.push(p.symbol.id)
+            elif any_type_mentions_any(param_type):
+                any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                             "parameter `{p.name}` carries erased values in a container type", p.span)
 
-    if any_type_is_any(f.return_type):
-        any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
-                     "function `{f.name}` returns `Any`", f.span)
-    elif any_type_mentions_any(f.return_type):
-        any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
-                     "function `{f.name}` returns a container of `Any`", f.span)
+    if val return_type = f.return_type:
+        if any_type_is_any(return_type):
+            any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
+                         "function `{f.name}` returns `Any`", f.span)
+        elif any_type_mentions_any(return_type):
+            any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
+                         "function `{f.name}` returns a container of `Any`", f.span)
 
     any_check_block(self, profile, f.body)
 
@@ -674,12 +683,13 @@ fn any_check_fields(self: AnyEscapeState, profile: AnyEscapeProfile,
     self.te_granted = false
     self.unsafe_depth = 0
     for fl in fields:
-        if any_type_is_any(fl.type_):
-            any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
-                         "field `{owner}.{fl.name}` is typed `Any`", fl.span)
-        elif any_type_mentions_any(fl.type_):
-            any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
-                         "field `{owner}.{fl.name}` is a container of `Any`", fl.span)
+        if val field_type = fl.type_:
+            if any_type_is_any(field_type):
+                any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                             "field `{owner}.{fl.name}` is typed `Any`", fl.span)
+            elif any_type_mentions_any(field_type):
+                any_emit_002(self, profile, AnyEscapeKind.EscapeStore,
+                             "field `{owner}.{fl.name}` is a container of `Any`", fl.span)
 
 # ============================================================================
 # Entry point
@@ -715,12 +725,13 @@ pub fn any_escape_check(module: HirModule, profile: AnyEscapeProfile) -> [AnyEsc
             state.function_name = cn.name
             state.te_granted = false
             state.unsafe_depth = 0
-            if any_type_is_any(cn.type_):
-                any_emit_002(state, profile, AnyEscapeKind.EscapeStore,
-                             "global `{cn.name}` is typed `Any`", cn.span)
-            elif any_type_mentions_any(cn.type_):
-                any_emit_002(state, profile, AnyEscapeKind.EscapeStore,
-                             "global `{cn.name}` is a container of `Any`", cn.span)
+            if val global_type = cn.type_:
+                if any_type_is_any(global_type):
+                    any_emit_002(state, profile, AnyEscapeKind.EscapeStore,
+                                 "global `{cn.name}` is typed `Any`", cn.span)
+                elif any_type_mentions_any(global_type):
+                    any_emit_002(state, profile, AnyEscapeKind.EscapeStore,
+                                 "global `{cn.name}` is a container of `Any`", cn.span)
 
     state.diags
 

@@ -1,8 +1,20 @@
 # MCP Server Setup and Usage
 
-The Simple MCP (Model Context Protocol) server currently provides 151 tools, 3
-resources, and 2 prompts for code intelligence, debugging, build, VCS,
-analysis, and UI access -- accessible from Claude Code and Claude Desktop.
+The Simple MCP (Model Context Protocol) server exposes code intelligence,
+debugging, build, VCS, analysis, and UI access to Claude Code and Claude Desktop.
+
+**Tool count is determined by the running server's `tools/list`, not by this
+page.** Measured 2026-08-21, both the deployed native artifact
+(`bin/release/linux-x86_64/simple_mcp_server`) and source mode
+(`bin/simple src/app/mcp/main.spl`) return the same **3 aggregate dispatch
+tools** -- `simple_pipe`, `simple_search`, `node_repl` -- where `simple_pipe`
+fans out over the spipe/context/codebase/search/ponytail surfaces. The Tool
+Reference below catalogues the individual capabilities reachable *through* those
+surfaces; it is not a flat count of top-level `tools/list` entries.
+
+(This paragraph previously claimed "151 tools, 3 resources, and 2 prompts". That
+figure did not match any running server and is removed rather than re-guessed --
+run the handshake if you need the current number.)
 
 Writing or migrating a server: use the McpServer facade — see
 `mcp_framework.md` (+tldr) and the ~30-line example in

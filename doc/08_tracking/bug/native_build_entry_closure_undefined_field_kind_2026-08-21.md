@@ -159,3 +159,83 @@ missing debug branch at `calls.rs:1032` and re-run with
 ### Iteration cost
 
 Use the LSP entry (~7.5 min) not the MCP entry (~33 min) to iterate.
+
+---
+
+## Update 2026-08-22 (second pass) — whole trap class closed; build now fails LATER
+
+### Trap 3 — FIXED (and five siblings with it)
+
+Localized by adding the missing default-off debug branch to the interpreter's
+dedicated `Option` and `Result` field arms (`calls.rs`, the arms emitting
+"unknown property or method '<f>' on Option"/"on Result"). The pre-existing
+branch covered only the generic-enum and non-enum arms, which is why the earlier
+run printed nothing. With it:
+
+```
+[field-access-error] field=kind recv_type=Option recv=Option::None expr=Identifier("t")
+  stack=any_escape_check -> any_check_function -> any_check_block -> any_check_stmt
+     -> any_check_expr -> ... -> any_expr_is_any -> any_type_is_any
+```
+
+Root cause: `any_expr_is_any` gated on `e.has_type_` — documented in its own
+docstring as "the authoritative presence bit, per HirExpr's own doc comment" —
+but `has_type_` can be **true while `type_` is absent**. The docstring's claim is
+simply not an invariant.
+
+This was not one site but a **class**. All six call sites in
+`35.semantics/any_escape/checker.spl` passed a type slot straight into
+`any_type_is_any` / `any_type_mentions_any` (both open with `match t.kind`) with
+no unwrap:
+
+| site | slot |
+|---|---|
+| `any_expr_is_any` | `e.type_` (gated only on `has_type_`) |
+| closure params | `p.type_` |
+| function params | `p.type_` |
+| function return | `f.return_type` |
+| class/struct fields | `fl.type_` |
+| module globals | `cn.type_` |
+
+All six now unwrap with `if val` (not `.unwrap()` — box-assuming, breaks flat
+optionals on the stage4 native lane). Semantics are unchanged: each predicate
+asks whether a DECLARED type is/mentions `Any`, and an absent slot has no
+declared type to answer about.
+
+### Result: the trap class is gone
+
+The LSP entry now runs with **zero** `[field-access-error]` lines and gets past
+semantic analysis entirely. It fails later, in a different phase:
+
+```
+error: MIR lowering error: unresolved method call: merge
+```
+
+That is **new ground and a separate defect**, tracked from here as such. Note
+`merge` is partly compiler-generated: `10.frontend/desugar/collection_desugar.spl`
+rewrites `x = x + other_arr` into `x.merge(other_arr)`, so the unresolved call is
+not necessarily written anywhere in source. `src/compiler/30.types/dim_constraints.spl:16`
+also carries a comment about a former `e1.span.merge(e2.span)` causing trouble,
+and `src/lib/common/sdn/value.spl:18` declares `fn merge(self, other: SdnSpan)`
+using the `fn ... (self, ...)` form rather than the usual `me merge(...)` — both
+worth checking first.
+
+### Evidence
+
+- any_escape suite **21/21** (3 files; 6 new examples in
+  `test/01_unit/compiler/semantics/any_escape/absent_declared_types_spec.spl`,
+  one per fixed call site).
+- Seed used for localization: built from this tree to
+  `/mnt/data/seedperf/simple.mcpdbg` (`CARGO_TARGET_DIR=/mnt/data/cargo-target-mcpdbg`,
+  `-j 4`, 60,407,296 bytes). **Not deployed.**
+- LSP entry wall on that seed: 428.8 s -> 348.7 s -> 544.9 s across the three
+  localization runs (shared box, load-dependent; not a perf measurement).
+
+### The Rust diagnostic is kept
+
+The added `Option`/`Result` debug branches are level-gated behind the existing
+`field_access_debug_enabled()` (`SIMPLE_DEBUG_FIELD_ACCESS=1` /
+`SIMPLE_BOOTSTRAP_DIAG=1`), default off, no behaviour change when unset. They are
+landed rather than reverted because this class of span-less error is otherwise
+undiagnosable, and the missing arms cost two full ~9-minute build iterations to
+discover.
