@@ -1909,7 +1909,7 @@ one checked call, cached lookup after initialization, and no explicit wrapper
 allocation for every operation. No provider or CUDA work changed.
 The focused readiness spec passes 15/15 under the configured bootstrap seed;
 this remains seed-only evidence. A checked-in authority baseline now fails the
-census if missing-authority calls rise above 19,892, so the migration is a
+census if missing-authority calls rise above 19,486, so the migration is a
 one-way source-safety ratchet with no runtime or hot-path cost.
 
 The complete dynamic Torch wrapper slice then placed all 69 availability
@@ -1938,3 +1938,13 @@ explicit authority rises to 1,479. `rt_torch` now has 621 explicit and 406
 missing calls. The gate locks all 486 direct runtime-family call sites at their
 existing counts, so this authority migration adds no provider calls or device
 work.
+
+The final Torch authority pass scopes the remaining 338 embedded calls in the
+runtime-family modules plus 68 calls in dynamic tensor and GPU owners. The
+global census is still exactly 21,371 calls, now 1,885 explicitly authorized
+and 19,486 missing. `rt_torch` reaches 1,027 of 1,027 calls with explicit
+lexical authority and zero missing. The gate fixes their combined raw call
+count at 1,021 across the dynamic and runtime-family owners, proving this pass
+did not add provider calls. This completes call-authority tagging only:
+raw-handle, ownership, nullability, artifact evidence, and signature work still
+prevent any global Torch safe/verified claim.

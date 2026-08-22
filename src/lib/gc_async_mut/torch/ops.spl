@@ -43,20 +43,25 @@ use std.torch.sffi.{
 # Returns scalar tensor handle (for backward pass).
 fn cross_entropy_loss_tensor(logits: i64, targets: i64) -> i64:
     # log_softmax over class dim
-    val log_probs = rt_torch_torchtensor_log_softmax(logits, 1)
+    val log_probs = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_log_softmax(logits, 1)
     # Negate: -log(softmax(x))
-    val neg_log_probs = rt_torch_torchtensor_neg(log_probs)
+    val neg_log_probs = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_neg(log_probs)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(log_probs)
     # Gather the target class probabilities: pick target index per sample
-    val gathered = rt_torch_torchtensor_gather(neg_log_probs, 1, targets)
+    val gathered = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_gather(neg_log_probs, 1, targets)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(neg_log_probs)
     # Mean over all elements -> scalar loss
-    val loss = rt_torch_torchtensor_mean_dim(gathered, 1, false)
+    val loss = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_mean_dim(gathered, 1, false)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(gathered)
-    val scalar_loss = rt_torch_torchtensor_mean_dim(loss, 0, false)
+    val scalar_loss = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_mean_dim(loss, 0, false)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(loss)
     scalar_loss
@@ -70,14 +75,18 @@ fn cross_entropy_loss_tensor(logits: i64, targets: i64) -> i64:
 # pred, target: same shape tensors
 # Returns scalar tensor handle.
 fn compute_mse_loss_tensor(pred: i64, target: i64) -> i64:
-    val diff = rt_torch_torchtensor_sub(pred, target)
-    val sq = rt_torch_torchtensor_mul(diff, diff)
+    val diff = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_sub(pred, target)
+    val sq = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_mul(diff, diff)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(diff)
-    val per_sample = rt_torch_torchtensor_sum_dim(sq, 1, false)
+    val per_sample = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_sum_dim(sq, 1, false)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(sq)
-    val loss = rt_torch_torchtensor_mean_dim(per_sample, 0, false)
+    val loss = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_mean_dim(per_sample, 0, false)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(per_sample)
     loss
@@ -92,24 +101,30 @@ fn compute_mse_loss_tensor(pred: i64, target: i64) -> i64:
 # Returns normalized tensor handle.
 fn rms_norm(x: i64, weight: i64, eps: f64) -> i64:
     # variance = mean(x^2, dim=-1, keepdim=True)
-    val x_sq = rt_torch_torchtensor_mul(x, x)
-    val variance = rt_torch_torchtensor_mean_dim(x_sq, -1, true)
+    val x_sq = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_mul(x, x)
+    val variance = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_mean_dim(x_sq, -1, true)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(x_sq)
     # variance + eps
-    val var_eps = rt_torch_torchtensor_add_scalar(variance, eps)
+    val var_eps = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_add_scalar(variance, eps)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(variance)
     # sqrt(variance + eps)
-    val var_sqrt = rt_torch_torchtensor_sqrt(var_eps)
+    val var_sqrt = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_sqrt(var_eps)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(var_eps)
     # x / sqrt(variance + eps)
-    val normed = rt_torch_torchtensor_div(x, var_sqrt)
+    val normed = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_div(x, var_sqrt)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(var_sqrt)
     # multiply by learned weight
-    val result = rt_torch_torchtensor_mul(normed, weight)
+    val result = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_mul(normed, weight)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(normed)
     result
@@ -129,9 +144,11 @@ fn clip_grad_norm(param_handles: [i64], max_norm: f64) -> Result<f64, text>:
     var idx = 0
     while idx < param_handles.len():
         val h = param_handles[idx]
-        val g = rt_torch_autograd_grad(h)
+        val g = unsafe(capabilities: [ffi]):
+            rt_torch_autograd_grad(h)
         if g != 0:
-            val g_sq = rt_torch_torchtensor_mul(g, g)
+            val g_sq = unsafe(capabilities: [ffi]):
+                rt_torch_torchtensor_mul(g, g)
             val g_sum_result = torch_torchtensor_sum_result(g_sq)
             unsafe(capabilities: [ffi]):
                 rt_torch_torchtensor_free(g_sq)
@@ -151,9 +168,11 @@ fn clip_grad_norm(param_handles: [i64], max_norm: f64) -> Result<f64, text>:
         var j = 0
         while j < param_handles.len():
             val h2 = param_handles[j]
-            val g2 = rt_torch_autograd_grad(h2)
+            val g2 = unsafe(capabilities: [ffi]):
+                rt_torch_autograd_grad(h2)
             if g2 != 0:
-                val scaled = rt_torch_torchtensor_mul_scalar(g2, scale)
+                val scaled = unsafe(capabilities: [ffi]):
+                    rt_torch_torchtensor_mul_scalar(g2, scale)
                 # Cannot replace grad in-place — the backward graph handles this.
                 # The scaled tensor is used by the optimizer during the update step.
                 unsafe(capabilities: [ffi]):
@@ -188,23 +207,28 @@ fn rt_sqrt(x: f64) -> f64:
 # since we can't extract individual values easily.
 fn compute_accuracy(logits: i64, targets: i64) -> Result<f64, text>:
     # Get predicted class indices: argmax over dim 1
-    val preds = rt_torch_torchtensor_argmax(logits, 1, false)
+    val preds = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_argmax(logits, 1, false)
     # Compare: preds == targets → need sub then check zeros
     # Workaround: (preds - targets)^2, sum, if 0 then match
-    val diff = rt_torch_torchtensor_sub(preds, targets)
+    val diff = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_sub(preds, targets)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(preds)
-    val diff_sq = rt_torch_torchtensor_mul(diff, diff)
+    val diff_sq = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_mul(diff, diff)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(diff)
     # Count correct: where diff_sq == 0
     # Since we can't do element-wise comparison, use a threshold approach:
     # accuracy ≈ 1.0 - (number of nonzero / batch_size)
     # Approximate: mean of 1/(1 + diff_sq) gives ~1.0 for correct, ~0.0 for wrong
-    val ones = rt_torch_torchtensor_add_scalar(diff_sq, 1.0)
+    val ones = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_add_scalar(diff_sq, 1.0)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(diff_sq)
-    val inv = rt_torch_torchtensor_pow(ones, -1.0)
+    val inv = unsafe(capabilities: [ffi]):
+        rt_torch_torchtensor_pow(ones, -1.0)
     unsafe(capabilities: [ffi]):
         rt_torch_torchtensor_free(ones)
     val accuracy = torch_torchtensor_mean_result(inv)

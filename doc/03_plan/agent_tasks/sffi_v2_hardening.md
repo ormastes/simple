@@ -306,17 +306,17 @@ passing placeholder.
     owning facades. Preserve raw ABI scalars inside the minimal unsafe wrapper;
     do not add conversion allocation or extra provider dispatch.
 58. Ratchet the live call-authority census alongside declarations. Current
-    baseline: 21,371 raw calls, 12,903 production calls, 1,479 explicitly
-    authorized, and 19,892 missing authority after the Torch family sweep. Use the per-symbol/family/scope
+    baseline: 21,371 raw calls, 12,903 production calls, 1,885 explicitly
+    authorized, and 19,486 missing authority after completing Torch call authority. Use the per-symbol/family/scope
     reports to prioritize real production exposure, and keep report generation
     to one source scan plus linear aggregations.
-59. Migrate the remaining 406 production `rt_torch` calls through minimal lexical FFI
+59. Keep all 1,027 production `rt_torch` calls under minimal lexical FFI
     scopes or checked semantic wrappers. Do not merely reclassify the census.
     Preserve the current number of provider calls and CUDA synchronization
     points, and do not add per-call symbol lookup, availability probing,
     allocation, handle copies, or device transfers.
 60. Keep `scripts/audit/baselines/sffi-call-authority-v1.tsv` monotonic. Missing
-    authority may decrease but must not rise above 19,892. Update the baseline
+    authority may decrease but must not rise above 19,486. Update the baseline
     only in the same reviewed change that proves the corresponding raw calls
     gained minimal lexical authority or were removed; never relax it to absorb
     an unrelated regression.
