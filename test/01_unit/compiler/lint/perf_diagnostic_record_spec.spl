@@ -15,6 +15,8 @@ use compiler.tools.lint._LintMain.config_and_model.{
 }
 use compiler.tools.lint._LintMain.lint_checks.{lint_rule_code_from_easyfix_id}
 use compiler.tools.fix.rules.impl_.lint_annotation.{check_unknown_annotation}
+use compiler.tools.fix.rules.impl_.lint_wide_public.{
+    check_wide_public_text_with_lines}
 
 describe "performance diagnostic records":
     it "uses one honest text fallback for unknown annotations":
@@ -113,6 +115,30 @@ describe "performance diagnostic records":
         expect(spec_source).not.to_contain(
             "source.slice(search_pos).find(\"\\\"\\\"\\\"\")")
         expect(lint_source.count("me check_silent_default_spl(")).to_equal(1)
+
+    it "deduplicates wide-public exports with indexed membership":
+        step("Keep export counting linear and exact")
+        var distinct: [text] = []
+        var index = 0
+        while index < 31:
+            distinct.push("export public_name_{index}")
+            index = index + 1
+        val over = check_wide_public_text_with_lines("regular.spl", distinct)
+        expect(over.len()).to_equal(1)
+        expect(over[0].description).to_contain("exports 31 public symbols")
+        var duplicates: [text] = []
+        index = 0
+        while index < 31:
+            duplicates.push("export repeated_name")
+            index = index + 1
+        expect(check_wide_public_text_with_lines(
+            "regular.spl", duplicates).len()).to_equal(0)
+        val source = read_file(
+            "src/compiler/90.tools/fix/rules/impl_/lint_wide_public.spl")
+        expect(source).to_contain("seen_exports.has(name)")
+        expect(source).to_contain("exported_count = exported_count + 1")
+        expect(source).not.to_contain("list_has(exported_names")
+        expect(source).not.to_contain("fn list_has(")
 
     it "keeps uncertain performance advice non-deniable":
         step("Apply one evidence-aware CLI severity policy")
