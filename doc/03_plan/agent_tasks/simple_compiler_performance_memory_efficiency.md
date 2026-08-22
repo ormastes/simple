@@ -287,3 +287,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Reuse disabled/allow state without rereading or reparsing configuration.
 - Pin one-load session ownership with a source contract.
 - Follow-up: add bounded directory-to-manifest discovery caching.
+## Completed tooling tranche: bounded manifest discovery
+
+- Cache source/common-ancestor directory outcomes, including manifest misses.
+- Consult cached ancestors before filesystem probes.
+- Cap retained directory entries at 4096 and fall back to correct uncached discovery.
+- Mark caller-prepared paths so lint policy resolution does not repeat the walk.
+- Continue cloning policy before file-local attributes.
+- Follow-up: extend parsed-policy caching from the adjacent-project slot to bounded unique manifests.
