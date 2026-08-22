@@ -2189,6 +2189,21 @@ traffic falls from `O(M)` to `O(1)` per parse. Disabled clocks/output remain
 zero; enabled behavior remains four clocks and three `PARSEPROF` interval lines
 per method. Same-process changes are observed at the next parse boundary.
 
+### MIR lowering trace snapshot
+
+General MIR lowering read three environment flags per predicate, while the
+builder union also read `SIMPLE_MIRB_TRACE`. Structural prescans repeated the
+general predicate, `emit_call_value` read MIRB for every non-unit call, and
+three local caches retained their first process value indefinitely.
+
+`mir_data.spl` now owns `[depth, general, MIRB, generation]`. Outermost
+`lower_module` samples four aliases once; nested lowering inherits them; both
+bootstrap and normal exits restore depth. General and MIRB-only semantics remain
+distinct, and local caches refresh once per generation. Repeated environment
+and transient-text work becomes four reads per outer module; storage is
+constant and disabled formatting stays guarded. No runtime measurements are
+claimed under the no-verify constraint.
+
 ### Leading explicit-code allocation audit
 
 The leading `Edddd` probe previously allocated a one-character prefix, a
