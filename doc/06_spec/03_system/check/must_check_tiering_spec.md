@@ -35,9 +35,18 @@ evidence to a stale deployment.
 The push tier rejects missing, stale, malformed, duplicate, unknown, failed, or
 non-passing push-blocking rows. Manifest and ledger commands must agree. A PASS
 needs its own UTC pass timestamp plus an existing evidence file whose SHA-256
-matches the ledger; a TODO
+matches the ledger's blob in the exact pushed revision; live-worktree bytes are
+not evidence. A TODO
 or blocked row must say `never`. TODO and blocked non-push rows remain visible
 and are not reported as PASS.
+
+An unfinished receipt row becomes PASS only through
+`--record-gate-pass <id> --evidence <repo-relative-committed-receipt>`. Repeating
+the same receipt preserves the first PASS time, and later fingerprints carry it
+only while the exact committed blob/hash remains. Automated results remain
+source-fingerprint scoped. Bootstrap recording refuses dirty fingerprinted
+inputs, and automated/phase evidence is retained under
+`doc/08_tracking/check/evidence/<source-fingerprint>/` for the ledger commit.
 
 Every ledger v3 row also names its owner and unblock condition. Unowned rows,
 unfinished rows without actionable unblock text, and PASS rows that retain a
@@ -65,9 +74,12 @@ Its assertions require explicit PASS markers, exact Stage 4 binding, and timing 
 reviewed against that source; regeneration remains pending until an admitted
 Stage-4 CLI is available in the worktree.
 
-The Sdoctest bootstrap row additionally requires both the Markdown `Sdoctest:`
-and source-comment `SPL Doctest:` summaries to report at least one passing case
-and zero failures; the aggregate `Results:` count alone is insufficient.
+The Sdoctest bootstrap row first executes the named Markdown fixture
+`test/fixtures/doctest/green.md` and named source-comment fixture
+`test/fixtures/doc_coverage/fully_documented.spl`, then runs the whole tree.
+Both `Sdoctest:` and `SPL Doctest:` summaries must report at least one passing
+case with zero failures and zero skips; the aggregate `Results:` count alone is
+insufficient.
 
 ## Bootstrap Caret suite
 

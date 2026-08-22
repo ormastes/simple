@@ -24,6 +24,14 @@
   mode while its exhaustive fixture campaign is bootstrap-owned.
 - Prove production ledger validation rejects absolute external evidence,
   parent traversal, and aggregate evidence beyond 64 MiB before hashing.
+- Prove receipt-backed TODO first promotion requires an explicit committed
+  evidence blob, preserves its first PASS timestamp for unchanged evidence,
+  and carries across fingerprints only while the same blob/hash remains.
+- Prove live-worktree evidence modification/removal cannot affect exact-ref
+  validation, while a pushed revision that omits its evidence blob fails.
+- Prove production bootstrap recording rejects fingerprinted input drift from
+  `HEAD`, and compiler/automated evidence is retained in the commit-ready
+  tracking tree rather than ignored `build/` state.
 - Prove `--ref` rules evaluation ignores a hostile dirty `rules.sdl`, parses the
   committed registry, and fingerprints that policy in producer and consumer.
 - On a native Windows host, create two linked worktrees, run

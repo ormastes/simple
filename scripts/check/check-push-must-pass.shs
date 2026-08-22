@@ -14,6 +14,7 @@ ZERO=0000000000000000000000000000000000000000
 MAX_PUSH_REF_ROWS=2
 MAX_EVIDENCE_BYTES=67108864
 ALLOW_EXTERNAL_EVIDENCE=0
+EVIDENCE_REV=""
 
 die() { echo "push-must-check: FAIL — $*" >&2; exit 1; }
 
@@ -34,22 +35,29 @@ resolve_evidence_path() {
     case "$_candidate" in
         /*)
             [ "$ALLOW_EXTERNAL_EVIDENCE" -eq 1 ] || return 1
-            _joined=$_candidate
+            EVIDENCE_PATH=$_candidate
             ;;
         ''|..|../*|*/../*|*/..)
             return 1
             ;;
-        *)
-            _joined="$ROOT/$_candidate"
-            ;;
+        *) EVIDENCE_PATH="$ROOT/$_candidate" ;;
     esac
-    _evidence_dir=$(CDPATH= cd -- "$(dirname -- "$_joined")" 2>/dev/null && pwd -P) || return 1
-    case "$_evidence_dir" in
-        "$ROOT"|"$ROOT"/*) ;;
-        *) [ "$ALLOW_EXTERNAL_EVIDENCE" -eq 1 ] || return 1 ;;
-    esac
-    EVIDENCE_PATH="$_evidence_dir/$(basename -- "$_joined")"
-    [ -f "$EVIDENCE_PATH" ] && [ ! -L "$EVIDENCE_PATH" ]
+    if [ "$ALLOW_EXTERNAL_EVIDENCE" -eq 1 ]; then
+        _evidence_dir=$(CDPATH= cd -- "$(dirname -- "$EVIDENCE_PATH")" 2>/dev/null && pwd -P) || return 1
+        EVIDENCE_PATH="$_evidence_dir/$(basename -- "$EVIDENCE_PATH")"
+        [ -f "$EVIDENCE_PATH" ] && [ ! -L "$EVIDENCE_PATH" ] || return 1
+        EVIDENCE_SIZE=$(wc -c < "$EVIDENCE_PATH" | tr -d ' ') || return 1
+        EVIDENCE_SHA=$(hash_file "$EVIDENCE_PATH") || return 1
+        return 0
+    fi
+    _rel=${EVIDENCE_PATH#"$ROOT/"}
+    [ -n "$EVIDENCE_REV" ] || return 1
+    _entry=$(git -C "$ROOT" ls-tree "$EVIDENCE_REV" -- "$_rel" 2>/dev/null) || return 1
+    [ "$(printf '%s\n' "$_entry" | wc -l | tr -d ' ')" -eq 1 ] || return 1
+    _mode=$(printf '%s\n' "$_entry" | awk '{print $1}')
+    case "$_mode" in 100644|100755) ;; *) return 1 ;; esac
+    EVIDENCE_SIZE=$(git -C "$ROOT" cat-file -s "$EVIDENCE_REV:$_rel" 2>/dev/null) || return 1
+    EVIDENCE_SHA=$(git -C "$ROOT" show "$EVIDENCE_REV:$_rel" 2>/dev/null | sha256sum | awk '{print $1}') || return 1
 }
 
 field_from_text() {
@@ -94,11 +102,11 @@ validate_ledger_text() {
             [ -n "$_evidence" ] && [ "$_evidence" != never ] && [ "$_evidence" != "pending required evidence" ] || exit 25
             printf '%s\n' "$_evidence_sha" | grep -Eq '^[0-9a-f]{64}$' || exit 27
             resolve_evidence_path "$_evidence" || exit 28
-            _evidence_size=$(wc -c < "$EVIDENCE_PATH" | tr -d ' ') || exit 33
+            _evidence_size=$EVIDENCE_SIZE
             case "$_evidence_size" in ''|*[!0-9]*) exit 33 ;; esac
             _evidence_total=$(( _evidence_total + _evidence_size ))
             [ "$_evidence_total" -le "$MAX_EVIDENCE_BYTES" ] || exit 34
-            [ "$(hash_file "$EVIDENCE_PATH")" = "$_evidence_sha" ] || exit 29
+            [ "$EVIDENCE_SHA" = "$_evidence_sha" ] || exit 29
             [ "$_unblock" = none ] || exit 31
         elif [ "$_passed_at" != never ]; then
             exit 24
@@ -208,6 +216,7 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     _ledger=$(git -C "$ROOT" show "$_local_sha:$LEDGER_REL" 2>/dev/null) || die "ledger is missing from $_local_sha"
     _manifest=$(git -C "$ROOT" show "$_local_sha:$MANIFEST_REL" 2>/dev/null) || die "manifest is missing from $_local_sha"
     _fp=$(fingerprint_rev "$_local_sha") || die "cannot fingerprint $_local_sha"
+    EVIDENCE_REV=$_local_sha
     validate_ledger_text "$_manifest" "$_ledger" "$_fp" || die "ledger is malformed stale or has a non-passing push-blocking row"
     _range="$_remote_sha..$_local_sha"
     if [ "$_remote_sha" = "$ZERO" ]; then

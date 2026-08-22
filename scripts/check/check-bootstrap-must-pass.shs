@@ -8,6 +8,8 @@ LEDGER=${MUST_CHECK_LEDGER:-$ROOT/doc/08_tracking/check/must_check_db.sdn}
 MODE=run
 [ "${1:-}" = --record-bootstrap-success ] && MODE=record-bootstrap
 [ "${1:-}" = --self-test ] && MODE=selftest
+RECORD_GATE_ID=""
+RECORD_GATE_EVIDENCE=""
 OUTPUT_DIR=build/bootstrap
 STAGE4_BINARY=""
 STAGE4_PROVENANCE=""
@@ -15,6 +17,8 @@ AUTOMATED_SIMPLE_BINARY=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --record-bootstrap-success|--self-test) shift ;;
+        --record-gate-pass) MODE=record-gate; RECORD_GATE_ID=$2; shift 2 ;;
+        --evidence) RECORD_GATE_EVIDENCE=$2; shift 2 ;;
         --output-dir) OUTPUT_DIR=$2; shift 2 ;;
         --stage4-binary) STAGE4_BINARY=$2; shift 2 ;;
         --stage4-provenance) STAGE4_PROVENANCE=$2; shift 2 ;;
@@ -33,6 +37,24 @@ fingerprint_head() {
 
 hash_file() {
     sha256sum -- "$1" 2>/dev/null | awk '{print $1}'
+}
+
+head_blob_metadata() {
+    _path=$1
+    case "$_path" in ''|/*|..|../*|*/../*|*/..) return 1 ;; esac
+    _entry=$(git -C "$ROOT" ls-tree HEAD -- "$_path" 2>/dev/null) || return 1
+    [ "$(printf '%s\n' "$_entry" | wc -l | tr -d ' ')" -eq 1 ] || return 1
+    _mode=$(printf '%s\n' "$_entry" | awk '{print $1}')
+    case "$_mode" in 100644|100755) ;; *) return 1 ;; esac
+    HEAD_BLOB_SIZE=$(git -C "$ROOT" cat-file -s "HEAD:$_path" 2>/dev/null) || return 1
+    HEAD_BLOB_SHA=$(git -C "$ROOT" show "HEAD:$_path" 2>/dev/null | sha256sum | awk '{print $1}') || return 1
+}
+
+fingerprinted_inputs_clean() {
+    _paths='src scripts config test rules.sdl doc/07_guide doc/00_llm_process doc/glossary.md'
+    git -C "$ROOT" diff --quiet HEAD -- $_paths || return 1
+    git -C "$ROOT" diff --cached --quiet HEAD -- $_paths || return 1
+    [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all -- $_paths)" ]
 }
 
 evidence_hash() {
@@ -208,7 +230,7 @@ if [ -n "${MUST_CHECK_EVIDENCE_DIR:-}" ]; then
     }
     _evidence_dir=$MUST_CHECK_EVIDENCE_DIR
 else
-    _evidence_dir="$ROOT/build/must-check/$_fp"
+    _evidence_dir="$ROOT/doc/08_tracking/check/evidence/$_fp"
 fi
 mkdir -p "$_evidence_dir"
 _old_fp=""
@@ -218,6 +240,25 @@ _carry_pass=0
 _rows=""
 _failed=0
 _phase_results=""
+if [ "$MODE" != selftest ] && [ "${MUST_CHECK_SELFTEST:-0}" != 1 ] && ! fingerprinted_inputs_clean; then
+    echo "bootstrap-must-check: ERROR — fingerprinted inputs differ from HEAD" >&2
+    exit 2
+fi
+if [ "$MODE" = record-gate ]; then
+    [ -n "$RECORD_GATE_ID" ] && [ -n "$RECORD_GATE_EVIDENCE" ] || {
+        echo "bootstrap-must-check: ERROR — --record-gate-pass requires --evidence" >&2
+        exit 2
+    }
+    _record_mode=$(awk -F, -v id="$RECORD_GATE_ID" '{x=$1; gsub(/^[[:space:]]+/, "", x); if (x==id) {v=$4; gsub(/[[:space:]]/, "", v); print v; exit}}' "$MANIFEST")
+    [ "$_record_mode" = todo ] || {
+        echo "bootstrap-must-check: ERROR — $RECORD_GATE_ID is not a TODO receipt gate" >&2
+        exit 2
+    }
+    head_blob_metadata "$RECORD_GATE_EVIDENCE" || {
+        echo "bootstrap-must-check: ERROR — evidence must be a committed regular file at HEAD" >&2
+        exit 2
+    }
+fi
 if [ "$MODE" = record-bootstrap ]; then
     _phase_results=$(validate_compiler_phases) || {
         echo "bootstrap-must-check: FAIL — compiler Stage 1/2/3/4 evidence did not all pass" >&2
@@ -256,11 +297,24 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
     _owner=$(gate_owner "$_id")
     _unblock=$_description
     _unblock=$(printf '%s' "$_unblock" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
-    if [ "$MODE" = record-bootstrap ] && { [ "$_id" = compiler-stage1 ] || [ "$_id" = compiler-stage2 ] || [ "$_id" = compiler-stage3 ] || [ "$_id" = compiler-stage4 ]; }; then
+    if [ "$MODE" = record-gate ] && [ "$_id" = "$RECORD_GATE_ID" ]; then
+        head_blob_metadata "$RECORD_GATE_EVIDENCE" || exit 1
+        _old=$(row_value "$_id" 2)
+        _old_evidence=$(row_value "$_id" 5)
+        _old_sha=$(row_value "$_id" 6)
+        _status=pass; _evidence=$RECORD_GATE_EVIDENCE; _evidence_sha=$HEAD_BLOB_SHA; _unblock=none
+        if [ "$_old" = pass ] && [ "$_old_evidence" = "$RECORD_GATE_EVIDENCE" ] && [ "$_old_sha" = "$HEAD_BLOB_SHA" ]; then
+            _passed_at=$(row_value "$_id" 3)
+        else
+            _passed_at=$_at
+        fi
+    elif [ "$MODE" = record-bootstrap ] && { [ "$_id" = compiler-stage1 ] || [ "$_id" = compiler-stage2 ] || [ "$_id" = compiler-stage3 ] || [ "$_id" = compiler-stage4 ]; }; then
         _status=pass; _passed_at=$_at
-        _evidence=$(printf '%s\n' "$_phase_results" | sed -n "s/^$_id-evidence=//p")
-        [ -n "$_evidence" ] || { echo "bootstrap-must-check: FAIL — missing $_id evidence reference" >&2; exit 1; }
-        case "$_evidence" in "$ROOT/"*) _evidence=${_evidence#"$ROOT/"} ;; esac
+        _source_evidence=$(printf '%s\n' "$_phase_results" | sed -n "s/^$_id-evidence=//p")
+        [ -n "$_source_evidence" ] || { echo "bootstrap-must-check: FAIL — missing $_id evidence reference" >&2; exit 1; }
+        _retained_evidence="$_evidence_dir/${_id}.receipt"
+        cp -- "$_source_evidence" "$_retained_evidence" || exit 1
+        _evidence=${_retained_evidence#"$ROOT/"}
         _evidence_sha=$(evidence_hash "$_evidence") || exit 1
         _unblock=none
     elif { [ "$MODE" = run ] || [ "$MODE" = record-bootstrap ]; } && [ "$_gate_mode" = automated ]; then
@@ -280,13 +334,19 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
         fi
     else
         _old=$(row_value "$_id" 2)
-        if [ "$_carry_pass" -eq 1 ] && [ "$_old" = pass ]; then
+        _old_evidence=$(row_value "$_id" 5)
+        _old_sha=$(row_value "$_id" 6)
+        _durable_pass=0
+        if [ "$_gate_mode" = todo ] && [ "$_old" = pass ] && head_blob_metadata "$_old_evidence" && [ "$HEAD_BLOB_SHA" = "$_old_sha" ]; then
+            _durable_pass=1
+        fi
+        if [ "$_old" = pass ] && { [ "$_carry_pass" -eq 1 ] || [ "$_durable_pass" -eq 1 ]; }; then
             _status=pass
             _passed_at=$(row_value "$_id" 3)
-            _evidence_sha=$(row_value "$_id" 6)
+            _evidence_sha=$_old_sha
             _unblock=none
         fi
-        _evidence=$(row_value "$_id" 5)
+        _evidence=$_old_evidence
         [ -n "$_evidence" ] || _evidence='pending required evidence'
     fi
     printf '    %s, %s, %s, "%s", "%s", "%s", "%s", "%s"\n' "$_id" "$_status" "$_passed_at" "$_command" "$_evidence" "$_evidence_sha" "$_owner" "$_unblock" >> "$_rows_tmp"

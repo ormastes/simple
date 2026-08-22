@@ -5,8 +5,9 @@ input or more than two unique updates, and deduplicates identical tip/base
 pairs. For each remaining outgoing revision it loads the manifest and ledger from that committed revision,
 recomputes the source fingerprint, validates ledger cardinality/status/command
 parity and evidence hashes, and runs the registry's `tier=push` range/ref rows.
-Production evidence is repository-contained and its aggregate hashed size is
-limited to 64 MiB. The tree-size range row is dispatched in `--push-tip` mode:
+Production evidence is a regular blob loaded from the exact pushed revision;
+the live checkout is not consulted, and aggregate hashed size is limited to
+64 MiB. The tree-size range row is dispatched in `--push-tip` mode:
 it retains absolute size, duplicate entry, source shape, load-bearing path, and
 first-parent delta checks without materializing or scanning every outgoing
 commit. Exhaustive detector fixtures run in the bootstrap tier.
@@ -18,9 +19,15 @@ diagnostic and self-test fixtures.
 bootstrap-completion mode first requires the exact Stage 2/3 full-provenance
 verdict and Stage 4 `post_bootstrap_stage4_acceptance=true` oracle, records
 distinct Stage 1–4 evidence references, and then executes every automated row.
-Gate logs are retained under the source fingerprint and accepted only when the
+Gate logs are retained under
+`doc/08_tracking/check/evidence/<source-fingerprint>/` and accepted only when the
 last non-empty line is an explicit PASS verdict. Ledger replacement is atomic
 only after row evaluation completes.
+Production recording requires fingerprinted inputs to match `HEAD`. The
+`--record-gate-pass <id> --evidence <repo-relative-path>` interface applies only
+to manifest `todo` rows and accepts a committed regular evidence blob. Repeating
+the same receipt preserves its first PASS timestamp; later fingerprints retain
+it only while the same blob and SHA-256 remain committed.
 In completion mode, automated dispatch receives the canonical validated Stage 4
 candidate as both `SIMPLE_BINARY` and `SIMPLE_BIN`; these assignments override
 any ambient value. The

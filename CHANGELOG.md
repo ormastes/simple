@@ -5,6 +5,10 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Exact-ref mandatory-check evidence** — retain bootstrap gate logs in a
+  commit-ready textual evidence tree, validate them from the exact pushed Git
+  revision, reject dirty bootstrap attribution, and allow receipt-backed TODO
+  rows to earn a durable hash-bound PASS without adding costly work to push.
 - **UP Squared resident RAM boot and storage evidence** — add a free GNU-EFI
   PE32+ mailbox loader with strong per-boot nonce, commit-last SHA-256/ELF64
   admission, final EFI-map/Multiboot2 construction, embedded ELF32 shim, and
