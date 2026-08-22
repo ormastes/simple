@@ -27,6 +27,10 @@ quadratic growing-array searches. Its exact counter adapters cross-check native 
 against serialized change and fail on disagreement. It is not yet the pipeline-wide
 `--verify-each` gate.
 
+Each structural failure carries a stable `MIRV001`-`MIRV019` code parallel to its
+human message. `MIRV999` explicitly marks an unclassified future failure instead of
+silently inventing a semantic category.
+
 Consequently `simple.opt-pipeline-report/v1` deliberately records
 `run_outcome: not-run` and null execution counters. Selection must not be interpreted as
 execution.
