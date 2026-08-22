@@ -1440,3 +1440,12 @@ through `TorchNDArray` instead of fabricating handle zero. Readiness passes
 13/13. Each path keeps one availability query, one direct raw call, and
 constant input/output checks with no allocation, lookup, hashing, I/O, retry,
 or synchronization added. The foreign implementations remain unsafe-tagged.
+
+The authoritative static census now distinguishes unsafe declarations whose
+unsafe surface has been minimized (both an unsafe tag and a documented
+contract) from unminimized unsafe declarations, and reports verified/signed
+counts per family and scope. Current owned-code totals are 12,294 declaration
+rows and 3,167 distinct symbols: 12,294 unsafe, 315 unsafe-minimized, 11,979
+unsafe-unminimized, 11,237 untouched, and zero evidence-verified, signed, or
+admitted. Implementations found by language are Simple 558, Rust 2,161, C
+2,323, and C++ 211. These are static source statistics, not safety proof.

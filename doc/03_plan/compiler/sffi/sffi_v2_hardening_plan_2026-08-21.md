@@ -1137,3 +1137,10 @@ Softmax, log-softmax, and leaky ReLU now preserve typed errors end-to-end.
 Readiness passes 13/13 and each wrapper retains one direct raw call. Next
 migrate scalar reductions to status/value results so valid numeric zero cannot
 be confused with provider failure; signed admission remains pending.
+
+The census now reports and ratchets `unsafe_minimized_rows` separately from
+unminimized unsafe rows, with family/scope evidence and signature columns.
+Current totals are 12,294 rows: 315 unsafe-minimized, 11,979 unminimized,
+11,237 untouched, and zero verified/signed. Use the largest untouched families
+(`rt_file`, `rt_process`, `rt_env`, then `rt_time`) as the next broad migration
+order while the cross-lane Torch scalar status/out ABI is designed.
