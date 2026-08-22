@@ -71,33 +71,77 @@ fn hir_phase_profile_enabled() -> bool:
         _hir_prof_state = if (rt_env_get("SIMPLE_HIR_PHASE_PROFILE") ?? "") == "1": 1 else: 2
     _hir_prof_state == 1
 
+# EXCL (2026-08-22): exclusive time per slot. Every `now()` opens a frame
+# (pushes a child-time accumulator) and the paired `add()` closes it, so
+# `_hir_prof_excl_ms[slot]` is the slot's time MINUS the time of every
+# profiled slot nested inside it. The RIS slots recurse into each other
+# (field_dep -> register_imported_symbol -> methods -> callable_deps -> ...),
+# which made the inclusive numbers sum to several times the module total and
+# hid where one first-time registration actually spends its ~40 ms. All
+# `now()`/`add()` pairs are balanced on every path (audited 2026-08-22).
+var _hir_prof_excl_ms: [i64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+var _hir_prof_child_stack: [i64] = []
+
 fn hir_phase_profile_now() -> i64:
     """Clock read for one boundary; 0 when profiling is off (never read)."""
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return 0
     if not hir_phase_profile_enabled():
         return 0
+    _hir_prof_child_stack.push(0)
     rt_time_now_monotonic_ms()
 
 fn hir_phase_profile_add(slot: i64, started_ms: i64):
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return 0
     if not hir_phase_profile_enabled():
         return
+    val elapsed = rt_time_now_monotonic_ms() - started_ms
+    var child_ms = 0
+    if _hir_prof_child_stack.len() > 0:
+        child_ms = _hir_prof_child_stack.pop()
+    if _hir_prof_child_stack.len() > 0:
+        val top = _hir_prof_child_stack.len() - 1
+        _hir_prof_child_stack[top] = _hir_prof_child_stack[top] + elapsed
     if slot < 0 or slot >= HIR_PROF_SLOT_COUNT:
         return
-    _hir_prof_ms[slot] = _hir_prof_ms[slot] + (rt_time_now_monotonic_ms() - started_ms)
+    _hir_prof_ms[slot] = _hir_prof_ms[slot] + elapsed
+    _hir_prof_excl_ms[slot] = _hir_prof_excl_ms[slot] + (elapsed - child_ms)
     _hir_prof_calls[slot] = _hir_prof_calls[slot] + 1
 
 fn hir_phase_profile_count_glob_expansion():
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return
     if hir_phase_profile_enabled():
         _hir_prof_glob_expansions = _hir_prof_glob_expansions + 1
 
 fn hir_phase_profile_count_imported_symbol():
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return
     if hir_phase_profile_enabled():
         _hir_prof_imported_symbol_calls = _hir_prof_imported_symbol_calls + 1
 
 fn hir_phase_profile_count_imported_symbol_skip():
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return
     if hir_phase_profile_enabled():
         _hir_prof_imported_symbol_skips = _hir_prof_imported_symbol_skips + 1
 
 fn hir_phase_profile_count_qtype(missed: bool):
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return
     if hir_phase_profile_enabled():
         _hir_prof_qtype_queries = _hir_prof_qtype_queries + 1
         if missed:
@@ -107,11 +151,19 @@ fn hir_phase_profile_count_explicit_scan(items: i64):
     """One full `use`-item sweep of a declaring surface, plus the number of
     import items it compared. Items-per-scan is the term that grows with the
     closure, so it is counted rather than inferred."""
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return 0
     if hir_phase_profile_enabled():
         _hir_prof_explicit_scans = _hir_prof_explicit_scans + 1
         _hir_prof_explicit_items = _hir_prof_explicit_items + items
 
 fn hir_phase_profile_count_enum_lowering():
+    # PROFOFF fast path: state 2 is the cached "off" verdict; skip the
+    # `hir_phase_profile_enabled()` call (~10 us interpreted) per site.
+    if _hir_prof_state == 2:
+        return
     if hir_phase_profile_enabled():
         _hir_prof_enum_lowerings = _hir_prof_enum_lowerings + 1
 
@@ -121,8 +173,11 @@ fn hir_phase_profile_module_begin():
     var slot = 0
     while slot < HIR_PROF_SLOT_COUNT:
         _hir_prof_ms[slot] = 0
+        _hir_prof_excl_ms[slot] = 0
         _hir_prof_calls[slot] = 0
         slot = slot + 1
+    val fresh_child_stack: [i64] = []
+    _hir_prof_child_stack = fresh_child_stack
     _hir_prof_glob_expansions = 0
     _hir_prof_imported_symbol_calls = 0
     _hir_prof_imported_symbol_skips = 0
@@ -174,4 +229,20 @@ fn hir_phase_profile_module_end(module_name: text):
         + " fields={_hir_prof_ms[HIR_PROF_RIS_FIELDS]}ms/{_hir_prof_calls[HIR_PROF_RIS_FIELDS]}"
         + " project={_hir_prof_ms[HIR_PROF_RIS_PROJECT]}ms/{_hir_prof_calls[HIR_PROF_RIS_PROJECT]}"
         + " qtype={_hir_prof_qtype_queries}/{_hir_prof_qtype_misses} miss")
+    eprint("[hir-prof-excl] module={module_name}"
+        + " imports={_hir_prof_excl_ms[HIR_PROF_IMPORTS]}ms"
+        + " glob={_hir_prof_excl_ms[HIR_PROF_GLOB]}ms"
+        + " enums={_hir_prof_excl_ms[HIR_PROF_ENUMS]}ms"
+        + " functions={_hir_prof_excl_ms[HIR_PROF_FUNCTIONS]}ms"
+        + " callable_deps={_hir_prof_excl_ms[HIR_PROF_RIS_CALLABLE_DEPS]}ms"
+        + " declared_dep={_hir_prof_excl_ms[HIR_PROF_RIS_DECLARED_DEP]}ms"
+        + " explicit_dep={_hir_prof_excl_ms[HIR_PROF_RIS_EXPLICIT_DEP]}ms"
+        + " field_dep={_hir_prof_excl_ms[HIR_PROF_RIS_FIELD_DEP]}ms"
+        + " payload={_hir_prof_excl_ms[HIR_PROF_RIS_PAYLOAD]}ms"
+        + " methods={_hir_prof_excl_ms[HIR_PROF_RIS_METHODS]}ms"
+        + " sigtype={_hir_prof_excl_ms[HIR_PROF_RIS_SIGTYPE]}ms"
+        + " define={_hir_prof_excl_ms[HIR_PROF_RIS_DEFINE]}ms"
+        + " scan={_hir_prof_excl_ms[HIR_PROF_RIS_SCAN]}ms"
+        + " fields={_hir_prof_excl_ms[HIR_PROF_RIS_FIELDS]}ms"
+        + " project={_hir_prof_excl_ms[HIR_PROF_RIS_PROJECT]}ms")
     rt_stdout_flush()

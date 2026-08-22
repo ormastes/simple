@@ -158,6 +158,23 @@ must_contain     "MATCHRET hoisted early-exit"                    "$HIRREG" 'val
 must_contain     "IMPLIDX per-surface impl index"                 "$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl" "val impl_positions = self.imported_impl_positions(imported_mod, imported_name)"
 must_contain     "MATCHRET/IMPLIDX cost spec"                     "$ROOT/test/01_unit/compiler/hir/hir_import_registration_per_symbol_cost_spec.spl" "PER_REGISTRATION_BUDGET_US"
 
+# --- NAMEIDX / SCOPEROW / EXCL / seed hot-path (2026-08-22, 7th session of the
+# same record). NAMEIDX: the six linear name sweeps per first-time registration
+# become Dict probes on a per-surface index (one sweep per surface, pinned by
+# name_index_build_count == packages). SCOPEROW: SymbolTable.define probes the
+# scope row in place instead of copying it. Seed: decision coverage resolves the
+# file only when coverage is ON; block-scope shadow capture computes the owner
+# target only when there is a prior value; CowEnv per-frame maps use ahash.
+must_contain     "NAMEIDX per-surface name index"                 "$HIRREG" 'val surface_key = self.ensure_surface_name_index(imported_mod)'
+must_not_contain "NAMEIDX no linear composite scan"               "$HIRREG" 'val composite_position = module_surface_name_position('
+must_contain     "NAMEIDX build count pinned"                     "$ROOT/test/01_unit/compiler/hir/hir_import_registration_per_symbol_cost_spec.spl" "expect(lowering.name_index_build_count).to_equal(FIXTURE_PACKAGES)"
+must_contain     "SCOPEROW define probes scope row in place"      "$ROOT/src/compiler/20.hir/hir_types.spl" 'val existing = self.scopes[self.current_scope.id].symbols.get(name)'
+must_contain     "EXCL exclusive slot time"                       "$ROOT/src/compiler/20.hir/hir_lowering/hir_phase_profile.spl" '_hir_prof_excl_ms[slot] = _hir_prof_excl_ms[slot] + (elapsed - child_ms)'
+must_contain     "seed: decision coverage checks enabled first"   "$ROOT/src/compiler_rust/compiler/src/interpreter_control.rs" 'record_decision_coverage_here('
+must_not_contain "seed: no eager coverage file per decision"      "$ROOT/src/compiler_rust/compiler/src/interpreter_control.rs" 'record_decision_coverage_sffi(&current_coverage_file(),'
+must_contain     "seed: CowEnv frame maps on ahash"               "$ROOT/src/compiler_rust/compiler/src/value.rs" 'pub(crate) type FrameMap<K, V> = HashMap<K, V, ahash::RandomState>;'
+must_contain     "seed: shadow capture tests prior value first"   "$ROOT/src/compiler_rust/compiler/src/interpreter/block_exec.rs" 'if let Some(value) = prior_value.as_ref() {'
+
 # --- pure-Simple core interpreter: collection writes through the owner, not a
 # temp alias (`var v = val_arrays[x]; v.push(e); val_arrays[x] = v` deep-copies
 # the whole array per write under COW value semantics: 22.3 s vs 1 ms at N=16k).

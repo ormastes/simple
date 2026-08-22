@@ -508,3 +508,120 @@ rows added to `scripts/check/check-perf-regression-tests.shs`.
   statement in the frame ~10 ms. Other `val x = match ...: ... return` sites
   across the compiler will pay the same; a census is owed. The closure-level
   wall time is still owed after the next seed deploy (same caveat as session 5).
+
+## Seventh session (2026-08-22): the whole stage1 compiler runs INTERPRETED
+
+Seed `/mnt/data/seedperf/simple.1ffdfb58baf` (match-expr + me-call fixes in),
+worktree `perf-hirwall` at `a32c3f3464f`. Two sessions were spent on
+`define` (2-3 ms in context) and `methods` (~10 ms); both turned out to be the
+same thing, and it is not in the compiler.
+
+### The frame cliff is the module's import graph, and it is JIT-vs-interpreter
+
+`SymbolTable.define` is **12 us** from a 4-line probe and **320-470 us** from
+`register_imported_symbol_inner` -- same seed, same receiver, same arguments.
+Bisected by hand: not the table size (flat to 30k symbols), not the nested
+`self.symbols.define` receiver path (13 us), not expression vs statement
+context, not 30 live locals, not call depth 24, not a 20k-entry outer object.
+It is the probe file's `use` header: copying the 23 `use` lines of
+`module_import_registration.spl` onto the unchanged probe makes the same
+define cost 190-450 us. Single lines reproduce it: `use
+compiler.frontend.flat_ast_bridge.{..}` -> 495 us, `..._Items.module_lowering.*`
+-> 227 us, `..._AstExpr.accessors.{expr_get_arg_names}` -> 210 us,
+`compiler.core.types.{int_to_str}` -> 53 us.
+
+Every statement in the probe costs 0 ms JIT-compiled and ~2 us interpreted; a
+call costs ~0 vs 8-16 us. The seed's `run` is whole-program JIT-or-nothing
+(`driver/src/exec_core.rs:1006-1035`): one unsupported construct anywhere in
+the closure prints `JIT compilation failed, falling back to interpreter` and
+the ENTIRE program runs on the tree-walker. The real bootstrap log shows
+exactly one such line:
+
+    Cranelift JIT compile: Module error: function '_make_noop_lexer' loads a
+    named function as a callable value; the JIT closure ABI has no tag-boxed
+    representation for a bare function pointer
+
+(`src/compiler/00.common/compiler_services.spl:168`, the port structs hold fn
+refs; open P2 `jit_closure_abi_refuses_lambdas_and_miscompiles_fn_refs_2026-08-06.md`).
+So **stage1 = the seed interpreting 1,500 compiler files at ~2 us/statement
+and ~10 us/call.** That is the ~200x between 42 s and 0.2 s per module, and
+it is why `define` is 12 us in a spec and 400 us in the compiler: the spec's
+closure JIT-compiles, the compiler's does not. Every number in sessions 1-6
+was measured on the interpreter; they stay valid, but none of them was a
+compiler-side algorithm past session 5. The remaining "bugs" are statement
+and call COUNTS on the interpreter.
+
+### What one first-time registration is, in calls
+
+Exclusive-time profiling (EXCL below) on the N=60 synthetic fixture, seed
+`simple.hirwall-wip`: `callable_deps` body 0.48 ms params loop + 0.24 ms
+return part per call = ~15 interpreted calls per parameter
+(`qtype_raw_counted` x2 -> `lookup_qualified_type_raw` -> key concat -> has ->
+bracket, plus the profile counter, plus `declared_dep`/`explicit_dep`), at
+~10 us each. `methods` is two of those plus `sigtype` + `define`. Nothing left
+is O(n) per call; it is ~300 small calls per registration.
+
+### Fixes
+
+- **NAMEIDX** (`module_import_registration.spl`, `types.spl`): the six linear
+  `module_surface_name_position` sweeps per first-time registration become six
+  Dict probes on a per-surface index built by one sweep per frozen surface
+  (`{generation} {physical_index} {C|E|T|A|F|K} {name}` -> position, first
+  occurrence wins like the scan). Counter `name_index_build_count`, pinned to
+  `== packages` in `hir_import_registration_per_symbol_cost_spec.spl`.
+  `scan` 229 -> 116 ms / 369 on the fixture (real surfaces are larger).
+- **SCOPEROW** (`hir_types.spl`): `define` probes `self.scopes[id].symbols` in
+  place instead of copying the Scope row (`VT_OBJECT_FIELD_CLONES` 1 per call).
+  Resolves the open "Scope row copy" item; `lookup` keeps its
+  `rt_dict_contains` bracket read unchanged.
+- **EXCL** (`hir_phase_profile.spl`): `[hir-prof-excl]` line with EXCLUSIVE
+  time per slot (child-time stack paired with the existing `now()`/`add()`
+  sites, all audited balanced). The inclusive RIS slots recurse into each
+  other and summed to 3-4x the module total; they could not say where the
+  41 ms went.
+- **PROFOFF** (`hir_phase_profile.spl`): every profiler site cost two
+  interpreted calls with profiling OFF (`now()` -> `enabled()`); the cached
+  "off" verdict now returns first. Fixture: 6,436 us/reg profile-on vs
+  **4,216 us/reg profile-off** -- the profiler inflates its own numbers ~35%,
+  which applies to every `[hir-prof]` line in this record.
+- **Seed hot path** (`src/compiler_rust/compiler/src/`, gdb-sampled since
+  `perf` is blocked here): (1) `record_decision_coverage_here` -- every
+  if/elif/while/match decision resolved `current_coverage_file()` (thread-local
+  borrow + String alloc) BEFORE the coverage-enabled check; 12 sites. (2)
+  `capture_node_scope_shadows` computed the owner write-back target (a
+  `global_binding` probe + `CURRENT_EXEC_MODULE` String clone) for every
+  block-local `val` on every block entry; it now tests the prior value first
+  (same writes in every case that wrote before). (3) `CowEnv::insert` skipped
+  nothing: two SipHash removes on sets that are empty in the common frame.
+  (4) `CowEnv`'s private per-frame maps (`overlay`, `tombstones`,
+  `local_bindings`, `block_local_bindings`, `refreshed_globals`,
+  `forwarded_globals`, `dirty_names`, `uninit_names`) on `ahash` (`FrameMap`
+  / `FrameSet`); public signatures still hand out std maps; iteration order
+  was already per-process random. Unit test
+  `cow_env_frame_maps_round_trip_and_tombstone_clear`. Micro-probes, old ->
+  new seed: 3 plain statements 17 -> 11 ms/3000, struct ctor 18 -> 12, free
+  fn call 29 -> 24, me call 29 -> 24, call loop 2363 -> 1779 ms/300k. All 5
+  cost/regression specs and the interpreter spec directory A/B pass.
+
+### Not fixed, and the order of magnitude that is left
+
+- The glob re-walk is NOT the glob cost: a memo-hit `register_imported_symbol`
+  is 44 us, so re-walking a 200-name surface is ~9 ms, <1% of the 38 s glob
+  on `driver_types.spl`. Glob time IS first-time registrations. The
+  module-scoped glob memo was designed and dropped on that measurement.
+- 87 `[hir-payload-origin-unresolved]` searches on the entry module are for
+  builtin type names (`text` 29, `bool` 14, `Option` 12, `Any`, `char`,
+  `Dict`) plus `i` 16 and `f` 6 -- which look like `i64`/`f64` with the digits
+  stripped by whoever produced the payload name. Each pays the declaration
+  probe + re-export walk + explicit-import sweep and finds nothing. Cheap
+  individually; filed here, not fixed (the name-splitting half needs its own
+  repro).
+- The remaining per-registration cost is ~300 interpreted calls at ~10 us.
+  The sampled profile after this session is a flat tail across the
+  tree-walker (thread-local owner saves, owner-map hashing, per-call
+  allocations, `publish_live_bound_globals` / `sync_owned_captured_globals`
+  walking both frames' overlays on every `me` call). Getting to the 10-min
+  stage1 target needs one of: the JIT closure ABI (P2 above) so the compiler
+  stops running interpreted at all, a per-function JIT fallback instead of
+  whole-program, or a pre-resolved-slot interpreter. None of those is a
+  minimal fix.

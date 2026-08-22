@@ -144,22 +144,53 @@ impl HirLowering:
             import_span, materialize_enum)
         self.registered_import_memo[registered_key] = true
 
+    me ensure_surface_name_index(imported_mod: ModuleSurface) -> text:
+        """NAMEIDX: build the name -> position index of one frozen surface on
+        first use (one sweep per declaration-kind array) and return the
+        surface key every probe is prefixed with. Keyed on the frozen
+        registry only, so it is shared across importers and never cleared."""
+        val surface_key = "{self.module_surfaces.generation} {imported_mod.physical_index}"
+        if not self.name_index_built.contains_key(surface_key):
+            self.name_index_build_count = self.name_index_build_count + 1
+            self.index_surface_names(surface_key + " C ", imported_mod.composite_names)
+            self.index_surface_names(surface_key + " E ", imported_mod.enum_names)
+            self.index_surface_names(surface_key + " T ", imported_mod.trait_names)
+            self.index_surface_names(surface_key + " A ", imported_mod.type_alias_names)
+            self.index_surface_names(surface_key + " F ", imported_mod.callable_names)
+            self.index_surface_names(surface_key + " K ", imported_mod.constant_names)
+            self.name_index_built[surface_key] = true
+        surface_key
+
+    me index_surface_names(prefix: text, names: [text]):
+        var position = 0
+        while position < names.len():
+            val key = prefix + names[position]
+            # First occurrence wins: identical to the linear scan's first hit.
+            if not self.name_index_positions.contains_key(key):
+                self.name_index_positions[key] = position
+            position = position + 1
+
+    fn surface_name_position(surface_key: text, kind: text, name: text) -> i64:
+        """Position of `name` in the `kind` array of the indexed surface, or -1.
+        Bracket read after contains_key: the native-path Dict.get caveat."""
+        val key = surface_key + " " + kind + " " + name
+        if self.name_index_positions.contains_key(key):
+            return self.name_index_positions[key]
+        -1
+
     me register_imported_symbol_inner(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         val imported_mod = self.module_surfaces.surfaces[imported_index]
         hir_phase_profile_count_imported_symbol()
         val scan_started = hir_phase_profile_now()
-        val composite_position = module_surface_name_position(
-            imported_mod.composite_names, imported_name)
-        val enum_position = module_surface_name_position(
-            imported_mod.enum_names, imported_name)
-        val trait_position = module_surface_name_position(
-            imported_mod.trait_names, imported_name)
-        val alias_position = module_surface_name_position(
-            imported_mod.type_alias_names, imported_name)
-        val callable_position = module_surface_name_position(
-            imported_mod.callable_names, imported_name)
-        val constant_position = module_surface_name_position(
-            imported_mod.constant_names, imported_name)
+        # NAMEIDX: six Dict probes against the per-surface name index instead
+        # of six linear sweeps of the surface's name arrays per registration.
+        val surface_key = self.ensure_surface_name_index(imported_mod)
+        val composite_position = self.surface_name_position(surface_key, "C", imported_name)
+        val enum_position = self.surface_name_position(surface_key, "E", imported_name)
+        val trait_position = self.surface_name_position(surface_key, "T", imported_name)
+        val alias_position = self.surface_name_position(surface_key, "A", imported_name)
+        val callable_position = self.surface_name_position(surface_key, "F", imported_name)
+        val constant_position = self.surface_name_position(surface_key, "K", imported_name)
         hir_phase_profile_add(HIR_PROF_RIS_SCAN, scan_started)
         if composite_position >= 0:
             val composite = imported_mod.composite_values[composite_position]

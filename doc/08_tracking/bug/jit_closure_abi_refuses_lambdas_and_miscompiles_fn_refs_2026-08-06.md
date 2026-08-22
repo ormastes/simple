@@ -11,6 +11,14 @@
   (2026-08-07, unit T7 — see "T7 landed" below). The ABI itself (this doc's
   "Fix direction" item 1) remains unfixed; the loud fallback (item 2) is
   landed.
+- **2026-08-22, bootstrap impact:** this is the ONE construct that drops the
+  whole stage1 compiler to the tree-walking interpreter. `bootstrap_main.spl`
+  -> `compiler_services.spl:168` (`LexerPort(tokenize_fn: _noop_tokenize)`)
+  trips the fn-ref refusal, the seed's whole-program JIT bails, and all ~1,500
+  compiler files run interpreted at ~2 us/statement, ~10 us/call -- the ~200x
+  between HIR's 42 s/module and the 0.2 s it takes compiled. Measured in
+  `hir_phase_per_module_cost_2026-08-21.md` (7th session). Fixing this ABI
+  (or a per-function JIT fallback) is the stage1-in-10-min lever.
 - **Severity:** High — defect 2 was a silent wrong answer with no diagnostic;
   it is now a loud, correct fallback.
 - **Component:** Rust seed JIT — `src/compiler_rust/compiler/src/codegen/jit.rs`
