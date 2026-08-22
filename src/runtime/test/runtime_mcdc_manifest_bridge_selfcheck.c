@@ -168,7 +168,12 @@ int main(void) {
     assert(rt_mcdc_report_mcdp_v1(
                incomplete, 2, wire, wire_size, NULL, 0, 10,
                SIMPLE_MCDC_REPORT_ALPHA_V1, programs, 1, tokens, 3,
-               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_OK);
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_GATE_FAILED);
+    assert(report.gate_passed == 0);
+    assert(rt_mcdc_report_mcdp_v1(
+               incomplete, 2, wire, wire_size, NULL, 0, 10,
+               SIMPLE_MCDC_REPORT_BETA_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_GATE_FAILED);
     assert(report.gate_passed == 0);
 
     SimpleMcdcExclusionV1 exclusion = {
@@ -235,6 +240,14 @@ int main(void) {
     assert(rt_mcdc_report_mcdp_v1(
                incomplete, 2, wire, wire_size, &exclusion, 1, 10,
                SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_EMPTY_DENOMINATOR);
+    assert(rt_mcdc_report_mcdp_v1(
+               incomplete, 2, wire, wire_size, &exclusion, 1, 10,
+               SIMPLE_MCDC_REPORT_ALPHA_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_EMPTY_DENOMINATOR);
+    assert(rt_mcdc_report_mcdp_v1(
+               incomplete, 2, wire, wire_size, &exclusion, 1, 10,
+               SIMPLE_MCDC_REPORT_BETA_V1, programs, 1, tokens, 3,
                witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_EMPTY_DENOMINATOR);
 
     /* Every canonical region is cryptographically bound. Structural validity

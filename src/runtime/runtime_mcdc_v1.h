@@ -286,7 +286,8 @@ int32_t rt_mcdc_analyze_masking_mcdp_v1(
 /* Authoritative bounded report/gate owner. Events are sorted in place, then
  * joined to the manifest, masking witnesses, and fresh governed exclusions.
  * All workspace is caller-owned; this function performs no allocation or I/O.
- * Normal mode returns GATE_FAILED unless eligible coverage is exactly 100%. */
+ * Normal, alpha, and beta return GATE_FAILED unless eligible coverage is
+ * exactly 100%.  Off/diagnostic operation does not call this production gate. */
 int32_t rt_mcdc_report_mcdp_v1(
     SimpleMcdcVectorV1 *events, uint64_t event_count,
     const uint8_t *manifest_bytes, uint64_t manifest_byte_count,

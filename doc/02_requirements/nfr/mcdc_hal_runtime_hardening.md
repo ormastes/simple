@@ -7,7 +7,9 @@
 - NFR-005: Mission-critical coverage/provider/environment storage shall be fixed before entry and statically bounded where target limits are known; event/log capacity shall be <=4 MiB by default and configurable downward.
 - NFR-006: Any post-initialization allocation, evidence loss, unreported overflow, or unbounded log growth in a mission-critical-or-higher entry closure is an immediate failure regardless of aggregate performance.
 - NFR-007: Every enabled provider pair shall produce identical normalized results and interaction traces; comparison order and final commit shall be deterministic across repeated and parallel runs.
-- NFR-008: Normal+coverage mode shall report exactly 100% eligible MC/DC with zero unexplained exclusions; every exclusion shall pass governance and freshness validation.
+- NFR-008: Normal, alpha, and beta coverage promotion shall report exactly
+  100% eligible MC/DC with zero unexplained exclusions; every exclusion shall
+  pass governance and freshness validation. Static-off and explicitly
+  diagnostic reporting do not invoke this promotion gate.
 - NFR-009: Benchmarks shall retain binary/compiler identity, warmup and sample counts, median, p95, peak RSS, allocation count/bytes, artifact section sizes, event throughput, log bytes, overflow state, and raw receipts.
 - NFR-010: The feature shall use one cross-platform app/test interface; all platform differences shall remain behind HAL/provider/environment executors.
-

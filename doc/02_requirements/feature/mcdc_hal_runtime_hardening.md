@@ -6,7 +6,9 @@
 - REQ-002: Interpreter, JIT, and supported native backends shall record correlated condition-evaluation vectors and final decision outcomes while preserving language short-circuit semantics.
 - REQ-003: The analyzer shall prove unique-cause independence where possible and permit masking only when it proves all changed non-target conditions cannot influence the decision.
 - REQ-004: Reports shall include gross, eligible, excluded, covered, and uncovered decision/condition totals, witnessed independence pairs, source locations, mode, binary identity, and deterministic cross-process merge provenance; an empty eligible denominator is not 100%.
-- REQ-005: Normal+coverage mode shall fail unless eligible MC/DC is exactly 100%.
+- REQ-005: Every coverage-enabled promotion mode (`normal`, `alpha`, and
+  `beta`) shall fail unless eligible MC/DC is exactly 100%; static-off and
+  explicitly diagnostic reporting do not invoke the promotion gate.
 - REQ-006: Static-off builds shall contain no coverage probes, branches, tables, symbols, sections, allocations, logging calls, dynload checks, or linked coverage payload.
 - REQ-007: Static-on builds shall use direct bounded instrumentation, while dynamic builds shall use the canonical aspect/dynload loader with disarmable patchpoints and lazy pack activation.
 - REQ-008: Dynamic-disarmed execution shall not map the coverage pack or allocate event/log buffers; activation, settlement, shutdown, overflow, and failure behavior shall be deterministic and bounded.

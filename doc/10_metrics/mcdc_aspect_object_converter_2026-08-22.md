@@ -49,3 +49,22 @@ leaving exactly one immutable executable section and one immutable non-executabl
 marker section. The converter rejects writable executable material, additional
 allocated sections, implicit imports, and relocation kinds unsupported by the
 current loader.
+
+## Dynamic-disarmed reader fast path follow-up
+
+The same one-million-call command was captured once before and once after
+moving reader-lease acquisition behind the null-target check:
+
+```text
+before: baseline_mean_ns=2 disarmed_mean_ns=12 disarmed_delta_ns=10 maxrss_kib=1024 heap_allocations=0 mapping_calls=0 dynload_calls=0
+after:  baseline_mean_ns=2 disarmed_mean_ns=3  disarmed_delta_ns=1  maxrss_kib=1024 heap_allocations=0 mapping_calls=0 dynload_calls=0
+```
+
+The disarmed path remains O(1), but now performs only epoch and target loads;
+it does not modify the shared active-reader cache line. Armed readers increment
+the bounded scalar lease counter and revalidate both epoch and target before
+dispatch. A deterministic race negative control paused a reader after it had
+captured a non-null target, completed unbind with no active lease, then resumed
+the reader. The receipt was
+`staged_stale_capture=1 stale_target_calls=0 armed_target_calls=1`, proving the
+stale speculative target was rejected while an ordinary armed call still ran.

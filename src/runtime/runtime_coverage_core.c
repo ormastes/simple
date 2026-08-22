@@ -679,25 +679,32 @@ int32_t rt_mcdc_dynamic_vector_patchpoint_v1(uint64_t decision_id,
     const uint64_t epoch = atomic_load_explicit(&g_mcdc_dynamic_epoch,
                                                 memory_order_acquire);
     if (epoch & 1u) return SIMPLE_MCDC_V1_OK;
-    atomic_fetch_add_explicit(&g_mcdc_dynamic_active_calls, 1,
-                              memory_order_acquire);
-    if (atomic_load_explicit(&g_mcdc_dynamic_epoch,
-                             memory_order_acquire) != epoch) {
-        atomic_fetch_sub_explicit(&g_mcdc_dynamic_active_calls, 1,
-                                  memory_order_release);
-        return SIMPLE_MCDC_V1_OK;
-    }
     SimpleMcdcDynamicTargetV1 target = atomic_load_explicit(
         &g_mcdc_dynamic_target, memory_order_relaxed);
-    if (!target) {
+    /* The overwhelmingly common disarmed path is read-only: the epoch's
+     * acquire pairs with publication and a null target needs no reader lease.
+     * Armed readers acquire a lease, then revalidate both publication words;
+     * an unbinder that raced the speculative loads either observes the lease
+     * or changes the epoch/target so this reader cannot call stale code. */
+    if (!target) return SIMPLE_MCDC_V1_OK;
+#ifdef SIMPLE_MCDC_DYNAMIC_RACE_TEST
+    extern void simple_mcdc_dynamic_race_test_after_target_load(void);
+    simple_mcdc_dynamic_race_test_after_target_load();
+#endif
+    atomic_fetch_add_explicit(&g_mcdc_dynamic_active_calls, 1,
+                              memory_order_seq_cst);
+    if (atomic_load_explicit(&g_mcdc_dynamic_epoch,
+                             memory_order_seq_cst) != epoch ||
+        atomic_load_explicit(&g_mcdc_dynamic_target,
+                             memory_order_seq_cst) != target) {
         atomic_fetch_sub_explicit(&g_mcdc_dynamic_active_calls, 1,
-                                  memory_order_release);
+                                  memory_order_seq_cst);
         return SIMPLE_MCDC_V1_OK;
     }
     const int32_t status = target(decision_id, condition_count, source_digest,
                                   evaluated_mask, true_mask, outcome);
     atomic_fetch_sub_explicit(&g_mcdc_dynamic_active_calls, 1,
-                              memory_order_release);
+                              memory_order_seq_cst);
     return status;
 }
 
@@ -1776,7 +1783,9 @@ int32_t rt_mcdc_report_mcdp_v1(
         mcdc_sha256_scalar_le_v1(&digest, w->sequence_b, 8u);
     }
     mcdc_sha256_finish_hex_v1(&digest, report->provenance_sha256);
-    if (mode == SIMPLE_MCDC_REPORT_NORMAL_V1 && !report->gate_passed)
+    /* Every production promotion mode is fail-closed.  Alpha and beta add
+     * provider-comparison policy; neither weakens the exact MC/DC gate. */
+    if (!report->gate_passed)
         return SIMPLE_MCDC_V1_GATE_FAILED;
     return SIMPLE_MCDC_V1_OK;
 }
