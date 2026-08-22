@@ -57,11 +57,18 @@ suppressed.
 
 ## Shared facts
 
-`PerfFacts` is the function-local owner for reusable MIR analysis. Its first deployed
-slice owns CFG successors, predecessors, block indexes, and block count; loop detection
-consumes this shared view. Dominance, loop forest, def-use, range/induction, region alias,
-effects, and MemorySSA-lite extend the same revision-local owner with explicit
-invalidation.
+`PerfFacts` is the function-local owner for reusable MIR analysis. Its deployed slices
+own CFG successors/predecessors, block indexes, reverse-postorder, immediate dominators,
+and a linear def/use index. Def/use buckets are indexed through declared locals and are
+mutated in place during one traversal, avoiding definitions-by-uses scans and repeated
+copy-on-write rebuilding. Any unmodeled instruction or undeclared local reference marks
+the def/use view incomplete; consumers must fail closed.
+
+Every pass has an explicit preservation contract. Current transforming adapters
+conservatively invalidate CFG, dominance, and def/use; non-transforming statuses preserve
+them. Finer preservation can be admitted only with a focused witness. Loop forest,
+range/induction, region alias, effects, and MemorySSA-lite remain future slices of the
+same revision-local owner.
 
 ## Current safety containment
 
