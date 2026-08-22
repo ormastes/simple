@@ -377,3 +377,8 @@ implementation-blocked-by-bootstrap-authority
   in-toto, SLSA, TUF, NIST, Bazel, GitHub, GitLab, and pre-commit references.
   The selected requirements remain unchanged; no option-selection cycle was
   reopened.
+- cross-host-audit: Added `windows-hook-installation` as an explicit
+  bootstrap-tier TODO with tooling-team ownership and the native Windows
+  two-worktree install/check resume command. PowerShell source parity is not
+  counted as native Windows PASS. The updated focused contract passed with
+  `selftest=5s ref-path=0s installed-hook=0s` and reported the TODO visibly.
