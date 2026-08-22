@@ -36,6 +36,12 @@ expectation, backend outcome and reason. Planning is not execution: its run outc
 changed MIR from selection alone. Populated `PassRunRecord` counters will be admitted
 only after dispatch owns verified change receipts.
 
+The first recorded execution boundary is `run_named_pass_with_record`. It rejects an
+invalid input or output when block/local identity, entry membership, or CFG targets are
+malformed, and distinguishes a serialized-MIR change from an unchanged run. This is a
+structural receipt, not yet proof of SSA dominance, type correctness, ownership, or
+semantic equivalence; those omissions remain explicit blockers for `--verify-each`.
+
 ## Diagnostic policy
 
 `COLL*` findings belong to the `collection_performance` lint family. Moderate and strict

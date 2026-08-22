@@ -15,6 +15,7 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.mir.mir_json.{serialize_mir_function}
 use compiler.mir.mir_data.*
 use compiler.mir_opt.mir_opt.dce (create_dce_pass, dce_run_on_function)
 use compiler.mir_opt.mir_opt.const_fold (create_const_fold_pass, cf_run_on_function)
@@ -233,6 +234,17 @@ struct PassRunRecord:
     elapsed_ns: i64
     elapsed_measured: bool
     reasons: [PassReasonCount]
+
+struct MirStructuralVerificationReceipt:
+    valid: bool
+    errors: [text]
+    block_count: i64
+    instruction_count: i64
+
+struct PassFunctionOutcome:
+    function: MirFunction
+    record: PassRunRecord
+    verifier: MirStructuralVerificationReceipt
 
 struct MirPassDescriptor:
     stable_name: text
@@ -468,6 +480,104 @@ fn pass_run_record_for_unavailable_request(pass_name: text) -> PassRunRecord:
         case Active:
             skipped = pass_run_record_add_reason(skipped, "not_run", 1)
     skipped
+
+fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerificationReceipt:
+    """Fail-closed minimum verifier for optimizer boundaries.
+
+    This receipt proves block/local identity, entry membership, and CFG target
+    membership only. It deliberately does not claim SSA, type, ownership, or
+    dominance verification.
+    """
+    var errors: [text] = []
+    var instruction_count = 0
+    var block_ids: [i64] = []
+    var local_ids: [i64] = []
+    for local in func.locals:
+        if local.id.id < 0:
+            errors.push("negative local identity")
+        elif local_ids.contains(local.id.id):
+            errors.push("duplicate local identity: " + local.id.id.to_string())
+        else:
+            local_ids.push(local.id.id)
+    for block in func.blocks:
+        instruction_count = instruction_count + block.instructions.len()
+        if block.id.id < 0:
+            errors.push("negative block identity")
+        elif block_ids.contains(block.id.id):
+            errors.push("duplicate block identity: " + block.id.id.to_string())
+        else:
+            block_ids.push(block.id.id)
+    if func.blocks.is_empty():
+        errors.push("function has no basic blocks")
+    elif not block_ids.contains(func.entry_block.id):
+        errors.push("entry block is outside the function")
+
+    for block in func.blocks:
+        var targets: [BlockId] = []
+        match block.terminator:
+            case Goto(target): targets.push(target)
+            case If(_, then_, else_):
+                targets.push(then_)
+                targets.push(else_)
+            case Switch(_, cases, default):
+                targets.push(default)
+                for switch_case in cases:
+                    targets.push(switch_case.target)
+            case CallTerminator(_, _, _, normal, unwind):
+                targets.push(normal)
+                if unwind.?: targets.push(unwind.unwrap())
+            case Ret(_) | Unreachable | Abort(_): pass_dn
+        for target in targets:
+            if not block_ids.contains(target.id):
+                errors.push("block " + block.id.id.to_string() + " targets missing block " + target.id.to_string())
+    MirStructuralVerificationReceipt(errors.is_empty(), errors, func.blocks.len(), instruction_count)
+
+fn run_named_pass_with_record(pass_name: text, func: MirFunction) -> Result<PassFunctionOutcome, text>:
+    """Run one function-scoped pass with structural before/after receipts.
+
+    Candidate counts are populated only when the serialized function changes;
+    native per-pass candidate/rejection statistics remain a separately tracked
+    requirement and are never fabricated here.
+    """
+    val before_receipt = mir_structural_verification_receipt(func)
+    if not before_receipt.valid:
+        return Err("invalid MIR before pass " + pass_name + ": " + before_receipt.errors.join("; "))
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        val record = pass_run_record_for_unavailable_request(pass_name)
+        return Ok(PassFunctionOutcome(func, record, before_receipt))
+    val found = descriptor.unwrap()
+    if not pass_status_allows_transform(found.status):
+        val record = pass_run_record_for_unavailable_request(pass_name)
+        return Ok(PassFunctionOutcome(func, record, before_receipt))
+    match found.scope:
+        case Module:
+            var record = pass_run_record_new(pass_name, found.stable_name, found.status, found.expectation, found.scope, PassRunDisposition.Skipped)
+            record = pass_run_record_add_reason(record, "module_scope", 1)
+            return Ok(PassFunctionOutcome(func, record, before_receipt))
+        case Function | FsDriver: pass_dn
+
+    val before_text = serialize_mir_function(func)
+    val updated = run_typed_pass_on_function(found.kind, func)
+    val after_receipt = mir_structural_verification_receipt(updated)
+    if not after_receipt.valid:
+        return Err("invalid MIR after pass " + found.stable_name + ": " + after_receipt.errors.join("; "))
+    var disposition = PassRunDisposition.Unchanged
+    if serialize_mir_function(updated) != before_text:
+        disposition = PassRunDisposition.Transformed
+    var record = pass_run_record_new(pass_name, found.stable_name, found.status, found.expectation, found.scope, disposition)
+    record.functions_seen = 1
+    record.instructions_before = before_receipt.instruction_count
+    record.instructions_after = after_receipt.instruction_count
+    if disposition == PassRunDisposition.Transformed:
+        record.candidates = 1
+        record.transformed = 1
+    else:
+        record = pass_run_record_add_reason(record, "no_change", 1)
+    val record_errors = pass_run_record_integrity_errors(record)
+    if not record_errors.is_empty():
+        return Err("invalid pass run record for " + found.stable_name + ": " + record_errors.join("; "))
+    Ok(PassFunctionOutcome(updated, record, after_receipt))
 
 fn mir_pass_descriptor_registry() -> [MirPassDescriptor]:
     [
@@ -1386,8 +1496,10 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
 export PassKind, PassScope, PassStatus, PassExpectation, MirPassBackendOutcome
 export PassWitnessContract, pass_witness_contract, pass_witness_registry_integrity_errors
 export PassRunDisposition, PassReasonCount, PassRunRecord
+export MirStructuralVerificationReceipt, PassFunctionOutcome
 export pass_run_record_new, pass_run_record_add_reason, pass_run_record_integrity_errors
 export pass_run_record_for_unavailable_request
+export mir_structural_verification_receipt, run_named_pass_with_record
 export MirPass, MirPassDescriptor, MirPassBackendDecision, MirPipelineBackendPlan
 export TargetOptContext, target_opt_context_default
 export OptLevel, optlevel_name
