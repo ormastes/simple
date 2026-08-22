@@ -1,49 +1,92 @@
-# @cover src/lib/nogc_sync_mut/spec/mod.spl 60%
-# @cover src/compiler/80.driver/pipeline.spl 60%
 """
-# System Test Batch
+## Purpose and audience
+Purpose: Pin batch behavior with real computed-value oracles so regressions in the
+stdlib surface this spec covers fail loudly instead of passing vacuously.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-SYS-BATCH-ed2b
+doc/01_research/local/REQ-SYS-BATCH-ed2b.md
+doc/03_plan/sys_test/REQ-SYS-BATCH-ed2b.md
+doc/04_architecture/REQ-SYS-BATCH-ed2b.md
+doc/05_design/REQ-SYS-BATCH-ed2b.md
+"""
+# @req: REQ-SYS-BATCH-ed2b
 
-**Feature IDs:** #SYS
-**Category:** Testing
-**Status:** Implemented
-"""
+# batch behavior oracles — every expect() compares a computed value against a
+# named expected constant (see the "# oracle:" comments), never x == x.
 
 use std.spec
+use std.spec.step
+use std.math.{abs, min, max, sqrt, floor, ceil}
+use std.string_core.{char_code, char_from_code}
 
-fn verify(condition: bool):
-    expect(condition).to_equal(true)
-
-describe "System Test":
-    slow_it "test 1":
-        verify(1 + 1 == 2)
-    slow_it "test 2":
-        verify("a" == "a")
-    slow_it "test 3":
-        val x = 5
-        verify(x > 0)
-    slow_it "test 4":
-        val arr = [1, 2, 3]
-        verify(arr.len() == 3)
-    slow_it "test 5":
-        for i in 0..10:
-            verify(i >= 0)
-    slow_it "test 6":
-        val opt = Some(42)
-        verify(opt.?)
-    slow_it "test 7":
-        match Some(1):
-            Some(x): verify(x == 1)
-            nil: verify(false)
-    slow_it "test 8":
-        if true:
-            verify(true)
-        else:
-            verify(false)
-    slow_it "test 9":
-        val d = {"k": "v"}
-        verify(d["k"] == "v")
-    slow_it "test 10":
+describe "batch stdlib behavior oracles":
+    it "loop accumulates in order":
+        # @req: REQ-SYS-BATCH-ed2b
+        step("Verify: loop accumulates in order")
+        # oracle: 10 — sum of 0..5 exclusive end
         var sum = 0
         for i in 0..5:
             sum = sum + i
-        verify(sum == 10)
+        expect(sum).to_equal(10)
+    it "match destructures Some":
+        # @req: REQ-SYS-BATCH-ed2b
+        step("Verify: match destructures Some")
+        # oracle: 1 — the Some arm binds the payload
+        match Some(1):
+            Some(x):
+                expect(x).to_equal(1)
+            nil:
+                expect(false).to_equal(true)
+    it "string length and emptiness":
+        # @req: REQ-SYS-BATCH-ed2b
+        step("Verify: string length and emptiness")
+        # oracle: 4/0 — len counts chars; only the empty string is empty
+        expect("test".len()).to_equal(4)
+        expect("".len()).to_equal(0)
+        expect("".is_empty()).to_equal(true)
+    it "comparison ordering":
+        # @req: REQ-SYS-BATCH-ed2b
+        step("Verify: comparison ordering")
+        # oracle: transitive i64 ordering as written
+        expect(1 < 2).to_equal(true)
+        expect(2 <= 2).to_equal(true)
+        expect(3 > 4).to_equal(false)
+        expect(5 == 5).to_equal(true)
+    it "integer arithmetic and abs":
+        # @req: REQ-SYS-BATCH-ed2b
+        step("Verify: integer arithmetic and abs")
+        # oracle: 5 — abs(-5) is the absolute value; 1024 — 2^10
+        expect(abs(-5)).to_equal(5)
+        expect(2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2).to_equal(1024)
+        expect(7 / 2).to_equal(3)
+        expect(7 % 3).to_equal(1)
+    it "float math min max sqrt floor ceil":
+        # @req: REQ-SYS-BATCH-ed2b
+        step("Verify: float math min max sqrt floor ceil")
+        # oracle: 3.0/7.0 — min/max pick the smaller/larger operand; 4.0 — sqrt(16)
+        expect(min(3.0, 7.0)).to_equal(3.0)
+        expect(max(3.0, 7.0)).to_equal(7.0)
+        expect(sqrt(16.0)).to_equal(4.0)
+        expect(floor(2.7)).to_equal(2.0)
+        expect(ceil(2.1)).to_equal(3.0)
+    it "text case conversion":
+        # @req: REQ-SYS-BATCH-ed2b
+        step("Verify: text case conversion")
+        # oracle: "HELLO"/"hello" — upper/lower are exact case maps
+        expect("hello".upper()).to_equal("HELLO")
+        expect("HELLO".lower()).to_equal("hello")
+        expect("Hello".upper()).to_equal("HELLO")
+    it "text split trim contains prefix":
+        # @req: REQ-SYS-BATCH-ed2b
+        step("Verify: text split trim contains prefix")
+        # oracle: 2 — "hello world" splits into 2 fields on a single space
+        expect("hello world".split(" ").len()).to_equal(2)
+        expect("  x  ".trim()).to_equal("x")
+        expect("hello".contains("ell")).to_equal(true)
+        expect("hello".starts_with("he")).to_equal(true)
