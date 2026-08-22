@@ -1,6 +1,11 @@
 extern fn rt_file_read_text(path: text) -> text
 
-use app.cli.query_diagnostics.{_split_structured_error, _extract_error_code, _strip_ansi}
+use app.cli.query_diagnostics.{
+    _split_structured_error, _extract_error_code, _strip_ansi,
+    _clean_check_output, _should_run_lint_after_clean_output,
+    _collect_check_output_diagnostics_json_clean,
+    _count_check_output_diagnostics_clean
+}
 use app.cli.query_error_codes.{query_extract_error_code}
 use app.cli.query_rich_common.{
     _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE,
@@ -37,6 +42,46 @@ describe "query diagnostics helpers":
         expect(_strip_ansi("prefix\033[unterminated")).to_equal("prefix")
         expect(_strip_ansi("✓\033[31m日本語\033[0m café")).to_equal(
             "✓日本語 café")
+
+    it "normalizes compiler output once for lint policy diagnostics and count":
+        val clean = _clean_check_output(
+            "fixture.spl:2:3: \033[31merror: first\033[0m",
+            "fixture.spl:4:5: warning: second")
+        expect(clean).to_equal(
+            "fixture.spl:2:3: error: first\n" +
+            "fixture.spl:4:5: warning: second")
+        expect(_should_run_lint_after_clean_output(clean)).to_equal(true)
+        val diagnostics = _collect_check_output_diagnostics_json_clean(
+            "fixture.spl", clean)
+        expect(diagnostics.len()).to_equal(2)
+        expect(diagnostics[0]).to_contain("first")
+        expect(diagnostics[1]).to_contain("second")
+        expect(_count_check_output_diagnostics_clean(
+            "fixture.spl", clean)).to_equal(2)
+        expect(_should_run_lint_after_clean_output(
+            "fixture.spl:1:1: ParseError: bad")).to_equal(false)
+        expect(_clean_check_output("out\n", "err")).to_equal("out\n\nerr")
+        val mixed =
+            "banner\n" +
+            "fixture.spl:malformed\n" +
+            "fixture.spl:2:3: error: duplicate\n" +
+            "fixture.spl:2:3: error: duplicate\n" +
+            "other.spl:1:1: error: excluded"
+        val mixed_diagnostics = _collect_check_output_diagnostics_json_clean(
+            "fixture.spl", mixed)
+        expect(mixed_diagnostics.len()).to_equal(3)
+        expect(mixed_diagnostics[1]).to_equal(mixed_diagnostics[2])
+        expect(_count_check_output_diagnostics_clean(
+            "fixture.spl", mixed)).to_equal(mixed_diagnostics.len())
+
+    it "keeps active check callers on the shared normalized output":
+        val source = rt_file_read_text("src/app/cli/query_diagnostics.spl") ?? ""
+        expect(source).to_contain(
+            "val clean_output = _clean_check_output(check_stdout, check_stderr)")
+        expect(source).to_contain(
+            "_collect_check_output_diagnostics_json_clean(\n            file, clean_output)")
+        expect(source).to_contain(
+            "_count_check_output_diagnostics_clean(\n                        spl_file, clean_output)")
 
     it "skips diagnostic code scans when severity policy is empty":
         val diagnostic = "{\"severity\":2,\"code\":\"X\",\"message\":\"m\"}"
