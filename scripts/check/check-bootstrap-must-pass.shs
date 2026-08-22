@@ -11,6 +11,7 @@ MODE=run
 OUTPUT_DIR=build/bootstrap
 STAGE4_BINARY=""
 STAGE4_PROVENANCE=""
+AUTOMATED_SIMPLE_BINARY=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --record-bootstrap-success|--self-test) shift ;;
@@ -129,10 +130,18 @@ run_automated_gate() {
             echo "bootstrap-must-check: ERROR — gate runner override is self-test-only" >&2
             return 2
         }
-        sh "$MUST_CHECK_GATE_RUNNER" "$_gate_command"
+        if [ -n "$AUTOMATED_SIMPLE_BINARY" ]; then
+            SIMPLE_BINARY="$AUTOMATED_SIMPLE_BINARY" SIMPLE_BIN="$AUTOMATED_SIMPLE_BINARY" sh "$MUST_CHECK_GATE_RUNNER" "$_gate_command"
+        else
+            sh "$MUST_CHECK_GATE_RUNNER" "$_gate_command"
+        fi
         return $?
     fi
-    (cd "$ROOT" && sh -c "$_gate_command")
+    if [ -n "$AUTOMATED_SIMPLE_BINARY" ]; then
+        (cd "$ROOT" && SIMPLE_BINARY="$AUTOMATED_SIMPLE_BINARY" SIMPLE_BIN="$AUTOMATED_SIMPLE_BINARY" sh -c "$_gate_command")
+    else
+        (cd "$ROOT" && sh -c "$_gate_command")
+    fi
 }
 
 accepted_gate_verdict() {
@@ -151,10 +160,11 @@ if [ "$MODE" = selftest ]; then
     for _phase in 1 2 3 4; do printf 'phase%s evidence\n' "$_phase" > "$_tmp/phase$_phase.receipt"; done
     printf '%s\n' '#!/bin/sh' 'printf "%s\n" compiler-stage1=pass compiler-stage2=pass compiler-stage3=pass compiler-stage4=pass' > "$_tmp/phase-validator"
     printf '%s\n' "printf '%s\\n' compiler-stage1-evidence=$_tmp/phase1.receipt compiler-stage2-evidence=$_tmp/phase2.receipt compiler-stage3-evidence=$_tmp/phase3.receipt compiler-stage4-evidence=$_tmp/phase4.receipt" >> "$_tmp/phase-validator"
-    printf '%s\n' '#!/bin/sh' 'echo "STATUS: PASS self-test automated gate"' > "$_tmp/gate-runner"
-    chmod +x "$_tmp/phase-validator"
+    printf '%s\n' '#!/bin/sh' "[ \"\${SIMPLE_BINARY:-}\" = \"$_tmp/stage4\" ] || { echo 'STATUS: FAIL wrong-stage4-binary'; exit 1; }" "[ \"\${SIMPLE_BIN:-}\" = \"$_tmp/stage4\" ] || { echo 'STATUS: FAIL wrong-stage4-bin'; exit 1; }" 'echo "STATUS: PASS self-test automated gate"' > "$_tmp/gate-runner"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$_tmp/stage4"
+    chmod +x "$_tmp/phase-validator" "$_tmp/stage4"
     chmod +x "$_tmp/gate-runner"
-    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 sh "$0" --record-bootstrap-success >/dev/null || exit 1
+    SIMPLE_BINARY="$_tmp/wrong-ambient-simple" SIMPLE_BIN="$_tmp/wrong-ambient-simple-bin" MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
     grep -q 'compiler-stage1, pass' "$_tmp/ledger.sdn" || exit 1
     grep -q 'compiler-stage2, pass' "$_tmp/ledger.sdn" || exit 1
     grep -q 'compiler-stage3, pass' "$_tmp/ledger.sdn" || exit 1
@@ -165,18 +175,18 @@ if [ "$MODE" = selftest ]; then
     grep -q 'caret-smux-multi-launch, todo' "$_tmp/ledger.sdn" || exit 1
     grep -q 'web-server-gpu-nginx, todo' "$_tmp/ledger.sdn" || exit 1
     _first=$(sha256sum "$_tmp/ledger.sdn" | awk '{print $1}')
-    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success >/dev/null || exit 1
-    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger2.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success >/dev/null || exit 1
+    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
+    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger2.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
     cmp "$_tmp/ledger.sdn" "$_tmp/ledger2.sdn" >/dev/null || exit 1
     [ -n "$_first" ] || exit 1
-    sed 's/source_fingerprint: "[^"]*"/source_fingerprint: "old"/; s/engine-differential, todo, never/engine-differential, pass, 1999-01-01T00:00:00Z/' "$_tmp/ledger.sdn" > "$_tmp/stale-ledger.sdn"
-    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/stale-ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence-stale" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=new MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success >/dev/null || exit 1
-    grep -q 'engine-differential, todo, never' "$_tmp/stale-ledger.sdn" || exit 1
+    sed 's/source_fingerprint: "[^"]*"/source_fingerprint: "old"/; s/caret-smux-multi-launch, todo, never/caret-smux-multi-launch, pass, 1999-01-01T00:00:00Z/' "$_tmp/ledger.sdn" > "$_tmp/stale-ledger.sdn"
+    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/stale-ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence-stale" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=new MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
+    grep -q 'caret-smux-multi-launch, todo, never' "$_tmp/stale-ledger.sdn" || exit 1
     if MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/rejected.sdn" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" sh "$0" --record-bootstrap-success >/dev/null 2>&1; then
         echo "bootstrap-must-check selftest: production validator override was accepted" >&2
         exit 1
     fi
-    echo "bootstrap-must-check: PASS — phase promotion TODO preservation stale reset override rejection and deterministic output checked"
+    echo "bootstrap-must-check: PASS — phase promotion TODO preservation exact Stage4 binding stale reset override rejection and deterministic output checked"
     exit 0
 fi
 
@@ -208,7 +218,7 @@ _carry_pass=0
 _rows=""
 _failed=0
 _phase_results=""
-    if [ "$MODE" = record-bootstrap ]; then
+if [ "$MODE" = record-bootstrap ]; then
     _phase_results=$(validate_compiler_phases) || {
         echo "bootstrap-must-check: FAIL — compiler Stage 1/2/3/4 evidence did not all pass" >&2
         exit 1
@@ -219,6 +229,12 @@ _phase_results=""
             exit 1
         }
     done
+    case "$STAGE4_BINARY" in
+        /*) AUTOMATED_SIMPLE_BINARY=$STAGE4_BINARY ;;
+        *) AUTOMATED_SIMPLE_BINARY="$ROOT/$STAGE4_BINARY" ;;
+    esac
+    _stage4_dir=$(CDPATH= cd -- "$(dirname -- "$AUTOMATED_SIMPLE_BINARY")" && pwd -P) || exit 2
+    AUTOMATED_SIMPLE_BINARY="$_stage4_dir/$(basename -- "$AUTOMATED_SIMPLE_BINARY")"
 fi
 
 manifest_rows | while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do

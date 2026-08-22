@@ -1205,6 +1205,8 @@ duplicate-check outcomes plus the aggregate pass marker. Raw source, a deployed
 wrapper, Rust seed, or stale binary is not evidence. This sanity does not
 replace release `--whole` or repository-wide policy checks, and it must not be
 copied into compiler Stages 2 or 3.
+The bootstrap completion recorder must override ambient `SIMPLE_BINARY`/`SIMPLE_BIN` and
+bind all automated gates to the exact validated Stage 4 candidate.
 
 An explicitly admitted Stage 2 or Stage 3 Simple binary may run focused
 pure-Simple compiler/interpreter/loader work under
