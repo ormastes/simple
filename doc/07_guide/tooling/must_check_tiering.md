@@ -82,6 +82,10 @@ Windows PowerShell:
 if ($LASTEXITCODE -ne 0) { & scripts/setup/install-must-check-hooks.ps1 -Install }
 ```
 
+The PowerShell source follows the same launcher contract, but native Windows
+linked-worktree execution is tracked as `windows-hook-installation` TODO until
+the bootstrap ledger carries retained Windows-host evidence.
+
 Linked worktrees share one Git hooks directory. Both installers therefore put
 the byte-stable `scripts/hooks/pre-push-worktree-launcher` there; it resolves
 the active worktree at invocation and enters that worktree's tracked dispatcher.
