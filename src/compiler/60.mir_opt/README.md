@@ -10,13 +10,19 @@ The canonical pass pipeline currently lives in:
 - [`mir_opt/__init__.spl`](./mir_opt/__init__.spl)
 - [`mir_opt_integration.spl`](./mir_opt_integration.spl)
 
-This pipeline defines the public `OptLevel` values and the pass lists used for:
+This pipeline defines the public `OptLevel` values, requested pass lists, and
+effective pass lists used for:
 
 - `Size`
 - `Speed`
 - `Aggressive`
 
-Representative pass groups in that pipeline:
+Every descriptor carries `PassStatus` and `PassExpectation`. Only `Active`
+passes enter an effective pipeline or transformation dispatch. `Skeleton`,
+`Disabled`, `AnalysisOnly`, and `RemarkOnly` entries remain visible in requested
+inventory with their honest status but cannot silently act as transforms.
+
+Representative requested pass groups:
 
 - cleanup: dead code elimination
 - scalar: constant folding, copy propagation, global value numbering, common subexpression elimination
