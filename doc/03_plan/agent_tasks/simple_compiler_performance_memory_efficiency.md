@@ -93,3 +93,14 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Pin enumeration/membership parity and reject the former source shape.
 - Leave one-time enumeration consumers intact; do not introduce a mutable global cache or
   per-`LintConfig` registry dictionary.
+
+## Active tool tranche: cached effective lint defaults
+
+- Store the selected default-level table in `LintConfig` and refresh only on profile
+  change.
+- Share immutable defaults into child configs while copying only authored overrides.
+- Require `get_level` to perform no registry construction, profile projection, source
+  read, or allocation.
+- Preserve collection evidence-tier warning caps and all allow/warn/deny behavior.
+- Follow-up: cache project SDN parsing by path/revision and combine duplicate policy
+  lookups only after output parity is pinned.
