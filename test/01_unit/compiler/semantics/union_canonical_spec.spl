@@ -1,0 +1,66 @@
+extern fn rt_file_read_text(path: text) -> text
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.semantics.union_normalize.canonical.{
+    union_member_key, union_normalize, union_normalize_members,
+    union_member_keys, union_canonical_name, union_variant_name
+}
+
+fn union_test_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+describe "structural union canonicalization":
+    it "is permutation invariant and collapses duplicate primitive members":
+        val i64_type = union_test_type(HirTypeKind.Int(64, true))
+        val text_type = union_test_type(HirTypeKind.Str)
+        val bool_type = union_test_type(HirTypeKind.Bool)
+        val first = union_normalize([text_type, i64_type, bool_type, i64_type])
+        val second = union_normalize([bool_type, text_type, i64_type])
+        expect(first.keys).to_equal(["bool", "i64", "text"])
+        expect(second.keys).to_equal(first.keys)
+        expect(first.name).to_equal("__Union_bool_i64_text")
+        expect(first.members.len()).to_equal(3)
+        val wrapped_members = union_normalize_members([text_type, i64_type, bool_type])
+        expect(union_member_key(wrapped_members[0])).to_equal(first.keys[0])
+        expect(union_member_key(wrapped_members[1])).to_equal(first.keys[1])
+        expect(union_member_key(wrapped_members[2])).to_equal(first.keys[2])
+        expect(union_member_keys([text_type, i64_type, bool_type])).to_equal(first.keys)
+        expect(union_canonical_name([text_type, i64_type, bool_type])).to_equal(first.name)
+
+    it "flattens nested unions and expands optional members exactly once":
+        val i64_type = union_test_type(HirTypeKind.Int(64, true))
+        val text_type = union_test_type(HirTypeKind.Str)
+        val bool_type = union_test_type(HirTypeKind.Bool)
+        val optional_bool = union_test_type(HirTypeKind.Optional(bool_type))
+        val optional_i64 = union_test_type(HirTypeKind.Optional(i64_type))
+        val nested = union_test_type(HirTypeKind.Union([text_type, optional_bool]))
+        val normalized = union_normalize([i64_type, nested, optional_i64])
+        expect(normalized.keys).to_equal(["bool", "i64", "nil", "text"])
+        expect(normalized.name).to_equal("__Union_bool_i64_nil_text")
+
+    it "distinguishes structural fields omitted by the former partial key":
+        val i64_type = union_test_type(HirTypeKind.Int(64, true))
+        val text_type = union_test_type(HirTypeKind.Str)
+        val named_i64 = union_test_type(HirTypeKind.Named(SymbolId.new(7), [i64_type]))
+        val named_text = union_test_type(HirTypeKind.Named(SymbolId.new(7), [text_type]))
+        val array_three = union_test_type(HirTypeKind.Array(i64_type, Some(3)))
+        val array_four = union_test_type(HirTypeKind.Array(i64_type, Some(4)))
+        val ref_const = union_test_type(HirTypeKind.Ref(i64_type, false))
+        val ref_mut = union_test_type(HirTypeKind.Ref(i64_type, true))
+        expect(union_member_key(named_i64) == union_member_key(named_text)).to_equal(false)
+        expect(union_member_key(array_three) == union_member_key(array_four)).to_equal(false)
+        expect(union_member_key(ref_const) == union_member_key(ref_mut)).to_equal(false)
+        expect(union_variant_name(union_member_key(named_i64)) ==
+            union_variant_name(union_member_key(named_text))).to_equal(false)
+
+    it "uses keyed deduplication one stable merge and one reusable result":
+        val canonical = rt_file_read_text(
+            "src/compiler/35.semantics/union_normalize/canonical.spl") ?? ""
+        val synth = rt_file_read_text(
+            "src/compiler/35.semantics/union_normalize/synth_enum.spl") ?? ""
+        expect(canonical).to_contain("var seen: Dict<text, bool> = {}")
+        expect(canonical).to_contain("while width < keys.len()")
+        expect(canonical.contains("for existing in keys")).to_equal(false)
+        expect(synth).to_contain("synth_union_enum_normalized(union_normalize(members)")
+        expect(synth).to_contain("val normalized = union_normalize(members)")
