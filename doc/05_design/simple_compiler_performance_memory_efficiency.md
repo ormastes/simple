@@ -533,6 +533,16 @@ Construct the request's canonical line array before policy resolution and call
 `apply_file_attributes_lines`; lint policy and all line-oriented checks must share
 that array rather than independently splitting the same source.
 
+Machine-output scopes use `compiler.frontend.trace_policy`, a cycle-free nested
+scalar owner. Establish suppression before parser initialization and retain it
+through AST lint traversal; restore the caller's value on normal return. Optional
+enabled trace/profile/debug predicates test the scope before output; default cached
+off paths must not gain a policy-dispatch call.
+Ordinary compiler APIs retain optional-trace activation and channels. Safety
+containment diagnostics remain active; ordinary calls retain stdout while machine
+scopes route them to stderr. They should become structured failures before a
+zero-process workspace session is enabled.
+
 Add compiler-tool owners under `compiler/90.tools/workspace_diagnostics` for an
 immutable `WorkspaceDiagnosticConfig`, ordinal/path/digest request, per-file
 result and serial `WorkspaceDiagnosticSession`. The app discovers files once,
