@@ -16,7 +16,9 @@ use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.traits.trait_coherence.{CoherenceError}
 use compiler.traits.trait_validation.{TraitError}
 
+@unsafe(reason: "raw source-file read; empty text is the unreadable or empty sentinel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw source-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(key: text) -> text
 extern fn rt_string_len(value: text) -> i64
@@ -601,7 +603,12 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
     result
 
 fn _driver_numbered_child_dir(parent: text, segment: text) -> text:
-    if parent == "" or not rt_file_exists(parent):
+    if parent == "":
+        return ""
+    var parent_exists = false
+    unsafe(capabilities: [ffi]):
+        parent_exists = rt_file_exists(parent)
+    if not parent_exists:
         return ""
     for entry in rt_dir_list(parent):
         var prefix_len = 0
@@ -613,7 +620,10 @@ fn _driver_numbered_child_dir(parent: text, segment: text) -> text:
             prefix_len = prefix_len + 1
         if prefix_len >= 1 and prefix_len <= 3 and prefix_len < entry_len and entry.char_at(prefix_len) == "." and entry.substring(prefix_len + 1) == segment:
             val candidate = parent + "/" + entry
-            if rt_file_exists(candidate):
+            var candidate_exists = false
+            unsafe(capabilities: [ffi]):
+                candidate_exists = rt_file_exists(candidate)
+            if candidate_exists:
                 return candidate
     ""
 
@@ -625,7 +635,10 @@ fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
     var i = 0
     while i + 1 < parts.len():
         val direct = if current == "": parts[i] else: current + "/" + parts[i]
-        if rt_file_exists(direct):
+        var direct_exists = false
+        unsafe(capabilities: [ffi]):
+            direct_exists = rt_file_exists(direct)
+        if direct_exists:
             current = direct
         else:
             val numbered = _driver_numbered_child_dir(current, parts[i])
@@ -634,12 +647,24 @@ fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
             current = numbered
         i = i + 1
     val base = if current == "": parts[parts.len() - 1] else: current + "/" + parts[parts.len() - 1]
-    if rt_file_exists(base + ".spl"):
-        return base + ".spl"
-    if rt_file_exists(base + "/mod.spl"):
-        return base + "/mod.spl"
-    if rt_file_exists(base + "/__init__.spl"):
-        return base + "/__init__.spl"
+    val spl_path = base + ".spl"
+    var spl_exists = false
+    unsafe(capabilities: [ffi]):
+        spl_exists = rt_file_exists(spl_path)
+    if spl_exists:
+        return spl_path
+    val mod_path = base + "/mod.spl"
+    var mod_exists = false
+    unsafe(capabilities: [ffi]):
+        mod_exists = rt_file_exists(mod_path)
+    if mod_exists:
+        return mod_path
+    val init_path = base + "/__init__.spl"
+    var init_exists = false
+    unsafe(capabilities: [ffi]):
+        init_exists = rt_file_exists(init_path)
+    if init_exists:
+        return init_path
     ""
 
 fn _driver_try_entry_import_rel(rel: text, entry_dir: text) -> text:
@@ -648,12 +673,24 @@ fn _driver_try_entry_import_rel(rel: text, entry_dir: text) -> text:
         roots = roots.push(entry_dir + "/")
     for root in roots:
         val base = root + rel
-        if rt_file_exists(base + ".spl"):
-            return base + ".spl"
-        if rt_file_exists(base + "/mod.spl"):
-            return base + "/mod.spl"
-        if rt_file_exists(base + "/__init__.spl"):
-            return base + "/__init__.spl"
+        val spl_path = base + ".spl"
+        var spl_exists = false
+        unsafe(capabilities: [ffi]):
+            spl_exists = rt_file_exists(spl_path)
+        if spl_exists:
+            return spl_path
+        val mod_path = base + "/mod.spl"
+        var mod_exists = false
+        unsafe(capabilities: [ffi]):
+            mod_exists = rt_file_exists(mod_path)
+        if mod_exists:
+            return mod_path
+        val init_path = base + "/__init__.spl"
+        var init_exists = false
+        unsafe(capabilities: [ffi]):
+            init_exists = rt_file_exists(init_path)
+        if init_exists:
+            return init_path
     # Resolver-transparent `NN.name` directories are a fallback only: ordinary
     # imports keep the existing fixed probes and pay no directory-list cost.
     for root in roots:
@@ -800,37 +837,85 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
 
     if not module_path.starts_with("std."):
         val lib_base = "src/lib/" + rel
-        if rt_file_exists(lib_base + ".spl"):
-            return lib_base + ".spl"
-        if rt_file_exists(lib_base + "/mod.spl"):
-            return lib_base + "/mod.spl"
-        if rt_file_exists(lib_base + "/__init__.spl"):
-            return lib_base + "/__init__.spl"
+        val lib_spl_path = lib_base + ".spl"
+        var lib_spl_exists = false
+        unsafe(capabilities: [ffi]):
+            lib_spl_exists = rt_file_exists(lib_spl_path)
+        if lib_spl_exists:
+            return lib_spl_path
+        val lib_mod_path = lib_base + "/mod.spl"
+        var lib_mod_exists = false
+        unsafe(capabilities: [ffi]):
+            lib_mod_exists = rt_file_exists(lib_mod_path)
+        if lib_mod_exists:
+            return lib_mod_path
+        val lib_init_path = lib_base + "/__init__.spl"
+        var lib_init_exists = false
+        unsafe(capabilities: [ffi]):
+            lib_init_exists = rt_file_exists(lib_init_path)
+        if lib_init_exists:
+            return lib_init_path
         for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
             val family_base = "src/lib/" + family + "/" + rel
-            if rt_file_exists(family_base + ".spl"):
-                return family_base + ".spl"
-            if rt_file_exists(family_base + "/mod.spl"):
-                return family_base + "/mod.spl"
-            if rt_file_exists(family_base + "/__init__.spl"):
-                return family_base + "/__init__.spl"
+            val family_spl_path = family_base + ".spl"
+            var family_spl_exists = false
+            unsafe(capabilities: [ffi]):
+                family_spl_exists = rt_file_exists(family_spl_path)
+            if family_spl_exists:
+                return family_spl_path
+            val family_mod_path = family_base + "/mod.spl"
+            var family_mod_exists = false
+            unsafe(capabilities: [ffi]):
+                family_mod_exists = rt_file_exists(family_mod_path)
+            if family_mod_exists:
+                return family_mod_path
+            val family_init_path = family_base + "/__init__.spl"
+            var family_init_exists = false
+            unsafe(capabilities: [ffi]):
+                family_init_exists = rt_file_exists(family_init_path)
+            if family_init_exists:
+                return family_init_path
     if module_path.starts_with("std."):
         val lib_base = "src/lib/" + rel.substring(4)
-        if rt_file_exists(lib_base + ".spl"):
-            return lib_base + ".spl"
-        if rt_file_exists(lib_base + "/mod.spl"):
-            return lib_base + "/mod.spl"
-        if rt_file_exists(lib_base + "/__init__.spl"):
-            return lib_base + "/__init__.spl"
+        val lib_spl_path = lib_base + ".spl"
+        var lib_spl_exists = false
+        unsafe(capabilities: [ffi]):
+            lib_spl_exists = rt_file_exists(lib_spl_path)
+        if lib_spl_exists:
+            return lib_spl_path
+        val lib_mod_path = lib_base + "/mod.spl"
+        var lib_mod_exists = false
+        unsafe(capabilities: [ffi]):
+            lib_mod_exists = rt_file_exists(lib_mod_path)
+        if lib_mod_exists:
+            return lib_mod_path
+        val lib_init_path = lib_base + "/__init__.spl"
+        var lib_init_exists = false
+        unsafe(capabilities: [ffi]):
+            lib_init_exists = rt_file_exists(lib_init_path)
+        if lib_init_exists:
+            return lib_init_path
         val lib_subpath = rel.substring(4)
         for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
             val family_base = "src/lib/" + family + "/" + lib_subpath
-            if rt_file_exists(family_base + ".spl"):
-                return family_base + ".spl"
-            if rt_file_exists(family_base + "/mod.spl"):
-                return family_base + "/mod.spl"
-            if rt_file_exists(family_base + "/__init__.spl"):
-                return family_base + "/__init__.spl"
+            val family_spl_path = family_base + ".spl"
+            var family_spl_exists = false
+            unsafe(capabilities: [ffi]):
+                family_spl_exists = rt_file_exists(family_spl_path)
+            if family_spl_exists:
+                return family_spl_path
+            val family_mod_path = family_base + "/mod.spl"
+            var family_mod_exists = false
+            unsafe(capabilities: [ffi]):
+                family_mod_exists = rt_file_exists(family_mod_path)
+            if family_mod_exists:
+                return family_mod_path
+            val family_init_path = family_base + "/__init__.spl"
+            var family_init_exists = false
+            unsafe(capabilities: [ffi]):
+                family_init_exists = rt_file_exists(family_init_path)
+            if family_init_exists:
+                return family_init_path
 
     # Non-compiler application/tool rewrites retain generic library precedence.
     #
@@ -978,7 +1063,9 @@ fn _driver_collect_entry_import_source_untimed(p: text) -> [SourceFile]:
         normalized.starts_with("doc/") or normalized.contains("/doc/"))
     if normalized.contains("/test/") or normalized.contains("/tests/") or normalized.contains("/testdata/") or is_repository_doc or normalized.contains("/verification/"):
         return result
-    val content = rt_file_read_text(p) ?? ""
+    var content = ""
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_text(p) ?? ""
     if content == "":
         return result
     _driver_module_aliases(p, content, _driver_module_name_from_path(p))
@@ -1012,7 +1099,9 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
             val core_allowed3 = core_allowed2 or p.ends_with("/__init__.spl")
             if not core_allowed3:
                 return result
-        val content = rt_file_read_text(p) ?? ""
+        var content = ""
+        unsafe(capabilities: [ffi]):
+            content = rt_file_read_text(p) ?? ""
         if _driver_source_trace_enabled():
             print "[collect_sources] content_len {content.len()}"
         if content != "":

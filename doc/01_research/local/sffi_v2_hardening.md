@@ -1980,3 +1980,32 @@ The one-scan census falls from 21,371 to 21,337 raw calls and from 19,486 to
 Lexically authorized calls rise by one to 1,378 because the single centralized
 move call is scoped. These are source and seed-behavior receipts only: the
 runtime provider remains unsigned and evidence-unadmitted.
+
+## Driver source-loading file-call authority
+
+The largest remaining production `rt_file` caller,
+`driver_source_loading.spl`, now keeps all 23 file probes/reads under minimal
+lexical FFI scopes. The raw declarations state their false/empty sentinel
+contracts. No forwarding facade, dynamic dispatch, provider lookup, retry, or
+additional provider call was added. Candidate `.spl`, `mod.spl`, and
+`__init__.spl` paths are constructed once and reused for both the probe and
+successful return, removing one duplicate string construction on each
+successful candidate.
+
+The deployed parser still rejects expression-form unsafe bindings; the already
+open `unsafe_block_expression_binding_parser_gap_2026-08-21.md` records that
+compiler defect. This slice uses the supported statement form with initialized
+scalar/text locals. Optimizer analysis reports the existing MIR dead-code,
+bounds, and loop-hoisting opportunities; it does not report a new dispatch or
+collection pattern. The source-shape spec passes 3/3 in 5.10 seconds at 173,704
+KiB peak RSS, and source-loading behavior passes 5/5 in 11.09 seconds at
+472,824 KiB peak RSS, both under the bootstrap seed only.
+
+Lint now parses the whole file but remains red on seven older non-boundary
+findings: six public bare-primitive API findings and the quadratic dirname
+concatenation at `_driver_entry_import_dirname`. Those are not accepted as a
+global lint pass and the latter remains a concrete performance follow-up. The
+one-scan census keeps 21,337 raw calls constant, raises lexical authority from
+1,378 to 1,401, and lowers missing authority from 19,451 to 19,428. All 23 file
+calls in this owner are lexical and zero are missing. The provider artifact is
+still unsigned and evidence-unadmitted.

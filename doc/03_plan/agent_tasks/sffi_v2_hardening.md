@@ -330,3 +330,12 @@ passing placeholder.
     warnings with typed status/`Result` boundaries. Preserve one provider call,
     add no success-path error allocation, and bind exact runtime artifact
     signature/evidence before classifying any file/env/time family verified.
+63. Retain all 23 driver source-loading file calls under minimal lexical FFI
+    authority and keep candidate path construction hoisted. Census baseline is
+    now 21,337 raw / 1,909 explicit / 19,428 missing calls. Fix the expression-
+    form unsafe parser gap before replacing the compatible statement form.
+64. Replace `_driver_entry_import_dirname`'s quadratic loop concatenation with
+    a linear last-separator slice, preserving empty/root/relative path behavior
+    under focused tests. Then migrate the same file's env/time/path/dir/process
+    calls and six public primitive APIs without adding lookup, allocation, or
+    extra provider dispatch. Signed runtime admission remains a separate gate.
