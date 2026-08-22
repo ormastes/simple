@@ -486,7 +486,8 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add dependency-closed requests and diagnostics for hidden expansion.
 - Keep full, no-liveness and verifier builders as compatibility wrappers.
 - Migrate loop detection to CFG plus dominators without instruction def-use.
-- Migrate vector/storage consumers to def-use without CFG/RPO/dominators.
+- Migrate storage access to def-use only and block-keyed vector/storage rewrite
+  consumers to CFG+def-use without RPO/dominators.
 - Keep every unrequested fact family empty and incomplete.
 - Follow-up: expose requested/effective capabilities in optimization telemetry
   and replace the hard-coded liveness cell cap with a named budget policy.
@@ -499,3 +500,13 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Reject duplicate block identities before block-keyed def-use interpretation.
 - Retain def-use-only storage-access analysis because incomplete facts become
   conservative unknown access rather than transformation authority.
+
+## Completed tooling tranche: linearize wide-public deduplication
+
+- Replace growing export-name array membership scans with a dictionary set.
+- Maintain an explicit unique-export count rather than relying on dictionary
+  length behavior.
+- Preserve facade, wildcard, re-export, whitespace, comment and duplicate rules.
+- Remove the single-use linear `list_has` helper.
+- Follow-up: inventory remaining canonical lint dedupe arrays and distinguish
+  count-only membership from ordering-sensitive result storage.
