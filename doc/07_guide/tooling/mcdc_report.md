@@ -37,6 +37,10 @@ manifest; hard ceilings remain enforced. Capacity exhaustion, malformed rows,
 proof-budget exhaustion, stale exclusions, an empty denominator, and incomplete
 normal-mode coverage all fail closed with a nonzero exit.
 
+Alpha and Beta are migration/reporting modes: incomplete evidence renders
+`report=WARN gate=NOT_ENFORCED` and never renders PASS. Normal is the only mode
+that renders `gate=PASS`, after both evidence and exclusion audit succeed.
+
 The provenance digest binds the compiler manifest identity, report mode and
 freshness epoch, canonical owner/sequence event order, accepted binary
 exclusions, and selected masking witnesses. It is stable under input-event
