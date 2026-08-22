@@ -1,0 +1,125 @@
+#!/bin/sh
+# Fail-closed source and optional native gate for the rt_env_get/set ABI.
+#
+# The generic extern ABI audit compares the canonical Rust RuntimeFuncSpec with
+# C/Rust providers and selected backend declaration lists.  This focused gate
+# also pins the Pure-Simple core provider, MIR text expansion registry, direct
+# interpreter bridge, and generator specs: those were the surfaces involved in
+# the deployed two-word rt_env_set / four-word caller crash.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+fail() {
+    echo "env_runtime_abi_error=$1" >&2
+    echo "FAIL — environment runtime ABI source contract diverged"
+    exit 1
+}
+
+require_fixed() {
+    file=$1
+    needle=$2
+    label=$3
+    [ -f "$file" ] || fail "missing $file"
+    grep -Fq "$needle" "$file" || fail "$label ($file)"
+}
+
+reject_fixed() {
+    file=$1
+    needle=$2
+    label=$3
+    [ -f "$file" ] || fail "missing $file"
+    if grep -Fq "$needle" "$file"; then
+        fail "$label ($file)"
+    fi
+}
+
+# Canonical machine-word declarations and C header/provider.
+require_fixed src/compiler_rust/compiler/src/codegen/runtime_sffi.rs \
+    'RuntimeFuncSpec::new("rt_env_get", &[I64, I64], &[I64])' \
+    'canonical rt_env_get declaration is not 2 words -> RuntimeValue'
+require_fixed src/compiler_rust/compiler/src/codegen/runtime_sffi.rs \
+    'RuntimeFuncSpec::new("rt_env_set", &[I64, I64, I64, I64], &[I8])' \
+    'canonical rt_env_set declaration is not 4 words -> bool'
+require_fixed src/runtime/runtime.h \
+    'bool        rt_env_set(const uint8_t* key, uint64_t key_len, const uint8_t* value, uint64_t value_len);' \
+    'runtime header does not expose the 4-word setter'
+require_fixed src/runtime/runtime_native.c \
+    'bool rt_env_set(const uint8_t* key_ptr, uint64_t key_len, const uint8_t* value_ptr, uint64_t value_len) {' \
+    'native C provider does not consume 4 words'
+require_fixed src/compiler_rust/runtime/src/value/sffi/env_process.rs \
+    'pub unsafe extern "C" fn rt_env_set(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64) -> bool {' \
+    'native Rust provider does not consume 4 words'
+
+# Pure-Simple provider and raw bridge declarations.  These exact signatures
+# prevent a future bootstrap from silently regenerating the obsolete provider.
+require_fixed src/runtime/simple_core/core_env.spl \
+    'pub fn rt_env_get(key_ptr_raw: i64, key_len: i64) -> i64:' \
+    'Pure-Simple core getter is not 2 words -> RuntimeValue'
+require_fixed src/runtime/simple_core/core_env.spl \
+    'pub fn rt_env_set(key_ptr_raw: i64, key_len: i64, value_ptr_raw: i64, value_len: i64) -> i8:' \
+    'Pure-Simple core setter is not 4 words -> bool'
+require_fixed src/compiler/70.backend/backend/interpreter_calls.spl \
+    'extern fn rt_env_set(name_ptr: i64, name_len: i64, value_ptr: i64, value_len: i64) -> bool' \
+    'direct interpreter bridge setter is not 4 words'
+require_fixed src/compiler/70.backend/sffi_minimal.spl \
+    'extern fn rt_env_set(name_ptr: i64, name_len: i64, value_ptr: i64, value_len: i64) -> bool' \
+    'minimal SFFI bridge setter is not 4 words'
+
+# Semantic text calls must be expanded exactly once to (ptr,len) pairs.
+require_fixed src/compiler/50.mir/text_extern_abi.spl \
+    'case "rt_env_get" | "rt_env_get_i64" | "rt_get_env" | "rt_env_exists" | "rt_env_remove":' \
+    'Pure-Simple MIR getter text expansion is missing'
+require_fixed src/compiler/50.mir/text_extern_abi.spl \
+    'case "rt_env_set" | "rt_set_env":' \
+    'Pure-Simple MIR setter text expansion is missing'
+require_fixed src/compiler/50.mir/text_extern_abi.spl \
+    'return Some([0, 1])' \
+    'Pure-Simple MIR setter does not expand both text arguments'
+require_fixed src/compiler/50.mir/text_extern_abi.spl \
+    'fn text_extern_semantic_arity(func_name: text) -> i64?:' \
+    'Pure-Simple MIR registry lacks a semantic/raw arity discriminator'
+require_fixed src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl \
+    'if args.len() != expected:' \
+    'Pure-Simple MIR lowering can resplit an already-raw environment call'
+require_fixed src/compiler_rust/compiler/src/codegen/instr/calls.rs \
+    '"rt_env_set" | "rt_set_env" => Some(&[0, 1]),' \
+    'Rust-seed call lowering does not expand both setter text arguments'
+require_fixed src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs \
+    '"rt_env_set" | "rt_set_env" => Some(&[0, 1]),' \
+    'Rust-seed LLVM lowering does not expand both setter text arguments'
+
+# Generator inputs must agree too; otherwise regeneration can reintroduce a
+# divergent public contract even while hand-written providers remain correct.
+require_fixed src/compiler/90.tools/sffi_gen/specs/env.spl \
+    'return_type: "bool", runtime_fn: "rt_env_set",' \
+    'environment generator setter result is not bool'
+require_fixed src/compiler/90.tools/sffi_gen/specs/system.spl \
+    'return_type: "bool", runtime_fn: "rt_env_set",' \
+    'system generator setter result is not bool'
+require_fixed src/compiler/90.tools/sffi_gen/specs/io_full.spl \
+    '[FFIParamSpec.raw_ptr("key", "*const u8"), FFIParamSpec.simple("key_len", "u64"), FFIParamSpec.raw_ptr("value", "*const u8"), FFIParamSpec.simple("value_len", "u64")],' \
+    'workspace SFFI setter provider is not 4 words'
+
+if [ "${1:-}" = "--binary" ]; then
+    [ "$#" -eq 2 ] || fail 'usage: check-env-runtime-abi.shs [--binary <candidate>]'
+    candidate=$2
+    [ -x "$candidate" ] || fail "candidate is not executable: $candidate"
+    timeout_bin=$(command -v timeout || true)
+    [ -n "$timeout_bin" ] || fail 'timeout is required for the native probe'
+    set +e
+    native_out=$(SIMPLE_NO_STUB_FALLBACK=1 "$timeout_bin" -k 2s 20s "$candidate" -c \
+        'extern fn rt_env_set(key: text, value: text) -> bool; extern fn rt_env_get(key: text) -> text?; val ok = rt_env_set("__SIMPLE_ENV_ABI_PROBE__", "four-word-ok"); print(if ok: rt_env_get("__SIMPLE_ENV_ABI_PROBE__") ?? "" else: "set-failed")' \
+        2>/dev/null)
+    native_status=$?
+    set -e
+    [ "$native_status" -eq 0 ] || fail "native environment probe exited $native_status"
+    [ "$native_out" = 'four-word-ok' ] || fail 'native environment round trip disagreed'
+    echo "env_runtime_abi_native=pass"
+elif [ "$#" -ne 0 ]; then
+    fail 'usage: check-env-runtime-abi.shs [--binary <candidate>]'
+fi
+
+echo "env_runtime_abi_source=pass"
+echo "PASS — rt_env_get/set ABI is consistent across source owners"

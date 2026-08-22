@@ -551,15 +551,19 @@ impl MirLowering:
         val maybe_indices = text_arg_indices(callee_name)
         if not maybe_indices.?:
             return args
+        # Raw compiler bridges already supply the runtime's machine words.
+        # Checking exact semantic facade arity prevents their i64 operands
+        # from being passed to rt_string_data/len and split a second time.
+        # This branch is constant-time and allocation-free.
+        val semantic_arity = text_extern_semantic_arity(callee_name)
+        if val expected = semantic_arity:
+            if args.len() != expected:
+                return args
         val indices = maybe_indices ?? []
         if indices.len() == 0:
             return args
-        # Defensive: an already-hand-split call site to the same C symbol
-        # (e.g. interpreter_calls.spl's 4-raw-i64-arg `rt_env_set`) has more
-        # args than the registry's text-only arity expects and no text-typed
-        # operand at the listed indices any more -- leave any call whose arg
-        # count doesn't reach every listed index untouched rather than
-        # corrupt it.
+        # Defensive for entries without an exact semantic arity: leave any
+        # call whose arg count does not reach every listed index untouched.
         var max_index = -1
         for idx in indices:
             if idx > max_index:

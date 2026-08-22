@@ -144,3 +144,28 @@ describe "pure-Simple compiler: text-extern-ABI registry fix (end-to-end)":
         val arg_count = top_level_call_arg_count(call_line, "rt_unregistered_text_probe(")
         print("[text_extern_abi_registry] unregistered_arg_count = " + arg_count.to_text())
         assert_equal(1, arg_count, "over-application: an unregistered extern's text arg was split even though it is not in text_arg_indices")
+
+    it "expands semantic rt_env_set 2 -> 4 but leaves its raw 4-word bridge unchanged":
+        val semantic_source = "extern fn rt_env_set(key: text, value: text) -> bool\n\nfn probe() -> bool:\n    rt_env_set(\"abi-key\", \"abi-value\")\n"
+        val semantic_ast = parse_full_frontend(semantic_source, "env_set_semantic_abi_fixture.spl", "env_set_semantic_abi_fixture.spl", Logger(level: 0))
+        var semantic_hir_lowering = HirLowering.with_filename("env_set_semantic_abi_fixture.spl")
+        val semantic_hir = semantic_hir_lowering.lower_module(semantic_ast)
+        var semantic_mir_lowering = MirLowering.new(semantic_hir.symbols)
+        val semantic_mir = semantic_mir_lowering.lower_module(semantic_hir)
+        val semantic_output = MirToLlvm.create("test.llvm.env_set_semantic_abi", CodegenTarget.X86_64, nil).translate_module(semantic_mir)
+        val semantic_call = find_call_line(semantic_output, "rt_env_set(")
+        assert_true(semantic_call != "", "expected semantic rt_env_set call")
+        assert_equal(4, top_level_call_arg_count(semantic_call, "rt_env_set("), "semantic rt_env_set must expand two text operands to four machine words")
+
+        val raw_source = "extern fn rt_env_set(key_ptr: i64, key_len: i64, value_ptr: i64, value_len: i64) -> bool\n\nfn probe() -> bool:\n    rt_env_set(1, 2, 3, 4)\n"
+        val raw_ast = parse_full_frontend(raw_source, "env_set_raw_abi_fixture.spl", "env_set_raw_abi_fixture.spl", Logger(level: 0))
+        var raw_hir_lowering = HirLowering.with_filename("env_set_raw_abi_fixture.spl")
+        val raw_hir = raw_hir_lowering.lower_module(raw_ast)
+        var raw_mir_lowering = MirLowering.new(raw_hir.symbols)
+        val raw_mir = raw_mir_lowering.lower_module(raw_hir)
+        val raw_output = MirToLlvm.create("test.llvm.env_set_raw_abi", CodegenTarget.X86_64, nil).translate_module(raw_mir)
+        val raw_call = find_call_line(raw_output, "rt_env_set(")
+        assert_true(raw_call != "", "expected raw rt_env_set call")
+        assert_equal(4, top_level_call_arg_count(raw_call, "rt_env_set("), "raw four-word rt_env_set must not be split again")
+        assert_equal("", find_call_line(raw_output, "rt_string_data("), "raw rt_env_set must not extract text data")
+        assert_equal("", find_call_line(raw_output, "rt_string_len("), "raw rt_env_set must not extract text length")
