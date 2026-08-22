@@ -59,3 +59,16 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - No profile-based semantic authorization.
 - No implementation/done mark with fail-fast scaffold or missing manual.
 - Maximum three fix/verify cycles per slice; stop and record remaining blocker.
+## Active hardening tranche: SSA dominance receipts
+
+- Merge owner: `/root`.
+- Parallel review input: `ssa_verifier_design`, `verifier_integration_review`, and
+  `architecture_perf_facts` lanes.
+- Source owners: `mir_opt/perf_facts.spl` for bounded shared facts and
+  `mir_opt/mod.spl` for optimizer-boundary policy.
+- Acceptance: reject undefined, multiply-defined, use-before-def, non-dominating, and
+  unavailable-dominance flows with stable codes; model call results on the normal edge.
+- Performance gate: no verification work in normal builds, no dense liveness matrices in
+  the verifier projection, and no definitions-by-uses Cartesian scans.
+- Remaining follow-up: opcode typing, ownership, loop-boundary proof, exact module-pass
+  outcomes, and admitted runtime differential evidence.
