@@ -3,7 +3,7 @@
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
 use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn}
-use os.kernel.loader.fs_exec_spawn.{fs_exec_adopt_authenticated_v1}
+use os.kernel.loader.fs_exec_spawn.{fs_exec_adopt_authenticated_with_launch_v1}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1}
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
@@ -34,7 +34,7 @@ fn _discard_execution_observation(child_id: u64):
     val token = scheduler_execution_take_reaped_token_v1(child_id)
     if token.?: _ = scheduler_execution_evidence_consume_once_v1(token.unwrap())
 
-pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
+pub fn riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
     scheduler: Scheduler,
     table: MountTable,
     authorities: ExecutableAuthorityRegistryV1,
@@ -43,14 +43,17 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
     entry_point: u64,
     caller: i64,
     path: text,
+    argv: [text],
+    envp: [text],
     recipe: i64
 ) -> Rv64AuthenticatedExecutionResultV1:
     """Authenticated RV64 adoption, stdout capture, exit, reap, and token handoff."""
     val capture_session = rv64_process_stdout_begin()
     if not capture_session.?:
         return Rv64AuthenticatedExecutionResultV1(exit_code: -10, evidence: nil)
-    val prepared = fs_exec_adopt_authenticated_v1(
-        scheduler, table, authorities, token, consumer, entry_point, caller, path, recipe)
+    val prepared = fs_exec_adopt_authenticated_with_launch_v1(
+        scheduler, table, authorities, token, consumer, entry_point,
+        caller, path, argv, envp, recipe)
     if prepared.pid <= 0:
         val failed_capture = rv64_process_stdout_finish(capture_session.unwrap(), prepared.pid)
         if not failed_capture.?:
@@ -93,17 +96,35 @@ pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
         exit_code: captured.exit_code,
         evidence: evidence)
 
-pub fn riscv64_authenticated_execution_acceptance_fixture_v1(
+pub fn riscv64_fs_exec_spawn_authenticated_capture_v1(
+    scheduler: Scheduler,
+    table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    path: text,
+    recipe: i64
+) -> Rv64AuthenticatedExecutionResultV1:
+    """Compatibility capture with path as argv[0] and an empty environment."""
+    riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
+        scheduler, table, authorities, token, consumer, entry_point,
+        caller, path, [path], [], recipe)
+
+pub fn riscv64_authenticated_execution_acceptance_fixture_with_launch_v1(
     scheduler: Scheduler, table: MountTable,
     authorities: ExecutableAuthorityRegistryV1, token: ExecutableAuthorityTokenV1,
     consumer: ExecutableLoadConsumerV1, entry_point: u64, caller: i64,
-    path: text, recipe: i64, bundle_nonce: text, expected_image_hash: text
+    path: text, argv: [text], envp: [text], recipe: i64,
+    bundle_nonce: text, expected_image_hash: text
 ) -> bool:
     """In-guest live fixture; uses only the production adoption and evidence APIs."""
     if bundle_nonce == "" or expected_image_hash == "":
         return false
-    val run = riscv64_fs_exec_spawn_authenticated_capture_v1(
-        scheduler, table, authorities, token, consumer, entry_point, caller, path, recipe)
+    val run = riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1(
+        scheduler, table, authorities, token, consumer, entry_point,
+        caller, path, argv, envp, recipe)
     if run.exit_code != 0 or not run.evidence.?:
         return false
     val evidence_token = run.evidence.unwrap()
@@ -121,6 +142,17 @@ pub fn riscv64_authenticated_execution_acceptance_fixture_v1(
     serial_println("RV64_AUTH_EXEC_TOKEN_REPLAY nonce={bundle_nonce} image={evidence.image_hash} status=rejected")
     serial_println("RV64_AUTH_EXEC_ACCEPTANCE nonce={bundle_nonce} image={evidence.image_hash} status=pass")
     true
+
+pub fn riscv64_authenticated_execution_acceptance_fixture_v1(
+    scheduler: Scheduler, table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1, token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1, entry_point: u64, caller: i64,
+    path: text, recipe: i64, bundle_nonce: text, expected_image_hash: text
+) -> bool:
+    """Compatibility acceptance fixture with path argv[0] and empty envp."""
+    riscv64_authenticated_execution_acceptance_fixture_with_launch_v1(
+        scheduler, table, authorities, token, consumer, entry_point, caller,
+        path, [path], [], recipe, bundle_nonce, expected_image_hash)
 
 pub fn riscv64_fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
     """Prepare one filesystem image and block until its RV64 user task exits."""

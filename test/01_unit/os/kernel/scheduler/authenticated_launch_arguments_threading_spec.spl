@@ -1,0 +1,229 @@
+use std.spec.{describe, it, expect, fail}
+use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.ramfs.{RamFsDriver}
+use std.fs_driver.types.{MountOptions, OpenFlags, ExecuteTrust}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableAdmissionDecisionV1, ExecutableAdmissionV1
+}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.scheduler_executable_adoption_state.{
+    SchedulerExecutableAdoptionOwnerStateV1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    ExecutableAuthorityStateV1, executable_authority_snapshot
+}
+use os.kernel.loader.executable_admission_pipeline.{
+    ExecutableLoaderVerificationInputsV1, ExecutableLoaderCryptographicProofV1,
+    executable_loader_admit_authenticated_open_binding_v1,
+    executable_loader_authority_owner_initialize, executable_loader_commit,
+    executable_loader_retrieve_once, executable_loader_release_retrieved
+}
+use os.kernel.loader.executable_crypto_authority.{
+    ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize,
+    executable_manifest_hash_v1, executable_manifest_signing_body_v1
+}
+use os.kernel.loader.artifact_manifest.{
+    manifest_for_kind, manifest_kind_elf, manifest_with_entrypoint,
+    manifest_with_target, manifest_with_signature
+}
+use os.kernel.loader.executable_load_consumer.{
+    ExecutableLoadConsumerErrorV1, executable_load_consumer_new_v1
+}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    ExecutableLaunchArgumentsV1, executable_launch_arguments_v1_validate
+}
+use os.kernel.loader.executable_image_prepare.{
+    executable_prepare_image_with_launch_v1
+}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.types.task_types.{TaskPriority}
+use os.kernel.types.capability_types.{CapabilitySet}
+
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
+
+fn _push_u16(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn _push_u32(buf: [u8], value: i64) -> [u8]:
+    var out = _push_u16(buf, value & 0xFFFF)
+    _push_u16(out, (value >> 16) & 0xFFFF)
+
+fn _push_u64(buf: [u8], value: i64) -> [u8]:
+    var out = _push_u32(buf, value & 0xFFFFFFFF)
+    _push_u32(out, (value >> 32) & 0xFFFFFFFF)
+
+fn _x86_64_elf() -> [u8]:
+    var b: [u8] = [0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 0, 0]
+    while b.len() < 16: b.push(0.to_u8())
+    b = _push_u16(b, 2)
+    b = _push_u16(b, 62)
+    b = _push_u32(b, 1)
+    b = _push_u64(b, 0x400000)
+    b = _push_u64(b, 64)
+    b = _push_u64(b, 0)
+    b = _push_u32(b, 0)
+    b = _push_u16(b, 64)
+    b = _push_u16(b, 56)
+    b = _push_u16(b, 1)
+    b = _push_u16(b, 0)
+    b = _push_u16(b, 0)
+    b = _push_u16(b, 0)
+    b = _push_u32(b, 1)
+    b = _push_u32(b, 5)
+    b = _push_u64(b, 0x80)
+    b = _push_u64(b, 0x400000)
+    b = _push_u64(b, 0x400000)
+    b = _push_u64(b, 4)
+    b = _push_u64(b, 4)
+    b = _push_u64(b, 0x1000)
+    while b.len() < 0x80: b.push(0.to_u8())
+    b.push(0xC3.to_u8())
+    b.push(0x90.to_u8())
+    b.push(0x90.to_u8())
+    b.push(0x90.to_u8())
+    b
+
+fn _signing_seed() -> [u8]:
+    [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+        0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+        0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+        0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+    ]
+
+fn _table_with_elf() -> MountTable:
+    var table = MountTable.new()
+    if table.mount("/", DriverInstance.RamFs(driver: RamFsDriver.new()),
+                   MountOptions.default()).is_err():
+        fail("fixture mount failed")
+    val opened = table.open("/simplebox", OpenFlags.create_write())
+    if opened.is_err(): fail("fixture open failed")
+    val handle = opened.unwrap()
+    if table.write(handle, rt_string_from_byte_array(_x86_64_elf())).is_err():
+        fail("fixture write failed")
+    if table.close(handle).is_err(): fail("fixture close failed")
+    table
+
+fn _admit(table: mut MountTable) -> (ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1, u64):
+    val binding_result = table.open_for_execute("/simplebox", ExecuteTrust.Trusted)
+    if binding_result.is_err(): fail("execute binding failed")
+    val binding: ExecuteOpenBinding = binding_result.unwrap()
+    val bytes = _x86_64_elf()
+    val image_hash = sha256_u8_hex(bytes)
+    val target = ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos")
+    var manifest = manifest_with_target(manifest_for_kind(manifest_kind_elf()), target)
+    manifest = manifest_with_entrypoint(manifest, "main")
+    manifest = manifest_with_signature(manifest, "ed25519:release-root", [image_hash])
+    val pair = pure_ed25519_keypair_from_seed(_signing_seed())
+    if not executable_loader_trust_roots_initialize([
+        ExecutableTrustedSignerV1(key_id: "release-root", public_key: pair.1)]):
+        fail("trust root init failed")
+    var admission = ExecutableAdmissionV1(
+        schema_version: 1, admission_id: "launch-args-test-1",
+        decision: ExecutableAdmissionDecisionV1.Admitted, rejection_reason: "",
+        image_hash: image_hash,
+        manifest_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        kernel_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        trust_root_hash: sha256_u8_hex(pair.1), trust_epoch: 1u64,
+        target: target, firmware_profile: "test", compiler_identity: "test",
+        source_identity: "test", config_identity: "test",
+        mount_id: binding.mount_id.id.to_u64(), mount_generation: binding.mount_generation,
+        file_id: binding.file_handle.id, file_generation: binding.content_generation,
+        effective_capabilities: manifest.required_capabilities)
+    admission.manifest_hash = executable_manifest_hash_v1(manifest, admission, image_hash)
+    val signature = pure_ed25519_sign(
+        _signing_seed(), pair.1,
+        executable_manifest_signing_body_v1(manifest, admission, image_hash))
+    val owner_result = executable_loader_authority_owner_initialize(2, 0x4C41554E43484152u64)
+    if owner_result.is_err(): fail("authority owner init failed")
+    val owner = owner_result.unwrap()
+    val inputs = ExecutableLoaderVerificationInputsV1(
+        manifest: manifest, manifest_hash: admission.manifest_hash,
+        image_hash: image_hash, trust_root_hash: admission.trust_root_hash,
+        target: target, format: "elf", role: "main-image", verified_load_ranges: [],
+        manifest_verified: true, signature_verified: true, trust_root_verified: true,
+        target_verified: true, format_verified: true, ranges_verified: true,
+        image_digest_verified: true)
+    val result = executable_loader_admit_authenticated_open_binding_v1(
+        table, owner, binding, inputs, admission,
+        ExecutableLoaderCryptographicProofV1(
+            signer_key_id: "release-root", signature: signature))
+    if result.is_err(): fail("authenticated fixture admission failed")
+    (owner, result.unwrap().authority_token, result.unwrap().entry_point)
+
+describe "authenticated executable launch argument boundary":
+    it "rejects forged invalid launch data before touching authority state":
+        var scheduler = Scheduler.new_bootstrap()
+        var table = MountTable.new()
+        # These coordinates are deliberately unusable. The launch preflight
+        # must reject first and leave the scheduler authority transaction idle.
+        val registry = ExecutableAuthorityRegistryV1(owner_epoch: 1u64)
+        val token = ExecutableAuthorityTokenV1(
+            slot_index: 7, generation: 9u64, nonce: 11u64)
+        val forged = ExecutableLaunchArgumentsV1(
+            path: "/bin/tool",
+            argv: ["tool\0hidden"],
+            envp: [],
+            argv_bytes: 1,
+            envp_bytes: 0,
+            combined_bytes: 1)
+        val adopted = scheduler.adopt_authenticated_executable_pid_with_launch_v1(
+            table, registry, token,
+            executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
+            forged, 0x400000u64, TaskPriority.Normal, CapabilitySet.empty())
+        expect(adopted.pid).to_equal(0u64)
+        expect(adopted.receipt.failure).to_equal(
+            ExecutableLoadConsumerErrorV1.InvalidConsumer)
+        val snapshot = scheduler.authenticated_executable_adoption_snapshot_v1()
+        expect(snapshot.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Idle)
+        expect(snapshot.pid).to_equal(0u64)
+        expect(snapshot.token_slot).to_equal(-1)
+        expect(snapshot.token_generation).to_equal(0u64)
+        expect(snapshot.token_nonce).to_equal(0u64)
+
+    it "keeps an admitted token armed after malformed launch and preserves alias argv zero":
+        var table = _table_with_elf()
+        val admitted = _admit(table)
+        val owner = admitted.0
+        val token = admitted.1
+        val entry_point = admitted.2
+        var scheduler = Scheduler.new_bootstrap()
+        val forged = ExecutableLaunchArgumentsV1(
+            path: "/bin/simplebox", argv: ["/bin/cat\0hidden"], envp: [],
+            argv_bytes: 1, envp_bytes: 0, combined_bytes: 1)
+        val rejected = scheduler.adopt_authenticated_executable_pid_with_launch_v1(
+            table, owner, token,
+            executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
+            forged, entry_point, TaskPriority.Normal, CapabilitySet.empty())
+        expect(rejected.receipt.failure).to_equal(
+            ExecutableLoadConsumerErrorV1.InvalidConsumer)
+        val still_armed = executable_authority_snapshot(owner, token)
+        expect(still_armed.is_ok()).to_be_true()
+        expect(still_armed.unwrap().state).to_equal(ExecutableAuthorityStateV1.Armed)
+
+        # The exact same loader-issued token remains usable after rejection.
+        expect(executable_loader_commit(owner, token).is_ok()).to_be_true()
+        val retrieved = executable_loader_retrieve_once(owner, token)
+        expect(retrieved.is_ok()).to_be_true()
+        val launch = executable_launch_arguments_v1_validate(
+            "/bin/simplebox", ["/bin/cat", "/tmp/input"], ["MODE=test"])
+        expect(launch.is_ok()).to_be_true()
+        val prepared = executable_prepare_image_with_launch_v1(
+            table, retrieved.unwrap().image_handle,
+            executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
+            entry_point, Architecture.X86_64, launch.unwrap())
+        expect(prepared.is_ok()).to_be_true()
+        val image = prepared.unwrap().image
+        expect(image.binary_path).to_equal("/bin/simplebox")
+        expect(image.argv).to_equal(["/bin/cat", "/tmp/input"])
+        expect(image.envp).to_equal(["MODE=test"])
+        expect(executable_loader_release_retrieved(table, owner, token).is_ok()).to_be_true()

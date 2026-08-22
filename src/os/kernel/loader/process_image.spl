@@ -4,7 +4,7 @@
 #   * Replaces the fixed 64 KB user stack with stack_builder.compute_stack_size(),
 #     which scales with binary size and caps at 128 MB.
 #   * Populates UserProcessImage.initial_sp and .initial_stack_bytes via
-#     stack_builder.build_initial_stack() so libc `_start` can recover argc,
+#     stack_builder.build_initial_stack_checked() so libc `_start` can recover argc,
 #     argv, envp, and the auxv vector per the System V ABI.
 
 use os.kernel.arch.arch_context.{Architecture}
@@ -21,7 +21,7 @@ use os.kernel.loader.elf_loader.{
 }
 use os.kernel.loader.smf.{smf_has_header, smf_extract_executable_stub, smf_extract_executable_stub_for_arch, smf_extract_executable_stub_unchecked}
 use os.kernel.loader.stack_builder.{
-    build_initial_stack, compute_stack_size, AuxEntry,
+    build_initial_stack_checked, compute_stack_size, AuxEntry,
     stack_build_result_sp, stack_build_result_bytes
 }
 use os.kernel.types.task_types.{UserLoadSegment, UserProcessImage}
@@ -352,7 +352,12 @@ fn _build_user_process_image_from_elf(
     elf_entry: u64,
     elf_segments: [ElfLoadSegment],
     source_len: u64
-) -> UserProcessImage:
+) -> Result<UserProcessImage, text>:
+    match arch:
+        case Architecture.X86_64: ()
+        case Architecture.Arm64: ()
+        case Architecture.Riscv64: ()
+        case _: return Err("ELF64 initial stack builder does not support 32-bit targets")
     val stack_top = _native_default_stack_top(arch)
     var stack_size = compute_stack_size(source_len)
     if stack_size == 0:
@@ -382,12 +387,18 @@ fn _build_user_process_image_from_elf(
         segments = _arm64_fallback_user_segments(native_data)
 
     val extra_aux: [AuxEntry] = [AuxEntry(aux_type: 9, value: elf_entry)]  # AT_ENTRY
-    val stack_frame = build_initial_stack(stack_top, effective_argv, envp, extra_aux)
+    # No kernel CSPRNG owner is wired here yet. Omit AT_RANDOM explicitly;
+    # never publish predictable bytes under an entropy-bearing auxv tag.
+    val stack_frame_result = build_initial_stack_checked(
+        stack_top, stack_size, 8, [], effective_argv, envp, extra_aux)
+    val stack_frame = match stack_frame_result:
+        case Ok(frame): frame
+        case Err(_): return Err("ELF64 initial stack construction failed")
     val initial_sp = stack_build_result_sp(stack_frame)
     val initial_stack_bytes = stack_build_result_bytes(stack_frame)
     serial_println("[process-image] build entry={elf_entry} stack_top={stack_top} stack_size={stack_size} initial_sp={initial_sp} segs={segments.len()}")
 
-    UserProcessImage(
+    Ok(UserProcessImage(
         binary_path: path,
         entry: elf_entry,
         stack_top: stack_top,
@@ -399,7 +410,7 @@ fn _build_user_process_image_from_elf(
         file_bytes: native_data,
         initial_sp: initial_sp,
         initial_stack_bytes: initial_stack_bytes
-    )
+    ))
 
 pub(package) fn build_user_process_image(
     path: text,
@@ -420,9 +431,9 @@ pub(package) fn build_user_process_image(
     val native_data = _normalise_executable_bytes(owned_input, arch)?
     val elf = load_user_executable(native_data, arch)?
     val entry = _user_entry_for_image(elf_image_entry(elf), native_data)
-    Ok(_build_user_process_image_from_elf(
+    _build_user_process_image_from_elf(
         path, native_data, arch, argv, envp, entry, elf_image_segments(elf), _pi_byte_len(data)
-    ))
+    )
 
 fn stage_user_process_image_for_scheduler(
     path: text,
@@ -455,10 +466,11 @@ fn stage_user_process_image_for_scheduler(
                     direct_elf = true
     if not direct_elf:
         val native_result = _normalise_executable_bytes(data, arch)
-        if native_result.is_err():
-            serial_println("[process-image] stage normalize failed")
-            return -8
-        native_data = native_result.unwrap()
+        match native_result:
+            case Ok(value): native_data = value
+            case Err(_):
+                serial_println("[process-image] stage normalize failed")
+                return -8
     val staged_segment_count = stage_x86_64_user_elf(native_data)
     if staged_segment_count <= 0:
         serial_println("[process-image] stage elf parse failed code={staged_segment_count}")
@@ -501,7 +513,13 @@ fn stage_user_process_image_for_scheduler(
     if segments.len() == 0:
         return -8
     val extra_aux: [AuxEntry] = [AuxEntry(aux_type: 9, value: entry)]
-    val stack_frame = build_initial_stack(stack_top, effective_argv, envp, extra_aux)
+    val stack_frame_result = build_initial_stack_checked(
+        stack_top, stack_size, 8, [], effective_argv, envp, extra_aux)
+    val stack_frame = match stack_frame_result:
+        case Ok(frame): frame
+        case Err(_):
+            serial_println("[process-image] stage initial stack rejected")
+            return -8
     val initial_sp = stack_build_result_sp(stack_frame)
     val initial_stack_bytes = stack_build_result_bytes(stack_frame)
     g_staged_process_path = path
@@ -582,12 +600,12 @@ fn _build_user_process_image_unchecked_from_native(
     argv: [text],
     envp: [text],
     source_len: u64
-) -> UserProcessImage:
+) -> Result<UserProcessImage, text>:
     rt_arm64_set_exec_image(native_data)
     val arm_entry = rt_arm_elf64_entry(native_data)
-    _build_arm64_user_process_image_from_native(
+    Ok(_build_arm64_user_process_image_from_native(
         path, native_data, arch, argv, envp, arm_entry, source_len
-    )
+    ))
 
 @cfg(arm32)
 fn _build_user_process_image_unchecked_from_native(
@@ -597,7 +615,7 @@ fn _build_user_process_image_unchecked_from_native(
     argv: [text],
     envp: [text],
     source_len: u64
-) -> UserProcessImage:
+) -> Result<UserProcessImage, text>:
     val elf = load_user_executable_unchecked(native_data, arch)
     val entry = _user_entry_for_image(elf_image_entry(elf), native_data)
     _build_user_process_image_from_elf(
@@ -612,7 +630,7 @@ fn _build_user_process_image_unchecked_from_native(
     argv: [text],
     envp: [text],
     source_len: u64
-) -> UserProcessImage:
+) -> Result<UserProcessImage, text>:
     val elf = load_user_executable_unchecked(native_data, arch)
     val entry = _user_entry_for_image(elf_image_entry(elf), native_data)
     _build_user_process_image_from_elf(
@@ -627,7 +645,7 @@ fn _build_user_process_image_unchecked_from_native(
     argv: [text],
     envp: [text],
     source_len: u64
-) -> UserProcessImage:
+) -> Result<UserProcessImage, text>:
     val elf = load_user_executable_unchecked(native_data, arch)
     val entry = _user_entry_for_image(elf_image_entry(elf), native_data)
     _build_user_process_image_from_elf(
@@ -642,7 +660,7 @@ fn _build_user_process_image_unchecked_from_native(
     argv: [text],
     envp: [text],
     source_len: u64
-) -> UserProcessImage:
+) -> Result<UserProcessImage, text>:
     val elf = load_user_executable_unchecked(native_data, arch)
     val entry = _user_entry_for_image(elf_image_entry(elf), native_data)
     _build_user_process_image_from_elf(
@@ -657,7 +675,7 @@ fn _build_user_process_image_unchecked_from_native(
     argv: [text],
     envp: [text],
     source_len: u64
-) -> UserProcessImage:
+) -> Result<UserProcessImage, text>:
     val elf = load_user_executable_unchecked(native_data, arch)
     val entry = _user_entry_for_image(elf_image_entry(elf), native_data)
     _build_user_process_image_from_elf(
@@ -670,8 +688,8 @@ fn build_user_process_image_unchecked(
     arch: Architecture,
     argv: [text],
     envp: [text]
-) -> UserProcessImage:
-    """Build a process image without Result predicates for ARM freestanding tests."""
+) -> Result<UserProcessImage, text>:
+    """Build through unchecked ELF normalization while preserving image failures."""
     val owned_input = _pi_owned_bytes(data)
     val native_data = _normalise_executable_bytes_unchecked(owned_input)
     serial_println("[process-image] unchecked src_elf={_has_elf_magic(owned_input)} native_len={_pi_byte_len(native_data)} native_elf={_has_elf_magic(native_data)} arch={arch}")
@@ -687,11 +705,19 @@ fn probe_user_process_image_unchecked(
     envp: [text]
 ) -> i64:
     """Exercise the process-image build path and return a scalar ARM-safe status."""
+    match arch:
+        case Architecture.X86_64: ()
+        case Architecture.Arm64: ()
+        case Architecture.Riscv64: ()
+        case _: return -8
     val owned_input = _pi_owned_bytes(data)
     val native_data = _normalise_executable_bytes_unchecked(owned_input)
     val elf = load_user_executable_unchecked(native_data, arch)
     val entry = _user_entry_for_image(elf_image_entry(elf), native_data)
-    val stack_top = _default_stack_top(arch).unwrap()
+    val stack_top_result = _default_stack_top(arch)
+    val stack_top = match stack_top_result:
+        case Ok(value): value
+        case Err(_): return -8
     var stack_size = compute_stack_size(_pi_byte_len(data))
     if stack_size == 0:
         stack_size = 8388608
@@ -708,6 +734,10 @@ fn probe_user_process_image_unchecked(
         segment_count = segment_count + 1
 
     val extra_aux: [AuxEntry] = [AuxEntry(aux_type: 9, value: entry)]  # AT_ENTRY
+    match build_initial_stack_checked(
+        stack_top, stack_size, 8, [], effective_argv, envp, extra_aux):
+        case Ok(_): ()
+        case Err(_): return -8
     val _probe_aux = extra_aux
     val _probe_argv = effective_argv
     val _probe_stack_size = stack_size

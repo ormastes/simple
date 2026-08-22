@@ -38,7 +38,11 @@ export use os.kernel.loader.executable_load_plan_v1.{
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.mod.{get_arch}
 use os.kernel.loader.executable_image_prepare.{
-    executable_prepare_max_source_bytes_v1, executable_prepare_image_v1
+    executable_prepare_max_source_bytes_v1,
+    executable_prepare_image_with_launch_v1
+}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_validate
 }
 use os.kernel.scheduler.scheduler_types.{_map_user_process_image}
 use os.kernel.memory.user_address_space.{
@@ -230,15 +234,27 @@ fn _load_close_failed_commit(
     _load_receipt_with_coordinates(
         next, receipt.load_slot_index, receipt.load_generation, receipt.load_nonce)
 
-pub fn executable_load_consumer_commit_v1(
+pub fn executable_load_consumer_commit_with_launch_v1(
     mut table: MountTable,
     authorities: ExecutableAuthorityRegistryV1,
     token: ExecutableAuthorityTokenV1,
     consumer: ExecutableLoadConsumerV1,
-    entry_point: u64
+    entry_point: u64,
+    path: text,
+    argv: [text],
+    envp: [text]
 ) -> ExecutableLoadReceiptV1:
     # This is the only public bridge from authority to the load consumer. The
     # admission path cannot mint `token`, and no mapping result is authorized.
+    # Validate/copy launch strings before committing the one-shot token. This
+    # compatibility mapper is non-authorizing, but it must preserve the same
+    # no-token-burn invariant as scheduler adoption.
+    val launch_result = executable_launch_arguments_v1_validate(path, argv, envp)
+    if launch_result.is_err():
+        var rejected = consumer
+        rejected.failure = ExecutableLoadConsumerErrorV1.InvalidConsumer
+        return executable_load_consumer_receipt_v1(rejected)
+    val launch = launch_result.unwrap()
     val committed = executable_loader_commit(authorities, token)
     if committed.is_err():
         var rejected = consumer
@@ -270,8 +286,9 @@ pub fn executable_load_consumer_commit_v1(
                 blocked.failure = ExecutableLoadConsumerErrorV1.RollbackUnavailable
                 return _load_close_failed_commit(
                     table, reserved, authorities, token, blocked)
-            val prepared = executable_prepare_image_v1(
-                table, value.image_handle, consumer, entry_point, Architecture.X86_64)
+            val prepared = executable_prepare_image_with_launch_v1(
+                table, value.image_handle, consumer, entry_point,
+                Architecture.X86_64, launch)
             if prepared.is_err():
                 var failed = planned
                 failed.failure = prepared.unwrap_err()
@@ -310,6 +327,18 @@ pub fn executable_load_consumer_commit_v1(
                 mapping, reserved.load_slot_index,
                 reserved.load_generation, reserved.load_nonce)
 
+pub fn executable_load_consumer_commit_v1(
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64
+) -> ExecutableLoadReceiptV1:
+    """Compatibility mapper with the historical authority-image argv[0]."""
+    executable_load_consumer_commit_with_launch_v1(
+        table, authorities, token, consumer, entry_point,
+        "authority-image", ["authority-image"], [])
+
 pub fn executable_load_consumer_release_v1(
     mut table: MountTable,
     receipt: ExecutableLoadReceiptV1
@@ -343,4 +372,5 @@ pub fn executable_load_consumer_retry_close_v1(
 export executable_load_consumer_max_source_bytes_v1
 export executable_load_consumer_max_live_slots_v1
 export executable_load_consumer_commit_v1, executable_load_consumer_release_v1
+export executable_load_consumer_commit_with_launch_v1
 export executable_load_consumer_retry_close_v1

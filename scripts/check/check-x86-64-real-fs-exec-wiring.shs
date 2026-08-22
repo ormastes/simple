@@ -49,16 +49,20 @@ require 'initial_rsp: task.user_stack' "$validation"
 # authenticated facade consumes a loader-issued token before it owns the exact
 # child handoff/exit/collection lifecycle.
 require 'fs_exec_spawn_as(0, path, argv, envp)' "$launcher"
+# The retained v1 wrapper is source compatibility only. Production adoption
+# must enter the launch-aware path so validated argv/envp reach the image.
 require 'fs_exec_adopt_authenticated_v1(' "$authenticated_owner"
+require 'fs_exec_adopt_authenticated_with_launch_v1(' "$authenticated_owner"
+require 'fs_exec_adopt_authenticated_with_launch_v1(' "$launcher"
 require 'token: ExecutableAuthorityTokenV1' "$authenticated_owner"
 require 'consumer: ExecutableLoadConsumerV1' "$authenticated_owner"
-require 'owner.adopt_authenticated_executable_pid_v1(' "$authenticated_owner"
+require 'owner.adopt_authenticated_executable_pid_with_launch_v1(' "$authenticated_owner"
 require 'owner.open_for_execute(executable_path, ExecuteTrust.Trusted)' "$authenticated_media"
 require 'executable_loader_admit_authenticated_open_binding_v1(' "$authenticated_media"
 require 'admitted.unwrap().authority_token' "$authenticated_media"
 require 'executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos")' "$authenticated_media"
 require 'x86_64_fs_exec_spawn_authenticated_v1(' "$authenticated_media"
-require 'val prepared = fs_exec_adopt_authenticated_v1(' "$launcher"
+require 'val prepared = fs_exec_adopt_authenticated_with_launch_v1(' "$launcher"
 require 'owner.exit_task_by_id(child, exit_code.to_i32())' "$launcher"
 require 'owner.wait_for_collect(TaskId(id: 0u64), child, false)' "$launcher"
 require 'if not vmm_clone_kernel_low_private(space.phys_root):' "$user_as"
@@ -95,6 +99,17 @@ cp "$user_as" "$tmp/user_address_space.spl"
 sed -i 's/if not vmm_clone_kernel_low_private(space\.phys_root):/if false:/' "$tmp/user_address_space.spl"
 if grep -Fq 'if not vmm_clone_kernel_low_private(space.phys_root):' "$tmp/user_address_space.spl"; then
     fail 'low-identity-clone sabotage was not applied'
+fi
+
+# Self-test fixture: rewriting the canonical owner handoff to the retained v1
+# wrapper must remove the exact launch-aware production call required above.
+cp "$authenticated_owner" "$tmp/fs_exec_spawn.spl"
+sed -i 's/owner\.adopt_authenticated_executable_pid_with_launch_v1(/owner.adopt_authenticated_executable_pid_v1(/' "$tmp/fs_exec_spawn.spl"
+if grep -Fq 'owner.adopt_authenticated_executable_pid_with_launch_v1(' "$tmp/fs_exec_spawn.spl"; then
+    fail 'launch-aware scheduler handoff sabotage was not applied'
+fi
+if ! grep -Fq 'owner.adopt_authenticated_executable_pid_v1(' "$tmp/fs_exec_spawn.spl"; then
+    fail 'compatibility-wrapper sabotage fixture is malformed'
 fi
 
 echo 'PASS x86_64 real filesystem execution wiring contract'

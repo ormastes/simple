@@ -13,6 +13,10 @@ use os.kernel.loader.executable_authority_registry.{
     ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1
 }
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_errno,
+    executable_launch_arguments_v1_validate
+}
 use os.kernel.scheduler.scheduler_executable_adoption.{
     SchedulerExecutableAdoptionResultV1
 }
@@ -200,6 +204,53 @@ pub fn fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     """
     fs_exec_spawn_as(0, path, argv, envp)
 
+pub fn fs_exec_adopt_authenticated_with_launch_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    path: text,
+    argv: [text],
+    envp: [text],
+    recipe: i64
+) -> FsExecPrepareResult:
+    """Consume one loader-issued authority and publish through Scheduler.
+
+    This bridge cannot issue or reconstruct a token. The loader registry owns
+    replay defense, while the returned Scheduler owns the newly published task.
+    """
+    # Validate and take independent copies before the scheduler can consume the
+    # one-shot loader authority or reach path/capability policy. A malformed
+    # vector therefore cannot burn a valid token or leave a partially prepared
+    # process image behind.
+    val launch_result = executable_launch_arguments_v1_validate(path, argv, envp)
+    if launch_result.is_err():
+        return FsExecPrepareResult(
+            scheduler: scheduler,
+            pid: executable_launch_arguments_v1_errno(launch_result.unwrap_err()),
+            entry: 0)
+    val launch = launch_result.unwrap()
+    val gate = exec_cap_check(caller, launch.path)
+    if gate != 0:
+        return FsExecPrepareResult(scheduler: scheduler, pid: gate as i64, entry: 0)
+    val allowed = spawn_authority_check_spawn(caller, recipe)
+    if allowed != 0:
+        return FsExecPrepareResult(scheduler: scheduler, pid: allowed as i64, entry: 0)
+    val caps = spawn_authority_spawn_caps(
+        caller, recipe, _fs_exec_parent_caps(caller, recipe))
+    var owner = scheduler
+    val adopted: SchedulerExecutableAdoptionResultV1 =
+        owner.adopt_authenticated_executable_pid_with_launch_v1(
+            table, authorities, token, consumer, launch, entry_point,
+            TaskPriority.Normal, caps)
+    if not adopted.receipt.execution_authorized or adopted.pid == 0u64:
+        return FsExecPrepareResult(scheduler: owner, pid: -13, entry: 0)
+    FsExecPrepareResult(
+        scheduler: owner, pid: adopted.pid as i64, entry: entry_point as i64)
+
 pub fn fs_exec_adopt_authenticated_v1(
     scheduler: Scheduler,
     mut table: MountTable,
@@ -211,28 +262,10 @@ pub fn fs_exec_adopt_authenticated_v1(
     path: text,
     recipe: i64
 ) -> FsExecPrepareResult:
-    """Consume one loader-issued authority and publish through Scheduler.
-
-    This bridge cannot issue or reconstruct a token. The loader registry owns
-    replay defense, while the returned Scheduler owns the newly published task.
-    """
-    val gate = exec_cap_check(caller, path)
-    if gate != 0:
-        return FsExecPrepareResult(scheduler: scheduler, pid: gate as i64, entry: 0)
-    val allowed = spawn_authority_check_spawn(caller, recipe)
-    if allowed != 0:
-        return FsExecPrepareResult(scheduler: scheduler, pid: allowed as i64, entry: 0)
-    val caps = spawn_authority_spawn_caps(
-        caller, recipe, _fs_exec_parent_caps(caller, recipe))
-    var owner = scheduler
-    val adopted: SchedulerExecutableAdoptionResultV1 =
-        owner.adopt_authenticated_executable_pid_v1(
-            table, authorities, token, consumer, entry_point,
-            TaskPriority.Normal, caps)
-    if not adopted.receipt.execution_authorized or adopted.pid == 0u64:
-        return FsExecPrepareResult(scheduler: owner, pid: -13, entry: 0)
-    FsExecPrepareResult(
-        scheduler: owner, pid: adopted.pid as i64, entry: entry_point as i64)
+    """Compatibility entrypoint with path as argv[0] and an empty environment."""
+    fs_exec_adopt_authenticated_with_launch_v1(
+        scheduler, table, authorities, token, consumer, entry_point,
+        caller, path, [path], [], recipe)
 
 pub fn fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
     """Reject unauthenticated live handoff through the same canonical gate."""

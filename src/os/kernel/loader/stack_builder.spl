@@ -11,7 +11,7 @@
 #                    argv[0], argv[1], ..., NULL
 #                    envp[0], envp[1], ..., NULL
 #                    auxv entries (pairs of u64), terminated by AT_NULL,0
-#                    16 random bytes (for AT_RANDOM)
+#                    optional 16 caller-supplied random bytes (for AT_RANDOM)
 #                    argv/envp string pool (NUL-terminated)
 #                    padding to 16-byte alignment of initial_sp
 #
@@ -47,6 +47,7 @@ val DEFAULT_USER_STACK_SIZE: u64 = 0x800000
 val MAX_USER_STACK_SIZE: u64 = 0x8000000
 val USER_PAGE_SIZE: u64 = 0x1000
 val AUX_RANDOM_BYTES: u64 = 0x10
+val STACK_BUILDER_U64_MAX: u64 = 0xffffffffffffffffu64
 
 extern fn rt_text_to_bytes(s: text) -> [u8]
 
@@ -65,6 +66,17 @@ struct StackBuildResult:
     """
     sp: u64
     bytes: [u8]
+
+enum StackBuildError:
+    InvalidStackBounds
+    UnsupportedAbi
+    FrameTooLarge
+    ArithmeticOverflow
+    InvalidEntropy
+    EmbeddedNul
+    InvalidAuxv
+    InvalidFramePointer
+    SerializationMismatch
 
 fn stack_build_result_sp(result: StackBuildResult) -> u64:
     result.sp
@@ -127,7 +139,15 @@ fn _zero_bytes(n: u64) -> [u8]:
         i = i + 1
     out
 
-fn build_initial_stack(stack_top: u64, argv: [text], envp: [text], auxv: [AuxEntry]) -> StackBuildResult:
+fn build_initial_stack_checked(
+    stack_top: u64,
+    stack_size: u64,
+    abi_word_size: u64,
+    random_bytes: [u8],
+    argv: [text],
+    envp: [text],
+    auxv: [AuxEntry]
+) -> Result<StackBuildResult, StackBuildError>:
     """Construct the initial SysV user-mode stack frame.
 
     The returned `bytes` are laid out so that position 0 of the blob is
@@ -135,20 +155,41 @@ fn build_initial_stack(stack_top: u64, argv: [text], envp: [text], auxv: [AuxEnt
     `stack_top - 1`. The kernel memcpy's `bytes` to
     `stack_top - bytes.len()`, then sets the userspace sp to that base.
 
-    Auxv defaults (AT_PAGESZ, AT_RANDOM, AT_EXECFN) are always included
-    even if the caller passes an empty list; caller entries are appended
-    before the AT_NULL terminator.
+    This builder is ELF64/SysV-only: every scalar and pointer slot is eight
+    bytes. `abi_word_size` must therefore be 8. `random_bytes` must contain
+    exactly 16 bytes to emit AT_RANDOM, or be empty to omit AT_RANDOM. It is
+    never synthesized. Caller entries precede the AT_NULL terminator.
     """
+    if stack_size == 0 or stack_size > MAX_USER_STACK_SIZE or stack_top < stack_size:
+        return Err(StackBuildError.InvalidStackBounds)
+    if abi_word_size != 8:
+        return Err(StackBuildError.UnsupportedAbi)
+    if random_bytes.len() != 0 and random_bytes.len() != AUX_RANDOM_BYTES as i64:
+        return Err(StackBuildError.InvalidEntropy)
+    val stack_bottom = stack_top - stack_size
     val argc: u64 = argv.len() as u64
+    val envc: u64 = envp.len() as u64
+    val auxc: u64 = auxv.len() as u64
+
+    # Even empty strings consume one byte and each vector element consumes at
+    # least one pointer slot. Reject impossible counts before doing arithmetic
+    # or allocating address tables.
+    if argc > stack_size / 8 or envc > stack_size / 8 or auxc > stack_size / 16:
+        return Err(StackBuildError.FrameTooLarge)
 
     # --- Pass 1: compute string pool starting at stack_top, growing down.
     # We compute final absolute addresses for each argv/envp string and for
     # the 16 AT_RANDOM bytes, then emit the pointer arrays with real addrs.
     var top: u64 = stack_top
 
-    # Reserve AT_RANDOM bytes at the very top.
-    top = top - AUX_RANDOM_BYTES
-    val random_addr: u64 = top
+    # AT_RANDOM is present only when its complete entropy payload is supplied.
+    val has_random = random_bytes.len() == AUX_RANDOM_BYTES as i64
+    var random_addr: u64 = 0
+    if has_random:
+        if top - stack_bottom < AUX_RANDOM_BYTES:
+            return Err(StackBuildError.FrameTooLarge)
+        top = top - AUX_RANDOM_BYTES
+        random_addr = top
 
     # argv string pool (argv[0], argv[1], ...). Push strings high->low so
     # argv[0] ends up at the highest address; track addresses in order.
@@ -158,7 +199,17 @@ fn build_initial_stack(stack_top: u64, argv: [text], envp: [text], auxv: [AuxEnt
     while i < argc_i:
         val s = argv[i]
         val raw = rt_text_to_bytes(s)
-        val slen: u64 = (raw.len() as u64) + 1
+        var raw_index: i64 = 0
+        while raw_index < raw.len():
+            if raw[raw_index] == 0:
+                return Err(StackBuildError.EmbeddedNul)
+            raw_index = raw_index + 1
+        val raw_len = raw.len() as u64
+        if raw_len == STACK_BUILDER_U64_MAX:
+            return Err(StackBuildError.ArithmeticOverflow)
+        val slen: u64 = raw_len + 1
+        if top - stack_bottom < slen:
+            return Err(StackBuildError.FrameTooLarge)
         top = top - slen
         argv_addrs.push(top)
         i = i + 1
@@ -169,7 +220,17 @@ fn build_initial_stack(stack_top: u64, argv: [text], envp: [text], auxv: [AuxEnt
     while j < envc_i:
         val s2 = envp[j]
         val raw2 = rt_text_to_bytes(s2)
-        val slen2: u64 = (raw2.len() as u64) + 1
+        var raw_index2: i64 = 0
+        while raw_index2 < raw2.len():
+            if raw2[raw_index2] == 0:
+                return Err(StackBuildError.EmbeddedNul)
+            raw_index2 = raw_index2 + 1
+        val raw_len2 = raw2.len() as u64
+        if raw_len2 == STACK_BUILDER_U64_MAX:
+            return Err(StackBuildError.ArithmeticOverflow)
+        val slen2: u64 = raw_len2 + 1
+        if top - stack_bottom < slen2:
+            return Err(StackBuildError.FrameTooLarge)
         top = top - slen2
         envp_addrs.push(top)
         j = j + 1
@@ -179,12 +240,18 @@ fn build_initial_stack(stack_top: u64, argv: [text], envp: [text], auxv: [AuxEnt
     # --- Build the full auxv: defaults + caller-supplied + AT_NULL terminator.
     var full_aux: [AuxEntry] = []
     full_aux.push(AuxEntry(aux_type: AT_PAGESZ, value: USER_PAGE_SIZE))
-    full_aux.push(AuxEntry(aux_type: AT_RANDOM, value: random_addr))
+    if has_random:
+        full_aux.push(AuxEntry(aux_type: AT_RANDOM, value: random_addr))
     if execfn_addr != 0:
         full_aux.push(AuxEntry(aux_type: AT_EXECFN, value: execfn_addr))
     var k: i64 = 0
     val auxc_i = auxv.len()
     while k < auxc_i:
+        if (auxv[k].aux_type == AT_NULL or
+            auxv[k].aux_type == AT_PAGESZ or
+            auxv[k].aux_type == AT_RANDOM or
+            auxv[k].aux_type == AT_EXECFN):
+            return Err(StackBuildError.InvalidAuxv)
         full_aux.push(auxv[k])
         k = k + 1
     full_aux.push(AuxEntry(aux_type: AT_NULL, value: 0))
@@ -194,7 +261,19 @@ fn build_initial_stack(stack_top: u64, argv: [text], envp: [text], auxv: [AuxEnt
     val n_argv: u64 = argv.len() as u64
     val n_envp: u64 = envp.len() as u64
     val n_aux:  u64 = full_aux.len() as u64
-    val fixed_slots: u64 = 1 + (n_argv + 1) + (n_envp + 1) + (n_aux * 2)
+    # Counts were bounded by stack_size above, but addition can still overflow
+    # when several individually-valid counts are combined.
+    if n_aux > STACK_BUILDER_U64_MAX / 2:
+        return Err(StackBuildError.ArithmeticOverflow)
+    val aux_slots = n_aux * 2
+    if n_argv > STACK_BUILDER_U64_MAX - n_envp - 3:
+        return Err(StackBuildError.ArithmeticOverflow)
+    val vector_slots = n_argv + n_envp + 3
+    if vector_slots > STACK_BUILDER_U64_MAX - aux_slots:
+        return Err(StackBuildError.ArithmeticOverflow)
+    val fixed_slots: u64 = vector_slots + aux_slots
+    if fixed_slots > STACK_BUILDER_U64_MAX / 8:
+        return Err(StackBuildError.ArithmeticOverflow)
     val fixed_size: u64 = fixed_slots * 8
 
     # --- The string/random region extends from `top` up to `stack_top`.
@@ -202,10 +281,31 @@ fn build_initial_stack(stack_top: u64, argv: [text], envp: [text], auxv: [AuxEnt
 
     # Base address of the fixed region must be 16-byte aligned (SysV).
     # `sp` points at argc. Align by growing fixed_size downward.
+    if top - stack_bottom < fixed_size:
+        return Err(StackBuildError.FrameTooLarge)
     var sp: u64 = top - fixed_size
     val pad: u64 = sp & 0xf
+    if sp - stack_bottom < pad:
+        return Err(StackBuildError.FrameTooLarge)
     sp = sp - pad
     val total_size: u64 = stack_top - sp
+    if total_size > stack_size:
+        return Err(StackBuildError.FrameTooLarge)
+
+    # Every address exposed to userspace must name storage in this exact frame.
+    if has_random:
+        if random_addr < sp or random_addr >= stack_top:
+            return Err(StackBuildError.InvalidFramePointer)
+    var pv: i64 = 0
+    while pv < argv_addrs.len():
+        if argv_addrs[pv] < sp or argv_addrs[pv] >= stack_top:
+            return Err(StackBuildError.InvalidFramePointer)
+        pv = pv + 1
+    pv = 0
+    while pv < envp_addrs.len():
+        if envp_addrs[pv] < sp or envp_addrs[pv] >= stack_top:
+            return Err(StackBuildError.InvalidFramePointer)
+        pv = pv + 1
 
     # --- Serialize into `bytes`. Index 0 of the blob maps to address `sp`.
     var bytes: [u8] = []
@@ -251,11 +351,9 @@ fn build_initial_stack(stack_top: u64, argv: [text], envp: [text], auxv: [AuxEnt
         aa_count = aa_count - 1
         bytes = _push_cstr(bytes, argv[aa_count])
 
-    # 8. 16 bytes for AT_RANDOM. Fill with a fixed cookie; the kernel may
-    #    overwrite with real entropy after placement.
-    var r: u64 = 0
-    while r < AUX_RANDOM_BYTES:
-        bytes.push(0x5a as u8)
-        r = r + 1
+    # 8. Exact caller-owned entropy for AT_RANDOM, when requested.
+    bytes = _push_bytes(buf: bytes, bytes: random_bytes)
 
-    StackBuildResult(sp: sp, bytes: bytes)
+    if bytes.len() as u64 != total_size:
+        return Err(StackBuildError.SerializationMismatch)
+    Ok(StackBuildResult(sp: sp, bytes: bytes))

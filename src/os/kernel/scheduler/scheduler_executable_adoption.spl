@@ -31,7 +31,12 @@ use os.kernel.loader.executable_admission_pipeline.{
     executable_loader_commit, executable_loader_retrieve_once,
     executable_loader_release_retrieved, executable_loader_revoke
 }
-use os.kernel.loader.executable_image_prepare.{executable_prepare_image_v1}
+use os.kernel.loader.executable_image_prepare.{
+    executable_prepare_image_with_launch_v1
+}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    ExecutableLaunchArgumentsV1, executable_launch_arguments_v1_validate
+}
 use os.kernel.loader.executable_load_plan_v1.{
     ExecutableLoadConsumerStateV1, ExecutableLoadConsumerErrorV1,
     ExecutableLoadConsumerV1, ExecutableLoadReceiptV1,
@@ -129,7 +134,9 @@ impl Scheduler:
         if arch == Architecture.Riscv64:
             return consumer.expected_arch == "riscv64"
         if arch == Architecture.Arm64:
-            return consumer.expected_arch == "arm64"
+            # Manifest/load-plan architecture vocabulary is canonicalized as
+            # aarch64; Architecture.Arm64 is the in-kernel enum spelling.
+            return consumer.expected_arch == "aarch64"
         false
 
     me _record_authenticated_executable_adoption_v1(
@@ -143,11 +150,12 @@ impl Scheduler:
         self.executable_adoption_token_generation = token.generation
         self.executable_adoption_token_nonce = token.nonce
 
-    pub me adopt_authenticated_executable_pid_v1(
+    pub me adopt_authenticated_executable_pid_with_launch_v1(
         mut table: MountTable,
         authorities: ExecutableAuthorityRegistryV1,
         token: ExecutableAuthorityTokenV1,
         consumer: ExecutableLoadConsumerV1,
+        launch: ExecutableLaunchArgumentsV1,
         entry_point: u64,
         priority: TaskPriority,
         caps: CapabilitySet
@@ -159,6 +167,15 @@ impl Scheduler:
         # token.  In particular, a quarantined transaction cannot be reset by
         # presenting fresh coordinates and can never reach publication or
         # authorization through this entry point.
+        # ExecutableLaunchArgumentsV1 is a public transport record and can be
+        # constructed directly. Revalidate and copy at the scheduler boundary
+        # before touching the one-shot authority token.
+        val checked_launch = executable_launch_arguments_v1_validate(
+            launch.path, launch.argv, launch.envp)
+        if checked_launch.is_err():
+            return _scheduler_adoption_reject(
+                consumer, ExecutableLoadConsumerErrorV1.InvalidConsumer)
+        val owned_launch = checked_launch.unwrap()
         val prepared_owner = scheduler_executable_adoption_transition_v1(
             self.executable_adoption_state,
             SchedulerExecutableAdoptionOwnerEventV1.Prepare)
@@ -189,8 +206,8 @@ impl Scheduler:
                 table, authorities, token, consumer,
                 ExecutableLoadConsumerErrorV1.RollbackUnavailable)
 
-        val prepared = executable_prepare_image_v1(
-            table, handle, consumer, entry_point, active_arch)
+        val prepared = executable_prepare_image_with_launch_v1(
+            table, handle, consumer, entry_point, active_arch, owned_launch)
         if prepared.is_err():
             self._record_authenticated_executable_adoption_v1(
                 SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
@@ -293,6 +310,25 @@ impl Scheduler:
         self._record_authenticated_executable_adoption_v1(
             completed_owner.state, id.id, token)
         result
+
+    pub me adopt_authenticated_executable_pid_v1(
+        mut table: MountTable,
+        authorities: ExecutableAuthorityRegistryV1,
+        token: ExecutableAuthorityTokenV1,
+        consumer: ExecutableLoadConsumerV1,
+        entry_point: u64,
+        priority: TaskPriority,
+        caps: CapabilitySet
+    ) -> SchedulerExecutableAdoptionResultV1:
+        """Compatibility entrypoint with the historical authority-image argv[0]."""
+        val launch = executable_launch_arguments_v1_validate(
+            "authority-image", ["authority-image"], [])
+        if launch.is_err():
+            return _scheduler_adoption_reject(
+                consumer, ExecutableLoadConsumerErrorV1.InvalidConsumer)
+        self.adopt_authenticated_executable_pid_with_launch_v1(
+            table, authorities, token, consumer, launch.unwrap(), entry_point,
+            priority, caps)
 
     pub me authenticated_executable_adoption_snapshot_v1(
     ) -> SchedulerExecutableAdoptionSnapshotV1:

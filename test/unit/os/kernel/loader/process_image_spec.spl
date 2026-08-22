@@ -197,6 +197,18 @@ fn make_x86_32_exec() -> [u8]:
     bytes.push(0x90.to_u8())
     bytes
 
+fn make_riscv32_exec() -> [u8]:
+    var bytes = make_x86_32_exec()
+    bytes[18] = 243.to_u8()
+    bytes[19] = 0.to_u8()
+    bytes
+
+fn make_arm32_exec() -> [u8]:
+    var bytes = make_x86_32_exec()
+    bytes[18] = 40.to_u8()
+    bytes[19] = 0.to_u8()
+    bytes
+
 describe "process image builder":
     it "builds an x86_64 user image from executable bytes":
         # @req: REQ-OS-KERNEL-001
@@ -213,18 +225,30 @@ describe "process image builder":
         expect(built.argv[0]).to_equal("/usr/bin/x86_exec_probe")
         expect(built.envp.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
-    it "builds an x86_32 user image from executable bytes":
+    it "rejects an x86_32 image at the ELF64-only stack boundary":
         # @req: REQ-OS-KERNEL-001
         step("Verify: builds an x86_32 user image from executable bytes")
         val bytes = make_x86_32_exec()
         val image = build_user_process_image("/usr/bin/x86_32_exec_probe", bytes, Architecture.X86, [], [])
-        expect(image.is_ok()).to_equal(true)
-        val built = image.unwrap()
-        expect(built.entry).to_equal(0x8048000)
-        expect(built.stack_top).to_equal(X86_32_USER_STACK_TOP)
-        expect(built.stack_size).to_equal(0x800000)
-        expect(built.segment_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(built.segments[0].virt_addr).to_equal(0x8048000)
+        expect(image.is_err()).to_equal(true)
+        expect(image.unwrap_err()).to_contain("ELF64 initial stack builder")
+
+    it "rejects ARM32 and RISC-V32 images without constructing a partial stack":
+        val arm = build_user_process_image(
+            "/usr/bin/arm32_exec_probe", make_arm32_exec(), Architecture.Arm32, [], [])
+        expect(arm.is_err()).to_equal(true)
+        expect(arm.unwrap_err()).to_contain("ELF64 initial stack builder")
+        val riscv = build_user_process_image(
+            "/usr/bin/rv32_exec_probe", make_riscv32_exec(), Architecture.Riscv32, [], [])
+        expect(riscv.is_err()).to_equal(true)
+        expect(riscv.unwrap_err()).to_contain("ELF64 initial stack builder")
+
+    it "returns an error for malformed ELF64 stack strings without panicking":
+        val image = build_user_process_image(
+            "/usr/bin/x86_exec_probe", make_x86_64_exec(), Architecture.X86_64,
+            ["/usr/bin/x86_exec_probe"], ["BAD=embedded\0tail"])
+        expect(image.is_err()).to_equal(true)
+        expect(image.unwrap_err()).to_contain("initial stack construction failed")
 
     it "builds an x86_64 user image from an SMF-wrapped executable stub":
         # @req: REQ-OS-KERNEL-001
