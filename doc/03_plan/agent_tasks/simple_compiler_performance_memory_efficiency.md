@@ -161,3 +161,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Share contexts across four SPipe rules and lines with missing-docstring analysis.
 - Pin normal lint dispatch and shared fact consumers with source contracts.
 - Follow-up: migrate code/module/annotation EasyFix families into the same bounded view.
+
+## Completed tool tranche: shared general EasyFix facts
+
+- Construct one general request-owned context array from canonical lint lines.
+- Migrate resource, struct, annotation, export/import-boundary, and SPipe consumers.
+- Pass canonical lines to non-exhaustive-match and bypass analysis.
+- Reuse lines/contexts in duplicate-typed-argument analysis, including per-signature calls.
+- Preserve standalone compatibility wrappers and registry result order.
+- Follow-up: index duplicate-typed call sites once and migrate remaining split-based rules.
