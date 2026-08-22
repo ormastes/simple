@@ -1462,3 +1462,12 @@ string entrypoints for external callers, while normal lint uses `*_lines` varian
 removes up to eight additional O(source bytes) splits/line-header arrays per applicable
 file without changing iteration order or text matching. EasyFix registry owners still
 contain independent splits and remain the next shared-view migration boundary.
+
+## 2026-08-22 implementation addendum: quality-check line view
+
+Five additional normal-path rule owners independently split the complete source:
+feature-tracking traceability, SPipe quality, and the three raw typed-UI checks. Their
+predicates and locations are exclusively line-based. They now accept the canonical
+request line view directly, removing five O(source bytes) traversals and five transient
+line-header arrays on applicable files. No whole-text predicate or diagnostic order
+changed. EasyFix registry owners remain the next allocation boundary.
