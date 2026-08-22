@@ -514,6 +514,18 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
 fn run_lint_file_with_linter(
     linter: Linter, file_path: String, args: [text]
 ) -> Int:
+    _run_lint_with_linter_source(linter, file_path, args, nil)
+
+# Source-owned command entrypoint. Batch callers that already validated and
+# loaded the file use this to share the exact payload with sibling analyses.
+fn run_lint_source_with_linter(
+    linter: Linter, file_path: String, args: [text], content: String
+) -> Int:
+    _run_lint_with_linter_source(linter, file_path, args, Some(content))
+
+fn _run_lint_with_linter_source(
+    linter: Linter, file_path: String, args: [text], content: String?
+) -> Int:
     val deny_all = args.contains("--deny-all")
     val warn_all = args.contains("--warn-all")
     val json_output = args.contains("--json")
@@ -572,11 +584,17 @@ fn run_lint_file_with_linter(
                     val _ = 0
 
     var lint_result = LintFileResult.LintFileErr("Failed to read file: {file_path}")
-    match lint_read_file(file_path):
-        case LintReadFileResult.ReadFileErr(error):
-            lint_result = LintFileResult.LintFileErr(error)
-        case LintReadFileResult.ReadFileOk(content):
-            lint_result = LintFileResult.LintFileOk(lint_cli_source(linter, file_path, content))
+    match content:
+        case Some(source):
+            lint_result = LintFileResult.LintFileOk(
+                lint_cli_source(linter, file_path, source))
+        case nil:
+            match lint_read_file(file_path):
+                case LintReadFileResult.ReadFileErr(error):
+                    lint_result = LintFileResult.LintFileErr(error)
+                case LintReadFileResult.ReadFileOk(source):
+                    lint_result = LintFileResult.LintFileOk(
+                        lint_cli_source(linter, file_path, source))
     match lint_result:
         case LintFileResult.LintFileOk(results):
             if results.is_empty():
