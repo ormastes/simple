@@ -460,3 +460,14 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Follow-up: introduce integrity-checked `PerfFactRequest` projections, and
   migrate the accessor-field lint from repeated source splits and
   `O(methods^2 + lines*methods)` scans to canonical source views and indexes.
+
+## Completed tooling tranche: index accessor field rewrites
+
+- Add line-based accessor-class parsing while preserving the source wrapper.
+- Route the active fix registry through canonical lines and contexts.
+- Replace repeated suffix and line-by-dummy scans with per-class dictionaries
+  plus actual call-name extraction.
+- Reuse canonical byte offsets and remove the redundant starts array.
+- Preserve exact getter/setter rewrite guards and fail closed on ambiguous names.
+- Follow-up: route the legacy aggregate easy-fix registry through one shared view
+  and profile remaining rules that still accept raw source.
