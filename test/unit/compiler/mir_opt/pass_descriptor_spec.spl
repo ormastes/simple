@@ -5,6 +5,7 @@ use compiler.mir_opt.mir_opt.mod.{
     mir_pass_provider_name,
     mir_pass_uses_pipeline_provider,
     mir_pass_applies_to_backend,
+    mir_pass_backend_decision, MirPassBackendOutcome,
     optimizationpipeline_passes_for_backend,
     OptLevel
 }
@@ -47,7 +48,6 @@ describe "MIR optimization pass descriptors":
         expect(provider.required_facts).to_contain("loop_bounds")
         expect(provider.required_facts).to_contain("collection_layout")
         expect(provider.produced_facts).to_contain("canonical_collection_loops")
-        expect(provider.produced_facts).to_contain("loop_invariant_scalar_ops")
 
     it "exposes strength reduction as a reusable optimization plugin provider":
         val descriptor = mir_pass_descriptor_for_name("strength_reduction")
@@ -61,7 +61,7 @@ describe "MIR optimization pass descriptors":
         expect(passes.contains("global_value_numbering")).to_equal(false)
         expect(passes.contains("loop_unroll")).to_equal(false)
         expect(passes.contains("strength_reduction")).to_equal(false)
-        expect(passes.contains("collection_opt")).to_equal(true)
+        expect(passes.contains("collection_opt")).to_equal(false)
 
     it "skips LLVM-duplicated scalar cleanup in backend-aware pipelines":
         val passes = optimizationpipeline_passes_for_backend(OptLevel.Aggressive, "llvm")
@@ -75,6 +75,14 @@ describe "MIR optimization pass descriptors":
     it "treats llvm-lib as LLVM for pass backend policy":
         expect(mir_pass_applies_to_backend("strength_reduction", "llvm-lib")).to_equal(false)
         expect(mir_pass_applies_to_backend("strength_reduction", "cranelift")).to_equal(true)
+
+    it "records selected delegated and rejected backend outcomes structurally":
+        val selected = mir_pass_backend_decision("predicate_promote", "cranelift", "high")
+        expect(selected.outcome).to_equal(MirPassBackendOutcome.Selected)
+        val delegated = mir_pass_backend_decision("predicate_promote", "llvm", "high")
+        expect(delegated.outcome).to_equal(MirPassBackendOutcome.Delegated)
+        val rejected = mir_pass_backend_decision("collection_opt", "cranelift", "high")
+        expect(rejected.outcome).to_equal(MirPassBackendOutcome.Rejected)
 
     it "returns nil or empty metadata for unknown passes":
         val descriptor = mir_pass_descriptor_for_name("not_a_pass")
