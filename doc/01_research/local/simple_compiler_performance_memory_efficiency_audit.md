@@ -1377,3 +1377,17 @@ instructions, preventing this subset from being mistaken for complete MIR typing
 Declared types are indexed once by local ID and compared structurally as `MirTypeKind`;
 the verifier performs no per-check serialization and no second instruction scan. All
 remaining opcodes are counted as unproved. Ownership and loop-boundary proof remain open.
+
+## 2026-08-22 implementation addendum: lint-name membership
+
+Collection diagnostics are already mapped to the stable `collection_performance` policy
+owner and honor configuration/file-attribute suppression on this branch. The adjacent
+configuration hot path still called `all_lint_names().contains(...)` once per SDN entry
+and once per authored `@allow`/`@warn`/`@deny` name. Each call rebuilt the full name array
+and then scanned it linearly.
+
+`lint_name_is_known` now provides exhaustive allocation-free match dispatch. For K
+authored names and N registered names, membership changes from O(K*N) comparisons plus K
+temporary N-element arrays to O(K) dispatch and no membership allocation. Enumeration
+remains available for `--warn-all`; a parity fixture checks every enumerated name against
+the matcher and rejects recurrence of `all_lint_names().contains`.
