@@ -14,8 +14,9 @@ still contain bounded nested work.
 - Match analysis now indexes duplicate arms and per-enum variant membership. It still
   tests each pattern against each candidate enum during ambiguous type inference; typed
   scrutinee facts should eventually remove that heuristic candidate search.
-- Unreachable-after-return recovery scans forward, although it normally stops at the
-  next sibling statement; a shared indentation index could own this query too.
+- RET001 and both UNREACH001 query projections now share caller-owned reverse indentation
+  facts in their main paths. Compatibility wrappers may construct the same linear index
+  when invoked independently.
 
 ## Completion condition
 
