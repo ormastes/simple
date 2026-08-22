@@ -15,9 +15,9 @@ Compiler self-rules include identity/empty active wrapper, missing/unchanged sen
 
 The verifier is admitted incrementally by named proof surface. The initial
 `MirStructuralVerificationReceipt` proves block/local identity, canonical access coverage,
-declared operand/local membership, entry membership, and CFG target closure only. It must
+declared operand/local membership, signature-consistent ABI locals, entry membership, and CFG target closure only. It must
 never be labeled a general MIR or semantic verifier.
-Later receipts add SSA dominance, type, ownership, loop-boundary,
+Later receipts add opcode type rules, SSA dominance, ownership, loop-boundary,
 and semantic-differential evidence. A pipeline-wide `--verify-each` claim requires all
 applicable receipts, not merely the structural slice.
 
