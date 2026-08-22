@@ -1,0 +1,165 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    echo "usage: $0 MANIFEST SIGNATURE TRUST_STORE ARTIFACT SOURCE_SNAPSHOT BUILD_INPUT COMPILER ABI_REGISTRY VERIFICATION_REPORT OUTPUT" >&2
+    exit 2
+}
+
+test "$#" -eq 10 || usage
+manifest=$1
+signature=$2
+trust_store=$3
+artifact=$4
+source_snapshot=$5
+build_input=$6
+compiler=$7
+abi_registry=$8
+verification_report=$9
+output=${10}
+
+for input in "$manifest" "$signature" "$trust_store" "$artifact" \
+    "$source_snapshot" "$build_input" "$compiler" "$abi_registry" \
+    "$verification_report"; do
+    test -f "$input" || { echo "sffi evidence admission: missing input: $input" >&2; exit 1; }
+done
+
+command -v openssl >/dev/null 2>&1 || {
+    echo 'sffi evidence admission: openssl unavailable' >&2
+    exit 1
+}
+command -v sha256sum >/dev/null 2>&1 || {
+    echo 'sffi evidence admission: sha256sum unavailable' >&2
+    exit 1
+}
+
+# Canonical v1 is UTF-8-compatible printable TSV with LF only, a final LF,
+# fixed singleton fields, then sorted unique symbol rows.
+if LC_ALL=C grep -q "$(printf '\r')" "$manifest" ||
+   test "$(tail -c 1 "$manifest" | od -An -tu1 | tr -d ' ')" != 10; then
+    echo 'sffi evidence admission: manifest is not canonical LF text' >&2
+    exit 1
+fi
+
+field() {
+    key=$1
+    count=$(awk -F '\t' -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$manifest")
+    test "$count" -eq 1 || {
+        echo "sffi evidence admission: field '$key' must occur exactly once" >&2
+        exit 1
+    }
+    awk -F '\t' -v key="$key" '$1 == key { print $2 }' "$manifest"
+}
+
+schema=$(field schema)
+provider_id=$(field provider_id)
+target=$(field target)
+signer_key_id=$(field signer_key_id)
+artifact_hash=$(field artifact_sha256)
+source_hash=$(field canonical_source_tree_sha256)
+build_hash=$(field exact_build_input_sha256)
+compiler_hash=$(field compiler_artifact_sha256)
+abi_hash=$(field abi_registry_sha256)
+report_hash=$(field verification_report_sha256)
+evidence_verified=$(field evidence_verified)
+symbol_count=$(field symbol_count)
+
+test "$schema" = simple.sffi-evidence.v1 || {
+    echo 'sffi evidence admission: unsupported schema' >&2; exit 1;
+}
+case "$provider_id:$target:$signer_key_id" in
+    *: | :* | *::* ) echo 'sffi evidence admission: empty identity field' >&2; exit 1 ;;
+esac
+test "$evidence_verified" = true || {
+    echo 'sffi evidence admission: verification report is not approved' >&2; exit 1;
+}
+case "$symbol_count" in
+    ''|*[!0-9]*) echo 'sffi evidence admission: invalid symbol_count' >&2; exit 1 ;;
+esac
+test "$symbol_count" -gt 0 || {
+    echo 'sffi evidence admission: empty symbol closure' >&2; exit 1;
+}
+
+allowed='schema provider_id target signer_key_id artifact_sha256 canonical_source_tree_sha256 exact_build_input_sha256 compiler_artifact_sha256 abi_registry_sha256 verification_report_sha256 evidence_verified symbol_count symbol'
+awk -F '\t' -v allowed="$allowed" '
+    BEGIN { split(allowed, names, " "); for (i in names) ok[names[i]]=1 }
+    !($1 in ok) || ($1 == "symbol" && NF != 3) ||
+        ($1 != "symbol" && NF != 2) { exit 1 }
+' "$manifest" || {
+    echo 'sffi evidence admission: unknown field or non-canonical framing' >&2
+    exit 1
+}
+
+symbols=$(mktemp)
+trap 'rm -f "$symbols" "${output}.part.$$"' EXIT INT TERM
+awk -F '\t' '$1 == "symbol" { print $2 "\t" $3 }' "$manifest" >"$symbols"
+test "$(wc -l <"$symbols" | tr -d ' ')" -eq "$symbol_count" || {
+    echo 'sffi evidence admission: symbol_count mismatch' >&2; exit 1;
+}
+awk -F '\t' 'BEGIN { previous="" }
+    $1 !~ /^rt_[A-Za-z0-9_]+$/ || length($2) != 64 || $2 ~ /[^0-9a-f]/ ||
+        (previous != "" && $0 <= previous) { exit 1 }
+    { previous=$0 }
+' "$symbols" || {
+    echo 'sffi evidence admission: symbol/signature rows must be sorted, unique, and canonical' >&2
+    exit 1
+}
+
+sha_valid() { test "${#1}" -eq 64 && ! printf '%s' "$1" | grep -q '[^0-9a-f]'; }
+for digest in "$artifact_hash" "$source_hash" "$build_hash" "$compiler_hash" "$abi_hash" "$report_hash"; do
+    sha_valid "$digest" || { echo 'sffi evidence admission: invalid SHA-256 field' >&2; exit 1; }
+done
+
+check_hash() {
+    expected=$1
+    path=$2
+    actual=$(sha256sum "$path" | awk '{ print $1 }')
+    test "$actual" = "$expected" || {
+        echo "sffi evidence admission: digest mismatch: $path" >&2
+        exit 1
+    }
+}
+check_hash "$artifact_hash" "$artifact"
+check_hash "$source_hash" "$source_snapshot"
+check_hash "$build_hash" "$build_input"
+check_hash "$compiler_hash" "$compiler"
+check_hash "$abi_hash" "$abi_registry"
+check_hash "$report_hash" "$verification_report"
+
+# Trust roots are outside the signed manifest. Each canonical row scopes one
+# key ID to one provider ID and names a PEM public key provisioned by policy.
+trust_matches=$(awk -F '\t' -v key="$signer_key_id" -v provider="$provider_id" '
+    NF == 3 && $1 == key && $2 == provider { count++; path=$3 }
+    END { if (count == 1) print path }
+' "$trust_store")
+test "$trust_matches" != "" || {
+    echo 'sffi evidence admission: signer is not trusted for provider' >&2
+    exit 1
+}
+case "$trust_matches" in
+    /*) public_key=$trust_matches ;;
+    *) public_key=$(dirname "$trust_store")/$trust_matches ;;
+esac
+test -f "$public_key" || {
+    echo 'sffi evidence admission: trusted public key is missing' >&2; exit 1;
+}
+test "$(wc -c <"$signature" | tr -d ' ')" -eq 64 || {
+    echo 'sffi evidence admission: Ed25519 signature must be 64 raw bytes' >&2
+    exit 1
+}
+openssl pkeyutl -verify -pubin -inkey "$public_key" -rawin \
+    -in "$manifest" -sigfile "$signature" >/dev/null 2>&1 || {
+    echo 'sffi evidence admission: Ed25519 signature invalid' >&2
+    exit 1
+}
+
+umask 077
+stage=${output}.part.$$
+{
+    printf 'symbol\tsource_signature_sha256\tartifact_sha256\tevidence_verified\tsignature_verified\n'
+    while IFS="$(printf '\t')" read -r symbol source_signature; do
+        printf '%s\t%s\t%s\ttrue\ttrue\n' "$symbol" "$source_signature" "$artifact_hash"
+    done <"$symbols"
+} >"$stage"
+mv "$stage" "$output"
+echo 'sffi evidence admission: PASS'

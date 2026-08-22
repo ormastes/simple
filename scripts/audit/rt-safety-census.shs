@@ -2,10 +2,9 @@
 # Fail-closed static census for owned rt_* boundaries and implementations.
 #
 # Source annotations are claims, never proof. A symbol is reported
-# verified_and_signed only when a trusted verifier supplies an exact
-# artifact-bound admission row through RT_VERIFIED_ADMISSION_TSV and the caller
-# explicitly sets RT_VERIFIED_ADMISSION_TRUSTED=1:
-#   symbol<TAB>artifact_sha256<TAB>evidence_verified<TAB>signature_verified
+# verified_and_signed only after sffi-evidence-admission.shs recomputes every
+# bound digest and verifies a provider-scoped Ed25519 signature against a
+# separately provisioned trust store. Caller-provided booleans are never trust.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -13,42 +12,62 @@ summary_out=${1:-/dev/stdout}
 declarations_out=${2:-${TMPDIR:-/tmp}/rt-safety-declarations.tsv}
 languages_out=${3:-${TMPDIR:-/tmp}/rt-safety-languages.tsv}
 families_out=${4:-${TMPDIR:-/tmp}/rt-safety-families.tsv}
-admission=${RT_VERIFIED_ADMISSION_TSV:-}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
 
 sh "$root/scripts/audit/sffi-contract-inventory.shs" \
     "$work/contracts.tsv" "$work/symbols.tsv" >/dev/null 2>&1
 
-if [ -n "$admission" ]; then
-    if [ "${RT_VERIFIED_ADMISSION_TRUSTED:-0}" != 1 ]; then
-        echo 'RT_VERIFIED_ADMISSION_TSV requires RT_VERIFIED_ADMISSION_TRUSTED=1' >&2
+if [ -n "${RT_VERIFIED_ADMISSION_TSV:-}" ] ||
+   [ -n "${RT_VERIFIED_ADMISSION_TRUSTED:-}" ]; then
+    echo 'legacy RT_VERIFIED_ADMISSION_* trust assertions are forbidden; use signed SFFI evidence inputs' >&2
+    exit 2
+fi
+
+evidence_count=0
+for input in "${RT_SFFI_EVIDENCE_MANIFEST:-}" \
+    "${RT_SFFI_EVIDENCE_SIGNATURE:-}" "${RT_SFFI_TRUST_STORE:-}" \
+    "${RT_SFFI_PROVIDER_ARTIFACT:-}" "${RT_SFFI_SOURCE_SNAPSHOT:-}" \
+    "${RT_SFFI_BUILD_INPUT:-}" "${RT_SFFI_COMPILER_ARTIFACT:-}" \
+    "${RT_SFFI_ABI_REGISTRY:-}" "${RT_SFFI_VERIFICATION_REPORT:-}"; do
+    test -z "$input" || evidence_count=$((evidence_count + 1))
+done
+if [ "$evidence_count" -ne 0 ]; then
+    test "$evidence_count" -eq 9 || {
+        echo 'all nine RT_SFFI_* evidence inputs are required' >&2
         exit 2
-    fi
-    test -f "$admission"
+    }
+    sh "$root/scripts/audit/sffi-evidence-admission.shs" \
+        "$RT_SFFI_EVIDENCE_MANIFEST" "$RT_SFFI_EVIDENCE_SIGNATURE" \
+        "$RT_SFFI_TRUST_STORE" "$RT_SFFI_PROVIDER_ARTIFACT" \
+        "$RT_SFFI_SOURCE_SNAPSHOT" "$RT_SFFI_BUILD_INPUT" \
+        "$RT_SFFI_COMPILER_ARTIFACT" "$RT_SFFI_ABI_REGISTRY" \
+        "$RT_SFFI_VERIFICATION_REPORT" \
+        "$work/admission.tsv" >/dev/null
     {
         printf '__admission_header__\tfalse\tfalse\n'
         awk -F '\t' 'BEGIN { OFS="\t" }
         NR == 1 { next }
         $1 ~ /^rt_[A-Za-z0-9_]+$/ && length($2) == 64 && $2 !~ /[^0-9a-f]/ &&
-        $3 == "true" && $4 == "true" { print $1, "true", "true" }
-        ' "$admission"
+        length($3) == 64 && $3 !~ /[^0-9a-f]/ &&
+        $4 == "true" && $5 == "true" { print $1, $2, "true", "true" }
+        ' "$work/admission.tsv"
     } | sort -u >"$work/admitted.tsv"
 else
     printf '__admission_header__\tfalse\tfalse\n' >"$work/admitted.tsv"
 fi
 
 awk -F '\t' 'BEGIN { OFS="\t" }
-    NR == FNR { admitted[$1]=1; next }
+    NR == FNR { admitted[$1 SUBSEP $2]=1; next }
     FNR == 1 {
         print $0, "evidence_verified", "signature_verified", "safety_class"
         next
     }
     $1 !~ /^rt_/ { next }
     {
-        verified = admitted[$1] ? "true" : "false"
+        verified = admitted[$1 SUBSEP $3] ? "true" : "false"
         signed = verified
-        safe = admitted[$1] && $6 == "tagged" && $7 != "missing"
+        safe = admitted[$1 SUBSEP $3] && $6 == "tagged" && $7 != "missing"
         print $0, verified, signed, (safe ? "verified_and_signed" : "unsafe")
     }
 ' "$work/admitted.tsv" "$work/contracts.tsv" >"$declarations_out"
