@@ -1,7 +1,7 @@
 # Aspect Dynload, Runtime, HAL, and Bootstrap Status
 
 **Date:** 2026-08-19  
-**Overall:** IMPLEMENTATION PARTIAL; END-TO-END EVIDENCE INCOMPLETE; RELEASE NOT READY  
+**Overall:** IMPLEMENTATION PARTIAL; END-TO-END EVIDENCE INCOMPLETE; RELEASE NOT READY
 **Plan:** `doc/03_plan/compiler/aspect_dynload/aspect_dynload_lane_plan_2026-08-19.md`
 
 ## Test status
