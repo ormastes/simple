@@ -1118,3 +1118,18 @@ Simple lint, five Rust dispatcher tests, and the Simple contract (2/2) pass.
 The census and ratchet pass at 12,493 declarations, 11,711 untouched, 508
 tagged, 586 contracted, and zero verified/signed admissions. Implementations
 are C++ 211, C 2,323, Rust 2,161, and Simple 580 rows.
+
+The soft JIT facade no longer claims ignored backend or optimization requests
+succeeded. It identifies its actual provider as `interpreter`, accepts only
+automatic/interpreter selection, rejects Cranelift and LLVM requests, reports
+native JIT unavailable, and accepts only optimization level zero. Integer
+execution now carries an internal `(success, value, error)` result, so a real
+`-1` return is preserved while compilation/non-integer failures cannot become
+successful values. The fabricated empty last-error and zero clear-error APIs
+and their public exports were removed. This improves the call path: the safe
+integer API consumes the result directly instead of executing a separate
+post-call last-error operation. Both duplicate compatibility modules pass
+source checks and lint, and the capability/numeric guard passes 3/3. Census and
+ratchet pass at 12,492 declarations, 11,711 untouched, 508 tagged, 585
+contracted, and zero verified/signed; Simple `rt_*` implementations drop to
+576 rows (533 distinct symbols) across 48 files.

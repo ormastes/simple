@@ -48,10 +48,10 @@ fn _delete_file(fpath: text):
     file_delete(fpath)
 
 fn rt_set_jit_backend(backend: text) -> bool:
-    true  # accepted; actual backend is interpreted
+    backend == "auto" or backend == "interpreter"
 
 fn rt_get_jit_backend() -> text:
-    "native"
+    "interpreter"
 
 fn _handle_path(handle: i64) -> text:
     "tmp/jit/simple_soft_jit_{handle}.spl"
@@ -83,7 +83,9 @@ fn _dedent(src: text) -> text:
     out_lines.join("\n")
 
 fn rt_exec_manager_create(backend: text) -> i64:
-    # Use timestamp for a reasonably unique handle
+    if backend != "auto" and backend != "interpreter":
+        return 0
+    # Use timestamp for a reasonably unique interpreter handle.
     _ensure_jit_dir()
     _cleanup_old_jit_files()
     current_time_ms()
@@ -137,15 +139,22 @@ fn _run_code(code: text) -> (text, i64):
         case _:
             return ("", 1)
 
-fn rt_exec_manager_execute(handle: i64, name: text, args: [i64]) -> i64:
+fn _exec_manager_execute_checked(handle: i64, name: text, args: [i64]) -> (bool, i64, text):
     val stored = _read_file(_handle_path(handle))
     if stored == "":
-        return -1
+        return (false, 0, "No compiled source")
     val code = _build_code(stored, name, args)
     val (out, code_ec) = _run_code(code)
     if code_ec != 0:
-        return -1
-    out.to_int() ?? -1
+        return (false, 0, "Execution failed")
+    val parsed = out.to_int()
+    if parsed == nil:
+        return (false, 0, "Execution returned non-integer output")
+    (true, parsed, "")
+
+fn rt_exec_manager_execute(handle: i64, name: text, args: [i64]) -> i64:
+    val (success, value, _) = _exec_manager_execute_checked(handle, name, args)
+    if success: value else: -1
 
 fn rt_exec_manager_execute_string(handle: i64, name: text, args: [text]) -> text:
     val stored = _read_file(_handle_path(handle))
@@ -162,7 +171,11 @@ fn rt_exec_manager_execute_string(handle: i64, name: text, args: [text]) -> text
     out
 
 fn rt_exec_manager_execute_void(handle: i64, name: text) -> bool:
-    rt_exec_manager_execute(handle, name, []) != -1
+    val stored = _read_file(_handle_path(handle))
+    if stored == "":
+        return false
+    val (_, code_ec) = _run_code(_build_code(stored, name, []))
+    code_ec == 0
 
 fn _parse_function_names(src: text) -> [text]:
     var names: [text] = []
@@ -192,22 +205,16 @@ fn rt_exec_manager_list_functions(handle: i64) -> [text]:
         _parse_function_names(stored)
 
 fn rt_exec_manager_backend_name(handle: i64) -> text:
-    "native"
+    if handle > 0: "interpreter" else: "unknown"
 
 fn rt_exec_manager_is_valid(handle: i64) -> bool:
     _read_file(_handle_path(handle)) != ""
 
 fn rt_exec_manager_set_opt_level(handle: i64, level: i64) -> bool:
-    true  # accept but ignore
+    handle > 0 and level == 0
 
 fn rt_exec_manager_get_opt_level(handle: i64) -> i64:
-    2
-
-fn rt_exec_manager_get_last_error(handle: i64) -> text:
-    ""
-
-fn rt_exec_manager_clear_error(handle: i64) -> i64:
-    0
+    if handle > 0: 0 else: -1
 
 # ============================================================================
 # Tier 2: Simple-Friendly Wrapper Functions
@@ -216,19 +223,22 @@ fn rt_exec_manager_clear_error(handle: i64) -> i64:
 # --- Core Types ---
 
 enum JitBackend:
-    Default    # Default backend selection (Cranelift preferred)
+    Default    # Automatic selection; interpreter in this soft manager
+    Interpreter # In-process CompilerDriver execution
     Cranelift  # Fast compilation, decent runtime
     LLVM       # Slower compilation, best runtime
     Unknown
 
 fn backend_to_string(backend: JitBackend) -> text:
     if backend == JitBackend.Default: "auto"
+    elif backend == JitBackend.Interpreter: "interpreter"
     elif backend == JitBackend.Cranelift: "cranelift"
     elif backend == JitBackend.LLVM: "llvm"
     else: "unknown"
 
 fn string_to_backend(s: text) -> JitBackend:
     if s == "auto": JitBackend.Default
+    elif s == "interpreter": JitBackend.Interpreter
     elif s == "cranelift": JitBackend.Cranelift
     elif s == "llvm": JitBackend.LLVM
     else: JitBackend.Unknown
@@ -237,7 +247,7 @@ struct ExecManager:
     handle: i64
     backend: JitBackend
     is_valid: bool
-    opt_level: i64  # 0-3 (0=none, 1=less, 2=default, 3=aggressive)
+    opt_level: i64  # Soft interpreter supports only 0 (no native optimization)
 
 enum JitCompileResult:
     Success
@@ -270,8 +280,8 @@ fn jit_available() -> bool:
     true  # In-process interpreter always available
 
 fn jit_native_available() -> bool:
-    debug("jit", "Native JIT available: true (in-process CompilerDriver)")
-    true
+    debug("jit", "Native JIT unavailable: using in-process CompilerDriver")
+    false
 
 # --- Execution Manager Creation ---
 
@@ -288,7 +298,7 @@ fn exec_manager_new() -> ExecManager:
         handle: handle,
         backend: backend,
         is_valid: is_valid,
-        opt_level: 2
+        opt_level: 0
     )
 
 fn exec_manager_with_backend(backend: JitBackend) -> ExecManager:
@@ -296,9 +306,9 @@ fn exec_manager_with_backend(backend: JitBackend) -> ExecManager:
     Create a new execution manager with specific backend.
 
     Backends:
-    - Default: Default selection (Cranelift preferred)
-    - Cranelift: Fast compilation, decent runtime performance
-    - LLVM: Slower compilation, best runtime performance
+    - Default: Select the available in-process interpreter
+    - Interpreter: Select the in-process interpreter explicitly
+    - Cranelift/LLVM: Rejected because this soft manager does not provide them
     """
     val backend_str = backend_to_string(backend)
     val handle = rt_exec_manager_create(backend_str)
@@ -308,7 +318,7 @@ fn exec_manager_with_backend(backend: JitBackend) -> ExecManager:
         handle: handle,
         backend: backend,
         is_valid: is_valid,
-        opt_level: 2
+        opt_level: 0
     )
 
 fn exec_manager_destroy(manager: ExecManager):
@@ -402,10 +412,9 @@ fn exec_manager_call(manager: ExecManager, function_name: text, args: [i64]) -> 
                 error_message: "Function '{function_name}' not found"
             )
         else:
-            val return_val = rt_exec_manager_execute(manager.handle, function_name, args)
-            val error = rt_exec_manager_get_last_error(manager.handle)
-
-            if error == "":
+            val (success, return_val, error) = _exec_manager_execute_checked(
+                manager.handle, function_name, args)
+            if success:
                 ExecutionResult(success: true, return_value: return_val, error_message: "")
             else:
                 ExecutionResult(success: false, return_value: 0, error_message: error)
@@ -425,13 +434,10 @@ fn exec_manager_call_void(manager: ExecManager, function_name: text) -> Executio
             error_message: "Invalid execution manager"
         )
     else:
-        val success = rt_exec_manager_execute_void(manager.handle, function_name)
-        val error = rt_exec_manager_get_last_error(manager.handle)
-
-        if success:
+        if rt_exec_manager_execute_void(manager.handle, function_name):
             ExecutionResult(success: true, return_value: 0, error_message: "")
         else:
-            ExecutionResult(success: false, return_value: 0, error_message: error)
+            ExecutionResult(success: false, return_value: 0, error_message: "Execution failed")
 
 fn exec_manager_call_string(manager: ExecManager, function_name: text, args: [text]) -> text:
     """
@@ -483,11 +489,8 @@ fn exec_manager_set_opt_level(manager: ExecManager, level: i64) -> bool:
     """
     Set optimization level (0-3).
 
-    Levels:
-    - 0: No optimization (fastest compilation)
-    - 1: Less optimization
-    - 2: Default optimization (balanced)
-    - 3: Aggressive optimization (best runtime, slower compilation)
+    This interpreter-backed manager accepts only level 0. Native optimization
+    requests fail rather than being reported as applied.
     """
     if not manager.is_valid or level < 0 or level > 3:
         false
@@ -500,20 +503,6 @@ fn exec_manager_get_opt_level(manager: ExecManager) -> i64:
         -1
     else:
         rt_exec_manager_get_opt_level(manager.handle)
-
-# --- Error Handling ---
-
-fn exec_manager_last_error(manager: ExecManager) -> text:
-    """Get the last error message."""
-    if not manager.is_valid:
-        "Invalid execution manager"
-    else:
-        rt_exec_manager_get_last_error(manager.handle)
-
-fn exec_manager_clear_error(manager: ExecManager):
-    """Clear the last error."""
-    if manager.is_valid:
-        rt_exec_manager_clear_error(manager.handle)
 
 # --- High-Level Helper Functions ---
 
@@ -618,4 +607,3 @@ fn jit_compile_with_compiler(manager: ExecManager, source: text) -> CompileStatu
 # ============================================================================
 # Exports
 # ============================================================================
-

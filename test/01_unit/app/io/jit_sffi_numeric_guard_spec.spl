@@ -1,36 +1,52 @@
-extern fn rt_file_read_text(path: text) -> text?
+use std.io_runtime.{read_file_text}
+use std.spec.{expect_not}
 
 describe "jit sffi numeric guard":
+    """Guards result parsing, canonical ABI names, and honest capabilities."""
     it "guards integer execution output parsing":
-        val source = rt_file_read_text("src/app/io/jit_sffi.spl") ?? ""
+        val source = read_file_text("src/app/io/jit_sffi.spl")
 
-        expect(source).to_contain("out.to_int() ?? -1")
-        expect(source.contains("out.to_int()\n")).to_equal(false)
+        expect(source).to_contain("val parsed = out.to_int()")
+        expect(source).to_contain("if parsed == nil:")
+        expect(source).to_contain("return (false, 0, \"Execution returned non-integer output\")")
+        expect(source).to_contain("(true, parsed, \"\")")
+        expect_not(source.contains("val error = rt_exec_manager_get_last_error"))
 
     it "uses canonical runtime ABI names":
-        val jit_source = rt_file_read_text("src/app/io/jit_sffi.spl") ?? ""
-        val io_source = rt_file_read_text("src/app/io/mod.spl") ?? ""
-        val cuda_source = rt_file_read_text("src/lib/nogc_sync_mut/io/cuda_sffi.spl") ?? ""
+        val jit_source = read_file_text("src/app/io/jit_sffi.spl")
+        val io_source = read_file_text("src/app/io/mod.spl")
+        val cuda_source = read_file_text("src/lib/nogc_sync_mut/io/cuda_sffi.spl")
 
-        expect(jit_source).to_contain("extern fn rt_file_write_text(path: text, content: text) -> bool")
-        expect(jit_source).to_contain("rt_file_write_text(fpath, content)")
-        expect(jit_source.contains("rt_file_write(")).to_equal(false)
+        expect(jit_source).to_contain("use std.io_runtime.")
+        expect(jit_source).to_contain("file_write")
+        expect(jit_source).to_contain("file_write(fpath, content)")
+        expect_not(jit_source.contains("rt_file_write("))
         expect(io_source).to_contain("extern fn rt_volatile_read_u64(addr: i64) -> i64")
-        expect(io_source.contains("rt_read_volatile_i64")).to_equal(false)
+        expect_not(io_source.contains("rt_read_volatile_i64"))
         expect(io_source).to_contain("extern fn rt_volatile_write_u64(addr: i64, value: i64)")
-        expect(io_source.contains("rt_write_volatile_i64")).to_equal(false)
+        expect_not(io_source.contains("rt_write_volatile_i64"))
         expect(cuda_source).to_contain("extern fn rt_cuda_mem_alloc(size: i64) -> i64")
         expect(cuda_source).to_contain("extern fn rt_cuda_mem_free(ptr: i64) -> i64")
         expect(cuda_source).to_contain("rt_cuda_mem_free(mem.ptr) == 0")
-        expect(cuda_source.contains("rt_cuda_malloc")).to_equal(false)
-        expect(cuda_source.contains("rt_cuda_free")).to_equal(false)
+        expect_not(cuda_source.contains("rt_cuda_malloc"))
+        expect_not(cuda_source.contains("rt_cuda_free"))
 
-        val closure_source = (rt_file_read_text("src/app/io/jit_ffi.spl") ?? "") +
-            (rt_file_read_text("src/app/io/feature_registry.spl") ?? "") +
-            (rt_file_read_text("src/os/ml/model.spl") ?? "") +
-            (rt_file_read_text("src/os/ml/gpu_tensor.spl") ?? "") +
-            (rt_file_read_text("src/lib/nogc_async_mut/engine/physics/backend_gpu/gpu_solver.spl") ?? "") +
-            (rt_file_read_text("src/lib/nogc_sync_mut/fuzz.spl") ?? "")
-        expect(closure_source.contains("extern fn rt_file_write(")).to_equal(false)
-        expect(closure_source.contains("rt_cuda_malloc")).to_equal(false)
-        expect(closure_source.contains("rt_cuda_free")).to_equal(false)
+        val closure_source = read_file_text("src/app/io/jit_ffi.spl") +
+            read_file_text("src/app/io/feature_registry.spl") +
+            read_file_text("src/os/ml/model.spl") +
+            read_file_text("src/os/ml/gpu_tensor.spl") +
+            read_file_text("src/lib/nogc_async_mut/engine/physics/backend_gpu/gpu_solver.spl") +
+            read_file_text("src/lib/nogc_sync_mut/fuzz.spl")
+        expect_not(closure_source.contains("extern fn rt_file_write("))
+        expect_not(closure_source.contains("rt_cuda_malloc"))
+        expect_not(closure_source.contains("rt_cuda_free"))
+
+    it "reports only capabilities implemented by the soft manager":
+        val source = read_file_text("src/app/io/jit_sffi.spl")
+
+        expect(source).to_contain("backend == \"auto\" or backend == \"interpreter\"")
+        expect(source).to_contain("if backend != \"auto\" and backend != \"interpreter\":")
+        expect(source).to_contain("if handle > 0: \"interpreter\" else: \"unknown\"")
+        expect(source).to_contain("handle > 0 and level == 0")
+        expect_not(source.contains("true  # accepted; actual backend is interpreted"))
+        expect_not(source.contains("true  # accept but ignore"))

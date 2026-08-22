@@ -898,3 +898,13 @@ slice's hot-path rule: existing owner lock plus direct typed call and status
 comparison; provider evidence and signatures remain admission-time work.
 Current gate: 12,493 declaration rows, 11,711 untouched, 508 tagged, 586
 contracted, and zero verified/signed admissions.
+
+The soft JIT backend/optimization fabricated-success setters are fixed. Backend
+selection is now an honest constant-time capability check, native availability
+is false, optimization level zero is the only accepted level, and integer
+execution preserves `-1` through a typed internal result. Fake last-error state
+was removed, eliminating its post-call operation. Next inspect the remaining
+empty-return paths, especially string execution, and either lift them to a
+typed result or delete unsupported APIs; do not introduce file-backed error
+state or per-call registries. Current gate: 12,492 declarations, 11,711
+untouched, 508 tagged, 585 contracted, and zero verified/signed admissions.
