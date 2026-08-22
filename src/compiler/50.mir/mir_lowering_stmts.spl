@@ -1868,6 +1868,7 @@ impl MirLowering:
         match cond.kind:
             case HirExprKind.Binary(HirBinOp.And, _, _) |
                  HirExprKind.Binary(HirBinOp.Or, _, _): true
+            case HirExprKind.Unary(HirUnaryOp.Not, _): true
             case _: false
 
     me mcdc_condition_leaf_count(cond: HirExpr) -> i64:
@@ -1875,7 +1876,47 @@ impl MirLowering:
             case HirExprKind.Binary(HirBinOp.And, left, right) |
                  HirExprKind.Binary(HirBinOp.Or, left, right):
                 self.mcdc_condition_leaf_count(left) + self.mcdc_condition_leaf_count(right)
+            case HirExprKind.Unary(HirUnaryOp.Not, operand):
+                self.mcdc_condition_leaf_count(operand)
             case _: 1
+
+    me mcdc_append_postfix_tokens(cond: HirExpr, next_ordinal: i64) -> i64:
+        match cond.kind:
+            case HirExprKind.Binary(HirBinOp.And, left, right):
+                val after_left = self.mcdc_append_postfix_tokens(left, next_ordinal)
+                val after_right = self.mcdc_append_postfix_tokens(right, after_left)
+                self.mcdc_manifest_token_opcodes.push(3)
+                self.mcdc_manifest_token_conditions.push(0)
+                after_right
+            case HirExprKind.Binary(HirBinOp.Or, left, right):
+                val after_left = self.mcdc_append_postfix_tokens(left, next_ordinal)
+                val after_right = self.mcdc_append_postfix_tokens(right, after_left)
+                self.mcdc_manifest_token_opcodes.push(4)
+                self.mcdc_manifest_token_conditions.push(0)
+                after_right
+            case HirExprKind.Unary(HirUnaryOp.Not, operand):
+                val after_operand = self.mcdc_append_postfix_tokens(operand, next_ordinal)
+                self.mcdc_manifest_token_opcodes.push(2)
+                self.mcdc_manifest_token_conditions.push(0)
+                after_operand
+            case _:
+                self.mcdc_manifest_token_opcodes.push(1)
+                self.mcdc_manifest_token_conditions.push(next_ordinal)
+                next_ordinal + 1
+
+    me mcdc_append_decision_program(cond: HirExpr):
+        val token_offset = self.mcdc_manifest_token_opcodes.len()
+        val final_ordinal = self.mcdc_append_postfix_tokens(cond, 0)
+        val token_count = self.mcdc_manifest_token_opcodes.len() - token_offset
+        if final_ordinal != self.mcdc_condition_count or token_count <= 0 or token_count > 256:
+            self.error_fatal("MCDC-E-PROGRAM: Boolean program exceeds bounded V1 postfix contract", Some(cond.span))
+            return
+        self.mcdc_manifest_semantic_ids.push(self.mcdc_current_decision_semantic_id)
+        self.mcdc_manifest_decision_ids.push(self.mcdc_current_decision_runtime_id)
+        self.mcdc_manifest_source_digests.push(self.mcdc_source_digest)
+        self.mcdc_manifest_condition_counts.push(self.mcdc_condition_count)
+        self.mcdc_manifest_token_offsets.push(token_offset)
+        self.mcdc_manifest_token_counts.push(token_count)
 
     me mcdc_bool_result(local: LocalId) -> LocalId:
         if val result_type = self.local_mir_type_of(local):
@@ -1908,6 +1949,7 @@ impl MirLowering:
         self.mcdc_current_decision_semantic_id = self.mcdc_authored_path + ":" + self.mcdc_current_function_name + ":" + cond.span.start.to_text() + ":decision"
         self.mcdc_condition_count = condition_count
         self.mcdc_next_condition_ordinal = 0
+        self.mcdc_append_decision_program(cond)
         var b = self.builder
         self.mcdc_evaluated_mask_slot = b.emit_entry_alloc(MirType.i64())
         self.mcdc_true_mask_slot = b.emit_entry_alloc(MirType.i64())

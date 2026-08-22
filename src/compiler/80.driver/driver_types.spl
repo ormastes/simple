@@ -50,6 +50,44 @@ use std.common.structural.storage_layout.storage_layout_contracts.{
     storage_layout_kind_to_u8, storage_conversion_policy_to_u8
 }
 
+fn mcdc_wire_put_u32_v1(output: [u8], offset: i64, value: i64):
+    var byte_index = 0
+    while byte_index < 4:
+        output[offset + byte_index] = ((value >> (byte_index * 8)) & 255).to_u8()
+        byte_index = byte_index + 1
+
+fn mcdc_wire_put_u64_v1(output: [u8], offset: i64, value: i64):
+    var byte_index = 0
+    while byte_index < 8:
+        output[offset + byte_index] = ((value >> (byte_index * 8)) & 255).to_u8()
+        byte_index = byte_index + 1
+
+fn mcdc_wire_put_bytes_v1(output: [u8], offset: i64, bytes: [u8]):
+    var byte_index = 0
+    while byte_index < bytes.len():
+        output[offset + byte_index] = bytes[byte_index]
+        byte_index = byte_index + 1
+
+fn mcdc_radix_order_pass_v1(order: [i64], keys: [i64], byte_index: i64) -> [i64]:
+    var counts: [i64] = [0; 256]
+    val shift = byte_index * 8
+    for row in order:
+        val bucket = (keys[row] >> shift) & 255
+        counts[bucket] = counts[bucket] + 1
+    var total = 0
+    var bucket = 0
+    while bucket < 256:
+        val count = counts[bucket]
+        counts[bucket] = total
+        total = total + count
+        bucket = bucket + 1
+    var result: [i64] = [0; order.len()]
+    for row in order:
+        val row_bucket = (keys[row] >> shift) & 255
+        result[counts[row_bucket]] = row
+        counts[row_bucket] = counts[row_bucket] + 1
+    result
+
 class FrozenStorageModuleSnapshotV1:
     ok: bool
     module_name: text
@@ -499,6 +537,19 @@ class CompileContext:
     frozen_storage_sites: [MirStorageViewSiteBindingV1]
     frozen_storage_evidence: [MirTypedStorageViewEvidenceV1]
     frozen_storage_known_module_names: [text]
+    # Canonical masking analyzer manifest. Rows are frozen in
+    # (source_digest, decision_id) order after MIR lowering. Token offsets
+    # address the aligned postfix opcode/condition arrays.
+    mcdc_manifest_semantic_ids: [text]
+    mcdc_manifest_decision_ids: [i64]
+    mcdc_manifest_source_digests: [i64]
+    mcdc_manifest_condition_counts: [i64]
+    mcdc_manifest_token_offsets: [i64]
+    mcdc_manifest_token_counts: [i64]
+    mcdc_manifest_token_opcodes: [i64]
+    mcdc_manifest_token_conditions: [i64]
+    mcdc_manifest_frozen: bool
+    mcdc_manifest_frozen_identity: text
 
     static fn create(options: CompileOptions) -> CompileContext:
         # Load config
@@ -626,8 +677,184 @@ class CompileContext:
             frozen_storage_module_names: [],
             frozen_storage_sites: [],
             frozen_storage_evidence: []
-            , frozen_storage_known_module_names: []
+            , frozen_storage_known_module_names: [],
+            mcdc_manifest_semantic_ids: [],
+            mcdc_manifest_decision_ids: [],
+            mcdc_manifest_source_digests: [],
+            mcdc_manifest_condition_counts: [],
+            mcdc_manifest_token_offsets: [],
+            mcdc_manifest_token_counts: [],
+            mcdc_manifest_token_opcodes: [],
+            mcdc_manifest_token_conditions: [],
+            mcdc_manifest_frozen: false,
+            mcdc_manifest_frozen_identity: ""
         )
+
+    fn mcdc_manifest_rows_well_formed() -> bool:
+        val rows = self.mcdc_manifest_decision_ids.len()
+        (not self.mcdc_manifest_frozen
+            and rows == self.mcdc_manifest_semantic_ids.len()
+            and rows == self.mcdc_manifest_source_digests.len()
+            and rows == self.mcdc_manifest_condition_counts.len()
+            and rows == self.mcdc_manifest_token_offsets.len()
+            and rows == self.mcdc_manifest_token_counts.len()
+            and self.mcdc_manifest_token_opcodes.len()
+                == self.mcdc_manifest_token_conditions.len())
+
+    me freeze_mcdc_manifest_v1() -> text:
+        if self.mcdc_manifest_frozen:
+            return self.mcdc_manifest_frozen_identity
+        if not self.mcdc_manifest_rows_well_formed():
+            return ""
+        val row_count = self.mcdc_manifest_decision_ids.len()
+        var order: [i64] = []
+        var index = 0
+        while index < row_count:
+            order.push(index)
+            index = index + 1
+        # Stable LSD radix ordering is O(D) with a fixed 16 passes. Sort the
+        # secondary decision key first, then the primary u64 source digest.
+        # This avoids an O(D^2) compile-time cliff for large applications.
+        var radix_byte = 0
+        while radix_byte < 8:
+            order = mcdc_radix_order_pass_v1(
+                order, self.mcdc_manifest_decision_ids, radix_byte)
+            radix_byte = radix_byte + 1
+        radix_byte = 0
+        while radix_byte < 8:
+            order = mcdc_radix_order_pass_v1(
+                order, self.mcdc_manifest_source_digests, radix_byte)
+            radix_byte = radix_byte + 1
+
+        var semantic_ids: [text] = []
+        var decision_ids: [i64] = []
+        var source_digests: [i64] = []
+        var condition_counts: [i64] = []
+        var token_offsets: [i64] = []
+        var token_counts: [i64] = []
+        var token_opcodes: [i64] = []
+        var token_conditions: [i64] = []
+        var identity_parts: [text] = ["mcdc-postfix-v1"]
+        var out_index = 0
+        while out_index < order.len():
+            val row = order[out_index]
+            val source_digest = self.mcdc_manifest_source_digests[row]
+            val decision_id = self.mcdc_manifest_decision_ids[row]
+            val condition_count = self.mcdc_manifest_condition_counts[row]
+            val old_offset = self.mcdc_manifest_token_offsets[row]
+            val count = self.mcdc_manifest_token_counts[row]
+            if source_digest == 0 or decision_id <= 0 or condition_count <= 0
+                or condition_count > 62 or count <= 0 or count > 256
+                or self.mcdc_manifest_semantic_ids[row] == ""
+                or self.mcdc_manifest_semantic_ids[row].len() > 4096
+                or old_offset < 0
+                or old_offset + count > self.mcdc_manifest_token_opcodes.len():
+                return ""
+            if out_index > 0 and source_digest == source_digests[out_index - 1]
+                and decision_id == decision_ids[out_index - 1]:
+                return ""
+            semantic_ids.push(self.mcdc_manifest_semantic_ids[row])
+            decision_ids.push(decision_id)
+            source_digests.push(source_digest)
+            condition_counts.push(condition_count)
+            token_offsets.push(token_opcodes.len())
+            token_counts.push(count)
+            val semantic_id = self.mcdc_manifest_semantic_ids[row]
+            var row_identity = source_digest.to_text() + ":" + decision_id.to_text()
+                + ":" + condition_count.to_text() + ":" + semantic_id.len().to_text()
+                + "#" + semantic_id
+            var stack_depth = 0
+            var referenced_mask = 0
+            var token_index = 0
+            while token_index < count:
+                val opcode = self.mcdc_manifest_token_opcodes[old_offset + token_index]
+                val condition = self.mcdc_manifest_token_conditions[old_offset + token_index]
+                if opcode == 1:
+                    if condition < 0 or condition >= condition_count:
+                        return ""
+                    val condition_bit = 1 << condition
+                    if (referenced_mask & condition_bit) != 0:
+                        return ""
+                    referenced_mask = referenced_mask | condition_bit
+                    stack_depth = stack_depth + 1
+                elif opcode == 2:
+                    if condition != 0 or stack_depth < 1:
+                        return ""
+                elif opcode == 3 or opcode == 4:
+                    if condition != 0 or stack_depth < 2:
+                        return ""
+                    stack_depth = stack_depth - 1
+                else:
+                    return ""
+                token_opcodes.push(opcode)
+                token_conditions.push(condition)
+                row_identity = row_identity + ":" + opcode.to_text() + "," + condition.to_text()
+                token_index = token_index + 1
+            if stack_depth != 1 or referenced_mask != (1 << condition_count) - 1:
+                return ""
+            identity_parts.push(row_identity)
+            out_index = out_index + 1
+        self.mcdc_manifest_semantic_ids = semantic_ids
+        self.mcdc_manifest_decision_ids = decision_ids
+        self.mcdc_manifest_source_digests = source_digests
+        self.mcdc_manifest_condition_counts = condition_counts
+        self.mcdc_manifest_token_offsets = token_offsets
+        self.mcdc_manifest_token_counts = token_counts
+        self.mcdc_manifest_token_opcodes = token_opcodes
+        self.mcdc_manifest_token_conditions = token_conditions
+        self.mcdc_manifest_frozen_identity = sha256_text(identity_parts.join("|"))
+        self.mcdc_manifest_frozen = true
+        self.mcdc_manifest_frozen_identity
+
+    fn mcdc_manifest_wire_v1() -> [u8]:
+        # MCDP V1 is directly consumable as runtime_mcdc_v1.h arrays:
+        # 24-byte header, 64-byte lowercase SHA-256 identity, then aligned
+        # 32-byte SimpleMcdcDecisionExprV1 rows, 8-byte token rows, and a
+        # length-prefixed semantic-ID table for report correlation.
+        if not self.mcdc_manifest_frozen or self.mcdc_manifest_frozen_identity.len() != 64:
+            return []
+        val row_count = self.mcdc_manifest_decision_ids.len()
+        val token_count = self.mcdc_manifest_token_opcodes.len()
+        if row_count > 1048576 or token_count > 8388608: return []
+        var semantic_bytes = 0
+        for semantic_id in self.mcdc_manifest_semantic_ids:
+            if semantic_id.len() > 4096: return []
+            semantic_bytes = semantic_bytes + 4 + semantic_id.bytes().len()
+        val total_bytes = 96 + row_count * 32 + token_count * 8 + semantic_bytes
+        # Artifact-local cap prevents pathological compiler allocation and
+        # keeps the section well below the signed SMF offset boundary.
+        if total_bytes < 96 or total_bytes > 67108864: return []
+        var out: [u8] = [0u8; total_bytes]
+        mcdc_wire_put_u32_v1(out, 0, 0x5044434d)
+        mcdc_wire_put_u32_v1(out, 4, 1)
+        mcdc_wire_put_u64_v1(out, 8, row_count)
+        mcdc_wire_put_u64_v1(out, 16, token_count)
+        mcdc_wire_put_bytes_v1(out, 24, self.mcdc_manifest_frozen_identity.bytes())
+        var cursor = 88
+        var row = 0
+        while row < row_count:
+            mcdc_wire_put_u64_v1(out, cursor, self.mcdc_manifest_decision_ids[row])
+            mcdc_wire_put_u64_v1(out, cursor + 8, self.mcdc_manifest_source_digests[row])
+            mcdc_wire_put_u32_v1(out, cursor + 16, self.mcdc_manifest_condition_counts[row])
+            mcdc_wire_put_u32_v1(out, cursor + 20, self.mcdc_manifest_token_counts[row])
+            mcdc_wire_put_u64_v1(out, cursor + 24, self.mcdc_manifest_token_offsets[row])
+            cursor = cursor + 32
+            row = row + 1
+        var token = 0
+        while token < token_count:
+            out[cursor] = self.mcdc_manifest_token_opcodes[token].to_u8()
+            mcdc_wire_put_u32_v1(out, cursor + 4, self.mcdc_manifest_token_conditions[token])
+            cursor = cursor + 8
+            token = token + 1
+        mcdc_wire_put_u64_v1(out, cursor, self.mcdc_manifest_semantic_ids.len())
+        cursor = cursor + 8
+        for semantic_id in self.mcdc_manifest_semantic_ids:
+            val bytes = semantic_id.bytes()
+            mcdc_wire_put_u32_v1(out, cursor, bytes.len())
+            cursor = cursor + 4
+            mcdc_wire_put_bytes_v1(out, cursor, bytes)
+            cursor = cursor + bytes.len()
+        out
 
     fn storage_binding_rows_well_formed() -> bool:
         self.storage_binding_module_names.len() == self.storage_view_site_bindings.len()

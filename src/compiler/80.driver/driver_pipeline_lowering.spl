@@ -23,6 +23,41 @@ fn _driver_mcdc_source_digest(ctx: CompileContext, module_name: text) -> i64:
         index = index + 1
     0
 
+fn _driver_transport_mcdc_manifest(ctx: CompileContext, lowering: MirLowering) -> bool:
+    if ctx.options.mcdc_policy == "off": return true
+    if ctx.mcdc_manifest_frozen: return false
+    val rows = lowering.mcdc_manifest_decision_ids.len()
+    if rows != lowering.mcdc_manifest_semantic_ids.len()
+        or rows != lowering.mcdc_manifest_source_digests.len()
+        or rows != lowering.mcdc_manifest_condition_counts.len()
+        or rows != lowering.mcdc_manifest_token_offsets.len()
+        or rows != lowering.mcdc_manifest_token_counts.len()
+        or lowering.mcdc_manifest_token_opcodes.len()
+            != lowering.mcdc_manifest_token_conditions.len():
+        return false
+    val base_offset = ctx.mcdc_manifest_token_opcodes.len()
+    var row = 0
+    while row < rows:
+        ctx.mcdc_manifest_semantic_ids.push(lowering.mcdc_manifest_semantic_ids[row])
+        ctx.mcdc_manifest_decision_ids.push(lowering.mcdc_manifest_decision_ids[row])
+        ctx.mcdc_manifest_source_digests.push(lowering.mcdc_manifest_source_digests[row])
+        ctx.mcdc_manifest_condition_counts.push(lowering.mcdc_manifest_condition_counts[row])
+        ctx.mcdc_manifest_token_offsets.push(
+            base_offset + lowering.mcdc_manifest_token_offsets[row])
+        ctx.mcdc_manifest_token_counts.push(lowering.mcdc_manifest_token_counts[row])
+        row = row + 1
+    var token = 0
+    while token < lowering.mcdc_manifest_token_opcodes.len():
+        ctx.mcdc_manifest_token_opcodes.push(lowering.mcdc_manifest_token_opcodes[token])
+        ctx.mcdc_manifest_token_conditions.push(lowering.mcdc_manifest_token_conditions[token])
+        token = token + 1
+    true
+
+fn _driver_freeze_mcdc_manifest(ctx: CompileContext) -> bool:
+    if ctx.options.mcdc_policy == "off": return true
+    val identity = ctx.freeze_mcdc_manifest_v1()
+    identity != ""
+
 # Diagnostics-plumbing: MirLowering.errors was silently dropped on the
 # native-build worker path (nothing outside 70.backend read it), so a bare
 # `nosuchfn(1)` call or an unsupported construct produced broken MIR that
@@ -191,6 +226,9 @@ impl CompilerDriver:
                 bootstrap_lowering.mcdc_source_digest = _driver_mcdc_source_digest(
                     self.ctx, "app.cli.bootstrap_main")
             var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
+            if (not _driver_transport_mcdc_manifest(self.ctx, bootstrap_lowering)
+                or not _driver_freeze_mcdc_manifest(self.ctx)):
+                self.ctx.add_error("MCDC-E-MANIFEST: failed to freeze canonical Boolean program manifest")
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
             log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()}")
@@ -242,6 +280,9 @@ impl CompilerDriver:
                         direct_lowering.mcdc_source_digest = _driver_mcdc_source_digest(
                             self.ctx, name_direct)
                     var lowered_entry = direct_lowering.lower_module(direct_hir)
+                    if not _driver_transport_mcdc_manifest(self.ctx, direct_lowering):
+                        self.ctx.add_error("MCDC-E-MANIFEST: malformed module Boolean program manifest")
+                        return false
                     lowered_entry.name = name_direct
                     log_phase("aot:lower_to_mir:module:done idx={direct_idx} module={name_direct} functions={lowered_entry.functions.len()}")
                     lowered_entry
@@ -262,6 +303,8 @@ impl CompilerDriver:
                         self.ctx.sources.len(), name_direct,
                         4, 6, 0, 0, "running")
             _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
+            if not _driver_freeze_mcdc_manifest(self.ctx):
+                self.ctx.add_error("MCDC-E-MANIFEST: failed to freeze canonical Boolean program manifest")
             return not self.ctx.has_errors()
 
         # Canonical constructor — this was a SECOND hand-duplicated
@@ -287,11 +330,16 @@ impl CompilerDriver:
                     lowering.mcdc_source_digest = _driver_mcdc_source_digest(
                         self.ctx, name)
                 var mir_module = lowering.lower_module(hir_module)
+                if not _driver_transport_mcdc_manifest(self.ctx, lowering):
+                    self.ctx.add_error("MCDC-E-MANIFEST: malformed module Boolean program manifest")
+                    return false
                 mir_module.name = name
                 self.ctx.mir_modules[name] = mir_module
                 if name == "app.cli.bootstrap_main":
                     self.ctx.set_bootstrap_entry_mir(name, mir_module)
             _driver_collect_mir_errors(self.ctx, lowering.errors)
+            if not _driver_freeze_mcdc_manifest(self.ctx):
+                self.ctx.add_error("MCDC-E-MANIFEST: failed to freeze canonical Boolean program manifest")
             log_debug("[lower_to_mir] MIR done")
         return not self.ctx.has_errors()
         for src3 in self.ctx.sources:

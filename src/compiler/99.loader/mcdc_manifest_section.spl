@@ -1,0 +1,60 @@
+# Loader access for the compiler-emitted `.mcdc_expr_v1` Note section.
+# Discovery is name-aware because Note wire type 7 is intentionally shared.
+
+use compiler.backend.linker.smf_reader_memory.{
+    SmfReaderMemory, bytes_to_u32, bytes_to_u64
+}
+use compiler.loader.smf_segment_load.{smf_section_extent, smf_section_bytes}
+
+val MCDC_SECTION_ENTRY_SIZE_V1: i64 = 64
+val MCDC_SECTION_NAME_OFFSET_V1: i64 = 40
+val MCDC_SECTION_NAME_V1: [u8] = [46, 109, 99, 100, 99, 95, 101, 120,
+                                      112, 114, 95, 118, 49]
+
+fn mcdc_section_name_matches_v1(reader: SmfReaderMemory, entry_offset: i64) -> bool:
+    if entry_offset < 0 or entry_offset + MCDC_SECTION_ENTRY_SIZE_V1 > reader.data.len():
+        return false
+    var index = 0
+    while index < MCDC_SECTION_NAME_V1.len():
+        if reader.data[entry_offset + MCDC_SECTION_NAME_OFFSET_V1 + index]
+            != MCDC_SECTION_NAME_V1[index]:
+            return false
+        index = index + 1
+    true
+
+fn smf_mcdc_manifest_section_index_v1(reader: SmfReaderMemory) -> i32:
+    var index = 0
+    while index < reader.header.section_count as i64:
+        val entry_offset = reader.sections_offset + index * MCDC_SECTION_ENTRY_SIZE_V1
+        if entry_offset + MCDC_SECTION_ENTRY_SIZE_V1 > reader.data.len(): return -1
+        if reader.data[entry_offset] == 7u8
+            and mcdc_section_name_matches_v1(reader, entry_offset):
+            return index as i32
+        index = index + 1
+    -1
+
+fn smf_mcdc_manifest_bytes_v1(reader: SmfReaderMemory) -> Result<[u8], text>:
+    val section_index = smf_mcdc_manifest_section_index_v1(reader)
+    if section_index < 0: return Err("SMF has no .mcdc_expr_v1 section")
+    val extent_result = smf_section_extent(reader, section_index)
+    if extent_result.is_err(): return Err(extent_result.unwrap_err())
+    val extent = extent_result.unwrap()
+    if extent.alignment < 8 or extent.file_offset % 8 != 0:
+        return Err("MCDP section is not aligned for V1 runtime rows")
+    val bytes_result = smf_section_bytes(reader, extent)
+    if bytes_result.is_err(): return Err(bytes_result.unwrap_err())
+    val bytes = bytes_result.unwrap()
+    if bytes.len() < 96 or bytes_to_u32(bytes, 0) != 0x5044434d
+        or bytes_to_u32(bytes, 4) != 1:
+        return Err("MCDP header is malformed")
+    val row_count = bytes_to_u64(bytes, 8) as i64
+    val token_count = bytes_to_u64(bytes, 16) as i64
+    if row_count < 0 or token_count < 0 or row_count > 1048576
+        or token_count > 8388608:
+        return Err("MCDP counts exceed bounded V1 admission")
+    val semantic_offset = 88 + row_count * 32 + token_count * 8
+    if semantic_offset < 88 or semantic_offset + 8 > bytes.len():
+        return Err("MCDP row/token ranges escape the section")
+    Ok(bytes)
+
+export smf_mcdc_manifest_section_index_v1, smf_mcdc_manifest_bytes_v1

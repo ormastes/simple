@@ -1,0 +1,89 @@
+use std.spec.*
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.smf_writer.{
+    SmfBuildOptions, Target, generate_smf_with_raw_code_options
+}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.loader.mcdc_manifest_section.{smf_mcdc_manifest_bytes_v1}
+
+fn manifest_fixture(reverse: bool) -> CompileContext:
+    val ctx = CompileContext.create(driver_core_compile_options_default())
+    if reverse:
+        ctx.mcdc_manifest_semantic_ids = ["src/b.spl:f:20:decision", "src/a.spl:f:10:decision"]
+        ctx.mcdc_manifest_decision_ids = [21, 11]
+        ctx.mcdc_manifest_source_digests = [200, 100]
+        ctx.mcdc_manifest_condition_counts = [1, 2]
+        ctx.mcdc_manifest_token_offsets = [0, 1]
+        ctx.mcdc_manifest_token_counts = [1, 3]
+        ctx.mcdc_manifest_token_opcodes = [1, 1, 1, 3]
+        ctx.mcdc_manifest_token_conditions = [0, 0, 1, 0]
+    else:
+        ctx.mcdc_manifest_semantic_ids = ["src/a.spl:f:10:decision", "src/b.spl:f:20:decision"]
+        ctx.mcdc_manifest_decision_ids = [11, 21]
+        ctx.mcdc_manifest_source_digests = [100, 200]
+        ctx.mcdc_manifest_condition_counts = [2, 1]
+        ctx.mcdc_manifest_token_offsets = [0, 3]
+        ctx.mcdc_manifest_token_counts = [3, 1]
+        ctx.mcdc_manifest_token_opcodes = [1, 1, 3, 1]
+        ctx.mcdc_manifest_token_conditions = [0, 1, 0, 0]
+    ctx
+
+describe "MC/DC frozen Boolean program manifest":
+    it "sorts rows and relocates bounded postfix token slices deterministically":
+        val reversed = manifest_fixture(true)
+        val canonical = manifest_fixture(false)
+        val reversed_identity = reversed.freeze_mcdc_manifest_v1()
+        val canonical_identity = canonical.freeze_mcdc_manifest_v1()
+        expect(reversed_identity != "").to_equal(true)
+        expect(reversed_identity).to_equal(canonical_identity)
+        expect(reversed.mcdc_manifest_source_digests).to_equal([100, 200])
+        expect(reversed.mcdc_manifest_decision_ids).to_equal([11, 21])
+        expect(reversed.mcdc_manifest_token_offsets).to_equal([0, 3])
+        expect(reversed.mcdc_manifest_token_opcodes).to_equal([1, 1, 3, 1])
+        expect(reversed.mcdc_manifest_token_conditions).to_equal([0, 1, 0, 0])
+        val wire = reversed.mcdc_manifest_wire_v1()
+        expect(wire.len() > 88 + 64 + 32).to_equal(true)
+        expect(wire[0:4]).to_equal([77u8, 67u8, 68u8, 80u8])
+
+    it "rejects duplicate runtime identities instead of ambiguously merging":
+        val duplicate = manifest_fixture(false)
+        duplicate.mcdc_manifest_source_digests[1] = 100
+        duplicate.mcdc_manifest_decision_ids[1] = 11
+        expect(duplicate.freeze_mcdc_manifest_v1()).to_equal("")
+        expect(duplicate.mcdc_manifest_frozen).to_equal(false)
+
+    it "freezes once and retains the exact identity":
+        val ctx = manifest_fixture(false)
+        val first = ctx.freeze_mcdc_manifest_v1()
+        expect(ctx.freeze_mcdc_manifest_v1()).to_equal(first)
+        expect(ctx.mcdc_manifest_frozen).to_equal(true)
+
+    it "sorts i64-carried source digests by their runtime u64 value":
+        val ctx = manifest_fixture(false)
+        ctx.mcdc_manifest_source_digests = [-1, 1]
+        expect(ctx.freeze_mcdc_manifest_v1() != "").to_equal(true)
+        expect(ctx.mcdc_manifest_source_digests).to_equal([1, -1])
+
+    it "rejects malformed postfix stacks before runtime admission":
+        val ctx = manifest_fixture(false)
+        ctx.mcdc_manifest_token_opcodes[0] = 3
+        expect(ctx.freeze_mcdc_manifest_v1()).to_equal("")
+
+    it "rejects duplicate atom ordinals that cannot align one-to-one with probes":
+        val ctx = manifest_fixture(false)
+        ctx.mcdc_manifest_token_conditions[1] = 0
+        expect(ctx.freeze_mcdc_manifest_v1()).to_equal("")
+
+    it "persists a discoverable aligned MCDP payload in SMF":
+        val ctx = manifest_fixture(false)
+        expect(ctx.freeze_mcdc_manifest_v1() != "").to_equal(true)
+        val wire = ctx.mcdc_manifest_wire_v1()
+        var options = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+        options.mcdc_manifest_bytes = wire
+        val smf = generate_smf_with_raw_code_options([195u8], options)
+        val parsed = SmfReaderMemory.from_data(smf)
+        expect(parsed.is_ok()).to_equal(true)
+        val extracted = smf_mcdc_manifest_bytes_v1(parsed.unwrap())
+        expect(extracted.is_ok()).to_equal(true)
+        expect(extracted.unwrap()).to_equal(wire)
