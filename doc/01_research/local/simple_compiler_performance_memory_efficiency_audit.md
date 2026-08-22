@@ -1637,3 +1637,6 @@ Strength reduction is structurally `Disabled` and canonical dispatch returns the
 ## 2026-08-22 follow-up: GVN block-order bypass removal
 
 GVN is structurally `Skeleton` and its canonical wrapper is an identity, but the exported class still executed a dormant implementation directly. It chose expression leaders while iterating MIR storage order—explicitly described as an approximation of dominator order—and reused field loads without memory-version/alias invalidation. The value-number tables, text-signature allocation, block/instruction rewrites, and mask-identity side transform were removed. Class/factory/statistics compatibility remains identity, preventing non-dominating reuse and eliminating dead compiler allocation/hash work.
+## 2026-08-22 follow-up: bounds-check removal bypass closure
+
+Bounds-check elimination is structurally `Disabled`, but its exported class still removed checks when called directly. It globally collected local loop-shape records, converted them to textual keys, and pre-seeded every block’s seen-check set, so a proof was not scoped to a dominated loop region. Same-block deduplication also assumed stable operand versions. All recognition, textual key allocation, proof seeding, and removal bodies are gone. Public proof record types, counters, dependencies, factory, and identity block/function entrypoints remain compatible.
