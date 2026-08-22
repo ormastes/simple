@@ -10,7 +10,8 @@ use std.fs.{read_file}
 use compiler.tools.lint._LintMain.config_and_model.{
     LintDiag, LintRunResult, LintLevel, LintCategory, LintEvidenceTier,
     LintConfig, LintProfile, apply_config_level_for_evidence,
-    lint_diag_effective_level, lint_run_result_apply_cli_policy
+    lint_diag_effective_level, lint_run_result_apply_cli_policy,
+    lint_policy_decision
 }
 
 describe "performance diagnostic records":
@@ -68,3 +69,28 @@ describe "performance diagnostic records":
         expect(policy).not.to_contain("read_file")
         expect(policy).not.to_contain("split(")
         expect(policy).not.to_contain("check_collection_patterns")
+
+    it "resolves suppression and evidence severity with one policy decision":
+        step("Avoid duplicate code mapping and level lookup per diagnostic")
+        var config = LintConfig.new()
+        config.set_level("collection_performance", LintLevel.Allow)
+        val allowed = lint_policy_decision(
+            config, "COLL010", LintLevel.Warn, LintEvidenceTier.SourcePattern)
+        expect(allowed.keep).to_equal(false)
+
+        config.set_level("collection_performance", LintLevel.Deny)
+        val advisory = lint_policy_decision(
+            config, "COLL010", LintLevel.Warn, LintEvidenceTier.SourcePattern)
+        expect(advisory.keep).to_equal(true)
+        expect(advisory.level).to_equal(LintLevel.Warn)
+        val proven = lint_policy_decision(
+            config, "COLL010", LintLevel.Warn, LintEvidenceTier.TypedProven)
+        expect(proven.keep).to_equal(true)
+        expect(proven.level).to_equal(LintLevel.Deny)
+
+        val checks_source = read_file(
+            "src/compiler/90.tools/lint/_LintMain/lint_checks.spl")
+        val append_source = read_file(
+            "src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl")
+        expect(checks_source).not.to_contain("should_keep_lint_result(file_config")
+        expect(append_source).not.to_contain("should_keep_lint_result(config")
