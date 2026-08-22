@@ -1619,3 +1619,6 @@ The repository CLI now reads each validated source through the error-aware lint 
 ## 2026-08-22 implementation follow-up: bounded manifest discovery cache
 
 Per-file lint previously walked up to ten ancestors to discover `simple.sdn`, then `lint_source` repeated discovery while resolving file attributes. The command-owned `Linter` now caches directory-to-manifest outcomes, including misses, checks cached ancestors during traversal, and caps retained directory entries at 4096. A prepared-path marker tells `lint_source` that manifest resolution is already complete, so it only clones base policy and applies file attributes. This removes the second walk entirely and shares common-ancestor results across sibling directories while bounding batch memory.
+## 2026-08-22 implementation follow-up: bounded parsed-policy cache
+
+The first command-session stage cached only the most recently parsed `simple.sdn`; alternating files from multiple projects could still reparse the same manifests repeatedly. The `Linter` now indexes up to 256 unique manifest paths into flat `LintConfig` storage. Hits clone the stored configuration before applying CLI or file-local overrides. The flat index avoids struct-valued dictionary retrieval hazards; after saturation, new manifests are parsed without retention, preserving correctness with bounded memory.
