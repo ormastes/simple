@@ -256,3 +256,8 @@ Compiler-owned EasyFix rules—including import, API-width, primitive/bool, gram
 script policy checks—consume that same view. Compatibility calls test path eligibility
 before constructing private lines. File-level allow scanning also reuses the caller's
 lines, so suppression does not add a hidden full-source array.
+
+`std.tooling.easy_fix.rules_helpers` owns the canonical EasyFix source view and line
+context type. Compiler helpers re-export it rather than defining another representation.
+Contextual-keyword, deprecated syntax, stub, and compiler rules therefore share one
+request-scoped context array with identical byte-offset semantics.
