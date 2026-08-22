@@ -20,6 +20,8 @@ never be labeled a general MIR or semantic verifier.
 Later receipts add opcode type rules, SSA dominance, ownership, loop-boundary,
 and semantic-differential evidence. A pipeline-wide `--verify-each` claim requires all
 applicable receipts, not merely the structural slice.
+The receipt exposes parallel stable `MIRVnnn` codes and human messages; cardinalities
+must match, and unclassified future failures use the explicit `MIRV999` sentinel.
 
 ### Typed diagnostics
 
