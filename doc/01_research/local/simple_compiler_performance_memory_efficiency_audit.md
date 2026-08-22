@@ -1471,3 +1471,12 @@ predicates and locations are exclusively line-based. They now accept the canonic
 request line view directly, removing five O(source bytes) traversals and five transient
 line-header arrays on applicable files. No whole-text predicate or diagnostic order
 changed. EasyFix registry owners remain the next allocation boundary.
+
+## 2026-08-22 implementation addendum: single EasyFix ownership
+
+The normal lint path invoked the compiler EasyFix registry and then separately invoked
+`primitive_api` and `simple_script_required`, although both are already registry members.
+Applicable source was therefore scanned twice for each rule and identical fixes could be
+appended twice. The redundant imports and append loops are removed. The registry is now
+the single owner, cutting those rules from two executions to one and preventing duplicate
+diagnostic/fix storage. Registry-wide shared line/context construction remains open.
