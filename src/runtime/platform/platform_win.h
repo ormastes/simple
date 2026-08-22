@@ -573,27 +573,33 @@ int64_t rt_page_size(void) {
 int64_t rt_time_now_nanos(void) {
     LARGE_INTEGER freq, count;
     if (!QueryPerformanceFrequency(&freq) || !QueryPerformanceCounter(&count)) {
-        return 0;
+        return -1;
     }
     int64_t seconds = (int64_t)(count.QuadPart / freq.QuadPart);
     int64_t remainder = (int64_t)(count.QuadPart % freq.QuadPart);
     if (seconds > INT64_MAX / 1000000000LL) {
-        return INT64_MAX;
+        return -1;
     }
-    return seconds * 1000000000LL + (int64_t)((remainder * 1000000000LL) / freq.QuadPart);
+    if (remainder > INT64_MAX / 1000000000LL) return -1;
+    int64_t nanos = seconds * 1000000000LL;
+    int64_t fractional = (remainder * 1000000000LL) / freq.QuadPart;
+    return fractional > INT64_MAX - nanos ? -1 : nanos + fractional;
 }
 
 int64_t rt_time_now_micros(void) {
     LARGE_INTEGER freq, count;
     if (!QueryPerformanceFrequency(&freq) || !QueryPerformanceCounter(&count)) {
-        return 0;
+        return -1;
     }
     int64_t seconds = (int64_t)(count.QuadPart / freq.QuadPart);
     int64_t remainder = (int64_t)(count.QuadPart % freq.QuadPart);
     if (seconds > INT64_MAX / 1000000LL) {
-        return INT64_MAX;
+        return -1;
     }
-    return seconds * 1000000LL + (int64_t)((remainder * 1000000LL) / freq.QuadPart);
+    if (remainder > INT64_MAX / 1000000LL) return -1;
+    int64_t micros = seconds * 1000000LL;
+    int64_t fractional = (remainder * 1000000LL) / freq.QuadPart;
+    return fractional > INT64_MAX - micros ? -1 : micros + fractional;
 }
 
 /* ----------------------------------------------------------------
@@ -660,7 +666,9 @@ int64_t rt_time_now_unix_micros(void) {
     ull.LowPart = ft.dwLowDateTime;
     ull.HighPart = ft.dwHighDateTime;
     /* Subtract offset from 1601-01-01 to 1970-01-01 (116444736000000000 * 100ns) */
+    if (ull.QuadPart < 116444736000000000ULL) return -1;
     uint64_t usec = (ull.QuadPart - 116444736000000000ULL) / 10ULL;
+    if (usec > (uint64_t)INT64_MAX) return -1;
     return (int64_t)usec;
 }
 

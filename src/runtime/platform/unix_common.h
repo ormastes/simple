@@ -409,16 +409,22 @@ static bool rt_monotonic_time(struct timespec* ts) {
 int64_t rt_time_now_nanos(void) {
     struct timespec ts;
     if (!rt_monotonic_time(&ts)) {
-        return 0;  /* Fallback on error */
+        return -1;
     }
+    if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000000LL) return -1;
+    if ((int64_t)ts.tv_sec == INT64_MAX / 1000000000LL &&
+        ts.tv_nsec > INT64_MAX % 1000000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 }
 
 int64_t rt_time_now_micros(void) {
     struct timespec ts;
     if (!rt_monotonic_time(&ts)) {
-        return 0;  /* Fallback on error */
+        return -1;
     }
+    if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000LL) return -1;
+    if ((int64_t)ts.tv_sec == INT64_MAX / 1000000LL &&
+        ts.tv_nsec / 1000 > INT64_MAX % 1000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
 }
 
@@ -487,9 +493,12 @@ int64_t rt_thread_available_parallelism(void) {
 int64_t rt_time_now_unix_micros(void) {
     struct timeval tv;
     if (gettimeofday(&tv, NULL) == 0) {
+        if (tv.tv_sec < 0 || (int64_t)tv.tv_sec > INT64_MAX / 1000000LL) return -1;
+        if ((int64_t)tv.tv_sec == INT64_MAX / 1000000LL &&
+            tv.tv_usec > INT64_MAX % 1000000LL) return -1;
         return (int64_t)tv.tv_sec * 1000000LL + (int64_t)tv.tv_usec;
     }
-    return 0;
+    return -1;
 }
 
 /* ----------------------------------------------------------------

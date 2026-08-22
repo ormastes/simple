@@ -10273,13 +10273,17 @@ int64_t rt_time_now_unix(void) {
 }
 
 int64_t rt_time_now_unix_micros(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
+    struct timespec ts = {0, 0};
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1;
+    if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000LL) return -1;
+    if ((int64_t)ts.tv_sec == INT64_MAX / 1000000LL &&
+        ts.tv_nsec / 1000 > INT64_MAX % 1000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
 }
 
 int64_t rt_time_ms(void) {
-    return rt_time_now_unix_micros() / 1000LL;
+    int64_t micros = rt_time_now_unix_micros();
+    return micros < 0 ? -1 : micros / 1000LL;
 }
 
 int64_t rt_entropy_hardware_ready(void) {
@@ -10287,8 +10291,11 @@ int64_t rt_entropy_hardware_ready(void) {
 }
 
 int64_t rt_time_now_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    struct timespec ts = {0, 0};
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
+    if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000000LL) return -1;
+    if ((int64_t)ts.tv_sec == INT64_MAX / 1000000000LL &&
+        ts.tv_nsec > INT64_MAX % 1000000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 }
 
@@ -10297,7 +10304,8 @@ int64_t rt_time_now_nanos(void) {
 }
 
 int64_t rt_time_now_micros(void) {
-    return rt_time_now_ns() / 1000LL;
+    int64_t nanos = rt_time_now_ns();
+    return nanos < 0 ? -1 : nanos / 1000LL;
 }
 
 void rt_sleep_nanos(int64_t ns) {

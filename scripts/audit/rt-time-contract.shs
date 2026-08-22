@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+binding="$root/src/lib/nogc_sync_mut/io/time_ops.spl"
+rust="$root/src/compiler_rust/runtime/src/value/sffi/time.rs"
+
+for symbol in rt_time_now_unix_micros rt_time_now_nanos rt_time_now_micros; do
+    grep -B1 -F "extern fn $symbol" "$binding" |
+        grep -q 'negative sentinel is failure'
+    test "$(grep -c "$symbol()" "$binding")" -eq 2
+done
+
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$binding")" -eq 3
+test "$(grep -c 'E-SFFI-TIME-00[123]' "$binding")" -eq 3
+for wrapper in try_rt_time_now_unix_micros try_rt_time_now_nanos try_rt_time_now_micros; do
+    grep -q "pub fn $wrapper() -> Option<i64>" "$rust"
+done
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+${CC:-cc} -std=gnu11 -O2 -Wall -Wextra -Werror \
+    "$root/src/runtime/test/runtime_time_failure_selfcheck.c" \
+    -o "$tmp/runtime_time_failure_selfcheck"
+"$tmp/runtime_time_failure_selfcheck"
+
+echo 'rt time contract: PASS'

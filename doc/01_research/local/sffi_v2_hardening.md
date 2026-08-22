@@ -790,13 +790,13 @@ artifact-bound admission ledger. On 2026-08-22 it reports:
 | --- | ---: |
 | Simple `rt_*` declaration rows | 12,610 |
 | Distinct declared symbols | 3,172 |
-| Rows explicitly tagged unsafe | 455 |
-| Rows with a documented/typed contract | 540 |
+| Rows explicitly tagged unsafe | 458 |
+| Rows with a documented/typed contract | 543 |
 | Verified evidence rows | 0 |
 | Signature-verified rows | 0 |
 | Verified and signed rows | 0 |
 | Fail-closed unsafe rows | 12,610 |
-| Untouched rows (no unsafe tag, contract, or evidence) | 11,879 |
+| Untouched rows (no unsafe tag, contract, or evidence) | 11,876 |
 | Symbols with source-signature variants | 297 |
 
 Implementation-shaped owned definitions are: C 2,301 rows / 1,821 distinct
@@ -808,7 +808,7 @@ the row unsafe.
 
 The census now also emits a provider-family migration queue and has a checked-in
 one-way ratchet. The largest untouched families are `rt_file` (2,791 rows),
-`rt_process` (1,045), `rt_env` (469), `rt_time` (368), and `rt_cuda` (353).
+`rt_process` (1,045), `rt_env` (469), `rt_time` (365), and `rt_cuda` (353).
 The ratchet rejects increases in untouched or signature-variant counts and
 decreases in unsafe tags, documented contracts, or trusted admissions. It runs
 only during audit/build verification and adds no runtime lookup, hash, branch,
@@ -829,3 +829,23 @@ The profile decision is process-cached and emitted target code is unchanged;
 there is no application hot-path or memory cost. Focused tests pass 2/2. This
 does not yet close raw-pointer or inline-assembly enforcement, nor does it turn
 any unsigned provider into verified evidence.
+
+The first `rt_time` provider slice removes fabricated-zero failure behavior for
+the canonical wall-clock, monotonic-nanosecond, and monotonic-microsecond ABI.
+Linux/Unix and Windows C lanes now return the disjoint negative sentinel on
+clock failure or representational overflow; derived micro/millisecond functions
+propagate it instead of integer division laundering `-1` into `0`. All native
+timespec values are initialized before use. The Rust boundary provides inline
+checked `Option<i64>` lifts, while the canonical Simple wrappers carry exact
+unsafe/sentinel contracts, one minimal lexical FFI scope, and an explicit panic
+on violation.
+
+Successful Simple wrappers still make exactly one provider call and add only
+one predictable negative comparison; no allocation, symbol lookup, hash,
+per-call mutex, retry, or retained object was added. `runtime_time.c` removes its unsynchronized Unix
+baseline state, and Windows initialization uses the platform one-time primitive.
+Failure sabotage passes for all four derived C entry points, the live epoch suite
+passes 6/6, Rust sentinel lifting passes, C syntax checks and Rust clippy pass,
+and the census advances by three tags/contracts/untouched rows. This is verified
+behavioral evidence, not signed artifact admission: globally signed rows remain
+zero.

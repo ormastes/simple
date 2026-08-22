@@ -32,16 +32,33 @@ mod c_sffi {
 }
 
 #[inline(always)]
+fn lift_clock_value(value: i64) -> Option<i64> {
+    (value >= 0).then_some(value)
+}
+
+#[inline(always)]
 pub fn rt_time_now_nanos() -> i64 {
     unsafe { c_sffi::rt_time_now_nanos() }
+}
+#[inline(always)]
+pub fn try_rt_time_now_nanos() -> Option<i64> {
+    lift_clock_value(rt_time_now_nanos())
 }
 #[inline(always)]
 pub fn rt_time_now_micros() -> i64 {
     unsafe { c_sffi::rt_time_now_micros() }
 }
 #[inline(always)]
+pub fn try_rt_time_now_micros() -> Option<i64> {
+    lift_clock_value(rt_time_now_micros())
+}
+#[inline(always)]
 pub fn rt_time_now_unix_micros() -> i64 {
     unsafe { c_sffi::rt_time_now_unix_micros() }
+}
+#[inline(always)]
+pub fn try_rt_time_now_unix_micros() -> Option<i64> {
+    lift_clock_value(rt_time_now_unix_micros())
 }
 #[inline(always)]
 pub fn rt_time_now_seconds() -> f64 {
@@ -106,4 +123,16 @@ pub fn rt_progress_reset() {
 #[inline(always)]
 pub fn rt_progress_get_elapsed_seconds() -> f64 {
     unsafe { c_sffi::rt_progress_get_elapsed_seconds() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lift_clock_value;
+
+    #[test]
+    fn clock_failure_sentinel_is_not_a_value() {
+        assert_eq!(lift_clock_value(-1), None);
+        assert_eq!(lift_clock_value(0), Some(0));
+        assert_eq!(lift_clock_value(i64::MAX), Some(i64::MAX));
+    }
 }
