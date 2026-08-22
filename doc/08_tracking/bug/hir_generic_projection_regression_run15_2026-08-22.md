@@ -122,3 +122,32 @@ from unit specs — the failing population is invisible to them by construction
 (48 of 124 hir specs are red on BOTH sides). Re-land condition is unchanged and
 applies to each commit independently: a measured stage-1 `[hir-fatal]` census at
 or below post19's 48 / 9.
+
+## Prepared, HELD re-land of the generic-callable half (independently verified)
+
+`86787968989` is prepared for re-land as an ISOLATED change, held and not
+pushed pending a run16/run17 stage-1 census:
+
+- branch `reland-generic-callable` in `/mnt/data/worktrees/generic-callable-1`,
+  tip `89d772f90b5`, code commit `8e70a394659`.
+
+Isolation verified here rather than taken on assertion, at `8e70a394659`:
+
+| claim | check | result |
+|---|---|---|
+| based on current origin/main | `git merge-base --is-ancestor a50b92999d2 89d772f90b5` | YES, merge-base is `a50b92999d2` exactly |
+| does not drag in `d481f15e1ac` | `git grep -c imported_surface_projected_named_args 8e70a394659 -- src/` | **0 occurrences** |
+| sibling spec / parity gate not restored | `git ls-tree -r --name-only` for `check-type-walk-constructor-parity` and `imported_generic_argument_projection_spec` | **0** |
+| touches only its own surface | `--stat` | 5 files: `parser_types_expr.spl`, `module_callable_types.spl`, `module_import_registration.spl`, its own spec, this record |
+
+This is the direction that untangles the entanglement recorded above: the
+generic-callable half applies alone on the post-revert tree, so if a later run
+regresses it can be reverted with per-commit evidence instead of as a pair.
+
+**The re-land condition is unchanged and is a census, not a review:** a measured
+stage-1 `[hir-fatal]` count at or below post19's 48 / 9. Unit specs do not
+qualify — 48 of 124 hir specs are red on both sides of the regression, and a
+purpose-built facade-hop fixture is green on both.
+
+`/mnt/fast/gc1-baseline` has been deleted by its owner; it was stale after the
+revert. Rebuild any future baseline from `ec13c319250` or later.
