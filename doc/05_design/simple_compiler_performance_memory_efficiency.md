@@ -337,3 +337,20 @@ including traps, ownership/destruction, unwind, volatile/atomic/device behavior
 and debug probes. Liveness must use sparse/worklist storage with bounded CPU and
 memory, expose incompleteness, reuse unchanged MIR storage, and pass activation,
 differential, idempotence and IR-verification gates.
+
+## PerfFacts capability and allocation contract
+
+Consumers explicitly select whether liveness is required. The no-liveness
+builder produces CFG, reverse-postorder, dominance and def-use while leaving
+DEF/USE matrices, live-in/live-out matrices, visits and exhaustion state empty.
+The ambiguous full builder retains compatibility but must not be used by active
+analyses that do not query liveness. A future `PerfFactRequest` validates
+dependencies among CFG, dominance, def-use and liveness and constructs only the
+requested capabilities.
+
+## Diagnostic rendering allocation contract
+
+Warning/error formatters accumulate complete logical records and join once.
+Evidence cardinality must produce linear payload construction; per-evidence
+immutable append is prohibited. Human and JSON rendering preserve source order,
+escape each JSON item once, and keep exact output compatibility.
