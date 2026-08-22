@@ -1,3 +1,22 @@
+"""
+## Purpose and audience
+Purpose: Prove that scheduler-owned actor channel authority.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-FEATURE-ACTOR-CHANNEL-001
+doc/01_research/feature/REQ-FEATURE-ACTOR-CHANNEL-001.md
+doc/03_plan/feature/REQ-FEATURE-ACTOR-CHANNEL-001.md
+doc/04_architecture/feature/REQ-FEATURE-ACTOR-CHANNEL-001.md
+doc/05_design/feature/REQ-FEATURE-ACTOR-CHANNEL-001.md
+"""
+# @req: REQ-FEATURE-ACTOR-CHANNEL-001
+
+
 # codex-system-test
 # @req REQ-PAR-002 REQ-PAR-006 NFR-PAR-002 NFR-PAR-003
 
@@ -44,15 +63,19 @@ fn actor_ref_with_authority(scheduler: ActorScheduler,
     val actor_id = scheduler.register_actor(actor)
     ActorRef(actor_id: actor_id, _scheduler: scheduler)
 
+use std.spec.step
+
 describe "scheduler-owned actor channel authority":
     it "should preserve bounded copied-reference authority through terminal stop":
+        # @req: REQ-FEATURE-ACTOR-CHANNEL-001
+        step("Verify: should preserve bounded copied-reference authority through terminal stop")
         step("Create one scheduler-owned bounded actor channel")
         val scheduler = ActorScheduler.with_reply_capacity(1)
         val mailbox = ActorMailbox.new(1)
         val original = actor_ref_with_authority(scheduler, mailbox)
         val copied = original
         expect(original.get_id()).to_be_greater_than(0)
-        expect(scheduler.reply_capacity()).to_equal(1)
+        expect(scheduler.reply_capacity()).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
 
         step("Admit copied arguments through one actor reference")
         var args = ["before"]
@@ -63,9 +86,9 @@ describe "scheduler-owned actor channel authority":
 
         step("Observe finite mailbox and reply backpressure")
         expect(copied.send("echo", ["mailbox-full"])).to_equal(false)
-        expect(copied.ask("echo", ["reply-full"])).to_equal(-1)
-        expect(scheduler.outstanding_reply_count()).to_equal(1)
-        expect(mailbox.pending_high_water_count()).to_equal(1)
+        expect(copied.ask("echo", ["reply-full"])).to_equal(-1)  # oracle: -1 — pinned expected value for this behavior
+        expect(scheduler.outstanding_reply_count()).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
+        expect(mailbox.pending_high_water_count()).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
 
         step("Dispatch and consume the isolated result")
         scheduler.run_until_idle()
@@ -75,7 +98,7 @@ describe "scheduler-owned actor channel authority":
             expect(reply).to_equal("before")
         else:
             fail("the admitted actor reply must remain available")
-        expect(scheduler.outstanding_reply_count()).to_equal(0)
+        expect(scheduler.outstanding_reply_count()).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
         expect(copied.has_messages()).to_equal(false)
 
         step("Stop once through the owning scheduler")
@@ -86,7 +109,7 @@ describe "scheduler-owned actor channel authority":
         expect(first_stop).to_equal(true)
         expect(second_stop).to_equal(false)
         expect(late_send).to_equal(false)
-        expect(late_ask).to_equal(-1)
+        expect(late_ask).to_equal(-1)  # oracle: -1 — pinned expected value for this behavior
         expect(original.has_messages()).to_equal(false)
 
         val evidence = canonical_evidence(
@@ -122,13 +145,15 @@ describe "scheduler-owned actor channel authority":
 
     # @manual: fold
     it "should reject an unknown actor without publishing work or reply credit":
+        # @req: REQ-FEATURE-ACTOR-CHANNEL-001
+        step("Verify: should reject an unknown actor without publishing work or reply credit")
         step("Create an actor reference whose ID is absent from the scheduler")
         val scheduler = ActorScheduler.with_reply_capacity(1)
         val unknown = ActorRef(actor_id: 999999, _scheduler: scheduler)
 
         step("Reject every operation at the scheduler-owned registry boundary")
         expect(unknown.send("echo", ["unknown"])).to_equal(false)
-        expect(unknown.ask("echo", ["unknown"])).to_equal(-1)
+        expect(unknown.ask("echo", ["unknown"])).to_equal(-1)  # oracle: -1 — pinned expected value for this behavior
         expect(unknown.has_messages()).to_equal(false)
         expect(unknown.stop()).to_equal(false)
-        expect(scheduler.outstanding_reply_count()).to_equal(0)
+        expect(scheduler.outstanding_reply_count()).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
