@@ -15,6 +15,16 @@ build attempts:
   1,399,268 KiB maximum RSS, ending with 29 failed files.
 - The focused core closure took 286.5 s and 208,444 KiB, versus 13.7 s for the
   focused HIR codec and 5.16 s for Trace32.
+- Current-tip cycle 3 (`ebb960009aeb`) used the preserved cache and native
+  arenas, produced 1,886 additional cached objects, but still failed after
+  945.43 s with 1,576,520 KiB maximum RSS. This is 11.2% faster than the
+  1071.71 s baseline but 6.6% higher peak RSS than 1,478,536 KiB, so the
+  performance/memory acceptance criterion remains failed.
+- A focused Rust compiler regression-test build for array-lvalue lowering was
+  blocked before test execution by the unrelated missing
+  `crate::interpreter::dispatch_profile` owner after 99.41 s and 2,164,056 KiB
+  maximum RSS. Test-build dependency closure and RSS therefore require their
+  own reduction; this run is not correctness evidence for the lowering fix.
 
 Static profiling identified value-semantic `Dict` copies in
 `_driver_text_bucket_set_add`, unbounded source splitting, and globally keyed
