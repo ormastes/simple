@@ -281,6 +281,13 @@ impl ManifestSection {
             return None;
         };
 
+        // Fail closed on a partial/garbage trailer: every byte of the section
+        // must have been consumed by a declared field. Without this, a section
+        // with leftover bytes parsed as if they were not there.
+        if offset != bytes.len() {
+            return None;
+        }
+
         Some(Self {
             manifest_toml,
             lock_toml,

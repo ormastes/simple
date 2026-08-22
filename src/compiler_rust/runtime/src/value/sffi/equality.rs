@@ -442,7 +442,10 @@ unsafe fn array_eq_contents(
 }
 
 fn generic_int_eq(value: RuntimeValue, expected: i64) -> bool {
-    (value.is_int() && expected >= 0 && value.as_int() >= 0 && value.as_int() == expected)
+    // `expected` is the packed word reinterpreted as i64 -- exactly what
+    // `rt_array_get` returns for a u64-packed element -- so negative values are
+    // legitimate and must not be excluded here.
+    (value.is_int() && value.as_int() == expected)
         || value.as_heap_u64().is_some_and(|actual| actual == expected as u64)
 }
 

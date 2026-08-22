@@ -764,25 +764,26 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
             NativeCallable::ClosureRecord {
                 entry,
                 closure_ptr,
-                raw_worker_args: _,
+                raw_worker_args,
             } => {
                 let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
                     unsafe { std::mem::transmute(entry) };
                 func(
                     closure_ptr,
-                    native_worker_arg(copied_data1, true),
-                    native_worker_arg(copied_data2, true),
+                    native_worker_arg(copied_data1, raw_worker_args),
+                    native_worker_arg(copied_data2, raw_worker_args),
                 )
             }
             NativeCallable::DirectFunction {
                 entry,
-                raw_worker_args: _,
+                raw_worker_args,
             } => {
-                let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
+                let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
                     unsafe { std::mem::transmute(entry) };
                 func(
-                    native_worker_arg(copied_data1, true),
-                    native_worker_arg(copied_data2, true),
+                    closure_ptr,
+                    native_worker_arg(copied_data1, raw_worker_args),
+                    native_worker_arg(copied_data2, raw_worker_args),
                 )
             }
         })
@@ -1122,25 +1123,26 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
                 NativeCallable::ClosureRecord {
                     entry,
                     closure_ptr,
-                    raw_worker_args: _,
+                    raw_worker_args,
                 } => {
                     let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
                         unsafe { std::mem::transmute(entry) };
                     func(
                         closure_ptr,
-                        native_worker_arg(copied_data1, true),
-                        native_worker_arg(copied_data2, true),
+                        native_worker_arg(copied_data1, raw_worker_args),
+                        native_worker_arg(copied_data2, raw_worker_args),
                     )
                 }
                 NativeCallable::DirectFunction {
                     entry,
-                    raw_worker_args: _,
+                    raw_worker_args,
                 } => {
-                    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
+                    let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
                         unsafe { std::mem::transmute(entry) };
                     func(
-                        native_worker_arg(copied_data1, true),
-                        native_worker_arg(copied_data2, true),
+                        closure_ptr,
+                        native_worker_arg(copied_data1, raw_worker_args),
+                        native_worker_arg(copied_data2, raw_worker_args),
                     )
                 }
             }
