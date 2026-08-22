@@ -57,8 +57,9 @@ fn _lint_profile_to_assurance_name(profile: Option<LintProfile>) -> text:
     ""
 
 fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunResult]:
-    var results = linter.lint_source(path, content)
+    var results = linter.lint_source_for_parsed_append(path, content)
     if not path.ends_with(".spl"):
+        linter.release_combined_lint_view()
         return results
 
     val previous_parse_error = parser_has_errors()
@@ -110,6 +111,7 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
                         parse_message = "{parse_message} ({reason})"
         val lint = LintDiag.new("PARSE001", LintLevel.Deny, LintCategory.Correctness, parse_message)
         results.push(LintRunResult.new(path, parse_line, parse_col, lint))
+        linter.release_combined_lint_view()
         return results
 
     lint_cli_append_parsed_results(linter, path, content, module_get_decls(), results)
@@ -131,8 +133,9 @@ fn lint_cli_source_with_parsed_revision(
     This entrypoint never invokes or resets the parser/AST arena. Revision
     identity is checked before declaration indices are consumed.
     """
-    var results = linter.lint_source(path, content)
+    var results = linter.lint_source_for_parsed_append(path, content)
     if not path.ends_with(".spl"):
+        linter.release_combined_lint_view()
         return results
     if revision.path != path or revision.source_digest != sha256_text(content)
         or revision.arena_generation != ast_generation():
@@ -140,6 +143,7 @@ fn lint_cli_source_with_parsed_revision(
             "LINTREV001", LintLevel.Deny, LintCategory.Correctness,
             "NOT LINTED: parsed revision does not match source path, digest, and AST generation")
         results.push(LintRunResult.new(path, 1, 0, lint))
+        linter.release_combined_lint_view()
         return results
     lint_cli_append_parsed_results(linter, path, content, revision.decls, results)
 
@@ -154,7 +158,10 @@ fn lint_cli_append_parsed_results(
         linter.last_resolved_config.unwrap()
     else:
         resolve_lint_config(linter.config, path, content)
-    val lines = content.split("\n")
+    val lines = if linter.last_resolved_path == path and linter.last_source_view_valid:
+        linter.last_source_lines
+    else:
+        content.split("\n")
     val source_locations = lint_source_location_index(lines)
     val stub_profile_name = _lint_profile_to_assurance_name(config.profile)
     for warning in check_argument_count(decls):
@@ -265,6 +272,7 @@ fn lint_cli_append_parsed_results(
         val message = "{warning.message} — {warning.hint}"
         val lint = LintDiag.new(warning.code, level, LintCategory.Correctness, message)
         results.push(LintRunResult.new(path, warning.line_num, 0, lint))
+    linter.release_combined_lint_view()
     results
 
 fn lint_cli_find_decl_line(lines: [text], prefix: text, module_path: text) -> i64:
