@@ -36,6 +36,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
+use simple_compiler::pipeline::native_project::DEFAULT_FILE_TIMEOUT_SECS;
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
 use simple_runtime::value::{
     rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_new, rt_tuple_set, RuntimeValue,
@@ -166,7 +167,14 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut verbose = false;
     let mut strip = false;
     let mut threads: Option<usize> = None;
-    let mut timeout: u64 = 60;
+    // Keep the embedded/C-ABI native-build entrypoint aligned with the
+    // canonical driver and NativeBuildConfig.  Large generated modules (for
+    // example hir_codec.spl) and export hubs legitimately need more than 60s
+    // for parse + lowering + codegen on bootstrap hosts.  The old bridge-only
+    // default killed those units even though the same build through the Rust
+    // CLI admitted 300s.  This remains a bounded per-file budget; it does not
+    // disable timeout containment or add work on the compiler hot path.
+    let mut timeout: u64 = DEFAULT_FILE_TIMEOUT_SECS;
     let mut incremental = true;
     let mut clean = false;
     let mut cache_dir: Option<PathBuf> = None;
@@ -207,7 +215,10 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --verbose, -v       Verbose output");
                 println!("  --strip             Strip symbols from output");
                 println!("  --threads <n>       Number of compilation threads");
-                println!("  --timeout <secs>    Per-file timeout (default: 60)");
+                println!(
+                    "  --timeout <secs>    Per-file timeout (default: {})",
+                    DEFAULT_FILE_TIMEOUT_SECS
+                );
                 println!("  --no-incremental    Disable incremental compilation");
                 println!("  --clean             Force clean rebuild");
                 println!("  --cache-dir <dir>   Cache directory");

@@ -1088,6 +1088,13 @@ fn test_collect_spl_files() {
 }
 
 #[test]
+fn default_file_timeout_admits_large_generated_modules_but_stays_bounded() {
+    let config = NativeBuildConfig::default();
+    assert_eq!(config.file_timeout, DEFAULT_FILE_TIMEOUT_SECS);
+    assert_eq!(DEFAULT_FILE_TIMEOUT_SECS, 300);
+}
+
+#[test]
 fn test_content_hash_consistency() {
     let h1 = content_hash("fn main(): return 42");
     let h2 = content_hash("fn main(): return 42");

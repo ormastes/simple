@@ -436,13 +436,18 @@ pub struct NativeBuildConfig {
     pub low_memory: bool,
 }
 
+/// Bounded per-source compilation budget shared by every native-build
+/// frontend. Keeping one owner prevents the embedded C-ABI bridge from
+/// silently reverting to the obsolete 60-second budget.
+pub const DEFAULT_FILE_TIMEOUT_SECS: u64 = 300;
+
 impl Default for NativeBuildConfig {
     fn default() -> Self {
         Self {
             // Large legitimate files (3000+-line controllers, big re-export hubs)
             // need more than 60s for full parse->lowering->codegen; they compile
             // fine, just slowly. Raised to avoid spurious bootstrap aborts.
-            file_timeout: 300,
+            file_timeout: DEFAULT_FILE_TIMEOUT_SECS,
             stack_size: 16 * 1024 * 1024,
             parallel: true,
             strip: false,
