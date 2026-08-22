@@ -155,6 +155,22 @@
 - Verification, optimizer, timing, allocation, and RSS execution intentionally
   remain omitted under the user's no-verify instruction.
 
+## Completed raw-SFFI source-view tranche
+
+- Built one reference-backed docstring-filtered `CodeLine` snapshot for
+  SFFI009 and SFFI010, replacing two independent snapshots.
+- Preserved both public string APIs, path exclusions, lexical heuristics, line
+  numbers, and call-before-declaration diagnostic ordering.
+- Removed a redundant extern-name trim and duplicate body-indent scan.
+- Added shared-snapshot behavior, category-order, exclusion, and source-owner
+  contracts to the existing real raw-SFFI spec.
+- Parallel lanes reviewed exact docstring quirks, boundary semantics, ordering,
+  allocation multiplicity, matching complexity, and coverage gaps.
+- Follow-up: replace `body lines * extern names * textual probes` with one
+  lexical call-name scan and indexed extern membership.
+- Verification, optimizer, timing, allocation, and RSS execution intentionally
+  remain omitted under the user's no-verify instruction.
+
 ## Completed VHDL metadata-index tranche
 
 - Built collision-framed exact and eligible-alias row-index maps once.
