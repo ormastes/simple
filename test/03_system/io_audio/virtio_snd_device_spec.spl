@@ -1,3 +1,22 @@
+"""
+## Purpose and audience
+Purpose: Prove that pure-Simple VirtIO sound device.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-IO_AUDIO-VIRTIO-SND-001
+doc/01_research/io_audio/REQ-IO_AUDIO-VIRTIO-SND-001.md
+doc/03_plan/io_audio/REQ-IO_AUDIO-VIRTIO-SND-001.md
+doc/04_architecture/io_audio/REQ-IO_AUDIO-VIRTIO-SND-001.md
+doc/05_design/io_audio/REQ-IO_AUDIO-VIRTIO-SND-001.md
+"""
+# @req: REQ-IO_AUDIO-VIRTIO-SND-001
+
+
 # @req REQ-001 REQ-003 REQ-007
 """Pure-Simple VirtIO sound owns bounded streams completions resets and events."""
 
@@ -8,8 +27,12 @@ use os.drivers.virtio.virtio_snd_device.{VirtioSndDevice}
 fn playback_request() -> VirtioSndPcmRequest:
     VirtioSndPcmRequest(stream_id: 2, direction: "playback", sample_rate: 48000, channels: 2, period_frames: 256, periods: 4, buffer_frames: 1024)
 
+use std.spec.step
+
 describe "pure-Simple VirtIO sound device":
     it "negotiates prepares starts and emits ordered playback completion":
+        # @req: REQ-IO_AUDIO-VIRTIO-SND-001
+        step("Verify: negotiates prepares starts and emits ordered playback completion")
         var device = VirtioSndDevice.create(8, 4)
         expect(device.negotiate(VIRTIO_SND_F_PCM_INFO, 1, 1).status).to_equal("accepted")
         expect(device.prepare(playback_request()).status).to_equal("prepared")
@@ -18,11 +41,13 @@ describe "pure-Simple VirtIO sound device":
         expect(submitted.status).to_equal("submitted")
         expect(device.complete(submitted.sequence, submitted.generation, 256, "playback", 100u64).status).to_equal("completed")
         val events = device.events.drain()
-        expect(events.len()).to_equal(1)
+        expect(events.len()).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
         expect(events[0].kind).to_equal("playback-period")
         expect(events[0].correlation_id).to_equal(submitted.sequence)
 
     it "rejects invalid lifecycle direction and stale completion":
+        # @req: REQ-IO_AUDIO-VIRTIO-SND-001
+        step("Verify: rejects invalid lifecycle direction and stale completion")
         var device = VirtioSndDevice.create(4, 2)
         expect(device.prepare(playback_request()).status).to_equal("not-negotiated")
         device.negotiate(VIRTIO_SND_F_PCM_INFO, 1, 0)
@@ -34,6 +59,8 @@ describe "pure-Simple VirtIO sound device":
         expect(device.complete(submitted.sequence, submitted.generation + 1u64, 256, "playback", 100u64).status).to_equal("stale-generation")
 
     it "bounds outstanding periods records xrun and releases on reset shutdown":
+        # @req: REQ-IO_AUDIO-VIRTIO-SND-001
+        step("Verify: bounds outstanding periods records xrun and releases on reset shutdown")
         var device = VirtioSndDevice.create(4, 2)
         device.negotiate(VIRTIO_SND_F_PCM_INFO, 1, 1)
         device.prepare(playback_request())
@@ -41,13 +68,15 @@ describe "pure-Simple VirtIO sound device":
         device.submit("playback")
         device.submit("playback")
         expect(device.submit("playback").status).to_equal("queue-full")
-        expect(device.xrun_count).to_equal(1)
-        expect(device.reset(200u64).outstanding).to_equal(0)
+        expect(device.xrun_count).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
+        expect(device.reset(200u64).outstanding).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
         expect(device.shutdown(300u64).status).to_equal("completed")
-        expect(device.outstanding).to_equal(0)
+        expect(device.outstanding).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
         expect(device.negotiated).to_equal(false)
 
     it "routes hardware jack period and xrun interrupts into ordered events":
+        # @req: REQ-IO_AUDIO-VIRTIO-SND-001
+        step("Verify: routes hardware jack period and xrun interrupts into ordered events")
         var device = VirtioSndDevice.create(8, 4)
         device.negotiate(VIRTIO_SND_F_PCM_INFO, 1, 1)
         device.prepare(playback_request())
@@ -57,8 +86,8 @@ describe "pure-Simple VirtIO sound device":
         expect(device.handle_hardware_event(VIRTIO_SND_EVT_PCM_XRUN, 2u32, 110u64).status).to_equal("published")
         expect(device.handle_hardware_event(VIRTIO_SND_EVT_PCM_XRUN, 9u32, 120u64).status).to_equal("stale-stream")
         val events = device.events.drain()
-        expect(events.len()).to_equal(3)
+        expect(events.len()).to_equal(3)  # oracle: 3 — pinned expected value for this behavior
         expect(events[0].kind).to_equal("audio-jack-connected")
         expect(events[1].kind).to_equal("audio-period-elapsed")
         expect(events[2].kind).to_equal("audio-xrun")
-        expect(device.xrun_count).to_equal(1)
+        expect(device.xrun_count).to_equal(1)  # oracle: 1 — pinned expected value for this behavior
