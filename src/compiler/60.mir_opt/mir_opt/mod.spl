@@ -262,6 +262,8 @@ struct MirStructuralVerificationReceipt:
     error_codes: [text]
     block_count: i64
     instruction_count: i64
+    type_checked_instruction_count: i64
+    type_unchecked_instruction_count: i64
 
 struct MirModuleStructuralVerificationReceipt:
     valid: bool
@@ -270,6 +272,8 @@ struct MirModuleStructuralVerificationReceipt:
     function_count: i64
     block_count: i64
     instruction_count: i64
+    type_checked_instruction_count: i64
+    type_unchecked_instruction_count: i64
 
 struct PassFunctionOutcome:
     function: MirFunction
@@ -557,6 +561,9 @@ fn mir_structural_verification_error_code(message: text) -> text:
     if message.starts_with("local ") and message.contains(" is used before its definition in block "): return "MIRV022"
     if message.starts_with("local ") and message.contains(" definition does not dominate use in block "): return "MIRV023"
     if message.starts_with("local ") and message.contains(" dominance is unavailable for use in block "): return "MIRV024"
+    if message.contains(" const destination type does not match explicit type"): return "MIRV025"
+    if message.contains(" copy/move source and destination types differ"): return "MIRV026"
+    if message.contains(" cast destination type does not match target type"): return "MIRV027"
     "MIRV999"
 
 fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerificationReceipt:
@@ -568,8 +575,11 @@ fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerifi
     """
     var errors: [text] = []
     var instruction_count = 0
+    var type_checked_instruction_count = 0
+    var type_unchecked_instruction_count = 0
     var block_ids: Dict<i64, bool> = {}
     var local_ids: Dict<i64, bool> = {}
+    var local_types: Dict<i64, MirType> = {}
     var argument_indices: Dict<i64, bool> = {}
     var return_local_count = 0
     for local in func.locals:
@@ -579,6 +589,7 @@ fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerifi
             errors.push("duplicate local identity: " + local.id.id.to_string())
         else:
             local_ids[local.id.id] = true
+            local_types[local.id.id] = local.type_
         match local.kind:
             case Arg(index):
                 if index < 0 or index >= func.signature.params.len():
@@ -634,6 +645,31 @@ fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerifi
                         "block " + block.id.id.to_string() + " instruction " +
                         instruction_index.to_string() + " defines missing local " +
                         local.id.to_string())
+            match instruction.kind:
+                case Const(dest, _, explicit_type):
+                    type_checked_instruction_count = type_checked_instruction_count + 1
+                    if local_types.has(dest.id) and local_types[dest.id].kind != explicit_type.kind:
+                        errors.push(
+                            "block " + block.id.id.to_string() + " instruction " +
+                            instruction_index.to_string() +
+                            " const destination type does not match explicit type")
+                case Copy(dest, source) | Move(dest, source):
+                    type_checked_instruction_count = type_checked_instruction_count + 1
+                    if (local_types.has(dest.id) and local_types.has(source.id) and
+                        local_types[dest.id].kind != local_types[source.id].kind):
+                        errors.push(
+                            "block " + block.id.id.to_string() + " instruction " +
+                            instruction_index.to_string() +
+                            " copy/move source and destination types differ")
+                case Cast(dest, _, target) | Bitcast(dest, _, target):
+                    type_checked_instruction_count = type_checked_instruction_count + 1
+                    if local_types.has(dest.id) and local_types[dest.id].kind != target.kind:
+                        errors.push(
+                            "block " + block.id.id.to_string() + " instruction " +
+                            instruction_index.to_string() +
+                            " cast destination type does not match target type")
+                case _:
+                    type_unchecked_instruction_count = type_unchecked_instruction_count + 1
             instruction_index = instruction_index + 1
         val terminator_access = perf_terminator_access(block.terminator)
         if not terminator_access.covered:
@@ -733,7 +769,8 @@ fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerifi
         error_codes.push(mir_structural_verification_error_code(error))
     MirStructuralVerificationReceipt(
         errors.is_empty(), errors, error_codes,
-        func.blocks.len(), instruction_count)
+        func.blocks.len(), instruction_count,
+        type_checked_instruction_count, type_unchecked_instruction_count)
 
 fn mir_module_structural_verification_receipt(
     module: MirModule
@@ -746,6 +783,8 @@ fn mir_module_structural_verification_receipt(
     var error_codes: [text] = []
     var block_count = 0
     var instruction_count = 0
+    var type_checked_instruction_count = 0
+    var type_unchecked_instruction_count = 0
     for symbol_id in symbol_ids:
         val key = SymbolId(id: symbol_id)
         val function = module.functions[key]
@@ -757,6 +796,10 @@ fn mir_module_structural_verification_receipt(
         val receipt = mir_structural_verification_receipt(function)
         block_count = block_count + receipt.block_count
         instruction_count = instruction_count + receipt.instruction_count
+        type_checked_instruction_count = (
+            type_checked_instruction_count + receipt.type_checked_instruction_count)
+        type_unchecked_instruction_count = (
+            type_unchecked_instruction_count + receipt.type_unchecked_instruction_count)
         var error_index = 0
         while error_index < receipt.errors.len():
             errors.push(
@@ -766,7 +809,8 @@ fn mir_module_structural_verification_receipt(
             error_index = error_index + 1
     MirModuleStructuralVerificationReceipt(
         errors.is_empty(), errors, error_codes, symbol_ids.len(),
-        block_count, instruction_count)
+        block_count, instruction_count,
+        type_checked_instruction_count, type_unchecked_instruction_count)
 
 fn run_named_pass_with_record(pass_name: text, func: MirFunction) -> Result<PassFunctionOutcome, text>:
     """Run one function-scoped pass with structural before/after receipts.
