@@ -625,3 +625,62 @@ is O(n) per call; it is ~300 small calls per registration.
   stops running interpreted at all, a per-function JIT fallback instead of
   whole-program, or a pre-resolved-slot interpreter. None of those is a
   minimal fix.
+
+### Closure re-measure (same 232-module repro, `native-build driver_types.spl`)
+
+Before = seed `1ffdfb58baf` + tree `a32c3f3464f` (`--threads 2`); after = seed
+`d30727e74e3` + tree `88146e0e7e5` (`--threads 8`; threads do not help the
+seed's interpretation, parse still finished in ~50 min vs ~90). Profile ON
+in both, so both carry the ~35% profiler inflation.
+
+| module | regs | before | after |
+|---|---|---|---|
+| `80.driver/driver_types.spl` (entry) | 1790 | 77,554 ms | **40,734 ms** |
+| `mir/mir.spl` | 1617 | 7,138 ms | 3,030 ms |
+| `hir/hir.spl` | 475 | 2,510 ms | 2,133 ms |
+| `common/driver_core_types.spl` | 349 | 940 ms | 748 ms |
+
+Per first-time registration on the entry module: 41.5 -> 21.5 ms. Exclusive
+split of the 38.5 s of imports after: `explicit_dep` 14,065 ms / 2,670 calls
+(5.3 ms each, only 280 real scans), `declared_dep` 7,893 / 1,032, `glob`
+7,081 (the `register_imported_symbol` wrapper bodies for 4,759 calls, ~1.5
+ms each vs 44 us on the fixture), `field_dep` 3,951, `payload` 3,347,
+`enums` 1,031; `define` 200 and `scan` 265 are noise now. Per-registration
+cost is NOT uniform across modules: `mir.spl` is 1.9 ms/reg, the entry
+module 21 ms/reg, and (before, same seed) `backend/interpreter.spl` 36
+ms/reg, `lexer.spl` 49,134 ms / 3,127. What differs is the depth of the
+field / payload / method closure each registration drags in, not the
+wrapper.
+
+### Parse phase: interpreted lexing was quadratic in the source (SCALARARR)
+
+Tracing the perf counters that looked quadratic on the fixture
+(`VT_ARRAY_ELEMS_SCANNED` 17M -> 71M -> 288M for N = 30/60/120) put them in
+the PARSE of the fixture, not in registration: `core_token_text_matches(
+self.source_chars, ...)` (`lexer_struct.spl:29`) is called once per token
+with the whole `[text]` of the source, and the seed's value-type argument
+copy (`arg_binding.rs`, `copy_value_type_in_place`, added 2026-08-21)
+scanned every element of every array ARGUMENT on every call looking for a
+value-type object: 12,590 chars x 5,625 calls = 70M element reads for three
+small files. Fix: an array parameter DECLARED with a scalar element type
+(`[text]`, `[i64]`, `[bool]`, ...) cannot hold a value-type object in a
+well-typed program, so the scan is skipped by name; `[Named]`, `[Any]`,
+nested arrays and unannotated parameters keep it. Unit tests pin both the
+predicate and that a `[Point]` bound next to a `[text]` is still copied.
+`parse_and_build_module` on `driver_types.spl`: 31 KB 8.4 s, 63 KB 28.8 s
+before; 63 KB 20.0 s after. Scans: 288M -> 327.
+
+Still quadratic after that, and filed here rather than fixed: the flat-AST
+pools. Every node append COW-clones ~15 parallel module-global arrays
+(`expr_tag`, `expr_left`, ..., `span_pool_*`): 109,427 clones / 133M
+elements for one 63 KB file. Mechanism (`value.rs` `CowEnv::get_mut`): the
+first mutating access to a module global in a frame promotes a CLONE of the
+store's Arc into the overlay, so `Arc::make_mut` copies the array; the
+store is refreshed at call exit and the next call promotes again -- one
+full copy per pool per node-appending call. A take-on-promote (move the
+value out of the owner store; `publish_and_repoint` already republishes
+dirty globals before every nested call) would make it O(1), but the store
+is a per-frame snapshot of `Arc<HashMap<owner, Arc<HashMap<..>>>>` and
+every `set_owned_global` already `make_mut`s the ~1,500-owner outer map, so
+the globals model needs its own design pass, not a hot patch. This is the
+"~50 min parse of the real closure" term.
