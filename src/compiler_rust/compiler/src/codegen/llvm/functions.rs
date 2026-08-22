@@ -2002,7 +2002,7 @@ impl LlvmBackend {
                     let unboxed = call.try_as_basic_value().left().ok_or_else(|| {
                         crate::error::factory::llvm_build_failed("unbox_int call", &"rt_value_unbox_int returned void")
                     })?;
-                    vreg_map.insert(*dest, unboxed.into_int_value());
+                    vreg_map.insert(*dest, unboxed.into_int_value().into());
                     return Ok(());
                 }
                 let shifted = builder

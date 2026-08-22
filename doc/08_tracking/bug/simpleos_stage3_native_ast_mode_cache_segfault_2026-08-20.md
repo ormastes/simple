@@ -1467,3 +1467,38 @@ entirely (resolve and consume scalar terminal indices/item positions in one
 owner), then prove both the declaration-owner index and package-name cache stay
 stable. The three-cycle cap is exhausted; no trusted Stage 3, ARM64 artifact,
 or QEMU rendering evidence is claimed.
+
+## Eager-index and scalar-consume cycles (2026-08-22)
+
+Cycle 1 moved declaration-index construction before import recursion and
+removed the mutable package-text cache from the field-dependency path. Stage 2
+stopped at link because an unchanged incremental caller still referenced the
+removed compatibility method. The pure helper surface was restored without
+restoring mutable package state.
+
+That failed link removed the canonical Stage-2 candidate. Its only preserved
+phase snapshot did not match the surviving sanity-receipt hash, and no matching
+admitted copy existed in the known workspaces. The canonical
+`--full-bootstrap --stop-after-stage2` recovery initially exposed a Rust LLVM
+seed type error: `vreg_map` expects `BasicValueEnum`, while `UnboxInt` inserted
+an `IntValue`. Converting that value with `.into()` passed
+`cargo check -p simple-compiler`; the full refresh then rebuilt the seed/runtime
+and independently admitted a new pure-Simple Stage 2 after compiler sanity and
+the struct-receiver/runtime gate.
+
+Cycle 2 resumed Stage 3 from that immutable parent. Eager index construction
+and removal of the mutable package-text cache did not remove the source-1
+`HirImpl` family. The resume wrapper returned zero after the child segfault even
+though no candidate, sanity receipt, or provenance manifest existed; artifact
+presence remains authoritative and this run is FAIL.
+
+Cycle 3 resolved and consumed enum-payload terminal routing in one frame using
+scalar surface index, item name, and kind, bypassing both aggregate-origin
+receiver returns in production. Stage 2 passed both gates, but Stage 3 still
+reported the source-1 family and exited 139 after reaching HIR module 72. The
+unproven HIR changes were removed. Aggregate return and eager index timing are
+therefore disproven as sole causes. The remaining common trigger is recursive
+payload registration mutating the active lowerer during import registration;
+the next design should collect scalar routes during the walk and apply them
+after the import frame completes. No trusted Stage 3, ARM64 artifact, or QEMU
+rendering evidence is claimed.
