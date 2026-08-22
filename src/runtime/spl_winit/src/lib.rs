@@ -699,12 +699,23 @@ pub extern "C" fn rt_winit_window_staging_ptr(win: i64, w: i64, h: i64) -> i64 {
         let Some(slot) = ps.inner.windows.get_mut(&win) else {
             return 0;
         };
-        let want = (w.max(1) as usize) * (h.max(1) as usize);
+        let (Ok(staging_w), Ok(staging_h)) = (u32::try_from(w), u32::try_from(h)) else {
+            return 0;
+        };
+        if staging_w == 0 || staging_h == 0 {
+            return 0;
+        }
+        let Some(want) = (staging_w as usize).checked_mul(staging_h as usize) else {
+            return 0;
+        };
+        if want > isize::MAX as usize / std::mem::size_of::<u32>() {
+            return 0;
+        }
         if slot.staging.len() != want {
             slot.staging = vec![0u32; want];
         }
-        slot.staging_w = w.max(1) as u32;
-        slot.staging_h = h.max(1) as u32;
+        slot.staging_w = staging_w;
+        slot.staging_h = staging_h;
         slot.staging.as_mut_ptr() as usize as i64
     })
 }
@@ -774,7 +785,7 @@ pub extern "C" fn rt_winit_window_stage_fill_rect(
 /// Blit the staging buffer (staging_w x staging_h) into the window surface,
 /// nearest-neighbour upscaling to the current window size, and present.
 #[no_mangle]
-pub extern "C" fn rt_winit_window_present_staged(win: i64, _w: i64, _h: i64) -> i64 {
+pub extern "C" fn rt_winit_window_present_staged(win: i64, w: i64, h: i64) -> i64 {
     let ok = PUMP.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(ps) = borrow.as_mut() else {
@@ -783,6 +794,9 @@ pub extern "C" fn rt_winit_window_present_staged(win: i64, _w: i64, _h: i64) -> 
         let Some(slot) = ps.inner.windows.get_mut(&win) else {
             return false;
         };
+        if i64::from(slot.staging_w) != w || i64::from(slot.staging_h) != h {
+            return false;
+        }
         let size = slot.window.inner_size();
         let surf_w = size.width.max(1);
         let surf_h = size.height.max(1);
@@ -1985,6 +1999,13 @@ mod sffi_contract_tests {
         assert_eq!(rt_winit_event_free(i64::MAX), 0);
         assert_eq!(rt_winit_window_free(i64::MAX), 0);
         assert_eq!(rt_winit_event_loop_free(i64::MAX), 0);
+    }
+
+    #[test]
+    fn invalid_staging_descriptor_fails_without_allocation() {
+        assert_eq!(rt_winit_window_staging_ptr(i64::MAX, i64::MAX, i64::MAX), 0);
+        assert_eq!(rt_winit_window_staging_ptr(i64::MAX, -1, 1), 0);
+        assert_eq!(rt_winit_window_present_staged(i64::MAX, 1, 1), 0);
     }
 
     #[test]

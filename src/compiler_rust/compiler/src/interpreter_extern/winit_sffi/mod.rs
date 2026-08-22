@@ -443,4 +443,17 @@ mod tests {
             assert!(matches!(dispatch(name, &args).unwrap(), Value::Bool(false)));
         }
     }
+
+    #[test]
+    fn invalid_staging_descriptor_fails_closed() {
+        let invalid = [Value::Int(i64::MAX), Value::Int(i64::MAX), Value::Int(i64::MAX)];
+        assert!(matches!(
+            dispatch("rt_winit_window_staging_ptr", &invalid).unwrap(),
+            Value::Int(0)
+        ));
+        assert!(matches!(
+            dispatch("rt_winit_window_present_staged", &invalid).unwrap(),
+            Value::Int(0)
+        ));
+    }
 }

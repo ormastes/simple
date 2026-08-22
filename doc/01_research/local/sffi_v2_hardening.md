@@ -672,3 +672,19 @@ GUI-feature interpreter stale-handle test, Simple check, and lifecycle
 call/memory-shape audit pass. The owned-production census becomes 228 fully
 contracted rows and 7,579 rows missing both tag and contract (the other gap
 classes remain 255 and 347). Signed Winit admission/evidence remains absent.
+
+Winit staging previously accepted negative dimensions by coercing them to one,
+multiplied dimensions without checked byte capacity, exposed its borrowed raw
+pointer without a declared lifetime, and ignored the caller's dimensions during
+present. The Rust provider and GUI interpreter now reject nonpositive/out-of-
+range/overflowing extents and require present dimensions to match the exact
+staging descriptor. The Simple wrapper checks signed multiplication before
+length comparison and gives pointer copy/present calls exact unsafe contracts.
+
+The frame path retains one existing `[i64]` to `[u32]` conversion buffer, one
+bulk pointer copy, and one present call. It adds only integer validation; there
+is no extra allocation, retained memory, copy, provider call, lookup, lock,
+hash, error query, or retry. Five Rust provider tests, the GUI interpreter
+descriptor test, Simple check, and staging memory/call-shape audit pass. Winit
+is 13/30 contracted; owned production becomes 231 contracted and 7,576 rows
+missing both. Artifact signing and bound sanitizer/proof evidence remain open.

@@ -141,3 +141,8 @@ passing placeholder.
     and interpreter lanes; canonical wrappers propagate lifecycle status with
     unchanged removal/call/memory shape. Continue the remaining 20 Winit raw
     declarations, duplicated app/OS declarations, and signed artifact evidence.
+26. Winit staging now rejects dimension/byte overflow, binds borrowed-pointer
+    extent to present dimensions, and declares raw copy ownership with the same
+    single conversion allocation/copy/present shape. Continue the remaining 17
+    Winit declarations and eliminate duplicate untagged app/OS bindings before
+    signed provider admission and artifact-bound runtime evidence.

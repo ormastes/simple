@@ -21,8 +21,11 @@ use std.nogc_sync_mut.io.window_winit_input_event.{
 extern fn rt_winit_event_loop_new() -> i64
 @unsafe(reason: "raw Winit owned-window creation ABI; nonpositive sentinel reports provider failure", capabilities: [ffi])
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+@unsafe(reason: "raw Winit borrowed staging-pointer ABI; zero sentinel reports stale handle, invalid dimensions, overflow, or allocation failure; valid until staging resize/free", capabilities: [ffi, raw_ptr])
 extern fn rt_winit_window_staging_ptr(win: i64, w: i64, h: i64) -> i64
+@unsafe(reason: "raw Winit staged-present status ABI; zero sentinel reports stale handle, descriptor mismatch, or surface failure", capabilities: [ffi])
 extern fn rt_winit_window_present_staged(win: i64, w: i64, h: i64) -> i64
+@unsafe(reason: "raw pointer-copy status ABI; caller owns writable capacity for the full u32 array and zero sentinel reports null pointer or invalid array", capabilities: [ffi, raw_ptr])
 extern fn rt_write_u32s_to_raw(ptr: i64, pixels: [u32]) -> i64
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 extern fn rt_winit_event_loop_wait_events(el: i64, timeout_ms: i64) -> i64
@@ -126,17 +129,27 @@ fn winit_window_free(win: WinitWindow) -> bool:
 fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]) -> bool:
     if not win.is_valid:
         return false
-    if w <= 0 or h <= 0 or pixels.len().to_i64() != w * h:
+    if w <= 0 or h <= 0 or w > 9223372036854775807 / h:
         return false
-    val staging = rt_winit_window_staging_ptr(win.handle, w, h)
+    if pixels.len().to_i64() != w * h:
+        return false
+    var staging: i64 = 0
+    unsafe(capabilities: [ffi, raw_ptr]):
+        staging = rt_winit_window_staging_ptr(win.handle, w, h)
     if staging == 0:
         return false
     var native_pixels: [u32] = []
     for pixel in pixels:
         native_pixels = native_pixels.push(pixel.to_u32())
-    if rt_write_u32s_to_raw(staging, native_pixels) != pixels.len().to_i64():
+    var written: i64 = 0
+    unsafe(capabilities: [ffi, raw_ptr]):
+        written = rt_write_u32s_to_raw(staging, native_pixels)
+    if written != pixels.len().to_i64():
         return false
-    rt_winit_window_present_staged(win.handle, w, h) != 0
+    var presented: i64 = 0
+    unsafe(capabilities: [ffi]):
+        presented = rt_winit_window_present_staged(win.handle, w, h)
+    presented != 0
 
 # Toggle borderless fullscreen on the native window. The mutation is routed
 # through the event-loop/main thread (required on macOS). Returns true when the
