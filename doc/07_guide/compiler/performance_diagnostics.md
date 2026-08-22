@@ -232,3 +232,8 @@ Verification is intentionally opt-in. The setting is cached after its first look
 normal builds do not scan MIR or allocate verifier receipts. Enabled verification scans
 the module and sorts function symbols for deterministic evidence, and should therefore
 be used for compiler development and focused diagnostics rather than routine builds.
+
+Lint source is split into lines once per request. Traceability, SPipe-quality, typed-UI,
+file-policy, and other line-oriented checks share that immutable view; rule owners must
+not create private full-source line arrays. This bounds transient memory while preserving
+the same diagnostic ordering and locations.
