@@ -1,0 +1,78 @@
+"""
+# Untyped-return-value: callback-parameter and non-scalar-param-ident shapes
+
+Reproduce for bootstrap run13 stage1 (2026-08-22): the HIR phase emitted
+`untyped function returns a value` x7, ALL in `src/lib/nogc_async_mut/array.spl`
+(`array_position`, `array_find`, `array_find_or`, `array_take_while`,
+`array_drop_while`, `array_sort_by`, `array_intersperse`) — while
+`scripts/check/check-untyped-return-value.shs`, the guard added by f9a7b5cb296
+for exactly this class, reported PASS on the same tree.
+
+Two independent guard holes, both pinned here as compiler truth:
+  A. six of the seven take a function-TYPED parameter (`predicate: fn(Any) ->
+     bool`). The guard classified "already has a return type" with
+     `sig !~ /\) *->/`, which the `) ->` INSIDE that parameter satisfies, so
+     every callback-taking untyped function was skipped tree-wide.
+  B. `array_intersperse` has no callback; it does `return arr` where
+     `arr: [Any]`. The guard treated any typed-param ident as resolved, but
+     `infer_simple_type_name_ast` resolves a param ident only through
+     `hir_type_simple_name`, which yields a name for SCALARS only
+     (i64/i32/u64/u32/f64/f32/bool/text) and nil for `[Any]` => ambiguous.
+
+The third case pins the mirror's bail rule: `declared_callable_type` returns
+nil as soon as any parameter is untyped, so such a function is NEVER
+diagnosed and must not be flagged (that rule removed 268 false positives from
+the ratchet baseline).
+"""
+
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+
+fn error_count(src: text, name: text) -> i64:
+    val parsed = parse_full_frontend(src, "testdata/{name}.spl", name, Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/{name}.spl")
+    lowering.lower_module(parsed)
+    var n = 0
+    for e in lowering.errors:
+        if e.message.contains("untyped function returns a value"):
+            n = n + 1
+    n
+
+describe "untyped return: callback param and non-scalar param ident":
+    it "callback param `fn(Any) -> bool`: untyped errors, -> Any? is clean":
+        val body = "    var i = 0\n" +
+            "    while i < arr.len():\n" +
+            "        if predicate(arr[i]):\n            return arr[i]\n" +
+            "        i = i + 1\n    nil\n"
+        val head = "fn array_find(arr: [Any], predicate: fn(Any) -> bool)"
+        expect(error_count(head + ":\n" + body, "cb_bad")).to_equal(1)
+        expect(error_count(head + " -> Any?:\n" + body, "cb_ok")).to_equal(0)
+
+    it "callback param + `return i` on a local: untyped errors, -> i64 is clean":
+        val body = "    var i = 0\n" +
+            "    while i < arr.len():\n" +
+            "        if predicate(arr[i]):\n            return i\n" +
+            "        i = i + 1\n    -1\n"
+        val head = "fn array_position(arr: [Any], predicate: fn(Any) -> bool)"
+        expect(error_count(head + ":\n" + body, "pos_bad")).to_equal(1)
+        expect(error_count(head + " -> i64:\n" + body, "pos_ok")).to_equal(0)
+
+    it "non-scalar param ident `return arr` where arr: [Any]: untyped errors, -> [Any] is clean":
+        val body = "    if arr.len() <= 1:\n        return arr\n" +
+            "    var result = [arr[0]]\n    result\n"
+        val head = "fn array_intersperse(arr: [Any], separator: Any)"
+        expect(error_count(head + ":\n" + body, "inter_bad")).to_equal(1)
+        expect(error_count(head + " -> [Any]:\n" + body, "inter_ok")).to_equal(0)
+
+    it "scalar param ident IS resolved: `return x` where x: i64 never errors":
+        val src = "fn passthrough(x: i64, predicate: fn(i64) -> bool):\n" +
+            "    if predicate(x):\n        return x\n    0\n"
+        expect(error_count(src, "scalar_ok")).to_equal(0)
+
+    it "an untyped parameter suppresses the diagnostic entirely":
+        val src = "fn option_ce_filter(value, predicate: fn() -> bool):\n" +
+            "    if value == nil:\n        return nil\n" +
+            "    if predicate(value):\n        return value\n    nil\n"
+        expect(error_count(src, "untyped_param")).to_equal(0)
