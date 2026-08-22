@@ -400,3 +400,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add mirrored regressions proving all retained entries are released and statistics remain cumulative.
 - Count prevention of cross-function `LocalId` contamination as correctness and release of retained MIR/dictionary state as memory hardening.
 - Follow-up: remove the semantic HIR constant-fold no-op traversal; keep semantic constant evaluation and canonical MIR folding distinct.
+
+## Completed compiler tranche: remove discarded HIR constant folding
+
+- Delete the semantic HIR pass that rebuilt bodies but never installed them.
+- Remove driver invocation and semantics-barrel exports; route `resolved_module` directly into bootstrap validation storage.
+- Preserve semantic `const_eval` and canonical typed-MIR constant folding as distinct owners.
+- Add mirrored source contracts for driver, barrel, removed file, and retained const evaluation.
+- Count eliminated evaluator construction, function/expression traversal, and temporary HIR arrays as active compiler CPU/memory improvement.
+- Follow-up: quarantine or rehabilitate the canonical MIR constant-fold direct method with shared arithmetic/result-type semantics.
