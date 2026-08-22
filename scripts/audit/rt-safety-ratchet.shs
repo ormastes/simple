@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+summary=${1:-/tmp/rt-safety-summary.tsv}
+baseline=${2:-scripts/audit/baselines/rt-safety-census-v1.tsv}
+
+metric() {
+    awk -F '\t' -v key="$1" '$1 == key { print $2; found=1 } END { exit !found }' "$2"
+}
+
+rows=$(metric declaration_rows "$summary")
+admitted=$(metric verified_and_signed_rows "$summary")
+unsafe=$(metric fail_closed_unsafe_rows "$summary")
+test "$unsafe" -eq "$((rows - admitted))"
+
+check_max() {
+    current=$(metric "$1" "$summary")
+    limit=$(metric "$2" "$baseline")
+    if test "$current" -gt "$limit"; then
+        echo "rt safety ratchet: $1 regressed ($current > $limit)" >&2
+        exit 1
+    fi
+}
+
+check_min() {
+    current=$(metric "$1" "$summary")
+    limit=$(metric "$2" "$baseline")
+    if test "$current" -lt "$limit"; then
+        echo "rt safety ratchet: $1 regressed ($current < $limit)" >&2
+        exit 1
+    fi
+}
+
+check_max untouched_rows max_untouched_rows
+check_max source_signature_variant_symbols max_source_signature_variant_symbols
+check_min unsafe_tagged_rows min_unsafe_tagged_rows
+check_min contract_documented_rows min_contract_documented_rows
+check_min verified_and_signed_rows min_verified_and_signed_rows
+
+echo 'rt safety ratchet: PASS'

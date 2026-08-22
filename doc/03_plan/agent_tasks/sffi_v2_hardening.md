@@ -176,6 +176,10 @@ passing placeholder.
     hosted compositor mouse coordinates and remaining hosted-entry bindings.
 33. The fail-closed `rt-safety-census.shs` now reports declaration/symbol totals,
     implementation languages, unsafe tags, contracts, trusted verified evidence,
-    signatures, and untouched rows. Reduce the current 11,864 untouched rows by
-    provider family; never lower the 12,595-row unsafe total without a trusted
+    signatures, and untouched rows. Reduce the current 11,879 untouched rows by
+    provider family; never lower the 12,610-row unsafe total without a trusted
     artifact-bound evidence+signature admission row.
+34. The census now emits a ranked provider-family queue and a build-time ratchet
+    freezes the fail-closed baseline. Migrate `rt_file`, `rt_process`, `rt_env`,
+    `rt_time`, then `rt_cuda`; each improvement must reduce untouched rows or
+    add exact trusted admission without adding any runtime census dependency.

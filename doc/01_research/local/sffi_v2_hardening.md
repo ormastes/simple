@@ -788,15 +788,15 @@ artifact-bound admission ledger. On 2026-08-22 it reports:
 
 | Metric | Count |
 | --- | ---: |
-| Simple `rt_*` declaration rows | 12,595 |
+| Simple `rt_*` declaration rows | 12,610 |
 | Distinct declared symbols | 3,172 |
 | Rows explicitly tagged unsafe | 455 |
 | Rows with a documented/typed contract | 540 |
 | Verified evidence rows | 0 |
 | Signature-verified rows | 0 |
 | Verified and signed rows | 0 |
-| Fail-closed unsafe rows | 12,595 |
-| Untouched rows (no unsafe tag, contract, or evidence) | 11,864 |
+| Fail-closed unsafe rows | 12,610 |
+| Untouched rows (no unsafe tag, contract, or evidence) | 11,879 |
 | Symbols with source-signature variants | 297 |
 
 Implementation-shaped owned definitions are: C 2,301 rows / 1,821 distinct
@@ -805,6 +805,14 @@ symbols / 82 files; Rust 2,161 / 2,097 / 172; Simple 584 / 535 / 51; C++ 211 /
 language distinct counts are not additive. Static annotations remain claims:
 without a trusted admission receipt bound to the exact artifact, the tool keeps
 the row unsafe.
+
+The census now also emits a provider-family migration queue and has a checked-in
+one-way ratchet. The largest untouched families are `rt_file` (2,791 rows),
+`rt_process` (1,045), `rt_env` (469), `rt_time` (368), and `rt_cuda` (353).
+The ratchet rejects increases in untouched or signature-variant counts and
+decreases in unsafe tags, documented contracts, or trusted admissions. It runs
+only during audit/build verification and adds no runtime lookup, hash, branch,
+allocation, or retained memory.
 
 Verification note: the non-incremental GUI compiler run selected six tests by
 the broad `stale_` filter. Both intended Winit sentinel/lifecycle tests passed;
