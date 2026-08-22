@@ -32,4 +32,23 @@ receipt=$(printf '%s\n' "$run_out" | sed -n 's/.* receipt=//p')
 grep -q '^compiler_timeout_seconds=600$' "$receipt"
 grep -q '^rss_limit_exceeded=0$' "$receipt"
 grep -q '^identity_changed=0$' "$receipt"
-echo "focused_failed_shard_harness_status=pass dry_run_overhead_us=$elapsed_us bounded_noop_run_us=$run_overhead_us"
+
+printf '#!/bin/sh\nsleep 5\n' >"$work/rss-compiler"
+chmod +x "$work/rss-compiler"
+set +e
+FOCUSED_SHARD_RUN_ROOT="$work/rss-runs" FOCUSED_SHARD_RSS_KIB=1 \
+  "$runner" --compiler "$work/rss-compiler" --label rss-reject \
+  --entry "$entry" --source "$source_root" >"$work/rss.out" 2>&1
+rss_rc=$?
+set -e
+[ "$rss_rc" -eq 125 ] || { echo "FAIL: RSS guard returned $rss_rc, expected 125" >&2; exit 1; }
+grep -q 'rss_limit_exceeded=1' "$work/rss-runs/rss-reject"/*/receipt.env
+if FOCUSED_SHARD_RUN_ROOT="$work/oversize-runs" FOCUSED_SHARD_RSS_KIB=999999999 \
+  "$runner" --compiler "$work/compiler" --label oversize \
+  --entry "$entry" --source "$source_root" --dry-run >/dev/null 2>&1; then
+  echo 'FAIL: unsafe explicit RSS override admitted' >&2; exit 1
+fi
+
+default_limit=$(printf '%s\n' "$out" | sed -n 's/^rss_limit_kib=//p')
+[ "$default_limit" -le 4194304 ] || { echo "FAIL: default RSS limit exceeds 4 GiB" >&2; exit 1; }
+echo "focused_failed_shard_harness_status=pass dry_run_overhead_us=$elapsed_us bounded_noop_run_us=$run_overhead_us default_rss_kib=$default_limit rss_rejection=pass"

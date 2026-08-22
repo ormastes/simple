@@ -12,7 +12,6 @@ backend=cranelift
 output=
 run_root=${FOCUSED_SHARD_RUN_ROOT:-$repo/build/native_probe/failed-shards}
 wall_s=${FOCUSED_SHARD_WALL_SECONDS:-660}
-rss_kib=${FOCUSED_SHARD_RSS_KIB:-12582912}
 poll_s=${FOCUSED_SHARD_POLL_SECONDS:-0.25}
 dry_run=false
 sources=
@@ -24,6 +23,25 @@ safe_label() { case $1 in ''|*[!A-Za-z0-9_.-]*) return 1;; esac; }
 canon_file() { [ -f "$1" ] && CDPATH= cd -- "$(dirname -- "$1")" && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$1")"; }
 canon_dir() { [ -d "$1" ] && CDPATH= cd -- "$1" && pwd -P; }
 sha_file() { sha256sum "$1" | awk '{print $1}'; }
+available_memory_kib() {
+  mem=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)
+  case $mem in ''|*[!0-9]*) mem=16777216;; esac
+  if [ -r /sys/fs/cgroup/memory.max ]; then
+    cg=$(sed -n '1p' /sys/fs/cgroup/memory.max)
+    case $cg in ''|max|*[!0-9]*) ;; *)
+      cg_kib=$((cg / 1024))
+      [ "$cg_kib" -ge "$mem" ] || mem=$cg_kib
+    ;; esac
+  fi
+  echo "$mem"
+}
+
+available_kib=$(available_memory_kib)
+default_rss_kib=$((available_kib / 4))
+[ "$default_rss_kib" -le 4194304 ] || default_rss_kib=4194304
+rss_ceiling_kib=$((available_kib / 2))
+[ "$rss_ceiling_kib" -le 8388608 ] || rss_ceiling_kib=8388608
+rss_kib=${FOCUSED_SHARD_RSS_KIB:-$default_rss_kib}
 
 while [ "$#" -gt 0 ]; do
   case $1 in
@@ -49,6 +67,7 @@ done
 safe_label "$label" || die invalid-label
 positive "$wall_s" || die invalid-wall-seconds
 positive "$rss_kib" || die invalid-rss-kib
+[ "$rss_kib" -le "$rss_ceiling_kib" ] || die "rss-kib-exceeds-safe-ceiling:$rss_ceiling_kib"
 positive_period "$poll_s" || die invalid-poll-seconds
 compiler=$(canon_file "$compiler") || die compiler-not-found
 entry=$(canon_file "$entry") || die entry-not-found
@@ -167,6 +186,7 @@ tmp="$receipt.tmp.$$"
   echo compiler_timeout_seconds=600
   echo wall_limit_seconds="$wall_s"
   echo rss_limit_kib="$rss_kib"
+  echo rss_safe_ceiling_kib="$rss_ceiling_kib"
   echo wall_ms="$wall_ms"
   echo max_rss_kib="$max_rss"
   echo rss_limit_exceeded="$rss_exceeded"
