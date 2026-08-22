@@ -1263,3 +1263,14 @@ The exact native fixture comparison
 was 2.02 s/2,048 KiB before and 1.96 s/2,048 KiB after, but both exited status 6
 in this environment, so it is performance evidence only and a correctness
 blocker remains recorded rather than retried.
+
+The incremental-cache owner now has lexical authority for its file, directory,
+environment, CLI, PID, and time calls. Preserve branch-local failure identity,
+one traversal, and one digest per artifact. Its content fingerprint now requests
+SHA-256 rather than a collision-prone integer hash. Next harden the canonical
+`sha256_text`/text-byte conversion boundary itself: explicitly contract and
+scope its two runtime calls, retain one conversion plus one cached/direct digest
+call, keep the pure-Simple fallback, and do not call that provider verified until
+signed evidence is admitted. The summary-only call-authority census is the
+required low-output ratchet command; current counts are 21,331 raw, 1,970
+explicit, and 19,361 missing.

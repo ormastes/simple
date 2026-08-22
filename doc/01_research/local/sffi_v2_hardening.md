@@ -2050,6 +2050,33 @@ owner are lexical. Lint has no remaining raw-file warning here, but the owner's
 env/dir/time/PID/CLI/hash calls and three public primitive APIs remain open.
 The runtime artifact is still unsigned and evidence-unadmitted.
 
+## Incremental-cache remaining runtime authority and census ergonomics
+
+The remaining incremental-cache environment, directory, CLI, PID, and wall-
+clock calls now carry explicit raw-sentinel contracts and minimal lexical FFI
+authority. Branch-local PID/time reads preserve failure-only call cardinality;
+the compiler-source fallback reuses one process-stable PID for its identity and
+temporary path, removing one redundant provider call. Directory probes retain
+their previous short-circuit order. The collision-prone `rt_hash_text` source
+fingerprint is removed in favor of the existing SHA-256 text path, without an
+extra file read or traversal.
+
+Focused behavior passes 7/7 after correcting a source assertion that matched
+`incremental_hash_text` as though it were the removed `rt_hash_text` extern.
+The measured seed invocation changed from 5.04 s / 173,128 KiB to 3.16 s /
+189,752 KiB. The lower elapsed time is favorable, but the 9.6% peak-RSS increase
+is not isolated from compiler/test-runner startup and the newly imported crypto
+module, so this is not a production performance admission. Optimizer analysis
+finds 14 general collection/length opportunities, one fewer than the earlier
+file-only slice; no new lookup or dispatch is introduced.
+
+The call-authority census now has `--summary`, which retains the identical one-
+scan and baseline checks while keeping the large call-site table off stdout.
+It completes in 14.04 s at 14,080 KiB peak RSS and reports 21,331 raw calls,
+1,970 explicitly authorized calls, and 19,361 missing-authority calls. The
+incremental owner is lexically authorized, but its providers and the SHA-256
+runtime fast path remain unsigned and evidence-unadmitted.
+
 ## Driver source-loading file-call authority
 
 The largest remaining production `rt_file` caller,
