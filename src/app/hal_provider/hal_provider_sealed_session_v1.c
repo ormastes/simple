@@ -217,7 +217,9 @@ int hal_sealed_session_invoke_mask_v1(
                                 deadline, &result_size[i]) ||
             result_size[i] < 8 ||
             (memcmp(result[i], "HALRES1|", 8) != 0 &&
-             memcmp(result[i], "HALRES2|", 8) != 0)) {
+             memcmp(result[i], "HALRES2|", 8) != 0 &&
+             (result_size[i] < 9 ||
+              memcmp(result[i], "HALRES2B|", 9) != 0))) {
             s->lane[i].healthy = 0; return 0;
         }
     }

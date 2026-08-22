@@ -16,6 +16,7 @@ enum {
 
 enum {
     HAL_SEALED_FACADE_RESULT_FIELDS_V2 = 19,
+    HAL_SEALED_FACADE_BUFFER_RESULT_FIELDS_V3 = 23,
     HAL_SEALED_DIFFERENCE_PURE_C_V2 = 1,
     HAL_SEALED_DIFFERENCE_PURE_RUST_V2 = 2,
     HAL_SEALED_DIFFERENCE_C_RUST_V2 = 4
@@ -96,11 +97,31 @@ int32_t rt_hal_clock_dispatch_init_v2(int32_t run_mode,
 int64_t rt_hal_clock_dispatch_compare_v2(void);
 int32_t rt_hal_clock_dispatch_shutdown_v2(void);
 
+/* Additive caller-owned buffer/status dispatch.  The parent has already
+ * performed the environment operation and supplies its normalized receipt.
+ * Payloads are bounded to the HALREQ2B inline ceiling (32 bytes); output is
+ * committed to caller memory only after the selected policy permits it. */
+int32_t rt_hal_buffer_dispatch_init_v3(int32_t run_mode,
+                                       int32_t preferred_provider,
+                                       int64_t deadline_ms);
+int32_t rt_hal_buffer_dispatch_compare_v3(
+    int64_t operation_id, int64_t fixture_id, int32_t captured_status,
+    int32_t error_domain, int64_t error_code, int64_t error_detail,
+    const uint8_t *captured, int64_t captured_length,
+    uint8_t *output, int64_t output_capacity,
+    int64_t trace_identity_hi, int64_t trace_identity_lo,
+    int64_t trace_cursor, int64_t trace_length, int64_t trace_capacity);
+int32_t rt_hal_buffer_dispatch_shutdown_v3(void);
+
 /* Focused tests use an explicit absolute launcher/worker configuration. */
 uint64_t hal_sealed_facade_prepare_config_v1(
     const char *launcher, const char *pure_worker, const char *c_worker,
     const char *rust_worker, int64_t deadline_ms);
 int32_t hal_clock_dispatch_init_config_v2(
+    const char *launcher, const char *pure_worker, const char *c_worker,
+    const char *rust_worker, int32_t run_mode, int32_t preferred_provider,
+    int64_t deadline_ms);
+int32_t hal_buffer_dispatch_init_config_v3(
     const char *launcher, const char *pure_worker, const char *c_worker,
     const char *rust_worker, int32_t run_mode, int32_t preferred_provider,
     int64_t deadline_ms);

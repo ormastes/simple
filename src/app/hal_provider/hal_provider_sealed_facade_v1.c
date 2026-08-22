@@ -8,6 +8,7 @@
 
 enum { HAL_FACADE_SLOT_COUNT_V1 = 4 };
 enum { HAL_CLOCK_OPERATION_ID_V2 = 101 };
+enum { HAL_BUFFER_INLINE_CAP_V3 = 32 };
 
 static const char *const HAL_LAUNCHER_V1 =
     "/usr/libexec/simple/hal-provider-launcher-v1";
@@ -24,7 +25,7 @@ typedef struct {
     int64_t result[HAL_SEALED_FACADE_LANES_V1]
                   [HAL_SEALED_FACADE_RESULT_FIELDS_V1];
     int64_t result_v2[HAL_SEALED_FACADE_LANES_V1]
-                     [HAL_SEALED_FACADE_RESULT_FIELDS_V2];
+                     [HAL_SEALED_FACADE_BUFFER_RESULT_FIELDS_V3];
     uint64_t generation;
     _Atomic int state; /* 0 free, 1 maintenance, 2 sealed, 3 invoking */
     int32_t last_status;
@@ -49,6 +50,7 @@ typedef struct {
     int32_t run_mode;
     int32_t preferred_provider;
     _Atomic uint64_t invocation;
+    _Atomic uint64_t buffer_trace_cursor;
     _Atomic int state; /* 0 empty, 1 initializing, 2 sealed, 3 shutting down */
 } HalClockDispatchOwnerV2;
 
@@ -158,7 +160,7 @@ static int result_v2_equivalent(const int64_t *a, const int64_t *b) {
     return 1;
 }
 
-static int difference_mask_v2(const int64_t result[3][19]) {
+static int difference_mask_v2(const int64_t result[3][23]) {
     int difference = 0;
     if (!result_v2_equivalent(result[0], result[1]))
         difference |= HAL_SEALED_DIFFERENCE_PURE_C_V2;
@@ -167,6 +169,103 @@ static int difference_mask_v2(const int64_t result[3][19]) {
     if (!result_v2_equivalent(result[1], result[2]))
         difference |= HAL_SEALED_DIFFERENCE_C_RUST_V2;
     return difference;
+}
+
+static int admitted_buffer_operation_v3(int64_t operation) {
+    return operation == 102 || operation == 1001 || operation == 1004 ||
+        (operation >= 1006 && operation <= 1008) ||
+        (operation >= 1012 && operation <= 1015);
+}
+
+static int canonical_buffer_word_v3(uint64_t word, int64_t used) {
+    if (used <= 0) return word == 0;
+    if (used >= 8) return 1;
+    return (word >> (unsigned)(used * 8)) == 0;
+}
+
+static int parse_buffer_result_v3(
+        const unsigned char *p, size_t n, int lane, int64_t invocation,
+        int64_t out[HAL_SEALED_FACADE_BUFFER_RESULT_FIELDS_V3]) {
+    size_t at = 9;
+    int field;
+    int word;
+    if (!p || n < 11 || n >= HAL_SEALED_FRAME_CAP_V1 ||
+        memcmp(p, "HALRES2B|", 9) != 0 || p[n - 1] != '\n') return 0;
+    for (field = 0; field < HAL_SEALED_FACADE_BUFFER_RESULT_FIELDS_V3;
+         ++field) {
+        if (!parse_i64(p, n, &at, &out[field])) return 0;
+        if (field + 1 < HAL_SEALED_FACADE_BUFFER_RESULT_FIELDS_V3) {
+            if (at >= n || p[at++] != '|') return 0;
+        }
+    }
+    if (at + 1 != n || p[at] != '\n' || out[0] != lane ||
+        out[1] != invocation || out[2] < 0 || out[2] > 7 ||
+        out[3] < 0 || out[3] > 4 || out[4] < 0 || out[5] < 0 ||
+        out[6] != 2 || out[7] != 0 || out[8] < 0 || out[9] <= 0 ||
+        out[9] > HAL_BUFFER_INLINE_CAP_V3 || out[8] > out[9] ||
+        (out[14] == 0 && out[15] == 0) || out[16] < 0 ||
+        out[16] > out[17] || out[17] > out[18] || out[18] <= 0 ||
+        out[19] != 0 || out[20] != -1 || out[21] != 0 || out[22] != 152)
+        return 0;
+    if ((out[2] == 0 && (out[3] != 0 || out[4] != 0 || out[5] != 0)) ||
+        (out[2] != 0 && (out[3] == 0 || out[4] == 0))) return 0;
+    for (word = 0; word < 4; ++word) {
+        int64_t remaining = out[8] - (int64_t)word * 8;
+        if (!canonical_buffer_word_v3((uint64_t)out[10 + word],
+                remaining > 8 ? 8 : remaining)) return 0;
+    }
+    return 1;
+}
+
+static int buffer_result_equivalent_v3(const int64_t *a, const int64_t *b) {
+    int field;
+    /* Provider is lane-local; elapsed ticks are outside normalized state. */
+    for (field = 2; field < 22; ++field)
+        if (a[field] != b[field]) return 0;
+    return 1;
+}
+
+static int buffer_difference_mask_v3(const int64_t result[3][23]) {
+    int difference = 0;
+    if (!buffer_result_equivalent_v3(result[0], result[1]))
+        difference |= HAL_SEALED_DIFFERENCE_PURE_C_V2;
+    if (!buffer_result_equivalent_v3(result[0], result[2]))
+        difference |= HAL_SEALED_DIFFERENCE_PURE_RUST_V2;
+    if (!buffer_result_equivalent_v3(result[1], result[2]))
+        difference |= HAL_SEALED_DIFFERENCE_C_RUST_V2;
+    return difference;
+}
+
+static int buffer_result_matches_capture_v3(
+        const int64_t *result, int32_t status, int32_t error_domain,
+        int64_t error_code, int64_t error_detail, int64_t payload_length,
+        int64_t payload_capacity, const uint64_t word[4]) {
+    int index;
+    if (result[2] != status || result[3] != error_domain ||
+        result[4] != error_code || result[5] != error_detail ||
+        result[8] != payload_length || result[9] != payload_capacity)
+        return 0;
+    for (index = 0; index < 4; ++index)
+        if ((uint64_t)result[10 + index] != word[index]) return 0;
+    return 1;
+}
+
+static uint64_t load_word_le_v3(const uint8_t *bytes, int64_t length,
+                                int word) {
+    uint64_t value = 0;
+    int byte;
+    int64_t base = (int64_t)word * 8;
+    for (byte = 0; byte < 8 && base + byte < length; ++byte)
+        value |= (uint64_t)bytes[base + byte] << (unsigned)(byte * 8);
+    return value;
+}
+
+static void store_words_v3(uint8_t *output, int64_t length,
+                           const int64_t *result) {
+    int64_t at;
+    for (at = 0; at < length; ++at)
+        output[at] = (uint8_t)((uint64_t)result[10 + at / 8] >>
+                               (unsigned)((at % 8) * 8));
 }
 
 uint64_t hal_sealed_facade_prepare_config_v1(
@@ -244,6 +343,8 @@ static int32_t clock_dispatch_init_config_v2(
     g_clock_owner_v2.run_mode = run_mode;
     g_clock_owner_v2.preferred_provider = preferred_provider;
     atomic_store_explicit(&g_clock_owner_v2.invocation, 0,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_clock_owner_v2.buffer_trace_cursor, 0,
                           memory_order_relaxed);
     if (run_mode == HAL_SEALED_RUN_NORMAL_V1) {
         for (index = 0; index < HAL_FACADE_SLOT_COUNT_V1; ++index) {
@@ -347,6 +448,213 @@ int64_t rt_hal_clock_dispatch_compare_v2(void) {
         return captured;
     }
     return -1;
+}
+
+static int32_t buffer_dispatch_invoke_v3(
+        uint64_t handle, int32_t run_mode, int32_t preferred_provider,
+        int64_t operation_id, int64_t invocation_id, int64_t fixture_id,
+        int32_t captured_status, int32_t error_domain, int64_t error_code,
+        int64_t error_detail, const uint8_t *captured,
+        int64_t captured_length, int64_t output_capacity,
+        int64_t trace_identity_hi, int64_t trace_identity_lo,
+        int64_t trace_cursor, int64_t trace_length, int64_t trace_capacity) {
+    HalSealedFacadeSlotV1 *slot = lookup(handle, NULL);
+    unsigned char request[HAL_SEALED_FRAME_CAP_V1];
+    unsigned char wire_result[3][HAL_SEALED_FRAME_CAP_V1];
+    size_t result_size[3];
+    uint64_t word[4] = {0, 0, 0, 0};
+    unsigned lane_mask;
+    int expected = 2, request_size, lane, difference = 0;
+    if (!slot || run_mode < HAL_SEALED_RUN_ALPHA_V1 ||
+        run_mode > HAL_SEALED_RUN_BETA_V1 || preferred_provider < 0 ||
+        preferred_provider >= HAL_SEALED_FACADE_LANES_V1 ||
+        !admitted_buffer_operation_v3(operation_id) || invocation_id <= 0 ||
+        fixture_id <= 0 || captured_status < 0 || captured_status > 7 ||
+        error_domain < 0 || error_domain > 4 || error_code < 0 ||
+        error_detail < 0 || captured_length < 0 ||
+        output_capacity <= 0 || output_capacity > HAL_BUFFER_INLINE_CAP_V3 ||
+        captured_length > output_capacity ||
+        (captured_length > 0 && !captured) ||
+        (captured_status == 0 &&
+         (error_domain != 0 || error_code != 0 || error_detail != 0)) ||
+        (captured_status != 0 && (error_domain == 0 || error_code == 0)) ||
+        (trace_identity_hi == 0 && trace_identity_lo == 0) ||
+        trace_cursor < 0 || trace_cursor > trace_length ||
+        trace_length > trace_capacity || trace_capacity <= 0 ||
+        trace_capacity > 65536)
+        return HAL_SEALED_FACADE_STATUS_INVALID_V1;
+    for (lane = 0; lane < 4; ++lane)
+        word[lane] = load_word_le_v3(captured, captured_length, lane);
+    lane_mask = 7u;
+    if (!atomic_compare_exchange_strong_explicit(
+            &slot->state, &expected, 3, memory_order_acq_rel,
+            memory_order_acquire)) return HAL_SEALED_FACADE_STATUS_STATE_V1;
+    if (invocation_id <= slot->last_v2_invocation) {
+        atomic_store_explicit(&slot->state, 2, memory_order_release);
+        return HAL_SEALED_FACADE_STATUS_INVALID_V1;
+    }
+    slot->completed_mask = 0;
+    slot->result_schema = 0;
+    slot->difference_mask_v2 = 0;
+    slot->commit_allowed_v2 = 0;
+    slot->selected_provider_v2 = -1;
+    slot->last_v2_invocation = invocation_id;
+    request_size = snprintf((char *)request, sizeof(request),
+        "HALREQ2B|2|%lld|%lld|%lld|%d|%d|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld\n",
+        (long long)operation_id, (long long)invocation_id,
+        (long long)fixture_id, captured_status, error_domain,
+        (long long)error_code, (long long)error_detail,
+        (long long)captured_length, (long long)output_capacity,
+        (long long)word[0], (long long)word[1], (long long)word[2],
+        (long long)word[3], (long long)trace_identity_hi,
+        (long long)trace_identity_lo, (long long)trace_cursor,
+        (long long)trace_length, (long long)trace_capacity);
+    if (request_size <= 0 || (size_t)request_size >= sizeof(request) ||
+        !hal_sealed_session_invoke_mask_v1(&slot->session,
+            (uint64_t)invocation_id, lane_mask, request, (size_t)request_size,
+            wire_result, result_size)) {
+        slot->last_status = HAL_SEALED_FACADE_STATUS_IO_V1;
+        atomic_store_explicit(&slot->state, 2, memory_order_release);
+        return slot->last_status;
+    }
+    for (lane = 0; lane < 3; ++lane) {
+        if (!parse_buffer_result_v3(wire_result[lane], result_size[lane], lane,
+                                    invocation_id, slot->result_v2[lane]) ||
+            slot->result_v2[lane][8] != captured_length ||
+            slot->result_v2[lane][9] != output_capacity ||
+            slot->result_v2[lane][14] != trace_identity_hi ||
+            slot->result_v2[lane][15] != trace_identity_lo ||
+            slot->result_v2[lane][16] != trace_cursor ||
+            slot->result_v2[lane][17] != trace_length ||
+            slot->result_v2[lane][18] != trace_capacity) {
+            slot->last_status = HAL_SEALED_FACADE_STATUS_PROTOCOL_V1;
+            atomic_store_explicit(&slot->state, 2, memory_order_release);
+            return slot->last_status;
+        }
+    }
+    difference = buffer_difference_mask_v3(slot->result_v2);
+    if ((difference == 0 &&
+         !buffer_result_matches_capture_v3(
+            slot->result_v2[0], captured_status, error_domain, error_code,
+            error_detail, captured_length, output_capacity, word)) ||
+        (run_mode == HAL_SEALED_RUN_BETA_V1 &&
+         !buffer_result_matches_capture_v3(
+            slot->result_v2[preferred_provider], captured_status,
+            error_domain, error_code, error_detail, captured_length,
+            output_capacity, word))) {
+        slot->last_status = HAL_SEALED_FACADE_STATUS_PROTOCOL_V1;
+        atomic_store_explicit(&slot->state, 2, memory_order_release);
+        return slot->last_status;
+    }
+    slot->completed_mask = (int32_t)lane_mask;
+    slot->result_schema = 3;
+    slot->difference_mask_v2 = difference;
+    slot->selected_provider_v2 = preferred_provider;
+    slot->commit_allowed_v2 = difference == 0 ||
+        run_mode == HAL_SEALED_RUN_BETA_V1;
+    slot->last_status = difference != 0 && run_mode == HAL_SEALED_RUN_ALPHA_V1
+        ? HAL_SEALED_FACADE_STATUS_DIVERGED_V2
+        : HAL_SEALED_FACADE_STATUS_OK_V1;
+    atomic_store_explicit(&slot->state, 2, memory_order_release);
+    return slot->last_status;
+}
+
+int32_t rt_hal_buffer_dispatch_compare_v3(
+        int64_t operation_id, int64_t fixture_id, int32_t captured_status,
+        int32_t error_domain, int64_t error_code, int64_t error_detail,
+        const uint8_t *captured, int64_t captured_length,
+        uint8_t *output, int64_t output_capacity,
+        int64_t trace_identity_hi, int64_t trace_identity_lo,
+        int64_t trace_cursor, int64_t trace_length, int64_t trace_capacity) {
+    HalClockDispatchOwnerV2 *owner = &g_clock_owner_v2;
+    HalSealedFacadeSlotV1 *slot;
+    uint64_t invocation, prior_cursor;
+    size_t index;
+    int32_t status;
+    if (atomic_load_explicit(&owner->state, memory_order_acquire) != 2 ||
+        !output || !admitted_buffer_operation_v3(operation_id) ||
+        fixture_id <= 0 || captured_status < 0 || captured_status > 7 ||
+        error_domain < 0 || error_domain > 4 || error_code < 0 ||
+        error_detail < 0 ||
+        captured_length < 0 || captured_length > output_capacity ||
+        output_capacity <= 0 || output_capacity > HAL_BUFFER_INLINE_CAP_V3 ||
+        (captured_length > 0 && !captured) ||
+        (captured_status == 0 &&
+         (error_domain != 0 || error_code != 0 || error_detail != 0)) ||
+        (captured_status != 0 && (error_domain == 0 || error_code == 0)) ||
+        (trace_identity_hi == 0 && trace_identity_lo == 0) ||
+        trace_cursor <= 0 || trace_cursor > trace_length ||
+        trace_length > trace_capacity || trace_capacity <= 0 ||
+        trace_capacity > 65536) return HAL_SEALED_FACADE_STATUS_INVALID_V1;
+    prior_cursor = atomic_load_explicit(&owner->buffer_trace_cursor,
+                                        memory_order_acquire);
+    do {
+        if ((uint64_t)trace_cursor <= prior_cursor)
+            return HAL_SEALED_FACADE_STATUS_INVALID_V1;
+    } while (!atomic_compare_exchange_weak_explicit(
+        &owner->buffer_trace_cursor, &prior_cursor, (uint64_t)trace_cursor,
+        memory_order_acq_rel, memory_order_acquire));
+    if (owner->run_mode == HAL_SEALED_RUN_NORMAL_V1) {
+        if (captured_length > 0) memmove(output, captured,
+                                         (size_t)captured_length);
+        return HAL_SEALED_FACADE_STATUS_OK_V1;
+    }
+    for (index = 0; index < HAL_FACADE_SLOT_COUNT_V1; ++index) {
+        int expected = 0;
+        if (!atomic_compare_exchange_strong_explicit(
+                &owner->busy[index], &expected, 1,
+                memory_order_acq_rel, memory_order_relaxed)) continue;
+        if (atomic_load_explicit(&owner->state, memory_order_acquire) != 2) {
+            atomic_store_explicit(&owner->busy[index], 0, memory_order_release);
+            return HAL_SEALED_FACADE_STATUS_STATE_V1;
+        }
+        invocation = atomic_fetch_add_explicit(
+            &owner->invocation, 1, memory_order_relaxed) + 1;
+        if (invocation == 0 || invocation > (uint64_t)INT64_MAX) {
+            atomic_store_explicit(&owner->busy[index], 0, memory_order_release);
+            return HAL_SEALED_FACADE_STATUS_STATE_V1;
+        }
+        status = buffer_dispatch_invoke_v3(
+            owner->handle[index], owner->run_mode, owner->preferred_provider,
+            operation_id, (int64_t)invocation, fixture_id, captured_status,
+            error_domain, error_code, error_detail, captured, captured_length,
+            output_capacity, trace_identity_hi, trace_identity_lo,
+            trace_cursor, trace_length, trace_capacity);
+        if ((status == HAL_SEALED_FACADE_STATUS_OK_V1 ||
+             status == HAL_SEALED_FACADE_STATUS_DIVERGED_V2) &&
+            rt_hal_sealed_commit_allowed_v2(owner->handle[index]) == 1) {
+            slot = lookup(owner->handle[index], NULL);
+            if (!slot) {
+                atomic_store_explicit(&owner->busy[index], 0,
+                                      memory_order_release);
+                return HAL_SEALED_FACADE_STATUS_STATE_V1;
+            }
+            store_words_v3(output, captured_length,
+                           slot->result_v2[owner->preferred_provider]);
+        }
+        atomic_store_explicit(&owner->busy[index], 0, memory_order_release);
+        return status;
+    }
+    return HAL_SEALED_FACADE_STATUS_STATE_V1;
+}
+
+int32_t hal_buffer_dispatch_init_config_v3(
+        const char *launcher, const char *pure_worker, const char *c_worker,
+        const char *rust_worker, int32_t run_mode, int32_t preferred_provider,
+        int64_t deadline_ms) {
+    return clock_dispatch_init_config_v2(launcher, pure_worker, c_worker,
+        rust_worker, run_mode, preferred_provider, deadline_ms);
+}
+
+int32_t rt_hal_buffer_dispatch_init_v3(int32_t run_mode,
+                                       int32_t preferred_provider,
+                                       int64_t deadline_ms) {
+    return rt_hal_clock_dispatch_init_v2(run_mode, preferred_provider,
+                                         deadline_ms);
+}
+
+int32_t rt_hal_buffer_dispatch_shutdown_v3(void) {
+    return rt_hal_clock_dispatch_shutdown_v2();
 }
 
 int32_t rt_hal_clock_dispatch_shutdown_v2(void) {
@@ -573,19 +881,22 @@ int64_t rt_hal_sealed_result_field_v2(uint64_t handle, int32_t lane,
 int32_t rt_hal_sealed_difference_mask_v2(uint64_t handle) {
     HalSealedFacadeSlotV1 *slot = lookup(handle, NULL);
     return slot && atomic_load_explicit(&slot->state, memory_order_acquire) == 2 &&
-        slot->result_schema == 2 ? slot->difference_mask_v2 : 0;
+        (slot->result_schema == 2 || slot->result_schema == 3)
+        ? slot->difference_mask_v2 : 0;
 }
 
 int32_t rt_hal_sealed_commit_allowed_v2(uint64_t handle) {
     HalSealedFacadeSlotV1 *slot = lookup(handle, NULL);
     return slot && atomic_load_explicit(&slot->state, memory_order_acquire) == 2 &&
-        slot->result_schema == 2 ? slot->commit_allowed_v2 : 0;
+        (slot->result_schema == 2 || slot->result_schema == 3)
+        ? slot->commit_allowed_v2 : 0;
 }
 
 int32_t rt_hal_sealed_selected_provider_v2(uint64_t handle) {
     HalSealedFacadeSlotV1 *slot = lookup(handle, NULL);
     return slot && atomic_load_explicit(&slot->state, memory_order_acquire) == 2 &&
-        slot->result_schema == 2 && slot->commit_allowed_v2
+        (slot->result_schema == 2 || slot->result_schema == 3) &&
+        slot->commit_allowed_v2
         ? slot->selected_provider_v2 : -1;
 }
 

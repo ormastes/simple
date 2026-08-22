@@ -54,3 +54,35 @@ direct heap calls. Measured peak RSS on the same host was unchanged: C V1/V2
 
 Pure-Simple execution and optimizer evidence remain blocked by the inadmissible
 self-hosted compiler; the Rust seed is deliberately not substituted.
+
+## Sealed caller-buffer owner V3
+
+The process-lifetime sealed owner now exposes an additive caller-buffer leaf
+for every `HALREQ2B` operation: environment get (`102`), file read (`1001`),
+stream read (`1004`), process spawn/poll/kill (`1006..1008`), and socket
+open/send/receive/close (`1012..1015`). The parent performs the physical
+operation once and loans an immutable captured byte range into the leaf. The
+leaf never retains either pointer. It packs at most four little-endian words
+into fixed stack wire storage, compares three isolated child-created results,
+and copies the selected result into the caller-owned output only after commit
+policy succeeds.
+
+Normal mode validates the exact status/error/trace contract and performs one
+bounded `memmove`, with no worker traffic. Alpha mode returns divergence and
+leaves output untouched. Beta mode retains the bounded diff and commits the
+configured provider. Payload capacities above 32 bytes fail closed; a future
+large-buffer protocol must use the existing caller buffer as a scoped loan and
+must not silently allocate an inline surrogate. Trace cursors are consumed by
+one monotonic atomic owner even when comparison rejects, preventing replay.
+
+All hot-path work is O(payload), where payload is bounded by 32 bytes. The
+three-lane comparison and four-slot admission are O(1); storage is fixed and
+cache-local. Initialization alone creates the isolated workers. Hot calls do
+not allocate, spawn, wait for another caller, or consult the environment.
+
+Compiler binding remains deliberately conservative. Existing environment,
+file, stream, process, and socket wrappers do not share this caller-buffer ABI,
+so their metadata rows remain non-rewritable. MIR substitution is enabled only
+for a binding whose complete HIR signature equals its frozen direct and compare
+leaf signature; adapting a heap-returning `text`/`[u8]` wrapper by symbol-only
+rewrite would change ownership and error semantics and is rejected.

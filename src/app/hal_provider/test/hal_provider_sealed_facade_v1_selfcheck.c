@@ -79,6 +79,24 @@ static int fake_session(int argc, char **argv) {
                 "HALRES2|%d|%llu|0|0|0|0|1|%lld|8|%lld|%lld|%lld|%lld|%lld|%lld|0|-1|0|88\n",
                 lane, invocation, scalar, result_capacity, trace_hi, trace_lo,
                 cursor, length, capacity) < 0) return 9;
+        } else if (memcmp(line, "HALREQ2B|", 9) == 0) {
+            long long operation, parsed_invocation, fixture, status, domain;
+            long long code, detail, payload_length, payload_capacity;
+            long long word0, word1, word2, word3, trace_hi, trace_lo;
+            long long cursor, length, capacity;
+            if (sscanf(line,
+                "HALREQ2B|2|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld",
+                &operation, &parsed_invocation, &fixture, &status, &domain,
+                &code, &detail, &payload_length, &payload_capacity,
+                &word0, &word1, &word2, &word3, &trace_hi, &trace_lo,
+                &cursor, &length, &capacity) != 18 ||
+                parsed_invocation != (long long)invocation) return 36;
+            if (fixture == 99 && lane == 1) word0++;
+            if (dprintf(STDOUT_FILENO,
+                "HALRES2B|%d|%llu|%lld|%lld|%lld|%lld|2|0|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|0|-1|0|152\n",
+                lane, invocation, status, domain, code, detail,
+                payload_length, payload_capacity, word0, word1, word2, word3,
+                trace_hi, trace_lo, cursor, length, capacity) < 0) return 37;
         } else return 6;
     }
     return 0;
@@ -100,6 +118,13 @@ int main(int argc, char **argv) {
     DispatchInvoke dispatch_call[8];
     int dispatch_ok = 0, dispatch_busy = 0;
     long long dispatch_batch_ns;
+    unsigned char captured[32] = {0, 1, 2, 3, 4, 5, 6, 7,
+        8, 9, 10, 11, 12, 13, 14, 15};
+    unsigned char committed[32];
+    long long buffer_elapsed_ns;
+    static const int64_t lifecycle_operation[] = {
+        1006, 1007, 1008, 1012, 1013, 1014, 1015
+    };
     if (argc > 1 && strcmp(argv[1], "--session") == 0)
         return fake_session(argc, argv);
     executable_size = readlink("/proc/self/exe", executable,
@@ -229,6 +254,73 @@ int main(int argc, char **argv) {
     if (rt_hal_clock_dispatch_shutdown_v2() !=
             HAL_SEALED_FACADE_STATUS_OK_V1 ||
         rt_hal_clock_dispatch_compare_v2() != -1) return 34;
+    if (hal_buffer_dispatch_init_config_v3(
+            executable, "/pure", "/c", "/rust", HAL_SEALED_RUN_ALPHA_V1,
+            0, 1000) != HAL_SEALED_FACADE_STATUS_OK_V1) return 38;
+    memset(committed, 0xa5, sizeof(committed));
+    if (rt_hal_buffer_dispatch_compare_v3(
+            1001, 99, 0, 0, 0, 0, captured, 16, committed, 32,
+            51, 52, 1, 1002, 1002) !=
+                HAL_SEALED_FACADE_STATUS_DIVERGED_V2 ||
+        committed[0] != 0xa5) return 39;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+    for (iteration = 2; iteration <= 1001; ++iteration) {
+        memset(committed, 0xa5, sizeof(committed));
+        if (rt_hal_buffer_dispatch_compare_v3(
+                iteration % 2 == 0 ? 102 : 1004, 9, 0, 0, 0, 0,
+                captured, 16, committed, 32, 51, 52,
+                iteration, 1002, 1002) != HAL_SEALED_FACADE_STATUS_OK_V1 ||
+            memcmp(committed, captured, 16) != 0) return 40;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &finished);
+    buffer_elapsed_ns =
+        (long long)(finished.tv_sec - started.tv_sec) * 1000000000LL +
+        (finished.tv_nsec - started.tv_nsec);
+    for (iteration = 0; iteration < 7; ++iteration) {
+        if (rt_hal_buffer_dispatch_compare_v3(
+                lifecycle_operation[iteration], 9, 0, 0, 0, 0,
+                captured, 16, committed, 32, 51, 52,
+                1002 + iteration, 1010, 1010) !=
+                    HAL_SEALED_FACADE_STATUS_OK_V1 ||
+            memcmp(committed, captured, 16) != 0) return 44;
+    }
+    committed[0] = 0xa5;
+    if (rt_hal_buffer_dispatch_compare_v3(
+            1006, 9, 3, 2, 17, 23, NULL, 0, committed, 32,
+            51, 52, 1009, 1010, 1010) !=
+                HAL_SEALED_FACADE_STATUS_OK_V1 || committed[0] != 0xa5)
+        return 45;
+    if (rt_hal_buffer_dispatch_compare_v3(
+            1001, 9, 0, 0, 0, 0, captured, 16, committed, 33,
+            51, 52, 1010, 1010, 1010) !=
+                HAL_SEALED_FACADE_STATUS_INVALID_V1 ||
+        rt_hal_buffer_dispatch_compare_v3(
+            1001, 9, 0, 0, 0, 0, captured, 16, committed, 32,
+            51, 52, 1009, 1010, 1010) !=
+                HAL_SEALED_FACADE_STATUS_INVALID_V1 ||
+        rt_hal_buffer_dispatch_shutdown_v3() !=
+                HAL_SEALED_FACADE_STATUS_OK_V1) return 41;
+    if (hal_buffer_dispatch_init_config_v3(
+            executable, "/pure", "/c", "/rust", HAL_SEALED_RUN_BETA_V1,
+            2, 1000) != HAL_SEALED_FACADE_STATUS_OK_V1) return 46;
+    memset(committed, 0xa5, sizeof(committed));
+    if (rt_hal_buffer_dispatch_compare_v3(
+            1001, 99, 0, 0, 0, 0, captured, 16, committed, 32,
+            71, 72, 1, 1, 1) != HAL_SEALED_FACADE_STATUS_OK_V1 ||
+        memcmp(committed, captured, 16) != 0 ||
+        rt_hal_buffer_dispatch_shutdown_v3() !=
+            HAL_SEALED_FACADE_STATUS_OK_V1) return 47;
+    if (hal_buffer_dispatch_init_config_v3(
+            executable, "/unneeded-pure", "/unneeded-c", "/unneeded-rust",
+            HAL_SEALED_RUN_NORMAL_V1, 2, 1000) !=
+                HAL_SEALED_FACADE_STATUS_OK_V1) return 42;
+    memcpy(committed, captured, 16);
+    if (rt_hal_buffer_dispatch_compare_v3(
+            1012, 9, 0, 0, 0, 0, committed, 16, committed, 32,
+            61, 62, 1, 1, 1) != HAL_SEALED_FACADE_STATUS_OK_V1 ||
+        memcmp(committed, captured, 16) != 0 ||
+        rt_hal_buffer_dispatch_shutdown_v3() !=
+            HAL_SEALED_FACADE_STATUS_OK_V1) return 43;
     if (hal_clock_dispatch_init_config_v2(
             executable, "/unneeded-pure", "/unneeded-c", "/unneeded-rust",
             HAL_SEALED_RUN_NORMAL_V1, 2, 1000) !=
@@ -241,8 +333,8 @@ int main(int argc, char **argv) {
            "race_winners=1 race_state_rejections=1 "
            "dispatch_slots=%d dispatch_busy_rejections=%d "
            "dispatch_batch_ns=%lld "
-           "v1_mean_ns=%lld v2_mean_ns=%lld\n",
+           "v1_mean_ns=%lld v2_mean_ns=%lld buffer_mean_ns=%lld\n",
            dispatch_ok, dispatch_busy, dispatch_batch_ns, elapsed_ns / 1000,
-           v2_elapsed_ns / 1000);
+           v2_elapsed_ns / 1000, buffer_elapsed_ns / 1000);
     return 0;
 }
