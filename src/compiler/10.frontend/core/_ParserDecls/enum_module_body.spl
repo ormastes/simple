@@ -20,7 +20,7 @@ use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
 use compiler.core.ast.{decl_set_gpu_target_text, decl_set_gpu_target_arg_name_text, decl_set_gpu_backends_text}
-use compiler.core.ast.{decl_set_unroll_factor, decl_set_pipeline_ii, decl_set_memory_banks}
+use compiler.core.ast.{decl_set_unroll_factor, decl_set_pipeline_ii, decl_set_memory_banks, decl_set_attributes}
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_field_bits, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path, module_add_decl}
@@ -660,6 +660,10 @@ fn parser_record_enum_attributes(enum_name: text):
     if PENDING_DECL_ATTRS.len() > 0:
         ENUM_ATTRIBUTES.push(enum_name + "|" + PENDING_DECL_ATTRS.join("|"))
 
+fn parser_attach_pending_attributes(decl_idx: i64):
+    if PENDING_DECL_ATTRS.len() > 0:
+        decl_set_attributes(decl_idx, PENDING_DECL_ATTRS)
+
 fn parser_enum_attributes_for(enum_name: text) -> [text]:
     """Raw decorator spellings recorded for `enum_name` in this module."""
     var out: [text] = []
@@ -805,6 +809,7 @@ fn parse_module_body():
             parser_skip_newlines_and_semicolons()
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
             if visible_decl >= 0:
+                parser_attach_pending_attributes(visible_decl)
                 if PENDING_HARDWARE == 1:
                     decl_set_hardware(visible_decl, 1)
                     decl_set_clocked_args(visible_decl, PENDING_CLOCKED_ARGS)
@@ -828,12 +833,14 @@ fn parse_module_body():
             parser_advance()
             if par_kind_get() == 20:
                 val d = parse_fn_decl(1)  # 1 = is_async
+                parser_attach_pending_attributes(d)
                 module_add_decl(d)
                 parser_reset_pending_vhdl_decorators()
             else:
                 parser_error("expected 'fn' after 'async'")
         elif par_kind_get() == 20:
             val d = parse_fn_decl(0)  # 0 = not async
+            parser_attach_pending_attributes(d)
             if PENDING_HARDWARE == 1:
                 decl_set_hardware(d, 1)
                 decl_set_clocked_args(d, PENDING_CLOCKED_ARGS)
@@ -847,11 +854,13 @@ fn parse_module_body():
             # an explicit self param (parity with the Rust parser, which routes
             # top-level Me to parse_function).
             val me_d = parse_fn_decl(0)
+            parser_attach_pending_attributes(me_d)
             module_add_decl(me_d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 25:
             parser_advance()
             val d = parse_extern_fn_decl()
+            parser_attach_pending_attributes(d)
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 23:

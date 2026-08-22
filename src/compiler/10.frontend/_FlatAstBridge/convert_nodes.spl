@@ -17,7 +17,7 @@ use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy,
 use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_get_gpu_target_text, decl_get_gpu_target_arg_name_text, decl_get_gpu_backends_text}
-use compiler.core.ast.{decl_get_is_hardware, decl_get_clocked_args, decl_get_vhdl_generic_args, decl_get_flatten_struct_output}
+use compiler.core.ast.{decl_get_is_hardware, decl_get_clocked_args, decl_get_vhdl_generic_args, decl_get_flatten_struct_output, decl_get_attributes}
 use compiler.core.ast.{decl_is_packed}
 use compiler.core.ast.{elif_get_else}
 use compiler.core.ast_expr.*
@@ -2110,6 +2110,22 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         proof_uses: contract_proof_uses
     )
     var fn_attributes: [Attribute] = []
+    # Preserve every generic source decorator. The flat parser stores its raw,
+    # whitespace-free argument spelling so semantic owners can parse a closed
+    # schema without another source scan. Specialized attributes below are
+    # skipped here to avoid duplicate interpretation.
+    for raw_attribute in decl_get_attributes(idx):
+        var attr_name = raw_attribute
+        var attr_args = ""
+        if raw_attribute.ends_with(")") and raw_attribute.contains("("):
+            val open = raw_attribute.find("(")
+            attr_name = raw_attribute.substring(0, open)
+            attr_args = raw_attribute.substring(open + 1, raw_attribute.len() - 1)
+        if attr_name != "gpu" and attr_name != "gpu_kernel" and attr_name != "hardware" and attr_name != "generic" and attr_name != "clocked" and attr_name != "flatten_struct_output":
+            var raw_args: [Expr] = []
+            if attr_args != "":
+                raw_args = [Expr(kind: ExprKind.StringLit(attr_args, nil), span: span)]
+            fn_attributes.push(Attribute(name: attr_name, args: raw_args, span: span))
     if decl_get_is_gpu_kernel(idx) != 0:
         var gpu_args: [Expr] = []
         val gpu_target = decl_get_gpu_target_text(idx)

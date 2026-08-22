@@ -30,6 +30,7 @@ use compiler.types.type_layout.{
     platform_predicate_default, platform_validate_variants
 }
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.hal.rt_hal_contract.{parse_rt_hal_contract_v1, rt_hal_contract_canonical_v1, rt_hal_contract_requires_sealed_archive}
 
 
 # ============================================================================
@@ -688,6 +689,11 @@ struct FunctionAttr:
     unroll_factor: i64      # @unroll(n) — structural unroll factor; 0 = no unroll
     pipeline_ii: i64        # @pipeline(n) / @pipeline(ii=n) — initiation interval; 0 = no pipeline
     memory_banks: i64       # @memory(n) / @memory(banks=n) — array port banking; 0 = no banking
+    has_rt_hal: bool = false
+    rt_hal_manifest: text = ""
+    rt_hal_assurance_rank: i64 = 3
+    rt_hal_requires_sealed_archive: bool = false
+    rt_hal_diagnostic: text = ""
 
 impl FunctionAttr:
     static fn default() -> FunctionAttr:
@@ -712,7 +718,12 @@ impl FunctionAttr:
             optimization_req: OptimizationReq(level: OptimizationReqLevel.None_, backend: OptimizationBackend.Unknown),
             unroll_factor: 0,
             pipeline_ii: 0,
-            memory_banks: 0
+            memory_banks: 0,
+            has_rt_hal: false,
+            rt_hal_manifest: "",
+            rt_hal_assurance_rank: 3,
+            rt_hal_requires_sealed_archive: false,
+            rt_hal_diagnostic: ""
         )
 
 fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
@@ -737,6 +748,11 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
     var unroll_factor: i64 = 0
     var pipeline_ii: i64 = 0
     var memory_banks: i64 = 0
+    var has_rt_hal = false
+    var rt_hal_manifest = ""
+    var rt_hal_assurance_rank: i64 = 3
+    var rt_hal_requires_archive = false
+    var rt_hal_diagnostic = ""
 
     for attr in attrs:
         if attr.name == "entry":
@@ -796,6 +812,17 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
                         simd_disable = true
                     elif simd_arg == "prefer_scalable":
                         simd_prefer_scalable = true
+        elif attr.name == "rt" and attr.args.len() > 0:
+            val raw_rt = extract_text_arg(attr.args[0])
+            if raw_rt.starts_with("hal"):
+                has_rt_hal = true
+                val contract = parse_rt_hal_contract_v1(raw_rt)
+                rt_hal_diagnostic = contract.diagnostic
+                rt_hal_assurance_rank = contract.assurance_rank
+                rt_hal_requires_archive = rt_hal_contract_requires_sealed_archive(contract)
+                rt_hal_manifest = rt_hal_contract_canonical_v1(contract)
+                if rt_hal_requires_archive:
+                    is_no_alloc = true
 
     # Parse optimization requirements (@must, @prefer, @error_not, @warn_not)
     val optimization_req = parse_optimization_req_attrs(attrs)
@@ -820,7 +847,12 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
         optimization_req: optimization_req,
         unroll_factor: unroll_factor,
         pipeline_ii: pipeline_ii,
-        memory_banks: memory_banks
+        memory_banks: memory_banks,
+        has_rt_hal: has_rt_hal,
+        rt_hal_manifest: rt_hal_manifest,
+        rt_hal_assurance_rank: rt_hal_assurance_rank,
+        rt_hal_requires_sealed_archive: rt_hal_requires_archive,
+        rt_hal_diagnostic: rt_hal_diagnostic
     )
 
 struct GpuFunctionAttrArgs:

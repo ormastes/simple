@@ -24,6 +24,7 @@ use compiler.semantics.safety_checker.{
 use compiler.common.parallel_policy.policy_schema.{ResolvedParallelPolicyV1}
 use compiler.driver.driver_source_loading.{_format_type_infer_error}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.diagnostics.span.{Span}
 use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
 use compiler.semantics.any_escape.{AnyEscapeProfile, any_escape_check}
 use compiler.semantics.enum_contract.{enum_contract_check}
@@ -380,4 +381,41 @@ pub fn run_enum_contract_pass(
         errors_raised: errors_raised
     ))
     out
-use compiler.common.diagnostics.span.{Span}
+pub fn run_rt_hal_contract_pass(
+    ctx: CompileContext,
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
+    """Reject an explicit rt(hal) downgrade in a Critical entry closure.
+
+    The default and higher classifications need no configuration. Lower
+    classifications have already supplied a rationale at attribute parsing;
+    this typed driver policy decides whether the current closure may admit it.
+    """
+    val critical_closure = ctx.assurance_policy.strictness.at_least(
+        AssuranceStrictness.Critical)
+    var out: [text] = []
+    var modules_checked = 0
+    var errors_raised = 0
+    for module_name in hir_modules.keys():
+        modules_checked = modules_checked + 1
+        for function_ in hir_modules[module_name].functions.values():
+            if function_.func_attr.has_rt_hal:
+                if function_.func_attr.rt_hal_manifest == "":
+                    val invalid = "[E-RT-HAL-012] {module_name}::{function_.name}: rt(hal) manifest is invalid or absent"
+                    out = out.push(invalid)
+                    ctx.add_error(invalid)
+                    errors_raised = errors_raised + 1
+                elif critical_closure and function_.func_attr.rt_hal_assurance_rank < 3:
+                    val downgrade = "[E-RT-HAL-013] {module_name}::{function_.name}: lower-assurance rt(hal) operation is reachable from a Critical closure"
+                    out = out.push(downgrade)
+                    ctx.add_error(downgrade)
+                    errors_raised = errors_raised + 1
+    val _receipt = record_pass_receipt(PassReceipt(
+        pass_name: "rt_hal_contract",
+        profile: ctx.assurance_policy.strictness.name(),
+        executed: true,
+        modules_checked: modules_checked,
+        diagnostics: out.len(),
+        errors_raised: errors_raised
+    ))
+    out

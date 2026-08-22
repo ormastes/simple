@@ -154,6 +154,22 @@ impl MirTextCodegen for MirToLlvm:
             print "[llvm-translate] runtime"
         self.emit_runtime_declarations()
 
+        # A Critical/Verified @rt(hal) contract creates one retained marker and
+        # one bounded manifest string per tagged operation. Static archives are
+        # selected from this marker at the final link boundary; untagged code
+        # emits neither symbol nor string and pays zero binary/runtime cost.
+        var rt_hal_required = false
+        var rt_hal_manifest_index: i64 = 0
+        for rt_hal_fn in module.functions.values():
+            if rt_hal_fn.has_rt_hal and rt_hal_fn.rt_hal_requires_sealed_archive:
+                rt_hal_required = true
+                val escaped_manifest = escape_llvm_string(rt_hal_fn.rt_hal_manifest)
+                val manifest_len = escaped_string_byte_len(rt_hal_fn.rt_hal_manifest) + 1
+                self.builder.emit("@__simple_rt_hal_manifest_v1_{rt_hal_manifest_index} = private unnamed_addr constant [{manifest_len} x i8] c\"{escaped_manifest}\\00\"")
+                rt_hal_manifest_index = rt_hal_manifest_index + 1
+        if rt_hal_required:
+            self.builder.emit("@__simple_rt_hal_sealed_required_v1 = constant i8 1")
+
         # DS3: line-table debug info. Emit the DWARF compile-unit header once,
         # up front, keyed off the first function whose MIR span carries a
         # real source file (begin_function's caller passes fn_.span for
