@@ -24,6 +24,13 @@ build attempts:
   produced no candidate: 865.15 s and 1,447,228 KiB maximum RSS. Wall time is
   19.3% below the original 1071.71 s baseline and peak RSS is 2.1% lower than
   1,478,536 KiB, but both remain excessive and correctness is still blocked.
+- Cycle 5 was the third and final full attempt for the scoped recovery session.
+  It reached about 10,000 cached objects but produced no candidate after
+  1234.90 s and 1,478,060 KiB maximum RSS. Five files remained: the old
+  admitted builder still enforced its embedded 60-second limit on frontend
+  core and generated HIR codec; one SMF executable-memory body, one browser
+  color body, and one legacy complex indexed lvalue also remained. The hard
+  three-cycle cap prohibits another full retry in this session.
 - A focused Rust compiler regression-test build for array-lvalue lowering was
   blocked before test execution by the unrelated missing
   `crate::interpreter::dispatch_profile` owner after 99.41 s and 2,164,056 KiB
