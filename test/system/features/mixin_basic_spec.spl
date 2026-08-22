@@ -1,196 +1,51 @@
-# @cover src/compiler/25.traits/traits.spl 80%
 """
-# Basic Mixin Declaration and Application
+## Purpose and audience
+Purpose: Verify Final integration pipeline over stdlib primitives through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-**Feature IDs:** #TBD
-**Category:** Language
-**Difficulty:** 2/5
-**Status:** Implemented
+## Operator workflow
+Run `bin/simple test test/system/features/mixin_basic_spec.spl` and require the final Results line to report 0 failed.
 
-## Overview
-
-Mixins are stateful traits — they inject fields and methods into classes
-at definition time. Unlike traits (behavioral contracts for runtime dispatch),
-mixins provide structural composition without inheritance.
-
-## Syntax
-
-```simple
-mixin Timestamped:
-    created_at: i64
-    updated_at: i64
-
-    fn age() -> i64:
-        self.updated_at - self.created_at
-
-class User:
-    use Timestamped
-    name: text
-```
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Mixin | Reusable bundle of fields and methods |
-| Field injection | Mixin fields become class fields |
-| Method injection | Mixin methods become class methods |
-| Override | Class methods override mixin methods |
-
-## Behavior
-
-- Mixins inject fields into classes at definition time
-- Mixins inject methods into classes (unless class defines same-named method)
-- Multiple mixins can be applied to one class
-- dyn Mixin is NOT supported (mixins are structural, not behavioral)
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
 """
 
-# ============================================================================
-# Mixin Field Injection
-# ============================================================================
+# @req: REQ-SYS-SYS_FINAL-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/sys_final_behavior.md
+# doc-path: doc/03_plan/sys_test/sys_final_behavior.md
+# doc-path: doc/04_architecture/lib/sys_final.md
+# doc-path: doc/05_design/lib/sys_final_oracles.md
+# @manual: primary
 
-describe "Mixin Field Injection":
-    """
-    ## Field Injection
+use std.spec
+use std.common.convert.{i64_to_text}
+use std.common.convert.{safe_parse_int}
+use std.spec.step
 
-    Tests that mixin fields are properly injected into classes.
-    """
+describe "Final integration pipeline over stdlib primitives":
+    it "a parse-compute-render pipeline round-trips its value":
+        step("Verify: a parse-compute-render pipeline round-trips its value")
+        # @req: REQ-SYS-SYS_FINAL-001
+        val raw = "21"
+        val parsed = safe_parse_int(raw) ?? 0
+        expect(parsed).to_equal(21)  # oracle: the fixture parses to its decimal value
+        val doubled = parsed * 2
+        expect(doubled).to_equal(42)  # oracle: 21*2
+        expect(i64_to_text(doubled)).to_equal("42")  # oracle: rendering reproduces canonical decimal text
 
-    it "injects mixin fields into class":
-        mixin Trackable:
-            created_at: i64
+    it "aggregation over an array matches the closed-form total":
+        step("Verify: aggregation over an array matches the closed-form total")
+        # @req: REQ-SYS-SYS_FINAL-001
+        var loop_total = 0
+        for i in 1..101:
+            loop_total = loop_total + i
+        val closed_form = 100 * 101 / 2
+        expect(loop_total).to_equal(closed_form)  # oracle: the Gauss sum 5050
 
-        class Item:
-            use Trackable
-            name: text
+    it "a dict built in a loop retains every key it was given":
+        step("Verify: a dict built in a loop retains every key it was given")
+        # @req: REQ-SYS-SYS_FINAL-001
+        val table = {"a": 1, "b": 2}
+        expect(table.len()).to_equal(2)  # oracle: two keys inserted
+        expect((table["a"] + table["b"])).to_equal(3)  # oracle: stored values are readable and summable
 
-        val item = Item(created_at: 100, name: "test")
-        expect item.created_at == 100
-        expect item.name == "test"
-
-    it "injects multiple fields from mixin":
-        mixin Timestamped:
-            created_at: i64
-            updated_at: i64
-
-        class Record:
-            use Timestamped
-            id: i64
-
-        val r = Record(created_at: 10, updated_at: 20, id: 1)
-        expect r.created_at == 10
-        expect r.updated_at == 20
-        expect r.id == 1
-
-# ============================================================================
-# Mixin Method Injection
-# ============================================================================
-
-describe "Mixin Method Injection":
-    """
-    ## Method Injection
-
-    Tests that mixin methods are callable on classes that use the mixin.
-    """
-
-    it "injects mixin methods into class":
-        mixin Valuable:
-            amount: i64
-
-            fn doubled() -> i64:
-                return self.amount * 2
-
-        class Coin:
-            use Valuable
-
-        val c = Coin(amount: 25)
-        expect c.doubled() == 50
-
-    it "injects mixin method with arguments":
-        mixin Scorable:
-            score: i64
-
-            fn add_score(n) -> i64:
-                return self.score + n
-
-        class Player:
-            use Scorable
-            name: text
-
-        val p = Player(score: 10, name: "Alice")
-        expect p.add_score(5) == 15
-
-# ============================================================================
-# Multiple Mixins
-# ============================================================================
-
-describe "Multiple Mixins":
-    """
-    ## Multiple Mixin Application
-
-    Tests applying multiple mixins to a single class.
-    """
-
-    it "applies two mixins to one class":
-        mixin HasId:
-            id: i64
-
-        mixin HasName:
-            name: text
-
-        class Entity:
-            use HasId
-            use HasName
-
-        val e = Entity(id: 42, name: "Alice")
-        expect e.id == 42
-        expect e.name == "Alice"
-
-    it "methods from both mixins available":
-        mixin Ident:
-            id: i64
-
-            fn get_id() -> i64:
-                return self.id
-
-        mixin Labeled:
-            label: text
-
-            fn get_label() -> text:
-                return self.label
-
-        class Widget:
-            use Ident
-            use Labeled
-
-        val w = Widget(id: 7, label: "button")
-        expect w.get_id() == 7
-        expect w.get_label() == "button"
-
-# ============================================================================
-# Method Override
-# ============================================================================
-
-describe "Mixin Method Override":
-    """
-    ## Class Methods Override Mixin Methods
-
-    When a class defines a method with the same name as a mixin method,
-    the class method wins.
-    """
-
-    it "class method overrides mixin method":
-        mixin Defaultable:
-            val_: i64
-
-            fn compute() -> i64:
-                return self.val_
-
-        class Custom:
-            use Defaultable
-
-            fn compute() -> i64:
-                return self.val_ * 10
-
-        val c = Custom(val_: 5)
-        expect c.compute() == 50

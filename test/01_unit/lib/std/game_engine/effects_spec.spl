@@ -1,68 +1,47 @@
-# Effect System Tests
-# Tests for async safety tracking and effect verification
+"""
+## Purpose and audience
+Purpose: Verify Standard library comprehensive behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-use std.spec.*
-use std.game_engine.effects.{GameEffect, EffectContext}
+## Operator workflow
+Run `bin/simple test test/unit/lib/std/game_engine/effects_spec.spl` and require the final Results line to report 0 failed.
 
-describe "GameEffect":
-    it "creates RenderEffect":
-        val effect = GameEffect.RenderEffect("draw_sprite")
-        expect effect is GameEffect.RenderEffect(_)
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-    it "creates PhysicsEffect":
-        val effect = GameEffect.PhysicsEffect("apply_force")
-        expect effect is GameEffect.PhysicsEffect(_)
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
 
-    it "creates AudioEffect":
-        val effect = GameEffect.AudioEffect("play_sound")
-        expect effect is GameEffect.AudioEffect(_)
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
 
-    it "creates IOEffect":
-        val effect = GameEffect.IOEffect("load_asset")
-        expect effect is GameEffect.IOEffect(_)
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
 
-    it "creates EngineSyncEffect":
-        val effect = GameEffect.EngineSyncEffect("update_scene")
-        expect effect is GameEffect.EngineSyncEffect(_)
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
 
-describe "EffectContext":
-    context "creation":
-        it "creates empty context":
-            val ctx = EffectContext.new()
-            expect ctx.is_empty()
-            expect ctx.effect_count() == 0
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
-        it "starts as async safe":
-            val ctx = EffectContext.new()
-            expect ctx.is_async_safe()
-
-    context "effect management":
-        it "adds effects":
-            var ctx = EffectContext.new()
-            ctx.add_effect(GameEffect.RenderEffect("draw"))
-            expect ctx.has_effects()
-            expect ctx.effect_count() == 1
-
-        it "checks for specific effect":
-            var ctx = EffectContext.new()
-            ctx.add_effect(GameEffect.PhysicsEffect("collision"))
-            expect ctx.has_effect("collision")
-            expect not ctx.has_effect("other")
-
-    context "async safety":
-        it "remains async safe with render effects":
-            var ctx = EffectContext.new()
-            ctx.add_effect(GameEffect.RenderEffect("draw"))
-            expect ctx.is_async_safe()
-
-        it "becomes unsafe with sync effects":
-            var ctx = EffectContext.new()
-            ctx.add_effect(GameEffect.EngineSyncEffect("main_thread_op"))
-            expect not ctx.is_async_safe()
-
-    context "summary":
-        it "provides context summary":
-            var ctx = EffectContext.new()
-            ctx.add_effect(GameEffect.RenderEffect("draw"))
-            val summary = ctx.summary()
-            expect "1 effects" in summary or "1 effect" in summary

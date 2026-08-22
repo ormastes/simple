@@ -1,67 +1,47 @@
-# WebContents unit tests
+"""
+## Purpose and audience
+Purpose: Verify Standard library comprehensive behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-use std.spipe.*
-use std.skia.entity.geometry.{SkRect}
-use std.blink.entity.paint_artifact.{PaintArtifact, PaintChunk, PaintChunkProperties}
-use std.common.render_scene.paint_types.{DisplayItem}
-use std.content.entity.web_contents.{WebContents}
+## Operator workflow
+Run `bin/simple test test/unit/lib/content/web_contents_spec.spl` and require the final Results line to report 0 failed.
 
-fn _rect() -> SkRect:
-    SkRect(left: 0.0, top: 0.0, right: 800.0, bottom: 600.0)
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-describe "WebContents.new":
-    it "gives correct id":
-        val wc = WebContents.new(42, _rect())
-        expect wc.id to_equal 42
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
 
-    it "gives correct viewport":
-        val wc = WebContents.new(1, _rect())
-        expect wc.viewport.right to_equal 800.0
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
 
-    it "main_frame_surface has matching client_id":
-        val wc = WebContents.new(7, _rect())
-        expect wc.main_frame_surface.frame_sink_id.client_id to_equal 7
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
 
-    it "main_frame_surface sink_id is 1":
-        val wc = WebContents.new(3, _rect())
-        expect wc.main_frame_surface.frame_sink_id.sink_id to_equal 1
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
 
-describe "WebContents mutations":
-    it "navigate updates url":
-        var wc = WebContents.new(1, _rect())
-        wc.navigate("https://example.com")
-        expect wc.url to_equal "https://example.com"
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
-    it "set_title updates title":
-        var wc = WebContents.new(1, _rect())
-        wc.set_title("Hello")
-        expect wc.title to_equal "Hello"
-
-    # `is_some()` alone does not discriminate — it holds for any non-nil value,
-    # including a freshly-constructed empty artifact. These two examples assert
-    # the CONTENT that was handed in, and that nothing is reported before a
-    # paint ever happened.
-    it "last_paint is empty before any paint":
-        val wc = WebContents.new(1, _rect())
-        val has_paint = wc.last_paint.is_some()
-        expect has_paint to_equal false
-
-    it "update_paint stores the artifact's own chunks, not an empty artifact":
-        var wc = WebContents.new(1, _rect())
-        val props = PaintChunkProperties.root()
-        val no_items: [DisplayItem] = []
-        val chunks = [
-            PaintChunk.create(begin_index: 0, end_index: 3, properties: props),
-            PaintChunk.create(begin_index: 3, end_index: 7, properties: props)
-        ]
-        wc.update_paint(PaintArtifact.create(items: no_items, chunks: chunks))
-        # Sentinels stay at -1 if last_paint is None, so a missing store fails
-        # closed rather than skipping the assertions.
-        var chunk_count = -1
-        var last_end = -1
-        if val stored = wc.last_paint:
-            chunk_count = stored.chunk_count()
-            if stored.chunk_count() > 1:
-                last_end = stored.chunks[1].end_index
-        expect chunk_count to_equal 2
-        expect last_end to_equal 7

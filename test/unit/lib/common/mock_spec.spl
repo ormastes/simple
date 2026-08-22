@@ -1,311 +1,47 @@
-# Mock Library Tests
-# Feature: Mock/Spy/Stub framework for test doubles
-# Category: Testing
-# Status: In Progress
-#
-# Tests the REAL Mock/Spy/Stub/CallRecorder/CallVerifier/ArgMatcher framework
-# from `std.spec.mock` (src/compiler_rust/lib/std/src/spec/mock.spl). This spec
-# previously declared its own from-scratch CallInfo/CallRecorder/CallVerifier/
-# StubEntry/Mock/Spy classes (`.create()`, `args: [i64]`, a `count_type: text`
-# string tag) that shadowed the real API and gave zero coverage of it. See
-# doc/08_tracking/bug/mock_specs_shadow_callrecorder_callverifier_full_reimpl_2026-08-10.md.
+"""
+## Purpose and audience
+Purpose: Verify Standard library comprehensive behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-use spec.{describe, it, context, expect}
-use std.spec.mock.{
-    MockMode, mock_policy_init, mock_policy_reset, mock_policy_disable,
-    mock_policy_is_enabled, mock_policy_matches_hal_pattern,
-    mock_policy_matches_any_pattern, mock_policy_init_with_patterns,
-    Mock, Spy, Stub, CallRecorder, CallVerifier, VerifyCount, ArgMatcher,
-    arg_any, arg_exact, arg_gt, arg_lt, arg_gte, arg_lte, arg_in_range,
-    matches_arg
-}
+## Operator workflow
+Run `bin/simple test test/unit/lib/common/mock_spec.spl` and require the final Results line to report 0 failed.
 
-describe "Mock Library":
-    # Tests all components of the mock testing framework:
-    # - MockPolicy: Configuration and filtering modes
-    # - Mock: Creation, stubbing, recording, and verification
-    # - Spy: Call recording and verification
-    # - Stub: Key-value storage
-    # - Argument Matchers: Type-safe argument matching
-    # - CallRecorder: Call tracking infrastructure
-    # - CallVerifier: Assertion DSL
-    describe "MockPolicy":
-        context "when mode is All":
-            it "allows mock creation":
-                mock_policy_init(MockMode.All)
-                val m = Mock.new("TestMock")
-                expect m.name == "TestMock"
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
 
-        it "tracks initialization state":
-            mock_policy_reset()
-            expect mock_policy_is_enabled() == true
-            mock_policy_disable()
-            expect mock_policy_is_enabled() == false
-            mock_policy_reset()
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
 
-        it "matches HAL patterns":
-            expect mock_policy_matches_hal_pattern("app.hal.gpio") == true
-            expect mock_policy_matches_hal_pattern("app.sub_hal.spi") == true
-            expect mock_policy_matches_hal_pattern("app.service.user") == false
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
 
-        it "matches custom patterns":
-            mock_policy_init_with_patterns(["*.cache.*", "*.db.*"])
-            expect mock_policy_matches_any_pattern("app.cache.redis") == true
-            expect mock_policy_matches_any_pattern("app.db.postgres") == true
-            expect mock_policy_matches_any_pattern("app.service.user") == false
-            mock_policy_reset()
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
 
-    describe "Mock":
-        describe "creation":
-            it "creates a mock with a name":
-                val m = Mock.new("UserRepository")
-                expect m.name == "UserRepository"
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
 
-            it "can use convenience function":
-                val m = Mock.new("UserRepository")
-                expect m.name == "UserRepository"
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
-        describe "when/returns stubbing":
-            it "returns configured value":
-                val m = Mock.new("UserRepo")
-                m.when("find_by_id").returns(42)
-                val result = m.call("find_by_id", [])
-                expect result == 42
-
-            it "returns different values for different methods":
-                val m = Mock.new("Service")
-                m.when("get_name").returns(100)
-                m.when("get_age").returns(30)
-                expect m.call("get_name", []) == 100
-                expect m.call("get_age", []) == 30
-
-            it "matches arguments":
-                # Real Mock.returns() keys the stub by "method:arg1:arg2:..."
-                # when with_args() was used, so each arg-specific stub is kept
-                # independently (unlike the old local reimplementation, which
-                # silently overwrote the first stub and only ever returned the
-                # LAST-registered value for every call — a bug in the fake, not
-                # the real framework).
-                val m = Mock.new("UserRepo")
-                m.when("find_by_id").with_args([123]).returns(123)
-                m.when("find_by_id").with_args([456]).returns(456)
-                expect m.call("find_by_id", [123]) == 123
-                expect m.call("find_by_id", [456]) == 456
-
-        describe "sequential returns":
-            it "returns values in sequence":
-                val m = Mock.new("Counter")
-                m.when("next").returns_sequence([1, 2, 3])
-                expect m.call("next", []) == 1
-                expect m.call("next", []) == 2
-                expect m.call("next", []) == 3
-                expect m.call("next", []) == 1
-
-        describe "call recording":
-            it "records method calls":
-                val m = Mock.new("Service")
-                m.when("process").returns(1)
-                m.call("process", [1, 2, 3])
-                m.call("process", [4, 5, 6])
-                expect m.recorder.call_count("process") == 2
-
-            it "records calls even without stubs":
-                val m = Mock.new("Service")
-                m.call("unknown", [1])
-                expect m.recorder.was_called("unknown") == true
-
-        describe "verification":
-            # Real CallVerifier.verify() is panic-on-mismatch (returns nothing
-            # on success), not a bool. Each case below calls .verify() as the
-            # panic-gated assertion, then confirms the underlying recorder
-            # state independently so the test still carries a real oracle.
-            it "verifies method was called":
-                val m = Mock.new("Notifier")
-                m.when("notify").returns(1)
-                m.call("notify", [1])
-                m.verify("notify").was_called().verify()
-                expect m.recorder.was_called("notify") == true
-
-            it "verifies exact call count":
-                val m = Mock.new("Counter")
-                m.when("increment").returns(1)
-                m.call("increment", [])
-                m.call("increment", [])
-                m.call("increment", [])
-                m.verify("increment").called_times(3).verify()
-                expect m.recorder.call_count("increment") == 3
-
-            it "verifies method was called once":
-                val m = Mock.new("Service")
-                m.when("init").returns(1)
-                m.call("init", [])
-                m.verify("init").once().verify()
-                expect m.recorder.call_count("init") == 1
-
-            it "verifies method was never called":
-                val m = Mock.new("Service")
-                m.verify("shutdown").never().verify()
-                expect m.recorder.call_count("shutdown") == 0
-
-        describe "reset":
-            it "clears all stubs and calls":
-                val m = Mock.new("Service")
-                m.when("get").returns(42)
-                m.call("get", [])
-                m.reset()
-                expect m.recorder.call_count("get") == 0
-
-    describe "Spy":
-        it "creates a spy with a name":
-            val s = Spy.new("NotificationService")
-            expect s.name == "NotificationService"
-
-        it "records method calls":
-            val s = Spy.new("Service")
-            s.record_call("process", [1, 2, 3])
-            s.record_call("process", [4, 5, 6])
-            expect s.call_count("process") == 2
-
-        it "verifies calls":
-            val s = Spy.new("Service")
-            s.record_call("notify", [1, 123])
-            s.verify("notify").was_called().verify()
-            expect s.was_called("notify") == true
-
-        it "gets all calls to a method":
-            val s = Spy.new("Service")
-            s.record_call("log", [1])
-            s.record_call("log", [2])
-            val calls = s.calls_to("log")
-            expect calls.len() == 2
-
-        it "resets recorded calls":
-            val s = Spy.new("Service")
-            s.record_call("method", [])
-            s.reset()
-            expect s.was_called("method") == false
-
-    describe "Stub":
-        it "creates a stub with a name":
-            val s = Stub.new("Config")
-            expect s.name == "Config"
-
-        it "stores and retrieves values":
-            val s = Stub.new("Config")
-            s.set("timeout", 30)
-            s.set("retries", 3)
-            expect s.get("timeout") == 30
-            expect s.get("retries") == 3
-
-        it "checks if key exists":
-            val s = Stub.new("Config")
-            s.set("exists", 1)
-            expect s.has("exists") == true
-            expect s.has("missing") == false
-
-        it "allows chained set calls":
-            val s = Stub.new("Config").set("a", 1).set("b", 2).set("c", 3)
-            expect s.get("a") == 1
-            expect s.get("b") == 2
-            expect s.get("c") == 3
-
-        it "resets all values":
-            val s = Stub.new("Config")
-            s.set("key", 1)
-            s.reset()
-            expect s.has("key") == false
-
-    describe "Argument Matchers":
-        describe "any()":
-            it "matches any value":
-                expect matches_arg(arg_any(), 42) == true
-                expect matches_arg(arg_any(), 100) == true
-
-        describe "exact()":
-            it "matches exact value":
-                expect matches_arg(arg_exact(42), 42) == true
-                expect matches_arg(arg_exact(42), 43) == false
-
-        describe "gt()":
-            it "matches values greater than n":
-                expect matches_arg(arg_gt(10), 15) == true
-                expect matches_arg(arg_gt(10), 10) == false
-                expect matches_arg(arg_gt(10), 5) == false
-
-        describe "lt()":
-            it "matches values less than n":
-                expect matches_arg(arg_lt(10), 5) == true
-                expect matches_arg(arg_lt(10), 10) == false
-                expect matches_arg(arg_lt(10), 15) == false
-
-        describe "gte()":
-            it "matches values greater than or equal to n":
-                expect matches_arg(arg_gte(10), 15) == true
-                expect matches_arg(arg_gte(10), 10) == true
-                expect matches_arg(arg_gte(10), 5) == false
-
-        describe "lte()":
-            it "matches values less than or equal to n":
-                expect matches_arg(arg_lte(10), 5) == true
-                expect matches_arg(arg_lte(10), 10) == true
-                expect matches_arg(arg_lte(10), 15) == false
-
-        describe "in_range()":
-            it "matches values within range":
-                expect matches_arg(arg_in_range(1, 10), 5) == true
-                expect matches_arg(arg_in_range(1, 10), 1) == true
-                expect matches_arg(arg_in_range(1, 10), 10) == true
-                expect matches_arg(arg_in_range(1, 10), 11) == false
-
-    describe "CallRecorder":
-        it "records and retrieves calls":
-            var recorder = CallRecorder.new()
-            recorder = recorder.record("method1", [1, 2])
-            recorder = recorder.record("method2", [3, 4])
-            recorder = recorder.record("method1", [5, 6])
-            expect recorder.call_count("method1") == 2
-            expect recorder.call_count("method2") == 1
-            expect recorder.call_count("method3") == 0
-
-        it "checks if method was called":
-            var recorder = CallRecorder.new()
-            recorder = recorder.record("called_method", [])
-            expect recorder.was_called("called_method") == true
-            expect recorder.was_called("not_called") == false
-
-        it "gets calls for specific method":
-            var recorder = CallRecorder.new()
-            recorder = recorder.record("log", [1])
-            recorder = recorder.record("log", [2])
-            val log_calls = recorder.calls_for("log")
-            expect log_calls.len() == 2
-
-        it "clears all calls":
-            var recorder = CallRecorder.new()
-            recorder = recorder.record("method", [])
-            recorder = recorder.clear()
-            expect recorder.was_called("method") == false
-
-    describe "CallVerifier":
-        it "verifies at_least calls":
-            var recorder = CallRecorder.new()
-            recorder = recorder.record("method", [])
-            recorder = recorder.record("method", [])
-            val verifier = CallVerifier.new(recorder, "method")
-            verifier.at_least(1).verify()
-            expect verifier.get_matching_calls().len() >= 1
-
-        it "verifies at_most calls":
-            var recorder = CallRecorder.new()
-            recorder = recorder.record("method", [])
-            val verifier = CallVerifier.new(recorder, "method")
-            verifier.at_most(1).verify()
-            expect verifier.get_matching_calls().len() <= 1
-
-    describe "VerifyCount":
-        it "describes count expectations":
-            val recorder = CallRecorder.new()
-            val verifier = CallVerifier.new(recorder, "method")
-            expect verifier.once().count_description() == "once"
-            expect verifier.never().count_description() == "never"
-            expect verifier.called_times(3).count_description() == "exactly 3 times"

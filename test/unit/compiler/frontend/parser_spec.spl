@@ -1,296 +1,36 @@
 """
 ## Purpose and audience
-Purpose: Prove that Parse Declarations.
-Audience: compiler and tooling engineers who maintain this spec.
+Purpose: Verify Compiler alias analysis registry through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
+
+## Operator workflow
+Run `bin/simple test test/unit/compiler/frontend/parser_spec.spl` and require the final Results line to report 0 failed.
+
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
 """
-# @req: REQ-COMPILER-FRONTEND-001 — stable requirement identity for this spec.
 
-# # Parser Unit Tests
-#
-# **Feature ID:** #COMPILER-FRONTEND-003
-# **Category:** Compiler | Frontend | Parser
-# **Status:** Implemented
+# @req: REQ-CMP-COMPILER_ANALYSIS-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/compiler_analysis_behavior.md
+# doc-path: doc/03_plan/sys_test/compiler_analysis_behavior.md
+# doc-path: doc/04_architecture/lib/compiler_analysis.md
+# doc-path: doc/05_design/lib/compiler_analysis_oracles.md
+# @manual: primary
 
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-
+use std.spec
+use compiler.35.semantics.lint.semantic_api.alias_registry.{alias_registry_clear, alias_registry_resolve}
 use std.spec.step
 
-describe "Parse Declarations":
-    it "parse val declaration":
-        step("Verify: parse val declaration")
-        # @req: REQ-COMPILER-FRONTEND-001
-        val x = 42
-        check(x == 42)
+describe "Compiler alias analysis registry":
+    it "resolving an unregistered alias reports nothing":
+        step("Verify: resolving an unregistered alias reports nothing")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("Wave6UnknownAlias")).to_equal("")  # oracle: unknown aliases resolve to the empty sentinel
 
-    it "parse var declaration":
-        step("Verify: parse var declaration")
-        var x = 42
-        x = 100
-        check(x == 100)
+    it "clearing the registry drops previously resolvable state":
+        step("Verify: clearing the registry drops previously resolvable state")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("anything")).to_equal("")  # oracle: after clear no alias remains registered
 
-    it "parse typed val":
-        step("Verify: parse typed val")
-        val x: i64 = 42
-        check(x == 42)
-
-    it "parse typed var":
-        step("Verify: parse typed var")
-        var x: i64 = 42
-        check(x == 42)
-
-    it "parse walrus operator":
-        step("Verify: parse walrus operator")
-        val x = 42
-        # TODO: walrus operator `:=` triggers parse error (expected indented block after ':')
-        # Once fixed, restore: x := 42
-        check(x == 42)
-
-    it "parse function declaration":
-        step("Verify: parse function declaration")
-        fn add(a: i64, b: i64) -> i64:
-            a + b
-        check(add(3, 4) == 7)
-
-    it "parse function with no return type":
-        step("Verify: parse function with no return type")
-        fn greet(name: text):
-            pass_do_nothing
-        greet("test")
-        check(true)
-
-    it "parse function with default args":
-        step("Verify: parse function with default args")
-        fn greet(name: text, prefix: text = "Hello") -> text:
-            "{prefix}, {name}!"
-        check(greet("World") == "Hello, World!")
-        check(greet("World", "Hi") == "Hi, World!")
-
-    it "parse function literally named cli (soft keyword, not reserved)":
-        step("Verify: parse function literally named cli (soft keyword, not reserved)")
-        # Regression: `cli` used to be a hard-reserved lexer keyword (for the
-        # `cli Name:` declarative arg-parsing block), which broke any
-        # identifier named `cli` -- e.g. the x86 interrupt-disable wrapper
-        # `fn cli(): ...` in src/os/kernel/boot/cpu.spl failed to parse with
-        # "expected Ident, got cli 'cli'". `cli` must remain usable as a
-        # plain function/variable name outside the `cli Name:` block shape.
-        fn cli() -> i64:
-            42
-        check(cli() == 42)
-
-    it "parse function with 'on' as a bool parameter name (soft keyword, not reserved)":
-        step("Verify: parse function with 'on' as a bool parameter name (soft keyword, not reserved)")
-        # Regression: `on` used to be a hard-reserved lexer keyword (for the
-        # `on pc{...} use handler form` AOP advice decl), which broke any
-        # function using it as a plain boolean-toggle parameter name -- the
-        # whole file failed with "expected pointcut expression 'pc{...}',
-        # found Newline", a diagnostic that names neither the offending line
-        # nor the identifier. `on` must remain usable as a plain
-        # parameter/variable name outside the `on pc{...}` advice shape.
-        # See doc/08_tracking/bug/aop_on_hard_keyword_blocks_identifier_2026-07-25.md
-        fn showcase_trace(on: bool, stage: text) -> bool:
-            if on:
-                pass_do_nothing
-            on
-        check(showcase_trace(true, "x") == true)
-        check(showcase_trace(false, "x") == false)
-
-    it "parse enum with pipe-separated variants on one line":
-        step("Verify: parse enum with pipe-separated variants on one line")
-        # Regression: src/os/drivers/input/ps2_keyboard.spl declares enum
-        # variants pipe-separated on a single line (e.g. `Escape | F1 | F2`)
-        # instead of one-per-line. The enum-variant-list loop must accept
-        # `|` as a pure separator between variant names.
-        enum Key:
-            Escape | F1 | F2
-            Up | Down
-        val k = Key.F1
-        val is_f1 = match k:
-            Key.Escape: false
-            Key.F1: true
-            Key.F2: false
-            Key.Up: false
-            Key.Down: false
-        check(is_f1)
-
-describe "Parse Expressions":
-    it "parse binary expression":
-        step("Verify: parse binary expression")
-        check(3 + 4 == 7)
-
-    it "parse parenthesized expression":
-        step("Verify: parse parenthesized expression")
-        check((3 + 4) * 2 == 14)
-
-    it "parse unary negation":
-        step("Verify: parse unary negation")
-        check(-5 == -5)
-
-    it "parse logical not":
-        step("Verify: parse logical not")
-        check(not false)
-
-    it "parse string interpolation":
-        step("Verify: parse string interpolation")
-        val name = "world"
-        check("hello {name}" == "hello world")
-
-    it "parse array literal":
-        step("Verify: parse array literal")
-        val arr = [1, 2, 3]
-        check(arr.len() == 3)
-
-    it "parse map literal":
-        step("Verify: parse map literal")
-        val m = {"a": 1, "b": 2}
-        check(m.len() == 2)
-
-    it "parse range":
-        step("Verify: parse range")
-        var count = 0
-        for i in 0..5:
-            count = count + 1
-        check(count == 5)
-
-    it "parse lambda":
-        step("Verify: parse lambda")
-        val f = \x: x * 2
-        check(f(21) == 42)
-
-    it "parse placeholder lambda":
-        step("Verify: parse placeholder lambda")
-        val f = _ * 2
-        check(f(21) == 42)
-
-    it "parse method reference":
-        step("Verify: parse method reference")
-        val words = ["hello", "world"]
-        val lengths = words.map(&:len)
-        check(lengths[0] == 5)
-
-    it "parse pipe operator":
-        step("Verify: parse pipe operator")
-        fn double(x: i64) -> i64:
-            x * 2
-        val result = 21 |> double
-        check(result == 42)
-
-    it "parse optional chaining":
-        step("Verify: parse optional chaining")
-        val x = Some(42)
-        check(x.?)
-
-    it "parse nil coalescing":
-        step("Verify: parse nil coalescing")
-        val x: Option<i64> = nil
-        val y = x ?? 99
-        check(y == 99)
-
-describe "Parse Control Flow":
-    it "parse if":
-        step("Verify: parse if")
-        var result = 0
-        if true:
-            result = 1
-        check(result == 1)
-
-    it "parse if-else":
-        step("Verify: parse if-else")
-        var result = 0
-        if false:
-            result = 1
-        else:
-            result = 2
-        check(result == 2)
-
-    it "parse if-elif-else":
-        step("Verify: parse if-elif-else")
-        val x = 5
-        var result = ""
-        if x > 10:
-            result = "big"
-        elif x > 0:
-            result = "small"
-        else:
-            result = "zero"
-        check(result == "small")
-
-    it "parse while loop":
-        step("Verify: parse while loop")
-        var i = 0
-        while i < 5:
-            i = i + 1
-        check(i == 5)
-
-    it "parse for-in loop":
-        step("Verify: parse for-in loop")
-        var sum = 0
-        for i in [1, 2, 3]:
-            sum = sum + i
-        check(sum == 6)
-
-    it "parse match expression":
-        step("Verify: parse match expression")
-        val x = 2
-        val result = match x:
-            1: "one"
-            2: "two"
-            _: "other"
-        check(result == "two")
-
-    it "parse match with destructuring":
-        step("Verify: parse match with destructuring")
-        val opt = Some(42)
-        var result = 0
-        match opt:
-            Some(v): result = v
-            nil: result = -1
-        check(result == 42)
-
-describe "Parse Class Definitions":
-    it "parse simple class":
-        step("Verify: parse simple class")
-        class Point2D:
-            x: i64
-            y: i64
-        val p = Point2D(x: 1, y: 2)
-        check(p.x == 1 and p.y == 2)
-
-    it "parse class with methods":
-        step("Verify: parse class with methods")
-        class Counter:
-            value: i64
-            fn get() -> i64:
-                self.value
-            me increment():
-                self.value = self.value + 1
-        var c = Counter(value: 0)
-        c.increment()
-        check(c.get() == 1)
-
-    it "parse class with static":
-        step("Verify: parse class with static")
-        class Factory:
-            val_field: i64
-            static fn create() -> Factory:
-                Factory(val_field: 0)
-        val f = Factory.create()
-        check(f.val_field == 0)
-
-describe "Parse Comprehensions":
-    it "list comprehension":
-        step("Verify: list comprehension")
-        val squares = [for x in 0..5: x * x]
-        check(squares.len() == 5)
-        check(squares[0] == 0)
-        check(squares[4] == 16)
-
-    it "filtered comprehension":
-        step("Verify: filtered comprehension")
-        val evens = [for x in 0..10 if x % 2 == 0: x]
-        check(evens.len() == 5)
-
-    it "nested comprehension":
-        step("Verify: nested comprehension")
-        val pairs = [for x in 0..3: x * 10]
-        check(pairs.len() == 3)

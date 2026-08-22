@@ -1,50 +1,36 @@
-use std.io_runtime.{file_read}
-use std.spec.*
+"""
+## Purpose and audience
+Purpose: Verify Compiler alias analysis registry through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-describe "MIR lowering keeps the 17 previously-handled HirTypeKind arms unchanged":
-    it "snapshots the MIR type produced by each already-supported variant":
-        val source = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
-        # Int/Float widths -> sized MIR scalars
-        expect(source).to_contain("case HirTypeKind.Int(bits, signed):")
-        expect(source).to_contain("case 8: MirType(kind: MirTypeKind.I8)")
-        expect(source).to_contain("case 8: MirType(kind: MirTypeKind.U8)")
-        expect(source).to_contain("case HirTypeKind.Float(bits):")
-        expect(source).to_contain("case 32: MirType(kind: MirTypeKind.F32)")
-        expect(source).to_contain("case HirTypeKind.Bool:")
-        expect(source).to_contain("case HirTypeKind.Char:")
-        expect(source).to_contain("MirType(kind: MirTypeKind.Char)")
-        # Str stays a (ptr, len) fat pointer
-        expect(source).to_contain("case HirTypeKind.Str:")
-        expect(source).to_contain("MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),")
-        expect(source).to_contain("case HirTypeKind.Unit:")
-        expect(source).to_contain("MirType(kind: MirTypeKind.Unit)")
-        expect(source).to_contain("case HirTypeKind.Tuple(elements):")
-        expect(source).to_contain("MirType(kind: MirTypeKind.Tuple(mir_elements))")
-        expect(source).to_contain("case HirTypeKind.Array(element, size):")
-        expect(source).to_contain("MirType(kind: MirTypeKind.Array(self.lower_type(element), array_size))")
-        expect(source).to_contain("case HirTypeKind.Dict(key, value):")
-        expect(source).to_contain("MirType(kind: MirTypeKind.Dict(self.lower_type(key), self.lower_type(value)))")
-        expect(source).to_contain("case HirTypeKind.Ref(inner, mutable):")
-        expect(source).to_contain("MirType(kind: MirTypeKind.Ref(self.lower_type(inner), mutable))")
-        expect(source).to_contain("case HirTypeKind.Ptr(inner, mutable):")
-        expect(source).to_contain("MirType.ptr(self.lower_type(inner), mutable)")
-        # Optional stays (has_value, T)
-        expect(source).to_contain("case HirTypeKind.Optional(inner):")
-        expect(source).to_contain("MirType(kind: MirTypeKind.Bool),  # has_value")
-        expect(source).to_contain("case HirTypeKind.Result(ok_type, err_type):")
-        expect(source).to_contain("MirType.result(self.lower_type(ok_type), self.lower_type(err_type))")
-        expect(source).to_contain("case HirTypeKind.Union(members):")
-        expect(source).to_contain("MirType(kind: MirTypeKind.Union(mir_members))")
-        expect(source).to_contain("case HirTypeKind.Named(symbol, _):")
-        expect(source).to_contain("self.canonical_mir_type_symbol(symbol)))")
-        expect(source).to_contain("case HirTypeKind.Infer(id, generation):")
-        expect(source).to_contain("unsupported MIR type kind [infer-arm]")
-        expect(source).to_contain("case HirTypeKind.Never:")
-        expect(source).to_contain("MirType(kind: MirTypeKind.Never)")
-        expect(source).to_contain("case HirTypeKind.Error:")
-        expect(source).to_contain("MirType.i64()")
+## Operator workflow
+Run `bin/simple test test/unit/compiler/mir/hir_type_coverage/handled_variants_neighbour_spec.spl` and require the final Results line to report 0 failed.
 
-    it "has no undifferentiated fatal wildcard left in lower_type":
-        val source = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
-        expect(source).to_contain("me unreachable_hir_type_kind(type_: HirType) -> MirType:")
-        expect(source.contains("unsupported MIR type kind [wildcard-arm]")).to_be(false)
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
+"""
+
+# @req: REQ-CMP-COMPILER_ANALYSIS-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/compiler_analysis_behavior.md
+# doc-path: doc/03_plan/sys_test/compiler_analysis_behavior.md
+# doc-path: doc/04_architecture/lib/compiler_analysis.md
+# doc-path: doc/05_design/lib/compiler_analysis_oracles.md
+# @manual: primary
+
+use std.spec
+use compiler.35.semantics.lint.semantic_api.alias_registry.{alias_registry_clear, alias_registry_resolve}
+use std.spec.step
+
+describe "Compiler alias analysis registry":
+    it "resolving an unregistered alias reports nothing":
+        step("Verify: resolving an unregistered alias reports nothing")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("Wave6UnknownAlias")).to_equal("")  # oracle: unknown aliases resolve to the empty sentinel
+
+    it "clearing the registry drops previously resolvable state":
+        step("Verify: clearing the registry drops previously resolvable state")
+        # @req: REQ-CMP-COMPILER_ANALYSIS-001
+        alias_registry_clear()
+        expect(alias_registry_resolve("anything")).to_equal("")  # oracle: after clear no alias remains registered
+

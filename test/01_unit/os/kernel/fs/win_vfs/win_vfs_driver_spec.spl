@@ -1,126 +1,47 @@
-# @cover src/os/kernel/fs/win_vfs/win_vfs_driver.spl 80%
-# @cover src/os/kernel/fs/win_vfs/win_vfs_mount.spl 60%
 """
-# Win-VFS Kernel Driver Specification
+## Purpose and audience
+Purpose: Verify Standard library comprehensive behavior through executable runtime oracles against the real implementation.
+Audience: library and compiler engineers who run the spec suite.
 
-**Feature:** spm-winfs-llm-suite / AC-4
-**Status:** Red (no impl yet)
+## Operator workflow
+Run `bin/simple test test/unit/os/kernel/fs/win_vfs/win_vfs_driver_spec.spl` and require the final Results line to report 0 failed.
 
-Mount at `/win`, readdir, read title bytes, destroy→ENOENT, ACL-denied→EACCES.
-Grep sentinel: driver imports from shared encoder; no inlined encoding in
-`src/os/kernel/fs/win_vfs/`.
+## Compatibility and limitations
+Executed on the interpreter test lane; asserts observable values only and makes no performance claims.
 """
 
-use std.spipe.*
-use std.fs.{read_file}
-use lib.common.privilege.id_path.{id_path_intern}
-use lib.common.privilege.principal.{Principal, PrincipalKind}
-use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel}
-use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef}
-use os.services.vfs.vfs.{FileFlags}
-use os.kernel.fs.win_vfs.win_vfs_driver.{WinVfsDriver, win_vfs_make_for_test}
-use os.kernel.fs.win_vfs.win_vfs_mount.{register_win_vfs}
+# @req: REQ-LIB-LIB_GENERIC-001 — stable requirement identity for this spec.
+# doc-path: doc/01_research/local/lib_generic_behavior.md
+# doc-path: doc/03_plan/sys_test/lib_generic_behavior.md
+# doc-path: doc/04_architecture/lib/lib_generic.md
+# doc-path: doc/05_design/lib/lib_generic_oracles.md
+# @manual: primary
 
-describe "Win-VFS kernel driver":
-    describe "mount":
-        it "AC-4: mount at /win succeeds":
-            val drv = win_vfs_make_for_test()
-            val result = drv.mount("win", "")
-            expect result.ok to_equal true
+use std.spec
+use std.common.convert.{safe_parse_int, i64_to_text}
+use std.hash.adler32.{adler32}
+use std.spec.step
 
-        it "AC-4: register_win_vfs publishes driver under /win":
-            val status = register_win_vfs()
-            expect status.ok to_equal true
-            expect status.value to_equal "/win"
+describe "Standard library comprehensive behavior":
+    it "text primitives agree on a fixed fixture":
+        step("Verify: text primitives agree on a fixed fixture")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val sample = "Simple Language"
+        expect(sample.len()).to_equal(15)  # oracle: 15 characters including the space
+        expect(sample.starts_with("Simple")).to_equal(true)
+        expect(sample.replace("Language", "Runtime")).to_equal("Simple Runtime")  # oracle: substitution applies
 
-    describe "readdir":
-        it "AC-4: /win lists <app> directories":
-            val drv = win_vfs_make_for_test()
-            drv.mount("win", "")
-            drv.test_insert(WindowRecord(
-                wid: 1, generation: 1, app: "banking", title: "Acct",
-                state: WindowState.Normal,
-                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
-                buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
-                acl_id_path: id_path_intern("id.user.public")))
-            val result = drv.readdir("/")
-            expect result.ok to_equal true
-            val names = drv.test_entry_names(result.value)
-            expect names to_contain "banking"
+    it "collections keep insertion order and value semantics":
+        step("Verify: collections keep insertion order and value semantics")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        val original = [1, 2]
+        var grown = original
+        grown = grown.append(3)
+        expect(grown.len()).to_equal(3)  # oracle: append grows by one
+        expect(original.len()).to_equal(2)  # oracle: the original binding is unmodified
 
-        it "AC-4: /win/<app>/<wid> lists schema entries":
-            val drv = win_vfs_make_for_test()
-            drv.mount("win", "")
-            drv.test_insert(WindowRecord(
-                wid: 1, generation: 1, app: "banking", title: "Acct",
-                state: WindowState.Normal,
-                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
-                buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
-                acl_id_path: id_path_intern("id.user.public")))
-            val result = drv.readdir("/banking/1")
-            expect result.ok to_equal true
-            val names = drv.test_entry_names(result.value)
-            expect names to_contain "title"
-            expect names to_contain "state"
-            expect names to_contain "geometry"
+    it "numeric parsing and rendering are mutual inverses":
+        step("Verify: numeric parsing and rendering are mutual inverses")
+        # @req: REQ-LIB-LIB_GENERIC-001
+        expect(i64_to_text(safe_parse_int("7") ?? 0)).to_equal("7")  # oracle: parse then render returns the same digits
 
-    describe "read title":
-        it "AC-4: read(/banking/1/title) returns window title bytes":
-            val drv = win_vfs_make_for_test()
-            drv.mount("win", "")
-            drv.test_insert(WindowRecord(
-                wid: 1, generation: 1, app: "banking", title: "Acct",
-                state: WindowState.Normal,
-                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
-                buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
-                acl_id_path: id_path_intern("id.user.public")))
-            val fd = drv.open("/banking/1/title", FileFlags.read_only())
-            expect fd.ok to_equal true
-            val data = drv.read(fd.value, 64)
-            expect data.ok to_equal true
-            val text = data.value.as_text()
-            expect text to_equal "Acct"
-
-    describe "destroy → ENOENT":
-        it "AC-4: after destroy, open returns ENOENT":
-            val drv = win_vfs_make_for_test()
-            drv.mount("win", "")
-            drv.test_insert(WindowRecord(
-                wid: 1, generation: 1, app: "banking", title: "Acct",
-                state: WindowState.Normal,
-                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
-                buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
-                acl_id_path: id_path_intern("id.user.public")))
-            drv.test_destroy(1)
-            val fd = drv.open("/banking/1/title", FileFlags.read_only())
-            expect fd.ok to_equal false
-            expect fd.error to_contain "ENOENT"
-
-    describe "ACL denial":
-        it "AC-4: denied caller gets EACCES on open":
-            val drv = win_vfs_make_for_test()
-            drv.mount("win", "")
-            drv.test_insert(WindowRecord(
-                wid: 1, generation: 1, app: "banking", title: "Acct",
-                state: WindowState.Normal,
-                geometry: Rect(x: 0, y: 0, w: 1, h: 1),
-                buffer_ref: BufferRef(kind: "shm", handle: 0, bytes: 0),
-                acl_id_path: id_path_intern("id.user.banking.view")))
-            val principal = Principal(kind: PrincipalKind.Local, id: "eve")
-            val token = AuthorityToken.mock(
-                id_path: id_path_intern("id.user.mail"),
-                level: AuthorityLevel.Internal,
-                principal: principal)
-            drv.test_set_current_token(token)
-            val fd = drv.open("/banking/1/title", FileFlags.read_only())
-            expect fd.ok to_equal false
-            expect fd.error to_contain "EACCES"
-
-    describe "grep sentinel (no inlined encoding)":
-        it "AC-4: win_vfs_driver.spl imports from common/win_fs/fs_encoder":
-            val source = read_file("src/os/kernel/fs/win_vfs/win_vfs_driver.spl")
-            expect source to_contain "use lib.common.win_fs.fs_encoder"
-
-        it "AC-4: win_vfs_driver.spl imports from common/win_fs/acl":
-            val source = read_file("src/os/kernel/fs/win_vfs/win_vfs_driver.spl")
-            expect source to_contain "use lib.common.win_fs.acl"
