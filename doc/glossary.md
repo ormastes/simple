@@ -426,6 +426,16 @@ See:
 - `doc/06_spec/app/compiler/feature/simple_optimization_plugin_spec.md`
 - `doc/02_requirements/feature/unified_optimizer_plugin.md`
 
+## Must-check tiers
+
+The mandatory release-safety split between a lightweight interactive push
+consumer and an expensive bootstrap evidence producer. The push tier validates
+committed tree structure plus a source-fresh textual SDN ledger, with bounded
+ref count and evidence hashing. The bootstrap tier runs compiler phases,
+full/exhaustive checks, Sdoctest, Caret, platform, and performance producers,
+then atomically promotes only explicit PASS evidence. TODO remains visible debt,
+never an implicit pass.
+
 ## MIR Optimizer
 The compile-time static optimization pass pipeline in `src/compiler/60.mir_opt/`. Runs deterministic passes (DCE, const-fold, inline, CSE, GVN, copy propagation, loop optimization, auto-vectorization, bounds-check elimination, tail-call optimization, strength reduction, string-builder optimization) on MIR before backend codegen. Passes implement `trait MirPass` and register via `DynamicPassRegistry` / `OptimizerManifest`. Controlled by `OptLevel` (nil/Size/Speed/Aggressive).
 

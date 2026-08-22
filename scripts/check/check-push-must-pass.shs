@@ -3,9 +3,17 @@
 set -u
 
 ROOT=${MUST_CHECK_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}
+[ -n "$ROOT" ] || { echo "push-must-check: FAIL — cannot locate repository root" >&2; exit 1; }
+ROOT=$(CDPATH= cd -- "$ROOT" 2>/dev/null && pwd -P) || {
+    echo "push-must-check: FAIL — cannot canonicalize repository root" >&2
+    exit 1
+}
 LEDGER_REL=${MUST_CHECK_LEDGER_REL:-doc/08_tracking/check/must_check_db.sdn}
 MANIFEST_REL=${MUST_CHECK_MANIFEST_REL:-config/check/must_check_gates.sdn}
 ZERO=0000000000000000000000000000000000000000
+MAX_PUSH_REF_ROWS=2
+MAX_EVIDENCE_BYTES=67108864
+ALLOW_EXTERNAL_EVIDENCE=0
 
 die() { echo "push-must-check: FAIL — $*" >&2; exit 1; }
 
@@ -20,6 +28,29 @@ fingerprint_rev() {
 }
 
 hash_file() { sha256sum -- "$1" 2>/dev/null | awk '{print $1}'; }
+
+resolve_evidence_path() {
+    _candidate=$1
+    case "$_candidate" in
+        /*)
+            [ "$ALLOW_EXTERNAL_EVIDENCE" -eq 1 ] || return 1
+            _joined=$_candidate
+            ;;
+        ''|..|../*|*/../*|*/..)
+            return 1
+            ;;
+        *)
+            _joined="$ROOT/$_candidate"
+            ;;
+    esac
+    _evidence_dir=$(CDPATH= cd -- "$(dirname -- "$_joined")" 2>/dev/null && pwd -P) || return 1
+    case "$_evidence_dir" in
+        "$ROOT"|"$ROOT"/*) ;;
+        *) [ "$ALLOW_EXTERNAL_EVIDENCE" -eq 1 ] || return 1 ;;
+    esac
+    EVIDENCE_PATH="$_evidence_dir/$(basename -- "$_joined")"
+    [ -f "$EVIDENCE_PATH" ] && [ ! -L "$EVIDENCE_PATH" ]
+}
 
 field_from_text() {
     _key=$1
@@ -41,6 +72,7 @@ validate_ledger_text() {
     [ "$(printf '%s\n' "$_ledger_ids" | sort | uniq -d | wc -l)" -eq 0 ] || return 14
     [ "$(printf '%s\n' "$_manifest_ids" | sort)" = "$(printf '%s\n' "$_ledger_ids" | sort)" ] || return 15
     _todo=0
+    _evidence_total=0
     printf '%s\n' "$_manifest" | awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/ {print}' |
     while IFS=, read -r _id _tier _blocking _mode _command _description; do
         _id=$(printf '%s' "$_id" | tr -d ' ')
@@ -61,9 +93,12 @@ validate_ledger_text() {
             printf '%s\n' "$_passed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' || exit 23
             [ -n "$_evidence" ] && [ "$_evidence" != never ] && [ "$_evidence" != "pending required evidence" ] || exit 25
             printf '%s\n' "$_evidence_sha" | grep -Eq '^[0-9a-f]{64}$' || exit 27
-            case "$_evidence" in /*) _evidence_path=$_evidence ;; *) _evidence_path="$ROOT/$_evidence" ;; esac
-            [ -f "$_evidence_path" ] && [ ! -L "$_evidence_path" ] || exit 28
-            [ "$(hash_file "$_evidence_path")" = "$_evidence_sha" ] || exit 29
+            resolve_evidence_path "$_evidence" || exit 28
+            _evidence_size=$(wc -c < "$EVIDENCE_PATH" | tr -d ' ') || exit 33
+            case "$_evidence_size" in ''|*[!0-9]*) exit 33 ;; esac
+            _evidence_total=$(( _evidence_total + _evidence_size ))
+            [ "$_evidence_total" -le "$MAX_EVIDENCE_BYTES" ] || exit 34
+            [ "$(hash_file "$EVIDENCE_PATH")" = "$_evidence_sha" ] || exit 29
             [ "$_unblock" = none ] || exit 31
         elif [ "$_passed_at" != never ]; then
             exit 24
@@ -117,6 +152,7 @@ if [ "${1:-}" = --self-test ]; then
     _evidence_sha=$(hash_file "$_tmp/evidence") || exit 1
     sed 's/source_fingerprint: "unrecorded"/source_fingerprint: "abc"/; s/compiler-stage1, todo, never/compiler-stage1, pass, 2000-01-01T00:00:00Z/; s/compiler-stage2, todo, never/compiler-stage2, pass, 2000-01-01T00:00:00Z/; s/compiler-stage3, todo, never/compiler-stage3, pass, 2000-01-01T00:00:00Z/; s/compiler-stage4, todo, never/compiler-stage4, pass, 2000-01-01T00:00:00Z/' "$_tmp/ledger" > "$_tmp/pass-raw"
     awk -F, -v ev="$_tmp/evidence" -v sha="$_evidence_sha" 'BEGIN{OFS=","} $2 ~ /pass/ {$5=" \"" ev "\""; $6=" \"" sha "\""; $8=" \"none\""} {print}' "$_tmp/pass-raw" > "$_tmp/pass"
+    ALLOW_EXTERNAL_EVIDENCE=1
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" abc || die "valid fixture rejected"
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" stale && die "stale fixture accepted"
     sed 's/compiler-stage4, pass/compiler-stage4, fail/' "$_tmp/pass" > "$_tmp/fail"
@@ -141,15 +177,31 @@ if [ "${1:-}" = --self-test ]; then
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass-with-unblock")" abc && die "PASS with pending unblock accepted"
     sed 's/compiler-stage4, pass, 2000-01-01T00:00:00Z/compiler-stage4, todo, never/; s/, "compiler-team", "none"$/, "compiler-team", "none"/' "$_tmp/pass" > "$_tmp/todo-without-unblock"
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/todo-without-unblock")" abc && die "TODO without unblock accepted"
-    echo "push-must-check: PASS — 12 ledger fixtures checked"
+    printf '%s\n' 'self-test authoritative evidence' > "$_tmp/evidence"
+    ALLOW_EXTERNAL_EVIDENCE=0
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" abc && die "external absolute evidence accepted"
+    awk -F, 'BEGIN{OFS=","} $2 ~ /pass/ {$5=" \"../outside-evidence\""} {print}' "$_tmp/pass" > "$_tmp/traversal"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/traversal")" abc && die "parent-traversal evidence accepted"
+    ALLOW_EXTERNAL_EVIDENCE=1
+    MAX_EVIDENCE_BYTES=1
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" abc && die "oversize aggregate evidence accepted"
+    echo "push-must-check: PASS — 15 ledger fixtures checked"
     exit 0
 fi
 
 [ -f "$ROOT/$MANIFEST_REL" ] || die "missing manifest $MANIFEST_REL"
 _refs=$(mktemp) || exit 2
-trap 'rm -f "$_refs"' EXIT INT TERM
+_unique_refs=$(mktemp) || exit 2
+trap 'rm -f "$_refs" "$_unique_refs"' EXIT INT TERM
 cat > "$_refs"
 [ -s "$_refs" ] || die "no pushed refs were provided"
+
+awk 'NF != 4 {bad=1; next} !seen[$2 SUBSEP $4]++ {print} END {exit bad}' "$_refs" > "$_unique_refs" ||
+    die "malformed pushed ref row"
+_ref_count=$(wc -l < "$_unique_refs" | tr -d ' ')
+[ "$_ref_count" -gt 0 ] || die "no non-duplicate pushed refs were provided"
+[ "$_ref_count" -le "$MAX_PUSH_REF_ROWS" ] ||
+    die "$_ref_count unique ref updates exceed the bounded limit $MAX_PUSH_REF_ROWS; split the push"
 
 while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     [ "$_local_sha" = "$ZERO" ] && continue
@@ -164,6 +216,6 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     fi
     run_manifest_push_gates "$_manifest" "$_range" "$_local_sha" ||
         die "one or more manifest-declared push gates failed"
-done < "$_refs"
+done < "$_unique_refs"
 
 echo "push-must-check: PASS — lightweight committed-tree and bootstrap-ledger checks passed"
