@@ -1,7 +1,7 @@
 # Aspect Dynload, Runtime, HAL, and Bootstrap Status
 
 **Date:** 2026-08-19  
-**Overall:** PLAN READY; IMPLEMENTATION INCOMPLETE; RELEASE NOT READY  
+**Overall:** IMPLEMENTATION PARTIAL; END-TO-END EVIDENCE INCOMPLETE; RELEASE NOT READY  
 **Plan:** `doc/03_plan/compiler/aspect_dynload/aspect_dynload_lane_plan_2026-08-19.md`
 
 ## Test status
@@ -84,6 +84,18 @@ as parallel supporting lanes.
 
 ## Current verdict
 
-**STATUS: WARN** — planning and repository-config recovery are complete, but
-implementation, current test reconciliation, real HAL coverage, pure-Simple
-bootstrap admission, and exact cleanup manifests remain incomplete.
+**STATUS: WARN** — the 2026-08-22 implementation tranche now includes compiler
+MC/DC manifests and probes, native report accounting, exact normal/alpha/beta
+promotion gates, five-kind governed exclusions, static/dynamic aspect policy,
+bounded environment adapters and replay cursors, critical-closure allocation
+and assurance checks, and bounded provider configuration. Focused native
+evidence measures the disarmed patchpoint at 3 ns/call versus a 2 ns baseline,
+with zero allocation/map/dynload activity and 1,024 KiB peak RSS.
+
+Release remains blocked on a source-current admitted Pure Simple compiler and
+the canonical matched five-mode receipt. Static-off/static-on and armed-mode
+NFR rows therefore remain unproven. The sealed provider protocol still carries
+digests rather than normalized operation payloads, so tagged calls are not yet
+wired end-to-end to real Pure/C/Rust I/O comparison or automatic environment
+instruction extraction. Trusted live sandbox execution is also unavailable on
+the current host. These are active gaps, not exclusions or PASS results.
