@@ -751,6 +751,18 @@ module traversal therefore requires a future sorted preregistration phase over
 all enum and variant identities; the incremental lowering owner cannot relocate
 an ID after it has already been embedded in HIR.
 
+### Name-lint indexed ownership
+
+One file-owned `NameLintClassIndex` retains source-order class records and a
+name-to-first-index dictionary, preserving the former first-match rule for
+duplicate declarations. Each class computes its ordered inherited-name vector
+and membership dictionary once for both ACC001 and NAME001. ACC001 uses a
+first-seen suffix vector plus flat group head/tail/next arrays, avoiding nested
+bucket mutation while retaining suffix-group order and method order. Class parsing
+owns the current method array locally and publishes the class once. Compatibility
+wrappers may construct an index for standalone calls; the normal lint path
+shares the single index and ancestry facts.
+
 HIR narrowing reserves the enum ID before building its Named enum type.
 Synthesis reserves the same enum identity and every `name::member-key` variant
 identity, then constructs the enum with those assigned IDs. Per-match member
