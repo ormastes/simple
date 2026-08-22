@@ -171,12 +171,13 @@ fn lint_cli_append_parsed_results(
         # is reserved for typed, high-confidence evidence; unresolved receiver,
         # effect, alias, and mutation facts must never become a build error.
         val base_level = LintLevel.Warn
-        val configured_level = apply_config_level(config, warning.code, base_level)
-        val level = if configured_level == LintLevel.Deny: LintLevel.Warn else: configured_level
+        val level = apply_config_level_for_evidence(
+            config, warning.code, base_level, LintEvidenceTier.SourcePattern)
         val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
             .with_fix(warning.hint)
             .with_evidence(["item=" + warning.item_name, "source_severity=" + warning.severity])
             .with_uncertainty("source-pattern fallback; receiver type, effects, aliasing, and mutation version are unresolved")
+            .with_evidence_tier(LintEvidenceTier.SourcePattern)
         # Locate the offending line textually; the AST span pool is empty on
         # this path (verified: expr/stmt spans all read 0 and span_is_valid is
         # false), so line recovery here works the same way lint_cli_find_fn_line
@@ -419,7 +420,7 @@ fn lint_main() -> Int:
         print("Usage: simple_lint <file.spl> [options]")
         print("")
         print("Options:")
-        print("  --deny-all        Treat all warnings as errors")
+        print("  --deny-all        Treat all deniable warnings as errors")
         print("  --warn-all        Enable all style lints")
         print("  --profile=<tier>  Strictness tier: moderate | strict | robust | critical")
         print("  --json            Output in JSON format")
@@ -538,29 +539,29 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
                 for lint_item in results:
                     if lint_item.lint.code == "PARSE001":
                         not_linted = true
+                    val effective_item = lint_run_result_apply_cli_policy(lint_item, deny_all)
                     if json_output:
                         var level_text = "allow"
-                        match lint_item.lint.level:
+                        match effective_item.lint.level:
                             case Deny: level_text = "error"
                             case Warn: level_text = "warning"
                             case Allow: val _ = 0
-                        val evidence_json = lint_evidence_json(lint_item.lint.evidence)
-                        val uncertainty_json = lint_uncertainty_json(lint_item.lint.uncertainty)
-                        print("{\"type\":\"lint-diagnostic\",\"file\":\"{escape_json(lint_item.file_path)}\",\"line\":{lint_item.line},\"column\":{lint_item.column},\"level\":\"{level_text}\",\"code\":\"{escape_json(lint_item.lint.code)}\",\"message\":\"{escape_json(lint_item.lint.message)}\",\"evidence\":{evidence_json},\"uncertainty\":{uncertainty_json}}")
+                        val evidence_json = lint_evidence_json(effective_item.lint.evidence)
+                        val uncertainty_json = lint_uncertainty_json(effective_item.lint.uncertainty)
+                        val confidence = lint_evidence_tier_name(effective_item.lint.evidence_tier)
+                        print("{\"type\":\"lint-diagnostic\",\"file\":\"{escape_json(effective_item.file_path)}\",\"line\":{effective_item.line},\"column\":{effective_item.column},\"level\":\"{level_text}\",\"code\":\"{escape_json(effective_item.lint.code)}\",\"message\":\"{escape_json(effective_item.lint.message)}\",\"confidence\":\"{confidence}\",\"evidence\":{evidence_json},\"uncertainty\":{uncertainty_json}}")
                     else:
-                        print(lint_item.format())
+                        print(effective_item.format())
 
-                    match lint_item.lint.level:
+                    match effective_item.lint.level:
                         case Deny:
                             error_count = error_count + 1
                         case Warn:
                             warning_count = warning_count + 1
-                            if deny_all:
-                                error_count = error_count + 1
                         case Allow:
                             val _ = 0
 
-                    if lint_item.has_easy_fix():
+                    if effective_item.has_easy_fix():
                         fix_count = fix_count + 1
 
                 # Render the flag as text rather than interpolating the Bool:

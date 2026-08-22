@@ -26,6 +26,13 @@ applicable receipts, not merely the structural slice.
 
 `PerfRuleRegistry` owns stable code, group, tier, default kind/policy, fix support, and suppression. `PerfDiagnostic` projects to legacy V1 only for compatibility-owned rules and to deterministic V2 text/JSON/LSP. Exact source origin is mandatory; textual location recovery is removed per migrated rule.
 
+During compatibility migration, `LintDiag.evidence_tier` is the single severity
+input shared by CLI and query/LSP projections. `SourcePattern`,
+`ParsedStructural`, and `Incomplete` performance diagnostics are warning-capped;
+`TypedProven` follows profile policy. Human and JSON output carry the same stable
+confidence, evidence, and uncertainty fields. The projection does no source read,
+parse, hash, or tree traversal.
+
 ### Symbolic resources
 
 `CostExpr` constructors flatten/sort/fold checked constants, cap depth/degree/variables/parts, and return `Unknown(BudgetExceeded)` rather than overflow. Expected, amortized, worst-case, total allocation, copied bytes, and peak-live bytes remain distinct.
