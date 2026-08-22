@@ -210,7 +210,9 @@ int hal_sealed_session_invoke_mask_v1(
         if ((lane_mask & (1u << i)) == 0) continue;
         if (!read_line_deadline(s->lane[i].fd_out, result[i], HAL_SEALED_FRAME_CAP_V1,
                                 deadline, &result_size[i]) ||
-            result_size[i] < 8 || memcmp(result[i], "HALRES1|", 8) != 0) {
+            result_size[i] < 8 ||
+            (memcmp(result[i], "HALRES1|", 8) != 0 &&
+             memcmp(result[i], "HALRES2|", 8) != 0)) {
             s->lane[i].healthy = 0; return 0;
         }
     }

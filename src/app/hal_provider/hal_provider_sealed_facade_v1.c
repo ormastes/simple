@@ -22,10 +22,17 @@ typedef struct {
     HalSealedSessionConfigV1 config;
     int64_t result[HAL_SEALED_FACADE_LANES_V1]
                   [HAL_SEALED_FACADE_RESULT_FIELDS_V1];
+    int64_t result_v2[HAL_SEALED_FACADE_LANES_V1]
+                     [HAL_SEALED_FACADE_RESULT_FIELDS_V2];
     uint64_t generation;
     _Atomic int state; /* 0 free, 1 maintenance, 2 sealed, 3 invoking */
     int32_t last_status;
     int32_t completed_mask;
+    int32_t result_schema;
+    int32_t difference_mask_v2;
+    int32_t commit_allowed_v2;
+    int32_t selected_provider_v2;
+    int64_t last_v2_invocation;
 } HalSealedFacadeSlotV1;
 
 static HalSealedFacadeSlotV1 g_slots[HAL_FACADE_SLOT_COUNT_V1];
@@ -101,6 +108,50 @@ static int parse_result(const unsigned char *p, size_t n, int lane,
     return 1;
 }
 
+static int parse_result_v2(
+        const unsigned char *p, size_t n, int lane, int64_t invocation,
+        int64_t out[HAL_SEALED_FACADE_RESULT_FIELDS_V2]) {
+    size_t at = 8;
+    int field;
+    if (!p || n < 10 || n >= HAL_SEALED_FRAME_CAP_V1 ||
+        memcmp(p, "HALRES2|", 8) != 0 || p[n - 1] != '\n') return 0;
+    for (field = 0; field < HAL_SEALED_FACADE_RESULT_FIELDS_V2; ++field) {
+        if (!parse_i64(p, n, &at, &out[field])) return 0;
+        if (field + 1 < HAL_SEALED_FACADE_RESULT_FIELDS_V2) {
+            if (at >= n || p[at++] != '|') return 0;
+        }
+    }
+    if (at + 1 != n || p[at] != '\n' || out[0] != lane ||
+        out[1] != invocation || out[2] < 0 || out[2] > 7 ||
+        out[3] < 0 || out[3] > 4 || out[4] < 0 || out[5] < 0 ||
+        out[6] != 1 || out[8] != 8 || out[9] < 8 || out[9] > 32 ||
+        (out[10] == 0 && out[11] == 0) || out[12] != 1 || out[13] != 1 ||
+        out[14] <= 0 || out[13] > out[14] || out[15] != 0 ||
+        out[16] != -1 || out[17] != 0 || out[18] < 0) return 0;
+    if ((out[2] == 0 && (out[3] != 0 || out[4] != 0 || out[5] != 0)) ||
+        (out[2] != 0 && (out[3] == 0 || out[4] <= 0))) return 0;
+    return 1;
+}
+
+static int result_v2_equivalent(const int64_t *a, const int64_t *b) {
+    int field;
+    /* Provider (0) and elapsed ticks (18) are intentionally lane-local. */
+    for (field = 2; field < 18; ++field)
+        if (a[field] != b[field]) return 0;
+    return 1;
+}
+
+static int difference_mask_v2(const int64_t result[3][19]) {
+    int difference = 0;
+    if (!result_v2_equivalent(result[0], result[1]))
+        difference |= HAL_SEALED_DIFFERENCE_PURE_C_V2;
+    if (!result_v2_equivalent(result[0], result[2]))
+        difference |= HAL_SEALED_DIFFERENCE_PURE_RUST_V2;
+    if (!result_v2_equivalent(result[1], result[2]))
+        difference |= HAL_SEALED_DIFFERENCE_C_RUST_V2;
+    return difference;
+}
+
 uint64_t hal_sealed_facade_prepare_config_v1(
     const char *launcher, const char *pure_worker, const char *c_worker,
     const char *rust_worker, int64_t deadline_ms) {
@@ -125,6 +176,7 @@ uint64_t hal_sealed_facade_prepare_config_v1(
         }
         memset(&g_slots[index].session, 0, sizeof(g_slots[index].session));
         memset(g_slots[index].result, 0, sizeof(g_slots[index].result));
+        memset(g_slots[index].result_v2, 0, sizeof(g_slots[index].result_v2));
         g_slots[index].config.launcher = launcher;
         g_slots[index].config.worker[0] = worker[0];
         g_slots[index].config.worker[1] = worker[1];
@@ -133,6 +185,11 @@ uint64_t hal_sealed_facade_prepare_config_v1(
         g_slots[index].generation = generation;
         g_slots[index].last_status = HAL_SEALED_FACADE_STATUS_STATE_V1;
         g_slots[index].completed_mask = 0;
+        g_slots[index].result_schema = 0;
+        g_slots[index].difference_mask_v2 = 0;
+        g_slots[index].commit_allowed_v2 = 0;
+        g_slots[index].selected_provider_v2 = -1;
+        g_slots[index].last_v2_invocation = 0;
         if (!hal_sealed_session_prepare_v1(&g_slots[index].session,
                                            &g_slots[index].config)) {
             g_slots[index].generation = 0;
@@ -203,6 +260,10 @@ int32_t rt_hal_sealed_invoke_mode_v1(
             &slot->state, &expected, 3, memory_order_acq_rel,
             memory_order_acquire)) return HAL_SEALED_FACADE_STATUS_STATE_V1;
     slot->completed_mask = 0;
+    slot->result_schema = 0;
+    slot->difference_mask_v2 = 0;
+    slot->commit_allowed_v2 = 0;
+    slot->selected_provider_v2 = -1;
     request_size = snprintf((char *)request, sizeof(request),
         "HALREQ1|1|%lld|%lld|%lld|%lld|%lld|%lld|%lld\n",
         (long long)operation_id, (long long)invocation_id,
@@ -227,9 +288,135 @@ int32_t rt_hal_sealed_invoke_mode_v1(
         }
     }
     slot->completed_mask = (int32_t)lane_mask;
+    slot->result_schema = 1;
     slot->last_status = HAL_SEALED_FACADE_STATUS_OK_V1;
     atomic_store_explicit(&slot->state, 2, memory_order_release);
     return HAL_SEALED_FACADE_STATUS_OK_V1;
+}
+
+int32_t rt_hal_sealed_invoke_clock_mode_v2(
+        uint64_t handle, int32_t run_mode, int32_t preferred_provider,
+        int64_t operation_id, int64_t invocation_id, int64_t fixture_id,
+        int64_t captured_scalar, int64_t result_capacity,
+        int64_t trace_identity_hi, int64_t trace_identity_lo,
+        int64_t trace_cursor, int64_t trace_length, int64_t trace_capacity) {
+    HalSealedFacadeSlotV1 *slot = lookup(handle, NULL);
+    unsigned char request[HAL_SEALED_FRAME_CAP_V1];
+    unsigned char result[3][HAL_SEALED_FRAME_CAP_V1];
+    size_t result_size[3];
+    unsigned lane_mask;
+    int expected = 2, request_size, lane, difference = 0;
+    if (!slot || run_mode < HAL_SEALED_RUN_ALPHA_V1 ||
+        run_mode > HAL_SEALED_RUN_NORMAL_V1 || preferred_provider < 0 ||
+        preferred_provider >= HAL_SEALED_FACADE_LANES_V1 ||
+        operation_id <= 0 || invocation_id <= 0 || fixture_id <= 0 ||
+        result_capacity < 8 || result_capacity > 32 ||
+        (trace_identity_hi == 0 && trace_identity_lo == 0) ||
+        trace_cursor != 1 || trace_length != 1 || trace_capacity < 1)
+        return HAL_SEALED_FACADE_STATUS_INVALID_V1;
+    /* The strictly increasing invocation is the sealed session's bounded,
+     * allocation-free one-consumption cursor. A captured ClockRead receipt can
+     * never be replayed, including after a divergent comparison. */
+    lane_mask = run_mode == HAL_SEALED_RUN_NORMAL_V1
+        ? (1u << (unsigned)preferred_provider) : 7u;
+    if (!atomic_compare_exchange_strong_explicit(
+            &slot->state, &expected, 3, memory_order_acq_rel,
+            memory_order_acquire)) return HAL_SEALED_FACADE_STATUS_STATE_V1;
+    if (invocation_id <= slot->last_v2_invocation) {
+        atomic_store_explicit(&slot->state, 2, memory_order_release);
+        return HAL_SEALED_FACADE_STATUS_INVALID_V1;
+    }
+    slot->completed_mask = 0;
+    slot->result_schema = 0;
+    slot->difference_mask_v2 = 0;
+    slot->commit_allowed_v2 = 0;
+    slot->selected_provider_v2 = -1;
+    slot->last_v2_invocation = invocation_id;
+    request_size = snprintf((char *)request, sizeof(request),
+        "HALREQ2|2|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld|%lld\n",
+        (long long)operation_id, (long long)invocation_id,
+        (long long)fixture_id, (long long)captured_scalar,
+        (long long)result_capacity, (long long)trace_identity_hi,
+        (long long)trace_identity_lo, (long long)trace_cursor,
+        (long long)trace_length, (long long)trace_capacity);
+    if (request_size <= 0 || (size_t)request_size >= sizeof(request) ||
+        !hal_sealed_session_invoke_mask_v1(&slot->session,
+            (uint64_t)invocation_id, lane_mask, request, (size_t)request_size,
+            result, result_size)) {
+        slot->last_status = HAL_SEALED_FACADE_STATUS_IO_V1;
+        atomic_store_explicit(&slot->state, 2, memory_order_release);
+        return slot->last_status;
+    }
+    for (lane = 0; lane < 3; ++lane) {
+        if ((lane_mask & (1u << lane)) == 0) continue;
+        if (!parse_result_v2(result[lane], result_size[lane], lane,
+                             invocation_id, slot->result_v2[lane]) ||
+            slot->result_v2[lane][9] != result_capacity ||
+            slot->result_v2[lane][10] != trace_identity_hi ||
+            slot->result_v2[lane][11] != trace_identity_lo ||
+            slot->result_v2[lane][12] != trace_cursor ||
+            slot->result_v2[lane][13] != trace_length ||
+            slot->result_v2[lane][14] != trace_capacity) {
+            slot->last_status = HAL_SEALED_FACADE_STATUS_PROTOCOL_V1;
+            atomic_store_explicit(&slot->state, 2, memory_order_release);
+            return slot->last_status;
+        }
+    }
+    if (run_mode != HAL_SEALED_RUN_NORMAL_V1)
+        difference = difference_mask_v2(slot->result_v2);
+    slot->completed_mask = (int32_t)lane_mask;
+    slot->result_schema = 2;
+    slot->difference_mask_v2 = difference;
+    slot->selected_provider_v2 = preferred_provider;
+    slot->commit_allowed_v2 = difference == 0 ||
+        run_mode == HAL_SEALED_RUN_BETA_V1 ||
+        run_mode == HAL_SEALED_RUN_NORMAL_V1;
+    slot->last_status = difference != 0 && run_mode == HAL_SEALED_RUN_ALPHA_V1
+        ? HAL_SEALED_FACADE_STATUS_DIVERGED_V2
+        : HAL_SEALED_FACADE_STATUS_OK_V1;
+    atomic_store_explicit(&slot->state, 2, memory_order_release);
+    return slot->last_status;
+}
+
+int32_t rt_hal_sealed_invoke_clock_v2(
+        uint64_t handle, int64_t operation_id, int64_t invocation_id,
+        int64_t fixture_id, int64_t captured_scalar,
+        int64_t trace_identity_hi, int64_t trace_identity_lo) {
+    /* No configuration is fail-safe: compare all lanes, stop on divergence,
+     * and prefer Pure Simple only after exact agreement. */
+    return rt_hal_sealed_invoke_clock_mode_v2(
+        handle, HAL_SEALED_RUN_ALPHA_V1, 0, operation_id, invocation_id,
+        fixture_id, captured_scalar, 8, trace_identity_hi,
+        trace_identity_lo, 1, 1, 1);
+}
+
+int64_t rt_hal_sealed_result_field_v2(uint64_t handle, int32_t lane,
+                                      int32_t field) {
+    HalSealedFacadeSlotV1 *slot = lookup(handle, NULL);
+    if (!slot || atomic_load_explicit(&slot->state, memory_order_acquire) != 2 ||
+        slot->result_schema != 2 || lane < 0 || lane >= 3 ||
+        (slot->completed_mask & (1 << lane)) == 0 || field < 0 ||
+        field >= HAL_SEALED_FACADE_RESULT_FIELDS_V2) return INT64_MIN;
+    return slot->result_v2[lane][field];
+}
+
+int32_t rt_hal_sealed_difference_mask_v2(uint64_t handle) {
+    HalSealedFacadeSlotV1 *slot = lookup(handle, NULL);
+    return slot && atomic_load_explicit(&slot->state, memory_order_acquire) == 2 &&
+        slot->result_schema == 2 ? slot->difference_mask_v2 : 0;
+}
+
+int32_t rt_hal_sealed_commit_allowed_v2(uint64_t handle) {
+    HalSealedFacadeSlotV1 *slot = lookup(handle, NULL);
+    return slot && atomic_load_explicit(&slot->state, memory_order_acquire) == 2 &&
+        slot->result_schema == 2 ? slot->commit_allowed_v2 : 0;
+}
+
+int32_t rt_hal_sealed_selected_provider_v2(uint64_t handle) {
+    HalSealedFacadeSlotV1 *slot = lookup(handle, NULL);
+    return slot && atomic_load_explicit(&slot->state, memory_order_acquire) == 2 &&
+        slot->result_schema == 2 && slot->commit_allowed_v2
+        ? slot->selected_provider_v2 : -1;
 }
 
 int32_t rt_hal_sealed_invoke_v1(uint64_t handle, int64_t operation_id,
@@ -244,7 +431,8 @@ int32_t rt_hal_sealed_invoke_v1(uint64_t handle, int64_t operation_id,
 int32_t rt_hal_sealed_completed_mask_v1(uint64_t handle) {
     HalSealedFacadeSlotV1 *slot = lookup(handle, NULL);
     if (!slot || atomic_load_explicit(&slot->state, memory_order_acquire) != 2 ||
-        slot->last_status != HAL_SEALED_FACADE_STATUS_OK_V1) return 0;
+        (slot->last_status != HAL_SEALED_FACADE_STATUS_OK_V1 &&
+         slot->last_status != HAL_SEALED_FACADE_STATUS_DIVERGED_V2)) return 0;
     return slot->completed_mask;
 }
 
@@ -252,7 +440,8 @@ int64_t rt_hal_sealed_result_field_v1(uint64_t handle, int32_t lane,
                                       int32_t field) {
     HalSealedFacadeSlotV1 *slot = lookup(handle, NULL);
     if (!slot || atomic_load_explicit(&slot->state, memory_order_acquire) != 2 ||
-        slot->last_status != HAL_SEALED_FACADE_STATUS_OK_V1 || lane < 0 ||
+        slot->last_status != HAL_SEALED_FACADE_STATUS_OK_V1 ||
+        slot->result_schema != 1 || lane < 0 ||
         lane >= 3 || (slot->completed_mask & (1 << lane)) == 0 ||
         field < 0 || field >= 16) return INT64_MIN;
     return slot->result[lane][field];

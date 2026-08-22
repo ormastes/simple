@@ -8,10 +8,12 @@ val HAL_SEALED_STATUS_INVALID_V1: i32 = 1
 val HAL_SEALED_STATUS_STATE_V1: i32 = 2
 val HAL_SEALED_STATUS_IO_V1: i32 = 3
 val HAL_SEALED_STATUS_PROTOCOL_V1: i32 = 4
+val HAL_SEALED_STATUS_DIVERGED_V2: i32 = 5
 val HAL_SEALED_PHASE_EMPTY_V1: i32 = 0
 val HAL_SEALED_PHASE_PREPARED_V1: i32 = 1
 val HAL_SEALED_PHASE_CRITICAL_V1: i32 = 2
 val HAL_SEALED_RESULT_FIELD_COUNT_V1: i32 = 16
+val HAL_SEALED_RESULT_FIELD_COUNT_V2: i32 = 19
 
 extern fn rt_hal_sealed_prepare_v1(deadline_ms: i64) -> u64
 extern fn rt_hal_sealed_seal_v1(handle: u64) -> i32
@@ -26,6 +28,23 @@ extern fn rt_hal_sealed_invoke_mode_v1(
     input_offset: i64, input_length: i64, input_capacity: i64,
     trace_capacity: i64
 ) -> i32
+extern fn rt_hal_sealed_invoke_clock_mode_v2(
+    handle: u64, run_mode: i32, preferred_provider: i32,
+    operation_id: i64, invocation_id: i64, fixture_id: i64,
+    captured_scalar: i64, result_capacity: i64,
+    trace_identity_hi: i64, trace_identity_lo: i64,
+    trace_cursor: i64, trace_length: i64, trace_capacity: i64
+) -> i32
+extern fn rt_hal_sealed_invoke_clock_v2(
+    handle: u64, operation_id: i64, invocation_id: i64, fixture_id: i64,
+    captured_scalar: i64, trace_identity_hi: i64, trace_identity_lo: i64
+) -> i32
+extern fn rt_hal_sealed_result_field_v2(
+    handle: u64, lane: i32, field: i32
+) -> i64
+extern fn rt_hal_sealed_difference_mask_v2(handle: u64) -> i32
+extern fn rt_hal_sealed_commit_allowed_v2(handle: u64) -> i32
+extern fn rt_hal_sealed_selected_provider_v2(handle: u64) -> i32
 extern fn rt_hal_sealed_completed_mask_v1(handle: u64) -> i32
 extern fn rt_hal_sealed_result_field_v1(
     handle: u64, lane: i32, field: i32
@@ -42,6 +61,20 @@ struct HalSealedInvocationReceiptV1:
     completed_mask: i64
     isolation_proven_mask: i64
     critical_ready: bool
+    hot_spawn_count: u64
+    hot_allocation_count: u64
+
+struct HalSealedClockReceiptV2:
+    native_status: i32
+    completed_mask: i64
+    difference_pair_mask: i64
+    commit_allowed: bool
+    selected_provider: HalProviderKind
+    selected_provider_valid: bool
+    environment_bound: bool
+    pure_result: HalProviderResultV2
+    c_result: HalProviderResultV2
+    rust_result: HalProviderResultV2
     hot_spawn_count: u64
     hot_allocation_count: u64
 
@@ -106,6 +139,77 @@ fn _hal_sealed_invalid_result(provider: HalProviderKind,
     hal_provider_result_v1(provider, invocation_id,
         HalStatusV1.ProviderError, 1, 0, 0, 0, 0, 0, 0, 0, 0,
         HalOverflowKindV1.None, -1, 0, 0)
+
+fn _hal_sealed_error_domain_v2(value: i64) -> HalErrorDomainV2:
+    match value:
+        case 0: HalErrorDomainV2.None
+        case 1: HalErrorDomainV2.Contract
+        case 2: HalErrorDomainV2.Provider
+        case 3: HalErrorDomainV2.Environment
+        case _: HalErrorDomainV2.Runtime
+
+fn _hal_sealed_invalid_result_v2(provider: HalProviderKind,
+                                 invocation_id: i64) -> HalProviderResultV2:
+    HalProviderResultV2(
+        contract_version: 0, provider: provider,
+        invocation_id: invocation_id, status: HalStatusV1.ProviderError,
+        value_kind: HalNormalizedValueKindV2.None, scalar: 0,
+        bytes: hal_inline_bytes_v2(0, 0),
+        error: hal_structured_error_v2(HalErrorDomainV2.Provider, 1),
+        trace: hal_trace_position_v2(0, 0, 0, 0, 0),
+        overflow_kind: HalOverflowKindV1.None,
+        overflow_first: -1, overflow_count: 0, elapsed_ticks: 0)
+
+fn _hal_sealed_result_v2(handle: u64, lane: i32, invocation_id: i64,
+                         valid: bool) -> HalProviderResultV2:
+    val provider = _hal_sealed_provider(lane)
+    if not valid:
+        return _hal_sealed_invalid_result_v2(provider, invocation_id)
+    hal_provider_scalar_result_v2(
+        provider, rt_hal_sealed_result_field_v2(handle, lane, 1),
+        _hal_sealed_status(rt_hal_sealed_result_field_v2(handle, lane, 2)),
+        rt_hal_sealed_result_field_v2(handle, lane, 7),
+        hal_structured_error_v2(
+            _hal_sealed_error_domain_v2(
+                rt_hal_sealed_result_field_v2(handle, lane, 3)),
+            rt_hal_sealed_result_field_v2(handle, lane, 4),
+            rt_hal_sealed_result_field_v2(handle, lane, 5)),
+        hal_trace_position_v2(
+            rt_hal_sealed_result_field_v2(handle, lane, 10),
+            rt_hal_sealed_result_field_v2(handle, lane, 11),
+            rt_hal_sealed_result_field_v2(handle, lane, 12),
+            rt_hal_sealed_result_field_v2(handle, lane, 13),
+            rt_hal_sealed_result_field_v2(handle, lane, 14)),
+        rt_hal_sealed_result_field_v2(handle, lane, 18))
+
+fn _hal_sealed_clock_receipt_v2(
+        handle: u64, native_status: i32, invocation_id: i64,
+        environment: HalEnvironmentPlanReceiptV2) -> HalSealedClockReceiptV2:
+    val completed = if (native_status == HAL_SEALED_STATUS_OK_V1
+            or native_status == HAL_SEALED_STATUS_DIVERGED_V2):
+        rt_hal_sealed_completed_mask_v1(handle).to_i64()
+    else:
+        0
+    val selected = rt_hal_sealed_selected_provider_v2(handle)
+    HalSealedClockReceiptV2(
+        native_status: native_status, completed_mask: completed,
+        difference_pair_mask:
+            rt_hal_sealed_difference_mask_v2(handle).to_i64(),
+        commit_allowed: rt_hal_sealed_commit_allowed_v2(handle) == 1,
+        selected_provider: _hal_sealed_provider(
+            if selected >= 0: selected else: 0),
+        selected_provider_valid: selected >= 0,
+        environment_bound:
+            hal_environment_plan_receipt_v2_well_formed(environment)
+                and environment.trace.length == 1,
+        pure_result: _hal_sealed_result_v2(
+            handle, 0, invocation_id, (completed & 1) != 0),
+        c_result: _hal_sealed_result_v2(
+            handle, 1, invocation_id, (completed & 2) != 0),
+        rust_result: _hal_sealed_result_v2(
+            handle, 2, invocation_id, (completed & 4) != 0),
+        hot_spawn_count: rt_hal_sealed_hot_spawn_count_v1(handle),
+        hot_allocation_count: rt_hal_sealed_hot_allocation_count_v1(handle))
 
 fn _hal_sealed_lane(handle: u64, lane: i32,
                     invocation_id: i64, valid: bool) -> HalProviderLaneV1:
@@ -201,6 +305,45 @@ impl HalSealedCoordinatorV1:
         rejected.providers_mask = 0
         self.invoke(rejected, request, config.mode)
 
+    me invoke_clock_v2(
+            operation: HalOperationV1, invocation_id: i64, fixture_id: i64,
+            captured_scalar: i64, environment: HalEnvironmentPlanReceiptV2,
+            mode: HalRunMode) -> HalSealedClockReceiptV2:
+        var status = HAL_SEALED_STATUS_INVALID_V1
+        val environment_ok = (
+            hal_environment_plan_receipt_v2_well_formed(environment)
+                and environment.tagged_operation_id == operation.operation_id
+                and environment.environment_schema_id
+                    == operation.environment_schema_id
+                and environment.invocation_id == invocation_id
+                and environment.trace.length == 1)
+        if (self.phase == HAL_SEALED_PHASE_CRITICAL_V1
+                and self.handle != 0u64
+                and hal_sealed_operation_admitted_v1(operation, mode)
+                and invocation_id > 0 and fixture_id > 0
+                and environment_ok):
+            status = rt_hal_sealed_invoke_clock_mode_v2(
+                self.handle, hal_run_mode_to_i64(mode).to_i32(),
+                hal_provider_kind_to_i64(
+                    operation.preferred_provider).to_i32(),
+                operation.operation_id, invocation_id, fixture_id,
+                captured_scalar, 8, environment.trace.identity_hi,
+                environment.trace.identity_lo, environment.trace.length,
+                environment.trace.length, environment.trace.capacity)
+        _hal_sealed_clock_receipt_v2(
+            self.handle, status, invocation_id, environment)
+
+    me invoke_clock_default_v2(
+            operation: HalOperationV1, invocation_id: i64, fixture_id: i64,
+            captured_scalar: i64,
+            environment: HalEnvironmentPlanReceiptV2
+        ) -> HalSealedClockReceiptV2:
+        # Missing configuration is deliberately fail-safe: compare all three
+        # sealed providers and decline commit on any normalized divergence.
+        self.invoke_clock_v2(
+            operation, invocation_id, fixture_id, captured_scalar,
+            environment, HalRunMode.AlphaCompare)
+
     me maintenance_shutdown() -> bool:
         if ((self.phase != HAL_SEALED_PHASE_PREPARED_V1
                 and self.phase != HAL_SEALED_PHASE_CRITICAL_V1)
@@ -216,7 +359,10 @@ impl HalSealedCoordinatorV1:
 export HAL_SEALED_STATUS_OK_V1, HAL_SEALED_STATUS_INVALID_V1
 export HAL_SEALED_STATUS_STATE_V1, HAL_SEALED_STATUS_IO_V1
 export HAL_SEALED_STATUS_PROTOCOL_V1
+export HAL_SEALED_STATUS_DIVERGED_V2
 export HAL_SEALED_PHASE_EMPTY_V1, HAL_SEALED_PHASE_PREPARED_V1
 export HAL_SEALED_PHASE_CRITICAL_V1, HAL_SEALED_RESULT_FIELD_COUNT_V1
-export HalSealedInvocationReceiptV1, HalSealedCoordinatorV1
+export HAL_SEALED_RESULT_FIELD_COUNT_V2
+export HalSealedInvocationReceiptV1, HalSealedClockReceiptV2
+export HalSealedCoordinatorV1
 export hal_sealed_operation_admitted_v1, hal_sealed_coordinator_prepare_v1

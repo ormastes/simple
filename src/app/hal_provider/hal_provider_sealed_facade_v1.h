@@ -10,7 +10,15 @@ enum {
     HAL_SEALED_FACADE_STATUS_INVALID_V1 = 1,
     HAL_SEALED_FACADE_STATUS_STATE_V1 = 2,
     HAL_SEALED_FACADE_STATUS_IO_V1 = 3,
-    HAL_SEALED_FACADE_STATUS_PROTOCOL_V1 = 4
+    HAL_SEALED_FACADE_STATUS_PROTOCOL_V1 = 4,
+    HAL_SEALED_FACADE_STATUS_DIVERGED_V2 = 5
+};
+
+enum {
+    HAL_SEALED_FACADE_RESULT_FIELDS_V2 = 19,
+    HAL_SEALED_DIFFERENCE_PURE_C_V2 = 1,
+    HAL_SEALED_DIFFERENCE_PURE_RUST_V2 = 2,
+    HAL_SEALED_DIFFERENCE_C_RUST_V2 = 4
 };
 
 enum {
@@ -50,6 +58,25 @@ int32_t rt_hal_sealed_invoke_mode_v1(
     int64_t operation_id, int64_t invocation_id, int64_t fixture_id,
     int64_t input_offset, int64_t input_length, int64_t input_capacity,
     int64_t trace_capacity);
+
+/* Additive normalized ClockRead ABI. The captured scalar and trace receipt are
+ * parent-owned inputs. Exactly one trace instruction must already be consumed
+ * (cursor/length == 1); workers never read the ambient clock themselves. */
+int32_t rt_hal_sealed_invoke_clock_mode_v2(
+    uint64_t handle, int32_t run_mode, int32_t preferred_provider,
+    int64_t operation_id, int64_t invocation_id, int64_t fixture_id,
+    int64_t captured_scalar, int64_t result_capacity,
+    int64_t trace_identity_hi, int64_t trace_identity_lo,
+    int64_t trace_cursor, int64_t trace_length, int64_t trace_capacity);
+int32_t rt_hal_sealed_invoke_clock_v2(
+    uint64_t handle, int64_t operation_id, int64_t invocation_id,
+    int64_t fixture_id, int64_t captured_scalar,
+    int64_t trace_identity_hi, int64_t trace_identity_lo);
+int64_t rt_hal_sealed_result_field_v2(uint64_t handle, int32_t lane,
+                                      int32_t field);
+int32_t rt_hal_sealed_difference_mask_v2(uint64_t handle);
+int32_t rt_hal_sealed_commit_allowed_v2(uint64_t handle);
+int32_t rt_hal_sealed_selected_provider_v2(uint64_t handle);
 int32_t rt_hal_sealed_completed_mask_v1(uint64_t handle);
 int64_t rt_hal_sealed_result_field_v1(uint64_t handle, int32_t lane,
                                       int32_t field);

@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/hal-sealed-clock-v2.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+facade="$repo_root/src/app/hal_provider/hal_provider_sealed_facade_v1.c"
+session="$repo_root/src/app/hal_provider/hal_provider_sealed_session_v1.c"
+spec="$repo_root/src/app/hal_provider/test/hal_provider_sealed_facade_v1_selfcheck.c"
+simple="$repo_root/src/app/hal_provider/sealed_session.spl"
+
+# Additive surface and parent-authoritative ClockRead binding. These checks
+# catch accidental fallback to HALREQ1/digest comparison or ambient rereads.
+rg 'rt_hal_sealed_invoke_clock_mode_v2' "$facade" "$simple" >/dev/null
+rg 'HALREQ2\|2\|' "$facade" >/dev/null
+rg 'difference_mask_v2' "$facade" >/dev/null
+rg 'trace_cursor != 1 \|\| trace_length != 1' "$facade" >/dev/null
+rg 'invocation_id <= slot->last_v2_invocation' "$facade" >/dev/null
+rg 'HalRunMode\.AlphaCompare' "$simple" >/dev/null
+if rg 'clock_gettime|rt_time_|malloc\(|calloc\(|realloc\(' "$simple" >/dev/null; then
+    echo 'FAIL: Simple sealed V2 facade reads ambient time or allocates' >&2
+    exit 1
+fi
+
+cc -std=c11 -O2 -Wall -Wextra -Werror -pthread \
+    "$session" "$facade" "$spec" -o "$work/hal-sealed-clock-v2"
+/usr/bin/time -f 'hal_sealed_clock_v2_peak_rss_kib=%M elapsed_s=%e' \
+    "$work/hal-sealed-clock-v2"
+
+echo 'hal sealed ClockRead V2 source/native check: PASS'
