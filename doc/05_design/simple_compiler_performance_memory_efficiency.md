@@ -354,3 +354,13 @@ Warning/error formatters accumulate complete logical records and join once.
 Evidence cardinality must produce linear payload construction; per-evidence
 immutable append is prohibited. Human and JSON rendering preserve source order,
 escape each JSON item once, and keep exact output compatibility.
+
+## Accessor rewrite indexing contract
+
+The compiler rule registry supplies one canonical `[text]` plus `LineContext`
+view to accessor-field analysis. The analyzer parses class/method facts from
+those lines, builds per-class real-field and accessor-name indexes, and scans
+each class line only for accessor-shaped call occurrences. Exact-name conflicts
+are ambiguous and suppress rewriting. Replacement offsets come from the shared
+contexts; active registry paths never split source or build parallel start
+arrays. Compatibility source APIs may construct one local view.

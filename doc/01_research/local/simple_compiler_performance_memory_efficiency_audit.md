@@ -1720,3 +1720,16 @@ a rendered payload of `B` bytes, cumulative copied bytes could grow quadraticall
 even though peak output is only `O(B)`. Both paths now collect complete logical
 lines/items and join once, preserving exact ordering and escaping. Focused
 contracts pin the human byte sequence and prohibit recurrence of append loops.
+
+### Accessor field-rewrite hot-path indexing
+
+The active `short_grammar_field_access` rule ignored the registry's canonical
+line/context view, split the source again in both its checker and accessor parser,
+allocated a redundant line-start array, called a linear same-suffix search for
+every dummy method, and then compared every class line with every surviving
+dummy. Accessor-heavy classes therefore approached `O(methods^2 + lines*methods)`
+plus two extra source-sized line views. The registry now passes canonical lines
+and byte offsets. Parsing accepts lines directly; each class indexes real fields
+and unambiguous dummy names once; each line extracts only actual accessor-shaped
+call names for dictionary lookup. The public source wrapper remains compatible
+and performs one split for standalone callers. Conflicting mappings fail closed.
