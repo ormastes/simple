@@ -22,7 +22,8 @@ describe "closed @rt(hal) compiler bindings":
         expect(binding.raw_symbol).to_equal(
             "hal_clock_monotonic_nanos_v1")
         expect(binding.compare_symbol).to_equal(
-            "rt_hal_sealed_invoke_clock_mode_v2")
+            "rt_hal_clock_dispatch_compare_v2")
+        expect(binding.direct_rewrite_supported).to_be(true)
         expect(binding.compare_supported).to_be(true)
         expect(rt_hal_binding_signature_diagnostic_v1(
             binding, 0, true, false)).to_equal("")
@@ -31,14 +32,16 @@ describe "closed @rt(hal) compiler bindings":
         val binding = rt_hal_static_binding_v1(
             "io.clock.monotonic_nanos.v1")
         expect(rt_hal_binding_signature_diagnostic_v1(
-            binding, 1, true, false)).to_contain("requires fn() -> i64")
+            binding, 1, true, false)).to_contain("requires fn()->i64")
 
     it "rejects EnvironmentGet comparison until bounded text ABI exists":
         val binding = rt_hal_static_binding_v1("io.environment.get.v1")
         expect(binding.known).to_be(true)
-        expect(binding.direct_symbol).to_equal("rt_env_get")
+        expect(binding.raw_symbol).to_equal("rt_env_get")
+        expect(binding.direct_symbol).to_equal("")
+        expect(binding.direct_rewrite_supported).to_be(false)
         expect(binding.compare_supported).to_be(false)
-        expect(binding.diagnostic).to_contain("bounded-text result ABI")
+        expect(binding.diagnostic).to_contain("validation metadata only")
 
     it "rejects unknown operation identities without lookup fallback":
         val binding = rt_hal_static_binding_v1("io.unknown.v1")
@@ -53,3 +56,81 @@ describe "closed @rt(hal) compiler bindings":
         expect(rt_hal_manifest_provider_mask_v1(manifest)).to_equal(7)
         expect(rt_hal_provider_mask_compares_v1(7)).to_be(true)
         expect(rt_hal_provider_mask_compares_v1(2)).to_be(false)
+
+    it "validates file ABI and rejects a different result ABI":
+        val binding = rt_hal_static_binding_v1("io.file.read.v1")
+        expect(binding.raw_symbol).to_equal("rt_io_file_read")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(i64,i64)->[u8]")).to_equal("")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(i64,i64)->text")).to_contain("E-RT-HAL-BIND-002")
+
+    it "validates stream ABI and rejects a different handle type":
+        val binding = rt_hal_static_binding_v1("io.stream.read.v1")
+        expect(binding.raw_symbol).to_equal("rt_process_read_stdout")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(i64)->text")).to_equal("")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(text)->text")).to_contain("requires fn(i64)->text")
+
+    it "validates process ABI and rejects a missing timeout":
+        val binding = rt_hal_static_binding_v1("io.process.wait.v1")
+        expect(binding.raw_symbol).to_equal("rt_process_wait")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(i64,i64)->i64")).to_equal("")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(i64)->i64")).to_contain("E-RT-HAL-BIND-002")
+
+    it "validates environment ABI and rejects an unbounded key omission":
+        val binding = rt_hal_static_binding_v1("io.environment.get.v1")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(text)->text?")).to_equal("")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(text)->text")).to_contain("requires fn(text)->text?")
+
+    it "validates clock ABI and rejects a supplied parameter":
+        val binding = rt_hal_static_binding_v1("io.clock.monotonic_nanos.v1")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn()->i64")).to_equal("")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(i64)->i64")).to_contain("E-RT-HAL-BIND-002")
+
+    it "validates randomness ABI and rejects a signed byte region":
+        val binding = rt_hal_static_binding_v1("io.random.fill.v1")
+        expect(binding.raw_symbol).to_equal("rt_entropy_fill")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn([u8])->i64")).to_equal("")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn([i8])->i64")).to_contain("E-RT-HAL-BIND-002")
+
+    it "validates socket ABI and rejects a missing address":
+        val binding = rt_hal_static_binding_v1("io.socket.connect_timeout.v1")
+        expect(binding.raw_symbol).to_equal("rt_io_tcp_connect_timeout")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(text,i64)->i64")).to_equal("")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(i64)->i64")).to_contain("E-RT-HAL-BIND-002")
+
+    it "validates interrupt ABI and rejects a widened result":
+        val binding = rt_hal_static_binding_v1("io.interrupt.acknowledge.v1")
+        expect(binding.raw_symbol).to_equal("plic_claim")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn()->i32")).to_equal("")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn()->i64")).to_contain("requires fn()->i32")
+
+    it "validates MMIO ABI and rejects a signed address":
+        val binding = rt_hal_static_binding_v1("io.mmio.read_u32.v1")
+        expect(binding.raw_symbol).to_equal("rt_mmio_read_u32")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(u64)->u32")).to_equal("")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(i64)->u32")).to_contain("E-RT-HAL-BIND-002")
+
+    it "validates DMA ABI and rejects a widened direction":
+        val binding = rt_hal_static_binding_v1("io.dma.map.v1")
+        expect(binding.raw_symbol).to_equal("rt_dma_alloc")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(i64,i32)->i64")).to_equal("")
+        expect(rt_hal_binding_signature_key_diagnostic_v1(
+            binding, "fn(i64,i64)->i64")).to_contain("requires fn(i64,i32)->i64")

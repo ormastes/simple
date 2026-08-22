@@ -41,7 +41,7 @@ use compiler.semantics.rt_hal_assurance_closure.{
 use compiler.common.hal.rt_hal_static_binding.{
     rt_hal_manifest_operation_v1, rt_hal_manifest_provider_mask_v1,
     rt_hal_provider_mask_compares_v1,
-    rt_hal_static_binding_v1, rt_hal_binding_signature_diagnostic_v1
+    rt_hal_static_binding_v1, rt_hal_binding_signature_key_diagnostic_v1
 }
 use compiler.mono.verify.post_mono_verify.{
     post_mono_verify_modules,
@@ -396,6 +396,30 @@ pub fn run_enum_contract_pass(
         errors_raised: errors_raised
     ))
     out
+fn _rt_hal_hir_type_key_v1(type_: HirType) -> text:
+    match type_.kind:
+        case HirTypeKind.Int(bits, signed):
+            (if signed: "i" else: "u") + bits.to_text()
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Float(bits): "f" + bits.to_text()
+        case HirTypeKind.Unit: "()"
+        case HirTypeKind.Array(element, size):
+            "[" + _rt_hal_hir_type_key_v1(element) + "]"
+        case HirTypeKind.Optional(inner):
+            _rt_hal_hir_type_key_v1(inner) + "?"
+        case _: "<unsupported>"
+
+fn _rt_hal_hir_signature_key_v1(function_: HirFunction) -> text:
+    var signature = "fn("
+    var index: i64 = 0
+    for parameter in function_.params:
+        if index > 0: signature = signature + ","
+        signature = signature + _rt_hal_hir_type_key_v1(parameter.type_)
+        index = index + 1
+    signature + ")->" + _rt_hal_hir_type_key_v1(function_.return_type)
+
 pub fn run_rt_hal_contract_pass(
     ctx: CompileContext,
     hir_modules: Dict<text, HirModule>
@@ -424,18 +448,9 @@ pub fn run_rt_hal_contract_pass(
                     val operation = rt_hal_manifest_operation_v1(
                         function_.func_attr.rt_hal_manifest)
                     val binding = rt_hal_static_binding_v1(operation)
-                    var returns_i64 = false
-                    var returns_text = false
-                    match function_.return_type.kind:
-                        case HirTypeKind.Int(bits, signed):
-                            returns_i64 = bits == 64 and signed
-                        case HirTypeKind.Str:
-                            returns_text = true
-                        case _: ()
                     val binding_diagnostic =
-                        rt_hal_binding_signature_diagnostic_v1(
-                            binding, function_.params.len(),
-                            returns_i64, returns_text)
+                        rt_hal_binding_signature_key_diagnostic_v1(
+                            binding, _rt_hal_hir_signature_key_v1(function_))
                     if binding_diagnostic != "":
                         val invalid_binding = "[" + binding_diagnostic + "] " +
                             module_name + "::" + function_.name

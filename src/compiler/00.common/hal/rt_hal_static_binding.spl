@@ -1,14 +1,18 @@
 # Closed compile-time binding table for @rt(hal) operations.
 #
-# This table is deliberately compiler-owned and bounded.  It is evaluated once
-# while lowering declarations; no runtime reflection, environment lookup, text
-# parsing, allocation, or indirect dispatch is introduced on the operation hot
-# path.
+# The ten rows are the REQ-015 representative production operations. Rows
+# without a frozen coordinator ABI are validation metadata only: they name the
+# real resolved leaf but cannot be rewritten or compared. Lookup is a bounded
+# O(10) manifest pass and adds no runtime lookup, allocation, or dispatch.
 
 enum RtHalResultAbiV1:
     Unsupported
     ScalarI64
+    ScalarI32
+    ScalarU32
     Text
+    OptionalText
+    BytesU8
 
 struct RtHalStaticBindingV1:
     known: bool
@@ -16,34 +20,29 @@ struct RtHalStaticBindingV1:
     raw_symbol: text
     direct_symbol: text
     compare_symbol: text
+    canonical_signature: text
     result_abi: RtHalResultAbiV1
+    direct_rewrite_supported: bool
     compare_supported: bool
     diagnostic: text
 
 fn rt_hal_manifest_operation_v1(manifest: text) -> text:
     val prefix = "rt-hal-v1|operation="
-    if not manifest.starts_with(prefix):
-        return ""
+    if not manifest.starts_with(prefix): return ""
     val tail = manifest.substring(prefix.len(), manifest.len())
     val separator = tail.find("|")
-    if separator < 0:
-        return tail
+    if separator < 0: return tail
     tail.substring(0, separator)
 
 fn rt_hal_manifest_provider_mask_v1(manifest: text) -> i64:
     val marker = "|providers="
     val start = manifest.find(marker)
-    if start < 0:
-        return 0
+    if start < 0: return 0
     val tail_start = start + marker.len()
     val tail = manifest.substring(tail_start, manifest.len())
     val separator = tail.find("|")
     val raw = if separator < 0: tail else: tail.substring(0, separator)
-    # A provider set is a non-empty subset of three providers, so its canonical
-    # encoding is exactly one ASCII digit in 1..7. Avoid permissive decimal
-    # forms and integer accumulation/overflow.
-    if raw.len() != 1:
-        return 0
+    if raw.len() != 1: return 0
     val ch = raw[0]
     if ch == "1": return 1
     if ch == "2": return 2
@@ -57,39 +56,83 @@ fn rt_hal_manifest_provider_mask_v1(manifest: text) -> i64:
 fn rt_hal_provider_mask_compares_v1(mask: i64) -> bool:
     mask > 0 and (mask & (mask - 1)) != 0
 
+fn _rt_hal_metadata_binding_v1(operation: text, raw_symbol: text,
+                               signature: text,
+                               result_abi: RtHalResultAbiV1) -> RtHalStaticBindingV1:
+    RtHalStaticBindingV1(
+        true, operation, raw_symbol, "", "", signature, result_abi,
+        false, false,
+        "E-RT-HAL-BIND-003: " + operation +
+        " has no frozen direct-rewrite/comparison ABI; validation metadata only")
+
 fn rt_hal_static_binding_v1(operation: text) -> RtHalStaticBindingV1:
+    if operation == "io.file.read.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_io_file_read",
+            "fn(i64,i64)->[u8]", RtHalResultAbiV1.BytesU8)
+    if operation == "io.stream.read.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_process_read_stdout",
+            "fn(i64)->text", RtHalResultAbiV1.Text)
+    if operation == "io.process.wait.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_process_wait",
+            "fn(i64,i64)->i64", RtHalResultAbiV1.ScalarI64)
+    if operation == "io.environment.get.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_env_get",
+            "fn(text)->text?", RtHalResultAbiV1.OptionalText)
     if operation == "io.clock.monotonic_nanos.v1":
         return RtHalStaticBindingV1(
             true, operation, "hal_clock_monotonic_nanos_v1",
-            "rt_time_now_nanos",
-            "rt_hal_sealed_invoke_clock_mode_v2",
-            RtHalResultAbiV1.ScalarI64, true, "")
-    if operation == "io.environment.get.v1":
-        return RtHalStaticBindingV1(
-            true, operation, "rt_env_get", "rt_env_get", "",
-            RtHalResultAbiV1.Text, false,
-            "E-RT-HAL-BIND-003: io.environment.get.v1 comparison requires a sealed bounded-text result ABI")
+            "rt_time_now_nanos", "rt_hal_clock_dispatch_compare_v2",
+            "fn()->i64", RtHalResultAbiV1.ScalarI64, true, true, "")
+    if operation == "io.random.fill.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_entropy_fill",
+            "fn([u8])->i64", RtHalResultAbiV1.ScalarI64)
+    if operation == "io.socket.connect_timeout.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_io_tcp_connect_timeout",
+            "fn(text,i64)->i64", RtHalResultAbiV1.ScalarI64)
+    if operation == "io.interrupt.acknowledge.v1":
+        return _rt_hal_metadata_binding_v1(operation, "plic_claim",
+            "fn()->i32", RtHalResultAbiV1.ScalarI32)
+    if operation == "io.mmio.read_u32.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_mmio_read_u32",
+            "fn(u64)->u32", RtHalResultAbiV1.ScalarU32)
+    if operation == "io.dma.map.v1":
+        return _rt_hal_metadata_binding_v1(operation, "rt_dma_alloc",
+            "fn(i64,i32)->i64", RtHalResultAbiV1.ScalarI64)
     RtHalStaticBindingV1(
-        false, operation, "", "", "", RtHalResultAbiV1.Unsupported, false,
+        false, operation, "", "", "", "", RtHalResultAbiV1.Unsupported,
+        false, false,
         "E-RT-HAL-BIND-001: no closed compiler binding for @rt(hal) operation '" + operation + "'")
 
+fn rt_hal_binding_signature_key_diagnostic_v1(
+        binding: RtHalStaticBindingV1, actual_signature: text) -> text:
+    if not binding.known: return binding.diagnostic
+    if actual_signature != binding.canonical_signature:
+        return "E-RT-HAL-BIND-002: " + binding.operation + " requires " +
+            binding.canonical_signature + ", received " + actual_signature
+    ""
+
+# Compatibility entrypoint for the original scalar/text callers. Exact
+# compiler validation uses rt_hal_binding_signature_key_diagnostic_v1.
 fn rt_hal_binding_signature_diagnostic_v1(
         binding: RtHalStaticBindingV1, parameter_count: i64,
         returns_i64: bool, returns_text: bool) -> text:
-    if not binding.known:
-        return binding.diagnostic
-    match binding.result_abi:
-        case ScalarI64:
-            if parameter_count != 0 or not returns_i64:
-                return "E-RT-HAL-BIND-002: io.clock.monotonic_nanos.v1 requires fn() -> i64"
-        case Text:
-            if parameter_count != 1 or not returns_text:
-                return "E-RT-HAL-BIND-002: io.environment.get.v1 requires fn(text) -> text"
-        case Unsupported:
-            return binding.diagnostic
-    ""
+    var result = "unsupported"
+    if returns_i64: result = "i64"
+    if returns_text: result = "text"
+    var signature = "fn("
+    var index: i64 = 0
+    while index < parameter_count:
+        if index > 0: signature = signature + ","
+        if binding.operation == "io.environment.get.v1":
+            signature = signature + "text"
+        else:
+            signature = signature + "?"
+        index = index + 1
+    signature = signature + ")->" + result
+    rt_hal_binding_signature_key_diagnostic_v1(binding, signature)
 
 export RtHalResultAbiV1, RtHalStaticBindingV1
 export rt_hal_manifest_operation_v1, rt_hal_manifest_provider_mask_v1
 export rt_hal_provider_mask_compares_v1, rt_hal_static_binding_v1
 export rt_hal_binding_signature_diagnostic_v1
+export rt_hal_binding_signature_key_diagnostic_v1
