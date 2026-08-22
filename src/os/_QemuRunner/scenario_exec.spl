@@ -3,7 +3,7 @@
 use os.qemu_runner.*
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.env_ops.{env_get}
-use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_hash_sha256}
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
 # SimpleOS QEMU Runner — Multi-Architecture Boot & Test
 #
@@ -414,6 +414,94 @@ fn build_scenario_command_headless(scenario: QemuScenario, kernel_path: text) ->
 pub fn arm64_wm_ramfb_serial_log_path() -> text:
     "build/os/arm64_wm_serial.log"
 
+fn _is_compiler_filesystem_scenario(scenario: QemuScenario) -> bool:
+    scenario.name == "x86_64-compiler-filesystem" or
+        scenario.name == "arm64-compiler-filesystem" or
+        scenario.name == "riscv64-compiler-filesystem"
+
+fn _compiler_filesystem_scenario_is_live_ready(scenario: QemuScenario) -> bool:
+    if not _is_compiler_filesystem_scenario(scenario):
+        return true
+    # These names reserve host routing only. A production guest boot caller
+    # must invoke compiler_filesystem_guest_workflow_v2 before this becomes true.
+    print "[scenario][{scenario.name}] BLOCKED: compiler-filesystem guest workflow not wired"
+    false
+
+fn _compiler_filesystem_nonce_is_safe(value: text) -> bool:
+    if value.len() == 0 or value.len() > 128:
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or
+                (code >= 97 and code <= 122) or code == 45 or code == 46 or code == 95):
+            return false
+        i = i + 1
+    true
+
+fn _compiler_filesystem_path_is_safe(value: text) -> bool:
+    if value.len() == 0 or value.len() > 1024:
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code <= 32 or code == 34 or code == 39 or code == 44 or code == 92 or code == 127:
+            return false
+        i = i + 1
+    true
+
+fn _compiler_filesystem_sha256_is_safe(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        i = i + 1
+    true
+
+fn _compiler_filesystem_qemu_args(scenario: QemuScenario) -> [text]:
+    val nonce = env_get("SIMPLEOS_COMPILER_FS_NONCE") ?? ""
+    val image = env_get("SIMPLEOS_COMPILER_FS_IMAGE") ?? ""
+    val image_sha256 = env_get("SIMPLEOS_COMPILER_FS_IMAGE_SHA256") ?? ""
+    if not _compiler_filesystem_nonce_is_safe(nonce) or
+            not _compiler_filesystem_path_is_safe(image) or
+            not _compiler_filesystem_sha256_is_safe(image_sha256) or
+            not file_exists(image) or file_hash_sha256(image) != image_sha256:
+        print "[qemu] compiler-filesystem scenario requires safe SIMPLEOS_COMPILER_FS_NONCE, SIMPLEOS_COMPILER_FS_IMAGE, and SIMPLEOS_COMPILER_FS_IMAGE_SHA256"
+        return []
+    val drive_arg = "file={image},if=none,id=cfsexecns1,format=raw"
+    # QEMU keyval syntax decodes doubled commas inside a string= value.
+    val fw_cfg_drive_arg = drive_arg.replace(",", ",,")
+    var args = [
+        "-drive", drive_arg,
+        "-fw_cfg", "name=opt/simpleos.cfs.nonce,string={nonce}",
+        "-fw_cfg", "name=opt/simpleos.cfs.image_path,string={image}",
+        "-fw_cfg", "name=opt/simpleos.cfs.image_sha256,string={image_sha256}",
+        "-fw_cfg", "name=opt/simpleos.cfs.drive_arg,string={fw_cfg_drive_arg}"
+    ]
+    args.push("-device")
+    if scenario.arch == Architecture.X86_64:
+        args.push("nvme,serial=cfsexec,drive=cfsexecns1")
+    else:
+        args.push("virtio-blk-device,drive=cfsexecns1")
+    args
+
+fn _compiler_filesystem_non_storage_args(scenario: QemuScenario) -> [text]:
+    var kept: [text] = []
+    var i = 0
+    while i < scenario.qemu_extra.len():
+        val option = scenario.qemu_extra[i]
+        if i + 1 < scenario.qemu_extra.len() and option == "-drive":
+            i = i + 2
+        elif i + 1 < scenario.qemu_extra.len() and option == "-device" and scenario.qemu_extra[i + 1].contains("drive="):
+            i = i + 2
+        else:
+            kept.push(option)
+            i = i + 1
+    kept
+
 fn _build_scenario_command_impl(scenario: QemuScenario, kernel_path: text, headless: bool) -> [text]:
     """Build QEMU command line from a scenario."""
     val qemu_bin = match scenario.arch:
@@ -460,8 +548,17 @@ fn _build_scenario_command_impl(scenario: QemuScenario, kernel_path: text, headl
     else:
         args.push("-kernel")
         args.push(kernel_path)
-    for extra in scenario.qemu_extra:
-        args.push(extra)
+    if _is_compiler_filesystem_scenario(scenario):
+        val compiler_fs_args = _compiler_filesystem_qemu_args(scenario)
+        if compiler_fs_args.len() == 0:
+            return []
+        for extra in _compiler_filesystem_non_storage_args(scenario):
+            args.push(extra)
+        for extra in compiler_fs_args:
+            args.push(extra)
+    else:
+        for extra in scenario.qemu_extra:
+            args.push(extra)
     args
 
 fn _prepare_q35_pure_nvme_user_namespace_disk(scenario: QemuScenario) -> bool:
@@ -478,6 +575,8 @@ fn _prepare_q35_pure_nvme_user_namespace_disk(scenario: QemuScenario) -> bool:
 
 fn build_scenario(scenario: QemuScenario) -> bool:
     """Build the kernel image required by a named scenario."""
+    if not _compiler_filesystem_scenario_is_live_ready(scenario):
+        return false
     if not ensure_scenario_media(scenario):
         print "[scenario][{scenario.name}] phase=media FAILED"
         return false
@@ -531,6 +630,8 @@ fn run_scenario_headless(scenario: QemuScenario) -> bool:
 
 fn _run_scenario_impl(scenario: QemuScenario, headless: bool) -> bool:
     """Build and run a named QEMU scenario."""
+    if not _compiler_filesystem_scenario_is_live_ready(scenario):
+        return false
     if not ensure_scenario_media(scenario):
         return false
     val target = _resolved_runtime_scenario_target(scenario)
@@ -542,6 +643,8 @@ fn _run_scenario_impl(scenario: QemuScenario, headless: bool) -> bool:
     if not _prepare_q35_pure_nvme_user_namespace_disk(scenario):
         return false
     val cmd_parts = _build_scenario_command_impl(scenario, scenario_kernel_path(scenario, target), headless)
+    if cmd_parts.len() == 0:
+        return false
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
     print "[run] {scenario.name}: {cmd_parts.join(" ")}"
@@ -569,6 +672,8 @@ fn _run_scenario_impl(scenario: QemuScenario, headless: bool) -> bool:
 
 fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     """Run a named QEMU scenario as a smoke/integration test."""
+    if not _compiler_filesystem_scenario_is_live_ready(scenario):
+        return false
     if not ensure_scenario_media(scenario):
         return false
     val target = _resolved_runtime_scenario_target(scenario)
@@ -583,6 +688,8 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     if not _prepare_q35_pure_nvme_user_namespace_disk(scenario):
         return false
     val cmd_parts = build_scenario_command_headless(scenario, scenario_kernel_path(scenario, target))
+    if cmd_parts.len() == 0:
+        return false
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
     print "[test] {scenario.name} (timeout: {timeout_ms}ms): {cmd_parts.join(" ")}"
@@ -850,6 +957,10 @@ fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
 
 fn ensure_scenario_media(scenario: QemuScenario) -> bool:
     """Materialize required host-side disk media for scenarios that attach storage."""
+    if _is_compiler_filesystem_scenario(scenario):
+        # The caller-provided evidence image is validated by command construction;
+        # never materialize or attach the scenario target's default disk as well.
+        return true
     if scenario.name == "arm64-wm-ramfb" or scenario.name == "arm64-desktop-engine2d":
         return ensure_arm64_desktop_disk_image()
     if scenario.name == "riscv64-display-smoke":

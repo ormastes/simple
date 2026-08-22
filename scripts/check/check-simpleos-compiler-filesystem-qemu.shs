@@ -25,6 +25,11 @@ for arg in "$@"; do
 done
 
 [ -n "$ARCH" ] || { usage >&2; exit 2; }
+REQUESTED_ARCH=$ARCH
+if [ "$ARCH" = aarch64 ]; then
+    # The guest protocol has one canonical identity for the 64-bit ARM lane.
+    ARCH=arm64
+fi
 case "$TIMEOUT" in *[!0-9]*|'') echo "invalid timeout: $TIMEOUT" >&2; exit 2 ;; esac
 [ "$TIMEOUT" -gt 0 ] || { echo "invalid timeout: $TIMEOUT" >&2; exit 2; }
 
@@ -33,7 +38,10 @@ LOG="$OUTPUT_DIR/$ARCH.serial.log"
 MANIFEST="$OUTPUT_DIR/$ARCH.manifest"
 RECEIPT="$OUTPUT_DIR/$ARCH.receipt"
 # A failed or blocked attempt must never leave a prior passing publication.
-rm -f "$LOG" "$MANIFEST" "$RECEIPT"
+rm -f "$LOG" "$MANIFEST" "$RECEIPT" \
+    "$OUTPUT_DIR/$REQUESTED_ARCH.serial.log" \
+    "$OUTPUT_DIR/$REQUESTED_ARCH.manifest" \
+    "$OUTPUT_DIR/$REQUESTED_ARCH.receipt"
 command -v xxd >/dev/null 2>&1 || {
     echo "simpleos_compiler_filesystem_qemu_status=fail" >&2
     echo "simpleos_compiler_filesystem_qemu_reason=xxd-required-for-observed-output-validation" >&2
@@ -61,7 +69,7 @@ fi
 case "$IMAGE" in *[!A-Za-z0-9_./-]*) echo "simpleos_compiler_filesystem_qemu_status=fail" >&2; echo "simpleos_compiler_filesystem_qemu_reason=image-path-not-marker-safe" >&2; exit 1 ;; esac
 
 TMP_LOG="$OUTPUT_DIR/.$ARCH.serial.log.tmp.$$"
-trap 'rm -f "$TMP_LOG" "$OUTPUT_DIR/.$ARCH.manifest.tmp.$$" "$OUTPUT_DIR/.$ARCH.receipt.tmp.$$"' EXIT HUP INT TERM
+trap 'rm -f "$TMP_LOG" "$OUTPUT_DIR/.$ARCH.manifest.tmp.$$" "$OUTPUT_DIR/.$ARCH.receipt.tmp.$$" "$OUTPUT_DIR/.$REQUESTED_ARCH.serial.log.tmp.$$" "$OUTPUT_DIR/.$REQUESTED_ARCH.manifest.tmp.$$" "$OUTPUT_DIR/.$REQUESTED_ARCH.receipt.tmp.$$"' EXIT HUP INT TERM
 
 EVIDENCE_STATUS=pass
 if [ -n "${SIMPLEOS_COMPILER_FS_QEMU_RUNNER:-}" ]; then
@@ -96,7 +104,13 @@ if [ -n "${SIMPLEOS_COMPILER_FS_QEMU_RUNNER:-}" ]; then
     fi
     RUNNER_PATH="$SIMPLEOS_COMPILER_FS_QEMU_RUNNER"
 else
-    [ "$ARCH" = x86_64 ] || {
+    case "$ARCH" in
+        x86_64) SCENARIO=x86_64-compiler-filesystem ;;
+        arm64|aarch64) SCENARIO=arm64-compiler-filesystem ;;
+        riscv64) SCENARIO=riscv64-compiler-filesystem ;;
+        *) SCENARIO= ;;
+    esac
+    [ -n "$SCENARIO" ] || {
         case "$ARCH" in
             x86_32) resume_arch=x86_32 ;;
             arm32) resume_arch=arm32 ;;
@@ -108,10 +122,20 @@ else
         echo "simpleos_compiler_filesystem_qemu_resume=implement-target-native-payload-and-in-guest-exec-for-${resume_arch}-virtio-fat32-smf"
         exit 3
     }
+    # Host command construction is registered, but no production guest boot
+    # path invokes compiler_filesystem_guest_workflow_v2 yet.  Do not advertise
+    # this lane as live or launch QEMU until that evidence producer exists.
+    GUEST_WORKFLOW_READY=0
+    if [ "$GUEST_WORKFLOW_READY" -ne 1 ]; then
+        echo "simpleos_compiler_filesystem_qemu_status=blocked"
+        echo "simpleos_compiler_filesystem_qemu_reason=${ARCH}-compiler-filesystem-guest-workflow-not-wired"
+        echo "simpleos_compiler_filesystem_qemu_resume=wire-production-guest-caller-for-$SCENARIO"
+        exit 3
+    fi
     [ -f "$IMAGE" ] || {
         echo "simpleos_compiler_filesystem_qemu_status=blocked"
-        echo "simpleos_compiler_filesystem_qemu_reason=x86-q35-image-unavailable"
-        echo "simpleos_compiler_filesystem_qemu_resume=build-build-os-fat32-x86_64-img-and-stage-x86_64-compiler-filesystem-kernel"
+        echo "simpleos_compiler_filesystem_qemu_reason=${ARCH}-compiler-filesystem-image-unavailable"
+        echo "simpleos_compiler_filesystem_qemu_resume=build-$IMAGE-and-stage-${ARCH}-compiler-filesystem-kernel"
         exit 3
     }
     IMAGE=$(realpath "$IMAGE")
@@ -121,7 +145,7 @@ else
     set +e
     SIMPLEOS_COMPILER_FS_NONCE="$nonce" SIMPLEOS_COMPILER_FS_IMAGE="$IMAGE" SIMPLEOS_COMPILER_FS_IMAGE_SHA256="$image_sha" \
         timeout --signal=TERM --kill-after=5s "$TIMEOUT" \
-        bin/simple os test --scenario=x86_64-compiler-filesystem >"$TMP_LOG" 2>&1
+        bin/simple os test --scenario="$SCENARIO" >"$TMP_LOG" 2>&1
     runner_code=$?
     set -e
     if [ "$runner_code" -ne 0 ]; then

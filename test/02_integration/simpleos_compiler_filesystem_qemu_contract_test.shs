@@ -10,15 +10,31 @@ trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
 IMAGE="$TMP_DIR/disk.img"
 printf 'contract fixture, never live evidence\n' >"$IMAGE"
 
+# Canonicalization must clear stale publications under both requested and
+# canonical names, then publish only the canonical arm64 identity.
+mkdir -p "$TMP_DIR/aarch64-stale"
+for suffix in serial.log manifest receipt; do
+    printf 'stale\n' >"$TMP_DIR/aarch64-stale/aarch64.$suffix"
+    printf 'stale\n' >"$TMP_DIR/aarch64-stale/arm64.$suffix"
+done
+SIMPLEOS_COMPILER_FS_QEMU_TEST_MODE=1 SIMPLEOS_COMPILER_FS_QEMU_RUNNER="$RUNNER" \
+    sh "$CHECKER" --arch=aarch64 --image="$IMAGE" --output-dir="$TMP_DIR/aarch64-stale" >/dev/null
+[ ! -e "$TMP_DIR/aarch64-stale/aarch64.serial.log" ]
+[ ! -e "$TMP_DIR/aarch64-stale/aarch64.manifest" ]
+[ ! -e "$TMP_DIR/aarch64-stale/aarch64.receipt" ]
+grep -Fx 'arch=arm64' "$TMP_DIR/aarch64-stale/arm64.manifest" >/dev/null
+
 for arch in x86_32 x86_64 arm32 arm64 aarch64 riscv32 riscv64; do
+    canonical_arch=$arch
+    [ "$arch" != aarch64 ] || canonical_arch=arm64
     output="$TMP_DIR/$arch"
     result=$(SIMPLEOS_COMPILER_FS_QEMU_TEST_MODE=1 \
         SIMPLEOS_COMPILER_FS_QEMU_RUNNER="$RUNNER" \
         sh "$CHECKER" --arch="$arch" --image="$IMAGE" --output-dir="$output")
     printf '%s\n' "$result" | grep -Fx "simpleos_compiler_filesystem_qemu_status=contract-pass" >/dev/null
-    grep -Fx "status=contract-pass" "$output/$arch.manifest" >/dev/null
-    grep -Fx "evidence_class=hermetic-fake-qemu-contract" "$output/$arch.manifest" >/dev/null
-    grep -Fx "arch=$arch" "$output/$arch.manifest" >/dev/null
+    grep -Fx "status=contract-pass" "$output/$canonical_arch.manifest" >/dev/null
+    grep -Fx "evidence_class=hermetic-fake-qemu-contract" "$output/$canonical_arch.manifest" >/dev/null
+    grep -Fx "arch=$canonical_arch" "$output/$canonical_arch.manifest" >/dev/null
 done
 
 if SIMPLEOS_COMPILER_FS_QEMU_RUNNER="$RUNNER" \
@@ -29,16 +45,7 @@ if SIMPLEOS_COMPILER_FS_QEMU_RUNNER="$RUNNER" \
 fi
 grep -F "runner-override-requires-test-mode" "$TMP_DIR/no-test-mode.log" >/dev/null
 
-set +e
-sh "$CHECKER" --arch=aarch64 --image="$IMAGE" --output-dir="$TMP_DIR/live" \
-    >"$TMP_DIR/live.log" 2>&1
-live_status=$?
-set -e
-[ "$live_status" -eq 3 ]
-grep -F "aarch64-live-compiler-filesystem-route-absent" "$TMP_DIR/live.log" >/dev/null
-[ ! -e "$TMP_DIR/live/aarch64.receipt" ]
-
-for arch in x86_32 arm32 riscv32 riscv64; do
+for arch in x86_32 arm32 riscv32; do
     set +e
     sh "$CHECKER" --arch="$arch" --image="$IMAGE" --output-dir="$TMP_DIR/live-$arch" \
         >"$TMP_DIR/live-$arch.log" 2>&1
@@ -49,5 +56,49 @@ for arch in x86_32 arm32 riscv32 riscv64; do
     grep -F "implement-target-native-payload-and-in-guest-exec-for-$arch-virtio-fat32-smf" "$TMP_DIR/live-$arch.log" >/dev/null
     [ ! -e "$TMP_DIR/live-$arch/$arch.receipt" ]
 done
+
+for arch in x86_64 arm64 aarch64 riscv64; do
+    canonical_arch=$arch
+    [ "$arch" != aarch64 ] || canonical_arch=arm64
+    set +e
+    sh "$CHECKER" --arch="$arch" --image="$IMAGE" --output-dir="$TMP_DIR/not-ready-$arch" \
+        >"$TMP_DIR/not-ready-$arch.log" 2>&1
+    live_status=$?
+    set -e
+    [ "$live_status" -eq 3 ]
+    grep -F "$canonical_arch-compiler-filesystem-guest-workflow-not-wired" "$TMP_DIR/not-ready-$arch.log" >/dev/null
+    [ ! -e "$TMP_DIR/not-ready-$arch/$canonical_arch.receipt" ]
+done
+
+# Host-route scaffolds must be registered, while the readiness gate prevents
+# advertising them as live before a production guest workflow caller exists.
+for scenario in x86_64-compiler-filesystem arm64-compiler-filesystem riscv64-compiler-filesystem; do
+    grep -F "\"$scenario\"" "$ROOT_DIR/src/os/_QemuRunner/scenario_catalog.spl" >/dev/null
+done
+grep -F 'arm64|aarch64) SCENARIO=arm64-compiler-filesystem' "$CHECKER" >/dev/null
+grep -F 'riscv64) SCENARIO=riscv64-compiler-filesystem' "$CHECKER" >/dev/null
+grep -F 'compiler-filesystem-guest-workflow-not-wired' "$CHECKER" >/dev/null
+
+COMMAND_BUILDER="$ROOT_DIR/src/os/_QemuRunner/scenario_exec.spl"
+grep -F 'env_get("SIMPLEOS_COMPILER_FS_NONCE") ?? ""' "$COMMAND_BUILDER" >/dev/null
+grep -F 'env_get("SIMPLEOS_COMPILER_FS_IMAGE") ?? ""' "$COMMAND_BUILDER" >/dev/null
+grep -F 'env_get("SIMPLEOS_COMPILER_FS_IMAGE_SHA256") ?? ""' "$COMMAND_BUILDER" >/dev/null
+grep -F 'file_hash_sha256(image) != image_sha256' "$COMMAND_BUILDER" >/dev/null
+grep -F 'if value.len() == 0 or value.len() > 128:' "$COMMAND_BUILDER" >/dev/null
+grep -F 'if value.len() == 0 or value.len() > 1024:' "$COMMAND_BUILDER" >/dev/null
+grep -F 'code == 34 or code == 39 or code == 44 or code == 92' "$COMMAND_BUILDER" >/dev/null
+grep -F 'not file_exists(image)' "$COMMAND_BUILDER" >/dev/null
+grep -F 'val drive_arg = "file={image},if=none,id=cfsexecns1,format=raw"' "$COMMAND_BUILDER" >/dev/null
+grep -F 'val fw_cfg_drive_arg = drive_arg.replace(",", ",,")' "$COMMAND_BUILDER" >/dev/null
+for item in nonce image_path image_sha256 drive_arg; do
+    grep -F "name=opt/simpleos.cfs.$item,string=" "$COMMAND_BUILDER" >/dev/null
+done
+grep -F 'if _is_compiler_filesystem_scenario(scenario):' "$COMMAND_BUILDER" >/dev/null
+grep -F '_compiler_filesystem_non_storage_args(scenario)' "$COMMAND_BUILDER" >/dev/null
+grep -F 'fn _compiler_filesystem_scenario_is_live_ready' "$COMMAND_BUILDER" >/dev/null
+[ "$(grep -F -c 'if not _compiler_filesystem_scenario_is_live_ready(scenario):' "$COMMAND_BUILDER")" -eq 3 ]
+grep -F 'BLOCKED: compiler-filesystem guest workflow not wired' "$COMMAND_BUILDER" >/dev/null
+grep -F 'never materialize or attach the scenario target' "$COMMAND_BUILDER" >/dev/null
+grep -F 'if cmd_parts.len() == 0:' "$COMMAND_BUILDER" >/dev/null
 
 echo "simpleos compiler filesystem QEMU contract tests passed"
