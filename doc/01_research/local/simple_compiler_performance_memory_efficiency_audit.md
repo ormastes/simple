@@ -2176,3 +2176,29 @@ registration, and narrowing reuse one result. Primitive names remain byte
 compatible. Synthetic SymbolId collision handling and source-level named-type
 narrowing remain separately tracked. Execution evidence is unavailable under
 the no-verify instruction.
+
+### Structural-union symbol ownership and narrowing lookup
+
+The preferred FNV-derived union ID occupies only 100 million values. Synthesis
+and narrowing formerly recomputed it independently, so a collision could alias
+an enum or variant and overwrite `module.enums`. `SymbolTable` now owns paired
+canonical-name-to-ID and ID-to-owner maps for the module lifetime. Both phases
+reserve through that owner, recompute the old preferred ID from canonical
+identity instead of trusting an encounter-dependent hint, probe a bounded 4096
+slots on collision, and fall back to the ordinary unique allocator
+rather than aliasing or scanning the whole reserved range. Registry state is
+reset with the module and encoded in HIR cache transport.
+
+This is collision-safe, not encounter-order independent for a genuine FNV
+collision: whichever identity is registered first retains the shared starting
+slot. Fully reproducible IDs across reversed traversal need a sorted
+preregistration phase before either identity is embedded in HIR.
+
+Narrowing now builds one key-to-variant dictionary instead of rescanning and
+resanitizing all union keys for every arm. Bare named pattern types resolve via
+the already-registered SymbolId, allowing their complete canonical key to match
+named members. Generic and qualified pattern syntax is still spelling-only at
+the parser/HIR boundary and remains tracked. Review also corrected nested union
+keys to preserve ordered `hir_types_equal` identity inside other constructors;
+only top-level union normalization is set-like. No execution evidence is
+claimed.
