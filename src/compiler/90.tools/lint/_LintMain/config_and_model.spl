@@ -134,7 +134,7 @@ fn all_lint_names() -> [text]:
      "unnamed_duplicate_typed_args", "resource_leak",
      "wildcard_match", "non_exhaustive_match",
      "export_outside_init", "init_boundary_violation",
-     "bypass_with_code_files", "unknown_decorator", "stub_impl",
+     "bypass_with_code_files", "unknown_annotation", "unknown_decorator", "stub_impl",
      "unknown_attribute", "too_many_arguments", "dummy_accessor",
      "parser_contextual_keyword", "deprecated_if_let",
      "struct_construction_parens", "short_grammar_refactor",
@@ -189,7 +189,8 @@ fn lint_name_is_known(name: text) -> bool:
              "unnamed_duplicate_typed_args" | "resource_leak" |
              "wildcard_match" | "non_exhaustive_match" |
              "export_outside_init" | "init_boundary_violation" |
-             "bypass_with_code_files" | "unknown_decorator" | "stub_impl" |
+             "bypass_with_code_files" | "unknown_annotation" |
+             "unknown_decorator" | "stub_impl" |
              "unknown_attribute" | "too_many_arguments" | "dummy_accessor" |
              "parser_contextual_keyword" | "deprecated_if_let" |
              "struct_construction_parens" | "short_grammar_refactor" |
@@ -238,6 +239,7 @@ fn build_default_levels() -> Dict<String, String>:
     levels["export_outside_init"] = "deny"
     levels["init_boundary_violation"] = "warn"
     levels["bypass_with_code_files"] = "warn"
+    levels["unknown_annotation"] = "warn"
     levels["unknown_decorator"] = "warn"
     levels["stub_impl"] = "deny"
     levels["unknown_attribute"] = "warn"
@@ -556,22 +558,16 @@ impl LintConfig:
                             config.set_error_once("unknown profile: {level_str}")
                     # Validate the lint name is known
                     elif lint_name_is_known(lint_name):
-                        if parse_lint_level(level_str).?:
-                            config.levels[lint_name] = level_str
-                        else:
-                            config.set_error_once("invalid level for {lint_name}: {level_str}")
+                        match parse_lint_level(level_str):
+                            case Some(level):
+                                config.set_level(lint_name, level)
+                            case nil:
+                                config.set_error_once("invalid level for {lint_name}: {level_str}")
                     elif lint_name == "default_level":
                         # Section-wide default (formatting_lints.md:438). LintConfig
                         # has no default-level field yet; recognised so it is not
                         # reported as an unknown lint, but not yet honoured.
                         ()
-                    elif lint_name == "unknown_annotation":
-                        # Meta-lint: sets both unknown_decorator and unknown_attribute
-                        if parse_lint_level(level_str).?:
-                            config.levels["unknown_decorator"] = level_str
-                            config.levels["unknown_attribute"] = level_str
-                        else:
-                            config.set_error_once("invalid level for {lint_name}: {level_str}")
                     else:
                         config.set_error_once("unknown lint: {lint_name}")
 
@@ -625,13 +621,20 @@ impl LintConfig:
 
     # Set the level for a specific lint name.
     me set_level(lint_name: String, level: LintLevel):
+        var value = "warn"
         match level:
             case Allow:
-                self.levels[lint_name] = "allow"
+                value = "allow"
             case Warn:
-                self.levels[lint_name] = "warn"
+                value = "warn"
             case Deny:
-                self.levels[lint_name] = "deny"
+                value = "deny"
+        self.levels[lint_name] = value
+        if lint_name == "unknown_annotation":
+            self.levels["unknown_decorator"] = value
+            self.levels["unknown_attribute"] = value
+        elif lint_name == "unknown_decorator" or lint_name == "unknown_attribute":
+            self.levels["unknown_annotation"] = value
 
     # Apply file-level attribute overrides.
     # Scans the first N lines (before first definition) for:
@@ -701,8 +704,7 @@ impl LintConfig:
                             continue
                         # Handle meta-lint unknown_annotation
                         if clean_name == "unknown_annotation":
-                            self.set_level("unknown_decorator", level)
-                            self.set_level("unknown_attribute", level)
+                            self.set_level("unknown_annotation", level)
                         elif lint_name_is_known(clean_name):
                             self.set_level(clean_name, level)
 
@@ -782,7 +784,7 @@ fn map_lint_code_to_config_name(code: String) -> String:
              "spipe_manual_assertions" | "unnamed_duplicate_typed_args" |
              "resource_leak" | "non_exhaustive_match" |
              "export_outside_init" | "init_boundary_violation" |
-             "bypass_with_code_files" | "unknown_decorator" |
+             "bypass_with_code_files" | "unknown_annotation" | "unknown_decorator" |
              "unknown_attribute" | "stub_impl": return code
         case "parser_contextual_keyword" | "deprecated_if_let" |
              "struct_construction_parens" | "raw_unit_postfix" |
