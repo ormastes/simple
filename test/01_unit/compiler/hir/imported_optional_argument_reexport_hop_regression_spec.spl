@@ -1,0 +1,131 @@
+"""
+# Imported Optional-Argument Projection Across a Re-export Hop — Regression Spec
+
+Run 15 of the stage-1 hardening lane regressed from 258 to 3716 `[hir-fatal]`
+`unresolved type` errors and from 112 to 437 poisoned modules. Every one of the
+new names is a type that appears as an OPTIONAL (`X?` == `Option<X>`) or other
+GENERIC ARGUMENT in an imported signature/field, reached through a package
+facade rather than through the module that declares it:
+
+| name | fatals | shape in the owner |
+|---|---|---|
+| HirContractBlock | 501 | `verification_contract: HirContractBlock?` (mir_instruction_graph.spl:208) |
+| SymbolId | 444 | `owner_symbol: SymbolId?` (module_callable_types.spl:88) |
+| Span | 141 | `span: Span?` (mir_instruction_graph.spl:14) |
+| LayoutPhase | 84 | `layout_phase: LayoutPhase?` (mir_instruction_graph.spl:177) |
+
+MECHANISM. `imported_surface_projected_named_args` now recurses into the
+generic ARGUMENT and calls
+`self.symbols.lookup_qualified_type_raw(imported_module_name, arg_name)`.
+`imported_module_name` is the module the IMPORTER NAMED -- a package facade or
+re-exporter -- not the module that DECLARES the argument type. The lookup
+misses, and `imported_surface_type` then falls through to `self.lower_type`,
+which resolves in the IMPORTER's scope and emits a HARD, non-recovered
+`unresolved type: X` attributed to an innocent module.
+
+Before the generic-argument lane the argument was DROPPED, so the miss was
+unreachable. Widening projection did not create the resolution gap; it made an
+existing one fatal at scale.
+
+The fix is owner-scope resolution that follows the re-export hop to the
+DECLARING module (the same hop `hir_unresolved_type_owner_missing_import` names)
+-- NOT restoring the drop, which is the original silent defect.
+
+## THIS FIXTURE DOES NOT YET REPRODUCE THE REGRESSION -- stated, not buried
+
+All three examples below are GREEN at the regressing tree `c05e7052843` AND
+green after the revert. That is a NEGATIVE result recorded rather than dressed
+up: the four-module facade hop written here is NOT sufficient to trigger the
+miss. The real victim, `50.mir/hwir/bit_vector_constant.spl`, has **no `use`
+line at all** -- it reaches `MirFunction` through package-sibling auto-import
+plus `use compiler.mir.mir_types.*` globs in its siblings, and its profile line
+reads `qtype=4725/3781 miss`, an 80% qualified-lookup miss rate that this
+fixture does not recreate. Until the fixture goes RED the only reproducer is the
+stage-1 census itself (`[hir-fatal]` count 48 -> 3716).
+
+The examples are kept as a NON-VACUOUS guard, not as proof: the third one
+pins that the non-generic spelling of the identical type stays clean, so if a
+future fix accidentally resolves argument types in the IMPORTER's scope the
+first two would pass for the wrong reason and the third would not change.
+
+See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+and doc/08_tracking/bug/hir_generic_projection_regression_run15_2026-08-22.md
+"""
+
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn hop_surfaces(mods: Dict<text, Module>, srcs: [SourceFile]) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(mods, srcs):
+        case Ok(value): value
+        case Err(error):
+            assert_true(false)
+            ModuleSurfacesByName.empty()
+
+fn hop_lower(param: text) -> HirLowering:
+    """Four modules, mirroring the real tree exactly:
+
+    - `sp.span`      declares `Span`
+    - `mir.graph`    IMPORTS `Span` and declares the callable using it
+    - `mir`          RE-EXPORTS the callable (the package facade / hop)
+    - `mir.hwir.bvc` imports the callable through the FACADE only
+    """
+    val log = Logger(level: 0)
+    val span_src = "struct Span:\n    lo: i64\n"
+    val graph_src = "use sp.span.\{Span\}\n\nfn graph_of(" + param + ") -> i64:\n    1\n"
+    val facade_src = "export use mir.graph.\{graph_of\}\n"
+    val victim_src = "use mir.\{graph_of\}\n\nfn go() -> i64:\n    1\n"
+    var mods: Dict<text, Module> = {}
+    mods["sp.span"] = parse_full_frontend(span_src, "sp.span", "sp.span", log)
+    mods["mir.graph"] = parse_full_frontend(graph_src, "mir.graph", "mir.graph", log)
+    mods["mir"] = parse_full_frontend(facade_src, "mir", "mir", log)
+    val victim = parse_full_frontend(victim_src, "mir.hwir.bvc", "mir.hwir.bvc", log)
+    mods["mir.hwir.bvc"] = victim
+    val srcs = [
+        SourceFile(path: "sp/span.spl", content: span_src, module_name: "sp.span"),
+        SourceFile(path: "mir/graph.spl", content: graph_src, module_name: "mir.graph"),
+        SourceFile(path: "mir/__init__.spl", content: facade_src, module_name: "mir"),
+        SourceFile(path: "mir/hwir/bvc.spl", content: victim_src, module_name: "mir.hwir.bvc")
+    ]
+    var lowering = hirlowering_for_module("mir.hwir.bvc", hop_surfaces(mods, srcs))
+    val hir = lowering.lower_module(victim)
+    lowering
+
+fn hop_unresolved_span_errors(lowering: HirLowering) -> i64:
+    var n = 0
+    for error in lowering.errors:
+        if error.message.contains("unresolved type: Span"):
+            n = n + 1
+    n
+
+describe "optional generic argument projected across a re-export hop":
+    it "does not blame the importer for a type only the OWNER imports":
+        # RED at run15's tree: the projected `Option<Span>` argument is looked
+        # up in the facade `mir`, misses, falls to the importer's scope, and
+        # reports `unresolved type: Span` against mir.hwir.bvc -- a module that
+        # never names Span. This is the shape of all 3716 run15 fatals.
+        val lowering = hop_lower("s: Span?")
+        for error in lowering.errors:
+            eprint("[hop-optional-error] {error.message}")
+        expect(hop_unresolved_span_errors(lowering)).to_equal(0)
+
+    it "does not blame the importer for a Dict VALUE the owner imports":
+        # Same miss, different generic constructor -- the argument recursion is
+        # shared, so both branches must clear together.
+        val lowering = hop_lower("d: Dict<text, Span>")
+        for error in lowering.errors:
+            eprint("[hop-dict-error] {error.message}")
+        expect(hop_unresolved_span_errors(lowering)).to_equal(0)
+
+    it "guards the guard: a NON-generic use of the same type is unaffected":
+        # The bare `s: Span` shape never went through the argument recursion,
+        # so it must be green on BOTH sides of the regression. If this ever
+        # goes red the fixture has stopped isolating the argument path.
+        val lowering = hop_lower("s: Span")
+        expect(hop_unresolved_span_errors(lowering)).to_equal(0)

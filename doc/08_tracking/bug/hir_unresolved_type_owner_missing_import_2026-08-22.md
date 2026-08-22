@@ -639,3 +639,32 @@ consistent with the two OTHER mechanisms identified in follow-up (c):
 
 Each needs its own lane, its own reproduce spec, and its own measured census —
 not a predicate.
+
+## Follow-up (e) — both generic lanes REVERTED after run15 (2026-08-22)
+
+Follow-ups (d)'s two fixes, `d481f15e1ac` (generic arguments) and
+`86787968989` (generic callables + the `Function` arm), were **reverted**. On a
+full stage-1 build they took `[hir-fatal]` from post19's 48 to **3716** and
+poisoned modules from 9 to **437**.
+
+The mechanism is this record's OWN mechanism, reached from a new direction:
+a projected generic argument is looked up with
+`lookup_qualified_type_raw(imported_module_name, name)` where
+`imported_module_name` is the module the importer NAMED — a package facade or
+glob re-exporter — not the module that DECLARES the type. On the miss,
+`imported_surface_type` falls to `lower_type` in the IMPORTER's scope and emits
+a hard `unresolved type: X` against a module that never names X.
+`50.mir/hwir/bit_vector_constant.spl` (no `use` line at all) reports exactly the
+four `X?` optional fields that `50.mir/mir_instruction_graph.spl` imports at its
+lines 3-5: Span, HirType, LayoutPhase, HirContractBlock. Its profile line reads
+`qtype=4725/3781 miss`.
+
+**The revert is not an endorsement of the drop.** Dropping the argument is the
+original silent defect (d) measured (`Dict<text,MirType>` recorded as
+`Dict<any,any>`, no diagnostic). Re-land both lanes only after the owner-scope
+lookup follows the re-export hop to the declaring module, and only behind a
+measured stage-1 census.
+
+Full measurement, the failing-name census, and the honest limits (no unit
+fixture reproduces it; per-commit attribution is static, not differential) are
+in `hir_generic_projection_regression_run15_2026-08-22.md`.
