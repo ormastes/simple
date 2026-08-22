@@ -106,7 +106,7 @@ pub fn render() -> String {
     out
 }
 
-fn expr_kind(expr: &Expr) -> &'static str {
+pub(crate) fn expr_kind(expr: &Expr) -> &'static str {
     match expr {
         Expr::Identifier(_) => "Identifier",
         Expr::Integer(_) | Expr::TypedInteger(_, _) => "Integer",

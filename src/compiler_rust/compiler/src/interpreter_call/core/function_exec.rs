@@ -627,6 +627,8 @@ pub(crate) fn execute_function_body(
     // oversized-allocation report can say WHICH .spl function's loop allocated.
     // No-op (one cached-bool branch) unless the guard is enabled.
     let _mem_frame = crate::mem_trace::InterpFrame::enter(&func.name);
+    // SIGPROF sampler frame (SIMPLE_INTERP_SAMPLE=1), default OFF.
+    let _sample_frame = crate::interpreter::sampler::Frame::enter(&func.name);
 
     // Stack overflow detection: push depth, auto-pop on drop
     let _depth_guard = crate::interpreter::push_call_depth(&func.name)?;

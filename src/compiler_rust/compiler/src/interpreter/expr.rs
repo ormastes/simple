@@ -290,6 +290,10 @@ pub(crate) fn evaluate_expr(
 
     // Phase D dispatch profiler: default OFF (one relaxed atomic load when off).
     crate::interpreter::dispatch_profile::record(expr);
+    // SIGPROF sampler (SIMPLE_INTERP_SAMPLE=1): innermost expr kind, default OFF.
+    let _kind_guard = crate::interpreter::sampler::KindGuard::enter(
+        if crate::interpreter::sampler::enabled() { crate::interpreter::dispatch_profile::expr_kind(expr) } else { "" },
+    );
 
     // Fast path: O(1) discriminant-based dispatch — avoids up to 4 sequential
     // full-enum matches when the previous cascade approach returned None.

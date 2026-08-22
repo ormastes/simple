@@ -134,6 +134,7 @@ pub(crate) use interpreter_control::exec_with;
 // `expr.rs` still calls `crate::interpreter::dispatch_profile::record`, which
 // left the seed unbuildable (E0433).
 pub(crate) mod dispatch_profile;
+pub(crate) mod sampler;
 mod expr;
 pub(crate) use expr::evaluate_expr;
 
