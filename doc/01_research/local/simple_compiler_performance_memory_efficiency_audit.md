@@ -1523,3 +1523,14 @@ Compiler helpers re-export that canonical context type/builders instead of redef
 them, and the registry derives both compiler and stdlib rule facts from one view. Normal
 lint therefore falls from four context arrays (one compiler plus three stdlib) to one,
 with no additional split and no retained source after dispatch.
+
+## 2026-08-22 implementation addendum: indexed duplicate-typed calls
+
+Duplicate-typed-argument analysis still scanned every source line for every eligible
+signature, giving O(signatures × source characters) matching after the array-allocation
+fix. It now counts `(name, arity)` targets once, rejects ambiguous keys, tokenizes source
+lines once, parses arguments only for eligible names, and records replacements by stable
+signature index. Records are ordered by `(signature index, source sequence)` so fix and
+replacement order remains unchanged. Cost becomes O(source characters + signatures +
+replacements log replacements), with O(signatures + replacements) transient memory and
+no per-signature source traversal or replacement-bucket COW growth.
