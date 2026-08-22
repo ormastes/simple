@@ -1,0 +1,85 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005
+
+use std.spec.*
+use std.common.structural.mcdc.contracts.*
+
+fn decision() -> McdcDecisionIdV1:
+    mcdc_decision_id_v1(11, 12, 100, 3)
+
+describe "bounded MC/DC evidence contracts":
+    describe "REQ-001 and REQ-002: stable decisions and correlated vectors":
+        it "accepts a bounded stable decision and short-circuit vector":
+            val item = decision()
+            val evaluation = mcdc_evaluation_v1(item, 1, 3, 1, false)
+            expect(mcdc_decision_id_v1_well_formed(item)).to_be(true)
+            expect(mcdc_evaluation_v1_well_formed(evaluation)).to_be(true)
+
+        it "rejects truth outside the evaluated and admitted masks":
+            val unevaluated_truth = mcdc_evaluation_v1(decision(), 1, 1, 2, false)
+            val unknown_condition = mcdc_evaluation_v1(decision(), 1, 8, 0, false)
+            expect(mcdc_evaluation_v1_well_formed(unevaluated_truth)).to_be(false)
+            expect(mcdc_evaluation_v1_well_formed(unknown_condition)).to_be(false)
+
+        it "keeps signed masks below the sign bit boundary":
+            val maximum = mcdc_decision_id_v1(11, 12, 100, 62)
+            val too_many = mcdc_decision_id_v1(11, 12, 100, 63)
+            expect(mcdc_decision_id_v1_well_formed(maximum)).to_be(true)
+            expect(mcdc_condition_mask(62)).to_be_greater_than(0)
+            expect(mcdc_decision_id_v1_well_formed(too_many)).to_be(false)
+            expect(mcdc_condition_mask(63)).to_equal(0)
+
+    describe "REQ-003: independence witnesses":
+        it "proves a unique-cause pair when only the target changes":
+            val a = mcdc_evaluation_v1(decision(), 1, 7, 0, false)
+            val b = mcdc_evaluation_v1(decision(), 2, 7, 2, true)
+            val witness = mcdc_witness_v1(
+                1, McdcWitnessPolicyV1.UniqueCause, 0, 0, 0)
+            expect(mcdc_unique_cause_pair(witness, a, b)).to_be(true)
+
+        it "rejects a unique-cause pair when another condition changes":
+            val a = mcdc_evaluation_v1(decision(), 1, 7, 0, false)
+            val b = mcdc_evaluation_v1(decision(), 2, 7, 6, true)
+            val witness = mcdc_witness_v1(
+                1, McdcWitnessPolicyV1.UniqueCause, 0, 0, 0)
+            expect(mcdc_unique_cause_pair(witness, a, b)).to_be(false)
+
+        it "rejects reused sequences and different decision identities":
+            val a = mcdc_evaluation_v1(decision(), 1, 7, 0, false)
+            val same_sequence = mcdc_evaluation_v1(decision(), 1, 7, 2, true)
+            val other_decision = mcdc_evaluation_v1(
+                mcdc_decision_id_v1(11, 12, 101, 3), 2, 7, 2, true)
+            val witness = mcdc_witness_v1(
+                1, McdcWitnessPolicyV1.UniqueCause, 0, 0, 0)
+            expect(mcdc_unique_cause_pair(witness, a, same_sequence)).to_be(false)
+            expect(mcdc_unique_cause_pair(witness, a, other_decision)).to_be(false)
+
+        it "accepts masking evidence shape only with a verifier receipt":
+            val a = mcdc_evaluation_v1(decision(), 1, 7, 0, false)
+            val b = mcdc_evaluation_v1(decision(), 2, 7, 6, true)
+            val proved = mcdc_witness_v1(
+                1, McdcWitnessPolicyV1.ValidatedMasking, 4, 21, 22)
+            val unproved = mcdc_witness_v1(
+                1, McdcWitnessPolicyV1.ValidatedMasking, 0, 0, 0)
+            expect(mcdc_witness_v1_evidence_well_formed(proved, a, b)).to_be(true)
+            expect(mcdc_witness_v1_evidence_well_formed(unproved, a, b)).to_be(false)
+
+        it "rejects an overbroad masking proof mask":
+            val a = mcdc_evaluation_v1(decision(), 1, 7, 0, false)
+            val b = mcdc_evaluation_v1(decision(), 2, 7, 6, true)
+            val overbroad = mcdc_witness_v1(
+                1, McdcWitnessPolicyV1.ValidatedMasking, 5, 21, 22)
+            expect(mcdc_witness_v1_evidence_well_formed(overbroad, a, b)).to_be(false)
+
+    describe "REQ-004 and REQ-005: truthful exact gate":
+        it "passes only when every non-excluded condition is covered":
+            val complete = mcdc_coverage_summary_v1(10, 2, 8)
+            val incomplete = mcdc_coverage_summary_v1(10, 2, 7)
+            expect(mcdc_coverage_summary_v1_is_exact_100(complete)).to_be(true)
+            expect(mcdc_coverage_summary_v1_is_exact_100(incomplete)).to_be(false)
+
+        it "does not report an empty eligible denominator as 100 percent":
+            val empty = mcdc_coverage_summary_v1(0, 0, 0)
+            val all_excluded = mcdc_coverage_summary_v1(2, 2, 0)
+            expect(mcdc_coverage_summary_v1_is_exact_100(empty)).to_be(false)
+            expect(mcdc_coverage_summary_v1_is_exact_100(all_excluded)).to_be(false)

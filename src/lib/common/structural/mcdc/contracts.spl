@@ -1,0 +1,155 @@
+# codex-impl
+# Pointer-free MC/DC evidence vocabulary for bounded runtime collection.
+
+val MCDC_SCHEMA_VERSION: i64 = 1
+val MCDC_MAX_CONDITIONS: i64 = 62
+
+enum McdcWitnessPolicyV1:
+    UniqueCause
+    ValidatedMasking
+
+struct McdcDecisionIdV1:
+    schema_version: i64
+    source_digest_hi: i64
+    source_digest_lo: i64
+    span_start: i64
+    condition_count: i64
+
+fn mcdc_decision_id_v1(source_digest_hi: i64, source_digest_lo: i64,
+                       span_start: i64, condition_count: i64) -> McdcDecisionIdV1:
+    McdcDecisionIdV1(schema_version: MCDC_SCHEMA_VERSION,
+                     source_digest_hi: source_digest_hi,
+                     source_digest_lo: source_digest_lo,
+                     span_start: span_start, condition_count: condition_count)
+
+fn mcdc_decision_id_v1_well_formed(value: McdcDecisionIdV1) -> bool:
+    (value.schema_version == MCDC_SCHEMA_VERSION
+        and (value.source_digest_hi != 0 or value.source_digest_lo != 0)
+        and value.span_start >= 0 and value.condition_count > 0
+        and value.condition_count <= MCDC_MAX_CONDITIONS)
+
+fn mcdc_condition_mask(condition_count: i64) -> i64:
+    if condition_count <= 0 or condition_count > MCDC_MAX_CONDITIONS:
+        return 0
+    (1 << condition_count) - 1
+
+struct McdcEvaluationV1:
+    schema_version: i64
+    decision: McdcDecisionIdV1
+    evaluation_sequence: i64
+    evaluated_mask: i64
+    true_mask: i64
+    outcome: bool
+
+fn mcdc_evaluation_v1(decision: McdcDecisionIdV1, evaluation_sequence: i64,
+                      evaluated_mask: i64, true_mask: i64,
+                      outcome: bool) -> McdcEvaluationV1:
+    McdcEvaluationV1(schema_version: MCDC_SCHEMA_VERSION, decision: decision,
+                     evaluation_sequence: evaluation_sequence,
+                     evaluated_mask: evaluated_mask, true_mask: true_mask,
+                     outcome: outcome)
+
+fn mcdc_evaluation_v1_well_formed(value: McdcEvaluationV1) -> bool:
+    if value.schema_version != MCDC_SCHEMA_VERSION:
+        return false
+    if not mcdc_decision_id_v1_well_formed(value.decision):
+        return false
+    if value.evaluation_sequence < 0 or value.evaluated_mask < 0 or value.true_mask < 0:
+        return false
+    val admitted = mcdc_condition_mask(value.decision.condition_count)
+    ((value.evaluated_mask & ~admitted) == 0
+        and (value.true_mask & ~value.evaluated_mask) == 0)
+
+fn mcdc_same_decision(a: McdcEvaluationV1, b: McdcEvaluationV1) -> bool:
+    (a.decision.schema_version == b.decision.schema_version
+        and a.decision.source_digest_hi == b.decision.source_digest_hi
+        and a.decision.source_digest_lo == b.decision.source_digest_lo
+        and a.decision.span_start == b.decision.span_start
+        and a.decision.condition_count == b.decision.condition_count)
+
+struct McdcWitnessV1:
+    schema_version: i64
+    condition_index: i64
+    policy: McdcWitnessPolicyV1
+    masked_proof_mask: i64
+    masking_proof_hi: i64
+    masking_proof_lo: i64
+
+fn mcdc_witness_v1(condition_index: i64, policy: McdcWitnessPolicyV1,
+                   masked_proof_mask: i64, masking_proof_hi: i64,
+                   masking_proof_lo: i64) -> McdcWitnessV1:
+    McdcWitnessV1(schema_version: MCDC_SCHEMA_VERSION,
+                  condition_index: condition_index, policy: policy,
+                  masked_proof_mask: masked_proof_mask,
+                  masking_proof_hi: masking_proof_hi,
+                  masking_proof_lo: masking_proof_lo)
+
+fn mcdc_witness_v1_evidence_well_formed(witness: McdcWitnessV1,
+                                        a: McdcEvaluationV1,
+                                        b: McdcEvaluationV1) -> bool:
+    if witness.schema_version != MCDC_SCHEMA_VERSION:
+        return false
+    if not mcdc_evaluation_v1_well_formed(a) or not mcdc_evaluation_v1_well_formed(b):
+        return false
+    if not mcdc_same_decision(a, b) or a.evaluation_sequence == b.evaluation_sequence:
+        return false
+    if witness.condition_index < 0 or witness.condition_index >= a.decision.condition_count:
+        return false
+    if a.outcome == b.outcome:
+        return false
+    val target = 1 << witness.condition_index
+    if (a.evaluated_mask & target) == 0 or (b.evaluated_mask & target) == 0:
+        return false
+    val changed = (a.true_mask ^ b.true_mask) | (a.evaluated_mask ^ b.evaluated_mask)
+    if (changed & target) == 0:
+        return false
+    val admitted = mcdc_condition_mask(a.decision.condition_count)
+    if witness.masked_proof_mask < 0 or (witness.masked_proof_mask & ~admitted) != 0:
+        return false
+    if (witness.masked_proof_mask & target) != 0:
+        return false
+    if witness.policy == McdcWitnessPolicyV1.UniqueCause:
+        return (changed == target and witness.masked_proof_mask == 0
+            and witness.masking_proof_hi == 0 and witness.masking_proof_lo == 0)
+    ((witness.masking_proof_hi != 0 or witness.masking_proof_lo != 0)
+        and witness.masked_proof_mask != 0
+        and witness.masked_proof_mask == (changed & ~target))
+
+fn mcdc_unique_cause_pair(witness: McdcWitnessV1,
+                          a: McdcEvaluationV1,
+                          b: McdcEvaluationV1) -> bool:
+    (witness.policy == McdcWitnessPolicyV1.UniqueCause
+        and mcdc_witness_v1_evidence_well_formed(witness, a, b))
+
+struct McdcCoverageSummaryV1:
+    gross_conditions: i64
+    excluded_conditions: i64
+    covered_conditions: i64
+
+fn mcdc_coverage_summary_v1(gross_conditions: i64, excluded_conditions: i64,
+                            covered_conditions: i64) -> McdcCoverageSummaryV1:
+    McdcCoverageSummaryV1(gross_conditions: gross_conditions,
+                          excluded_conditions: excluded_conditions,
+                          covered_conditions: covered_conditions)
+
+fn mcdc_coverage_summary_v1_well_formed(value: McdcCoverageSummaryV1) -> bool:
+    (value.gross_conditions >= 0 and value.excluded_conditions >= 0
+        and value.covered_conditions >= 0
+        and value.excluded_conditions <= value.gross_conditions
+        and value.covered_conditions <= value.gross_conditions - value.excluded_conditions)
+
+fn mcdc_coverage_summary_v1_is_exact_100(value: McdcCoverageSummaryV1) -> bool:
+    if not mcdc_coverage_summary_v1_well_formed(value):
+        return false
+    val eligible = value.gross_conditions - value.excluded_conditions
+    eligible > 0 and value.covered_conditions == eligible
+
+export MCDC_SCHEMA_VERSION, MCDC_MAX_CONDITIONS
+export McdcWitnessPolicyV1, McdcDecisionIdV1, McdcEvaluationV1, McdcWitnessV1
+export McdcCoverageSummaryV1
+export mcdc_decision_id_v1, mcdc_decision_id_v1_well_formed, mcdc_condition_mask
+export mcdc_evaluation_v1, mcdc_evaluation_v1_well_formed, mcdc_same_decision
+export mcdc_witness_v1, mcdc_witness_v1_evidence_well_formed
+export mcdc_unique_cause_pair
+export mcdc_coverage_summary_v1, mcdc_coverage_summary_v1_well_formed
+export mcdc_coverage_summary_v1_is_exact_100
