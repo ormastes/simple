@@ -705,6 +705,20 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   assignment under genuine FNV collisions.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed name-lint indexing tranche
+
+- Finalize each parsed class once instead of copy-modify-reassigning it for
+  every method, and reuse each method-body scan endpoint.
+- Build one first-definition class index and one ordered inheritance fact per
+  class for both ACC001 and NAME001.
+- Replace suffix dedup and suffix-by-method rescans with indexed flat groups,
+  preserving exact legacy diagnostic grouping and order.
+- Add mirrored contracts for group order, duplicate-class/transitive lookup,
+  and nested textual-class behavior.
+- Deferred: banded allocation-bounded edit distance and compact first-statement
+  storage for NAME001/ACC001.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed query outline-index tranche
 
 - Build return-type and parameter-name facts together from the already-split
