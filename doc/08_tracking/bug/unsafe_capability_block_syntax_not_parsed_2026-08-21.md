@@ -86,3 +86,22 @@ Evidence: `test/01_unit/compiler/semantics/any_escape/unsafe_block_capabilities_
 — scenario "parses the block form into HirExprKind.UnsafeBlock carrying its
 capabilities" (fixture `test/fixtures/any_escape/block_form_type_erasure.spl`),
 which pre-fix returned `["<none>"]` because the statement was not an UnsafeBlock.
+
+## Hosted function-body regression (2026-08-22)
+
+A strict source-matched stage-3 build exposed a second entry path for the same
+syntax. `parser_decls_fn.spl` imported `parse_block` through the legacy
+`compiler.core.parser_stmts` alias. In a restricted entry closure that owner did
+not resolve to the capability-aware statement parser, so every scoped FFI block
+inside `HostedCocoaBackend` and four such bodies inside `HostedSdl2Backend`
+lowered `ffi` as an ordinary identifier. Cranelift then failed closed with
+`GlobalLoad: unresolved identifier 'ffi'`.
+
+The function-declaration owner now imports the canonical
+`compiler.frontend.core.parser_stmts.{parse_block}` surface. The bounded
+`scripts/check/check-unsafe-capability-metadata-ownership.shs` preflight scans
+the frontend owner directory for any reintroduced legacy import and pins both
+production hosted backends as regressors. The gate reads seven fixed source
+files plus the small frontend-owner directory, performs no compiler launch,
+build-cache walk, or heap-sensitive runtime work, and is intended to stay well
+below the 15-second bootstrap preflight budget.

@@ -9,8 +9,10 @@ decl_use=src/compiler/10.frontend/core/parser_decls_use.spl
 stmt=src/compiler/10.frontend/core/parser_stmts.spl
 flat=src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
 hir=src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl
+cocoa=src/os/compositor/hosted_backend_cocoa.spl
+sdl2=src/os/compositor/hosted_backend_sdl2.spl
 
-for owner in "$decl_fn" "$decl_use" "$stmt" "$flat" "$hir"; do
+for owner in "$decl_fn" "$decl_use" "$stmt" "$flat" "$hir" "$cocoa" "$sdl2"; do
     test -f "$owner" || {
         echo "unsafe capability ownership: missing owner $owner" >&2
         exit 1
@@ -26,7 +28,10 @@ grep -Fq "$canonical" "$decl_use" || {
     echo "unsafe capability ownership: use declarations lack canonical parse_block owner" >&2
     exit 1
 }
-if grep -Fq 'use compiler.core.parser_stmts' "$decl_fn" "$decl_use"; then
+# This is a source-closure ownership invariant, not just a two-file spelling
+# check. A new declaration split that imports the legacy alias would recreate
+# the same ordinary-expression lowering and unresolved GlobalLoad.
+if grep -R -Fq 'use compiler.core.parser_stmts' src/compiler/10.frontend/core; then
     echo "unsafe capability ownership: legacy parser_stmts alias remains" >&2
     exit 1
 fi
@@ -53,5 +58,20 @@ grep -Fq 'unsafe_hir_body.unsafe_caps = caps' "$hir" || {
     echo "unsafe capability ownership: HIR drops capability metadata" >&2
     exit 1
 }
+
+# Exact production regressors from the strict stage-3 failure: both hosted
+# backends place FFI capability blocks inside class/impl function bodies. Keep
+# these assertions local and allocation-free; no generated tree or build cache
+# scan belongs in this preflight.
+for backend in "$cocoa" "$sdl2"; do
+    grep -Fq 'unsafe(capabilities: [ffi]):' "$backend" || {
+        echo "unsafe capability ownership: hosted regressor missing from $backend" >&2
+        exit 1
+    }
+    grep -Fq 'capabilities: [ffi])' "$backend" || {
+        echo "unsafe capability ownership: hosted extern metadata missing from $backend" >&2
+        exit 1
+    }
+done
 
 echo "unsafe capability metadata ownership: PASS"
