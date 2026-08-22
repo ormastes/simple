@@ -33,11 +33,14 @@ fn _count_triple_quotes(line: text) -> i64:
     count
 fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
     var fixes: [EasyFix] = []
+    val lambda_starts = _short_lambda_starts(ctx.line)
+    var candidate_index = 0
     var search_from = 0
-    while search_from < ctx.line.len():
-        val lambda_start = _find_next_lambda_start(ctx.line, search_from)
-        if lambda_start < 0:
-            return fixes
+    while candidate_index < lambda_starts.len():
+        val lambda_start = lambda_starts[candidate_index]
+        candidate_index = candidate_index + 1
+        if lambda_start < search_from:
+            continue
         if _line_has_functional_update_before(ctx.line, lambda_start):
             search_from = lambda_start + 1
             continue
@@ -131,26 +134,22 @@ fn _check_short_grammar_line(ctx: LineContext, file: text) -> [EasyFix]:
                                         search_from = lambda_start + 1
 
     fixes
-fn _find_next_lambda_start(line: text, search_from: i64) -> i64:
-    val candidate = _find_text_from(line, "\\", search_from)
-    if candidate < 0:
-        return -1
-    if _line_has_comment_before(line, candidate) or _position_is_inside_string(line, candidate):
-        return _find_next_lambda_start(line, candidate + 1)
-    if candidate + 1 >= line.len():
-        return -1
-    val next = line[candidate + 1:candidate + 2]
-    if _is_identifier_start(next) or next == "(":
-        return candidate
-    _find_next_lambda_start(line, candidate + 1)
-
-fn _line_has_comment_before(line: text, pos: i64) -> bool:
+fn _short_lambda_starts(line: text) -> [i64]:
+    var result: [i64] = []
     var i = 0
-    while i < pos:
-        if line[i:i + 1] == "#":
-            return true
+    var in_string = false
+    while i < line.len():
+        val ch = line[i:i + 1]
+        if ch == "#":
+            return result
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string and ch == "\\" and i + 1 < line.len():
+            val next = line[i + 1:i + 2]
+            if _is_identifier_start(next) or next == "(":
+                result.push(i)
         i = i + 1
-    false
+    result
 
 fn _line_has_functional_update_before(line: text, pos: i64) -> bool:
     var search_from = 0
@@ -207,16 +206,6 @@ fn _arrow_is_function_type_return(line: text, arrow_pos: i64) -> bool:
                 return line[name_start:name_end] == "fn"
         i = i - 1
     false
-fn _position_is_inside_string(line: text, pos: i64) -> bool:
-    var i = 0
-    var in_string = false
-    while i < pos:
-        val ch = line[i:i + 1]
-        if ch == "\"":
-            in_string = not in_string
-        i = i + 1
-    in_string
-
 struct ShortGrammarMethodRefCandidate:
     method: text
     end_offset: i64
