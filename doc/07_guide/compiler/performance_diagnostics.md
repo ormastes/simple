@@ -204,3 +204,15 @@ make those findings typed or authorize fixes.
 
 See [the architecture](../../04_architecture/simple_compiler_performance_memory_efficiency.md)
 and [system-test plan](../../03_plan/sys_test/simple_compiler_performance_memory_efficiency.md).
+## Checked MIR pass execution
+
+Set `SIMPLE_MIR_VERIFY_EACH=1` to apply the admitted structural MIR proof surface to the
+module before and after each canonical optimization pass. Malformed input or output is
+rejected fail-closed; tracing with `SIMPLE_COMPILER_TRACE=1` reports the stable verifier
+codes. This does not yet prove SSA dominance, full opcode typing, ownership, or loop
+invariants.
+
+Verification is intentionally opt-in. The setting is cached after its first lookup, so
+normal builds do not scan MIR or allocate verifier receipts. Enabled verification scans
+the module and sorts function symbols for deterministic evidence, and should therefore
+be used for compiler development and focused diagnostics rather than routine builds.
