@@ -3,6 +3,8 @@
 **Date:** 2026-08-21
 **Research:** `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md` (§15, §20, §21, §24)
 **Design:** `doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md`
+**Status updates go in the canonical table:** `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md` §27 (Execution status). Do NOT add dated status rows to this file — it tracks phase/lane scope only.
+
 **Status legend:** `not started` / `partial` (with evidence) / `done`
 
 Every phase exit gate below is an **executable verdict line** in the repo convention
@@ -370,6 +372,8 @@ Phase 7 stays blocked by the four SEGVing stage binaries.
 2026-08-21 sections of `layer_expert/{compiler_driver,mir_lowering,bootstrap,test_runner}/skill.md`.
 
 ## 27. Seed JIT: erased-receiver method dispatch (2026-08-22)
+
+*Lane scope detail; its execution-status row lives in the canonical §27 table (see header pointer).*
 
 | Lane | Status | Evidence |
 |---|---|---|
