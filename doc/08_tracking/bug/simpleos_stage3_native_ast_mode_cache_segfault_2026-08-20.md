@@ -1535,3 +1535,34 @@ instrument the single surface-to-HIR transition boundary (surface-registry
 finalization, module-order handoff, and first HIR module selection) without
 reintroducing payload recursion. No trusted Stage 3, ARM64 SimpleOS artifact,
 or QEMU 2D, web, GUI, or window-manager evidence is claimed.
+
+## Surface-finalization resolver entry cycles (2026-08-22)
+
+Three fresh admitted diagnostic cycles narrowed the post-surface crash without
+promoting a Stage-3 artifact. Every Phase-2 candidate passed compiler sanity
+and the struct-receiver/runtime capability gate; every Phase-3 admission and
+both cache-ownership checks passed.
+
+Cycle 1 placed fixed scalar probes around the streaming surface finalizer. It
+proved that all 694 surfaces release, retained `SourceFile` reconstruction and
+commit complete, and the crash occurs inside
+`ModuleSurfaceBuilder.resolve_export_origins()` before registry freeze or HIR.
+
+Cycle 2 placed fixed entry probes inside that resolver. Method dispatch, the
+`frozen` check, trace-gate evaluation, trace dispatch, and
+`module_surface_name_index_build` all completed. The process exited 139 before
+the owner-index completion marker, isolating the remaining failure to the
+resolver's owner-index construction boundary.
+
+Cycle 3 deferred rebuilding the 694 boxed `SourceFile` records until after
+export-origin resolution and registry promotion to reduce the no-GC peak. The
+failure boundary did not move: 694 surfaces released, then exit 139 before
+`phase2:parse:done`; no Stage-3 candidate, sanity receipt, or provenance
+manifest existed. The memory-order change and all probes were removed.
+
+The three-cycle cap is exhausted. The next session should instrument the owner
+index one allocation/category at a time, beginning with
+`owner_by_package_name`, and replace the first failing dictionary construction
+or aggregate iteration with a retained scalar/SoA owner rather than changing
+later HIR code. No ARM64 SimpleOS artifact or QEMU 2D, web, GUI, or
+window-manager evidence is claimed.
