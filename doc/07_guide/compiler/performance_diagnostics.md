@@ -70,6 +70,11 @@ them. Finer preservation can be admitted only with a focused witness. Loop fores
 range/induction, region alias, effects, and MemorySSA-lite remain future slices of the
 same revision-local owner.
 
+The legacy vectorizer still has compatibility-local analysis, but its operand and
+array-access collectors append into owned buffers rather than repeatedly concatenating
+growing arrays. It must migrate to `PerfFacts` before transformation status can be
+reconsidered; partial shared def/use coverage is not sufficient.
+
 ## Current safety containment
 
 - Unknown escape state remains escaping after finalization.
