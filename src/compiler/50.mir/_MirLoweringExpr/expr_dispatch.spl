@@ -4210,7 +4210,27 @@ impl MirLowering:
                 self.unsupported_expr_kind("E-MIR-EXPR-Error", "error-recovery expression node (an earlier phase already reported the real error)", expr_value.span)
 
             case Lambda(_, _, _):
-                self.unsupported_expr_kind("E-MIR-EXPR-Lambda", "lambda expression (closure conversion has not run)", expr_value.span)
+                # A lambda literal in any other value position (returned from
+                # a fn, stored in a struct field/array, nested inside another
+                # lambda body): run the same closure conversion the Let/call-arg
+                # paths use -- lift to `__lambda_lift_<n>` and, when it
+                # captures, materialize an rt_closure_new env. Only a capture
+                # shape the lift cannot handle keeps the loud failure.
+                val lifted_lambda = self.lower_lambda_value(expr_value)
+                if lifted_lambda != nil:
+                    val lifted = lifted_lambda.unwrap()
+                    match lifted.kind:
+                        case Const(_, lambda_type):
+                            var lambda_b = self.builder
+                            val lambda_local = lambda_b.emit_cast(lifted, lambda_type)
+                            self.builder = lambda_b
+                            lambda_local
+                        case Copy(lambda_local) | Move(lambda_local):
+                            lambda_local
+                        case _:
+                            self.unsupported_expr_kind("E-MIR-EXPR-Lambda", "lambda expression (closure conversion has not run)", expr_value.span)
+                else:
+                    self.unsupported_expr_kind("E-MIR-EXPR-Lambda", "lambda expression (closure conversion has not run)", expr_value.span)
 
             case OptionalChain(_, _):
                 self.unsupported_expr_kind("E-MIR-EXPR-OptionalChain", "optional-chain field access (`base?.field`)", expr_value.span)

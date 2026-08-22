@@ -3759,6 +3759,24 @@ impl MirLowering:
             i = i + 1
         acc1
 
+    fn lambda_binding_local(symbol_id: i64) -> LocalId:
+        """Resolve a lambda's free variable to its live local.
+
+        Identifier resolution moved to `find_local` (local_symbol_ids via
+        bind_local, 033d79338a1) but the whole lambda machinery -- capture
+        snapshot, beta-reduction, lift -- still read and wrote only the dead
+        `local_map`, so every capturing lambda on the native path either saw
+        "undefined variable" or fell through to E-MIR-EXPR-Lambda. Consult
+        the authoritative store first, then the legacy map. Bug
+        native_capturing_lambda_closure_conversion_2026-08-22.
+        """
+        val found = self.find_local(symbol_id)
+        if found.id >= 0:
+            return found
+        if self.local_map.has(symbol_id):
+            return self.local_map[symbol_id]
+        LocalId(id: -1)
+
     me snapshot_lambda_capture(lam: HirExpr) -> Dict<i64, LocalId>:
         """Bind-time by-value capture snapshot for `val f = \\x: ...`.
 
@@ -3783,8 +3801,8 @@ impl MirLowering:
                 var fi = 0
                 while fi < free_syms.len():
                     val fsid = free_syms[fi]
-                    if self.local_map.has(fsid):
-                        val live_local = self.local_map[fsid]
+                    val live_local = self.lambda_binding_local(fsid)
+                    if live_local.id >= 0:
                         val ty = self.lookup_local_type(live_local)
                         var b = self.builder
                         val frozen = b.new_temp(ty)
@@ -3830,47 +3848,56 @@ impl MirLowering:
                 # SSA-reassigned-since-bind) ambient map. The live map is
                 # restored after the body is lowered so the rest of the
                 # enclosing scope keeps seeing current values.
-                val live_map = self.local_map
+                # The binding store is the parallel-array pair behind
+                # bind_local/find_local; save a value copy, overlay the
+                # frozen snapshot and the params, lower, and restore.
+                val saved_ids = self.local_symbol_ids
+                val saved_values = self.local_symbol_values
                 if self.lambda_capture_snapshot.has(sid):
-                    # Dict has REFERENCE semantics here: aliasing
-                    # `self.local_map` directly to the stored snapshot would let
-                    # the param-binding writes below (and any body-local `val`s)
-                    # mutate the shared master snapshot in place. Copy it into a
-                    # fresh per-call dict instead.
+                    # Re-derive the free-variable list instead of iterating
+                    # `snap.keys()`: under the seed interpreter dict keys come
+                    # back as strings, and bind_local compares ids as i64.
                     val snap = self.lambda_capture_snapshot[sid]
-                    var call_map: Dict<i64, LocalId> = {}
-                    for snap_key in snap.keys():
-                        call_map[snap_key] = snap[snap_key]
-                    self.local_map = call_map
+                    var snap_param_syms: [i64] = []
+                    var spi = 0
+                    while spi < params.len():
+                        snap_param_syms = snap_param_syms.push(mir_expr_symbol_id_value(params[spi].symbol))
+                        spi = spi + 1
+                    val snap_free = self.collect_free_var_syms(body, snap_param_syms, [])
+                    var sfi = 0
+                    while sfi < snap_free.len():
+                        val snap_sid = snap_free[sfi]
+                        if snap.has(snap_sid):
+                            self.bind_local(snap_sid, snap[snap_sid])
+                        sfi = sfi + 1
                 var pi = 0
                 while pi < params.len():
                     if pi < arg_locals.len():
                         val pid = mir_expr_symbol_id_value(params[pi].symbol)
                         if pid >= 0:
-                            self.local_map[pid] = arg_locals[pi]
+                            self.bind_local(pid, arg_locals[pi])
                     pi = pi + 1
                 val result = self.lower_expr(body)
-                self.local_map = live_map
+                self.local_symbol_ids = saved_ids
+                self.local_symbol_values = saved_values
                 Some(result)
             case _:
                 nil
 
     me lower_inline_lambda_with_locals(params: [HirParam], body: HirExpr, arg_locals: [LocalId]) -> LocalId:
         """Lower a lambda body at its call site with already-lowered args."""
-        val live_map = self.local_map
-        var call_map: Dict<i64, LocalId> = {}
-        for k in live_map.keys():
-            call_map[k] = live_map[k]
-        self.local_map = call_map
+        val saved_ids = self.local_symbol_ids
+        val saved_values = self.local_symbol_values
         var pi = 0
         while pi < params.len():
             if pi < arg_locals.len():
                 val pid = mir_expr_symbol_id_value(params[pi].symbol)
                 if pid >= 0:
-                    self.local_map[pid] = arg_locals[pi]
+                    self.bind_local(pid, arg_locals[pi])
             pi = pi + 1
         val result = self.lower_expr(body)
-        self.local_map = live_map
+        self.local_symbol_ids = saved_ids
+        self.local_symbol_values = saved_values
         result
 
     me lower_iife_call(params: [HirParam], body: HirExpr, args: [HirCallArg]) -> LocalId:
@@ -4156,8 +4183,9 @@ impl MirLowering:
                 var ci = 0
                 while ci < free_syms.len():
                     val fsid = free_syms[ci]
-                    if self.local_map.has(fsid):
-                        val capture_ty = self.lookup_local_type(self.local_map[fsid])
+                    val capture_live = self.lambda_binding_local(fsid)
+                    if capture_live.id >= 0:
+                        val capture_ty = self.lookup_local_type(capture_live)
                         match capture_ty.kind:
                             case MirTypeKind.F32 | MirTypeKind.F64:
                                 # Closure slots are raw native words. Float
@@ -4233,7 +4261,7 @@ impl MirLowering:
                 while qi < arity:
                     val psym = param_syms[qi]
                     if psym >= 0:
-                        lw.local_map[psym] = LocalId(id: qi + offset)
+                        lw.bind_local(psym, LocalId(id: qi + offset))
                     qi = qi + 1
                 if capture_syms.len() > 0:
                     val env_local = LocalId(id: offset - 1)
@@ -4251,8 +4279,8 @@ impl MirLowering:
                             return nil
                         val loaded_local = loaded.unwrap()
                         val capture_sid = capture_syms[cap_i]
-                        lw.local_map[capture_sid] = loaded_local
-                        val source_local = self.local_map[capture_sid]
+                        lw.bind_local(capture_sid, loaded_local)
+                        val source_local = self.lambda_binding_local(capture_sid)
                         val capture_struct = self.struct_value_syms.get(source_local.id)
                         if capture_struct != nil:
                             lw.struct_value_syms[loaded_local.id] = capture_struct ?? ""
@@ -4314,7 +4342,7 @@ impl MirLowering:
                     val index_local = set_b.emit_const_int(set_i)
                     set_b.emit_call(
                         closure_set,
-                        [mir_operand_copy(closure_local), mir_operand_copy(index_local), mir_operand_copy(self.local_map[capture_syms[set_i]])],
+                        [mir_operand_copy(closure_local), mir_operand_copy(index_local), mir_operand_copy(self.lambda_binding_local(capture_syms[set_i]))],
                         MirType.i64()
                     )
                     self.builder = set_b

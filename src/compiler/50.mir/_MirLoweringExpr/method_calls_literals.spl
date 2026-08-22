@@ -3289,6 +3289,15 @@ impl MirLowering:
                     val poly_bool = b_poly.emit_binop(MirBinOp.Ne, mir_operand_copy(poly_raw), mir_operand_copy(poly_zero), MirType.bool())
                     self.builder = b_poly
                     return poly_bool
+                # `h.f(4)` where `f` is a fn-typed FIELD of a known struct, not
+                # a method: re-dispatch as a call of the field value (the same
+                # closure/raw indirect-call diamond `(h.f)(4)` already takes).
+                # Bug native_capturing_lambda_closure_conversion_2026-08-22.
+                if unresolved_struct_name != nil:
+                    val field_owner = unresolved_struct_name ?? ""
+                    if self.struct_field_order.has(field_owner) and self.struct_field_order[field_owner].contains(method):
+                        val field_callee = HirExpr(kind: HirExprKind.Field(receiver, method, nil), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: receiver.span), span: receiver.span)
+                        return self.lower_call(field_callee, args)
                 self.error("unresolved method call: {method}", nil)
                 # Task #145: self.error only COLLECTS -- both the bootstrap
                 # lane (driver_bootstrap.spl reads ctx.errors, never

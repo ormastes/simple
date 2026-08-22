@@ -1,0 +1,181 @@
+"""Capturing lambdas on the native path: closure conversion.
+
+Bug native_capturing_lambda_closure_conversion_2026-08-22. Pre-fix, on
+`native-build`, `val add_k = \\v: v + k; add_k(10)` died with
+`MIR lowering error: undefined variable v`, and a lambda literal passed as a
+call argument `apply(\\v: v + k, 10)` with
+`E-MIR-EXPR-Lambda ... closure conversion has not run`.
+
+The closure-conversion pass DID exist (`lower_lambda_value`: lift to
+`__lambda_lift_<n>`, captures materialized by value into an `rt_closure_new`
+env, read back with `rt_closure_get_capture`, called through the
+`rt_closure_func_ptr` diamond). It was written against the dead `local_map`
+while identifier resolution had moved to `bind_local`/`find_local`, so every
+capture lookup missed: the lift declined (nil -> E-MIR-EXPR-Lambda) and the
+beta-reduced inline path bound its params into a map nobody read.
+
+Capture semantics are BY VALUE at creation (oracle: `var n = 5; val f = \\x:
+x + n; n = 100; f(3)` -> 8), matching the seed's rt_closure_set_capture copy.
+
+The MIR-level examples run in-process and are cheap; the native example
+shells out ONCE for the whole six-shape fixture (a native-build is ~2-3 min)
+and compares its stdout against the interpreter lane on the same source.
+"""
+
+use std.spec
+use std.io_runtime.{file_write, process_run, env_get}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+# NOTE: no `{...}` interpolation in the embedded source (the spec's own lexer
+# would resolve it); the fixture prints via string concatenation instead.
+val PROGRAM_SOURCE: text = ("struct Holder:\n" +
+    "    f: fn(i64) -> i64\n" +
+    "\n" +
+    "fn apply(f: fn(i64) -> i64, x: i64) -> i64:\n" +
+    "    f(x)\n" +
+    "\n" +
+    "fn make_adder(k: i64) -> fn(i64) -> i64:\n" +
+    "    \\v: v + k\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val k = 5\n" +
+    "    val add_k = \\v: v + k\n" +
+    "    print(add_k(10))\n" +
+    "    var n = 5\n" +
+    "    val f = \\x: x + n\n" +
+    "    n = 100\n" +
+    "    print(f(3))\n" +
+    "    print(apply(\\v: v + k, 10))\n" +
+    "    val add7 = make_adder(7)\n" +
+    "    print(add7(1))\n" +
+    "    val outer = 2\n" +
+    "    val nested = \\a: apply(\\b: b + a + outer, 10)\n" +
+    "    print(nested(1))\n" +
+    "    val h = Holder(f: \\v: v * k)\n" +
+    "    print(h.f(4))\n" +
+    "    print((h.f)(5))\n")
+
+val EXPECTED: text = "158158132025"
+
+fn simple_bin() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    bin
+
+fn lower_source(src: text) -> MirModule:
+    val ast = parse_full_frontend(src, "closure.spl", "closure.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("closure.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
+fn lowering_errors(src: text) -> [MirError]:
+    val ast = parse_full_frontend(src, "closure.spl", "closure.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("closure.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+    mir_lowering.errors
+
+fn has_function_prefix(mir: MirModule, prefix: text) -> bool:
+    for function in mir.functions.values():
+        if function.name.starts_with(prefix):
+            return true
+    false
+
+fn count_direct_calls_named(mir: MirModule, callee: text) -> i64:
+    var n = 0
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, operand, _):
+                        match operand.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                if name == callee:
+                                    n = n + 1
+                            case _:
+                                pass
+                    case _:
+                        pass
+    n
+
+fn errors_joined(errs: [MirError]) -> text:
+    var out = ""
+    for e in errs:
+        out = out + e.message + "\n"
+    out
+
+describe "capturing lambda MIR closure conversion", tag: ["only-compiled"]:
+    it "lowers a val-bound capturing lambda call without 'undefined variable'":
+        val src = "fn run() -> i64:\n    val k = 5\n    val add_k = \\v: v + k\n    add_k(10)\n"
+        val errs = errors_joined(lowering_errors(src))
+        expect_not(errs.contains("undefined variable"))
+        expect_not(errs.contains("E-MIR-EXPR-Lambda"))
+
+    it "materializes a capturing lambda call argument as an rt_closure_new env":
+        val src = "fn apply(f: fn(i64) -> i64, x: i64) -> i64:\n    f(x)\nfn run() -> i64:\n    val k = 5\n    apply(\\v: v + k, 10)\n"
+        val errs = errors_joined(lowering_errors(src))
+        expect_not(errs.contains("E-MIR-EXPR-Lambda"))
+        val mir = lower_source(src)
+        expect(has_function_prefix(mir, "__lambda_lift_")).to_equal(true)
+        expect(count_direct_calls_named(mir, "rt_closure_new")).to_equal(1)
+        expect(count_direct_calls_named(mir, "rt_closure_set_capture")).to_equal(1)
+        expect(count_direct_calls_named(mir, "rt_closure_get_capture")).to_equal(1)
+
+    it "lowers a capturing lambda returned from a fn":
+        val src = "fn make_adder(k: i64) -> fn(i64) -> i64:\n    \\v: v + k\n"
+        val errs = errors_joined(lowering_errors(src))
+        expect_not(errs.contains("E-MIR-EXPR-Lambda"))
+        expect(has_function_prefix(lower_source(src), "__lambda_lift_")).to_equal(true)
+
+    it "lowers a nested capturing lambda (inner captures the outer's param and a local)":
+        val src = "fn apply(f: fn(i64) -> i64, x: i64) -> i64:\n    f(x)\nfn run() -> i64:\n    val outer = 2\n    val nested = \\a: apply(\\b: b + a + outer, 10)\n    nested(1)\n"
+        val errs = errors_joined(lowering_errors(src))
+        expect_not(errs.contains("undefined variable"))
+        expect_not(errs.contains("E-MIR-EXPR-Lambda"))
+
+    it "calls a fn-typed struct field holding a capturing lambda via method-call syntax":
+        val src = "struct Holder:\n    f: fn(i64) -> i64\nfn run() -> i64:\n    val k = 5\n    val h = Holder(f: \\v: v * k)\n    h.f(4)\n"
+        val errs = errors_joined(lowering_errors(src))
+        expect_not(errs.contains("unresolved method call: f"))
+        expect_not(errs.contains("E-MIR-EXPR-Lambda"))
+
+describe "capturing lambdas native-build dual-run", tag: ["only-compiled", "slow"]:
+    it "native-builds all six capture shapes and matches the interpreter lane":
+        step("Write the fixture and run it on the interpreter lane")
+        # An ABSOLUTE scratch dir: a repo-relative path under build/ is read by
+        # native-build as module `build.test_artifacts...` and fails with
+        # "missing importing module surface".
+        var scratch = env_get("SIMPLE_TEST_SCRATCH")
+        if scratch == "":
+            scratch = "/tmp"
+        val dir = scratch + "/native_capturing_lambda_closure_conversion"
+        val src = dir + "/prog.spl"
+        val bin_out = dir + "/prog.bin"
+        process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+        file_write(src, PROGRAM_SOURCE)
+        # Newlines are stripped on BOTH lanes: native `print` drops its trailing
+        # newline (separate bug native_build_print_drops_newline_2026-08-17);
+        # this spec pins the closure VALUES, not that defect.
+        val interp = process_run("sh", ["-c", simple_bin() + " run " + src + " 2>/dev/null | tr -d '\\n'"])
+        expect(interp.0).to_equal(EXPECTED)
+
+        step("native-build the same source (one build for all shapes)")
+        val cmd = ("SIMPLE_TIMEOUT_SECONDS=0 nice -n 19 " + simple_bin() +
+            " native-build --threads 8 -o " + bin_out + " " + src +
+            " > " + dir + "/build.log 2>&1; echo RC=$?")
+        val build = process_run("sh", ["-c", cmd])
+        val log = process_run("sh", ["-c", "grep -h 'undefined variable\\|E-MIR-EXPR-Lambda\\|unresolved method call' " + dir + "/build.log | sort -u | head -3"])
+        expect(log.0).to_equal("")
+        expect(build.0).to_contain("RC=0")
+
+        step("Run the native artifact: by-value capture, same output as interpreter")
+        val native = process_run("sh", ["-c", bin_out + " 2>&1 | tr -d '\\n'; echo RC=$?"])
+        expect(native.0).to_equal(EXPECTED + "RC=0\n")
