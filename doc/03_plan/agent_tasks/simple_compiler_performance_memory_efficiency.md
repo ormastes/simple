@@ -127,6 +127,20 @@
   workspace subprocess removal.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed silent frontend trace-scope tranche
+
+- Add one cycle-free nested frontend trace-suppression owner.
+- Enter before silent parser initialization and across structured lint parsing and
+  AST walks; restore caller state on normal return.
+- Gate optional reset/warning/profile/debug, parser-type, statement/expr tag/OOB,
+  and parser-flow output while preserving cached-off hot paths.
+- Collapse six expression-call trace environment probes to one decision per call
+  allocation.
+- Add mirrored subprocess contracts with ordinary traced positive controls.
+- Keep workspace child isolation until cleanup-safe unwinding, structured safety
+  failures, and parser/AST request ownership are complete.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed workspace diagnostic JSON scanner tranche
 
 - Replace two per-byte-substring scans and the full interior copy with one

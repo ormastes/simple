@@ -6,6 +6,8 @@
 # See ast.spl for the full AST module documentation.
 
 use compiler.core.ast_expr.{asm_arm_new, ast_generation}
+use compiler.frontend.trace_policy.{frontend_trace_suppressed}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.string_core.{char_code}
 use compiler.core.types.{int_to_str}
 use compiler.frontend.core.flat_pool_codec.*
@@ -301,7 +303,8 @@ fn stmt_alloc(tag: i64, span_id: i64) -> i64:
     stmt_list_set(idx, "BODY", [])
     stmt_i64_set(idx, "IF_ELSE_SINGLE", -1)
     val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
-    if trace_stmt_tags != "" and (idx < 8 or tag <= 0):
+    if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
+        (idx < 8 or tag <= 0)):
         print "[stmt_alloc] idx={idx} tag={tag} span={span_id}"
     idx
 
@@ -574,7 +577,8 @@ fn stmt_get_tag(idx: i64) -> i64:
     if direct != "":
         val parsed = stmt_parse_i64(direct)
         val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
-        if trace_stmt_tags != "" and (idx < 8 or parsed <= 0):
+        if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
+            (idx < 8 or parsed <= 0)):
             print "[stmt_get_tag] idx={idx} env={direct} parsed={parsed}"
         return parsed
     # Bounds guard: a stale stmt index (captured before an interleaved
@@ -585,11 +589,16 @@ fn stmt_get_tag(idx: i64) -> i64:
     if idx < 0 or idx >= stmt_tag.len():
         # L6: include the live arena generation so a stale index (minted before
         # an ast_reset) is diagnosable from ONE line instead of an OOB flood.
-        print "[stmt_get_tag] OOB idx={idx} arena_len={stmt_tag.len()} arena_gen={ast_generation()} -> -1"
+        val message = "[stmt_get_tag] OOB idx={idx} arena_len={stmt_tag.len()} arena_gen={ast_generation()} -> -1"
+        if frontend_trace_suppressed():
+            eprint(message)
+        else:
+            print message
         return -1
     val fallback = stmt_tag[idx]
     val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
-    if trace_stmt_tags != "" and (idx < 8 or fallback <= 0):
+    if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
+        (idx < 8 or fallback <= 0)):
         print "[stmt_get_tag] idx={idx} env=<missing> fallback={fallback}"
     fallback
 
@@ -629,6 +638,8 @@ fn stmt_get_tag(idx: i64) -> i64:
 # gated behind SIMPLE_TRACE_AST_OOB (default off, same knob as the expression
 # half) so one stale subtree cannot flood the log with a line per field read.
 fn stmt_oob_trace(accessor: text, idx: i64, arena_len: i64):
+    if frontend_trace_suppressed():
+        return
     val trace_ast_oob = rt_env_get("SIMPLE_TRACE_AST_OOB") ?? ""
     if trace_ast_oob != "":
         print "[{accessor}] OOB idx={idx} arena_len={arena_len} arena_gen={ast_generation()}"
