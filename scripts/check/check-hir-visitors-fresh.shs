@@ -1,0 +1,268 @@
+#!/bin/sh
+# check-hir-visitors-fresh.shs — hardening plan §11.5 / §20.4 row C4.
+#
+# The HIR visitors, child enumeration and structural hash under
+# src/compiler/20.hir/generated/ are GENERATED from the authoritative HIR enum
+# declarations. This guard regenerates them into a temp dir and diffs, so a new
+# `HirExprKind`/`HirStmtKind`/`HirTypeKind`/`HirPatternKind` variant cannot land
+# with the visitors silently missing an arm for it — the exact failure mode a
+# hand-written walker has.
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS — <n> visitor(s) fresh across <k> kind(s)     exit 0
+#   FAIL — ...                                          exit 1
+#   ERROR — nothing was checked (<reason>)              exit 2
+# A run that compared 0 files is an ERROR, never a pass.
+#
+# Usage:
+#   sh scripts/check/check-hir-visitors-fresh.shs [--root DIR]
+#   sh scripts/check/check-hir-visitors-fresh.shs --selftest
+
+set -u
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+ROOT="$REPO_ROOT"
+SELFTEST=0
+GEN_REL="src/compiler/20.hir/generated"
+GEN_FILES="hir_visit.spl hir_children.spl hir_hash.spl __init__.spl"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT=$2; shift 2 ;;
+        --selftest) SELFTEST=1; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+# The generator itself is a load-bearing input. A commit snapshot taken
+# mid-write once left it PARTIAL in git while the working tree was complete;
+# had it been absent, a guard that only diffs the OUTPUT tree would have gone
+# on comparing a stale-but-self-consistent tree and reported PASS. Absence of
+# the generator is absence of evidence, so it is ERROR, never a pass.
+GENERATOR=${HIR_VISITOR_GENERATOR:-$REPO_ROOT/src/app/compiler_schema/visitor_gen.spl}
+GENERATOR_CLI=${HIR_VISITOR_CLI:-$REPO_ROOT/src/app/compiler_schema/main.spl}
+
+SIMPLE_BIN=${SIMPLE_BIN:-$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple}
+if [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN=$REPO_ROOT/bin/simple
+fi
+# Build artifacts are intentionally untracked and therefore are normally
+# present only in the primary worktree.  A pre-push from an isolated worktree
+# must still run the guard, but must not search arbitrary paths or fall back to
+# the Rust seed.  Git's first registered worktree is the repository's primary
+# worktree, so use its self-hosted release binary when this worktree has none.
+if [ ! -x "$SIMPLE_BIN" ]; then
+    _primary=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null |
+        awk '$1 == "worktree" { print substr($0, 10); exit }')
+    if [ -n "$_primary" ] && [ -x "$_primary/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
+        SIMPLE_BIN=$_primary/bin/release/x86_64-unknown-linux-gnu/simple
+    fi
+fi
+
+fail_error() {
+    echo "ERROR — nothing was checked ($1)"
+    exit 2
+}
+
+# Regenerate the visitors for repo root $1 into out dir $2. Never reads $2.
+regen() {
+    _root=$1
+    _out=$2
+    SIMPLE_REPO_ROOT="$_root" "$SIMPLE_BIN" run \
+        "$REPO_ROOT/src/app/compiler_schema/main.spl" visitors "$_out" \
+        >"$_out.log" 2>&1
+    _rc=$?
+    return $_rc
+}
+
+# Compare a tree; echoes "OK", "STALE <names>" or "MISSING <names>".
+compare_tree() {
+    _root=$1
+    _fresh=$2
+    _stale=""
+    _missing=""
+    _checked=0
+    for f in $GEN_FILES; do
+        _have="$_root/$GEN_REL/$f"
+        if [ ! -f "$_have" ]; then
+            _missing="$_missing $f"
+            continue
+        fi
+        _checked=$((_checked + 1))
+        if ! cmp -s "$_have" "$_fresh/$f"; then
+            _stale="$_stale $f"
+        fi
+    done
+    if [ -n "$_missing" ]; then
+        echo "$_checked MISSING$_missing$_stale"
+        return 0
+    fi
+    if [ -n "$_stale" ]; then
+        echo "$_checked STALE$_stale"
+        return 0
+    fi
+    echo "$_checked OK"
+}
+
+# One full check of a root. Echoes the verdict line, sets CHECK_RC.
+check_root() {
+    _root=$1
+    if [ ! -f "$GENERATOR" ]; then
+        CHECK_RC=2
+        echo "ERROR — nothing was checked (generator missing: $GENERATOR)"
+        return 0
+    fi
+    if [ ! -f "$GENERATOR_CLI" ]; then
+        CHECK_RC=2
+        echo "ERROR — nothing was checked (generator CLI missing: $GENERATOR_CLI)"
+        return 0
+    fi
+    if [ ! -x "$SIMPLE_BIN" ]; then
+        CHECK_RC=2
+        echo "ERROR — nothing was checked (self-hosted Simple binary missing: $SIMPLE_BIN)"
+        return 0
+    fi
+    if [ ! -d "$_root/$GEN_REL" ]; then
+        CHECK_RC=2
+        echo "ERROR — nothing was checked (no $GEN_REL under $_root)"
+        return 0
+    fi
+    _tmp=$(mktemp -d) || { CHECK_RC=2; echo "ERROR — nothing was checked (mktemp failed)"; return 0; }
+    if ! regen "$_root" "$_tmp/fresh"; then
+        _first=$(grep -i "error" "$_tmp/fresh.log" 2>/dev/null | head -1)
+        rm -rf "$_tmp"
+        CHECK_RC=2
+        echo "ERROR — nothing was checked (regeneration failed: $_first)"
+        return 0
+    fi
+    # The generator emits visitor totals before the fold/AST summaries, so the
+    # visitor line is not necessarily the last line.  Parse that exact record;
+    # treating the final AST summary as visitor evidence made every valid run
+    # look like a zero-kind run.
+    _counts=$(grep '^generated [0-9][0-9]* visitor function(s) across [0-9][0-9]* kind(s)' \
+        "$_tmp/fresh.log" | tail -1)
+    _nfn=$(echo "$_counts" | sed -n 's/^generated \([0-9]*\) visitor function(s).*/\1/p')
+    _nkind=$(echo "$_counts" | sed -n 's/.*across \([0-9]*\) kind(s).*/\1/p')
+    [ -n "$_nfn" ] || _nfn=0
+    [ -n "$_nkind" ] || _nkind=0
+    _raw=$(compare_tree "$_root" "$_tmp/fresh")
+    _checked=${_raw%% *}
+    _res=${_raw#* }
+    rm -rf "$_tmp"
+    if [ "$_checked" -eq 0 ] || [ "$_nkind" -eq 0 ]; then
+        CHECK_RC=2
+        echo "ERROR — nothing was checked (0 generated file(s) compared under $_root)"
+        return 0
+    fi
+    case "$_res" in
+        OK)
+            CHECK_RC=0
+            echo "PASS — $_nfn visitor(s) fresh across $_nkind kind(s)"
+            ;;
+        *)
+            CHECK_RC=1
+            echo "FAIL — $_nfn visitor(s) across $_nkind kind(s): generated tree is stale, regenerate with \`bin/simple run src/app/compiler_schema/main.spl visitors\` ($_res)"
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — fatal, runs before every real scan.
+# ---------------------------------------------------------------------------
+selftest() {
+    _sroot=$(mktemp -d) || return 1
+    _ok=1
+
+    # Fixture root carries only what the generator reads, plus a generated tree.
+    make_fixture() {
+        _fx=$1
+        mkdir -p "$_fx/src/compiler/20.hir/generated"
+        cp "$REPO_ROOT/src/compiler/20.hir/hir_definitions.spl" "$_fx/src/compiler/20.hir/"
+        cp "$REPO_ROOT/src/compiler/20.hir/hir_types.spl" "$_fx/src/compiler/20.hir/"
+        regen "$_fx" "$_fx/$GEN_REL" >/dev/null 2>&1
+    }
+
+    # 1. A freshly generated tree must PASS.
+    make_fixture "$_sroot/fresh" || _ok=0
+    check_root "$_sroot/fresh" >"$_sroot/v1"
+    _rc1=$CHECK_RC
+    if [ "$_rc1" -ne 0 ]; then
+        echo "selftest: fresh fixture did not PASS: $(cat "$_sroot/v1")" >&2
+        _ok=0
+    fi
+
+    # 2. A hand-edited generated file must FAIL.
+    make_fixture "$_sroot/edited" || _ok=0
+    printf '\n# hand edit\n' >> "$_sroot/edited/$GEN_REL/hir_visit.spl"
+    check_root "$_sroot/edited" >"$_sroot/v2"
+    _rc2=$CHECK_RC
+    if [ "$_rc2" -ne 1 ]; then
+        echo "selftest: hand-edited fixture did not FAIL: $(cat "$_sroot/v2")" >&2
+        _ok=0
+    fi
+
+    # 3. THE POINT: a kind whose variant has no arm in the generated file.
+    #    Deleting the `NilLit` arm is exactly what a hand-maintained walker
+    #    looks like after a new variant lands and nobody updated it.
+    make_fixture "$_sroot/missing" || _ok=0
+    grep -v "case NilLit:" "$_sroot/missing/$GEN_REL/hir_visit.spl" \
+        > "$_sroot/missing/$GEN_REL/hir_visit.spl.new"
+    mv "$_sroot/missing/$GEN_REL/hir_visit.spl.new" "$_sroot/missing/$GEN_REL/hir_visit.spl"
+    check_root "$_sroot/missing" >"$_sroot/v3"
+    _rc3=$CHECK_RC
+    if [ "$_rc3" -ne 1 ]; then
+        echo "selftest: missing-variant fixture did not FAIL: $(cat "$_sroot/v3")" >&2
+        _ok=0
+    fi
+
+    # 4. A root with no generated tree at all is ERROR, never a pass.
+    mkdir -p "$_sroot/empty"
+    check_root "$_sroot/empty" >"$_sroot/v4"
+    _rc4=$CHECK_RC
+    if [ "$_rc4" -ne 2 ]; then
+        echo "selftest: empty fixture did not ERROR: $(cat "$_sroot/v4")" >&2
+        _ok=0
+    fi
+
+    # 5. THE REGRESSION THAT HID ITSELF: generator absent, output tree intact
+    #    and internally consistent. Must ERROR, must NOT report PASS.
+    _saved_gen=$GENERATOR
+    GENERATOR="$_sroot/definitely-not-a-file.spl"
+    check_root "$_sroot/fresh" >"$_sroot/v5"
+    _rc5=$CHECK_RC
+    GENERATOR=$_saved_gen
+    if [ "$_rc5" -ne 2 ]; then
+        echo "selftest: absent-generator fixture did not ERROR: $(cat "$_sroot/v5")" >&2
+        _ok=0
+    fi
+
+    rm -rf "$_sroot"
+    [ "$_ok" -eq 1 ]
+}
+
+# Precondition, checked BEFORE the selftest: with no generator there is
+# nothing to regenerate from, so no fixture can be built and no comparison can
+# mean anything. Report it as ERROR (nothing was checked) rather than letting
+# it surface as a confusing "the guard itself is broken".
+if [ ! -f "$GENERATOR" ]; then
+    echo "ERROR — nothing was checked (generator missing: $GENERATOR)"
+    exit 2
+fi
+if [ ! -f "$GENERATOR_CLI" ]; then
+    echo "ERROR — nothing was checked (generator CLI missing: $GENERATOR_CLI)"
+    exit 2
+fi
+
+if ! selftest; then
+    echo "FAIL — selftest failed; the guard itself is broken"
+    exit 1
+fi
+
+if [ "$SELFTEST" -eq 1 ]; then
+    echo "PASS — selftest: 5 fixture(s) checked (fresh, hand-edited, missing-variant, empty, absent-generator)"
+    exit 0
+fi
+
+check_root "$ROOT"
+exit $CHECK_RC
