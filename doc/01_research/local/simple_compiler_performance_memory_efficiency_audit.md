@@ -2068,3 +2068,17 @@ standalone dynamic phrase at priority 49. The renderer reconstructs the explicit
 early-return cascade and fallback mapping with precedence-aware parentheses.
 The runtime classifier therefore keeps its scalar hit record and straight-line
 dispatch; manifest arrays and token lists exist only during generation.
+
+### Direct scalar rule lowering
+
+The first generated rule form still called `query_error_pattern_hit` about 135
+times on a late/no-match diagnostic. Each call repeated ID range selection,
+low/high word selection, a variable shift, and a branch unless the backend
+inlined and folded it. Generated `Hit(id)` leaves now lower directly to a fully
+parenthesized constant-mask test on `pattern_hits.lo` or `.hi`. IDs 0–63 map to
+the low word and 64–115 restart at high-word bit zero; literals are fixed-width
+lowercase `u64` hex. This retains short-circuit evaluation and first-match
+returns while removing helper dispatch and runtime shifts. It adds no locals,
+arrays, registry, callbacks, or allocation. Timing evidence remains unavailable
+under the requested no-verify policy, so only the static operation reduction is
+claimed.
