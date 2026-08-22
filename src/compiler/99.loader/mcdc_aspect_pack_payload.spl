@@ -11,7 +11,8 @@ use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.elf_parser.{
     ElfObject, ElfSymbol, elf_parse_object, elf_strtab_get,
     elf_symbol_binding, elf_symbol_type, elf_reloc_sym, elf_reloc_type,
-    SHT_RELA, SHT_REL, SHN_UNDEF, STB_GLOBAL, STT_OBJECT, STT_FUNC
+    SHT_RELA, SHT_REL, SHN_UNDEF, STB_GLOBAL,
+    STT_NOTYPE, STT_OBJECT, STT_FUNC, ELF64_RELA_SIZE
 }
 use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, SHT_PROGBITS}
 use compiler.backend.linker.smf_writer.{
@@ -140,12 +141,8 @@ fn _mcdc_object_reloc_type(machine: i64, kind: i64) -> Result<RelocationType, te
     if machine != EM_X86_64:
         return Err("MCDC-ASPECT-E-ARCH: only the loader-proven x86_64 relocation ABI is admitted")
     match kind:
-        case 1: Ok(RelocationType.Abs64)       # R_X86_64_64
-        case 2: Ok(RelocationType.Rel32)       # R_X86_64_PC32
         case 4: Ok(RelocationType.PltRel32)    # R_X86_64_PLT32
-        case 9: Ok(RelocationType.GotRel32)    # R_X86_64_GOTPCREL
-        case 10: Ok(RelocationType.Abs32)      # R_X86_64_32
-        case _: Err("MCDC-ASPECT-E-RELOC: unsupported x86_64 relocation {kind}")
+        case _: Err("MCDC-ASPECT-E-RELOC: aspect provider requires exact R_X86_64_PLT32 relocation")
 
 fn _mcdc_find_object_symbol(obj: ElfObject, name: text) -> Result<ElfSymbol, text>:
     var found: ElfSymbol? = nil
@@ -180,9 +177,17 @@ fn mcdc_convert_aspect_object_v1(object_bytes: [u8]) -> Result<McdcAspectObjectC
             obj.symbols.len() > MCDC_ASPECT_OBJECT_MAX_SYMBOLS_V1 or
             obj.relocations.len() > MCDC_ASPECT_OBJECT_MAX_RELOCS_V1:
         return Err("MCDC-ASPECT-E-BOUNDS: object metadata exceeds fixed capacities")
+    var rela_sections = 0
     for section in obj.sections:
         if section.sh_type == SHT_REL:
             return Err("MCDC-ASPECT-E-RELOC: REL is unsupported; use explicit-addend RELA")
+        if section.sh_type == SHT_RELA:
+            rela_sections = rela_sections + 1
+            if section.sh_size <= 0 or section.sh_size % ELF64_RELA_SIZE != 0 or
+                    section.sh_info <= 0 or section.sh_info >= obj.sections.len():
+                return Err("MCDC-ASPECT-E-RELOC: malformed RELA section")
+    if rela_sections != 1:
+        return Err("MCDC-ASPECT-E-RELOC: object must contain exactly one RELA section")
 
     val vector = _mcdc_find_object_symbol(obj, MCDC_ASPECT_VECTOR_SYMBOL_V1)?
     val marker = _mcdc_find_object_symbol(obj, MCDC_ASPECT_VECTOR_ABI_MARKER_V1)?
@@ -191,8 +196,10 @@ fn mcdc_convert_aspect_object_v1(object_bytes: [u8]) -> Result<McdcAspectObjectC
         return Err("MCDC-ASPECT-E-ABI: vector must be a global function")
     if elf_symbol_type(marker) != STT_OBJECT or elf_symbol_binding(marker) != STB_GLOBAL:
         return Err("MCDC-ASPECT-E-ABI: marker must be a global object")
-    if runtime_import.st_shndx != SHN_UNDEF:
-        return Err("MCDC-ASPECT-E-IMPORT: runtime collector must remain unresolved")
+    if runtime_import.st_shndx != SHN_UNDEF or
+            elf_symbol_binding(runtime_import) != STB_GLOBAL or
+            elf_symbol_type(runtime_import) != STT_NOTYPE:
+        return Err("MCDC-ASPECT-E-IMPORT: runtime collector must be one unresolved global symbol import")
 
     # No additional externally visible definitions or unresolved dependencies.
     for symbol in obj.symbols:
