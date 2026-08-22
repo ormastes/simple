@@ -1923,6 +1923,30 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
           I64, I64, I64, I64, I64],
         &[I32],
     ),
+    RuntimeFuncSpec::new("rt_hal_process_socket_lifecycle_init_v4", &[I64], &[I32]),
+    RuntimeFuncSpec::new(
+        "rt_hal_process_socket_register_spawn_v4",
+        &[I64, I64, I64, I64, I64, I64, I64], &[I32]),
+    RuntimeFuncSpec::new(
+        "rt_hal_process_socket_register_attempt_v4",
+        &[I64, I64, I64, I64, I64, I64, I64], &[I32]),
+    RuntimeFuncSpec::new(
+        "rt_hal_process_wait_dispatch_direct_v4",
+        &[I64, I32, I32, I64, I64, I64, I64, I64, I64, I64, I64, I64,
+          I64, I64], &[I32]),
+    RuntimeFuncSpec::new(
+        "rt_hal_process_wait_dispatch_compare_v4",
+        &[I64, I32, I32, I64, I64, I64, I64, I64, I64, I64, I64, I64,
+          I64, I64], &[I32]),
+    RuntimeFuncSpec::new(
+        "rt_hal_socket_connect_dispatch_direct_v4",
+        &[I64, I32, I32, I64, I64, I64, I64, I64, I64, I64, I64, I64,
+          I64, I64], &[I32]),
+    RuntimeFuncSpec::new(
+        "rt_hal_socket_connect_dispatch_compare_v4",
+        &[I64, I32, I32, I64, I64, I64, I64, I64, I64, I64, I64, I64,
+          I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_hal_process_socket_hot_allocation_count_v4", &[], &[I64]),
     RuntimeFuncSpec::new("rt_time_now_micros", &[], &[I64]),
     RuntimeFuncSpec::new("rt_time_now_monotonic_ms", &[], &[I64]),
     RuntimeFuncSpec::new("rt_time_now_unix_micros", &[], &[I64]),
