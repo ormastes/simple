@@ -1,4 +1,4 @@
-# Machine-applicable fixes for the collection-efficiency lints.
+# Proof-gated fixes for collection-efficiency lints.
 use std.spec.*
 use compiler.tools.lint.main.{Linter, lint_cli_source}
 use std.tooling.easy_fix.*
@@ -23,28 +23,18 @@ describe "collection lint auto-fix":
         # `out = out + [x]` is line 4; `fn build` is line 1.
         assert_equal(line, 4)
 
-    it "offers a push rewrite that applies cleanly to the source":
-        """The fix must be machine-applicable: splicing its replacement into the
-        original text has to yield working code with the concat gone."""
-        step("Collect the COLL001 replacement and splice it into the source")
-        var replacements = 0
-        var new_text = ""
-        var applied = ""
+    it "keeps the AST fallback advisory and exposes its uncertainty":
+        """A source-shape match lacks the typed/effect/alias proof required for
+        a machine-applicable rewrite."""
+        step("Inspect the COLL001 evidence contract")
+        var found = false
         for result in lint_cli_source(Linter.new(), "/tmp/coll_push2.spl", CONCAT_SRC):
             if result.lint.code == "COLL001":
-                match result.lint.easy_fix:
-                    case Some(fix):
-                        for rep in easyfix_replacements(fix):
-                            replacements = replacements + 1
-                            new_text = rep.new_text
-                            applied = CONCAT_SRC.slice(0, rep.start) + rep.new_text + CONCAT_SRC.slice(rep.end)
-                    case nil:
-                        val _ = 0
-        assert_equal(replacements, 1)
-        expect(new_text).to_equal("out.push(x)")
-        step("The spliced source keeps the indentation and drops the concat")
-        expect(applied).to_contain("        out.push(x)\n")
-        assert_false(applied.contains("out + [x]"))
+                found = true
+                expect(result.lint.easy_fix).to_be_nil()
+                expect(result.lint.uncertainty.is_some()).to_equal(true)
+                expect(result.lint.evidence).to_contain("item=build")
+        assert_true(found)
 
     it "warns without a fix when the concat appends more than one element":
         """`arr + [a, b]` needs one push per element, which is not a
@@ -63,29 +53,16 @@ describe "collection lint auto-fix":
         assert_true(warned)
         assert_equal(replacements, 0)
 
-    it "offers a .pop() rewrite for the array-rebuild-to-pop shape":
+    it "keeps the array-rebuild fallback hint-only":
         """The bug report and this rule's own header comment wrote the
         fixture with `..` (arr[0..arr.len()-1]); that is not valid slice
-        syntax (`..` builds a Range, not a slice — indexing by one errors
-        at runtime), so neither the warning nor the fix could ever see it.
-        The rule fires on the real colon slice form, and the fix must
-        offer the matching rewrite."""
+        syntax. The rule fires on the real colon form, but typed proof is still
+        required before rewriting it."""
         step("Lint a loop that rebuilds arr via arr[0:arr.len()-1]")
-        var replacements = 0
-        var new_text = ""
-        var applied = ""
+        var found = false
         for result in lint_cli_source(Linter.new(), "/tmp/coll_pop.spl", POP_SRC):
             if result.lint.code == "COLL007":
-                match result.lint.easy_fix:
-                    case Some(fix):
-                        for rep in easyfix_replacements(fix):
-                            replacements = replacements + 1
-                            new_text = rep.new_text
-                            applied = POP_SRC.slice(0, rep.start) + rep.new_text + POP_SRC.slice(rep.end)
-                    case nil:
-                        val _ = 0
-        assert_equal(replacements, 1)
-        expect(new_text).to_equal("arr.pop()")
-        step("The spliced source keeps the indentation and drops the rebuild")
-        expect(applied).to_contain("        arr.pop()\n")
-        assert_false(applied.contains("arr[0:arr.len()-1]"))
+                found = true
+                expect(result.lint.easy_fix).to_be_nil()
+                expect(result.lint.uncertainty.is_some()).to_equal(true)
+        assert_true(found)

@@ -167,7 +167,11 @@ class GcSafetyAnalyzer:
             # Allocation
             case Alloc(dest, ty, size):
                 val type_id = self.type_to_id(ty)
-                self.escape_analysis.record_allocation(point, type_id, dest.id)
+                val allocation_id = self.escape_analysis.record_allocation(point, type_id, dest.id)
+                match size.kind:
+                    case Const(MirConstValue.Int(size_bytes), _):
+                        self.escape_analysis.record_allocation_size(allocation_id, size_bytes)
+                    case _: pass_do_nothing
 
                 if self.is_gc_type(type_id):
                     self.root_analysis.record_gc_point(GcPoint.allocation(point))
@@ -237,7 +241,7 @@ class GcSafetyAnalyzer:
                             base_id_v,
                             field_idx,
                             dest.id,
-                            0
+                            base_id_v  # Same conservative base-region key as SetField
                         )
                     case nil:
                         pass_do_nothing
@@ -262,13 +266,17 @@ class GcSafetyAnalyzer:
 
     me process_terminator(term: MirTerminator, point: i64):
         """Process a block terminator."""
-        match term.kind:
-            case Return:
-                # Return value escapes
-                pass  # Would need return value info
-
-            case _:
-                pass
+        match term:
+            case Ret(value):
+                # A returned local is externally reachable. Explicit matches
+                # preserve local id 0 and keep constants/nil out of points-to.
+                match value:
+                    case Some(operand):
+                        match self.operand_local(operand):
+                            case Some(local_id): self.escape_analysis.record_return(local_id)
+                            case nil: pass_do_nothing
+                    case nil: pass_do_nothing
+            case _: pass_do_nothing
 
     fn operand_local(operand: MirOperand) -> i64?:
         """Extract local ID from operand."""
