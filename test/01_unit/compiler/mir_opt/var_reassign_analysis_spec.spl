@@ -269,6 +269,41 @@ describe "var reassignment analysis":
         expect(analysis.ssa_transform_safe).to_equal(false)
         expect(analysis.reason).to_equal("borrow.reassign_unsafe")
 
+    it "checks an alias old root before overwriting that alias":
+        val blocks = one_block(
+            [
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
+                inst(MirInstKind.Copy(local(2), local(0))),
+                inst(MirInstKind.Ref(local(3), MirBorrowKind.Shared, MirPlace.local_place(local(2)))),
+                inst(MirInstKind.Const(local(2), MirConstValue.Int(9), MirType.i64()))
+            ],
+            MirTerminator.Ret(Some(copy_operand(3)))
+        )
+        val analysis = analyze_var_reassign_blocks(blocks)
+        expect(analysis.reassignment_count).to_equal(1)
+        expect(analysis.borrow_reassign_safe).to_equal(false)
+        expect(analysis.reason).to_equal("borrow.reassign_unsafe")
+
+    it "counts many distinct reassigned locals without ordered parallel maps":
+        var instructions: [MirInst] = []
+        for id in 0..256:
+            instructions.push(inst(MirInstKind.Const(
+                local(id), MirConstValue.Int(id), MirType.i64())))
+            instructions.push(inst(MirInstKind.Const(
+                local(id), MirConstValue.Int(id + 1), MirType.i64())))
+        val analysis = analyze_var_reassign_blocks(
+            one_block(instructions, MirTerminator.Ret(nil)))
+        expect(analysis.reassignment_count).to_equal(256)
+        expect(analysis.no_escape).to_equal(true)
+        expect(analysis.borrow_reassign_safe).to_equal(true)
+        expect(analysis.ssa_transform_safe).to_equal(true)
+        val facts = var_reassign_analysis_hotspot_facts(
+            ["typed_mir", "safe_deopt"], analysis)
+        expect(facts).to_equal([
+            "typed_mir", "safe_deopt", "var.reassignment",
+            "ssa.var_transform", "escape.analyzed", "escape.no_escape",
+            "borrow.reassign_safe"])
+
     it "feeds analyzer output into JIT var hotspot planning":
         val blocks = one_block(
             [
