@@ -688,6 +688,20 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add mirrored behavioral contracts for cycles, methods, and duplicates.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed diagnostic runtime tranche: fixed-pattern automaton
+
+- Intern 116 fixed classifier literals into 1,160 sparse Aho-Corasick states.
+- Scan each diagnostic byte string once into two local `u64` hit masks.
+- Preserve all 80 ordered predicates, the negative `function` guard, explicit
+  code precedence, shadowed rules, case sensitivity, and arbitrary dynamic
+  codegen phrase behavior.
+- Add mirrored every-literal, Unicode-neighbor, suffix-output, case, and
+  no-match contracts.
+- Retain one dynamic phrase search at its exact rule priority.
+- Follow-up: add the deterministic Pure Simple generator and stale-data gate
+  tracked in `doc/08_tracking/bug/query_error_matcher_generation_freshness_2026-08-22.md`.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed diagnostic tranche: shared query error-code ownership
 
 - Move the duplicated ordered classifier into cycle-free `query_error_codes`.
@@ -696,6 +710,6 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   error-kind fallbacks with mirrored contracts.
 - Replace 473 entry-local lines with one 242-line owner plus four wrapper lines
   (net 227-line reduction).
-- Follow-up: generate an immutable multi-pattern matcher for the remaining 136
-  per-diagnostic substring probes without constructing a registry per call.
+- Completed next: replace the remaining fixed probes with an immutable sparse
+  multi-pattern matcher without constructing a registry per call.
 - Verification intentionally not run under the user's no-verify instruction.
