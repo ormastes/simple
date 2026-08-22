@@ -1490,3 +1490,15 @@ registry now accepts the lint request's canonical lines, builds one context arra
 same lines directly. Compatibility entrypoints keep their early file gate and construct
 private facts only for standalone callers. Normal spec lint therefore removes one line
 split plus three duplicate context arrays and their repeated trim/indent/offset work.
+
+## 2026-08-22 implementation addendum: shared general EasyFix facts
+
+The same `LineContext` derivation was repeated by resource-leak, struct-construction,
+unknown decorator/attribute, export-boundary, and import-boundary rules. The registry now
+builds one general request-owned context view and shares it with those rules and the SPipe
+family. Non-exhaustive match and bypass checks consume canonical lines directly. The
+duplicate-typed-argument rule also reuses both views, eliminating a fresh line array for
+every candidate signature while retaining its existing candidate-by-line matching order.
+Normal lint removes eight additional context/line arrays plus candidate-count-dependent
+line arrays; the remaining repeated candidate traversal is tracked for a future indexed
+call-site fact rather than being misreported as solved.
