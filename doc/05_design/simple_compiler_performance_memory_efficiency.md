@@ -502,6 +502,17 @@ JSON parser without constructing messages, codes, escaped JSON, or diagnostic
 objects. Compatibility wrappers may normalize independently, but active callers
 must use the clean-input helpers.
 
+Workspace wrapper extraction searches for the first exact compact
+`"diagnostics":[` token, then performs one byte-indexed scan over the original
+wrapper. The key search is byte-indexed and allocation-free, so arbitrary
+Unicode prefix text does not invalidate offsets. Array depth identifies the
+existing closing boundary; object depth
+selects exact object slices; quote and immediate-backslash state suppress JSON
+structure bytes inside strings. Results append in encounter order without
+deduplication. If the outer array never closes, all partial objects are rejected,
+matching the prior finder-first behavior. The scanner does not broaden malformed
+JSON acceptance or introduce sorting/validation.
+
 ## Workspace diagnostic session design
 
 Add compiler-tool owners under `compiler/90.tools/workspace_diagnostics` for an
