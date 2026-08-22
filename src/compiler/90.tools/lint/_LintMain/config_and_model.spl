@@ -392,6 +392,9 @@ fn parse_lint_level(level_str: String) -> Option<LintLevel>:
 # Loaded from the simple.sdn `lints:` section and/or file-level attributes.
 class LintConfig:
     levels: Dict<String, String>
+    # Immutable effective defaults for this selected profile. Built once when
+    # the config/profile changes, never once per diagnostic lookup.
+    effective_defaults: Dict<String, String>
     # Selected strictness tier; nil = unset (legacy build_default_levels behavior).
     profile: Option<LintProfile>
     error: String
@@ -399,7 +402,9 @@ class LintConfig:
     # Create a default config (all defaults, no overrides).
 impl LintConfig:
     static fn new() -> LintConfig:
-        LintConfig(levels: {}, profile: nil, error: "")
+        LintConfig(
+            levels: {}, effective_defaults: build_default_levels(),
+            profile: nil, error: "")
 
     # Load config from an SDN file.  Parses the canonical `lints:` section.
     static fn from_sdn_file(path: String) -> LintConfig:
@@ -498,16 +503,8 @@ impl LintConfig:
         if self.levels.has(lint_name):
             level_str = self.levels[lint_name]
         else:
-            # Fall back to tier defaults when a profile is selected, else the
-            # legacy global defaults (nil profile == today's exact behavior).
-            var defaults: Dict<String, String> = build_default_levels()
-            match self.profile:
-                case Some(p):
-                    defaults = profile_default_levels(p)
-                case nil:
-                    val _ = 0
-            if defaults.has(lint_name):
-                level_str = defaults[lint_name]
+            if self.effective_defaults.has(lint_name):
+                level_str = self.effective_defaults[lint_name]
             else:
                 return LintLevel.Warn  # Unknown lint defaults to Warn
 
@@ -521,6 +518,7 @@ impl LintConfig:
     # Select the strictness tier directly.
     me set_profile(profile: LintProfile):
         self.profile = Some(profile)
+        self.effective_defaults = profile_default_levels(profile)
 
     me set_error_once(message: String):
         if self.error == "":
@@ -531,7 +529,7 @@ impl LintConfig:
         val parsed = parse_lint_profile(profile_str)
         match parsed:
             case Some(p):
-                self.profile = Some(p)
+                self.set_profile(p)
             case nil:
                 val _ = 0
 
@@ -625,7 +623,9 @@ impl LintConfig:
             if src_keys != nil:
                 for key in src_keys:
                     new_levels[key] = src_levels[key]
-        LintConfig(levels: new_levels, profile: self.profile, error: self.error)
+        LintConfig(
+            levels: new_levels, effective_defaults: self.effective_defaults,
+            profile: self.profile, error: self.error)
 
 fn resolve_lint_config(base: LintConfig, path: String, content: String) -> LintConfig:
     var config = base.child()
