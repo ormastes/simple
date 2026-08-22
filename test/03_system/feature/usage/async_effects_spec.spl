@@ -15,46 +15,37 @@ doc/04_architecture/feature/REQ-FEATURE-ASYNC-EFFECTS-001.md
 doc/05_design/feature/REQ-FEATURE-ASYNC-EFFECTS-001.md
 """
 
-
-"""
-# Asynchronous Effects and Async/Await
-
-**Feature ID:** #RUNTIME-011
-**Category:** Runtime
-**Status:** In Progress
-
-## Overview
-
-Asynchronous effects integrate Simple's effect system with async/await concurrency,
-allowing effectful computations to suspend and resume without blocking. This enables
-composable async pipelines where effects like logging, error handling, or I/O propagate
-through awaited call chains. This spec validates that async functions correctly carry
-and propagate effects across suspension points.
-
-## Syntax
-
-```simple
-# Async effect propagation (planned)
-async fn fetch_data(url: text) -> text with IO, Error:
-val response = await http_get(url)
-response.body
-
-val result = await fetch_data("https://example.com")
-```
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Async/Await | Syntax for non-blocking suspension and resumption of coroutines |
-| Effect Propagation | Effects declared on async functions carry through await boundaries |
-| Effect Handler | A construct that intercepts and processes effects from async computations |
-| Suspension Point | A location where an async function yields control until a result is ready |
-"""
-
-
+use std.spec.*
 use std.spec.step
+use std.concurrent.green_thread.{green_spawn, green_fail, green_task_error, green_run_one}
+
+var AE_LOG: text = ""
+
+fn ae_stage_one() -> i64:
+    AE_LOG = AE_LOG + "one;"
+    1
+
+fn ae_stage_failing() -> i64:
+    AE_LOG = AE_LOG + "fail;"
+    green_fail("async-effects probe failure")
+    0
 
 describe "Async Effects":
-    # Tests for async effects system including async/await and effect propagation.
-    pass
+    it "suspends an effectful computation until the scheduler resumes it":
+        # @req: REQ-FEATURE-ASYNC-EFFECTS-001
+        step("Spawn a task and confirm it has not run before resume")
+        AE_LOG = ""
+        val handle = green_spawn(ae_stage_one)
+        assert_equal(AE_LOG, "")
+        assert_equal(green_run_one(), true)
+        assert_equal(AE_LOG, "one;")
+        assert_equal(handle.join(), 1)
+
+    it "propagates an effect failure through the scheduler to the caller":
+        # @req: REQ-FEATURE-ASYNC-EFFECTS-001
+        step("Run a failing effectful task and read back its error")
+        AE_LOG = ""
+        val handle = green_spawn(ae_stage_failing)
+        assert_equal(green_run_one(), true)
+        assert_equal(AE_LOG, "fail;")
+        assert_equal(green_task_error(handle.id()), "async-effects probe failure")

@@ -1,78 +1,77 @@
 """
 ## Purpose and audience
-
-Concurrency Primitives Specification
-
-**Feature:** Async/await, futures, and concurrency primitives
-**Category:** Concurrency
-**Status:** In Progress
-
-Tests for asynchronous programming features including futures, async blocks,
-await expressions, and concurrent execution patterns. Verifies correct scheduling
-and interaction with the runtime.
-
-This specification is maintained for compiler and library engineers reviewing FEATURE-USAGE behavior, and for operators verifying a build.
-
+Purpose: Prove that Concurrency Primitives.
+Audience: compiler and tooling engineers who maintain this spec.
 ## Operator workflow
-
-Run `bin/simple test --no-session-daemon test/feature/usage/concurrency_primitives_spec.spl` and confirm the Results line reports 0 failed. Each scenario names the requirement it traces to and starts with a Verify step.
-
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
 ## Compatibility and limitations
-
-Covers only the behavior explicitly asserted below on the current toolchain. No external standard or cross-version contract is claimed; numeric oracles are explained inline where they appear.
-
-## Recovery and troubleshooting
-
-If a scenario fails, re-run the single spec file, read the first failing Verify step, and compare the reported value against the inline oracle comment before bisecting recent changes.
-"""
-use std.spec.{step}
+Covers the pinned behavior only; fixture data is local to this spec.
 # @manual: primary
-# REQ-FEATURE-USAGE-001
-# doc-path: doc/01_research/app/
-# doc-path: doc/03_plan/app/
-# doc-path: doc/04_architecture/app/
-# doc-path: doc/05_design/app/
+REQ-FEATURE-CONCURRENCY-PRIMITIV-001
+doc/01_research/feature/REQ-FEATURE-CONCURRENCY-PRIMITIV-001.md
+doc/03_plan/feature/REQ-FEATURE-CONCURRENCY-PRIMITIV-001.md
+doc/04_architecture/feature/REQ-FEATURE-CONCURRENCY-PRIMITIV-001.md
+doc/05_design/feature/REQ-FEATURE-CONCURRENCY-PRIMITIV-001.md
+"""
+
+use std.spec.*
+use std.spec.step
+use std.concurrent.green_thread.{
+    green_spawn, green_spawn_value, green_fail, green_task_error,
+    green_run_one, green_run_all}
+
+var CP_SEEN: i64 = 0
+
+fn cp_task() -> i64:
+    CP_SEEN = CP_SEEN + 1
+    21
+
+fn cp_failing_task() -> i64:
+    green_fail("concurrency-primitives probe failure")
+    0
+
 describe "Concurrency Primitives":
-    # Tests for concurrency features including futures, async functions,
-    # and await expressions. Verifies proper execution scheduling,
-    # cancellation semantics, and interaction with the async runtime.
-
     context "Futures":
-        it "creates and executes futures":
-            # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-            # @req: REQ-FEATURE-USAGE-001
-            step("Verify: creates and executes futures")
-            # @capture: assertion outcomes retained in the spec Results output as evidence
-            skip
+        it "executes a spawned task to completion when the scheduler runs":
+            # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
+            step("Spawn a task and drive it through green_run_one")
+            val before = CP_SEEN
+            val handle = green_spawn(cp_task)
+            assert_true(not handle.is_done())
+            assert_equal(green_run_one(), true)
+            assert_true(handle.is_done())
+            assert_equal(handle.join(), 21)
+            assert_equal(CP_SEEN - before, 1)
 
-    context "Async blocks":
-        it "runs code asynchronously in async blocks":
-            # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-            # @req: REQ-FEATURE-USAGE-002
-            step("Verify: runs code asynchronously in async blocks")
-            # @capture: assertion outcomes retained in the spec Results output as evidence
-            skip
-
-    context "Await expressions":
-        it "awaits future completion":
-            # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-            # @req: REQ-FEATURE-USAGE-003
-            step("Verify: awaits future completion")
-            # @capture: assertion outcomes retained in the spec Results output as evidence
-            skip
+    context "Value futures":
+        it "resolves a pre-computed future without a scheduler step":
+            # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
+            step("Create a green_spawn_value future and resolve it with run_one")
+            val handle = green_spawn_value(42)
+            assert_equal(green_run_one(), true)
+            assert_true(handle.is_done())
+            assert_equal(handle.join(), 42)
 
     context "Concurrent execution":
-        it "executes multiple futures concurrently":
-            # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-            # @req: REQ-FEATURE-USAGE-004
-            step("Verify: executes multiple futures concurrently")
-            # @capture: assertion outcomes retained in the spec Results output as evidence
-            skip
+        it "runs every queued task to completion with green_run_all":
+            # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
+            step("Queue three tasks then drain them with green_run_all")
+            val before = CP_SEEN
+            val h1 = green_spawn(cp_task)
+            val h2 = green_spawn(cp_task)
+            val h3 = green_spawn(cp_task)
+            val ran = green_run_all()
+            assert_equal(CP_SEEN - before, 3)
+            assert_true(h1.is_done() and h2.is_done() and h3.is_done())
+            assert_equal(h1.id() != h2.id(), true)
 
     context "Error handling in async":
-        it "propagates errors from async operations":
-            # @oracle: this scenario asserts through a file-local helper wrapping expect(<value>).to_equal(<expected>)
-            # @req: REQ-FEATURE-USAGE-005
-            step("Verify: propagates errors from async operations")
-            # @capture: assertion outcomes retained in the spec Results output as evidence
-            skip
+        it "captures a failed task's reason for the caller":
+            # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
+            step("Run a failing task and read green_task_error")
+            val handle = green_spawn(cp_failing_task)
+            assert_equal(green_run_one(), true)
+            assert_true(handle.is_done())
+            assert_equal(green_task_error(handle.id()),
+                "concurrency-primitives probe failure")

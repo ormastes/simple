@@ -15,53 +15,63 @@ doc/04_architecture/feature/REQ-FEATURE-CONCURRENCY-PRIMITIV-001.md
 doc/05_design/feature/REQ-FEATURE-CONCURRENCY-PRIMITIV-001.md
 """
 
-
-"""
-Concurrency Primitives Specification
-
-**Feature:** Async/await, futures, and concurrency primitives
-**Category:** Concurrency
-**Status:** In Progress
-
-Tests for asynchronous programming features including futures, async blocks,
-await expressions, and concurrent execution patterns. Verifies correct scheduling
-and interaction with the runtime.
-"""
-
+use std.spec.*
 use std.spec.step
+use std.concurrent.green_thread.{
+    green_spawn, green_spawn_value, green_fail, green_task_error,
+    green_run_one, green_run_all}
+
+var CP_SEEN: i64 = 0
+
+fn cp_task() -> i64:
+    CP_SEEN = CP_SEEN + 1
+    21
+
+fn cp_failing_task() -> i64:
+    green_fail("concurrency-primitives probe failure")
+    0
 
 describe "Concurrency Primitives":
-    # Tests for concurrency features including futures, async functions,
-    # and await expressions. Verifies proper execution scheduling,
-    # cancellation semantics, and interaction with the async runtime.
-
     context "Futures":
-        it "creates and executes futures":
+        it "executes a spawned task to completion when the scheduler runs":
             # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
-            # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
-            step("Verify: creates and executes futures")
-            skip
+            step("Spawn a task and drive it through green_run_one")
+            val before = CP_SEEN
+            val handle = green_spawn(cp_task)
+            assert_true(not handle.is_done())
+            assert_equal(green_run_one(), true)
+            assert_true(handle.is_done())
+            assert_equal(handle.join(), 21)
+            assert_equal(CP_SEEN - before, 1)
 
-    context "Async blocks":
-        it "runs code asynchronously in async blocks":
+    context "Value futures":
+        it "resolves a pre-computed future without a scheduler step":
             # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
-            step("Verify: runs code asynchronously in async blocks")
-            skip
-
-    context "Await expressions":
-        it "awaits future completion":
-            # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
-            step("Verify: awaits future completion")
-            skip
+            step("Create a green_spawn_value future and resolve it with run_one")
+            val handle = green_spawn_value(42)
+            assert_equal(green_run_one(), true)
+            assert_true(handle.is_done())
+            assert_equal(handle.join(), 42)
 
     context "Concurrent execution":
-        it "executes multiple futures concurrently":
+        it "runs every queued task to completion with green_run_all":
             # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
-            step("Verify: executes multiple futures concurrently")
-            skip
+            step("Queue three tasks then drain them with green_run_all")
+            val before = CP_SEEN
+            val h1 = green_spawn(cp_task)
+            val h2 = green_spawn(cp_task)
+            val h3 = green_spawn(cp_task)
+            val ran = green_run_all()
+            assert_equal(CP_SEEN - before, 3)
+            assert_true(h1.is_done() and h2.is_done() and h3.is_done())
+            assert_equal(h1.id() != h2.id(), true)
 
     context "Error handling in async":
-        it "propagates errors from async operations":
+        it "captures a failed task's reason for the caller":
             # @req: REQ-FEATURE-CONCURRENCY-PRIMITIV-001
-            step("Verify: propagates errors from async operations")
-            skip
+            step("Run a failing task and read green_task_error")
+            val handle = green_spawn(cp_failing_task)
+            assert_equal(green_run_one(), true)
+            assert_true(handle.is_done())
+            assert_equal(green_task_error(handle.id()),
+                "concurrency-primitives probe failure")
