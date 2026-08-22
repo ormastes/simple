@@ -7,8 +7,11 @@ Audience: compiler and optimizer maintainers.
 
 use std.spec.*
 use compiler.mir_opt.mir_opt.mod.{
-    PassKind, PassStatus, PassExpectation,
+    PassKind, PassScope, PassStatus, PassExpectation, PassRunDisposition,
     pass_status, pass_expectation, pass_status_allows_transform,
+    pass_witness_contract, pass_witness_registry_integrity_errors,
+    pass_run_record_new, pass_run_record_add_reason,
+    pass_run_record_integrity_errors, pass_run_record_for_unavailable_request,
     optimizationpipeline_passes_for_level,
     optimizationpipeline_effective_passes_for_level,
     optimizationpipeline_for_level,
@@ -34,10 +37,16 @@ describe "MIR pass operational status":
         expect(pass_status_allows_transform(pass_status(PassKind.CollectionOpt))).to_equal(false)
         expect(pass_expectation(PassKind.CollectionOpt)).to_equal(PassExpectation.NeverTransforms)
 
-    it "retains the active narrow vector rewrite classification":
-        step("Classify the active vector transform")
+    it "keeps vectorization analysis-only":
+        step("Classify the vector analysis")
         expect(pass_status(PassKind.AutoVectorize)).to_equal(PassStatus.AnalysisOnly)
         expect(pass_status_allows_transform(pass_status(PassKind.AutoVectorize))).to_equal(false)
+
+    it "keeps active identity and analysis routes out of transformation dispatch":
+        step("Reject an active identity route")
+        expect(pass_status(PassKind.TargetNarrowForm)).to_equal(PassStatus.Skeleton)
+        expect(pass_status(PassKind.ReadAheadHoist)).to_equal(PassStatus.AnalysisOnly)
+        expect(pass_status(PassKind.InlineFunctions)).to_equal(PassStatus.Skeleton)
 
     it "distinguishes requested passes from the effective pipeline":
         step("Load requested and effective optimizer plans")
@@ -51,3 +60,38 @@ describe "MIR pass operational status":
     it "passes the structural optimizer registry self-check":
         step("Reject dishonest active transforms")
         expect(mir_pass_registry_integrity_errors().len()).to_equal(0)
+        expect(pass_witness_registry_integrity_errors().len()).to_equal(0)
+
+    it "binds every retained active transform to positive and negative witnesses":
+        step("Reject an active pass without both witness identities")
+        val pattern = pass_witness_contract(PassKind.PatternIdiom)
+        expect(pattern.?).to_be(true)
+        expect(pattern.unwrap().positive_id).to_equal("pattern.supported_aes_call")
+        expect(pattern.unwrap().negative_id).to_equal("pattern.unsupported_target")
+        expect(pass_witness_contract(PassKind.TargetNarrowForm)).to_be_nil()
+
+    it "fails closed when a requested pass is unknown or inactive":
+        step("Reject an unknown requested pass")
+        val unknown = pass_run_record_for_unavailable_request("not_a_pass")
+        expect(unknown.disposition).to_equal(PassRunDisposition.Failed)
+        expect(unknown.reasons[0].code).to_equal("unknown_pass")
+        expect(pass_run_record_integrity_errors(unknown).len()).to_equal(0)
+
+        val inactive = pass_run_record_for_unavailable_request("collection_opt")
+        expect(inactive.disposition).to_equal(PassRunDisposition.Skipped)
+        expect(inactive.reasons[0].code).to_equal("inactive_status")
+        expect(pass_run_record_integrity_errors(inactive).len()).to_equal(0)
+
+    it "rejects internally contradictory pass-run records":
+        step("Validate a pass-run record")
+        var invalid = pass_run_record_new(
+            "pattern_idiom", "pattern_idiom", PassStatus.Active,
+            PassExpectation.MustTransformSentinel, PassScope.Module,
+            PassRunDisposition.Transformed
+        )
+        invalid.candidates = 1
+        invalid.transformed = 2
+        invalid = pass_run_record_add_reason(invalid, "legality_unproved", 1)
+        invalid = pass_run_record_add_reason(invalid, "legality_unproved", 2)
+        expect(invalid.reasons[0].count).to_equal(3)
+        expect(pass_run_record_integrity_errors(invalid).len()).to_be_greater_than(1)
