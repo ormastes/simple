@@ -1871,5 +1871,7 @@ with one final join (`O(S + output)` copied bytes). Equal-start edits retain the
 legacy selection sort because its historical insertion order is observable.
 Negative, reversed, or originally out-of-range spans retain incremental legacy
 application because dynamic length checks are also observable. Missing-source and
-overlap errors are unchanged. Grouping replacements by file still uses dictionary
-array copyback and remains a separate COW optimization target.
+overlap errors are unchanged. Follow-up replaced per-file dictionary array
+copyback with stable integer bucket indexes and owned nested replacement arrays,
+making grouping expected `O(R)` while retaining dictionary key iteration and
+per-file discovery order.
