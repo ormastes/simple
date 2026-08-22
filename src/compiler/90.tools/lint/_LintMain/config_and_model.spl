@@ -1082,3 +1082,48 @@ class Linter:
     cached_sdn_config: LintConfig?
     critical_dynamic_acquire_loaded: bool
     critical_dynamic_acquire_mode: String
+    manifest_dir_cache: Dict<String, String>
+    manifest_dir_cache_count: i64
+    prepared_config_path: String
+
+fn linter_find_project_sdn(linter: Linter, file_path: String) -> String:
+    """Resolve one source's project manifest with a bounded command cache."""
+    val source_directory = get_parent_directory(file_path)
+    var directory = source_directory
+    var depth = 0
+    while depth < 10:
+        if linter.manifest_dir_cache.contains_key(directory):
+            val resolved = linter.manifest_dir_cache[directory]
+            linter_cache_manifest_dir(linter, source_directory, resolved)
+            return resolved
+        val candidate = "{directory}/simple.sdn"
+        if file_exists(candidate):
+            linter_cache_manifest_dir(linter, directory, candidate)
+            linter_cache_manifest_dir(linter, source_directory, candidate)
+            return candidate
+        val parent = get_parent_directory(directory)
+        if parent == directory:
+            linter_cache_manifest_dir(linter, source_directory, "")
+            return ""
+        directory = parent
+        depth = depth + 1
+    linter_cache_manifest_dir(linter, source_directory, "")
+    ""
+
+fn linter_cache_manifest_dir(
+    linter: Linter, directory: String, resolved: String
+):
+    if linter.manifest_dir_cache.contains_key(directory):
+        return
+    # Bound command memory for generated trees with many distinct directories.
+    if linter.manifest_dir_cache_count < 4096:
+        linter.manifest_dir_cache[directory] = resolved
+        linter.manifest_dir_cache_count = linter.manifest_dir_cache_count + 1
+
+fn resolve_prepared_lint_config_with_lines(
+    base: LintConfig, lines: [String]
+) -> LintConfig:
+    """Apply file attributes when manifest discovery already belongs to caller."""
+    var config = base.child()
+    config.apply_file_attributes_lines(lines)
+    config
