@@ -488,6 +488,15 @@ increments an exact count. Lookup selects a domain from `hardware_only` and raw
 above one retains ambiguity; count one returns the SymbolId. Successful target
 rewriting and BFS enqueue behavior are unchanged.
 
+### VHDL metadata index
+
+`vhdl_catalog_metadata_key` frames both text components by length. The exact
+index records every row; the alias index records only rows whose raw module is
+not loaded, using one-prefix-stripped `std.`/`lib.` identity. First row stores
+its ordinal and any duplicate replaces it with `-2`. For each module, alias
+normalization is hoisted outside the function loop. Two lookups yield absent,
+unique, or ambiguous; only a unique row is copied into recovered metadata.
+
 ## Fix application fast-path contract
 
 Per-file replacements use a typed stable merge sort ordered by descending start.
