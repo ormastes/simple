@@ -1,0 +1,304 @@
+# HIR cache — one encoded HirModule per (module source, closure surfaces,
+# compiler identity), under build/bootstrap/native_cache/<lane>/hir/.
+#
+# Sibling of the front-end parse cache (frontend_parse_cache.spl) one phase
+# later: a hit hands the driver a decoded HirModule and skips lowering, which
+# is the phase that costs 142 s/module interpreted on the bootstrap closure
+# (doc/08_tracking/bug/native_build_phases_after_parse_single_threaded_2026-08-22.md).
+# HIR shard workers (native_build_main.spl) exist only to fill this cache.
+#
+# KEY. What lowering reads besides the module's own source is the FROZEN
+# MODULE SURFACES -- and not only its imports': module_lowering.spl builds a
+# decl-owner index over EVERY surface (`surface_decl_owners`, the whole-closure
+# loop at module_lowering.spl:358) and re-export materialization walks package
+# siblings that are not import edges. So the key folds a digest of ALL frozen
+# surfaces, not the import closure alone; a per-import key would serve a stale
+# module after an edit to a non-imported sibling that adds a same-named
+# declaration. The price is that any source edit invalidates every entry --
+# acceptable, because the win this cache exists for is the repeated bootstrap
+# stages over an IDENTICAL tree.
+#   key = sha256( sha256(source file) | closure digest | is_entry
+#                 | the env switches that change what lowering emits
+#                 | codec header )
+# The compiler identity rides in the entry HEADER and the directory (the
+# front-end cache's scope, which folds the compiler SOURCE fingerprint), so a
+# compiler edit is a loud version mismatch, never a silent hit.
+#
+# STORE is atomic (pid-unique temp + rename) because N shard workers write one
+# directory concurrently. A module the codec refuses (hir_codec_support.spl)
+# is simply not stored: a cache that cannot store is a slow build, not a wrong
+# one.
+
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
+use std.common.crypto.sha256.{sha256_text}
+use std.io.{file_lock, file_unlock, file_exists, file_write}
+use compiler.driver.driver_source_pipeline_parsing.{driver_parse_shard_hash}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_file_move(src: text, dst: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+val HIR_CACHE_ENTRY_VERSION: text = "spl-hircache-v1"
+
+# Diagnostic counters, same shape as the front-end cache's.
+var _hir_cache_hits: i64 = 0
+var _hir_cache_misses: i64 = 0
+var _hir_cache_stores: i64 = 0
+
+fn hir_cache_enabled() -> bool:
+    if (rt_env_get("SIMPLE_HIR_CACHE") ?? "") == "0":
+        return false
+    # Requires the front-end cache scope: that is the compiler identity the
+    # header is checked against. No scope, no identity, no cache.
+    frontend_parse_cache_scope() != ""
+
+fn hir_cache_dir() -> text:
+    val root = rt_env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+    if root != "":
+        return root
+    val lane = rt_env_get("SIMPLE_CACHE_SCOPE") ?? ""
+    val lane_name = if lane == "": "default" else: lane
+    "build/bootstrap/native_cache/{lane_name}/hir"
+
+# Digest of every frozen surface, computed ONCE per build. Folds the fields
+# that identify a surface's content: its canonical path and content hash plus
+# the names it is registered under (an alias change moves what a sibling
+# resolves to without changing any file hash).
+fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
+    var parts: [text] = ["{surfaces.surfaces.len()}\n"]
+    var i = 0
+    while i < surfaces.surfaces.len():
+        val s = surfaces.surfaces[i]
+        parts = parts.push(s.canonical_path + "|" + "{s.content_hash}" + "|" + "{s.content_length}" + "|" + s.module_name + "|" + s.logical_name + "\n")
+        i = i + 1
+    sha256_text(parts.join(""))
+
+fn _hir_cache_env_switches() -> text:
+    # Every environment switch module_build.spl / the driver consult when
+    # deciding WHAT to lower (bootstrap constants recovery, flat rows, stub
+    # HIR). Folding them keeps one directory safe across modes.
+    var out = ""
+    for name in ["SIMPLE_BOOTSTRAP", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "SIMPLE_BOOTSTRAP_STAGE4", "SIMPLE_STUB_HIR", "SIMPLE_STAGE3_STREAMING_SURFACES"]:
+        out = out + name + "=" + (rt_env_get(name) ?? "") + "\n"
+    out
+
+fn hir_cache_key(source_path: text, closure_digest: text, is_entry: bool) -> text:
+    if closure_digest == "" or not rt_file_exists(source_path):
+        return ""
+    val source_digest = rt_file_hash_sha256(source_path)
+    if source_digest.len() != 64:
+        return ""
+    val entry_flag = if is_entry: "entry" else: "module"
+    sha256_text(source_digest + "\n" + closure_digest + "\n" + entry_flag + "\n" + _hir_cache_env_switches() + hir_codec_header() + "\n")
+
+fn hir_cache_path(key: text) -> text:
+    hir_cache_dir() + "/" + key + ".hir"
+
+fn hir_cache_header() -> text:
+    HIR_CACHE_ENTRY_VERSION + " " + hir_codec_header() + " " + frontend_parse_cache_scope()
+
+fn hir_cache_has(key: text) -> bool:
+    key != "" and hir_cache_enabled() and rt_file_exists(hir_cache_path(key))
+
+# nil for a miss, a foreign/corrupt entry, or a truncated one: every one of
+# those is "lower it in process", and the caller must not need to tell them
+# apart.
+fn hir_cache_load(key: text) -> HirModule?:
+    if key == "" or not hir_cache_enabled():
+        return nil
+    val path = hir_cache_path(key)
+    if not rt_file_exists(path):
+        _hir_cache_misses = _hir_cache_misses + 1
+        return nil
+    val raw = rt_file_read_text(path) ?? ""
+    val nl = raw.index_of("\n")
+    if raw == "" or nl < 0 or raw.substring(0, nl) != hir_cache_header():
+        _hir_cache_misses = _hir_cache_misses + 1
+        return nil
+    val decoded = hir_module_decode(raw.substring(nl + 1, raw.len()))
+    if decoded == nil:
+        _hir_cache_misses = _hir_cache_misses + 1
+        return nil
+    _hir_cache_hits = _hir_cache_hits + 1
+    decoded
+
+fn hir_cache_store(key: text, module: HirModule) -> bool:
+    if key == "" or not hir_cache_enabled():
+        return false
+    val blob = hir_module_encode(module)
+    if blob == "":
+        return false
+    val dir = hir_cache_dir()
+    val _made = rt_dir_create_all(dir)
+    val final_path = hir_cache_path(key)
+    val tmp = final_path + ".{rt_getpid()}.tmp"
+    if not rt_file_write_text(tmp, hir_cache_header() + "\n" + blob):
+        return false
+    if rt_file_move(tmp, final_path):
+        _hir_cache_stores = _hir_cache_stores + 1
+        return true
+    val _cleaned = rt_file_delete(tmp)
+    false
+
+fn hir_cache_hits() -> i64:
+    _hir_cache_hits
+
+fn hir_cache_misses() -> i64:
+    _hir_cache_misses
+
+fn hir_cache_stores() -> i64:
+    _hir_cache_stores
+
+fn hir_cache_summary() -> text:
+    "[hir-cache] hits={_hir_cache_hits} misses={_hir_cache_misses} stores={_hir_cache_stores}"
+
+# ===== HIR sharding ==========================================================
+#
+# SIMPLE_HIR_SHARD="<index>/<count>" (from --hir-shard=, which only the
+# orchestrator in native_build_main.spl passes). A shard child runs the real
+# pipeline up to and including HIR, lowers ONLY the modules it claims, stores
+# each into this cache, and exits before typecheck. The real build that
+# follows hits every entry. Same mechanism as the parse shards (work queue =
+# flock'd marker dir published as SIMPLE_HIR_SHARD_QUEUE; static path-hash
+# split when no queue is published or the lock fails).
+#
+# DEPENDENCY LEVELS. Lowering reads only the FROZEN surfaces (every child
+# rebuilds them from front-end cache hits), so no module's HIR is an input to
+# another's and no barrier between levels is needed for correctness. The
+# shards still CLAIM in topological level order of the import graph (Kahn
+# over ModuleSurface.import_target_indices; a cycle's members share the level
+# after everything they depend on) so the claim sequence is the one a
+# level-barriered scheduler would use, and the receipt names the level count.
+# Output is unchanged by construction: a claimed module is lowered by exactly
+# one shard into the same content-keyed entry the sequential build would
+# store, and an unclaimed one is lowered by the real build.
+
+var _hir_shard_memo: text = "@@unset@@"
+var _hir_shard_queue_memo: text = "@@unset@@"
+var _hir_shard_claimed: i64 = 0
+
+fn hir_shard_spec() -> text:
+    if _hir_shard_memo != "@@unset@@":
+        return _hir_shard_memo
+    _hir_shard_memo = rt_env_get("SIMPLE_HIR_SHARD") ?? ""
+    _hir_shard_memo
+
+fn hir_shard_active() -> bool:
+    hir_shard_spec() != ""
+
+fn hir_shard_claimed() -> i64:
+    _hir_shard_claimed
+
+fn _hir_shard_queue_dir() -> text:
+    if _hir_shard_queue_memo != "@@unset@@":
+        return _hir_shard_queue_memo
+    _hir_shard_queue_memo = rt_env_get("SIMPLE_HIR_SHARD_QUEUE") ?? ""
+    _hir_shard_queue_memo
+
+# A malformed spec owns EVERYTHING (same fail-closed rule as the parse shard:
+# a shard that silently owns nothing looks like a fast success).
+fn _hir_shard_owns_static(path: text) -> bool:
+    val spec = hir_shard_spec()
+    val slash = spec.index_of("/")
+    if slash <= 0:
+        return true
+    val index = spec.substring(0, slash).to_i64() ?? -1
+    val count = spec.substring(slash + 1, spec.len()).to_i64() ?? 0
+    if count <= 0 or index < 0 or index >= count:
+        return true
+    (driver_parse_shard_hash(path) % count) == index
+
+fn hir_shard_owns(path: text) -> bool:
+    if not hir_shard_active():
+        return true
+    val queue_dir = _hir_shard_queue_dir()
+    if queue_dir == "":
+        return _hir_shard_owns_static(path)
+    val marker = "{queue_dir}/{driver_parse_shard_hash(path)}-{path.len()}.claim"
+    if file_exists(marker):
+        return false
+    val fd = file_lock("{queue_dir}/.lock", 30)
+    if fd < 0:
+        return _hir_shard_owns_static(path)
+    var claimed = false
+    if not file_exists(marker):
+        claimed = file_write(marker, hir_shard_spec())
+    val _unlocked = file_unlock(fd)
+    if claimed:
+        _hir_shard_claimed = _hir_shard_claimed + 1
+    claimed
+
+# Topological level of every surface (index-aligned with surfaces.surfaces).
+fn hir_shard_levels(surfaces: ModuleSurfacesByName) -> [i64]:
+    val n = surfaces.surfaces.len()
+    var level: [i64] = []
+    var indeg: [i64] = []
+    var i = 0
+    while i < n:
+        level.push(-1)
+        var d = 0
+        for t in surfaces.surfaces[i].import_target_indices:
+            if t >= 0 and t < n and t != i:
+                d = d + 1
+        indeg.push(d)
+        i = i + 1
+    var current = 0
+    var assigned = 0
+    while assigned < n:
+        var frontier: [i64] = []
+        i = 0
+        while i < n:
+            if level[i] < 0 and indeg[i] == 0:
+                frontier.push(i)
+            i = i + 1
+        if frontier.len() == 0:
+            # Only cycles remain: they all depend on something already levelled
+            # (or on each other), so they share the next level.
+            i = 0
+            while i < n:
+                if level[i] < 0:
+                    level[i] = current
+                    assigned = assigned + 1
+                i = i + 1
+            break
+        for f in frontier:
+            level[f] = current
+            assigned = assigned + 1
+        # Release the importers of this level.
+        i = 0
+        while i < n:
+            if level[i] < 0:
+                var d = 0
+                for t in surfaces.surfaces[i].import_target_indices:
+                    if t >= 0 and t < n and t != i and level[t] < 0:
+                        d = d + 1
+                indeg[i] = d
+            i = i + 1
+        current = current + 1
+    level
+
+fn hir_shard_level_count(levels: [i64]) -> i64:
+    var top = -1
+    for l in levels:
+        if l > top:
+            top = l
+    top + 1
+
+fn hir_shard_summary(levels: i64, lowered: i64) -> text:
+    "[hir-shard] done shard={hir_shard_spec()} lowered={lowered} claimed={_hir_shard_claimed} levels={levels}"
+
+export HIR_CACHE_ENTRY_VERSION
+export hir_cache_enabled, hir_cache_dir, hir_cache_closure_digest, hir_cache_key
+export hir_cache_has, hir_cache_load, hir_cache_store
+export hir_cache_hits, hir_cache_misses, hir_cache_stores, hir_cache_summary
+export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
+export hir_shard_levels, hir_shard_level_count, hir_shard_summary

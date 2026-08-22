@@ -43,11 +43,16 @@ use compiler.semantics.resolve.{resolve_methods}
 use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity}
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_summary}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 extern fn rt_env_get(key: text) -> text
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_exit(code: i64)
+extern fn rt_stdout_flush()
 
 impl CompilerDriver:
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
@@ -416,12 +421,56 @@ impl CompilerDriver:
             module_lowering_diagnostic_messages,
             module_lowering_diagnostic_recovered)
         bootstrap_hir_modules_reset()
+        # HIR cache (driver_hir_cache.spl): one digest of every frozen surface
+        # per build; a hit below replaces lowering for that module.
+        val hir_closure_digest: text = if hir_cache_enabled():
+            hir_cache_closure_digest(retained_module_surfaces)
+        else:
+            ""
+        # HIR shard child (SIMPLE_HIR_SHARD, see driver_hir_cache.spl): visit
+        # the sources in dependency-LEVEL order, lower only what this shard
+        # claims and is not already cached, store, and exit after the loop.
+        # The sequential build keeps source order; the set of entries produced
+        # is the same either way, so the real build's output cannot change.
+        val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
+        var hir_visit_order: [i64] = []
+        var hir_level_count: i64 = 0
+        var hir_shard_lowered: i64 = 0
+        if hir_shard_mode:
+            val hir_levels = hir_shard_levels(retained_module_surfaces)
+            hir_level_count = hir_shard_level_count(hir_levels)
+            var hir_level_index: i64 = 0
+            while hir_level_index <= hir_level_count:
+                var hir_order_idx: i64 = 0
+                while hir_order_idx < self.ctx.sources.len():
+                    val hir_order_name = self.ctx.sources[hir_order_idx].module_name
+                    var hir_source_level: i64 = hir_level_count
+                    if retained_module_surfaces.index_by_name.contains_key(hir_order_name):
+                        val hir_surface_idx = retained_module_surfaces.index_by_name[hir_order_name]
+                        if hir_surface_idx >= 0 and hir_surface_idx < hir_levels.len():
+                            hir_source_level = hir_levels[hir_surface_idx]
+                    if hir_source_level == hir_level_index:
+                        hir_visit_order.push(hir_order_idx)
+                    hir_order_idx = hir_order_idx + 1
+                hir_level_index = hir_level_index + 1
+        else:
+            var hir_order_idx: i64 = 0
+            while hir_order_idx < self.ctx.sources.len():
+                hir_visit_order.push(hir_order_idx)
+                hir_order_idx = hir_order_idx + 1
+        var hir_loop_pos: i64 = 0
         if mem_snapshot_begin() < 0:
             self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
             return (self.ctx, false)
-        while source_idx < self.ctx.sources.len():
+        while hir_loop_pos < hir_visit_order.len():
+            source_idx = hir_visit_order[hir_loop_pos]
             val src = self.ctx.sources[source_idx]
             val name = src.module_name
+            if hir_shard_mode:
+                val hir_shard_key = hir_cache_key(src.path, hir_closure_digest, source_idx == entry_source_index)
+                if hir_shard_key == "" or hir_cache_has(hir_shard_key) or not hir_shard_owns(src.path):
+                    hir_loop_pos = hir_loop_pos + 1
+                    continue
             # Baseline for the per-module poison check below. Errors already in
             # the list belong to EARLIER modules and must not poison this one.
             # Avoid the staged aggregate-receiver accessor hazard; add_error
@@ -465,7 +514,28 @@ impl CompilerDriver:
             val is_requested_bootstrap_entry = source_idx == entry_source_index
             val is_bootstrap_entry = is_requested_bootstrap_entry
             dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
-            val hir_module: HirModule = if is_bootstrap_entry:
+            val hir_cache_key_value: text = if hir_closure_digest != "":
+                hir_cache_key(src.path, hir_closure_digest, is_bootstrap_entry)
+            else:
+                ""
+            val hir_cached: HirModule? = if hir_cache_key_value != "":
+                hir_cache_load(hir_cache_key_value)
+            else:
+                nil
+            val hir_cache_hit: bool = hir_cached != nil
+            if hir_cache_hit:
+                # Replay the one global side effect lowering has besides its
+                # return value: the flat HIR rows the bootstrap MIR bridge
+                # reads (module_build.spl's bootstrap_flat_mode block).
+                val hir_registry_name = if is_bootstrap_entry:
+                    hir_module_logical_name_from_path(src_path ?? "")
+                else:
+                    name
+                bootstrap_hir_modules_add_from_module(hir_cached.unwrap(), hir_registry_name, is_bootstrap_entry)
+            var hir_module: HirModule = if hir_cache_hit:
+                dtrace("[DRV] branch=hir_cache_hit")
+                hir_cached.unwrap()
+            elif is_bootstrap_entry:
                 dtrace("[DRV] branch=bootstrap_entry")
                 # The phase-2 cached ParserModule can still be non-nil after
                 # its flat-AST arena has been reset while carrying an empty
@@ -602,9 +672,21 @@ impl CompilerDriver:
                     return (self.ctx, false)
                 # Skip the shared-trait fold and the phase_hir_modules store
                 # below: neither may observe a poisoned module.
-                source_idx = source_idx + 1
+                hir_loop_pos = hir_loop_pos + 1
                 continue
 
+            # Codec self-check (SIMPLE_HIR_CODEC_ROUNDTRIP=1, default off): one
+            # receipt per module, and the build CONTINUES FROM THE DECODED
+            # module so a lossy codec cannot pass quietly. Gate:
+            # scripts/check/check-hir-codec-roundtrip.shs
+            if (rt_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
+                val hir_round_trip = hir_codec_roundtrip_selfcheck(hir_module)
+                print hir_codec_roundtrip_line(hir_round_trip, src.path)
+                hir_module = hir_round_trip.module
+
+            if hir_cache_key_value != "" and not hir_cache_hit:
+                if hir_cache_store(hir_cache_key_value, hir_module):
+                    hir_shard_lowered = hir_shard_lowered + 1
             val hir_function_count: i64 = driver_dict_entry_count(hir_module.functions)
             if focused_future_driver_diag:
                 eprint("[driver-hir] functions={hir_function_count}")
@@ -695,10 +777,10 @@ impl CompilerDriver:
                 phase_entry_hir = Some(hir_module)
             log_phase("phase3:hir:file:done {src.path} module={name} funcs={hir_function_count}")
             log_trace("stored HIR module")
-            source_idx = source_idx + 1
+            hir_loop_pos = hir_loop_pos + 1
             # Completion receipt, one per module (see the parse loop for why a
             # cadence is not good enough).
-            log_build_progress("hir", "modules", source_idx,
+            log_build_progress("hir", "modules", hir_loop_pos,
                 self.ctx.sources.len(), name, 2, 6, 0, 0, "running")
 
         # Step 3b: ParserTrait coherence checking (Check mode only)
@@ -711,6 +793,14 @@ impl CompilerDriver:
         # Step 2d: Effect inference pass is skipped in bootstrap empty-HIR mode.
         log_debug("effect inference done")
 
+        if hir_cache_enabled():
+            print hir_cache_summary()
+        if hir_shard_mode:
+            # Shard children exist only to fill the HIR cache. Everything after
+            # this point is the real build's job and must not run N times.
+            print hir_shard_summary(hir_level_count, hir_shard_lowered)
+            rt_stdout_flush()
+            rt_exit(0)
         log_debug("HIR lowering complete")
 
         if not mem_snapshot_finish():
