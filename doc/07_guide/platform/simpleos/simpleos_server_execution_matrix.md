@@ -26,9 +26,20 @@ the physical SimpleOS runtime/provider nor a filesystem server executable.
 2. Build from current source and retain the source revision and executable hash.
    Record the credential-bearing image SHA-256 for provenance; the hash may be
    retained, but the image itself is never public/distributable evidence.
-   Supply `SIMPLEOS_SERVER_DB_CREDENTIAL_FILE` as a non-empty file of at most
-   128 bytes; the image stages it as `/SYS/SRVDB.KEY` and fails closed if it is
-   absent. Do not place the credential bytes on the command line.
+   Supply `SIMPLEOS_SERVER_DB_CREDENTIAL_FILE` as a non-empty regular file of
+   at most 128 bytes, `SIMPLEOS_SERVER_DB_CERTIFICATE_FILE` as a matching DER
+   X.509 certificate of at most 65,536 bytes, and
+   `SIMPLEOS_SERVER_DB_PRIVATE_KEY_FILE` as its Ed25519 PKCS#8 DER private key
+   of at most 16,384 bytes. The image stages them at `/SYS/SRVDB.KEY`,
+   `/SYS/SRVDB.CRT`, and `/SYS/SRVDB.PK8`; any missing, malformed, mismatched,
+   oversized, symlinked, or mid-build-changing input fails before publication.
+   `/SYS/SRVDB.MAN` records their SHA-256 continuity inside the sensitive image.
+   Do not place credential or private-key bytes on the command line.
+   The POSIX host builder publishes through a same-directory private pending
+   image and an atomic no-replace hard link only after extracting and comparing
+   all four staged files. It refuses a pre-existing output. Windows-hosted
+   secret staging remains fail-closed until an equivalent no-reparse descriptor
+   reader exists; this does not change x86_64, AArch64, or RV64 guest support.
    Keep the generated image ephemeral and access-restricted, then securely
    destroy it after the same-image reboot probe. Exclude it from caches,
    uploads, release artifacts, and evidence bundles.

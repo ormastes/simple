@@ -18,6 +18,9 @@
 #include <sys/types.h>
 #ifdef _WIN32
 #include <direct.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 enum {
@@ -153,18 +156,26 @@ int main(int argc, char **argv)
     struct bytes servers_admission = read_file(getenv("SIMPLEOS_SERVERS_ADMISSION"));
     struct bytes servers_proof = read_file(getenv("SIMPLEOS_SERVERS_PROOF"));
     struct bytes servers_trust_root = read_file(getenv("SIMPLEOS_SERVERS_TRUST_ROOT"));
-    if ((servers_manifest.len || servers_admission.len || servers_proof.len || servers_trust_root.len) &&
+    if ((servers_payload.len || servers_manifest.len || servers_admission.len || servers_proof.len || servers_trust_root.len) &&
         (!servers_payload.len || !servers_manifest.len || !servers_admission.len ||
          !servers_proof.len || !servers_trust_root.len)) {
         fprintf(stderr, "SERVERS.ELF requires manifest, admission, proof, and trust-root sidecars\n");
         return 1;
     }
     const char *server_credential_path = getenv("SIMPLEOS_SERVER_DB_CREDENTIAL_FILE");
-    struct bytes server_credential = read_file(server_credential_path);
-    if (servers_payload.len && (!server_credential_path || !server_credential_path[0] ||
-                                !server_credential.len || server_credential.len > 128)) {
+    const char *server_certificate_path = getenv("SIMPLEOS_SERVER_DB_CERTIFICATE_FILE");
+    const char *server_private_key_path = getenv("SIMPLEOS_SERVER_DB_PRIVATE_KEY_FILE");
+    const char *server_credentials_manifest_path = getenv("SIMPLEOS_SERVER_DB_CREDENTIAL_MANIFEST_FILE");
+    struct bytes server_credential = read_bounded_regular_file(server_credential_path, 128);
+    struct bytes server_certificate = read_bounded_regular_file(server_certificate_path, 65536);
+    struct bytes server_private_key = read_bounded_regular_file(server_private_key_path, 16384);
+    struct bytes server_credentials_manifest = read_bounded_regular_file(server_credentials_manifest_path, 1024);
+    if (servers_payload.len && (!server_credential.len || !server_certificate.len ||
+                                !server_private_key.len || !server_credentials_manifest.len)) {
         wipe_bytes(server_credential);
-        fprintf(stderr, "SIMPLEOS_SERVER_DB_CREDENTIAL_FILE must name a non-empty file of at most 128 bytes when staging SERVERS.ELF\n");
+        wipe_bytes(server_certificate);
+        wipe_bytes(server_private_key);
+        fprintf(stderr, "SERVERS.ELF requires bounded regular SRVDB.KEY, SRVDB.CRT, SRVDB.PK8, and credential-manifest inputs\n");
         return 1;
     }
     /* The fullscreen WM showcase stages a REAL freestanding browser client at
@@ -320,10 +331,25 @@ int main(int argc, char **argv)
     int hello_txt_cluster = alloc_clusters(hello_txt.data, hello_txt.len);
     int server_document_cluster = servers_payload.len ? alloc_clusters(server_document.data, server_document.len) : 0;
     int server_credential_cluster = servers_payload.len ? alloc_clusters(server_credential.data, server_credential.len) : 0;
+    int server_certificate_cluster = servers_payload.len ? alloc_clusters(server_certificate.data, server_certificate.len) : 0;
+    int server_private_key_cluster = servers_payload.len ? alloc_clusters(server_private_key.data, server_private_key.len) : 0;
+    int server_credentials_manifest_cluster = servers_payload.len ? alloc_clusters(server_credentials_manifest.data, server_credentials_manifest.len) : 0;
+    if (servers_payload.len) {
+        require_cluster_bytes(server_credential_cluster, server_credential,
+                              "SRVDB.KEY staging verification failed");
+        require_cluster_bytes(server_certificate_cluster, server_certificate,
+                              "SRVDB.CRT staging verification failed");
+        require_cluster_bytes(server_private_key_cluster, server_private_key,
+                              "SRVDB.PK8 staging verification failed");
+        require_cluster_bytes(server_credentials_manifest_cluster, server_credentials_manifest,
+                              "SRVDB.MAN staging verification failed");
+    }
     /* alloc_clusters copied the secret into the credential-bearing image.
      * Remove the transient host-side read buffer immediately; the resulting
      * image remains sensitive and is governed by the acceptance-image policy. */
     wipe_bytes(server_credential);
+    wipe_bytes(server_certificate);
+    wipe_bytes(server_private_key);
     int qemu_nonce_cluster = alloc_clusters(qemu_nonce_slot.data, qemu_nonce_slot.len);
     int collector_nonce_cluster = alloc_clusters(
         collector_nonce_slot.data, collector_nonce_slot.len);
@@ -514,6 +540,9 @@ int main(int argc, char **argv)
     if (servers_payload.len) {
         put_dir_entry(sys, &sys_n, "SERVER  HTM", server_document_cluster, server_document.len, 0x20);
         put_dir_entry(sys, &sys_n, "SRVDB   KEY", server_credential_cluster, server_credential.len, 0x20);
+        put_dir_entry(sys, &sys_n, "SRVDB   CRT", server_certificate_cluster, server_certificate.len, 0x20);
+        put_dir_entry(sys, &sys_n, "SRVDB   PK8", server_private_key_cluster, server_private_key.len, 0x20);
+        put_dir_entry(sys, &sys_n, "SRVDB   MAN", server_credentials_manifest_cluster, server_credentials_manifest.len, 0x20);
     }
     for (int i = 0; i < FONT_ASSET_COUNT; ++i) {
         put_named_dir_entry(fonts, &fonts_n, font_fat_names[i], font_long_names[i],
@@ -623,6 +652,34 @@ int main(int argc, char **argv)
     write_directory(work_cluster, work, work_n);
 
     finish_fat32_image(img_path);
+    if (servers_payload.len) {
+#ifdef _WIN32
+        die("server credential staging requires a no-reparse Windows descriptor owner");
+#else
+        const char *receipt_path = getenv("SIMPLEOS_SERVER_CREDENTIAL_STAGING_RECEIPT");
+        if (!receipt_path || receipt_path[0] == '\0')
+            die("server credential staging receipt path is required");
+        int receipt_fd = open(receipt_path,
+                              O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                              S_IRUSR | S_IWUSR);
+        if (receipt_fd < 0)
+            die("server credential staging receipt creation failed");
+        FILE *receipt = fdopen(receipt_fd, "w");
+        if (!receipt)
+            die("server credential staging receipt stream failed");
+        fprintf(receipt, "schema=simpleos-server-credential-staging-v1\n");
+        fprintf(receipt, "credential_offset=%zu\ncredential_length=%zu\n",
+                cluster_offset(server_credential_cluster), server_credential.len);
+        fprintf(receipt, "certificate_offset=%zu\ncertificate_length=%zu\n",
+                cluster_offset(server_certificate_cluster), server_certificate.len);
+        fprintf(receipt, "private_key_offset=%zu\nprivate_key_length=%zu\n",
+                cluster_offset(server_private_key_cluster), server_private_key.len);
+        fprintf(receipt, "manifest_offset=%zu\nmanifest_length=%zu\n",
+                cluster_offset(server_credentials_manifest_cluster), server_credentials_manifest.len);
+        if (fclose(receipt) != 0)
+            die("server credential staging receipt write failed");
+#endif
+    }
     if (strcmp(platform, "x86_64") == 0 && bootloader_file.len)
         maybe_write_esp(img_path, &bootloader, &kernel, &limine);
     return 0;

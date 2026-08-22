@@ -19,8 +19,11 @@ QEMU gate; it does not itself claim a live guest pass.
   target cleanup, and host-only destruction of a credential-bearing image.
 - Wire the production payload producer for x86_64, ARM64, and RISC-V 64 target
   triples, require no-stub compilation, reject unresolved strong symbols, and
-  validate the staged ELF machine before image admission. This scenario reads
-  the wiring; it does not invoke or prove a payload build.
+  validate the staged ELF machine before image admission. The same image owner
+  snapshots a bounded credential, DER certificate, and matching Ed25519 PKCS#8
+  key into private storage, stages the exact `/SYS/SRVDB.KEY`, `.CRT`, `.PK8`,
+  and `.MAN` files, and verifies copied image bytes plus pre/post hashes. This
+  scenario reads the wiring; it does not invoke or prove a payload build.
 - Keep the x86_64 and RISC-V 64 filesystem-server boot entries on their
   architecture scheduler/VFS owners and require explicit QEMU failure exits
   when authenticated `/SERVERS.ELF` launch cannot complete.

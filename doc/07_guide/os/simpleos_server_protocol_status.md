@@ -51,6 +51,12 @@ database implementation. It reads `/SYS/SRVDB.KEY`, `/SYS/SRVDB.CRT`, and
 before DBFS recovery. The paths are configuration locations, never embedded
 credential values.
 
+The image owner requires all three files together. It bounds each regular-file
+read before allocation, validates DER X.509 and Ed25519 PKCS#8 types plus public
+key equality, stages an adjacent `/SYS/SRVDB.MAN` hash manifest, and compares
+the three source hashes again after construction. There is no embedded key,
+certificate, development fallback, or partial server-image mode.
+
 Startup additionally requires the mounted VFS owner to attest DBFS root,
 durable file sync, and transactional namespace replacement. A missing bit is a
 hard startup failure. Operators should never place secrets in command-line

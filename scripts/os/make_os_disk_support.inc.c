@@ -257,6 +257,73 @@ static struct bytes read_file(const char *path)
     return out;
 }
 
+/* Read a security-sensitive build input only after proving that its size is
+ * bounded.  The generic image inputs predate this contract and may be large;
+ * server credentials must never be allocated from an attacker-controlled
+ * length before their limits are checked. */
+static struct bytes read_bounded_regular_file(const char *path, size_t max_len)
+{
+    struct bytes out = {0};
+#ifdef _WIN32
+    /* Windows hosted builds retain the generic image writer, but server-secret
+     * staging stays disabled until a CreateFile/reparse-point owner provides
+     * the same descriptor contract as O_NOFOLLOW+fstat below. */
+    (void)path;
+    (void)max_len;
+    return out;
+#else
+    struct stat metadata;
+    if (!path || path[0] == '\0')
+        return out;
+    int descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0 || fstat(descriptor, &metadata) != 0 ||
+        !S_ISREG(metadata.st_mode) || metadata.st_size <= 0 ||
+        (metadata.st_mode & (S_IRWXG | S_IRWXO)) != 0 ||
+        (uintmax_t)metadata.st_size > (uintmax_t)max_len) {
+        if (descriptor >= 0)
+            close(descriptor);
+        return out;
+    }
+    size_t expected = (size_t)metadata.st_size;
+    out.len = expected;
+    out.data = (unsigned char *)xcalloc(out.len + 1, 1);
+    size_t read_total = 0;
+    while (read_total < expected) {
+        ssize_t count = read(descriptor, out.data + read_total, expected - read_total);
+        if (count <= 0)
+            break;
+        read_total += (size_t)count;
+    }
+    unsigned char extra = 0;
+    ssize_t extra_count = read(descriptor, &extra, 1);
+    if (read_total != expected || extra_count != 0 ||
+        fstat(descriptor, &metadata) != 0 || (size_t)metadata.st_size != expected) {
+        wipe_bytes(out);
+        free(out.data);
+        out.data = NULL;
+        out.len = 0;
+    }
+    close(descriptor);
+    return out;
+#endif
+}
+
+static void require_cluster_bytes(int first_cluster, const struct bytes expected,
+                                  const char *label)
+{
+    size_t consumed = 0;
+    int cluster = first_cluster;
+    while (consumed < expected.len) {
+        size_t chunk = expected.len - consumed;
+        if (chunk > g_cluster_size)
+            chunk = g_cluster_size;
+        if (memcmp(g_image + cluster_offset(cluster), expected.data + consumed, chunk) != 0)
+            die(label);
+        consumed += chunk;
+        cluster = (int)g_fat[cluster];
+    }
+}
+
 static struct bytes read_sibling_file(const char *path, const char *leaf)
 {
     char sibling[1024];
@@ -747,4 +814,3 @@ static void write_desktop_font_image(
     write_directory(fonts_cluster, fonts, fonts_n);
     finish_fat32_image(img_path);
 }
-

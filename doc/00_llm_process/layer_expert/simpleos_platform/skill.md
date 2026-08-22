@@ -41,3 +41,13 @@ absent until their production owner exists. Never turn unknown TLS ALPN into
 H1, advertise H3 without QUIC, or bypass SFTP's
 canonical VFS capability gates with ambient host filesystem access. Live server evidence requires admitted target tooling
 and configured credentials.
+
+## Server credential media staging (2026-08-22)
+
+The cross-target disk writer stages KEY/CRT/PK8/MAN through bounded
+descriptor-backed snapshots and verifies the exact FAT bytes before atomic
+no-clobber publication. x86_64, AArch64, and RV64 use the same credential
+contract. Missing, malformed, symlinked, unsafe-mode, changed, mismatched, or
+oversized inputs fail before publishing an image; pre-existing images are
+preserved. Windows intentionally rejects server-secret staging until an
+equivalent no-reparse descriptor boundary is implemented.

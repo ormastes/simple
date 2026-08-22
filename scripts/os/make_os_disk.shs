@@ -19,6 +19,8 @@ sha256_file() {
     fi
 }
 
+. "$ROOT_DIR/scripts/os/lib/simpleos_server_credentials.shs"
+
 validate_elf_payload() {
     payload_path="$1"
     expected_machine="$2"
@@ -450,6 +452,44 @@ if [ -n "$SIMPLEOS_SERVERS_BINARY" ]; then
         x86_64) validate_elf_payload "$SIMPLEOS_SERVERS_BINARY" 62 Servers ;;
     esac
 fi
+SIMPLEOS_SERVER_DB_CREDENTIAL_FILE="${SIMPLEOS_SERVER_DB_CREDENTIAL_FILE:-}"
+SIMPLEOS_SERVER_DB_CERTIFICATE_FILE="${SIMPLEOS_SERVER_DB_CERTIFICATE_FILE:-}"
+SIMPLEOS_SERVER_DB_PRIVATE_KEY_FILE="${SIMPLEOS_SERVER_DB_PRIVATE_KEY_FILE:-}"
+SERVER_CREDENTIAL_MANIFEST_DIR=""
+SERVER_CREDENTIAL_IMAGE_VERIFIED=true
+SERVER_CREDENTIAL_FINAL_IMAGE=""
+SERVER_CREDENTIAL_PENDING_IMAGE=""
+SERVER_CREDENTIAL_FINAL_PUBLISHED=false
+cleanup_server_credential_staging() {
+    if [ -n "$SERVER_CREDENTIAL_PENDING_IMAGE" ]; then
+        rm -f "$SERVER_CREDENTIAL_PENDING_IMAGE" "$SERVER_CREDENTIAL_PENDING_IMAGE.esp"
+    fi
+    if [ "$SERVER_CREDENTIAL_IMAGE_VERIFIED" != true ] &&
+        [ "$SERVER_CREDENTIAL_FINAL_PUBLISHED" = true ]; then
+        rm -f "$SERVER_CREDENTIAL_FINAL_IMAGE" "$SERVER_CREDENTIAL_FINAL_IMAGE.esp"
+    fi
+    if [ -n "$SERVER_CREDENTIAL_MANIFEST_DIR" ]; then
+        rm -rf "$SERVER_CREDENTIAL_MANIFEST_DIR"
+    fi
+}
+if [ -n "$SIMPLEOS_SERVERS_BINARY" ]; then
+    for required in SIMPLEOS_SERVER_DB_CREDENTIAL_FILE SIMPLEOS_SERVER_DB_CERTIFICATE_FILE SIMPLEOS_SERVER_DB_PRIVATE_KEY_FILE; do
+        eval "required_path=\${$required:-}"
+        [ -n "$required_path" ] || { echo "$required is required when staging SERVERS.ELF" >&2; exit 1; }
+    done
+    [ ! -e "$image_path" ] || { echo "refusing to replace existing server image: $image_path" >&2; exit 1; }
+    SERVER_CREDENTIAL_FINAL_IMAGE=$image_path
+    SERVER_CREDENTIAL_PENDING_IMAGE=$(mktemp "${image_path}.server-pending.XXXXXX") || exit 1
+    image_path=$SERVER_CREDENTIAL_PENDING_IMAGE
+    SERVER_CREDENTIAL_MANIFEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-server-manifest.XXXXXX")
+    SERVER_CREDENTIAL_IMAGE_VERIFIED=false
+    trap cleanup_server_credential_staging EXIT HUP INT TERM
+    chmod 700 "$SERVER_CREDENTIAL_MANIFEST_DIR"
+    simpleos_server_credentials_snapshot "$SIMPLEOS_SERVER_DB_CREDENTIAL_FILE" \
+        "$SIMPLEOS_SERVER_DB_CERTIFICATE_FILE" "$SIMPLEOS_SERVER_DB_PRIVATE_KEY_FILE" \
+        "$SERVER_CREDENTIAL_MANIFEST_DIR"
+    SIMPLEOS_SERVER_CREDENTIAL_STAGING_RECEIPT="$SERVER_CREDENTIAL_MANIFEST_DIR/staging.env"
+fi
 SIMPLEOS_FONT_ASSET_NSANSSC="assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf"
 SIMPLEOS_FONT_ASSET_NSANSDEV="assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf"
 SIMPLEOS_FONT_ASSET_NSANSARB="assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf"
@@ -522,7 +562,9 @@ export SIMPLEOS_SIMPLE_BINARY SIMPLEOS_CLANG_BINARY SIMPLEOS_LLC_BINARY SIMPLEOS
 export SIMPLEOS_CRT0_OBJECT SIMPLEOS_RUNTIME_ARCHIVE SIMPLEOS_LIBC_ARCHIVE SIMPLEOS_LINKER_SCRIPT
 export SIMPLEOS_SIMPLE_ENTRY_OBJECT SIMPLEOS_HELLO_OBJECT SIMPLEOS_HELLO_IR SIMPLEOS_FSEXEC_BINARY SIMPLEOS_SERVERS_BINARY
 export SIMPLEOS_SERVERS_MANIFEST SIMPLEOS_SERVERS_ADMISSION SIMPLEOS_SERVERS_PROOF SIMPLEOS_SERVERS_TRUST_ROOT
-export SIMPLEOS_SERVER_DB_CREDENTIAL_FILE
+export SIMPLEOS_SERVER_DB_CREDENTIAL_FILE SIMPLEOS_SERVER_DB_CERTIFICATE_FILE SIMPLEOS_SERVER_DB_PRIVATE_KEY_FILE
+export SIMPLEOS_SERVER_DB_CREDENTIAL_MANIFEST_FILE
+export SIMPLEOS_SERVER_CREDENTIAL_STAGING_RECEIPT
 export SIMPLEOS_BROWSER_DEMO_BINARY
 export SIMPLEOS_FONT_ASSET_NSANSSC SIMPLEOS_FONT_ASSET_NSANSDEV SIMPLEOS_FONT_ASSET_NSANSARB
 export SIMPLEOS_FONT_ASSET_NSANSBEN SIMPLEOS_FONT_ASSET_NSERIFSC SIMPLEOS_FONT_ASSET_NSERFDEV
@@ -531,4 +573,52 @@ export SIMPLEOS_FONT_ASSET_BUNGEE SIMPLEOS_FONT_ASSET_NUNITO SIMPLEOS_FONT_ASSET
 export SIMPLEOS_FONT_ASSET_ROBOSLAB SIMPLEOS_FONT_ASSET_UNIFRAKT SIMPLEOS_FONT_ASSET_PIXELIFY
 export SIMPLEOS_FONT_ASSET_NOTOEMOJ
 
-exec "$BIN" "$image_path" "$platform" "$size_bits" "$kernel_path" "$profile"
+"$BIN" "$image_path" "$platform" "$size_bits" "$kernel_path" "$profile"
+if [ -n "$SIMPLEOS_SERVERS_BINARY" ]; then
+    if [ "${SIMPLEOS_SERVER_CREDENTIAL_STAGING_TESTING:-0}:${SIMPLEOS_SERVER_CREDENTIAL_STAGING_TEST_FAIL:-}" = "1:receipt" ]; then
+        echo "forced SimpleOS server credential staging receipt failure" >&2
+        exit 1
+    fi
+    [ "$(sha256_file "$SIMPLEOS_SERVER_DB_CREDENTIAL_FILE")" = "$SERVER_CREDENTIAL_SHA256" ] &&
+    [ "$(sha256_file "$SIMPLEOS_SERVER_DB_CERTIFICATE_FILE")" = "$SERVER_CERTIFICATE_SHA256" ] &&
+    [ "$(sha256_file "$SIMPLEOS_SERVER_DB_PRIVATE_KEY_FILE")" = "$SERVER_PRIVATE_KEY_SHA256" ] || {
+        rm -f "$image_path"
+        echo "SimpleOS server credential snapshot changed during image construction" >&2
+        exit 1
+    }
+    [ "$(stamp_value schema "$SIMPLEOS_SERVER_CREDENTIAL_STAGING_RECEIPT")" = \
+        simpleos-server-credential-staging-v1 ] || {
+        rm -f "$image_path"; echo "invalid SimpleOS server credential staging receipt" >&2; exit 1; }
+    for binding in \
+        "credential:$SIMPLEOS_SERVER_DB_CREDENTIAL_FILE" \
+        "certificate:$SIMPLEOS_SERVER_DB_CERTIFICATE_FILE" \
+        "private_key:$SIMPLEOS_SERVER_DB_PRIVATE_KEY_FILE" \
+        "manifest:$SIMPLEOS_SERVER_DB_CREDENTIAL_MANIFEST_FILE"
+    do
+        label=${binding%%:*}
+        expected=${binding#*:}
+        offset=$(stamp_value "${label}_offset" "$SIMPLEOS_SERVER_CREDENTIAL_STAGING_RECEIPT") || exit 1
+        length=$(stamp_value "${label}_length" "$SIMPLEOS_SERVER_CREDENTIAL_STAGING_RECEIPT") || exit 1
+        extracted="$SERVER_CREDENTIAL_MANIFEST_DIR/extracted-$label"
+        dd if="$image_path" of="$extracted" bs=1 skip="$offset" count="$length" 2>/dev/null
+        if [ "${SIMPLEOS_SERVER_CREDENTIAL_STAGING_TESTING:-0}:${SIMPLEOS_SERVER_CREDENTIAL_STAGING_TEST_FAIL:-}" = "1:extract" ]; then
+            echo "forced SimpleOS server credential extraction failure" >&2
+            exit 1
+        fi
+        cmp -s "$expected" "$extracted" || {
+            rm -f "$image_path"; echo "SimpleOS server $label image-byte verification failed" >&2; exit 1; }
+    done
+    ln "$SERVER_CREDENTIAL_PENDING_IMAGE" "$SERVER_CREDENTIAL_FINAL_IMAGE" || {
+        echo "SimpleOS server image atomic publication failed" >&2; exit 1; }
+    SERVER_CREDENTIAL_FINAL_PUBLISHED=true
+    if [ -e "$SERVER_CREDENTIAL_PENDING_IMAGE.esp" ]; then
+        ln "$SERVER_CREDENTIAL_PENDING_IMAGE.esp" "$SERVER_CREDENTIAL_FINAL_IMAGE.esp" || {
+            rm -f "$SERVER_CREDENTIAL_FINAL_IMAGE"
+            echo "SimpleOS server ESP atomic publication failed" >&2
+            exit 1
+        }
+    fi
+    SERVER_CREDENTIAL_IMAGE_VERIFIED=true
+    rm -f "$SERVER_CREDENTIAL_PENDING_IMAGE" "$SERVER_CREDENTIAL_PENDING_IMAGE.esp"
+    SERVER_CREDENTIAL_PENDING_IMAGE=""
+fi

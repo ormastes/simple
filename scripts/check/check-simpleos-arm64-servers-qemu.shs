@@ -1,7 +1,7 @@
 #!/bin/sh
 # Canonical live ARM64 SimpleOS filesystem-server acceptance gate.
 # Builds the fs-exec kernel owner, stages the current /SERVERS.ELF plus the
-# fixed /SYS/SERVER.HTM witness and a private database credential, then proves
+# fixed /SYS/SERVER.HTM witness and private database/TLS credentials, then proves
 # exact HTTP bytes and authenticated durable DB readback across two distinct
 # QEMU processes using the same writable FAT32 image.
 set -eu
@@ -71,7 +71,7 @@ TRUST_KEY_SHA=$(receipt_field trusted_key_sha256 "$TRUST_POLICY") || fail "trust
 [ -n "$COMPILER_ADMISSION" ] || fail "SIMPLEOS_ARM64_SERVERS_COMPILER_ADMISSION_RECEIPT is required"
 [ -f "$COMPILER_ADMISSION" ] && [ ! -L "$COMPILER_ADMISSION" ] || fail "compiler admission receipt must be a regular non-symlink file"
 CURRENT_REVISION=$(git rev-parse HEAD)
-SOURCE_MANIFEST_ROOTS='src/compiler|src/lib|src/os|examples/09_embedded/simple_os|scripts/check/check-simpleos-arm64-servers-qemu.shs|scripts/check/lib/simpleos-server-zeroization-evidence.shs|scripts/check/simpleos-arm64-server-cap-status.spl|scripts/os/build_arm64_servers_payload.shs|scripts/os/build_simpleos_servers_payload.shs|scripts/os/sign_simpleos_servers_payload.shs|scripts/os/make_os_disk.shs|scripts/os/make_os_disk.c|scripts/os/make_os_disk_support.inc.c|config/simpleos_arm64_servers_weak_undefined_allowlist.sdn'
+SOURCE_MANIFEST_ROOTS='src/compiler|src/lib|src/os|examples/09_embedded/simple_os|scripts/check/check-simpleos-arm64-servers-qemu.shs|scripts/check/lib/simpleos-server-zeroization-evidence.shs|scripts/check/simpleos-arm64-server-cap-status.spl|scripts/os/build_arm64_servers_payload.shs|scripts/os/build_simpleos_servers_payload.shs|scripts/os/generate_simpleos_server_tls_material.shs|scripts/os/sign_simpleos_servers_payload.shs|scripts/os/make_os_disk.shs|scripts/os/make_os_disk.c|scripts/os/make_os_disk_support.inc.c|config/simpleos_arm64_servers_weak_undefined_allowlist.sdn'
 qemu_admission_source_snapshot \
     src/compiler src/lib src/os examples/09_embedded/simple_os \
     scripts/check/check-simpleos-arm64-servers-qemu.shs \
@@ -79,6 +79,7 @@ qemu_admission_source_snapshot \
     scripts/check/simpleos-arm64-server-cap-status.spl \
     scripts/os/build_arm64_servers_payload.shs \
     scripts/os/build_simpleos_servers_payload.shs \
+    scripts/os/generate_simpleos_server_tls_material.shs \
     scripts/os/sign_simpleos_servers_payload.shs \
     scripts/os/make_os_disk.shs scripts/os/make_os_disk.c scripts/os/make_os_disk_support.inc.c \
     config/simpleos_arm64_servers_weak_undefined_allowlist.sdn \
@@ -156,17 +157,21 @@ done
 
 umask 077
 CREDENTIAL_FILE="$OUT_DIR/.db-credential.$$"
+CERTIFICATE_FILE="$OUT_DIR/.db-certificate.$$.der"
+PRIVATE_KEY_FILE="$OUT_DIR/.db-private-key.$$.pk8"
 SENSITIVE_IMAGES=""
-SENSITIVE_FILES="$CREDENTIAL_FILE $OUT_DIR/db.request $OUT_DIR/db.open $OUT_DIR/db.reboot.open $OUT_DIR/crash-db.open"
+SENSITIVE_FILES="$CREDENTIAL_FILE $CERTIFICATE_FILE $PRIVATE_KEY_FILE $OUT_DIR/db.request $OUT_DIR/db.open $OUT_DIR/db.reboot.open $OUT_DIR/crash-db.open"
 cleanup_sensitive() {
     test -n "${QEMU_PID:-}" && kill "$QEMU_PID" 2>/dev/null || true
-    rm -f "$CREDENTIAL_FILE" "$QMP"
+    rm -f "$CREDENTIAL_FILE" "$CERTIFICATE_FILE" "$PRIVATE_KEY_FILE" "$QMP"
     for sensitive_image in $SENSITIVE_IMAGES; do rm -f "$sensitive_image"; done
     for sensitive_file in $SENSITIVE_FILES; do rm -f "$sensitive_file"; done
 }
 trap cleanup_sensitive EXIT HUP INT TERM
 dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' > "$CREDENTIAL_FILE"
 [ "$(wc -c < "$CREDENTIAL_FILE" | tr -d ' ')" -eq 48 ] || fail "credential generation failed"
+sh scripts/os/generate_simpleos_server_tls_material.shs \
+    "$CERTIFICATE_FILE" "$PRIVATE_KEY_FILE" >/dev/null || fail "server TLS material generation failed"
 CREDENTIAL=$(one_line "$CREDENTIAL_FILE")
 
 cat > "$GENERATED_SOURCE/generated/simpleos_log_config.spl" <<'SPL'
@@ -231,6 +236,8 @@ env SIMPLEOS_SERVERS_BINARY="$SERVER_ELF" \
     SIMPLEOS_SERVERS_TRUST_ROOT="$SERVER_SIDECARS/SERVER.PUB" \
     SIMPLEOS_FSEXEC_BINARY="$SERVER_ELF" \
     SIMPLEOS_SERVER_DB_CREDENTIAL_FILE="$CREDENTIAL_FILE" \
+    SIMPLEOS_SERVER_DB_CERTIFICATE_FILE="$CERTIFICATE_FILE" \
+    SIMPLEOS_SERVER_DB_PRIVATE_KEY_FILE="$PRIVATE_KEY_FILE" \
     sh scripts/os/make_os_disk.shs 256 "$IMAGE" "$KERNEL" arm64 fs-exec \
     > "$OUT_DIR/image-build.log" 2>&1 || fail "ARM FAT32 server image staging failed"
 [ -s "$IMAGE" ] || fail "image builder produced no FAT32 image"
@@ -452,6 +459,7 @@ qemu_admission_source_snapshot \
     scripts/check/lib/simpleos-server-zeroization-evidence.shs \
     scripts/check/simpleos-arm64-server-cap-status.spl \
     scripts/os/build_arm64_servers_payload.shs \
+    scripts/os/generate_simpleos_server_tls_material.shs \
     scripts/os/make_os_disk.shs scripts/os/make_os_disk.c scripts/os/make_os_disk_support.inc.c \
     config/simpleos_arm64_servers_weak_undefined_allowlist.sdn \
     || fail "post-run worktree content manifest failed"

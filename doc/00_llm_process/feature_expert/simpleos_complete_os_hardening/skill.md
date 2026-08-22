@@ -83,3 +83,14 @@ RISC-V 64. Its x86_32, ARM64, ARM32, and RISC-V 32 target branches must return
 the shared unavailable-launcher status `126`, never `0`. Keep `127` distinct
 for a real command/PATH miss on an implemented launcher. Source contract coverage is
 not target-native or QEMU execution evidence.
+
+## Server credential image authority (2026-08-22)
+
+Filesystem-server images require externally supplied KEY, DER X.509 CRT, and
+Ed25519 PKCS#8 material. The image owner validates type, bounds, permissions,
+format, and key match from private immutable snapshots; stages exact
+`/SYS/SRVDB.{KEY,CRT,PK8,MAN}` paths; verifies their physical completed-image
+bytes; and publishes by same-directory atomic no-clobber only after verification.
+Never log secret bytes, overwrite an existing output, or treat generated test
+credentials as deployment provenance. Windows staging remains fail-closed until
+a no-reparse descriptor owner exists.

@@ -1,0 +1,29 @@
+#!/bin/sh
+# Generate ephemeral Ed25519 TLS material in the exact DER formats consumed by
+# /SYS/SRVDB.CRT and /SYS/SRVDB.PK8. Production callers may instead provide
+# externally provisioned files to make_os_disk.shs.
+set -eu
+
+fail() { echo "simpleos-server-tls-material: $*" >&2; exit 1; }
+[ "$#" -eq 2 ] || fail "usage: CERTIFICATE_DER PRIVATE_KEY_PKCS8_DER"
+certificate=$1
+private_key=$2
+command -v openssl >/dev/null 2>&1 || fail "openssl is required"
+[ "$certificate" != "$private_key" ] || fail "certificate and private-key outputs must differ"
+work=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-server-tls.XXXXXX") || fail "temporary directory creation failed"
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+umask 077
+openssl genpkey -algorithm ED25519 -out "$work/private.pem" >/dev/null 2>&1 || fail "Ed25519 key generation failed"
+openssl req -new -x509 -key "$work/private.pem" -sha256 -days 1 \
+    -subj /CN=simpleos-server -addext 'subjectAltName=DNS:simpleos-server,DNS:localhost,IP:127.0.0.1' \
+    -outform DER -out "$work/certificate.der" >/dev/null 2>&1 || fail "X.509 certificate generation failed"
+openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER -in "$work/private.pem" \
+    -out "$work/private.pk8" >/dev/null 2>&1 || fail "PKCS#8 conversion failed"
+[ -s "$work/certificate.der" ] && [ -s "$work/private.pk8" ] || fail "empty TLS output"
+mkdir -p "$(dirname -- "$certificate")" "$(dirname -- "$private_key")"
+cp "$work/certificate.der" "$certificate.tmp"
+cp "$work/private.pk8" "$private_key.tmp"
+chmod 600 "$certificate.tmp" "$private_key.tmp"
+mv "$certificate.tmp" "$certificate"
+mv "$private_key.tmp" "$private_key"
+printf 'simpleos_server_tls_material=pass certificate=%s private_key=%s\n' "$certificate" "$private_key"
