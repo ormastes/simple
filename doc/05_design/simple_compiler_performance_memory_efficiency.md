@@ -640,3 +640,10 @@ as a standalone predicate at ordinal 49. A precedence-aware renderer maintains
 the existing explicit early-return cascade, section order, negative guard,
 overlap shadowing, and fallback order. Runtime code must not import the rule
 manifest or allocate/iterate a generic rule registry.
+
+Generated `Hit(id)` leaves select exactly one scalar word: IDs below 64 test
+`pattern_hits.lo`, and IDs 64–115 test `pattern_hits.hi` at `id-64`. Emit a
+fixed-width literal mask and fully parenthesize bitwise and comparison operators.
+Never emit runtime shifts, eager per-pattern booleans, combined lo/hi probes, or
+an invalid-ID fallback. Manifest validation is the proof that generated IDs are
+in range; the public matcher helper remains available to other consumers.
