@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+# Fail-fast bootstrap/source-closure gate for scoped unsafe capabilities.
+# Read only the five semantic owners; do not parse the full source tree or
+# invoke a compiler. This keeps I/O and memory bounded and the gate below 15s.
+decl_fn=src/compiler/10.frontend/core/parser_decls_fn.spl
+decl_use=src/compiler/10.frontend/core/parser_decls_use.spl
+stmt=src/compiler/10.frontend/core/parser_stmts.spl
+flat=src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+hir=src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl
+
+for owner in "$decl_fn" "$decl_use" "$stmt" "$flat" "$hir"; do
+    test -f "$owner" || {
+        echo "unsafe capability ownership: missing owner $owner" >&2
+        exit 1
+    }
+done
+
+canonical='use compiler.frontend.core.parser_stmts.{parse_block}'
+grep -Fq "$canonical" "$decl_fn" || {
+    echo "unsafe capability ownership: function declarations lack canonical parse_block owner" >&2
+    exit 1
+}
+grep -Fq "$canonical" "$decl_use" || {
+    echo "unsafe capability ownership: use declarations lack canonical parse_block owner" >&2
+    exit 1
+}
+if grep -Fq 'use compiler.core.parser_stmts' "$decl_fn" "$decl_use"; then
+    echo "unsafe capability ownership: legacy parser_stmts alias remains" >&2
+    exit 1
+fi
+
+# Capability identifiers must be consumed as text before generic expression
+# parsing and stay metadata through Flat AST and HIR.
+grep -Fq 'uns_caps.push(par_text_get())' "$stmt" || {
+    echo "unsafe capability ownership: parser does not consume capability metadata" >&2
+    exit 1
+}
+grep -Fq 'expr_unsafe_block_with_caps(caps_body, uns_caps, 0)' "$stmt" || {
+    echo "unsafe capability ownership: parser does not publish scoped metadata" >&2
+    exit 1
+}
+grep -Fq 'u_caps = u_caps_raw.split(",")' "$flat" || {
+    echo "unsafe capability ownership: Flat AST bridge drops capability metadata" >&2
+    exit 1
+}
+grep -Fq 'case ExprKind.UnsafeBlock(body, caps):' "$hir" || {
+    echo "unsafe capability ownership: HIR lacks scoped capability lowering" >&2
+    exit 1
+}
+grep -Fq 'unsafe_hir_body.unsafe_caps = caps' "$hir" || {
+    echo "unsafe capability ownership: HIR drops capability metadata" >&2
+    exit 1
+}
+
+echo "unsafe capability metadata ownership: PASS"
