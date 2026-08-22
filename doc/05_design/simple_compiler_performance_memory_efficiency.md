@@ -461,4 +461,6 @@ chunk-assembly path. It walks replacements in reverse, emits each untouched sour
 slice and replacement once, then joins one time. Any range outside that contract
 uses the historical descending incremental splice loop. This preserves insertion,
 deletion, equal-start, invalid-range, missing-file, and conflict behavior while
-bounding the ordinary valid path.
+bounding the ordinary valid path. File grouping stores only bucket indexes in its
+dictionary and appends replacements directly into owned nested arrays; it never
+extracts and writes back a growing dictionary-held array.
