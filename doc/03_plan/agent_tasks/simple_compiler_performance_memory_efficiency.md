@@ -241,3 +241,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Pin absence of dormant rewrite markers/header insertion with source contracts.
 - Keep real preheader/effect/alias/speculatability requirements explicit.
 - Follow-up: implement LICM only on shared canonical loop and memory facts.
+## Completed compiler tranche: remove dormant trip-count recognizer
+
+- Keep loop trip counts unknown until SCEV-lite supplies the complete proof contract.
+- Delete the unreachable comparison-bound recognizer and its private-only helpers.
+- Pin the absence of dormant recognizer markers and helper names with a source contract.
+- Preserve natural-loop discovery and complete `(from,to)` exit-edge facts.
+- Follow-up: implement bounded SCEV-lite as a shared immutable analysis with explicit invalidation.
