@@ -83,6 +83,11 @@ The compatibility `CLOS001` producer indexes visible outer-variable names and ex
 one leading assignment target per closure-body line. It therefore avoids comparing every
 body line with every captured name; lexical capture truth still belongs to typed HIR.
 
+Textual match compatibility facts retain ordered variants and arms for stable messages,
+alongside dictionary membership for duplicate and missing-variant queries. Type inference
+still fails to a generic advisory when patterns do not identify exactly one enum; typed
+scrutinee facts are required before increasing confidence.
+
 The standalone CLI and query/LSP source-pattern collection projections use the same
 confidence vocabulary. Query governance recognizes `COLL001` through `COLL019`, so
 `Allow` suppresses them, while robust/critical policy cannot upgrade those untyped
