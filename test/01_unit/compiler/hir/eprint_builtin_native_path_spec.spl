@@ -1,0 +1,80 @@
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/expression_support.spl
+#
+# Regression: the `eprint(msg)` builtin must resolve on the native HIR path
+# WITHOUT `SIMPLE_BOOTSTRAP=1`, exactly like `print` / `println`.
+#
+# BACKGROUND (2026-08-22). `eprint` lived only in `is_bootstrap_builtin_fn`,
+# which is consulted behind an env gate (`SIMPLE_BOOTSTRAP == "1"`), while
+# `print`/`println` sit in the unconditional `is_interp_builtin_fn` list. So
+# any module calling `eprint` -- src/compiler/10.frontend/core/lexer.spl does
+# at its two `[lexer_fatal]` sites -- hard-errored
+# `unresolved name: eprint` on a stage1 build that did not export the env
+# var, while the interpreter happily ran it. The runtime side is
+# `rt_eprintln(const char*)` (stderr + newline, matching the seed's eprint
+# semantics), routed by MIR lowering the same way `println` -> `rt_println`.
+#
+# HARNESS NOTE: lowering a module now requires its own module surface to be
+# registered (module_import_resolution.spl `missing importing module
+# surface`), so each `it` builds a one-module surface set and lowers through
+# hirlowering_for_module. The pipeline is inlined per block on purpose.
+#
+# tag: unit
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.parser_types.{Module}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+
+fn lower_single(src: text, path: text, name: text) -> [text]:
+    val log = Logger(level: 0)
+    val parsed = parse_full_frontend(src, path, name, log)
+    var modules: Dict<text, Module> = {}
+    modules[name] = parsed
+    val surfaces_result = module_surfaces_from_modules(
+        modules, [SourceFile(path: path, content: src, module_name: name)])
+    if surfaces_result.is_err():
+        return ["surface build failed: " + surfaces_result.unwrap_err()]
+    var hl = hirlowering_for_module(name, surfaces_result.unwrap())
+    val hir = hl.lower_module(parsed)
+    var messages: [text] = []
+    for e in hl.errors:
+        messages.push(e.message)
+    messages
+
+describe "eprint builtin resolves on the native HIR path":
+    it "lowers a module calling eprint with zero diagnostics":
+        val src = "fn warn(path: text):\n" +
+            "    eprint(\"[lexer_fatal] empty source handed to lexer\")\n"
+        val errors = lower_single(src, "testdata/eprint_builtin.spl", "testdata.eprint_builtin")
+        var unresolved_eprint = false
+        for m in errors:
+            if m.contains("unresolved name: eprint"):
+                unresolved_eprint = true
+        expect(unresolved_eprint).to_equal(false)
+        expect(errors.len()).to_equal(0)
+
+    it "treats eprint like print: both lower with zero errors side by side":
+        val src = "fn both(msg: text):\n" +
+            "    print(msg)\n" +
+            "    eprint(msg)\n"
+        val errors = lower_single(src, "testdata/eprint_vs_print.spl", "testdata.eprint_vs_print")
+        var unresolved_names = 0
+        for m in errors:
+            if m.contains("unresolved name:"):
+                unresolved_names = unresolved_names + 1
+        expect(unresolved_names).to_equal(0)
+        expect(errors.len()).to_equal(0)
+
+    it "control: an unrelated unknown callee still errors loudly":
+        val src = "fn bad(msg: text):\n" +
+            "    definitely_not_a_builtin(msg)\n"
+        val errors = lower_single(src, "testdata/eprint_control.spl", "testdata.eprint_control")
+        var unresolved_names = 0
+        for m in errors:
+            if m.contains("unresolved name: definitely_not_a_builtin"):
+                unresolved_names = unresolved_names + 1
+        expect(unresolved_names).to_equal(1)

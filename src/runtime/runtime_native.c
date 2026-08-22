@@ -2064,6 +2064,10 @@ void rt_println(const char* s) {
     spl_println(s);
 }
 
+void rt_eprintln(const char* s) {
+    spl_eprintln(s);
+}
+
 char* rt_readline(void) {
     char buf[4096];
     if (fgets(buf, sizeof(buf), stdin)) {
