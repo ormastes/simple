@@ -1,0 +1,599 @@
+# HirModule codec generator — src/app/compiler_schema/codec_gen.spl
+#
+# Generates src/compiler/20.hir/generated/hir_codec.spl: a line-oriented
+# encoder/decoder pair for EVERY declaration reachable from `HirModule`,
+# including the SymbolTable, so a lowered module can cross a process boundary
+# (HIR shard workers, the HIR cache under native_cache/<scope>/hir/).
+#
+# Same discipline as visitor_gen.spl: the generator reads the authoritative
+# declarations line by line and refuses to guess. A field whose type it cannot
+# classify is a GENERATION FAILURE, never a silently skipped field -- an omitted
+# field would be a silent miscompile on every cache hit, exactly the failure
+# class check-flat-ast-codec-complete.shs exists for on the parser side. A new
+# enum variant is picked up automatically (one arm per declared variant); a new
+# field type outside the declaration universe fails `generate` and therefore
+# fails scripts/check/check-hir-codec-complete.shs.
+#
+# Two declarations are deliberately NOT descended into (hand-written in
+# src/compiler/20.hir/hir_codec_support.spl, both fail closed on the encoder
+# side): the parser `Expr` that `TypeKind.Array` can carry, and `BlockValue`,
+# whose payloads are `Any`.
+#
+# FORMAT: one scalar per line (flat_pool_codec escaping), a list is its length
+# then its elements, an optional is 0 or 1 then the value, an enum is its
+# declaration index then its payload, a dict is its length then key/value
+# pairs in `.keys()` order -- insertion order, so a decoded module iterates in
+# the same order the lowered one did and MIR sees identical sequences.
+
+use std.io_runtime.{read_file_text, file_exists, file_write, dir_create_all, exit}
+use app.compiler_schema.extract.{VariantRow, extract_enum_variants}
+use app.compiler_schema.visitor_gen.{FieldDecl, parse_payload_fields, _split_top, _contains, _join, _indent_of, _sort_texts}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+fn _codec_fail(message: text):
+    """Generation must fail LOUDLY: a skipped field is a silent miscompile."""
+    eprint("error: " + message + "\n")
+    exit(1)
+
+val CODEC_GEN_HEADER = "# GENERATED — do not edit; regenerate with: bin/simple run src/app/compiler_schema/main.spl codec\n"
+
+fn codec_decl_sources() -> [text]:
+    """Every file whose struct/enum/class declarations the codec may expand."""
+    [
+        "src/compiler/20.hir/hir_types.spl",
+        "src/compiler/20.hir/hir_definitions.spl",
+        "src/compiler/20.hir/hir_operators.spl",
+        "src/compiler/00.common/diagnostics/span.spl",
+        "src/compiler/00.common/dependency/visibility.spl",
+        "src/compiler/00.common/dynamic_identity/closure.spl",
+        "src/compiler/00.common/_Attributes/decl_attrs.spl",
+        "src/compiler/30.types/_TypeLayout/layout_core.spl",
+        "src/compiler/10.frontend/parser_types_expr.spl"
+    ]
+
+fn codec_opaque_types() -> [text]:
+    """Hand-coded in hir_codec_support.spl; the generator emits a call, never a body."""
+    ["Expr", "BlockValue"]
+
+fn codec_use_lines() -> text:
+    var out = "use compiler.hir.hir_definitions.*\n"
+    out = out + "use compiler.hir.hir_types.*\n"
+    out = out + "use compiler.hir.hir_operators.{{HirBinOp, HirUnaryOp, HirAssignOp}}\n"
+    out = out + "use compiler.common.diagnostics.span.{{Span}}\n"
+    out = out + "use compiler.common.dependency.visibility.{{Visibility}}\n"
+    out = out + "use compiler.common.dynamic_identity.closure.{{Closure}}\n"
+    out = out + "use compiler.blocks.value.{{BlockValue}}\n"
+    out = out + "use compiler.types.type_layout.{{LayoutAttr, TypeLayoutKind}}\n"
+    out = out + "use compiler.common.attributes.{{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}}\n"
+    out = out + "use compiler.frontend.parser_types_expr.{{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}}\n"
+    out = out + "use compiler.frontend.core.flat_pool_codec.{{FlatPoolReader, flat_pool_parse_i64, flat_pool_unescape}}\n"
+    out = out + "use compiler.hir.hir_codec_support.{{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64}}\n"
+    out
+
+# ============================================================================
+# Type shapes
+# ============================================================================
+
+struct TypeShape:
+    """cat: prim_i64 | prim_bool | prim_text | opt | list | pair | dict | node | opaque.
+    a/b hold the inner type TEXTS (re-classified on use); name holds a node name."""
+    cat: text
+    a: text
+    b: text
+    name: text
+
+fn _codec_no_comment(line: text) -> text:
+    val idx = line.find("#")
+    if idx < 0:
+        return line
+    line.substring(0, idx)
+
+fn _strip_default(t: text) -> text:
+    """`[HirExtendEnum] = []` -> `[HirExtendEnum]`; only a top-level `=` counts."""
+    var depth = 0
+    var i = 0
+    while i < t.len():
+        val ch = t.char_at(i)
+        if ch == "(" or ch == "[" or ch == "{" or ch == "<":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}" or ch == ">":
+            depth = depth - 1
+        elif ch == "=" and depth == 0:
+            return t.substring(0, i).trim()
+        i = i + 1
+    t.trim()
+
+fn _split_top_colon(s: text) -> [text]:
+    """`text: HirType` -> [text, HirType] at the first top-level colon."""
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "(" or ch == "[" or ch == "{" or ch == "<":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}" or ch == ">":
+            depth = depth - 1
+        elif ch == ":" and depth == 0:
+            return [s.substring(0, i).trim(), s.substring(i + 1, s.len()).trim()]
+        i = i + 1
+    [s.trim()]
+
+# ============================================================================
+# Declaration universe
+# ============================================================================
+
+struct CodecDecl:
+    name: text
+    is_enum: bool
+    fields: [FieldDecl]
+    variants: [VariantRow]
+
+class CodecUniverse:
+    sources: [text]
+    source_names: [text]
+    struct_names: [text]
+    enum_names: [text]
+    alias_names: [text]
+    alias_targets: [text]
+    decl_owner: [text]          # parallel to struct_names ++ enum_names: which file declared it
+    opaques: [text]
+
+    static fn load(repo_root: text) -> CodecUniverse:
+        var texts: [text] = []
+        var names: [text] = []
+        var snames: [text] = []
+        var enames: [text] = []
+        var anames: [text] = []
+        var atargets: [text] = []
+        var owners: [text] = []
+        for rel in codec_decl_sources():
+            val path = repo_root + "/" + rel
+            if not file_exists(path):
+                _codec_fail("hir codec generator: declaration source missing: {rel}")
+            val body = read_file_text(path)
+            texts.push(body)
+            names.push(rel)
+            for line in body.split("\n"):
+                if _indent_of(line) != 0:
+                    continue
+                val t = _codec_no_comment(line).trim()
+                if (t.starts_with("struct ") or t.starts_with("class ")) and t.ends_with(":"):
+                    val start = if t.starts_with("struct "): 7 else: 6
+                    val nm = t.substring(start, t.len() - 1).trim()
+                    if nm.find("<") < 0:
+                        snames.push(nm)
+                        owners.push(rel)
+                if t.starts_with("enum ") and t.ends_with(":"):
+                    val nm = t.substring(5, t.len() - 1).trim()
+                    if nm.find("<") < 0:
+                        enames.push(nm)
+                        owners.push(rel)
+                if t.starts_with("type ") and t.find("=") > 0:
+                    val eq = t.find("=")
+                    anames.push(t.substring(5, eq).trim())
+                    atargets.push(t.substring(eq + 1, t.len()).trim())
+        CodecUniverse(sources: texts, source_names: names, struct_names: snames,
+            enum_names: enames, alias_names: anames, alias_targets: atargets,
+            decl_owner: owners, opaques: codec_opaque_types())
+
+    me is_struct(name: text) -> bool:
+        _contains(self.struct_names, name)
+
+    me is_enum(name: text) -> bool:
+        _contains(self.enum_names, name)
+
+    me alias_of(name: text) -> text:
+        var i = 0
+        while i < self.alias_names.len():
+            if self.alias_names[i] == name:
+                return self.alias_targets[i]
+            i = i + 1
+        ""
+
+    me declaration_count(name: text) -> i64:
+        var n = 0
+        for s in self.struct_names:
+            if s == name:
+                n = n + 1
+        for e in self.enum_names:
+            if e == name:
+                n = n + 1
+        n
+
+    me decl_of(name: text) -> CodecDecl:
+        if self.declaration_count(name) != 1:
+            _codec_fail("hir codec generator: `{name}` is declared {self.declaration_count(name)} times across the codec sources; it must be declared exactly once")
+        if self.is_enum(name):
+            var rows: [VariantRow] = []
+            for body in self.sources:
+                if rows.len() == 0:
+                    rows = extract_enum_variants(body, name, "codec")
+            if rows.len() == 0:
+                _codec_fail("hir codec generator: enum `{name}` has no extractable variants")
+            return CodecDecl(name: name, is_enum: true, fields: [], variants: rows)
+        var fields: [FieldDecl] = []
+        for body in self.sources:
+            if fields.len() == 0:
+                fields = extract_codec_struct_fields(body, name)
+        if fields.len() == 0:
+            _codec_fail("hir codec generator: struct `{name}` has no extractable fields")
+        CodecDecl(name: name, is_enum: false, fields: fields, variants: [])
+
+    me classify(type_text: text) -> TypeShape:
+        val t = _strip_default(type_text).trim()
+        if t == "":
+            _codec_fail("hir codec generator: empty type text")
+        if t.ends_with("?"):
+            return TypeShape(cat: "opt", a: t.substring(0, t.len() - 1).trim(), b: "", name: "")
+        val alias = self.alias_of(t)
+        if alias != "":
+            return self.classify(alias)
+        if t == "i64":
+            return TypeShape(cat: "prim_i64", a: "", b: "", name: "")
+        if t == "bool":
+            return TypeShape(cat: "prim_bool", a: "", b: "", name: "")
+        if t == "text" or t == "char":
+            return TypeShape(cat: "prim_text", a: "", b: "", name: "")
+        if t == "f64":
+            return TypeShape(cat: "prim_f64", a: "", b: "", name: "")
+        if t.starts_with("[") and t.ends_with("]"):
+            val inner = t.substring(1, t.len() - 1).trim()
+            if inner.starts_with("(") and inner.ends_with(")"):
+                val sides = _split_top(inner.substring(1, inner.len() - 1))
+                if sides.len() != 2:
+                    _codec_fail("hir codec generator: unsupported tuple element `{t}`")
+                return TypeShape(cat: "pair", a: sides[0].trim(), b: sides[1].trim(), name: "")
+            return TypeShape(cat: "list", a: inner, b: "", name: "")
+        if t.starts_with("{") and t.ends_with("}"):
+            val kv = _split_top_colon(t.substring(1, t.len() - 1).trim())
+            if kv.len() != 2:
+                _codec_fail("hir codec generator: unsupported dict type `{t}`")
+            return TypeShape(cat: "dict", a: kv[0], b: kv[1], name: "")
+        if t.starts_with("Dict<") and t.ends_with(">"):
+            val kv = _split_top(t.substring(5, t.len() - 1))
+            if kv.len() != 2:
+                _codec_fail("hir codec generator: unsupported dict type `{t}`")
+            return TypeShape(cat: "dict", a: kv[0].trim(), b: kv[1].trim(), name: "")
+        if _contains(self.opaques, t):
+            return TypeShape(cat: "opaque", a: "", b: "", name: t)
+        if self.is_struct(t) or self.is_enum(t):
+            return TypeShape(cat: "node", a: "", b: "", name: t)
+        _codec_fail("hir codec generator: cannot classify field type `{t}`; add its declaration source to codec_decl_sources() or hand-code it in hir_codec_support.spl")
+
+fn extract_codec_struct_fields(source: text, name: text) -> [FieldDecl]:
+    """Fields of `struct <name>:` or `class <name>:` at exactly 4-space indent.
+    Accepts an optional `var `/`val ` prefix and strips a default value."""
+    var out: [FieldDecl] = []
+    val header_s = "struct " + name + ":"
+    val header_c = "class " + name + ":"
+    val lines = source.split("\n")
+    var inside = false
+    var in_doc = false
+    for raw in lines:
+        if not inside:
+            val h = _codec_no_comment(raw).trim()
+            if h == header_s or h == header_c:
+                inside = true
+            continue
+        val stripped = _codec_no_comment(raw)
+        var trimmed = stripped.trim()
+        if trimmed == "":
+            continue
+        if _indent_of(stripped) == 0:
+            break
+        if in_doc:
+            if trimmed.ends_with("\"\"\""):
+                in_doc = false
+            continue
+        if trimmed.starts_with("\"\"\""):
+            if not (trimmed.len() > 5 and trimmed.ends_with("\"\"\"")):
+                in_doc = true
+            continue
+        if _indent_of(stripped) != 4:
+            continue
+        if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static ") or trimmed.starts_with("@") or trimmed.starts_with("pub "):
+            continue
+        if trimmed.starts_with("var "):
+            trimmed = trimmed.substring(4, trimmed.len()).trim()
+        elif trimmed.starts_with("val "):
+            trimmed = trimmed.substring(4, trimmed.len()).trim()
+        val kv = _split_top_colon(trimmed)
+        if kv.len() != 2:
+            continue
+        val fname = kv[0]
+        val ftype = _strip_default(kv[1])
+        if fname == "" or ftype == "" or fname.find(" ") >= 0 or fname.find("(") >= 0:
+            continue
+        out.push(FieldDecl(fname, ftype))
+    out
+
+# ============================================================================
+# Closure from HirModule
+# ============================================================================
+
+fn _codec_push_unique(items: [text], name: text) -> [text]:
+    if _contains(items, name):
+        return items
+    var out = items
+    out.push(name)
+    out
+
+fn _shape_children(u: CodecUniverse, type_text: text, acc: [text]) -> [text]:
+    val s = u.classify(type_text)
+    if s.cat == "node":
+        return _codec_push_unique(acc, s.name)
+    if s.cat == "opt" or s.cat == "list":
+        return _shape_children(u, s.a, acc)
+    if s.cat == "pair" or s.cat == "dict":
+        return _shape_children(u, s.b, _shape_children(u, s.a, acc))
+    acc
+
+fn codec_closure(u: CodecUniverse) -> [text]:
+    """Every declaration reachable from HirModule, in discovery order."""
+    var work: [text] = ["HirModule"]
+    var seen: [text] = []
+    var i = 0
+    while i < work.len():
+        val name = work[i]
+        i = i + 1
+        if _contains(seen, name):
+            continue
+        seen = seen.push(name)
+        val decl = u.decl_of(name)
+        var kids: [text] = []
+        if decl.is_enum:
+            for row in decl.variants:
+                for f in parse_payload_fields(row.payload_schema):
+                    kids = _shape_children(u, f.type_text, kids)
+        else:
+            for f in decl.fields:
+                kids = _shape_children(u, f.type_text, kids)
+        for k in kids:
+            work = _codec_push_unique(work, k)
+    seen
+
+fn codec_emit_order(u: CodecUniverse) -> [text]:
+    _sort_texts(codec_closure(u))
+
+fn _codec_snake(name: text) -> text:
+    """Full snake case; the Hir prefix is KEPT so HirType/Type and HirTypeKind/TypeKind stay distinct."""
+    var out = ""
+    var i = 0
+    while i < name.len():
+        val ch = name.char_at(i)
+        if ch >= "A" and ch <= "Z":
+            if i > 0:
+                out = out + "_"
+            out = out + ch.to_lower()
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn enc_fn_name(name: text) -> text:
+    "hc_enc_" + _codec_snake(name)
+
+fn dec_fn_name(name: text) -> text:
+    "hc_dec_" + _codec_snake(name)
+
+# ============================================================================
+# Emission: one value
+# ============================================================================
+
+class EmitCounter:
+    n: i64
+
+    me next() -> i64:
+        val v = self.n
+        self.n = self.n + 1
+        v
+
+fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCounter) -> text:
+    """Statements that write one value `v` of `type_text`."""
+    val s = u.classify(type_text)
+    if s.cat == "prim_i64":
+        return indent + "w.put_i64(" + v + ")\n"
+    if s.cat == "prim_bool":
+        return indent + "w.put_bool(" + v + ")\n"
+    if s.cat == "prim_text":
+        return indent + "w.put_text(" + v + ")\n"
+    if s.cat == "prim_f64":
+        return indent + "w.put_f64(" + v + ")\n"
+    # A declared non-optional node field can still hold nil in a real
+    # lowered module (extern fn bodies, unresolved types); the generated
+    # visitor guards the same way. One presence line per node keeps that
+    # state instead of crashing on `.kind` of nil.
+    if s.cat == "node" or s.cat == "opaque":
+        val callee = if s.cat == "node": enc_fn_name(s.name) else: "hc_enc_opaque_" + _codec_snake(s.name)
+        var out = indent + "if " + v + " == nil:\n"
+        out = out + indent + "    w.put_i64(0)\n"
+        out = out + indent + "else:\n"
+        out = out + indent + "    w.put_i64(1)\n"
+        out = out + indent + "    " + callee + "(w, " + v + ")\n"
+        return out
+    val k = c.next()
+    if s.cat == "opt":
+        var out = indent + "if val o{k} = " + v + ":\n"
+        out = out + indent + "    w.put_i64(1)\n"
+        out = out + _emit_enc(u, s.a, "o{k}", indent + "    ", c)
+        out = out + indent + "else:\n"
+        out = out + indent + "    w.put_i64(0)\n"
+        return out
+    if s.cat == "list":
+        var out = indent + "w.put_i64(if " + v + " == nil: 0 else: " + v + ".len())\n"
+        out = out + indent + "for e{k} in (" + v + " ?? []):\n"
+        out = out + _emit_enc(u, s.a, "e{k}", indent + "    ", c)
+        return out
+    if s.cat == "pair":
+        var out = indent + "w.put_i64(if " + v + " == nil: 0 else: " + v + ".len())\n"
+        out = out + indent + "for (pa{k}, pb{k}) in (" + v + " ?? []):\n"
+        out = out + _emit_enc(u, s.a, "pa{k}", indent + "    ", c)
+        out = out + _emit_enc(u, s.b, "pb{k}", indent + "    ", c)
+        return out
+    if s.cat == "dict":
+        var out = indent + "val ks{k} = if " + v + " == nil: [] else: " + v + ".keys()\n"
+        out = out + indent + "w.put_i64(ks{k}.len())\n"
+        out = out + indent + "for dk{k} in ks{k}:\n"
+        out = out + _emit_enc(u, s.a, "dk{k}", indent + "    ", c)
+        out = out + _emit_enc(u, s.b, v + "[dk{k}]", indent + "    ", c)
+        return out
+    _codec_fail("hir codec generator: unhandled shape {s.cat}")
+
+fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter) -> text:
+    """Statements that read one value of `type_text` into a new local `target`."""
+    val s = u.classify(type_text)
+    val decl_type = _strip_default(type_text).trim()
+    # Scalars are decoded INLINE through an if-expression rather than a
+    # helper returning `T?`: a helper's Some(false) is a truthy box to the
+    # encoder's `if v:` and re-encoded as 1 (seen on the first round-trip run).
+    if s.cat == "prim_i64" or s.cat == "prim_bool" or s.cat == "prim_text":
+        val k0 = c.next()
+        var out = indent + "val raw{k0} = r.next()\n"
+        if s.cat == "prim_i64":
+            out = out + indent + "val " + target + " = if raw{k0} == \"N\": nil else: flat_pool_parse_i64(raw{k0})\n"
+        elif s.cat == "prim_bool":
+            out = out + indent + "val " + target + " = if raw{k0} == \"N\": nil else: raw{k0} == \"1\"\n"
+        else:
+            out = out + indent + "val " + target + " = if raw{k0} == \"\\\\N\": nil else: flat_pool_unescape(raw{k0})\n"
+        return out
+    if s.cat == "prim_f64":
+        return indent + "val " + target + " = hc_read_f64(r)\n"
+    if s.cat == "node" or s.cat == "opaque":
+        val callee = if s.cat == "node": dec_fn_name(s.name) else: "hc_dec_opaque_" + _codec_snake(s.name)
+        return indent + "val " + target + " = if r.next_i64() == 1: " + callee + "(r) else: nil\n"
+    val k = c.next()
+    if s.cat == "opt":
+        var out = indent + "var " + target + ": " + decl_type + " = nil\n"
+        out = out + indent + "if r.next_i64() == 1:\n"
+        out = out + _emit_dec(u, s.a, "ov{k}", indent + "    ", c)
+        out = out + indent + "    " + target + " = Some(ov{k})\n"
+        return out
+    if s.cat == "list":
+        var out = indent + "var " + target + ": " + decl_type + " = []\n"
+        out = out + indent + "val n{k} = r.next_len()\n"
+        out = out + indent + "var i{k} = 0\n"
+        out = out + indent + "while i{k} < n{k}:\n"
+        out = out + _emit_dec(u, s.a, "ev{k}", indent + "    ", c)
+        out = out + indent + "    " + target + ".push(ev{k})\n"
+        out = out + indent + "    i{k} = i{k} + 1\n"
+        return out
+    if s.cat == "pair":
+        var out = indent + "var " + target + ": " + decl_type + " = []\n"
+        out = out + indent + "val n{k} = r.next_len()\n"
+        out = out + indent + "var i{k} = 0\n"
+        out = out + indent + "while i{k} < n{k}:\n"
+        out = out + _emit_dec(u, s.a, "pa{k}", indent + "    ", c)
+        out = out + _emit_dec(u, s.b, "pb{k}", indent + "    ", c)
+        out = out + indent + "    " + target + ".push((pa{k}, pb{k}))\n"
+        out = out + indent + "    i{k} = i{k} + 1\n"
+        return out
+    if s.cat == "dict":
+        var out = indent + "var " + target + ": " + decl_type + " = {}\n"
+        out = out + indent + "val n{k} = r.next_len()\n"
+        out = out + indent + "var i{k} = 0\n"
+        out = out + indent + "while i{k} < n{k}:\n"
+        out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c)
+        out = out + _emit_dec(u, s.b, "dv{k}", indent + "    ", c)
+        out = out + indent + "    " + target + "[dk{k}] = dv{k}\n"
+        out = out + indent + "    i{k} = i{k} + 1\n"
+        return out
+    _codec_fail("hir codec generator: unhandled shape {s.cat}")
+
+# ============================================================================
+# Emission: one declaration
+# ============================================================================
+
+fn _codec_binders(fields: [FieldDecl]) -> text:
+    if fields.len() == 0:
+        return ""
+    var names: [text] = []
+    for f in fields:
+        names.push("b_" + f.binder)
+    "(" + _join(names, ", ") + ")"
+
+fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
+    var parts: [text] = ["fn " + enc_fn_name(decl.name) + "(w: HirCodecWriter, node: " + decl.name + "):\n"]
+    var c = EmitCounter(n: 0)
+    if decl.is_enum:
+        parts.push("    match node:\n")
+        var idx = 0
+        for row in decl.variants:
+            val fields = parse_payload_fields(row.payload_schema)
+            parts.push("        case " + row.variant + _codec_binders(fields) + ":\n")
+            parts.push("            w.put_i64(" + "{idx}" + ")\n")
+            for f in fields:
+                parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c))
+            idx = idx + 1
+        parts.push("        case _: hc_bad_tag(\"" + decl.name + "\", -1)\n")
+        return parts.join("")
+    var body: [text] = []
+    for f in decl.fields:
+        body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c))
+    if body.len() == 0:
+        body.push("    val _leaf = 0\n")
+    parts.join("") + body.join("")
+
+fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
+    var parts: [text] = ["fn " + dec_fn_name(decl.name) + "(r: FlatPoolReader) -> " + decl.name + ":\n"]
+    var c = EmitCounter(n: 0)
+    if decl.is_enum:
+        parts.push("    val tag = r.next_i64()\n")
+        var idx = 0
+        for row in decl.variants:
+            val fields = parse_payload_fields(row.payload_schema)
+            parts.push("    if tag == " + "{idx}" + ":\n")
+            var names: [text] = []
+            for f in fields:
+                parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c))
+                names.push("f_" + f.binder)
+            if fields.len() == 0:
+                parts.push("        return " + decl.name + "." + row.variant + "\n")
+            else:
+                parts.push("        return " + decl.name + "." + row.variant + "(" + _join(names, ", ") + ")\n")
+            idx = idx + 1
+        parts.push("    hc_bad_tag(\"" + decl.name + "\", tag)\n")
+        # Unreachable: hc_bad_tag exits. A typed tail keeps the checker happy
+        # on every lane without inventing a sentinel variant.
+        parts.push("    " + dec_fn_name(decl.name) + "(r)\n")
+        return parts.join("")
+    var names: [text] = []
+    for f in decl.fields:
+        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c))
+        names.push(f.binder + ": f_" + f.binder)
+    parts.push("    " + decl.name + "(" + _join(names, ", ") + ")\n")
+    parts.join("")
+
+fn emit_codec_file(u: CodecUniverse) -> text:
+    var parts: [text] = [CODEC_GEN_HEADER]
+    parts.push("#\n# HirModule <-> line blob codec. One encoder and one decoder per\n")
+    parts.push("# declaration reachable from HirModule (see codec_gen.spl for the format).\n")
+    parts.push("# Enum arms are exhaustive by construction; the trailing `_` arm only\n")
+    parts.push("# satisfies the seed's match checker and routes to hc_bad_tag, which exits.\n\n")
+    parts.push(codec_use_lines() + "\n")
+    val order = codec_emit_order(u)
+    for name in order:
+        val decl = u.decl_of(name)
+        parts.push(_emit_enc_decl(u, decl) + "\n")
+        parts.push(_emit_dec_decl(u, decl) + "\n")
+    var names: [text] = []
+    for name in order:
+        names.push(enc_fn_name(name))
+        names.push(dec_fn_name(name))
+    parts.push("export " + _join(names, ", ") + "\n")
+    parts.join("")
+
+fn generate_codec_into(repo_root: text, out_dir: text) -> i64:
+    """Write hir_codec.spl. Returns the number of declarations covered."""
+    val u = CodecUniverse.load(repo_root)
+    val body = emit_codec_file(u)
+    dir_create_all(out_dir)
+    file_write(out_dir + "/hir_codec.spl", body)
+    codec_closure(u).len()
+
+fn codec_decl_count(repo_root: text) -> i64:
+    codec_closure(CodecUniverse.load(repo_root)).len()
+
+export codec_decl_sources, codec_opaque_types, CodecUniverse, CodecDecl, TypeShape
+export extract_codec_struct_fields, codec_closure, codec_emit_order
+export emit_codec_file, generate_codec_into, codec_decl_count
+export enc_fn_name, dec_fn_name, CODEC_GEN_HEADER

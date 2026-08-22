@@ -1,0 +1,118 @@
+# HIR codec support — the hand-written half of the HirModule codec.
+#
+# The generated half (generated/hir_codec.spl, from
+# src/app/compiler_schema/codec_gen.spl) covers every declaration reachable
+# from HirModule. This file holds what the generator must not invent:
+#   - HirCodecWriter: the line accumulator (parts array joined once, same as
+#     flat_pool_codec's encoders -- `out = out + piece` is quadratic).
+#   - the two opaque payloads the generator refuses to descend into, both
+#     FAIL CLOSED on encode: a parser `Expr` carried by `TypeKind.Array` and a
+#     `BlockValue` (whose payloads are `Any`). An unsupported value clears
+#     `w.ok`, so the caller stores nothing for that module and the real build
+#     lowers it in process -- never a lossy entry.
+#   - hc_bad_tag: a decoder that meets an enum tag no arm names raises, since a
+#     versioned, atomically-written entry with a wrong tag is a codec bug, not
+#     a cache miss.
+
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape, flat_pool_unescape, flat_pool_parse_i64}
+use compiler.frontend.parser_types_expr.{Expr}
+use compiler.blocks.value.{BlockValue}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.common.binary_io.{f64_to_bits, f64_from_bits}
+
+class HirCodecWriter:
+    parts: [text]
+    ok: bool
+    unsupported: text
+
+    static fn create() -> HirCodecWriter:
+        HirCodecWriter(parts: [], ok: true, unsupported: "")
+
+    # Scalars too can be nil in a lowered module (see put_text). `N` is not a
+    # digit, so it cannot collide with any encoded number or bool.
+    me put_i64(v: i64):
+        if v == nil:
+            self.parts.push("N\n")
+            return
+        self.parts.push("{v}\n")
+
+    me put_bool(v: bool):
+        if v == nil:
+            self.parts.push("N\n")
+            return
+        self.parts.push(if v: "1\n" else: "0\n")
+
+    # A declared `text` field can hold nil in a real lowered module (doc
+    # comments, gpu targets). The escaper only ever emits `\\` or `\n`
+    # after a backslash, so the line `\N` cannot collide with any real value
+    # and marks nil exactly, keeping nil and "" distinct across the boundary.
+    me put_text(v: text):
+        if v == nil:
+            self.parts.push("\\N\n")
+            return
+        self.parts.push(flat_pool_escape(v) + "\n")
+
+    # Bit-exact: two i64 halves of the IEEE-754 image, never the printed form
+    # (a C-runtime %g print is lossy; the seed's shortest-round-trip print is
+    # not the contract either).
+    me put_f64(v: f64):
+        val bits = f64_to_bits(v)
+        val hi = (bits >> 32) as i64
+        val lo = (bits & 0xFFFFFFFFu64) as i64
+        self.parts.push("{hi}\n{lo}\n")
+
+    me reject(what: text):
+        if self.ok:
+            self.unsupported = what
+        self.ok = false
+
+    me finish() -> text:
+        self.parts.join("")
+
+fn hc_read_f64(r: FlatPoolReader) -> f64:
+    val hi = r.next_i64()
+    val lo = r.next_i64()
+    f64_from_bits(((hi as u64) << 32) | (lo as u64))
+
+fn hc_bad_tag(type_name: text, tag: i64):
+    eprint("error: hir codec: no `{type_name}` arm for tag {tag}; regenerate src/compiler/20.hir/generated/hir_codec.spl\n")
+    exit(1)
+
+# --- opaque: parser Expr (only reachable through TypeKind.Array's size) -----
+
+fn hc_enc_opaque_expr(w: HirCodecWriter, value: Expr):
+    w.reject("parser Expr inside a HIR type")
+
+fn hc_dec_opaque_expr(r: FlatPoolReader) -> Expr:
+    hc_bad_tag("Expr", -1)
+    hc_dec_opaque_expr(r)
+
+# --- opaque: BlockValue (HirExprKind.CustomBlock) ---------------------------
+#
+# Raw and Error carry text; every other variant carries `Any` or a DSL tree
+# and is rejected on encode.
+
+fn hc_enc_opaque_block_value(w: HirCodecWriter, value: BlockValue):
+    match value:
+        case Raw(t):
+            w.put_i64(0)
+            w.put_text(t)
+        case Error(m):
+            w.put_i64(1)
+            w.put_text(m)
+        case _:
+            w.put_i64(2)
+            w.reject("BlockValue with a non-text payload")
+
+fn hc_dec_opaque_block_value(r: FlatPoolReader) -> BlockValue:
+    val tag = r.next_i64()
+    if tag == 0:
+        return BlockValue.Raw(flat_pool_unescape(r.next()))
+    if tag == 1:
+        return BlockValue.Error(flat_pool_unescape(r.next()))
+    hc_bad_tag("BlockValue", tag)
+    BlockValue.Error("unreachable")
+
+export HirCodecWriter, hc_bad_tag, hc_read_f64
+export hc_enc_opaque_expr, hc_dec_opaque_expr
+export hc_enc_opaque_block_value, hc_dec_opaque_block_value

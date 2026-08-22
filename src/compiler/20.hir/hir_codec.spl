@@ -1,0 +1,109 @@
+# HirModule codec — public entry points.
+#
+# A lowered HirModule is a pure function of (its parser module, the frozen
+# module surfaces): HirLowering.begin_module resets every per-module owner
+# (symbols, lowered_traits, imported_*, memos), and the symbol table's ids
+# restart at 0 per module, so a module's HirModule is self-contained and its
+# SymbolIds are MODULE-LOCAL. That is what lets one cross a process boundary
+# as a blob with no id remapping: the table travels with the module.
+#
+# Format: one version header line, then the generated line codec
+# (generated/hir_codec.spl). decode returns nil for a version mismatch, a
+# truncated blob, or trailing bytes -- all of which a caller treats as a miss.
+#
+# Round-trip contract (scripts/check/check-hir-codec-roundtrip.shs, and the
+# SIMPLE_HIR_CODEC_ROUNDTRIP=1 self-check in driver_hir_pipeline_lowering):
+#   encode(decode(encode(m))) == encode(m)  byte for byte, and a build made
+#   from decoded modules is byte-identical to one made in process.
+
+use compiler.hir.hir_types.{HirModule}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_module, hc_dec_hir_module}
+
+val HIR_CODEC_VERSION: text = "spl-hircodec-v1"
+
+fn hir_codec_header() -> text:
+    HIR_CODEC_VERSION + " " + FLAT_POOL_CODEC_VERSION
+
+# "" when the module carries a payload the codec refuses (see
+# hir_codec_support.spl); `hir_module_encode_reason` names it.
+fn hir_module_encode(module: HirModule) -> text:
+    var w = HirCodecWriter.create()
+    hc_enc_hir_module(w, module)
+    if not w.ok:
+        return ""
+    hir_codec_header() + "\n" + w.finish()
+
+fn hir_module_encode_reason(module: HirModule) -> text:
+    var w = HirCodecWriter.create()
+    hc_enc_hir_module(w, module)
+    if w.ok:
+        return ""
+    w.unsupported
+
+fn hir_module_decode(blob: text) -> HirModule?:
+    if blob == "":
+        return nil
+    val nl = blob.index_of("\n")
+    if nl < 0:
+        return nil
+    if blob.substring(0, nl) != hir_codec_header():
+        return nil
+    var r = FlatPoolReader.new(blob.substring(nl + 1, blob.len()))
+    val module = hc_dec_hir_module(r)
+    if not r.ok:
+        return nil
+    # The encoder terminates every line with "\n", so split leaves exactly one
+    # trailing empty element; anything else is a framing error.
+    if r.pos != r.lines.len() - 1:
+        return nil
+    Some(module)
+
+# --- in-process round-trip self-check (SIMPLE_HIR_CODEC_ROUNDTRIP=1) ---------
+#
+# Same shape as the flat-AST pool self-check: the driver runs it on every
+# module right after lowering, prints ONE line, and CONTINUES THE BUILD FROM
+# THE DECODED MODULE, so a lossy codec breaks the build loudly and the gate
+# (scripts/check/check-hir-codec-roundtrip.shs) can compare that build's
+# binary against an unchecked one.
+#
+#   HIRROUNDTRIP<TAB>ok=<bool><TAB>stable=<bool><TAB>bytes=<n><TAB>path=<p>[<TAB>reason=<r>]
+#
+# ok=false means encode refused (reason names the payload) or decode returned
+# nil; stable=false means decode(encode(m)) re-encoded differently. On any
+# failure the ORIGINAL module is returned so the line, not a crash, is the
+# evidence.
+
+struct HirCodecRoundTrip:
+    module: HirModule
+    ok: bool
+    stable: bool
+    bytes: i64
+    reason: text
+
+fn hir_codec_roundtrip_selfcheck(module: HirModule) -> HirCodecRoundTrip:
+    val blob = hir_module_encode(module)
+    if blob == "":
+        return HirCodecRoundTrip(module: module, ok: false, stable: false, bytes: 0,
+            reason: hir_module_encode_reason(module))
+    val decoded = hir_module_decode(blob)
+    if decoded == nil:
+        return HirCodecRoundTrip(module: module, ok: false, stable: false, bytes: blob.len(), reason: "decode")
+    val back: HirModule = decoded.unwrap()
+    val again = hir_module_encode(back)
+    if again != blob:
+        return HirCodecRoundTrip(module: module, ok: true, stable: false, bytes: blob.len(), reason: "reencode")
+    HirCodecRoundTrip(module: back, ok: true, stable: true, bytes: blob.len(), reason: "")
+
+fn hir_codec_roundtrip_line(rt: HirCodecRoundTrip, path: text) -> text:
+    var line = "HIRROUNDTRIP\tok=" + (if rt.ok: "true" else: "false")
+    line = line + "\tstable=" + (if rt.stable: "true" else: "false")
+    line = line + "\tbytes={rt.bytes}\tpath=" + path
+    if rt.reason != "":
+        line = line + "\treason=" + rt.reason
+    line
+
+export HIR_CODEC_VERSION, hir_codec_header
+export hir_module_encode, hir_module_encode_reason, hir_module_decode
+export HirCodecRoundTrip, hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line

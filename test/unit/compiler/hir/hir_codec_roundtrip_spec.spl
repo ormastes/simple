@@ -1,0 +1,77 @@
+"""
+Purpose: Prove that the generated HirModule codec reproduces a REAL lowered
+module: encode -> decode -> encode is byte-identical, the decoded aggregate
+has the same shape (functions, structs, enums, symbols), and a foreign or
+truncated blob decodes to nil rather than to a partial module.
+
+The codec (src/compiler/20.hir/generated/hir_codec.spl) is generated from
+the HIR declarations by src/app/compiler_schema/codec_gen.spl so a new
+variant cannot be silently skipped; this spec is the runtime half of that
+guarantee, through the real pipeline parse_full_frontend -> HirLowering.
+doc/08_tracking/bug/native_build_phases_after_parse_single_threaded_2026-08-22.md
+
+HARNESS NOTE: `use compiler.hir.hir_lowering.statements.*` is REQUIRED for
+lower_module (see enum_payload_range_or_frontend_exec_spec.spl).
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header}
+
+fn lower(src: text) -> HirModule:
+    val parsed = parse_full_frontend(src, "spec.spl", "spec", Logger(level: 0))
+    var hl = HirLowering.with_filename("spec.spl")
+    hl.lower_module(parsed)
+
+val SRC = "struct Point:\n    x: i64\n    y: i64\n\nenum Shape:\n    Dot\n    Line(a: Point, b: Point)\n\ntrait Area:\n    fn area() -> i64\n\nimpl Area for Point:\n    fn area() -> i64:\n        self.x * self.y\n\nfn pick(s: Shape, flag: bool) -> i64:\n    var total = 0\n    match s:\n        case Shape.Dot: total = 1\n        case Shape.Line(a, b): total = a.x + b.y\n    val name = \"n\\\\ame\\nwith newline\"\n    val f = 2.5\n    if flag and total > 0:\n        total = total * 2\n    else:\n        total = -1\n    for i in 0..3:\n        total = total + i\n    total\n"
+
+describe "HirModule codec round trip":
+    it "re-encodes a decoded real module byte-identically":
+        step("Verify: re-encodes a decoded real module byte-identically")
+        val hm = lower(SRC)
+        expect(hm.functions.len() > 0).to_equal(true)
+        val blob = hir_module_encode(hm)
+        expect(blob != "").to_equal(true)
+        expect(blob.starts_with(hir_codec_header() + "\n")).to_equal(true)
+        val decoded = hir_module_decode(blob)
+        expect(decoded != nil).to_equal(true)
+        val again = hir_module_encode(decoded.unwrap())
+        expect(again.len()).to_equal(blob.len())
+        expect(again == blob).to_equal(true)
+
+    it "preserves the module shape: functions, structs, enums, traits, impls, symbols":
+        step("Verify: preserves the module shape")
+        val hm = lower(SRC)
+        val back = hir_module_decode(hir_module_encode(hm)).unwrap()
+        expect(back.name).to_equal(hm.name)
+        expect(back.functions.len()).to_equal(hm.functions.len())
+        expect(back.structs.len()).to_equal(hm.structs.len())
+        expect(back.enums.len()).to_equal(hm.enums.len())
+        expect(back.traits.len()).to_equal(hm.traits.len())
+        expect(back.impls.len()).to_equal(hm.impls.len())
+        expect(back.symbols.symbols.len()).to_equal(hm.symbols.symbols.len())
+        expect(back.symbols.next_symbol_id).to_equal(hm.symbols.next_symbol_id)
+        expect(back.symbols.scopes.len()).to_equal(hm.symbols.scopes.len())
+        # Dict iteration order is part of the contract (MIR walks .values()).
+        val keys_a = hm.functions.keys()
+        val keys_b = back.functions.keys()
+        var i = 0
+        while i < keys_a.len():
+            expect(keys_b[i].id).to_equal(keys_a[i].id)
+            expect(back.functions[keys_b[i]].name).to_equal(hm.functions[keys_a[i]].name)
+            i = i + 1
+
+    it "rejects a foreign header and a truncated blob instead of returning a partial module":
+        step("Verify: rejects a foreign header and a truncated blob")
+        val hm = lower(SRC)
+        val blob = hir_module_encode(hm)
+        expect(hir_module_decode("")).to_equal(nil)
+        expect(hir_module_decode("spl-hircodec-v0 x\n" + blob)).to_equal(nil)
+        val cut = blob.substring(0, blob.len() / 2)
+        expect(hir_module_decode(cut)).to_equal(nil)
+        expect(hir_module_decode(blob + "7\n")).to_equal(nil)

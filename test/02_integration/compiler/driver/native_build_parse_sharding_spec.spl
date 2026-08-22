@@ -76,27 +76,54 @@ describe "native-build parse sharding":
         expect(file_exists("{root}/plain.bin")).to_equal(true)
         expect(file_read("{root}/sharded.bin")).to_equal(file_read("{root}/plain.bin"))
 
-    slow_it "is deterministic: the same shard owns the same modules every run":
-        # Two independent sharded builds must split the work identically. A
-        # path-hash split cannot drift; a position-based one could, and would
-        # show up here as a different per-shard parse count.
+    slow_it "claims modules from a shared work queue, each exactly once, and the real build hits them all":
+        # The split is a shared work queue (claim markers under the frontend
+        # cache dir, flock'd), not a static hash slice: a static slice has a
+        # tail where the slowest slice gates the phase
+        # (doc/08_tracking/bug/native_build_phases_after_parse_single_threaded_2026-08-22.md).
+        # WHICH shard parses a module is now timing-dependent, so the old
+        # "same shard, same count, every run" pin is gone; the invariant that
+        # replaced it is the one that actually protects the output: every
+        # module is claimed by exactly one shard (claimed counts sum to N with
+        # no duplicates) and the real build then parses nothing.
         val run_id = getpid()
-        val root = "build/tmp/parse_shard_det_spec_{run_id}"
+        val root = "build/tmp/parse_shard_queue_spec_{run_id}"
         expect(dir_create_all(root)).to_equal(true)
-        val (a, ca) = run_build("{root}/c1", "{root}/fe1", "{root}/a.bin", "1", "1")
-        expect(ca).to_equal(0)
-        val (b, cb) = run_build("{root}/c2", "{root}/fe2", "{root}/b.bin", "1", "1")
-        expect(cb).to_equal(0)
-        var shard_lines_a: [text] = []
-        for line in a.split("\n"):
+        val (blob, code) = run_build("{root}/cache", "{root}/fe", "{root}/out", "1", "1")
+        expect(code).to_equal(0)
+        expect(blob.contains("[parse-shard] 2/2 shard(s) completed split=queue")).to_equal(true)
+        var claimed_total: i64 = 0
+        var parsed_total: i64 = 0
+        var shard_lines = 0
+        for line in blob.split("\n"):
             if line.contains("[parse-shard] done shard="):
-                shard_lines_a = shard_lines_a.push(line.trim())
-        var shard_lines_b: [text] = []
-        for line in b.split("\n"):
-            if line.contains("[parse-shard] done shard="):
-                shard_lines_b = shard_lines_b.push(line.trim())
-        expect(shard_lines_a.len()).to_equal(2)
-        expect(shard_lines_b.len()).to_equal(2)
-        # Same shard index, same parse count, both runs. The union is always
-        # every module exactly once, so the counts must sum to 3.
-        expect(shard_lines_a.join("|")).to_equal(shard_lines_b.join("|"))
+                shard_lines = shard_lines + 1
+                for tok in line.trim().split(" "):
+                    if tok.starts_with("claimed="):
+                        claimed_total = claimed_total + (tok.substring(8).to_i64() ?? -100)
+                    elif tok.starts_with("parses="):
+                        parsed_total = parsed_total + (tok.substring(7).to_i64() ?? -100)
+        # Per-worker progress from BOTH workers, and the union is every module
+        # exactly once: a double claim would push the sum past 3, a lost one
+        # would leave it short.
+        expect(shard_lines).to_equal(2)
+        expect(claimed_total).to_equal(3)
+        expect(parsed_total).to_equal(3)
+        expect(last_summary(blob).contains("hits=3")).to_equal(true)
+        # The queue dir is private to the orchestrator and removed with it.
+        expect(file_exists("{root}/fe/.lock")).to_equal(false)
+
+    slow_it "keeps the static hash split available behind SIMPLE_PARSE_SHARD_QUEUE=0":
+        # Same output, same cache hits, just the old partition -- the knob is
+        # the escape hatch if the queue ever misbehaves on a host, so it must
+        # keep working rather than silently becoming the queue.
+        val run_id = getpid()
+        val root = "build/tmp/parse_shard_static_spec_{run_id}"
+        expect(dir_create_all(root)).to_equal(true)
+        rt_env_set("SIMPLE_PARSE_SHARD_QUEUE", "0")
+        val (blob, code) = run_build("{root}/cache", "{root}/fe", "{root}/out", "1", "1")
+        rt_env_set("SIMPLE_PARSE_SHARD_QUEUE", "")
+        expect(code).to_equal(0)
+        expect(blob.contains("[parse-shard] 2/2 shard(s) completed split=static")).to_equal(true)
+        expect(count_of(blob, "claimed=0")).to_equal(2)
+        expect(last_summary(blob).contains("hits=3")).to_equal(true)
