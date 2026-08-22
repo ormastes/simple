@@ -1449,7 +1449,12 @@ fn test_string_char_at() {
 fn test_string_char_at_out_of_bounds() {
     let s = rt_string_new("Hi".as_ptr(), 2);
 
-    assert!(rt_string_char_at(s, 10).is_nil());
+    // Forward over-run returns EMPTY TEXT, not nil, since 7d39f8ae3b6
+    // ("fix(runtime): rt_string_char_at over-run returns empty text, not nil")
+    // aligned the compiled path with the tree-walk interpreter so the
+    // pervasive `if ch == "": break` idiom terminates on both.
+    assert_eq!(rt_string_len(rt_string_char_at(s, 10)), 0);
+    // Negative underflow (|index| past the codepoint count) is still nil.
     assert!(rt_string_char_at(s, -10).is_nil());
 }
 

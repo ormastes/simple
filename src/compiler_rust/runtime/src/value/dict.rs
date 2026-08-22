@@ -181,7 +181,13 @@ pub(super) fn keys_equal(a: RuntimeValue, b: RuntimeValue) -> bool {
 /// Get a value from a dictionary by key
 #[no_mangle]
 pub extern "C" fn rt_dict_get(dict: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
-    let d = as_typed_ptr!(dict, HeapObjectType::Dict, RuntimeDict, rt_array_new(0));
+    // A receiver that is not a Dict at all is an ABSENT lookup, so it takes the
+    // same NIL exit as every other miss path in this function (and as
+    // `rt_dict_remove` below). It previously returned `rt_array_new(0)`, an
+    // empty ARRAY: a non-nil value of the wrong shape, so a caller's
+    // `if v == nil` absence guard was fail-open on a non-dict receiver and the
+    // value flowed on as an array.
+    let d = as_typed_ptr!(dict, HeapObjectType::Dict, RuntimeDict, RuntimeValue::NIL);
     unsafe {
         let capacity = (*d).capacity;
         if capacity == 0 {

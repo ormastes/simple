@@ -187,7 +187,7 @@ impl HeapHeader {
 
 use super::core::RuntimeValue;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 const MIN_VALID_HEAP_ADDR: usize = 4096;
@@ -585,18 +585,45 @@ pub extern "C" fn rt_heap_array_capacity_bytes() -> i64 {
 // path is a single cached-bool check — no lock, no map, no TL write.
 // ---------------------------------------------------------------------------
 
-static ATTR_ENABLED: OnceLock<bool> = OnceLock::new();
+// Tri-state so a programmatic enable is authoritative rather than a race
+// against whoever reads the gate first. A `OnceLock<bool>` seeded from the
+// environment latched OFF permanently as soon as ANY allocation observed the
+// gate before `mem_attr_enable()` ran, silently turning the enable into a
+// no-op (test-order dependent, and unfixable from the caller side). The off
+// path is still a single relaxed atomic load — no lock, no map, no TL write.
+const ATTR_UNRESOLVED: u8 = 0;
+const ATTR_OFF: u8 = 1;
+const ATTR_ON: u8 = 2;
+
+static ATTR_GATE: AtomicU8 = AtomicU8::new(ATTR_UNRESOLVED);
 
 #[inline]
 fn mem_attr_enabled() -> bool {
-    *ATTR_ENABLED
-        .get_or_init(|| std::env::var("SIMPLE_MEM_ATTR").map(|v| v == "1").unwrap_or(false))
+    match ATTR_GATE.load(Ordering::Relaxed) {
+        ATTR_ON => true,
+        ATTR_OFF => false,
+        _ => {
+            let on = std::env::var("SIMPLE_MEM_ATTR").map(|v| v == "1").unwrap_or(false);
+            let resolved = if on { ATTR_ON } else { ATTR_OFF };
+            // Only fill in from the environment while still unresolved: an
+            // explicit `mem_attr_enable()` that raced in must win.
+            match ATTR_GATE.compare_exchange(
+                ATTR_UNRESOLVED,
+                resolved,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => on,
+                Err(prev) => prev == ATTR_ON,
+            }
+        }
+    }
 }
 
-/// Programmatic enable (CLI/--mem-infra path, and tests). Must run before the
-/// first allocation to win the OnceLock; later calls are no-ops.
+/// Programmatic enable (CLI/--mem-infra path, and tests). Authoritative: it
+/// overrides an environment-derived OFF no matter when it runs.
 pub fn mem_attr_enable() {
-    let _ = ATTR_ENABLED.set(true);
+    ATTR_GATE.store(ATTR_ON, Ordering::Relaxed);
 }
 
 #[derive(Default)]
