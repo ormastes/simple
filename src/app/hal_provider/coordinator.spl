@@ -13,6 +13,12 @@ val HAL_PROCESS_PROTOCOL_V1: text = "HALRES1"
 val HAL_PROCESS_RESPONSE_FIELDS_V1: i64 = 17
 val HAL_PROCESS_MAX_RESPONSE_BYTES_V1: i64 = 512
 val HAL_PROCESS_MAX_OUTPUT_BYTES_V1: i64 = 704
+val HAL_PROCESS_MAX_REQUEST_BYTES_V1: i64 = 4096
+val HAL_PROCESS_MAX_COMMAND_BYTES_V1: i64 = 512
+val HAL_PROCESS_MAX_ARGUMENT_COUNT_V1: i64 = 32
+val HAL_PROCESS_MAX_ARGUMENT_BYTES_V1: i64 = 4096
+val HAL_PROCESS_MAX_DEADLINE_MS_V1: i64 = 600000
+val HAL_PROCESS_I64_MIN_V1: i64 = -9223372036854775807 - 1
 val HAL_ISOLATION_PROTOCOL_V1: text = "HALISO1"
 val HAL_ISOLATION_FIELDS_V1: i64 = 8
 val HAL_TRUSTED_LAUNCHER_V1: text =
@@ -61,6 +67,8 @@ struct HalProcessCoordinatorReceiptV1:
     output_overflow_mask: i64
     isolation_proven_mask: i64
     critical_ready: bool
+    elapsed_ms: i64
+    cleanup_overran_deadline: bool
 
 class HalProcessLaneOwnerV1:
     endpoint: HalWorkerEndpointV1
@@ -78,6 +86,7 @@ class HalProcessLaneOwnerV1:
     output_overflow: bool
     isolation: HalIsolationReceiptV1
     isolation_valid: bool
+    result_start: i64
 
 fn _hal_invalid_result(provider: HalProviderKind,
                        invocation_id: i64) -> HalProviderResultV1:
@@ -94,9 +103,7 @@ fn _hal_unproven_isolation(provider: HalProviderKind, invocation_id: i64,
 
 fn _hal_request_line(operation: HalOperationV1,
                      request: HalProviderRequestV1) -> text:
-    "HALREQ1|{operation.contract_version}|{operation.operation_id}|" +
-        "{request.invocation_id}|{request.fixture_id}|{request.input_offset}|" +
-        "{request.input_length}|{request.input_capacity}|{request.trace_capacity}\n"
+    "HALREQ1|{operation.contract_version}|{operation.operation_id}|{request.invocation_id}|{request.fixture_id}|{request.input_offset}|{request.input_length}|{request.input_capacity}|{request.trace_capacity}\n"
 
 fn _hal_process_lane_owner(endpoint: HalWorkerEndpointV1,
                            request: text,
@@ -108,22 +115,58 @@ fn _hal_process_lane_owner(endpoint: HalWorkerEndpointV1,
         cancelled: false, protocol_error: false, output_overflow: false,
         isolation: _hal_unproven_isolation(
             endpoint.provider, invocation_id, -1),
-        isolation_valid: false)
+        isolation_valid: false, result_start: 0)
 
-fn _hal_signed_decimal(value: text) -> bool:
-    if value == "":
+fn _hal_prefix_at(value: text, start: i64, prefix: text) -> bool:
+    if start < 0 or start + prefix.len() > value.len():
         return false
     var index = 0
-    if value.substring(0, 1) == "-":
-        if value.len() == 1:
-            return false
-        index = 1
-    while index < value.len():
-        val ch = value.substring(index, index + 1)
-        if ch < "0" or ch > "9":
+    while index < prefix.len():
+        if value.char_code_at(start + index) != prefix.char_code_at(index):
             return false
         index = index + 1
     true
+
+fn _hal_parse_i64_field(value: text, start: i64,
+                        end: i64) -> (bool, i64, i64):
+    if start < 0 or start >= end or end > value.len():
+        return (false, 0, start)
+    var cursor = start
+    var negative = false
+    if value.char_code_at(cursor) == 45:
+        negative = true
+        cursor = cursor + 1
+        if cursor >= end:
+            return (false, 0, start)
+    var parsed: i64 = 0
+    var digits = 0
+    while cursor < end and value.char_code_at(cursor) != 124:
+        val code = value.char_code_at(cursor)
+        if code < 48 or code > 57:
+            return (false, 0, start)
+        val digit = code - 48
+        if negative:
+            if parsed < (HAL_PROCESS_I64_MIN_V1 + digit) / 10:
+                return (false, 0, start)
+            parsed = parsed * 10 - digit
+        else:
+            if parsed > (9223372036854775807 - digit) / 10:
+                return (false, 0, start)
+            parsed = parsed * 10 + digit
+        digits = digits + 1
+        cursor = cursor + 1
+    if digits == 0:
+        return (false, 0, start)
+    val next = if cursor < end: cursor + 1 else: cursor
+    (true, parsed, next)
+
+fn _hal_find_newline(value: text, start: i64) -> i64:
+    var index = start
+    while index < value.len():
+        if value.char_code_at(index) == 10:
+            return index
+        index = index + 1
+    -1
 
 fn _hal_status_from_i64(value: i64) -> (bool, HalStatusV1):
     match value:
@@ -146,65 +189,83 @@ fn _hal_overflow_from_i64(value: i64) -> (bool, HalOverflowKindV1):
         case 4: (true, HalOverflowKindV1.Log)
         case _: (false, HalOverflowKindV1.None)
 
-fn _hal_parse_result_line(provider: HalProviderKind, line: text,
-                          expected_invocation: i64) -> (bool, HalProviderResultV1):
+fn _hal_parse_result_range(provider: HalProviderKind, line: text,
+                           start: i64, end: i64,
+                           expected_invocation: i64) -> (bool, HalProviderResultV1):
     val invalid = _hal_invalid_result(provider, expected_invocation)
-    if line.len() <= 0 or line.len() > HAL_PROCESS_MAX_RESPONSE_BYTES_V1:
+    if start < 0 or end <= start or end > line.len()
+            or end - start > HAL_PROCESS_MAX_RESPONSE_BYTES_V1:
         return (false, invalid)
-    val fields = line.split("|")
-    if fields.len() != HAL_PROCESS_RESPONSE_FIELDS_V1:
+    if line.char_code_at(end - 1) == 124:
         return (false, invalid)
-    if fields[0] != HAL_PROCESS_PROTOCOL_V1:
+    if not _hal_prefix_at(line, start, "HALRES1|"):
         return (false, invalid)
-    var index = 1
-    while index < fields.len():
-        if not _hal_signed_decimal(fields[index]):
-            return (false, invalid)
-        if fields[index].parse_int() == nil:
-            return (false, invalid)
-        index = index + 1
-    if int(fields[1]) != hal_provider_kind_to_i64(provider):
+    val f1 = _hal_parse_i64_field(line, start + 8, end)
+    val f2 = _hal_parse_i64_field(line, f1.2, end)
+    val f3 = _hal_parse_i64_field(line, f2.2, end)
+    val f4 = _hal_parse_i64_field(line, f3.2, end)
+    val f5 = _hal_parse_i64_field(line, f4.2, end)
+    val f6 = _hal_parse_i64_field(line, f5.2, end)
+    val f7 = _hal_parse_i64_field(line, f6.2, end)
+    val f8 = _hal_parse_i64_field(line, f7.2, end)
+    val f9 = _hal_parse_i64_field(line, f8.2, end)
+    val f10 = _hal_parse_i64_field(line, f9.2, end)
+    val f11 = _hal_parse_i64_field(line, f10.2, end)
+    val f12 = _hal_parse_i64_field(line, f11.2, end)
+    val f13 = _hal_parse_i64_field(line, f12.2, end)
+    val f14 = _hal_parse_i64_field(line, f13.2, end)
+    val f15 = _hal_parse_i64_field(line, f14.2, end)
+    val f16 = _hal_parse_i64_field(line, f15.2, end)
+    if (not f1.0 or not f2.0 or not f3.0 or not f4.0
+            or not f5.0 or not f6.0 or not f7.0 or not f8.0
+            or not f9.0 or not f10.0 or not f11.0 or not f12.0
+            or not f13.0 or not f14.0 or not f15.0 or not f16.0
+            or f16.2 != end):
         return (false, invalid)
-    val invocation = int(fields[2])
+    if f1.1 != hal_provider_kind_to_i64(provider):
+        return (false, invalid)
+    val invocation = f2.1
     if invocation != expected_invocation:
         return (false, invalid)
-    val status_pair = _hal_status_from_i64(int(fields[3]))
-    val overflow_pair = _hal_overflow_from_i64(int(fields[13]))
+    val status_pair = _hal_status_from_i64(f3.1)
+    val overflow_pair = _hal_overflow_from_i64(f13.1)
     if not status_pair.0 or not overflow_pair.0:
         return (false, invalid)
     val result = hal_provider_result_v1(
-        provider, invocation, status_pair.1, int(fields[4]),
-        int(fields[5]), int(fields[6]), int(fields[7]), int(fields[8]),
-        int(fields[9]), int(fields[10]), int(fields[11]), int(fields[12]),
-        overflow_pair.1, int(fields[14]), int(fields[15]), int(fields[16]))
+        provider, invocation, status_pair.1, f4.1,
+        f5.1, f6.1, f7.1, f8.1, f9.1, f10.1, f11.1, f12.1,
+        overflow_pair.1, f14.1, f15.1, f16.1)
     (hal_provider_result_v1_well_formed(result), result)
 
-fn _hal_parse_isolation_line(provider: HalProviderKind, line: text,
-                             expected_invocation: i64) ->
+fn _hal_parse_isolation_range(provider: HalProviderKind, line: text,
+                              start: i64, end: i64,
+                              expected_invocation: i64) ->
         (bool, HalIsolationReceiptV1):
     val invalid = _hal_unproven_isolation(
         provider, expected_invocation, -1)
-    val fields = line.split("|")
-    if fields.len() != HAL_ISOLATION_FIELDS_V1:
+    if start < 0 or end <= start or end > line.len() or end - start > 192:
         return (false, invalid)
-    if fields[0] != HAL_ISOLATION_PROTOCOL_V1:
+    if line.char_code_at(end - 1) == 124:
         return (false, invalid)
-    var index = 1
-    while index < fields.len():
-        if not _hal_signed_decimal(fields[index]):
-            return (false, invalid)
-        if fields[index].parse_int() == nil:
-            return (false, invalid)
-        index = index + 1
-    if int(fields[1]) != expected_invocation:
+    if not _hal_prefix_at(line, start, "HALISO1|"):
+        return (false, invalid)
+    val f1 = _hal_parse_i64_field(line, start + 8, end)
+    val f2 = _hal_parse_i64_field(line, f1.2, end)
+    val f3 = _hal_parse_i64_field(line, f2.2, end)
+    val f4 = _hal_parse_i64_field(line, f3.2, end)
+    val f5 = _hal_parse_i64_field(line, f4.2, end)
+    val f6 = _hal_parse_i64_field(line, f5.2, end)
+    val f7 = _hal_parse_i64_field(line, f6.2, end)
+    if (not f1.0 or not f2.0 or not f3.0 or not f4.0
+            or not f5.0 or not f6.0 or not f7.0 or f7.2 != end):
+        return (false, invalid)
+    if f1.1 != expected_invocation:
         return (false, invalid)
     val receipt = hal_isolation_receipt_v1(
-        provider, int(fields[1]), int(fields[2]), int(fields[2]),
-        int(fields[3]), int(fields[4]), int(fields[5]),
-        int(fields[6]) == 1, int(fields[7]) == 1)
-    (int(fields[2]) > 0 and int(fields[3]) == 0
-        and int(fields[4]) == 0 and int(fields[5]) == 0
-        and int(fields[6]) == 1 and int(fields[7]) == 1, receipt)
+        provider, f1.1, f2.1, f2.1, f3.1, f4.1, f5.1,
+        f6.1 == 1, f7.1 == 1)
+    (f2.1 > 0 and f3.1 == 0 and f4.1 == 0 and f5.1 == 0
+        and f6.1 == 1 and f7.1 == 1, receipt)
 
 impl HalProcessLaneOwnerV1:
     me spawn(enabled: bool, preflight_valid: bool, deadline_ms: i64):
@@ -260,30 +321,34 @@ impl HalProcessLaneOwnerV1:
                 self.output_overflow = true
                 self.cancel()
                 return
-            self.output = self.output + chunk
-            var newline = self.output.find("\n")
+            if self.output.len() == 0:
+                self.output = chunk
+            else:
+                self.output = self.output + chunk
+            var result_start = self.result_start
+            var newline = _hal_find_newline(self.output, result_start)
             if (self.endpoint.trusted_launcher and not self.isolation_valid
                     and newline >= 0):
-                val parsed_isolation = _hal_parse_isolation_line(
-                    self.endpoint.provider,
-                    self.output.substring(0, newline), expected_invocation)
+                val parsed_isolation = _hal_parse_isolation_range(
+                    self.endpoint.provider, self.output, 0, newline,
+                    expected_invocation)
                 self.isolation_valid = parsed_isolation.0
                 self.isolation = parsed_isolation.1
                 if not parsed_isolation.0:
                     self.protocol_error = true
                     self.cancel()
                     return
-                self.output = self.output.substring(
-                    newline + 1, self.output.len())
-                newline = self.output.find("\n")
+                result_start = newline + 1
+                self.result_start = result_start
+                newline = _hal_find_newline(self.output, result_start)
             if newline >= 0:
                 if newline != self.output.len() - 1:
                     self.protocol_error = true
                     self.cancel()
                     return
-                val parsed = _hal_parse_result_line(
-                    self.endpoint.provider,
-                    self.output.substring(0, newline), expected_invocation)
+                val parsed = _hal_parse_result_range(
+                    self.endpoint.provider, self.output,
+                    result_start, newline, expected_invocation)
                 self.result_valid = parsed.0
                 self.result = parsed.1
                 if not parsed.0:
@@ -349,61 +414,104 @@ fn _hal_mask_if(value: bool, provider: HalProviderKind) -> i64:
         return hal_provider_kind_mask(provider)
     0
 
-fn _hal_reject_spawn_after_critical_init(
-        operation: HalOperationV1,
-        receipt: HalOrchestrationReceiptV1) -> HalOrchestrationReceiptV1:
-    if hal_assurance_to_i64(operation.assurance_floor) < HAL_ASSURANCE_CRITICAL:
-        return receipt
-    # This coordinator still creates processes per invocation. That is useful
-    # for explicitly lower-assurance compatibility, but it cannot satisfy the
-    # sealed/no-allocation epoch of Critical or Verified operations. Preserve
-    # comparison evidence while revoking selection and commit until the
-    # preinitialized session owner lands.
-    HalOrchestrationReceiptV1(
+fn _hal_endpoint_bounded(endpoint: HalWorkerEndpointV1,
+                         slot_provider: HalProviderKind) -> bool:
+    if endpoint.provider != slot_provider:
+        return false
+    if endpoint.command.len() <= 0
+            or endpoint.command.len() > HAL_PROCESS_MAX_COMMAND_BYTES_V1:
+        return false
+    val reserved_args = if endpoint.trusted_launcher: 3 else: 0
+    if endpoint.args.len() + reserved_args > HAL_PROCESS_MAX_ARGUMENT_COUNT_V1:
+        return false
+    var total = endpoint.command.len()
+    if endpoint.trusted_launcher:
+        # Decimal deadline/output-cap arguments plus separators are generated
+        # after admission; reserve their maximum encoded budget up front.
+        total = total + 64
+        if total > HAL_PROCESS_MAX_ARGUMENT_BYTES_V1:
+            return false
+    for arg in endpoint.args:
+        if arg.len() > HAL_PROCESS_MAX_ARGUMENT_BYTES_V1 - total:
+            return false
+        total = total + arg.len()
+    total <= HAL_PROCESS_MAX_ARGUMENT_BYTES_V1
+
+fn _hal_preflight_rejection(operation: HalOperationV1,
+                            mode: HalRunMode, elapsed_ms: i64,
+                            deadline_ms: i64) -> HalProcessCoordinatorReceiptV1:
+    val expected = hal_execution_expected_mask(operation, mode)
+    val comparison = HalOrchestrationReceiptV1(
         status: HalOrchestrationStatusV1.InvalidReceipt,
-        expected_mask: receipt.expected_mask,
-        received_mask: receipt.received_mask,
-        admitted_mask: receipt.admitted_mask,
-        rejected_mask: receipt.rejected_mask,
-        difference_pair_mask: receipt.difference_pair_mask,
-        all_equivalent: receipt.all_equivalent,
-        preferred_result_ok: receipt.preferred_result_ok,
-        commit_allowed: false,
-        selected_provider: receipt.selected_provider,
+        expected_mask: expected, received_mask: 0, admitted_mask: 0,
+        rejected_mask: 0, difference_pair_mask: 0,
+        all_equivalent: false, preferred_result_ok: false,
+        commit_allowed: false, selected_provider: operation.preferred_provider,
         selected_provider_valid: false)
+    HalProcessCoordinatorReceiptV1(
+        comparison: comparison, launched_mask: 0, completed_mask: 0,
+        cancelled_mask: 0, reaped_mask: 0, protocol_error_mask: expected,
+        output_overflow_mask: 0, isolation_proven_mask: 0,
+        critical_ready: false, elapsed_ms: elapsed_ms,
+        cleanup_overran_deadline: deadline_ms > 0 and elapsed_ms > deadline_ms)
 
 fn hal_coordinate_provider_processes_v1(
         operation: HalOperationV1, request: HalProviderRequestV1,
         mode: HalRunMode, pure_endpoint: HalWorkerEndpointV1,
         c_endpoint: HalWorkerEndpointV1, rust_endpoint: HalWorkerEndpointV1,
         deadline_ms: i64) -> HalProcessCoordinatorReceiptV1:
+    # Execution-deadline accounting begins before validation/request encoding,
+    # owner setup, and spawn. The canonical spawn/close facade is synchronous
+    # and has no deadline parameter; mandatory reap may extend past the
+    # execution deadline and that cleanup overrun is reported in the receipt.
+    val start_ms = time_now_monotonic_ms()
+    val effective_deadline = if deadline_ms > 0:
+        deadline_ms
+    else:
+        operation.capacity.deadline_ticks
+    val pure_enabled = _hal_lane_enabled(
+        operation, mode, HalProviderKind.PureSimple)
+    val c_enabled = _hal_lane_enabled(operation, mode, HalProviderKind.C)
+    val rust_enabled = _hal_lane_enabled(operation, mode, HalProviderKind.Rust)
+    val preflight_valid = (hal_operation_v1_well_formed(operation)
+        and hal_provider_request_v1_well_formed(request)
+        and request.operation_id == operation.operation_id
+        and hal_assurance_to_i64(operation.assurance_floor)
+            < HAL_ASSURANCE_CRITICAL
+        and operation.capacity.request_bytes <= HAL_PROCESS_MAX_REQUEST_BYTES_V1
+        and effective_deadline > 0
+        and effective_deadline <= HAL_PROCESS_MAX_DEADLINE_MS_V1
+        and (not pure_enabled or _hal_endpoint_bounded(
+            pure_endpoint, HalProviderKind.PureSimple))
+        and (not c_enabled or _hal_endpoint_bounded(
+            c_endpoint, HalProviderKind.C))
+        and (not rust_enabled or _hal_endpoint_bounded(
+            rust_endpoint, HalProviderKind.Rust)))
+    if not preflight_valid:
+        return _hal_preflight_rejection(
+            operation, mode, time_now_monotonic_ms() - start_ms,
+            effective_deadline)
     val request_line = _hal_request_line(operation, request)
+    if request_line.len() > operation.capacity.request_bytes
+            or request_line.len() > HAL_PROCESS_MAX_REQUEST_BYTES_V1:
+        return _hal_preflight_rejection(
+            operation, mode, time_now_monotonic_ms() - start_ms,
+            effective_deadline)
     val pure_lane = _hal_process_lane_owner(
         pure_endpoint, request_line, request.invocation_id)
     val c_lane = _hal_process_lane_owner(
         c_endpoint, request_line, request.invocation_id)
     val rust_lane = _hal_process_lane_owner(
         rust_endpoint, request_line, request.invocation_id)
-    val pure_enabled = _hal_lane_enabled(
-        operation, mode, HalProviderKind.PureSimple)
-    val c_enabled = _hal_lane_enabled(operation, mode, HalProviderKind.C)
-    val rust_enabled = _hal_lane_enabled(operation, mode, HalProviderKind.Rust)
-    val effective_deadline = if deadline_ms > 0:
-        deadline_ms
-    else:
-        operation.capacity.deadline_ticks
-    val preflight_valid = (hal_operation_v1_well_formed(operation)
-        and hal_provider_request_v1_well_formed(request)
-        and request.operation_id == operation.operation_id
-        and request_line.len() <= operation.capacity.request_bytes
-        and effective_deadline > 0)
     # Spawn every requested lane before servicing any lane: provider work may
     # proceed concurrently while the parent remains the sole result owner.
-    pure_lane.spawn(pure_enabled, preflight_valid, effective_deadline)
-    c_lane.spawn(c_enabled, preflight_valid, effective_deadline)
-    rust_lane.spawn(rust_enabled, preflight_valid, effective_deadline)
+    var remaining_ms = effective_deadline - (time_now_monotonic_ms() - start_ms)
+    pure_lane.spawn(pure_enabled, remaining_ms > 0, remaining_ms)
+    remaining_ms = effective_deadline - (time_now_monotonic_ms() - start_ms)
+    c_lane.spawn(c_enabled, remaining_ms > 0, remaining_ms)
+    remaining_ms = effective_deadline - (time_now_monotonic_ms() - start_ms)
+    rust_lane.spawn(rust_enabled, remaining_ms > 0, remaining_ms)
     val expected = hal_execution_expected_mask(operation, mode)
-    val start_ms = time_now_monotonic_ms()
     while not _hal_all_terminal(expected, pure_lane, c_lane, rust_lane):
         pure_lane.advance_write()
         c_lane.advance_write()
@@ -423,13 +531,12 @@ fn hal_coordinate_provider_processes_v1(
                 rust_lane.cancel()
         elif not _hal_all_terminal(expected, pure_lane, c_lane, rust_lane):
             rt_sleep_ms(1)
-    val raw_comparison = hal_orchestrate_provider_receipts_v1(
+    val comparison = hal_orchestrate_provider_receipts_v1(
         operation, request, mode,
         pure_lane.structural_lane(request.invocation_id),
         c_lane.structural_lane(request.invocation_id),
         rust_lane.structural_lane(request.invocation_id))
-    val comparison = _hal_reject_spawn_after_critical_init(
-        operation, raw_comparison)
+    val elapsed_ms = time_now_monotonic_ms() - start_ms
     HalProcessCoordinatorReceiptV1(
         comparison: comparison,
         launched_mask: _hal_mask_if(pure_lane.spawned, HalProviderKind.PureSimple)
@@ -454,11 +561,16 @@ fn hal_coordinate_provider_processes_v1(
             pure_lane.isolation_valid, HalProviderKind.PureSimple)
             | _hal_mask_if(c_lane.isolation_valid, HalProviderKind.C)
             | _hal_mask_if(rust_lane.isolation_valid, HalProviderKind.Rust),
-        critical_ready: false)
+        critical_ready: false, elapsed_ms: elapsed_ms,
+        cleanup_overran_deadline: elapsed_ms > effective_deadline)
 
 export HAL_PROCESS_PROTOCOL_V1, HAL_PROCESS_RESPONSE_FIELDS_V1
 export HAL_PROCESS_MAX_RESPONSE_BYTES_V1
 export HAL_PROCESS_MAX_OUTPUT_BYTES_V1, HAL_ISOLATION_PROTOCOL_V1
+export HAL_PROCESS_MAX_REQUEST_BYTES_V1, HAL_PROCESS_MAX_COMMAND_BYTES_V1
+export HAL_PROCESS_MAX_ARGUMENT_COUNT_V1, HAL_PROCESS_MAX_ARGUMENT_BYTES_V1
+export HAL_PROCESS_MAX_DEADLINE_MS_V1
+export HAL_PROCESS_I64_MIN_V1
 export HAL_ISOLATION_FIELDS_V1, HAL_TRUSTED_LAUNCHER_V1
 export HAL_TRUSTED_PURE_PROVIDER_V1, HAL_TRUSTED_C_PROVIDER_V1
 export HAL_TRUSTED_RUST_PROVIDER_V1
