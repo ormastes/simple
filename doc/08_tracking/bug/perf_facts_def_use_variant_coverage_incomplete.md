@@ -26,8 +26,12 @@ use information over specialized MIR.
 5. Rewire remaining compiler consumers to consume only complete shared facts.
 
 The vectorizer loop dependency path now consumes shared facts and rejects
-`analysis_complete=false`. Typed-storage production and storage access summaries now use
-the same complete-facts gate and shared use counts. Other private consumers remain.
+`analysis_complete=false`. Typed-storage production and storage access summaries use
+the same complete-facts gate and shared use counts. Shared block liveness derives from
+the same visitor and is unavailable when coverage is partial. The dormant DCE
+implementation consumes those facts, returns the original function on incompleteness,
+and no longer carries private CFG or per-definition later-use scans. Other private
+consumers remain.
 
 ## Unblock condition
 
