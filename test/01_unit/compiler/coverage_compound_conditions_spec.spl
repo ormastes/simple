@@ -6,30 +6,58 @@ fn coverage_interpreter_source() -> text:
 fn coverage_statement_source() -> text:
     file_read("src/compiler/10.frontend/core/interpreter/eval_stmts.spl") ?? ""
 
+fn coverage_module_source() -> text:
+    file_read("src/compiler/10.frontend/core/interpreter/mod.spl") ?? ""
+
 describe "Interpreter compound control coverage":
     it "assigns source-stable condition identifiers":
         val source = coverage_interpreter_source()
         expect(source).to_contain("fn coverage_condition_id(condition_eid: i64) -> i64")
         expect(source).to_contain("return span_start(condition_span) + 1")
-        expect(source).to_contain("condition_eid + 1")
 
     it "records only short-circuit evaluated atomic operands":
         val source = coverage_interpreter_source()
         expect(source).to_contain("fn eval_control_condition(condition_eid: i64, decision_id: i64) -> i64")
+        expect(source).to_contain("fn eval_control_condition_at(condition_eid: i64, decision_id: i64,")
         expect(source).to_contain("if condition_node.tag == EXPR_BINARY and condition_node.i_val == 55:")
         expect(source).to_contain("if condition_node.tag == EXPR_BINARY and condition_node.i_val == 56:")
         expect(source).to_contain("record_control_condition(decision_id, condition_eid, taken)")
 
+    it "retains static leaf ordinals across skipped right subtrees":
+        val source = coverage_interpreter_source()
+        expect(source).to_contain("fn coverage_condition_leaf_count(condition_eid: i64) -> i64")
+        expect(source).to_contain("val right_index = condition_index + coverage_condition_leaf_count(condition_node.left)")
+        expect(source).to_contain("coverage_mcdc_evaluated_mask = coverage_mcdc_evaluated_mask | condition_bit")
+
+    it "emits one correlated bounded vector after the decision outcome":
+        val source = coverage_interpreter_source()
+        expect(source).to_contain("rt_mcdc_record_vector_v1(")
+        expect(source).to_contain("coverage_mcdc_evaluated_mask, coverage_mcdc_true_mask")
+        expect(source).to_contain("coverage_mcdc_owner_id, coverage_mcdc_owner_sequence")
+        expect(coverage_module_source()).to_contain("mcdc_interpreter_register_source(path, source)")
+
+    it "selects the dynamic-disarmed fast path once per decision":
+        val source = coverage_interpreter_source()
+        expect(source).to_contain("fn eval_control_condition_legacy(condition_eid: i64, decision_id: i64) -> i64")
+        expect(source).to_contain("if coverage_mcdc_session_id == 0u64 or coverage_mcdc_owner_id == 0u64:")
+        expect(source).to_contain("return eval_control_condition_legacy(condition_eid, decision_id)")
+
+    it "restores outer masks after nested control evaluation":
+        val source = coverage_interpreter_source()
+        expect(source).to_contain("val saved_evaluated_mask = coverage_mcdc_evaluated_mask")
+        expect(source).to_contain("coverage_mcdc_evaluated_mask = saved_evaluated_mask")
+        expect(source).to_contain("coverage_mcdc_condition_count = saved_condition_count")
+
     it "uses compound instrumentation for if while and match guards":
         val source = coverage_interpreter_source()
-        expect(source).to_contain("val cond_val = eval_control_condition(cond_id, eid)")
-        expect(source).to_contain("val cond_val = eval_control_condition(cond_eid, eid)")
-        expect(source).to_contain("val guard_val = eval_control_condition(guard_eid, arm_id)")
+        expect(source).to_contain("val cond_val = eval_control_condition(cond_id, coverage_span_decision_id(e_node.span_id))")
+        expect(source).to_contain("val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(e_node.span_id))")
+        expect(source).to_contain("val guard_val = eval_control_condition(guard_eid, coverage_span_decision_id(expr_get(guard_eid).span_id))")
         expect(source).to_contain("record_control_decision(")
 
     it "uses the same predicate evaluation for statement controls":
         val source = coverage_statement_source()
         expect(source).to_contain("fn record_stmt_control_decision(sid: i64, taken: bool)")
-        expect(source).to_contain("val cond_val = eval_control_condition(cond_eid, sid)")
+        expect(source).to_contain("val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(stmt_get(sid).span_id))")
         expect(source).to_contain("record_stmt_control_decision(sid, taken)")
-        expect(source).to_contain("val guard_val = eval_control_condition(guard_eid, arm_id)")
+        expect(source).to_contain("val guard_val = eval_control_condition(guard_eid, coverage_span_decision_id(expr_get(guard_eid).span_id))")

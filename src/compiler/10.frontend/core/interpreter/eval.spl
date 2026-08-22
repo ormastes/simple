@@ -20,6 +20,70 @@ extern fn rt_coverage_decision_probe(decision_id: i64, result: bool,
     file: text, line: i64, column: i64)
 extern fn rt_coverage_condition_probe(decision_id: i64, condition_id: i64,
     result: bool, file: text, line: i64, column: i64)
+extern fn rt_mcdc_record_vector_v1(session_id: u64, decision_id: u64,
+    condition_count: u32, source_digest: u64,
+    evaluated_mask: u64, true_mask: u64,
+    owner_id: u64, owner_sequence: u64, outcome: u8) -> i32
+extern fn rt_mcdc_claim_interpreter_owner_v1(session_id: u64,
+                                              owner_id: u64) -> i32
+extern fn rt_mcdc_release_interpreter_owner_v1(session_id: u64,
+                                                owner_id: u64) -> i32
+
+var coverage_mcdc_session_id: u64 = 0u64
+var coverage_mcdc_owner_id: u64 = 0u64
+var coverage_mcdc_owner_sequence: u64 = 0u64
+var coverage_mcdc_evaluated_mask: u64 = 0u64
+var coverage_mcdc_true_mask: u64 = 0u64
+var coverage_mcdc_condition_count: i64 = 0
+var coverage_mcdc_last_status: i32 = 0
+var coverage_mcdc_source_digest_by_path: Dict<text, u64> = {}
+
+fn mcdc_interpreter_configure(session_id: u64, owner_id: u64) -> bool:
+    if session_id == 0u64 or owner_id == 0u64: return false
+    if rt_mcdc_claim_interpreter_owner_v1(session_id, owner_id) != 0: return false
+    coverage_mcdc_session_id = session_id
+    coverage_mcdc_owner_id = owner_id
+    coverage_mcdc_owner_sequence = 0u64
+    coverage_mcdc_last_status = 0
+    coverage_mcdc_source_digest_by_path = {}
+    true
+
+fn mcdc_interpreter_disable():
+    if coverage_mcdc_session_id != 0u64 and coverage_mcdc_owner_id != 0u64:
+        val release_status = rt_mcdc_release_interpreter_owner_v1(
+            coverage_mcdc_session_id, coverage_mcdc_owner_id)
+        mcdc_interpreter_note_status(release_status)
+    coverage_mcdc_session_id = 0u64
+    coverage_mcdc_owner_id = 0u64
+    coverage_mcdc_owner_sequence = 0u64
+
+fn mcdc_interpreter_last_status() -> i32:
+    coverage_mcdc_last_status
+
+fn mcdc_interpreter_note_status(status: i32):
+    if coverage_mcdc_last_status == 0 and status != 0:
+        coverage_mcdc_last_status = status
+
+fn mcdc_stable_text_hash(value: text, seed: i64, multiplier: i64,
+                         modulus: i64) -> i64:
+    var digest = seed
+    var index: i64 = 0
+    while index < value.len():
+        digest = ((digest * multiplier) + char_code(value[index:index + 1])) % modulus
+        index = index + 1
+    digest
+
+fn mcdc_interpreter_register_source(path: text, source: text):
+    if coverage_mcdc_session_id == 0u64: return
+    var first = mcdc_stable_text_hash(path, 5381, 33, 2147483647)
+    first = ((first * 33) + 31) % 2147483647
+    first = mcdc_stable_text_hash(source, first, 33, 2147483647)
+    var second = mcdc_stable_text_hash(path, 7919, 37, 2147483629)
+    second = ((second * 37) + 31) % 2147483629
+    second = mcdc_stable_text_hash(source, second, 37, 2147483629)
+    var combined = ((first as u64) << 32) | (second as u64)
+    if combined == 0u64: combined = 1u64
+    coverage_mcdc_source_digest_by_path[path] = combined
 
 # The runtime SFFI ABI is decision-id/result/file/line/column.  Keep the
 # compiler-owned ID stable for one parsed AST: an execution counter produces a
@@ -46,9 +110,30 @@ fn coverage_span_decision_id(span_id: i64) -> i64:
     if span_is_valid(span_id): return span_start(span_id) + 1
     -1
 
+fn coverage_source_digest(file: text) -> u64:
+    coverage_mcdc_source_digest_by_path[file] ?? 0u64
+
 fn record_control_decision(file: text, line: i64, column: i64, decision_id: i64, taken: bool):
     if rt_coverage_enabled():
         rt_coverage_decision_probe(decision_id, taken, file, line, column)
+    if coverage_mcdc_session_id != 0u64 and coverage_mcdc_owner_id != 0u64:
+        if decision_id > 0 and coverage_mcdc_condition_count > 0:
+            val source_digest = coverage_source_digest(file)
+            if source_digest == 0u64:
+                mcdc_interpreter_note_status(2)
+                return
+            if coverage_mcdc_owner_sequence == 18446744073709551615u64:
+                mcdc_interpreter_note_status(3)
+                return
+            val status = rt_mcdc_record_vector_v1(
+                coverage_mcdc_session_id, decision_id as u64,
+                coverage_mcdc_condition_count as u32,
+                source_digest,
+                coverage_mcdc_evaluated_mask, coverage_mcdc_true_mask,
+                coverage_mcdc_owner_id, coverage_mcdc_owner_sequence,
+                if taken: 1u8 else: 0u8)
+            mcdc_interpreter_note_status(status)
+            coverage_mcdc_owner_sequence = coverage_mcdc_owner_sequence + 1u64
 
 fn record_control_condition(decision_id: i64, condition_eid: i64, taken: bool):
     if rt_coverage_enabled():
@@ -69,22 +154,27 @@ fn record_control_condition(decision_id: i64, condition_eid: i64, taken: bool):
 # Evaluates a control predicate while preserving language short-circuit
 # semantics.  Only leaf operands are conditions: the enclosing `and`/`or`
 # expression is a decision composition, not an independently evaluated input.
-fn eval_control_condition(condition_eid: i64, decision_id: i64) -> i64:
+fn coverage_condition_leaf_count(condition_eid: i64) -> i64:
+    val condition_node = expr_get(condition_eid)
+    if condition_node.tag == EXPR_BINARY and (condition_node.i_val == 55 or condition_node.i_val == 56):
+        return (coverage_condition_leaf_count(condition_node.left) +
+            coverage_condition_leaf_count(condition_node.right))
+    1
+
+fn eval_control_condition_legacy(condition_eid: i64, decision_id: i64) -> i64:
     val condition_node = expr_get(condition_eid)
     if condition_node.tag == EXPR_BINARY and condition_node.i_val == 55:
-        val left_value = eval_control_condition(condition_node.left, decision_id)
+        val left_value = eval_control_condition_legacy(condition_node.left, decision_id)
         if eval_had_error: return -1
-        if val_is_truthy(left_value) == false:
-            return val_make_bool(false)
-        val right_value = eval_control_condition(condition_node.right, decision_id)
+        if val_is_truthy(left_value) == false: return val_make_bool(false)
+        val right_value = eval_control_condition_legacy(condition_node.right, decision_id)
         if eval_had_error: return -1
         return val_make_bool(val_is_truthy(right_value))
     if condition_node.tag == EXPR_BINARY and condition_node.i_val == 56:
-        val left_value = eval_control_condition(condition_node.left, decision_id)
+        val left_value = eval_control_condition_legacy(condition_node.left, decision_id)
         if eval_had_error: return -1
-        if val_is_truthy(left_value):
-            return val_make_bool(true)
-        val right_value = eval_control_condition(condition_node.right, decision_id)
+        if val_is_truthy(left_value): return val_make_bool(true)
+        val right_value = eval_control_condition_legacy(condition_node.right, decision_id)
         if eval_had_error: return -1
         return val_make_bool(val_is_truthy(right_value))
     val condition_value = eval_expr(condition_eid)
@@ -92,6 +182,60 @@ fn eval_control_condition(condition_eid: i64, decision_id: i64) -> i64:
     val taken = val_is_truthy(condition_value)
     record_control_condition(decision_id, condition_eid, taken)
     condition_value
+
+fn eval_control_condition_at(condition_eid: i64, decision_id: i64,
+                             condition_index: i64) -> i64:
+    val condition_node = expr_get(condition_eid)
+    if condition_node.tag == EXPR_BINARY and condition_node.i_val == 55:
+        val left_value = eval_control_condition_at(condition_node.left, decision_id,
+                                                   condition_index)
+        if eval_had_error: return -1
+        if val_is_truthy(left_value) == false:
+            return val_make_bool(false)
+        val right_index = condition_index + coverage_condition_leaf_count(condition_node.left)
+        val right_value = eval_control_condition_at(condition_node.right, decision_id,
+                                                    right_index)
+        if eval_had_error: return -1
+        return val_make_bool(val_is_truthy(right_value))
+    if condition_node.tag == EXPR_BINARY and condition_node.i_val == 56:
+        val left_value = eval_control_condition_at(condition_node.left, decision_id,
+                                                   condition_index)
+        if eval_had_error: return -1
+        if val_is_truthy(left_value):
+            return val_make_bool(true)
+        val right_index = condition_index + coverage_condition_leaf_count(condition_node.left)
+        val right_value = eval_control_condition_at(condition_node.right, decision_id,
+                                                    right_index)
+        if eval_had_error: return -1
+        return val_make_bool(val_is_truthy(right_value))
+    val saved_evaluated_mask = coverage_mcdc_evaluated_mask
+    val saved_true_mask = coverage_mcdc_true_mask
+    val saved_condition_count = coverage_mcdc_condition_count
+    val condition_value = eval_expr(condition_eid)
+    coverage_mcdc_evaluated_mask = saved_evaluated_mask
+    coverage_mcdc_true_mask = saved_true_mask
+    coverage_mcdc_condition_count = saved_condition_count
+    if eval_had_error: return -1
+    val taken = val_is_truthy(condition_value)
+    record_control_condition(decision_id, condition_eid, taken)
+    if condition_index >= 0 and condition_index < 62:
+        val condition_bit = 1u64 << condition_index
+        coverage_mcdc_evaluated_mask = coverage_mcdc_evaluated_mask | condition_bit
+        if taken:
+            coverage_mcdc_true_mask = coverage_mcdc_true_mask | condition_bit
+    condition_value
+
+fn eval_control_condition(condition_eid: i64, decision_id: i64) -> i64:
+    if coverage_mcdc_session_id == 0u64 or coverage_mcdc_owner_id == 0u64:
+        return eval_control_condition_legacy(condition_eid, decision_id)
+    coverage_mcdc_evaluated_mask = 0u64
+    coverage_mcdc_true_mask = 0u64
+    coverage_mcdc_condition_count = coverage_condition_leaf_count(condition_eid)
+    if coverage_mcdc_condition_count > 62:
+        mcdc_interpreter_note_status(2)
+        coverage_mcdc_condition_count = 0
+        return eval_control_condition_legacy(condition_eid, decision_id)
+    eval_control_condition_at(condition_eid, decision_id, 0)
 
 # Resolve the file that should own a coverage decision/line probe fired RIGHT
 # NOW — the pure-Simple counterpart of the seed's RC1 (impl-method owner
@@ -1165,6 +1309,9 @@ use compiler.core.interpreter.eval_ops.*
 # ===== Exports =====
 # Symbols defined in this file
 export eval_warnings, eval_get_warnings, eval_clear_warnings
+export mcdc_interpreter_configure, mcdc_interpreter_disable
+export mcdc_interpreter_last_status
+export mcdc_interpreter_register_source
 
 # Re-exports from eval_tables.spl
 

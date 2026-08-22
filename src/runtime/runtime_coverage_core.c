@@ -32,6 +32,7 @@ typedef struct {
     uint64_t overflow_first;
     uint64_t overflow_count;
     uint64_t session_id;
+    uint64_t interpreter_owner_id;
     bool initialized;
     bool overflowed;
     bool sealed;
@@ -96,6 +97,7 @@ int32_t rt_mcdc_collector_init_v1(void *storage, uint64_t storage_bytes,
         return SIMPLE_MCDC_V1_INVALID;
     if (storage_bytes > SIZE_MAX) return SIMPLE_MCDC_V1_INVALID;
     mcdc_lock();
+    if (g_mcdc.initialized) { mcdc_unlock(); return SIMPLE_MCDC_V1_BUSY; }
     g_mcdc.events = (SimpleMcdcVectorV1 *)storage;
     g_mcdc.capacity = (size_t)storage_bytes / sizeof(SimpleMcdcVectorV1);
     g_mcdc.count = 0;
@@ -103,6 +105,7 @@ int32_t rt_mcdc_collector_init_v1(void *storage, uint64_t storage_bytes,
     g_mcdc.overflow_first = UINT64_MAX;
     g_mcdc.overflow_count = 0;
     g_mcdc.session_id = session_id;
+    g_mcdc.interpreter_owner_id = 0;
     g_mcdc.overflowed = false;
     g_mcdc.sealed = false;
     g_mcdc.initialized = true;
@@ -110,12 +113,14 @@ int32_t rt_mcdc_collector_init_v1(void *storage, uint64_t storage_bytes,
     return SIMPLE_MCDC_V1_OK;
 }
 
-int32_t rt_mcdc_record_vector_v1(uint64_t session_id, uint32_t decision_id,
+int32_t rt_mcdc_record_vector_v1(uint64_t session_id, uint64_t decision_id,
                                  uint32_t condition_count,
+                                 uint64_t source_digest,
                                  uint64_t evaluated_mask, uint64_t true_mask,
                                  uint64_t owner_id, uint64_t owner_sequence,
                                  uint8_t outcome) {
     if (!session_id || !decision_id || !condition_count || condition_count > 62u ||
+        !source_digest ||
         !owner_id || outcome > 1u) return SIMPLE_MCDC_V1_INVALID;
     const uint64_t admitted = (UINT64_C(1) << condition_count) - UINT64_C(1);
     if ((evaluated_mask & ~admitted) || (true_mask & ~evaluated_mask))
@@ -143,7 +148,7 @@ int32_t rt_mcdc_record_vector_v1(uint64_t session_id, uint32_t decision_id,
         return SIMPLE_MCDC_V1_OVERFLOW;
     }
     g_mcdc.events[g_mcdc.count++] = (SimpleMcdcVectorV1){
-        decision_id, condition_count, evaluated_mask, true_mask,
+        decision_id, condition_count, 0u, source_digest, evaluated_mask, true_mask,
         owner_id, owner_sequence, outcome, {0}
     };
     mcdc_unlock();
@@ -155,6 +160,30 @@ int32_t rt_mcdc_collector_seal_v1(uint64_t session_id) {
     if (!g_mcdc.initialized) { mcdc_unlock(); return SIMPLE_MCDC_V1_NOT_INITIALIZED; }
     if (g_mcdc.session_id != session_id) { mcdc_unlock(); return SIMPLE_MCDC_V1_SESSION_MISMATCH; }
     g_mcdc.sealed = true;
+    mcdc_unlock();
+    return SIMPLE_MCDC_V1_OK;
+}
+
+int32_t rt_mcdc_claim_interpreter_owner_v1(uint64_t session_id,
+                                           uint64_t owner_id) {
+    if (!session_id || !owner_id) return SIMPLE_MCDC_V1_INVALID;
+    mcdc_lock();
+    if (!g_mcdc.initialized) { mcdc_unlock(); return SIMPLE_MCDC_V1_NOT_INITIALIZED; }
+    if (g_mcdc.session_id != session_id) { mcdc_unlock(); return SIMPLE_MCDC_V1_SESSION_MISMATCH; }
+    if (g_mcdc.interpreter_owner_id != 0) { mcdc_unlock(); return SIMPLE_MCDC_V1_BUSY; }
+    g_mcdc.interpreter_owner_id = owner_id;
+    mcdc_unlock();
+    return SIMPLE_MCDC_V1_OK;
+}
+
+int32_t rt_mcdc_release_interpreter_owner_v1(uint64_t session_id,
+                                             uint64_t owner_id) {
+    if (!session_id || !owner_id) return SIMPLE_MCDC_V1_INVALID;
+    mcdc_lock();
+    if (!g_mcdc.initialized) { mcdc_unlock(); return SIMPLE_MCDC_V1_NOT_INITIALIZED; }
+    if (g_mcdc.session_id != session_id) { mcdc_unlock(); return SIMPLE_MCDC_V1_SESSION_MISMATCH; }
+    if (g_mcdc.interpreter_owner_id != owner_id) { mcdc_unlock(); return SIMPLE_MCDC_V1_SESSION_MISMATCH; }
+    g_mcdc.interpreter_owner_id = 0;
     mcdc_unlock();
     return SIMPLE_MCDC_V1_OK;
 }
@@ -190,6 +219,7 @@ void rt_mcdc_collector_reset_v1(void) {
     g_mcdc.overflow_first = UINT64_MAX;
     g_mcdc.overflow_count = 0;
     g_mcdc.session_id = 0;
+    g_mcdc.interpreter_owner_id = 0;
     g_mcdc.initialized = false;
     g_mcdc.overflowed = false;
     g_mcdc.sealed = false;
