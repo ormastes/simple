@@ -6,6 +6,9 @@
 # from top-level statements because the diagnostic collect-mode uses module-level vars that
 # the interpreter test runner does not share into `it`-block execution.
 use app.cli.query_lint.{_collect_lint_diagnostics_json}
+use app.cli.query_rich_common.{
+    _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE,
+    _DIAG_SEVERITY_OVERRIDE_COUNT, _diag_emit_or_collect}
 
 extern fn rt_exit(code: i32)
 
@@ -24,6 +27,72 @@ if plain.1.len() == 0 or not plain.1[0].contains("\"code\":\"MEXH002\"") or not 
     print "FAIL: default (no tier) changed MEXH002 from severity 2"
     rt_exit(1)
 print "PASS: default (no tier) keeps MEXH002 at severity 2"
+
+# A nested structured collection must not destroy its caller's buffer or policy.
+_DIAG_COLLECT_MODE = true
+_DIAG_COLLECTED = ["outer-sentinel"]
+_DIAG_SEVERITY_OVERRIDE = {"MEXH002": -1}
+_DIAG_SEVERITY_OVERRIDE_COUNT = 1
+val nested = _collect_lint_diagnostics_json("nested.spl", body)
+if (nested.1.len() == 0 or
+   not nested.1[0].contains("\"code\":\"MEXH002\"") or
+   not nested.1[0].contains("\"severity\":2") or not _DIAG_COLLECT_MODE or
+   _DIAG_COLLECTED.len() != 1 or _DIAG_COLLECTED[0] != "outer-sentinel" or
+   _DIAG_SEVERITY_OVERRIDE_COUNT != 1 or
+   not _DIAG_SEVERITY_OVERRIDE.has("MEXH002") or
+   _DIAG_SEVERITY_OVERRIDE["MEXH002"] != -1):
+    print "FAIL: nested lint collection did not restore caller state"
+    rt_exit(1)
+_diag_emit_or_collect(
+    "{\"severity\":2,\"code\":\"MEXH002\",\"message\":\"outer\"}")
+if _DIAG_COLLECTED.len() != 1:
+    print "FAIL: restored outer suppression is not operational"
+    rt_exit(1)
+_DIAG_COLLECT_MODE = false
+_DIAG_COLLECTED = []
+_DIAG_SEVERITY_OVERRIDE = {}
+_DIAG_SEVERITY_OVERRIDE_COUNT = 0
+print "PASS: nested lint collection restores caller state"
+
+# A failed AST parse must stay inside its collection and not contaminate a sibling.
+val malformed = _collect_lint_diagnostics_json("bad.spl", "fn broken(")
+var saw_parse = false
+for diagnostic in malformed.1:
+    if diagnostic.contains("\"code\":\"PARSE001\""):
+        saw_parse = true
+if not saw_parse:
+    print "FAIL: malformed lint collection omitted PARSE001"
+    rt_exit(1)
+val after_malformed = _collect_lint_diagnostics_json("clean.spl", "")
+if after_malformed.1.len() != 0:
+    print "FAIL: malformed lint state contaminated the next file"
+    rt_exit(1)
+print "PASS: parse failure is isolated from the next collection"
+
+# The collector must retain duplicate diagnostics and their original order.
+val closure_source =
+    "fn outer():\n" +
+    "    var x = 0\n" +
+    "    var x = 1\n" +
+    "    fn first():\n" +
+    "        x = 2\n" +
+    "    fn second():\n" +
+    "        x += 1\n"
+val closure_result = _collect_lint_diagnostics_json(
+    "closure.spl", closure_source)
+var closure_lines: [i64] = []
+for diagnostic in closure_result.1:
+    if diagnostic.contains("\"code\":\"CLOS001\""):
+        if diagnostic.contains("\"line\":5"):
+            closure_lines.push(5)
+        elif diagnostic.contains("\"line\":7"):
+            closure_lines.push(7)
+if (closure_lines.len() != 4 or closure_lines[0] != 5 or
+    closure_lines[1] != 5 or closure_lines[2] != 7 or
+    closure_lines[3] != 7):
+    print "FAIL: collector changed ordered duplicate CLOS001 diagnostics"
+    rt_exit(1)
+print "PASS: collector retains ordered duplicate diagnostics"
 
 val wide_body = "export symbol00\nexport symbol01\nexport symbol02\nexport symbol03\nexport symbol04\nexport symbol05\nexport symbol06\nexport symbol07\nexport symbol08\nexport symbol09\nexport symbol10\nexport symbol11\nexport symbol12\nexport symbol13\nexport symbol14\nexport symbol15\nexport symbol16\nexport symbol17\nexport symbol18\nexport symbol19\nexport symbol20\nexport symbol21\nexport symbol22\nexport symbol23\nexport symbol24\nexport symbol25\nexport symbol26\nexport symbol27\nexport symbol28\nexport symbol29\nexport symbol30\n"
 val wide_allowed = _collect_lint_diagnostics_json("p.spl", "@allow(visibility_boundary)\n" + wide_body)
