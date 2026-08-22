@@ -156,3 +156,11 @@ USE/DEF/live-in/live-out matrices. Validation visits each definition and use buc
 Opcode checks reuse the structural instruction traversal and an O(locals) declared-type
 dictionary. They compare `MirTypeKind` structurally rather than allocating serialized type
 keys. Receipt coverage counters make partial admission machine-visible.
+
+### Shared line-view quality checks
+
+Traceability, SPipe-quality, and raw typed-UI rule owners receive the immutable line view
+created by `lint_source`. These owners must not split `content` again or retain the view
+beyond the request. Their cost remains one aggregate O(source lines) scan across the
+rules, with no rule-local full-source arrays. Whole-text input is reserved for predicates
+that cannot be expressed without cross-line context.
