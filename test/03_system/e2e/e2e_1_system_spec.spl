@@ -1,189 +1,82 @@
-# @cover src/lib/nogc_sync_mut/spec/mod.spl 60%
 """
-# System Test - Full Integration
+## Purpose and audience
+Purpose: Pin core behavior with real computed-value oracles so regressions in the
+stdlib surface this spec covers fail loudly instead of passing vacuously.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-SYS-CORE-f43c
+doc/01_research/local/REQ-SYS-CORE-f43c.md
+doc/03_plan/sys_test/REQ-SYS-CORE-f43c.md
+doc/04_architecture/REQ-SYS-CORE-f43c.md
+doc/05_design/REQ-SYS-CORE-f43c.md
+"""
+# @req: REQ-SYS-CORE-f43c
 
-**Feature IDs:** #SYSTEM
-**Category:** Testing  
-**Status:** Implemented
-"""
+# core behavior oracles — every expect() compares a computed value against a
+# named expected constant (see the "# oracle:" comments), never x == x.
 
 use std.spec
+use std.spec.step
+use std.math.{abs, min, max, sqrt, floor, ceil}
+use std.string_core.{char_code, char_from_code}
 
-fn verify(condition: bool):
-    expect(condition).to_equal(true)
-
-describe "System Level Test":
-    slow_it "end-to-end workflow":
-        val input = "system test input"
-        verify(input.len() > 0)
-        
-        var processed = input
-        for i in 0..5:
-            processed = processed + "_step{i}"
-        
-        verify(processed.contains("step"))
-        
-    slow_it "integration point 1":
-        var data = []
-        for i in 0..30:
-            data = data.append(i)
-        
-        var sum = 0
-        for d in data:
-            sum = sum + d
-        
-        verify(sum == 435)
-        
-    slow_it "integration point 2":
-        val a = 1
-        val b = 2
-        val c = 3
-        val total = a + b + c
-        verify(total == 6)
-        
-    slow_it "full stack test":
-        # Bottom layer
-        val base = [1, 2, 3]
-        
-        # Middle layer
-        var processed = []
-        for b in base:
-            processed = processed.append(b * 2)
-        
-        # Top layer
-        var sum = 0
-        for p in processed:
-            sum = sum + p
-        
-        verify(sum == 12)
-        
-    slow_it "boundary condition test":
-        val cases = [0, 1, -1, 100, -100]
-        
-        for c in cases:
-            val result = if c > 0: "positive"
-                        elif c < 0: "negative"  
-                        else: "zero"
-            verify(result.len() > 0)
-            
-    slow_it "error handling test":
-        var errors = []
-        
-        for i in 0..10:
-            if i == 5:
-                errors = errors.append("error at 5")
-        
-        verify(errors.len() == 1)
-        
-    slow_it "recovery test":
-        var state = "normal"
-        
-        # Simulate error
-        state = "error"
-        
-        # Recover
-        if state == "error":
-            state = "recovered"
-        
-        verify(state == "recovered")
-        
-    slow_it "complex scenario":
-        var results = []
-        
-        for outer in 0..5:
-            var inner_sum = 0
-            for inner in 0..5:
-                inner_sum = inner_sum + inner
-            results = results.append(inner_sum)
-        
-        verify(results.len() == 5)
-        
-    slow_it "data flow test":
-        val source = "data"
-        val stage1 = source + "_1"
-        val stage2 = stage1 + "_2"
-        val stage3 = stage2 + "_3"
-        val final = stage3 + "_final"
-        
-        verify(final == "data_1_2_3_final")
-        
-    slow_it "state transition":
-        var state = 0
-        
-        for i in 0..10:
-            if state == 0:
-                state = 1
-            elif state == 1:
-                state = 2
-            else:
-                state = 0
-        
-        verify(state >= 0)
-        
-    slow_it "validation chain":
-        val valid1 = true
-        val valid2 = true
-        val valid3 = true
-        
-        val all_valid = valid1 and valid2 and valid3
-        verify(all_valid)
-        
-    slow_it "pipeline test":
-        val input = [1, 2, 3, 4, 5]
-        
-        # Stage 1: filter
-        var filtered = []
-        for x in input:
-            if x % 2 == 0:
-                filtered = filtered.append(x)
-        
-        # Stage 2: transform
-        var transformed = []
-        for f in filtered:
-            transformed = transformed.append(f * 10)
-        
-        verify(transformed.len() == 2)
-        
-    slow_it "comprehensive check":
-        var checks = 0
-        
-        if 1 == 1:
-            checks = checks + 1
-        if 2 > 1:
-            checks = checks + 1
-        if 3 < 4:
-            checks = checks + 1
-        if true:
-            checks = checks + 1
-        if not false:
-            checks = checks + 1
-        
-        verify(checks == 5)
-        
-    slow_it "resource lifecycle":
-        var resource = "allocated"
-        verify(resource.len() > 0)
-        
-        # Use resource
-        val used = resource + "_used"
-        verify(used.contains("used"))
-        
-        # Release
-        resource = ""
-        verify(resource.len() == 0)
-        
-    slow_it "complex condition":
-        val a = 10
-        val b = 20  
-        val c = 30
-        
-        if a < b:
-            if b < c:
-                if a + b <= c:
-                    verify(true)
-                else:
-                    verify(false)
-            else:
-                verify(false)
-        else:
-            verify(false)
+describe "core stdlib behavior oracles":
+    it "text case conversion":
+        # @req: REQ-SYS-CORE-f43c
+        step("Verify: text case conversion")
+        # oracle: "HELLO"/"hello" — upper/lower are exact case maps
+        expect("hello".upper()).to_equal("HELLO")
+        expect("HELLO".lower()).to_equal("hello")
+        expect("Hello".upper()).to_equal("HELLO")
+    it "text split trim contains prefix":
+        # @req: REQ-SYS-CORE-f43c
+        step("Verify: text split trim contains prefix")
+        # oracle: 2 — "hello world" splits into 2 fields on a single space
+        expect("hello world".split(" ").len()).to_equal(2)
+        expect("  x  ".trim()).to_equal("x")
+        expect("hello".contains("ell")).to_equal(true)
+        expect("hello".starts_with("he")).to_equal(true)
+    it "text replace":
+        # @req: REQ-SYS-CORE-f43c
+        step("Verify: text replace")
+        # oracle: "heLLo" — every 'l' replaced by 'L'
+        expect("hello".replace("l", "L")).to_equal("heLLo")
+        expect("aaa".replace("a", "b")).to_equal("bbb")
+    it "text concat slice reverse":
+        # @req: REQ-SYS-CORE-f43c
+        step("Verify: text concat slice reverse")
+        # oracle: "abcdef"/"bc"/"cba" — concat, slice from index 1, reverse
+        expect("abc" + "def").to_equal("abcdef")
+        expect("abc".slice(1)).to_equal("bc")
+        expect("abc".reverse()).to_equal("cba")
+    it "array sort":
+        # @req: REQ-SYS-CORE-f43c
+        step("Verify: array sort")
+        # oracle: [1, 2, 3] — sorted() returns ascending order
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+    it "array map filter":
+        # @req: REQ-SYS-CORE-f43c
+        step("Verify: array map filter")
+        # oracle: [4, 2, 3] — each element +1; [3, 2] — elements > 1 in order
+        expect([3, 1, 2].map(fn (x: i64) -> i64: x + 1)).to_equal([4, 2, 3])
+        expect([3, 1, 2].filter(fn (x: i64) -> bool: x > 1)).to_equal([3, 2])
+    it "array membership and index":
+        # @req: REQ-SYS-CORE-f43c
+        step("Verify: array membership and index")
+        # oracle: true/2 — 2 is present at index 2
+        expect([3, 1, 2].contains(2)).to_equal(true)
+        expect([3, 1, 2].contains(9)).to_equal(false)
+        expect([3, 1, 2].index_of(2)).to_equal(2)
+    it "array append and len":
+        # @req: REQ-SYS-CORE-f43c
+        step("Verify: array append and len")
+        # oracle: 4 — append grows the owner list by one and returns it
+        var arr = [1, 2, 3]
+        arr.append(4)
+        expect(arr.len()).to_equal(4)
+        expect(arr[3]).to_equal(4)
