@@ -86,6 +86,10 @@ int main(void) {
         rt_transient_heap_promote((int64_t)((uintptr_t)carrier_root | 1));
     check(carriers_promoted == 1,
           "tagged raw root promotes through collection and raw aggregate edges");
+    check(rt_transient_last_promoted_nodes() == 8,
+          "promotion reports exactly two raw carriers plus six heap nodes");
+    check(rt_transient_last_promoted_bytes() > 8 * (int64_t)sizeof(int64_t),
+          "promotion reports retained header and backing bytes");
     check(rt_transient_heap_promote(kept.dict) == 1,
           "a second promotion of the retained graph succeeds");
     check(rt_transient_array_scope_end() == 1, "promoted scope ends");

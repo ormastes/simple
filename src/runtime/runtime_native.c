@@ -1930,9 +1930,49 @@ static int rt_core_transient_add(RtCoreTransientPlan* plan, int64_t value) {
     return rt_core_transient_plan_push(plan, node.ptr, node.kind, node.bytes) ? 1 : -1;
 }
 
+static int64_t rt_core_transient_last_promoted_node_count = 0;
+static int64_t rt_core_transient_last_promoted_byte_count = 0;
+
+int64_t rt_transient_last_promoted_nodes(void) {
+    return rt_core_transient_last_promoted_node_count;
+}
+
+int64_t rt_transient_last_promoted_bytes(void) {
+    return rt_core_transient_last_promoted_byte_count;
+}
+
+static size_t rt_core_transient_node_bytes(RtCoreTransientNode node) {
+    switch (node.kind) {
+        case RT_CORE_TRANSIENT_STRING: {
+            RtCoreString* string = (RtCoreString*)node.ptr;
+            return sizeof(*string) + (size_t)string->len + 1;
+        }
+        case RT_CORE_TRANSIENT_ARRAY: {
+            RtCoreArray* array = (RtCoreArray*)node.ptr;
+            size_t element = sizeof(int64_t);
+            if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) element = 1;
+            return sizeof(*array) + (size_t)array->cap * element;
+        }
+        case RT_CORE_TRANSIENT_DICT: {
+            RtCoreDict* dict = (RtCoreDict*)node.ptr;
+            return sizeof(*dict) + (size_t)dict->cap * sizeof(RtCoreDictEntry);
+        }
+        case RT_CORE_TRANSIENT_ENUM: return sizeof(RtCoreEnum);
+        case RT_CORE_TRANSIENT_FLOAT: return sizeof(RtCoreFloat);
+        case RT_CORE_TRANSIENT_CLOSURE: {
+            RtCoreClosure* closure = (RtCoreClosure*)node.ptr;
+            return sizeof(*closure) + (size_t)closure->capture_count * sizeof(int64_t);
+        }
+        case RT_CORE_TRANSIENT_RAW: return node.bytes;
+        default: return 0;
+    }
+}
+
 int8_t rt_transient_heap_promote(int64_t value) {
     if (!rt_core_transient_array_scope_active || !rt_core_transient_array_scope_paused) return 0;
     rt_core_heap_lifecycle_acquire();
+    rt_core_transient_last_promoted_node_count = 0;
+    rt_core_transient_last_promoted_byte_count = 0;
     RtCoreTransientPlan plan = {0};
     RtCoreTransientNode root;
     int ok = rt_core_transient_classify(value, &root) == 1 &&
@@ -1971,11 +2011,15 @@ int8_t rt_transient_heap_promote(int64_t value) {
     }
     if (ok) {
         const uint32_t scope_id = rt_core_transient_array_scope_id;
+        int64_t promoted_nodes = 0;
+        int64_t promoted_bytes = 0;
         for (size_t i = 0; i < plan.len; i++) {
             RtCoreTransientNode node = plan.nodes[i];
             uint32_t* object_scope = NULL;
+            int promoted = 0;
             switch (node.kind) {
                 case RT_CORE_TRANSIENT_STRING:
+                    promoted = ((((RtCoreString*)node.ptr)->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0);
                     ((RtCoreString*)node.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
                     break;
                 case RT_CORE_TRANSIENT_ARRAY: object_scope = &((RtCoreArray*)node.ptr)->transient_scope_id; break;
@@ -1986,12 +2030,26 @@ int8_t rt_transient_heap_promote(int64_t value) {
                 case RT_CORE_TRANSIENT_RAW: {
                     RtCoreTransientRawAlloc* raw =
                         rt_core_transient_raw_lookup((uintptr_t)node.ptr);
-                    if (raw) raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+                    if (raw) {
+                        promoted = (raw->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
+                        raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+                    }
                     break;
                 }
             }
-            if (object_scope && *object_scope == scope_id) *object_scope = 0;
+            if (object_scope && *object_scope == scope_id) {
+                promoted = 1;
+                *object_scope = 0;
+            }
+            if (promoted) {
+                size_t bytes = rt_core_transient_node_bytes(node);
+                promoted_nodes++;
+                if (bytes > (size_t)(INT64_MAX - promoted_bytes)) promoted_bytes = INT64_MAX;
+                else promoted_bytes += (int64_t)bytes;
+            }
         }
+        rt_core_transient_last_promoted_node_count = promoted_nodes;
+        rt_core_transient_last_promoted_byte_count = promoted_bytes;
     }
     free(plan.nodes);
     free(plan.seen);

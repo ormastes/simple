@@ -25,6 +25,7 @@ use compiler.driver.driver_hir_pipeline_support.{
     driver_stage3_surface_content_matches,
     driver_stage3_surface_identity_mismatch,
     driver_hir_mem_snapshot,
+    driver_hir_promotion_snapshot,
     driver_shown_fatal_count,
     driver_collect_hir_errors,
     driver_dict_entry_count,
@@ -51,11 +52,18 @@ extern fn rt_hash_text(content: text) -> i64
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_transient_last_promoted_nodes() -> i64
+extern fn rt_transient_last_promoted_bytes() -> i64
 extern fn rt_exit(code: i64)
 extern fn rt_stdout_flush()
 
+struct StreamingHirPromotion:
+    module: HirModule
+    promoted_nodes: i64
+    promoted_bytes: i64
+
 impl CompilerDriver:
-    me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
+    me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<StreamingHirPromotion, text>:
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
         val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
@@ -74,6 +82,8 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
             return Err("HIR ownership promotion failed for {source.path}")
+        val hir_promoted_nodes = rt_transient_last_promoted_nodes()
+        val hir_promoted_bytes = rt_transient_last_promoted_bytes()
         if not lowering.promote_diagnostics_transient_owner():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_end_transient_parse_scope()
@@ -92,7 +102,10 @@ impl CompilerDriver:
         if not driver_end_transient_parse_scope():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             return Err("transient parser scope end failed for {source.path}")
-        Ok(hir_module)
+        Ok(StreamingHirPromotion(
+            module: hir_module,
+            promoted_nodes: hir_promoted_nodes,
+            promoted_bytes: hir_promoted_bytes))
 
     me lower_and_check_streaming_surfaces_impl() -> (CompileContext, bool):
         if (not self.streaming_surface_owner_ready or
@@ -139,6 +152,9 @@ impl CompilerDriver:
         val hir_bootstrap_mode_gate = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
             "pending", 2, 6, 0, 0, "running")
+        if mem_snapshot_begin() < 0:
+            self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
+            return (self.ctx, false)
 
         val source_count = self.ctx.source_paths_owner.len()
         while hir_loop_pos < hir_visit_order.len():
@@ -150,12 +166,14 @@ impl CompilerDriver:
                 module_name: self.ctx.source_module_names_owner[source_index])
             if not surfaces.index_by_name.contains_key(source.module_name):
                 self.ctx.add_error("Missing module surface alias for {source.module_name}")
+                mem_snapshot_abort()
                 return (self.ctx, false)
             val surface_index = surfaces.index_by_name[source.module_name]
             val is_requested_bootstrap_entry = source_index == entry_source_index
 
             if surface_index < 0 or surface_index >= surfaces.surfaces.len():
                 self.ctx.add_error("Invalid module surface index for {source.module_name}: {surface_index}")
+                mem_snapshot_abort()
                 return (self.ctx, false)
             if lowered_by_surface.contains_key(surface_index):
                 val alias_hir = lowered_by_surface[surface_index]
@@ -206,6 +224,7 @@ impl CompilerDriver:
                         surfaces.surfaces[surface_index].content_hash,
                         source_index, source.path, source.module_name,
                         source_content_length, source_content_hash))
+                mem_snapshot_abort()
                 return (self.ctx, false)
 
             val hir_stream_key: text = if hir_closure_digest != "":
@@ -253,10 +272,18 @@ impl CompilerDriver:
                     val poison_ctx: CompileContext = self.ctx
                     poison_ctx.mark_module_poisoned(source.module_name)
                     if poison_ctx.poison_budget_exhausted():
+                        mem_snapshot_abort()
                         return (self.ctx, false)
                     hir_loop_pos = hir_loop_pos + 1
                     continue
-                hir_module = lower_result.unwrap()
+                val promoted_hir = lower_result.unwrap()
+                hir_module = promoted_hir.module
+                if not driver_hir_promotion_snapshot(
+                    source_index, source.path,
+                    promoted_hir.promoted_nodes, promoted_hir.promoted_bytes):
+                    self.ctx.add_error("durable HIR promotion snapshot write failed")
+                    mem_snapshot_abort()
+                    return (self.ctx, false)
                 # Keep the aggregate diagnostic array inside its canonical
                 # HirLowering owner. Transporting `lowering.errors` or comparing a
                 # before/after CompileContext scalar both mis-lower under the
@@ -294,6 +321,7 @@ impl CompilerDriver:
                     val poison_ctx: CompileContext = self.ctx
                     poison_ctx.mark_module_poisoned(source.module_name)
                     if poison_ctx.poison_budget_exhausted():
+                        mem_snapshot_abort()
                         return (self.ctx, false)
                     hir_loop_pos = hir_loop_pos + 1
                     continue
@@ -327,6 +355,9 @@ impl CompilerDriver:
                 2, 6, 0, 0, "running")
             hir_loop_pos = hir_loop_pos + 1
 
+        if not mem_snapshot_finish():
+            self.ctx.add_error("durable memory snapshot terminal write failed")
+            return (self.ctx, false)
         if hir_cache_enabled():
             print hir_cache_summary()
         if hir_shard_mode:
