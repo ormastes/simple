@@ -1,4 +1,4 @@
-"""Regression guard for the module-level-accumulator-never-reset defect family.
+"""Regression guard for LLVM bootstrap accumulator ownership.
 
 Both members of this family were invisible to every single-unit test, because
 the per-instance mirror was always correct. Only N>=2 units in ONE process
@@ -8,12 +8,9 @@ uncontaminated by unit one.
   1. _llvm_bootstrap_ir_text (llvm_ir_builder.spl) -- fixed d5c65c647922 by
      clearing it in LlvmIRBuilder.create(), symmetric with the fresh
      rt_string_builder_new() on the same line.
-  2. _llvm_bootstrap_string_global_text (asm_constraints_helpers.spl) -- fixed
-     by clearing it in MirToLlvm.create()/create_baremetal(), symmetric with
-     the per-instance string_global_text/string_counter initialised there.
-     translate_module() also resets it, but the bootstrap object emitters
-     (bootstrap_emit_real_llvm_object / bootstrap_emit_real_llvm_module_object)
-     never call translate_module.
+  2. Bootstrap string globals are translator-owned. There is no process-global
+     mutable mirror for concurrent translators to race or retain after their
+     compilation unit ends.
 
 Assertions are on positive artifacts -- the exact decl count and the exact
 symbol name emitted for unit two -- never on the absence of an error.
@@ -21,7 +18,6 @@ See doc/08_tracking/bug/llvm_bootstrap_string_globals_not_reset_2026-08-01.md
 """
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
-use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_text}
 
 extern fn rt_env_set(key: text, value: text) -> bool
 
@@ -38,17 +34,17 @@ fn count_occurrences(hay: text, needle: text) -> i64:
         rest = rest.substring(i + needle.len(), rest.len())
     n
 
-describe "LLVM bootstrap module-level accumulators reset per compilation unit":
+describe "LLVM bootstrap accumulators remain owner-local per compilation unit":
     it "does not carry unit one's string constants into unit two":
         rt_env_set("SIMPLE_BOOTSTRAP", "1")
 
         var a = MirToLlvm.create("mod_a", CodegenTarget.X86_64, nil)
         val a_name = a.add_string_global("AAA_UNIT_ONE")
-        val after_a = llvm_bootstrap_string_globals_text()
+        val after_a = a.string_global_text
 
         var b = MirToLlvm.create("mod_b", CodegenTarget.X86_64, nil)
         val b_name = b.add_string_global("BBB_UNIT_TWO")
-        val after_b = llvm_bootstrap_string_globals_text()
+        val after_b = b.string_global_text
 
         # string_counter is per-instance, so BOTH units name their first
         # constant @.str.0. If unit two inherits unit one's decl the emitted
@@ -72,12 +68,26 @@ describe "LLVM bootstrap module-level accumulators reset per compilation unit":
         var b = MirToLlvm.create("mod_b2", CodegenTarget.X86_64, nil)
         b.add_string_global("BBB_UNIT_TWO")
 
-        # This mirror was always correct -- that is exactly why the defect was
-        # invisible. Pinned so a future "fix" cannot make the global right by
-        # making the instance field wrong.
+        # Pin the translator-owned representation so a future compatibility
+        # change cannot recreate a process-global mirror.
         expect(count_occurrences(b.string_global_text, DECL_MARKER)).to_equal(1)
         expect(b.string_global_text).to_contain("BBB_UNIT_TWO")
         expect(b.string_global_text).to_not_contain("AAA_UNIT_ONE")
+
+    it "keeps interleaved translator writes owner-local":
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+
+        var a = MirToLlvm.create("mod_interleave_a", CodegenTarget.X86_64, nil)
+        var b = MirToLlvm.create("mod_interleave_b", CodegenTarget.X86_64, nil)
+        a.add_string_global("A_FIRST")
+        b.add_string_global("B_ONLY")
+        a.add_string_global("A_SECOND")
+
+        expect(count_occurrences(a.string_global_text, DECL_MARKER)).to_equal(2)
+        expect(count_occurrences(b.string_global_text, DECL_MARKER)).to_equal(1)
+        expect(a.string_global_text).to_not_contain("B_ONLY")
+        expect(b.string_global_text).to_not_contain("A_FIRST")
+        expect(b.string_global_text).to_not_contain("A_SECOND")
 
     it "does not carry unit one's IR text into unit two":
         rt_env_set("SIMPLE_BOOTSTRAP", "1")
