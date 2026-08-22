@@ -61,3 +61,28 @@ Measured 10k-key dict: 1000/4000/16000 `keys()` calls = 0.26/1.08/4.06 s, flat
 runtime has no refcount; `rt_dict_set` `:8161` mutates in place). A `keys()`
 inside a loop body is the caller's O(n²), which `.claude/rules/code-style.md`
 already forbids and `check-cow-alias-hotpath.shs` ratchets.
+
+## 2026-08-22 design stop: no ABI-preserving sole-owner fast path exists
+
+Re-audited for an in-place append that keeps the `rt_*` ABI and the
+`RtCoreString` layout (`kind / reserved / len / data[]`) unchanged:
+
+- **No ownership signal of any kind.** Strings are registered immortal
+  (`rt_core_register_string` -> `rt_core_register_immortal_ptr`) and never
+  refcounted. `val t = s; s = s + "x"` makes `t` and `s` the same pointer, so
+  any in-place write to `a` after `rt_string_concat(a, b)` is observable
+  through `t`. The `reserved` word carries only `SHARED` (cache-owned) and
+  `TRANSIENT` (scope-owned) bits; neither distinguishes "one holder" from
+  "many holders in this scope".
+- **`malloc_usable_size` / a header word cannot supply ownership.** Slack
+  capacity is knowable, but capacity without uniqueness is unusable: `data[]`
+  is inline, so a result cannot share `a`'s buffer under its own header.
+- **A codegen-side signal is a layering change.** The only sound route is a
+  new entry (`rt_string_append_owned(s, x)`) emitted by MIR solely for
+  `s = s + x` / `s += x` on a local `var` whose previous value has no live
+  alias (needs a last-use/escape check in lowering). That is option 1 in the
+  record above, and it crosses the rt_*/MIR boundary this lane must keep.
+
+Decision: NOT patched in the runtime. Filed as a lowering feature (option 1
+with an escape check, or option 2 builder-loop lowering). Any runtime-only
+"fix" here would be a silent aliasing bug, which is worse than quadratic.
