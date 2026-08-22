@@ -276,3 +276,7 @@ EasyFix diagnostics participate in the same configurable policy as native lint r
 Existing named rules such as export boundaries, SPipe quality, resource leaks, stubs, and
 annotations map directly to their configured names; W0406 uses `visibility_boundary`.
 Default deny and authored allow settings therefore apply consistently after ID decoding.
+
+Contextual-keyword, deprecated syntax, struct-construction, short-grammar, raw-unit, and
+SIMD EasyFix advice is configurable and defaults to warning. The four short-grammar
+diagnostic codes share the `short_grammar_refactor` policy name.
