@@ -461,6 +461,15 @@ depth token. General lowering and MIRB-only accessors preserve their prior
 distinct semantics, while the union accessor retains both. Local
 expression/method/optional caches refresh when their saved generation differs.
 
+### LLVM adapter operation policy
+
+`llvm_codegen_target_config_for` and `llvm_codegen_translator_for` take the same
+`bare_metal` snapshot. A private IR translation helper accepts it; the public
+two-argument translation function samples once and delegates. Both compile
+entry points bind `trace_enabled` and `bare_metal` before phase output and use
+those locals through result dispatch. Disabled trace formatting remains
+branch-guarded, and function count reads `Dict.len()` directly.
+
 ## Fix application fast-path contract
 
 Per-file replacements use a typed stable merge sort ordered by descending start.
