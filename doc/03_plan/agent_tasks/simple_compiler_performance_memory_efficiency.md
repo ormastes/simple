@@ -113,6 +113,18 @@
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed VHDL deterministic-sort tranche
+
+- Replaced quadratic catalog text and SymbolId selection scans with stable
+  bottom-up merge ordering.
+- Cached module-name and per-module category key snapshots across consumers.
+- Added mirrored structural contracts for merge invariants, preserved raw
+  comparators, overflow guard, removal of selection scans, and cache ownership.
+- Parallel review covered complexity, array/COW ownership, stable tie behavior,
+  odd runs, and current reverse-insertion behavioral coverage.
+- Verification and optimizer execution intentionally not run under the user's
+  no-verify instruction; no timing/RSS claim is made.
+
 ## Completed VHDL metadata-index tranche
 
 - Built collision-framed exact and eligible-alias row-index maps once.

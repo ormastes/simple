@@ -902,3 +902,13 @@ getter. The latter returns zero immediately when disabled, preserving the
 existing `parse_prof_mark` zero sentinel so disabled mode performs no clock,
 formatting, or output work. Enabled interval boundaries and labels remain
 unchanged.
+
+### VHDL catalog key ordering
+
+Text and SymbolId helpers allocate result and scratch arrays once, merge
+adjacent runs into scratch, then copy scratch back before doubling run width.
+Avoid array-variable swapping because Simple value assignment may introduce a
+COW copy. Equality consumes the left run, incomplete final runs are copied, and
+the width guard prevents overflow. Catalog construction stores one ordered
+module-name array and one function/static/constant/type key array per module for
+reuse across rebasing and conversion.
