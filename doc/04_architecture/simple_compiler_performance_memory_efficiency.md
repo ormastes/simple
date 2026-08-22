@@ -243,6 +243,12 @@ retain independent snapshots to avoid widening their API. Each snapshot occurs
 after initial entry/root validation and is immutable through metadata/function
 loops. Trace remains stderr-only and outside generated VHDL/catalog state.
 
+VHDL target resolution owns an operation-local raw-name index with four logical
+domains: all/hardware-only crossed with qualified/bare. One symbol dictionary
+and one match-count dictionary use domain prefixes. Counts, rather than
+candidate order, authorize resolution; duplicates fail closed. Sanitized emitted
+names and metadata aliases remain downstream, separate facts.
+
 ## References
 
 - `doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`
