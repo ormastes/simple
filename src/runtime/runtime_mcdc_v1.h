@@ -102,7 +102,16 @@ enum {
     SIMPLE_MCDC_REPORT_ALPHA_V1 = 1,
     SIMPLE_MCDC_REPORT_BETA_V1 = 2,
     SIMPLE_MCDC_EXCLUSION_CAPABILITY_UNAVAILABLE_V1 = 1,
-    SIMPLE_MCDC_EXCLUSION_REASON_BYTES_V1 = 96
+    SIMPLE_MCDC_EXCLUSION_FIXTURE_UNAVAILABLE_V1 = 2,
+    SIMPLE_MCDC_EXCLUSION_PLATFORM_INAPPLICABLE_V1 = 3,
+    SIMPLE_MCDC_EXCLUSION_SAFETY_PROHIBITED_V1 = 4,
+    SIMPLE_MCDC_EXCLUSION_UNCONTROLLABLE_NONDETERMINISM_V1 = 5,
+    SIMPLE_MCDC_PREDICATE_CAPABILITY_UNAVAILABLE_V1 = 1,
+    SIMPLE_MCDC_PREDICATE_FIXTURE_UNAVAILABLE_V1 = 2,
+    SIMPLE_MCDC_PREDICATE_PLATFORM_INAPPLICABLE_V1 = 3,
+    SIMPLE_MCDC_PREDICATE_SAFETY_PROHIBITED_V1 = 4,
+    SIMPLE_MCDC_PREDICATE_UNCONTROLLABLE_NONDETERMINISM_V1 = 5,
+    SIMPLE_MCDC_EXCLUSION_REASON_BYTES_V1 = 256
 };
 
 /* Governed exclusion bound to the complete native decision identity.  Text is
@@ -111,10 +120,14 @@ typedef struct {
     uint64_t decision_id;
     uint64_t source_digest;
     uint64_t condition_mask;
+    uint64_t scenario_id;
+    uint64_t code_id;
+    uint64_t predicate_id;
     uint64_t capability_id;
     uint64_t evidence_digest_hi;
     uint64_t evidence_digest_lo;
     uint64_t owner_id;
+    uint64_t observed_epoch;
     uint64_t reviewed_epoch;
     uint64_t expires_epoch;
     uint32_t condition_count;
@@ -166,7 +179,7 @@ SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcAnalysisV1) == 48, "SimpleMcdcAnalysi
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcExprTokenV1) == 8, "SimpleMcdcExprTokenV1 ABI");
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcDecisionExprV1) == 32, "SimpleMcdcDecisionExprV1 ABI");
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcManifestInfoV1) == 96, "SimpleMcdcManifestInfoV1 ABI");
-SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcExclusionV1) == 184, "SimpleMcdcExclusionV1 ABI");
+SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcExclusionV1) == 376, "SimpleMcdcExclusionV1 ABI");
 SIMPLE_MCDC_STATIC_ASSERT(sizeof(SimpleMcdcReportV1) == 152, "SimpleMcdcReportV1 ABI");
 #undef SIMPLE_MCDC_STATIC_ASSERT
 

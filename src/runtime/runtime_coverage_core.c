@@ -1513,7 +1513,7 @@ static bool mcdc_reason_equals_ascii_v1(const SimpleMcdcExclusionV1 *row,
 }
 
 static bool mcdc_exclusion_reason_valid_v1(const SimpleMcdcExclusionV1 *row) {
-    if (row->reason_length < 12u ||
+    if (row->reason_length < 8u ||
         row->reason_length > SIMPLE_MCDC_EXCLUSION_REASON_BYTES_V1) return false;
     bool visible = false, separator = false;
     for (uint32_t i = 0; i < row->reason_length; ++i) {
@@ -1562,6 +1562,24 @@ static void mcdc_sha256_finish_hex_v1(McdcSha256V1 *ctx, uint8_t hex[64]) {
         const uint8_t value = (uint8_t)(ctx->state[i] >> (24u - j * 8u));
         hex[(i * 4u + j) * 2u] = digits[value >> 4];
         hex[(i * 4u + j) * 2u + 1u] = digits[value & 15u];
+    }
+}
+
+static bool mcdc_exclusion_kind_predicate_valid_v1(
+        uint32_t kind, uint64_t predicate_id) {
+    switch (kind) {
+        case SIMPLE_MCDC_EXCLUSION_CAPABILITY_UNAVAILABLE_V1:
+            return predicate_id == SIMPLE_MCDC_PREDICATE_CAPABILITY_UNAVAILABLE_V1;
+        case SIMPLE_MCDC_EXCLUSION_FIXTURE_UNAVAILABLE_V1:
+            return predicate_id == SIMPLE_MCDC_PREDICATE_FIXTURE_UNAVAILABLE_V1;
+        case SIMPLE_MCDC_EXCLUSION_PLATFORM_INAPPLICABLE_V1:
+            return predicate_id == SIMPLE_MCDC_PREDICATE_PLATFORM_INAPPLICABLE_V1;
+        case SIMPLE_MCDC_EXCLUSION_SAFETY_PROHIBITED_V1:
+            return predicate_id == SIMPLE_MCDC_PREDICATE_SAFETY_PROHIBITED_V1;
+        case SIMPLE_MCDC_EXCLUSION_UNCONTROLLABLE_NONDETERMINISM_V1:
+            return predicate_id == SIMPLE_MCDC_PREDICATE_UNCONTROLLABLE_NONDETERMINISM_V1;
+        default:
+            return false;
     }
 }
 
@@ -1646,11 +1664,17 @@ int32_t rt_mcdc_report_mcdp_v1(
         const uint64_t complete = (UINT64_C(1) << program->condition_count) - 1u;
         if (!row->decision_id || !row->source_digest || !row->condition_mask ||
             (row->condition_mask & ~complete) || !row->capability_id ||
+            !row->scenario_id || !row->code_id ||
             (!row->evidence_digest_hi && !row->evidence_digest_lo) ||
             !row->owner_id ||
             row->condition_count != program->condition_count || row->reserved0 ||
-            row->kind != SIMPLE_MCDC_EXCLUSION_CAPABILITY_UNAVAILABLE_V1 ||
+            !mcdc_exclusion_kind_predicate_valid_v1(row->kind,
+                                                     row->predicate_id) ||
+            !row->observed_epoch || row->observed_epoch > row->reviewed_epoch ||
+            row->reviewed_epoch - row->observed_epoch > UINT64_C(7776000) ||
             row->reviewed_epoch > current_epoch || current_epoch > row->expires_epoch ||
+            current_epoch - row->observed_epoch > UINT64_C(7776000) ||
+            row->expires_epoch - row->reviewed_epoch > UINT64_C(7776000) ||
             !mcdc_exclusion_reason_valid_v1(row))
             return SIMPLE_MCDC_V1_EXCLUSION_INVALID;
         if (exclusion_index &&
@@ -1725,10 +1749,14 @@ int32_t rt_mcdc_report_mcdp_v1(
         mcdc_sha256_scalar_le_v1(&digest, x->decision_id, 8u);
         mcdc_sha256_scalar_le_v1(&digest, x->source_digest, 8u);
         mcdc_sha256_scalar_le_v1(&digest, x->condition_mask, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->scenario_id, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->code_id, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->predicate_id, 8u);
         mcdc_sha256_scalar_le_v1(&digest, x->capability_id, 8u);
         mcdc_sha256_scalar_le_v1(&digest, x->evidence_digest_hi, 8u);
         mcdc_sha256_scalar_le_v1(&digest, x->evidence_digest_lo, 8u);
         mcdc_sha256_scalar_le_v1(&digest, x->owner_id, 8u);
+        mcdc_sha256_scalar_le_v1(&digest, x->observed_epoch, 8u);
         mcdc_sha256_scalar_le_v1(&digest, x->reviewed_epoch, 8u);
         mcdc_sha256_scalar_le_v1(&digest, x->expires_epoch, 8u);
         mcdc_sha256_scalar_le_v1(&digest, x->condition_count, 4u);

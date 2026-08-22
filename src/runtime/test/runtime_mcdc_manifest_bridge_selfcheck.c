@@ -173,8 +173,11 @@ int main(void) {
 
     SimpleMcdcExclusionV1 exclusion = {
         .decision_id = 9, .source_digest = 99, .condition_mask = 2,
+        .scenario_id = 101, .code_id = 102,
+        .predicate_id = SIMPLE_MCDC_PREDICATE_CAPABILITY_UNAVAILABLE_V1,
         .capability_id = 77, .evidence_digest_hi = 123,
         .evidence_digest_lo = 456, .owner_id = 88,
+        .observed_epoch = 4,
         .reviewed_epoch = 5, .expires_epoch = 20,
         .condition_count = 2,
         .kind = SIMPLE_MCDC_EXCLUSION_CAPABILITY_UNAVAILABLE_V1,
@@ -188,6 +191,40 @@ int main(void) {
     assert(report.excluded_conditions == 1 && report.eligible_conditions == 1 &&
            report.covered_eligible_conditions == 1 &&
            report.validated_exclusions == 1 && report.gate_passed == 1);
+    const uint32_t kinds[] = {
+        SIMPLE_MCDC_EXCLUSION_CAPABILITY_UNAVAILABLE_V1,
+        SIMPLE_MCDC_EXCLUSION_FIXTURE_UNAVAILABLE_V1,
+        SIMPLE_MCDC_EXCLUSION_PLATFORM_INAPPLICABLE_V1,
+        SIMPLE_MCDC_EXCLUSION_SAFETY_PROHIBITED_V1,
+        SIMPLE_MCDC_EXCLUSION_UNCONTROLLABLE_NONDETERMINISM_V1
+    };
+    const uint64_t predicates[] = {
+        SIMPLE_MCDC_PREDICATE_CAPABILITY_UNAVAILABLE_V1,
+        SIMPLE_MCDC_PREDICATE_FIXTURE_UNAVAILABLE_V1,
+        SIMPLE_MCDC_PREDICATE_PLATFORM_INAPPLICABLE_V1,
+        SIMPLE_MCDC_PREDICATE_SAFETY_PROHIBITED_V1,
+        SIMPLE_MCDC_PREDICATE_UNCONTROLLABLE_NONDETERMINISM_V1
+    };
+    for (size_t kind_index = 0; kind_index < 5; ++kind_index) {
+        exclusion.kind = kinds[kind_index];
+        exclusion.predicate_id = predicates[kind_index];
+        assert(rt_mcdc_report_mcdp_v1(
+                   incomplete, 2, wire, wire_size, &exclusion, 1, 10,
+                   SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,
+                   witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_OK);
+    }
+    exclusion.predicate_id = SIMPLE_MCDC_PREDICATE_CAPABILITY_UNAVAILABLE_V1;
+    assert(rt_mcdc_report_mcdp_v1(
+               incomplete, 2, wire, wire_size, &exclusion, 1, 10,
+               SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_EXCLUSION_INVALID);
+    exclusion.kind = SIMPLE_MCDC_EXCLUSION_CAPABILITY_UNAVAILABLE_V1;
+    exclusion.observed_epoch = 6;
+    assert(rt_mcdc_report_mcdp_v1(
+               incomplete, 2, wire, wire_size, &exclusion, 1, 10,
+               SIMPLE_MCDC_REPORT_NORMAL_V1, programs, 1, tokens, 3,
+               witnesses, 2, 100, &report) == SIMPLE_MCDC_V1_EXCLUSION_INVALID);
+    exclusion.observed_epoch = 4;
     exclusion.expires_epoch = 9;
     assert(rt_mcdc_report_mcdp_v1(
                incomplete, 2, wire, wire_size, &exclusion, 1, 10,
