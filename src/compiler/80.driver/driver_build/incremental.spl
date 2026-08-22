@@ -111,6 +111,20 @@ fn native_build_compiler_source_fingerprint() -> text:
     fp
 
 fn native_build_compiler_executable_hash() -> text:
+    # Under `simple run <script>` rt_cli_get_args()[0] is the SCRIPT, not the
+    # compiler, so each entrypoint script hashed to a different "exe=" identity:
+    # parse-shard children (parse_shard_main.spl) and HIR-shard children
+    # (native_build_worker.spl) landed in disjoint front-end cache scopes and
+    # every HIR child re-parsed the whole closure from source. See
+    # doc/08_tracking/bug/hir_shard_children_reparse_closure_2026-08-22.md.
+    # The orchestrator publishes the resolved compiler in SIMPLE_BINARY before
+    # spawning anything; hash THAT when present so every process of a build
+    # (and every build run by the same compiler) shares one identity.
+    val simple_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if simple_bin != "" and rt_file_exists(simple_bin):
+        val bin_hash = rt_file_hash_sha256(simple_bin)
+        if bin_hash.len() == 64:
+            return bin_hash
     val args = rt_cli_get_args()
     if args.len() > 0:
         val hash = rt_file_hash_sha256(args[0])
