@@ -113,6 +113,18 @@
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed VHDL target-index tranche
+
+- Indexed exact raw qualified/bare names for all and hardware-only functions.
+- Preserved ambiguity counts, qualified errors, bare nil, and rewrite behavior.
+- Removed per-edge key materialization, selection sort, full scan, and repeated
+  qualified-identity construction.
+- Reused behavioral coverage for unique/qualified/ambiguous calls and port maps;
+  added mirrored structural complexity/diagnostic contracts.
+- Static model: `O(E*F^2)` and `E*F` identity churn become expected `O(F+E)`
+  with `O(F)` operation-local index state.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Completed VHDL trace-loop tranche
 
 - Hoisted driver and catalog trace decisions after initial validation.
