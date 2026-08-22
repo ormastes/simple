@@ -94,6 +94,13 @@ typedef struct {
     uint8_t identity_sha256[64];
 } SimpleMcdcManifestInfoV1;
 
+/* Recompute the lowercase SHA-256 identity over canonical MCDP V1 bytes:
+ * bytes [0,24) followed by bytes [88,byte_count). The embedded identity field
+ * is deliberately excluded. This helper is allocation free. */
+int32_t rt_mcdc_manifest_identity_v1(const uint8_t *bytes,
+                                     uint64_t byte_count,
+                                     uint8_t identity_sha256[64]);
+
 #if defined(__cplusplus)
 #define SIMPLE_MCDC_STATIC_ASSERT static_assert
 #else

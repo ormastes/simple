@@ -2,8 +2,30 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <time.h>
 
 #include "../runtime_mcdc_v1.h"
+
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+static int track_allocations;
+static uint64_t tracked_allocations;
+void *__real_malloc(size_t);
+void *__real_calloc(size_t, size_t);
+void *__real_realloc(void *, size_t);
+void *__wrap_malloc(size_t size) {
+    if (track_allocations) ++tracked_allocations;
+    return __real_malloc(size);
+}
+void *__wrap_calloc(size_t count, size_t size) {
+    if (track_allocations) ++tracked_allocations;
+    return __real_calloc(count, size);
+}
+void *__wrap_realloc(void *old, size_t size) {
+    if (track_allocations) ++tracked_allocations;
+    return __real_realloc(old, size);
+}
+#endif
 
 int64_t rt_string_new(const uint8_t *bytes, uint64_t length) {
     uint8_t *copy = (uint8_t *)malloc((size_t)length + 1u);
@@ -31,7 +53,6 @@ static size_t make_manifest(uint8_t *wire) {
     put_u32(wire + 4, 1);
     put_u64(wire + 8, 1);
     put_u64(wire + 16, 3);
-    memset(wire + 24, 'a', 64);
     put_u64(wire + 88, 9);
     put_u64(wire + 96, 99);
     put_u32(wire + 104, 2);
@@ -46,6 +67,10 @@ static size_t make_manifest(uint8_t *wire) {
     put_u64(wire + 144, 1);
     put_u32(wire + 152, 3);
     memcpy(wire + 156, "sid", 3);
+    uint8_t identity[64];
+    assert(rt_mcdc_manifest_identity_v1(wire, 159, identity) ==
+           SIMPLE_MCDC_V1_OK);
+    memcpy(wire + 24, identity, sizeof(identity));
     return 159;
 }
 
@@ -53,7 +78,10 @@ static size_t make_empty_manifest(uint8_t *wire) {
     memset(wire, 0, 96);
     put_u32(wire, UINT32_C(0x5044434d));
     put_u32(wire + 4, 1);
-    memset(wire + 24, 'b', 64);
+    uint8_t identity[64];
+    assert(rt_mcdc_manifest_identity_v1(wire, 96, identity) ==
+           SIMPLE_MCDC_V1_OK);
+    memcpy(wire + 24, identity, sizeof(identity));
     return 96;
 }
 
@@ -65,13 +93,16 @@ int main(void) {
            SIMPLE_MCDC_V1_OK);
     assert(info.program_count == 1 && info.token_count == 3 &&
            info.semantic_count == 1 && info.semantic_offset == 144);
-    assert(info.identity_sha256[0] == 'a' && info.identity_sha256[63] == 'a');
+    assert(memcmp(info.identity_sha256, wire + 24, 64) == 0);
 
     uint8_t empty_wire[96];
     assert(make_empty_manifest(empty_wire) == sizeof(empty_wire));
     assert(rt_mcdc_manifest_requirements_v1(empty_wire, sizeof(empty_wire),
                                             &info) == SIMPLE_MCDC_V1_OK);
     assert(info.program_count == 0 && info.token_count == 0);
+    assert(memcmp(info.identity_sha256,
+                  "aed8c54219a538aba0c6f80905a7bb1e28ccff9e376f4a9f5d00540c4ce8cfc8",
+                  64) == 0);
 
     SimpleMcdcDecisionExprV1 programs[1];
     SimpleMcdcExprTokenV1 tokens[3];
@@ -97,6 +128,26 @@ int main(void) {
                witnesses, 2, 20, &analysis, &info) == SIMPLE_MCDC_V1_OK);
     assert(analysis.covered_conditions == 1 && witnesses[0].policy == 1);
 
+    /* Every canonical region is cryptographically bound. Structural validity
+     * alone must not admit a manifest altered after compiler publication. */
+    uint8_t tampered[160];
+    memcpy(tampered, wire, wire_size);
+    tampered[96] ^= 1u; /* source digest */
+    assert(rt_mcdc_manifest_requirements_v1(tampered, wire_size, &info) ==
+           SIMPLE_MCDC_V1_INVALID);
+    memcpy(tampered, wire, wire_size);
+    tampered[132] ^= 1u; /* condition ordinal */
+    assert(rt_mcdc_manifest_requirements_v1(tampered, wire_size, &info) ==
+           SIMPLE_MCDC_V1_INVALID);
+    memcpy(tampered, wire, wire_size);
+    tampered[158] ^= 1u; /* semantic identity */
+    assert(rt_mcdc_manifest_requirements_v1(tampered, wire_size, &info) ==
+           SIMPLE_MCDC_V1_INVALID);
+    memcpy(tampered, wire, wire_size);
+    tampered[16] ^= 1u; /* header token count */
+    assert(rt_mcdc_manifest_requirements_v1(tampered, wire_size, &info) ==
+           SIMPLE_MCDC_V1_INVALID);
+
     SimpleMcdcDecisionExprV1 with_unobserved[] = {
         programs[0], {10, 100, 1, 1, 3}
     };
@@ -120,5 +171,38 @@ int main(void) {
     wire[24] = 'A';
     assert(rt_mcdc_manifest_requirements_v1(wire, wire_size, &info) ==
            SIMPLE_MCDC_V1_INVALID);
+
+#ifdef MCDC_SELFCHECK_PERF
+    make_manifest(wire);
+    const uint64_t iterations = UINT64_C(200000);
+    struct timespec start, finish;
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+    tracked_allocations = 0;
+    track_allocations = 1;
+#endif
+    assert(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+    for (uint64_t i = 0; i < iterations; ++i)
+        assert(rt_mcdc_manifest_requirements_v1(wire, wire_size, &info) ==
+               SIMPLE_MCDC_V1_OK);
+    assert(clock_gettime(CLOCK_MONOTONIC, &finish) == 0);
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+    track_allocations = 0;
+    assert(tracked_allocations == 0);
+#endif
+    const uint64_t elapsed_ns = (uint64_t)(
+        (int64_t)(finish.tv_sec - start.tv_sec) * INT64_C(1000000000) +
+        (int64_t)(finish.tv_nsec - start.tv_nsec));
+    const uint64_t ns_per_manifest = elapsed_ns / iterations;
+    printf("mcdc_manifest_identity_perf iterations=%llu ns_per_manifest=%llu allocations=%llu\n",
+           (unsigned long long)iterations,
+           (unsigned long long)ns_per_manifest,
+#ifdef MCDC_SELFCHECK_WRAP_ALLOC
+           (unsigned long long)tracked_allocations
+#else
+           0ull
+#endif
+    );
+    assert(ns_per_manifest < UINT64_C(100000));
+#endif
     return 0;
 }

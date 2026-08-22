@@ -38,6 +38,15 @@ Sibling layers communicate only through the common contracts. App I/O remains a 
 
 The HIR pass canonicalizes `(schema, package/module identity, enclosing symbol, authored relative path, source span, Boolean DAG)` and hashes it for a semantic decision ID. Condition IDs add canonical ordinal and atom span. Rows are sorted by semantic ID and receive dense nonzero runtime slots only after closure freeze; collision is a hard error.
 
+The frozen `MCDP` V1 artifact identity is lowercase SHA-256 over the exact
+little-endian bytes `[0,24)` followed by `[88,end)`: magic, schema, program and
+token counts, every sorted program row, every postfix token (including reserved
+zero bytes), and the length-prefixed semantic-ID table. Bytes `[24,88)` contain
+the digest itself and are the only excluded region. Loaders/runtime bridges
+recompute this identity before decoding or analysis and compare all 64 hex bytes;
+a syntactically valid but altered manifest fails closed. Recompute uses a
+single streaming pass and fixed stack workspace, with no heap allocation.
+
 The MIR sequence is:
 
 ```text
@@ -105,4 +114,3 @@ External hardware rows remain explicit excluded/blocked rows with stable executo
 - Duplicate physical side effects per provider: unsafe and nondeterministic.
 - Free-text skip or defect waiver: weakens the 100% eligible claim.
 - Private MC/DC dynloader: duplicates canonical aspect-pack ownership.
-

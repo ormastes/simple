@@ -45,7 +45,7 @@ use compiler.mir_opt.mir_opt.typed_storage_view_producer.{
 }
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type,
     serialize_const_value}
-use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use std.common.structural.storage_layout.storage_layout_contracts.{
     storage_layout_kind_to_u8, storage_conversion_policy_to_u8
 }
@@ -734,7 +734,6 @@ class CompileContext:
         var token_counts: [i64] = []
         var token_opcodes: [i64] = []
         var token_conditions: [i64] = []
-        var identity_parts: [text] = ["mcdc-postfix-v1"]
         var out_index = 0
         while out_index < order.len():
             val row = order[out_index]
@@ -760,9 +759,6 @@ class CompileContext:
             token_offsets.push(token_opcodes.len())
             token_counts.push(count)
             val semantic_id = self.mcdc_manifest_semantic_ids[row]
-            var row_identity = source_digest.to_text() + ":" + decision_id.to_text()
-                + ":" + condition_count.to_text() + ":" + semantic_id.len().to_text()
-                + "#" + semantic_id
             var stack_depth = 0
             var referenced_mask = 0
             var token_index = 0
@@ -788,11 +784,9 @@ class CompileContext:
                     return ""
                 token_opcodes.push(opcode)
                 token_conditions.push(condition)
-                row_identity = row_identity + ":" + opcode.to_text() + "," + condition.to_text()
                 token_index = token_index + 1
             if stack_depth != 1 or referenced_mask != (1 << condition_count) - 1:
                 return ""
-            identity_parts.push(row_identity)
             out_index = out_index + 1
         self.mcdc_manifest_semantic_ids = semantic_ids
         self.mcdc_manifest_decision_ids = decision_ids
@@ -802,9 +796,60 @@ class CompileContext:
         self.mcdc_manifest_token_counts = token_counts
         self.mcdc_manifest_token_opcodes = token_opcodes
         self.mcdc_manifest_token_conditions = token_conditions
-        self.mcdc_manifest_frozen_identity = sha256_text(identity_parts.join("|"))
         self.mcdc_manifest_frozen = true
+        # Canonical MCDP V1 identity is SHA-256 over the exact little-endian
+        # 24-byte header followed by every byte after the 64-byte identity
+        # field. This binds counts, rows, tokens, and semantic IDs without a
+        # text/number formatting contract at the runtime boundary.
+        val identity_input = self.mcdc_manifest_identity_input_v1()
+        if identity_input.len() == 0:
+            self.mcdc_manifest_frozen = false
+            return ""
+        self.mcdc_manifest_frozen_identity = sha256_u8_hex(identity_input)
+        if self.mcdc_manifest_frozen_identity.len() != 64:
+            self.mcdc_manifest_frozen = false
+            return ""
         self.mcdc_manifest_frozen_identity
+
+    fn mcdc_manifest_identity_input_v1() -> [u8]:
+        if not self.mcdc_manifest_frozen: return []
+        val row_count = self.mcdc_manifest_decision_ids.len()
+        val token_count = self.mcdc_manifest_token_opcodes.len()
+        var semantic_bytes = 0
+        for semantic_id in self.mcdc_manifest_semantic_ids:
+            semantic_bytes = semantic_bytes + 4 + semantic_id.bytes().len()
+        val total_bytes = 32 + row_count * 32 + token_count * 8 + semantic_bytes
+        if total_bytes < 32 or total_bytes > 67108800: return []
+        var out: [u8] = [0u8; total_bytes]
+        mcdc_wire_put_u32_v1(out, 0, 0x5044434d)
+        mcdc_wire_put_u32_v1(out, 4, 1)
+        mcdc_wire_put_u64_v1(out, 8, row_count)
+        mcdc_wire_put_u64_v1(out, 16, token_count)
+        var cursor = 24
+        var row = 0
+        while row < row_count:
+            mcdc_wire_put_u64_v1(out, cursor, self.mcdc_manifest_decision_ids[row])
+            mcdc_wire_put_u64_v1(out, cursor + 8, self.mcdc_manifest_source_digests[row])
+            mcdc_wire_put_u32_v1(out, cursor + 16, self.mcdc_manifest_condition_counts[row])
+            mcdc_wire_put_u32_v1(out, cursor + 20, self.mcdc_manifest_token_counts[row])
+            mcdc_wire_put_u64_v1(out, cursor + 24, self.mcdc_manifest_token_offsets[row])
+            cursor = cursor + 32
+            row = row + 1
+        var token = 0
+        while token < token_count:
+            out[cursor] = self.mcdc_manifest_token_opcodes[token].to_u8()
+            mcdc_wire_put_u32_v1(out, cursor + 4, self.mcdc_manifest_token_conditions[token])
+            cursor = cursor + 8
+            token = token + 1
+        mcdc_wire_put_u64_v1(out, cursor, self.mcdc_manifest_semantic_ids.len())
+        cursor = cursor + 8
+        for semantic_id in self.mcdc_manifest_semantic_ids:
+            val bytes = semantic_id.bytes()
+            mcdc_wire_put_u32_v1(out, cursor, bytes.len())
+            cursor = cursor + 4
+            mcdc_wire_put_bytes_v1(out, cursor, bytes)
+            cursor = cursor + bytes.len()
+        out
 
     fn mcdc_manifest_wire_v1() -> [u8]:
         # MCDP V1 is directly consumable as runtime_mcdc_v1.h arrays:

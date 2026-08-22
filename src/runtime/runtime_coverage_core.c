@@ -993,6 +993,106 @@ static bool mcdc_manifest_identity_valid_v1(const uint8_t *identity) {
     return true;
 }
 
+typedef struct {
+    uint32_t state[8];
+    uint64_t byte_count;
+    uint8_t block[64];
+    size_t used;
+} McdcSha256V1;
+
+static uint32_t mcdc_sha256_rotr_v1(uint32_t value, unsigned shift) {
+    return (value >> shift) | (value << (32u - shift));
+}
+
+static void mcdc_sha256_compress_v1(McdcSha256V1 *ctx,
+                                     const uint8_t block[64]) {
+    static const uint32_t k[64] = {
+        0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
+        0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,
+        0xe49b69c1u,0xefbe4786u,0x0fc19dc6u,0x240ca1ccu,0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,
+        0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,0xc6e00bf3u,0xd5a79147u,0x06ca6351u,0x14292967u,
+        0x27b70a85u,0x2e1b2138u,0x4d2c6dfcu,0x53380d13u,0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,
+        0xa2bfe8a1u,0xa81a664bu,0xc24b8b70u,0xc76c51a3u,0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,
+        0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,
+        0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u
+    };
+    uint32_t w[64];
+    for (size_t i = 0; i < 16u; ++i) {
+        const size_t o = i * 4u;
+        w[i] = ((uint32_t)block[o] << 24) | ((uint32_t)block[o + 1u] << 16) |
+               ((uint32_t)block[o + 2u] << 8) | (uint32_t)block[o + 3u];
+    }
+    for (size_t i = 16u; i < 64u; ++i) {
+        const uint32_t s0 = mcdc_sha256_rotr_v1(w[i - 15u], 7) ^
+                            mcdc_sha256_rotr_v1(w[i - 15u], 18) ^ (w[i - 15u] >> 3);
+        const uint32_t s1 = mcdc_sha256_rotr_v1(w[i - 2u], 17) ^
+                            mcdc_sha256_rotr_v1(w[i - 2u], 19) ^ (w[i - 2u] >> 10);
+        w[i] = w[i - 16u] + s0 + w[i - 7u] + s1;
+    }
+    uint32_t a=ctx->state[0],b=ctx->state[1],c=ctx->state[2],d=ctx->state[3];
+    uint32_t e=ctx->state[4],f=ctx->state[5],g=ctx->state[6],h=ctx->state[7];
+    for (size_t i = 0; i < 64u; ++i) {
+        const uint32_t s1=mcdc_sha256_rotr_v1(e,6)^mcdc_sha256_rotr_v1(e,11)^mcdc_sha256_rotr_v1(e,25);
+        const uint32_t t1=h+s1+((e&f)^((~e)&g))+k[i]+w[i];
+        const uint32_t s0=mcdc_sha256_rotr_v1(a,2)^mcdc_sha256_rotr_v1(a,13)^mcdc_sha256_rotr_v1(a,22);
+        const uint32_t t2=s0+((a&b)^(a&c)^(b&c));
+        h=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;
+    }
+    ctx->state[0]+=a;ctx->state[1]+=b;ctx->state[2]+=c;ctx->state[3]+=d;
+    ctx->state[4]+=e;ctx->state[5]+=f;ctx->state[6]+=g;ctx->state[7]+=h;
+}
+
+static void mcdc_sha256_update_v1(McdcSha256V1 *ctx, const uint8_t *bytes,
+                                  size_t count) {
+    ctx->byte_count += count;
+    while (count) {
+        size_t take = 64u - ctx->used;
+        if (take > count) take = count;
+        memcpy(ctx->block + ctx->used, bytes, take);
+        ctx->used += take; bytes += take; count -= take;
+        if (ctx->used == 64u) {
+            mcdc_sha256_compress_v1(ctx, ctx->block);
+            ctx->used = 0;
+        }
+    }
+}
+
+static void mcdc_manifest_identity_compute_v1(const uint8_t *bytes,
+                                              size_t byte_count,
+                                              uint8_t hex[64]) {
+    McdcSha256V1 ctx = {{0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,
+                         0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u},0,{0},0};
+    mcdc_sha256_update_v1(&ctx, bytes, 24u);
+    mcdc_sha256_update_v1(&ctx, bytes + 88u, byte_count - 88u);
+    const uint64_t bits = ctx.byte_count * 8u;
+    const uint8_t one = 0x80u;
+    const uint8_t zeroes[64] = {0};
+    mcdc_sha256_update_v1(&ctx, &one, 1u);
+    const size_t padding = ctx.used <= 56u ? 56u - ctx.used : 120u - ctx.used;
+    mcdc_sha256_update_v1(&ctx, zeroes, padding);
+    uint8_t length[8];
+    for (size_t i = 0; i < 8u; ++i) length[7u - i] = (uint8_t)(bits >> (i * 8u));
+    mcdc_sha256_update_v1(&ctx, length, sizeof(length));
+    static const uint8_t digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < 8u; ++i) for (size_t j = 0; j < 4u; ++j) {
+        const uint8_t value = (uint8_t)(ctx.state[i] >> (24u - j * 8u));
+        hex[(i * 4u + j) * 2u] = digits[value >> 4];
+        hex[(i * 4u + j) * 2u + 1u] = digits[value & 15u];
+    }
+}
+
+int32_t rt_mcdc_manifest_identity_v1(const uint8_t *bytes,
+                                     uint64_t byte_count,
+                                     uint8_t identity_sha256[64]) {
+    if (!bytes || !identity_sha256 || byte_count < 96u ||
+        byte_count > MCDC_MANIFEST_MAX_BYTES_V1 || byte_count > SIZE_MAX ||
+        mcdc_ranges_overlap(bytes, (size_t)byte_count, identity_sha256, 64u))
+        return SIMPLE_MCDC_V1_INVALID;
+    mcdc_manifest_identity_compute_v1(bytes, (size_t)byte_count,
+                                      identity_sha256);
+    return SIMPLE_MCDC_V1_OK;
+}
+
 static int32_t mcdc_manifest_inspect_v1(
         const uint8_t *bytes, uint64_t byte_count,
         SimpleMcdcManifestInfoV1 *info) {
@@ -1074,6 +1174,13 @@ static int32_t mcdc_manifest_inspect_v1(
         cursor += length;
     }
     if (cursor != byte_count) return SIMPLE_MCDC_V1_INVALID;
+    uint8_t recomputed_identity[64];
+    mcdc_manifest_identity_compute_v1(bytes, (size_t)byte_count,
+                                      recomputed_identity);
+    uint8_t identity_difference = 0;
+    for (size_t i = 0; i < sizeof(recomputed_identity); ++i)
+        identity_difference |= (uint8_t)(recomputed_identity[i] ^ bytes[24u + i]);
+    if (identity_difference) return SIMPLE_MCDC_V1_INVALID;
     *info = (SimpleMcdcManifestInfoV1){program_count, token_count,
                                       semantic_count, semantic_offset, {0}};
     memcpy(info->identity_sha256, bytes + 24, 64);
