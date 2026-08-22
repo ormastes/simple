@@ -514,24 +514,33 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
 fn run_lint_file_with_linter(
     linter: Linter, file_path: String, args: [text]
 ) -> Int:
-    _run_lint_with_linter_source(linter, file_path, args, nil)
+    _run_lint_with_linter_source(
+        linter, file_path, LintCliPolicy.from_args(args), nil)
 
 # Source-owned command entrypoint. Batch callers that already validated and
 # loaded the file use this to share the exact payload with sibling analyses.
 fn run_lint_source_with_linter(
     linter: Linter, file_path: String, args: [text], content: String
 ) -> Int:
-    _run_lint_with_linter_source(linter, file_path, args, Some(content))
+    _run_lint_with_linter_source(
+        linter, file_path, LintCliPolicy.from_args(args), Some(content))
+
+# Command-scoped entrypoint: the caller parses invariant CLI policy once and
+# reuses it for every source. Positional targets never enter the file hot path.
+fn run_lint_source_with_linter_policy(
+    linter: Linter, file_path: String, policy: LintCliPolicy, content: String
+) -> Int:
+    _run_lint_with_linter_source(linter, file_path, policy, Some(content))
 
 fn _run_lint_with_linter_source(
-    linter: Linter, file_path: String, args: [text], content: String?
+    linter: Linter, file_path: String, policy: LintCliPolicy, content: String?
 ) -> Int:
-    val deny_all = args.contains("--deny-all")
-    val warn_all = args.contains("--warn-all")
-    val json_output = args.contains("--json")
-    val fix_mode = args.contains("--fix")
-    val fix_all = args.contains("--fix-all")
-    val fix_dry_run = args.contains("--fix-dry-run")
+    val deny_all = policy.deny_all
+    val warn_all = policy.warn_all
+    val json_output = policy.json_output
+    val fix_mode = policy.fix_mode
+    val fix_all = policy.fix_all
+    val fix_dry_run = policy.fix_dry_run
 
     # Try to load config relative to the target file
     val sdn_path = linter_find_project_sdn(linter, file_path)
@@ -557,28 +566,26 @@ fn _run_lint_with_linter_source(
             error("lint", linter.config.error)
         return 2
 
+    if policy.error != "":
+        if json_output:
+            print("{\"type\":\"lint-error\",\"message\":\"{escape_json(policy.error)}\"}")
+        else:
+            error("lint", policy.error)
+        return 2
+
     # --profile=<tier> selects the strictness tier (moderate|strict|robust|
     # critical; old spellings moderate|lib|reliable|mission-critical still
     # parse as deprecated aliases — see config_and_model.parse_lint_profile).
     # A file-header @profile() may still override this (most-local-wins).
-    for arg in args:
-        if arg.starts_with("--profile="):
-            val prof_str = arg.slice(10, arg.len())
-            match parse_lint_profile(prof_str):
-                case Some(profile):
-                    linter.config.set_profile(profile)
-                case nil:
-                    if json_output:
-                        print("{\"type\":\"lint-error\",\"message\":\"unknown profile: {escape_json(prof_str)}\"}")
-                    else:
-                        error("lint", "Unknown profile: " + prof_str)
-                    return 2
+    match policy.profile:
+        case Some(profile): linter.config.set_profile(profile)
+        case nil: pass_do_nothing
 
     # --wm-lane turns ON the default-off WM/GUI/web/2D portable-lane boundary
     # rule and nothing else, so the portability contract can be checked without
     # the ~900 lines of noise --warn-all produces. See
     # _LintMain/wm_lane_boundary_lints.spl.
-    if args.contains("--wm-lane"):
+    if policy.wm_lane:
         linter.config.set_level("wm_lane_boundary", LintLevel.Deny)
 
     if warn_all:
