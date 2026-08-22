@@ -228,6 +228,18 @@ implementation-blocked-by-bootstrap-authority
   dispatch work and preserving the existing Pure-Simple callable API. The
   meaningful remaining regression is the measured Stage-3 HIR RSS blocker
   above; no C/Rust substitution is accepted.
+- verify-post-rebase: The single final focused batch passed the real interpreter
+  owner guard selftest/local/ref paths (13/13 modules each) and the complete
+  must-check tiering contract. Push selftest took 4s, committed-ref validation
+  1s, and installed-hook validation 0s; the combined batch took 14.13s with
+  108,288 KiB peak RSS. Each push path independently satisfies the 10-second
+  NFR. The Simple optimizer was not run because Stage 4 remains unavailable;
+  the admitted Stage 2 artifact is not general optimizer/SPipe evidence.
+- docs-audit: Operator manual, guide, feature expert, bootstrap layer expert,
+  glossary, Unix/Windows installers, and `doc/06_spec` layout are present; the
+  layout scan found zero executable `*_spec.spl` files under `doc/06_spec`.
+  `doc/01_research/domain/must_check_tiering.md` remains missing and must be
+  produced through the required domain-research tooling before goal completion.
 - verify: Updated push/bootstrap/tiering self-tests passed; the real ref fixture
   remained within the ten-second budget. Full bootstrap remains blocked by the
   unchanged Stage-3 imported-type cascade after the third bounded cycle.
