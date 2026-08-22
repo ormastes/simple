@@ -660,3 +660,33 @@ phase-profile owners now lower this raw SFFI boundary explicitly with
 `rt_string_data` and `rt_string_len`. Another Stage 2 admission is required
 before Stage 3 can be retried because the admitted compiler embeds the old
 call site.
+
+### 2026-08-22 rebuilt Stage 2 and first durable promotion evidence
+
+The raw-boundary audit found a second instance of the same defect:
+`rt_mem_snapshot_record` still passed three boxed Simple `text` values to a C
+provider whose ABI is `(byte_ptr, byte_len)` for each value. The initial file
+was therefore created successfully but remained zero bytes when its first
+record was rejected. The driver now lowers `event`, `phase`, and `source_path`
+explicitly through `rt_string_data` / `rt_string_len` in both snapshot owners.
+
+A fresh four-job Stage 2 at `9c3cc6b4048` passed sanity and the struct receiver
+proof and was admitted. The canonical Stage 3 recovery then showed one
+intermittent SIGSEGV during streaming surfaces at sequence 62. A debugger run
+with the identical admitted compiler, environment, one-thread mode, and cache
+passed all 688 surfaces and entered HIR. Its durable first-module rows are:
+
+| row | promoted nodes | promoted bytes | RSS | HWM |
+|---|---:|---:|---:|---:|
+| `hir-promotion` | 13,485 | 419,955 | 640,932 KiB | 688,312 KiB |
+| `hir-promotion-total` | 38,060 | 1,218,945 | 640,932 KiB | 688,312 KiB |
+
+The debugger transaction was externally terminated while module 1 was still
+lowering. Its live backtrace was in `rt_transient_raw_insert` via `rt_alloc`,
+under a repeating chain of `register_imported_symbol_inner`,
+`materialize_imported_field_dependency_inner`, and
+`register_imported_type_methods_inner`. This is measured evidence of recursive
+import-materialization fan-out in the allocation hot path; it does not yet
+prove whether the termination is caused by a cycle, repeated acyclic work, or
+an ownership lifetime defect. The row remains OPEN pending a visited/in-flight
+audit of those three functions and a canonical Stage 3 completion.
