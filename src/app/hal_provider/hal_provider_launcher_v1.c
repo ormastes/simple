@@ -13,6 +13,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fsverity.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -22,6 +23,7 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -34,6 +36,8 @@ enum {
 };
 
 static const char *const HAL_BWRAP_PATH = "/usr/bin/bwrap";
+static const char *const HAL_PROVIDER_POLICY_PATH =
+    "/usr/libexec/simple/hal-provider-policy-v1";
 
 static int64_t monotonic_ms(void) {
     struct timespec value;
@@ -114,17 +118,147 @@ static int trusted_bwrap_image(void) {
         (value.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 }
 
+static int parse_u64_text(const char *text, uint64_t *out) {
+    char *end = NULL;
+    unsigned long long value;
+    if (!text || !*text) return 0;
+    errno = 0;
+    value = strtoull(text, &end, 10);
+    if (errno || !end || *end) return 0;
+    *out = (uint64_t)value;
+    return 1;
+}
+
+static int hex_nibble(char value) {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+static int policy_admits_worker(int worker_fd, const char *path,
+                                const struct stat *worker_stat) {
+    char buffer[4097];
+    char *save_line = NULL, *line;
+    int policy_fd;
+    ssize_t size;
+    struct stat policy_stat;
+    struct {
+        uint16_t digest_algorithm;
+        uint16_t digest_size;
+        unsigned char digest[64];
+    } measured;
+    policy_fd = open(HAL_PROVIDER_POLICY_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (policy_fd < 0 || fstat(policy_fd, &policy_stat) != 0 ||
+        !S_ISREG(policy_stat.st_mode) || policy_stat.st_uid != 0 ||
+        (policy_stat.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        if (policy_fd >= 0) close(policy_fd);
+        return 0;
+    }
+    size = read(policy_fd, buffer, sizeof(buffer) - 1);
+    close(policy_fd);
+    if (size <= 0 || size >= (ssize_t)sizeof(buffer) - 1) return 0;
+    buffer[size] = '\0';
+    memset(&measured, 0, sizeof(measured));
+    measured.digest_size = sizeof(measured.digest);
+    if (ioctl(worker_fd, FS_IOC_MEASURE_VERITY, &measured) != 0 ||
+        measured.digest_algorithm != FS_VERITY_HASH_ALG_SHA256 ||
+        measured.digest_size != 32) return 0;
+    line = strtok_r(buffer, "\n", &save_line);
+    while (line) {
+        char *fields[6];
+        char *save_field = NULL;
+        int count = 0, index;
+        uint64_t device, inode, file_size;
+        char *field = strtok_r(line, "|", &save_field);
+        while (field && count < 6) {
+            fields[count++] = field;
+            field = strtok_r(NULL, "|", &save_field);
+        }
+        if (count == 6 && field == NULL && strcmp(fields[0], "HALPROV1") == 0 &&
+            strcmp(fields[1], path) == 0 &&
+            parse_u64_text(fields[2], &device) &&
+            parse_u64_text(fields[3], &inode) &&
+            parse_u64_text(fields[4], &file_size) &&
+            device == (uint64_t)worker_stat->st_dev &&
+            inode == (uint64_t)worker_stat->st_ino &&
+            file_size == (uint64_t)worker_stat->st_size &&
+            strlen(fields[5]) == 64) {
+            for (index = 0; index < 32; ++index) {
+                int hi = hex_nibble(fields[5][index * 2]);
+                int lo = hex_nibble(fields[5][index * 2 + 1]);
+                if (hi < 0 || lo < 0 ||
+                    measured.digest[index] != (unsigned char)((hi << 4) | lo))
+                    break;
+            }
+            if (index == 32) return 1;
+        }
+        line = strtok_r(NULL, "\n", &save_line);
+    }
+    return 0;
+}
+
 static int trusted_worker_fd(const char *path) {
     struct stat value;
     int fd = open(path, O_PATH | O_NOFOLLOW);
     if (fd < 0) return -1;
     if (fstat(fd, &value) != 0 || !S_ISREG(value.st_mode) ||
         value.st_uid != 0 || (value.st_mode & (S_IWGRP | S_IWOTH)) != 0 ||
-        (value.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0) {
+        (value.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 ||
+        !policy_admits_worker(fd, path, &value)) {
         close(fd);
         return -1;
     }
     return fd;
+}
+
+static int read_small_file(const char *path, char *buffer, size_t capacity) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    ssize_t size;
+    if (fd < 0) return 0;
+    size = read(fd, buffer, capacity - 1);
+    close(fd);
+    if (size <= 0 || size >= (ssize_t)capacity - 1) return 0;
+    buffer[size] = '\0';
+    while (size > 0 && (buffer[size - 1] == '\n' || buffer[size - 1] == '\r'))
+        buffer[--size] = '\0';
+    return 1;
+}
+
+static int bounded_cgroup_v2(void) {
+    char membership[1024], base[1536], path[1664], value[128];
+    char *line, *newline;
+    uint64_t limit, quota, period;
+    if (!read_small_file("/proc/self/cgroup", membership, sizeof(membership)))
+        return 0;
+    line = strstr(membership, "0::/");
+    if (!line) return 0;
+    newline = strchr(line, '\n');
+    if (newline) *newline = '\0';
+    if (snprintf(base, sizeof(base), "/sys/fs/cgroup%s", line + 3) <= 0)
+        return 0;
+#define HAL_READ_CONTROL(name) do { \
+    if (snprintf(path, sizeof(path), "%s/%s", base, (name)) <= 0 || \
+        !read_small_file(path, value, sizeof(value))) return 0; \
+} while (0)
+    HAL_READ_CONTROL("memory.max");
+    if (!parse_u64_text(value, &limit) || limit > 256ULL * 1024ULL * 1024ULL)
+        return 0;
+    HAL_READ_CONTROL("memory.swap.max");
+    if (!parse_u64_text(value, &limit) || limit != 0) return 0;
+    HAL_READ_CONTROL("pids.max");
+    if (!parse_u64_text(value, &limit) || limit > 32) return 0;
+    HAL_READ_CONTROL("cpu.max");
+    {
+        char *space = strchr(value, ' ');
+        if (!space) return 0;
+        *space = '\0';
+        if (!parse_u64_text(value, &quota) ||
+            !parse_u64_text(space + 1, &period) || period == 0 || quota > period)
+            return 0;
+    }
+#undef HAL_READ_CONTROL
+    return 1;
 }
 
 static int apply_resource_limits(int64_t deadline_ms) {
@@ -261,7 +395,7 @@ static int session_main(int argc, char **argv) {
     size_t parent_size = 0, worker_size = 0;
     int status = 0;
     if (argc < 5 || argc > HAL_LAUNCHER_ARG_CAP || argv[4][0] != '/' ||
-        !trusted_bwrap_image() ||
+        !trusted_bwrap_image() || !bounded_cgroup_v2() ||
         !parse_positive(argv[2], 3600000, &deadline_ms) ||
         !parse_positive(argv[3], HAL_LAUNCHER_RESPONSE_CAP, &response_cap) ||
         pipe2(to_child, O_CLOEXEC) != 0 || pipe2(from_child, O_CLOEXEC) != 0)

@@ -7,6 +7,10 @@ C, and Rust provider lanes. The coordinator pins it and all three providers to
 root-installed `/usr/libexec/simple/*-v1` identities. Provider images are
 opened with `O_PATH|O_NOFOLLOW`, validated as root-owned/non-writable ELF
 executables, and passed by preserved descriptor to avoid pathname replacement.
+Admission additionally requires Linux fs-verity SHA-256 to match the exact
+device, inode, size, and digest row in the root-owned, non-writable
+`/usr/libexec/simple/hal-provider-policy-v1`; ordinary shells/interpreters and
+unmeasured or replaced provider images cannot enter a trusted lane.
 
 The worker receives only bounded stdin/stdout protocol endpoints. The launcher
 clears the environment, exhaustively closes ambient descriptors with
@@ -17,6 +21,12 @@ secret mounts. Fixed RLIMITs bound address space, processes, CPU, file output,
 descriptors, and core output. Deadline cancellation kills the process group and
 reaps the direct namespace supervisor; Bubblewrap `--die-with-parent` owns its
 descendants.
+
+Before any fork, the launcher also verifies that its current cgroup-v2 owner
+already enforces memory <=256 MiB, swap=0, pids <=32, and CPU quota <=one core.
+The worker inherits that cgroup and the minimal sandbox does not expose cgroupfs,
+so it cannot relax or escape those limits. Missing or unbounded cgroup controls
+fail before launch and emit no receipt.
 
 ## Evidence
 
