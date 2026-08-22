@@ -201,6 +201,16 @@ Malformed MIR, unknown effects/aliases, stale artifacts, unavailable facts, solv
 
 Positive: one source of compiler truth, bounded reuse, safer transformations, actionable diagnostics, and measurable hot paths. Negative: large multi-release migration, compatibility adapters, memory for bounded caches, and many passes remain disabled until individually proven. Neutral: downstream LLVM optimization remains separate backend delegation evidence and does not make a Simple MIR identity adapter active.
 
+### Parse-boundary trace policy
+
+`compiler.frontend.trace_policy` is the dependency-leaf owner for optional
+frontend tracing. A top-level parse samples `SIMPLE_COMPILER_TRACE` once;
+reentrant parses inherit that value and restore the exact prior active/cache
+pair. Outside a parse scope the accessor remains dynamic. The representation is
+two process-owned i64 cells, so it adds constant storage and avoids per-node
+environment/text traffic. It relies on the parser's existing serial
+process-global execution model and is not a concurrency primitive.
+
 ## References
 
 - `doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`
