@@ -763,6 +763,13 @@ owns the current method array locally and publishes the class once. Compatibilit
 wrappers may construct an index for standalone calls; the normal lint path
 shares the single index and ancestry facts.
 
+NAME001 distance uses Optimal String Alignment semantics with an explicit
+maximum distance. Only the `2L+1` diagonal band is material. Three row IDs
+rotate over one flat buffer; each row carries a logical start/end so stale
+slots are unreachable without clearing. Byte comparison preserves the existing
+String indexing contract and avoids substring allocation. Candidate iteration
+remains ordered because the first match determines the diagnostic message.
+
 HIR narrowing reserves the enum ID before building its Named enum type.
 Synthesis reserves the same enum identity and every `name::member-key` variant
 identity, then constructs the enum with those assigned IDs. Per-match member
