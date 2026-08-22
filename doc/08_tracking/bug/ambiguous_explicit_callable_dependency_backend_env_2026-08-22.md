@@ -1,7 +1,7 @@
 # `ambiguous explicit callable dependency `Backend`` blocks HIR lowering of llvm_backend.spl
 
 - **Date:** 2026-08-22
-- **Status:** SYMPTOM RESOLVED (run14, `75a66d615bd`) — LATENT DEFECT OPEN (the sweep still lets a glob veto an explicit import; no disagreeing candidate pair observed live yet)
+- **Status:** FIXED (explicit-over-glob precedence, in BOTH the facade chase and the sweep)
 - **Area:** `src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl`
   (`materialize_imported_callable_explicit_dependency_inner`, lines ~548-634)
 - **Severity:** HIGH — fatal HIR lowering error in a stage1 build lane
@@ -17,11 +17,22 @@ at `7f9a3e1c050`) emits, twice (once per lowering attempt, same site):
   ambiguous explicit callable dependency `Backend` in `compiler.backend.backend.env`
 ```
 
-There is exactly ONE `Backend` declaration in the whole tree —
-`src/compiler/70.backend/backend/backend_api.spl:166`, `type Backend = CompilerBackend`
-(`/usr/bin/grep -rnE '^(struct|class|trait|enum|type|interface) Backend\b' src/compiler/70.backend/`
-returns that single line). So this is NOT the tree-wide duplicate-type-name defect
-(`3f0ee65e2d1` / `duplicate_type_name_collision_audit_2026-07-17.md`).
+**CORRECTED (iteration 5) — the original claim here was wrong.** This record first
+said "there is exactly ONE `Backend` declaration in the whole tree". That grep was
+scoped to `src/compiler/70.backend/`. Tree-wide there are FOUR owned-code definitions:
+
+```
+src/lib/nogc_sync_mut/src/dl/config.spl:93:enum Backend:
+src/lib/nogc_sync_mut/src/di.spl:255:trait Backend:
+src/compiler/10.frontend/parser_types_expr.spl:237:enum Backend:
+src/compiler/70.backend/backend/backend_api.spl:166:type Backend = CompilerBackend
+```
+
+So this IS a genuine two-owner collision, of the same family as the `std.io`
+`file_lock`/`file_unlock` case — and it is exactly the trap the run14 lane named:
+**count DEFINITIONS, not export lines, and never scope the census to the directory you
+already suspect.** The correct resolution is not "the diagnostic is spurious" but "the
+explicit import decides which owner wins".
 
 ## Not caused by the recent callable-dependency rework
 
@@ -177,41 +188,55 @@ run14 (lane `a1174d1d99f3687a0`, worktree `/mnt/data/worktrees/stage1-clean16`, 
 17:14:59Z from `75a66d615bd`, which includes `ed4ca46f4c2`) ran with
 `SIMPLE_AMBIGDBG=1`. Measured in `stage1_build14.log` at HIR 522/688:
 
-**The diagnostic no longer occurs: `ambiguous explicit callable dependency` appears
-ZERO times in the whole log.** `llvm_backend.spl` is no longer among the `hir-fatal`
-sites; the 15 remaining fatals are a different class (`unresolved type: MirType` x8,
-`unresolved type: HirPattern` x2, ...).
+**RETRACTED (see the correction below).** This section originally read: "The diagnostic
+no longer occurs: `ambiguous explicit callable dependency` appears ZERO times in the
+whole log. `llvm_backend.spl` is no longer among the `hir-fatal` sites."
 
-The trace says exactly why, and the site itself is already past:
+**That was measured MID-PHASE (HIR 522/688) and was wrong.** At 17:44Z the same run
+shows:
+
+```
+[hir-fatal] source_idx=222 path=src/compiler/70.backend/backend/llvm_backend.spl
+  error_idx=0 text=... ambiguous explicit callable dependency ...
+```
+
+Class E is **1** in run14 (run13's terminal count was 2): down, but NOT closed, and a
+LIVE diagnostic rather than a latent wrong selection. The methodological error is worth
+naming because this lane has now made it twice: **a count taken from an unfinished run
+is not a count.** A zero measured before the phase ends is an absence of evidence, and I
+reported it as evidence of absence.
+
+What the trace does show, and what survives the retraction, is the mechanism — the
+`router-preresolved` lines below are real, they simply describe the OTHER importers of
+this dependency, not the one that errors:
 
 ```
 [ambig-dep] router owner=compiler.backend.backend.env dep=Backend imports=4
 [ambig-dep] router-preresolved owner=compiler.backend.backend.env dep=Backend
 ```
 
-`Backend` is now already bound in `compiler.backend.backend.env`'s qualified scope
-BEFORE the router's first step, so neither the facade chase nor the ambiguity sweep is
-consulted for it at all. That is the effect of the owner-side import-edge repairs landed
-between run13 and run14 (`1aa81cac8c6` "owner-side import gaps behind run13
-`unresolved type`/`unresolved name`" and `ead29e6df64` "repair import edges behind the
-run13 unresolved-name class"), not of any change in this lane. **This lane fixed
-nothing; it diagnosed and instrumented.**
+For 49 of the 50 requests, `Backend` is already bound in
+`compiler.backend.backend.env`'s qualified scope before the router's first step, so
+neither the chase nor the sweep is consulted. The remaining ONE request enters the sweep
+(`sweep-enter` x1) and produces `ambiguous=true`, which is the error above. The
+import-edge repairs landed between run13 and run14 (`1aa81cac8c6`, `ead29e6df64`)
+reduced the site from 2 diagnostics to 1; they did not close it.
 
-### The latent defect is unchanged, and the sweep is demonstrably live
+### The sweep is demonstrably live
 
-630 `sweep-enter` events, 9 `sweep-candidate` rows, and **0 `sweep-verdict
-ambiguous=true`**. Every observed multi-candidate case AGREED on its terminal, e.g. two
-glob routes reaching the same owner:
+630 `sweep-enter` events and 9 `sweep-candidate` rows at the mid-phase sample. The one
+`ambiguous=true` verdict in the build is this bug (captured in full in iteration 5); at
+the time of this sample it had not yet been reached, which is the same premature-read
+error as above. Other multi-candidate cases AGREED on their terminal, e.g. two glob
+routes reaching the same owner:
 
 ```
 sweep-candidate route=glob owner=compiler.backend.linker.linker_context dep=AopWeaver import=2 target=compiler.tools.aop item=AopWeaver
 sweep-candidate route=glob owner=compiler.backend.linker.linker_context dep=AopWeaver import=3 target=compiler.tools.aop item=AopWeaver
 ```
 
-So the named/glob merge is still there and still reachable; this run simply had no pair
-that disagreed. The fix stays designed-not-landed for the same reason as before: there
-is still no input that makes a spec red, and landing a behaviour change on a path with
-no failing witness is how a "fix" silently becomes a regression.
+So the named/glob merge is reachable and does fire. Superseded by iteration 5, which has
+the disagreeing pair and the fix.
 
 ### What the trace measured about the resolution path (52,024 router calls)
 
@@ -277,6 +302,92 @@ shape. (Credit: the run14 lane caught this.)
 
 Note the retraction also lands this candidate back in THIS bug's family rather than the
 `std.io` one — competing ROUTES to a single entity, exactly like `Backend`.
+
+## Iteration 5 (2026-08-22): captured, reproduced, FIXED
+
+The run14 lane forwarded the one `sweep-verdict ... ambiguous=true` in the build, and it
+is this bug:
+
+```
+sweep-verdict owner=compiler.backend.backend.env dep=Backend ambiguous=true
+              selected_target=compiler.frontend.parser_types_expr selected_item=Backend
+sweep-candidate route=glob  import=0 target=compiler.frontend.parser_types_expr  item=Backend
+sweep-candidate route=glob  import=1 target=compiler.frontend.parser_types_expr  item=Backend
+sweep-candidate route=named import=2 target=compiler.backend.backend.backend_api item=Backend
+sweep-candidate route=glob  import=3 target=compiler.frontend.parser_types_expr  item=Backend
+```
+
+The import slots match `env.spl` exactly (`compiler.hir.hir.*`,
+`compiler.backend.backend_types.*`, `use ...backend_api.{Backend}`,
+`compiler.backend.backend.objects.*`). **The glob won the name over the explicit
+import**, selecting the frontend `enum Backend` where the owner explicitly imported
+`type Backend = CompilerBackend`. That is a wrong TYPE for `EvalContext.backend`, not
+merely a noisy diagnostic.
+
+### The defect is in TWO places, not one
+
+The trace also showed the first-wins facade chase making the same wrong pick, EARLIER:
+
+```
+chase mod=compiler.backend.backend.env wanted=Backend found=true
+      target=compiler.frontend.parser_types_expr item=Backend      (x52)
+router-preresolved owner=compiler.backend.backend.env dep=Backend  (x49)
+```
+
+`find_reexport_source_walk` sets `matches = item_start == item_end`, i.e. a glob row
+matches ANY wanted name, and it scans import rows in a single ordered pass — so a glob
+in an EARLIER slot beats an explicit `use m.{Name}` in a later one. Fixing only the
+sweep would have left the wrong binding in place, because in the real tree the chase is
+what actually binds. The reproduce spec confirmed this: pre-fix it failed with
+`chase ... target=graph.px.expr`, and the sweep was never even reached.
+
+### Fix
+
+One rule, applied in both places: **an explicit named import binds the name; a glob only
+fills names the module did not import explicitly.**
+
+- `find_reexport_source_walk`: two passes over the import rows — explicit named rows
+  first, glob rows only if no explicit route resolved. Only the named pass scans item
+  rows, so a named row cannot re-match in the glob pass.
+- The sweep: a `selected_rank` (1 = explicit named route, 0 = glob, -1 = none). A named
+  candidate supersedes any glob selection and clears a glob-vs-glob `ambiguous`; a glob
+  candidate is ignored once a named one is taken; ambiguity is only computed WITHIN a
+  rank. Two disagreeing EXPLICIT routes are still a real ambiguity and still report.
+
+### On the "row vs pair counting" question
+
+Checked, and the sweep does **not** miscount rows as arity. It compares each candidate
+against the running selection, so the four rows above produce: glob -> select; glob ->
+agrees, no flag; named -> disagrees, flag; glob -> disagrees, flag stays. Distinct pairs
+= 2, which is the true arity. The real defects were precedence and last-writer-wins
+selection, both fixed above.
+
+**But the same "count the entity, not the syntax" trap IS live nearby, and is left
+open deliberately:** the bare-export sibling inference in the same walk dedups with
+`sibling_match_index != sibling_index`, comparing only against the LAST match, so an
+A, B, A ordering counts three owners instead of two and makes the chase decline where
+it should resolve. It is not exercised by this bug's route and changing when the chase
+declines is a separate behaviour change; filed here rather than fixed blind.
+
+### Verification
+
+- `test/01_unit/compiler/hir/explicit_import_wins_over_glob_owner_spec.spl` — RED
+  pre-fix (bound `graph.px.expr`), GREEN post-fix (binds `graph.px.api`), with the
+  `[ambig-dep]` trace showing the chase target flip. It asserts the resolved OWNER, not
+  the diagnostic, so it pins the miscompile rather than the message.
+- No regressions. Every neighbouring import/re-export spec was run on the fix AND at
+  baseline `d5e67ca1f60`, and the counts are identical:
+
+  | spec | baseline | with fix |
+  |---|---|---|
+  | `same_named_package_facade_reexport_spec` | 0/5 | 0/5 (pre-existing red) |
+  | `resolve_import_symbols_spec` | 26/32 | 26/32 (6 pre-existing red) |
+  | `reexport_physical_cache_spec` | 16/17 | 16/17 (1 pre-existing red) |
+  | `package_export_route_shapes_spec` | — | 26/26 |
+  | `two_hop_glob_import_does_not_transit_spec` | — | 3/3 |
+  | `enum_payload_owner_imports_dependency_spec` | — | 2/2 |
+  | `explicit_import_beats_glob_reexport_spec` | — | 2/2 |
+  | `ambig_dep_trace_default_off_spec` | — | 2/2 |
 
 ## Next steps
 

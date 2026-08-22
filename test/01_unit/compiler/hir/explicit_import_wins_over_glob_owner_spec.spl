@@ -1,0 +1,88 @@
+"""
+## Purpose and audience
+Purpose: Pin that when two DIFFERENT modules each define a type with the same
+short name, a module that imports one of them EXPLICITLY binds that one — a
+glob import must never win the name over an explicit named import.
+Audience: compiler engineers maintaining HIR import/re-export materialization.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+Set `SIMPLE_AMBIGDBG=1` to see the competing routes as `[ambig-dep]` lines.
+## Compatibility and limitations
+Fixture data is local to this spec. It is modelled directly on the real route
+captured in run14 for `compiler.backend.backend.env` `dep=Backend`: three glob
+import slots reaching `compiler.frontend.parser_types_expr` `enum Backend` and
+one named slot reaching `compiler.backend.backend.backend_api`
+`type Backend = CompilerBackend`, with the globs occupying the EARLIER slots.
+# @manual: primary
+REQ-COMPILER-HIR-001
+doc/01_research/local/REQ-COMPILER-HIR-001.md
+doc/03_plan/sys_test/REQ-COMPILER-HIR-001.md
+doc/04_architecture/REQ-COMPILER-HIR-001.md
+doc/05_design/REQ-COMPILER-HIR-001.md
+"""
+# @req: REQ-COMPILER-HIR-001
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn owner_logger() -> Logger:
+    Logger(level: 0)
+
+fn owner_module(source: text, name: text, log: Logger) -> Module:
+    parse_full_frontend(source, name, name, log)
+
+fn expect_explicit_import_owner_wins():
+    val log = owner_logger()
+    # Two genuinely different `Backend` owners, exactly as in the real tree:
+    # an enum in a frontend module reached only by GLOB, and an alias in the
+    # module the owner names EXPLICITLY.
+    val expr_source = "pub enum Backend:\n    Cranelift\n    Llvm"
+    val api_source = "pub class CompilerBackend:\n    tag: i64\n\ntype Backend = CompilerBackend"
+    val other_source = "pub struct ObjectRecord:\n    id: i64"
+    # Glob slots FIRST, explicit slot after them -- the real env.spl order
+    # (glob 0, glob 1, named 2, glob 3).
+    val env_source = "use graph.px.expr.*\nuse graph.px.other.*\nuse graph.px.api.\{Backend\}\npub fn make_backend(b: Backend) -> i64:\n    1"
+    val consumer_source = "use graph.px.env.\{make_backend\}\nfn main() -> i64:\n    0"
+
+    var modules: Dict<text, Module> = {}
+    modules["graph.px.expr"] = owner_module(expr_source, "graph.px.expr", log)
+    modules["graph.px.api"] = owner_module(api_source, "graph.px.api", log)
+    modules["graph.px.other"] = owner_module(other_source, "graph.px.other", log)
+    modules["graph.px.env"] = owner_module(env_source, "graph.px.env", log)
+    modules["graph.px.consumer"] = owner_module(consumer_source, "graph.px.consumer", log)
+
+    val sources = [
+        SourceFile(path: "graph/px/expr.spl", content: expr_source, module_name: "graph.px.expr"),
+        SourceFile(path: "graph/px/api.spl", content: api_source, module_name: "graph.px.api"),
+        SourceFile(path: "graph/px/other.spl", content: other_source, module_name: "graph.px.other"),
+        SourceFile(path: "graph/px/env.spl", content: env_source, module_name: "graph.px.env"),
+        SourceFile(path: "graph/px/consumer.spl", content: consumer_source, module_name: "graph.px.consumer")
+    ]
+
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+
+    var lowering = hirlowering_for_module("graph.px.consumer", surfaces)
+    val hir = lowering.lower_module(modules["graph.px.consumer"])
+
+    # The owner's `Backend` must be the one it imported EXPLICITLY.
+    val raw = hir.symbols.lookup_qualified_type_raw("graph.px.env", "Backend")
+    expect(raw >= 0).to_be_truthy()
+    var owner_name = ""
+    if hir.symbols.symbols.has(raw):
+        if val defined_in = hir.symbols.symbols[raw].defining_module:
+            owner_name = defined_in
+    # oracle: "graph.px.api" — the explicitly imported owner, never the globbed
+    # `graph.px.expr` enum that merely shares the short name
+    expect(owner_name).to_equal("graph.px.api")
+
+describe("explicit named import wins the name over a glob import"):
+    it("binds the explicitly imported owner, not a globbed same-named type"):
+        expect_explicit_import_owner_wins()

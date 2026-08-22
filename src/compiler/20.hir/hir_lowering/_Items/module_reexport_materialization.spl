@@ -98,41 +98,62 @@ impl HirLowering:
                 module_name: self.module_surfaces.surfaces[origin_index_value].preferred_registry_name,
                 item_name: origin_lookup.source_name)
 
-        var import_idx = 0
-        while import_idx < facade_mod.imports.len():
-            val item_start = facade_mod.import_item_offsets[import_idx]
-            val item_end = facade_mod.import_item_offsets[import_idx + 1]
-            var matches = item_start == item_end
-            var source_item = wanted
-            var item_idx = item_start
-            while item_idx < item_end:
-                val item_name = facade_mod.import_item_names[item_idx]
-                val local = if facade_mod.import_item_has_alias[item_idx]:
-                    facade_mod.import_item_aliases[item_idx]
-                else: item_name
-                if local == wanted or item_name == wanted:
-                    matches = true
-                    source_item = item_name
-                item_idx = item_idx + 1
-            if matches and import_idx < facade_mod.import_target_indices.len():
-                val next_index = facade_mod.import_target_indices[import_idx]
-                if next_index >= 0 and next_index < self.module_surfaces.surfaces.len():
-                    val next_mod = self.module_surfaces.surfaces[next_index]
-                    if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                        val next_declares = hir_module_declares_item(
-                            next_mod, source_item)
-                        eprint("[reexport-hop] facade={facade_mod.preferred_registry_name} wanted={wanted} import={import_idx} item_start={item_start} item_end={item_end} source_item={source_item} target={next_index} target_name={next_mod.preferred_registry_name} declares={next_declares} composites={next_mod.composite_names.len()} enums={next_mod.enum_names.len()} traits={next_mod.trait_names.len()} callables={next_mod.callable_names.len()} aliases={next_mod.type_alias_names.len()} constants={next_mod.constant_names.len()}")
-                    if hir_module_declares_item(next_mod, source_item):
-                        return HirReexportSource(
-                            found: true,
-                            module_index: next_index,
-                            module_name: next_mod.preferred_registry_name,
-                            item_name: source_item)
-                    val deeper = self.find_reexport_source_walk(
-                        next_index, source_item, depth + 1, state)
-                    if deeper.found:
-                        return deeper
-            import_idx = import_idx + 1
+        # Two passes: explicit named import rows first, glob rows only if no
+        # explicit route resolved. An explicit import binds the name; a glob
+        # only fills names the module did not import explicitly.
+        var pass_index = 0
+        while pass_index < 2:
+            var import_idx = 0
+            while import_idx < facade_mod.imports.len():
+                val item_start = facade_mod.import_item_offsets[import_idx]
+                val item_end = facade_mod.import_item_offsets[import_idx + 1]
+                val row_is_glob = item_start == item_end
+                var matches = row_is_glob
+                # EXPLICIT-OVER-GLOB (2026-08-22): pass 0 considers ONLY
+                # explicit named rows, pass 1 ONLY globs. A glob row matches
+                # ANY wanted name, so a single ordered pass let a glob in an
+                # EARLIER import slot win the name over an explicit
+                # `use m.{Name}` in a later slot -- measured in run14:
+                # `compiler.backend.backend.env` bound the GLOBBED
+                # `compiler.frontend.parser_types_expr` `enum Backend` instead
+                # of the `use ...backend_api.{Backend}` it explicitly names.
+                if (pass_index == 0 and row_is_glob) or
+                   (pass_index == 1 and not row_is_glob):
+                    matches = false
+                var source_item = wanted
+                var item_idx = item_start
+                # Only the named pass scans item rows; otherwise the scan below
+                # would set `matches` back to true for a named row in the glob
+                # pass and undo the gate above.
+                while pass_index == 0 and item_idx < item_end:
+                    val item_name = facade_mod.import_item_names[item_idx]
+                    val local = if facade_mod.import_item_has_alias[item_idx]:
+                        facade_mod.import_item_aliases[item_idx]
+                    else: item_name
+                    if local == wanted or item_name == wanted:
+                        matches = true
+                        source_item = item_name
+                    item_idx = item_idx + 1
+                if matches and import_idx < facade_mod.import_target_indices.len():
+                    val next_index = facade_mod.import_target_indices[import_idx]
+                    if next_index >= 0 and next_index < self.module_surfaces.surfaces.len():
+                        val next_mod = self.module_surfaces.surfaces[next_index]
+                        if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                            val next_declares = hir_module_declares_item(
+                                next_mod, source_item)
+                            eprint("[reexport-hop] facade={facade_mod.preferred_registry_name} wanted={wanted} import={import_idx} item_start={item_start} item_end={item_end} source_item={source_item} target={next_index} target_name={next_mod.preferred_registry_name} declares={next_declares} composites={next_mod.composite_names.len()} enums={next_mod.enum_names.len()} traits={next_mod.trait_names.len()} callables={next_mod.callable_names.len()} aliases={next_mod.type_alias_names.len()} constants={next_mod.constant_names.len()}")
+                        if hir_module_declares_item(next_mod, source_item):
+                            return HirReexportSource(
+                                found: true,
+                                module_index: next_index,
+                                module_name: next_mod.preferred_registry_name,
+                                item_name: source_item)
+                        val deeper = self.find_reexport_source_walk(
+                            next_index, source_item, depth + 1, state)
+                        if deeper.found:
+                            return deeper
+                import_idx = import_idx + 1
+            pass_index = pass_index + 1
 
         var route_index = 0
         while route_index < facade_mod.export_route_sources.len():
@@ -580,6 +601,18 @@ impl HirLowering:
             # signature.
             var import_index: i64 = 0
             var ambiguous = false
+            # EXPLICIT-OVER-GLOB (2026-08-22). Rank of the current selection:
+            # 1 = an explicit named import row written by the callable owner,
+            # 0 = a glob route, -1 = nothing selected yet. Ambiguity is only
+            # ever computed WITHIN a rank: two disagreeing EXPLICIT routes are
+            # a real ambiguity and still report, but a glob route must never
+            # compete with -- let alone override -- an explicit import.
+            # Measured in run14: this owner's four candidate rows were
+            # glob/glob/named/glob, the named row naming
+            # `compiler.backend.backend.backend_api` and the globs naming
+            # `compiler.frontend.parser_types_expr`; last-writer-wins made the
+            # trailing GLOB the selection and flagged the pair ambiguous.
+            var selected_rank: i64 = -1
             while import_index < imported_mod.imports.len() and
                   import_index < imported_mod.import_target_indices.len():
                 val target_index = imported_mod.import_target_indices[import_index]
@@ -608,10 +641,15 @@ impl HirLowering:
                         if candidate_found:
                             if hir_ambig_dep_trace_enabled():
                                 hir_ambig_dep_trace("sweep-candidate route=named owner={imported_mod.module_name} dep={dependency} import={import_index} target={self.module_surfaces.surfaces[candidate_target].module_name} item={candidate_item}")
-                            if selected_target >= 0 and
+                            if selected_rank == 1 and
                                (selected_target != candidate_target or
                                 selected_item != candidate_item):
                                 ambiguous = true
+                            if selected_rank < 1:
+                                # First explicit route supersedes any glob
+                                # selection, including a glob-vs-glob ambiguity.
+                                ambiguous = false
+                            selected_rank = 1
                             selected_target = candidate_target
                             selected_item = candidate_item
                     item_index = item_index + 1
@@ -632,13 +670,14 @@ impl HirLowering:
                             candidate_target = hop.module_index
                             candidate_item = hop.item_name
                             candidate_found = true
-                    if candidate_found:
+                    if candidate_found and selected_rank < 1:
                         if hir_ambig_dep_trace_enabled():
                             hir_ambig_dep_trace("sweep-candidate route=glob owner={imported_mod.module_name} dep={dependency} import={import_index} target={self.module_surfaces.surfaces[candidate_target].module_name} item={candidate_item}")
-                        if selected_target >= 0 and
+                        if selected_rank == 0 and
                            (selected_target != candidate_target or
                             selected_item != candidate_item):
                             ambiguous = true
+                        selected_rank = 0
                         selected_target = candidate_target
                         selected_item = candidate_item
                 import_index = import_index + 1
