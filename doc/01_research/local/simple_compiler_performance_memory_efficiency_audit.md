@@ -1558,3 +1558,13 @@ levels. Exact allocation-free mapping now covers every existing configurable Eas
 name, while W0406 maps to `visibility_boundary` alongside W0401–W0404. Default-deny
 `export_outside_init` now promotes to deny, and an explicit allow suppresses it through
 the same one-pass `LintPolicyDecision` used by other diagnostics.
+
+## 2026-08-22 implementation addendum: advisory EasyFix policy completeness
+
+Six emitted EasyFix families had no configurable identity: contextual-keyword ordering,
+deprecated `if let`, struct-construction parentheses, four short-grammar variants,
+raw-unit postfix, and SIMD opportunity. They are now registered with warning defaults and
+allocation-free membership. Exact emitted-code mapping routes the four short-grammar IDs
+to one `short_grammar_refactor` policy and maps the other codes directly. Users and CI can
+now allow, warn, or deny every emitted EasyFix family rather than relying on an immutable
+authored warning level.
