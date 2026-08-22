@@ -210,6 +210,40 @@ impl HirLowering:
             else:
                 HirType(kind: self.lower_named_kind(array_element_name, [], type_.span), span: type_.span)
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
+        # ARRAY WHOSE ELEMENT IS NOT A PLAIN NAMED TYPE must still be projected
+        # ELEMENTWISE. The branch above is keyed on
+        # `parser_type_kind_array_element_name`, which answers "" for BOTH "not
+        # an array" and "an array of something that is not a bare Named" --
+        # `[(text, MirType)]`, `[[T]]`, `[T?]`. So an array-of-TUPLE fell past
+        # it to `lower_type`, which resolves names in the IMPORTER's scope,
+        # where a cross-module signature dependency is bound only as
+        # `{owner}::{name}`.
+        #
+        # This is the same defect as the bare-tuple one fixed on 2026-08-21
+        # (`hir_tuple_signature_dependency_unprojected_2026-08-21.md`), one
+        # level of nesting deeper: that lane taught `imported_surface_type` to
+        # recurse through a TOP-LEVEL tuple, but the array arm still projected
+        # by NAME only, so wrapping the same tuple in `[...]` slipped through
+        # again.
+        #
+        # Stage-1: `fn map_struct(fields: [(text, MirType)])` in
+        # `70.backend/backend/common/type_mapper.spl` -- which explicitly
+        # imports MirType on line 8 -- produced `unresolved type: MirType`
+        # attributed to innocent importers such as the 29-line, zero-`use`
+        # `70.backend/backend_port.spl`. It emits NO
+        # `[hir-callable-dep-origin-unresolved]`, because the MATERIALIZATION
+        # walk (`parser_type_named_dependencies`) does recurse Array -> Tuple
+        # -> Named and binds the name correctly; only this PROJECTION failed to
+        # consult it. That asymmetry is why the owner-missing-import lane's
+        # predicted MirType clearance never materialised.
+        # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+        if parser_type_kind_is_array(type_.kind):
+            val nested_element = parser_type_kind_array_element(type_.kind, type_)
+            return HirType(
+                kind: HirTypeKind.Array(
+                    self.imported_surface_type(nested_element, imported_module_name),
+                    nil),
+                span: type_.span)
         self.lower_type(type_)
 
     me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_module_name: text) -> HirType:
@@ -233,6 +267,8 @@ impl HirLowering:
                     imported_module_name, type_name[4:])
                 if has_symbol_id >= 0:
                     return HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Named(SymbolId(id: has_symbol_id), []), span: type_.span)), span: type_.span)
+            if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
+                eprint("[ist-proj-miss] name={type_name} owner={imported_module_name} lowering={self.module_filename}")
             return HirType(kind: self.lower_named_kind(type_name, [], type_.span), span: type_.span)
         if array_element_name != "":
             val raw_element_id = self.symbols.lookup_qualified_type_raw(

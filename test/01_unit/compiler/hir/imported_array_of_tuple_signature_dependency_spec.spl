@@ -1,0 +1,90 @@
+"""
+# Imported Array-of-Tuple Signature Dependency — Unit Spec
+
+Regression guard for the Stage-1 HIR fatal
+
+    HIR lowering error in src/compiler/backend/backend_port.spl:
+    unresolved type: MirType
+
+`src/compiler/70.backend/backend_port.spl` is 29 lines, carries ZERO `use`
+statements and never names `MirType`, yet run14 blamed it 6x. The real owner is
+`70.backend/backend/common/type_mapper.spl`, which explicitly imports MirType on
+line 8 and declares
+
+    fn map_struct(fields: [(text, MirType)]) -> text:
+
+An ARRAY whose element is a TUPLE. `imported_surface_type`'s array arm was keyed
+on `parser_type_kind_array_element_name`, which answers "" for BOTH "not an
+array" and "an array of something that is not a bare Named type". So
+`[(text, MirType)]` fell past it to `lower_type`, which resolves names in the
+IMPORTER's scope, where a cross-module signature dependency is bound only as
+`{owner}::{name}`.
+
+This is the same defect as the bare-tuple one fixed on 2026-08-21
+(`imported_tuple_signature_dependency_spec.spl`), one level of nesting deeper:
+that lane taught the projection to recurse through a TOP-LEVEL tuple, but the
+array arm still projected by NAME only, so wrapping the same tuple in `[...]`
+slipped through again.
+
+It is NOT the owner-missing-import class: the owner's import is present, and no
+`[hir-callable-dep-origin-unresolved]` is ever emitted for MirType, because the
+MATERIALIZATION walk (`parser_type_named_dependencies`) DOES recurse
+Array -> Tuple -> Named and binds the name correctly. Only the PROJECTION failed
+to consult it. That asymmetry is why the owner-import lane's predicted MirType
+clearance never materialised.
+
+The defect is SHAPE-specific, not type-specific — the control below proves the
+identical signature written as a bare `[MirType]` always worked.
+
+See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+"""
+
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn array_tuple_dep_surfaces(mods: Dict<text, Module>, srcs: [SourceFile]) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(mods, srcs):
+        case Ok(value): value
+        case Err(error):
+            assert_true(false)
+            ModuleSurfacesByName.empty()
+
+fn array_tuple_dep_lower(owner_param: text) -> HirLowering:
+    val log = Logger(level: 0)
+    # The owner explicitly imports MirType, exactly as type_mapper.spl:8 does.
+    val mir_src = "struct MirType:\n    width: i64\n"
+    val own_src =
+        "use mir.mir_types.\{MirType\}\n\nfn map_struct(" + owner_param + ") -> text:\n    \"x\""
+    # The victim: imports only the CALLABLE, never the type in its signature.
+    val cons_src = "use be.type_mapper.\{map_struct\}\n\nfn go() -> i64:\n    1"
+    var mods: Dict<text, Module> = {}
+    mods["mir.mir_types"] = parse_full_frontend(mir_src, "mir.mir_types", "mir.mir_types", log)
+    mods["be.type_mapper"] = parse_full_frontend(own_src, "be.type_mapper", "be.type_mapper", log)
+    val cons = parse_full_frontend(cons_src, "be.backend_port", "be.backend_port", log)
+    mods["be.backend_port"] = cons
+    val srcs = [
+        SourceFile(path: "mir/mir_types.spl", content: mir_src, module_name: "mir.mir_types"),
+        SourceFile(path: "be/type_mapper.spl", content: own_src, module_name: "be.type_mapper"),
+        SourceFile(path: "be/backend_port.spl", content: cons_src, module_name: "be.backend_port")
+    ]
+    var lowering = hirlowering_for_module("be.backend_port", array_tuple_dep_surfaces(mods, srcs))
+    val hir = lowering.lower_module(cons)
+    lowering
+
+describe "imported callable whose signature dependency sits inside an array of tuples":
+    it "resolves an array-of-tuple element type through the declaring module":
+        # Pre-fix: `unresolved type: MirType`, attributed to be.backend_port.
+        val lowering = array_tuple_dep_lower("fields: [(text, MirType)]")
+        for error in lowering.errors:
+            eprint("[array-tuple-dep-error] {error.message}")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "still resolves the bare-array shape that always worked":
+        # Control: proves the defect was the SHAPE, not the type name.
+        val lowering = array_tuple_dep_lower("fields: [MirType]")
+        expect(lowering.errors.len()).to_equal(0)

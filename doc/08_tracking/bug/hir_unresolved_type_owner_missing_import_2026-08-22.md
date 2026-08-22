@@ -228,3 +228,104 @@ HirPattern 16, HirFunction 2, CompiledModule 2 — reasons unchanged from the
 **Status:** class A callable half CLEARED for 459 of the 479 terminal
 errors (402 by this commit + A1's 57); 20 remain (2 blocked on a cycle, 18
 pending owner evidence from a verification build). Do not close.
+
+## Follow-up 2026-08-22 (b) — why the predicted MirType clearance never happened
+
+The owner-import lane (eeaf35d3be0 + 214fdfac2db) predicted that its 49 imports
+across 45 owner modules would clear 402-459 occurrences **including MirType (87)
+and AsmLocation/AsmConstraintKind**. Run14 measured `unresolved type` at **486**
+vs run13's 479 — essentially unchanged — with MirType at **333** anchored
+occurrences (153 in the `error:` census). That lane flagged its own figure as
+predicate-derived and never observed in a build. It was wrong, and this is why.
+
+### MirType is a DIFFERENT defect. The owner's import was never missing.
+
+Ground truth came from a new level-gated probe, `[ist-proj-miss]`, added to
+`imported_surface_type_projected` (default off, `SIMPLE_HIR_UNRESOLVED_TYPE_TRACE=1`),
+run over a full stage-1 build. It names the OWNER whose qualified scope the
+projection queried:
+
+```
+[ist-proj-miss] name=text owner=compiler.backend.backend.common.type_mapper lowering=src/compiler/backend/backend_port.spl
+[hir-unresolved-type-origin] name=MirType lowering_module=src/compiler/backend/backend_port.spl span_file= span_line=0 span_col=0
+```
+
+The owner is **`70.backend/backend/common/type_mapper.spl`**, which imports
+MirType explicitly on **line 8**. Nothing was missing from it. The signature is
+
+```
+fn map_struct(fields: [(text, MirType)]) -> text:
+```
+
+an ARRAY whose element is a TUPLE.
+
+### Mechanism: the array arm projected by NAME, so array-of-tuple slipped past
+
+`imported_surface_type` (`_Items/module_callable_types.spl`) handled exactly
+three shapes: top-level `Named`, top-level `Tuple`, and `Array` — but the array
+arm was keyed on `parser_type_kind_array_element_name`, which returns `""` for
+BOTH "not an array" and "an array of something that is not a bare Named"
+(`[(text, MirType)]`, `[[T]]`, `[T?]`). So `[(text, MirType)]` fell through to
+`lower_type`, which resolves in the IMPORTER's scope, where the dependency is
+bound only as `{owner}::{name}`.
+
+This is the **same defect as the bare-tuple one fixed on 2026-08-21**
+(`hir_tuple_signature_dependency_unprojected_2026-08-21.md`), one level of
+nesting deeper: that lane taught the projection to recurse through a top-level
+tuple, but left the array arm name-keyed, so wrapping the same tuple in `[...]`
+slipped through again.
+
+### Why NO diagnostic ever fired for MirType
+
+`grep dependency=MirType` over run14's 6.3M-line `[ambig-dep]` trace returns
+**zero** `[hir-callable-dep-origin-unresolved]`, zero `[hir-payload-origin-unresolved]`,
+zero `sweep-verdict`, zero `router-step*-missed` — and for
+`owner=compiler.backend.codegen` it shows MirType resolving **76/76**
+(57 preresolved + 19 step1-bound). That is not a gap in the diagnostic: the
+MATERIALIZATION walk (`parser_type_named_dependencies`) genuinely DOES recurse
+`Array -> Tuple -> Named` and binds the name correctly. Only the PROJECTION
+failed to consult it. **Materialization and projection walk the same type with
+different recursion sets** — that asymmetry is the whole bug, and it is why an
+owner-import predicate could never have predicted this population.
+
+### Hypotheses tested and REJECTED (recorded so they are not re-tried)
+
+- **Optional (`T?`) / generic-argument (`Dict<K, MirType>`) projection.** Fixed
+  speculatively first; measured **byte-identical** results pre/post on a
+  real-file harness (100 unresolved-type errors, same distribution). Reverted.
+  Both are still unprojected shapes and may bite later, but they are NOT this
+  population.
+- **Errors reported against importers with the owner gap elsewhere (c).** Half
+  true and misleading: attribution IS to the importer, but the owner has no gap.
+- **MirType count GREW because more modules now lower far enough (e).** Not the
+  cause; the shape was always broken.
+- **Misattribution via accumulated diagnostics.** A real, separate bug found on
+  the way: `driver_hir_pipeline_lowering.spl:438` passes the whole accumulated
+  `bootstrap_lowering.errors` array to `driver_collect_hir_errors` on every
+  module of the `sources<=0` loop, so that path re-reports modules 1..N under
+  module N's name. The streaming path run14 used drains per module via
+  `begin_module`, so it is NOT the MirType cause — filed separately rather than
+  conflated.
+
+### Fix
+
+- `parser_types_expr.spl`: new `parser_type_kind_is_array`, because
+  `..._array_element_name() == ""` cannot distinguish "not an array" from
+  "array of a non-Named element".
+- `module_callable_types.spl`: `imported_surface_type`'s array arm now recurses
+  into the element via `imported_surface_type` when the element is not a bare
+  Named type. Existing `[Named]` fast path unchanged.
+- Two level-gated diagnostics kept (default off), so the next instance of this
+  class is one run away instead of a day: `[ist-proj-miss]` (projection missed
+  the owner's qualified scope) and `[field-dep-unresolved]` (the field-dependency
+  path's silent four-step failure, which had no diagnostic at all — the twin of
+  the callable path's).
+
+### Reproduce spec (FAILS pre-fix)
+
+`test/01_unit/compiler/hir/imported_array_of_tuple_signature_dependency_spec.spl`
+
+Measured at `d684064754b` (pre-fix): `2 examples, 1 failure`,
+`[array-tuple-dep-error] unresolved type: MirType`. Post-fix: `2 examples, 0 failures`.
+The control (`[MirType]`, bare array) is GREEN on both sides, proving the defect
+is SHAPE-specific rather than type-specific.
