@@ -2244,6 +2244,23 @@ read only when count is one, so encounter order cannot affect output. Expected
 total work becomes `O(F+E)` with `O(F)` operation-local index memory. No name
 sanitization, aliasing, local preference, API, or diagnostic text changed.
 
+### VHDL metadata sidecar index
+
+Hardware metadata matching scanned all `N` sidecar rows for every one of `F`
+functions and repeatedly normalized `std.`/`lib.` module spellings, giving
+`Theta(F*N)` comparisons and worst-case `Theta(F*N)` substring allocations.
+Despite rank variables, any second eligible exact or alias row was ambiguous;
+exact never overrode alias.
+
+The catalog now builds two collision-framed indexes once: exact raw
+`(module,function)` and normalized alias keys only for row module spellings not
+loaded in the design. Values are row indices, not heavyweight row copies; `-2`
+retains duplicate rows as ambiguity evidence. Each function performs two
+lookups. Exact+alias, duplicate exact, and duplicate alias remain ambiguous
+before validation; a unique row alone is validated/recovered. Expected work is
+`O(N+F)` and memory `O(N)` keys/indices, with alias normalization once per row
+and once per module rather than per function-row pair.
+
 ### Leading explicit-code allocation audit
 
 The leading `Edddd` probe previously allocated a one-character prefix, a
