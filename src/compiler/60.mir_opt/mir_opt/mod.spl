@@ -251,6 +251,14 @@ struct MirStructuralVerificationReceipt:
     block_count: i64
     instruction_count: i64
 
+struct MirModuleStructuralVerificationReceipt:
+    valid: bool
+    errors: [text]
+    error_codes: [text]
+    function_count: i64
+    block_count: i64
+    instruction_count: i64
+
 struct PassFunctionOutcome:
     function: MirFunction
     record: PassRunRecord
@@ -652,6 +660,39 @@ fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerifi
     MirStructuralVerificationReceipt(
         errors.is_empty(), errors, error_codes,
         func.blocks.len(), instruction_count)
+
+fn mir_module_structural_verification_receipt(
+    module: MirModule
+) -> MirModuleStructuralVerificationReceipt:
+    """Aggregate deterministic structural proof for a MIR module."""
+    var symbol_ids: [i64] = []
+    for symbol in module.functions.keys(): symbol_ids.push(symbol.id)
+    symbol_ids.sort()
+    var errors: [text] = []
+    var error_codes: [text] = []
+    var block_count = 0
+    var instruction_count = 0
+    for symbol_id in symbol_ids:
+        val key = SymbolId(id: symbol_id)
+        val function = module.functions[key]
+        if function.symbol.id != symbol_id:
+            errors.push(
+                "function map key " + symbol_id.to_string() +
+                " does not match function symbol " + function.symbol.id.to_string())
+            error_codes.push("MIRVM001")
+        val receipt = mir_structural_verification_receipt(function)
+        block_count = block_count + receipt.block_count
+        instruction_count = instruction_count + receipt.instruction_count
+        var error_index = 0
+        while error_index < receipt.errors.len():
+            errors.push(
+                "function " + symbol_id.to_string() + ": " +
+                receipt.errors[error_index])
+            error_codes.push(receipt.error_codes[error_index])
+            error_index = error_index + 1
+    MirModuleStructuralVerificationReceipt(
+        errors.is_empty(), errors, error_codes, symbol_ids.len(),
+        block_count, instruction_count)
 
 fn run_named_pass_with_record(pass_name: text, func: MirFunction) -> Result<PassFunctionOutcome, text>:
     """Run one function-scoped pass with structural before/after receipts.
@@ -1655,8 +1696,10 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
 export PassKind, PassScope, PassStatus, PassExpectation, MirPassBackendOutcome
 export PassWitnessContract, pass_witness_contract, pass_witness_registry_integrity_errors
 export PassRunDisposition, PassReasonCount, PassRunRecord
-export MirStructuralVerificationReceipt, PassFunctionOutcome
+export MirStructuralVerificationReceipt, MirModuleStructuralVerificationReceipt
+export PassFunctionOutcome
 export mir_structural_verification_error_code
+export mir_module_structural_verification_receipt
 export pass_run_record_new, pass_run_record_add_reason, pass_run_record_integrity_errors
 export pass_run_record_for_unavailable_request
 export mir_structural_verification_receipt, run_named_pass_with_record
