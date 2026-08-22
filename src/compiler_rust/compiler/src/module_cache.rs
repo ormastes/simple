@@ -94,6 +94,9 @@ struct LoaderStats {
 // Thread-local cache for normalize_path_key to avoid repeated canonicalize() syscalls
 thread_local! {
     static PATH_KEY_CACHE: RefCell<HashMap<PathBuf, PathBuf>> = RefCell::new(HashMap::new());
+    /// `filter_functions_from_value` memo: source dict ptr -> (source Arc, filtered Arc).
+    static FILTERED_DICT_CACHE: RefCell<HashMap<usize, (Arc<HashMap<String, Value>>, Arc<HashMap<String, Value>>)>> =
+        RefCell::new(HashMap::new());
     static LOADER_STATS: RefCell<LoaderStats> = RefCell::new(LoaderStats::default());
 }
 
@@ -141,6 +144,7 @@ pub fn clear_module_cache() {
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
+    FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
     crate::mem_trace::report("clear_module_cache");
@@ -201,6 +205,8 @@ pub fn clear_module_cache_selective() {
     MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
     MODULE_LOAD_DEPTH.with(|depth| *depth.borrow_mut() = 0);
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
+    // Drop memoised filtered dicts whose source no one else holds any more.
+    FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().retain(|_, (src, _)| Arc::strong_count(src) > 1));
     // Reset module counter but don't clear PATH_KEY_CACHE (path normalization is stable)
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     // Keep path resolution cache (stable across tests)
@@ -626,12 +632,33 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
             }
         }
         Value::Dict(dict) => {
-            // Recursively process dict values (imported modules) — preserve functions inside
-            let filtered: HashMap<String, Value> = dict
-                .iter()
-                .map(|(k, v)| (k.clone(), filter_functions_from_value(v)))
-                .collect();
-            Value::Dict(Arc::new(filtered))
+            // Recursively process dict values (imported modules) — preserve functions inside.
+            //
+            // Memoised per SOURCE dict: an imported module's export dict is the
+            // same `Arc` in every importer's env, and this filter is a pure
+            // function of its contents, so rebuilding a fresh ~1000-entry map
+            // (new keys, new Function values) once per importing module was
+            // O(importers x exports) retained memory encoding nothing. The
+            // cache holds a clone of the source `Arc` alongside the result, so
+            // a pointer can never be recycled while its entry is live. Cleared
+            // with every other loader cache in `clear_module_cache`.
+            let key = Arc::as_ptr(dict) as usize;
+            if let Some(hit) = FILTERED_DICT_CACHE.with(|c| {
+                c.borrow().get(&key).and_then(|(src, out)| Arc::ptr_eq(src, dict).then(|| Arc::clone(out)))
+            }) {
+                crate::perf_counters::bump(&crate::perf_counters::FILTERED_DICT_HITS, 1);
+                return Value::Dict(hit);
+            }
+            crate::perf_counters::bump(&crate::perf_counters::FILTERED_DICT_BUILDS, 1);
+            let filtered: Arc<HashMap<String, Value>> = Arc::new(
+                dict.iter()
+                    .map(|(k, v)| (k.clone(), filter_functions_from_value(v)))
+                    .collect(),
+            );
+            FILTERED_DICT_CACHE.with(|c| {
+                c.borrow_mut().insert(key, (Arc::clone(dict), Arc::clone(&filtered)));
+            });
+            Value::Dict(filtered)
         }
         // For all other values, clone them as-is
         other => other.clone(),

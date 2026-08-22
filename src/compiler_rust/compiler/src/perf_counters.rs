@@ -36,6 +36,9 @@ counters!(
     SELF_FIELD_ARR_MUT_CALLS,
     SELF_FIELD_ARR_COW_CLONES,
     SELF_FIELD_ARR_COW_ELEMS_CLONED,
+    // filter_functions_from_value: imported-module dict rebuilt vs memo hit
+    FILTERED_DICT_BUILDS,
+    FILTERED_DICT_HITS,
 );
 
 #[inline(always)]
