@@ -77,12 +77,12 @@ var _LINT_TIER_ACTIVE: bool = false
 
 # Resolve the LintConfig for file+source (sdn [lints] profile= + @lint_profile attr)
 # and load its severity overrides.
-fn _load_lint_config_for(file: text, source: text):
+fn _load_lint_config_for(file: text, lines: [text]):
     var cfg = LintConfig.new()
     val sdn = find_project_sdn(file)
     if sdn != "":
         cfg = LintConfig.from_sdn_file(sdn)
-    cfg.apply_file_attributes(source)
+    cfg.apply_file_attributes_lines(lines)
     # Only override emitted severities when a strictness tier or explicit [lints]/
     # @allow/@deny config is present; with neither, leave the legacy LSP severities
     # untouched (nil profile == today's exact behavior — zero default change).
@@ -185,13 +185,34 @@ fn _emit_lint_if_readable(file: text, format: text):
             _emit_source_lint_diagnostics(file, source, format)
 
 fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, [text]):
-    """Run the full lint pipeline in JSON collection mode."""
+    """Run the full lint pipeline in a nested JSON collection scope.
+
+    The scalar preserves legacy per-rule producer counting. Suppression handling
+    differs between rule families, so `collected.len()` is the authoritative
+    emitted count."""
+    val previous_mode = _DIAG_COLLECT_MODE
+    val previous_collected = _DIAG_COLLECTED
+    val previous_overrides = _DIAG_SEVERITY_OVERRIDE
+    val previous_override_count = _DIAG_SEVERITY_OVERRIDE_COUNT
+    val previous_tier_active = _LINT_TIER_ACTIVE
+
     _DIAG_COLLECT_MODE = true
     _DIAG_COLLECTED = []
+    _DIAG_SEVERITY_OVERRIDE = {}
+    _DIAG_SEVERITY_OVERRIDE_COUNT = 0
+    _LINT_TIER_ACTIVE = false
+
     val count = _emit_source_lint_diagnostics(file, source, "json")
     val collected = _DIAG_COLLECTED
-    _DIAG_COLLECT_MODE = false
-    _DIAG_COLLECTED = []
+
+    # The lint owner restores its private tier flag together with the shared
+    # collector policy. Nested callers keep their exact outer buffer/policy;
+    # inner diagnostics are returned separately and are never appended to it.
+    _DIAG_COLLECT_MODE = previous_mode
+    _DIAG_COLLECTED = previous_collected
+    _DIAG_SEVERITY_OVERRIDE = previous_overrides
+    _DIAG_SEVERITY_OVERRIDE_COUNT = previous_override_count
+    _LINT_TIER_ACTIVE = previous_tier_active
     (count, collected)
 
 fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
@@ -215,10 +236,14 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
     PTAG001/002 run in the preceding text pass. The project-level critical-file
     guard has a separate entry point.
 
-    Returns the number of diagnostics emitted.
+    Returns the legacy per-rule producer count. Suppression/count timing differs
+    across rule families; collection callers use the collected array length as
+    the authoritative emitted count.
     """
-    _load_lint_config_for(file, source)
     val lines = source.split("\n")
+    # The complete lint pipeline owns one canonical line array. Reuse it for
+    # file attributes instead of splitting the source again in LintConfig.
+    _load_lint_config_for(file, lines)
     val source_locations = _query_ast_lint_location_index(lines)
     val indent_successors = _query_indent_successor_index(lines)
     var count = 0
