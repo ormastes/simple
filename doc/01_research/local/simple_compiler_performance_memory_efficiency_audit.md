@@ -2144,6 +2144,25 @@ arrays, registry, callbacks, or allocation. Timing evidence remains unavailable
 under the requested no-verify policy, so only the static operation reduction is
 claimed.
 
+### Parse-scope compiler-trace snapshot
+
+Static hot-path review found a simple expression statement could consult
+`SIMPLE_COMPILER_TRACE` about 18 times: the precedence chain alone issued about
+15 environment reads per `parse_expr`, with additional primary and statement
+checks. The trace-disabled path therefore paid repeated foreign environment
+dispatch and transient text handling even though no trace payload was emitted.
+
+The cycle-free frontend trace-policy owner now samples the flag once at each
+outer parse boundary. Nested parses inherit the immutable outer snapshot and
+restore it LIFO; the next top-level parse resamples, while direct callers outside
+a parse scope retain dynamic environment behavior. Five parser/type predicates
+use the shared cached decision. Work remains O(tokens), but environment reads
+fall from approximately `15E + P + S` to one per top-level parse, with two i64
+state cells and no per-probe allocation.
+
+No timing, RSS, allocation, optimizer, or executable-test evidence is claimed
+because verification was explicitly disabled for this tranche.
+
 ### Leading explicit-code allocation audit
 
 The leading `Edddd` probe previously allocated a one-character prefix, a
