@@ -858,7 +858,17 @@ fn cl_translate_terminator(
                 cranelift_return_void(ctx)
 
         case If(cond, then_, else_):
-            val cond_val = cl_translate_operand(ctx, cl_module, cond, value_map, slot_map, func)
+            val raw_cond_val = cl_translate_operand(ctx, cl_module, cond, value_map, slot_map, func)
+            # Cranelift brif's wrapper tests its input against integer zero.
+            # A legal Simple float condition therefore must first become a
+            # Boolean through fcmp; passing f32/f64 directly produces the
+            # verifier error `icmp_imm.f32`.  Optional-float nil comparisons
+            # are eliminated in MIR lowering, while this keeps the backend
+            # correct for genuine bare-float truthiness too.
+            var cond_val = raw_cond_val
+            if operand_is_float(cond, func):
+                val cond_zero = cranelift_fconst(ctx, mir_type_to_cl(operand_type(cond, func)), 0.0)
+                cond_val = cranelift_fcmp(ctx, CL_FCMP_NE, raw_cond_val, cond_zero)
             val then_edge = cranelift_create_block(ctx)
             val else_edge = cranelift_create_block(ctx)
             cranelift_brif(ctx, cond_val, then_edge, else_edge)
@@ -1062,7 +1072,10 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
 # ============================================================================
 
 fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, a: i64, b: i64, left_operand: MirOperand, right_operand: MirOperand, func: MirFunction) -> i64:
-    val is_float = operand_is_float(left_operand, func)
+    # Comparisons are symmetric in operand type.  Looking only at the left
+    # operand selected icmp for `nil != optional_float` when malformed MIR
+    # reached this boundary, even though the right SSA value was f32/f64.
+    val is_float = operand_is_float(left_operand, func) or operand_is_float(right_operand, func)
     val left_is_unsigned = operand_is_unsigned(left_operand, func)
     val is_unsigned = left_is_unsigned or operand_is_unsigned(right_operand, func)
     match op:

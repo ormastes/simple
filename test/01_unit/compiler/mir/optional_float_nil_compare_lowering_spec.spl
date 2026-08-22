@@ -1,0 +1,48 @@
+"""
+Regression coverage for staged Optional<f32/f64> nil comparisons.
+
+The MIR owner must recognize Optional by its enum discriminant and lower nil
+comparisons to rt_is_none/rt_is_some.  No float value may reach an integer
+comparison or a raw Cranelift branch condition.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn lower_optional_float_function(src: text, target: text) -> text:
+    val module = parse_full_frontend(src, "optional_float_nil.spl", "optional_float_nil.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("optional_float_nil.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with(".{target}"):
+            return serialize_mir_function(function)
+    ""
+
+describe "Optional float nil comparison lowering", tag: ["only-compiled"]:
+    it "uses presence helpers for f32 and f64 in either operand order":
+        val source = (
+            "fn f32_ne(v: f32?) -> bool:\n    v != nil\n\n" +
+            "fn f32_eq(v: f32?) -> bool:\n    nil == v\n\n" +
+            "fn f64_ne(v: f64?) -> bool:\n    nil != v\n\n" +
+            "fn f64_eq(v: f64?) -> bool:\n    v == nil\n"
+        )
+
+        expect(lower_optional_float_function(source, "f32_ne")).to_contain("rt_is_some")
+        expect(lower_optional_float_function(source, "f32_eq")).to_contain("rt_is_none")
+        expect(lower_optional_float_function(source, "f64_ne")).to_contain("rt_is_some")
+        expect(lower_optional_float_function(source, "f64_eq")).to_contain("rt_is_none")
+
+    it "keeps Cranelift float comparisons and conditions off integer opcodes":
+        val source = rt_file_read_text(
+            "src/compiler/70.backend/backend/cranelift_codegen_adapter.spl") ?? ""
+        expect(source).to_contain("operand_is_float(left_operand, func) or operand_is_float(right_operand, func)")
+        expect(source).to_contain("if operand_is_float(cond, func):")
+        expect(source).to_contain("cond_val = cranelift_fcmp(ctx, CL_FCMP_NE, raw_cond_val, cond_zero)")
