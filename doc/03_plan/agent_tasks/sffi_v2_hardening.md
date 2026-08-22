@@ -334,8 +334,9 @@ passing placeholder.
     authority and keep candidate path construction hoisted. Census baseline is
     now 21,337 raw / 1,909 explicit / 19,428 missing calls. Fix the expression-
     form unsafe parser gap before replacing the compatible statement form.
-64. Replace `_driver_entry_import_dirname`'s quadratic loop concatenation with
-    a linear last-separator slice, preserving empty/root/relative path behavior
-    under focused tests. Then migrate the same file's env/time/path/dir/process
-    calls and six public primitive APIs without adding lookup, allocation, or
-    extra provider dispatch. Signed runtime admission remains a separate gate.
+64. Retain `_driver_entry_import_dirname`'s verified linear last-separator
+    slice: 6/6 behavior examples cover leaf/root/relative/trailing/repeated
+    separators, optimizer opportunities fall 246 to 243, and `COLL006` is gone.
+    Next migrate the same file's env/time/path/dir/process calls and six public
+    primitive APIs without adding lookup, allocation, or provider dispatch.
+    Signed runtime admission remains a separate gate.

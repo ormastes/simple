@@ -1981,6 +1981,19 @@ Lexically authorized calls rise by one to 1,378 because the single centralized
 move call is scoped. These are source and seed-behavior receipts only: the
 runtime provider remains unsigned and evidence-unadmitted.
 
+## Linear entry-import dirname prerequisite
+
+The source-loading lint blocker at `_driver_entry_import_dirname` is removed.
+The old implementation allocated a split array and repeatedly concatenated an
+ever-growing directory string, making path length work quadratic. The new
+implementation performs one `rfind("/")` scan and one substring, O(n) time with
+no intermediate parts collection. Edge coverage includes leaf, root-level,
+ordinary relative, trailing-slash, and repeated-separator paths and passes 6/6
+with the surrounding source-loading behavior. The bootstrap-seed observation
+is 9.77 seconds and 473,616 KiB peak RSS; it is not a self-hosted performance
+admission. Optimizer opportunities fall from 246 to 243 and the lint no longer
+reports `COLL006`; six unrelated public primitive-API errors remain.
+
 ## Driver source-loading file-call authority
 
 The largest remaining production `rt_file` caller,
