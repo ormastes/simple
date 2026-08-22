@@ -12,6 +12,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.mir_opt.mir_opt.perf_facts.{
     PerfFactKind, PerfFactPreservation,
+    perf_instruction_access,
     perf_facts_build, perf_facts_successors, perf_facts_predecessors,
     perf_facts_dominates, perf_facts_definitions, perf_facts_uses,
     perf_facts_is_live_in, perf_facts_is_live_out,
@@ -209,13 +210,40 @@ describe "shared MIR PerfFacts":
         expect(facts.liveness_complete).to_equal(true)
         expect(perf_facts_is_live_in(facts, BlockId(id: 0), local0)).to_equal(true)
 
-    it "fails def-use completeness closed for an unmodeled instruction":
+    it "covers ownership SIMD and nested-place local accesses":
+        step("Model representative MIR access families")
+        val base = LocalId(id: 0)
+        val index = LocalId(id: 1)
+        val right = LocalId(id: 2)
+        val vector = LocalId(id: 3)
+        val reference = LocalId(id: 4)
+        val freeze_access = perf_instruction_access(
+            MirInst(MirInstKind.FreezeRegion(base), nil))
+        expect(freeze_access.covered).to_equal(true)
+        expect(freeze_access.uses).to_equal([base])
+        val simd_access = perf_instruction_access(MirInst(
+            MirInstKind.SimdAddF32x4(vector, mir_operand_copy(base), mir_operand_copy(right)), nil))
+        expect(simd_access.defs).to_equal([vector])
+        expect(simd_access.uses).to_equal([base, right])
+        val ref_access = perf_instruction_access(MirInst(MirInstKind.Ref(
+            reference, MirBorrowKind.Shared,
+            MirPlace(base, [MirProjection.Deref, MirProjection.Index(index)])), nil))
+        expect(ref_access.covered).to_equal(true)
+        expect(ref_access.defs).to_equal([reference])
+        expect(ref_access.uses).to_equal([base, index])
+
+    it "fails def-use completeness closed for semantically unadmitted metadata":
         step("Reject incomplete def-use coverage")
         val func = _pf_function_with_locals_blocks([
-            MirLocal(LocalId(id: 0), Some("region"), MirType.i64(), LocalKind.Temp, false)
+            MirLocal(LocalId(id: 0), Some("scrutinee"), MirType.i64(), LocalKind.Temp, false),
+            MirLocal(LocalId(id: 1), Some("destination"), MirType.i64(), LocalKind.Temp, false),
+            MirLocal(LocalId(id: 2), Some("ok_payload"), MirType.i64(), LocalKind.Temp, false),
+            MirLocal(LocalId(id: 3), Some("err_payload"), MirType.i64(), LocalKind.Temp, false)
         ], [
             _pf_block_with(0, [
-                MirInst(MirInstKind.FreezeRegion(LocalId(id: 0)), nil)
+                MirInst(MirInstKind.ResultMatchSemantic(
+                    LocalId(id: 0), LocalId(id: 1), BlockId(id: 1), BlockId(id: 2),
+                    BlockId(id: 3), LocalId(id: 2), LocalId(id: 3)), nil)
             ], MirTerminator.Ret(nil))
         ])
         val facts = perf_facts_build(func)
@@ -254,11 +282,19 @@ describe "shared MIR PerfFacts":
     it "keeps dormant DCE unchanged when shared liveness is incomplete":
         step("Fail DCE closed on uncovered MIR")
         val local0 = LocalId(id: 0)
+        val local1 = LocalId(id: 1)
+        val local2 = LocalId(id: 2)
+        val local3 = LocalId(id: 3)
         val func = _pf_function_with_locals_blocks([
-            MirLocal(local0, Some("region"), MirType.i64(), LocalKind.Temp, false)
+            MirLocal(local0, Some("scrutinee"), MirType.i64(), LocalKind.Temp, false),
+            MirLocal(local1, Some("destination"), MirType.i64(), LocalKind.Temp, false),
+            MirLocal(local2, Some("ok_payload"), MirType.i64(), LocalKind.Temp, false),
+            MirLocal(local3, Some("err_payload"), MirType.i64(), LocalKind.Temp, false)
         ], [
             _pf_block_with(0, [
-                MirInst(MirInstKind.FreezeRegion(local0), nil)
+                MirInst(MirInstKind.ResultMatchSemantic(
+                    local0, local1, BlockId(id: 1), BlockId(id: 2),
+                    BlockId(id: 3), local2, local3), nil)
             ], MirTerminator.Ret(nil))
         ])
         var dce = create_dce_pass()
