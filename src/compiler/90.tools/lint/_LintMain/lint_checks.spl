@@ -52,7 +52,8 @@ use compiler.semantics.lint.const_ref_default.{check_const_ref_default}
 use compiler.semantics.lint.bare_primitive_internal.{check_bare_primitive_internal}
 use compiler.semantics.lint.unwrapped_foreign_resource.{check_unwrapped_foreign_resource}
 use compiler.semantics.lint.raw_sffi_call.{
-    check_raw_sffi_calls, check_raw_sffi_declarations
+    RawSffiCodeSnapshot, raw_sffi_code_snapshot, check_raw_sffi_calls_snapshot,
+    check_raw_sffi_declarations_snapshot
 }
 
 # File I/O wrapper
@@ -339,8 +340,7 @@ impl Linter:
         self.check_const_ref_default_spl(path, content)
         self.check_bare_primitive_internal_spl(path, content)
         self.check_unwrapped_foreign_resource_spl(path, content)
-        self.check_raw_sffi_call_spl(path, content)
-        self.check_raw_sffi_declaration_spl(path, content)
+        self.check_raw_sffi_spl(path, content)
         self.check_wm_lane_boundary(file_config, path, lines)
 
         # Run shared EasyFix rules and attach as lint results
@@ -600,16 +600,27 @@ impl Linter:
                 .with_fix(finding.note)
             self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
 
-    me check_raw_sffi_call_spl(path: String, content: String):
-        val findings = check_raw_sffi_calls(content, path)
-        for finding in findings:
+    me check_raw_sffi_spl(path: String, content: String):
+        val snapshot = raw_sffi_code_snapshot(content, path)
+        # Preserve the historical category order: all call findings precede
+        # all declaration findings regardless of physical source line.
+        self.append_raw_sffi_call_findings(path, snapshot)
+        self.append_raw_sffi_declaration_findings(path, snapshot)
+
+    me append_raw_sffi_call_findings(
+        path: String, snapshot: RawSffiCodeSnapshot
+    ):
+        val call_findings = check_raw_sffi_calls_snapshot(snapshot)
+        for finding in call_findings:
             val lint = LintDiag.new(finding.code, LintLevel.Allow, LintCategory.Safety, finding.message)
                 .with_fix(finding.note)
             self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
 
-    me check_raw_sffi_declaration_spl(path: String, content: String):
-        val findings = check_raw_sffi_declarations(content, path)
-        for finding in findings:
+    me append_raw_sffi_declaration_findings(
+        path: String, snapshot: RawSffiCodeSnapshot
+    ):
+        val declaration_findings = check_raw_sffi_declarations_snapshot(snapshot)
+        for finding in declaration_findings:
             val lint = LintDiag.new(finding.code, LintLevel.Allow, LintCategory.Safety, finding.message)
                 .with_fix(finding.note)
             self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
