@@ -33,7 +33,7 @@ use compiler.mir_opt.mir_opt.tco (create_tco_pass, tco_run_on_function)
 use compiler.mir_opt.mir_opt.gvn (create_gvn_pass, gvn_run_on_function)
 use compiler.mir_opt.mir_opt.predicate_promote (run_predicate_promote)
 use compiler.mir_opt.mir_opt.auto_vectorize (run_auto_vectorize)
-use compiler.mir_opt.mir_opt.pattern_dispatch (run_pattern_idiom_pass, run_pattern_idiom_pass_x86, run_pattern_idiom_pass_generic, run_narrow_form_pass)
+use compiler.mir_opt.mir_opt.pattern_dispatch (run_pattern_idiom_pass_x86, run_pattern_idiom_pass_generic, run_narrow_form_pass)
 extern fn rt_env_get(key: text) -> text?
 
 # `rt_env_get` yields nil for an UNSET variable, so both the extern and this
@@ -60,7 +60,6 @@ fn mir_opt_is_inline_pass(pass_name: text) -> bool:
 
 fn mir_opt_bootstrap_skip_pass(pass_name: text) -> bool:
     mir_opt_is_inline_pass(pass_name) or pass_name == "collection_opt" or pass_name == "predicate_promote"
-use compiler.mir_opt.mir_opt.pattern.pattern_rule_pass (pattern_rule_pass_new, pattern_rule_pass_run)
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
     optimization_rule_provider_builtin_with_contract,
@@ -255,13 +254,23 @@ fn pass_status(kind: PassKind) -> PassStatus:
     match kind:
         case DeadCodeElimination | ConstantFolding | CopyPropagation | CommonSubexprElim:
             PassStatus.Skeleton
+        case InlineSmallFunctions | InlineFunctions | InlineAggressive:
+            PassStatus.Active
         case LoopInvariantMotion | LoopUnroll | BoundsCheckElimination | StrengthReduction:
             PassStatus.Disabled("legality proof incomplete")
+        case CollectionOpt:
+            PassStatus.Disabled("ownership, alias, effect, and semantic-equivalence proofs incomplete")
         case StringBuilderOpt | GeneratorStateMachine | TailCallOptimization | GlobalValueNumbering | TypedByteCanon:
             PassStatus.Skeleton
         case BodyOutlining:
             PassStatus.Skeleton
-        case _:
+        case AutoVectorize:
+            # The canonical pass currently discovers candidates and logs
+            # blockers; it performs no production MIR rewrite.
+            PassStatus.AnalysisOnly
+        case PatternIdiom | PredicatePromote | TargetNarrowForm:
+            PassStatus.Active
+        case WriteCoalesce | ReadAheadHoist | SyscallBatch:
             PassStatus.Active
 
 fn pass_expectation(kind: PassKind) -> PassExpectation:
@@ -1131,15 +1140,14 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
             # See: doc/05_design/simd_auto_vectorize_design.md §2, §10
             result_module = run_auto_vectorize(result_module)
         case PatternIdiom:
-            # pattern_idiom with no loaded rules is a no-op (empty PatternRulePass
-            # returns module unchanged).  Pipeline callers supply rules via
-            # DynamicPassRegistry; bare callers here get an empty pass.
-            val prp = pattern_rule_pass_new()
-            result_module = pattern_rule_pass_run(prp, result_module)
+            # Match the canonical pipeline's default target route.  A public
+            # active-pass dispatcher must not silently substitute an empty
+            # PatternRulePass that can never activate its positive witness.
+            val default_ctx = target_opt_context_default()
+            result_module = run_pattern_idiom_pass_x86(result_module, default_ctx.x86_caps, default_ctx.cipher_remark)
         case TargetNarrowForm:
-            # target_narrow_form is dispatched by pipeline_optimize with target context;
-            # bare run_pass_on_module callers without context get a no-op.
-            pass_do_nothing
+            val default_ctx = target_opt_context_default()
+            result_module = run_narrow_form_pass(result_module, default_ctx.caps_kind)
         case WriteCoalesce:
             for func in functions:
                 var wc_stats = OptimizationStats.create()
