@@ -8,6 +8,47 @@ use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
 use std.tooling.easy_fix.*
 use compiler.tools.fix.rules.helpers.*
 
+fn _annotation_name(trimmed: text) -> text:
+    if not trimmed.starts_with("@") or trimmed.len() <= 1:
+        return ""
+    val after_at = trimmed.slice(1)
+    var end_pos = after_at.len()
+    val paren_pos = after_at.find("(")
+    val space_pos = after_at.find(" ")
+    if paren_pos >= 0 and paren_pos < end_pos:
+        end_pos = paren_pos
+    if space_pos >= 0 and space_pos < end_pos:
+        end_pos = space_pos
+    val name = after_at.slice(0, end_pos)
+    if name.starts_with("#") or name.starts_with("@"):
+        return ""
+    name
+
+fn check_unknown_annotation(source: text, file: text) -> [EasyFix]:
+    check_unknown_annotation_with_contexts(file, line_contexts(source))
+
+fn check_unknown_annotation_with_contexts(file: text, contexts: [LineContext]) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    for raw_ctx in contexts:
+        val ctx: LineContext = raw_ctx
+        val name = _annotation_name(ctx.trimmed)
+        if name != "" and not _is_known_decorator(name) and not _is_known_attribute(name):
+            var fix = EasyFix.create(
+                id: "L:unknown_annotation:{ctx.line_num}",
+                description: "unknown annotation '@{name}' — not in known decorator/attribute sets",
+                confidence: FixConfidence.Likely
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: ctx.byte_offset + ctx.indent,
+                end: ctx.byte_offset + ctx.line.len(),
+                line: ctx.line_num,
+                column: ctx.indent + 1,
+                new_text: ctx.line
+            ))
+            fixes.push(fix)
+    fixes
+
 # ============================================================================
 # Rule: unknown_decorator
 # Detects @name lines where name is not in the known whitelist.

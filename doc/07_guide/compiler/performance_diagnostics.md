@@ -280,3 +280,9 @@ Default deny and authored allow settings therefore apply consistently after ID d
 Contextual-keyword, deprecated syntax, struct-construction, short-grammar, raw-unit, and
 SIMD EasyFix advice is configurable and defaults to warning. The four short-grammar
 diagnostic codes share the `short_grammar_refactor` policy name.
+
+Source-only annotation checking reports `unknown_annotation`, because raw `@name` syntax
+cannot distinguish decorators from attributes. It accepts the union of known names and
+emits at most one warning per line. Existing `unknown_decorator` and `unknown_attribute`
+settings remain aliases for compatibility; typed analysis may later provide precise
+category-specific diagnostics.
