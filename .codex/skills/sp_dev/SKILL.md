@@ -60,6 +60,11 @@ complete when workflow/tooling behavior changed and the matching guide, skill,
 agent, command, or generated/manual spec docs are still stale. Update the docs
 first, then run focused verification evidence once.
 
+For must-check hook work in linked Git worktrees, remember that the hooks
+directory is shared. Install the stable `scripts/hooks/pre-push-worktree-launcher`
+and let it resolve the active worktree; never bind the shared hook to one
+worktree's absolute dispatcher path.
+
 For every acceptance criterion, record one passing result and do not rerun the
 same unchanged green command. Stop after three verify/fix cycles for one
 feature and report any remaining failure; convergence ends the lane instead of

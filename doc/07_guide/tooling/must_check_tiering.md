@@ -82,13 +82,17 @@ Windows PowerShell:
 if ($LASTEXITCODE -ne 0) { & scripts/setup/install-must-check-hooks.ps1 -Install }
 ```
 
-Both installers preserve an unrelated existing hook as `pre-push.local`. The
-tracked dispatcher snapshots Git's ref input and supplies it to both the local
-hook and the canonical repository guard. The repository hook verifier accepts
-only the exact canonical guard or exact tracked dispatcher path; an unrelated
-wrapper containing a guard-name substring is not accepted.
-An exact file copy of the legacy canonical guard is treated like its symlink;
-if that same guard is already preserved as `pre-push.local`, installation may
-replace only `pre-push` with the dispatcher without overwriting either payload.
+Linked worktrees share one Git hooks directory. Both installers therefore put
+the byte-stable `scripts/hooks/pre-push-worktree-launcher` there; it resolves
+the active worktree at invocation and enters that worktree's tracked dispatcher.
+An absolute symlink to one checkout is invalid because it breaks sibling
+worktrees. Both installers preserve an unrelated existing hook as
+`pre-push.local`. The tracked dispatcher snapshots Git's ref input and supplies
+it to both the local hook and the canonical repository guard. The verifier
+accepts only the exact canonical guard, dispatcher, launcher, or launcher copy;
+an unrelated wrapper containing a guard-name substring is not accepted.
+An exact legacy guard or dispatcher payload is canonical replacement material;
+it is not preserved as a local hook, because preserving a dispatcher would
+recursively invoke itself.
 The dispatcher detects that exact duplicate and does not execute it twice;
 non-identical local hooks remain chained and fail closed.

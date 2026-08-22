@@ -18,6 +18,12 @@ PASS rows whose unblock condition is not `none`. Focused transition evidence
 must come from the bootstrap producer and then pass through the committed-ref
 push consumer; a hand-authored PASS fixture is insufficient.
 
+Linked worktrees share the common Git hooks directory. Install only the stable
+`scripts/hooks/pre-push-worktree-launcher`, which resolves the active worktree
+and enters its tracked dispatcher. Never install an absolute symlink to one
+worktree's dispatcher, and never preserve a legacy dispatcher as
+`pre-push.local` because that creates recursive dispatch.
+
 ## 2026-08-21 bootstrap repair handoff
 
 The must-check producer remains correctly blocked until a fresh Stage 4 exists.
