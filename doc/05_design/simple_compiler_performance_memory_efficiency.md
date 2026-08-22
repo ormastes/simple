@@ -217,3 +217,12 @@ replacement)` records. Sort by signature and sequence to retain legacy grouping 
 source order without nested mutable/COW replacement buckets. The bounded cost is
 O(source + signatures + replacements log replacements), memory O(signatures +
 replacements); future typed call resolution may replace the lexical index.
+
+### Allocation-free lint metadata dispatch
+
+Small immutable lint registries used on every diagnostic or annotation line are encoded
+as exact match dispatch, not freshly constructed arrays. EasyFix ID decoding supports two
+wire shapes: `L|E:code:location...` and `direct_code:location...`. It returns the semantic
+code, preserves malformed input as an unknown authored code, allocates no parts array,
+and never treats a location component as policy identity. Text and JSON severity paths
+must consume this single decoded code.

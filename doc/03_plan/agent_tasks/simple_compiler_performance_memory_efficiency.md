@@ -197,3 +197,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Remove obsolete per-signature scan and uniqueness helpers.
 - Pin indexed dictionaries and absence of the quadratic helper with source contracts.
 - Follow-up: replace lexical candidates with typed resolved-call facts when available.
+
+## Completed tool tranche: allocation-free annotation and EasyFix IDs
+
+- Replace per-annotation whitelist arrays with exact allocation-free match dispatch.
+- Decode namespaced and direct EasyFix ID formats through one helper.
+- Fix W0404/W0406 policy identity so line numbers cannot become lint codes.
+- Preserve malformed IDs as unknown authored codes rather than dropping diagnostics.
+- Add functional ID-shape and source-allocation regression contracts.
+- Follow-up: unify unknown decorator/attribute classification with typed annotation facts.
