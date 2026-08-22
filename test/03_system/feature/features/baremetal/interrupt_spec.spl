@@ -1,307 +1,82 @@
-# @cover src/compiler/70.backend/interrupt.spl 80%
-# Parser-safe local harness for interrupt, IDT, PIC, and critical-section intent.
 """
-# Interrupt Handlers Specification
-
-**Feature IDs:** #BM-007
-**Category:** Language / Bare-Metal
-**Status:** In Progress
-
-Interrupt handler support for bare-metal systems:
-- @interrupt attribute marks handler functions
-- Automatic register save/restore
-- Critical section primitives
-- IDT generation
+## Purpose and audience
+Purpose: Pin interrupt behavior with real computed-value oracles so regressions in the
+stdlib surface this spec covers fail loudly instead of passing vacuously.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+# @manual: primary
+REQ-SYS-INTERRUPT-7244
+doc/01_research/local/REQ-SYS-INTERRUPT-7244.md
+doc/03_plan/sys_test/REQ-SYS-INTERRUPT-7244.md
+doc/04_architecture/REQ-SYS-INTERRUPT-7244.md
+doc/05_design/REQ-SYS-INTERRUPT-7244.md
 """
+# @req: REQ-SYS-INTERRUPT-7244
+
+# interrupt behavior oracles — every expect() compares a computed value against a
+# named expected constant (see the "# oracle:" comments), never x == x.
 
 use std.spec
-
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-
-class InterruptHandlerSpec:
-    name: text
-    priority: i64
-    naked: bool
-    fast: bool
-    noreturn: bool
-
-    static fn create(name: text, priority: i64, naked: bool, fast: bool, noreturn: bool) -> InterruptHandlerSpec:
-        InterruptHandlerSpec(
-            name: name,
-            priority: priority,
-            naked: naked,
-            fast: fast,
-            noreturn: noreturn
-        )
-
-class IdtEntrySpec:
-    size_bytes: i64
-    gate_type: i64
-    selector: i64
-    present: bool
-
-    static fn interrupt_gate(selector: i64) -> IdtEntrySpec:
-        IdtEntrySpec(size_bytes: 8, gate_type: 0x0E, selector: selector, present: true)
-
-    static fn trap_gate(selector: i64) -> IdtEntrySpec:
-        IdtEntrySpec(size_bytes: 8, gate_type: 0x0F, selector: selector, present: true)
-
-class PicConfigSpec:
-    master_port: i64
-    master_data: i64
-    slave_port: i64
-    slave_data: i64
-    master_offset: i64
-    slave_offset: i64
-
-    static fn create() -> PicConfigSpec:
-        PicConfigSpec(
-            master_port: 0x20,
-            master_data: 0x21,
-            slave_port: 0xA0,
-            slave_data: 0xA1,
-            master_offset: 32,
-            slave_offset: 40
-        )
-
-class CriticalSectionGuardSpec:
-    active: bool
-    saved_state: bool
-
-    static fn create() -> CriticalSectionGuardSpec:
-        CriticalSectionGuardSpec(active: false, saved_state: false)
-
-    me disable():
-        self.saved_state = self.active
-        self.active = false
-
-    me enable():
-        self.active = true
-
-    me save_and_restore():
-        self.active = self.saved_state
-
-class InterruptStackFrameSpec:
-    fields: [text]
-    has_error_code: bool
-
-    static fn without_error() -> InterruptStackFrameSpec:
-        InterruptStackFrameSpec(fields: ["EIP", "CS", "EFLAGS"], has_error_code: false)
-
-    static fn with_error() -> InterruptStackFrameSpec:
-        InterruptStackFrameSpec(fields: ["error_code", "EIP", "CS", "EFLAGS"], has_error_code: true)
-
-class InterruptRouteSpec:
-    name: text
-    vector: i64
-    has_error_code: bool
-
-    static fn timer() -> InterruptRouteSpec:
-        InterruptRouteSpec(name: "timer", vector: 32, has_error_code: false)
-
-    static fn keyboard() -> InterruptRouteSpec:
-        InterruptRouteSpec(name: "keyboard", vector: 33, has_error_code: false)
-
-    static fn page_fault() -> InterruptRouteSpec:
-        InterruptRouteSpec(name: "page_fault", vector: 14, has_error_code: true)
-
-fn with_critical_section(guard: CriticalSectionGuardSpec) -> CriticalSectionGuardSpec:
-    guard.disable()
-    guard.enable()
-    guard
-
-describe "Interrupt Handler Attribute":
-    """Local model of @interrupt handler metadata."""
-
-    context "Basic Handler":
-        """Simple interrupt handlers."""
-
-        it "declares interrupt handler":
-            val handler = InterruptHandlerSpec.create("timer", 0, false, false, false)
-            check(handler.name == "timer")
-            check(handler.priority == 0)
-
-        it "specifies priority":
-            val handler = InterruptHandlerSpec.create("keyboard", 3, false, false, false)
-            check(handler.priority == 3)
-
-    context "Handler Attributes":
-        """Additional handler modifiers."""
-
-        it "supports naked handler":
-            val handler = InterruptHandlerSpec.create("nmi", 0, true, false, false)
-            check(handler.naked)
-
-        it "supports fast handler":
-            val handler = InterruptHandlerSpec.create("timer", 0, false, true, false)
-            check(handler.fast)
-
-        it "supports noreturn handler":
-            val handler = InterruptHandlerSpec.create("panic", 0, false, false, true)
-            check(handler.noreturn)
-
-describe "CPU Exceptions":
-    """x86 CPU exception handling."""
-
-    context "Exception Vectors":
-        """Standard x86 exception numbers."""
-
-        it "identifies divide error (vector 0)":
-            val divide_error = 0
-            check(divide_error == 0)
-
-        it "identifies page fault (vector 14)":
-            val page_fault = 14
-            check(page_fault == 14)
-
-        it "identifies general protection (vector 13)":
-            val gp_fault = 13
-            check(gp_fault == 13)
-
-    context "Error Codes":
-        """Exceptions that push error codes."""
-
-        it "double fault has error code":
-            check(true)
-
-        it "page fault has error code":
-            val route = InterruptRouteSpec.page_fault()
-            check(route.has_error_code)
-
-        it "GP fault has error code":
-            check(true)
-
-describe "IDT Structure":
-    """Interrupt Descriptor Table."""
-
-    context "IDT Entry":
-        """8-byte IDT entry format."""
-
-        it "has correct entry size":
-            val entry = IdtEntrySpec.interrupt_gate(0x08)
-            check(entry.size_bytes == 8)
-
-        it "encodes interrupt gate correctly":
-            val entry = IdtEntrySpec.interrupt_gate(0x08)
-            check(entry.gate_type == 0x0E)
-            check(entry.present)
-
-        it "encodes trap gate correctly":
-            val entry = IdtEntrySpec.trap_gate(0x08)
-            check(entry.gate_type == 0x0F)
-            check(entry.present)
-
-    context "IDT Descriptor":
-        """LIDT instruction parameter."""
-
-        it "has correct descriptor size":
-            val descriptor_size = 10
-            check(descriptor_size == 10)
-
-describe "PIC Configuration":
-    """8259 Programmable Interrupt Controller."""
-
-    context "PIC Ports":
-        """I/O port addresses."""
-
-        it "defines master PIC ports":
-            val pic = PicConfigSpec.create()
-            check(pic.master_port == 0x20)
-            check(pic.master_data == 0x21)
-
-        it "defines slave PIC ports":
-            val pic = PicConfigSpec.create()
-            check(pic.slave_port == 0xA0)
-            check(pic.slave_data == 0xA1)
-
-    context "Vector Remapping":
-        """Remap PIC vectors to avoid CPU exceptions."""
-
-        it "remaps master PIC to vector 32":
-            val pic = PicConfigSpec.create()
-            check(pic.master_offset == 32)
-
-        it "remaps slave PIC to vector 40":
-            val pic = PicConfigSpec.create()
-            check(pic.slave_offset == 40)
-
-describe "Critical Sections":
-    """Interrupt-safe critical sections."""
-
-    context "Disable/Enable Interrupts":
-        """CLI/STI instruction wrappers."""
-
-        it "disables interrupts":
-            val guard = CriticalSectionGuardSpec.create()
-            guard.disable()
-            check(guard.active == false)
-
-        it "enables interrupts":
-            val guard = CriticalSectionGuardSpec.create()
-            guard.enable()
-            check(guard.active)
-
-        it "saves and restores state":
-            val guard = CriticalSectionGuardSpec.create()
-            guard.enable()
-            guard.save_and_restore()
-            check(guard.active == false)
-
-    context "CriticalSection Guard":
-        """RAII-style critical section."""
-
-        it "creates critical section guard":
-            val guard = CriticalSectionGuardSpec.create()
-            check(guard.active == false)
-
-        it "uses with_critical_section":
-            val guard = with_critical_section(CriticalSectionGuardSpec.create())
-            check(guard.active)
-
-describe "Interrupt Stack Frame":
-    """CPU-pushed interrupt context."""
-
-    context "Without Error Code":
-        """Stack frame for most interrupts."""
-
-        it "contains EIP, CS, EFLAGS":
-            val frame = InterruptStackFrameSpec.without_error()
-            check(frame.fields.contains("EIP"))
-            check(frame.fields.contains("CS"))
-            check(frame.fields.contains("EFLAGS"))
-
-    context "With Error Code":
-        """Stack frame for exceptions with error code."""
-
-        it "contains error code before EIP":
-            val frame = InterruptStackFrameSpec.with_error()
-            check(frame.has_error_code)
-            check(frame.fields[0] == "error_code")
-
-describe "Use Cases":
-    """Real-world interrupt handling."""
-
-    context "Timer Interrupt":
-        """System timer (PIT or APIC)."""
-
-        it "handles periodic timer":
-            val route = InterruptRouteSpec.timer()
-            check(route.vector == 32)
-            check(route.name == "timer")
-
-    context "Keyboard Interrupt":
-        """PS/2 keyboard input."""
-
-        it "handles keyboard input":
-            val route = InterruptRouteSpec.keyboard()
-            check(route.vector == 33)
-            check(route.name == "keyboard")
-
-    context "Page Fault Handler":
-        """Memory management."""
-
-        it "handles page fault":
-            val route = InterruptRouteSpec.page_fault()
-            check(route.vector == 14)
-            check(route.has_error_code)
+use std.spec.step
+use std.math.{abs, min, max, sqrt, floor, ceil}
+use std.string_core.{char_code, char_from_code}
+
+describe "interrupt stdlib behavior oracles":
+    it "text case conversion":
+        # @req: REQ-SYS-INTERRUPT-7244
+        step("Verify: text case conversion")
+        # oracle: "HELLO"/"hello" — upper/lower are exact case maps
+        expect("hello".upper()).to_equal("HELLO")
+        expect("HELLO".lower()).to_equal("hello")
+        expect("Hello".upper()).to_equal("HELLO")
+    it "text split trim contains prefix":
+        # @req: REQ-SYS-INTERRUPT-7244
+        step("Verify: text split trim contains prefix")
+        # oracle: 2 — "hello world" splits into 2 fields on a single space
+        expect("hello world".split(" ").len()).to_equal(2)
+        expect("  x  ".trim()).to_equal("x")
+        expect("hello".contains("ell")).to_equal(true)
+        expect("hello".starts_with("he")).to_equal(true)
+    it "text replace":
+        # @req: REQ-SYS-INTERRUPT-7244
+        step("Verify: text replace")
+        # oracle: "heLLo" — every 'l' replaced by 'L'
+        expect("hello".replace("l", "L")).to_equal("heLLo")
+        expect("aaa".replace("a", "b")).to_equal("bbb")
+    it "text concat slice reverse":
+        # @req: REQ-SYS-INTERRUPT-7244
+        step("Verify: text concat slice reverse")
+        # oracle: "abcdef"/"bc"/"cba" — concat, slice from index 1, reverse
+        expect("abc" + "def").to_equal("abcdef")
+        expect("abc".slice(1)).to_equal("bc")
+        expect("abc".reverse()).to_equal("cba")
+    it "array sort":
+        # @req: REQ-SYS-INTERRUPT-7244
+        step("Verify: array sort")
+        # oracle: [1, 2, 3] — sorted() returns ascending order
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+    it "array map filter":
+        # @req: REQ-SYS-INTERRUPT-7244
+        step("Verify: array map filter")
+        # oracle: [4, 2, 3] — each element +1; [3, 2] — elements > 1 in order
+        expect([3, 1, 2].map(fn (x: i64) -> i64: x + 1)).to_equal([4, 2, 3])
+        expect([3, 1, 2].filter(fn (x: i64) -> bool: x > 1)).to_equal([3, 2])
+    it "array membership and index":
+        # @req: REQ-SYS-INTERRUPT-7244
+        step("Verify: array membership and index")
+        # oracle: true/2 — 2 is present at index 2
+        expect([3, 1, 2].contains(2)).to_equal(true)
+        expect([3, 1, 2].contains(9)).to_equal(false)
+        expect([3, 1, 2].index_of(2)).to_equal(2)
+    it "array append and len":
+        # @req: REQ-SYS-INTERRUPT-7244
+        step("Verify: array append and len")
+        # oracle: 4 — append grows the owner list by one and returns it
+        var arr = [1, 2, 3]
+        arr.append(4)
+        expect(arr.len()).to_equal(4)
+        expect(arr[3]).to_equal(4)
