@@ -1,0 +1,172 @@
+#!/bin/sh
+# check-no-free-generic-fn-in-bootstrap-closure.shs
+#
+# Fail-closed guard: no free generic function (`fn name<T>(...)` at module
+# top level) may be reachable from the bootstrap entry closure
+# (src/app/cli/bootstrap_main.spl), because the native HIR path refuses them:
+#   "generic functions are not supported on the native build path yet ...
+#    monomorphization is not implemented (#158 Phase B)"
+# (src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl), and the
+# 40.mono pass is a documented no-op
+# (doc/08_tracking/bug/hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md).
+#
+# Incident 2026-08-22: stage1 fatal on src/compiler/10.frontend/core/lexer.spl
+# `fn lexer_array_len<T>` -- a helper that sat on a SIMPLE_BOOTSTRAP=1-only
+# allowlist, so it only fataled on a lane that did not export the env var.
+# Two siblings (lexer_struct.spl, _Ast/decl_nodes.spl) were one HIR step away.
+#
+# Mechanism: a static top-level (column-0) `use`/`export use` BFS from the
+# entry file -- function-local `use` lines are deliberately NOT followed, which
+# matches the driver (a 2026-08-22 stage1 log shows 667 parsed modules and no
+# 99.loader files, though codegen.spl:701 has an indented `use compiler.loader`) -- over
+# src/compiler (numbered layer dirs resolved by glob), src/app and src/lib
+# (`std.` and `lib.` prefixes). Every closure file is scanned for
+# `^(pub )?fn <ident><` declarations. Offenders not in the baseline FAIL; a
+# baselined offender that no longer exists is a STALE baseline and also FAILs.
+#
+# Verdict (last stdout line):
+#   PASS — <n> closure file(s) scanned, 0 new free generic fn(s), 0 stale   exit 0
+#   FAIL — ...                                                              exit 1
+#   ERROR — nothing was checked (<reason>)                                  exit 2
+#
+# Usage: sh scripts/check/check-no-free-generic-fn-in-bootstrap-closure.shs
+#        [--root DIR] [--entry FILE] [--baseline FILE] [--selftest-only]
+#        [--generate-baseline]   (reviewed updates only -- read the diff)
+
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ENTRY="src/app/cli/bootstrap_main.spl"
+BASELINE="scripts/check/free_generic_fn_bootstrap_closure_baseline.txt"
+GENERATE=0
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT=$(cd "$2" && pwd); shift 2 ;;
+        --entry) ENTRY="$2"; shift 2 ;;
+        --baseline) BASELINE="$2"; shift 2 ;;
+        --generate-baseline) GENERATE=1; shift ;;
+        --selftest-only) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+# resolve_module ROOT dotted -> file path (relative to ROOT) or empty
+resolve_module() {
+    r=$1; m=$2
+    case "$m" in
+        std.*|lib.*) rel="src/lib/$(printf '%s' "$m" | cut -d. -f2- | tr . /)" ;;
+        app.*)       rel="src/app/$(printf '%s' "$m" | cut -d. -f2- | tr . /)" ;;
+        compiler.*)
+            rest=$(printf '%s' "$m" | cut -d. -f2-)
+            layer=$(printf '%s' "$rest" | cut -d. -f1)
+            tail=$(printf '%s' "$rest" | cut -d. -f2- -s | tr . /)
+            d=""
+            for cand in "$r"/src/compiler/[0-9][0-9]."$layer" "$r/src/compiler/$layer"; do
+                [ -d "$cand" ] && { d=$cand; break; }
+            done
+            [ -z "$d" ] && return 0
+            rel="${d#"$r"/}${tail:+/$tail}" ;;
+        *) return 0 ;;
+    esac
+    if [ -f "$r/$rel.spl" ]; then printf '%s\n' "$rel.spl"
+    elif [ -f "$r/$rel/__init__.spl" ]; then printf '%s\n' "$rel/__init__.spl"
+    elif [ -f "$r/$rel/mod.spl" ]; then printf '%s\n' "$rel/mod.spl"
+    fi
+}
+
+# closure ROOT ENTRY -> prints closure file list (relative), one per line
+closure() {
+    r=$1; e=$2
+    [ -f "$r/$e" ] || return 0
+    seen=$(mktemp); queue=$(mktemp)
+    printf '%s\n' "$e" > "$queue"; printf '%s\n' "$e" > "$seen"
+    while [ -s "$queue" ]; do
+        f=$(head -n1 "$queue"); sed -i '1d' "$queue"
+        sed -n 's/^\(export[[:space:]]\+\)\?use[[:space:]]\+\([A-Za-z0-9_.]*\).*/\2/p' "$r/$f" |
+        while IFS= read -r mod; do
+            mod=${mod%.}
+            p=$(resolve_module "$r" "$mod")
+            # `use a.b.Symbol` names a symbol inside module a.b
+            [ -z "$p" ] && case "$mod" in *.*) p=$(resolve_module "$r" "${mod%.*}") ;; esac
+            [ -z "$p" ] && continue
+            grep -qxF "$p" "$seen" || { printf '%s\n' "$p" >> "$seen"; printf '%s\n' "$p" >> "$queue"; }
+        done
+    done
+    sort "$seen"; rm -f "$seen" "$queue"
+}
+
+# scan ROOT < closure-list -> "file:fn_name" lines
+scan_offenders() {
+    r=$1
+    while IFS= read -r f; do
+        grep -n '^\(pub \)\?fn [A-Za-z_][A-Za-z0-9_]*<' "$r/$f" 2>/dev/null |
+            sed "s|^[0-9]*:\(pub \)\?fn \([A-Za-z_][A-Za-z0-9_]*\)<.*|$f:\2|"
+    done | sort -u
+}
+
+run_check() {
+    r=$1; e=$2; b=$3
+    files=$(closure "$r" "$e")
+    n=$(printf '%s\n' "$files" | grep -c .)
+    if [ "$n" -eq 0 ]; then
+        echo "ERROR — nothing was checked (entry $e not found or has no closure under $r)"; return 2
+    fi
+    found=$(printf '%s\n' "$files" | scan_offenders "$r")
+    base=""; [ -f "$r/$b" ] && base=$(grep -v '^#' "$r/$b" | grep . | sort -u)
+    if [ "$GENERATE" -eq 1 ]; then
+        { echo "# free generic fns reachable from $e (reviewed baseline; see guard header)"; printf '%s\n' "$found"; } > "$r/$b"
+        echo "baseline written: $b ($(printf '%s\n' "$found" | grep -c .) entries)"
+        base=$found
+    fi
+    bf=$(mktemp); ff=$(mktemp)
+    { printf "%s\n" "$base"; echo __none__; } > "$bf"
+    { printf "%s\n" "$found"; echo __none__; } > "$ff"
+    new=$(printf "%s\n" "$found" | grep . | grep -vxF -f "$bf")
+    stale=$(printf "%s\n" "$base" | grep . | grep -vxF -f "$ff")
+    rm -f "$bf" "$ff"
+    nn=$(printf '%s\n' "$new" | grep -c .); ns=$(printf '%s\n' "$stale" | grep -c .)
+    if [ "$nn" -eq 0 ] && [ "$ns" -eq 0 ]; then
+        echo "PASS — $n closure file(s) scanned, 0 new free generic fn(s), 0 stale ($(printf '%s\n' "$base" | grep -c .) baselined)"; return 0
+    fi
+    echo "FAIL — $n closure file(s) scanned, $nn new free generic fn(s): $(printf '%s' "$new" | tr '\n' ' '); $ns stale baseline entry(ies): $(printf '%s' "$stale" | tr '\n' ' ')"
+    return 1
+}
+
+selftest() {
+    t=$(mktemp -d)
+    mk() { mkdir -p "$(dirname "$t/$1")"; printf '%s\n' "$2" > "$t/$1"; }
+    # fixture repo: entry -> compiler.frontend.core.lexer (numbered dir) -> app helper
+    mk src/app/cli/bootstrap_main.spl 'use compiler.frontend.core.lexer.{lex}
+use app.util.helper.*
+fn main(): ()'
+    mk src/compiler/10.frontend/core/lexer.spl 'fn lex(): ()'
+    mk src/app/util/helper.spl 'pub fn ok(): ()'
+    mk src/app/unreached.spl 'fn free_generic_unreached<T>(x: [T]) -> i64: 0'
+    out=$(GENERATE=0 run_check "$t" src/app/cli/bootstrap_main.spl scripts/check/base.txt); rc=$?
+    [ $rc -eq 0 ] && printf '%s' "$out" | grep -q '^PASS — 3 closure' || { echo "selftest FAIL (clean fixture): $out"; exit 2; }
+    # a generic in the closure must FAIL naming it (replays the incident shape)
+    mk src/compiler/10.frontend/core/lexer.spl 'fn lexer_array_len<T>(array: [T]) -> i64:
+    return array.len()
+fn lex(): ()'
+    out=$(GENERATE=0 run_check "$t" src/app/cli/bootstrap_main.spl scripts/check/base.txt); rc=$?
+    [ $rc -eq 1 ] && printf '%s' "$out" | grep -q 'lexer.spl:lexer_array_len' || { echo "selftest FAIL (incident replay): $out"; exit 2; }
+    # baselined offender PASSes; removing it then makes the baseline STALE -> FAIL
+    mk scripts/check/base.txt 'src/compiler/10.frontend/core/lexer.spl:lexer_array_len'
+    out=$(GENERATE=0 run_check "$t" src/app/cli/bootstrap_main.spl scripts/check/base.txt); rc=$?
+    [ $rc -eq 0 ] || { echo "selftest FAIL (baselined): $out"; exit 2; }
+    mk src/compiler/10.frontend/core/lexer.spl 'fn lex(): ()'
+    out=$(GENERATE=0 run_check "$t" src/app/cli/bootstrap_main.spl scripts/check/base.txt); rc=$?
+    [ $rc -eq 1 ] && printf '%s' "$out" | grep -q '1 stale' || { echo "selftest FAIL (stale baseline): $out"; exit 2; }
+    # an unreachable generic must NOT be reported (closure, not whole tree)
+    printf '%s' "$out" | grep -q unreached && { echo "selftest FAIL (unreached leaked): $out"; exit 2; }
+    # missing entry -> ERROR
+    out=$(GENERATE=0 run_check "$t" src/app/cli/nope.spl scripts/check/base.txt); rc=$?
+    [ $rc -eq 2 ] || { echo "selftest FAIL (missing entry): $out"; exit 2; }
+    rm -rf "$t"
+    echo "selftest: 6 fixtures OK"
+}
+
+selftest
+[ "$SELFTEST_ONLY" -eq 1 ] && exit 0
+run_check "$ROOT" "$ENTRY" "$BASELINE"
+exit $?
