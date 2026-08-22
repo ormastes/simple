@@ -21,3 +21,7 @@ retains `status.sdn`, per-lane stdout/stderr/identity files, and an exact
 Current source review: the matrix is O(1) in lane count and uses bounded fixture
 vectors. Each lane executes once and is compared by streaming `cmp`; there is no
 quadratic lookup, full-tree scan, retry, or hot-path allocation introduced.
+
+Host fail-closed measurement at this source revision: 0.06 s wall and 2,304 KiB
+peak RSS. The result was exit 2, `BLOCKED reason=compiler-not-set`; it is startup
+cost evidence only and is not promoted to a cross-engine equivalence receipt.
