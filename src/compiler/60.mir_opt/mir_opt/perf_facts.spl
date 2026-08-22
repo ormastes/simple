@@ -588,6 +588,9 @@ fn perf_facts_build_internal(func: MirFunction, raw_request: PerfFactRequest) ->
     val request = perf_fact_request_with_dependencies(raw_request)
     var successors: Dict<i64, [BlockId]> = {}
     var predecessors: Dict<i64, [i64]> = {}
+    var predecessor_bucket_index: Dict<i64, i64> = {}
+    var predecessor_bucket_keys: [i64] = []
+    var predecessor_buckets: [[i64]] = []
     var block_index: Dict<i64, i64> = {}
     var local_index: Dict<i64, i64> = {}
     var definition_buckets: [[MirDefUseSite]] = []
@@ -633,9 +636,12 @@ fn perf_facts_build_internal(func: MirFunction, raw_request: PerfFactRequest) ->
             val block_successors = perf_facts_terminator_successors(block.terminator)
             successors[block.id.id] = block_successors
             for successor in block_successors:
-                var incoming = predecessors[successor.id] ?? []
-                incoming.push(block.id.id)
-                predecessors[successor.id] = incoming
+                if not predecessor_bucket_index.has(successor.id):
+                    predecessor_bucket_index[successor.id] = predecessor_buckets.len()
+                    predecessor_bucket_keys.push(successor.id)
+                    predecessor_buckets.push([])
+                val bucket = predecessor_bucket_index[successor.id]
+                predecessor_buckets[bucket].push(block.id.id)
         index = index + 1
         if request.def_use:
             var instruction_index = 0
@@ -691,6 +697,15 @@ fn perf_facts_build_internal(func: MirFunction, raw_request: PerfFactRequest) ->
                 else:
                     def_use_complete = false
                     invalid_local_reference_count = invalid_local_reference_count + 1
+
+    if request.cfg:
+        var bucket = 0
+        while bucket < predecessor_bucket_keys.len():
+            predecessors[predecessor_bucket_keys[bucket]] = predecessor_buckets[bucket]
+            bucket = bucket + 1
+        predecessor_bucket_index = {}
+        predecessor_bucket_keys = []
+        predecessor_buckets = []
 
     var cfg_complete = false
     if request.cfg:
