@@ -583,8 +583,8 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 
 ## Completed tooling tranche: bounded fix assembly
 
-- Use comparator sorting for the common distinct-start replacement set.
-- Retain legacy selection ordering when equal starts make order observable.
+- Stable-merge every replacement batch by descending start.
+- Preserve equal-start insertion order through left-first equality.
 - Assemble valid non-overlapping edits from source chunks with one join.
 - Retain incremental behavior for negative, reversed, or out-of-range spans.
 - Pin multi-edit output, equal-start insertion order, and invalid-span skipping.
@@ -592,4 +592,4 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   preserving dictionary key iteration and per-file replacement order.
 - Consolidate ordering and assembly in the stdlib EasyFix owner.
 - Delegate compiler FixToolApplicator and route lint fix through shared primitives.
-- Remove all three private quadratic sort/repeated-splice implementations.
+- Remove every private and equal-start quadratic sort/repeated-splice implementation.
