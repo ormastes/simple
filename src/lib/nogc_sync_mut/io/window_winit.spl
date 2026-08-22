@@ -52,12 +52,12 @@ extern fn rt_winit_event_mouse_x_milli(ev: i64) -> i64
 extern fn rt_winit_event_mouse_y_milli(ev: i64) -> i64
 @unsafe(reason: "raw Winit wheel-y milli-unit ABI; INT64_MIN sentinel reports stale handle or wrong event kind", capabilities: [ffi])
 extern fn rt_winit_event_wheel_y_milli(ev: i64) -> i64
-@unsafe(reason: "raw Winit owned-event release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
-extern fn rt_winit_event_free(ev: i64) -> i64
-@unsafe(reason: "raw Winit owned-window release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
-extern fn rt_winit_window_free(win: i64) -> i64
-@unsafe(reason: "raw Winit owned-loop release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
-extern fn rt_winit_event_loop_free(el: i64) -> i64
+@unsafe(reason: "raw Winit owned-event release status ABI; false sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_event_free(ev: i64) -> bool
+@unsafe(reason: "raw Winit owned-window release status ABI; false sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_window_free(win: i64) -> bool
+@unsafe(reason: "raw Winit owned-loop release status ABI; false sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_event_loop_free(el: i64) -> bool
 @unsafe(reason: "raw Winit fullscreen mutation ABI; requires a live owned window handle and false reports mutation failure", capabilities: [ffi])
 extern fn rt_winit_window_set_fullscreen(win: i64, on: bool) -> bool
 @unsafe(reason: "raw Winit fullscreen read ABI; requires a live owned window handle", capabilities: [ffi])
@@ -119,10 +119,10 @@ fn winit_loop_new() -> WinitLoop:
 
 fn winit_loop_free(lp: WinitLoop) -> bool:
     if lp.is_valid:
-        var released: i64 = 0
+        var released = false
         unsafe(capabilities: [ffi]):
             released = rt_winit_event_loop_free(lp.handle)
-        released != 0
+        released
     else:
         false
 
@@ -137,10 +137,10 @@ fn winit_window_new(lp: WinitLoop, w: i64, h: i64, title: text) -> WinitWindow:
 
 fn winit_window_free(win: WinitWindow) -> bool:
     if win.is_valid:
-        var released: i64 = 0
+        var released = false
         unsafe(capabilities: [ffi]):
             released = rt_winit_window_free(win.handle)
-        released != 0
+        released
     else:
         false
 
@@ -296,9 +296,10 @@ fn winit_poll_close_requested(lp: WinitLoop) -> bool?:
             kind = rt_winit_event_get_type(ev)
         if kind == EVT_CLOSE:
             close_requested = true
+        var event_released = false
         unsafe(capabilities: [ffi]):
-            rt_winit_event_free(ev)
-        if kind < 0:
+            event_released = rt_winit_event_free(ev)
+        if kind < 0 or not event_released:
             return nil
         unsafe(capabilities: [ffi]):
             ev = rt_winit_event_loop_poll_events(lp.handle, 1)
@@ -415,8 +416,11 @@ fn winit_poll_input_into(
             if wheel_y_milli == WINT_I64_MIN:
                 decode_valid = false
         val pressed = pressed_raw != 0
+        var event_released = false
         unsafe(capabilities: [ffi]):
-            rt_winit_event_free(ev)
+            event_released = rt_winit_event_free(ev)
+        if not event_released:
+            decode_valid = false
         if not decode_valid:
             ev = -1
             break
@@ -523,8 +527,11 @@ fn winit_wait_input_into(
             if wheel_y_milli == WINT_I64_MIN:
                 decode_valid = false
         val pressed = pressed_raw != 0
+        var event_released = false
         unsafe(capabilities: [ffi]):
-            rt_winit_event_free(ev)
+            event_released = rt_winit_event_free(ev)
+        if not event_released:
+            decode_valid = false
         if not decode_valid:
             ev = -1
             break

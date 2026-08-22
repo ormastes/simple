@@ -457,6 +457,7 @@ mod tests {
             "rt_winit_event_get_type",
             "rt_winit_event_key_keycode",
             "rt_winit_event_key_pressed",
+            "rt_winit_event_key_packed",
             "rt_winit_event_text_len",
             "rt_winit_event_mouse_button",
             "rt_winit_event_mouse_pressed",

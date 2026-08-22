@@ -1,0 +1,150 @@
+#!/bin/sh
+# Fail-closed static census for owned rt_* boundaries and implementations.
+#
+# Source annotations are claims, never proof. A symbol is reported
+# verified_and_signed only when a trusted verifier supplies an exact
+# artifact-bound admission row through RT_VERIFIED_ADMISSION_TSV and the caller
+# explicitly sets RT_VERIFIED_ADMISSION_TRUSTED=1:
+#   symbol<TAB>artifact_sha256<TAB>evidence_verified<TAB>signature_verified
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+summary_out=${1:-/dev/stdout}
+declarations_out=${2:-${TMPDIR:-/tmp}/rt-safety-declarations.tsv}
+languages_out=${3:-${TMPDIR:-/tmp}/rt-safety-languages.tsv}
+admission=${RT_VERIFIED_ADMISSION_TSV:-}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+sh "$root/scripts/audit/sffi-contract-inventory.shs" \
+    "$work/contracts.tsv" "$work/symbols.tsv" >/dev/null 2>&1
+
+if [ -n "$admission" ]; then
+    if [ "${RT_VERIFIED_ADMISSION_TRUSTED:-0}" != 1 ]; then
+        echo 'RT_VERIFIED_ADMISSION_TSV requires RT_VERIFIED_ADMISSION_TRUSTED=1' >&2
+        exit 2
+    fi
+    test -f "$admission"
+    {
+        printf '__admission_header__\tfalse\tfalse\n'
+        awk -F '\t' 'BEGIN { OFS="\t" }
+        NR == 1 { next }
+        $1 ~ /^rt_[A-Za-z0-9_]+$/ && length($2) == 64 && $2 !~ /[^0-9a-f]/ &&
+        $3 == "true" && $4 == "true" { print $1, "true", "true" }
+        ' "$admission"
+    } | sort -u >"$work/admitted.tsv"
+else
+    printf '__admission_header__\tfalse\tfalse\n' >"$work/admitted.tsv"
+fi
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR == FNR { admitted[$1]=1; next }
+    FNR == 1 {
+        print $0, "evidence_verified", "signature_verified", "safety_class"
+        next
+    }
+    $1 !~ /^rt_/ { next }
+    {
+        verified = admitted[$1] ? "true" : "false"
+        signed = verified
+        safe = admitted[$1] && $6 == "tagged" && $7 != "missing"
+        print $0, verified, signed, (safe ? "verified_and_signed" : "unsafe")
+    }
+' "$work/admitted.tsv" "$work/contracts.tsv" >"$declarations_out"
+
+export RT_CENSUS_ROOT=$root
+find "$root/src" -type f \
+    \( -name '*.spl' -o -name '*.rs' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' \) \
+    ! -path '*/vendor/*' ! -path '*/compiler_rust/vendor/*' \
+    ! -path '*/target/*' ! -path '*/build/*' -print0 |
+xargs -0 -r -n 200 perl -0ne '
+    my $file = $ARGV;
+    my $language = $file =~ /\.spl$/ ? "Simple" :
+                   $file =~ /\.rs$/ ? "Rust" :
+                   $file =~ /\.c$/ ? "C" : "C++";
+    my %seen;
+    if ($language eq "Simple") {
+        while (/^\s*(?!extern\b)(?:pub\s+)?(?:unsafe\s+)?fn\s+(rt_[A-Za-z0-9_]+)\s*\(/mg) {
+            $seen{$1}=1;
+        }
+    } elsif ($language eq "Rust") {
+        while (/^\s*(?:pub\s+)?(?:unsafe\s+)?extern\s+"C"\s+fn\s+(rt_[A-Za-z0-9_]+)\s*\(/mg) {
+            $seen{$1}=1;
+        }
+    } else {
+        my @lines = split /\n/, $_, -1;
+        for (my $i = 0; $i <= $#lines; $i++) {
+            next if $lines[$i] !~ /\b(rt_[A-Za-z0-9_]+)\s*\(/;
+            my $symbol = $1;
+            my $candidate = $lines[$i];
+            my $j = $i;
+            while ($candidate !~ /[;{]/ && $j < $#lines && $j - $i < 8) {
+                $j++;
+                $candidate .= " " . $lines[$j];
+            }
+            $seen{$symbol}=1 if $candidate =~ /\{/ && $candidate !~ /;[^{}]*\{/;
+        }
+    }
+    $file =~ s/^\Q$ENV{RT_CENSUS_ROOT}\E\///;
+    for my $symbol (sort keys %seen) {
+        print join("\t", $language, $symbol, $file), "\n";
+    }
+' | sort -u >"$work/definitions.tsv"
+
+{
+    printf 'language\timplementation_definitions\tdistinct_symbols\tfiles\n'
+    awk -F '\t' 'BEGIN { OFS="\t" }
+        {
+            rows[$1]++
+            sk=$1 SUBSEP $2
+            fk=$1 SUBSEP $3
+            if (!(sk in symbols)) { symbols[sk]=1; symbol_count[$1]++ }
+            if (!(fk in files)) { files[fk]=1; file_count[$1]++ }
+        }
+        END {
+            for (language in rows)
+                print language, rows[language], symbol_count[language], file_count[language]
+        }
+    ' "$work/definitions.tsv" | sort
+} >"$languages_out"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR == 1 { next }
+    {
+        rows++
+        symbol[$1]=1
+        if ($6 == "tagged") tagged++
+        if ($7 != "missing") contracted++
+        if ($8 == "claim_present_unverified") claims++
+        if ($10 == "true") verified++
+        if ($11 == "true") signed++
+        if ($12 == "verified_and_signed") admitted++
+        else unsafe++
+        if ($6 == "missing" && $7 == "missing" && $8 == "missing") untouched++
+        signature[$1 SUBSEP $3]=1
+    }
+    END {
+        for (s in symbol) symbols++
+        for (key in signature) {
+            split(key, p, SUBSEP)
+            signature_count[p[1]]++
+        }
+        for (s in signature_count) if (signature_count[s] > 1) variants++
+        print "metric", "value"
+        print "declaration_rows", rows + 0
+        print "distinct_declared_symbols", symbols + 0
+        print "unsafe_tagged_rows", tagged + 0
+        print "contract_documented_rows", contracted + 0
+        print "evidence_claim_unverified_rows", claims + 0
+        print "evidence_verified_rows", verified + 0
+        print "signature_verified_rows", signed + 0
+        print "verified_and_signed_rows", admitted + 0
+        print "fail_closed_unsafe_rows", unsafe + 0
+        print "untouched_rows", untouched + 0
+        print "source_signature_variant_symbols", variants + 0
+    }
+' "$declarations_out" >"$summary_out"
+
+cat "$summary_out"
+printf '\nlanguage statistics\n'
+cat "$languages_out"

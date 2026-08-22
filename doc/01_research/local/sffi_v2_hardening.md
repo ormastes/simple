@@ -766,3 +766,49 @@ failure propagate through the existing boolean run result. Each admitted event
 is still decoded once and released once before the next poll. No call,
 allocation, lookup, lock, hash, or retry was added. Simple check/lint, the
 19-example Chromium interaction spec, and the call/memory-shape audit pass.
+
+Lifecycle return correction: event, window, and event-loop release have exactly
+two outcomes, so their canonical ABI is now `bool`, not an integer status. The
+Rust provider exports C-compatible booleans, the interpreter returns
+`Value::Bool`, and canonical/Chromium/game2d declarations agree. Safe consumers
+check `false` and propagate or fail closed; this fixes the provider contract
+rather than wrapping the integer mismatch.
+
+Game2D's interpreter-only keyboard tuple was replaced by
+`rt_winit_event_key_packed`, a versioned one-call scalar snapshot implemented in
+both Rust provider and interpreter. Bit zero carries pressed state and upper
+bits carry the non-negative keycode; `-1` is the failure sentinel. This retains
+one dispatch and one interpreter lock per keyboard event while making native
+and interpreter ABI identical. Admission, kind, packed decode, release, and
+teardown failures now close the backend rather than fabricating input.
+
+The new `scripts/audit/rt-safety-census.shs` performs a fail-closed owned-source
+`rt_*` census and accepts signed/verified state only from an explicitly trusted,
+artifact-bound admission ledger. On 2026-08-22 it reports:
+
+| Metric | Count |
+| --- | ---: |
+| Simple `rt_*` declaration rows | 12,595 |
+| Distinct declared symbols | 3,172 |
+| Rows explicitly tagged unsafe | 455 |
+| Rows with a documented/typed contract | 540 |
+| Verified evidence rows | 0 |
+| Signature-verified rows | 0 |
+| Verified and signed rows | 0 |
+| Fail-closed unsafe rows | 12,595 |
+| Untouched rows (no unsafe tag, contract, or evidence) | 11,864 |
+| Symbols with source-signature variants | 297 |
+
+Implementation-shaped owned definitions are: C 2,301 rows / 1,821 distinct
+symbols / 82 files; Rust 2,161 / 2,097 / 172; Simple 584 / 535 / 51; C++ 211 /
+211 / 1. Symbols may intentionally appear in multiple language lanes, so those
+language distinct counts are not additive. Static annotations remain claims:
+without a trusted admission receipt bound to the exact artifact, the tool keeps
+the row unsafe.
+
+Verification note: the non-incremental GUI compiler run selected six tests by
+the broad `stale_` filter. Both intended Winit sentinel/lifecycle tests passed;
+an unrelated existing JIT struct-field test failed because `rt_struct_alloc`
+was unresolved and the module correctly refused a potential null jump. This is
+not counted as a Winit pass or silently discarded; the focused Winit evidence
+is the two named passing tests plus the provider and static contract audits.

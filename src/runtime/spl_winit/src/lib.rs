@@ -648,14 +648,14 @@ pub extern "C" fn rt_winit_event_loop_wait_events(el: i64, timeout_ms: i64) -> i
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_event_loop_free(el: i64) -> i64 {
+pub extern "C" fn rt_winit_event_loop_free(el: i64) -> bool {
     PUMP.with(|cell| {
         let mut state = cell.borrow_mut();
         if el != 1 || state.is_none() {
-            return 0;
+            return false;
         }
         *state = None;
-        1
+        true
     })
 }
 
@@ -866,16 +866,16 @@ pub extern "C" fn rt_winit_window_present_staged(win: i64, w: i64, h: i64) -> i6
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_window_free(win: i64) -> i64 {
+pub extern "C" fn rt_winit_window_free(win: i64) -> bool {
     PUMP.with(|cell| {
         let mut borrow = cell.borrow_mut();
         if let Some(ps) = borrow.as_mut() {
             if let Some(slot) = ps.inner.windows.remove(&win) {
                 ps.inner.id_map.remove(&slot.window.id());
-                return 1;
+                return true;
             }
         }
-        0
+        false
     })
 }
 
@@ -1100,6 +1100,19 @@ pub extern "C" fn rt_winit_event_key_pressed(ev: i64) -> i64 {
     .unwrap_or(-1)
 }
 
+/// One-call keyboard snapshot for hot consumers. Bit 0 is pressed and the
+/// remaining bits are the non-negative Simple keycode; -1 is invalid.
+#[no_mangle]
+pub extern "C" fn rt_winit_event_key_packed(ev: i64) -> i64 {
+    with_event(ev, |e| match e {
+        StoredEvent::Keyboard {
+            keycode, pressed, ..
+        } if *keycode >= 0 && *keycode <= (i64::MAX >> 1) => (*keycode << 1) | i64::from(*pressed),
+        _ => -1,
+    })
+    .unwrap_or(-1)
+}
+
 #[no_mangle]
 pub extern "C" fn rt_winit_event_key_shifted(ev: i64) -> i64 {
     with_event(ev, |e| match e {
@@ -1191,13 +1204,13 @@ pub extern "C" fn rt_winit_event_wheel_y_milli(ev: i64) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_winit_event_free(ev: i64) -> i64 {
+pub extern "C" fn rt_winit_event_free(ev: i64) -> bool {
     PUMP.with(|cell| {
         let mut borrow = cell.borrow_mut();
         if let Some(ps) = borrow.as_mut() {
-            return ps.inner.stored_events.remove(&ev).is_some() as i64;
+            return ps.inner.stored_events.remove(&ev).is_some();
         }
-        0
+        false
     })
 }
 
@@ -2044,9 +2057,9 @@ mod sffi_contract_tests {
 
     #[test]
     fn stale_lifecycle_handles_report_failure() {
-        assert_eq!(rt_winit_event_free(i64::MAX), 0);
-        assert_eq!(rt_winit_window_free(i64::MAX), 0);
-        assert_eq!(rt_winit_event_loop_free(i64::MAX), 0);
+        assert!(!rt_winit_event_free(i64::MAX));
+        assert!(!rt_winit_window_free(i64::MAX));
+        assert!(!rt_winit_event_loop_free(i64::MAX));
         assert_eq!(rt_winit_event_loop_poll_events(i64::MAX, 1), -1);
         assert_eq!(rt_winit_event_loop_wait_events(i64::MAX, 0), -1);
     }
@@ -2057,6 +2070,7 @@ mod sffi_contract_tests {
         assert_eq!(rt_winit_event_get_type(stale), -1);
         assert_eq!(rt_winit_event_key_keycode(stale), -1);
         assert_eq!(rt_winit_event_key_pressed(stale), -1);
+        assert_eq!(rt_winit_event_key_packed(stale), -1);
         assert_eq!(rt_winit_event_text_len(stale), -1);
         assert_eq!(rt_winit_event_text_byte(stale, 0), -1);
         assert_eq!(rt_winit_event_mouse_button(stale), -1);

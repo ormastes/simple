@@ -32,12 +32,12 @@ extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 @unsafe(reason: "raw Winit event-kind ABI; negative sentinel reports stale event handle", capabilities: [ffi])
 extern fn rt_winit_event_get_type(ev: i64) -> i64
-@unsafe(reason: "raw Winit event release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
-extern fn rt_winit_event_free(ev: i64) -> i64
-@unsafe(reason: "raw Winit window release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
-extern fn rt_winit_window_free(win: i64) -> i64
-@unsafe(reason: "raw Winit loop release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
-extern fn rt_winit_event_loop_free(el: i64) -> i64
+@unsafe(reason: "raw Winit event release status ABI; false sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_event_free(ev: i64) -> bool
+@unsafe(reason: "raw Winit window release status ABI; false sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_window_free(win: i64) -> bool
+@unsafe(reason: "raw Winit loop release status ABI; false sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_event_loop_free(el: i64) -> bool
 
 val EVT_CLOSE: i64 = 3
 val CHROMIUM_WINDOW_TITLE: text = "Simple Browser (V3 chromium shell)"
@@ -188,10 +188,10 @@ impl ChromiumApp:
             window = rt_winit_window_new(
                 event_loop, w, h, CHROMIUM_WINDOW_TITLE)
         if window == 0:
-            var released: i64 = 0
+            var released = false
             unsafe(capabilities: [ffi]):
                 released = rt_winit_event_loop_free(event_loop)
-            if released == 0:
+            if not released:
                 return Err("failed to create window and release winit event loop")
             return Err("failed to create chromium host window")
 
@@ -336,10 +336,10 @@ impl ChromiumApp:
                     self.handle_ui_event(ui_event)
                 if event_type == EVT_CLOSE:
                     self.running = false
-                var released: i64 = 0
+                var released = false
                 unsafe(capabilities: [ffi]):
                     released = rt_winit_event_free(ev)
-                if released == 0:
+                if not released:
                     presentation_ok = false
                     self.running = false
                 if not self.running:
@@ -425,9 +425,9 @@ impl ChromiumApp:
     me shutdown() -> bool:
         """Clean window teardown — no orphan threads (M1 acceptance)."""
         self.compositor.stop()
-        var window_released: i64 = 0
-        var loop_released: i64 = 0
+        var window_released = false
+        var loop_released = false
         unsafe(capabilities: [ffi]):
             window_released = rt_winit_window_free(self.window)
             loop_released = rt_winit_event_loop_free(self.event_loop)
-        window_released != 0 and loop_released != 0
+        window_released and loop_released

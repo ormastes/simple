@@ -187,6 +187,18 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
                 _ => Ok(int_value(-1)),
             }
         }
+        "rt_winit_event_key_packed" => {
+            let event_id = get_i64(args, 0, name)?;
+            let events = EVENTS.lock();
+            match events.get(&event_id) {
+                Some(RuntimeEvent::KeyboardInput { keycode, pressed, .. })
+                    if *keycode >= 0 && *keycode <= (i64::MAX >> 1) =>
+                {
+                    Ok(int_value((*keycode << 1) | i64::from(*pressed)))
+                }
+                _ => Ok(int_value(-1)),
+            }
+        }
         // The interpreter event stream does not track shift state or IME text
         // events; report none rather than guessing.
         "rt_winit_event_key_shifted" | "rt_winit_event_text_len" | "rt_winit_event_text_byte" => Ok(int_value(-1)),

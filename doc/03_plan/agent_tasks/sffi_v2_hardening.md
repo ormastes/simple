@@ -169,3 +169,13 @@ passing placeholder.
     Hosted compositor input is confirmed ABI-incompatible across lanes; add one
     generated typed snapshot/status-out thunk rather than regressing its hot path
     with extra scalar calls/locks, then migrate hosted-entry and game bindings.
+32. Winit lifecycle release is standardized as boolean across Rust provider,
+    interpreter, and Simple consumers. Game2D keyboard input now uses a shared
+    one-call packed snapshot, preserving one dispatch/lock while removing the
+    interpreter-only tuple ABI. Apply the same generated snapshot principle to
+    hosted compositor mouse coordinates and remaining hosted-entry bindings.
+33. The fail-closed `rt-safety-census.shs` now reports declaration/symbol totals,
+    implementation languages, unsafe tags, contracts, trusted verified evidence,
+    signatures, and untouched rows. Reduce the current 11,864 untouched rows by
+    provider family; never lower the 12,595-row unsafe total without a trusted
+    artifact-bound evidence+signature admission row.

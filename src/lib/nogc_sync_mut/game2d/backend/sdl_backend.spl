@@ -38,14 +38,22 @@ use std.nogc_sync_mut.game2d.input.snapshot.{InputSnapshot}
 use std.nogc_sync_mut.io.window_winit.{WinitWindow, winit_present_rgba}
 
 # rt_winit_* SFFI (interpreter-native; see module docstring).
+@unsafe(reason: "raw Winit loop creation ABI; zero sentinel reports provider failure and positive handle is owned until release", capabilities: [ffi])
 extern fn rt_winit_event_loop_new() -> i64
+@unsafe(reason: "raw Winit loop release status ABI; false sentinel reports stale handle", capabilities: [ffi])
 extern fn rt_winit_event_loop_free(el: i64) -> bool
+@unsafe(reason: "raw Winit event admission ABI; negative sentinel reports invalid loop/provider, zero means no event, and positive event is owned until release", capabilities: [ffi])
 extern fn rt_winit_event_loop_poll_events(el: i64, max_events: i64) -> i64
+@unsafe(reason: "raw Winit window creation ABI; borrows title for the call, zero sentinel reports failure, and positive handle is owned until release", capabilities: [ffi])
 extern fn rt_winit_window_new(el: i64, width: i64, height: i64, title: text) -> i64
+@unsafe(reason: "raw Winit window release status ABI; false sentinel reports stale handle", capabilities: [ffi])
 extern fn rt_winit_window_free(win: i64) -> bool
+@unsafe(reason: "raw Winit event-kind ABI; negative sentinel reports stale event handle", capabilities: [ffi])
 extern fn rt_winit_event_get_type(ev: i64) -> i64
-extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
-extern fn rt_winit_event_free(ev: i64)
+@unsafe(reason: "raw Winit packed keyboard snapshot ABI; negative sentinel reports stale handle/wrong kind, bit zero is pressed, and upper bits are keycode", capabilities: [ffi])
+extern fn rt_winit_event_key_packed(ev: i64) -> i64
+@unsafe(reason: "raw Winit event release status ABI; false sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_event_free(ev: i64) -> bool
 
 # winit event type codes (interpreter_extern/winit_sffi/mod.rs).
 val EV_CLOSE_REQUESTED: i64 = 3
@@ -146,8 +154,17 @@ class SdlBackend:
 # GameBackend surface implementation — composition only.
 impl SdlBackend:
     me gb_create_window(self, cfg: WindowConfig) -> Window:
-        self.event_loop = rt_winit_event_loop_new()
-        val handle = rt_winit_window_new(self.event_loop, cfg.width, cfg.height, cfg.title)
+        unsafe(capabilities: [ffi]):
+            self.event_loop = rt_winit_event_loop_new()
+        var handle: i64 = 0
+        if self.event_loop > 0:
+            unsafe(capabilities: [ffi]):
+                handle = rt_winit_window_new(
+                    self.event_loop, cfg.width, cfg.height, cfg.title)
+        if handle == 0 and self.event_loop > 0:
+            unsafe(capabilities: [ffi]):
+                rt_winit_event_loop_free(self.event_loop)
+            self.event_loop = 0
         self.window = SdlWindow(
             raw: handle,
             width: cfg.width,
@@ -171,22 +188,41 @@ impl SdlBackend:
         var guard: i64 = 0
         var polling = true
         while polling and guard < 256:
-            val ev = rt_winit_event_loop_poll_events(self.event_loop, 1)
+            var ev: i64 = -1
+            unsafe(capabilities: [ffi]):
+                ev = rt_winit_event_loop_poll_events(self.event_loop, 1)
             if ev == 0:
+                polling = false
+            elif ev < 0:
+                self.should_close_flag = true
+                self.window.closed = true
                 polling = false
             else:
                 count = count + 1
-                val ev_type = rt_winit_event_get_type(ev)
+                var ev_type: i64 = -1
+                unsafe(capabilities: [ffi]):
+                    ev_type = rt_winit_event_get_type(ev)
                 if ev_type == EV_CLOSE_REQUESTED:
                     self.should_close_flag = true
                 elif ev_type == EV_KEYBOARD_INPUT:
-                    val kb = rt_winit_event_keyboard_input(ev)
-                    val code = _winit_key_to_sdl(kb.1)
-                    if kb.2:
-                        self._mark_key_down(code)
+                    var packed: i64 = -1
+                    unsafe(capabilities: [ffi]):
+                        packed = rt_winit_event_key_packed(ev)
+                    if packed < 0:
+                        ev_type = -1
                     else:
-                        self._mark_key_up(code)
-                rt_winit_event_free(ev)
+                        val code = _winit_key_to_sdl(packed >> 1)
+                        if (packed & 1) != 0:
+                            self._mark_key_down(code)
+                        else:
+                            self._mark_key_up(code)
+                var released = false
+                unsafe(capabilities: [ffi]):
+                    released = rt_winit_event_free(ev)
+                if ev_type < 0 or not released:
+                    self.should_close_flag = true
+                    self.window.closed = true
+                    polling = false
             guard = guard + 1
         count
 
@@ -213,12 +249,21 @@ impl SdlBackend:
         Sound.new(path)
 
     me gb_shutdown(self):
+        var release_ok = true
         if self.window.raw != 0:
-            rt_winit_window_free(self.window.raw)
+            var window_released = false
+            unsafe(capabilities: [ffi]):
+                window_released = rt_winit_window_free(self.window.raw)
+            release_ok = window_released
         if self.event_loop != 0:
-            rt_winit_event_loop_free(self.event_loop)
+            var loop_released = false
+            unsafe(capabilities: [ffi]):
+                loop_released = rt_winit_event_loop_free(self.event_loop)
+            release_ok = release_ok and loop_released
         self.window = SdlWindow.null()
         self.event_loop = 0
+        if not release_ok:
+            panic("E-SFFI-WINIT-GAME2D-RELEASE: stale window or event-loop handle")
 
     me gb_current_input(self) -> InputSnapshot:
         var down: [KeyCode] = []
