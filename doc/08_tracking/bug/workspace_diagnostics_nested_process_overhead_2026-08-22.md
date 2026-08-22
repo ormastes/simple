@@ -18,8 +18,9 @@ intermediate MCP diagnostic wrapper once per file.
 Running `_emit_source_lint_diagnostics` directly in the workspace parent was
 rejected in static parallel review:
 
-- `SIMPLE_TRACE_AST_RESET=1` can make parser initialization print into stdout,
-  corrupting the workspace JSON envelope that the child currently isolates.
+- `SIMPLE_TRACE_AST_RESET=1` formerly made parser initialization print into
+  stdout. Silent/structured scopes now suppress optional frontend trace output,
+  with ordinary traced parsing retained as a positive control.
 - lint owns private `_LINT_TIER_ACTIVE` state in addition to common diagnostic
   collection and severity globals; restoring only common globals changes caller
   state.
@@ -28,7 +29,8 @@ rejected in static parallel review:
 
 ## Required fix
 
-1. Add a nonprinting structured per-file compiler/lint result API.
+1. Optional parser/AST traces now have a structured-scope suppression owner.
+   Convert always-on safety-containment output into structured failure evidence.
 2. Collection, severity, and tier activation now have a lint-owned nested-safe
    snapshot/restore boundary. Move parser/AST reset and failure cleanup behind
    request-owned state before workspace integration.
