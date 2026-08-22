@@ -1316,3 +1316,15 @@ signed rows. The `rt_torch` family is 167 rows with 139 tagged and 28
 untouched. Existing high-level dynamic Torch functions still fabricate zero
 for several unavailable/error paths; this consolidation does not call those
 APIs safe and the next semantic migration must add typed result/status APIs.
+
+The first dynamic Torch semantic migration removes
+`dyn_torch_tensor_linalg_solve -> i64`, which previously collapsed unavailable,
+invalid-input, and provider failure into handle zero. Both production consumers
+now call `dyn_torch_tensor_linalg_solve_result` and require `status == "ready"`
+plus a positive handle before constructing an array. Input handles are released
+before error propagation exactly as before. The success path still performs one
+raw provider call and one combined status/handle branch; there is no added
+lookup, allocation, hashing, or second FFI call. The readiness spec passes 4/4,
+all three changed source files check, and lint reports zero errors. The raw C++
+ABI still returns a zero sentinel and remains unsigned/unverified, so provider
+status/out migration is still required before the Torch boundary is safe.

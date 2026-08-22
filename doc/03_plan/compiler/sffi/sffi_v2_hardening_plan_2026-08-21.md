@@ -1037,3 +1037,13 @@ or verified-and-signed admissions. Next migrate dynamic Torch's fabricated
 zero error paths to typed result/status APIs and versioned provider status/out
 shims; do not reinterpret the six fixed-dimension symbols as canonical
 descriptor calls, and do not claim an unsafe tag as semantic verification.
+
+Dynamic Torch solve no longer exposes a zero-return compatibility API. Its two
+production consumers require the existing explicit result status and positive
+handle, and the old source/readiness tests now assert that the fabricated-value
+wrapper is absent. Verification: readiness spec 4/4, three focused source
+checks pass, lint has zero errors. Continue the same migration family-by-family
+for clone/matmul/reductions/creation. Keep one raw call per operation and do not
+add hot-path availability rechecks beyond those needed to distinguish provider
+absence from a contract violation. The C++ provider still needs a versioned
+status/out ABI and signed evidence; this wrapper change alone is not admission.
