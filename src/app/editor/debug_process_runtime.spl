@@ -1,6 +1,8 @@
 # Native runtime helpers for process-backed editor debug adapters.
 
-use std.nogc_sync_mut.io.process_ops.{process_spawn_piped, process_write_stdin}
+use std.nogc_sync_mut.io.process_ops.{
+    process_spawn_piped_result, process_write_stdin_result
+}
 use std.io_runtime.{file_exists}
 
 fn editor_debug_process_find_simple_binary() -> text:
@@ -14,23 +16,26 @@ fn editor_debug_process_find_simple_binary() -> text:
         return "bin/release/macos-x86_64/simple"
     "bin/simple"
 
-fn editor_debug_process_spawn_simple_adapter() -> i64:
+fn editor_debug_process_spawn_simple_adapter() -> Result<i64, text>:
     editor_debug_process_spawn_adapter("src/app/dap/simple_dap_main.spl")
 
-fn editor_debug_process_spawn_adapter(adapter_program: text) -> i64:
-    process_spawn_piped(editor_debug_process_find_simple_binary(), ["run", adapter_program])
+fn editor_debug_process_spawn_adapter(adapter_program: text) -> Result<i64, text>:
+    process_spawn_piped_result(editor_debug_process_find_simple_binary(), ["run", adapter_program])
 
-fn editor_debug_process_write_frame(pid: i64, json: text) -> bool:
+fn editor_debug_process_write_frame(pid: i64, json: text) -> Result<(), text>:
     # BUG-3 fix: guard against invalid pids (spawn failure returns 0 or -1).
     # Forwarding a bad pid to rt_process_write_stdin writes to an invalid fd
     # which can SIGSEGV in the kernel pipe handler.
     if pid <= 0:
-        return false
-    process_write_stdin(pid, "Content-Length: " + str(json.len()) + "\r\n\r\n" + json)
+        return Err("invalid_process_handle")
+    process_write_stdin_result(pid, "Content-Length: " + str(json.len()) + "\r\n\r\n" + json)
 
-fn editor_debug_process_start_simple_adapter(pid: i64) -> bool:
+fn editor_debug_process_start_simple_adapter(pid: i64) -> Result<(), text>:
     if pid <= 0:
-        return false
+        return Err("invalid_process_handle")
     val init_json = "{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\",\"arguments\":{\"adapterID\":\"simple\"}}"
     val launch_json = "{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":{\"program\":\"src/app/dap/simple_dap_main.spl\",\"cwd\":\".\"}}"
-    editor_debug_process_write_frame(pid, init_json) and editor_debug_process_write_frame(pid, launch_json)
+    match editor_debug_process_write_frame(pid, init_json):
+        case Err(error): return Err(error)
+        case Ok(_): pass
+    editor_debug_process_write_frame(pid, launch_json)

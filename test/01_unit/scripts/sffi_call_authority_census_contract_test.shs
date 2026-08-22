@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+sh "$root/scripts/audit/sffi-call-authority-census.shs" \
+    "$work/calls.tsv" "$work/summary.tsv" "$work/symbols.tsv" \
+    "$work/families.tsv" "$work/scopes.tsv" >/dev/null
+
+value() {
+    awk -F '\t' -v key="$1" '$1 == key { print $2 }' "$work/summary.tsv"
+}
+
+rows=$(value raw_call_sites)
+test "$rows" -gt 0
+test "$(awk -F '\t' 'NR > 1 { n++ } END { print n + 0 }' "$work/calls.tsv")" -eq "$rows"
+test "$(awk -F '\t' 'NR > 1 { n += $2 } END { print n + 0 }' "$work/symbols.tsv")" -eq "$rows"
+test "$(awk -F '\t' 'NR > 1 { n += $2 } END { print n + 0 }' "$work/families.tsv")" -eq "$rows"
+test "$(awk -F '\t' 'NR > 1 { n += $2 } END { print n + 0 }' "$work/scopes.tsv")" -eq "$rows"
+
+explicit=$(($(value lexical_unsafe_call_sites) + $(value function_unsafe_call_sites)))
+missing=$(value missing_authority_call_sites)
+test "$((explicit + missing))" -eq "$rows"
+test "$(awk -F '\t' 'NR > 1 && $1 == "unknown" { n += $2 } END { print n + 0 }' "$work/scopes.tsv")" -eq 0
+
+for scope in production bootstrap_library test; do
+    awk -F '\t' -v scope="$scope" '$1 == scope && $2 > 0 { found=1 } END { exit !found }' "$work/scopes.tsv"
+done
+
+echo "SFFI call authority census contract: PASS rows=$rows explicit=$explicit missing=$missing"

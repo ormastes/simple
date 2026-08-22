@@ -9,6 +9,10 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 out=${1:-/dev/stdout}
+summary_out=${2:-${TMPDIR:-/tmp}/sffi-call-authority-summary.tsv}
+symbols_out=${3:-${TMPDIR:-/tmp}/sffi-call-authority-symbols.tsv}
+families_out=${4:-${TMPDIR:-/tmp}/sffi-call-authority-families.tsv}
+scopes_out=${5:-${TMPDIR:-/tmp}/sffi-call-authority-scopes.tsv}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
 
@@ -82,11 +86,111 @@ xargs -0 -r -n 200 perl -0ne '
     cat "$work/calls.tsv"
 } >"$out"
 
+# Derive every prioritization view from the one source scan above.  This keeps
+# the census O(source bytes + call sites) instead of rescanning the repository
+# once per language/family/scope report.
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR > 1 {
+        rows++
+        symbols[$3]=1
+        files[$1]=1
+        authority[$4]++
+    }
+    END {
+        for (symbol in symbols) symbol_count++
+        for (file in files) file_count++
+        print "metric", "value"
+        print "raw_call_sites", rows + 0
+        print "distinct_called_symbols", symbol_count + 0
+        print "caller_files", file_count + 0
+        print "lexical_unsafe_call_sites", authority["lexical_unsafe"] + 0
+        print "function_unsafe_call_sites", authority["function_unsafe"] + 0
+        print "missing_authority_call_sites", authority["missing"] + 0
+    }
+' "$out" >"$summary_out"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR > 1 {
+        symbol=$3
+        rows[symbol]++
+        file_key=symbol SUBSEP $1
+        if (!(file_key in seen_file)) { seen_file[file_key]=1; files[symbol]++ }
+        authority=symbol SUBSEP $4
+        authority_count[authority]++
+        if ($1 ~ /^test\//) tests[symbol]++
+        else if ($1 ~ /^src\/compiler_rust\/lib\/std\//) bootstrap[symbol]++
+        else if ($1 ~ /^src\//) production[symbol]++
+    }
+    END {
+        print "symbol", "call_sites", "caller_files", "production_calls", \
+              "bootstrap_library_calls", "test_calls", \
+              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls"
+        for (symbol in rows)
+            print symbol, rows[symbol], files[symbol], production[symbol] + 0, \
+                  bootstrap[symbol] + 0, tests[symbol] + 0, \
+                  authority_count[symbol SUBSEP "lexical_unsafe"] + 0, \
+                  authority_count[symbol SUBSEP "function_unsafe"] + 0, \
+                  authority_count[symbol SUBSEP "missing"] + 0
+    }
+' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort -t "$(printf '\t')" -k4,4nr -k2,2nr -k1,1; } >"$symbols_out"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR > 1 {
+        split($3, parts, "_")
+        family=parts[1] "_" parts[2]
+        rows[family]++
+        symbol_key=family SUBSEP $3
+        if (!(symbol_key in seen_symbol)) { seen_symbol[symbol_key]=1; symbols[family]++ }
+        authority_count[family SUBSEP $4]++
+        if ($1 ~ /^test\//) tests[family]++
+        else if ($1 ~ /^src\/compiler_rust\/lib\/std\//) bootstrap[family]++
+        else if ($1 ~ /^src\//) production[family]++
+    }
+    END {
+        print "family", "call_sites", "distinct_symbols", "production_calls", \
+              "bootstrap_library_calls", "test_calls", \
+              "explicit_authority_calls", "missing_authority_calls"
+        for (family in rows)
+            print family, rows[family], symbols[family], production[family] + 0, \
+                  bootstrap[family] + 0, tests[family] + 0, \
+                  authority_count[family SUBSEP "lexical_unsafe"] + \
+                      authority_count[family SUBSEP "function_unsafe"], \
+                  authority_count[family SUBSEP "missing"] + 0
+    }
+' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort -t "$(printf '\t')" -k4,4nr -k2,2nr -k1,1; } >"$families_out"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR > 1 {
+        scope = $1 ~ /^test\// ? "test" : \
+            ($1 ~ /^src\/compiler_rust\/lib\/std\// ? "bootstrap_library" : \
+            ($1 ~ /^src\// ? "production" : "unknown"))
+        rows[scope]++
+        symbol_key=scope SUBSEP $3
+        if (!(symbol_key in seen_symbol)) { seen_symbol[symbol_key]=1; symbols[scope]++ }
+        authority_count[scope SUBSEP $4]++
+    }
+    END {
+        print "scope", "call_sites", "distinct_symbols", \
+              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls"
+        for (scope in rows)
+            print scope, rows[scope], symbols[scope], \
+                  authority_count[scope SUBSEP "lexical_unsafe"] + 0, \
+                  authority_count[scope SUBSEP "function_unsafe"] + 0, \
+                  authority_count[scope SUBSEP "missing"] + 0
+    }
+' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort; } >"$scopes_out"
+
 awk -F '\t' 'NR > 1 { count[$4]++ } END { for (state in count) print count[state], state }' "$out" \
     | sort -nr >&2
 
 missing=$(awk -F '\t' 'NR > 1 && $4 == "missing" { count++ } END { print count + 0 }' "$out")
-maximum_missing=${SFFI_MAX_MISSING:-20976}
+baseline="$root/scripts/audit/baselines/sffi-call-authority-v1.tsv"
+baseline_missing=$(awk -F '\t' '$1 == "missing_authority_call_sites" { print $2 }' "$baseline")
+test -n "$baseline_missing" || {
+    echo 'SFFI call authority census: missing or malformed baseline' >&2
+    exit 1
+}
+maximum_missing=${SFFI_MAX_MISSING:-$baseline_missing}
 if [ "$missing" -gt "$maximum_missing" ]; then
     echo "SFFI call authority census: FAIL ($missing > $maximum_missing raw call sites lack explicit FFI authority)" >&2
     exit 1

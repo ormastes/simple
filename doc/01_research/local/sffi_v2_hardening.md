@@ -1851,3 +1851,63 @@ lint, nine system examples, and the new static gate pass. Census falls to
 12,291 declaration rows: 350 unsafe-minimized, 11,941 unsafe-unminimized,
 11,211 untouched, and zero evidence/signature verified. `rt_process` is 1,027
 rows, 29 minimized, 994 untouched, and zero verified/signed.
+
+## 2026-08-22 current-tree census and typed DAP lifecycle results
+
+The post-sync authoritative owned-code census now contains 12,065 Simple
+`rt_*` declaration rows and 3,162 distinct declared symbols. All 12,065 remain
+fail-closed unsafe: 353 are minimized by both an unsafe tag and a contract,
+11,712 are unminimized, 10,987 are completely untouched, and zero have
+artifact-bound evidence verification, signature verification, or admission.
+Implementation definitions span Simple (558), Rust (2,161), C (2,321), and
+C++ (219). The largest untouched families are `rt_file` (2,616), `rt_process`
+(971), `rt_env` (462), `rt_time` (357), and `rt_cuda`/`rt_dir` (265 each).
+
+The editor DAP lifecycle now consumes canonical typed results for piped spawn,
+stdin write, and close rather than locally interpreting raw PID and boolean
+sentinels. Compatibility functions remain unchanged. Each new result wrapper
+performs exactly one existing raw provider call, with no registry lookup,
+retry, sleep, copy, or success-path error allocation. This is unsafe
+minimization, not verification: the provider is still unsigned and the raw
+PID lifecycle still needs generation-bearing handles and cross-platform
+concurrency proof before it can be classified safe.
+
+The focused source contract passes and proves exactly one raw provider call in
+each typed lifecycle wrapper. The canonical editor DAP system spec passes 10/10
+under the configured runtime, but that runtime identifies itself as the Rust
+bootstrap seed, so this is seed-only behavioral evidence. Focused lint exposes
+pre-existing `process_ops` primitive-API and direct-runtime-owner debt; it is
+not a green production lint receipt. No self-hosted artifact, production
+signature, or memory/performance admission is claimed from these checks.
+
+## Live SFFI consumer/authority census
+
+The call-authority tool now emits summary, per-symbol, per-family, and per-scope
+reports from one source scan. This keeps analysis linear in source bytes plus
+call sites and avoids four additional repository traversals. The current tree
+contains 21,371 raw SFFI call sites in 3,117 files and 3,270 called symbols:
+350 calls have lexical FFI authority, 508 are inside explicitly FFI-unsafe
+functions, and 20,513 lack explicit authority. Production owns 12,903 calls,
+bootstrap-library code 820, and tests 7,648.
+
+This consumer view changes migration priority. Production calls are led by
+`rt_torch` (1,027), `rt_file` (820), `serial_println` (767), `rt_env` (529),
+and `rt_array` (280). Initially all 1,027 Torch calls lacked explicit authority,
+even though its declaration inventory had no untouched rows. That is direct
+evidence that declaration tagging alone is not boundary safety. The next Torch
+migration must place each raw call in a minimal lexical FFI scope or route it
+through a checked semantic wrapper, without adding availability probes,
+dynamic lookup, allocation, synchronization, or extra device transfers.
+
+The first call-authority slice covers all eight status/out scalar reductions.
+Their checked raw calls now have minimal lexical `[ffi, raw_ptr]` scopes after
+handle validation and before status validation. The before/after census keeps
+21,371 calls constant while lexical authority rises from 350 to 358 and
+missing authority falls from 20,513 to 20,505; `rt_torch` now has eight
+explicitly authorized and 1,019 missing calls. The static ABI gate confirms
+one checked call, cached lookup after initialization, and no explicit wrapper
+allocation for every operation. No provider or CUDA work changed.
+The focused readiness spec passes 15/15 under the configured bootstrap seed;
+this remains seed-only evidence. A checked-in authority baseline now fails the
+census if missing-authority calls rise above 20,505, so the migration is a
+one-way source-safety ratchet with no runtime or hot-path cost.

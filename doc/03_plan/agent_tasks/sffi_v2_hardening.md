@@ -288,3 +288,35 @@ passing placeholder.
     window event constants/types, SIMD `Vec8i`, and unresolved string methods).
     Keep `SIMPLE_NO_STUB_FALLBACK=1` release-blocking: any unresolved method
     lowered to constant zero is a fabricated value and must reject admission.
+55. Preserve the canonical typed piped-process lifecycle results for spawn,
+    stdin write, and close. Production DAP must consume these `Result` APIs,
+    while compatibility boolean/integer functions remain only for unmigrated
+    callers. Keep the one-provider-call hot path and add no per-call lookup,
+    retry, allocation, or copy. Next add generation-bearing handles and migrate
+    remaining direct `rt_process_*` declarations by owner rather than tagging
+    duplicate declarations mechanically.
+56. Use the current 12,065-row census as the next ratchet baseline: 353
+    unsafe-minimized, 11,712 unsafe-unminimized, 10,987 untouched, and zero
+    verified/signed. Prioritize `rt_file`, `rt_process`, `rt_env`, `rt_time`,
+    and `rt_cuda`; do not claim source tags, fixture signatures, or synthetic
+    receipts as production verification.
+57. Close the focused lint blocker in the canonical process owner by replacing
+    bare public PID/status primitives with semantic handle/status types and by
+    routing its remaining file, stream, and browser intrinsics through their
+    owning facades. Preserve raw ABI scalars inside the minimal unsafe wrapper;
+    do not add conversion allocation or extra provider dispatch.
+58. Ratchet the live call-authority census alongside declarations. Current
+    baseline: 21,371 raw calls, 12,903 production calls, 866 explicitly
+    authorized, and 20,505 missing authority after the first Torch slice. Use the per-symbol/family/scope
+    reports to prioritize real production exposure, and keep report generation
+    to one source scan plus linear aggregations.
+59. Migrate the remaining 1,019 production `rt_torch` calls through minimal lexical FFI
+    scopes or checked semantic wrappers. Do not merely reclassify the census.
+    Preserve the current number of provider calls and CUDA synchronization
+    points, and do not add per-call symbol lookup, availability probing,
+    allocation, handle copies, or device transfers.
+60. Keep `scripts/audit/baselines/sffi-call-authority-v1.tsv` monotonic. Missing
+    authority may decrease but must not rise above 20,505. Update the baseline
+    only in the same reviewed change that proves the corresponding raw calls
+    gained minimal lexical authority or were removed; never relax it to absorb
+    an unrelated regression.
