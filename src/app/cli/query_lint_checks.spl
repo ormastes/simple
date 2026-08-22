@@ -325,8 +325,15 @@ fn _closure_assignment_target(trimmed: text) -> text:
 
 fn _check_ignored_return_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for ignored return value detection."""
+    _check_ignored_return_text_indexed(
+        lines, file, format, _query_indent_successor_index(lines))
+
+fn _check_ignored_return_text_indexed(
+    lines: [text], file: text, format: text,
+    indent_successors: QueryIndentSuccessorIndex
+) -> i64:
+    """Emit RET001 using caller-owned indentation facts."""
     var count = 0
-    val last_statement = _query_last_statement_flags(lines)
     val side_effects: [text] = [
         "print", "println", "eprint", "eprintln",
         "push", "pop", "clear", "sort", "reverse", "remove", "insert",
@@ -363,7 +370,7 @@ fn _check_ignored_return_text(lines: [text], file: text, format: text) -> i64:
                                 is_side_effect = true
                                 break
                     if not is_side_effect:
-                        if not last_statement[ret_i]:
+                        if not indent_successors.last_statement[ret_i]:
                             if format == "json":
                                 _diag_emit_or_collect("{\"severity\":3,\"code\":\"RET001\",\"message\":\"return value of '{call_name}()' is discarded\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[1],\"source\":\"simple-lint\"}")
                             else:
@@ -436,17 +443,23 @@ fn _is_any_assign_ret(trimmed: text) -> bool:
         return true
     false
 
-fn _query_last_statement_flags(lines: [text]) -> [bool]:
-    """Index whether each non-empty line is last at its indentation level.
+struct QueryIndentSuccessorIndex:
+    last_statement: [bool]
+    next_same_or_shallower: [i64]
+
+fn _query_indent_successor_index(lines: [text]) -> QueryIndentSuccessorIndex:
+    """Index block successors for each non-empty source line.
 
     A reverse monotonic stack exposes the first later non-empty line at the
-    same or a shallower indent. This preserves `_is_last_stmt_ret` semantics
-    without scanning the suffix once per call candidate.
+    same or a shallower indent. Both RET001 and UNREACH001 can consume these
+    facts without scanning the suffix once per candidate.
     """
-    var result: [bool] = []
+    var last_statement: [bool] = []
+    var next_same_or_shallower: [i64] = []
     var fill = 0
     while fill < lines.len():
-        result.push(true)
+        last_statement.push(true)
+        next_same_or_shallower.push(-1)
         fill = fill + 1
     var stack: [i64] = []
     var line_index = lines.len() - 1
@@ -459,10 +472,15 @@ fn _query_last_statement_flags(lines: [text]) -> [bool]:
             _count_indent(lines[stack.last()]) > indent):
             stack.pop()
         if stack.len() > 0:
-            result[line_index] = _count_indent(lines[stack.last()]) < indent
+            val successor = stack.last()
+            next_same_or_shallower[line_index] = successor
+            last_statement[line_index] = _count_indent(lines[successor]) < indent
         stack.push(line_index)
         line_index = line_index - 1
-    result
+    QueryIndentSuccessorIndex(last_statement, next_same_or_shallower)
+
+fn _query_last_statement_flags(lines: [text]) -> [bool]:
+    _query_indent_successor_index(lines).last_statement
 
 # ============================================================================
 # BOOL001: Multiline boolean without parentheses (text-based heuristic)
