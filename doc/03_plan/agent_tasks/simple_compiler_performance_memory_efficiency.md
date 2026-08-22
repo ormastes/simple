@@ -367,3 +367,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Pin absence of direct rewrite machinery with a source contract.
 - Count the deletion as compiler parse/compile, allocation, and code-footprint reduction; do not claim runtime speedup without measurement.
 - Follow-up: rehabilitate only with canonical region facts, complete SSA/ownership/unwind/debug proofs, checked module construction, profitability, and differential tests.
+
+## Completed compiler tranche: quarantine local CSE
+
+- Preserve exported expression/table/class/factory/statistics compatibility with fail-closed lookup and transform surfaces.
+- Remove direct MIR rewrite, mutable leader selection, incomplete invalidation, and per-expression table operations from the Skeleton path.
+- Pin absence of rewrite construction with a source contract.
+- Record removed text hashing, dictionary churn, array cloning, and dead compiler source as compile-time/memory improvements without claiming runtime benefit.
+- Follow-up: activate Copy-only local propagation first; then shared-semantics constant folding; rehabilitate CSE only with structural keys, ownership, kills, effects/traps, and MemorySSA-lite; defer DCE until observability and sparse-liveness budgets are proved.
