@@ -46,8 +46,10 @@ extern fn rt_winit_event_free(ev: i64) -> i64
 extern fn rt_winit_window_free(win: i64) -> i64
 @unsafe(reason: "raw Winit owned-loop release status ABI; zero sentinel reports stale handle", capabilities: [ffi])
 extern fn rt_winit_event_loop_free(el: i64) -> i64
-extern fn rt_winit_window_set_fullscreen(win: i64, on: bool) -> bool
-extern fn rt_winit_window_is_fullscreen(win: i64) -> bool
+@unsafe(reason: "raw Winit fullscreen mutation status ABI; zero sentinel reports stale handle or provider failure", capabilities: [ffi])
+extern fn rt_winit_window_set_fullscreen(win: i64, on: i64) -> i64
+@unsafe(reason: "raw Winit fullscreen-state ABI; negative sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_winit_window_is_fullscreen(win: i64) -> i64
 @unsafe(reason: "raw Winit window width ABI; negative sentinel reports stale handle", capabilities: [ffi])
 extern fn rt_winit_window_inner_width(win: i64) -> i64
 @unsafe(reason: "raw Winit window height ABI; negative sentinel reports stale handle", capabilities: [ffi])
@@ -58,6 +60,7 @@ extern fn rt_winit_window_scale_factor_milli(win: i64) -> i64
 extern fn rt_winit_window_position_x(win: i64) -> i64
 @unsafe(reason: "raw Winit window-position ABI; INT64_MIN sentinel reports stale handle or unavailable position", capabilities: [ffi])
 extern fn rt_winit_window_position_y(win: i64) -> i64
+@unsafe(reason: "raw Winit position mutation status ABI; zero sentinel reports stale handle, unsupported engine, or out-of-range coordinates", capabilities: [ffi])
 extern fn rt_winit_window_set_position(win: i64, x: i64, y: i64) -> i64
 extern fn rt_winit_event_window_x(ev: i64) -> i64
 extern fn rt_winit_event_window_y(ev: i64) -> i64
@@ -157,13 +160,21 @@ fn winit_present_rgba(win: WinitWindow, w: i64, h: i64, pixels: [i64]) -> bool:
 fn winit_window_set_fullscreen(win: WinitWindow, on: bool) -> bool:
     if not win.is_valid:
         return false
-    rt_winit_window_set_fullscreen(win.handle, on)
+    var changed: i64 = 0
+    unsafe(capabilities: [ffi]):
+        changed = rt_winit_window_set_fullscreen(win.handle, if on: 1 else: 0)
+    changed != 0
 
 # Read the current fullscreen state from the runtime window record.
-fn winit_window_is_fullscreen(win: WinitWindow) -> bool:
+fn winit_window_is_fullscreen(win: WinitWindow) -> bool?:
     if not win.is_valid:
-        return false
-    rt_winit_window_is_fullscreen(win.handle)
+        return nil
+    var state: i64 = -1
+    unsafe(capabilities: [ffi]):
+        state = rt_winit_window_is_fullscreen(win.handle)
+    if state < 0:
+        return nil
+    state != 0
 
 # Current inner size (width, height) in physical pixels from the runtime window
 # record. Updated by present/resize handling, so it reflects fullscreen growth.
@@ -213,7 +224,10 @@ fn winit_window_get_position(win: WinitWindow) -> WinitWindowPosition?:
 fn winit_window_set_position(win: WinitWindow, position: WinitWindowPosition) -> bool:
     if not win.is_valid:
         return false
-    rt_winit_window_set_position(win.handle, position.x.to_i64(), position.y.to_i64()) != 0
+    var changed: i64 = 0
+    unsafe(capabilities: [ffi]):
+        changed = rt_winit_window_set_position(win.handle, position.x.to_i64(), position.y.to_i64())
+    changed != 0
 
 # Position carried by an EVT_WINDOW_MOVED event.
 fn winit_event_window_position(event: i64) -> WinitWindowPosition:

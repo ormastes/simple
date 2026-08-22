@@ -424,7 +424,7 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
         | "rt_winit_window_set_cursor_position" => Ok(unsupported_window_mutation(name)),
         "rt_winit_window_set_fullscreen" => {
             let window_id = get_i64(args, 0, name)?;
-            let fullscreen = get_bool(args, 1, name)?;
+            let fullscreen = get_i64(args, 1, name)? != 0;
             let event_loop_id = WINDOW_OWNERS.lock().get(&window_id).copied();
             if let Some(el_id) = event_loop_id {
                 let (response_tx, response_rx) = crossbeam::channel::bounded(1);
@@ -442,7 +442,7 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                             })?;
                     } else {
                         set_last_error(format!("invalid event loop handle: {el_id}"));
-                        return Ok(bool_value(false));
+                        return Ok(int_value(0));
                     }
                 } // Release EVENT_LOOPS lock before pumping
 
@@ -452,10 +452,10 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                     macos_pump(el_id);
                     if let Ok(result) = response_rx.try_recv() {
                         return match result {
-                            Ok(_) => Ok(bool_value(true)),
+                            Ok(_) => Ok(int_value(1)),
                             Err(err) => {
                                 set_last_error(err);
-                                Ok(bool_value(false))
+                                Ok(int_value(0))
                             }
                         };
                     }
@@ -463,10 +463,10 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                 }
 
                 return match response_rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                    Ok(Ok(_)) => Ok(bool_value(true)),
+                    Ok(Ok(_)) => Ok(int_value(1)),
                     Ok(Err(err)) => {
                         set_last_error(err);
-                        Ok(bool_value(false))
+                        Ok(int_value(0))
                     }
                     Err(err) => Err(super::runtime_error(format!(
                         "failed to receive set_fullscreen response: {err}"
@@ -474,7 +474,7 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                 };
             }
             set_last_error(format!("invalid window handle: {window_id}"));
-            Ok(bool_value(false))
+            Ok(int_value(0))
         }
         "rt_winit_window_is_visible" => {
             let window_id = get_i64(args, 0, name)?;
@@ -494,12 +494,12 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
         }
         "rt_winit_window_is_fullscreen" => {
             let window_id = get_i64(args, 0, name)?;
-            Ok(bool_value(
+            Ok(int_value(
                 WINDOW_STATES
                     .lock()
                     .get(&window_id)
-                    .map(|w| w.fullscreen)
-                    .unwrap_or(false),
+                    .map(|w| i64::from(w.fullscreen))
+                    .unwrap_or(-1),
             ))
         }
         "rt_winit_window_id" => {
