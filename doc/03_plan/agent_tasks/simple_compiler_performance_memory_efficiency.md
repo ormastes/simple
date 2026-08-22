@@ -303,3 +303,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Avoid struct-valued dictionary retrieval by storing integer indexes.
 - Preserve uncached parsing after saturation.
 - Follow-up: reuse `LintConfig.new()` defaults for manifest-free files without mutable sharing.
+## Completed tooling tranche: shared manifest-free defaults
+
+- Build the default lint-level dictionary once per command-owned `Linter`.
+- Give each manifest-free file an isolated child configuration.
+- Share immutable effective defaults while keeping overrides mutable per file.
+- Pin absence of per-file `LintConfig.new()` in the no-manifest branch.
+- Follow-up: reduce CLI argument policy rescans to one parsed command policy.
