@@ -2,12 +2,42 @@ extern fn rt_file_read_text(path: text) -> text
 
 use app.cli.query_diagnostics.{_split_structured_error, _extract_error_code, _strip_ansi}
 use app.cli.query_error_codes.{query_extract_error_code}
+use app.cli.query_lint_checks.{_check_closure_capture_text}
 use app.cli.query_rich_common.{
     _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE,
     _DIAG_SEVERITY_OVERRIDE_COUNT,
     _diag_emit_or_collect, query_mcp_diagnostics_wrapper_json}
 
 describe "query diagnostics helpers":
+    it "preserves ordered duplicate CLOS001 diagnostics across sibling closures":
+        val lines = [
+            "fn outer():",
+            "    var x = 0",
+            "    var x = 1",
+            "    fn first():",
+            "        x = 2",
+            "    fn second():",
+            "        x += 1"
+        ]
+        _DIAG_COLLECT_MODE = true
+        _DIAG_COLLECTED = []
+        val count = _check_closure_capture_text(lines, "fixture.spl", "json")
+        expect(count).to_equal(4)
+        expect(_DIAG_COLLECTED.len()).to_equal(4)
+        expect(_DIAG_COLLECTED[0]).to_contain("\"line\":5")
+        expect(_DIAG_COLLECTED[1]).to_contain("\"line\":5")
+        expect(_DIAG_COLLECTED[2]).to_contain("\"line\":7")
+        expect(_DIAG_COLLECTED[3]).to_contain("\"line\":7")
+        _DIAG_COLLECTED = []
+        _DIAG_COLLECT_MODE = false
+
+    it "uses one forward CLOS001 scope index instead of reverse walks":
+        val source = rt_file_read_text("src/app/cli/query_lint_checks.spl") ?? ""
+        expect(source).to_contain("var boundary_tree: [i64] = []")
+        expect(source).to_contain("var group_scan_start: [i64] = []")
+        expect(source.contains("_collect_outer_var_counts_clos")).to_equal(false)
+        expect(source.contains("var si = fn_line - 1")).to_equal(false)
+
     it "assembles MCP diagnostic JSON once without changing its envelope":
         expect(query_mcp_diagnostics_wrapper_json([])).to_equal(
             "{\"content\":[{\"type\":\"text\",\"text\":\"0 diagnostics found\"}],\"structuredContent\":{\"diagnostics\":[],\"count\":0},\"isError\":false}")
