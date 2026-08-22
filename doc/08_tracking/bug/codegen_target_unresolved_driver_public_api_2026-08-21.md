@@ -209,3 +209,54 @@ driver module:
   `reexport_physical_cache_spec`) have **byte-identical** pass/fail counts
   before and after the change (2/3, 3/1, 1/15 — all pre-existing failures,
   none introduced here).
+
+## Round 3 (2026-08-22) — env-gated exemption: the rescue only ran with SIMPLE_BOOTSTRAP=1
+
+**Status: RESOLVED in tree (core fix).**
+
+### Root cause
+
+Stage 1 run9 (`fp9/run9.sh`) runs the seed `native-build --entry-closure
+--threads 8` with **no** `SIMPLE_BOOTSTRAP` in the environment. Every one of
+the 17+ `unresolved name/type: X` shapes it died on (`CodegenTarget`,
+`BlockValue`, `MirType`, `parser_type_kind_named_name`, `TypeLayout`,
+`MirStatic`, `GpuIntrinsicKind`, `HirIfArm`, `HirFunction`, `CompiledModule`,
+`CompilationContext`, `mir_transfer_mode_consumes_source`, ...) is the
+documented GLB2 second-level-glob / package-sibling residual: `use m.*`
+expands only what `m` declares or `export`s, never what `m` itself reaches
+through its own plain `use n.*`. The ONLY rescue for that residual was
+`try_register_bootstrap_global_symbol` (unique-owner fallback), gated on
+`SIMPLE_BOOTSTRAP=1`. Same defect class as d2bdc42d8ad (eprint/generic):
+an environment variable was silently load-bearing for correctness.
+
+### Fix (no env gates)
+
+1. `_Items/module_import_registration.spl`: new
+   `try_register_glob_reachable_symbol(name, span)`, called first from
+   `try_register_bootstrap_global_symbol` **before** the env check. It is
+   name-directed: for ONE unbound name it visits only the importer's glob
+   targets, and for each target either takes the target's own declaration or
+   delegates the second-level hop to `find_reexport_source` (registry-pure,
+   memoized, depth-capped). Nothing is expanded that the name does not need,
+   so the >13 min / 8.5 GB cost that blocked ungating GLB2 is not incurred.
+2. `_Items/module_reexport_materialization.spl`, bare-export package-sibling
+   inference: a sibling that RE-EXPORTS the name (`export use other.{Name}`)
+   now counts as an owner (walked to its terminal) under the same uniqueness
+   rule as a sibling that declares it. Ambiguity (two distinct terminals)
+   still returns not-found rather than guessing.
+3. `SIMPLE_REXMEMO_VERIFY=1` diagnostic: re-walks on every REXMEMO memo hit
+   and prints `[rexmemo-mismatch]` if the memoized terminal disagrees. Probe
+   runs of driver.spl and interpreter.spl with the verifier on produced
+   **zero** `[rexmemo-mismatch]` lines, so the f8681a7afa6 miss-caching is
+   not implicated.
+
+### Verification
+
+- `test/01_unit/compiler/hir/package_export_route_shapes_spec.spl` (16
+  examples; 13 new multi-hop / second-level-glob / sibling shapes):
+  pre-fix 11 pass without `SIMPLE_BOOTSTRAP`; post-fix **16/16 without**
+  `SIMPLE_BOOTSTRAP` and 16/16 with it.
+- Single-module `native-build` of `src/compiler/driver/driver.spl` and
+  `src/compiler/backend/backend/interpreter.spl` (`--threads 2`, no
+  `SIMPLE_BOOTSTRAP`): see the landing commit message for the
+  `unresolved name/type` counts.

@@ -456,6 +456,8 @@ impl HirLowering:
 
     me try_register_bootstrap_global_symbol(name: text, span: Span) -> bool:
         """Resolve one uniquely owned flat-global bootstrap declaration."""
+        if self.try_register_glob_reachable_symbol(name, span):
+            return true
         if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             return false
         if self.symbols.lookup_or_invalid(name).is_valid():
@@ -654,6 +656,12 @@ impl HirLowering:
         if self.reexport_root_memo_index.contains_key(memo_key):
             self.reexport_chase_memo_hits = self.reexport_chase_memo_hits + 1
             val terminal_index: i64 = self.reexport_root_memo_index[memo_key]
+            if (rt_env_get("SIMPLE_REXMEMO_VERIFY") ?? "") == "1":
+                val verify_state = HirReexportWalkState.fresh()
+                val verify = self.find_reexport_source_walk(facade_index, wanted, 0, verify_state)
+                val verify_index = if verify.found: verify.module_index else: -1
+                if verify_index != terminal_index:
+                    eprint("[rexmemo-mismatch] facade={facade_index} wanted={wanted} memo={terminal_index} walk={verify_index} complete={verify_state.complete} valid={verify_state.valid}")
             if terminal_index < 0:
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             if terminal_index >= self.module_surfaces.surfaces.len():
@@ -682,3 +690,66 @@ impl HirLowering:
             self.reexport_root_memo_index[memo_key] = -1
             self.reexport_root_memo_item[memo_key] = ""
         result
+
+impl HirLowering:
+    me try_register_glob_reachable_symbol(name: text, span: Span) -> bool:
+        """GLB2-RESIDUAL (2026-08-22): name-directed second-level glob resolution.
+
+        `use m.*` expands only what `m` DECLARES or `export`s; a name `m`
+        itself reaches through its OWN `use n.*` never leaks (the nested-glob
+        expansion is gated on the pure-facade shape -- see GLB2 in
+        module_import_resolution.spl, where ungating cost >13 min / 8.5 GB).
+        Stage 1 run9 died on exactly that residual: `MirType` via
+        mir_data's `use compiler.mir.mir_types.*`, `parser_type_kind_named_name`
+        via parser_types' `use parser_types_expr.*`, `CodegenTarget` /
+        `GpuIntrinsicKind` through package facades. Until now the only rescue
+        was try_register_bootstrap_global_symbol, which is gated on
+        SIMPLE_BOOTSTRAP=1 -- and the stage-1 lane does not export it.
+
+        This is the cheap dual of ungating: it is driven by ONE unbound name,
+        visits only the importer's glob targets, and delegates the
+        second-level hop to find_reexport_source (registry-pure, memoized,
+        depth-capped), so nothing is expanded that the name does not need. No
+        env gate: the route is a user-written glob, not a bootstrap exemption."""
+        if self.symbols.lookup_or_invalid(name).is_valid():
+            return true
+        var importer_key = self.module_filename
+        if importer_key.ends_with(".spl"):
+            importer_key = importer_key[0:importer_key.len() - 4]
+        importer_key = importer_key.replace("/", ".")
+        if importer_key.starts_with("src."):
+            importer_key = importer_key.substring(4)
+        val importer_index = self.surface_index_for_name(importer_key)
+        if importer_index < 0 or importer_index >= self.module_surfaces.surfaces.len():
+            return false
+        val importer = self.module_surfaces.surfaces[importer_index]
+        var import_idx = 0
+        while import_idx < importer.imports.len() and import_idx < importer.import_target_indices.len():
+            val item_start = importer.import_item_offsets[import_idx]
+            val item_end = importer.import_item_offsets[import_idx + 1]
+            if item_start == item_end:
+                val target_index = importer.import_target_indices[import_idx]
+                if target_index >= 0 and target_index < self.module_surfaces.surfaces.len():
+                    val target = self.module_surfaces.surfaces[target_index]
+                    var owner_index = -1
+                    var owner_item = name
+                    if hir_module_declares_item(target, name):
+                        owner_index = target.physical_index
+                    else:
+                        val hop = self.find_reexport_source(target.physical_index, name)
+                        if hop.found:
+                            owner_index = hop.module_index
+                            owner_item = hop.item_name
+                    if owner_index >= 0 and owner_index < self.module_surfaces.surfaces.len():
+                        # Same save/restore discipline as the bootstrap path
+                        # below: Pass 0 may already be registering.
+                        val saved_registering = self.registering_import_symbols
+                        self.registering_import_symbols = true
+                        self.register_imported_symbol(
+                            owner_index, self.module_surfaces.surfaces[owner_index].module_name,
+                            owner_item, name, span, true)
+                        self.registering_import_symbols = saved_registering
+                        if self.symbols.lookup_or_invalid(name).is_valid():
+                            return true
+            import_idx = import_idx + 1
+        false
