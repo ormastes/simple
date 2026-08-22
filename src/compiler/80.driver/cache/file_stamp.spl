@@ -15,9 +15,13 @@
 # field is named mtime_s. A same-size rewrite within the same second is the
 # known stamp ceiling — exactly what strict mode exists to catch.
 
+@unsafe(reason: "raw file probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw file size; negative values are the inaccessible or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> i64
+@unsafe(reason: "raw whole-second mtime; negative values may be pre-epoch data or provider failure", capabilities: [ffi])
 extern fn rt_file_stat(path: text) -> i64
+@unsafe(reason: "raw file digest; empty text is the unreadable or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_file_hash_sha256(path: text) -> text
 
 # ============================================================================
@@ -33,27 +37,50 @@ struct FileStamp:
 
 fn file_stamp_take(path: text) -> FileStamp?:
     """Stat + SHA-256 `path` into a stamp. nil when the file does not exist."""
-    if not rt_file_exists(path):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(path)
+    if not exists:
         return nil
     _file_stamp_measure(path)
 
 fn file_stamp_check(stamp: FileStamp) -> bool:
     """Fast path: true iff current size+mtime match the stamp. No read, no hash."""
-    if not rt_file_exists(stamp.path):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(stamp.path)
+    if not exists:
         return false
-    (rt_file_size(stamp.path) == stamp.size and
-     rt_file_stat(stamp.path) == stamp.mtime_s)
+    var size: i64 = -1
+    unsafe(capabilities: [ffi]):
+        size = rt_file_size(stamp.path)
+    if size != stamp.size:
+        return false
+    var mtime: i64 = -1
+    unsafe(capabilities: [ffi]):
+        mtime = rt_file_stat(stamp.path)
+    mtime == stamp.mtime_s
 
 fn _file_stamp_measure(path: text) -> FileStamp?:
     """Option-C torn-read guard: stat before read, hash, stat after; retry
     once when size/mtime changed mid-read; accept the retry's measurement."""
     var attempt = 0
     while attempt < 2:
-        val size_before = rt_file_size(path)
-        val mtime_before = rt_file_stat(path)
-        val sha = rt_file_hash_sha256(path)
-        val size_after = rt_file_size(path)
-        val mtime_after = rt_file_stat(path)
+        var size_before: i64 = -1
+        var mtime_before: i64 = -1
+        var sha = ""
+        var size_after: i64 = -1
+        var mtime_after: i64 = -1
+        unsafe(capabilities: [ffi]):
+            size_before = rt_file_size(path)
+        unsafe(capabilities: [ffi]):
+            mtime_before = rt_file_stat(path)
+        unsafe(capabilities: [ffi]):
+            sha = rt_file_hash_sha256(path)
+        unsafe(capabilities: [ffi]):
+            size_after = rt_file_size(path)
+        unsafe(capabilities: [ffi]):
+            mtime_after = rt_file_stat(path)
         if (size_before == size_after and
             mtime_before == mtime_after):
             return Some(FileStamp(path: path, size: size_after,
@@ -62,9 +89,17 @@ fn _file_stamp_measure(path: text) -> FileStamp?:
     # Still torn after the retry: hash once more and pair the result with the
     # post-hash identity — coherent-enough best effort for a file being
     # rewritten under us.
-    val sha_final = rt_file_hash_sha256(path)
-    Some(FileStamp(path: path, size: rt_file_size(path),
-                   mtime_s: rt_file_stat(path), content_sha: sha_final))
+    var sha_final = ""
+    var size_final: i64 = -1
+    var mtime_final: i64 = -1
+    unsafe(capabilities: [ffi]):
+        sha_final = rt_file_hash_sha256(path)
+    unsafe(capabilities: [ffi]):
+        size_final = rt_file_size(path)
+    unsafe(capabilities: [ffi]):
+        mtime_final = rt_file_stat(path)
+    Some(FileStamp(path: path, size: size_final,
+                   mtime_s: mtime_final, content_sha: sha_final))
 
 # ============================================================================
 # Stamp index (value type — functions return the updated index)
@@ -93,7 +128,10 @@ fn file_sha_via_stamp(index: StampIndex, path: text, strict: bool) -> (text, Sta
     differs from the fresh SHA, count the divergence and record the path so
     callers can surface it. Missing file -> ("", index, false)."""
     var idx = index
-    if not rt_file_exists(path):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(path)
+    if not exists:
         return ("", idx, false)
     val has_stamp = idx.stamps.contains_key(path)
     if not strict and has_stamp:

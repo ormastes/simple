@@ -1292,3 +1292,9 @@ probes with an allocated candidate table on this startup path. The next bounded
 `rt_file` owners are compiler cache stamp/lease/GC modules; prefer owners whose
 nullable reads and write/delete statuses can be preserved without fabricating
 empty data or adding a second provider call.
+
+The file-stamp cache owner is now call-authority complete with its exact torn-
+read observation sequence and retry bound retained. Next take `cache/lease`:
+preserve one directory listing per sweep, one liveness query per parsed lease,
+and one write/delete per state transition. Do not turn its empty read, false
+write/delete, negative clock/PID, or empty listing sentinels into success.

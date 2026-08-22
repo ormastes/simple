@@ -2150,3 +2150,18 @@ API findings. The call census remains 21,329 raw and moves 27 calls from missing
 to lexical: 2,005 explicit and 19,324 missing. Declaration rows fall to 12,052;
 842 are tagged, 368 are minimized, 10,945 are untouched, and zero are signed or
 admitted.
+
+## File-stamp cache authority
+
+The Option-C file-stamp owner now documents and lexically scopes all 13 file
+provider calls. The fast check preserves existence-first and size-before-mtime
+short-circuiting. Each torn-read attempt preserves size/mtime/hash/size/mtime,
+and the final fallback preserves one hash followed by one size and one mtime;
+there is no additional probe, hash, retry, collection, lookup, or allocation.
+
+Focused behavior and authority pass 11/11. The seed observation improves from
+5.21 s / 173,372 KiB to 5.15 s / 172,836 KiB. Optimizer general findings remain
+zero, and lint moves from 17 raw-runtime warnings to zero errors/warnings for
+the touched boundary. The call census is 21,329 raw, 2,018 explicit, and 19,311
+missing. Declaration totals remain 12,052; 846 are tagged, 370 minimized,
+10,941 untouched, and zero signed/admitted.
