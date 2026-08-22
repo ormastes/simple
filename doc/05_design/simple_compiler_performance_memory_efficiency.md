@@ -350,6 +350,11 @@ closed capabilities. Raw missing dependencies remain reportable even though the
 runtime builder closes them safely. Unrequested families have empty storage and
 `complete = false`; queries therefore fail closed.
 
+Dominance availability is explicit through `dominators_complete`; an empty map
+never means success. Any consumer that interprets def-use sites by block ID or
+rewrites MIR requests CFG+def-use and checks both completeness bits. Def-use-only
+is reserved for analyses whose result remains conservative without CFG identity.
+
 ## Diagnostic rendering allocation contract
 
 Warning/error formatters accumulate complete logical records and join once.
