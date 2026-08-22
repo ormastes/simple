@@ -1072,3 +1072,12 @@ checks and lint pass, and the ratchet passes. Census is 12,294 rows, 785 tagged,
 untouched rows. Continue with shape/index and constructor/copy families, where
 legacy empty-array and zero-handle adapters are still explicitly tested and
 must be removed rather than retained as compatibility behavior.
+
+The tensor from-values and copy-values compatibility APIs are now removed.
+Every production consumer requires explicit ready/error status before lifting a
+handle or accepting copied values; the previous zero/empty fabrication tests
+were deleted. Status tests remain 4/4, three focused checks and lint pass. This
+shortens the success call path by removing an unwrap wrapper and preserves the
+copy routine's existing single buffer allocation/free. Next remove fabricated
+handles from reshape/permute/cat/stack/binary/to-float and fixed-dimension
+constructors, then address scalar reductions separately.

@@ -1,6 +1,6 @@
 use std.ndarray.*
 use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_dot_result, dyn_torch_tensor_free, dyn_torch_tensor_inverse_result, dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_matmul_result, dyn_torch_tensor_sum}
-use std.common.torch.dyn_sffi_tensor_ops.{dyn_torch_tensor_copy_values, dyn_torch_tensor_from_values_1d, dyn_torch_tensor_from_values_2d}
+use std.common.torch.dyn_sffi_tensor_ops.{dyn_torch_tensor_copy_values_result, dyn_torch_tensor_from_values_1d_result, dyn_torch_tensor_from_values_2d_result}
 use std.linalg.linalg_core.{BackendError, _scilib_call3, _scilib_call_n, dyn_cuda_available, dyn_openblas_available, float64_values_to_f64, float64_matrix_to_f64, column_matrix_from_vector, vector_from_column_matrix, vector_from}
 use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_i64, spl_f64_to_bits, spl_bits_to_f64}
 
@@ -265,13 +265,15 @@ fn torch_dot_values(left: [Float64], right: [Float64]) -> Result<Float64, Backen
         return Err(BackendError.BackendExecutionFailed("pytorch dot requires same-length vectors"))
     if not dyn_torch_available():
         return Err(BackendError.BackendUnavailable("pytorch"))
-    val left_handle = dyn_torch_tensor_from_values_1d(float64_values_to_f64(left))
-    if left_handle <= 0:
-        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_1d"))
-    val right_handle = dyn_torch_tensor_from_values_1d(float64_values_to_f64(right))
-    if right_handle <= 0:
+    val left_create = dyn_torch_tensor_from_values_1d_result(float64_values_to_f64(left))
+    if left_create.status != "ready" or left_create.handle <= 0:
+        return Err(BackendError.BackendExecutionFailed("pytorch left dot tensor construction failed: " + left_create.reason))
+    val left_handle = left_create.handle
+    val right_create = dyn_torch_tensor_from_values_1d_result(float64_values_to_f64(right))
+    if right_create.status != "ready" or right_create.handle <= 0:
         dyn_torch_tensor_free(left_handle)
-        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_1d"))
+        return Err(BackendError.BackendExecutionFailed("pytorch right dot tensor construction failed: " + right_create.reason))
+    val right_handle = right_create.handle
     val dot_handle = match dyn_torch_tensor_dot_result(left_handle, right_handle):
         case Ok(handle): handle
         case Err(reason):
@@ -294,25 +296,28 @@ fn torch_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArr
     val rows = a.rows().value
     val cols = b.cols().value
     val inner = a.cols().value
-    val a_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(a, rows, inner), rows, inner)
-    if a_handle <= 0:
-        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
-    val b_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(b, inner, cols), inner, cols)
-    if b_handle <= 0:
+    val a_create = dyn_torch_tensor_from_values_2d_result(float64_matrix_to_f64(a, rows, inner), rows, inner)
+    if a_create.status != "ready" or a_create.handle <= 0:
+        return Err(BackendError.BackendExecutionFailed("pytorch left matrix construction failed: " + a_create.reason))
+    val a_handle = a_create.handle
+    val b_create = dyn_torch_tensor_from_values_2d_result(float64_matrix_to_f64(b, inner, cols), inner, cols)
+    if b_create.status != "ready" or b_create.handle <= 0:
         dyn_torch_tensor_free(a_handle)
-        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
+        return Err(BackendError.BackendExecutionFailed("pytorch right matrix construction failed: " + b_create.reason))
+    val b_handle = b_create.handle
     val product_handle = match dyn_torch_tensor_matmul_result(a_handle, b_handle):
         case Ok(handle): handle
         case Err(reason):
             dyn_torch_tensor_free(a_handle)
             dyn_torch_tensor_free(b_handle)
             return Err(BackendError.BackendExecutionFailed("pytorch matmul failed: " + reason))
-    val values = dyn_torch_tensor_copy_values(product_handle, rows * cols)
+    val copy_result = dyn_torch_tensor_copy_values_result(product_handle, rows * cols)
     dyn_torch_tensor_free(product_handle)
     dyn_torch_tensor_free(a_handle)
     dyn_torch_tensor_free(b_handle)
-    if values.len() != rows * cols:
-        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_copy_bits"))
+    if copy_result.status != "ready" or copy_result.values.len() != rows * cols:
+        return Err(BackendError.BackendExecutionFailed("pytorch matrix result copy failed: " + copy_result.reason))
+    val values = copy_result.values
     var out: [Float64] = []
     var row = 0
     while row < rows:
@@ -341,28 +346,31 @@ fn torch_solve(a: NDArray, b: NDArray) -> Result<NDArray, BackendError>:
     if not dyn_torch_available():
         return Err(BackendError.BackendUnavailable("pytorch"))
     val n = a.rows().value
-    val a_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(a, n, n), n, n)
-    if a_handle <= 0:
-        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
+    val a_create = dyn_torch_tensor_from_values_2d_result(float64_matrix_to_f64(a, n, n), n, n)
+    if a_create.status != "ready" or a_create.handle <= 0:
+        return Err(BackendError.BackendExecutionFailed("pytorch solve matrix construction failed: " + a_create.reason))
+    val a_handle = a_create.handle
     var rhs_values: [Float64] = []
     var rhs_i = 0
     while rhs_i < b.len().value:
         rhs_values.push(b.get_f64(Index.new(rhs_i)))
         rhs_i = rhs_i + 1
-    val b_handle = dyn_torch_tensor_from_values_1d(float64_values_to_f64(rhs_values))
-    if b_handle <= 0:
+    val b_create = dyn_torch_tensor_from_values_1d_result(float64_values_to_f64(rhs_values))
+    if b_create.status != "ready" or b_create.handle <= 0:
         dyn_torch_tensor_free(a_handle)
-        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_1d"))
+        return Err(BackendError.BackendExecutionFailed("pytorch solve right-hand construction failed: " + b_create.reason))
+    val b_handle = b_create.handle
     val solve_result = dyn_torch_tensor_linalg_solve_result(a_handle, b_handle)
     dyn_torch_tensor_free(a_handle)
     dyn_torch_tensor_free(b_handle)
     if solve_result.status != "ready" or solve_result.handle <= 0:
         return Err(BackendError.BackendExecutionFailed("pytorch solve backend execution failed: " + solve_result.reason))
     val out_handle = solve_result.handle
-    val values = dyn_torch_tensor_copy_values(out_handle, n)
+    val copy_result = dyn_torch_tensor_copy_values_result(out_handle, n)
     dyn_torch_tensor_free(out_handle)
-    if values.len() != n:
-        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_copy_bits"))
+    if copy_result.status != "ready" or copy_result.values.len() != n:
+        return Err(BackendError.BackendExecutionFailed("pytorch solve result copy failed: " + copy_result.reason))
+    val values = copy_result.values
     var out: [Float64] = []
     var i = 0
     while i < values.len():
@@ -376,18 +384,20 @@ fn torch_inv(a: NDArray) -> Result<NDArray, BackendError>:
     if not dyn_torch_available():
         return Err(BackendError.BackendUnavailable("pytorch"))
     val n = a.rows().value
-    val a_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(a, n, n), n, n)
-    if a_handle <= 0:
-        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
+    val a_create = dyn_torch_tensor_from_values_2d_result(float64_matrix_to_f64(a, n, n), n, n)
+    if a_create.status != "ready" or a_create.handle <= 0:
+        return Err(BackendError.BackendExecutionFailed("pytorch inverse matrix construction failed: " + a_create.reason))
+    val a_handle = a_create.handle
     val inverse_result = dyn_torch_tensor_inverse_result(a_handle)
     dyn_torch_tensor_free(a_handle)
     val out_handle = match inverse_result:
         case Ok(handle): handle
         case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch inv failed: " + reason))
-    val values = dyn_torch_tensor_copy_values(out_handle, n * n)
+    val copy_result = dyn_torch_tensor_copy_values_result(out_handle, n * n)
     dyn_torch_tensor_free(out_handle)
-    if values.len() != n * n:
-        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_copy_bits"))
+    if copy_result.status != "ready" or copy_result.values.len() != n * n:
+        return Err(BackendError.BackendExecutionFailed("pytorch inverse result copy failed: " + copy_result.reason))
+    val values = copy_result.values
     var out: [Float64] = []
     var i = 0
     while i < values.len():

@@ -1363,3 +1363,13 @@ ratchet passes. Census: 12,294 declaration rows, 785 tagged, 587 contracted,
 11,237 untouched, and zero verified/signed. `rt_torch` is 161 rows, 139 tagged,
 22 untouched. Each result wrapper still has one raw operation call and only
 the availability/input/output contract branches.
+
+Dynamic Torch tensor construction and value-copy no longer expose legacy
+wrappers that discard explicit status into handle zero or an empty array.
+Backend algebra and `TorchNDArray` now consume the existing result structs,
+validate `ready` plus handle/length, preserve cleanup on every error path, and
+include the provider reason in `BackendError`. This removes a compatibility
+wrapper from each success path; it does not add a provider call, allocation,
+lookup, hash, retry, or I/O. The status spec remains 4/4, all three production
+modules check, and lint has zero errors. Empty arrays can again be legitimate
+data only when accompanied by `ready`, rather than doubling as bridge failure.
