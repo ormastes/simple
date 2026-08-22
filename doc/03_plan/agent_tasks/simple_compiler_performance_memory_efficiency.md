@@ -153,3 +153,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Remove their duplicate direct invocations and imports from normal lint.
 - Pin registry membership and absence of duplicate call sites with source contracts.
 - Follow-up: construct one bounded line/context view inside the registry.
+
+## Completed tool tranche: shared SPipe EasyFix facts
+
+- Add a canonical-lines registry entrypoint while retaining standalone compatibility.
+- Build one request-owned `LineContext` array only for admitted spec files.
+- Share contexts across four SPipe rules and lines with missing-docstring analysis.
+- Pin normal lint dispatch and shared fact consumers with source contracts.
+- Follow-up: migrate code/module/annotation EasyFix families into the same bounded view.
