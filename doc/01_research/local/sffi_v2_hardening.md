@@ -1006,3 +1006,16 @@ modules pass focused checks. A combined 60-file check was stopped after several
 minutes under the runaway guard; the static proof confirms every removed symbol
 had no call occurrence. Removing dead declarations adds no hot-path work and
 slightly reduces parsing and name-resolution input.
+
+A second exact-occurrence sweep covered every other `rt_file_*` symbol and
+removed 33 more declaration-only boundaries across 23 files. It also removed
+one now-unused unsafe attribute and the documentation owned solely by a dead
+declaration. The census is now 12,517 declarations, 11,741 untouched, 502
+unsafe-tagged, 582 contract-documented, and zero verified-and-signed. Production
+is 6,207 rows with 5,631 untouched; bootstrap-library is 678 with 645 untouched;
+tests are 5,632 with 5,465 untouched. All 12,517 remain fail-closed unsafe. The
+11 changed compiler files pass together, every removed symbol has zero remaining
+occurrence in its file, and census/ratchet gates pass. A bounded 12-file mixed
+check was stopped after five minutes at about 336 MB RSS under the convergence
+guard; it produced no source diagnostic. This slice deletes compile-time input
+only and adds no runtime branch, allocation, lookup, or hashing.

@@ -832,3 +832,11 @@ migrate callers to canonical checked owners; tag only irreducible raw bindings.
 The current gate is 12,548 declarations, 11,770 untouched, and zero signed
 admissions. Do not claim safety until provider evidence is admitted and the
 cross-lane nullable-read deployment gate passes.
+
+The all-symbol unused `rt_file_*` sweep removed a further 33 dead boundaries;
+the current gate is 12,517 declarations and 11,741 untouched. The next file-I/O
+work must target live duplicate declarations: route ordinary callers through
+the canonical checked facade, retain direct raw calls only where measured
+closure constraints require lexical `unsafe(ffi)`, and avoid per-call registry,
+signature, or hash work. Signed admission remains a load-time operation and is
+still zero for production providers.
