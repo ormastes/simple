@@ -32,3 +32,20 @@ The remaining optional bounded fields are `trace_operations`, `trace_bytes`,
 `environment_schema`. Runtime configuration cannot widen these compile-time
 caps. Provider arrival order never grants commit authority; the parent compares
 validated normalized I/O and owns the sole commit.
+
+## Production clock migration
+
+`std.io.time_now_nanos` is the first production I/O wrapper carried by this
+contract. Its operation is `io.clock.monotonic_nanos.v1`. It deliberately omits
+`assurance`, so the compiler promotes it to Critical and implies `@no_alloc`.
+The request, result, and replay trace are fixed scalar envelopes (32 bytes, one
+trace operation), and the existing raw clock is called exactly once.
+
+The manifest admits isolated Pure-Simple, C, and Rust lanes. C remains preferred
+while the Pure-Simple clock provider is maturing: normal mode runs only C and
+preserves the legacy wrapper's latency and return/error behavior; alpha and beta
+compare the same capture-once observation through replay lanes. Existing
+`current_time_unix`, `current_time_ms`, `time_now_nanos`, and `time_now_micros`
+names remain compatible. The bounded migration checker continues to warn for an
+exact untouched legacy raw-clock declaration until its release epoch, while a
+new or changed untagged declaration is an immediate error.

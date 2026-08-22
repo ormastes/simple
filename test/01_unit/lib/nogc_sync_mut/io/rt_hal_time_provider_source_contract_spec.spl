@@ -1,0 +1,48 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-009 REQ-010 REQ-011 REQ-012 REQ-015 NFR-005 NFR-006
+# @evidence-class source-contract
+
+use std.spec.*
+use std.io_runtime.{file_read}
+
+describe "production rt(hal) monotonic clock declaration":
+    it "tags the existing public I/O wrapper with the bounded critical provider contract":
+        val source = file_read("src/lib/nogc_sync_mut/io/time_ops.spl")
+        val operation = source.find("@rt(hal, operation: io.clock.monotonic_nanos.v1,")
+        val wrapper = source.find("fn time_now_nanos() -> i64:")
+        expect(operation).to_be_greater_than(-1)
+        expect(wrapper).to_be_greater_than(operation)
+        val contract = source.substring(operation, wrapper)
+        expect(contract).to_contain("providers: pure+c+rust")
+        expect(contract).to_contain("effects: replay_only")
+        expect(contract).to_contain("request_bytes: 32")
+        expect(contract).to_contain("result_bytes: 32")
+        expect(contract).to_contain("trace_operations: 1")
+        expect(contract).to_contain("trace_bytes: 32")
+        expect(contract).to_contain("preferred: c")
+        expect(contract.contains("assurance:")).to_equal(false)
+
+    it "preserves the compatibility API and exactly one raw provider call":
+        val source = file_read("src/lib/nogc_sync_mut/io/time_ops.spl")
+        val begin = source.find("fn time_now_nanos() -> i64:")
+        val finish = source.find("fn time_now_micros() -> i64:")
+        expect(begin).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(begin)
+        val wrapper = source.substring(begin, finish)
+        expect(wrapper.split("rt_time_now_nanos()").len() - 1).to_equal(1)
+        expect(wrapper).to_contain("if value < 0:")
+        expect(wrapper).to_contain("E-SFFI-TIME-002")
+        expect(source).to_contain("fn current_time_unix() -> i64:")
+        expect(source).to_contain("fn current_time_ms() -> i64:")
+
+    it "keeps the hot path scalar and free of dynamic storage or diagnostics":
+        val source = file_read("src/lib/nogc_sync_mut/io/time_ops.spl")
+        val begin = source.find("fn time_now_nanos() -> i64:")
+        val finish = source.find("fn time_now_micros() -> i64:")
+        val wrapper = source.substring(begin, finish)
+        expect(wrapper.contains("var storage: [")).to_equal(false)
+        expect(wrapper.contains("[u8]")).to_equal(false)
+        expect(wrapper.contains(".push(")).to_equal(false)
+        expect(wrapper.contains(".to_text(")).to_equal(false)
+        expect(wrapper.contains("print ")).to_equal(false)
+        expect(wrapper.contains("log ")).to_equal(false)
