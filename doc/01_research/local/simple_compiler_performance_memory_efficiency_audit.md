@@ -2177,6 +2177,18 @@ parsing, interpolation/desugaring, and assembly, so its recursive parser probes
 also reuse that same single snapshot. Cache-hit reconstruction enters at
 `flat_ast_to_module` and receives the equivalent one-lookup bridge scope.
 
+### Shared parser profiling policy
+
+Declaration profiling independently read `SIMPLE_PARSE_PROFILE` once for every
+parsed method even though token profiling already owned a cached decision.
+With `M` methods, the default-off path performed `M` foreign environment/key
+conversions and temporary text work. Parser initialization now invalidates the
+shared tri-state once per parse; the first token/profile query samples it, and
+declaration timing consumes the same suppression-aware result. Environment
+traffic falls from `O(M)` to `O(1)` per parse. Disabled clocks/output remain
+zero; enabled behavior remains four clocks and three `PARSEPROF` interval lines
+per method. Same-process changes are observed at the next parse boundary.
+
 ### Leading explicit-code allocation audit
 
 The leading `Edddd` probe previously allocated a one-character prefix, a
