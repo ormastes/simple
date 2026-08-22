@@ -14,7 +14,7 @@ Observed on the current Linux x86_64 host:
 
 ```text
 PASS object_bytes=1200 iterations=10000 mean_ns=178 maxrss_kib=1792 heap_allocations=0
-PASS smf_relocated_call=1 iterations=1000000 resolve_mean_ns=4 disarmed_mean_ns=15 maxrss_kib=1792 heap_allocations=0 sink=0
+PASS smf_relocated_call=1 iterations=1000000 resolve_mean_ns=2 baseline_mean_ns=2 disarmed_mean_ns=11 disarmed_delta_ns=9 maxrss_kib=1024 heap_allocations=0 mapping_calls=0 dynload_calls=0 sink=0
 PASS reproducible_object_sha256=707026d886e0a16d4f4558e35b177b287a85c91d7a862600849760e8a173e20b static_off_build_calls=0
 ```
 
@@ -38,7 +38,9 @@ C self-check executes the synthetic retained-SMF call shape through that thunk,
 and the checker asserts publication ordering from source. Linker-wrapped
 malloc/calloc/realloc evidence observed zero heap
 allocations across one million address resolutions and one million disarmed
-patchpoint calls. The 15 ns disarmed number is a focused host smoke, not a
+patchpoint calls. Linker-wrapped mapping and dynload entrypoints also remained
+at zero after disarm. The 11 ns disarmed result (9 ns over the same-loop
+indirect-call baseline) is a focused host smoke, not a
 cross-host NFR result.
 
 The two independently compiled objects were byte-identical. The compiler flags

@@ -5,6 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/mcdc-perf-gate.XXXXXX") || exit 2
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 GATE="$ROOT/scripts/check/check-mcdc-performance-gate.shs"
+ARTIFACT_GATE="$ROOT/scripts/check/check-mcdc-static-off-artifact.shs"
 FIXTURE="$ROOT/test/05_perf/mcdc/mcdc_performance_fixture.c"
 TIME_WRAPPER="$ROOT/test/05_perf/mcdc/deterministic_time_wrapper.shs"
 CC=${CC:-cc}
@@ -13,6 +14,37 @@ CC_BIN=$(command -v "$CC") || exit 2
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror "$FIXTURE" -o "$TMP/fixture" || exit 2
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror -DPOST_SEAL_ALLOC_COUNT=1 \
     "$FIXTURE" -o "$TMP/bad-fixture" || exit 2
+
+# Exact artifact-equivalence self-check plus adversarial failures for a hidden
+# branch/probe and a dynload edge. The normal pass below exercises payload and
+# section absence on the controlled fixture.
+cp "$TMP/fixture" "$TMP/artifact-off"
+sh "$ARTIFACT_GATE" "$TMP/fixture" "$TMP/artifact-off" "$TMP/artifact-pass" \
+    >"$TMP/artifact-pass.out" 2>&1 || exit 2
+"$CC" -std=c11 -O2 \
+    "$ROOT/test/05_perf/mcdc/mcdc_static_off_forbidden_fixture.c" \
+    -ldl -o "$TMP/artifact-bad"
+set +e
+sh "$ARTIFACT_GATE" "$TMP/fixture" "$TMP/artifact-bad" "$TMP/artifact-fail" \
+    >"$TMP/artifact-fail.out" 2>&1
+artifact_rc=$?
+set -e
+[ "$artifact_rc" -eq 1 ] || {
+    echo "mcdc-performance-gate-selfcheck: FAIL artifact-bad-accepted"
+    exit 1
+}
+# Identical-but-instrumented inputs must also fail. This proves the forbidden
+# material scan is independent of control/off equivalence.
+set +e
+sh "$ARTIFACT_GATE" "$TMP/artifact-bad" "$TMP/artifact-bad" \
+    "$TMP/artifact-both-bad" >"$TMP/artifact-both-bad.out" 2>&1
+both_bad_rc=$?
+set -e
+[ "$both_bad_rc" -eq 1 ] && grep -q 'reason=forbidden-' \
+    "$TMP/artifact-both-bad.out" || {
+    echo "mcdc-performance-gate-selfcheck: FAIL identical-instrumented-artifacts-accepted"
+    exit 1
+}
 
 set +e
 MCDC_PERF_SAMPLES=1 sh "$GATE" >"$TMP/error.out" 2>&1

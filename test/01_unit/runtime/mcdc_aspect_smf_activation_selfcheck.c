@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <assert.h>
+#include <dlfcn.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,6 +15,8 @@
 #define ITERATIONS 1000000u
 
 static uint64_t allocation_count;
+static uint64_t mapping_count;
+static uint64_t dynload_count;
 void *__real_malloc(size_t);
 void *__real_calloc(size_t, size_t);
 void *__real_realloc(void *, size_t);
@@ -22,6 +25,36 @@ void *__wrap_malloc(size_t n) { ++allocation_count; return __real_malloc(n); }
 void *__wrap_calloc(size_t n, size_t s) { ++allocation_count; return __real_calloc(n, s); }
 void *__wrap_realloc(void *p, size_t n) { ++allocation_count; return __real_realloc(p, n); }
 void __wrap_free(void *p) { __real_free(p); }
+void *__real_mmap(void *, size_t, int, int, int, off_t);
+int __real_mprotect(void *, size_t, int);
+int __real_munmap(void *, size_t);
+void *__real_dlopen(const char *, int);
+void *__real_dlsym(void *, const char *);
+int __real_dlclose(void *);
+void *__wrap_mmap(void *p, size_t n, int prot, int flags, int fd, off_t off) {
+    ++mapping_count;
+    return __real_mmap(p, n, prot, flags, fd, off);
+}
+int __wrap_mprotect(void *p, size_t n, int prot) {
+    ++mapping_count;
+    return __real_mprotect(p, n, prot);
+}
+int __wrap_munmap(void *p, size_t n) {
+    ++mapping_count;
+    return __real_munmap(p, n);
+}
+void *__wrap_dlopen(const char *path, int flags) {
+    ++dynload_count;
+    return __real_dlopen(path, flags);
+}
+void *__wrap_dlsym(void *handle, const char *name) {
+    ++dynload_count;
+    return __real_dlsym(handle, name);
+}
+int __wrap_dlclose(void *handle) {
+    ++dynload_count;
+    return __real_dlclose(handle);
+}
 
 /* runtime_coverage_core.c's report wrapper dependency is not exercised here. */
 int64_t rt_string_new(const uint8_t *bytes, uint64_t len) {
@@ -34,11 +67,16 @@ static uint64_t elapsed_ns(struct timespec a, struct timespec b) {
            (uint64_t)(b.tv_nsec - a.tv_nsec);
 }
 
+static int32_t baseline_patchpoint(uint64_t decision_id) {
+    return decision_id == UINT64_MAX ? 1 : 0;
+}
+
 int main(void) {
     struct timespec begin, end;
     struct rusage usage;
     volatile uint64_t address_sink = 0;
     volatile int32_t status_sink = 0;
+    int32_t (*volatile baseline_call)(uint64_t) = baseline_patchpoint;
 
     const uint64_t collector = rt_mcdc_compiled_target_address_v1();
     assert(collector != 0);
@@ -77,6 +115,14 @@ int main(void) {
     assert(munmap(mapped, (size_t)page_size) == 0);
 
     allocation_count = 0;
+    mapping_count = 0;
+    dynload_count = 0;
+    assert(clock_gettime(CLOCK_MONOTONIC, &begin) == 0);
+    for (unsigned i = 0; i < ITERATIONS; ++i)
+        status_sink |= baseline_call(i);
+    assert(clock_gettime(CLOCK_MONOTONIC, &end) == 0);
+    const uint64_t baseline_ns = elapsed_ns(begin, end);
+
     assert(clock_gettime(CLOCK_MONOTONIC, &begin) == 0);
     for (unsigned i = 0; i < ITERATIONS; ++i)
         address_sink ^= rt_mcdc_compiled_target_address_v1();
@@ -90,11 +136,19 @@ int main(void) {
     const uint64_t idle_ns = elapsed_ns(begin, end);
     assert(status_sink == 0);
     assert(allocation_count == 0);
+    assert(mapping_count == 0);
+    assert(dynload_count == 0);
+    const uint64_t idle_mean_ns = idle_ns / ITERATIONS;
+    const uint64_t baseline_mean_ns = baseline_ns / ITERATIONS;
+    assert(idle_mean_ns <= 100u);
     assert(getrusage(RUSAGE_SELF, &usage) == 0);
     printf("PASS smf_relocated_call=1 iterations=%u resolve_mean_ns=%" PRIu64
-           " disarmed_mean_ns=%" PRIu64 " maxrss_kib=%ld heap_allocations=%" PRIu64
-           " sink=%" PRIu64 "\n",
-           ITERATIONS, resolve_ns / ITERATIONS, idle_ns / ITERATIONS,
-           usage.ru_maxrss, allocation_count, address_sink);
+           " baseline_mean_ns=%" PRIu64 " disarmed_mean_ns=%" PRIu64
+           " disarmed_delta_ns=%" PRIu64 " maxrss_kib=%ld heap_allocations=%" PRIu64
+           " mapping_calls=%" PRIu64 " dynload_calls=%" PRIu64 " sink=%" PRIu64 "\n",
+           ITERATIONS, resolve_ns / ITERATIONS, baseline_mean_ns, idle_mean_ns,
+           idle_mean_ns > baseline_mean_ns ? idle_mean_ns - baseline_mean_ns : 0,
+           usage.ru_maxrss, allocation_count, mapping_count, dynload_count,
+           address_sink);
     return 0;
 }
