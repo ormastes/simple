@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+runner="$repo/scripts/check/run-focused-failed-shard.shs"
+work=$(mktemp -d "${TMPDIR:-/tmp}/focused-shard-harness.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+printf '#!/bin/sh\nexit 0\n' >"$work/compiler"
+chmod +x "$work/compiler"
+source_root="$repo/test/fixtures/compiler"
+entry="$source_root/native_option_eq_representation.spl"
+[ -f "$entry" ] || entry=$(find "$source_root" -type f -name '*.spl' | LC_ALL=C sort | head -1)
+
+start=$(date +%s%N)
+out=$(FOCUSED_SHARD_RUN_ROOT="$work/runs" "$runner" --compiler "$work/compiler" \
+  --label selftest --entry "$entry" --source "$source_root" --dry-run)
+elapsed_us=$(( ($(date +%s%N) - start) / 1000 ))
+printf '%s\n' "$out" | grep -q '^focused_failed_shard_status=dry-run$'
+printf '%s\n' "$out" | grep -q '<--entry-closure>'
+printf '%s\n' "$out" | grep -q '<--timeout> <600>'
+printf '%s\n' "$out" | grep -q '<--threads> <1>'
+printf '%s\n' "$out" | grep -q '/cache>'
+if FOCUSED_SHARD_RUN_ROOT="$work/runs" "$runner" --compiler "$work/compiler" \
+  --label selftest --entry "$entry" --source "$repo" --dry-run >/dev/null 2>&1; then
+  echo 'FAIL: repository root source admitted' >&2; exit 1
+fi
+run_start=$(date +%s%N)
+run_out=$(FOCUSED_SHARD_RUN_ROOT="$work/runs" "$runner" --compiler "$work/compiler" \
+  --label execution --entry "$entry" --source "$source_root")
+run_overhead_us=$(( ($(date +%s%N) - run_start) / 1000 ))
+receipt=$(printf '%s\n' "$run_out" | sed -n 's/.* receipt=//p')
+[ -f "$receipt" ]
+grep -q '^compiler_timeout_seconds=600$' "$receipt"
+grep -q '^rss_limit_exceeded=0$' "$receipt"
+grep -q '^identity_changed=0$' "$receipt"
+echo "focused_failed_shard_harness_status=pass dry_run_overhead_us=$elapsed_us bounded_noop_run_us=$run_overhead_us"

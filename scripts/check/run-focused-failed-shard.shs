@@ -1,0 +1,178 @@
+#!/bin/sh
+# Run one failed native-build closure without contaminating the main build cache.
+# The runner freezes source/compiler identity, injects the compiler's 600-second
+# timeout, and applies independent wall/RSS backstops. It never discovers roots.
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+compiler=
+entry=
+label=
+backend=cranelift
+output=
+run_root=${FOCUSED_SHARD_RUN_ROOT:-$repo/build/native_probe/failed-shards}
+wall_s=${FOCUSED_SHARD_WALL_SECONDS:-660}
+rss_kib=${FOCUSED_SHARD_RSS_KIB:-12582912}
+poll_s=${FOCUSED_SHARD_POLL_SECONDS:-0.25}
+dry_run=false
+sources=
+
+die() { echo "focused_failed_shard_status=error reason=$*" >&2; exit 2; }
+positive() { case $1 in ''|*[!0-9]*|0) return 1;; esac; }
+positive_period() { echo "$1" | awk 'BEGIN {ok=0} /^[0-9]+([.][0-9]+)?$/ {if ($1 > 0) ok=1} END {exit !ok}'; }
+safe_label() { case $1 in ''|*[!A-Za-z0-9_.-]*) return 1;; esac; }
+canon_file() { [ -f "$1" ] && CDPATH= cd -- "$(dirname -- "$1")" && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$1")"; }
+canon_dir() { [ -d "$1" ] && CDPATH= cd -- "$1" && pwd -P; }
+sha_file() { sha256sum "$1" | awk '{print $1}'; }
+
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --compiler) [ "$#" -ge 2 ] || die missing-compiler-value; compiler=$2; shift 2;;
+    --entry) [ "$#" -ge 2 ] || die missing-entry-value; entry=$2; shift 2;;
+    --source) [ "$#" -ge 2 ] || die missing-source-value; sources="${sources}${sources:+
+}$2"; shift 2;;
+    --label) [ "$#" -ge 2 ] || die missing-label-value; label=$2; shift 2;;
+    --backend) [ "$#" -ge 2 ] || die missing-backend-value; backend=$2; shift 2;;
+    --output) [ "$#" -ge 2 ] || die missing-output-value; output=$2; shift 2;;
+    --run-root) [ "$#" -ge 2 ] || die missing-run-root-value; run_root=$2; shift 2;;
+    --dry-run) dry_run=true; shift;;
+    -h|--help)
+      echo "usage: $0 --compiler BIN --label NAME --entry FILE --source DIR [--source DIR ...] [--backend NAME] [--output FILE] [--dry-run]"
+      exit 0;;
+    *) die "unknown-argument:$1";;
+  esac
+done
+
+[ -n "$compiler" ] || die compiler-required
+[ -n "$entry" ] || die entry-required
+[ -n "$sources" ] || die source-required
+safe_label "$label" || die invalid-label
+positive "$wall_s" || die invalid-wall-seconds
+positive "$rss_kib" || die invalid-rss-kib
+positive_period "$poll_s" || die invalid-poll-seconds
+compiler=$(canon_file "$compiler") || die compiler-not-found
+entry=$(canon_file "$entry") || die entry-not-found
+[ -x "$compiler" ] || die compiler-not-executable
+
+cd "$repo"
+source_revision=$(git rev-parse HEAD)
+source_tree=$(git rev-parse 'HEAD^{tree}')
+compiler_sha=$(sha_file "$compiler")
+entry_sha=$(sha_file "$entry")
+
+source_args=
+source_manifest=
+entry_admitted=false
+old_ifs=$IFS
+IFS='
+'
+for raw_source in $sources; do
+  source=$(canon_dir "$raw_source") || die source-not-found
+  case "$source" in "$repo") die repository-root-source-forbidden;; esac
+  case "$source" in "$repo"/*) ;; *) die source-outside-frozen-repository;; esac
+  source_rel=${source#"$repo"/}
+  git diff --quiet HEAD -- "$source_rel" || die "dirty-source-root:$source_rel"
+  [ -z "$(git ls-files --others --exclude-standard -- "$source_rel" | sed -n '1p')" ] || die "untracked-source:$source_rel"
+  case "$entry" in "$source"/*) entry_admitted=true;; esac
+  source_args="$source_args --source $source"
+  source_manifest="${source_manifest}source=$source
+"
+done
+IFS=$old_ifs
+[ "$entry_admitted" = true ] || die entry-outside-declared-sources
+entry_rel=${entry#"$repo"/}
+git ls-files --error-unmatch "$entry_rel" >/dev/null 2>&1 || die entry-not-tracked
+
+identity=$(printf '%s\n%s\n%s\n%s\n%s' "$source_tree" "$compiler_sha" "$entry_sha" "$backend" "$source_manifest" | sha256sum | cut -c1-24)
+run_dir="$run_root/$label/$identity"
+cache_dir="$run_dir/cache"
+log="$run_dir/build.log"
+metrics="$run_dir/time.txt"
+receipt="$run_dir/receipt.env"
+lock="$run_dir/writer.lock"
+[ -n "$output" ] || output="$run_dir/candidate"
+
+mkdir -p "$run_dir"
+if [ -f "$receipt" ]; then
+  grep -Fqx "identity=$identity" "$receipt" || die receipt-identity-mismatch
+fi
+mkdir "$lock" 2>/dev/null || die concurrent-cache-writer
+trap 'rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
+mkdir -p "$cache_dir" "$(dirname -- "$output")"
+
+set -- "$compiler" native-build --backend "$backend" --entry-closure --entry "$entry" \
+  --timeout 600 --threads 1 --cache-dir "$cache_dir" --output "$output"
+IFS='
+'
+for source in $sources; do
+  source=$(canon_dir "$source") || die source-disappeared
+  set -- "$@" --source "$source"
+done
+IFS=$old_ifs
+
+if [ "$dry_run" = true ]; then
+  printf 'focused_failed_shard_status=dry-run\nidentity=%s\nsource_revision=%s\nsource_tree=%s\ncompiler_sha256=%s\nentry_sha256=%s\ncache_dir=%s\nwall_seconds=%s\nrss_limit_kib=%s\n' \
+    "$identity" "$source_revision" "$source_tree" "$compiler_sha" "$entry_sha" "$cache_dir" "$wall_s" "$rss_kib"
+  printf 'argv='; printf ' <%s>' "$@"; printf '\n'
+  exit 0
+fi
+
+command -v setsid >/dev/null 2>&1 || die setsid-required
+[ -x /usr/bin/time ] || die time-required
+start_ns=$(date +%s%N)
+rss_exceeded=0
+set +e
+setsid /usr/bin/time -v -o "$metrics" timeout -k 15 "$wall_s" "$@" >"$log" 2>&1 &
+leader=$!
+while kill -0 "$leader" 2>/dev/null; do
+  group_rss=$(ps -o rss= -g "$leader" 2>/dev/null | awk '{s += $1} END {print s + 0}')
+  if [ "$group_rss" -gt "$rss_kib" ]; then
+    rss_exceeded=1
+    kill -TERM "-$leader" 2>/dev/null || true
+    sleep 1
+    kill -KILL "-$leader" 2>/dev/null || true
+    break
+  fi
+  sleep "$poll_s"
+done
+wait "$leader"
+rc=$?
+set -e
+end_ns=$(date +%s%N)
+wall_ms=$(( (end_ns - start_ns) / 1000000 ))
+max_rss=$(sed -n 's/.*Maximum resident set size (kbytes): *//p' "$metrics" 2>/dev/null | tail -1)
+max_rss=${max_rss:-0}
+[ "$rss_exceeded" -eq 0 ] || rc=125
+if [ "$(git rev-parse 'HEAD^{tree}')" != "$source_tree" ] || \
+   [ "$(sha_file "$compiler")" != "$compiler_sha" ] || \
+   [ "$(sha_file "$entry")" != "$entry_sha" ]; then
+  rc=126
+  identity_changed=1
+else
+  identity_changed=0
+fi
+
+tmp="$receipt.tmp.$$"
+{
+  echo schema=focused-failed-shard-v1
+  echo identity="$identity"
+  echo source_revision="$source_revision"
+  echo source_tree="$source_tree"
+  echo compiler_path="$compiler"
+  echo compiler_sha256="$compiler_sha"
+  echo entry_path="$entry"
+  echo entry_sha256="$entry_sha"
+  printf '%s' "$source_manifest"
+  echo cache_dir="$cache_dir"
+  echo compiler_timeout_seconds=600
+  echo wall_limit_seconds="$wall_s"
+  echo rss_limit_kib="$rss_kib"
+  echo wall_ms="$wall_ms"
+  echo max_rss_kib="$max_rss"
+  echo rss_limit_exceeded="$rss_exceeded"
+  echo identity_changed="$identity_changed"
+  echo exit_code="$rc"
+} >"$tmp"
+mv "$tmp" "$receipt"
+echo "focused_failed_shard_status=$([ "$rc" -eq 0 ] && echo pass || echo fail) exit_code=$rc wall_ms=$wall_ms max_rss_kib=$max_rss receipt=$receipt"
+exit "$rc"
