@@ -1,0 +1,117 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+export LC_ALL=C
+
+for tool in openssl cc sha256sum; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "SKIP: $tool unavailable"
+        exit 0
+    }
+done
+
+hash() { sha256sum "$1" | awk '{ print $1 }'; }
+if test "$(uname -s)" != Linux || test "$(uname -m)" != x86_64; then
+    echo 'SKIP: fixture currently targets x86_64-linux'
+    exit 0
+fi
+target=x86_64-linux
+signature_hash=a65ee89f5846f49396d5e1878beab876b0f308a0f845c0904ddc4cecaa30dbca
+
+printf '%s\n' \
+    '#include <stdint.h>' \
+    '#include <time.h>' \
+    'int64_t rt_time_now_unix_micros(void) {' \
+    '    struct timespec value;' \
+    '    return clock_gettime(CLOCK_REALTIME, &value) == 0' \
+    '        ? (int64_t)value.tv_sec * 1000000 + value.tv_nsec / 1000 : -1;' \
+    '}' \
+    'int64_t rt_time_now_nanos(void) {' \
+    '    struct timespec value;' \
+    '    return clock_gettime(CLOCK_MONOTONIC, &value) == 0' \
+    '        ? (int64_t)value.tv_sec * 1000000000 + value.tv_nsec : -1;' \
+    '}' \
+    'int64_t rt_time_now_micros(void) { return rt_time_now_nanos() / 1000; }' \
+    >"$work/provider.c"
+printf '%s\n' 'cc -std=gnu11 -O2 -c provider.c' >"$work/build-input"
+cc -std=gnu11 -O2 -c "$work/provider.c" -o "$work/provider.o"
+cp "$(command -v cc)" "$work/compiler"
+printf '%s\n' \
+    '#include <stdint.h>' \
+    'extern int64_t rt_time_now_micros(void);' \
+    'extern int64_t rt_time_now_nanos(void);' \
+    'extern int64_t rt_time_now_unix_micros(void);' \
+    'int main(void) {' \
+    '    return (rt_time_now_micros() < 0 || rt_time_now_nanos() < 0 ||' \
+    '            rt_time_now_unix_micros() < 0) ? 1 : 0;' \
+    '}' >"$work/consumer.c"
+cc -std=gnu11 -O2 "$work/consumer.c" "$work/provider.o" \
+    -Wl,-Map,"$work/consumer.map" -o "$work/consumer"
+linker_path=$(cc -print-prog-name=ld)
+case "$linker_path" in /*) ;; *) linker_path=$(command -v "$linker_path") ;; esac
+cp "$linker_path" "$work/linker"
+
+artifact_hash=$(hash "$work/provider.o")
+source_hash=$(hash "$work/provider.c")
+build_hash=$(hash "$work/build-input")
+compiler_hash=$(hash "$work/compiler")
+
+printf 'schema\tsimple.sffi-abi-registry.v1\nprovider_id\tsimple.runtime.time\ntarget\t%s\nsymbol_count\t3\nsymbol\trt_time_now_micros\t%s\nsymbol\trt_time_now_nanos\t%s\nsymbol\trt_time_now_unix_micros\t%s\n' \
+    "$target" "$signature_hash" "$signature_hash" "$signature_hash" >"$work/abi.tsv"
+abi_hash=$(hash "$work/abi.tsv")
+
+config_hash=1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+printf 'schema\tsimple.sffi-verification-receipt.v1\nkind\tcontract-test\nprovider_id\tsimple.runtime.time\ntarget\t%s\nartifact_sha256\t%s\ncanonical_source_tree_sha256\t%s\nexact_build_input_sha256\t%s\ncompiler_artifact_sha256\t%s\nabi_registry_sha256\t%s\ntool_id\tfixture-clock-test\nconfig_sha256\t%s\nresult\tpass\n' \
+    "$target" "$artifact_hash" "$source_hash" "$build_hash" "$compiler_hash" \
+    "$abi_hash" "$config_hash" >"$work/contract.receipt"
+test_hash=$(hash "$work/contract.receipt")
+consumer_hash=$(hash "$work/consumer")
+link_map_hash=$(hash "$work/consumer.map")
+linker_hash=$(hash "$work/linker")
+link_config=$(printf 'target\t%s\nprovider_artifact_sha256\t%s\nconsumer_artifact_sha256\t%s\nlink_map_sha256\t%s\nlinker_artifact_sha256\t%s\nabi_registry_sha256\t%s\n' \
+    "$target" "$artifact_hash" "$consumer_hash" "$link_map_hash" \
+    "$linker_hash" "$abi_hash" | sha256sum | awk '{ print $1 }')
+printf 'schema\tsimple.sffi-verification-receipt.v1\nkind\tnative-link\nprovider_id\tsimple.runtime.time\ntarget\t%s\nartifact_sha256\t%s\ncanonical_source_tree_sha256\t%s\nexact_build_input_sha256\t%s\ncompiler_artifact_sha256\t%s\nabi_registry_sha256\t%s\ntool_id\tfixture-linker\nconfig_sha256\t%s\nresult\tpass\n' \
+    "$target" "$artifact_hash" "$source_hash" "$build_hash" "$compiler_hash" \
+    "$abi_hash" "$link_config" >"$work/link.receipt"
+link_hash=$(hash "$work/link.receipt")
+printf 'schema\tsimple.sffi-verification-report.v2\nprovider_id\tsimple.runtime.time\ntarget\t%s\nartifact_sha256\t%s\ncanonical_source_tree_sha256\t%s\nexact_build_input_sha256\t%s\ncompiler_artifact_sha256\t%s\nabi_registry_sha256\t%s\nreceipt_count\t2\nresult\tpass\nreceipt\tcontract-test\tfixture-clock-test\t%s\t%s\tcontract.receipt\nreceipt\tnative-link\tfixture-linker\t%s\t%s\tlink.receipt\n' \
+    "$target" "$artifact_hash" "$source_hash" "$build_hash" "$compiler_hash" \
+    "$abi_hash" "$config_hash" "$test_hash" "$config_hash" "$link_hash" >"$work/report.tsv"
+report_hash=$(hash "$work/report.tsv")
+
+openssl genpkey -algorithm ED25519 -out "$work/private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
+printf 'fixture-time-key\tsimple.runtime.time\tpublic.pem\n' >"$work/trust.tsv"
+printf 'schema\tsimple.sffi-evidence.v2\nprovider_id\tsimple.runtime.time\ntarget\t%s\nsigner_key_id\tfixture-time-key\nartifact_sha256\t%s\ncanonical_source_tree_sha256\t%s\nexact_build_input_sha256\t%s\ncompiler_artifact_sha256\t%s\nabi_registry_sha256\t%s\nverification_report_sha256\t%s\nsymbol_count\t3\nsymbol\trt_time_now_micros\t%s\nsymbol\trt_time_now_nanos\t%s\nsymbol\trt_time_now_unix_micros\t%s\n' \
+    "$target" "$artifact_hash" "$source_hash" "$build_hash" "$compiler_hash" \
+    "$abi_hash" "$report_hash" "$signature_hash" "$signature_hash" \
+    "$signature_hash" >"$work/manifest.tsv"
+openssl pkeyutl -sign -inkey "$work/private.pem" -rawin \
+    -in "$work/manifest.tsv" -out "$work/signature.bin"
+
+RT_TIME_SFFI_MANIFEST="$work/manifest.tsv" \
+RT_TIME_SFFI_SIGNATURE="$work/signature.bin" \
+RT_TIME_SFFI_TRUST_STORE="$work/trust.tsv" \
+RT_TIME_SFFI_PROVIDER_ARTIFACT="$work/provider.o" \
+RT_TIME_SFFI_SOURCE_SNAPSHOT="$work/provider.c" \
+RT_TIME_SFFI_BUILD_INPUT="$work/build-input" \
+RT_TIME_SFFI_COMPILER_ARTIFACT="$work/compiler" \
+RT_TIME_SFFI_ABI_REGISTRY="$work/abi.tsv" \
+RT_TIME_SFFI_VERIFICATION_REPORT="$work/report.tsv" \
+RT_TIME_SFFI_LINK_RECEIPT="$work/link.receipt" \
+RT_TIME_SFFI_CONSUMER_ARTIFACT="$work/consumer" \
+RT_TIME_SFFI_LINK_MAP="$work/consumer.map" \
+RT_TIME_SFFI_LINKER_ARTIFACT="$work/linker" \
+RT_TIME_SFFI_FIXTURE=1 \
+sh "$root/scripts/check/check-rt-time-sffi-provider-evidence.shs"
+
+sh "$root/scripts/audit/rt-safety-census.shs" "$work/summary.tsv" \
+    "$work/declarations.tsv" "$work/languages.tsv" "$work/families.tsv" \
+    "$work/scopes.tsv"
+
+grep -q '^verified_and_signed_rows[[:space:]]0$' "$work/summary.tsv"
+echo 'STATUS: PASS rt-time-sffi-signed-admission fixture_only=true admitted=3'

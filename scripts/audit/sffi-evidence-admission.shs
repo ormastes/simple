@@ -18,11 +18,51 @@ abi_registry=$8
 verification_report=$9
 output=${10}
 
+manifest_source=$manifest
+signature_source=$signature
+trust_store_source=$trust_store
+artifact_source=$artifact
+source_snapshot_source=$source_snapshot
+build_input_source=$build_input
+compiler_source=$compiler
+abi_registry_source=$abi_registry
+verification_report_source=$verification_report
+report_source_dir=$(CDPATH= cd -- "$(dirname -- "$verification_report_source")" && pwd)
+trust_source_dir=$(CDPATH= cd -- "$(dirname -- "$trust_store_source")" && pwd)
+
 for input in "$manifest" "$signature" "$trust_store" "$artifact" \
     "$source_snapshot" "$build_input" "$compiler" "$abi_registry" \
     "$verification_report"; do
-    test -f "$input" || { echo "sffi evidence admission: missing input: $input" >&2; exit 1; }
+    test -f "$input" && test ! -L "$input" || {
+        echo "sffi evidence admission: input must be a regular non-symlink file: $input" >&2
+        exit 1
+    }
 done
+
+# Admission reads private snapshots only. This prevents a mutable build or
+# trust directory from changing an input between hashing, parsing, and crypto.
+snapshot=$(mktemp -d)
+chmod 700 "$snapshot"
+trap 'rm -rf "$snapshot"; rm -f "${output}.part.$$"' EXIT INT TERM
+copy_input() { cp -- "$1" "$snapshot/$2"; }
+copy_input "$manifest_source" manifest
+copy_input "$signature_source" signature
+copy_input "$trust_store_source" trust-store
+copy_input "$artifact_source" artifact
+copy_input "$source_snapshot_source" source-snapshot
+copy_input "$build_input_source" build-input
+copy_input "$compiler_source" compiler
+copy_input "$abi_registry_source" abi-registry
+copy_input "$verification_report_source" verification-report
+manifest=$snapshot/manifest
+signature=$snapshot/signature
+trust_store=$snapshot/trust-store
+artifact=$snapshot/artifact
+source_snapshot=$snapshot/source-snapshot
+build_input=$snapshot/build-input
+compiler=$snapshot/compiler
+abi_registry=$snapshot/abi-registry
+verification_report=$snapshot/verification-report
 
 command -v openssl >/dev/null 2>&1 || {
     echo 'sffi evidence admission: openssl unavailable' >&2
@@ -30,6 +70,14 @@ command -v openssl >/dev/null 2>&1 || {
 }
 command -v sha256sum >/dev/null 2>&1 || {
     echo 'sffi evidence admission: sha256sum unavailable' >&2
+    exit 1
+}
+command -v nm >/dev/null 2>&1 || {
+    echo 'sffi evidence admission: nm unavailable' >&2
+    exit 1
+}
+command -v file >/dev/null 2>&1 || {
+    echo 'sffi evidence admission: file unavailable' >&2
     exit 1
 }
 
@@ -63,18 +111,14 @@ build_hash=$(field exact_build_input_sha256)
 compiler_hash=$(field compiler_artifact_sha256)
 abi_hash=$(field abi_registry_sha256)
 report_hash=$(field verification_report_sha256)
-evidence_verified=$(field evidence_verified)
 symbol_count=$(field symbol_count)
 
-test "$schema" = simple.sffi-evidence.v1 || {
+test "$schema" = simple.sffi-evidence.v2 || {
     echo 'sffi evidence admission: unsupported schema' >&2; exit 1;
 }
 case "$provider_id:$target:$signer_key_id" in
     *: | :* | *::* ) echo 'sffi evidence admission: empty identity field' >&2; exit 1 ;;
 esac
-test "$evidence_verified" = true || {
-    echo 'sffi evidence admission: verification report is not approved' >&2; exit 1;
-}
 case "$symbol_count" in
     ''|*[!0-9]*) echo 'sffi evidence admission: invalid symbol_count' >&2; exit 1 ;;
 esac
@@ -82,7 +126,7 @@ test "$symbol_count" -gt 0 || {
     echo 'sffi evidence admission: empty symbol closure' >&2; exit 1;
 }
 
-allowed='schema provider_id target signer_key_id artifact_sha256 canonical_source_tree_sha256 exact_build_input_sha256 compiler_artifact_sha256 abi_registry_sha256 verification_report_sha256 evidence_verified symbol_count symbol'
+allowed='schema provider_id target signer_key_id artifact_sha256 canonical_source_tree_sha256 exact_build_input_sha256 compiler_artifact_sha256 abi_registry_sha256 verification_report_sha256 symbol_count symbol'
 awk -F '\t' -v allowed="$allowed" '
     BEGIN { split(allowed, names, " "); for (i in names) ok[names[i]]=1 }
     !($1 in ok) || ($1 == "symbol" && NF != 3) ||
@@ -101,18 +145,17 @@ awk -F '\t' '
         fixed[8]="compiler_artifact_sha256";
         fixed[9]="abi_registry_sha256";
         fixed[10]="verification_report_sha256";
-        fixed[11]="evidence_verified"; fixed[12]="symbol_count"
+        fixed[11]="symbol_count"
     }
-    NR <= 12 && $1 != fixed[NR] { exit 1 }
-    NR > 12 && $1 != "symbol" { exit 1 }
-    END { if (NR < 13) exit 1 }
+    NR <= 11 && $1 != fixed[NR] { exit 1 }
+    NR > 11 && $1 != "symbol" { exit 1 }
+    END { if (NR < 12) exit 1 }
 ' "$manifest" || {
     echo 'sffi evidence admission: manifest fields are not in canonical order' >&2
     exit 1
 }
 
-symbols=$(mktemp)
-trap 'rm -f "$symbols" "${output}.part.$$"' EXIT INT TERM
+symbols=$snapshot/symbols
 awk -F '\t' '$1 == "symbol" { print $2 "\t" $3 }' "$manifest" >"$symbols"
 test "$(wc -l <"$symbols" | tr -d ' ')" -eq "$symbol_count" || {
     echo 'sffi evidence admission: symbol_count mismatch' >&2; exit 1;
@@ -147,26 +190,151 @@ check_hash "$compiler_hash" "$compiler"
 check_hash "$abi_hash" "$abi_registry"
 check_hash "$report_hash" "$verification_report"
 
-# A signed digest is useful only when it names a structured, passing report
-# bound to this exact provider artifact and ABI registry.
+# V2 deliberately admits Linux ELF providers only. Other object formats need
+# format-specific target and symbol validation before they can be advertised.
+artifact_kind=$(file -b "$artifact")
+case "$artifact_kind" in
+    *ELF*) ;;
+    *) echo 'sffi evidence admission: v2 requires a Linux ELF provider artifact' >&2; exit 1 ;;
+esac
+case "$target" in
+    x86_64-linux*) printf '%s\n' "$artifact_kind" | grep -Eq 'x86-64|x86_64' ;;
+    aarch64-linux*|arm64-linux*) printf '%s\n' "$artifact_kind" | grep -Eq 'aarch64|arm64|ARM64' ;;
+    arm-linux*) printf '%s\n' "$artifact_kind" | grep -Eq 'ARM' ;;
+    riscv64-linux*) printf '%s\n' "$artifact_kind" | grep -Eq 'RISC-V|riscv' ;;
+    *) echo 'sffi evidence admission: v2 target must name supported Linux ELF ABI' >&2; exit 1 ;;
+esac || {
+    echo 'sffi evidence admission: provider artifact target mismatch' >&2
+    exit 1
+}
+compiler_kind=$(file -b "$compiler")
+case "$compiler_kind" in
+    *ELF*|*Mach-O*|*PE32*|*executable*|*script*) ;;
+    *) echo 'sffi evidence admission: compiler artifact is not executable' >&2; exit 1 ;;
+esac
+artifact_symbols=$snapshot/artifact-symbols
+nm -g --defined-only "$artifact" 2>/dev/null | awk '
+    NF >= 2 {
+        type=$(NF-1); name=$NF
+        if (type == "T" && name ~ /^rt_[A-Za-z0-9_]+$/) print name
+    }
+' | sort -u >"$artifact_symbols"
+while IFS="$(printf '\t')" read -r symbol source_signature; do
+    grep -Fxq "$symbol" "$artifact_symbols" || {
+        echo "sffi evidence admission: missing strong artifact symbol: $symbol" >&2
+        exit 1
+    }
+done <"$symbols"
+cut -f 1 "$symbols" >"$snapshot/expected-artifact-symbols"
+cmp -s "$snapshot/expected-artifact-symbols" "$artifact_symbols" || {
+    echo 'sffi evidence admission: artifact rt_* function closure is not exact' >&2
+    exit 1
+}
+
+# Parse the ABI registry rather than trusting only its digest. Its exact
+# provider, target, closure size, and sorted symbol/signature rows must equal
+# the signed manifest.
+if grep -q "$(printf '\r')" "$abi_registry" ||
+   test "$(tail -c 1 "$abi_registry" | od -An -tu1 | tr -d ' ')" != 10; then
+    echo 'sffi evidence admission: ABI registry is not canonical LF text' >&2
+    exit 1
+fi
+registry_symbols=$snapshot/registry-symbols
+awk -F '\t' -v provider="$provider_id" -v target="$target" -v count="$symbol_count" \
+    -v rows="$registry_symbols" '
+    NR == 1 { good = (NF == 2 && $1 == "schema" && $2 == "simple.sffi-abi-registry.v1") }
+    NR == 2 { good = good && NF == 2 && $1 == "provider_id" && $2 == provider }
+    NR == 3 { good = good && NF == 2 && $1 == "target" && $2 == target }
+    NR == 4 { good = good && NF == 2 && $1 == "symbol_count" && $2 == count }
+    NR > 4 {
+        if (NF != 3 || $1 != "symbol") good = 0
+        print $2 "\t" $3 > rows
+    }
+    END { exit !(NR == 4 + count && good) }
+' "$abi_registry" || {
+    echo 'sffi evidence admission: ABI registry identity or framing mismatch' >&2
+    exit 1
+}
+cmp -s "$symbols" "$registry_symbols" || {
+    echo 'sffi evidence admission: manifest/ABI registry symbol closure mismatch' >&2
+    exit 1
+}
+
+# A passing report must bind actual canonical receipt files. Hash-shaped text
+# supplied by the report is not verification evidence.
 if grep -q "$(printf '\r')" "$verification_report" ||
    test "$(tail -c 1 "$verification_report" | od -An -tu1 | tr -d ' ')" != 10; then
     echo 'sffi evidence admission: verification report is not canonical LF text' >&2
     exit 1
 fi
-awk -F '\t' -v provider="$provider_id" -v artifact="$artifact_hash" \
-    -v abi="$abi_hash" '
-    NR == 1 { good = (NF == 2 && $1 == "schema" && $2 == "simple.sffi-verification-report.v1") }
+awk -F '\t' -v provider="$provider_id" -v target="$target" \
+    -v artifact="$artifact_hash" -v source="$source_hash" \
+    -v build="$build_hash" -v compiler="$compiler_hash" -v abi="$abi_hash" '
+    NR == 1 { good = (NF == 2 && $1 == "schema" && $2 == "simple.sffi-verification-report.v2") }
     NR == 2 { good = good && NF == 2 && $1 == "provider_id" && $2 == provider }
-    NR == 3 { good = good && NF == 2 && $1 == "artifact_sha256" && $2 == artifact }
-    NR == 4 { good = good && NF == 2 && $1 == "abi_registry_sha256" && $2 == abi }
-    NR == 5 { good = good && NF == 2 && $1 == "result" && $2 == "pass" }
-    NR > 5 { good = 0 }
-    END { exit !(NR == 5 && good) }
+    NR == 3 { good = good && NF == 2 && $1 == "target" && $2 == target }
+    NR == 4 { good = good && NF == 2 && $1 == "artifact_sha256" && $2 == artifact }
+    NR == 5 { good = good && NF == 2 && $1 == "canonical_source_tree_sha256" && $2 == source }
+    NR == 6 { good = good && NF == 2 && $1 == "exact_build_input_sha256" && $2 == build }
+    NR == 7 { good = good && NF == 2 && $1 == "compiler_artifact_sha256" && $2 == compiler }
+    NR == 8 { good = good && NF == 2 && $1 == "abi_registry_sha256" && $2 == abi }
+    NR == 9 { good = good && NF == 2 && $1 == "receipt_count" && $2 ~ /^[1-9][0-9]*$/; receipts=$2+0 }
+    NR == 10 { good = good && NF == 2 && $1 == "result" && $2 == "pass" }
+    NR > 10 {
+        if (NF != 6 || $1 != "receipt" || $2 !~ /^[a-z][a-z0-9_-]*$/ ||
+            $3 == "" || length($4) != 64 || $4 ~ /[^0-9a-f]/ ||
+            length($5) != 64 || $5 ~ /[^0-9a-f]/ ||
+            $6 !~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/ || $6 ~ /\.\./ ||
+            (previous != "" && $0 <= previous)) good = 0
+        if (++receipt_kind[$2] != 1) good = 0
+        previous=$0
+    }
+    END { exit !(NR == 10 + receipts && good) }
 ' "$verification_report" || {
     echo 'sffi evidence admission: verification report is stale, malformed, or not passing' >&2
     exit 1
 }
+
+receipts=$snapshot/receipt-rows
+awk -F '\t' '$1 == "receipt" { print }' "$verification_report" >"$receipts"
+while IFS="$(printf '\t')" read -r receipt_tag receipt_kind receipt_tool \
+    receipt_config receipt_hash receipt_name; do
+    receipt_source=$report_source_dir/$receipt_name
+    test -f "$receipt_source" && test ! -L "$receipt_source" || {
+        echo "sffi evidence admission: receipt must be a regular non-symlink file: $receipt_name" >&2
+        exit 1
+    }
+    receipt=$snapshot/receipt-$receipt_name
+    cp -- "$receipt_source" "$receipt"
+    check_hash "$receipt_hash" "$receipt"
+    if grep -q "$(printf '\r')" "$receipt" ||
+       test "$(tail -c 1 "$receipt" | od -An -tu1 | tr -d ' ')" != 10; then
+        echo "sffi evidence admission: receipt is not canonical LF text: $receipt_name" >&2
+        exit 1
+    fi
+    awk -F '\t' -v kind="$receipt_kind" -v provider="$provider_id" \
+        -v target="$target" -v artifact="$artifact_hash" -v source="$source_hash" \
+        -v build="$build_hash" -v compiler="$compiler_hash" -v abi="$abi_hash" \
+        -v tool="$receipt_tool" -v config="$receipt_config" '
+        NR == 1 { good = (NF == 2 && $1 == "schema" && $2 == "simple.sffi-verification-receipt.v1") }
+        NR == 2 { good = good && NF == 2 && $1 == "kind" && $2 == kind }
+        NR == 3 { good = good && NF == 2 && $1 == "provider_id" && $2 == provider }
+        NR == 4 { good = good && NF == 2 && $1 == "target" && $2 == target }
+        NR == 5 { good = good && NF == 2 && $1 == "artifact_sha256" && $2 == artifact }
+        NR == 6 { good = good && NF == 2 && $1 == "canonical_source_tree_sha256" && $2 == source }
+        NR == 7 { good = good && NF == 2 && $1 == "exact_build_input_sha256" && $2 == build }
+        NR == 8 { good = good && NF == 2 && $1 == "compiler_artifact_sha256" && $2 == compiler }
+        NR == 9 { good = good && NF == 2 && $1 == "abi_registry_sha256" && $2 == abi }
+        NR == 10 { good = good && NF == 2 && $1 == "tool_id" && $2 == tool }
+        NR == 11 { good = good && NF == 2 && $1 == "config_sha256" && $2 == config }
+        NR == 12 { good = good && NF == 2 && $1 == "result" && $2 == "pass" }
+        NR > 12 { good = 0 }
+        END { exit !(NR == 12 && good) }
+    ' "$receipt" || {
+        echo "sffi evidence admission: stale, malformed, or non-passing receipt: $receipt_name" >&2
+        exit 1
+    }
+done <"$receipts"
 
 # Trust roots are outside the signed manifest. Each canonical row scopes one
 # key ID to one provider ID and names a PEM public key provisioned by policy.
@@ -190,12 +358,19 @@ test "$trust_matches" != "" || {
     exit 1
 }
 case "$trust_matches" in
-    /*) public_key=$trust_matches ;;
-    *) public_key=$(dirname "$trust_store")/$trust_matches ;;
+    /*) public_key_source=$trust_matches ;;
+    *) public_key_source=$trust_source_dir/$trust_matches ;;
 esac
-test -f "$public_key" || {
+test -f "$public_key_source" && test ! -L "$public_key_source" || {
     echo 'sffi evidence admission: trusted public key is missing' >&2; exit 1;
 }
+public_key=$snapshot/public-key.pem
+cp -- "$public_key_source" "$public_key"
+openssl pkey -pubin -in "$public_key" -text_pub -noout 2>/dev/null |
+    grep -qi ED25519 || {
+        echo 'sffi evidence admission: trusted public key is not Ed25519' >&2
+        exit 1
+    }
 test "$(wc -c <"$signature" | tr -d ' ')" -eq 64 || {
     echo 'sffi evidence admission: Ed25519 signature must be 64 raw bytes' >&2
     exit 1

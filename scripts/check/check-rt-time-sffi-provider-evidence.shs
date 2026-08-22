@@ -1,0 +1,88 @@
+#!/bin/sh
+# Admit the exact production runtime provider for the three scalar clock SFFI
+# contracts. Signing/trust material must be provisioned externally; this gate
+# never generates or trusts an adjacent key.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+required='RT_TIME_SFFI_MANIFEST RT_TIME_SFFI_SIGNATURE RT_TIME_SFFI_TRUST_STORE RT_TIME_SFFI_PROVIDER_ARTIFACT RT_TIME_SFFI_SOURCE_SNAPSHOT RT_TIME_SFFI_BUILD_INPUT RT_TIME_SFFI_COMPILER_ARTIFACT RT_TIME_SFFI_ABI_REGISTRY RT_TIME_SFFI_VERIFICATION_REPORT RT_TIME_SFFI_LINK_RECEIPT RT_TIME_SFFI_CONSUMER_ARTIFACT RT_TIME_SFFI_LINK_MAP RT_TIME_SFFI_LINKER_ARTIFACT'
+for name in $required; do
+    eval "value=\${$name:-}"
+    if test -z "$value" || test ! -e "$value"; then
+        echo "STATUS: BLOCKED rt-time-sffi-evidence missing=$name" >&2
+        exit 1
+    fi
+done
+
+export LC_ALL=C
+command -v sha256sum >/dev/null 2>&1 || {
+    echo 'STATUS: BLOCKED rt-time-sffi-evidence missing=sha256sum' >&2
+    exit 1
+}
+
+artifact_hash=$(sha256sum "$RT_TIME_SFFI_PROVIDER_ARTIFACT" | awk '{ print $1 }')
+receipt_hash=$(sha256sum "$RT_TIME_SFFI_LINK_RECEIPT" | awk '{ print $1 }')
+provider_id=$(awk -F '\t' '$1 == "provider_id" { print $2 }' "$RT_TIME_SFFI_MANIFEST")
+target=$(awk -F '\t' '$1 == "target" { print $2 }' "$RT_TIME_SFFI_MANIFEST")
+abi_hash=$(sha256sum "$RT_TIME_SFFI_ABI_REGISTRY" | awk '{ print $1 }')
+consumer_hash=$(sha256sum "$RT_TIME_SFFI_CONSUMER_ARTIFACT" | awk '{ print $1 }')
+link_map_hash=$(sha256sum "$RT_TIME_SFFI_LINK_MAP" | awk '{ print $1 }')
+linker_hash=$(sha256sum "$RT_TIME_SFFI_LINKER_ARTIFACT" | awk '{ print $1 }')
+link_config=$(printf 'target\t%s\nprovider_artifact_sha256\t%s\nconsumer_artifact_sha256\t%s\nlink_map_sha256\t%s\nlinker_artifact_sha256\t%s\nabi_registry_sha256\t%s\n' \
+    "$target" "$artifact_hash" "$consumer_hash" "$link_map_hash" \
+    "$linker_hash" "$abi_hash" | sha256sum | awk '{ print $1 }')
+
+awk -F '\t' -v config="$link_config" '
+    $1 == "kind" && $2 == "native-link" { kind++ }
+    $1 == "config_sha256" && $2 == config { config_ok++ }
+    $1 == "result" && $2 == "pass" { passed++ }
+    END { exit !(kind == 1 && config_ok == 1 && passed == 1) }
+' "$RT_TIME_SFFI_LINK_RECEIPT" || {
+    echo 'rt-time SFFI evidence: native-link receipt does not bind exact consumer/link inputs' >&2
+    exit 1
+}
+
+awk -F '\t' -v digest="$receipt_hash" -v config="$link_config" '
+    $1 == "receipt" && $2 == "native-link" && $4 == config && $5 == digest { found++ }
+    END { exit !(found == 1) }
+' "$RT_TIME_SFFI_VERIFICATION_REPORT" || {
+    echo 'rt-time SFFI evidence: verification report does not bind native-link receipt' >&2
+    exit 1
+}
+
+sh "$root/scripts/audit/rt-time-contract.shs"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+sh "$root/scripts/audit/sffi-evidence-admission.shs" \
+    "$RT_TIME_SFFI_MANIFEST" "$RT_TIME_SFFI_SIGNATURE" \
+    "$RT_TIME_SFFI_TRUST_STORE" "$RT_TIME_SFFI_PROVIDER_ARTIFACT" \
+    "$RT_TIME_SFFI_SOURCE_SNAPSHOT" "$RT_TIME_SFFI_BUILD_INPUT" \
+    "$RT_TIME_SFFI_COMPILER_ARTIFACT" "$RT_TIME_SFFI_ABI_REGISTRY" \
+    "$RT_TIME_SFFI_VERIFICATION_REPORT" "$work/admission.tsv"
+
+signature_hash=$(printf '%s' '()->i64' | sha256sum | awk '{ print $1 }')
+expected="$work/expected.tsv"
+{
+    printf 'rt_time_now_micros\t%s\n' "$signature_hash"
+    printf 'rt_time_now_nanos\t%s\n' "$signature_hash"
+    printf 'rt_time_now_unix_micros\t%s\n' "$signature_hash"
+} >"$expected"
+awk -F '\t' 'NR > 1 { print $1 "\t" $2 }' "$work/admission.tsv" >"$work/actual.tsv"
+cmp -s "$expected" "$work/actual.tsv" || {
+    echo 'rt-time SFFI evidence: admitted closure is not the exact clock set' >&2
+    exit 1
+}
+
+if test "${RT_TIME_SFFI_FIXTURE:-0}" = 1; then
+    echo 'STATUS: PASS rt-time-sffi-evidence symbols=3 admission=fixture_verified admission_time_only=true'
+else
+    trust_path=$(CDPATH= cd -- "$(dirname -- "$RT_TIME_SFFI_TRUST_STORE")" && pwd)/$(basename -- "$RT_TIME_SFFI_TRUST_STORE")
+    case "$trust_path" in
+        "$root"/*|/tmp/*|/var/tmp/*)
+            echo 'STATUS: BLOCKED rt-time-sffi-evidence trust-store-is-not-external-production-policy' >&2
+            exit 1 ;;
+    esac
+    echo 'STATUS: PASS rt-time-sffi-evidence symbols=3 admission=verified_and_signed admission_time_only=true'
+fi

@@ -1565,6 +1565,48 @@ signature-verified, or verified-and-signed. Implementations are C++ 219, C
 2,325, Rust 2,161, and Simple 558. `rt_process` has 1,031 rows, 31 minimized,
 994 untouched, and zero signed/verified admissions.
 
+### Evidence admission v2 and first clock-provider ratchet
+
+The v1 admission gate verified Ed25519 authenticity and file digests but still
+trusted a signed `evidence_verified=true` field and a five-line report whose
+`result=pass` was not bound to source, exact build input, compiler, target, or
+machine receipts. It also hashed the ABI registry without parsing its closure
+or confirming that the exact artifact strongly defined the admitted symbols.
+
+Evidence v2 removes the caller-provided verification boolean. Admission now
+requires an immutable private snapshot of every input, a Linux ELF provider
+matching the declared Linux target, exact function-only `rt_*` closure, a
+canonical ABI registry whose
+provider/target/count/sorted symbol-signature rows exactly match the manifest,
+and a canonical v2 report bound to the artifact, source snapshot, exact build
+input, compiler artifact, ABI registry, and at least one actual canonical
+machine-receipt file whose bytes, tool/config identity, result, and build
+identities are checked. Hash-shaped assertions are not receipts.
+The trust store remains separately provisioned and provider-scoped; production
+code never generates or trusts an adjacent key.
+
+The clock-provider gate additionally requires a signed report to bind a
+canonical native-link receipt for the exact provider, final consumer, linker,
+link map, target, and ABI-registry bytes, then
+admits exactly `rt_time_now_micros`, `rt_time_now_nanos`, and
+`rt_time_now_unix_micros` with the compiler inventory fingerprint for
+`() -> i64`. Missing production trust/evidence reports `STATUS: BLOCKED`, not
+PASS or SKIP. The test-generated Ed25519 key is explicitly fixture-only.
+
+Sabotage coverage rejects a signed report without receipts, false receipt
+content, ABI signature mismatch, missing/data/extra artifact exports, wrong
+artifact architecture or OS format, artifact or
+report tampering, a signed failing report, malformed canonical order, duplicate
+trust entries, an untrusted key, and signature substitution. The fixture census
+reports 273 declaration rows matching fixture symbol/signature evidence, but
+only the three canonical tagged and contracted fixture clock declarations
+become `fixture_verified`; production `verified_and_signed` remains zero until
+external trust and real release artifacts are supplied. The other 12,281 rows
+remain fail-closed unsafe. All proof, hashing,
+symbol inspection, and signature work is admission-time. Clock calls retain one
+direct provider call, one negative-sentinel branch, and no lookup, allocation,
+lock, hash, retry, or retained evidence state.
+
 This migration adds no map, symbol lookup, hash, retry, sleep, or explicit
 success-path allocation. Each send retains one liveness query and one write;
 each poll retains one read. The source-shape gate reports the stdout contract
