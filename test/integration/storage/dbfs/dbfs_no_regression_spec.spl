@@ -27,7 +27,7 @@ with shared filesystem regression coverage.
 
 use std.spec.step
 use std.spipe.*
-use std.fs_driver.types.{MountOptions}
+use std.fs_driver.types.{MountOptions, OpenFlags, ExecuteTrust}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.mount_table.{MountTable}
 use std.db.dbfs_driver.{DbFsDriver}
@@ -81,3 +81,18 @@ describe "DBFS hosted seam — readdir and open":
         # evidence(expect(...) oracle verified): pinned constants below are authoritative values asserted by this scenario
         val mt = make_dbfs_mounted()
         assert_read_returns_empty_or_better(mt, "/data/README.TXT")
+
+    it "opens real DBFS bytes for execution without creating misses":
+        var table = make_dbfs_mounted()
+        val created = table.open("/data/program.smf", OpenFlags.create_write()).unwrap()
+        table.write(created, "SMF1").unwrap()
+        table.close(created).unwrap()
+        expect(table.stat("/data/program.smf").unwrap().size).to_equal(4)
+        val binding = table.open_for_execute("/data/program.smf", ExecuteTrust.Trusted).unwrap()
+        expect(binding.backend_name).to_equal("DbFsDriver")
+        expect(binding.size).to_equal(4)
+        expect(table.execute_binding_is_current(binding)).to_equal(true)
+        expect(table.pread(binding.file_handle, 0, binding.size).unwrap()).to_equal("SMF1")
+        table.close(binding.file_handle).unwrap()
+        expect(table.open_for_execute("/data/missing.smf", ExecuteTrust.Trusted).is_err()).to_equal(true)
+        expect(table.stat("/data/missing.smf").is_err()).to_equal(true)

@@ -1,16 +1,12 @@
 # SimpleOS WM IPC protocol: 8 status/event symbols imported by live code were never implemented
 
-**Status:** OPEN (partially fixed) — re-verified 2026-08-17 by content grep, not
-SHA ancestry, per session correction. `WmStatus`, `WM_STATUS_OK`,
-`WM_STATUS_ERROR`, `WM_STATUS_NO_SPACE` now exist at
-`src/lib/common/window_protocol/window_protocol.spl:11-16`. The remaining 4 of
-the original 8 symbols are still declared in no `src/**/*.spl` file:
-`WmCreateResponse`, `WmFocusEvent`, `WM_EVENT_FOCUS`, `WM_EVENT_RESIZE`,
-`wm_input_event`, `wm_focus_event` (confirmed via
-`grep -n "WmCreateResponse\|WmFocusEvent\|WM_EVENT_FOCUS\|WM_EVENT_RESIZE\|wm_input_event\|wm_focus_event" src/lib/common/window_protocol/window_protocol.spl`
-= no output). Still needs a WM wire-protocol design decision from an owner who
-can fix it against the codec byte-for-byte on real hardware; re-confirmed
-2026-08-10.
+**Status:** RESOLVED in source (2026-08-22); runtime execution remains subject
+to the repository's admitted self-hosted-runtime gate. The common protocol now
+defines every originally missing name and strict byte codecs. The create reply
+remains exactly `status(i32 LE) | window_id(u64 LE)` (12 bytes). The focus body
+remains exactly `window_id(u64 LE) | focused(u8)` (9 bytes) after the existing
+`COMP_FOCUS_CHANGED` method word. The WM service encodes through those common
+owners, and WindowClient decodes create replies through the same owner.
 **Found:** 2026-07-28 (dangling-reference triage, `src/os/**` scope)
 **Area:** `src/lib/common/window_protocol/window_protocol.spl`,
 `src/os/services/wm/`, `src/os/userlib/_Window/`, `src/os/desktop/`
@@ -113,5 +109,15 @@ the added lines are unrelated (`WM_INPUT_TEXT_MAX_BYTES` and other
 `wm_input_event`/`wm_focus_event`) are still declared nowhere in the file; the
 declared-symbol set (`WM_EVENT_CLOSE`, `WmInputEvent`,
 `WmCreateRequest`/`WmCloseRequest`/`WmResizeRequest`/`WmMoveRequest`) is
-identical to what this doc originally found. No fix attempted here per the
-"why this is not fixed" reasoning above, which still applies unchanged.
+identical to what this doc originally found. No fix was attempted in that
+2026-08-10 pass; that historical conclusion is superseded below.
+
+## Resolution evidence (2026-08-22)
+
+- `window_protocol_wire_spec.spl` checks byte literals, valid round trips,
+  truncated/trailing payloads, unknown status words, contradictory
+  status/window pairs, invalid focus booleans, zero IDs, and the three legacy
+  event-tag constructors with real assertions.
+- Both codecs are O(1), operate on fixed 12-byte/9-byte records, and use no
+  text or unbounded payload allocation.
+- No C or Rust provider was added; this remains a Pure-Simple common contract.

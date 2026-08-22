@@ -39,6 +39,66 @@ describe "SimpleOS compiler-filesystem guest workflow v2":
         expect(result.lines[19]).to_start_with("SIMPLEOS_COMPILER_FS_PASS ")
         expect(result.lines[18]).to_start_with("SIMPLEOS_COMPILER_FS_EXEC path=/TMP/HELLO ")
 
+    it "renders version bytes as exact two-character lowercase hex":
+        val evidence = valid_evidence()
+        val version = evidence.runs[0]
+        version.stdout = [0u8, 1u8, 9u8, 10u8, 15u8, 16u8, 127u8, 128u8, 254u8, 255u8]
+        evidence.runs[0] = version
+        val result = simpleos_cfs_validate_guest_evidence_v2(evidence)
+        expect(result.passed).to_equal(true)
+        expect(result.lines[16]).to_contain("stdout_hex=0001090a0f107f80feff ")
+
+    it "scales output by exactly two hex bytes per captured byte":
+        val short_evidence = valid_evidence()
+        val short_version = short_evidence.runs[0]
+        short_version.stdout = [171u8]
+        short_evidence.runs[0] = short_version
+        val short_result = simpleos_cfs_validate_guest_evidence_v2(short_evidence)
+
+        val byte_count: i64 = 4096
+        val large_evidence = valid_evidence()
+        val large_version = large_evidence.runs[0]
+        large_version.stdout = [171u8; byte_count]
+        large_evidence.runs[0] = large_version
+        val large_result = simpleos_cfs_validate_guest_evidence_v2(large_evidence)
+
+        expect(short_result.passed).to_equal(true)
+        expect(large_result.passed).to_equal(true)
+        # All other VERSION fields have fixed width, including SHA-256.
+        expect(large_result.lines[16].len() - short_result.lines[16].len()).to_equal(
+            (byte_count - 1) * 2)
+
+    it "accepts the inclusive 64 KiB capture boundary":
+        val evidence = valid_evidence()
+        val boundary: [u8] = [171u8; 65536]
+        var i: i64 = 0
+        while i < evidence.runs.len():
+            val run = evidence.runs[i]
+            run.stderr = boundary
+            if i == 0:
+                run.stdout = boundary
+            evidence.runs[i] = run
+            i = i + 1
+        expect(simpleos_cfs_validate_guest_evidence_v2(evidence).passed).to_equal(true)
+
+    it "rejects every oversized stdout and stderr before run validation":
+        val oversized: [u8] = [171u8; 65537]
+        var stream_index: i64 = 0
+        while stream_index < 8:
+            val evidence = valid_evidence()
+            val run_index = stream_index / 2
+            val run = evidence.runs[run_index]
+            if stream_index % 2 == 0:
+                run.stdout = oversized
+            else:
+                run.stderr = oversized
+            evidence.runs[run_index] = run
+            val result = simpleos_cfs_validate_guest_evidence_v2(evidence)
+            expect(result.passed).to_equal(false)
+            expect(result.reason).to_equal("run-output-too-large-{run_index}")
+            expect(result.lines.len()).to_equal(0)
+            stream_index = stream_index + 1
+
     it "rejects an executable alias with different bytes and emits no lines":
         val evidence = valid_evidence()
         val substituted = evidence.role_reads[4]

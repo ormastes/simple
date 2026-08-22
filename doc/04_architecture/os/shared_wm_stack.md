@@ -138,6 +138,22 @@ remain Simple-owned.
 | [`src/os/compositor/display_backend.spl`](../../src/os/compositor/display_backend.spl) | `CompositorBackend` trait + `FbCompositorBackend`, `GpuCompositorBackend` |
 | [`src/os/compositor/input_backend.spl`](../../src/os/compositor/input_backend.spl) | `InputBackend` trait + `Ps2InputBackend` |
 
+### 5a. Canonical fixed response/event bodies
+
+`window_protocol.spl` also owns the byte-exact codecs used on both sides of
+the SimpleOS IPC boundary. A create response is 12 bytes:
+`status(i32 little-endian) | window_id(u64 little-endian)`. A focus event body
+is 9 bytes: `window_id(u64 little-endian) | focused(u8)`, and follows the
+existing four-byte `COMP_FOCUS_CHANGED` method header. Decoders require the
+exact length, recognize only the three published status values, require a
+nonzero ID on success and zero on failure, and accept only `0` or `1` as a
+focus byte. This makes malformed or concatenated messages fail closed without
+changing the established service/client wire layout.
+
+Both records and their codecs are O(1). Each codec allocates only its fixed
+returned wire array; service/client framing may make one additional fixed-size
+copy, but never copies title, committed-text, or another variable payload.
+
 For the full backend implementation matrix, see [`gui_layer_contract.md`](gui_layer_contract.md).
 
 ## 6. How to Add a New Host Backend

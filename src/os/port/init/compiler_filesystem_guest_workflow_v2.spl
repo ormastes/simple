@@ -6,7 +6,10 @@ filesystem and process claim is bound to real bytes/output.
 """
 
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{bytes_to_text}
 use os.sosix.compiler_filesystem_guest_protocol_v2.*
+
+const CFS_MAX_CAPTURE_STREAM_BYTES_V2: i64 = 65536
 
 pub fn simpleos_cfs_role_paths_v2() -> [text]:
     # Keep this function-local: freestanding SimpleOS images do not run module
@@ -80,17 +83,20 @@ fn _cfs_valid_sha256_v2(value: text) -> bool:
     true
 
 fn _cfs_bytes_hex_v2(bytes: [u8]) -> text:
-    val digits = "0123456789abcdef"
-    var out = ""
+    # Allocate an exact-width byte result, then fill it in one pass. Repeated text
+    # concatenation copied the complete prefix twice per input byte (O(n^2)).
+    # ASCII hex is valid UTF-8, so one final linear byte-to-text copy preserves
+    # the exact lowercase wire representation without a text-fragment list.
+    var out: [u8] = [0u8; bytes.len() * 2]
     var i: i64 = 0
     while i < bytes.len():
         val value = bytes[i] as i64
         val hi = (value >> 4) & 15
         val lo = value & 15
-        out = out + digits[hi:hi + 1]
-        out = out + digits[lo:lo + 1]
+        out[i * 2] = (if hi < 10: 48 + hi else: 87 + hi) as u8
+        out[i * 2 + 1] = (if lo < 10: 48 + lo else: 87 + lo) as u8
         i = i + 1
-    out
+    bytes_to_text(out)
 
 fn _cfs_args_equal_v2(actual: [text], expected: [text]) -> bool:
     if actual.len() != expected.len():
@@ -157,6 +163,17 @@ pub fn simpleos_cfs_validate_guest_evidence_v2(
         return _cfs_fail_v2("artifact-reread-mismatch")
     if evidence.runs.len() != 4:
         return _cfs_fail_v2("process-run-count")
+
+    # The adapter's capture contract is 64 KiB per stdout/stderr stream. Check
+    # every retained stream before captured-stream hashing or the exact-width
+    # hex allocation, so incorrectly untruncated evidence cannot amplify them.
+    var stream_index: i64 = 0
+    while stream_index < evidence.runs.len():
+        val stream_run = evidence.runs[stream_index]
+        if stream_run.stdout.len() > CFS_MAX_CAPTURE_STREAM_BYTES_V2 or
+           stream_run.stderr.len() > CFS_MAX_CAPTURE_STREAM_BYTES_V2:
+            return _cfs_fail_v2("run-output-too-large-{stream_index}")
+        stream_index = stream_index + 1
 
     var reason = _cfs_check_run_v2(evidence.runs[0], "/usr/bin/simple", ["--version"], "version")
     if reason != "": return _cfs_fail_v2(reason)

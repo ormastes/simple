@@ -29,7 +29,7 @@ use os.userlib.window.*
 
 use os.userlib.syscall_raw.{syscall}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED}
-use common.window_protocol.window_protocol.{WmCreateRequest, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WM_STATUS_OK, WM_EVENT_CLOSE, WM_EVENT_FOCUS, WM_INPUT_TEXT_MAX_BYTES, wm_input_event}
+use common.window_protocol.window_protocol.{WmCreateRequest, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WM_STATUS_OK, WM_EVENT_CLOSE, WM_EVENT_FOCUS, WM_INPUT_TEXT_MAX_BYTES, wm_input_event, wm_create_response_decode, wm_focus_event_decode}
 use common.window_protocol.geometry.{WindowId, Point, Px, KeyCode, Modifiers, WmEventType}
 use std.common.base_encoding.utilities.{base_encoding_bytes_to_text as bytes_to_text}
 use os.userlib.process.{getpid}
@@ -195,20 +195,18 @@ impl WindowClient:
 
         # Wait for response: status(i32) | window_id(u64)
         val reply = self._recv_reply()
-        if reply.len() < 12:
-            log_raw_println("[window-client] Invalid create response (len={reply.len()})")
-            return 0
-
-        val status = _decode_i32(reply, 0)
-        val wid = _decode_u64(reply, 4)
-
-        if status == WM_STATUS_OK.value and wid > 0:
-            self.window_id = wid
-            log_raw_println("[window-client] Created window {wid}: '{title}' ({width}x{height})")
-            return wid
-        else:
-            log_raw_println("[window-client] Create window failed with status {status}")
-            return 0
+        match wm_create_response_decode(reply):
+            Err(reason):
+                log_raw_println("[window-client] Invalid create response: {reason}")
+                return 0
+            Ok(response):
+                if response.status.value == WM_STATUS_OK.value:
+                    val wid = response.window_id.value
+                    self.window_id = wid
+                    log_raw_println("[window-client] Created window {wid}: '{title}' ({width}x{height})")
+                    return wid
+                log_raw_println("[window-client] Create window failed with status {response.status.value}")
+                return 0
 
     me destroy_window():
         """Destroy the current primary window.
@@ -780,16 +778,24 @@ impl WindowClient:
                     Point.xy(0, 0)
                 )
             COMP_FOCUS_CHANGED:
-                if payload_len < 13:
+                if payload_len != 13:
                     return nil
-                val wid = _read_u64_at(payload_addr + 4)
-                val focused_byte = _read_u8_at(payload_addr + 12)
-                return wm_input_event(
-                    WindowId(value: wid),
-                    WM_EVENT_FOCUS,
-                    KeyCode(code: focused_byte.to_u32(), name: ""),
-                    Point.xy(0, 0)
-                )
+                var focus_payload: [u8] = []
+                var focus_index = 0u64
+                while focus_index < 9u64:
+                    focus_payload.push(_read_u8_at(payload_addr + 4u64 + focus_index))
+                    focus_index = focus_index + 1u64
+                match wm_focus_event_decode(focus_payload):
+                    Err(reason):
+                        log_raw_println("[window-client] Invalid focus event: {reason}")
+                        return nil
+                    Ok(focus_event):
+                        return wm_input_event(
+                            focus_event.window_id,
+                            WM_EVENT_FOCUS,
+                            KeyCode(code: if focus_event.focused: 1u32 else: 0u32, name: ""),
+                            Point.xy(0, 0)
+                        )
             _:
                 log_raw_println("[window-client] Unknown event method {method}")
                 return nil

@@ -15,7 +15,7 @@ use std.io_runtime.{read_file}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.ops.{FsDriver}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
-use std.fs_driver.types.{OpenFlags, MountOptions}
+use std.fs_driver.types.{OpenFlags, MountOptions, ExecuteTrust}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.mount_table.{MountTable}
 use std.db.dbfs_driver.{DbFsDriver}
@@ -105,6 +105,21 @@ describe "FAT32 hosted seam — mount table registration":
         table.close(opened).unwrap()
         table.unlink("/boot/NEW.BIN").unwrap()
         expect(table.stat("/boot/NEW.BIN").is_err()).to_equal(true)
+
+    it "opens real FAT32 bytes for execution without creating misses":
+        var driver = FsFat32Driver.new_ram_backed_with_file("PROGRAM.SMF", "SMF1")
+        driver.mount(MountOptions.default()).unwrap()
+        var table = MountTable.new()
+        table.mount("/boot", DriverInstance.Fat32(driver), MountOptions.default()).unwrap()
+        expect(table.stat("/boot/PROGRAM.SMF").unwrap().size).to_equal(4)
+        val binding = table.open_for_execute("/boot/PROGRAM.SMF", ExecuteTrust.Trusted).unwrap()
+        expect(binding.backend_name).to_equal("Fat32Driver")
+        expect(binding.size).to_equal(4)
+        expect(table.execute_binding_is_current(binding)).to_equal(true)
+        expect(table.pread(binding.file_handle, 0, binding.size).unwrap()).to_equal("SMF1")
+        table.close(binding.file_handle).unwrap()
+        expect(table.open_for_execute("/boot/MISSING.SMF", ExecuteTrust.Trusted).is_err()).to_equal(true)
+        expect(table.stat("/boot/MISSING.SMF").is_err()).to_equal(true)
 
 describe "FAT32 hosted seam — DBFS co-existence":
     it "FAT32 and DBFS can both be mounted simultaneously":

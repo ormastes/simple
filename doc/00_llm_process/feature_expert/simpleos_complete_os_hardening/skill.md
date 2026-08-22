@@ -119,3 +119,14 @@ no-replace host capability in
 `doc/08_tracking/bug/simpleos_server_data_atomic_publication_primitive_2026-08-22.md`
 exists. Never replace that missing boundary with whole-image text conversion,
 overwrite rename, shell `ln`, or a readiness claim.
+
+## Shared filesystem execute-open evidence (2026-08-22)
+
+`MountTable.open_for_execute` is the sole shared execute-open seam for FAT32,
+DBFS, and NVFS. Hosted integration coverage now checks real FAT32 and DBFS
+bytes, exact stat size, backend identity, generation-current bindings,
+positioned reads through the returned handle, close, and side-effect-free
+missing paths; NVFS has the corresponding no-regression coverage. This proves
+shared interface behavior only. It is not evidence of a native DBFS guest
+spawn, mounted NVFS durability, target artifact admission, or three-architecture
+QEMU execution.
