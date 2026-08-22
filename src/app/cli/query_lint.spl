@@ -223,7 +223,7 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
         count = count + _emit_basic_line_lints(lines, file, format)
         count = count + _emit_text_heuristic_lints(lines, file, format)
         count = count + _emit_primitive_api_text(lines, file, format)
-    count = count + _run_ast_lint_passes(source, file, format)
+    count = count + _run_ast_lint_passes(source, lines, file, format)
     _clear_lint_config_overrides()
     count
 
@@ -565,29 +565,77 @@ fn _word_occurs_in(line: text, word: text) -> bool:
         pos = pos + 1
     false
 
-fn _find_fn_line_in_source(lines: [text], fn_name: text) -> i64:
-    """Find the 1-based line number of a function definition by name.
-    Searches for 'fn <name>(' or 'me <name>(' patterns.
-    Returns 1 if not found.
-    """
-    var li = 0
-    while li < lines.len():
-        val trimmed = lines[li].trim()
-        if (trimmed.contains("fn {fn_name}(") or
-            trimmed.contains("me {fn_name}(") or
-            trimmed.contains("fn {fn_name} (") or
-            trimmed.starts_with("fn {fn_name}:") or
-            trimmed.starts_with("me {fn_name}:")):
-            return li + 1
-        li = li + 1
-    1
+struct QueryAstLintLocationIndex:
+    callable_lines: Dict<text, i64>
+    use_star_lines: Dict<text, i64>
+    export_star_lines: Dict<text, i64>
 
-fn _emit_wildcard_warnings(warnings: [StarWildcardWarning], lines: [text], file: text, format: text, keyword: text) -> i64:
+fn _query_callable_name(trimmed: text) -> text:
+    val is_declaration = trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ") or
+        trimmed.starts_with("static fn ") or trimmed.starts_with("pub static fn ") or
+        trimmed.starts_with("async fn ") or trimmed.starts_with("pub async fn ") or
+        trimmed.starts_with("me ") or trimmed.starts_with("pub me ")
+    if not is_declaration: return ""
+    var marker = ""
+    var position = trimmed.find("fn ")
+    if position >= 0:
+        marker = "fn "
+    else:
+        position = trimmed.find("me ")
+        if position >= 0: marker = "me "
+    if marker == "": return ""
+    val suffix = trimmed[position + marker.len():]
+    var finish = suffix.find("(")
+    val generic = suffix.find("<")
+    val colon = suffix.find(":")
+    if finish < 0 or (generic >= 0 and generic < finish): finish = generic
+    if finish < 0 or (colon >= 0 and colon < finish): finish = colon
+    if finish <= 0: return ""
+    suffix[0:finish].trim()
+
+fn _query_star_module(trimmed: text, keyword: text) -> text:
+    if not trimmed.starts_with(keyword): return ""
+    var suffix = trimmed[keyword.len():]
+    if keyword == "export " and suffix.starts_with("use "):
+        suffix = suffix[4:]
+    val star = suffix.find(".*")
+    if star <= 0: return ""
+    suffix[0:star].trim()
+
+fn _query_ast_lint_location_index(lines: [text]) -> QueryAstLintLocationIndex:
+    var callable_lines: Dict<text, i64> = {}
+    var use_star_lines: Dict<text, i64> = {}
+    var export_star_lines: Dict<text, i64> = {}
+    var line_index = 0
+    while line_index < lines.len():
+        val trimmed = lines[line_index].trim()
+        val callable = _query_callable_name(trimmed)
+        if callable != "" and not callable_lines.has(callable):
+            callable_lines[callable] = line_index + 1
+        val use_module = _query_star_module(trimmed, "use ")
+        if use_module != "" and not use_star_lines.has(use_module):
+            use_star_lines[use_module] = line_index + 1
+        val export_module = _query_star_module(trimmed, "export ")
+        if export_module != "" and not export_star_lines.has(export_module):
+            export_star_lines[export_module] = line_index + 1
+        line_index = line_index + 1
+    QueryAstLintLocationIndex(callable_lines, use_star_lines, export_star_lines)
+
+fn _query_callable_line(index: QueryAstLintLocationIndex, name: text) -> i64:
+    index.callable_lines[name] ?? 1
+
+fn _query_wildcard_line(
+    index: QueryAstLintLocationIndex, keyword: text, module_path: text
+) -> i64:
+    if keyword == "use ": return index.use_star_lines[module_path] ?? 1
+    index.export_star_lines[module_path] ?? 1
+
+fn _emit_wildcard_warnings(warnings: [StarWildcardWarning], locations: QueryAstLintLocationIndex, file: text, format: text, keyword: text) -> i64:
     var count = 0
     for w in warnings:
         if _lint_code_suppressed(w.code):
             continue
-        val line_num = _find_decl_line_in_source(lines, keyword, w.module_path)
+        val line_num = _query_wildcard_line(locations, keyword, w.module_path)
         if format == "json":
             val msg = _escape_json(w.message)
             _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
@@ -611,9 +659,6 @@ fn _find_use_line_in_source(lines: [text], module_path: text) -> i64:
         return line
     _find_decl_line_in_source(lines, "import ", module_path)
 
-fn _find_export_line_in_source(lines: [text], module_path: text) -> i64:
-    _find_decl_line_in_source(lines, "export ", module_path)
-
 fn _severity_text_to_json(severity: text) -> i64:
     """Convert severity string to LSP severity number.
     1=Error, 2=Warning, 3=Information, 4=Hint
@@ -628,7 +673,7 @@ fn _severity_text_to_json(severity: text) -> i64:
         return 2
     2
 
-fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
+fn _run_ast_lint_passes(source: text, lines: [text], file: text, format: text) -> i64:
     """Parse source into AST and run all AST-based lint passes.
 
     Runs the following checks after parsing the source:
@@ -642,7 +687,7 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
     Returns the number of diagnostics emitted.
     """
     var count = 0
-    val lines = source.split("\n")
+    val locations = _query_ast_lint_location_index(lines)
 
     # Parse source into the AST arena. The checked result must cross the parser
     # module boundary by value; parse_module_silent() followed by
@@ -681,7 +726,7 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
     for w in coll_warnings:
         if _lint_code_suppressed(w.code):
             continue
-        val line_num = _find_fn_line_in_source(lines, w.item_name)
+        val line_num = _query_callable_line(locations, w.item_name)
         # These legacy checks run before type/effect completion. Keep them at
         # warning severity and disclose the missing proof rather than allowing
         # a textual HIGH label to look like a proven error.
@@ -731,9 +776,9 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
 
     # --- C5a/C5c: Star wildcard warnings (W0406 import, W0407 export) ---
     val star_warnings = check_star_import_file(decl_indices, file)
-    count = count + _emit_wildcard_warnings(star_warnings, lines, file, format, "use ")
+    count = count + _emit_wildcard_warnings(star_warnings, locations, file, format, "use ")
     val star_export_warnings = check_star_export_file(decl_indices, file)
-    count = count + _emit_wildcard_warnings(star_export_warnings, lines, file, format, "export ")
+    count = count + _emit_wildcard_warnings(star_export_warnings, locations, file, format, "export ")
 
     # --- C5b: Wide public API warnings (W0404) ---
     val wide_warnings = check_wide_public_file(decl_indices, file)
