@@ -1,0 +1,46 @@
+# @cover src/compiler/10.frontend/parser_types_expr.spl
+# Class A (payload half) regression for
+# doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+#
+# `ExprKind.CustomBlock(text, BlockValue)` names BlockValue in an enum PAYLOAD
+# position, but parser_types_expr.spl never imported it. HIR payload-origin
+# resolution asks the OWNER for a declaration, a re-export hop, or an explicit
+# import; all three missed, the origin came back not-found, and the failure
+# resurfaced later as a hard `unresolved type: BlockValue` blamed on modules
+# that never name it -- 47 poisoned modules and 193
+# [hir-payload-origin-unresolved] advisories in stage-1 run13.
+#
+# FAILS pre-fix: the import line does not exist.
+use std.spec.{describe, it, expect}
+
+fn file_lines(path: text) -> [text]:
+    (rt_file_read_text(path) ?? "").split("\n")
+
+fn file_imports_from(path: text, module_prefix: text, name: text) -> bool:
+    # NOTE: no `{` in any literal here -- braces are string INTERPOLATION in
+    # Simple, so an "expected import line" literal containing `.{BlockValue}`
+    # silently interpolates and never matches. That cost one spec iteration.
+    for line in file_lines(path):
+        if line.starts_with("use " + module_prefix) and line.contains(name):
+            return true
+    false
+
+fn payload_name_used(path: text, needle: text) -> bool:
+    for line in file_lines(path):
+        if line.contains(needle) and not line.starts_with("use ") and
+           not line.starts_with("#"):
+            return true
+    false
+
+describe "an enum payload type is imported by the enum's own module":
+    it "parser_types_expr.spl still uses BlockValue in a payload position":
+        # Guards the guard: if CustomBlock is ever retyped this spec must be
+        # re-derived, not silently pass on an absent use site.
+        expect(payload_name_used(
+            "src/compiler/10.frontend/parser_types_expr.spl",
+            "CustomBlock(text, BlockValue)")).to_be_true()
+
+    it "parser_types_expr.spl explicitly imports BlockValue":
+        expect(file_imports_from(
+            "src/compiler/10.frontend/parser_types_expr.spl",
+            "compiler.blocks.blocks.value.", "BlockValue")).to_be_true()

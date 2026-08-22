@@ -1,0 +1,49 @@
+# @cover src/compiler/20.hir/hir_lowering/module_surface_declarations.spl
+# @cover src/compiler/10.frontend/desugar/suspension_analysis.spl
+# Class B regression for
+# doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+#
+# Both modules reached parser_types_expr through a TWO-HOP GLOB:
+#   consumer      -- use compiler.frontend.parser_types.*
+#   parser_types  -- use compiler.frontend.parser_types_expr.*   (line 11)
+# Neither hop is an `export use`, so a plain glob does NOT transit. Names
+# declared in parser_types_expr were invisible in the consumers and died as
+# `unresolved name:` -- parser_type_kind_named_name x10,
+# parser_type_kind_array_element_name x10, expr_kind x3, stmt_kind x2 in
+# stage-1 run13.
+#
+# FAILS pre-fix: neither explicit import exists.
+use std.spec.{describe, it, expect}
+
+fn imports_from_parser_types_expr(path: text, name: text) -> bool:
+    for line in (rt_file_read_text(path) ?? "").split("\n"):
+        # No `{` in any literal: braces are string interpolation in Simple.
+        if line.starts_with("use compiler.frontend.parser_types_expr.") and
+           line.contains(name):
+            return true
+    false
+
+fn is_plain_glob(path: text, module_name: text) -> bool:
+    for line in (rt_file_read_text(path) ?? "").split("\n"):
+        if line == "use " + module_name + ".*":
+            return true
+    false
+
+describe "a two-hop plain glob does not transit":
+    it "parser_types.spl still reaches parser_types_expr by a plain glob":
+        # Guards the guard: if that hop ever becomes an `export use`, the
+        # explicit imports below stop being load-bearing and this must be
+        # re-derived rather than silently passing.
+        expect(is_plain_glob(
+            "src/compiler/10.frontend/parser_types.spl",
+            "compiler.frontend.parser_types_expr")).to_be_true()
+
+    it "module_surface_declarations.spl imports its TypeKind accessors explicitly":
+        val p = "src/compiler/20.hir/hir_lowering/module_surface_declarations.spl"
+        expect(imports_from_parser_types_expr(p, "parser_type_kind_named_name")).to_be_true()
+        expect(imports_from_parser_types_expr(p, "parser_type_kind_array_element_name")).to_be_true()
+
+    it "suspension_analysis.spl imports expr_kind/stmt_kind explicitly":
+        val p = "src/compiler/10.frontend/desugar/suspension_analysis.spl"
+        expect(imports_from_parser_types_expr(p, "expr_kind")).to_be_true()
+        expect(imports_from_parser_types_expr(p, "stmt_kind")).to_be_true()

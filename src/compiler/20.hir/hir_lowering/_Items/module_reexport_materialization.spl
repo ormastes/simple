@@ -410,6 +410,9 @@ impl HirLowering:
 
     me register_materialized_payload_named_dependency_inner(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text, skipped: {text: bool}, import_span: Span):
         if dependency == "" or skipped.contains_key(dependency): return
+        # Builtins are resolved by lower_named_kind's primitive arms, never by a
+        # module surface; asking an owner to declare `text` can only ever fail.
+        if hir_dependency_is_builtin_type(dependency): return
         val origin = self.resolve_materialized_enum_payload_origin(imported_mod, imported_mod_name, dependency)
         if not origin.found:
             # NEVER silent. An unresolved payload origin used to return with no
@@ -526,6 +529,9 @@ impl HirLowering:
     ):
         """Profile wrapper (SIMPLE_HIR_PHASE_PROFILE=1, default off)."""
         val started = hir_phase_profile_now()
+        if hir_dependency_is_builtin_type(hir_dependency_type_name(dependency)):
+            hir_phase_profile_add(HIR_PROF_RIS_EXPLICIT_DEP, started)
+            return
         self.materialize_imported_callable_explicit_dependency_inner(
             imported_mod, hir_dependency_type_name(dependency), import_span, materialize_enum)
         hir_phase_profile_add(HIR_PROF_RIS_EXPLICIT_DEP, started)
@@ -633,6 +639,25 @@ impl HirLowering:
                 import_span)
             return
         if selected_target < 0:
+            # NEVER silent -- same rule the payload path already follows.
+            # This bare `return` is the twin of the payload-origin defect: the
+            # callable owner names a type in a signature that it neither
+            # declares, re-exports, nor explicitly imports, nothing is bound,
+            # and the failure resurfaces much later as a hard
+            # `unresolved type: {dependency}` (hir_lowering/types.spl)
+            # attributed to whichever module imported the CALLABLE -- an
+            # innocent third party that never names the type. Stage-1 run13
+            # lost 12 distinct type names this way (CodegenTarget 113,
+            # MirType 87, Export 26, TypeLayout 18, HirPattern 14, HirIfArm 11,
+            # CompilationContext 6, AsmLocation 5, AsmConstraintKind 5,
+            # HirModule/HirFunction/HirExpr/CompiledModule 2 each) with ZERO
+            # diagnostic naming the real owner. Advisory (eprint, not
+            # self.error) on purpose, exactly as the payload twin: a consumer
+            # that already has the name in scope still lowers fine, so failing
+            # here would be a regression rather than a fix.
+            # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+            if not hir_dependency_is_builtin_type(dependency):
+                eprint("[hir-callable-dep-origin-unresolved] owner={imported_mod.module_name} dependency={dependency}: no declaration, re-export hop, or explicit import of this name in the owner; a later `unresolved type: {dependency}` will be reported against an importing module instead")
             return
         val terminal = self.module_surfaces.surfaces[selected_target]
         val terminal_local_name = "{terminal.module_name}::{selected_item}"
@@ -1001,6 +1026,50 @@ impl HirLowering:
                                     trait_method, trait_module.module_name,
                                     Some(local_owner))
                                 self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
+
+fn hir_dependency_is_builtin_type(dependency: text) -> bool:
+    """True for a PRIMITIVE/builtin spelling that no user module can ever own.
+
+    Payload- and callable-dependency materialization asks the DECLARING module
+    for a declaration, a re-export hop, or an explicit import of every name a
+    signature or enum payload mentions -- including `text`, `i64`, `bool`,
+    `Option`, `f64`, `Any`, `char`, `Dict`. No module declares or imports those,
+    so every one resolved to not-found and, since 2026-08-21, printed a
+    `[hir-payload-origin-unresolved]` advisory. In stage-1 run13 that was
+    12,171 of 12,364 advisory lines (98.4%) -- pure noise that buried the ONE
+    genuine finding (BlockValue, 193) and cost a full sweep of the owner's
+    import table per occurrence.
+
+    Filtering them is not merely cosmetic: `lower_named_kind` resolves every
+    name here from its own primitive arms BEFORE any symbol lookup, so
+    materializing them was never capable of changing a lowering outcome.
+    See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md"""
+    if dependency == "": return true
+    # DELIBERATELY lowercase-only, plus `Any`. The CAPITALIZED dialect aliases
+    # (Int/Bool/Char/String/Float) and the container spellings
+    # (Option/Result/Dict/Set/Map/List/Array/Vec) are NOT filtered, because
+    # `lower_named_kind` places their arms AFTER the symbol lookup precisely so
+    # a DECLARED type of the same name wins -- and such declarations really
+    # exist in this tree (`struct Bool` in */ndarray/mod.spl, and 42 `Result`,
+    # 14 `Option`, 10 `Array`, 7 `List`, 4 `Set`, 4 `Map`, 1 `Dict`
+    # declarations). Filtering those would silently stop materializing a real
+    # user type, which is a correctness regression, not noise reduction. `Any`
+    # is safe: zero declarations in the tree, and its lowering is `recovered`,
+    # never a hard error.
+    if dependency == "text" or dependency == "str" or dependency == "string":
+        return true
+    if dependency == "i8" or dependency == "i16" or dependency == "i32" or
+       dependency == "i64" or dependency == "int" or dependency == "isize":
+        return true
+    if dependency == "u8" or dependency == "u16" or dependency == "u32" or
+       dependency == "u64" or dependency == "uint" or dependency == "usize":
+        return true
+    if dependency == "f32" or dependency == "f64" or dependency == "float":
+        return true
+    if dependency == "bool" or dependency == "char" or dependency == "byte" or
+       dependency == "void" or dependency == "nil" or dependency == "Any":
+        return true
+    false
 
 fn hir_dependency_type_name(dependency: text) -> text:
     """The declared type a signature dependency names. `has_X` is the optional
