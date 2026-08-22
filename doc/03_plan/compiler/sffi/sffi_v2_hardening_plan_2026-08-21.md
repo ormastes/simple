@@ -1149,3 +1149,16 @@ Twelve migrated Torch raw handle declarations now state their enforced
 nonpositive-handle sentinel, raising contract-documented rows to 599 and
 unsafe-minimized rows to 327. Do not apply this annotation to scalar reductions
 until their status/value ABI removes the valid-zero ambiguity.
+
+The restarted dedicated-worktree audit completed the remaining Torch
+declaration slice. Canonical imports replace seven duplicate or missing raw
+declarations, fixed tensor operations are explicitly unsafe-tagged, and the
+copy lift validates expected count, multiplication bounds, and exact provider
+copy count before reading. Focused status coverage passes 7/7. Census is now
+12,287 rows, 800 tagged, 614 contracted, 342 unsafe-minimized, 11,215 untouched,
+and zero verified/signed. Next implement compiler-owned typed status/out thunks
+for the eight scalar reductions across interpreter, JIT, native, and C++;
+retain a stack output, one provider call, and no hot-path lookup or allocation.
+After that, migrate the five piped-process declarations in
+`src/lib/editor/services/debug_session_dap.spl` without claiming its empty-read
+sentinel is fully safe.

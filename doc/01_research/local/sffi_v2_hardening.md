@@ -1456,3 +1456,20 @@ from tagged-only to unsafe-minimized without claiming provider verification:
 `rt_torch` remains 161 unsafe rows, now with 12 contract-documented/minimized,
 22 untouched, and zero verified or signed. Scalar floating-point reductions
 remain uncontracted because valid zero is still indistinguishable from error.
+
+The remaining dynamic Torch declaration audit removed seven duplicate or
+nonexistent raw declarations. GPU memory now aliases the canonical CUDA, CPU,
+free, and clone owners; dynamic tensor copying imports the canonical numel and
+copy functions; binary arithmetic dispatches directly to the four implemented
+providers instead of declaring the missing generic symbol. Fifteen remaining
+raw boundaries are explicitly tagged, but this is unsafe-surface minimization,
+not provider proof. Tensor copying now rejects an unexpected element count,
+guards `n * sizeof(f32)` overflow, and rejects partial copies before allocating
+the result array or reading the buffer. The success path retains one provider
+copy, one buffer allocation/free, and the existing result construction.
+
+The refreshed owned-code census is 12,287 declaration rows and 3,162 distinct
+symbols: 800 unsafe-tagged, 614 contract-documented, 342 unsafe-minimized,
+11,945 unsafe-unminimized, 11,215 untouched, and zero evidence-verified,
+signed, or admitted. Scalar Torch reductions still require a cross-lane
+status/out ABI; valid `0.0` must remain data, never an error workaround.

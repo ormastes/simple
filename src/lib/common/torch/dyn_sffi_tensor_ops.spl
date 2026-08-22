@@ -14,7 +14,7 @@ Consumed by:
 
 use std.common.torch.dyn_sffi_ops.{DynTorchTensorResult, dyn_torch_available}
 use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i32}
-use std.nogc_sync_mut.torch.sffi.{rt_torch_torchtensor_acos, rt_torch_torchtensor_asin, rt_torch_torchtensor_atan2, rt_torch_torchtensor_cos, rt_torch_torchtensor_sin, rt_torch_torchtensor_tan}
+use std.nogc_sync_mut.torch.sffi.{rt_torch_copy_data_to_cpu, rt_torch_torchtensor_acos, rt_torch_torchtensor_add, rt_torch_torchtensor_asin, rt_torch_torchtensor_atan2, rt_torch_torchtensor_cos, rt_torch_torchtensor_div, rt_torch_torchtensor_mul, rt_torch_torchtensor_numel, rt_torch_torchtensor_sin, rt_torch_torchtensor_sub, rt_torch_torchtensor_tan}
 
 struct DynTorchValueCopyResult:
     status: text
@@ -59,24 +59,31 @@ fn dyn_torch_tensor_copy_values_result(handle: i64, expected_n: i64) -> DynTorch
         return _dyn_torch_value_copy_result("unavailable", "libtorch_unavailable", [])
     if handle <= 0:
         return _dyn_torch_value_copy_result("invalid", "invalid_handle", [])
+    if expected_n <= 0:
+        return _dyn_torch_value_copy_result("invalid", "invalid_expected_count", [])
     val n = rt_torch_torchtensor_numel(handle)
     if n <= 0:
         return _dyn_torch_value_copy_result("invalid", "empty_or_invalid_tensor", [])
+    if n != expected_n:
+        return _dyn_torch_value_copy_result("invalid", "unexpected_tensor_element_count", [])
+    # Guard n * sizeof(f32) before allocating the transfer buffer.
+    if n > 2305843009213693951:
+        return _dyn_torch_value_copy_result("invalid", "tensor_element_count_overflow", [])
     val byte_count = n * 4
     val buf = rt_alloc(byte_count)
     if buf == 0:
         return _dyn_torch_value_copy_result("error", "buffer_allocation_failed", [])
     val copied = rt_torch_copy_data_to_cpu(handle, buf, n)
+    if copied != n:
+        rt_free(buf)
+        return _dyn_torch_value_copy_result("error", "runtime_copy_count_mismatch", [])
     var out: [f64] = []
-    if copied > 0:
-        var i = 0
-        while i < n:
-            val bits = rt_ptr_read_i32(buf, i * 4)
-            out.push(f32_from_bits(bits as u32) as f64)
-            i = i + 1
+    var i = 0
+    while i < copied:
+        val bits = rt_ptr_read_i32(buf, i * 4)
+        out.push(f32_from_bits(bits as u32) as f64)
+        i = i + 1
     rt_free(buf)
-    if copied <= 0:
-        return _dyn_torch_value_copy_result("error", "runtime_copy_failed", [])
     _dyn_torch_value_copy_result("ready", "ok", out)
 
 # ============================================================================
@@ -84,9 +91,6 @@ fn dyn_torch_tensor_copy_values_result(handle: i64, expected_n: i64) -> DynTorch
 # ============================================================================
 
 extern fn rt_ps_torch_tensor_from_data(data: [f64], dims: [i64]) -> i64
-extern fn rt_torch_torchtensor_numel(handle: i64) -> i64
-# buffer_size is element count; runtime writes float32 (4 bytes/element)
-extern fn rt_torch_copy_data_to_cpu(handle: i64, buffer_ptr: i64, buffer_size: i64) -> i64
 @unsafe(reason: "nonnull raw read; tensor descriptor owner validates bounds", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
 extern fn f32_from_bits(bits: u32) -> f32
@@ -141,12 +145,19 @@ fn dyn_torch_tensor_atan2_result(a: i64, b: i64) -> Result<i64, text>:
 # Shape manipulation
 # ============================================================================
 
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_reshape_1d(handle: i64, d0: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_reshape_2d(handle: i64, d0: i64, d1: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_reshape_3d(handle: i64, d0: i64, d1: i64, d2: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_reshape_4d(handle: i64, d0: i64, d1: i64, d2: i64, d3: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_permute_2d(handle: i64, d0: i64, d1: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_permute_3d(handle: i64, d0: i64, d1: i64, d2: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_permute_4d(handle: i64, d0: i64, d1: i64, d2: i64, d3: i64) -> i64
 
 fn dyn_torch_tensor_reshape_1d_result(handle: i64, d0: i64) -> Result<i64, text>:
@@ -202,11 +213,17 @@ fn dyn_torch_tensor_permute_4d_result(handle: i64, d0: i64, d1: i64, d2: i64, d3
 # Cat / stack
 # ============================================================================
 
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_cat_2(a: i64, b: i64, dim: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_cat_3(a: i64, b: i64, c: i64, dim: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_cat_4(a: i64, b: i64, c: i64, d: i64, dim: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_stack_2(a: i64, b: i64, dim: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_stack_3(a: i64, b: i64, c: i64, dim: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_stack_4(a: i64, b: i64, c: i64, d: i64, dim: i64) -> i64
 
 fn dyn_torch_tensor_cat_2_result(a: i64, b: i64, dim: i64) -> Result<i64, text>:
@@ -255,14 +272,22 @@ fn dyn_torch_tensor_stack_4_result(a: i64, b: i64, c: i64, d: i64, dim: i64) -> 
 # Binary ops / type conversion
 # ============================================================================
 
-extern fn rt_torch_torchtensor_binary_op(a: i64, b: i64, op: i64) -> i64
+@unsafe(reason: "raw Torch ABI; nonpositive handle sentinel is rejected by typed wrapper", capabilities: [ffi])
 extern fn rt_torch_torchtensor_to_float(handle: i64) -> i64
 
 fn dyn_torch_tensor_binary_op_result(a: i64, b: i64, op: i64) -> Result<i64, text>:
     if not dyn_torch_available(): return Err("libtorch_unavailable")
     if a <= 0 or b <= 0: return Err("invalid_handle")
     if op < 0 or op > 3: return Err("invalid_operation")
-    val result = rt_torch_torchtensor_binary_op(a, b, op)
+    var result = 0
+    if op == 0:
+        result = rt_torch_torchtensor_add(a, b)
+    elif op == 1:
+        result = rt_torch_torchtensor_sub(a, b)
+    elif op == 2:
+        result = rt_torch_torchtensor_mul(a, b)
+    else:
+        result = rt_torch_torchtensor_div(a, b)
     if result <= 0: return Err("runtime_returned_null_handle")
     Ok(result)
 
