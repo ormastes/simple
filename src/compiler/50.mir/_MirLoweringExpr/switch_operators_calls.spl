@@ -926,6 +926,161 @@ impl MirLowering:
 
         result
 
+    me emit_guarded_scalar_match(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
+        """Ordered scalar match lowering with lazy, independently-probed guards.
+
+        The scrutinee is evaluated once. Pattern tests have no side effects;
+        guards run only in their candidate block, after a binding is installed,
+        and a false guard resumes at the next source arm.
+        """
+        var has_final_unconditional_fallback = false
+        if arms.len() > 0:
+            val final_arm = arms[arms.len() - 1]
+            if not final_arm.has_guard:
+                match final_arm.pattern.kind:
+                    case Wildcard | Binding(_, _):
+                        has_final_unconditional_fallback = true
+                    case _:
+                        ()
+        if not has_final_unconditional_fallback:
+            self.error_fatal(
+                "MCDC-E-MATCH-GUARD-NONEXHAUSTIVE: guarded scalar match must end with an unguarded wildcard/binding arm",
+                Some(scrutinee.span))
+            var b_invalid = self.builder
+            val invalid_result = b_invalid.new_temp(MirType.unit())
+            b_invalid.emit_const(invalid_result, MirConstValue.Zero, MirType.unit())
+            self.builder = b_invalid
+            return invalid_result
+
+        val scrut_local = self.lower_expr(scrutinee)
+        var b = self.builder
+        val result_type = self.match_result_mir_type(expected_type)
+        val result = b.new_temp(result_type)
+        val merge_block = b.new_block(Some("match_guard_merge"))
+        self.builder = b
+        var result_defined = false
+        var inferred_known = false
+        var inferred_ty = MirType.i64()
+        var ai = 0
+        while ai < arms.len():
+            val arm = arms[ai]
+            var bp = self.builder
+            var pattern_local = bp.emit_const_bool(false)
+            var binding_symbol = SymbolId.new(-1)
+            var has_binding = false
+            match arm.pattern.kind:
+                case Wildcard:
+                    pattern_local = bp.emit_const_bool(true)
+                case Binding(symbol, _):
+                    pattern_local = bp.emit_const_bool(true)
+                    binding_symbol = symbol
+                    has_binding = true
+                case Literal(lit_expr):
+                    match lit_expr.kind:
+                        case IntLit(n, _):
+                            val key = bp.emit_const_int(n)
+                            pattern_local = bp.emit_binop(MirBinOp.Eq,
+                                mir_operand_copy(scrut_local), mir_operand_copy(key), MirType.bool())
+                        case _:
+                            self.error_fatal("guarded match: non-integer literal pattern is not supported by native MIR", Some(arm.pattern.span))
+                case Or(sub_patterns):
+                    var oi = 0
+                    while oi < sub_patterns.len():
+                        match sub_patterns[oi].kind:
+                            case Literal(or_lit):
+                                match or_lit.kind:
+                                    case IntLit(n, _):
+                                        val key = bp.emit_const_int(n)
+                                        val equals = bp.emit_binop(MirBinOp.Eq,
+                                            mir_operand_copy(scrut_local), mir_operand_copy(key), MirType.bool())
+                                        pattern_local = bp.emit_binop(MirBinOp.BitOr,
+                                            mir_operand_copy(pattern_local), mir_operand_copy(equals), MirType.bool())
+                                    case _:
+                                        self.error_fatal("guarded match: Or contains a non-integer literal", Some(arm.pattern.span))
+                            case _:
+                                self.error_fatal("guarded match: Or contains a non-literal pattern", Some(arm.pattern.span))
+                        oi = oi + 1
+                case _:
+                    self.error_fatal("guarded match: pattern kind is not supported by native scalar MIR", Some(arm.pattern.span))
+            val final_unconditional_arm = ai == arms.len() - 1 and not arm.has_guard
+            val candidate_block = bp.new_block(Some("match_guard_candidate"))
+            val next_block = if final_unconditional_arm:
+                merge_block
+            else:
+                bp.new_block(Some("match_guard_next"))
+            if final_unconditional_arm:
+                # Validation above proves this pattern is Wildcard/Binding.
+                # Emit a direct edge so an impossible next block never becomes
+                # an SSA predecessor of the result merge.
+                bp.terminate_goto(candidate_block)
+            else:
+                bp.terminate_if(mir_operand_copy(pattern_local), candidate_block, next_block)
+            bp.switch_to_block(candidate_block)
+            self.builder = bp
+
+            if has_binding:
+                self.local_map[binding_symbol.id] = scrut_local
+                self.bind_local(binding_symbol.id, scrut_local)
+
+            if arm.has_guard:
+                val saved_runtime_id = self.mcdc_current_decision_runtime_id
+                val saved_semantic_id = self.mcdc_current_decision_semantic_id
+                val saved_evaluated_slot = self.mcdc_evaluated_mask_slot
+                val saved_true_slot = self.mcdc_true_mask_slot
+                val saved_ordinal = self.mcdc_next_condition_ordinal
+                val saved_count = self.mcdc_condition_count
+                if self.mcdc_instrumentation_enabled():
+                    self.begin_mcdc_decision(arm.guard, "match-guard")
+                val guard_local = self.lower_cond_expr(arm.guard)
+                self.emit_mcdc_decision_probe(arm.guard, guard_local)
+                self.mcdc_current_decision_runtime_id = saved_runtime_id
+                self.mcdc_current_decision_semantic_id = saved_semantic_id
+                self.mcdc_evaluated_mask_slot = saved_evaluated_slot
+                self.mcdc_true_mask_slot = saved_true_slot
+                self.mcdc_next_condition_ordinal = saved_ordinal
+                self.mcdc_condition_count = saved_count
+                var bg = self.builder
+                val body_block = bg.new_block(Some("match_guard_body"))
+                bg.terminate_if(mir_operand_copy(guard_local), body_block, next_block)
+                bg.switch_to_block(body_block)
+                self.builder = bg
+
+            val arm_result = self.lower_block_expected(arm.body, expected_type)
+            var ba = self.builder
+            if not ba.current_block_has_explicit_terminator():
+                if arm_result.?:
+                    val fallback = LocalId(id: 0)
+                    val arm_local = arm_result ?? fallback
+                    ba.emit_copy(result, arm_local)
+                    result_defined = true
+                    if self.struct_value_syms.contains(arm_local.id):
+                        self.struct_value_syms[result.id] = self.struct_value_syms[arm_local.id]
+                    if not inferred_known:
+                        if val arm_ty = self.local_mir_type_of(arm_local):
+                            inferred_known = true
+                            inferred_ty = arm_ty
+                ba.terminate_goto(merge_block)
+            if not final_unconditional_arm:
+                ba.switch_to_block(next_block)
+            self.builder = ba
+            ai = ai + 1
+
+        var bt = self.builder
+        if not bt.current_block_has_explicit_terminator(): bt.terminate_goto(merge_block)
+        bt.switch_to_block(merge_block)
+        if not result_defined: bt.emit_const(result, MirConstValue.Zero, result_type)
+        if inferred_known: bt.set_local_type(result, inferred_ty)
+        self.builder = bt
+        if val found_expected = expected_type:
+            self.remember_local_hir_type(result.id, found_expected, 0, 0)
+            match found_expected.kind:
+                case HirTypeKind.Optional(_):
+                    self.option_value_locals[result.id] = true
+                    self.mark_runtime_value_local(result.id)
+                case _:
+                    ()
+        result
+
     me emit_if_chain_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?, expected_type: HirType?) -> LocalId:
         """Emit a nested If chain for sparse / small int matches.
         Cheaper than a jump table when arms < 4 or key span > 1024."""
@@ -2098,6 +2253,12 @@ impl MirLowering:
         var enum_bind_pos: [[i64]] = []
         var enum_arities: [i64] = []
         var enum_bodies: [HirBlock] = []
+        var enum_has_guards: [bool] = []
+        var enum_guards: [HirExpr] = []
+        # 1 only for payloads proven to accept every value of the variant:
+        # no payload, or a tuple made solely of bindings/wildcards. Struct,
+        # literal, nested-enum, and other deep payloads remain conservative 0.
+        var enum_payload_catchalls: [i64] = []
         # Parallel to enum_discs: whether the arm's payload contains a nested
         # Enum/Literal sub-pattern (1/0), and the arm's index in `arms`, so
         # the deep payload walk (emit_enum_payload_deep) can re-read the
@@ -2116,6 +2277,20 @@ impl MirLowering:
         var enum_variants: [text] = []
         var has_default = false
         var default_body = HirBlock(stmts: [], value: nil, span: scrutinee.span)
+        var enum_default_has_guard = false
+        var enum_default_guard = scrutinee
+        var enum_default_has_binding = false
+        var enum_default_binding = SymbolId.new(-1)
+        # The legacy enum collector groups variant arms before one default.
+        # That is semantics-preserving only when an irrefutable arm is last.
+        # Guarded mixed-order matches are rejected rather than silently
+        # reordered until this owner is replaced by a fully ordered collector.
+        var enum_match_has_any_guard = false
+        var guard_order_scan = 0
+        while guard_order_scan < arms.len():
+            if arms[guard_order_scan].has_guard: enum_match_has_any_guard = true
+            guard_order_scan = guard_order_scan + 1
+        var seen_irrefutable_source_arm = false
         var enum_name = ""
         # WP-6: the enum's own symbol id, captured alongside `enum_name` so
         # ResolvedMatchCoverage (compiler.hir.match_coverage) can be built
@@ -2134,6 +2309,10 @@ impl MirLowering:
             val arm = arms[ai]
             match arm.pattern.kind:
                 case Enum(etype, variant, epayload):
+                    if enum_match_has_any_guard and seen_irrefutable_source_arm:
+                        self.error_fatal(
+                            "MCDC-E-MATCH-GUARD-ORDER: enum variant after wildcard/binding cannot be reordered; place the irrefutable arm last",
+                            Some(arm.span))
                     if enum_name == "":
                         enum_name = match etype.kind:
                             case Named(esym, _):
@@ -2224,12 +2403,47 @@ impl MirLowering:
                             self.error("enum match: bare variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}", Some(arm.pattern.span))
                         else:
                             self.error("enum match: unknown variant '{variant}' (no registered enum declares it)", Some(arm.pattern.span))
+                    var payload_catchall = 0
+                    if not epayload.?:
+                        payload_catchall = 1
+                    else:
+                        match epayload.unwrap():
+                            case Tuple(catchall_patterns):
+                                payload_catchall = 1
+                                var catchall_i = 0
+                                while catchall_i < catchall_patterns.len():
+                                    match catchall_patterns[catchall_i].kind:
+                                        case Binding(_, _) | HirPatternKind.Wildcard:
+                                            ()
+                                        case _:
+                                            payload_catchall = 0
+                                    catchall_i = catchall_i + 1
+                            case _:
+                                ()
+                    if arm.has_guard:
+                        var prior_candidate_i = 0
+                        while prior_candidate_i < enum_variants.len():
+                            if (enum_variants[prior_candidate_i] == variant
+                                and not enum_has_guards[prior_candidate_i]
+                                and enum_payload_catchalls[prior_candidate_i] == 1):
+                                self.error_fatal(
+                                    "MCDC-E-MATCH-GUARD-SUBSUMED: guarded enum candidate is unreachable after an earlier unguarded same-variant catch-all",
+                                    Some(arm.span))
+                                var b_subsumed = self.builder
+                                val subsumed_result = b_subsumed.new_temp(MirType.unit())
+                                b_subsumed.emit_const(subsumed_result, MirConstValue.Zero, MirType.unit())
+                                self.builder = b_subsumed
+                                return subsumed_result
+                            prior_candidate_i = prior_candidate_i + 1
                     enum_discs = enum_discs.push(d)
                     enum_binds = enum_binds.push(enum_pat_binding_syms(epayload))
                     enum_bind_pos = enum_bind_pos.push(enum_pat_binding_positions(epayload))
                     enum_arities = enum_arities.push(enum_pat_arity(epayload))
                     enum_bodies = enum_bodies.push(arm.body)
+                    enum_has_guards = enum_has_guards.push(arm.has_guard)
+                    enum_guards = enum_guards.push(arm.guard)
                     enum_variants = enum_variants.push(variant)
+                    enum_payload_catchalls = enum_payload_catchalls.push(payload_catchall)
                     # Classify HERE, on the proven-good `epayload` binding —
                     # see the enum_deep_flags declaration comment. The scan is
                     # INLINE, not a bool-returning helper: a helper's bool
@@ -2257,14 +2471,74 @@ impl MirLowering:
                     enum_deep_flags = enum_deep_flags.push(deep_flag)
                     enum_arm_srcidx = enum_arm_srcidx.push(ai)
                 case HirPatternKind.Wildcard:
+                    if enum_match_has_any_guard and seen_irrefutable_source_arm:
+                        self.error_fatal(
+                            "MCDC-E-MATCH-GUARD-ORDER: multiple wildcard/binding arms cannot be represented by the native enum collector",
+                            Some(arm.span))
+                    seen_irrefutable_source_arm = true
                     has_default = true
                     default_body = arm.body
-                case Binding(_, _):
+                    enum_default_has_guard = arm.has_guard
+                    enum_default_guard = arm.guard
+                case Binding(default_symbol, _):
+                    if enum_match_has_any_guard and seen_irrefutable_source_arm:
+                        self.error_fatal(
+                            "MCDC-E-MATCH-GUARD-ORDER: multiple wildcard/binding arms cannot be represented by the native enum collector",
+                            Some(arm.span))
+                    seen_irrefutable_source_arm = true
                     has_default = true
                     default_body = arm.body
+                    enum_default_has_guard = arm.has_guard
+                    enum_default_guard = arm.guard
+                    enum_default_has_binding = true
+                    enum_default_binding = default_symbol
                 case _:
                     self.error("enum match: unsupported arm pattern", Some(arm.pattern.span))
             ai = ai + 1
+
+        # A guarded enum is exhaustive without a wildcard when every declared
+        # variant has at least one UNGUARDED candidate. Earlier guarded
+        # candidates for that same variant remain in source order and can
+        # fall through to the unguarded candidate. If the declaration cannot
+        # be resolved or any variant lacks such a candidate, require the same
+        # final unconditional fallback as scalar guarded matches.
+        var guarded_enum_variant_exhaustive = false
+        if enum_match_has_any_guard:
+            val declared_key = if enum_key != "": enum_key else: enum_name
+            val declared_variants = self.enum_variant_names(declared_key)
+            if declared_variants.len() > 0:
+                guarded_enum_variant_exhaustive = true
+                var declared_i = 0
+                while declared_i < declared_variants.len():
+                    var has_unguarded_candidate = false
+                    var candidate_i = 0
+                    while candidate_i < enum_variants.len():
+                        if (enum_variants[candidate_i] == declared_variants[declared_i]
+                            and not enum_has_guards[candidate_i]
+                            and enum_payload_catchalls[candidate_i] == 1):
+                            has_unguarded_candidate = true
+                        candidate_i = candidate_i + 1
+                    if not has_unguarded_candidate:
+                        guarded_enum_variant_exhaustive = false
+                    declared_i = declared_i + 1
+            var enum_has_final_unconditional_fallback = false
+            if arms.len() > 0:
+                val enum_final_arm = arms[arms.len() - 1]
+                if not enum_final_arm.has_guard:
+                    match enum_final_arm.pattern.kind:
+                        case Wildcard | Binding(_, _):
+                            enum_has_final_unconditional_fallback = true
+                        case _:
+                            ()
+            if not guarded_enum_variant_exhaustive and not enum_has_final_unconditional_fallback:
+                self.error_fatal(
+                    "MCDC-E-MATCH-GUARD-NONEXHAUSTIVE: guarded enum match must cover every declared variant with an unguarded candidate or end with an unguarded wildcard/binding arm",
+                    Some(scrutinee.span))
+                var b_invalid_enum = self.builder
+                val invalid_enum_result = b_invalid_enum.new_temp(MirType.unit())
+                b_invalid_enum.emit_const(invalid_enum_result, MirConstValue.Zero, MirType.unit())
+                self.builder = b_invalid_enum
+                return invalid_enum_result
 
         # ---- Option dual-ABI normalization (bug: Dict.get / any raw-or-nil
         # producer feeding `match ... case Some(x)`) -------------------------
@@ -2360,7 +2634,8 @@ impl MirLowering:
             payload_symbol = "rt_unwrap_or_self"
 
         var b = self.builder
-        val result = b.new_temp(self.match_result_mir_type(expected_type))
+        val result_type = self.match_result_mir_type(expected_type)
+        val result = b.new_temp(result_type)
         # Arm-type inference fallback: HIR match exprs usually carry NO type_
         # (expected_type nil), leaving the temp i64 — print then decimal-
         # renders text results. Capture the first arm result's MIR type and
@@ -2384,6 +2659,7 @@ impl MirLowering:
             var candidate_index = 0
             while candidate_index < enum_variants.len():
                 val candidate_variant = enum_variants[candidate_index]
+                if enum_has_guards[candidate_index]: result_match_candidate = false
                 if enum_deep_flags[candidate_index] != 0 or enum_arities[candidate_index] != 1 or enum_binds[candidate_index].len() != 1:
                     result_match_candidate = false
                 if candidate_variant == "Ok":
@@ -2624,6 +2900,34 @@ impl MirLowering:
                             self.local_map[bind_syms[fi].id] = gl
                             self.bind_local(bind_syms[fi].id, gl)
                     fi = fi + 1
+            # A guard is evaluated only after the discriminant/deep pattern
+            # and payload bindings succeed. False resumes the ordered arm
+            # chain at next_block; short-circuit evaluation stays owned by
+            # lower_cond_expr. MC/DC state is nested and restored exactly as
+            # for if/elif/while decisions.
+            if enum_has_guards[ci]:
+                val saved_guard_runtime_id = self.mcdc_current_decision_runtime_id
+                val saved_guard_semantic_id = self.mcdc_current_decision_semantic_id
+                val saved_guard_evaluated_slot = self.mcdc_evaluated_mask_slot
+                val saved_guard_true_slot = self.mcdc_true_mask_slot
+                val saved_guard_ordinal = self.mcdc_next_condition_ordinal
+                val saved_guard_count = self.mcdc_condition_count
+                val enum_guard_expr = enum_guards[ci]
+                if self.mcdc_instrumentation_enabled():
+                    self.begin_mcdc_decision(enum_guard_expr, "match-guard")
+                val enum_guard_local = self.lower_cond_expr(enum_guard_expr)
+                self.emit_mcdc_decision_probe(enum_guard_expr, enum_guard_local)
+                self.mcdc_current_decision_runtime_id = saved_guard_runtime_id
+                self.mcdc_current_decision_semantic_id = saved_guard_semantic_id
+                self.mcdc_evaluated_mask_slot = saved_guard_evaluated_slot
+                self.mcdc_true_mask_slot = saved_guard_true_slot
+                self.mcdc_next_condition_ordinal = saved_guard_ordinal
+                self.mcdc_condition_count = saved_guard_count
+                var b_guard = self.builder
+                val guarded_enum_body = b_guard.new_block(Some("ematch_guard_body"))
+                b_guard.terminate_if(mir_operand_copy(enum_guard_local), guarded_enum_body, next_block)
+                b_guard.switch_to_block(guarded_enum_body)
+                self.builder = b_guard
             val arm_result = self.lower_block_expected(enum_bodies[ci], expected_type)
             var b_arm2 = self.builder
             # Guard: if the arm body already terminated (e.g. `return r`), emit
@@ -2683,7 +2987,7 @@ impl MirLowering:
         # in-tree today, so `error_fatal` here would fail the build at 286
         # sites. See doc/08_tracking/bug/match_enum_fallthrough_silent_2026-08-01.md
         # for the enumeration and the promotion plan.
-        if not has_default:
+        if (not has_default or enum_default_has_guard) and not guarded_enum_variant_exhaustive:
             var missing_v: [text] = []
             if self.enum_variant_index.has(enum_name):
                 for known_v in self.enum_variant_index[enum_name]:
@@ -2769,7 +3073,8 @@ impl MirLowering:
                         covered_ids = covered_ids.push(cd)
                 val coverage = build_match_coverage(
                     enum_symbol_id, enum_symbol_id, enum_name,
-                    all_ids, all_names, covered_ids, has_default,
+                    all_ids, all_names, covered_ids,
+                    (has_default and not enum_default_has_guard) or guarded_enum_variant_exhaustive,
                 )
                 if match_coverage_requires_hard_error(coverage, rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""):
                     val missing_names = coverage.missing_variant_names()
@@ -2778,6 +3083,31 @@ impl MirLowering:
                     self.error_fatal(cmsg, Some(scrutinee.span))
 
         if has_default:
+            if enum_default_has_binding:
+                self.local_map[enum_default_binding.id] = scrut_local
+                self.bind_local(enum_default_binding.id, scrut_local)
+            if enum_default_has_guard:
+                val saved_default_runtime_id = self.mcdc_current_decision_runtime_id
+                val saved_default_semantic_id = self.mcdc_current_decision_semantic_id
+                val saved_default_evaluated_slot = self.mcdc_evaluated_mask_slot
+                val saved_default_true_slot = self.mcdc_true_mask_slot
+                val saved_default_ordinal = self.mcdc_next_condition_ordinal
+                val saved_default_count = self.mcdc_condition_count
+                if self.mcdc_instrumentation_enabled():
+                    self.begin_mcdc_decision(enum_default_guard, "match-guard")
+                val enum_default_guard_local = self.lower_cond_expr(enum_default_guard)
+                self.emit_mcdc_decision_probe(enum_default_guard, enum_default_guard_local)
+                self.mcdc_current_decision_runtime_id = saved_default_runtime_id
+                self.mcdc_current_decision_semantic_id = saved_default_semantic_id
+                self.mcdc_evaluated_mask_slot = saved_default_evaluated_slot
+                self.mcdc_true_mask_slot = saved_default_true_slot
+                self.mcdc_next_condition_ordinal = saved_default_ordinal
+                self.mcdc_condition_count = saved_default_count
+                var b_default_guard = self.builder
+                val guarded_default_body = b_default_guard.new_block(Some("ematch_default_guard_body"))
+                b_default_guard.terminate_if(mir_operand_copy(enum_default_guard_local), guarded_default_body, merge_block)
+                b_default_guard.switch_to_block(guarded_default_body)
+                self.builder = b_default_guard
             val dres = self.lower_block_expected(default_body, expected_type)
             var b_d2 = self.builder
             # Same post-terminator guard as the arm loop above.
@@ -2794,7 +3124,19 @@ impl MirLowering:
             self.builder = b_d2
         var b_end = self.builder
         if not b_end.current_block_has_explicit_terminator():
-            b_end.terminate_goto(merge_block)
+            if guarded_enum_variant_exhaustive and not has_default:
+                # Declared-variant coverage proves this tail unreachable for a
+                # well-formed enum value. Keep malformed discriminants fail-fast
+                # and out of the result merge's predecessor set.
+                val impossible_msg = b_end.emit_const_str("guarded exhaustive enum match received an invalid discriminant")
+                val panic_operand = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_panic"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [], return_type: MirType.unit(), is_variadic: false)))))
+                b_end.emit_call(panic_operand, [mir_operand_copy(impossible_msg)], MirType.unit())
+                b_end.terminate_unreachable()
+            else:
+                b_end.terminate_goto(merge_block)
         self.builder = b_end
 
         var b_m = self.builder
@@ -4383,6 +4725,87 @@ impl MirLowering:
                 ()
         arg_local
 
+    me lower_mcdc_runtime_assert_call(
+        args: [HirCallArg], direct_symbol: SymbolId, direct_name: text
+    ) -> LocalId:
+        """Lower executable `assert` once and retain its MC/DC decision.
+
+        The parser represents `assert CONDITION[, MESSAGE]` as a direct
+        `__assert` call.  Lowering it through the generic call path would hide
+        CONDITION inside the argument loop, after the last point where MC/DC
+        can preserve its authored short-circuit tree.  Lower the Boolean
+        argument through `lower_cond_expr` exactly once, emit and close its
+        decision immediately, then keep eager message evaluation in source
+        order before the raising intrinsic.  Static-off never enters this helper's instrumentation arm
+        and therefore retains the generic call's instruction/allocation shape.
+        """
+        if args.len() == 0:
+            # Preserve the existing malformed-intrinsic diagnostic path.
+            val malformed_return = self.bootstrap_resolved_call_return_type(
+                direct_symbol, direct_name)
+            val malformed_func = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str(direct_name),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [], return_type: malformed_return,
+                    is_variadic: false)))))
+            return self.emit_resolved_direct_call(
+                malformed_func, [], malformed_return)
+
+        # The off policy must be byte-for-byte equivalent to generic argument
+        # lowering: no decision state, entry alloc, manifest row, or dispatch.
+        if not self.mcdc_instrumentation_enabled():
+            var off_operands: [MirOperand] = []
+            for arg in args:
+                val off_local = self.lower_expr(arg.value)
+                off_operands = off_operands.push(mir_operand_copy(off_local))
+            val off_return = self.bootstrap_resolved_call_return_type(
+                direct_symbol, direct_name)
+            val off_func = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str(direct_name),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [], return_type: off_return,
+                    is_variadic: false)))))
+            return self.emit_resolved_direct_call(
+                off_func, off_operands, off_return)
+
+        val saved_decision_runtime_id = self.mcdc_current_decision_runtime_id
+        val saved_decision_semantic_id = self.mcdc_current_decision_semantic_id
+        val saved_evaluated_mask_slot = self.mcdc_evaluated_mask_slot
+        val saved_true_mask_slot = self.mcdc_true_mask_slot
+        val saved_next_condition_ordinal = self.mcdc_next_condition_ordinal
+        val saved_condition_count = self.mcdc_condition_count
+
+        val condition = args[0].value
+        self.begin_mcdc_decision(condition, "runtime-assertion")
+        val condition_local = self.lower_cond_expr(condition)
+        self.emit_mcdc_decision_probe(condition, condition_local)
+        self.mcdc_current_decision_runtime_id = saved_decision_runtime_id
+        self.mcdc_current_decision_semantic_id = saved_decision_semantic_id
+        self.mcdc_evaluated_mask_slot = saved_evaluated_mask_slot
+        self.mcdc_true_mask_slot = saved_true_mask_slot
+        self.mcdc_next_condition_ordinal = saved_next_condition_ordinal
+        self.mcdc_condition_count = saved_condition_count
+
+        var operands: [MirOperand] = [mir_operand_copy(condition_local)]
+        var arg_index = 1
+        while arg_index < args.len():
+            # Assertions are ordinary eager calls: message/extra malformed
+            # arguments retain their original left-to-right evaluation.  The
+            # assertion decision is already closed, so a Boolean expression in
+            # a message cannot accidentally inherit its mask slots.
+            val arg_local = self.lower_expr(args[arg_index].value)
+            operands = operands.push(mir_operand_copy(arg_local))
+            arg_index = arg_index + 1
+
+        val return_type = self.bootstrap_resolved_call_return_type(
+            direct_symbol, direct_name)
+        val func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(direct_name),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [], return_type: return_type,
+                is_variadic: false)))))
+        self.emit_resolved_direct_call(func_operand, operands, return_type)
+
     me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
         """Lower function call.
 
@@ -4496,6 +4919,9 @@ impl MirLowering:
                 return self.lower_enum_construct_named("Option", direct_name, args)
 
         if is_direct:
+            if direct_name == "__assert":
+                return self.lower_mcdc_runtime_assert_call(
+                    args, direct_symbol, direct_name)
             if direct_name == "print" or direct_name == "_cli_eprint":
                 return self.lower_bootstrap_print_call(args, "rt_print")
             if direct_name == "eprint":

@@ -27,7 +27,7 @@ fn census_has(ids: [text], form: text) -> bool:
 describe "MC/DC semantic decision census", tag: ["only-compiled"]:
     it "is a closed, unique, reason-bearing catalog":
         expect(mcdc_semantic_decision_census_v1_well_formed()).to_equal(true)
-        expect(mcdc_semantic_decision_census_v1().len()).to_equal(8)
+        expect(mcdc_semantic_decision_census_v1().len()).to_equal(9)
 
     it "enumerates statement if and value conditional through their shared HIR owner":
         val ids = census_manifest_ids("fn choose(a: bool, b: bool) -> bool:\n    if a and b:\n        true\n    else:\n        false\n")
@@ -44,17 +44,19 @@ describe "MC/DC semantic decision census", tag: ["only-compiled"]:
         expect(census_has(ids, "while")).to_equal(true)
         expect(ids.len()).to_equal(1)
 
-    it "names match guards and comprehension filters as governed backend gaps":
+    it "classifies match guards and comprehension filters as instrumented decisions":
         val rows = mcdc_semantic_decision_census_v1()
-        var governed = 0
+        var instrumented_forms = 0
         for row in rows:
-            if row.disposition == McdcSemanticDecisionDispositionV1.BackendInapplicable:
-                expect(row.governed_code.starts_with("MCDC-BACKEND-INAPPLICABLE-")).to_equal(true)
-                expect(row.reason.contains("platform-inapplicable")).to_equal(true)
-                governed = governed + 1
-        expect(governed).to_equal(2)
+            if row.stable_name == "match-guard" or row.stable_name == "comprehension-filter":
+                expect(row.disposition).to_equal(McdcSemanticDecisionDispositionV1.Instrumented)
+                expect(row.governed_code).to_equal("")
+                instrumented_forms = instrumented_forms + 1
+        expect(instrumented_forms).to_equal(2)
 
-    it "classifies assertions and contracts as compile-time-only, never silent runtime decisions":
+    it "instruments executable assertions but keeps static assertions and proof contracts compile-time-only":
+        val ids = census_manifest_ids("fn validate(a: bool, b: bool):\n    assert a and b, \"required\"\n")
+        expect(census_has(ids, "runtime-assertion")).to_equal(true)
         val rows = mcdc_semantic_decision_census_v1()
         var compile_time = 0
         for row in rows:

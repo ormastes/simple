@@ -630,16 +630,24 @@ impl HirLowering:
                 HirExprKind.Range(rstart, rend, inclusive, rstep)
 
             case ExprKind.ListComprehension(expr, clauses):
+                # The binder belongs only to the comprehension.  Push an
+                # explicit lexical scope, lower each iterable before defining
+                # its binder (so `[for x in x: ...]` reads the outer `x`), then
+                # lower filters/body with the binder visible and pop it.
+                self.symbols.push_scope(ScopeKind.Block)
                 var hir_clauses: [HirCompClause] = []
                 for clause in clauses:
                     val hir_kind = match clause.kind:
                         case For(var_, iter):
+                            val hir_iter = self.lower_hir_expr(iter)
                             val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, clause.span, false, false, nil)
-                            HirCompClauseKind.For(symbol, self.lower_hir_expr(iter))
+                            HirCompClauseKind.For(symbol, hir_iter)
                         case If(cond):
                             HirCompClauseKind.If(self.lower_hir_expr(cond))
                     hir_clauses = hir_clauses.push(HirCompClause(kind: hir_kind, span: clause.span))
-                HirExprKind.Comprehension(HirComprehensionKind.List, self.lower_hir_expr(expr), hir_clauses)
+                val hir_value = self.lower_hir_expr(expr)
+                self.symbols.pop_scope()
+                HirExprKind.Comprehension(HirComprehensionKind.List, hir_value, hir_clauses)
 
             case ExprKind.StructLit(type_, fields):
                 var hir_fields: [(text, HirExpr)] = []

@@ -3859,6 +3859,219 @@ impl MirLowering:
             )))
         ))
 
+    me lower_list_comprehension(kind: HirComprehensionKind, value_expr: HirExpr,
+                                clauses: [HirCompClause], source_span: Span) -> LocalId:
+        """Lower the canonical one-generator list comprehension.
+
+        The flat frontend deliberately emits exactly `For` plus an optional
+        `If`.  Lower it as one counted loop: the iterable is evaluated once,
+        the filter once per visited element, and the value only for accepted
+        elements.  MC/DC state is fixed entry storage reset in the loop body;
+        static-off emits none of those instructions and neither lane allocates
+        per element beyond the result array's required growth.
+        """
+        match kind:
+            case HirComprehensionKind.List: ()
+            case _:
+                return self.unsupported_expr_kind("E-MIR-EXPR-ComprehensionKind", "non-list comprehension", source_span)
+        if clauses.len() < 1 or clauses.len() > 2:
+            return self.unsupported_expr_kind("E-MIR-EXPR-ComprehensionClauses", "comprehension with more than one generator/filter", source_span)
+
+        var loop_symbol = SymbolId(id: -1)
+        var iterable = value_expr
+        match clauses[0].kind:
+            case HirCompClauseKind.For(symbol, iter_expr):
+                loop_symbol = symbol
+                iterable = iter_expr
+            case _:
+                return self.unsupported_expr_kind("E-MIR-EXPR-ComprehensionOrder", "comprehension whose first clause is not `for`", source_span)
+        var has_filter = false
+        var filter_expr = value_expr
+        if clauses.len() == 2:
+            match clauses[1].kind:
+                case HirCompClauseKind.If(cond):
+                    has_filter = true
+                    filter_expr = cond
+                case _:
+                    return self.unsupported_expr_kind("E-MIR-EXPR-ComprehensionOrder", "comprehension second generator", source_span)
+
+        var element_type = MirType.i64()
+        var collection = LocalId(id: -1)
+        var end_local = LocalId(id: -1)
+        var step_local = LocalId(id: -1)
+        var inclusive = false
+        var is_range = false
+        var loop_type = MirType.i64()
+        match iterable.kind:
+            case HirExprKind.Range(start_type_expr, end_type_expr, _, _):
+                if val typed_end = end_type_expr:
+                    if val end_hir_type = typed_end.type_: loop_type = self.lower_type(end_hir_type)
+                elif val typed_start = start_type_expr:
+                    if val start_hir_type = typed_start.type_: loop_type = self.lower_type(start_hir_type)
+            case _: ()
+        var b_init = self.builder
+        var counter = LocalId(id: -1)
+        match iterable.kind:
+            case HirExprKind.Range(start, end_, incl, step):
+                is_range = true
+                inclusive = incl
+                var start_value = LocalId(id: -1)
+                if val start_expr = start:
+                    start_value = self.lower_expr(start_expr)
+                else:
+                    var b_start = self.builder
+                    start_value = b_start.new_temp(loop_type)
+                    b_start.emit_const(start_value, MirConstValue.Int(0), loop_type)
+                    self.builder = b_start
+                if val end_expr = end_:
+                    end_local = self.lower_expr(end_expr)
+                else:
+                    var b_end = self.builder
+                    end_local = b_end.new_temp(loop_type)
+                    b_end.emit_const(end_local, MirConstValue.Int(0), loop_type)
+                    self.builder = b_end
+                if val step_expr = step:
+                    # The authored flat frontend currently has no step slot,
+                    # and sharing one body between positive/negative native
+                    # loops would otherwise require a direction branch on
+                    # every element.  Reject this HIR-only form loudly until a
+                    # two-loop lowering can preserve both MC/DC identity and
+                    # the zero-dispatch hot path.
+                    return self.unsupported_expr_kind(
+                        "E-MIR-EXPR-ComprehensionRangeStep",
+                        "list comprehension with an explicit range step",
+                        step_expr.span)
+                var b_step = self.builder
+                step_local = b_step.new_temp(loop_type)
+                b_step.emit_const(step_local, MirConstValue.Int(1), loop_type)
+                self.builder = b_step
+                # Allocate the mutable counter only after all bound
+                # expressions have finished lowering.  Those lowerings may
+                # replace `self.builder`; allocating from the earlier snapshot
+                # can reuse an SSA/local id and corrupt either value.
+                b_init = self.builder
+                counter = b_init.new_local(nil, loop_type, LocalKind.Var)
+                b_init.emit_copy(counter, start_value)
+            case _:
+                collection = self.lower_expr(iterable)
+                if not self.local_is_runtime_array(collection):
+                    return self.unsupported_expr_kind("E-MIR-EXPR-ComprehensionIterable", "comprehension over non-array iterable", source_span)
+                if val collection_type = self.local_mir_type_of(collection):
+                    match collection_type.kind:
+                        case MirTypeKind.Array(found_element, _) | MirTypeKind.Slice(found_element): element_type = found_element
+                        case _: ()
+                b_init = self.builder
+                val length_call = b_init.emit_call(self.rt_array_len_operand(), [mir_operand_copy(collection)], MirType.i64())
+                end_local = length_call ?? b_init.new_temp(MirType.i64())
+                # As above, allocate after lowering the iterable and length so
+                # the counter id comes from the authoritative builder state.
+                counter = b_init.new_local(nil, MirType.i64(), LocalKind.Var)
+                val zero_index = b_init.emit_const_int(0)
+                b_init.emit_copy(counter, zero_index)
+                step_local = b_init.emit_const_int(1)
+        self.builder = b_init
+
+        # Allocate the required result only after evaluating the iterable and
+        # range bounds, preserving source evaluation order on erroring inputs.
+        # Keep initial capacity zero for filtered comprehensions: reserving the
+        # source length turns a highly selective filter into O(source length)
+        # retained memory.  rt_array_push provides amortized growth, so this
+        # remains O(n) time without an intermediate or per-element array.
+        val result_storage_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        var b_new = self.builder
+        val zero_capacity = b_new.emit_const_int(0)
+        val result_call = b_new.emit_call(MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: result_storage_type, is_variadic: false)))
+        )), [mir_operand_copy(zero_capacity)], result_storage_type)
+        val result_array = result_call ?? b_new.new_temp(result_storage_type)
+        self.builder = b_new
+        self.runtime_array_locals[result_array.id] = true
+        self.mark_runtime_value_local(result_array.id)
+
+        var b_blocks = self.builder
+        val condition_block = b_blocks.new_block(Some("comprehension_cond"))
+        val body_block = b_blocks.new_block(Some("comprehension_body"))
+        val accept_block = b_blocks.new_block(Some("comprehension_accept"))
+        val increment_block = b_blocks.new_block(Some("comprehension_inc"))
+        val exit_block = b_blocks.new_block(Some("comprehension_exit"))
+        # Arrays and authored ranges are statically +1: retain the direct
+        # backedge with no direction dispatch in the hot loop.
+        b_blocks.terminate_goto(condition_block)
+        b_blocks.switch_to_block(condition_block)
+        val compare_op = if is_range and inclusive: MirBinOp.Le else: MirBinOp.Lt
+        val in_bounds = b_blocks.emit_binop(compare_op,
+            mir_operand_copy(counter), mir_operand_copy(end_local), MirType.bool())
+        b_blocks.terminate_if(mir_operand_copy(in_bounds), body_block, exit_block)
+        b_blocks.switch_to_block(body_block)
+        self.builder = b_blocks
+
+        var element_local = counter
+        if not is_range:
+            var b_get = self.builder
+            val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(collection), mir_operand_copy(counter)], MirType.i64())
+            val tagged_element = get_call ?? b_get.new_temp(MirType.i64())
+            self.builder = b_get
+            element_local = self.decode_runtime_value(tagged_element, element_type)
+        # The loop binder is lexical, not a function-local declaration.  Save
+        # both lookup representations before overlaying it and restore them
+        # after the comprehension has been fully lowered so a same-named outer
+        # local remains authoritative for following expressions.
+        val saved_local_map = self.local_map
+        val saved_local_symbol_ids = self.local_symbol_ids
+        val saved_local_symbol_values = self.local_symbol_values
+        self.bind_local(loop_symbol.id, element_local)
+
+        if has_filter:
+            val saved_runtime_id = self.mcdc_current_decision_runtime_id
+            val saved_semantic_id = self.mcdc_current_decision_semantic_id
+            val saved_eval_slot = self.mcdc_evaluated_mask_slot
+            val saved_true_slot = self.mcdc_true_mask_slot
+            val saved_ordinal = self.mcdc_next_condition_ordinal
+            val saved_count = self.mcdc_condition_count
+            if self.mcdc_instrumentation_enabled():
+                self.begin_mcdc_decision(filter_expr, "comprehension-filter")
+            val keep = self.lower_cond_expr(filter_expr)
+            self.emit_mcdc_decision_probe(filter_expr, keep)
+            self.mcdc_current_decision_runtime_id = saved_runtime_id
+            self.mcdc_current_decision_semantic_id = saved_semantic_id
+            self.mcdc_evaluated_mask_slot = saved_eval_slot
+            self.mcdc_true_mask_slot = saved_true_slot
+            self.mcdc_next_condition_ordinal = saved_ordinal
+            self.mcdc_condition_count = saved_count
+            var b_filter = self.builder
+            b_filter.terminate_if(mir_operand_copy(keep), accept_block, increment_block)
+            b_filter.switch_to_block(accept_block)
+            self.builder = b_filter
+        else:
+            var b_accept = self.builder
+            b_accept.terminate_goto(accept_block)
+            b_accept.switch_to_block(accept_block)
+            self.builder = b_accept
+
+        val mapped = self.lower_expr(value_expr)
+        var mapped_type = MirType.i64()
+        if val found_mapped_type = self.local_mir_type_of(mapped): mapped_type = found_mapped_type
+        val tagged_mapped = self.box_runtime_value(mapped)
+        var b_push = self.builder
+        b_push.emit_call(self.rt_array_push_operand(), [mir_operand_copy(result_array), mir_operand_copy(tagged_mapped)], MirType(kind: MirTypeKind.I8))
+        b_push.terminate_goto(increment_block)
+        b_push.switch_to_block(increment_block)
+        val next_index = b_push.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(step_local), loop_type)
+        b_push.emit_copy(counter, next_index)
+        b_push.terminate_goto(condition_block)
+        b_push.switch_to_block(exit_block)
+        val result_type = MirType(kind: MirTypeKind.Array(mapped_type, 0))
+        val typed_result = b_push.new_temp(result_type)
+        b_push.emit_copy(typed_result, result_array)
+        self.builder = b_push
+        self.runtime_array_locals[typed_result.id] = true
+        self.mark_runtime_value_local(typed_result.id)
+        self.local_map = saved_local_map
+        self.local_symbol_ids = saved_local_symbol_ids
+        self.local_symbol_values = saved_local_symbol_values
+        typed_result
+
     me lower_array_map(arr: LocalId, map_params: [HirParam], map_body: HirExpr) -> LocalId:
         """Lower `arr.map(\\x: expr)` for a runtime `[i64]` array.
 

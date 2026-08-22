@@ -333,16 +333,42 @@ left-to-right short-circuit lowering records only evaluated atoms.
 
 HIR intentionally aliases statement `if` and value conditional/ternary into
 `HirExprKind.If`; their stable form is therefore `if-or-conditional`, rather
-than inventing a distinction erased by the authoritative semantic tree. Match
-guards and comprehension filters remain native-backend gaps and emit named
-`MCDC-BACKEND-INAPPLICABLE-*` diagnostics. They may affect an eligible
-denominator only after the existing signed `platform-inapplicable` evidence
-gate accepts them. Static assertions, preconditions, and postconditions are
-compile-time proof obligations erased before executable HIR and are catalogued
-as compile-time-only, not silently counted as runtime decisions.
+than inventing a distinction erased by the authoritative semantic tree.
+Match guards lower as independent `match-guard` decisions. Scalar guards use
+one ordered MIR chain so an irrefutable binding whose guard is false continues
+at the next source arm; enum guards run only after discriminant/deep-pattern
+success and payload binding. Both paths preserve `and`/`or` laziness, restore
+enclosing MC/DC state, and use the authored guard span in the stable identity.
+Every guarded scalar match must end with an unguarded wildcard or binding.
+Guarded enum matches may instead prove exhaustive when every declared variant
+has an unguarded candidate; earlier guarded candidates for the same variant
+retain source order and fall through to it. Other shapes emit fatal
+`MCDC-E-MATCH-GUARD-NONEXHAUSTIVE`. The scalar final irrefutable arm uses a
+direct edge, while an exhaustive enum's invalid-discriminant tail panics and is
+`Unreachable`; neither creates a merge predecessor with an undefined result or
+adds a synthetic fallback value. Optional result provenance is retained exactly
+as in the unguarded match owners. A guarded enum candidate after an earlier
+unguarded same-variant catch-all is fatal
+`MCDC-E-MATCH-GUARD-SUBSUMED`, preventing unreachable decisions from entering
+the MC/DC denominator. Catch-all proof is deliberately narrow: absent payload,
+or tuple payload containing only bindings/wildcards; deep/struct/literal
+payloads never subsume by variant name alone. The current enum collector cannot represent an
+irrefutable wildcard/binding before later variant arms; guarded instances fail
+closed with `MCDC-E-MATCH-GUARD-ORDER` instead of silently changing source
+order.
+Static-off emits no mask slots or recording call, while static and dynamic
+policies reuse the existing fixed masks and direct/dormant-patchpoint owners.
+Runtime `assert` is different from `static assert`: the
+parser lowers it to the raising `__assert` intrinsic, so its Boolean argument
+receives the stable `runtime-assertion` identity and the same bounded
+short-circuit vector instrumentation as another executable decision. Static
+assertions remain compile-time-only. Verification preconditions and
+postconditions are retained as typed proof metadata on the current native MIR
+path, but are not executed there; they remain compile-time-only rather than
+fabricating runtime coverage for predicates that did not run.
 
 The census construction and instrumentation walk are O(HIR nodes). The catalog
-is eight constant rows; no runtime probe-path allocation, lookup, or dispatch is
+is nine constant rows; no runtime probe-path allocation, lookup, or dispatch is
 introduced. Static-off still bypasses decision construction entirely.
 
 - Per-thread fixed shards; one compact commit per decision evaluation.
