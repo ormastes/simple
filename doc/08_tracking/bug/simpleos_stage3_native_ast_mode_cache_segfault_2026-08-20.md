@@ -1621,3 +1621,36 @@ surface 5 around direct declaration lookup, explicit-import origin lookup,
 retained-origin lookup, explicit-route detection, sibling-origin lookup, and
 origin-index insertion. No trusted Stage 3, ARM64 SimpleOS artifact, or QEMU
 2D, web, GUI, or window-manager evidence is claimed.
+
+## Imported export-item scalarization cycles (2026-08-22)
+
+Cycle 1 added numeric declaration/item and sub-operation receipts only for
+surface 5. The failing authored item is declaration 7/item 3,
+`process_run_bounded`, from
+`src/std/nogc_sync_mut/io_runtime.spl`. Direct declaration lookup correctly
+returned missing. The process exited 139 after `explicit:start` and before
+`explicit:return`, proving the crash was inside
+`module_surface_explicit_import_origin` while traversing the retained named
+`ParserImport`/`ImportItem` route.
+
+Cycle 2 replaced that named-import tier with the surface's frozen scalar
+projections: target indices, item offsets, names, aliases, and alias flags. Its
+first Phase-2 build failed discovery with a concrete parse error at the split
+conditional expression `if has_alias and` followed by the second operand on
+the next line. The diagnostic was finally surfaced in the stage log despite
+the wrapper's initial no-diagnostic summary.
+
+Cycle 3 kept the compact condition on one line. Phase 2 then passed compiler
+sanity and the struct-receiver/runtime capability gate, and the bound Stage-3
+admission plus both cache-ownership checks passed. Stage 3 still exited 139
+after all 694 surfaces and before `phase2:parse:done`; with probes removed, this
+run does not prove that the scalar named-import helper returned. No candidate,
+sanity receipt, or provenance manifest existed.
+
+The three-cycle cap is exhausted. The scalar named-import correction remains
+because it removes the directly diagnosed retained aggregate traversal. A
+fresh session must add entry/return receipts inside that scalar helper and, if
+it returns, resume sub-operation tracing at the first-pass caller. The split
+conditional-expression parse failure is also concrete language evidence; do
+not reintroduce that unaccepted line break. No trusted Stage 3, ARM64 SimpleOS
+artifact, or QEMU rendering evidence is claimed.

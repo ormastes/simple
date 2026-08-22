@@ -427,52 +427,53 @@ pub(package) fn module_surface_explicit_import_origin(
     # Named imports are the strict first tier. If a matching named route is
     # delayed, do not let a currently-resolved glob route replace it.
     var has_named_route = false
-    for import_decl in facade.imports:
-        if module_surface_import_owner_is_physical_self(
-            surfaces, name_index, facade, import_decl.module):
-            continue
-        for item in import_decl.items:
-            val imported_local = if item.has_alias: item.alias else: item.name
-            if imported_local == source_name or imported_local == local_name:
-                has_named_route = true
-
     var found = false
     var selected = ModuleSurfaceExportOrigin(
         owner_module: "", source_name: "", resolution_kind: "")
-    if has_named_route:
-        for import_decl in facade.imports:
-            val owner_index = module_surface_index_by_name(
-                name_index, import_decl.module)
-            if owner_index < 0 or owner_index >= surfaces.len():
-                continue
+    var import_index = 0
+    while import_index < facade.import_target_indices.len() and
+          import_index + 1 < facade.import_item_offsets.len():
+        val owner_index = facade.import_target_indices[import_index]
+        val item_end = facade.import_item_offsets[import_index + 1]
+        var item_index = facade.import_item_offsets[import_index]
+        if owner_index >= 0 and owner_index < surfaces.len():
             val owner = surfaces[owner_index]
-            if owner.canonical_path == facade.canonical_path:
-                continue
-            for item in import_decl.items:
-                val imported_local = if item.has_alias: item.alias else: item.name
+            while owner.canonical_path != facade.canonical_path and
+                  item_index < item_end and
+                  item_index < facade.import_item_names.len():
+                val item_name = facade.import_item_names[item_index]
+                val has_alias = item_index < facade.import_item_has_alias.len() and
+                    facade.import_item_has_alias[item_index]
+                val imported_local = if has_alias and item_index < facade.import_item_aliases.len():
+                    facade.import_item_aliases[item_index]
+                else:
+                    item_name
                 if imported_local != source_name and imported_local != local_name:
+                    item_index = item_index + 1
                     continue
+                has_named_route = true
                 var candidate_found = false
                 var candidate = ModuleSurfaceExportOrigin(
                     owner_module: "", source_name: "", resolution_kind: "")
-                if module_surface_declares_item(owner, item.name):
+                if module_surface_declares_item(owner, item_name):
                     candidate = ModuleSurfaceExportOrigin(
                         owner_module: owner.module_name,
-                        source_name: item.name,
-                        resolution_kind: if item.has_alias: "alias" else: "explicit"
+                        source_name: item_name,
+                        resolution_kind: if has_alias: "alias" else: "explicit"
                     )
                     candidate_found = true
                 else:
                     val owner_origin_index_item: ModuleSurfaceExportOriginIndex = owner.export_origin_index
-                    val terminal_lookup = module_surface_export_origin_index_lookup(owner_origin_index_item, item.name)
+                    val terminal_lookup = module_surface_export_origin_index_lookup(owner_origin_index_item, item_name)
                     if terminal_lookup.found:
                         candidate = ModuleSurfaceExportOrigin(
                             owner_module: terminal_lookup.owner_module,
                             source_name: terminal_lookup.source_name,
-                            resolution_kind: if item.has_alias: "alias" else: "explicit"
+                            resolution_kind: if has_alias: "alias" else: "explicit"
                         )
                         candidate_found = true
                 if not candidate_found:
+                    item_index = item_index + 1
                     continue
                 if not found:
                     selected = candidate
@@ -481,6 +482,9 @@ pub(package) fn module_surface_explicit_import_origin(
                       selected.source_name != candidate.source_name):
                     return module_surface_origin_error(
                         "ambiguous explicit facade export: module={facade.module_name} item={local_name}")
+                item_index = item_index + 1
+        import_index = import_index + 1
+    if has_named_route:
         if found:
             return module_surface_origin_found(
                 selected.owner_module, selected.source_name, selected.resolution_kind)
