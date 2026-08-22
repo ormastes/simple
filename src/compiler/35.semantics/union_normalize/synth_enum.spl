@@ -19,7 +19,7 @@ use compiler.hir.hir_definitions.{
 }
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.semantics.union_normalize.canonical.{
-    union_normalize_members, union_member_keys, union_canonical_name, union_variant_name
+    UnionNormalized, union_normalize, union_variant_name
 }
 
 # Synthetic symbol ids live above this base so they cannot alias a real one.
@@ -42,9 +42,16 @@ fn synth_union_enum(members: [HirType], span_from: HirType) -> HirEnum:
     is the discriminant and the payload is the narrowed value -- exactly the
     shape `HirPatternKind.Enum(type_, variant, payload)` and MIR's tagged enum
     layout already consume."""
-    val norm = union_normalize_members(members)
-    val keys = union_member_keys(members)
-    val name = union_canonical_name(members)
+    synth_union_enum_normalized(union_normalize(members), span_from)
+
+fn synth_union_enum_normalized(
+    normalized: UnionNormalized, span_from: HirType
+) -> HirEnum:
+    """Build from one canonicalization result so keys, payloads, and name
+    cannot diverge or repeat flatten/key/sort work."""
+    val norm = normalized.members
+    val keys = normalized.keys
+    val name = normalized.name
     var variants: [HirVariant] = []
     var i = 0
     for k in keys:
@@ -166,7 +173,7 @@ fn union_normalize_module(module: HirModule) -> HirModule:
     Idempotent: the canonical name is the identity, so running the pass twice
     (or two unions spelled differently that normalize alike) registers once."""
     var out = module
-    var registered: [text] = []
+    var registered: Dict<text, bool> = {}
     for ut in collect_union_types(module):
         var members: [HirType] = []
         # collect_union_types only ever yields Union types; a non-union here
@@ -178,15 +185,12 @@ fn union_normalize_module(module: HirModule) -> HirModule:
             case non_union_kind_from_collector: members = []
         if members.len() < 2:
             continue
-        val name = union_canonical_name(members)
-        var seen = false
-        for r in registered:
-            if r == name:
-                seen = true
-        if seen:
+        val normalized = union_normalize(members)
+        val name = normalized.name
+        if registered.contains_key(name):
             continue
-        registered = registered.push(name)
-        val e = synth_union_enum(members, ut)
+        registered[name] = true
+        val e = synth_union_enum_normalized(normalized, ut)
         out.enums[e.symbol] = e
     out
 
@@ -199,5 +203,6 @@ fn union_synth_enum_names(module: HirModule) -> [text]:
     out
 
 export UNION_SYNTH_SYMBOL_BASE, union_synth_symbol_id, synth_union_enum
+export synth_union_enum_normalized
 export collect_union_types_in_type, collect_union_types
 export union_normalize_module, union_synth_enum_names
