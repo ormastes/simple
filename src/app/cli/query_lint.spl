@@ -33,6 +33,10 @@ fn _governed_lint_codes() -> [text]:
     ["primitive_api", "bare_bool", "simple_script_required",
      "T001", "T002", "T003", "T004", "ARG001", "ARG002", "ACC001", "NAME001",
      "DTYP001",
+     "COLL001", "COLL002", "COLL003", "COLL004", "COLL005", "COLL006",
+     "COLL007", "COLL008", "COLL009", "COLL010", "COLL011", "COLL012",
+     "COLL013", "COLL014", "COLL015", "COLL016", "COLL017", "COLL018",
+     "COLL019",
      "STUB001", "STUB002", "STUB003",
      "SPIPE001", "SPIPE002", "SPIPE003", "SPIPE004", "SPIPE005", "SPIPE006", "SPIPE007",
      "I001", "I002", "I003", "C002",
@@ -57,7 +61,10 @@ fn _apply_lint_config_overrides(cfg: LintConfig):
             case Allow:
                 _DIAG_SEVERITY_OVERRIDE[code] = -1
             case Deny:
-                _DIAG_SEVERITY_OVERRIDE[code] = 1
+                # Query collection diagnostics are still source-pattern facts.
+                # A profile is policy, not typed proof, so keep them advisory.
+                if not code.starts_with("COLL"):
+                    _DIAG_SEVERITY_OVERRIDE[code] = 1
             case Warn:
                 val _ = 0
 
@@ -679,12 +686,18 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
         # warning severity and disclose the missing proof rather than allowing
         # a textual HIGH label to look like a proven error.
         val uncertainty = "source-pattern fallback; receiver type, effects, aliasing, and mutation version are unresolved"
-        val advisory_message = "{w.message} ({uncertainty})"
         if format == "json":
-            val msg = _escape_json(advisory_message)
-            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+            val msg = _escape_json(w.message)
+            val item_evidence = _escape_json("item=" + w.item_name)
+            val severity_evidence = _escape_json("source_severity=" + w.severity)
+            val uncertainty_json = _escape_json(uncertainty)
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"confidence\":\"source-pattern\",\"evidence\":[\"{item_evidence}\",\"{severity_evidence}\"],\"uncertainty\":\"{uncertainty_json}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
         else:
-            print "{file}:{line_num}: warning[{w.code}]: {advisory_message}"
+            print "{file}:{line_num}: warning[{w.code}]: {w.message}"
+            print "  confidence: source-pattern"
+            print "  evidence: item={w.item_name}"
+            print "  evidence: source_severity={w.severity}"
+            print "  uncertainty: {uncertainty}"
         count = count + 1
 
     # --- C3: DTYP001 — duplicate typed argument detection ---
