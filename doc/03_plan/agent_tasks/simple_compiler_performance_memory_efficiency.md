@@ -426,3 +426,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Replace direct-transform fixtures/manual with effective-pipeline and fail-closed contracts.
 - Record deleted source/IR, avoided direct-call allocations, and malformed-result prevention as compiler performance/memory/correctness hardening.
 - Follow-up: design one shared typed evaluator with exact target semantics, structured rejections, changed flags, receipts, verification, and differential tests.
+
+## Completed tooling tranche: compact lint results in place
+
+- Replace the second filtered result array with stable request-owned read/write compaction.
+- Preserve ordering and construct isolated records only for severity changes.
+- Truncate the tail after the captured original range is fully scanned.
+- Pin `write <= read` algorithm shape and absence of the second buffer with source contracts.
+- Reduce peak diagnostic reference/capacity retention without relying on mutable aliases.
+- Follow-up: migrate remaining safe split-based lint wrappers to the canonical line view; preserve intentionally transformed/masked views.
