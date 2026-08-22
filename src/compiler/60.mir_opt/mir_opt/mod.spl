@@ -247,6 +247,7 @@ struct PassRunRecord:
 struct MirStructuralVerificationReceipt:
     valid: bool
     errors: [text]
+    error_codes: [text]
     block_count: i64
     instruction_count: i64
 
@@ -509,6 +510,30 @@ fn pass_run_record_for_unavailable_request(pass_name: text) -> PassRunRecord:
             skipped = pass_run_record_add_reason(skipped, "not_run", 1)
     skipped
 
+fn mir_structural_verification_error_code(message: text) -> text:
+    if message == "negative local identity": return "MIRV001"
+    if message.starts_with("duplicate local identity:"): return "MIRV002"
+    if message.starts_with("argument local index is outside"): return "MIRV003"
+    if message.starts_with("duplicate argument local index:"): return "MIRV004"
+    if (message.starts_with("argument local ") and
+        message.ends_with(" type does not match signature")):
+        return "MIRV005"
+    if message.starts_with("missing argument local index:"): return "MIRV006"
+    if message == "return local type does not match function signature": return "MIRV007"
+    if message == "multiple return locals": return "MIRV008"
+    if message == "negative block identity": return "MIRV009"
+    if message.starts_with("duplicate block identity:"): return "MIRV010"
+    if message == "function has no basic blocks": return "MIRV011"
+    if message == "entry block is outside the function": return "MIRV012"
+    if message.starts_with("uncovered MIR access in block "): return "MIRV013"
+    if message.contains(" instruction ") and message.contains(" uses missing local "): return "MIRV014"
+    if message.contains(" instruction ") and message.contains(" defines missing local "): return "MIRV015"
+    if message.starts_with("uncovered terminator access in block "): return "MIRV016"
+    if message.contains(" terminator uses missing local "): return "MIRV017"
+    if message.contains(" terminator defines missing local "): return "MIRV018"
+    if message.contains(" targets missing block "): return "MIRV019"
+    "MIRV999"
+
 fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerificationReceipt:
     """Fail-closed minimum verifier for optimizer boundaries.
 
@@ -621,7 +646,12 @@ fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerifi
                     if not block_ids.has(unwind_target.id):
                         errors.push("block " + block.id.id.to_string() + " targets missing block " + unwind_target.id.to_string())
             case Ret(_) | Unreachable | Abort(_): pass_dn
-    MirStructuralVerificationReceipt(errors.is_empty(), errors, func.blocks.len(), instruction_count)
+    var error_codes: [text] = []
+    for error in errors:
+        error_codes.push(mir_structural_verification_error_code(error))
+    MirStructuralVerificationReceipt(
+        errors.is_empty(), errors, error_codes,
+        func.blocks.len(), instruction_count)
 
 fn run_named_pass_with_record(pass_name: text, func: MirFunction) -> Result<PassFunctionOutcome, text>:
     """Run one function-scoped pass with structural before/after receipts.
@@ -1626,6 +1656,7 @@ export PassKind, PassScope, PassStatus, PassExpectation, MirPassBackendOutcome
 export PassWitnessContract, pass_witness_contract, pass_witness_registry_integrity_errors
 export PassRunDisposition, PassReasonCount, PassRunRecord
 export MirStructuralVerificationReceipt, PassFunctionOutcome
+export mir_structural_verification_error_code
 export pass_run_record_new, pass_run_record_add_reason, pass_run_record_integrity_errors
 export pass_run_record_for_unavailable_request
 export mir_structural_verification_receipt, run_named_pass_with_record
