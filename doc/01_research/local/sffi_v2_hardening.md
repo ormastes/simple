@@ -1382,3 +1382,10 @@ checks pass, and lint has zero errors. Each operation keeps one availability
 query and one raw operation call; the second 2-D slice remains intrinsically a
 second operation, with no retry, synchronization, lookup, hash, or allocation
 added by validation.
+
+Dynamic Torch reshape ranks 1-4 and permute ranks 2-4 now expose only typed
+results. `TorchNDArray` matches those results before lifting a handle; transpose
+uses the same typed permute path. The status spec passes 5/5, both source checks
+pass, and lint has zero errors. Each wrapper contains one availability query,
+constant-time input validation, one raw call, and one output-handle check, with
+no allocation, lookup, hashing, I/O, retry, or synchronization added.

@@ -1089,3 +1089,9 @@ checks and lint pass. Continue with reshape/permute/cat/stack/binary/to-float
 inside `dyn_sffi_tensor_ops`, then fixed-dimension constructors and scalar
 reductions. Preserve one raw call per logical operation and explicit cleanup
 for every intermediate tensor.
+
+Reshape ranks 1-4 and permute ranks 2-4 now return typed results through all
+production callers. Status tests pass 5/5, focused checks and lint pass, and
+each wrapper keeps exactly one raw operation call. Continue with cat/stack,
+binary operations, and to-float; then migrate fixed-dimension constructors and
+scalar reductions. Do not combine valid numeric zero with provider failure.
