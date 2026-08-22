@@ -11,6 +11,9 @@ val MCDC_EXPR_TOKEN_V1_BYTES: i64 = 8
 val MCDC_MANIFEST_INFO_V1_BYTES: i64 = 96
 val MCDC_EXCLUSION_V1_BYTES: i64 = 376
 val MCDC_REPORT_V1_BYTES: i64 = 152
+val MCDC_SOURCE_LOCATION_V2_BYTES: i64 = 32
+val MCDC_DECISION_REPORT_V2_BYTES: i64 = 208
+val MCDC_REPORT_V2_BYTES: i64 = 256
 val MCDC_STATUS_OK: i32 = 0
 val MCDC_STATUS_INVALID: i32 = 2
 val MCDC_STATUS_BUSY: i32 = 7
@@ -76,6 +79,22 @@ extern fn rt_mcdc_report_mcdp_v1(
     tokens: i64, token_capacity: u64,
     witnesses: i64, witness_capacity: u64,
     proof_budget: u64, report: i64
+) -> i32
+extern fn rt_mcdc_report_mcdp_v2(
+    events: i64, event_count: u64, manifest: i64, manifest_bytes: u64,
+    binary_identity_sha256: i64,
+    exclusions: i64, exclusion_count: u64,
+    locations: i64, location_count: u64,
+    current_epoch: u64, mode: u32, process_id: u64, process_sequence: u64,
+    programs: i64, program_capacity: u64,
+    tokens: i64, token_capacity: u64,
+    witnesses: i64, witness_capacity: u64,
+    decision_rows: i64, decision_capacity: u64,
+    proof_budget: u64, report: i64
+) -> i32
+extern fn rt_mcdc_merge_reports_v2(
+    inputs: i64, input_count: u64, outputs: i64, output_capacity: u64,
+    report: i64
 ) -> i32
 extern fn rt_mcdc_collector_reset_v1()
 extern fn rt_mcdc_collector_reset_checked_v1() -> i32
@@ -195,6 +214,67 @@ fn mcdc_runtime_report_manifest(
         (witnesses.len() / MCDC_WITNESS_V1_BYTES) as u64,
         proof_budget, rt_array_data_ptr(report))
 
+fn mcdc_runtime_report_manifest_v2(
+    events: [u8], manifest: [u8], binary_identity_sha256: [u8],
+    exclusions: [u8], locations: [u8], current_epoch: u64,
+    mode: u32, process_id: u64, process_sequence: u64,
+    programs: [u8], tokens: [u8], witnesses: [u8],
+    decision_rows: [u8], proof_budget: u64, report: [u8]
+) -> i32:
+    """Build a complete V2 report using only caller-owned fixed buffers."""
+    if events.len() % MCDC_VECTOR_V1_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if exclusions.len() % MCDC_EXCLUSION_V1_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if locations.len() % MCDC_SOURCE_LOCATION_V2_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if programs.len() % MCDC_DECISION_EXPR_V1_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if tokens.len() % MCDC_EXPR_TOKEN_V1_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if witnesses.len() % MCDC_WITNESS_V1_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if decision_rows.len() % MCDC_DECISION_REPORT_V2_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if binary_identity_sha256.len() != 64 or report.len() != MCDC_REPORT_V2_BYTES:
+        return MCDC_STATUS_INVALID
+    if manifest.len() == 0 or process_id == 0u64 or process_sequence == 0u64:
+        return MCDC_STATUS_INVALID
+    rt_mcdc_report_mcdp_v2(
+        rt_array_data_ptr(events), (events.len() / MCDC_VECTOR_V1_BYTES) as u64,
+        rt_array_data_ptr(manifest), manifest.len() as u64,
+        rt_array_data_ptr(binary_identity_sha256),
+        rt_array_data_ptr(exclusions),
+        (exclusions.len() / MCDC_EXCLUSION_V1_BYTES) as u64,
+        rt_array_data_ptr(locations),
+        (locations.len() / MCDC_SOURCE_LOCATION_V2_BYTES) as u64,
+        current_epoch, mode, process_id, process_sequence,
+        rt_array_data_ptr(programs),
+        (programs.len() / MCDC_DECISION_EXPR_V1_BYTES) as u64,
+        rt_array_data_ptr(tokens),
+        (tokens.len() / MCDC_EXPR_TOKEN_V1_BYTES) as u64,
+        rt_array_data_ptr(witnesses),
+        (witnesses.len() / MCDC_WITNESS_V1_BYTES) as u64,
+        rt_array_data_ptr(decision_rows),
+        (decision_rows.len() / MCDC_DECISION_REPORT_V2_BYTES) as u64,
+        proof_budget, rt_array_data_ptr(report))
+
+fn mcdc_runtime_merge_reports_v2(inputs: [u8], outputs: [u8],
+                                 report: [u8]) -> i32:
+    """Merge sorted authenticated V2 rows into caller-owned output storage."""
+    if inputs.len() == 0 or inputs.len() % MCDC_DECISION_REPORT_V2_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if outputs.len() % MCDC_DECISION_REPORT_V2_BYTES != 0:
+        return MCDC_STATUS_INVALID
+    if report.len() != MCDC_REPORT_V2_BYTES:
+        return MCDC_STATUS_INVALID
+    rt_mcdc_merge_reports_v2(
+        rt_array_data_ptr(inputs),
+        (inputs.len() / MCDC_DECISION_REPORT_V2_BYTES) as u64,
+        rt_array_data_ptr(outputs),
+        (outputs.len() / MCDC_DECISION_REPORT_V2_BYTES) as u64,
+        rt_array_data_ptr(report))
+
 fn mcdc_runtime_reset():
     rt_mcdc_collector_reset_v1()
 
@@ -206,6 +286,8 @@ export MCDC_WITNESS_V1_BYTES, MCDC_ANALYSIS_V1_BYTES
 export MCDC_DECISION_EXPR_V1_BYTES, MCDC_EXPR_TOKEN_V1_BYTES
 export MCDC_MANIFEST_INFO_V1_BYTES
 export MCDC_EXCLUSION_V1_BYTES, MCDC_REPORT_V1_BYTES
+export MCDC_SOURCE_LOCATION_V2_BYTES, MCDC_DECISION_REPORT_V2_BYTES
+export MCDC_REPORT_V2_BYTES
 export MCDC_STATUS_OK, MCDC_STATUS_INVALID, MCDC_STATUS_BUSY, MCDC_STATUS_DRAINING
 export MCDC_STATUS_GATE_FAILED, MCDC_STATUS_EMPTY_DENOMINATOR
 export MCDC_STATUS_EXCLUSION_INVALID
@@ -216,6 +298,7 @@ export mcdc_runtime_analyze_unique
 export mcdc_runtime_analyze_manifest
 export mcdc_runtime_sort_vectors
 export mcdc_runtime_report_manifest
+export mcdc_runtime_report_manifest_v2, mcdc_runtime_merge_reports_v2
 export mcdc_compiled_owner_configure, mcdc_compiled_owner_release
 export mcdc_compiled_record, mcdc_compiled_last_status
 export mcdc_dynamic_bind_compiled, mcdc_dynamic_unbind_compiled

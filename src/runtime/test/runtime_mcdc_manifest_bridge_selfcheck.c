@@ -210,6 +210,14 @@ int main(void) {
     corrupted_rows[1] = corrupted_rows[0];
     assert(rt_mcdc_merge_reports_v2(corrupted_rows, 2, merged_rows, 1,
                                      &report_v2) == SIMPLE_MCDC_V1_DUPLICATE);
+    memcpy(corrupted_rows, process_rows, sizeof(corrupted_rows));
+    corrupted_rows[1].process_id = 0;
+    assert(rt_mcdc_merge_reports_v2(corrupted_rows, 2, merged_rows, 1,
+                                     &report_v2) == SIMPLE_MCDC_V1_INVALID);
+    memcpy(corrupted_rows, process_rows, sizeof(corrupted_rows));
+    memset(corrupted_rows[1].binary_identity_sha256, 0, 64);
+    assert(rt_mcdc_merge_reports_v2(corrupted_rows, 2, merged_rows, 1,
+                                     &report_v2) == SIMPLE_MCDC_V1_INVALID);
     assert(rt_mcdc_merge_reports_v2(process_rows, 2, merged_rows, 0,
                                      &report_v2) == SIMPLE_MCDC_V1_OUTPUT_TOO_SMALL);
 

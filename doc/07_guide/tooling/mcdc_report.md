@@ -53,6 +53,24 @@ for both decisions and conditions, the exact witnessed-pair count, report mode,
 binary identity, explicit source spans, and process provenance. All output and
 workspace storage is caller-owned. It performs no heap allocation.
 
+The concise command remains V1 by default. Request the complete report
+explicitly; the location file contains one 32-byte row in exact manifest order
+and the identity file contains exactly 64 raw lowercase hexadecimal bytes (no
+newline):
+
+```text
+simple coverage mcdc --report-version v2 \
+  --manifest build/test.mcdp --events build/test.mcdc-events \
+  --locations build/test.mcdc-locations-v2 \
+  --binary-identity build/test.binary.sha256 \
+  --process-id 41 --process-sequence 1 --max-output-lines 20000
+```
+
+V2 prints every decision source span and authenticated row, every concrete
+independence witness, both decision and condition totals, executable identity,
+process provenance, and the complete-report receipt in canonical order. It
+checks the line budget before formatting and fails instead of truncating.
+
 For cross-process coverage, concatenate complete per-process decision rows and
 sort once by `(source_digest, decision_id, process_id, process_sequence)`.
 `rt_mcdc_merge_reports_v2` then merges the rows in one deterministic O(N) pass.
@@ -60,6 +78,17 @@ Every decision must contain the same ordered process set. Duplicate process
 contributions, omitted rows, mixed identities/modes/locations/exclusions, and
 changed rows whose digest was not updated fail closed. Output is a fixed
 caller-owned decision array; insufficient capacity also fails closed.
+
+The cold-path merge CLI accepts already sorted fixed rows. Aggregate size is
+checked before reads, and missing process/binary identity fails closed. Output
+includes the canonical process set and one merged-witness line for every
+covered condition; both count against the all-or-nothing line bound:
+
+```text
+simple coverage mcdc-merge \
+  --input build/process-41.rows-v2 --input build/process-42.rows-v2 \
+  --max-input-rows 16384 --max-output-lines 20000
+```
 
 Every workspace is allocated before the allocation-free report boundary. The
 defaults cap events at 65,536 rows (4 MiB), manifests at 64 KiB, programs at

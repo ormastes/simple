@@ -2044,7 +2044,10 @@ int32_t rt_mcdc_merge_reports_v2(
         if (!first->decision_id || !first->source_digest ||
             !first->source_file_digest || !first->line || !first->column ||
             !first->condition_count || first->condition_count > 62u ||
-            first->mode > SIMPLE_MCDC_REPORT_BETA_V1)
+            first->mode > SIMPLE_MCDC_REPORT_BETA_V1 ||
+            !first->process_id || !first->process_sequence ||
+            !mcdc_manifest_identity_valid_v1(
+                first->binary_identity_sha256))
             return SIMPLE_MCDC_V1_INVALID;
         uint64_t covered = 0;
         while (i < (size_t)input_count &&
@@ -2054,6 +2057,8 @@ int32_t rt_mcdc_merge_reports_v2(
             if (i && mcdc_merge_order_v2(&inputs[i - 1], row) >= 0)
                 return mcdc_merge_order_v2(&inputs[i - 1], row) == 0
                     ? SIMPLE_MCDC_V1_DUPLICATE : SIMPLE_MCDC_V1_INVALID;
+            if (!row->process_id || !row->process_sequence)
+                return SIMPLE_MCDC_V1_INVALID;
             mcdc_decision_row_digest_v2(row, expected_digest);
             if (memcmp(expected_digest, row->row_provenance_sha256, 64u))
                 return SIMPLE_MCDC_V1_TAMPERED;

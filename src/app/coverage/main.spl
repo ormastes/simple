@@ -25,7 +25,10 @@ use std.nogc_sync_mut.io.coverage_mcdc.{
     MCDC_DECISION_EXPR_V1_BYTES, MCDC_EXPR_TOKEN_V1_BYTES,
     MCDC_WITNESS_V1_BYTES, MCDC_STATUS_OK, MCDC_STATUS_GATE_FAILED,
     MCDC_STATUS_EMPTY_DENOMINATOR,
-    mcdc_runtime_report_manifest
+    MCDC_SOURCE_LOCATION_V2_BYTES, MCDC_DECISION_REPORT_V2_BYTES,
+    MCDC_REPORT_V2_BYTES,
+    mcdc_runtime_report_manifest, mcdc_runtime_report_manifest_v2,
+    mcdc_runtime_merge_reports_v2
 }
 use std.common.structural.mcdc.contracts.{
     McdcReportModeV1, mcdc_coverage_summary_v1, mcdc_normal_gate_v1
@@ -99,6 +102,16 @@ fn print_usage():
     print "            --max-tokens <n>        Boolean token bound (default: 65536)"
     print "            --max-witnesses <n>     Evidence bound (default: 65536)"
     print "            --proof-budget <n>      Masking proof bound (default: 1000000)"
+    print "            --report-version <v>    v1|v2 (default: v1)"
+    print "            --locations <file>      V2 fixed 32-byte source rows"
+    print "            --binary-identity <file> V2 raw lowercase executable SHA-256 text"
+    print "            --process-id <n>        V2 nonzero process identity"
+    print "            --process-sequence <n>  V2 nonzero process sequence"
+    print "            --max-output-lines <n>  Fail-closed V2 display bound"
+    print "  mcdc-merge Merge sorted authenticated V2 decision rows"
+    print "            --input <file>          Fixed 208-byte V2 rows; repeatable"
+    print "            --max-input-rows <n>    Aggregate row bound (default: 16384)"
+    print "            --max-output-lines <n>  Fail-closed display bound"
     print ""
     print "Shared log options:"
     for line in log_options_help():
@@ -265,6 +278,23 @@ fn _report_u64(bytes: [u8], offset: i64) -> u64:
         i = i + 1
     result
 
+fn _report_u32(bytes: [u8], offset: i64) -> u32:
+    var result: u32 = 0u32
+    var i = 0
+    while i < 4:
+        result = result | ((bytes[offset + i] as u32) << ((i * 8) as u32))
+        i = i + 1
+    result
+
+fn _fixed_text(bytes: [u8], offset: i64, byte_count: i64) -> text:
+    var selected: [u8] = []
+    selected.reserve(byte_count)
+    var i = 0
+    while i < byte_count:
+        selected.push(bytes[offset + i])
+        i = i + 1
+    bytes_to_text(selected)
+
 fn _report_digest(bytes: [u8]) -> text:
     var digest: [u8] = []
     var i = 88
@@ -273,9 +303,109 @@ fn _report_digest(bytes: [u8]) -> text:
         i = i + 1
     bytes_to_text(digest)
 
+fn _emit_mcdc_v2(report: [u8], rows: [u8], witnesses: [u8],
+                 witness_rows: i64, max_output_lines: i64) -> bool:
+    val decision_rows = _report_u64(report, 96) as i64
+    # Four summary lines, every decision row, and every concrete witness row.
+    # Refuse partial output: certification evidence must never look complete
+    # after display truncation.
+    if decision_rows < 0 or witness_rows < 0 or
+            decision_rows + witness_rows + 4 > max_output_lines:
+        print "Error: MC/DC V2 report exceeds --max-output-lines"
+        return false
+    val process_count = _report_u64(report, 88)
+    val process_id = _report_u64(report, 104)
+    val process_sequence = _report_u64(report, 112)
+    val mode = _report_u32(report, 120)
+    val gate = _report_u32(report, 124)
+    print "MC/DC report_schema=v2 mode={mode} gate={gate} process_count={process_count} process_id={process_id} process_sequence={process_sequence}"
+    print "MC/DC identity binary_sha256={_fixed_text(report, 128, 64)} provenance_sha256={_fixed_text(report, 192, 64)}"
+    print "MC/DC decisions gross={_report_u64(report, 0)} eligible={_report_u64(report, 8)} excluded={_report_u64(report, 16)} covered={_report_u64(report, 24)} uncovered={_report_u64(report, 32)}"
+    print "MC/DC conditions gross={_report_u64(report, 40)} eligible={_report_u64(report, 48)} excluded={_report_u64(report, 56)} covered={_report_u64(report, 64)} uncovered={_report_u64(report, 72)} witnessed_pairs={_report_u64(report, 80)}"
+    var row_index = 0
+    while row_index < decision_rows:
+        val offset = row_index * MCDC_DECISION_REPORT_V2_BYTES
+        print "MC/DC decision index={row_index} decision_id={_report_u64(rows, offset)} source_digest={_report_u64(rows, offset + 8)} file_digest={_report_u64(rows, offset + 16)} line={_report_u32(rows, offset + 64)} column={_report_u32(rows, offset + 68)} conditions={_report_u32(rows, offset + 72)} covered_mask={_report_u64(rows, offset + 24)} excluded_mask={_report_u64(rows, offset + 32)} eligible_mask={_report_u64(rows, offset + 40)} process_id={_report_u64(rows, offset + 48)} process_sequence={_report_u64(rows, offset + 56)} binary_sha256={_fixed_text(rows, offset + 80, 64)} row_provenance_sha256={_fixed_text(rows, offset + 144, 64)}"
+        row_index = row_index + 1
+    var witness_index = 0
+    while witness_index < witness_rows:
+        val offset = witness_index * MCDC_WITNESS_V1_BYTES
+        print "MC/DC witness index={witness_index} decision_id={_report_u64(witnesses, offset)} source_digest={_report_u64(witnesses, offset + 8)} condition={_report_u32(witnesses, offset + 16)} policy={_report_u32(witnesses, offset + 20)} owner_a={_report_u64(witnesses, offset + 24)} sequence_a={_report_u64(witnesses, offset + 32)} owner_b={_report_u64(witnesses, offset + 40)} sequence_b={_report_u64(witnesses, offset + 48)}"
+        witness_index = witness_index + 1
+    true
+
+fn cmd_mcdc_merge(args: [text]) -> i64:
+    val input_paths = get_all_args(args, "--input")
+    if input_paths.len() == 0:
+        print "Error: mcdc-merge requires at least one --input"
+        return 1
+    val max_input_rows = _bounded_number(args, "--max-input-rows", 16384, 1048576)
+    val max_output_lines = _bounded_number(args, "--max-output-lines", 20000, 1048580)
+    if max_input_rows <= 0 or max_output_lines < 4:
+        print "Error: MC/DC V2 merge capacity is invalid or above its hard bound"
+        return 1
+    var total_bytes: i64 = 0
+    for path in input_paths:
+        if not file_exists(path):
+            print "Error: MC/DC V2 merge input does not exist: {path}"
+            return 1
+        val byte_count = file_size(path)
+        if byte_count <= 0 or byte_count % MCDC_DECISION_REPORT_V2_BYTES != 0 or
+                total_bytes > max_input_rows * MCDC_DECISION_REPORT_V2_BYTES - byte_count:
+            print "Error: MC/DC V2 merge input is malformed or exceeds --max-input-rows"
+            return 1
+        total_bytes = total_bytes + byte_count
+    var inputs: [u8] = []
+    inputs.reserve(total_bytes)
+    for path in input_paths:
+        val part = file_read_bytes(path)
+        for byte in part:
+            inputs.push(byte)
+    val input_rows = total_bytes / MCDC_DECISION_REPORT_V2_BYTES
+    # At least two processes are required, so output rows cannot exceed the
+    # input count. The native owner validates the exact common process set.
+    var outputs = _zero_workspace(input_rows * MCDC_DECISION_REPORT_V2_BYTES)
+    var report = _zero_workspace(MCDC_REPORT_V2_BYTES)
+    val status = mcdc_runtime_merge_reports_v2(inputs, outputs, report)
+    if status != MCDC_STATUS_OK and status != MCDC_STATUS_GATE_FAILED:
+        print "MC/DC V2 merge=ERROR status={status}"
+        return 1
+    val merged_rows = _report_u64(report, 96) as i64
+    val merged_processes = _report_u64(report, 88) as i64
+    val merged_witnesses = _report_u64(report, 80) as i64
+    if merged_rows + merged_processes + merged_witnesses + 4 > max_output_lines:
+        print "Error: MC/DC V2 merge report exceeds --max-output-lines"
+        return 1
+    if not _emit_mcdc_v2(report, outputs, [], 0, max_output_lines):
+        return 1
+    var process_index = 0
+    while process_index < merged_processes:
+        val offset = process_index * MCDC_DECISION_REPORT_V2_BYTES
+        print "MC/DC merge_process index={process_index} process_id={_report_u64(inputs, offset + 48)} process_sequence={_report_u64(inputs, offset + 56)}"
+        process_index = process_index + 1
+    var row_index = 0
+    while row_index < merged_rows:
+        val offset = row_index * MCDC_DECISION_REPORT_V2_BYTES
+        val covered_mask = _report_u64(outputs, offset + 24)
+        val condition_count = _report_u32(outputs, offset + 72) as i64
+        var condition_index = 0
+        while condition_index < condition_count:
+            if (covered_mask & (1u64 << (condition_index as u64))) != 0u64:
+                print "MC/DC merged_witness decision_id={_report_u64(outputs, offset)} source_digest={_report_u64(outputs, offset + 8)} condition={condition_index}"
+            condition_index = condition_index + 1
+        row_index = row_index + 1
+    if status == MCDC_STATUS_OK:
+        print "MC/DC gate=PASS"
+        return 0
+    print "MC/DC gate=FAIL reason=eligible coverage is not exactly 100%"
+    1
+
 fn cmd_mcdc(args: [text]) -> i64:
     val manifest_path = get_arg(args, "--manifest", "")
     val events_path = get_arg(args, "--events", "")
+    val report_version = get_arg(args, "--report-version", "v1")
+    val locations_path = get_arg(args, "--locations", "")
+    val binary_identity_path = get_arg(args, "--binary-identity", "")
     val exclusions_path = get_arg(args, "--exclusions", "")
     val evidence_path = get_arg(args, "--exclusion-evidence", "")
     val trust_key_path = get_arg(args, "--exclusion-trust-key", "")
@@ -283,8 +413,19 @@ fn cmd_mcdc(args: [text]) -> i64:
     if manifest_path == "" or events_path == "":
         print "Error: mcdc requires --manifest and --events"
         return 1
+    if report_version != "v1" and report_version != "v2":
+        print "Error: --report-version must be v1 or v2"
+        return 1
+    if report_version == "v2" and
+            (locations_path == "" or binary_identity_path == ""):
+        print "Error: MC/DC V2 requires --locations and --binary-identity"
+        return 1
     if not file_exists(manifest_path) or not file_exists(events_path):
         print "Error: MC/DC manifest or events file does not exist"
+        return 1
+    if report_version == "v2" and
+            (not file_exists(locations_path) or not file_exists(binary_identity_path)):
+        print "Error: MC/DC V2 locations or binary identity file does not exist"
         return 1
     if exclusions_path != "" and not file_exists(exclusions_path):
         print "Error: MC/DC exclusions file does not exist"
@@ -323,10 +464,14 @@ fn cmd_mcdc(args: [text]) -> i64:
     val max_programs = _bounded_number(args, "--max-programs", 4096, 1048576)
     val max_tokens = _bounded_number(args, "--max-tokens", 65536, 8388608)
     val max_witnesses = _bounded_number(args, "--max-witnesses", 65536, 1048576)
+    val max_output_lines = _bounded_number(args, "--max-output-lines", 20000, 1048580)
     val proof_budget = _bounded_number(args, "--proof-budget", 1000000, 1000000000)
     val current_epoch = _bounded_number(args, "--current-epoch", 0, 9223372036854775807)
+    val process_id = _bounded_number(args, "--process-id", 1, 9223372036854775807)
+    val process_sequence = _bounded_number(args, "--process-sequence", 1, 9223372036854775807)
     if max_events < 0 or max_manifest_bytes <= 0 or max_programs <= 0 or max_tokens <= 0 or
-            max_witnesses <= 0 or proof_budget <= 0 or current_epoch < 0:
+            max_witnesses <= 0 or max_output_lines < 4 or proof_budget <= 0 or
+            current_epoch < 0 or process_id <= 0 or process_sequence <= 0:
         print "Error: MC/DC capacity/epoch argument is invalid or above its hard bound"
         return 1
     val mode_name = get_arg(args, "--mode", "normal")
@@ -337,6 +482,21 @@ fn cmd_mcdc(args: [text]) -> i64:
 
     var manifest = file_read_bytes(manifest_path)
     var events = file_read_bytes(events_path)
+    var locations: [u8] = []
+    var binary_identity: [u8] = []
+    if report_version == "v2":
+        val locations_bytes = file_size(locations_path)
+        val identity_bytes = file_size(binary_identity_path)
+        if locations_bytes <= 0 or
+                locations_bytes > max_programs * MCDC_SOURCE_LOCATION_V2_BYTES or
+                locations_bytes % MCDC_SOURCE_LOCATION_V2_BYTES != 0:
+            print "Error: MC/DC V2 locations are malformed or exceed --max-programs"
+            return 1
+        if identity_bytes != 64:
+            print "Error: MC/DC V2 binary identity must be exactly 64 raw lowercase SHA-256 bytes"
+            return 1
+        locations = file_read_bytes(locations_path)
+        binary_identity = file_read_bytes(binary_identity_path)
     var exclusions: [u8] = []
     if exclusions_path != "":
         exclusions = file_read_bytes(exclusions_path)
@@ -386,16 +546,41 @@ fn cmd_mcdc(args: [text]) -> i64:
     var programs = _zero_workspace(max_programs * MCDC_DECISION_EXPR_V1_BYTES)
     var tokens = _zero_workspace(max_tokens * MCDC_EXPR_TOKEN_V1_BYTES)
     var witnesses = _zero_workspace(max_witnesses * MCDC_WITNESS_V1_BYTES)
-    var report = _zero_workspace(MCDC_REPORT_V1_BYTES)
-    val status = mcdc_runtime_report_manifest(
-        events, manifest, exclusions, current_epoch as u64, mode as u32,
-        programs, tokens, witnesses, proof_budget as u64, report)
+    var report = if report_version == "v2":
+        _zero_workspace(MCDC_REPORT_V2_BYTES)
+    else:
+        _zero_workspace(MCDC_REPORT_V1_BYTES)
+    var decision_rows: [u8] = []
+    var status: i32 = MCDC_STATUS_INVALID
+    if report_version == "v2":
+        decision_rows = _zero_workspace(max_programs * MCDC_DECISION_REPORT_V2_BYTES)
+        status = mcdc_runtime_report_manifest_v2(
+            events, manifest, binary_identity, exclusions, locations,
+            current_epoch as u64, mode as u32,
+            process_id as u64, process_sequence as u64,
+            programs, tokens, witnesses, decision_rows,
+            proof_budget as u64, report)
+    else:
+        status = mcdc_runtime_report_manifest(
+            events, manifest, exclusions, current_epoch as u64, mode as u32,
+            programs, tokens, witnesses, proof_budget as u64, report)
 
     if status != MCDC_STATUS_OK and status != MCDC_STATUS_GATE_FAILED:
         if status == MCDC_STATUS_EMPTY_DENOMINATOR:
             print "MC/DC gate=ERROR reason=eligible denominator is empty"
             return 1
         print "MC/DC gate=ERROR status={status}"
+        return 1
+
+    if report_version == "v2":
+        val witness_rows = _report_u64(report, 80) as i64
+        if not _emit_mcdc_v2(
+                report, decision_rows, witnesses, witness_rows, max_output_lines):
+            return 1
+        if status == MCDC_STATUS_OK:
+            print "MC/DC gate=PASS"
+            return 0
+        print "MC/DC gate=FAIL reason=eligible coverage is not exactly 100%"
         return 1
 
     val eligible = _report_u64(report, 24)
@@ -471,6 +656,8 @@ fn main() -> i64:
             return cmd_summary(args)
         case "mcdc":
             return cmd_mcdc(args)
+        case "mcdc-merge":
+            return cmd_mcdc_merge(args)
         case "--help" | "-h" | "help":
             print_usage()
             return 0
