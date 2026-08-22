@@ -13,8 +13,8 @@
 #   3. Identify natural loops (blocks reachable from backedge sources)
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir_opt.mir_opt.perf_facts.{PerfFacts, perf_facts_build, perf_facts_successors, perf_facts_predecessors, perf_facts_dominates}
 
 # ============================================================================
 # Edge Pair
@@ -91,112 +91,70 @@ impl LoopDetector:
         """
         Detect all loops in function.
 
-        For now, simple heuristic:
-        - Look for blocks that jump backwards (to earlier block)
-        - These indicate potential loops
+        A natural-loop backedge is an edge whose target dominates its source.
+        Storage order and block IDs are never used as dominance substitutes.
         """
         # Reset loops
         self.loops = []
+        val facts = perf_facts_build(func)
 
-        # Pre-compute block index map for O(1) lookup
-        var block_idx_map = {}
-        for i in 0..(func.blocks.len()):
-            block_idx_map[func.blocks[i].id.id] = i
-
-        # Find potential loop headers (blocks jumped to from later blocks)
+        # Find natural-loop headers from dominance-proven backedges.
         var potential_headers: [BlockId] = []
         var header_set = {}
 
         for block in func.blocks:
-            val successors = self.get_successors(block.terminator)
+            val successors = perf_facts_successors(facts, block.id)
             for succ in successors:
-                # Check if successor appears earlier in block list (O(1) lookup)
-                val succ_idx = block_idx_map[succ.id] ?? -1
-                val block_idx = block_idx_map[block.id.id] ?? -1
-                if succ_idx <= block_idx:
-                    # Potential backedge
+                if perf_facts_dominates(facts, succ, block.id):
                     if not header_set.has(succ.id):
                         header_set[succ.id] = true
                         potential_headers = potential_headers.push(succ)
 
-        # Build LoopInfo for each header. build_loop_info returns nil when the
-        # candidate has no genuine backedge (a block-order "backedge" that is
-        # really a forward edge, e.g. `break` jumping to an earlier-listed exit
-        # block) so such pseudo-loops are dropped instead of driving unsound
-        # loop transforms (bug #160).
+        # Build LoopInfo for each dominance-proven header. The cycle-region
+        # check remains as a second fail-closed guard (bug #160).
         for header in potential_headers:
-            val loop_info_opt = self.build_loop_info(func, header)
+            val loop_info_opt = self.build_loop_info(func, header, facts)
             if loop_info_opt.?:
                 self.loops = self.loops.push(loop_info_opt.unwrap())
 
-    # WORKAROUND VERSION:
-    fn get_successors(term: MirTerminator) -> [BlockId]:
-        """Get successor blocks from terminator."""
-        val empty: [BlockId] = []
-        match term:
-            case Ret(_): empty
-            case Unreachable: empty
-            case Goto(target): [target]
-            case If(_, then_, else_): [then_, else_]
-            case Switch(_, targets, default):
-                var succs: [BlockId] = []
-                for case_item in targets:
-                    val sc: SwitchCase = case_item
-                    succs = succs.push(sc.target)
-                succs = succs.push(default)
-                succs
-            case CallTerminator(_, _, _, normal, unwind):
-                if val unwind_target = unwind:
-                    [normal, unwind_target]
-                else:
-                    [normal]
-            case _: empty
-
-    me reachable_from(func: MirFunction, start: BlockId) -> Dict<i64, bool>:
+    me reachable_from(facts: PerfFacts, start: BlockId) -> Dict<i64, bool>:
         """Blocks reachable from `start` via one or more CFG edges. `start`
         itself is marked only if it lies on a cycle."""
-        var succ_map: Dict<i64, [BlockId]> = {}
-        for block in func.blocks:
-            succ_map[block.id.id] = self.get_successors(block.terminator)
         var visited: Dict<i64, bool> = {}
         var stack: [BlockId] = []
-        for s in (succ_map[start.id] ?? []):
+        for s in perf_facts_successors(facts, start):
             stack = stack.push(s)
-        while stack.len() > 0:
-            val cur = stack[stack.len() - 1]
-            stack = stack[0 : stack.len() - 1]
+        var next_index = 0
+        while next_index < stack.len():
+            val cur = stack[next_index]
+            next_index = next_index + 1
             if visited.has(cur.id):
                 continue
             visited[cur.id] = true
-            for s in (succ_map[cur.id] ?? []):
+            for s in perf_facts_successors(facts, cur):
                 if not visited.has(s.id):
                     stack = stack.push(s)
         visited
 
-    me can_reach_target(func: MirFunction, target: BlockId) -> Dict<i64, bool>:
+    me can_reach_target(facts: PerfFacts, target: BlockId) -> Dict<i64, bool>:
         """Blocks that can reach `target` via one or more CFG edges."""
-        var preds: Dict<i64, [i64]> = {}
-        for block in func.blocks:
-            for s in self.get_successors(block.terminator):
-                var lst = preds[s.id] ?? []
-                lst = lst.push(block.id.id)
-                preds[s.id] = lst
         var visited: Dict<i64, bool> = {}
         var stack: [i64] = []
-        for p in (preds[target.id] ?? []):
+        for p in perf_facts_predecessors(facts, target):
             stack = stack.push(p)
-        while stack.len() > 0:
-            val cur = stack[stack.len() - 1]
-            stack = stack[0 : stack.len() - 1]
+        var next_index = 0
+        while next_index < stack.len():
+            val cur = stack[next_index]
+            next_index = next_index + 1
             if visited.has(cur):
                 continue
             visited[cur] = true
-            for p in (preds[cur] ?? []):
+            for p in (facts.predecessors[cur] ?? []):
                 if not visited.has(p):
                     stack = stack.push(p)
         visited
 
-    fn build_loop_info(func: MirFunction, header: BlockId) -> LoopInfo?:
+    fn build_loop_info(func: MirFunction, header: BlockId, facts: PerfFacts) -> LoopInfo?:
         """Build LoopInfo for the natural loop with the given header.
 
         Bug #160: the previous heuristic treated any block whose successor
@@ -212,8 +170,8 @@ impl LoopDetector:
         body is exactly the blocks that are both reachable FROM the header and
         can reach BACK to the header. That excludes break/exit blocks and the
         preheader, and includes every real loop-body block."""
-        val reach_fwd = self.reachable_from(func, header)
-        val reach_bwd = self.can_reach_target(func, header)
+        val reach_fwd = self.reachable_from(facts, header)
+        val reach_bwd = self.can_reach_target(facts, header)
 
         # A genuine backedge is an edge p -> header where the header can reach p
         # (or p is the header itself, a self-loop). Absent one, this is not a
@@ -221,7 +179,7 @@ impl LoopDetector:
         var backedges: [BlockId] = []
         var has_real_backedge = false
         for block in func.blocks:
-            val succs_bk = self.get_successors(block.terminator)
+            val succs_bk = perf_facts_successors(facts, block.id)
             for succ in succs_bk:
                 if succ.id == header.id:
                     if block.id.id == header.id or reach_fwd.has(block.id.id):
@@ -254,7 +212,7 @@ impl LoopDetector:
         for block in func.blocks:
             if not all_body_set.has(block.id.id):
                 continue
-            val successors = self.get_successors(block.terminator)
+            val successors = perf_facts_successors(facts, block.id)
             for succ in successors:
                 if not all_body_set.has(succ.id):
                     if not exit_set.has(succ.id):
