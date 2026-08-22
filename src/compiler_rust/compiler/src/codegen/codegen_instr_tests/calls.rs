@@ -269,8 +269,8 @@ fn codegen_bare_unwrap_calls_rt_unwrap_or_self_not_rt_enum_payload() {
     // Option enum id, silently returning a boxed `Result` (or any other
     // non-Option enum) receiver UNCHANGED instead of unwrapping it. See
     // doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
-    // `unwrap_or` keeps the old mapping (out of scope for that fix); see the
-    // sibling test below.
+    // `unwrap_or` was moved to its own `rt_unwrap_or_value` helper later, by
+    // f1f8dba2e69; see the sibling test below.
     assert!(
         object_relocates_to_symbol(&object, "rt_unwrap_or_trap"),
         "bare .unwrap() must compile to a call to rt_unwrap_or_trap (correct fallback: \
@@ -284,10 +284,10 @@ fn codegen_bare_unwrap_calls_rt_unwrap_or_self_not_rt_enum_payload() {
     );
 }
 
-// Edge case: `unwrap_or` shares the exact same fallback mapping in
-// `try_compile_builtin_method_call` (`"unwrap" | "unwrap_or" => "rt_unwrap_or_self"`).
-// A fix that only patched the `unwrap` arm (e.g. a hand-edited partial
-// revert) would leave this one still calling `rt_enum_payload`.
+// Edge case: `unwrap_or` used to share the exact same fallback mapping as
+// `unwrap` in `try_compile_builtin_method_call`. A fix that only patched the
+// `unwrap` arm (e.g. a hand-edited partial revert) would leave this one still
+// calling `rt_enum_payload`.
 #[test]
 fn codegen_bare_unwrap_or_calls_rt_unwrap_or_self_not_rt_enum_payload() {
     let object = aot_object("bare_unwrap_or_symbol", |f| {
@@ -309,9 +309,17 @@ fn codegen_bare_unwrap_or_calls_rt_unwrap_or_self_not_rt_enum_payload() {
         dest
     });
 
+    // Contract commit f1f8dba2e69: `.unwrap_or(default)` was re-routed from
+    // `rt_unwrap_or_self` to the dedicated two-argument `rt_unwrap_or_value`.
+    // `rt_unwrap_or_self` backs the never-trapping `??` operator and only
+    // special-cases the reserved Option enum id, so it silently returned a
+    // boxed `Result` (or any other non-Option enum) receiver UNCHANGED and
+    // ignored the caller's default. The point of this test is unchanged:
+    // `unwrap_or` must reach a real unwrap helper and must never fall back to
+    // `rt_enum_payload`.
     assert!(
-        object_relocates_to_symbol(&object, "rt_unwrap_or_self"),
-        "bare .unwrap_or() must compile to a call to rt_unwrap_or_self, same as .unwrap()"
+        object_relocates_to_symbol(&object, "rt_unwrap_or_value"),
+        "bare .unwrap_or() must compile to a call to rt_unwrap_or_value (receiver, default)"
     );
     assert!(
         !object_relocates_to_symbol(&object, "rt_enum_payload"),

@@ -307,16 +307,38 @@ fn optional_field_unwrap_lowers_to_enum_payload_not_named_method() {
         "class Report:\n    code: text?\n\nimpl Report:\n    fn get_code() -> text:\n        if self.code.?:\n            return self.code.unwrap()\n        else:\n            return \"\"\n",
     )
     .unwrap();
-    assert!(has_inst(&mir, |i| matches!(
-        i,
-        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload")
-    )));
+    // Contract commits 1b915112b68 and 20416a1bda7: a `T?` FIELD is a
+    // flat-nullable (HIR `Pointer { inner: T }`) that stores its payload
+    // DIRECTLY, not as a boxed `Option::Some` enum object. `rt_enum_payload`
+    // returns tagged-nil for such a receiver, and reading it as an enum
+    // payload segfaulted on subsequent field access -- so the contract
+    // inverted for this case: the flat-nullable unwrap must stay on the
+    // erased, runtime tag-dispatching path (a BARE `unwrap`, which codegen
+    // maps to `rt_unwrap_or_trap`). `rt_enum_payload` remains correct for a
+    // genuine boxed enum receiver and is still pinned by
+    // `direct_result_unwrap_lowers_to_enum_payload_not_method_dispatch` above.
     assert!(
         !has_inst(&mir, |i| matches!(
             i,
-            MirInst::MethodCallStatic { func_name, .. } if func_name == "unwrap" || func_name.ends_with(".unwrap")
+            MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload")
+        )),
+        "a flat-nullable `T?` field unwrap must NOT read an enum payload"
+    );
+    // The original defect this test guards is unchanged: it must not dispatch
+    // to a NAMED (receiver-qualified) `Type.unwrap` method that does not exist.
+    assert!(
+        !has_inst(&mir, |i| matches!(
+            i,
+            MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".unwrap")
         )),
         "optional field unwrap should not lower to a named method dispatch"
+    );
+    assert!(
+        has_inst(&mir, |i| matches!(
+            i,
+            MirInst::MethodCallStatic { func_name, .. } if func_name == "unwrap"
+        )),
+        "optional field unwrap must stay on the bare erased dispatch that codegen maps to rt_unwrap_or_trap"
     );
 }
 

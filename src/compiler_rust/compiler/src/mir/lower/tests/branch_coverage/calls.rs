@@ -393,11 +393,23 @@ fn primitive_field_method_call_is_builtin_qualified() {
 #[test]
 fn primitive_to_text_method_call_is_builtin_qualified() {
     let mir = compile_to_mir("fn test() -> text:\n    val n = 42\n    return n.to_text()\n").unwrap();
-    assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+    // Contract commit 610ce80229e: `i64`/`u64` receivers no longer go through
+    // BoxInt + a builtin-qualified `i64.to_text` dispatch. BoxInt packs
+    // `(value << 3) | TAG_INT`, which is lossy above the 61-bit tagged-int
+    // limit (i64::MAX rendered as -1), so they are routed to the raw
+    // signed/unsigned bridge instead. The BoxInt + builtin-qualification
+    // contract this test was written for still holds for the narrower
+    // primitives and is covered by
+    // `primitive_field_method_call_is_builtin_qualified` above (i32).
     assert!(has_inst(&mir, |i| matches!(
         i,
-        MirInst::MethodCallStatic { func_name, .. } if func_name == "i64.to_text"
+        MirInst::Call { target, args, .. }
+            if target == &CallTarget::from_name("rt_raw_i64_to_string") && args.len() == 1
     )));
+    assert!(
+        !has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })),
+        "an i64 receiver must NOT be BoxInt-tagged before rendering -- that is the lossy path 610ce80229e removed"
+    );
 }
 
 #[test]
@@ -451,11 +463,7 @@ fn code_and_split(value: text) -> i64:
         ("rt_string_trim", 1),
         ("rt_string_to_lower", 1),
         ("rt_string_to_upper", 1),
-        ("rt_string_starts_with", 2),
         ("rt_slice", 4),
-        ("rt_string_rfind", 2),
-        ("rt_string_replace", 3),
-        ("rt_string_split", 2),
         ("rt_string_char_code_at", 2),
     ] {
         assert!(
@@ -465,6 +473,27 @@ fn code_and_split(value: text) -> i64:
                     if target == &CallTarget::from_name(target_name) && args.len() == arity
             )),
             "missing canonical {target_name}/{arity}"
+        );
+    }
+
+    // Contract commit cfe0506e336 added `builtin_method_receiver_name`, which
+    // qualifies a text receiver's method dispatch as `str.<method>` instead of
+    // expanding it to a canonical `rt_string_*` MIR `Call`. `starts_with`,
+    // `rfind` and `replace` moved onto that path there and are separately
+    // pinned by `chained_text_replace_rfind_keeps_string_receiver`,
+    // `double_ended_iterator_compatibility_alias_lowers_to_string_method` and
+    // `inferred_text_predicate_does_not_reuse_unrelated_custom_owner`. The
+    // canonical runtime symbol is still what they reach -- codegen resolves
+    // `str.<method>` to `rt_string_starts_with`/`rt_string_rfind`/
+    // `rt_string_replace` -- but the expansion no longer happens in MIR, so
+    // these are asserted at the dispatch level here rather than dropped.
+    for qualified in ["str.starts_with", "str.rfind", "str.replace", "str.split"] {
+        assert!(
+            has_inst(&mir, |i| matches!(
+                i,
+                MirInst::MethodCallStatic { func_name, .. } if func_name == qualified
+            )),
+            "missing text-qualified dispatch {qualified}"
         );
     }
     assert!(!has_inst(&mir, |i| matches!(
@@ -900,7 +929,12 @@ fn di_resolve_arg_no_config_error() {
     let result = lowerer.resolve_di_arg(hir::TypeId::I64, "test_fn", 0);
     assert!(result.is_err(), "expected error without DI config");
     let err = result.unwrap_err();
-    assert!(format!("{}", err).contains("No DI configuration"));
+    // Contract commit cfe0506e336: the no-`di_config` branch no longer bails
+    // with "No DI configuration"; it now attempts `resolve_convention_binding`
+    // and, on failure, reports the richer `no_di_binding_error` diagnostic.
+    // The intent of this test is unchanged: resolution without a DI config
+    // must still be an error, and the message must name the failure.
+    assert!(format!("{}", err).contains("No binding found for this type"));
     lowerer.end_function().unwrap();
 }
 
