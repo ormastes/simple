@@ -428,8 +428,12 @@ pub(package) fn module_surface_explicit_import_origin(
     # delayed, do not let a currently-resolved glob route replace it.
     var has_named_route = false
     var found = false
-    var selected = ModuleSurfaceExportOrigin(
-        owner_module: "", source_name: "", resolution_kind: "")
+    # Keep the selected route scalar.  The Stage2 native compiler can lose a
+    # class-valued loop local while retaining its adjacent `found` flag; the
+    # old aggregate then reached the return path as nil and crashed Stage3.
+    var selected_owner_module = ""
+    var selected_source_name = ""
+    var selected_resolution_kind = ""
     var import_index = 0
     while import_index < facade.import_target_indices.len() and
           import_index + 1 < facade.import_item_offsets.len():
@@ -453,33 +457,32 @@ pub(package) fn module_surface_explicit_import_origin(
                     continue
                 has_named_route = true
                 var candidate_found = false
-                var candidate = ModuleSurfaceExportOrigin(
-                    owner_module: "", source_name: "", resolution_kind: "")
+                var candidate_owner_module = ""
+                var candidate_source_name = ""
+                var candidate_resolution_kind = ""
                 if module_surface_declares_item(owner, item_name):
-                    candidate = ModuleSurfaceExportOrigin(
-                        owner_module: owner.module_name,
-                        source_name: item_name,
-                        resolution_kind: if has_alias: "alias" else: "explicit"
-                    )
+                    candidate_owner_module = owner.module_name
+                    candidate_source_name = item_name
+                    candidate_resolution_kind = if has_alias: "alias" else: "explicit"
                     candidate_found = true
                 else:
                     val owner_origin_index_item: ModuleSurfaceExportOriginIndex = owner.export_origin_index
                     val terminal_lookup = module_surface_export_origin_index_lookup(owner_origin_index_item, item_name)
                     if terminal_lookup.found:
-                        candidate = ModuleSurfaceExportOrigin(
-                            owner_module: terminal_lookup.owner_module,
-                            source_name: terminal_lookup.source_name,
-                            resolution_kind: if has_alias: "alias" else: "explicit"
-                        )
+                        candidate_owner_module = terminal_lookup.owner_module
+                        candidate_source_name = terminal_lookup.source_name
+                        candidate_resolution_kind = if has_alias: "alias" else: "explicit"
                         candidate_found = true
                 if not candidate_found:
                     item_index = item_index + 1
                     continue
                 if not found:
-                    selected = candidate
+                    selected_owner_module = candidate_owner_module
+                    selected_source_name = candidate_source_name
+                    selected_resolution_kind = candidate_resolution_kind
                     found = true
-                elif (selected.owner_module != candidate.owner_module or
-                      selected.source_name != candidate.source_name):
+                elif (selected_owner_module != candidate_owner_module or
+                      selected_source_name != candidate_source_name):
                     return module_surface_origin_error(
                         "ambiguous explicit facade export: module={facade.module_name} item={local_name}")
                 item_index = item_index + 1
@@ -487,7 +490,7 @@ pub(package) fn module_surface_explicit_import_origin(
     if has_named_route:
         if found:
             return module_surface_origin_found(
-                selected.owner_module, selected.source_name, selected.resolution_kind)
+                selected_owner_module, selected_source_name, selected_resolution_kind)
         return module_surface_origin_missing()
 
     # A wildcard import is encoded with no ImportItems. Resolve all matching
@@ -504,37 +507,36 @@ pub(package) fn module_surface_explicit_import_origin(
         if owner.canonical_path == facade.canonical_path:
             continue
         var candidate_found = false
-        var candidate = ModuleSurfaceExportOrigin(
-            owner_module: "", source_name: "", resolution_kind: "")
+        var candidate_owner_module = ""
+        var candidate_source_name = ""
+        var candidate_resolution_kind = ""
         if module_surface_declares_item(owner, source_name):
-            candidate = ModuleSurfaceExportOrigin(
-                owner_module: owner.module_name,
-                source_name: source_name,
-                resolution_kind: "glob"
-            )
+            candidate_owner_module = owner.module_name
+            candidate_source_name = source_name
+            candidate_resolution_kind = "glob"
             candidate_found = true
         else:
             val owner_origin_index_source: ModuleSurfaceExportOriginIndex = owner.export_origin_index
             val terminal_lookup = module_surface_export_origin_index_lookup(owner_origin_index_source, source_name)
             if terminal_lookup.found:
-                candidate = ModuleSurfaceExportOrigin(
-                    owner_module: terminal_lookup.owner_module,
-                    source_name: terminal_lookup.source_name,
-                    resolution_kind: "glob"
-                )
+                candidate_owner_module = terminal_lookup.owner_module
+                candidate_source_name = terminal_lookup.source_name
+                candidate_resolution_kind = "glob"
                 candidate_found = true
         if not candidate_found:
             continue
         if not found:
-            selected = candidate
+            selected_owner_module = candidate_owner_module
+            selected_source_name = candidate_source_name
+            selected_resolution_kind = candidate_resolution_kind
             found = true
-        elif (selected.owner_module != candidate.owner_module or
-              selected.source_name != candidate.source_name):
+        elif (selected_owner_module != candidate_owner_module or
+              selected_source_name != candidate_source_name):
             return module_surface_origin_error(
                 "ambiguous explicit facade export: module={facade.module_name} item={local_name}")
     if found:
         module_surface_origin_found(
-            selected.owner_module, selected.source_name, selected.resolution_kind)
+            selected_owner_module, selected_source_name, selected_resolution_kind)
     else:
         module_surface_origin_missing()
 
