@@ -1,6 +1,6 @@
 # stage1 HIR fatals on lexer.spl: `unresolved name: eprint` and a `<T>` array-len helper
 
-**Status:** FIXED (eprint, three `<T>` len helpers); walkers follow-up FIXED 2026-08-22 via #158 Phase B (see bottom); NEW open sibling: fn-typed parameter call links as undefined symbol
+**Status:** FIXED (eprint, three `<T>` len helpers); walkers follow-up FIXED 2026-08-22 via #158 Phase B (see bottom); fn-typed parameter call sibling FIXED 2026-08-22 (see bottom)
 **Filed:** 2026-08-22
 **Relates to:** #158 Phase B; `hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md`
 
@@ -113,7 +113,7 @@ generic fns; they are now monomorphized rather than refused.
 Gated probe: `SIMPLE_MONO_DIAG=1` traces every function/stmt/expr the pass
 visits and every argument it could not type.
 
-## OPEN sibling (found 2026-08-22, not caused by mono): calling a fn-typed parameter
+## FIXED 2026-08-22 sibling (found 2026-08-22, not caused by mono): calling a fn-typed parameter
 
 On the same in-process native path, a NON-generic
 `fn apply(x: i64, f: fn(i64) -> i64) -> i64: f(x)` links with
@@ -122,3 +122,53 @@ parameter as a direct callee by name (`local_map` does not demote it).
 Reproduces single-file, with and without `SIMPLE_BOOTSTRAP=1`. The
 walkers call `f(node, acc)`, so after monomorphization the stage lane will
 hit THIS at link time for `hir_visitor.spl`. Separate defect, separate fix.
+
+### Resolution (2026-08-22)
+
+Reproduced single-file with `bin/simple native-build --threads 2` on a
+four-case fixture (fn-typed param called; named fn passed; non-capturing
+lambda passed as a value; fn-typed struct field called). Three stacked
+defects, all on the native path, fixed together:
+
+1. **MIR call lowering** (`50.mir/_MirLoweringExpr/switch_operators_calls.spl`,
+   `lower_call`): the direct->indirect demotion consulted only
+   `self.local_map`, but params and `val` locals are bound via `bind_local`
+   into `local_symbol_ids` (read by `find_local`); `local_map` is written
+   only by a few pattern-binding sites. A fn-typed PARAM therefore stayed
+   `is_direct` and was emitted as `call @f`. Now demotes when
+   `find_local(callee).id >= 0` too, except for `lambda_bindings` (a
+   `val f = \x: ...` keeps its existing `try_inline_lambda_call`
+   beta-reduction). Reuses the existing `rt_closure_func_ptr` closure/raw
+   diamond + `emit_call_indirect` path verbatim -- no new ABI.
+2. **Same function, result merge**: the diamond wrote ONE temp from both
+   arms (`emit_copy`), a multi-def SSA local. The alloca SSA transform
+   refuses any value-returning function and the phi transform leaves later
+   uses unrewritten, so llc failed with `multiple definition of local value
+   'l6'`. The merge now goes through an explicit `Alloc` slot: `Store` per
+   arm, one `Load` at the join (the shape the alloca transform itself emits).
+3. **LLVM emitter** (`70.backend/backend/_MirToLlvm/core_codegen.spl`,
+   `translate_const`): a `Const(Str(name), FuncPtr)` INSTRUCTION (a top-level
+   fn named as a value -- `Op(f: double)`) was emitted as a string literal
+   (`@.str.0 = "double\0"`), so the indirect call jumped into .rodata
+   (SIGSEGV). Now renders `getelementptr i8, ptr @name, i64 0  ; fn ref`,
+   matching what the operand renderer already did for call args.
+
+Incidental unblock found while reproducing: `80.driver/driver_build/
+incremental.spl:449` bound `if val hash_text = hs:`, shadowing the imported
+`std.io_runtime.hash_text` fn; under the seed interpreter the body's
+`hash_text` resolved to the FUNCTION, and the next `build_cache_persist`
+died with `method replace not found on type function (function 'hash_text'
+was not called)` whenever a build cache already existed. Renamed the local.
+
+Spec: `test/01_unit/compiler/mir/fn_typed_parameter_indirect_call_spec.spl`
+(mirrored in `test/unit/`), 8 cases: 5 fail pre-fix / 3 guards pass;
+8/8 post-fix. Sibling `module_global_function_pointer_lowering_spec.spl`
+(3/3) and `llvm_runtime_call_origin_spec.spl` (3/3) unchanged. Fixture
+prints `42 12 11 8` natively.
+
+Still OPEN, separate and pre-existing (reproduced on the unmodified tree):
+a CAPTURING lambda on the native path -- `val add_k = \v: v + k;
+add_k(10)` fails with `MIR lowering error: undefined variable v`, and a
+lambda LITERAL as a call argument `apply(\v: v + k, 10)` fails with
+`E-MIR-EXPR-Lambda unsupported ... closure conversion has not run`. Not
+touched here.

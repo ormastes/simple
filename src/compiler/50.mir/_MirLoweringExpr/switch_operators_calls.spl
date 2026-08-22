@@ -4415,8 +4415,21 @@ impl MirLowering:
                 case _:
                     pass
 
-        if is_direct and self.local_map.has(mir_expr_symbol_id_value(direct_symbol)):
-            is_direct = false
+        # A callee naming a per-function LOCAL or PARAMETER (`fn apply(f: fn(i64)
+        # -> i64, x: i64): f(x)`) is a value call, not a symbol call. Locals and
+        # params are bound through `bind_local` into `local_symbol_ids`, NOT
+        # `local_map` (which only a few pattern-binding sites write), so
+        # consulting `local_map` alone left a fn-typed param `is_direct` and the
+        # native link died with `undefined symbol: f`. Bug
+        # stage1_lexer_hir_fatals_eprint_and_generic_len_helper_2026-08-22.
+        # A `val f = \x: ...` binding stays on the direct path so
+        # try_inline_lambda_call below keeps beta-reducing it as before.
+        if is_direct:
+            val callee_sid = mir_expr_symbol_id_value(direct_symbol)
+            if self.local_map.has(callee_sid):
+                is_direct = false
+            elif self.find_local(callee_sid).id >= 0 and not self.lambda_bindings.has(callee_sid):
+                is_direct = false
 
         # A module-global function-pointer SLOT is not a call target bound at
         # lowering time: `var cleanup: fn() = default_cleanup` followed by
@@ -4760,7 +4773,16 @@ impl MirLowering:
         val closure_block = b.new_block(Some("closure_call"))
         val raw_block = b.new_block(Some("raw_fn_call"))
         val merge_block = b.new_block(Some("indirect_call_merge"))
-        val result_slot: LocalId? = if ret_type.kind != MirTypeKind.Unit: Some(b.new_temp(ret_type)) else: nil
+        # The two arms join on ONE result. Writing a shared temp from both
+        # arms (emit_copy) is a multi-def SSA local that neither SSA
+        # transform repairs here (the alloca pass refuses value-returning
+        # functions, the phi pass leaves later uses of the old local
+        # unrewritten), so llc failed with "multiple definition of local
+        # value". Merge through an explicit entry-block Alloc slot instead:
+        # Store per arm, one Load at the join -- the exact instruction shape
+        # the alloca transform itself emits, so the backend already handles
+        # it. Bug stage1_lexer_hir_fatals_eprint_and_generic_len_helper_2026-08-22.
+        val result_slot: LocalId? = if ret_type.kind != MirTypeKind.Unit: Some(b.emit_alloc(ret_type)) else: nil
         b.terminate_if(mir_operand_copy(is_closure), closure_block, raw_block)
         self.builder = b
 
@@ -4774,7 +4796,7 @@ impl MirLowering:
         val closure_sig = MirSignature(params: closure_params, return_type: ret_type, is_variadic: false)
         val closure_call_result = closure_b.emit_call_indirect(mir_operand_copy(closure_target), closure_args, closure_sig, ret_type)
         if closure_call_result != nil and result_slot != nil:
-            closure_b.emit_copy(result_slot.unwrap(), closure_call_result.unwrap())
+            closure_b.emit_store(mir_operand_copy(result_slot.unwrap()), mir_operand_copy(closure_call_result.unwrap()))
         closure_b.terminate_goto(merge_block)
         self.builder = closure_b
 
@@ -4782,15 +4804,16 @@ impl MirLowering:
         raw_b.switch_to_block(raw_block)
         val raw_call_result = raw_b.emit_call_indirect(mir_operand_copy(callee_local), arg_operands, sig, ret_type)
         if raw_call_result != nil and result_slot != nil:
-            raw_b.emit_copy(result_slot.unwrap(), raw_call_result.unwrap())
+            raw_b.emit_store(mir_operand_copy(result_slot.unwrap()), mir_operand_copy(raw_call_result.unwrap()))
         raw_b.terminate_goto(merge_block)
         self.builder = raw_b
 
         var merge_b = self.builder
         merge_b.switch_to_block(merge_block)
         if result_slot != nil:
+            val merged = merge_b.emit_load(mir_operand_copy(result_slot.unwrap()), ret_type)
             self.builder = merge_b
-            return result_slot.unwrap()
+            return merged
         val unit_local = merge_b.new_temp(MirType.unit())
         self.builder = merge_b
         unit_local

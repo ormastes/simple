@@ -1314,11 +1314,29 @@ impl MirTextCodegen for MirToLlvm:
                     self.bool_locals[dest_id] = true
                 self.builder.emit("  {dest_name} = add {llvm_ty} {bval}, 0  ; const bool")
             case Str(v):
-                val global_name = self.add_string_global(v)
-                val str_len = escaped_string_byte_len(v) + 1
-                val nit = self.native_int()
-                self.mark_ptr_local(dest_id)
-                self.builder.emit("  {dest_name} = getelementptr inbounds [{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; string const")
+                # A `Const(Str(name), FuncPtr(..))` INSTRUCTION is a function
+                # reference (a top-level fn named as a value: struct-literal
+                # field `Op(f: double)`, `val g = double`), the same shape the
+                # operand renderer below already maps to `@name`. Emitting it
+                # as a string literal stored the address of "double\0" and the
+                # later indirect call jumped into .rodata (SIGSEGV). Bug
+                # stage1_lexer_hir_fatals_eprint_and_generic_len_helper_2026-08-22.
+                val is_fn_ref = match ty.kind:
+                    case FuncPtr(_): true
+                    case Function(_, _): true
+                    case _: false
+                if is_fn_ref:
+                    val fn_operand = MirOperand(kind: MirOperandKind.Const(value, ty))
+                    val fn_ref = self.translate_operand(fn_operand)
+                    val nit_fn = self.native_int()
+                    self.mark_ptr_local(dest_id)
+                    self.builder.emit("  {dest_name} = getelementptr i8, ptr {fn_ref}, {nit_fn} 0  ; fn ref")
+                else:
+                    val global_name = self.add_string_global(v)
+                    val str_len = escaped_string_byte_len(v) + 1
+                    val nit = self.native_int()
+                    self.mark_ptr_local(dest_id)
+                    self.builder.emit("  {dest_name} = getelementptr inbounds [{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; string const")
             case Zero:
                 if is_float_type(llvm_ty):
                     self.builder.emit("  {dest_name} = fadd {llvm_ty} 0.0, 0.0  ; const zero")
