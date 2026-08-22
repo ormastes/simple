@@ -10,6 +10,10 @@ command -v openssl >/dev/null 2>&1 || {
     echo 'SKIP: openssl unavailable'
     exit 0
 }
+command -v cc >/dev/null 2>&1 || {
+    echo 'SKIP: C compiler unavailable'
+    exit 0
+}
 
 hash() { sha256sum "$1" | awk '{ print $1 }'; }
 expect_reject() {
@@ -22,9 +26,12 @@ expect_reject() {
     echo "PASS: $name rejected"
 }
 
-for name in artifact source build compiler abi; do
+for name in source build; do
     printf '%s-v1\n' "$name" >"$work/$name"
 done
+printf 'long rt_test(void) { return 7; }\n' >"$work/provider.c"
+cc -c "$work/provider.c" -o "$work/artifact"
+cp "$(command -v cc)" "$work/compiler"
 openssl genpkey -algorithm ED25519 -out "$work/private.pem" >/dev/null 2>&1
 openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
 openssl genpkey -algorithm ED25519 -out "$work/untrusted-private.pem" >/dev/null 2>&1
@@ -33,14 +40,22 @@ artifact_hash=$(hash "$work/artifact")
 source_hash=$(hash "$work/source")
 build_hash=$(hash "$work/build")
 compiler_hash=$(hash "$work/compiler")
-abi_hash=$(hash "$work/abi")
 signature_hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 test_symbol=$(printf 'r%s_%s' t test)
 
-printf 'schema\tsimple.sffi-verification-report.v1\nprovider_id\ttest.provider\nartifact_sha256\t%s\nabi_registry_sha256\t%s\nresult\tpass\n' \
-    "$artifact_hash" "$abi_hash" >"$work/report.tsv"
+printf 'schema\tsimple.sffi-abi-registry.v1\nprovider_id\ttest.provider\ntarget\tx86_64-linux\nsymbol_count\t1\nsymbol\t%s\t%s\n' \
+    "$test_symbol" "$signature_hash" >"$work/abi"
+abi_hash=$(hash "$work/abi")
+receipt_config_hash=1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+printf 'schema\tsimple.sffi-verification-receipt.v1\nkind\tcontract-test\nprovider_id\ttest.provider\ntarget\tx86_64-linux\nartifact_sha256\t%s\ncanonical_source_tree_sha256\t%s\nexact_build_input_sha256\t%s\ncompiler_artifact_sha256\t%s\nabi_registry_sha256\t%s\ntool_id\tfixture-tool\nconfig_sha256\t%s\nresult\tpass\n' \
+    "$artifact_hash" "$source_hash" "$build_hash" "$compiler_hash" \
+    "$abi_hash" "$receipt_config_hash" >"$work/contract.receipt"
+receipt_result_hash=$(hash "$work/contract.receipt")
+printf 'schema\tsimple.sffi-verification-report.v2\nprovider_id\ttest.provider\ntarget\tx86_64-linux\nartifact_sha256\t%s\ncanonical_source_tree_sha256\t%s\nexact_build_input_sha256\t%s\ncompiler_artifact_sha256\t%s\nabi_registry_sha256\t%s\nreceipt_count\t1\nresult\tpass\nreceipt\tcontract-test\tfixture-tool\t%s\t%s\tcontract.receipt\n' \
+    "$artifact_hash" "$source_hash" "$build_hash" "$compiler_hash" \
+    "$abi_hash" "$receipt_config_hash" "$receipt_result_hash" >"$work/report.tsv"
 report_hash=$(hash "$work/report.tsv")
-printf 'schema\tsimple.sffi-evidence.v1\nprovider_id\ttest.provider\ntarget\tx86_64-linux\nsigner_key_id\ttest-key\nartifact_sha256\t%s\ncanonical_source_tree_sha256\t%s\nexact_build_input_sha256\t%s\ncompiler_artifact_sha256\t%s\nabi_registry_sha256\t%s\nverification_report_sha256\t%s\nevidence_verified\ttrue\nsymbol_count\t1\nsymbol\t%s\t%s\n' \
+printf 'schema\tsimple.sffi-evidence.v2\nprovider_id\ttest.provider\ntarget\tx86_64-linux\nsigner_key_id\ttest-key\nartifact_sha256\t%s\ncanonical_source_tree_sha256\t%s\nexact_build_input_sha256\t%s\ncompiler_artifact_sha256\t%s\nabi_registry_sha256\t%s\nverification_report_sha256\t%s\nsymbol_count\t1\nsymbol\t%s\t%s\n' \
     "$artifact_hash" "$source_hash" "$build_hash" "$compiler_hash" \
     "$abi_hash" "$report_hash" "$test_symbol" "$signature_hash" >"$work/manifest.tsv"
 printf 'test-key\ttest.provider\tpublic.pem\n' >"$work/trust.tsv"
@@ -54,9 +69,118 @@ verify() {
         "$work/abi" "$work/report.tsv" "$work/admission.tsv"
 }
 
+sign_manifest() {
+    openssl pkeyutl -sign -inkey "$work/private.pem" -rawin \
+        -in "$work/manifest.tsv" -out "$work/signature.bin"
+}
+
+refresh_artifact_evidence() {
+    next_artifact_hash=$(hash "$work/artifact")
+    sed "s/$artifact_hash/$next_artifact_hash/" "$work/contract.receipt" \
+        >"$work/contract.receipt.next"
+    mv "$work/contract.receipt.next" "$work/contract.receipt"
+    next_receipt_hash=$(hash "$work/contract.receipt")
+    sed -e "s/$artifact_hash/$next_artifact_hash/" \
+        -e "s/$receipt_result_hash/$next_receipt_hash/" \
+        "$work/report.tsv" >"$work/report.next"
+    mv "$work/report.next" "$work/report.tsv"
+    next_report_hash=$(hash "$work/report.tsv")
+    sed -e "s/$artifact_hash/$next_artifact_hash/" \
+        -e "s/$report_hash/$next_report_hash/" \
+        "$work/manifest.tsv" >"$work/manifest.next"
+    mv "$work/manifest.next" "$work/manifest.tsv"
+    artifact_hash=$next_artifact_hash
+    receipt_result_hash=$next_receipt_hash
+    report_hash=$next_report_hash
+    sign_manifest
+}
+
 verify >/dev/null
 grep -q "^$test_symbol	$signature_hash	$artifact_hash	true	true$" "$work/admission.tsv"
 echo 'PASS: exact signed evidence admitted'
+
+cp "$work/report.tsv" "$work/report.good"
+cp "$work/manifest.tsv" "$work/manifest.good"
+sed '/^receipt\t/d; s/^receipt_count\t1$/receipt_count\t0/' \
+    "$work/report.good" >"$work/report.tsv"
+arbitrary_report_hash=$(hash "$work/report.tsv")
+sed "s/$report_hash/$arbitrary_report_hash/" "$work/manifest.good" >"$work/manifest.tsv"
+sign_manifest
+expect_reject signed-arbitrary-report verify
+mv "$work/report.good" "$work/report.tsv"
+mv "$work/manifest.good" "$work/manifest.tsv"
+sign_manifest
+
+cp "$work/abi" "$work/abi.good"
+cp "$work/report.tsv" "$work/report.good"
+cp "$work/manifest.tsv" "$work/manifest.good"
+mismatched_signature=3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+sed "s/$signature_hash/$mismatched_signature/" "$work/abi.good" >"$work/abi"
+mismatched_abi_hash=$(hash "$work/abi")
+sed "s/$abi_hash/$mismatched_abi_hash/" "$work/report.good" >"$work/report.tsv"
+mismatched_report_hash=$(hash "$work/report.tsv")
+sed -e "s/$abi_hash/$mismatched_abi_hash/" \
+    -e "s/$report_hash/$mismatched_report_hash/" \
+    "$work/manifest.good" >"$work/manifest.tsv"
+sign_manifest
+expect_reject abi-signature-mismatch verify
+mv "$work/abi.good" "$work/abi"
+mv "$work/report.good" "$work/report.tsv"
+mv "$work/manifest.good" "$work/manifest.tsv"
+sign_manifest
+
+cp "$work/abi" "$work/abi.good"
+cp "$work/report.tsv" "$work/report.good"
+cp "$work/manifest.tsv" "$work/manifest.good"
+sed "s/$test_symbol/rt_missing/" "$work/abi.good" >"$work/abi"
+missing_abi_hash=$(hash "$work/abi")
+sed "s/$abi_hash/$missing_abi_hash/" "$work/report.good" >"$work/report.tsv"
+missing_report_hash=$(hash "$work/report.tsv")
+sed -e "s/$test_symbol/rt_missing/" -e "s/$abi_hash/$missing_abi_hash/" \
+    -e "s/$report_hash/$missing_report_hash/" \
+    "$work/manifest.good" >"$work/manifest.tsv"
+sign_manifest
+expect_reject missing-artifact-export verify
+mv "$work/abi.good" "$work/abi"
+mv "$work/report.good" "$work/report.tsv"
+mv "$work/manifest.good" "$work/manifest.tsv"
+sign_manifest
+
+cp "$work/abi" "$work/abi.good"
+cp "$work/report.tsv" "$work/report.good"
+cp "$work/manifest.tsv" "$work/manifest.good"
+sed 's/x86_64-linux/aarch64-linux/' "$work/abi.good" >"$work/abi"
+wrong_target_abi_hash=$(hash "$work/abi")
+sed -e 's/x86_64-linux/aarch64-linux/' -e "s/$abi_hash/$wrong_target_abi_hash/" \
+    "$work/report.good" >"$work/report.tsv"
+wrong_target_report_hash=$(hash "$work/report.tsv")
+sed -e 's/x86_64-linux/aarch64-linux/' -e "s/$abi_hash/$wrong_target_abi_hash/" \
+    -e "s/$report_hash/$wrong_target_report_hash/" \
+    "$work/manifest.good" >"$work/manifest.tsv"
+sign_manifest
+expect_reject wrong-artifact-target verify
+mv "$work/abi.good" "$work/abi"
+mv "$work/report.good" "$work/report.tsv"
+mv "$work/manifest.good" "$work/manifest.tsv"
+sign_manifest
+
+cp "$work/abi" "$work/abi.good"
+cp "$work/report.tsv" "$work/report.good"
+cp "$work/manifest.tsv" "$work/manifest.good"
+sed 's/x86_64-linux/x86_64-windows/' "$work/abi.good" >"$work/abi"
+wrong_os_abi_hash=$(hash "$work/abi")
+sed -e 's/x86_64-linux/x86_64-windows/' -e "s/$abi_hash/$wrong_os_abi_hash/" \
+    "$work/report.good" >"$work/report.tsv"
+wrong_os_report_hash=$(hash "$work/report.tsv")
+sed -e 's/x86_64-linux/x86_64-windows/' -e "s/$abi_hash/$wrong_os_abi_hash/" \
+    -e "s/$report_hash/$wrong_os_report_hash/" \
+    "$work/manifest.good" >"$work/manifest.tsv"
+sign_manifest
+expect_reject wrong-artifact-os verify
+mv "$work/abi.good" "$work/abi"
+mv "$work/report.good" "$work/report.tsv"
+mv "$work/manifest.good" "$work/manifest.tsv"
+sign_manifest
 
 cp "$work/artifact" "$work/artifact.good"
 printf 'tamper\n' >>"$work/artifact"
@@ -97,5 +221,28 @@ printf 'test-key\ttest.provider\tpublic.pem\n' >"$work/trust.tsv"
 openssl pkeyutl -sign -inkey "$work/untrusted-private.pem" -rawin \
     -in "$work/manifest.tsv" -out "$work/signature.bin"
 expect_reject substituted-signature verify
+sign_manifest
+
+cp "$work/artifact" "$work/artifact.good"
+printf 'long rt_extra(void) { return 9; }\n' >"$work/extra.c"
+cc -c "$work/extra.c" -o "$work/extra.o"
+cc -r "$work/artifact.good" "$work/extra.o" -o "$work/artifact"
+refresh_artifact_evidence
+expect_reject extra-artifact-export verify
+mv "$work/artifact.good" "$work/artifact"
+refresh_artifact_evidence
+
+cp "$work/artifact" "$work/artifact.good"
+printf 'long %s = 7;\n' "$test_symbol" >"$work/provider-data.c"
+cc -c "$work/provider-data.c" -o "$work/artifact"
+refresh_artifact_evidence
+expect_reject data-symbol-substitution verify
+mv "$work/artifact.good" "$work/artifact"
+refresh_artifact_evidence
+
+cp "$work/contract.receipt" "$work/contract.receipt.good"
+sed 's/result\tpass/result\tfail/' "$work/contract.receipt.good" >"$work/contract.receipt"
+expect_reject failed-receipt-content verify
+mv "$work/contract.receipt.good" "$work/contract.receipt"
 
 echo 'STATUS: PASS sffi-evidence-admission-contract'

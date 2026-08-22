@@ -1220,3 +1220,19 @@ manifest has been signed or admitted. Next actions are:
 
 Current census: 12,295 rows, 810 tagged, 626 contracted, 352 minimized, 11,211
 untouched, and zero evidence-verified, signature-verified, or admitted.
+
+Evidence admission v2 now derives admission from a parsed ABI closure, exact
+function-only closure in a target-matched Linux ELF provider, immutable input
+snapshots, exact source/build/compiler/ABI identities, actual canonical receipt
+files rather than asserted hashes, detached
+Ed25519 signature, and separately provisioned provider trust. The first bounded
+production target is the three scalar clock contracts. Its live production gate
+must remain BLOCKED without externally supplied evidence and trust; the
+integration key is fixture-only. Next bind the real Stage4-selected runtime
+archive and release signing authority, bind the final consumer artifact, link
+map, linker, target, and ABI in its native-link receipt, then run the census
+with those evidence inputs. A fixture admission remains `fixture_verified`,
+never production `verified_and_signed`. Do not promote the remaining
+273 matching clock declaration rows unless each duplicate is also lexically
+unsafe-tagged and contract-documented. No admission operation belongs on the
+clock call path.
