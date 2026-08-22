@@ -244,6 +244,40 @@ Two conclusions worth keeping:
    the package-sibling fallback. That is a resolution-shape finding for the hardening
    plan in its own right and is not specific to this bug.
 
+### Correction: a retracted lead, and the discriminator that kills it
+
+While reading the run14 trace this lane floated a second candidate — that
+`src/compiler/70.backend/backend/__init__.spl` exports `format_mir_module`,
+`select_backend`, `select_backend_with_mode`, `available_backends`, `gpu_backends`,
+`backend_for_name`, `compile_module_with_backend` and `get_effective_backend_name`
+TWICE, once under a "Re-exported from backend_api.spl" comment and again under
+"Re-exported from backend_helpers.spl", and that this was therefore a two-owner
+collision of the `std.io` `file_lock`/`file_unlock` kind.
+
+**That lead is wrong and is retracted.** It was inferred from EXPORT LINES, not from
+definitions. Verified by counting definitions:
+
+```
+/usr/bin/grep -rn '^\(pub \)\?fn <name>\b' src/
+```
+
+`format_mir_module`, `backend_for_name`, `available_backends` and
+`get_effective_backend_name` have exactly ONE definition each, all in
+`backend_helpers.spl`; `select_backend` has six tree-wide but none of them in
+`backend_api.spl` (the rest are unrelated `src/lib` math/physics modules). Definitions
+of any of those names in `backend_api.spl`: **zero** — it merely
+`use compiler.backend.backend_helpers.{...}` at line 29 and re-exports what it
+imported. So the barrel has a redundant export line over a SINGLE owner, with two
+comments that disagree about provenance: hygiene, not a live error source.
+
+The discriminator, worth stating because this lane got it wrong in public: **count
+DEFINITIONS, not export lines.** Two export lines naming one owner is duplication; two
+definitions behind one exported name is a collision. Only the latter is the `std.io`
+shape. (Credit: the run14 lane caught this.)
+
+Note the retraction also lands this candidate back in THIS bug's family rather than the
+`std.io` one — competing ROUTES to a single entity, exactly like `Backend`.
+
 ## Next steps
 
 1. DONE (iteration 4): the symptom is gone at `75a66d615bd` and the trace shows why
