@@ -34,6 +34,10 @@ child proof surfaces and counts, and remains separate from module-pass execution
 
 `PerfRuleRegistry` owns stable code, group, tier, default kind/policy, fix support, and suppression. `PerfDiagnostic` projects to legacy V1 only for compatibility-owned rules and to deterministic V2 text/JSON/LSP. Exact source origin is mandatory; textual location recovery is removed per migrated rule.
 
+Configuration-name membership must not allocate the complete registry for every SDN or
+attribute entry. `all_lint_names` remains the enumeration surface; the hot parser path
+uses allocation-free `lint_name_is_known` dispatch. A parity fixture prevents drift.
+
 During compatibility migration, `LintDiag.evidence_tier` is the single severity
 input shared by CLI and query/LSP projections. `SourcePattern`,
 `ParsedStructural`, and `Incomplete` performance diagnostics are warning-capped;
