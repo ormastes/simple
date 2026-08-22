@@ -1951,3 +1951,19 @@ now joins the completed line array once, giving `O(S)` output assembly. Because
 the same `split(content, "\n")` result is joined with the same delimiter, empty
 interior lines and the trailing empty item that represents a final newline remain
 unchanged. Atomic-write failure and unchanged/written status values are untouched.
+
+### MCP diagnostic wrapper allocation audit
+
+Both query-check implementations independently joined every serialized diagnostic
+into a full array string, concatenated that payload into another full
+`structuredContent` string, then joined a final envelope. Total work remained
+linear in diagnostic bytes `S`, but several overlapping `O(S)` intermediates
+increased copied bytes and peak RSS for large warning/error sets.
+
+The cycle-free `query_rich_common` owner now assembles one fragment list: fixed
+envelope literals, one cached count string, each existing diagnostic record with
+comma separators, and the suffix. One final join creates the only full wrapper
+output. Diagnostics remain embedded verbatim and in input order; empty, single and
+multiple arrays retain the exact prior MCP envelope. The active rich-query path
+and its older query-check predecessor both delegate to this owner, preventing
+serialization drift.
