@@ -268,3 +268,6 @@ The current TCO facade is a `Skeleton` identity and must contain no dormant rewr
 ## CLI-scoped lint session
 
 Repository lint should construct one `LintSession` per command. The session owns the immutable lint registry, parsed CLI policy, critical-mode policy, a directory-to-manifest cache, and a manifest-to-parsed-config cache. Per-file attributes are applied to a child configuration; cached configurations are never mutated. The CLI reads each source once and shares it with ordinary and SIMD checks. Session lifetime provides batch invalidation; long-lived daemon/LSP sessions must key cached policy by path plus content digest or validated metadata. This removes file-count-multiplied descriptor allocation, ancestor walks, configuration reads, and parsing without creating process-global stale state.
+### Staged lint-session delivery
+
+The first implementation stage reuses one command-owned `Linter` and a bounded last-project parsed-policy cache. It deliberately does not introduce a process-global cache. This immediately removes `O(files * rules)` descriptor construction and repeated adjacent manifest parsing while keeping configuration children isolated. The next stage adds bounded directory/manifest indexes and a source payload shared by lint, SIMD, and fix rendering; daemon/LSP caching remains digest-keyed and separate.
