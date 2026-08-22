@@ -752,3 +752,23 @@ times** in the re-landed `module_callable_types.spl` (they arrived as
 cherry-pick conflicts, from this lane's earlier rebase onto that sibling, and
 were resolved OUT). The parity gate and spec that `ec13c319250` removed with
 the sibling lane are likewise NOT restored here — they belong to that lane.
+
+### run16 — the revert is confirmed to restore the tree, and this lane is cleared to re-land
+
+`run16` (tree `ec13c319250`, BOTH generic lanes reverted) is terminal: `rc=1` at
+4326s, **15 HIR fatals / 21 poisoned**, honest basis 16 distinct error lines.
+That is at or below the post19 band the re-land condition named, `MirType` is
+gone (was 180), and there is **no new error class**: run15's generic-name flood
+(`Option` 1547, `Result` 962, `Dict` 889) is fully undone. So the revert did
+restore the tree, and the re-land condition agreed by both lanes is met.
+
+**Counting-basis caveat, recorded before anyone quotes the numbers.** run16's
+**21 poisoned** vs post19's **9** may be a difference in COUNTING BASIS rather
+than a real delta. post19's figure must be re-derived on run16's basis before
+that gap is treated as a regression — comparing two censuses that were not
+computed the same way is exactly the error that produced the false MirType
+clearance prediction in follow-up (b) of this record.
+
+What run16 does NOT establish: which of the two reverted lanes caused run15.
+It removed both at once. This lane re-lands ALONE so `run17` can measure it in
+isolation; `run17`, not run16, is what decides whether this fix stays.
