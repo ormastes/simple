@@ -123,10 +123,38 @@ from unit specs — the failing population is invisible to them by construction
 applies to each commit independently: a measured stage-1 `[hir-fatal]` census at
 or below post19's 48 / 9.
 
-## Prepared, HELD re-land of the generic-callable half (independently verified)
+## RE-LANDED (2026-08-22): the generic-callable half, alone — was held, now at origin
 
-`86787968989` is prepared for re-land as an ISOLATED change, held and not
-pushed pending a run16/run17 stage-1 census:
+**Status changed.** This section first recorded the change as prepared-and-held.
+It has since been re-landed ALONE, at origin/main `b7e474b6cd8` (code commit
+`8f08930460d`, docs `b7e474b6cd8`), superseding the held branch
+`reland-generic-callable` / `8e70a394659`. The generic-ARGUMENT half
+(`d481f15e1ac`) is UNTOUCHED by that push and remains reverted, so it is still
+free to be re-landed and measured on its own afterwards.
+
+Re-verified at ORIGIN after the push, not from anyone's working copy
+(`git show origin/main:<file>`):
+
+| check | result |
+|---|---|
+| `bound_type_params` in `module_callable_types.spl` | 17 |
+| `imported_surface_projected_named_args` (the sibling's symbol) | **0** |
+| `imported_generic_argument_projection_spec.spl` | absent |
+| `check-type-walk-constructor-parity.shs` | absent |
+| `imported_generic_callable_signature_projection_spec.spl` | present |
+
+So whatever the next stage-1 run measures is attributable to the
+generic-CALLABLE half alone — which is the entire reason for splitting the pair.
+
+Precision note on the guard, since the re-land reported it as "reduced to
+`if not callable.has_return_type:` — 1": that is true of
+`declared_imported_surface_callable_type` (line 373), the path that matters
+here. A `type_params.len() > 0` bail still stands at line 143, in the SIBLING
+function `declared_surface_callable_type`, which handles the module's OWN
+callables rather than imported ones. Not a contradiction, but the two must not
+be conflated by a future grep.
+
+The original held-branch verification, kept for history:
 
 - branch `reland-generic-callable` in `/mnt/data/worktrees/generic-callable-1`,
   tip `89d772f90b5`, code commit `8e70a394659`.
@@ -151,3 +179,24 @@ purpose-built facade-hop fixture is green on both.
 
 `/mnt/fast/gc1-baseline` has been deleted by its owner; it was stale after the
 revert. Rebuild any future baseline from `ec13c319250` or later.
+
+## run16 — the revert worked, and what run16 does NOT establish
+
+run16 (both halves reverted, i.e. the tree this record's revert produced)
+measured **15 HIR fatals / 21 poisoned modules**, honest basis 16 distinct error
+lines, rc=1 at 4326 s. run15's `Option` 1547 / `Result` 962 / `Dict` 889 flood
+is fully undone and `MirType` stays gone (was 180 at run14). Against run15's
+3716 / 437 that is the revert doing exactly what it was landed to do.
+
+**Two caveats, stated before anyone quotes these numbers:**
+
+1. **Counting basis.** run16's 21 poisoned against post19's 9 may be a
+   counting-basis difference rather than a real delta; post19 must be
+   re-derived on run16's basis before that gap is called a regression.
+   Comparing two censuses computed different ways is precisely what produced
+   the false MirType clearance prediction in follow-up (b) of
+   `hir_unresolved_type_owner_missing_import_2026-08-22.md`.
+2. **run16 does not attribute run15.** It removed both halves at once, so it
+   cannot say which one caused the regression. The run AFTER the isolated
+   generic-callable re-land is the decider. If fatals go materially above
+   run16's 15 / 21, the generic-callable half owns it.
