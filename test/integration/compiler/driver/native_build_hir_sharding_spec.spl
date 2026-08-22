@@ -1,0 +1,97 @@
+use std.spec
+use std.io.{file_exists, file_read}
+use std.io_runtime.{dir_create_all}
+use app.io.sysinfo_ops.{getpid}
+
+# HIR lowering across --threads worker processes
+# (doc/08_tracking/bug/native_build_phases_after_parse_single_threaded_2026-08-22.md).
+#
+# HIR lowering is the cost centre of a native build by two orders of
+# magnitude, and a module's HirModule is a pure function of (its source, the
+# frozen module surfaces) -- so it can be lowered in N shard PROCESSES that
+# each store their claimed modules into the HIR cache
+# (src/compiler/80.driver/driver_hir_cache.spl, encoded with the generated
+# HirModule codec), after which the real build loads every module and lowers
+# nothing. Processes, not threads: the lowerer and the flat HIR rows are
+# module-level state.
+#
+# These cases fail CLOSED on a silent fallback to the sequential path: a build
+# whose shards quietly lowered nothing would report no shard receipts and
+# `hits=0` in the real build, and both are asserted exactly.
+
+val FIXTURE_ROOT = "test/02_integration/compiler/driver/fixtures/native_build_cache"
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_set(key: text, value: text)
+
+fn run_build(cache_dir: text, fe_dir: text, hir_dir: text, output: text, threads: text, sharding: text) -> (text, i64):
+    rt_env_set("SIMPLE_FRONTEND_CACHE_DIR", fe_dir)
+    rt_env_set("SIMPLE_HIR_CACHE_DIR", hir_dir)
+    rt_env_set("SIMPLE_HIR_SHARDING", sharding)
+    rt_env_set("SIMPLE_PARSE_SHARDING", sharding)
+    rt_env_set("SIMPLE_HIR_CACHE", sharding)
+    rt_env_set("SIMPLE_FRONTEND_CACHE", sharding)
+    val (out, err, code) = rt_process_run("bin/simple",
+        ["native-build", "--source", FIXTURE_ROOT, "--entry-closure", "--threads", threads,
+         "--cache-dir", cache_dir, "--entry", "{FIXTURE_ROOT}/main.spl", "--output", output])
+    (out + "\n" + err, code)
+
+fn last_line_with(blob: text, needle: text) -> text:
+    var found = ""
+    for line in blob.split("\n"):
+        if line.contains(needle):
+            found = line.trim()
+    found
+
+fn sum_field(blob: text, line_needle: text, field: text) -> i64:
+    var total: i64 = 0
+    for line in blob.split("\n"):
+        if line.contains(line_needle):
+            for tok in line.trim().split(" "):
+                if tok.starts_with(field):
+                    total = total + (tok.substring(field.len()).to_i64() ?? -100)
+    total
+
+fn count_of(blob: text, needle: text) -> i64:
+    blob.split(needle).len() - 1
+
+describe "native-build HIR sharding":
+
+    slow_it "lowers every module in exactly one HIR shard process and the real build loads them all":
+        val run_id = getpid()
+        val root = "build/tmp/hir_shard_spec_{run_id}"
+        expect(dir_create_all(root)).to_equal(true)
+        val (blob, code) = run_build("{root}/cache", "{root}/fe", "{root}/hir", "{root}/out", "2", "1")
+        expect(code).to_equal(0)
+        # N workers ran and each reported.
+        expect(blob.contains("[hir-shard] 2/2 shard(s) completed split=queue")).to_equal(true)
+        expect(count_of(blob, "[hir-shard] done shard=")).to_equal(2)
+        # Every module lowered and stored by exactly one shard: a double
+        # claim overshoots 3, a lost one undershoots, a shard that silently
+        # fell back to "own nothing" contributes 0 to both sums.
+        expect(sum_field(blob, "[hir-shard] done shard=", "lowered=")).to_equal(3)
+        expect(sum_field(blob, "[hir-shard] done shard=", "claimed=")).to_equal(3)
+        # Dependency levels were computed (main imports util_a/util_b: 2 levels).
+        expect(last_line_with(blob, "[hir-shard] done shard=").contains("levels=2")).to_equal(true)
+        # The REAL build's HIR phase was all hits and lowered nothing.
+        val summary = last_line_with(blob, "[hir-cache]")
+        expect(summary.contains("hits=3")).to_equal(true)
+        expect(summary.contains("misses=0")).to_equal(true)
+        expect(summary.contains("stores=0")).to_equal(true)
+        # The queue dir is private to the orchestrator and removed with it.
+        expect(file_exists("{root}/hir/.lock")).to_equal(false)
+
+    slow_it "produces a binary byte-identical to an unsharded, uncached --threads 1 build":
+        # Sharding may only change WHICH PROCESS lowered a module. The real
+        # build runs MIR/codegen from DECODED modules, so identical bytes here
+        # is the proof that the codec reproduces what MIR needs.
+        val run_id = getpid()
+        val root = "build/tmp/hir_shard_ident_spec_{run_id}"
+        expect(dir_create_all(root)).to_equal(true)
+        val (_a, ca) = run_build("{root}/c1", "{root}/fe", "{root}/hir", "{root}/sharded.bin", "2", "1")
+        expect(ca).to_equal(0)
+        val (_b, cb) = run_build("{root}/c2", "{root}/fe2", "{root}/hir2", "{root}/plain.bin", "1", "0")
+        expect(cb).to_equal(0)
+        expect(file_exists("{root}/sharded.bin")).to_equal(true)
+        expect(file_exists("{root}/plain.bin")).to_equal(true)
+        expect(file_read("{root}/sharded.bin")).to_equal(file_read("{root}/plain.bin"))
