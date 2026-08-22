@@ -15,7 +15,7 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction}
-use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type}
 use compiler.mir.mir_data.*
 use compiler.mir_opt.mir_opt.dce (create_dce_pass, dce_run_on_function)
 use compiler.mir_opt.mir_opt.const_fold (create_const_fold_pass, cf_run_on_function)
@@ -520,6 +520,8 @@ fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerifi
     var instruction_count = 0
     var block_ids: Dict<i64, bool> = {}
     var local_ids: Dict<i64, bool> = {}
+    var argument_indices: Dict<i64, bool> = {}
+    var return_local_count = 0
     for local in func.locals:
         if local.id.id < 0:
             errors.push("negative local identity")
@@ -527,6 +529,28 @@ fn mir_structural_verification_receipt(func: MirFunction) -> MirStructuralVerifi
             errors.push("duplicate local identity: " + local.id.id.to_string())
         else:
             local_ids[local.id.id] = true
+        match local.kind:
+            case Arg(index):
+                if index < 0 or index >= func.signature.params.len():
+                    errors.push("argument local index is outside the function signature: " + index.to_string())
+                elif argument_indices.has(index):
+                    errors.push("duplicate argument local index: " + index.to_string())
+                else:
+                    argument_indices[index] = true
+                    if serialize_mir_type(local.type_) != serialize_mir_type(func.signature.params[index]):
+                        errors.push("argument local " + index.to_string() + " type does not match signature")
+            case Return:
+                return_local_count = return_local_count + 1
+                if serialize_mir_type(local.type_) != serialize_mir_type(func.signature.return_type):
+                    errors.push("return local type does not match function signature")
+            case Var | Temp: pass_dn
+    var parameter_index = 0
+    while parameter_index < func.signature.params.len():
+        if not argument_indices.has(parameter_index):
+            errors.push("missing argument local index: " + parameter_index.to_string())
+        parameter_index = parameter_index + 1
+    if return_local_count > 1:
+        errors.push("multiple return locals")
     for block in func.blocks:
         instruction_count = instruction_count + block.instructions.len()
         if block.id.id < 0:
