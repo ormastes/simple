@@ -417,3 +417,8 @@ implementation-blocked-by-bootstrap-authority
   now a bootstrap automated row; interactive push retains bounded tip structure
   checks. The complete focused contract passed in 7.14s at 71,168 KiB peak RSS;
   committed-ref and installed-hook paths reported 1s and 0s respectively.
+- committed-rules-fix: The quick rules gate now extracts `rules.sdl` from the
+  exact pushed ref and fingerprints it in both producer and consumer. A dirty
+  hostile `sleep 30` registry was ignored in favor of the committed passing
+  policy. The updated focused contract passed in 7.61s at 71,936 KiB peak RSS;
+  ref and installed-hook paths reported 0s and 1s.
