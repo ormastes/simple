@@ -2,10 +2,136 @@
 
 use compiler.driver.driver_types.{CompileContext}
 
-extern fn rt_file_write_bytes(path: text, content: [u8]) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_rename(old_path: text, new_path: text) -> bool
+extern fn rt_file_create_excl(path: text, content: text) -> bool
+extern fn rt_file_fsync(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_getpid() -> i64
+extern fn rt_io_file_open(path: text, mode: i64) -> i64
+extern fn rt_io_file_write_all(fd: i64, data: [u8]) -> bool
+extern fn rt_io_file_flush(fd: i64) -> bool
+extern fn rt_io_file_close(fd: i64) -> bool
+
+val NATIVE_MCDC_STREAM_CHUNK_BYTES_V1: i64 = 65536
+val NATIVE_MCDC_MANIFEST_MAX_BYTES_V1: i64 = 67108864
+
+fn native_mcdc_put_u32_v1(out: [u8], offset: i64, value: i64):
+    out[offset] = (value & 255).to_u8()
+    out[offset + 1] = ((value >> 8) & 255).to_u8()
+    out[offset + 2] = ((value >> 16) & 255).to_u8()
+    out[offset + 3] = ((value >> 24) & 255).to_u8()
+
+fn native_mcdc_put_u64_v1(out: [u8], offset: i64, value: i64):
+    native_mcdc_put_u32_v1(out, offset, value)
+    native_mcdc_put_u32_v1(out, offset + 4, value >> 32)
+
+fn native_mcdc_stream_flush_v1(fd: i64, chunk: [u8], used: i64) -> bool:
+    if used <= 0: return true
+    rt_io_file_write_all(fd, chunk[0:used])
+
+fn driver_native_stream_mcdc_wire_v1(ctx: CompileContext, path: text) -> bool:
+    if not ctx.mcdc_manifest_frozen
+        or ctx.mcdc_manifest_frozen_identity.len() != 64:
+        return false
+    val row_count = ctx.mcdc_manifest_decision_ids.len()
+    val token_count = ctx.mcdc_manifest_token_opcodes.len()
+    if row_count > 1048576 or token_count > 8388608: return false
+    var semantic_bytes = 0
+    for semantic_id in ctx.mcdc_manifest_semantic_ids:
+        if semantic_id.len() == 0 or semantic_id.len() > 4096: return false
+        semantic_bytes = semantic_bytes + 4 + semantic_id.bytes().len()
+    val total_bytes = 96 + row_count * 32 + token_count * 8 + semantic_bytes
+    if total_bytes < 96 or total_bytes > NATIVE_MCDC_MANIFEST_MAX_BYTES_V1:
+        return false
+    val fd = rt_io_file_open(path, 1)
+    if fd < 0: return false
+    var chunk: [u8] = [0u8; NATIVE_MCDC_STREAM_CHUNK_BYTES_V1]
+    var ok = true
+    var header: [u8] = [0u8; 88]
+    native_mcdc_put_u32_v1(header, 0, 0x5044434d)
+    native_mcdc_put_u32_v1(header, 4, 1)
+    native_mcdc_put_u64_v1(header, 8, row_count)
+    native_mcdc_put_u64_v1(header, 16, token_count)
+    val identity_bytes = ctx.mcdc_manifest_frozen_identity.bytes()
+    var identity_index = 0
+    while identity_index < 64:
+        header[24 + identity_index] = identity_bytes[identity_index]
+        identity_index = identity_index + 1
+    ok = rt_io_file_write_all(fd, header)
+    var used = 0
+    var row = 0
+    while ok and row < row_count:
+        if used + 32 > chunk.len():
+            ok = native_mcdc_stream_flush_v1(fd, chunk, used)
+            used = 0
+        if not ok: break
+        native_mcdc_put_u64_v1(
+            chunk, used, ctx.mcdc_manifest_decision_ids[row])
+        native_mcdc_put_u64_v1(
+            chunk, used + 8, ctx.mcdc_manifest_source_digests[row])
+        native_mcdc_put_u32_v1(
+            chunk, used + 16, ctx.mcdc_manifest_condition_counts[row])
+        native_mcdc_put_u32_v1(
+            chunk, used + 20, ctx.mcdc_manifest_token_counts[row])
+        native_mcdc_put_u64_v1(
+            chunk, used + 24, ctx.mcdc_manifest_token_offsets[row])
+        used = used + 32
+        row = row + 1
+    if ok: ok = native_mcdc_stream_flush_v1(fd, chunk, used)
+    used = 0
+    var token = 0
+    while ok and token < token_count:
+        if used + 8 > chunk.len():
+            ok = native_mcdc_stream_flush_v1(fd, chunk, used)
+            used = 0
+        if not ok: break
+        chunk[used] = ctx.mcdc_manifest_token_opcodes[token].to_u8()
+        chunk[used + 1] = 0u8
+        chunk[used + 2] = 0u8
+        chunk[used + 3] = 0u8
+        native_mcdc_put_u32_v1(
+            chunk, used + 4, ctx.mcdc_manifest_token_conditions[token])
+        used = used + 8
+        token = token + 1
+    if ok: ok = native_mcdc_stream_flush_v1(fd, chunk, used)
+    used = 0
+    if ok:
+        native_mcdc_put_u64_v1(
+            chunk, 0, ctx.mcdc_manifest_semantic_ids.len())
+        used = 8
+    var semantic = 0
+    while ok and semantic < ctx.mcdc_manifest_semantic_ids.len():
+        val semantic_id_bytes = ctx.mcdc_manifest_semantic_ids[semantic].bytes()
+        if used + 4 > chunk.len():
+            ok = native_mcdc_stream_flush_v1(fd, chunk, used)
+            used = 0
+        if not ok: break
+        native_mcdc_put_u32_v1(chunk, used, semantic_id_bytes.len())
+        used = used + 4
+        var byte_index = 0
+        while ok and byte_index < semantic_id_bytes.len():
+            if used >= chunk.len():
+                ok = native_mcdc_stream_flush_v1(fd, chunk, used)
+                used = 0
+            if not ok: break
+            val available = chunk.len() - used
+            val remaining = semantic_id_bytes.len() - byte_index
+            val take = if available < remaining: available else: remaining
+            var copy_index = 0
+            while copy_index < take:
+                chunk[used + copy_index] = semantic_id_bytes[byte_index + copy_index]
+                copy_index = copy_index + 1
+            used = used + take
+            byte_index = byte_index + take
+        semantic = semantic + 1
+    if ok: ok = native_mcdc_stream_flush_v1(fd, chunk, used)
+    if ok: ok = rt_io_file_flush(fd)
+    if not rt_io_file_close(fd): ok = false
+    if ok: ok = rt_file_size(path) == total_bytes
+    if ok: ok = rt_file_fsync(path)
+    ok
 
 pub fn driver_native_mcdc_manifest_path_v1(output: text) -> text:
     output + ".mcdp"
@@ -22,23 +148,20 @@ pub fn driver_native_write_mcdc_transport_v1(
     is success; otherwise the caller must reject the native build.
     """
     val path = driver_native_mcdc_manifest_path_v1(output)
-    val temp_path = path + ".tmp"
     if ctx.options.mcdc_policy == "off":
-        if rt_file_exists(temp_path) and not rt_file_delete(temp_path):
-            return "MCDC-E-NATIVE-STALE: cannot remove {temp_path}"
         if rt_file_exists(path) and not rt_file_delete(path):
             return "MCDC-E-NATIVE-STALE: cannot remove {path}"
         return ""
-    val wire = ctx.mcdc_manifest_wire_v1()
-    if wire.len() == 0:
+    if not ctx.mcdc_manifest_frozen
+        or ctx.mcdc_manifest_frozen_identity.len() != 64:
         return "MCDC-E-MANIFEST: frozen Boolean program wire payload unavailable"
-    if rt_file_exists(temp_path) and not rt_file_delete(temp_path):
-        return "MCDC-E-NATIVE-WRITE: cannot replace {temp_path}"
-    if not rt_file_write_bytes(temp_path, wire):
-        return "MCDC-E-NATIVE-WRITE: cannot write {temp_path}"
-    if rt_file_exists(path) and not rt_file_delete(path):
+    val identity_head = ctx.mcdc_manifest_frozen_identity.substring(0, 16)
+    val temp_path = path + ".tmp." + rt_getpid().to_text() + "." + identity_head
+    if not rt_file_create_excl(temp_path, ""):
+        return "MCDC-E-NATIVE-WRITE: cannot reserve {temp_path}"
+    if not driver_native_stream_mcdc_wire_v1(ctx, temp_path):
         val _ = rt_file_delete(temp_path)
-        return "MCDC-E-NATIVE-WRITE: cannot replace {path}"
+        return "MCDC-E-NATIVE-WRITE: cannot write {temp_path}"
     if not rt_file_rename(temp_path, path):
         val _ = rt_file_delete(temp_path)
         return "MCDC-E-NATIVE-WRITE: cannot publish {path}"
@@ -46,3 +169,4 @@ pub fn driver_native_write_mcdc_transport_v1(
 
 export driver_native_mcdc_manifest_path_v1
 export driver_native_write_mcdc_transport_v1
+export driver_native_stream_mcdc_wire_v1
