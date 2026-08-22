@@ -1070,3 +1070,16 @@ not restored. The RV64 runtime-link contract passes 2/2 through the canonical
 export. The installer-font spec now reads correctly but exposes two unrelated
 stale assertions, also recorded. This export cleanup adds no runtime layer or
 per-call security work; consumers call the same canonical function directly.
+
+The general `app.io` facade no longer exports the shell-backed function named
+`rt_file_rename`. All six consumers now use canonical `file_rename`, whose real
+raw declaration is tagged, false-sentinel contracted, and lexically contained.
+The obsolete shell wrapper was deleted. This is performance-positive: rename no
+longer spawns `/bin/sh` and `mv`, and instead makes one typed runtime call with
+one status branch. Seven changed source modules pass together. The integration
+spec executes 19 examples with 15 passing and four unrelated maintenance
+failures; it is not claimed fully green. Census/ratchet pass at 12,499
+declarations, 11,719 untouched, 506 tagged, 586 contracted, and zero signed
+admissions. The compatibility `file_ops` surface retains a semantic
+`file_rename` wrapper, but it delegates to the typed provider rather than
+spawning a shell.

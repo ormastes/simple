@@ -869,3 +869,9 @@ Raw read/write exports are now removed. Fix the import-alias dependency-capture
 bug before using aliases that reuse foreign symbol names; until then use the
 canonical exported name directly. Repair the stale installer-font source
 contract separately. Neither issue justifies reopening raw SFFI exports.
+
+The raw-looking shell rename export is removed and all consumers use the typed
+canonical rename boundary. Continue auditing general-module `export rt_*`
+entries before explicit FFI modules: replace misleading wrappers with semantic
+names, remove shell/process marshalling where a typed provider exists, and tag
+the irreducible raw declaration at its single owner.
