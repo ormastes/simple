@@ -226,3 +226,11 @@ wire shapes: `L|E:code:location...` and `direct_code:location...`. It returns th
 code, preserves malformed input as an unknown authored code, allocates no parts array,
 and never treats a location component as policy identity. Text and JSON severity paths
 must consume this single decoded code.
+
+### EasyFix policy reachability
+
+Every EasyFix semantic code that has a declared configurable lint name must map exactly
+to that name. Direct visibility warnings W0401–W0404 and W0406 map to the shared
+`visibility_boundary` policy. Mapping uses exact match dispatch and precedes severity and
+suppression projection; no diagnostic may bypass configured allow/warn/deny because its
+producer uses EasyFix. Registry/default/mapping parity is a source-contract invariant.
