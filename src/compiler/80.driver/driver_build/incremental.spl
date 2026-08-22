@@ -19,7 +19,7 @@ use compiler.driver.cache.action_key.{interface_digest_of_source, dependency_int
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_size(path: text) -> i64
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text
@@ -36,11 +36,15 @@ fn incremental_file_exists(path: text) -> bool:
 fn incremental_file_size(path: text) -> i64:
     rt_file_size(path)
 
-fn incremental_file_read_text(path: text) -> text:
+# nil = file missing/unreadable. Callers MUST treat nil as a cache MISS — never
+# as empty content (an empty text would be hashed/parsed as real content).
+fn incremental_file_read_text(path: text) -> text?:
     rt_file_read_text(path)
 
-fn incremental_parse_file(path: text):
-    parse(incremental_file_read_text(path))
+fn incremental_parse_file(path: text) -> Result<SdnValue, text>:
+    if val content = incremental_file_read_text(path):
+        return parse(content)
+    Err("cache file missing or unreadable: {path}")
 
 fn incremental_hash_text(content: text) -> i64:
     rt_hash_text(content)
@@ -242,11 +246,19 @@ impl FileFingerprint:
         if not incremental_file_exists(path):
             return nil
 
-        val content = incremental_file_read_text(path)
-        val hash = incremental_hash_text(content).to_text()
+        # Text read is nil for a missing OR non-UTF-8 file. Object files
+        # (.o, fingerprinted by the native capsule receipt) are binary, so
+        # fall back to a byte-level digest; only a vanished file is a miss.
+        var hash = ""
+        val content_opt = incremental_file_read_text(path)
+        if val content = content_opt:
+            hash = incremental_hash_text(content).to_text()
+        else:
+            hash = rt_file_hash_sha256(path)
+            if hash == "":
+                return nil
         val size = incremental_file_size(path)
         val mtime = 0
-
         Some(FileFingerprint(path: path, content_hash: hash,
                              modified_time: mtime, size: size))
 
@@ -279,10 +291,13 @@ fn incremental_dependency_interface_fold(dep_paths: [text]) -> text?:
     for p in dep_paths:
         if not incremental_file_exists(p):
             return nil
-        val src = rt_file_read_text(p)
-        if src == "":
+        val src_opt = incremental_file_read_text(p)
+        if val src = src_opt:
+            if src == "":
+                return nil
+            entries.push("{p}={interface_digest_of_source(src)}")
+        else:
             return nil
-        entries.push("{p}={interface_digest_of_source(src)}")
     Some(dependency_interface_fold(entries))
 
 struct DependencyEntry:
@@ -735,9 +750,10 @@ impl IncrementalCompiler:
             val safe_name = slashless.replace(":", "_")
             val mir_path = "{cache_dir}/{safe_name}.sdn"
             if incremental_file_exists(mir_path):
-                val content = incremental_file_read_text(mir_path)
-                if content != "":
-                    result[name] = content
+                val content_opt = incremental_file_read_text(mir_path)
+                if val content = content_opt:
+                    if content != "":
+                        result[name] = content
 
         if result.keys().len() == 0:
             return nil

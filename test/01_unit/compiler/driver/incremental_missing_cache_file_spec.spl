@@ -1,0 +1,38 @@
+# Reproduce: doc/08_tracking/bug/non_optional_wrappers_return_nil_sweep_2026-08-21.md
+# On a cold SIMPLE_CACHE_SCOPE the Phase D dependency-digest path read a cache
+# file that does not exist; rt_file_read_text returns nil, and the wrapper was
+# declared `-> text`, so the seed's non-optional return contract aborted every
+# native-build with "nil is forbidden by the non-optional return contract of
+# 'incremental_file_read_text'". Pre-fix this spec dies with that exact error.
+use std.spec.{describe, it, expect}
+use compiler.driver.driver_build.incremental.{
+    incremental_file_read_text, incremental_parse_file,
+    incremental_dependency_interface_fold, FileFingerprint, BuildCache}
+
+val missing = "/nonexistent/incremental_missing_cache_file_spec/does_not_exist.sdn"
+
+describe "incremental cache reads on a missing file":
+    it "read returns nil (not empty text) for a missing path":
+        val got = incremental_file_read_text(missing)
+        expect got == nil
+
+    it "parse of a missing cache file is an Err, never a parse of nil":
+        val r = incremental_parse_file(missing)
+        expect r.is_err()
+
+    it "fingerprint of a missing file is a miss":
+        expect FileFingerprint.from_file(missing) == nil
+
+    it "dependency interface fold over a missing dep fails closed (nil)":
+        expect incremental_dependency_interface_fold([missing]) == nil
+
+    it "BuildCache.load on a missing cache path yields an empty cache":
+        val cache = BuildCache.load(missing)
+        expect cache.entries.keys().len() == 0
+
+    it "fingerprint of an existing binary (non-UTF-8) file is NOT a miss":
+        # rt_file_read_text is nil for non-UTF-8 bytes; native capsule receipts
+        # fingerprint .o files through this path, so nil-text must fall back to
+        # a byte digest rather than report the object as missing.
+        val fp = FileFingerprint.from_file("/bin/sh")
+        expect fp != nil
