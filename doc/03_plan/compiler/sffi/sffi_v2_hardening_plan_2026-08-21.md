@@ -1064,3 +1064,11 @@ operation call and no explicit allocation per migrated wrapper. Next migrate
 the five trigonometric helpers in `dyn_sffi_tensor_ops`, then shape/index and
 constructor handle families. Scalar reductions must use a status/value result
 because floating-point zero is valid data and cannot remain an error sentinel.
+
+Torch sin/cos/tan/asin/acos/atan2 now use typed results end-to-end and import
+their six raw symbols from the canonical owner. Status tests pass 4/4, focused
+checks and lint pass, and the ratchet passes. Census is 12,294 rows, 785 tagged,
+587 contracted, 11,237 untouched, zero verified/signed; `rt_torch` has 22
+untouched rows. Continue with shape/index and constructor/copy families, where
+legacy empty-array and zero-handle adapters are still explicitly tested and
+must be removed rather than retained as compatibility behavior.

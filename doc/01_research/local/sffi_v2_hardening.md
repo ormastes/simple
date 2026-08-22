@@ -1352,3 +1352,14 @@ lint has zero errors. A mechanical call-shape audit confirms exactly one raw
 operation call and zero explicit allocations in each of the fourteen migrated
 wrappers. Required availability/input/output checks remain; no hashing, lookup,
 I/O, retry, or extra provider call was introduced.
+
+The dynamic Torch trigonometric family now returns typed results for sin, cos,
+tan, asin, acos, and atan2. Production unary and binary dispatchers propagate
+the provider reason rather than receiving handle zero. Six duplicate raw
+declarations were removed and replaced with compile-time imports from the
+canonical tagged Torch owner; there is no runtime forwarding layer. The status
+spec passes 4/4, three focused checks pass, lint has zero errors, and the safety
+ratchet passes. Census: 12,294 declaration rows, 785 tagged, 587 contracted,
+11,237 untouched, and zero verified/signed. `rt_torch` is 161 rows, 139 tagged,
+22 untouched. Each result wrapper still has one raw operation call and only
+the availability/input/output contract branches.
