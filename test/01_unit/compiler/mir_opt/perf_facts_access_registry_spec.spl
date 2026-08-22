@@ -1,0 +1,55 @@
+"""
+## Purpose and audience
+Purpose: Keep the shared MIR def/use visitor synchronized with the generated opcode registry.
+Audience: MIR and optimizer maintainers adding or changing instruction variants.
+"""
+# @req: REQ-013
+
+use std.spec.*
+use std.fs.{read_file}
+
+val MIR_INST_REGISTRY = "spec/compiler_schema/registry/compiler.mir.MirInstKind.sdn"
+val PERF_FACTS_SOURCE = "src/compiler/60.mir_opt/mir_opt/perf_facts.spl"
+
+fn _access_registry_variants() -> [text]:
+    var variants: [text] = []
+    for line in read_file(MIR_INST_REGISTRY).split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("payload_schema:"):
+            val schema = trimmed.substring(15, trimmed.len()).trim()
+            val open = schema.find("(")
+            if open > 0:
+                variants.push(schema.substring(0, open))
+            else:
+                variants.push(schema)
+    variants
+
+fn _access_visitor_source() -> text:
+    val source = read_file(PERF_FACTS_SOURCE)
+    val begin = source.find("fn perf_instruction_access(")
+    val finish = source.find("fn perf_terminator_access(")
+    if begin < 0 or finish <= begin: return ""
+    source.substring(begin, finish)
+
+fn _missing_access_variants() -> [text]:
+    val source = _access_visitor_source()
+    var missing: [text] = []
+    for variant in _access_registry_variants():
+        val case_payload = "case " + variant + "("
+        val grouped_payload = "| " + variant + "("
+        val case_empty = "case " + variant + ":"
+        val grouped_empty = "| " + variant + ":"
+        if (source.find(case_payload) < 0 and source.find(grouped_payload) < 0 and
+            source.find(case_empty) < 0 and source.find(grouped_empty) < 0):
+            missing.push(variant)
+    missing
+
+describe "PerfFacts MIR access registry coverage":
+    it "names every generated MIR instruction variant explicitly":
+        step("Compare the canonical access visitor with the MIR opcode registry")
+        expect(_access_registry_variants().len()).to_be_greater_than(0)
+        expect(_missing_access_variants()).to_equal([])
+
+    it "does not hide new opcodes behind a wildcard arm":
+        step("Require new MIR opcodes to declare their access contract")
+        expect(_access_visitor_source().find("case _:")).to_equal(-1)
