@@ -287,6 +287,15 @@ static char* win_filtered_environment(void) {
     return filtered;
 }
 
+/* SIMPLE_RUNTIME_PROCESS_RUST_CORE: the Rust runtime crate
+ * (src/compiler_rust/runtime/src/value/sffi/env_process.rs) carries its own
+ * rt_process_run_timeout / rt_process_run_bounded / rt_process_wait. When this
+ * file is compiled INTO that crate (src/compiler_rust/runtime/build.rs, so the
+ * seed/JIT can resolve the C-only rt_process_*_piped / *_checked family), those
+ * three would be duplicate symbols at link time. The macro is defined only by
+ * that build; every other lane (native product build, SimpleOS sysroot,
+ * standalone) keeps the C definitions unchanged. */
+#ifndef SIMPLE_RUNTIME_PROCESS_RUST_CORE
 static SplArray* win_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
                                          int64_t timeout_ms, int64_t max_output_bytes) {
     const char* failure = NULL;
@@ -518,6 +527,7 @@ SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* ar
                                  int64_t timeout_ms, int64_t max_output_bytes) {
     return win_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes);
 }
+#endif /* SIMPLE_RUNTIME_PROCESS_RUST_CORE */
 
 struct WinPipedSlot {
     DWORD pid;
@@ -1469,6 +1479,15 @@ int64_t rt_browser_renderer_spawn_sandboxed(
 #endif
 }
 
+/* SIMPLE_RUNTIME_PROCESS_RUST_CORE: the Rust runtime crate
+ * (src/compiler_rust/runtime/src/value/sffi/env_process.rs) carries its own
+ * rt_process_run_timeout / rt_process_run_bounded / rt_process_wait. When this
+ * file is compiled INTO that crate (src/compiler_rust/runtime/build.rs, so the
+ * seed/JIT can resolve the C-only rt_process_*_piped / *_checked family), those
+ * three would be duplicate symbols at link time. The macro is defined only by
+ * that build; every other lane (native product build, SimpleOS sysroot,
+ * standalone) keeps the C definitions unchanged. */
+#ifndef SIMPLE_RUNTIME_PROCESS_RUST_CORE
 static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
                                            int64_t timeout_ms, int64_t max_output_bytes) {
     if (!cmd || cmd_len == 0 || cmd_len > SIZE_MAX - 1) {
@@ -1544,6 +1563,7 @@ SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* ar
     }
     return posix_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes);
 }
+#endif /* SIMPLE_RUNTIME_PROCESS_RUST_CORE */
 
 int64_t rt_editor_spawn_simple_dap(void) {
     char* argv[] = {
@@ -2280,6 +2300,15 @@ bool rt_browser_renderer_sandbox_enter(void) {
 /* Backfill: runtime.h prototype with no C definition (caught by the Stage4
    runtime-capsule gate). Mirrors env_process.rs rt_process_wait semantics:
    returns child exit code, -1 on error, -2 on timeout (child keeps running). */
+/* SIMPLE_RUNTIME_PROCESS_RUST_CORE: the Rust runtime crate
+ * (src/compiler_rust/runtime/src/value/sffi/env_process.rs) carries its own
+ * rt_process_run_timeout / rt_process_run_bounded / rt_process_wait. When this
+ * file is compiled INTO that crate (src/compiler_rust/runtime/build.rs, so the
+ * seed/JIT can resolve the C-only rt_process_*_piped / *_checked family), those
+ * three would be duplicate symbols at link time. The macro is defined only by
+ * that build; every other lane (native product build, SimpleOS sysroot,
+ * standalone) keeps the C definitions unchanged. */
+#ifndef SIMPLE_RUNTIME_PROCESS_RUST_CORE
 #ifdef _WIN32
 int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     (void)pid; (void)timeout_ms;
@@ -2309,3 +2338,4 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     }
 }
 #endif
+#endif /* SIMPLE_RUNTIME_PROCESS_RUST_CORE */

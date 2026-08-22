@@ -16,6 +16,8 @@ fn main() {
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_process.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_fork.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
@@ -317,6 +319,21 @@ fn compile_c_runtime_sources() {
         // exact-equivalent since every value it deep-frees is a string.
         // Re-added after the tree-wipe restore ae55a746719 dropped it again.
         "runtime_process_owned.c",
+        // rt_process_*_piped / rt_process_read_stdout_checked /
+        // rt_process_is_alive_checked / rt_process_write_stdin_some /
+        // rt_process_close_piped / rt_process_is_alive / rt_browser_renderer_* /
+        // rt_editor_*_simple_dap: all C-only (no Rust twin), listed in
+        // runtime_symbols.rs and emitted by JIT codegen, but runtime_process.c
+        // was never in this list — so the JIT's `first_unresolved_import`
+        // guard tripped on `rt_process_read_stdout_checked` and dropped whole
+        // modules (stage1 included) to the interpreter. Exact same shape as
+        // runtime_process_owned.c above. Its three Rust-duplicated symbols
+        // (rt_process_run_timeout / rt_process_run_bounded / rt_process_wait)
+        // are compiled out by SIMPLE_RUNTIME_PROCESS_RUST_CORE below.
+        "runtime_process.c",
+        // runtime_process.c's fork/exec helper (rt_fork_*), used by the piped
+        // spawn path.
+        "runtime_fork.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");
@@ -331,6 +348,9 @@ fn compile_c_runtime_sources() {
     // See the runtime_process_owned.c comment above: rt_free_deep lives in
     // runtime_native.c, which this crate does not compile.
     build.define("SIMPLE_RUNTIME_PROCESS_OWNED_STRING_FREE", None);
+    // See the runtime_process.c comment above: the Rust runtime crate already
+    // defines rt_process_run_timeout / rt_process_run_bounded / rt_process_wait.
+    build.define("SIMPLE_RUNTIME_PROCESS_RUST_CORE", None);
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");
     } else {
@@ -453,6 +473,8 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
         "runtime_memtrack.c",
         "runtime_simd_dispatch.c",
         "hosted_win32.c",
+        "runtime_process.c",
+        "runtime_fork.c",
     ];
     for source in LINKED_C_SOURCES {
         if *source == "hosted_win32.c" && (target_os == "windows" || native_all_provider) {
@@ -462,7 +484,18 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
         let Ok(file) = fs::read_to_string(path) else {
             continue;
         };
-        if *source == "runtime_simd_dispatch.c" {
+        if *source == "runtime_process.c" {
+            // SIMPLE_RUNTIME_PROCESS_RUST_CORE compiles these three OUT of the
+            // C object; the Rust runtime provides them. The text scan can't see
+            // the #ifndef, so drop them explicitly or the generated extern
+            // block would anchor a C symbol that isn't there.
+            const RUST_OWNED: &[&str] = &["rt_process_run_timeout", "rt_process_run_bounded", "rt_process_wait"];
+            exported.extend(
+                runtime_export_scan::c_function_definitions(&file)
+                    .into_iter()
+                    .filter(|symbol| !RUST_OWNED.contains(&symbol.as_str())),
+            );
+        } else if *source == "runtime_simd_dispatch.c" {
             let dispatch_exports = runtime_export_scan::c_function_definitions(&file);
             exported.extend(
                 dispatch_exports
