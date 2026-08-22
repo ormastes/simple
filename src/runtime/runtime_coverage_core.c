@@ -576,7 +576,7 @@ int32_t rt_mcdc_dynamic_unbind_v1(uint64_t target_handle) {
                                           memory_order_acquire);
     if ((epoch & 1u) || !atomic_compare_exchange_strong_explicit(
             &g_mcdc_dynamic_epoch, &epoch, epoch + 1,
-            memory_order_acq_rel, memory_order_relaxed))
+            memory_order_seq_cst, memory_order_relaxed))
         { mcdc_unlock(); return SIMPLE_MCDC_V1_BUSY; }
     if (atomic_load_explicit(&g_mcdc_dynamic_target,
                              memory_order_relaxed) != target) {
@@ -585,11 +585,11 @@ int32_t rt_mcdc_dynamic_unbind_v1(uint64_t target_handle) {
         mcdc_unlock();
         return SIMPLE_MCDC_V1_INVALID;
     }
-    atomic_store_explicit(&g_mcdc_dynamic_target, NULL, memory_order_relaxed);
+    atomic_store_explicit(&g_mcdc_dynamic_target, NULL, memory_order_seq_cst);
     atomic_store_explicit(&g_mcdc_dynamic_bound_handle, 0,
                           memory_order_relaxed);
     if (atomic_load_explicit(&g_mcdc_dynamic_active_calls,
-                             memory_order_acquire) == 0) {
+                             memory_order_seq_cst) == 0) {
         atomic_store_explicit(&g_mcdc_dynamic_epoch, epoch + 2,
                               memory_order_release);
         mcdc_unlock();
@@ -661,11 +661,11 @@ int32_t rt_mcdc_dynamic_settled_v1(void) {
                                     memory_order_acquire) == NULL
             ? SIMPLE_MCDC_V1_OK : SIMPLE_MCDC_V1_BUSY;
     if (atomic_load_explicit(&g_mcdc_dynamic_active_calls,
-                             memory_order_acquire) != 0)
+                             memory_order_seq_cst) != 0)
         return SIMPLE_MCDC_V1_BUSY;
     if (!atomic_compare_exchange_strong_explicit(
             &g_mcdc_dynamic_epoch, &epoch, epoch + 1,
-            memory_order_release, memory_order_relaxed))
+            memory_order_seq_cst, memory_order_relaxed))
         return SIMPLE_MCDC_V1_BUSY;
     return SIMPLE_MCDC_V1_OK;
 }
