@@ -1,7 +1,9 @@
 # Must-Check Tiering NFRs
 
-- NFR-MCT-001: The focused push self-test and a committed-ref fixture path must
-  each complete within 10 seconds on the development host.
+- NFR-MCT-001: The focused push self-test, committed-ref fixture, and a
+  representative production-tree push path must each complete within 10
+  seconds on the development host. One hook invocation accepts at most two
+  unique ref updates and deduplicates identical updates.
 - NFR-MCT-002: Push behavior is read-only with respect to repository state and
   uses a closed gate allowlist; registry text cannot inject arbitrary commands.
 - NFR-MCT-003: Ledger replacement is deterministic for the same fingerprint,
@@ -10,3 +12,5 @@
   and individually timestamped. TODO/blocked rows use `passed_at_utc=never`.
 - NFR-MCT-005: No full bootstrap is required merely to execute the push hook;
   missing required bootstrap evidence is reported quickly and fails closed.
+- NFR-MCT-006: Production PASS evidence is repository-contained, non-symlinked,
+  SHA-256 bound, and limited to 64 MiB aggregate input per ledger validation.

@@ -1,6 +1,6 @@
 # Pre-push tree guard repeats full-tree scans per commit and ref
 
-Status: PARTIALLY RESOLVED — `codex/session-01a023a8`
+Status: RESOLVED — `codex/session-01a023a8`
 
 ## Evidence
 
@@ -39,4 +39,11 @@ mode remains available through `--selftest` outside the hook.
 Before the user-requested unverified sync boundary, the same 12-commit range
 had measured 25.79 seconds / 79,872 KiB in exhaustive mode and 1.29 seconds /
 79,872 KiB in bounded tip mode. The remaining multi-ref deduplication and
-evidence-file bounds are still open and must be handled in a later slice.
+evidence-file bounds were then closed: identical updates are deduplicated,
+more than two unique updates fail closed with split-push guidance, and evidence
+hashing has a repository-containment plus 64 MiB aggregate bound.
+
+The focused end-to-end contract passed in 7.14 seconds with 71,168 KiB peak
+RSS; its committed-ref path took one second and installed-hook path zero
+whole seconds. The preserved production-tree measurement remains 1.29 seconds
+for the same 12-commit tip.
