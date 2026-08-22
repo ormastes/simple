@@ -1594,3 +1594,30 @@ receipts per surface and declaration category while retaining the name-array
 path, then isolate the first failing category/owner mutation. No Stage-3
 candidate, sanity receipt, provenance manifest, ARM64 SimpleOS artifact, or
 QEMU rendering evidence is claimed.
+
+## Disabled-trace and first-pass export cycles (2026-08-22)
+
+Cycle 1 added scalar surface/category receipts on the retained-name owner-index
+path. All six declaration categories completed for all 694 surfaces. The crash
+occurred immediately afterward, before first-pass processing, at a disabled
+trace call whose eagerly interpolated message read
+`owner_by_package_name.len()`.
+
+Cycle 2 guarded every interpolated export-origin trace at its call site so a
+disabled trace constructs no message and reads no dictionary or surface
+aggregate. Phase 2 passed both admission gates. Phase 3 advanced into the next
+unmarked first-pass boundary, then exited 139 without producing a candidate,
+sanity receipt, or provenance manifest.
+
+Cycle 3 added scalar first-pass surface/export/item receipts. Surfaces 0 through
+4 completed. Surface 5, `src/std/nogc_sync_mut/io_runtime.spl`, reached its
+eighth export declaration and fourth export item before exit 139 inside that
+item's origin-resolution work. All probes were removed; the lazy trace guards
+remain as the evidence-backed correction.
+
+The three-cycle cap is exhausted. The next session must retain this source
+state and add export-declaration/item indices plus sub-operation receipts for
+surface 5 around direct declaration lookup, explicit-import origin lookup,
+retained-origin lookup, explicit-route detection, sibling-origin lookup, and
+origin-index insertion. No trusted Stage 3, ARM64 SimpleOS artifact, or QEMU
+2D, web, GUI, or window-manager evidence is claimed.
