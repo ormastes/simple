@@ -723,7 +723,37 @@ assembly use fragments and one join.
 Keys must encode the same identity as `hir_types_equal`, excluding provenance
 spans, function effects, and inference levels while including every compared
 field. Numeric text atoms and length-framed ordered lists avoid delimiter and
-identifier-sanitization collisions. Nested unions recursively normalize their
-member keys, making their identity order-independent. Public legacy wrappers
+identifier-sanitization collisions. Nested unions inside another type preserve
+ordered list identity to match `hir_types_equal`; only the top-level union
+normalizer flattens and orders members. Public legacy wrappers
 delegate to `union_normalize`; production callers must retain and reuse the
 result instead of invoking wrappers in sequence.
+
+### Structural-union SymbolId registry
+
+`SymbolTable` is the request/module owner because it exists during HIR match
+lowering and is later embedded in `HirModule` for synthesis and cache transport.
+The registry stores canonical identity to raw SymbolId and the reverse owner.
+
+Reservation is idempotent. It recomputes the legacy FNV preferred ID from the
+canonical identity rather than trusting a caller hint, so bad hints cannot
+perturb the normal starting slot. It
+performs at most 4096 wrapped probes in the reserved lane, then uses the
+ordinary unique allocator. It checks ordinary symbol occupancy and reverse
+union ownership; it never advances normal allocation to the reserved base on
+the successful common path. Production callers do not pre-hash the identity,
+so each new reservation performs one key traversal. Reset and codec round-trip
+preserve ownership.
+
+The bounded probe is collision-safe but a genuine same-hash pair is assigned
+according to fixed encounter order. Byte-identical assignment under reversed
+module traversal therefore requires a future sorted preregistration phase over
+all enum and variant identities; the incremental lowering owner cannot relocate
+an ID after it has already been embedded in HIR.
+
+HIR narrowing reserves the enum ID before building its Named enum type.
+Synthesis reserves the same enum identity and every `name::member-key` variant
+identity, then constructs the enum with those assigned IDs. Per-match member
+recognition is a dictionary keyed by complete canonical member key. Bare named
+patterns resolve their existing symbol; generic/qualified patterns require a
+future grammar/HIR type payload.
