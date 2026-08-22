@@ -125,6 +125,20 @@
 - Verification and optimizer execution intentionally not run under the user's
   no-verify instruction; no timing/RSS claim is made.
 
+## Completed storage-layout overlap foundation tranche
+
+- Replaced the global typed-fact pair scan with compact deterministic
+  region-grouped interval ordering and distinct-field endpoint leaders.
+- Preserved half-open, same-field, cross-region, identity-order, incomplete,
+  and malformed externally constructed range behavior.
+- Added direct-summary behavioral fixtures and mirrored structural contracts.
+- Parallel lanes reviewed exact semantics, allocation/locality, sorting
+  complexity, malformed ranges, and coverage gaps.
+- Production reference inventory found no current pipeline caller, so this is
+  activation-path hardening rather than a measured compiler speedup.
+- Verification/optimizer/timing/RSS execution remains intentionally omitted
+  under the user's no-verify instruction.
+
 ## Completed VHDL metadata-index tranche
 
 - Built collision-framed exact and eligible-alias row-index maps once.
