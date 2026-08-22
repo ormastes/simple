@@ -251,3 +251,8 @@ The same request-owned contexts feed general code, annotation, deprecation, and 
 boundary EasyFix rules. Duplicate-typed-argument candidates reuse canonical lines rather
 than allocating one line array per signature. These facts are immutable and released with
 the registry call; long-lived lint/LSP instances retain no EasyFix source view.
+
+Compiler-owned EasyFix rules—including import, API-width, primitive/bool, grammar, and
+script policy checks—consume that same view. Compatibility calls test path eligibility
+before constructing private lines. File-level allow scanning also reuses the caller's
+lines, so suppression does not add a hidden full-source array.
