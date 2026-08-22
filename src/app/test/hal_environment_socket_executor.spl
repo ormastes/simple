@@ -1,0 +1,254 @@
+# codex-impl
+# Bounded hosted TCP capture adapter. Network effects are owned by std.net.tcp
+# before sealing; execution and replay use caller-owned buffers only.
+
+use std.net.tcp.TcpStream
+use std.common.structural.environment_instruction.*
+
+val HOSTED_SOCKET_CAPTURE_MAX_BYTES_V1: i64 = 65536
+val HOSTED_SOCKET_TIMEOUT_MAX_MS_V1: i64 = 5000
+val HOSTED_SOCKET_TRANSCRIPT_STEPS_V1: i64 = 4
+
+struct HostedSocketEndpointPolicyV1:
+    capability_id: i64
+    endpoint: text
+    max_send_bytes: i64
+    max_receive_bytes: i64
+    timeout_ms: i64
+    allow_privileged_port: bool
+    sealed: bool
+
+class HostedPreparedSocketTranscriptV1:
+    capability_id: i64
+    endpoint_bytes: [u8]
+    sent_bytes: [u8]
+    received_bytes: [u8]
+    physical_capture: bool
+    capture_valid: bool
+    sealed: bool
+
+struct HostedSocketTranscriptCursorV1:
+    next_sequence: i64
+    consumed_count: i64
+    sealed: bool
+
+struct HostedSocketStepReceiptV1:
+    receipt: EnvExecutionReceiptV1
+    cursor: HostedSocketTranscriptCursorV1
+
+fn _socket_ascii_bytes(value: text) -> [u8]:
+    var out: [u8] = [0u8; value.len()]
+    var i = 0
+    while i < value.len():
+        out[i] = value.char_code_at(i) as u8
+        i = i + 1
+    out
+
+fn _socket_endpoint_port(endpoint: text) -> i64:
+    val prefix = "127.0.0.1:"
+    if not endpoint.starts_with(prefix) or endpoint.len() <= prefix.len():
+        return -1
+    var port = 0
+    var i = prefix.len()
+    while i < endpoint.len():
+        val code = endpoint.char_code_at(i)
+        if code < 48 or code > 57:
+            return -1
+        port = port * 10 + code - 48
+        if port > 65535:
+            return -1
+        i = i + 1
+    port
+
+fn hosted_socket_endpoint_policy_v1_well_formed(
+        policy: HostedSocketEndpointPolicyV1) -> bool:
+    val port = _socket_endpoint_port(policy.endpoint)
+    policy.sealed and policy.capability_id > 0 and policy.capability_id < 63
+        and policy.endpoint.len() <= 64 and port > 0 and port <= 65535
+        and (policy.allow_privileged_port or port >= 1024)
+        and policy.max_send_bytes >= 0
+        and policy.max_send_bytes <= HOSTED_SOCKET_CAPTURE_MAX_BYTES_V1
+        and policy.max_receive_bytes >= 0
+        and policy.max_receive_bytes <= HOSTED_SOCKET_CAPTURE_MAX_BYTES_V1
+        and policy.timeout_ms > 0
+        and policy.timeout_ms <= HOSTED_SOCKET_TIMEOUT_MAX_MS_V1
+
+fn _invalid_socket_transcript_v1() -> HostedPreparedSocketTranscriptV1:
+    HostedPreparedSocketTranscriptV1(capability_id: 0, endpoint_bytes: [],
+        sent_bytes: [], received_bytes: [], physical_capture: false,
+        capture_valid: false, sealed: true)
+
+fn hosted_prepare_socket_exchange_v1(
+        endpoint_policy: HostedSocketEndpointPolicyV1,
+        request_bytes: [u8]) -> HostedPreparedSocketTranscriptV1:
+    if not hosted_socket_endpoint_policy_v1_well_formed(endpoint_policy)
+            or request_bytes.len() > endpoint_policy.max_send_bytes:
+        return _invalid_socket_transcript_v1()
+    var stream = match TcpStream.connect_timeout(
+            endpoint_policy.endpoint, endpoint_policy.timeout_ms):
+        case Ok(value): value
+        case Err(_): return _invalid_socket_transcript_v1()
+    val read_timeout_set = stream.set_read_timeout_status(
+        endpoint_policy.timeout_ms)
+    val write_timeout_set = match stream.set_write_timeout(
+            Some(endpoint_policy.timeout_ms)):
+        case Ok(_): true
+        case Err(_): false
+    if not read_timeout_set or not write_timeout_set:
+        val _closed = stream.close_status()
+        return _invalid_socket_transcript_v1()
+    val wrote = match stream.write_all(request_bytes):
+        case Ok(_): true
+        case Err(_): false
+    if not wrote:
+        val _closed = stream.close_status()
+        return _invalid_socket_transcript_v1()
+    val received = match stream.read(endpoint_policy.max_receive_bytes):
+        case Ok(value): value
+        case Err(_):
+            val _closed = stream.close_status()
+            return _invalid_socket_transcript_v1()
+    val closed = stream.close_status()
+    if not closed or received.len() > endpoint_policy.max_receive_bytes:
+        return _invalid_socket_transcript_v1()
+    HostedPreparedSocketTranscriptV1(
+        capability_id: endpoint_policy.capability_id,
+        endpoint_bytes: _socket_ascii_bytes(endpoint_policy.endpoint),
+        sent_bytes: request_bytes, received_bytes: received,
+        physical_capture: true, capture_valid: true, sealed: true)
+
+fn hosted_prepare_socket_exchange_from_capture_v1(
+        endpoint_policy: HostedSocketEndpointPolicyV1,
+        request_bytes: [u8], received_bytes: [u8]) -> HostedPreparedSocketTranscriptV1:
+    if not hosted_socket_endpoint_policy_v1_well_formed(endpoint_policy)
+            or request_bytes.len() > endpoint_policy.max_send_bytes
+            or received_bytes.len() > endpoint_policy.max_receive_bytes:
+        return _invalid_socket_transcript_v1()
+    HostedPreparedSocketTranscriptV1(
+        capability_id: endpoint_policy.capability_id,
+        endpoint_bytes: _socket_ascii_bytes(endpoint_policy.endpoint),
+        sent_bytes: request_bytes, received_bytes: received_bytes,
+        physical_capture: false, capture_valid: true, sealed: true)
+
+fn hosted_socket_transcript_cursor_v1() -> HostedSocketTranscriptCursorV1:
+    HostedSocketTranscriptCursorV1(next_sequence: 0, consumed_count: 0,
+                                   sealed: true)
+
+fn _socket_opcode_for_sequence_v1(sequence: i64) -> EnvOpcodeV1:
+    if sequence == 0:
+        return EnvOpcodeV1.SocketOpen
+    if sequence == 1:
+        return EnvOpcodeV1.SocketSend
+    if sequence == 2:
+        return EnvOpcodeV1.SocketReceive
+    EnvOpcodeV1.SocketClose
+
+fn _socket_argument_matches_v1(transcript: HostedPreparedSocketTranscriptV1,
+                               instruction: EnvInstructionV1,
+                               argument_bytes: [u8]) -> bool:
+    val expected_length = if instruction.sequence == 0:
+        transcript.endpoint_bytes.len()
+    else if instruction.sequence == 1:
+        transcript.sent_bytes.len()
+    else:
+        0
+    if instruction.argument_length != expected_length:
+        return false
+    var i = 0
+    while i < expected_length:
+        val expected_byte = if instruction.sequence == 0:
+            transcript.endpoint_bytes[i]
+        else:
+            transcript.sent_bytes[i]
+        if argument_bytes[instruction.argument_offset + i] != expected_byte:
+            return false
+        i = i + 1
+    true
+
+fn _socket_result_length_v1(transcript: HostedPreparedSocketTranscriptV1,
+                            sequence: i64) -> i64:
+    if sequence == 1:
+        return 8
+    if sequence == 2:
+        return transcript.received_bytes.len()
+    1
+
+fn _socket_write_result_v1(transcript: HostedPreparedSocketTranscriptV1,
+                           instruction: EnvInstructionV1,
+                           result_bytes: [u8]):
+    val offset = instruction.result_offset
+    if instruction.sequence == 0 or instruction.sequence == 3:
+        result_bytes[offset] = 1u8
+        return
+    if instruction.sequence == 1:
+        var i = 0
+        while i < 8:
+            result_bytes[offset + i] =
+                ((transcript.sent_bytes.len() >> (i * 8)) & 255) as u8
+            i = i + 1
+        return
+    var i = 0
+    while i < transcript.received_bytes.len():
+        result_bytes[offset + i] = transcript.received_bytes[i]
+        i = i + 1
+
+fn _socket_step_rejected_v1(instruction: EnvInstructionV1,
+                            cursor: HostedSocketTranscriptCursorV1,
+                            status: EnvInstructionStatusV1) -> HostedSocketStepReceiptV1:
+    HostedSocketStepReceiptV1(
+        receipt: env_execution_rejected_v1(instruction, status), cursor: cursor)
+
+fn hosted_socket_transcript_execute_v1(
+        transcript: HostedPreparedSocketTranscriptV1,
+        cursor: HostedSocketTranscriptCursorV1,
+        policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+        argument_bytes: [u8], result_bytes: [u8]) -> HostedSocketStepReceiptV1:
+    val validation = env_executor_validate_instruction(
+        policy, instruction, argument_bytes, result_bytes)
+    if env_instruction_status_to_i64(validation)
+            != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+        return _socket_step_rejected_v1(instruction, cursor, validation)
+    if not transcript.sealed or not transcript.capture_valid or not cursor.sealed:
+        return _socket_step_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.InvalidInstruction)
+    if cursor.next_sequence < 0
+            or cursor.next_sequence >= HOSTED_SOCKET_TRANSCRIPT_STEPS_V1
+            or cursor.consumed_count != cursor.next_sequence
+            or instruction.sequence != cursor.next_sequence
+            or instruction.capability_id != transcript.capability_id
+            or instruction.opcode != _socket_opcode_for_sequence_v1(
+                cursor.next_sequence):
+        return _socket_step_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Diverged)
+    if not _socket_argument_matches_v1(transcript, instruction, argument_bytes):
+        return _socket_step_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Diverged)
+    val result_length = _socket_result_length_v1(
+        transcript, instruction.sequence)
+    if result_length > instruction.result_capacity:
+        return _socket_step_rejected_v1(
+            instruction, cursor, EnvInstructionStatusV1.Overflow)
+    _socket_write_result_v1(transcript, instruction, result_bytes)
+    val receipt = env_execution_record_applied_v1(
+        instruction, argument_bytes, result_bytes, result_length,
+        transcript.physical_capture, 0)
+    val next = HostedSocketTranscriptCursorV1(
+        next_sequence: cursor.next_sequence + 1,
+        consumed_count: cursor.consumed_count + 1, sealed: true)
+    HostedSocketStepReceiptV1(receipt: receipt, cursor: next)
+
+fn hosted_socket_transcript_complete_v1(
+        cursor: HostedSocketTranscriptCursorV1) -> bool:
+    cursor.sealed
+        and cursor.next_sequence == HOSTED_SOCKET_TRANSCRIPT_STEPS_V1
+        and cursor.consumed_count == HOSTED_SOCKET_TRANSCRIPT_STEPS_V1
+
+export HOSTED_SOCKET_CAPTURE_MAX_BYTES_V1, HOSTED_SOCKET_TIMEOUT_MAX_MS_V1
+export HOSTED_SOCKET_TRANSCRIPT_STEPS_V1
+export HostedSocketEndpointPolicyV1, HostedPreparedSocketTranscriptV1
+export HostedSocketTranscriptCursorV1, HostedSocketStepReceiptV1
+export hosted_socket_endpoint_policy_v1_well_formed
+export hosted_prepare_socket_exchange_v1
+export hosted_prepare_socket_exchange_from_capture_v1
+export hosted_socket_transcript_cursor_v1, hosted_socket_transcript_execute_v1
+export hosted_socket_transcript_complete_v1
