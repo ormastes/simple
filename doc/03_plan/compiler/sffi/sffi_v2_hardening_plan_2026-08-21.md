@@ -1025,3 +1025,15 @@ path. Separately redesign dependency/orphan quarantine admission with bounded
 backpressure: current global arrays are unbounded, while a blind cap would
 lose ownership and leak GPU resources, and synchronous forced-idle retry would
 create a latency regression.
+
+The general Vulkan facade now imports 37 ABI-identical declarations from the
+canonical owner and tags its 37 graphics-only raw declarations. Dynamic Torch
+now imports 39 ABI-compatible raw symbols from the canonical Torch owner and
+keeps 12 unique/legacy declarations explicitly unsafe. Both are compile-time
+owner consolidation: no runtime forwarding, lookup, allocation, hashing, or
+new branch was added. Current census: 12,300 declaration rows, 785 tagged, 587
+contracted, 11,243 untouched, and zero evidence-verified, signature-verified,
+or verified-and-signed admissions. Next migrate dynamic Torch's fabricated
+zero error paths to typed result/status APIs and versioned provider status/out
+shims; do not reinterpret the six fixed-dimension symbols as canonical
+descriptor calls, and do not claim an unsafe tag as semantic verification.

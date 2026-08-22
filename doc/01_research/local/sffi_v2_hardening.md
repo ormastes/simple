@@ -1295,3 +1295,24 @@ without errors. Census: 12,376 declarations, 736 tagged, 587 contracted, 11,368
 untouched, zero verified/signed. Existing quarantine arrays still trigger two
 unbounded-growth warnings; this slice does not worsen them, and they must gain
 backpressure/ownership-aware bounds rather than silently dropping GPU handles.
+
+The general Vulkan facade now statically imports 37 ABI-identical symbols from
+the canonical engine2d Vulkan owner and explicitly tags its 37 remaining
+graphics-only declarations as FFI-unsafe. This removes duplicate declaration
+authority without adding a forwarding wrapper, lookup, allocation, hash, or
+call-path branch. The focused check passes and lint has no errors. These tags
+do not establish nullability, handle ownership, or signed provider admission.
+
+Dynamic Torch previously redeclared 51 raw symbols beside the canonical Torch
+owner. It now statically imports the 39 ABI-compatible symbols and retains only
+12 unique or legacy fixed-dimension declarations, each explicitly tagged
+FFI-unsafe. The legacy shapes cannot be silently redirected to the canonical
+array-descriptor ABI because that would change calling convention. Check and
+lint pass; measured check cost was 33.48 seconds / 247,004 KiB peak RSS and
+lint was 24.21 seconds / 401,252 KiB with the bootstrap seed. The refreshed
+census is 12,300 declaration rows, 785 unsafe-tagged, 587 contracted, 11,243
+untouched, and zero evidence-verified, signature-verified, or verified-and-
+signed rows. The `rt_torch` family is 167 rows with 139 tagged and 28
+untouched. Existing high-level dynamic Torch functions still fabricate zero
+for several unavailable/error paths; this consolidation does not call those
+APIs safe and the next semantic migration must add typed result/status APIs.
