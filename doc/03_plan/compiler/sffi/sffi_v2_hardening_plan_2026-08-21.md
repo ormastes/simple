@@ -846,3 +846,10 @@ the unused-boundary audit so comment-only mentions do not hide dead declarations
 then repeat deletion before migrating additional live callers. Preserve the
 file-I/O-dominated hot-path shape: one typed call and required null/result branch,
 with signature/evidence verification confined to provider admission.
+
+The canonical `file_exists` owner is now tagged, contract-documented, and
+lexically contained; six duplicate application wrappers were removed. Continue
+the same owner-first migration for live existence predicates, but preserve
+specialized no-follow, sandbox, and loader admission semantics rather than
+rewriting them to the general boolean facade. Current gate: 12,506 declarations,
+11,729 untouched, zero signed admissions.

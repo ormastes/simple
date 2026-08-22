@@ -1030,3 +1030,15 @@ The added branch occurs only after file I/O; there is no per-call registry,
 signature, hash, allocation, or generic dispatch. The census is now 12,512
 declarations, 11,736 untouched, and zero verified-and-signed; production is
 6,202 declarations with 5,626 untouched.
+
+The canonical file-existence predicate now owns an explicit lexical `ffi`
+unsafe boundary and documents its boolean sentinel contract: `false` covers a
+missing or inaccessible path and provider failure, while `true` asserts the
+provider observed an existing path. Six application-local raw declarations and
+their pass-through wrappers were replaced by the canonical facade. The seven
+affected modules pass together. Application call depth is unchanged (one local
+wrapper became one canonical wrapper), and canonical internal calls use lexical
+unsafe blocks directly, so no helper call, allocation, lookup, hashing, or
+signature verification was added. The census is now 12,506 declarations,
+11,729 untouched, 503 unsafe-tagged, 583 contract-documented, and zero signed
+admissions; production is 6,196 declarations with 5,619 untouched.
