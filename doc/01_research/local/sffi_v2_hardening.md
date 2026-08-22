@@ -1083,3 +1083,21 @@ declarations, 11,719 untouched, 506 tagged, 586 contracted, and zero signed
 admissions. The compatibility `file_ops` surface retains a semantic
 `file_rename` wrapper, but it delegates to the typed provider rather than
 spawning a shell.
+
+The general time facade no longer exports raw-looking `rt_timestamp_now` or
+`rt_sleep_ms` names. Their semantic replacements are `timestamp_now` and
+`sleep_ms`. More importantly, `sleep_ms` no longer launches `/bin/sh` once or
+twice per delay; it calls the typed runtime thread-sleep provider exactly once
+for positive delays. That raw provider is tagged and lexically contained. Eight
+changed source modules pass, and the retry/backoff suite passes all 31 examples.
+The census/ratchet passes at 12,499 declarations, 11,718 untouched, 507 tagged,
+586 contracted, and zero signed admissions. This removes two semantic functions
+with raw names and one shell/process dependency from the delay path.
+
+The database extended-test runtime helpers no longer fabricate timestamp `0`,
+PID `12345`, or hostname `localhost`. Semantic `timestamp_now`, `process_id`,
+and `host_name` helpers call canonical providers, and all persisted run/tracking
+evidence uses those values. Five affected database modules pass. Together with
+the time-facade rename, the implementation census drops to 587 Simple `rt_*`
+definitions, 542 distinct symbols, in 49 files. Declaration safety remains
+12,499 total, 11,718 untouched, 507 tagged, 586 contracted, and zero signed.

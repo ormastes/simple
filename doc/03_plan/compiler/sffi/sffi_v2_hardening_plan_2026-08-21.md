@@ -875,3 +875,14 @@ canonical rename boundary. Continue auditing general-module `export rt_*`
 entries before explicit FFI modules: replace misleading wrappers with semantic
 names, remove shell/process marshalling where a typed provider exists, and tag
 the irreducible raw declaration at its single owner.
+
+Timestamp and sleep now have semantic exported names, and sleep uses the typed
+thread provider rather than shelling out. Continue with general `app.io` debug
+and fault-control exports: expose reviewed capability APIs where available and
+otherwise keep raw controls in explicitly unsafe modules rather than the broad
+compatibility facade.
+
+Database evidence helpers now use real canonical identity/time providers rather
+than dummy zero/fixed values. Continue searching production `rt_*` definitions
+for constant success, zero, empty, or dummy returns before merely tagging them;
+fabricated implementations must be replaced or deleted, not blessed as unsafe.
