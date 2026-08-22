@@ -63,16 +63,30 @@ suppressed.
 
 `PerfFacts` is the function-local owner for reusable MIR analysis. Its deployed slices
 own CFG successors/predecessors, block indexes, reverse-postorder, immediate dominators,
-and a linear def/use index. Def/use buckets are indexed through declared locals and are
+a linear def/use index, and block live-in/live-out facts. Def/use buckets are indexed through declared locals and are
 mutated in place during one traversal, avoiding definitions-by-uses scans and repeated
 copy-on-write rebuilding. Any unmodeled instruction or undeclared local reference marks
 the def/use view incomplete; consumers must fail closed.
 
+Liveness uses flat dense bit matrices indexed by block and declared local, avoiding nested
+array COW during fixed-point propagation. A predecessor worklist reuses its storage, has
+an explicit visit budget, and rejects functions above the dense-cell memory cap before
+allocating the matrices. Duplicate blocks, dangling CFG targets, uncovered opcodes,
+unknown locals, or budget exhaustion make liveness explicitly incomplete. A
+`CallTerminator` result with an unwind edge is conservatively not treated as a block-wide
+kill because it exists only on the normal edge.
+
 Every pass has an explicit preservation contract. Current transforming adapters
-conservatively invalidate CFG, dominance, and def/use; non-transforming statuses preserve
+conservatively invalidate CFG, dominance, def/use, and liveness; non-transforming statuses preserve
 them. Finer preservation can be admitted only with a focused witness. Loop forest,
 range/induction, region alias, effects, and MemorySSA-lite remain future slices of the
 same revision-local owner.
+
+The dormant DCE implementation now consumes shared reachability and liveness, seeds each
+block from live-out plus terminator uses, and performs one backward instruction transfer.
+Its former private CFG traversal and per-definition later-instruction scans are removed.
+DCE remains `Skeleton`: opcode effect/trap coverage, full verification, and semantic
+differential gates are still required before its public adapter may transform MIR.
 
 Natural-loop membership is built from dominance-proven latch edges by a reverse
 predecessor walk bounded at the header. Multiple latches are unioned once and bodies are
