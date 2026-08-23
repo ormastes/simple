@@ -229,12 +229,58 @@ fn aggregate_failed_count(result: TestRunResult) -> i64:
         uncounted_bad = result.total_timed_out
     result.total_failed + uncounted_bad
 
+fn run_aborted_before_execution(result: TestRunResult) -> bool:
+    """True when a run claims failures while having executed NOTHING.
+
+    Structural, not gate-specific, so it covers every present and future
+    preflight abort: no per-file result exists, nothing passed, yet a nonzero
+    failure figure is being claimed. That shape can only come from a gate that
+    returned `TestRunResult(files: [], total_failed: <n>)` before the executor
+    ever started -- e.g. the `@cover` annotation gate, which turned 587 healthy
+    un-annotated specs into `Results: 587 total, 0 passed, 587 failed` in
+    ~3 minutes with `Time: 0ms` and not one `SPEC FILE VERDICT:` line.
+
+    A genuine empty selection (0 files, 0 failures) is NOT this shape and is
+    deliberately excluded -- it still prints "No tests selected."."""
+    result.files.len() == 0 and result.total_passed == 0 and result.total_failed > 0
+
 fn print_summary(result: TestRunResult, format: text):
     if format == "json":
         print test_run_result_json(result)
         return
     print ""
     print "========================================="
+    # ZERO-EXECUTED ABORT: refuse to emit a `Results:` line at all.
+    #
+    # A preflight gate that aborts before any spec runs used to return
+    # `TestRunResult(files: [], total_failed: <n>)` -- and this printer turned
+    # that into a fully-formed `Results: 587 total, 0 passed, 587 failed`,
+    # indistinguishable to any automated reader from a real mass failure of 587
+    # healthy specs. Four sweep lanes were about to classify specs from exactly
+    # that line (bug: test_runner_cover_gate_aborts_read_as_mass_failure).
+    #
+    # `Results:` is the repo's designated evidence line, so the fix is not a
+    # softer wording: a run in which ZERO units executed must produce output
+    # that CANNOT be parsed as a completed run. No `Results:`, no `Time:`, no
+    # pass/fail verdict -- only an ABORTED block naming the count that was
+    # never run. Detection is structural, not gate-specific, so it covers every
+    # present and future preflight abort: no per-file result exists, nothing
+    # passed, yet a nonzero failure figure is being claimed.
+    #
+    # Untouched: a genuine empty selection (files == 0, failures == 0) still
+    # takes the normal path and prints "No tests selected."
+    if run_aborted_before_execution(result):
+        print "ABORTED BEFORE EXECUTION"
+        print "========================================="
+        print "Units executed:     0"
+        print "Units not run:      {result.total_failed}"
+        print ""
+        print "This run was aborted by a preflight gate. NOTHING was executed,"
+        print "so this is NOT a test result: the {result.total_failed} unit(s) above are"
+        print "UNKNOWN, not failed. See the ERROR block above for the gate that"
+        print "aborted, and re-run with its documented bypass to get a verdict."
+        print "========================================="
+        return
     # The six outcome classes come from test_file_outcome_class() -- the single
     # classifier above, which tokenises the "<CLASS>:" head rather than
     # prefix-matching the whole error string, so rewording a message can no
