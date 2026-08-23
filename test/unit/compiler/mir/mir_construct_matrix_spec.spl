@@ -1,0 +1,216 @@
+"""
+## Purpose and audience
+Purpose: Prove, by VALUE assertion, that named MIR constructs behave as
+specified — the construct-matrix lane for `src/compiler/50.mir/**`.
+Audience: compiler engineers maintaining MIR lowering and the MIR->backend
+contract surface.
+
+## Why value assertions
+Every MIR defect this lane was chartered against was a SILENT WRONG ANSWER:
+code that runs, returns a number, and the number is wrong. A spec that only
+proves "it did not crash" is blind to that entire class. Every expectation
+below therefore pins a concrete VALUE.
+
+## Engine coverage (state it, do not assume it)
+All assertions here execute in the SPEC HOST ENGINE (the interpreter/tree-walk
+path used by `simple test`). The native/JIT path resolves these functions
+independently, so nothing here is evidence about native codegen. The native
+side of the matrix is covered statically by
+`scripts/check/check-mir-backend-coverage.shs`, which re-derives every
+backend's handled construct set from source.
+
+Map: doc/09_report/mir_construct_coverage_matrix_2026-08-23.md
+"""
+# @req: REQ-COMPILER-MIR-002 — MIR construct matrix: constructs behave as specified.
+
+# @cover src/compiler/50.mir/mir_types.spl 60%
+# @cover src/compiler/50.mir/mir_aop_injection.spl 40%
+# @cover src/compiler/50.mir/mir_instruction_support.spl 30%
+use std.spec
+use compiler.mir.mir_aop_injection.{classify_mir_inst_kind}
+use compiler.mir.mir_instructions.{MirInstKind, MirOperand, MirOperandKind, MirBinOp, MirUnaryOp, LocalId, MirSignature}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirConstValue}
+
+fn lid(n: i64) -> LocalId:
+    return LocalId(id: n)
+
+fn op_copy(n: i64) -> MirOperand:
+    return MirOperand(kind: MirOperandKind.Copy(lid(n)))
+
+fn ty(k: MirTypeKind) -> MirType:
+    return MirType(kind: k)
+
+fn binop_tag(op: MirBinOp) -> text:
+    return classify_mir_inst_kind(MirInstKind.BinOp(lid(0), op, op_copy(1), op_copy(2)))
+
+describe "MIR construct matrix":
+
+    # ------------------------------------------------------------------
+    # MirBinOp — all 24 variants get a VALUE, and comparison is separated
+    # from arithmetic. Engine: spec host.
+    # ------------------------------------------------------------------
+    describe "MirBinOp (24 variants) classification value":
+        it "classifies the 6 comparison operators as comparison":
+            step("Verify: Eq/Ne/Lt/Le/Gt/Ge classify as comparison")
+            # @req: REQ-COMPILER-MIR-002
+            expect(binop_tag(MirBinOp.Eq)).to_equal("comparison")
+            expect(binop_tag(MirBinOp.Ne)).to_equal("comparison")
+            expect(binop_tag(MirBinOp.Lt)).to_equal("comparison")
+            expect(binop_tag(MirBinOp.Le)).to_equal("comparison")
+            expect(binop_tag(MirBinOp.Gt)).to_equal("comparison")
+            expect(binop_tag(MirBinOp.Ge)).to_equal("comparison")
+
+        it "classifies the 5 core arithmetic operators as arithmetic":
+            step("Verify: Add/Sub/Mul/Div/Rem classify as arithmetic")
+            # @req: REQ-COMPILER-MIR-002
+            expect(binop_tag(MirBinOp.Add)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.Sub)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.Mul)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.Div)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.Rem)).to_equal("arithmetic")
+
+        it "classifies Pow, MatMul and Offset as arithmetic":
+            step("Verify: Pow/MatMul/Offset classify as arithmetic")
+            # @req: REQ-COMPILER-MIR-002
+            expect(binop_tag(MirBinOp.Pow)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.MatMul)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.Offset)).to_equal("arithmetic")
+
+        it "classifies the 5 bitwise operators as arithmetic":
+            step("Verify: BitAnd/BitOr/BitXor/Shl/Shr classify as arithmetic")
+            # @req: REQ-COMPILER-MIR-002
+            expect(binop_tag(MirBinOp.BitAnd)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.BitOr)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.BitXor)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.Shl)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.Shr)).to_equal("arithmetic")
+
+        it "classifies the 5 broadcast operators as arithmetic":
+            step("Verify: BroadcastAdd/Sub/Mul/Div/Pow classify as arithmetic")
+            # @req: REQ-COMPILER-MIR-002
+            expect(binop_tag(MirBinOp.BroadcastAdd)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.BroadcastSub)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.BroadcastMul)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.BroadcastDiv)).to_equal("arithmetic")
+            expect(binop_tag(MirBinOp.BroadcastPow)).to_equal("arithmetic")
+
+    # ------------------------------------------------------------------
+    # MirInstKind — the arms that carry a specified classification.
+    # Engine: spec host.
+    # ------------------------------------------------------------------
+    describe "MirInstKind classification value":
+        it "classifies the 4 assignment-shaped instructions as assignment":
+            step("Verify: Store/SetField/VhdlVarAssign/MirSimdStore are assignment")
+            # @req: REQ-COMPILER-MIR-002
+            val v = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(7), MirType.i64()))
+            expect(classify_mir_inst_kind(MirInstKind.Store(op_copy(1), v))).to_equal("assignment")
+            expect(classify_mir_inst_kind(MirInstKind.SetField(lid(1), 0, v))).to_equal("assignment")
+
+        it "classifies Intrinsic as intrinsic, not call":
+            step("Verify: Intrinsic is tagged intrinsic")
+            # @req: REQ-COMPILER-MIR-002
+            expect(classify_mir_inst_kind(MirInstKind.Intrinsic(lid(0), "ctpop", []))).to_equal("intrinsic")
+
+        it "classifies Nop as other":
+            step("Verify: Nop falls to the residual class")
+            # @req: REQ-COMPILER-MIR-002
+            expect(classify_mir_inst_kind(MirInstKind.Nop)).to_equal("other")
+
+    # ------------------------------------------------------------------
+    # MirTypeKind — layout VALUES for every primitive width.
+    # Engine: spec host.
+    # ------------------------------------------------------------------
+    describe "MirTypeKind primitive layout values":
+        it "gives each integer width its exact size in bytes":
+            step("Verify: I8=1 I16=2 I32=4 I64=8 and unsigned mirrors")
+            # @req: REQ-COMPILER-MIR-002
+            expect(ty(MirTypeKind.I8).size_bytes()).to_equal(1)
+            expect(ty(MirTypeKind.I16).size_bytes()).to_equal(2)
+            expect(ty(MirTypeKind.I32).size_bytes()).to_equal(4)
+            expect(ty(MirTypeKind.I64).size_bytes()).to_equal(8)
+            expect(ty(MirTypeKind.U8).size_bytes()).to_equal(1)
+            expect(ty(MirTypeKind.U16).size_bytes()).to_equal(2)
+            expect(ty(MirTypeKind.U32).size_bytes()).to_equal(4)
+            expect(ty(MirTypeKind.U64).size_bytes()).to_equal(8)
+
+        it "gives each float width and Bool/Char/Unit/Never its exact size":
+            step("Verify: F32=4 F64=8 Bool=1 Char=2 Unit=0 Never=0")
+            # @req: REQ-COMPILER-MIR-002
+            expect(ty(MirTypeKind.F32).size_bytes()).to_equal(4)
+            expect(ty(MirTypeKind.F64).size_bytes()).to_equal(8)
+            expect(ty(MirTypeKind.Bool).size_bytes()).to_equal(1)
+            expect(ty(MirTypeKind.Char).size_bytes()).to_equal(2)
+            expect(ty(MirTypeKind.Unit).size_bytes()).to_equal(0)
+            expect(ty(MirTypeKind.Never).size_bytes()).to_equal(0)
+
+        it "gives Unit and Never alignment 1, not the pointer default":
+            step("Verify: zero-size types align to 1")
+            # @req: REQ-COMPILER-MIR-002
+            expect(ty(MirTypeKind.Unit).alignment()).to_equal(1)
+            expect(ty(MirTypeKind.Never).alignment()).to_equal(1)
+
+    describe "MirTypeKind aggregate layout values":
+        it "sizes an Array as element size times count":
+            step("Verify: [I32; 4] is 16 bytes and aligns to 4")
+            # @req: REQ-COMPILER-MIR-002
+            val a = ty(MirTypeKind.Array(ty(MirTypeKind.I32), 4))
+            expect(a.size_bytes()).to_equal(16)
+            expect(a.alignment()).to_equal(4)
+
+        it "sizes a Tuple as the sum of its members":
+            step("Verify: (I8, I32, I64) is 13 bytes and aligns to its widest member")
+            # @req: REQ-COMPILER-MIR-002
+            val t = ty(MirTypeKind.Tuple([ty(MirTypeKind.I8), ty(MirTypeKind.I32), ty(MirTypeKind.I64)]))
+            expect(t.size_bytes()).to_equal(13)
+            expect(t.alignment()).to_equal(8)
+
+        it "sizes a Union as an 8-byte discriminant plus the largest member":
+            step("Verify: union{I8, I32} is 8+4 = 12 bytes")
+            # @req: REQ-COMPILER-MIR-002
+            val u = ty(MirTypeKind.Union([ty(MirTypeKind.I8), ty(MirTypeKind.I32)]))
+            expect(u.size_bytes()).to_equal(12)
+            expect(u.alignment()).to_equal(8)
+
+        it "rounds Bits up to whole bytes":
+            step("Verify: Bits(1)=1, Bits(8)=1, Bits(9)=2, Bits(64)=8")
+            # @req: REQ-COMPILER-MIR-002
+            expect(ty(MirTypeKind.Bits(1, false)).size_bytes()).to_equal(1)
+            expect(ty(MirTypeKind.Bits(8, false)).size_bytes()).to_equal(1)
+            expect(ty(MirTypeKind.Bits(9, false)).size_bytes()).to_equal(2)
+            expect(ty(MirTypeKind.Bits(64, true)).size_bytes()).to_equal(8)
+
+        it "sizes a nested Array of Tuple structurally":
+            step("Verify: [(I32,I32); 3] is 24 bytes — the array-of-tuple projection shape")
+            # @req: REQ-COMPILER-MIR-002
+            val inner = ty(MirTypeKind.Tuple([ty(MirTypeKind.I32), ty(MirTypeKind.I32)]))
+            expect(inner.size_bytes()).to_equal(8)
+            expect(ty(MirTypeKind.Array(inner, 3)).size_bytes()).to_equal(24)
+
+    # ------------------------------------------------------------------
+    # RED — filed defect. See
+    # doc/08_tracking/bug/mir_type_simd_vector_size_bytes_returns_8_2026-08-23.md
+    # `mir_types.spl` documents Vec4f as "4x f32 (128-bit SSE/NEON)" and Vec8f
+    # as 256-bit, but primitive_size() has no arm for them, so size_bytes()
+    # falls to the residual `case _: 8`. These expectations assert the SPECIFIED
+    # values and are expected to FAIL until the source is fixed. Do not bend
+    # them to the broken source.
+    # ------------------------------------------------------------------
+    describe "MirTypeKind SIMD vector layout values (RED — filed defect)":
+        it "sizes the 128-bit vectors as 16 bytes":
+            step("Verify: Vec4f and Vec4i are 128-bit = 16 bytes")
+            # @req: REQ-COMPILER-MIR-002
+            expect(ty(MirTypeKind.Vec4f).size_bytes()).to_equal(16)
+            expect(ty(MirTypeKind.Vec4i).size_bytes()).to_equal(16)
+
+        it "sizes the 256-bit vectors as 32 bytes":
+            step("Verify: Vec8f, Vec4d and Vec8i are 256-bit = 32 bytes")
+            # @req: REQ-COMPILER-MIR-002
+            expect(ty(MirTypeKind.Vec8f).size_bytes()).to_equal(32)
+            expect(ty(MirTypeKind.Vec4d).size_bytes()).to_equal(32)
+            expect(ty(MirTypeKind.Vec8i).size_bytes()).to_equal(32)
+
+        it "aligns the vector types to their own width":
+            step("Verify: Vec4f aligns to 16, Vec8f to 32 — not the 8-byte default")
+            # @req: REQ-COMPILER-MIR-002
+            expect(ty(MirTypeKind.Vec4f).alignment()).to_equal(16)
+            expect(ty(MirTypeKind.Vec8f).alignment()).to_equal(32)
