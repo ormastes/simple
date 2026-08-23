@@ -381,6 +381,25 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
     value
 }
 
+/// Formation probe for heap-typed enum/Option payloads at fail-closed
+/// handoffs (2026-08-22 stage-3 streaming-owner incident: a Some-tagged
+/// Option read back with payload word 0 passed every discriminant/nil guard
+/// and SIGSEGV'd on the first field load — see
+/// doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md).
+/// Answers FORMATION ONLY — a heap-tagged pointer outside the zero page —
+/// with no registry probe, so it can never false-reject a live object. Call
+/// sites own the payload-type contract: scalar payloads are not heap-tagged
+/// and report 0 by design. Mirrors `rt_heap_ref_wellformed` in
+/// src/runtime/runtime_native.c and src/runtime/simple_core/core_enum.spl.
+#[no_mangle]
+pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
+    if !value.is_heap() {
+        return 0;
+    }
+    let addr = value.as_heap_ptr() as usize;
+    if addr < 4096 { 0 } else { 1 }
+}
+
 /// Unwrap the payload of a present `Result.Ok`/`Option.Some` value; return
 /// `default` (never trap) if the receiver is a genuine `Result.Err`/
 /// `Option.None`. This is `.unwrap_or(default)` METHOD-CALL semantics —

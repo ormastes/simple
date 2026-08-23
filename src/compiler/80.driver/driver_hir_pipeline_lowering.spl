@@ -52,6 +52,7 @@ extern fn rt_hash_text(content: text) -> i64
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 extern fn rt_transient_last_promoted_nodes() -> i64
 extern fn rt_transient_last_promoted_bytes() -> i64
 extern fn rt_transient_scope_promoted_nodes() -> i64
@@ -131,6 +132,15 @@ impl CompilerDriver:
         val surfaces = self.streaming_module_surfaces_owner.unwrap()
         if surfaces == nil:
             self.ctx.add_error("Streaming module surface owner payload missing after phase 2")
+            return (self.ctx, false)
+        # Fail closed on a malformed payload, never on a valid one. A
+        # heap-typed payload must be a tagged pointer outside the zero page;
+        # the 2026-08-22 incident read back a Some-tagged Option with payload
+        # word 0 and SIGSEGV'd on the first field load below. This is a
+        # formation probe (rt_heap_ref_wellformed), not a liveness proof, so
+        # it cannot false-reject a live owner.
+        if not rt_heap_ref_wellformed(surfaces):
+            self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
             return (self.ctx, false)
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         var lowered_by_surface: Dict<i64, HirModule> = {}
@@ -489,6 +499,12 @@ impl CompilerDriver:
         # creating a fresh array near the terminal module can fail registry
         # growth under peak AST+HIR pressure and leave `errors` invalid.
         dtrace("[DRV] lac-canary=module-surfaces-before")
+        # Same fail-closed formation probe as the streaming entry: a
+        # heap-typed owner payload must be a tagged pointer outside the zero
+        # page (2026-08-22 zeroed-payload incident class).
+        if self.ctx.module_surfaces != nil and not rt_heap_ref_wellformed(self.ctx.module_surfaces.unwrap()):
+            self.ctx.add_error("E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module surface payload malformed at HIR entry (heap-typed payload word is 0 or in the zero page)")
+            return (self.ctx, false)
         val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.module_surfaces != nil:
             self.ctx.module_surfaces.unwrap()
         elif self.ctx.sources.len() > 0:

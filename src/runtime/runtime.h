@@ -581,6 +581,10 @@ int64_t  rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload);
 int64_t  rt_enum_id(int64_t value);
 int64_t  rt_enum_discriminant(int64_t value);
 int64_t  rt_enum_payload(int64_t value);
+/* Formation probe for heap-typed enum/Option payloads at fail-closed
+ * handoffs: 1 only for a heap-tagged pointer outside the zero page. This is a
+ * FORMATION check, not liveness — see runtime_native.c. */
+int8_t   rt_heap_ref_wellformed(int64_t value);
 int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);
 int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);

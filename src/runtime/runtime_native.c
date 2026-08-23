@@ -7429,6 +7429,20 @@ int64_t rt_enum_payload(int64_t value) {
     return e ? e->payload : rt_core_nil();
 }
 
+/* Formation probe for heap-typed enum/Option payloads at fail-closed
+ * handoffs. The 2026-08-22 stage-3 streaming-owner incident read back a
+ * Some-tagged Option whose payload word was 0: every discriminant/nil guard
+ * passed and the first field load SIGSEGV'd at 0x0. A heap payload must be a
+ * tagged pointer outside the zero page; this answers exactly that, with no
+ * registry probe — a FORMATION check, not a liveness proof, so it can never
+ * false-reject a live object. Call sites own the payload-type contract
+ * (heap/aggregate payloads only; scalar payloads are not heap-tagged by
+ * design and report 0 here). */
+int8_t rt_heap_ref_wellformed(int64_t value) {
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
+    return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;
+}
+
 /* Array `at`: bounds-checked element access with an Option (`T?`) result.
  *
  * The native lane previously had NO array `at` at all -- the LLVM codegen

@@ -660,6 +660,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_enum_id",
     "rt_enum_discriminant",
     "rt_enum_payload",
+    "rt_heap_ref_wellformed",
     // Raw memory allocation
     "rt_alloc",
     "rt_free",
