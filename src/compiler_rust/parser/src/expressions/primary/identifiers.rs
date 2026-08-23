@@ -60,6 +60,9 @@ impl<'a> Parser<'a> {
             // The 'bounds' keyword is only used in type constraint contexts
             TokenKind::Bounds => self.parse_keyword_identifier("bounds"),
             TokenKind::Default => self.parse_keyword_identifier("default"),
+            // Soft keywords: keyword only at match-arm / contract-clause markers.
+            TokenKind::Case => self.parse_keyword_identifier("case"),
+            TokenKind::Invariant => self.parse_keyword_identifier("invariant"),
             // Allow 'new' and 'old' to be used as identifiers (variable names)
             // These are keywords only in specific contexts: new Type(...) and old(x)
             TokenKind::New => self.parse_keyword_identifier("new"),

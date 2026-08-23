@@ -93,6 +93,8 @@ impl<'a> Parser<'a> {
             | TokenKind::Alias
             | TokenKind::Bounds
             | TokenKind::Default
+            | TokenKind::Case
+            | TokenKind::Invariant
             | TokenKind::From
             | TokenKind::To
             | TokenKind::Loop

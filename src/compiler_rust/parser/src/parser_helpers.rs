@@ -945,6 +945,11 @@ impl<'a> Parser<'a> {
             TokenKind::Context => "context".to_string(),
             // Allow 'default' to be used as identifier (field name, variable, trait name)
             TokenKind::Default => "default".to_string(),
+            // Soft keywords: `case` is only a keyword as a match-ARM marker, and
+            // `invariant` only as a contract-clause marker. Both are consumed
+            // explicitly at those positions, so they are ordinary names elsewhere.
+            TokenKind::Case => "case".to_string(),
+            TokenKind::Invariant => "invariant".to_string(),
             // Allow 'common' to be used as identifier (directory name in stdlib)
             TokenKind::Common => "common".to_string(),
             // Allow logical/conversion operators as trait names or identifiers
