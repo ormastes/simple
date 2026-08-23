@@ -131,10 +131,81 @@ The reproduce spec is not a spec that would pass either way:
 | stage-2 native | `7 examples, 6 failures` — every f32 example fails, the f64 control passes |
 | seed interpreter | `7 examples, 0 failures`, `executed=7` |
 
+
+## Root cause located in source (2026-08-23)
+
+`src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl`. Struct
+and tuple fields are one native-int (i64) word, so a float field must
+round-trip through that word's *bits*. The two halves disagree on width:
+
+- **Store**, `store_field_bits` (:329-345), keys off the value's **actual**
+  LLVM type. f32 literals are translated as `double`, so it emits
+  `bitcast double -> i64` and writes 64 bits. Confirmed in the built binary's
+  `.rodata`: `00000000 0000f03f` is 1.0 as f64.
+- **Read**, `load_field_bits` (:347-359), keys off the **declared** type
+  (`"float"`), so `int_equiv` is `i32` and it emits
+  `trunc i64 -> i32` then `bitcast i32 -> float`. The low 32 bits of
+  `0x3FF0000000000000` are zero, hence 0.0.
+
+`float_int_equiv` (:317-321) is the pivot: mapping `"float" -> "i32"` is only
+valid if the slot held 32 bits, which it never does.
+
+The correct f64 mirror is the same pair of functions with `int_equiv == nit` —
+no truncation, no widening. Disassembly of the f64 control shows a bare
+`mov (%rbx),%rdi`. LLVM folds the broken load/trunc/bitcast plus the consumer's
+float->i64 conversion into the single `vcvttss2si (%rbx),%rdi` observed above.
+
+### Proposed fix (NOT applied — see "cannot be verified" below)
+
+Canonicalize f32 through f64 in the slot, which is the convention the runtime
+tag, the array path, `box_runtime_value`'s F32 arm
+(`_MirLoweringExpr/expr_dispatch.spl:786-789`) and the enum-payload box
+(`switch_operators_calls.spl:1517-1520`) already use: on store, `fpext float ->
+double` before the bitcast; on read, always treat the slot as f64 bits and
+`fptrunc double -> float` at the end. The f64 path stays byte-identical and the
+storage convention is unchanged; only the f32 read and write become symmetric.
+
+A broader alternative — mapping `F32 -> "double"` in
+`llvm_type_mapper.spl:121,153` — is coherent with all the evidence but risks
+the extern/SFFI ABI where C genuinely expects `float` (e.g. the
+`rt_simd_add_f32x4` just added to the C runtime). Do not adopt it blindly.
+
+### Why no fix is landed here
+
+stage2 is already compiled, so a change to `src/compiler/**` cannot be verified
+without a full bootstrap rebuild. This lane did not rebuild stage2, so landing
+the edit would ship an unverified claim. The repair is specified above for a
+lane that can bootstrap and re-run the reproduce spec.
+
+## Neighbouring shapes (measured on stage-2, 2026-08-23)
+
+| shape | observed | verdict |
+|---|---|---|
+| struct `f32` field | `0.0 / 0.0 / 0.0` | BROKEN |
+| mixed struct (`f64` + `f32`) | `1.5` / `0.0` | f64 fine, f32 BROKEN |
+| `f32` local (`val a: f32 = 2.5f32`) | `0.000...0005315` (denormal) | BROKEN |
+| `f32` arithmetic (`a + 1.0f32`) | `1.0000002388842404` | BROKEN |
+| `f32` fn arg + return | `8.988...e307` | BROKEN |
+| `[f32]` array element | `1.5 / 2.5` | FINE (arrays store f64) |
+
+So the class is wider than struct fields: every f32 boundary except arrays is
+wrong on this binary.
+
+**Caveat that must not be lost:** stage2 still emits the legacy inline
+`and -8; or 2` float tag, i.e. it predates the F32 arms now present in
+`expr_dispatch.spl:786` and `switch_operators_calls.spl:1505`. The local /
+argument / arithmetic rows above may therefore be artefacts of a stale binary
+that current source already fixes. The **aggregate store/read asymmetry is
+different**: it was read in CURRENT source and is still there. Re-measure the
+non-aggregate rows on a freshly bootstrapped stage2 before treating them as
+open defects.
+
 ## Next steps
 
-1. Settle the missing third cell (seed native codegen) with a seed new enough to
+1. Apply the `aggregate_intrinsics.spl` repair specified above, rebuild stage2,
+   and re-run `test/01_unit/compiler/backend/f32_struct_field_read_spec.spl` —
+   it must go from `7 examples, 6 failures` to `7 examples, 0 failures`.
+2. Settle the missing third cell (seed native codegen) with a seed new enough to
    build current `src/`.
-2. Fix the read side to mirror the f64 field-read path.
-3. Re-run the reproduce spec on a rebuilt stage2 — the fix cannot be verified
-   without a bootstrap, since stage2 is already compiled.
+3. Re-measure the non-aggregate neighbour rows on the rebuilt stage2 and close
+   or re-file them per the caveat above.
