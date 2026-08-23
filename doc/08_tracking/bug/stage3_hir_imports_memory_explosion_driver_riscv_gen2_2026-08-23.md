@@ -277,3 +277,104 @@ then the stage-3 leg.
 - Whole-call memoization of `register_imported_type_methods` was considered and
   rejected: a first call may run before its dependencies resolve, so caching the
   outcome is not sound.
+
+---
+
+## RUN 3-5 (2026-08-23, macOS aarch64-apple-darwin) — the "dead carrier" premise is REFUTED by direct probe
+
+Three measured stage-2 -> stage-3 cycles on this host. Stage 2 green each time
+(`Build complete: 750 compiled, 0 cached, 0 failed` cold, then `6 compiled, 744
+cached` warm; `stage2-sanity: pass`, `stage2-provenance: pure-simple`,
+`ADMISSION_RC=0`).
+
+### 1. `Dict.len()` lies after the teardown; the carriers are NOT dead
+
+A one-shot probe of the PRE-rebuild carrier, printed from the driver owner site
+immediately after `rt_transient_array_scope_end()`:
+
+```
+[module-surface] pre-rebuild authority carrier probe: surface=0 names=26 dict_len=-1 contains=true key=rt_native_build
+```
+
+`contains_key` answers **true** on the very carrier whose `len()` reports `-1`.
+The same shape holds for the aggregate-valued Dict that crosses the boundary,
+`ModuleSurfaceImpl.methods`:
+
+```
+[reexport-probe] owner=CompileMode module=compiler.common.driver_core_modes impl_rows=1 methods_dict_len=-1 methods_keys=2 visited=1
+[reexport-probe] owner=AssuranceStrictness module=compiler.common.assurance.policy_schema impl_rows=1 methods_dict_len=-1 methods_keys=4 visited=5
+```
+
+`len()` is `-1` while `keys()` returns the right number of usable keys. So the
+RUN-2 inference "dead carrier -> every frozen lookup returns found:false" was
+wrong: only the **count** is unreadable after teardown. Nothing was silently
+missing every lookup.
+
+### 2. What landed, and what it actually did
+
+The operative unblocking change is the CRITERION, not the repopulation: the
+len()-based gate refused a registry that was in fact usable. The rebuild is a
+verified-harmless defense that additionally proves all 946 keys answerable.
+
+`module_surfaces_rebuild_declaration_authority_carriers_error`
+(`src/compiler/20.hir/hir_lowering/module_surface_registry.spl:441`), called from
+`driver_source_pipeline_parsing.spl:493` immediately after
+`rt_transient_array_scope_end()`, rebuilds each surface's `index_by_name` from
+the retained `names` array into a FRESH Dict and publishes it with the freeze
+path's explicit write-back. O(946 keys) once, never per lookup. It then
+verifies EVERY key through the published registry path.
+
+The len()-based gate in `module_surfaces_frozen_alignment_error`
+(`module_surface_registry_index.spl:254`) was replaced by a functional probe of
+`module_surface_declaration_authority_lookup` over every key, comparing the
+answered `declaring_module` against the scalar array. This is not the reverted
+relaxation `10fc2c44785`: that TOLERATED a bad carrier, this VERIFIES a good
+one and still fails closed. Phase-2 retention now passes with all 946 keys
+proven answerable.
+
+Note for anyone re-deriving this: a freshly allocated, freshly filled
+`Dict<text, i64>` with 26 entries ALSO reported `len() == -1` at this site
+(`rebuilt authority dict carrier is not viable: index=0 names=26 rebuilt=-1
+dead_dict=-1`). `len()` is unreliable in this lowering context regardless of
+teardown; never gate on it here.
+
+### 3. The explosion is a SECOND defect, and it is now located by profile
+
+With the carrier proven live, stage 3 still runs away, in
+`phase3:hir:imports`, in `src/compiler/backend/backend/interpreter.spl` — the
+same module RUN 2 named.
+
+**Judge these runs by FOOTPRINT, not `ps` RSS.** RSS read as a flat 4-8 GB while
+`vmmap --summary` reported:
+
+```
+22:41:42 rss_kb=7789248 footprint=34.3G
+22:44:38 rss_kb=7322784 footprint=35.8G
+22:47:35 rss_kb=6135296 footprint=36.9G
+22:50:34 rss_kb=5468160 footprint=38.1G
+```
+
+Monotone ~+0.45 GB/min with RSS FALLING. Swap 5.66 GB of 7.17 GB. SIGTERM'd at
+38.1 GB.
+
+`sample` on the live process, twice 21 minutes apart and again in a later run,
+gives an identical picture: **~100% of samples in
+`HirLowering.register_imported_type_methods_inner`
+(`_Items/module_reexport_materialization.spl:1104`), inside `rt_alloc ->
+rt_transient_raw_register`**, at the insert-probe offsets of
+`runtime_memory.c:110`. Before the read-side CoW fixes landed in the tree the
+same profile also showed `SymbolTable.lookup_or_invalid` (35%) and
+`SymbolId.is_valid` (7%); after them the whole cost collapses into five
+allocation sites inlined in `register_imported_type_methods_inner` itself.
+
+It is an allocation storm, not a leak: `driver_hir_pipeline_lowering.spl:71-84`
+holds `rt_transient_array_scope_begin()` active across the whole module
+lowering, so every `rt_alloc` is recorded OWNED and nothing is freed until scope
+end, while the registry's probe cost grows with its own size.
+
+### 4. Side effect worth noting
+
+The read-side CoW fixes did not only change speed: `[hir-fatal-count]` for
+`driver_riscv_gen2_product.spl` went **45 -> 24** and `driver.spl` reports 8.
+The `unresolved type` / `field not visible` class is therefore also NOT explained
+by the surface registry, and is a third open thread.

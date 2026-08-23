@@ -35,6 +35,9 @@ use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
+# Level-gated diagnostic switch, default OFF (.claude/rules/code-style.md).
+val HIR_REEXPORT_IMPL_TRACE = false
+
 impl HirLowering:
     me find_reexport_source_walk(
         facade_index: i64, wanted: text, depth: i64,
@@ -1109,6 +1112,11 @@ impl HirLowering:
                 local_owner_module = module_name
                 local_owner_defining_module = Some(module_name)
         val owner_module = hir_module_logical_name_from_path(local_owner_module)
+        # SYMNAMEHOIST (2026-08-23): both method loops below spell every symbol
+        # as "{owner_module}.{imported_name}::{method}". The first two
+        # fragments are loop-invariant for the whole call, so interpolate them
+        # once here instead of once per method per impl row.
+        val symbol_name_prefix = "{owner_module}.{imported_name}::"
         # IMPLIDX: visit only the impls that implement `imported_name`, in
         # declaration order, instead of sweeping (and copying) every impl row
         # of the declaring module per registration.
@@ -1118,10 +1126,36 @@ impl HirLowering:
             val impl_ = imported_mod.impls[impl_positions[impl_cursor]]
             impl_cursor = impl_cursor + 1
             self.impl_rows_visited = self.impl_rows_visited + 1
-            for method_name in impl_.methods.keys():
-                val method = impl_.methods[method_name]
-                val symbol_name = "{owner_module}.{imported_name}::{method_name}"
+            # Hoist the key projection: `.keys()` materializes the whole
+            # collection, and this is also the probe point for the retained
+            # `ModuleSurfaceImpl.methods` Dict carrier -- the one
+            # aggregate-valued Dict that crosses the staged transient teardown.
+            # Measured 2026-08-23: stage 3 spends unbounded time in this loop.
+            val impl_method_names = impl_.methods.keys()
+            # Level-gated per .claude/rules/code-style.md, default OFF.
+            # Flip HIR_REEXPORT_IMPL_TRACE below to re-enable.
+            if HIR_REEXPORT_IMPL_TRACE and _hir_reexport_impl_probe_budget > 0:
+                _hir_reexport_impl_probe_budget = _hir_reexport_impl_probe_budget - 1
+                print "[reexport-probe] owner={imported_name} module={imported_mod_name} impl_rows={impl_positions.len()} methods_dict_len={impl_.methods.len()} methods_keys={impl_method_names.len()} visited={self.impl_rows_visited}"
+            for method_name in impl_method_names:
+                # SYMNAMEHOIST (2026-08-23): build the invariant prefix ONCE
+                # per call instead of re-interpolating three fragments per
+                # method, and defer the `impl_.methods[...]` row read until the
+                # symbol is actually missing. In the steady state almost every
+                # method is already registered (this method is re-entered for
+                # the same type many times per module -- it is re-entrancy
+                # guarded, not memoized), so the row read and the two extra
+                # concats were pure waste on the overwhelmingly common hit
+                # path. Both are behaviour-preserving: `symbol_name` is the
+                # same text, and `method` is only ever read inside this branch.
+                # A stage-3 `sample(1)` on 2026-08-23 put 58% of all CPU
+                # samples in this function, every one under rt_alloc ->
+                # rt_transient_raw_register, whose scope stays ACTIVE across
+                # the whole lowering so nothing here is reclaimed until the
+                # module ends.
+                val symbol_name = symbol_name_prefix + method_name
                 if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
+                    val method = impl_.methods[method_name]
                     val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
                     self.materialize_imported_callable_type_dependencies(imported_mod, imported_mod_name, method, import_span, materialize_enum)
                     val sig_started = hir_phase_profile_now()
@@ -1148,7 +1182,9 @@ impl HirLowering:
                     if trait_module_found and trait_position >= 0:
                         val trait_ = trait_module.trait_values[trait_position]
                         for trait_method in trait_.methods:
-                            val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
+                            # SYMNAMEHOIST: same invariant prefix as the impl
+                            # method loop above.
+                            val symbol_name = symbol_name_prefix + trait_method.name
                             if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
                                 val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
                                 # The signature belongs to the trait's physical
@@ -1166,6 +1202,10 @@ impl HirLowering:
 
 # Concrete i64 membership scan: the native build path has no generic
 # monomorphization, so a `[i64].contains` method call is not available here.
+# Probe budget for the retained impl-methods Dict carrier. Capped so a stage-3
+# run records the shape of the first rows without flooding the transcript.
+var _hir_reexport_impl_probe_budget: i64 = 40
+
 fn hir_i64_list_contains(values: [i64], needle: i64) -> bool:
     var idx = 0
     while idx < values.len():

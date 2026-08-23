@@ -8,6 +8,11 @@ use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_name_i
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze, module_surfaces_frozen_alignment, module_surfaces_frozen_alignment_error}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_declaration_matches}
 
+# Level-gated diagnostic switch, default OFF (.claude/rules/code-style.md:
+# probes are converted to level-gated logs, never deleted). Flip to true to
+# re-emit the one-shot pre-rebuild authority-carrier probe.
+val HIR_SURFACE_CARRIER_TRACE = false
+
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_transient_heap_promote(value: Any) -> bool
 
@@ -437,6 +442,63 @@ pub fn module_surfaces_promote(registry: ModuleSurfacesByName) -> bool:
             return false
         surface_index = surface_index + 1
     rt_transient_heap_promote(registry)
+
+pub fn module_surfaces_rebuild_declaration_authority_carriers_error(
+    registry: ModuleSurfacesByName
+) -> text:
+    # The declaration-authority Dict carrier does not survive the staged
+    # transient teardown, and `module_surface_declaration_authority_lookup` is
+    # the one member of this family with no scalar fallback, so a dead carrier
+    # silently misses EVERY frozen lookup and corrupts HIR lowering. See
+    # doc/08_tracking/bug/stage3_hir_imports_memory_explosion_driver_riscv_gen2_2026-08-23.md
+    #
+    # Repair it here, at the owner site, where the field is mutable and the
+    # registry lives on the surviving driver-level heap.  This is O(total
+    # names) ONCE.  It cannot live in the by-value lookup: a lazy rebuild there
+    # is discarded on return, or deep-copies the whole index per call.
+    #
+    # Never write into the dead carrier - allocate a fresh Dict and publish it
+    # with the same explicit write-back the freeze path uses for these surfaces.
+    #
+    # Viability is judged by a FULL functional sweep through the published
+    # registry path, never by `len()`: measured 2026-08-23, a Dict<text, i64>
+    # freshly allocated and filled with 26 entries at this point reports
+    # `len() == -1` while the entries themselves are the thing that matters.
+    # A sampled probe would miss a resize-boundary loss, so every key is
+    # checked; the total is 946 keys across 692 surfaces, O(n) once.
+    var surface_index = 0
+    while surface_index < registry.surfaces.len():
+        var surface = registry.surfaces[surface_index]
+        val name_count = surface.declaration_authority_index.names.len()
+        if name_count < 0:
+            return "authority names array is dead: index={surface_index} names={name_count}"
+        if HIR_SURFACE_CARRIER_TRACE and surface_index == 0 and name_count > 0:
+            # One-shot probe of the PRE-rebuild carrier. This is the only
+            # direct evidence for whether the teardown kills lookups or merely
+            # kills `len()`, and a bootstrap cycle costs ~15 minutes, so it is
+            # kept rather than deleted -- level-gated per
+            # .claude/rules/code-style.md, default OFF.
+            # Flip HIR_SURFACE_CARRIER_TRACE below to re-enable.
+            val probe_name = surface.declaration_authority_index.names[0]
+            print "[module-surface] pre-rebuild authority carrier probe: surface=0 names={name_count} dict_len={surface.declaration_authority_index.index_by_name.len()} contains={surface.declaration_authority_index.index_by_name.contains_key(probe_name)} key={probe_name}"
+        var rebuilt: Dict<text, i64> = {}
+        var name_index = 0
+        while name_index < name_count:
+            rebuilt[surface.declaration_authority_index.names[name_index]] = name_index
+            name_index = name_index + 1
+        surface.declaration_authority_index.index_by_name = rebuilt
+        registry.surfaces[surface_index] = surface
+        val published = registry.surfaces[surface_index].declaration_authority_index
+        var verify_index = 0
+        while verify_index < name_count:
+            val verify_name = published.names[verify_index]
+            if not published.index_by_name.contains_key(verify_name):
+                return "published authority dict missing key: index={surface_index} position={verify_index} key={verify_name} names={name_count} dict_len={published.index_by_name.len()}"
+            if published.index_by_name[verify_name] != verify_index:
+                return "published authority dict wrong position: index={surface_index} position={verify_index} key={verify_name} value={published.index_by_name[verify_name]} names={name_count}"
+            verify_index = verify_index + 1
+        surface_index = surface_index + 1
+    ""
 
 pub fn module_surfaces_retained_alignment(registry: ModuleSurfacesByName) -> bool:
     module_surfaces_frozen_alignment(registry)

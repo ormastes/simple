@@ -25,6 +25,7 @@ use compiler.hir.hir_lowering.module_surface.{
     module_surface_promote,
     module_surface_promote_last_failure,
     module_surfaces_promote,
+    module_surfaces_rebuild_declaration_authority_carriers_error,
     module_surfaces_retained_alignment_error
 }
 use compiler.driver.driver_source_loading.{
@@ -482,6 +483,19 @@ impl CompilerDriver:
         if not rt_transient_array_scope_end():
             self.ctx.add_error(
                 "Module surface retention scope end failed after phase 2")
+            return false
+        # The declaration-authority Dict carriers do not survive the teardown
+        # above (they report len() == -1 while their aligned scalar arrays are
+        # intact).  Rebuild them once, here, on the surviving driver-level heap
+        # -- the frozen authority lookup has no scalar fallback, so a dead
+        # carrier silently misses every lookup.  See
+        # doc/08_tracking/bug/stage3_hir_imports_memory_explosion_driver_riscv_gen2_2026-08-23.md
+        val authority_rebuild_error =
+            module_surfaces_rebuild_declaration_authority_carriers_error(
+                retained_surfaces)
+        if authority_rebuild_error != "":
+            self.ctx.add_error(
+                "Module surface declaration-authority carrier rebuild failed after phase 2 retention: {authority_rebuild_error}; surfaces={retained_surfaces.surfaces.len()}")
             return false
         val retained_alignment_error = module_surfaces_retained_alignment_error(
             retained_surfaces)
