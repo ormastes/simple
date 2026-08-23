@@ -167,23 +167,46 @@ path. The treesitter outline path *does* parse a per-field marker
 now disagrees with the semantic answer above; it feeds outlines/LSP, not the
 HIR surface, so it was left alone rather than changed speculatively.
 
-### Real-scale re-measurement status (honest)
+### Real-scale re-measurement: COMPLETED, the visibility class is eliminated
 
-The post-fix 140-module `src/app/lint --entry-closure` rerun is **still
-running** and its error count is **NOT yet established**. Recorded so the gap
-is not mistaken for a green result:
+The post-fix 140-module `src/app/lint --entry-closure` rerun finished
+(`--threads 4`, matching the original probe's command exactly; closure size
+reconfirmed at **140**).
 
-- Closure size **reconfirmed at 140 modules** post-fix (`[build] parse N/140`).
-- Host is saturated: `--threads 2` reached `parse 39/140` in 2h33m; a
-  `--threads 4` rerun (matching the original probe's command exactly) reached
-  `parse 5/140` in ~3h. Neither reached step 2/6, where the 1512 errors were
-  raised.
-- What IS established at unit scale: the reproduce spec's third case puts the
-  exact HIR question to the real policy owner — may `rules_lint.spl` name
-  `LineContext.trimmed` declared in `rules_helpers.spl` — and it goes from
-  DENIED pre-fix to ALLOWED post-fix.
+| class | pre-fix | post-fix |
+|---|---|---|
+| ``field `X` is not visible from this module`` | 1238 | **0** |
+| ``aggregate constructor `X` is not visible`` | 174 | **0** |
+| `unresolved type` | 80 | 377 |
+| `unresolved name` | 20 | 12 |
 
-Any claim that the lint closure now clears step 2/6 is unsupported until that
-run completes. Whether monomorphization is then reached, and whether
-`E-MONO-030/032/033` fire there, remains exactly as open as this record's
-original section said.
+**The entire 1412-error visibility class is gone.** That zero is not a
+truncation artifact: the three files that carried the most errors
+(`rules_lint.spl` 156, `rules.spl` 148, `lint_checks.spl` 108) now report
+**0** visibility errors each, and the specific fields that accounted for 522
+of the 1238 (`trimmed` 190, `line_num` 182, `byte_offset` 150) appear **0**
+times anywhere in the log.
+
+### The wall moved, it did not disappear
+
+The closure now advances deep into HIR — `hir 136/140` at step 2/6, versus
+dying at the very start of step 2/6 before — and hits a **different, later**
+blocker. Recorded honestly:
+
+- `unresolved type` rose 80 -> **377**. This is expected direction, not a
+  regression introduced here: 44 files previously bailed out early on
+  visibility errors, so far more of their code is now reachable and lowering
+  reports what was always behind that wall. Top names: `String` 84, `Option`
+  63, `int` 62, `Int` 53, `Dict` 51, `Bool` 30, `Result` 16, `fn` 16 — a
+  type-name/alias resolution gap (note the foreign-looking `String`/`Int`/
+  `Bool` spellings), with no visibility content.
+- 47 modules end `hir-poisoned`.
+- The run ends **rc=255** with `native-build worker wrapper exited abnormally
+  (signal or wait failure, code -1) before producing a binary`, and stderr is
+  explicitly **truncated** (`!!!!!! END NATIVE-BUILD TRUNCATED STDERR !!!!!!`).
+  So 377 / 12 are **lower bounds**, and the silent-abort symptom this record
+  earlier noted as "gone" has reappeared at a later point in the pipeline.
+- **Monomorphization is still never reached**: 0 `[mono]` receipts, 0
+  `E-MONO-030/032/033`. The mono fix at `75f554903ff` therefore remains
+  **unvalidated at real closure scale**, exactly as this record originally
+  said. Cross-module visibility was one wall; it was not the last one.
