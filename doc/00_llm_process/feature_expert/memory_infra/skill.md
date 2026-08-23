@@ -145,3 +145,35 @@ When a new M-phase lands, gains a design doc, or an env gate's status
 changes, update the Code map / Env gates / Known limits tables above and the
 `## M-plan status` section in `.spipe/stage4_memory_harden/state.md` in the
 same change.
+
+## Measured peak RSS of the compiler itself (2026-08-23)
+
+Seed `f6521b60b67d…` (60,650,360 B), box 32 CPU / load 16–30. Full data:
+`doc/10_metrics/perf/compiler_peak_rss_and_throughput_2026-08-23.md`.
+
+| workload | peak RSS | note |
+|---|---|---|
+| 3-line hello, `compile` | 29.7 MB | 0.15 s median |
+| 807-module closure, `compile` | 1.55 GiB | flat at 1571 MB for the last 62 % of the run — nothing released |
+| `native-build` worker (`simple run native_build_worker.spl`) | **2.66–2.77 GiB, still climbing at ~40 MB/s** | 953 MB (25 %) from the ~3.7 GiB earlyoom kill; ~24 s to kill at that rate |
+
+Three things to know before measuring memory here:
+
+1. **`native-build` is multi-process.** The parent sits at 54 MB flat; the
+   memory is in `simple run src/app/cli/native_build_worker.spl` children. A
+   parent-only sampler (or bare `/usr/bin/time -v` on the parent) reports 54 MB
+   and is wrong by ~50x. Sample by matching `/proc/*/exe` against your binary's
+   absolute path — pgid/setsid sampling was tried and lost the children.
+2. **rc=137 / rc=143 here is an earlyoom SIGKILL, not a compiler crash.**
+   `simple` is the designated victim at ~3.7 GiB. Log MemAvailable at exit
+   before classifying anything as a crash.
+3. **Freeze your binary.** Other lanes replace `bin/simple`'s symlink target
+   mid-session. Copy the binary into your own worktree and cite its sha256.
+
+The dominant known term is `IMPORTED_MODULE_AST`
+(`src/compiler_rust/compiler/src/hir/lower/import_loader.rs:33`): an
+`Arc<Module>` per imported path, retained for the process lifetime, cleared only
+by the global `clear_module_cache` — never at end-of-lowering. **Do not "fix" it
+by deleting the memo**; it is a landed fix for a real 112x *re-parse* defect and
+is pinned by parse count. The open question is its retention lifetime. Bug:
+`doc/08_tracking/bug/native_build_worker_rss_unbounded_953mb_from_oom_kill_2026-08-23.md`.
