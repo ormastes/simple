@@ -1,0 +1,94 @@
+# @cover src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
+# @cover src/compiler/00.common/dependency/member_visibility.spl
+#
+# Bug: doc/08_tracking/bug/
+# hir_cross_module_field_visibility_blocks_lint_closure_2026-08-23.md
+#
+# The flat-AST bridge used to stamp `visibility: Visibility.Private` on EVERY
+# struct/class field it rebuilt. Because the flat AST carries no per-field
+# visibility at all (decl_nodes.spl exposes fields / field_types /
+# field_defaults / field_bits and NO visibilities array, and parse_struct_decl
+# collects no such list), `pub x: T` inside a struct body is structurally
+# unrepresentable on this path -- so that Private default could never be
+# overridden from source. HIR's member_visibility_allows() then denied every
+# cross-module field read and every aggregate construction: 1512 errors across
+# 44 files on the real 140-module `src/app/lint` entry closure.
+#
+# An unmarked field is PUBLIC, gated by the composite's own visibility. Enum
+# variant payload fields in the same bridge function were already Public, the
+# declaring module's own HIR tables grant every field unconditionally, and
+# compile_interface.spl treats an undeclared visibility as "public".
+#
+# HARNESS NOTE: the parse call is inlined per `it` block on purpose -- see
+# enum_payload_capture_spec.spl in this directory.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_has_errors}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types.{ParserField}
+use compiler.common.dependency.member_visibility.{member_access_scope_for_modules, member_visibility_allows}
+
+fn field_index(fields: [ParserField], name: text) -> i64:
+    var i = 0
+    while i < fields.len():
+        if fields[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+fn is_public_visibility(v: Visibility) -> bool:
+    match v:
+        case Visibility.Public: true
+        case _: false
+
+describe "an unmarked struct field is public, not module-private":
+    it "gives a plain struct field Visibility.Public":
+        val src = "struct LineContext:\n" +
+            "    trimmed: text\n" +
+            "    line_num: i64\n" +
+            "\n" +
+            "fn identity(n: i64) -> i64:\n" +
+            "    n\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_fieldvis_struct.spl", "fixture_fieldvis_struct", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.structs.contains_key("LineContext"))
+        val s = parsed.structs["LineContext"]
+        val ti = field_index(s.fields, "trimmed")
+        assert_true(ti >= 0)
+        assert_true(is_public_visibility(s.fields[ti].visibility))
+        assert_true(s.fields[ti].is_public)
+
+    it "lets a DIFFERENT module read that unmarked field":
+        val src = "struct LineContext:\n" +
+            "    trimmed: text\n" +
+            "\n" +
+            "fn identity(n: i64) -> i64:\n" +
+            "    n\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_fieldvis_cross.spl", "fixture_fieldvis_cross", Logger(level: 0))
+        assert_false(parser_has_errors())
+        val s = parsed.structs["LineContext"]
+        val ti = field_index(s.fields, "trimmed")
+        assert_true(ti >= 0)
+        # Exactly the HIR question: an unrelated consumer module asking the
+        # real policy owner whether it may name this field.
+        val scope = member_access_scope_for_modules(
+            "src/lib/nogc_sync_mut/tooling/easy_fix/rules_lint.spl", "easy_fix",
+            "src/lib/nogc_sync_mut/tooling/easy_fix/rules_helpers.spl", "easy_fix",
+            [], false)
+        assert_true(member_visibility_allows(s.fields[ti].visibility, scope))
+
+    it "gives a plain class field Visibility.Public too":
+        val src = "class Counter:\n" +
+            "    count: i64\n" +
+            "\n" +
+            "fn identity(n: i64) -> i64:\n" +
+            "    n\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_fieldvis_class.spl", "fixture_fieldvis_class", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.classes.contains_key("Counter"))
+        val c = parsed.classes["Counter"]
+        val ci = field_index(c.fields, "count")
+        assert_true(ci >= 0)
+        assert_true(is_public_visibility(c.fields[ci].visibility))
