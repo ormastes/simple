@@ -1,0 +1,78 @@
+# Memory-aware clamp for native-build shard concurrency.
+#
+# Why this exists: the shard thread count was derived from CPU count alone --
+# scripts/bootstrap/bootstrap-from-scratch.sh picks host_cpus/2, which is 16 on
+# a 32-core box -- while a measured worker holds 2.4-2.7 GB RSS (VmPeak 3.37 GB,
+# 99.4% anonymous, Pss ~= Rss so nothing is shared between siblings). A single
+# stage1 run therefore asked for ~40 GB, and on a shared box the whole worker
+# group was OOM-reaped mid-HIR after an hour of work (run17: rc=255 after
+# 12,643 s across 3 attempts, death points 13/688, 288/688, 509/688 -- flaky, so
+# not a deterministic compiler defect). Nothing anywhere derived concurrency
+# from memory; check-heavy-work-preflight.shs is a one-shot admission gate that
+# refuses to start, it never lowers N.
+# Measurements: doc/09_report/build_parallelism_memory_audit_2026-08-23.md
+#
+# Safety properties: sharding is a cache warm-up, so the compiled output is
+# byte-identical at any N and lowering N is always semantics-preserving. The
+# clamp only ever *reduces* the count, reads one file once at spawn time, and is
+# deliberately NOT a mid-run feedback loop -- killing or suspending live shards
+# would re-open the orphaned-claim class fixed by 6cedd51faec.
+# std-only on purpose: the orchestrator is a slim entry that must not drag the
+# compiler closure in.
+use std.io_runtime.{file_read}
+use app.io.env_ops.{env_get}
+
+# MemAvailable (kB) from /proc/meminfo; 0 when unreadable (non-Linux, or a
+# kernel without the field). Absence of evidence must never *raise* concurrency,
+# so 0 makes the caller skip the clamp rather than assume anything.
+pub fn shard_mem_available_kb() -> i64:
+    shard_mem_available_kb_from(file_read("/proc/meminfo") ?? "")
+
+# Split out so a spec can feed a fixture without a /proc dependency.
+pub fn shard_mem_available_kb_from(meminfo: text) -> i64:
+    if meminfo == "":
+        return 0
+    for line in meminfo.split("\n"):
+        if line.starts_with("MemAvailable:"):
+            for tok in line.substring(13).trim().split(" "):
+                if tok != "":
+                    return tok.to_i64() ?? 0
+    0
+
+# Per-worker memory budget in kB. Parse shards run the slim parse-lane entry
+# (~1.5 GB, pinned by scripts/check/check-parse-shard-rss-budget.shs); HIR
+# shards still spawn the full worker closure (measured 2.4-2.7 GB RSS), so they
+# carry a larger budget and are clamped harder. Overridable per phase.
+pub fn shard_worker_budget_kb(var_name: text, default_kb: i64) -> i64:
+    val raw = env_get(var_name) ?? ""
+    if raw != "":
+        val parsed = raw.to_i64() ?? 0
+        if parsed > 0:
+            return parsed
+    default_kb
+
+# The clamp itself, pure: N x budget must fit inside 60% of MemAvailable.
+# avail_kb <= 0 means "unknown" and returns the request untouched.
+pub fn shard_threads_cap_for(requested: i64, budget_kb: i64, avail_kb: i64) -> i64:
+    if requested <= 1:
+        return requested
+    if budget_kb <= 0 or avail_kb <= 0:
+        return requested
+    var cap = (avail_kb * 6 / 10) / budget_kb
+    if cap < 1:
+        cap = 1
+    if cap >= requested:
+        return requested
+    cap
+
+# Live entry point used by the orchestrator. SIMPLE_SHARD_MEM_CLAMP=0 disables.
+pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64) -> i64:
+    if requested <= 1:
+        return requested
+    if (env_get("SIMPLE_SHARD_MEM_CLAMP") ?? "") == "0":
+        return requested
+    val avail_kb = shard_mem_available_kb()
+    val cap = shard_threads_cap_for(requested, budget_kb, avail_kb)
+    if cap < requested:
+        print "[shard] threads={cap} (requested {requested}, capped by MemAvailable={avail_kb} kB / worker budget {budget_kb} kB)"
+    cap

@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=131
+ROW_FLOOR=139
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -534,6 +534,29 @@ must_contain     "IMPORTASTMEMO reproduce test pins one parse per module" \
 must_contain     "IMPORTASTMEMO read-site attribution trace kept" \
     "$ROOT/src/compiler_rust/compiler/src/read_trace.rs" \
     "SIMPLE_READ_TRACE"
+
+# --- shard concurrency MemAvailable clamp (2026-08-23) ---------------------
+# doc/08_tracking/bug/shard_threads_no_memavailable_clamp_2026-08-23.md
+# Pre-fix the shard count came from host_cpus/2 alone (16 here => ~40 GB) with
+# no memory awareness, and the worker group was OOM-reaped mid-HIR (run17,
+# rc=255 after 12,643 s / 3 attempts). The mechanism IS the cap arithmetic and
+# the two call sites; deleting either restores the kill.
+must_contain     "SHARDCLAMP cap arithmetic present"               \
+    "$ROOT/src/app/cli/shard_mem_clamp.spl" "var cap = (avail_kb * 6 / 10) / budget_kb"
+must_contain     "SHARDCLAMP reads MemAvailable"                   \
+    "$ROOT/src/app/cli/shard_mem_clamp.spl" "MemAvailable:"
+must_contain     "SHARDCLAMP never raises the request"             \
+    "$ROOT/src/app/cli/shard_mem_clamp.spl" "if cap >= requested:"
+must_contain     "SHARDCLAMP wired into the shard chooser"         \
+    "$ROOT/src/app/cli/native_build_main.spl" "shard_threads_mem_cap(threads, budget_kb)"
+must_contain     "SHARDCLAMP parse phase carries the slim budget"  \
+    "$ROOT/src/app/cli/native_build_main.spl" "SIMPLE_PARSE_SHARD_WORKER_KB"
+must_contain     "SHARDCLAMP HIR phase clamped harder"             \
+    "$ROOT/src/app/cli/native_build_main.spl" "SIMPLE_HIR_SHARD_WORKER_KB"
+must_contain     "SHARDCLAMP spec pins the run17 shape"            \
+    "$ROOT/test/01_unit/app/cli/shard_mem_clamp_spec.spl" "shard_threads_cap_for(16, 3000000, 16000000)"
+must_contain     "SHARDCLAMP spec pins per-phase asymmetry"        \
+    "$ROOT/test/01_unit/app/cli/shard_mem_clamp_spec.spl" "expect(hir_cap < parse_cap).to_be_true()"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
