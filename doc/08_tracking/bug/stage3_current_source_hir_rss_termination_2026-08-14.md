@@ -711,3 +711,21 @@ measure the number of distinct registration keys and key-length growth during
 module 1, plus successful/completed memo cardinality, before changing
 materialization semantics. No additional Stage 3 retry is allowed in this
 session under the three-cycle cap.
+
+### 2026-08-23 scalar registration-shape instrumentation
+
+The opt-in HIR profiler now measures registration attempts, memo-published completed bodies,
+memo skips, current/maximum recursive depth, aliased-local attempts, and the
+maximum serialized registration-key length. It retains only scalar counters:
+there is no visited set, key array, dictionary, or behavioral cycle guard.
+While profiling is enabled it emits `[hir-prof-reg]` samples at attempt counts
+1, 2, 4, 8, and so on, flushing stderr after each sample so an OOM termination
+still leaves logarithmically bounded evidence. A final per-module row reports
+the same counters. Skip and completed-inner paths both balance the active-depth
+counter.
+
+This is diagnostic instrumentation only. It has not been built or executed in
+this change, does not establish a Stage-3 result, and does not change import
+registration semantics. A future canonical Stage-3 transaction may use the
+rows to distinguish deep changing-key recursion from broad repeated acyclic
+fan-out without retaining the keys that are being measured.
