@@ -1150,3 +1150,89 @@ immediately found **44** owners naming it in signature position with no real
 import. All 44 now import from the declaring module; the guard is back to
 `PASS — 1809 file(s) checked, 0 offender(s)`. Running total for this class:
 **73 latent owners repaired** across three types.
+
+## Follow-up (k) 2026-08-23 — the owner probe names the owner, and the fix is on the IMPORTER side
+
+### The probe worked, and it says the failing name is the OUTER generic
+
+Two new level-gated owner probes were added at the two fall-throughs in
+`imported_surface_type` that hand a type to `lower_type` in the IMPORTER's scope
+(`[ist-scalar-fallthrough]`, `[ist-catchall-fallthrough]`). `[ist-proj-miss]`
+covers only `imported_surface_type_projected`, which is exactly why `HirModule`
+and `LocalId` produced zero probe lines of any kind. On the reproducing closure:
+
+    [ist-scalar-fallthrough] name=Dict owner=compiler.mono.monomorphize_integration lowering=src/compiler/mono/instantiation.spl
+    [ist-scalar-fallthrough] name=Any  owner=compiler.mono.monomorphize.engine    lowering=src/compiler/mono/instantiation.spl
+
+The owner hypothesis from follow-up (i) was **right** —
+`compiler.mono.monomorphize_integration` — but the name that falls through is
+**`Dict`**, the OUTER generic of `Dict<text, HirModule>`, not `HirModule`. The
+whole type is then handed to `lower_type` in the IMPORTER's scope, which
+recurses into the generic ARGUMENT there; `HirModule`, which the importer never
+imported, is what hard-errors. Hence the synthesized span, hence the silence of
+every owner-side probe, and hence — decisively — why the owner-side import in
+follow-up (i) could not possibly have helped: **once the type is handed to
+`lower_type` in the importer's scope, what the owner imports is irrelevant.**
+
+### Measured: the fix is on the IMPORTER
+
+| tree | `mono/instantiation.spl` | `40.mono/__init__.spl` |
+|---|---|---|
+| baseline | 2 fatals (8 occurrences) | 1 fatal |
+| + owner-side batch (75 imports across all of `40.mono`) | **unchanged** | unchanged |
+| + IMPORTER-side `use compiler.hir.hir_types.{HirModule}` | **0 — CLEARED** | 4 occurrences remain |
+
+`instantiation.spl` — the file this whole hunt started from, which does not
+contain the string `HirModule` anywhere — is clear. The barrel
+`40.mono/__init__.spl` still fails; it re-exports the signature onward, so it is
+being retried with the import placed BEFORE its `export use` lines rather than
+after.
+
+### Consequence for the generalized sweep — stated plainly
+
+The tree-wide sweep is **owner-side by construction**: it finds modules that
+NAME a type without importing it. It can never find this defect, because the
+importer does not name the type at all. So the two are complementary and must
+not be conflated:
+
+* the sweep removes **latent origin gaps** (prophylactic — it stops future
+  fatals surfacing as importers lower further, the effect measured when clearing
+  `CompiledModule` revealed 10 new `LocalId` fatals in `backend_types.spl`);
+* only an **importer-side** binding clears an ACTIVE fatal of this shape.
+
+Measured proof that they are different: the 75-import owner-side batch over all
+of `40.mono` left the fatal count **completely unchanged**. Landing the whole
+1,657-row `src/compiler` sweep as "the fix" would therefore have been a false
+claim, and batching-then-measuring is what caught it.
+
+### The generalized ratchet
+
+`--auto` mode derives the type -> declaring-module table FROM THE TREE (every
+top-level `struct`/`class`/`enum`/`trait` under `src/`), and drops any name
+declared in more than one module into an ambiguous report for human judgement
+instead of guessing. Measured on the whole tree in **19 seconds**:
+
+    files 14454   uniquely-declared types 13522   ambiguous EXCLUDED 1822
+    FAIL — 14454 file(s) checked, 2620 offender(s)
+
+Cross-validated: an independent Python implementation of the same predicate
+returns **exactly** 2620 offenders / 1822 ambiguous. Two exclusion rules, each
+with a reason recorded in the data file rather than buried in code: built-in
+names the HIR lowerer has arms for (`Option`, `Result`, `Dict`, `Bool`, ... — a
+`struct Bool` really exists in `src/lib/*/ndarray`, so an import could SHADOW the
+primitive), and names of one or two capitals, which in this tree are
+overwhelmingly type parameters (`fn walk<C>(ctx: C) -> C`).
+
+`--auto` is **ADVISORY** because it is honestly RED at 2620. The curated-row
+mode stays green (`PASS — 1809 file(s) checked, 0 offender(s)`) and is the one
+safe to enforce today. Auto-mode selftest is fatal and non-optional, 5 further
+fixtures: a uniquely-declared cross-module type must be flagged; an AMBIGUOUS
+two-module name must be excluded, not guessed; an excluded builtin must not be
+flagged; a type-parameter-shaped name must not be flagged; and the ambiguous
+name must appear in the report.
+
+Implementation note worth keeping: the auto scan is a **single awk process that
+reads the file list itself**. A first version piped the list through `xargs`,
+which splits on `ARG_MAX` — each split then built its OWN declaration map and
+produced per-batch answers that looked plausible and were wrong (5 partial
+`META` lines, 2538 offenders instead of 2620).

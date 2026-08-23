@@ -49,11 +49,15 @@ set -u
 ROOT="."
 TYPES_FILE=""
 SELFTEST_ONLY=0
+AUTO=0
+REPORT=""
 for arg in "$@"; do
     case "$arg" in
         --root=*)  ROOT=${arg#--root=} ;;
         --types=*) TYPES_FILE=${arg#--types=} ;;
         --selftest) SELFTEST_ONLY=1 ;;
+        --auto) AUTO=1 ;;
+        --report=*) REPORT=${arg#--report=} ;;
         *) echo "unknown argument: $arg" >&2; echo "ERROR — nothing was checked (bad argument)"; exit 2 ;;
     esac
 done
@@ -190,10 +194,75 @@ EOF
     return 1
 }
 
+
+# ---------------------------------------------------------------------------
+# --auto: derive the type -> declaring-module table FROM THE TREE instead of
+# reading the curated row list.  Enumerates every top-level struct/class/enum/
+# trait declaration under src/, maps name -> declaring module, and drops any
+# name declared in MORE THAN ONE module into an ambiguous report rather than
+# guessing which one an importer meant.  Same header-scoped predicate.
+#
+# Single awk process by construction: the file list is read by awk itself, never
+# by xargs.  xargs splits on ARG_MAX and each split would build its OWN
+# declaration map -- per-batch answers that look plausible and are wrong.
+# ---------------------------------------------------------------------------
+AUTO_AWK="$SCRIPT_DIR/signature_type_import_provenance_auto.awk"
+AUTO_EXCL="$SCRIPT_DIR/signature_type_import_provenance_exclusions.txt"
+
+run_auto() {
+    auto_root=$1; auto_list=$2; auto_amb=$3
+    [ -f "$AUTO_AWK" ] || return 5
+    [ -f "$AUTO_EXCL" ] || return 5
+    ( cd "$auto_root" 2>/dev/null || exit 4
+      find src -name '*.spl' -not -path '*/vendor/*' -not -path '*/compiler_rust/*' -type f 2>/dev/null \
+        | while IFS= read -r f; do realpath --relative-to=. "$f"; done | sort -u ) > "$auto_list"
+    [ -s "$auto_list" ] || return 4
+    ( cd "$auto_root" && awk -v EXCL="$AUTO_EXCL" -v LIST="$auto_list" -v AMBOUT="$auto_amb" \
+        -f "$AUTO_AWK" 2>"$auto_list.meta" )
+    ac=$?
+    grep -o 'files=[0-9]*' "$auto_list.meta" 2>/dev/null | head -1 | cut -d= -f2 > "$COUNT_FILE"
+    return $ac
+}
+
+selftest_auto() {
+    t=$(mktemp -d) || return 1
+    mkdir -p "$t/src/a" "$t/src/b"
+    # uniquely-declared type, importer has NO import -> offender
+    printf 'struct Gizmo:\n    x: i64\n' > "$t/src/a/owner.spl"
+    printf 'use a.something.*\nfn f(g: Gizmo) -> i64: g.x\n' > "$t/src/b/user.spl"
+    # AMBIGUOUS type declared in two modules -> must be EXCLUDED, not guessed
+    printf 'struct Twin:\n    x: i64\n' > "$t/src/a/twin1.spl"
+    printf 'struct Twin:\n    y: i64\n' > "$t/src/b/twin2.spl"
+    printf 'use a.something.*\nfn g(v: Twin) -> i64: 0\n' > "$t/src/b/twinuser.spl"
+    # excluded builtin name declared once -> must be EXCLUDED
+    printf 'struct Bool:\n    value: bool\n' > "$t/src/a/ndarray.spl"
+    printf 'use a.something.*\nfn h(b: Bool) -> i64: 0\n' > "$t/src/b/booluser.spl"
+    # type PARAMETER shape -> must be EXCLUDED
+    printf 'struct C:\n    x: i64\n' > "$t/src/a/cdecl.spl"
+    printf 'use a.something.*\nfn w(ctx: C) -> i64: 0\n' > "$t/src/b/cuser.spl"
+    out=$(run_auto "$t" "$t/list" "$t/amb"); arc=$?
+    rm -rf "$t.keep" 2>/dev/null
+    af=0
+    printf '%s\n' "$out" | grep -q 'src/b/user.spl	Gizmo' || { echo "selftest FAIL(auto): unique cross-module type not flagged"; af=1; }
+    printf '%s\n' "$out" | grep -q 'Twin' && { echo "selftest FAIL(auto): AMBIGUOUS type was flagged instead of excluded"; af=1; }
+    printf '%s\n' "$out" | grep -q 'Bool' && { echo "selftest FAIL(auto): excluded builtin name was flagged"; af=1; }
+    printf '%s\n' "$out" | grep -qP '\tC\t' && { echo "selftest FAIL(auto): type-parameter-shaped name was flagged"; af=1; }
+    grep -q '^Twin' "$t/amb" 2>/dev/null || { echo "selftest FAIL(auto): ambiguous name not reported for human judgement"; af=1; }
+    rm -rf "$t"
+    [ $af -eq 0 ] || return 1
+    echo "check-signature-type-import-provenance: auto selftest 5/5 fixtures correct (1 must-flag, 3 must-exclude, 1 ambiguity report)"
+    return 0
+}
+
 COUNT_FILE=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
 if ! selftest; then
     rm -f "$COUNT_FILE"
     echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if ! selftest_auto; then
+    rm -f "$COUNT_FILE"
+    echo "ERROR — nothing was checked (auto selftest failed)"
     exit 2
 fi
 [ $SELFTEST_ONLY -eq 1 ] && { rm -f "$COUNT_FILE"; exit 0; }
@@ -204,9 +273,19 @@ if [ ! -s "$TYPES_FILE" ]; then
     exit 2
 fi
 
-SCAN_ROOT="$ROOT/src/compiler"
-[ -d "$SCAN_ROOT" ] || SCAN_ROOT="$ROOT"
-offenders=$(run_scan "$SCAN_ROOT" "$TYPES_FILE"); rc=$?
+if [ $AUTO -eq 1 ]; then
+    AMB=${REPORT:-$(mktemp)}
+    LIST=$(mktemp)
+    offenders=$(run_auto "$ROOT" "$LIST" "$AMB"); rc=$?
+    [ $rc -eq 5 ] && { rm -f "$COUNT_FILE"; echo "ERROR — nothing was checked (auto mode data files missing)"; exit 2; }
+    nambig=$(wc -l < "$AMB" 2>/dev/null | tr -d " ")
+    echo "auto: ambiguous (multi-declaration) names EXCLUDED and reported: ${nambig:-0} -> $AMB"
+    rm -f "$LIST" "$LIST.meta"
+else
+    SCAN_ROOT="$ROOT/src/compiler"
+    [ -d "$SCAN_ROOT" ] || SCAN_ROOT="$ROOT"
+    offenders=$(run_scan "$SCAN_ROOT" "$TYPES_FILE"); rc=$?
+fi
 nfiles=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
 rm -f "$COUNT_FILE"
 
@@ -220,9 +299,15 @@ esac
 [ "${nfiles:-0}" -gt 0 ] 2>/dev/null || { echo "ERROR — nothing was checked (0 files scanned)"; exit 2; }
 
 if [ -n "$offenders" ]; then
-    printf '%s\n' "$offenders" | sed 's/^/  offender: /'
     k=$(printf '%s\n' "$offenders" | wc -l | tr -d ' ')
-    names=$(printf '%s\n' "$offenders" | awk -F'\t' '{n=split($1,a,"/"); printf "%s(%s) ", a[n], $2}')
+    # Cap what goes to stdout. The FULL list is always available via --report,
+    # and a verdict line that names 2,620 offenders is unreadable in a log and
+    # unusable in a hook.
+    printf '%s\n' "$offenders" | head -50 | sed 's/^/  offender: /'
+    [ "$k" -gt 50 ] && echo "  ... $((k - 50)) more offender(s) not listed (use --report=FILE for the full list)"
+    if [ -n "$REPORT" ]; then printf '%s\n' "$offenders" > "$REPORT.offenders"; echo "  full offender list: $REPORT.offenders"; fi
+    names=$(printf '%s\n' "$offenders" | head -15 | awk -F'\t' '{n=split($1,a,"/"); printf "%s(%s) ", a[n], $2}')
+    [ "$k" -gt 15 ] && names="$names... and $((k - 15)) more"
     echo "FAIL — $nfiles file(s) checked, $k offender(s): $names"
     exit 1
 fi
