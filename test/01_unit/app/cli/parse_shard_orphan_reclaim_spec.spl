@@ -24,7 +24,7 @@ Covers the behavior asserted here; platform-specific behavior is out of scope.
 use std.spec
 use std.spec.step
 use std.io_runtime.{file_read, file_write, file_exists, dir_create_all, dir_remove_all, getpid}
-use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
+use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label, parse_shard_orphaned_paths, parse_shard_orphan_ledger_path}
 
 # doc/08_tracking/bug/parse_shard_orphaned_claims_after_shard_death_2026-08-22.md
 #
@@ -94,3 +94,81 @@ describe "parse shard orphan reclaim":
         expect(reclaim_at > 0).to_be_true()
         expect(retry_at > reclaim_at).to_be_true()
         expect(done_at > retry_at).to_be_true()
+
+    # doc/05_design/compiler/incremental_build/convergence_mode_2026-08-23.md
+    #
+    # REPRODUCE (fails before 2026-08-23): releasing a dead shard's claim used to
+    # delete the marker and record nothing, so the file that was in flight when
+    # the worker died left no per-file trace at all. The marker NAME is a
+    # non-invertible hash+length, so once deleted the identity was unrecoverable
+    # -- this is why run23 could not pin its spin to a module. Convergence mode
+    # needs that identity to build a failing set, so the release now appends to a
+    # durable orphan ledger BEFORE deleting.
+    it "records the claimed path of a dead shard's release in the orphan ledger":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: records the claimed path of a dead shard's release in the orphan ledger")
+        val dir = fresh_queue("ledger")
+        expect(file_write("{dir}/111-20.claim", "6/8\nsrc/compiler/50.mir/hwir/zca_rows.spl")).to_be_true()
+        expect(file_write("{dir}/222-31.claim", "6/8\nsrc/lib/common/text.spl")).to_be_true()
+        expect(file_write("{dir}/333-18.claim", "1/8\nsrc/app/cli/lint_entry.spl")).to_be_true()
+        expect(parse_shard_release_claims(dir, ["6/8"])).to_equal(2)
+        # The surviving shard's claim is untouched, and its path is NOT recorded.
+        expect(file_exists("{dir}/333-18.claim")).to_be_true()
+        val orphans = parse_shard_orphaned_paths(dir)
+        expect(orphans.len()).to_equal(2)
+        expect(orphans.contains("src/compiler/50.mir/hwir/zca_rows.spl")).to_be_true()
+        expect(orphans.contains("src/lib/common/text.spl")).to_be_true()
+        expect(orphans.contains("src/app/cli/lint_entry.spl")).to_be_false()
+        # The ledger is durable on disk, not just an in-memory return value: a
+        # worker death must leave evidence a LATER process can read.
+        val raw = file_read(parse_shard_orphan_ledger_path(dir))
+        expect(raw.contains("status=orphaned spec=6/8")).to_be_true()
+        val _c = dir_remove_all(dir)
+
+    it "keeps ownership decided by the shard spec alone, so legacy markers still release":
+        step("Verify: keeps ownership decided by the shard spec alone, so legacy markers still release")
+        val dir = fresh_queue("legacy")
+        # No path line -- exactly what an older shard binary writes.
+        expect(file_write("{dir}/111-20.claim", "6/8")).to_be_true()
+        expect(file_write("{dir}/222-31.claim", "1/8")).to_be_true()
+        expect(parse_shard_release_claims(dir, ["6/8"])).to_equal(1)
+        expect(file_exists("{dir}/111-20.claim")).to_be_false()
+        expect(file_exists("{dir}/222-31.claim")).to_be_true()
+        # A legacy marker cannot be attributed to a file, and must NOT be
+        # reported under a fabricated name -- a convergence loop handed a
+        # nonexistent path would rebuild nothing and loop forever.
+        expect(parse_shard_orphaned_paths(dir).len()).to_equal(0)
+        val _c = dir_remove_all(dir)
+
+    it "reports each orphaned path once even when several shards died holding it":
+        step("Verify: reports each orphaned path once even when several shards died holding it")
+        val dir = fresh_queue("dedupe")
+        expect(file_write("{dir}/1-1.claim", "2/4\nsrc/a.spl")).to_be_true()
+        expect(file_write("{dir}/2-1.claim", "3/4\nsrc/a.spl")).to_be_true()
+        expect(file_write("{dir}/3-1.claim", "3/4\nsrc/b.spl")).to_be_true()
+        expect(parse_shard_release_claims(dir, ["2/4", "3/4"])).to_equal(3)
+        expect(parse_shard_orphaned_paths(dir).len()).to_equal(2)
+        val _c = dir_remove_all(dir)
+
+    it "returns no orphans for an unpublished queue or a queue that never lost a shard":
+        step("Verify: returns no orphans for an unpublished queue or a queue that never lost a shard")
+        val dir = fresh_queue("none")
+        expect(parse_shard_orphaned_paths("").len()).to_equal(0)
+        expect(parse_shard_orphaned_paths(dir).len()).to_equal(0)
+        val _c = dir_remove_all(dir)
+
+    it "records the claimed path at claim time, so a death is attributable":
+        step("Verify: records the claimed path at claim time, so a death is attributable")
+        # The claim writer and the release reader are in different modules; if
+        # the writer stops recording the path, the ledger silently degrades to
+        # the pre-fix behaviour with every test above still passing on synthetic
+        # markers. Pin the writer's format here.
+        val src = file_read("src/compiler/80.driver/driver_source_pipeline_parsing.spl")
+        # Brace-free assertion on purpose: a "{...}" literal here would be
+        # interpolated by the spec itself.
+        val writes_at = src.index_of("claimed = file_write(marker, ")
+        expect(writes_at > 0).to_be_true()
+        val tail = src.substring(writes_at, writes_at + 80)
+        expect(tail.contains("_driver_parse_shard_spec()")).to_be_true()
+        expect(tail.contains("\\n")).to_be_true()
+        expect(tail.contains("path")).to_be_true()
