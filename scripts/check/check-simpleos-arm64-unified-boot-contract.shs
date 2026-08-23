@@ -54,9 +54,54 @@ verdict_fail()  { printf 'FAIL — %s\n' "$1"; exit 1; }
 for f in "$CRT0" "$LD" "$PROBE"; do
     [ -s "$f" ] || verdict_error "missing input $f"
 done
-for t in aarch64-linux-gnu-gcc aarch64-linux-gnu-ld llvm-objcopy qemu-system-aarch64; do
-    command -v "$t" >/dev/null 2>&1 || verdict_error "missing tool $t"
-done
+# --- toolchain discovery ----------------------------------------------------
+# The gate needs a FREESTANDING aarch64 ELF toolchain, and nothing more: it
+# assembles the real crt0.S, compiles the C probe, links them through the real
+# linker.ld, and extracts a flat image. A GNU cross-gcc/ld is used verbatim
+# when present, so the Linux lane's behaviour is byte-for-byte unchanged.
+# Otherwise an equivalent clang/LLD cross-compile is accepted — the idiom the
+# sibling arm64 freestanding scripts in this repo already use
+# (scripts/os/build_arm64_fsexec_payload.shs, and
+#  scripts/check/check-simpleos-arm64-runtime-owner-contract.shs), and the one
+# the repo's LLVM toolchain policy points at. Measured equivalent on the
+# artifact property this gate actually asserts: the same crt0.S + linker.ld
+# yield a flat Image carrying "ARM\x64" magic at offset 56 with a nonzero
+# image_size under either toolchain.
+# When NEITHER exists this is still ERROR (exit 2) — a missing toolchain is
+# never a pass.
+find_tool() {
+    for _c in "$@"; do
+        [ -n "$_c" ] || continue
+        case "$_c" in
+            /*) [ -x "$_c" ] && { printf '%s\n' "$_c"; return 0; } ;;
+            *)  command -v "$_c" >/dev/null 2>&1 && { command -v "$_c"; return 0; } ;;
+        esac
+    done
+    return 1
+}
+
+if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 \
+   && command -v aarch64-linux-gnu-ld >/dev/null 2>&1; then
+    CROSS_KIND=gnu
+    CROSS_CC=aarch64-linux-gnu-gcc
+    CROSS_CC_TARGET=
+    CROSS_LD=aarch64-linux-gnu-ld
+    CROSS_LD_EMUL=
+else
+    CROSS_KIND=llvm
+    CROSS_CC=$(find_tool "${CC_AARCH64:-}" clang /opt/homebrew/opt/llvm/bin/clang /usr/bin/clang) \
+        || verdict_error "missing tool aarch64-linux-gnu-gcc (and no clang available to cross-compile aarch64 freestanding)"
+    CROSS_CC_TARGET=--target=aarch64-unknown-none-elf
+    CROSS_LD=$(find_tool "${LD_AARCH64:-}" ld.lld /opt/homebrew/opt/llvm/bin/ld.lld) \
+        || verdict_error "missing tool aarch64-linux-gnu-ld (and no ld.lld available to link aarch64 ELF)"
+    CROSS_LD_EMUL="-m aarch64elf"
+fi
+OBJCOPY=$(find_tool "${LLVM_OBJCOPY:-}" llvm-objcopy /opt/homebrew/opt/llvm/bin/llvm-objcopy) \
+    || verdict_error "missing tool llvm-objcopy"
+command -v qemu-system-aarch64 >/dev/null 2>&1 || verdict_error "missing tool qemu-system-aarch64"
+
+cross_cc() { $CROSS_CC $CROSS_CC_TARGET "$@"; }
+cross_ld() { $CROSS_LD $CROSS_LD_EMUL "$@"; }
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -66,14 +111,15 @@ grep -Fq 'ARM\x64' "$CRT0" || verdict_error "crt0.S carries no arm64 Linux Image
 grep -Fq '_kernel_load_end' "$LD" || verdict_error "linker.ld defines no _kernel_load_end"
 
 # --- build the probe kernel against the REAL early-boot sources -------------
-aarch64-linux-gnu-gcc -ffreestanding -nostdlib -O1 -c "$CRT0" -o "$OUT/crt0.o" \
+echo "[boot-contract] toolchain=$CROSS_KIND cc=$CROSS_CC ld=$CROSS_LD objcopy=$OBJCOPY"
+cross_cc -ffreestanding -nostdlib -O1 -c "$CRT0" -o "$OUT/crt0.o" \
     >"$OUT/build.log" 2>&1 || { cat "$OUT/build.log" >&2; verdict_error "crt0.S did not assemble"; }
-aarch64-linux-gnu-gcc -ffreestanding -nostdlib -O1 -fno-pic -mcmodel=large \
+cross_cc -ffreestanding -nostdlib -O1 -fno-pic -mcmodel=large \
     -c "$PROBE" -o "$OUT/probe.o" >>"$OUT/build.log" 2>&1 \
     || { cat "$OUT/build.log" >&2; verdict_error "probe payload did not compile"; }
-aarch64-linux-gnu-ld -T "$LD" "$OUT/crt0.o" "$OUT/probe.o" -o "$OUT/probe.elf" \
+cross_ld -T "$LD" "$OUT/crt0.o" "$OUT/probe.o" -o "$OUT/probe.elf" \
     >>"$OUT/build.log" 2>&1 || { cat "$OUT/build.log" >&2; verdict_error "probe kernel did not link"; }
-llvm-objcopy -O binary "$OUT/probe.elf" "$OUT/probe.Image" \
+"$OBJCOPY" -O binary "$OUT/probe.elf" "$OUT/probe.Image" \
     || verdict_error "flat Image extraction failed"
 [ -s "$OUT/probe.Image" ] || verdict_error "flat Image is empty"
 

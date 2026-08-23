@@ -97,17 +97,39 @@ die() { printf 'build-aarch64-efi-esp: ERROR — %s\n' "$1" >&2; exit 1; }
 if [ -z "${AAVMF_CODE:-}" ]; then
     for c in /usr/share/AAVMF/AAVMF_CODE.fd \
              /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd \
-             /usr/share/qemu-efi-aarch64/QEMU_EFI.fd; do
+             /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+             /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
+             /usr/local/share/qemu/edk2-aarch64-code.fd; do
         [ -f "$c" ] && { AAVMF_CODE=$c; break; }
     done
 fi
 if [ -z "${AAVMF_VARS:-}" ]; then
-    for c in /usr/share/AAVMF/AAVMF_VARS.fd; do
+    for c in /usr/share/AAVMF/AAVMF_VARS.fd \
+             /opt/homebrew/share/qemu/edk2-aarch64-vars.fd \
+             /usr/local/share/qemu/edk2-aarch64-vars.fd; do
         [ -f "$c" ] && { AAVMF_VARS=$c; break; }
     done
 fi
 [ -n "${AAVMF_CODE:-}" ] || die "no EDK2/AAVMF aarch64 firmware found (set AAVMF_CODE). Install qemu-efi-aarch64. Faking this with QEMU -kernel is forbidden by .claude/rules/board-runnable.md."
-[ -n "${AAVMF_VARS:-}" ] || die "no AAVMF_VARS.fd found (set AAVMF_VARS)"
+# Some QEMU distributions (notably Homebrew's) ship the aarch64 CODE blob with
+# NO matching VARS blob, because a pflash VARS region is just blank NVRAM that
+# EDK2 initialises on first boot. Synthesize one at exactly the CODE blob's
+# size — that is what a distro-shipped AAVMF_VARS.fd is. A FRESH NVRAM has no
+# BootOrder entry, which is precisely the case /startup.nsh below exists for,
+# so this changes nothing about how the image boots.
+if [ -z "${AAVMF_VARS:-}" ]; then
+    _code_sz=$(wc -c <"$AAVMF_CODE" | tr -d ' ')
+    [ "$_code_sz" -gt 0 ] 2>/dev/null || die "AAVMF_CODE $AAVMF_CODE is empty"
+    mkdir -p "$OUT_DIR"
+    AAVMF_VARS=$OUT_DIR/AAVMF_VARS.blank.fd
+    rm -f "$AAVMF_VARS"
+    dd if=/dev/zero of="$AAVMF_VARS" bs=1m count=$(( _code_sz / 1048576 )) status=none 2>/dev/null \
+        || dd if=/dev/zero of="$AAVMF_VARS" bs=1M count=$(( _code_sz / 1048576 )) status=none 2>/dev/null \
+        || die "could not synthesize a blank AAVMF_VARS at $AAVMF_VARS"
+    [ "$(wc -c <"$AAVMF_VARS" | tr -d ' ')" = "$_code_sz" ] \
+        || die "synthesized AAVMF_VARS size mismatch (want $_code_sz)"
+    echo "[esp] synthesized blank AAVMF_VARS ($_code_sz bytes) — no system VARS blob on this host"
+fi
 
 # --- inputs -----------------------------------------------------------------
 BOOTAA64=$REPO_ROOT/vendor/limine/BOOTAA64.EFI
