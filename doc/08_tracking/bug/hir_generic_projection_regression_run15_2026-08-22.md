@@ -200,3 +200,53 @@ is fully undone and `MirType` stays gone (was 180 at run14). Against run15's
    cannot say which one caused the regression. The run AFTER the isolated
    generic-callable re-land is the decider. If fatals go materially above
    run16's 15 / 21, the generic-callable half owns it.
+
+## RESOLVED 2026-08-23 — the generic-ARGUMENT half, re-landed with the missing materialization half
+
+**Status:** the defect this record kept open is fixed at `350dd6bff2b` (spec `9f2719af402`). `d481f15e1ac`'s mechanism
+is re-landed, but only alongside the change without which it could never have
+worked.
+
+### What the previous analysis got wrong
+
+This record's "Next lane" said: *fix `lookup_qualified_type_raw` (or its caller)
+to resolve a projected argument in the module that DECLARES it, following the
+owner's import table and re-export hops.* That framing assumed the argument WAS
+bound somewhere and projection was merely looking in the wrong place. It was not
+bound anywhere.
+
+`materialize_imported_callable_type_dependencies_inner` dispatches on the
+pre-captured scalar head name. For `Dict<text, HirModule>` that head is `Dict`, a
+builtin, so the branch materialized nothing and returned **without ever walking
+the arguments** — `parser_type_named_dependencies`, which does recurse
+`Named -> args` correctly, is only called in the `else` that a captured scalar
+head skips. So no re-export hop needed following: there was no binding at either
+end of it.
+
+That fully explains the 50x. `d481f15e1ac` made projection recurse into arguments
+that materialization had bound nothing for, so **every** argument missed the
+owner-scope lookup and fell through to `lower_type` in the importer's scope.
+3716 fatals is what "every generic argument in the tree misses" looks like — the
+number was not a mystery, it was arithmetic.
+
+### Reproduced at unit scale, which this record said was impossible
+
+This record's honest-limits section states *"No unit fixture reproduces it"* and
+the re-land condition was *"a measured stage-1 `[hir-fatal]` census"*, on the
+grounds that the only oracle was a ~5 h build. That is now superseded:
+`test/01_unit/compiler/hir/imported_generic_head_argument_owner_scope_spec.spl`
+reproduces the flood in seconds. Applying only the projection half to a
+three-module fixture yields `unresolved type: Payload` — the exact shape — at
+2 of 6 passing.
+
+Why the earlier fixtures missed it, stated so the lesson survives: they asserted
+on ERROR COUNTS. The `imported_surface_type_projected` miss path drops generic
+arguments **silently**, so an error-count fixture is green pre-fix. The
+discriminating assertion is argument IDENTITY — pristine projects
+`Dict<text, Payload>` as `Dict<any, any>`, and the spec asserts the value
+argument is still `Named`.
+
+The stage-1 census was run anyway, as a differential A/B (both sides built from
+the same base with the same seed) rather than against a historical number — which
+also answers caveat 1 of the run16 section, since both sides are computed on an
+identical basis by construction.

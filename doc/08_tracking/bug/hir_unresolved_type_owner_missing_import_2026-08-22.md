@@ -1302,3 +1302,277 @@ regression: the generic-argument carry in both scalar branches, the
 `TypeKind.Weak` arm. When that lands, this guard's count returns to 12 and the
 `Weak` allowlist reason should drop its 2026-08-23 note. The guard now stands
 independently, so a second revert cannot take it out again.
+
+## Follow-up (l) 2026-08-23 — follow-up (e) FIXED: projection could not resolve what materialization never bound
+
+**Status:** FIXED at `350dd6bff2b` (spec `9f2719af402`, landed separately — see below).
+The generic HEAD-AND-ARGUMENT defect is fixed, in four sites, with a
+unit reproducer that is measured RED pre-fix and GREEN post-fix. This is the
+mechanism follow-up (k) localized and the one `d481f15e1ac` failed to fix.
+
+### The missing half nobody had looked at: MATERIALIZATION also only saw the head
+
+Every previous analysis — this record's follow-up (c), the run15 record, and
+`d481f15e1ac` itself — treated the defect as a PROJECTION problem and assumed the
+materialization walk was already correct, because
+`parser_type_named_dependencies` demonstrably recurses `Named -> args`
+(`parser_types_expr.spl:244-246`). That function is fine. **It was never called
+on the path that matters.**
+
+`materialize_imported_callable_type_dependencies_inner` dispatches on the
+PRE-CAPTURED scalar head name:
+
+    if param.type_name != "":
+        materialize(param.type_name)          # "Dict" -- a builtin, binds nothing
+    elif param.array_element_name != "":
+        ...
+    else:
+        for dep in parser_type_named_dependencies(param.type_): ...   # never reached
+
+For `Dict<text, Payload>` the surface captures `type_name = "Dict"`, so the first
+branch wins, materializes a builtin (a no-op), and **returns without ever walking
+the arguments**. `Payload` is therefore never bound in the owner's qualified
+scope at all — not under a facade name, not under any name.
+
+That is why the symmetry framing in follow-up (c) was half right and half
+misleading. The two walks do recurse over different constructor sets, but the
+asymmetry that produced the fatals is not "projection lacks an arm materialization
+has". It is that **on the scalar-head path materialization binds nothing for the
+arguments, so no scope exists in which projection could resolve them.**
+
+### Why this makes `d481f15e1ac`'s 50x regression fully explained, not merely attributed
+
+`d481f15e1ac` taught projection to recurse into generic arguments while
+materialization still bound nothing for them. Every recursed argument therefore
+missed `lookup_qualified_type_raw(owner, arg)` — necessarily, not occasionally —
+and fell through to `lower_type` in the IMPORTER's scope, which is where the hard
+`unresolved type: X` comes from. 3716 fatals / 437 poisoned modules is what
+"every generic argument in the tree misses" looks like.
+
+**This was reproduced deliberately, in miniature, before writing the real fix.**
+Applying only the projection half of this lane to the three-module fixture below
+produced `unresolved type: Payload` — the exact flood shape — in seconds. The
+same experiment that cost 72 minutes and a revert last time cost one spec run.
+Recorded because it is the single most useful thing this lane learned: *the flood
+is reproducible at unit scale, and it always was.*
+
+### The FIELD path had the identical gap — and carries the largest population
+
+Found while auditing whether the projection change was safe everywhere, not
+after a build failed. `register_imported_symbol`'s composite-field loop
+(`module_import_registration.spl:253-266`) dispatches on `field.type_name`
+exactly as the callable walk does, so an OPTIONAL FIELD captures the head
+`Option`, materializes a builtin, and returns without binding the argument.
+
+This matters more than the callable path. run15's four largest names —
+HirContractBlock 501, SymbolId 444, Span 141, LayoutPhase 84 — are all `X?`
+FIELDS of `50.mir/mir_instruction_graph.spl`, not callable parameters. Fixing
+only the callable site while teaching `imported_surface_type_projected` (which
+line 296 feeds every imported field through) to recurse into arguments would
+have reproduced the flood on the LARGEST population while every callable-shaped
+fixture stayed green.
+
+Stated plainly because it is the near-miss of this lane: the first version of
+this fix had three sites and was already running a stage-1 build when the field
+site was found by reading the twin, not by measuring. That build was discarded
+and restarted.
+
+### The fix (four sites, all guarded on the type actually having arguments)
+
+1. `module_import_registration.spl`, the composite-FIELD materialization loop —
+   same generic-argument walk as (2). Largest population; see above.
+2. `module_reexport_materialization.spl`,
+   `materialize_imported_callable_type_dependencies_inner` — when a scalar head
+   was captured AND the type carries named arguments, additionally walk
+   `parser_type_named_dependencies` and materialize each argument. Both the param
+   and the return branch. **This is the load-bearing change**; the two below
+   cannot work without it.
+3. `module_callable_types.spl`, `imported_surface_type` — project a generic
+   HEAD-AND-ARGUMENTS instead of falling through: recurse each argument in the
+   OWNER's scope, then hand the already-lowered `HirType`s to `lower_named_kind`,
+   which resolves the head by name and has real arms for `Option`/`Result`/`Dict`.
+   `lower_type` is never reached for a generic, so the importer's scope is never
+   consulted for an argument. This closes the `[ist-scalar-fallthrough]` path.
+4. `module_callable_types.spl`, `imported_surface_type_projected` — delegate to
+   (2) when the retained parser `Type` carries arguments. This closes the
+   `[ist-proj-miss]` path, whose miss branch called `lower_named_kind(name, [],
+   ...)` and **silently erased** the arguments with no error and no probe line.
+
+All three are guarded on `parser_type_kind_named_args(...).len() > 0`, so a true
+scalar type is byte-identical to before and the blast radius is exactly the types
+that carry generic arguments.
+
+### The reproduce spec, and how its discrimination was VERIFIED rather than assumed
+
+`test/01_unit/compiler/hir/imported_generic_head_argument_owner_scope_spec.spl`.
+Three modules: `decl.payload_types` declares `Payload`; `svc.provider` imports it
+and names it inside a generic constructor; `svc.consumer` imports only the
+provider's item and never names `Payload`. Nine cases cover the CALLABLE shapes
+(`Dict`, `X?`, `Result`, plus a non-generic control) and — through a separate
+`field_lower` harness — the composite-FIELD shapes, because those run through a
+different materialization site and a callable-only fixture would have passed
+while fields flooded.
+
+The predecessor fixture
+`imported_optional_argument_reexport_hop_regression_spec.spl` is green on both
+sides of the regression and its docstring says so. **This one discriminates, and
+the check was run, not asserted:**
+
+| tree | result |
+|---|---|
+| `591d65b5e8e` (pristine) | **8 of 9 pass — RED** on `expected erased-any to equal named` |
+| projection half only (the `d481f15e1ac` shape) | **2 of 6 pass** — emits `unresolved type: Payload`, the flood (measured before the field cases were added) |
+| all four sites (this lane) | **9 of 9 pass** |
+
+Two findings worth keeping, both negative results about what does NOT
+discriminate:
+
+* **The error-count cases pass on BOTH sides.** This fixture routes through
+  `imported_surface_type_projected`, whose miss path drops arguments *silently*.
+  A fixture that only counts `unresolved type` errors is green pre-fix and proves
+  nothing — which is very likely why the predecessor fixture was green.
+* **The discriminating assertion is argument IDENTITY**, not error count:
+  `Dict<text, Payload>` reached the importer's symbol table as `Dict<any, any>`.
+  The probe confirms neither `Payload` nor `decl.payload_types::Payload` is bound
+  in the consumer at all.
+
+That case exists specifically so a future change cannot "fix" a regression by
+restoring the silent drop — the behaviour `d481f15e1ac` measured as erasing
+`Dict<text, MirType>` to `Dict<any, any>`. Restoring it makes this spec fail.
+
+### Completeness audit of the scalar-head idiom
+
+Done by enumeration rather than by fixing what a build happened to surface. The
+dispatch idiom that causes this defect is `if <thing>.type_name != "":` guarding
+an `else` that calls `parser_type_named_dependencies`. Every occurrence in
+`src/compiler/20.hir/`:
+
+| site | role | status |
+|---|---|---|
+| `module_import_registration.spl:254` | composite FIELD materialization | fixed (1) |
+| `module_reexport_materialization.spl:917` | callable PARAM materialization | fixed (2) |
+| `module_reexport_materialization.spl:958` | callable RETURN materialization | fixed (2) |
+| `module_callable_types.spl:421` | `imported_surface_type_projected` | fixed (4) |
+| `module_callable_types.spl:410` | bound-type-param fast path in the same function | n/a — returns a `TypeParam`, never resolves a name |
+| `_Expressions/expression_core.spl:510` | `is <Type>` expression check | out of scope — not an imported-surface walk |
+
+The other two files that call `parser_type_named_dependencies`
+(`module_lowering.spl`, `module_surface_declarations.spl`) call it
+unconditionally, with no scalar-head guard, so they never had the gap.
+
+That accounts for every site. The population is closed, not sampled.
+
+### The full stage-1 census could NOT be produced, and why — stated, not omitted
+
+The re-land condition both records set is *"a measured stage-1 `[hir-fatal]`
+census at or below post19's 48 / 9."* **That census does not exist for this lane,
+because `origin/main` does not currently complete a stage-1 build.**
+
+A differential A/B was attempted first (both sides from the same base
+`591d65b5e8e`, same seed, same flags — chosen over comparing against a historical
+number precisely because of caveat 1 in the run16 section). The PRISTINE side
+died at 1092 s with:
+
+    error: semantic: unknown static method new on class TreeSitter
+    error: native-build worker exited with code 1
+
+It reported **0 `[hir-fatal]` lines**, and the phase trace shows why: of the
+build's six steps it reached only three — `load_sources`, `parse`,
+`source_closure` — and died before HIR lowering ran at all. So the 0 means
+*"HIR never executed"*, **not** *"the tree is clean"*.
+Quoting that 0 as a census would have been the exact false-clearance error this
+record already made once, in follow-up (b), and warns about in the run16 section:
+comparing censuses that were not computed the same way.
+
+A second trap, recorded because it wasted a cycle: a targeted
+`--entry-closure` on the named victim `50.mir/hwir/bit_vector_constant.spl`
+returns `source_closure 1/1`. That module has no `use` line at all — the very
+property that makes it the interesting victim — so its closure is *itself*, and
+a clean 0/0 A/B over it proves nothing whatsoever. `hir_lowering/module_surface.spl`
+gives 21 modules, also too small to be a census. **An `--entry-closure` result is
+only evidence if the closure size is reported alongside it.**
+
+So the evidence for this lane is (a) the unit reproducer, which discriminates and
+is measured on both sides, and (b) a multi-module `--entry-closure` A/B on the
+same two trees. That is weaker than a full census and is labelled as such. **The full-census re-land condition remains
+formally unmet**; whoever next gets a stage-1 build to complete on `main` should
+re-check this lane against it.
+
+The `TreeSitter` failure is unrelated to this change (it reproduces on the
+pristine tree, which contains none of it) and is a separate defect blocking the
+stage-1 oracle for every lane, not just this one.
+
+### Regression evidence: the imported-surface spec family, A/B
+
+The directory-level sweep (`simple test test/01_unit/compiler/hir`) aborts with
+rc=42 immediately after session setup — on BOTH trees, so it is a runner defect,
+not this change. Replaced with a per-spec A/B over the whole 11-spec
+imported-surface family, one spec per invocation so a single aborting spec cannot
+take the run down.
+
+Result: **byte-identical on both sides for all 11 specs — 0 newly red, 0 newly
+green.** Five carry PRE-EXISTING failures, unchanged by this lane and recorded
+here so they are not later mistaken for its damage:
+
+| spec | both sides |
+|---|---|
+| `same_named_package_facade_reexport` | 0/5 |
+| `imported_tuple_signature_dependency` | 0/2 |
+| `imported_surface_callable_projection` | 1/3 (already noted red in the run15 record) |
+| `imported_callable_materialization_cardinality` | 0/1 |
+| `imported_composite_field_package_sibling` | 0/1 |
+| `reexport_physical_cache` | 16/17 |
+
+The five green ones — including `imported_generic_callable_signature_projection`
+(4/4, the sibling lane's spec) and `module_surface_projected_type_shape` (4/4) —
+stay green, so this lane does not disturb `8f08930460d`.
+
+### Walk-parity guard
+
+`scripts/check/check-type-walk-constructor-parity.shs` (re-landed standalone at
+`0fe0323565c` after the `d481f15e1ac` revert had silently deleted it) reports
+**`PASS — 11 constructor(s) checked, 0 unprojected and unallowlisted`** on the
+fixed tree. The count is 11 rather than 12 because the reverted `TypeKind.Weak`
+materialization arm is still absent; this lane does **not** restore it (the diff
+contains zero occurrences of `Weak`), so the count is unchanged and the `Weak`
+allowlist entry still describes the tree correctly.
+
+### Multi-module closure census, A/B — no regression, and what it does NOT show
+
+`native-build --source src/compiler --entry-closure --entry
+src/compiler/80.driver/driver_pipeline_execution.spl`, both trees, same seed,
+same base:
+
+| tree | closure | `[hir-fatal]` | wall |
+|---|---|---|---|
+| pristine `591d65b5e8e` | 428/428 modules | **0** | 850 s |
+| + this lane | 428/428 modules | **0** | 842 s |
+
+Fatals do not increase, on a genuinely non-vacuous closure. Two limits stated
+rather than left implied:
+
+1. **It does not show the fix DOING anything.** The
+   `[ist-generic-head-projected]` probe fired **0** times in this closure, so the
+   generic-head path was never exercised by these 428 modules. The A/B is
+   evidence of NO REGRESSION, not evidence of repair. The repair evidence is the
+   unit reproducer.
+2. **Both sides carry an unlanded prerequisite.** `origin/main` cannot complete
+   this build at all — `src/compiler/10.frontend/treesitter/outline.spl:23`
+   spells `use ...{TreeSitter}` where the re-export requires `export use`, and
+   every closure dies at step 0/6 before `source_closure`. A one-line
+   `export use` was applied IDENTICALLY to both trees purely as a measurement
+   enabler and is **not** part of either commit; that fix belongs to another
+   lane and had not landed at `892999e61b9`. A differential stays valid when both
+   sides carry the same patch, but the absolute numbers are from a patched tree.
+
+### The spec lands in its OWN commit, and why
+
+Fix `350dd6bff2b`, spec `9f2719af402`, deliberately separate, fix first.
+
+`check-type-walk-constructor-parity.shs` was bundled into `d481f15e1ac` — the
+commit it guarded. Reverting that commit silently deleted the guard, and this
+record went on asserting enforcement that was no longer in the tree, until a
+later lane noticed and re-landed it standalone at `0fe0323565c`. A reproducer
+bundled with its fix has the identical failure mode. Fix-first keeps `main` green
+throughout and leaves the property worth having: revert `350dd6bff2b` and the spec stays,
+goes RED, and says so.
