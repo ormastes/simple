@@ -87,3 +87,34 @@ same way and are all `bool?` payloads.
 A lint rule for `X.? == <bool literal>` where `X`'s payload type is not `bool`
 would make this class impossible to reintroduce. That is a new lint rule, not a
 minimal fix, so it is recorded here rather than bundled.
+
+## Ratchet decision (routed 2026-08-23)
+
+Asked whether `.? == <bool literal>` deserves a lint or a pre-push ratchet.
+Recommendation: **a lint rule, not a ratchet — and not yet a fatal one.**
+
+Why a lint and not a ratchet: a ratchet freezes a population and fails on
+growth. That is the right tool when the population is large and cannot be
+drained (as with `unbacked_extern_baseline.txt`'s 1,466 symbols). Here the
+whole-tree census is **12 sites**, of which **11 are correct** — the payload
+really is `bool` and `.?` really does unwrap to it. A ratchet over a
+12-row population that is 92% legitimate would be pinning noise, and the
+one real defect is already fixed by this record. There is nothing to freeze.
+
+Why a lint: the failure is silent and type-directed, which is exactly what a
+compiler-side check is good at and what review is bad at. `X.? == true`
+where `X`'s payload type is not `bool` is **unconditionally false** — never
+what anyone meant — so the rule has no false-positive class as long as it
+consults the payload TYPE and does not fire on the 11 `bool?` sites. A
+text-only grep rule would flag all 12 and be turned off within a day.
+
+Scope note, so the rule is not written too narrowly: the defect is not
+specific to `== true`. `X.? == <any non-bool-typed literal>` has the same
+shape, and `.? == false` (31 sites, all `bool?` payloads today) would fail
+the same way the moment a non-`bool` optional appears. Key the rule on
+"payload type of `.?` is not comparable to the literal's type", not on the
+`true` token.
+
+Not implemented here: a new lint rule is a feature, not the minimal fix this
+record is about, and `90.tools/lint` is outside this lane. Recorded so it is
+tracked rather than lost.

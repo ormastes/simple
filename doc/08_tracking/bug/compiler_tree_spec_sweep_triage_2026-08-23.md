@@ -47,6 +47,57 @@ the seed at `3f0acf071cf`. Suspect surface named by the spec's own
 canonical name into `HirExprKind.NamedVar`). Treat as a regression, not a
 new gap.
 
+#### Cross-reference: very likely the SAME construct as `runtime_file_rename`
+
+Routed here after the coordinator flagged three failed fix attempts on
+`runtime_file_rename`. Checked, and the connection is real but needs stating
+precisely, because it is **not** literally one code path:
+
+`src/lib/nogc_sync_mut/io/file_ops.spl:218-220` is
+
+```
+use std.io_runtime.{file_rename as runtime_file_rename}
+
+fn file_rename(src: text, dst: text) -> bool:
+    runtime_file_rename(src, dst)
+```
+
+That is `use {Real as Alias}` with the alias used in **callee position** — the
+exact construct, and the exact position, that
+`compiler/hir/alias_static_call_resolution_spec.spl` guards.
+
+The two are separate IMPLEMENTATIONS of the same resolution step:
+
+| | `runtime_file_rename` | this red spec |
+|---|---|---|
+| tree | Rust seed, `src/compiler_rust/**` | pure-Simple, `src/compiler/20.hir/**` |
+| site | `hir/lower/lowerer.rs::collect_flattened_import_aliases` | `hir_lowering/_Items/module_lowering.spl` (`register_imported_symbol` / `rename_symbol`) |
+| failure | alias left unresolved -> `Linkage::Import` named after the ALIAS | callee resolves to something other than the alias TARGET |
+
+So: **same construct, same defect class, two implementations** — not
+provably one root cause, and a fix to either proves nothing about the other.
+
+What makes this worth escalating rather than filing as a coincidence: the
+pure-Simple spec's own header asserts that this architecture is *structurally
+immune* to the seed's failure — "pure-Simple resolves the alias ONCE, at import
+registration ... so there is only one source of truth for every consumer",
+explicitly contrasted with "the Rust seed's per-consumer ad-hoc name
+reconstruction". Both assertions are now red, so that immunity claim is
+**empirically false today**. The pure-Simple side has either lost the
+single-resolution property or grown a consumer that re-derives the name.
+Verify which before attempting a fix; the header's architectural claim can no
+longer be trusted as a starting assumption.
+
+Concrete candidate shape for the pure-Simple fix, from what worked in the seed:
+the seed's root cause was that its two resolution tiers (owner-mangled symbol,
+else bare `source_name` if unique) BOTH declined — tier 2 because the flattened
+unit held **four** `file_rename` definitions and it refused as ambiguous. The
+fix added a third tier keyed on the flattener's own module-owner tag
+(`tag_function_module_owner`). If pure-Simple's failure is also an
+ambiguity-refusal against several same-named targets, the same owner-tag
+disambiguation is the shape to try. Confirm the ambiguity first — do not port
+the tier blind.
+
 ### `src/compiler/10.frontend/core/**` (contested)
 
 `compiler/bootstrap/ast_native_arena_spec.spl`, 4/5 failures.
