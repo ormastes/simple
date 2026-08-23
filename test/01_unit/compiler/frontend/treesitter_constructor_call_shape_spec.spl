@@ -1,0 +1,29 @@
+# Reproduce spec for: `TreeSitter.new(...)` called on a struct that never
+# declared a `new` static method.
+#
+# Pre-fix, src/compiler/10.frontend/frontend.spl:134 called
+# `TreeSitter.new(authority_source)`. `TreeSitter` is `struct TreeSitter:`
+# (src/compiler/10.frontend/treesitter/outline_lexer.spl:19) with no static
+# `new`; its constructor is the free function `treesitter_new(source)`.
+# Under `native-build --entry-closure`, the seed's constructor dispatch
+# (interpreter_method/special/objects.rs) found the class but no `new`
+# candidate and aborted the whole build with
+#   error: semantic: unknown static method new on class TreeSitter
+# killing every `--source src/compiler` closure at step 1.
+#
+# This is a source-shape guard because the defect only manifests on the
+# semantic/native-build path, not under the permissive interpreter `run`.
+
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+describe "TreeSitter constructor call shape":
+    it "constructs TreeSitter through treesitter_new, never TreeSitter.new":
+        val src = file_read("src/compiler/10.frontend/frontend.spl") ?? ""
+        expect(src.len() > 0).to_be_true()
+        expect(src.contains("TreeSitter.new(")).to_be_false()
+        expect(src.contains("treesitter_new(authority_source)")).to_be_true()
+
+    it "declares TreeSitter as a struct with no static new":
+        val decl = file_read("src/compiler/10.frontend/treesitter/outline_lexer.spl") ?? ""
+        expect(decl.contains("struct TreeSitter:")).to_be_true()
+        expect(decl.contains("fn treesitter_new(source: text) -> TreeSitter:")).to_be_true()
