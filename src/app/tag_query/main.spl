@@ -7,6 +7,26 @@
 `bin/simple tags --tag <name>`    list the items carrying one tag
 `bin/simple tags --root <dir>`    restrict the scan (repeatable; default test/ src/)
 `bin/simple tags --json`          machine-readable
+`bin/simple tags --dev-ids`       list in-development workstream ids + counts
+`bin/simple tags --dev-id <id>`   list the specs of one workstream
+`bin/simple tags --in-development[=<id>]`  the run set for a dev session
+`bin/simple tags --no-in-development`      the run set with WIP excluded
+`bin/simple tags --paths`         bare newline-separated paths, for `$( )`
+
+## How a dev session actually runs its own set
+
+`--paths` exists so the selection composes with EITHER engine without a
+runner flag, which is the point: a flag that works on one engine only is a
+trap, and this shape has no engine-specific half at all.
+
+    bin/simple tags --dev-ids                                  # what exists
+    bin/simple test $(bin/simple tags --dev-id auth-rework --paths)
+    bin/simple test $(bin/simple tags --in-development --paths)
+    bin/simple test $(bin/simple tags --no-in-development --paths)
+
+Default (no selection flag) keeps in-development specs INCLUDED, matching
+the landed sweep rule that a tagged spec still executes and it is only its
+verdict that is neutralised.
 
 It is a TOP-LEVEL command, not `simple test --tag ... --list`, for two
 reasons. (1) Dispatch convention: `src/app/cli/dispatch/table.spl` maps one
@@ -22,6 +42,11 @@ use std.io.{cli_get_args}
 use std.tag_query.{
     IN_DEVELOPMENT_TAG, tag_index_scan, tag_index_items_with, tag_index_tag_counts
 }
+use std.tag_query.dev_id.{
+    DevSelection, dev_selection_parse, dev_selection_parse_id,
+    tag_index_items_with_dev_id, tag_index_selected,
+    tag_index_dev_ids, tag_index_unnamed_in_development
+}
 
 fn _default_roots() -> [text]:
     ["test", "src"]
@@ -31,11 +56,29 @@ fn main() -> i64:
     var want_tag = ""
     var roots: [text] = []
     var is_json = false
+    var want_dev_id = ""
+    var list_dev_ids = false
+    var bare_paths = false
+    var mode = DevSelection.Default
+    var mode_id = ""
     var i = 0
     while i < raw.len():
         val a = raw[i]
         if a == "--json":
             is_json = true
+        elif a == "--paths":
+            bare_paths = true
+        elif a == "--dev-ids":
+            list_dev_ids = true
+        elif a == "--dev-id":
+            if i + 1 < raw.len():
+                want_dev_id = raw[i + 1]
+                i = i + 1
+        elif a.starts_with("--dev-id="):
+            want_dev_id = a[9:]
+        elif a == "--no-in-development" or a == "--in-development" or a.starts_with("--in-development="):
+            mode = dev_selection_parse(a)
+            mode_id = dev_selection_parse_id(a)
         elif a == "--tag":
             if i + 1 < raw.len():
                 want_tag = raw[i + 1]
@@ -55,8 +98,90 @@ fn main() -> i64:
 
     val idx = tag_index_scan(roots)
 
+    # --dev-id <id>: exactly one workstream.
+    if want_dev_id != "":
+        val items = tag_index_items_with_dev_id(idx, want_dev_id)
+        if bare_paths:
+            for p in items:
+                print p
+            return 0
+        if is_json:
+            var body = ""
+            var n = 0
+            for p in items:
+                if n > 0:
+                    body = "{body}, "
+                body = "{body}\"{p}\""
+                n = n + 1
+            print "{{\"command\":\"tags\",\"dev_id\":\"{want_dev_id}\",\"count\":{items.len()},\"items\":[{body}]}}"
+            return 0
+        print "Dev id: {want_dev_id}"
+        for p in items:
+            print "  {p}"
+        print ""
+        print "{items.len()} in-development spec(s) in workstream `{want_dev_id}` ({idx.scanned} file(s) scanned)"
+        print "Run them with: simple test $(simple tags --dev-id {want_dev_id} --paths)"
+        return 0
+
+    # --dev-ids: the listing a dev session reads to find its workstream.
+    if list_dev_ids:
+        val rows = tag_index_dev_ids(idx)
+        val orphans = tag_index_unnamed_in_development(idx)
+        if is_json:
+            var body = ""
+            var n = 0
+            for r in rows:
+                if n > 0:
+                    body = "{body}, "
+                body = "{body}{{\"dev_id\":\"{r.0}\",\"count\":{r.1}}}"
+                n = n + 1
+            print "{{\"command\":\"tags\",\"dev_ids\":[{body}],\"unnamed\":{orphans.len()},\"scanned\":{idx.scanned}}}"
+            return 0
+        print "In-development workstreams ({rows.len()} id(s), {idx.scanned} file(s) scanned):"
+        print ""
+        print "| Dev id | Specs |"
+        print "|--------|-------|"
+        for r in rows:
+            print "| {r.0} | {r.1} |"
+        print ""
+        # Never hidden: an unnamed WIP spec is reachable by no id-scoped run,
+        # and an invisible backlog is the exact failure this surface prevents.
+        print "Unnamed (in-development, no dev id): {orphans.len()}"
+        for p in orphans:
+            print "  {p}"
+        print ""
+        print "Run one with: simple test $(simple tags --dev-id <id> --paths)"
+        return 0
+
+    # --in-development[=<id>] / --no-in-development: a selected run set.
+    if mode != DevSelection.Default:
+        val items = tag_index_selected(idx, mode, mode_id)
+        if bare_paths:
+            for p in items:
+                print p
+            return 0
+        if is_json:
+            var body = ""
+            var n = 0
+            for p in items:
+                if n > 0:
+                    body = "{body}, "
+                body = "{body}\"{p}\""
+                n = n + 1
+            print "{{\"command\":\"tags\",\"selected\":{items.len()},\"items\":[{body}]}}"
+            return 0
+        for p in items:
+            print "  {p}"
+        print ""
+        print "{items.len()} spec(s) selected ({idx.scanned} file(s) scanned)"
+        return 0
+
     if want_tag != "":
         val items = tag_index_items_with(idx, want_tag)
+        if bare_paths:
+            for p in items:
+                print p
+            return 0
         if is_json:
             var body = ""
             var n = 0
@@ -95,4 +220,5 @@ fn main() -> i64:
     print ""
     print "In development: {tag_index_items_with(idx, IN_DEVELOPMENT_TAG).len()} (tag `{IN_DEVELOPMENT_TAG}`)"
     print "List them with: simple tags --tag {IN_DEVELOPMENT_TAG}"
+    print "Workstream ids:  simple tags --dev-ids"
     0
