@@ -1,0 +1,106 @@
+"""
+# Default cache existence + size-capped LRU eviction
+
+**Category:** Infrastructure
+**Brief:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md §27
+
+Two defects, one spec.
+
+1. `frontend_parse_cache_scope()` memoized a NEGATIVE result, so any process
+   that parsed before the driver published `SIMPLE_FRONTEND_CACHE_SCOPE`
+   latched the parse cache OFF for its whole lifetime — the cache dir default
+   was never the problem, the scope gate was.
+   (doc/08_tracking/bug/frontend_parse_cache_scope_memo_latches_off_2026-08-23.md)
+
+2. Nothing ever bounded the flat entry caches. `build/bootstrap/native_cache/
+   <lane>/{frontend,hir}` grew without limit across scopes forever.
+
+Contract:
+- a scope published AFTER a first (empty) read is still observed — no latch;
+- `cache_dir_max_bytes()` defaults to 4 GiB and honours `SIMPLE_CACHE_MAX_BYTES`;
+- eviction under the cap is a no-op;
+- eviction over the cap removes least-recently-modified entries until under it;
+- `*.tmp` in-flight stores and entries inside the grace window are NEVER
+  evicted (crash safety: no live build's entry is pulled out from under it).
+
+Pre-fix this spec fails: `compiler.frontend.cache_dir_evict` does not exist,
+and the memo latch keeps the scope empty after a late publish.
+"""
+
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.io.{file_exists}
+use compiler.frontend.cache_dir_evict.{
+    CACHE_DEFAULT_MAX_BYTES, CACHE_EVICT_SWEEP_INTERVAL,
+    cache_dir_max_bytes, cache_dir_evict_due, cache_dir_evict_to_cap
+}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope, frontend_parse_cache_enabled}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_getpid() -> i64
+
+val SCRATCH: text = "/tmp/simple-cache-evict-spec-{rt_getpid()}"
+
+fn write_entry(name: text, bytes: i64):
+    var body = ""
+    var i: i64 = 0
+    while i < bytes:
+        body = body + "x"
+        i = i + 1
+    val _w = rt_file_write_text(SCRATCH + "/" + name, body)
+
+describe("cache dir default + eviction", fn():
+
+    it("does not latch the frontend cache off when the scope is published late", fn():
+        val _clear = rt_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "")
+        assert_equal(frontend_parse_cache_scope(), "", "no scope published yet")
+        assert_false(frontend_parse_cache_enabled(), "cache is off without a scope")
+        val _set = rt_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "late-published-scope")
+        assert_equal(frontend_parse_cache_scope(), "late-published-scope",
+                     "a late publish must be observed, not shadowed by a memoized empty")
+        assert_true(frontend_parse_cache_enabled(), "cache is on once a scope exists")
+    )
+
+    it("defaults the cap to 4 GiB and honours SIMPLE_CACHE_MAX_BYTES", fn():
+        val _c = rt_env_set("SIMPLE_CACHE_MAX_BYTES", "")
+        assert_equal(cache_dir_max_bytes(), CACHE_DEFAULT_MAX_BYTES, "default cap is 4 GiB")
+        val _s = rt_env_set("SIMPLE_CACHE_MAX_BYTES", "12345")
+        assert_equal(cache_dir_max_bytes(), 12345, "env override wins")
+        val _r = rt_env_set("SIMPLE_CACHE_MAX_BYTES", "")
+    )
+
+    it("sweeps only on the interval", fn():
+        assert_false(cache_dir_evict_due(0), "no sweep before any store")
+        assert_false(cache_dir_evict_due(1), "no sweep on every store")
+        assert_true(cache_dir_evict_due(CACHE_EVICT_SWEEP_INTERVAL), "sweep on the interval")
+    )
+
+    it("is a no-op under the cap and a no-op for a zero cap", fn():
+        val _d = rt_dir_create_all(SCRATCH)
+        write_entry("a.fpc", 100)
+        assert_equal(cache_dir_evict_to_cap(SCRATCH, ".fpc", 1000000), 0, "under the cap evicts nothing")
+        assert_equal(cache_dir_evict_to_cap(SCRATCH, ".fpc", 0), 0, "a zero cap disables eviction")
+        assert_true(file_exists(SCRATCH + "/a.fpc"), "entry survives")
+    )
+
+    it("never evicts an in-flight .tmp or a fresh entry", fn():
+        val _d = rt_dir_create_all(SCRATCH)
+        write_entry("b.fpc.4242.tmp", 64)
+        write_entry("c.fpc", 64)
+        assert_true(file_exists(SCRATCH + "/b.fpc.4242.tmp"), "fixture tmp written")
+        assert_true(file_exists(SCRATCH + "/c.fpc"), "fixture entry written")
+        # Cap of 1 byte: everything eligible would go. Nothing is eligible,
+        # because the .tmp has the wrong suffix and c.fpc is inside the grace
+        # window -- this is the crash-safety guarantee.
+        assert_equal(cache_dir_evict_to_cap(SCRATCH, ".fpc", 1), 0,
+                     "a live build's entries are never evicted")
+        assert_true(file_exists(SCRATCH + "/b.fpc.4242.tmp"), "in-flight store survives")
+        assert_true(file_exists(SCRATCH + "/c.fpc"), "fresh entry survives")
+    )
+
+    it("reports a missing directory as nothing evicted", fn():
+        assert_equal(cache_dir_evict_to_cap(SCRATCH + "/absent", ".fpc", 1), 0,
+                     "a missing cache dir is not an error")
+    )
+)

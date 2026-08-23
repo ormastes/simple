@@ -287,11 +287,23 @@ pub fn rt_file_is_dir(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get file stat info (simplified - returns size or -1)
 pub fn rt_file_stat(args: &[Value]) -> Result<Value, CompileError> {
+    // Modification time in SECONDS since the epoch, matching both native
+    // runtimes (`src/runtime/runtime.c` returns `st.st_mtime`;
+    // `runtime/src/value/sffi/file_io/metadata.rs` returns `as_secs()`) and
+    // the documented contract of `std.io.file_modified_time`, which is just a
+    // rename of this call. This returned `meta.len()` — the file SIZE — so
+    // under the interpreter every mtime query silently answered a byte count.
+    // Anything doing age arithmetic on it (cache eviction grace windows,
+    // freshness checks) got nonsense that looked like a plausible integer.
+    // 0 on error, again matching the native runtimes.
     let path = extract_path(args, 0)?;
-    match fs::metadata(&path) {
-        Ok(meta) => Ok(Value::Int(meta.len() as i64)),
-        Err(_) => Ok(Value::Int(-1)),
-    }
+    let secs = fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(Value::Int(secs))
 }
 
 /// Get file size in bytes

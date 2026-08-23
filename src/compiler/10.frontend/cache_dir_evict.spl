@@ -1,0 +1,111 @@
+# Size-capped LRU eviction for the FLAT entry caches (`*.fpc` front-end parse
+# entries, `*.hir` HIR entries). Each entry is one self-contained file whose
+# name is a content hash, so eviction is a plain unlink: there is no index to
+# keep consistent and no partially-deleted state a later run could mistake for
+# a hit. That is the whole reason this is separate from the CAS store's GC
+# (80.driver/cache/gc/) — that machinery exists for a multi-file store with
+# leases and trash, and none of it is needed here.
+#
+# CRASH SAFETY / CONCURRENCY.
+#   * `*.tmp` files are never touched: they are in-flight stores by other pids.
+#   * Files modified within GRACE_SECS are never evicted, so an entry a live
+#     build just wrote or just read past cannot be pulled out from under it.
+#     A reader that loses the race sees a missing file, which every caller
+#     already treats as a miss — the caches are designed so a miss is slow,
+#     never wrong.
+#   * LRU order is mtime. `rt_file_stat` is seconds-resolution and store is
+#     write-then-rename, so ties are broken arbitrarily; that only affects
+#     WHICH cold entry goes, never correctness.
+#
+# ponytail: deliberately an O(n) directory scan with an O(n^2) selection sort
+# over the entry list, run at most once per process and only when the store
+# count crosses the sweep interval. At the measured scale (a bootstrap closure
+# is ~700 entries per cache dir) that is milliseconds. If an entry dir ever
+# exceeds ~10k files this needs a real sort, and past ~100k it needs an index
+# file instead of a scan — at that point adopt 80.driver/cache/gc/ rather than
+# growing this.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_stat(path: text) -> i64
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+# 4 GiB. Big enough that a full bootstrap closure never evicts (a 688-module
+# HIR cache measures well under 1 GiB), small enough that an unattended box
+# cannot fill a disk with stale scopes.
+val CACHE_DEFAULT_MAX_BYTES: i64 = 4294967296
+
+# Entries touched this recently are assumed live and are never evicted.
+val CACHE_EVICT_GRACE_SECS: i64 = 300
+
+# Sweep every N stores rather than on every store, so the scan cost amortises.
+val CACHE_EVICT_SWEEP_INTERVAL: i64 = 512
+
+pub fn cache_dir_max_bytes() -> i64:
+    val raw = rt_env_get("SIMPLE_CACHE_MAX_BYTES") ?? ""
+    if raw == "":
+        return CACHE_DEFAULT_MAX_BYTES
+    val parsed = raw.to_i64() ?? -1
+    if parsed < 0:
+        return CACHE_DEFAULT_MAX_BYTES
+    parsed
+
+pub fn cache_dir_evict_due(store_count: i64) -> bool:
+    if store_count <= 0:
+        return false
+    store_count % CACHE_EVICT_SWEEP_INTERVAL == 0
+
+# Evicts least-recently-modified entries with the given suffix until the
+# directory's total entry bytes are at or below `max_bytes`. Returns the number
+# of entries deleted. A `max_bytes` of 0 disables eviction entirely.
+pub fn cache_dir_evict_to_cap(dir: text, suffix: text, max_bytes: i64) -> i64:
+    if max_bytes <= 0 or dir == "" or not rt_dir_exists(dir):
+        return 0
+    val now_secs = rt_time_now_unix_micros() / 1000000
+    var paths: [text] = []
+    var sizes: [i64] = []
+    var mtimes: [i64] = []
+    var total: i64 = 0
+    for name in rt_dir_list(dir):
+        if not name.ends_with(suffix):
+            continue
+        val path = dir + "/" + name
+        val size = rt_file_size(path)
+        if size <= 0:
+            continue
+        total = total + size
+        val mtime = rt_file_stat(path)
+        if now_secs - mtime < CACHE_EVICT_GRACE_SECS:
+            continue
+        paths.push(path)
+        sizes.push(size)
+        mtimes.push(mtime)
+    if total <= max_bytes:
+        return 0
+    var removed: i64 = 0
+    var remaining = paths.len()
+    while total > max_bytes and remaining > 0:
+        var oldest = -1
+        var oldest_mtime: i64 = 0
+        var i = 0
+        while i < paths.len():
+            if paths[i] != "" and (oldest < 0 or mtimes[i] < oldest_mtime):
+                oldest = i
+                oldest_mtime = mtimes[i]
+            i = i + 1
+        if oldest < 0:
+            break
+        val victim = paths[oldest]
+        paths[oldest] = ""
+        remaining = remaining - 1
+        if rt_file_delete(victim):
+            total = total - sizes[oldest]
+            removed = removed + 1
+    removed
+
+export CACHE_DEFAULT_MAX_BYTES, CACHE_EVICT_GRACE_SECS, CACHE_EVICT_SWEEP_INTERVAL
+export cache_dir_max_bytes, cache_dir_evict_due, cache_dir_evict_to_cap
