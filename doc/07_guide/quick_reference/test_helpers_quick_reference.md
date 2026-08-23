@@ -157,6 +157,20 @@ val result = testing.with_timeout(
 
 ---
 
+## In-Development Tag
+
+```simple
+# @tag:in-development
+# Tracks: <TODO id / bug record / plan row>     # MANDATORY
+```
+
+Expected to FAIL, SKIPPED in whole-suite runs, COUNTED in the summary, selected
+by `simple test --tag in-development`. **Never** for a regression, an
+undiagnosed failure, or an unavailable host (use `skip(name, reason)` /
+`pending(name)`). Delete the tag the moment the spec passes. Not yet enforced at
+`origin/main` @ `3ccf808f6f2` — full rules and status:
+`doc/07_guide/infra/testing.md` § Tags and Filtering.
+
 ## Common Patterns
 
 ### Pattern: Test with Option

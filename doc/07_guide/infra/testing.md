@@ -388,8 +388,93 @@ simple test --tag slow           # Run only @slow tests
 simple test --tag integration    # Run only @integration tests
 ```
 
----
 
+### `@tag:in-development` — work that is expected to fail
+
+**Status (verified against `origin/main` @ `3ccf808f6f2`, 2026-08-23): the tag
+NAME and its policy are settled here; the runner enforcement is still landing in
+sibling lanes. Do not read the "Runner behaviour" table below as already-shipped
+behaviour — the "Verified today" column is the only part backed by code at
+origin.**
+
+An in-development test is one written *ahead of* the implementation it
+describes. It is a real, honest specification of behaviour that does not work
+yet. Marking it tells the suite: *this failure is known, intended, and owned* —
+so the whole-suite run stays a meaningful signal instead of a wall of noise that
+everyone learns to ignore.
+
+#### Marking a spec
+
+Add the tag as a plain comment line in the spec header, the same shape as the
+other `# @…` header directives:
+
+```simple
+# @tag:in-development
+# Tracks: doc/08_tracking/todo/... (or a bug record / plan row)
+
+describe "Widget reflow":
+    it "reflows on resize":
+        expect(reflow(box, 800)).to_equal(expected)   # fails until reflow lands
+```
+
+Every in-development spec MUST name what it is waiting on — a TODO id, bug
+record, or plan row — on the line after the tag. A tag with no owner and no
+tracking link is indistinguishable from a hidden regression, which is exactly
+what this tag must never become.
+
+#### What the tag guarantees
+
+| Guarantee | Meaning | Verified today |
+|---|---|---|
+| Expected to FAIL | A red result is the *normal* state; it is not an incident | policy only |
+| SKIPPED in whole-suite runs | `bin/simple test` with no path does not execute it, so it cannot turn the suite red | pending sibling lane |
+| COUNTED in the summary | The runner summary reports the in-development count, so the debt is visible, never invisible | pending sibling lane |
+| Listable | `simple test --tag in-development` selects exactly these specs | `--tag <name>` filtering itself exists (`src/compiler_rust/driver/src/cli/test_runner/args.rs:24`, forwarded at `execution.rs:923-925`); the `in-development` value is pending |
+
+Two things follow from "counted, not hidden": the count is a **debt figure that
+is supposed to go down**, and a suite whose in-development count is rising
+without matching tracking rows is a process failure, not a green run.
+
+Note that the pure-Simple runner (`src/app/test_runner_new/test_runner_single.spl`)
+parses exactly two header directives today — `# @di_test` and `# @exec_limit <N>`
+— and no `@tag:` directive at all. `@tag:qemu` is recognised only by the Rust
+seed's timeout-budget scanner (`execution.rs:95`). So until the sibling lanes
+land, writing `# @tag:in-development` documents intent but changes nothing at
+runtime: **the spec still runs and still fails.** Do not claim otherwise in a
+report.
+
+#### Promoting a spec when it starts passing
+
+1. Run it directly: `bin/simple test path/to/foo_spec.spl`.
+2. If it passes, **delete the `# @tag:in-development` line and the tracking
+   line** in the same commit as the implementation change that made it pass.
+3. Close the TODO / bug row it named.
+4. Never leave a passing spec tagged. A tag that no longer describes the spec is
+   the same failure mode as a stale ratchet baseline: it silently stops meaning
+   anything, and the count stops being a debt figure.
+
+#### What this tag must NOT be used for
+
+This is the whole point of the tag having a narrow definition. It is **not** a
+general mute button.
+
+- **Never** to silence a regression. If a spec used to pass and now fails, that
+  is a regression: fix it or revert. Tagging it converts a loud, actionable
+  failure into a line in a debt counter, and it will not come back.
+- **Never** to get a red suite green before a landing, or to make a deadline.
+- **Never** on a spec whose failure you have not diagnosed. "It fails and I
+  don't know why" is not in-development; it is an unfiled bug.
+- **Never** for environmental unavailability — no GPU, no board, no network.
+  That is `skip(name, reason)` / `pending(name)` (`src/lib/gc_async_mut/spec/__init__.spl:40-43`)
+  or the host-aware `skip:` / `blocked:` wording, not this tag.
+- **Never** as a substitute for deleting a spec that describes behaviour nobody
+  intends to build. Delete it.
+
+The distinction in one line: **in-development means the code is missing;
+everything else means the test or the environment is wrong.** Only the first is
+this tag's business.
+
+---
 ## Gherkin-Style Syntax
 
 Simple supports Gherkin-style BDD for system tests:

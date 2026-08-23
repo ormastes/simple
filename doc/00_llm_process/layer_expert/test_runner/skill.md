@@ -73,6 +73,30 @@ Related env the same setup manages: `SIMPLE_TIMEOUT_SECONDS` (raise-only
 against the monitor timeout) and `SIMPLE_SYSTEM_TEST` (`1` for paths containing
 `/system/` or `/feature/`, else `0`).
 
+
+### `# @tag:in-development` — NOT parsed by this runner (yet)
+
+The in-development tag (canonical guide:
+`doc/07_guide/infra/testing.md` § Tags and Filtering) marks a spec that is
+expected to fail because the code it describes does not exist yet. Its contract
+is: expected FAIL, SKIPPED in whole-suite runs, **COUNTED** in the summary,
+selectable with `simple test --tag in-development`.
+
+**Status against `origin/main` @ `3ccf808f6f2` (2026-08-23): this layer does not
+implement any of it.** `test_runner_single.spl` still parses exactly the two
+directives in the table above; there is no `@tag:` branch. `--tag <name>`
+filtering exists only in the seed driver
+(`src/compiler_rust/driver/src/cli/test_runner/args.rs:24`, forwarded at
+`execution.rs:923-925`), and `@tag:qemu` is read there solely for the timeout
+budget (`execution.rs:95`). So a spec carrying the tag today **runs normally and
+fails normally**. Do not report a tagged spec as skipped without checking the
+parser first — that is exactly the shape of false claim this wiki exists to stop.
+
+When the sibling lanes land the skip+count semantics, the natural home is the
+same header-scan in `test_runner_single.spl` that reads `# @di_test`, plus the
+summary emitter, plus the `test_db.sdn` / `test_result.md` writers so the count
+survives into the tracking artefacts.
+
 ## Statement coverage
 
 - Working `SIMPLE_COVERAGE=1` statement coverage landed as `1a6c1e362a5`

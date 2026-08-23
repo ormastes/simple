@@ -1064,6 +1064,22 @@ evidence/gate script asserts on. See
 `doc/07_guide/os/baremetal/baremetal_simple_codegen_landmines.md` § "Probe
 caveats".
 
+## In-development tag (`@tag:in-development`)
+
+A spec written ahead of its implementation is marked `# @tag:in-development`
+plus a MANDATORY `# Tracks: <TODO/bug/plan row>` line. Contract: expected FAIL,
+SKIPPED in whole-suite runs, COUNTED in the summary, selected by
+`simple test --tag in-development`.
+
+**Never** use it for a regression, an undiagnosed failure, an unavailable host
+(that is `skip()` / `pending()`), or to make a red suite green. Delete the tag
+in the same commit as the fix that makes the spec pass.
+
+**Not enforced at `origin/main` @ `3ccf808f6f2` (2026-08-23)** — the pure-Simple
+runner parses only `# @di_test` and `# @exec_limit`; a tagged spec still runs and
+still fails. Canonical guide: `doc/07_guide/infra/testing.md` § Tags and
+Filtering.
+
 ## SSpec documentization maintenance
 
 For SSpec authoring or cleanup, run `simple sspec-maintain scan <spec>` as the

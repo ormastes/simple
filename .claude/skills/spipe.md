@@ -1956,6 +1956,48 @@ oracle; region screen-capture is flaky). Full launch/capture/parity-gate details
 `doc/04_architecture/ui/simple_gui_stack.md` → "GUI Sanity Apps". The web-layout
 lane is interpreter-bound (~1.5 ms/px) — keep web sanity surfaces ≤ ~900×760.
 
+## `@tag:in-development` — the ONE legitimate way to ship an expected-to-fail spec
+
+Canonical guide: [`doc/07_guide/infra/testing.md`](../../doc/07_guide/infra/testing.md)
+§ "Tags and Filtering" → `@tag:in-development`. Read it before using the tag.
+
+When you write a spec ahead of the implementation it describes, mark it:
+
+```simple
+# @tag:in-development
+# Tracks: <TODO id / bug record / plan row>   <- MANDATORY, no exceptions
+```
+
+Contract: expected to FAIL, SKIPPED in whole-suite runs, **COUNTED** in the
+runner summary, selectable via `simple test --tag in-development`.
+
+**Enforcement status (checked against `origin/main` @ `3ccf808f6f2`, 2026-08-23).**
+`--tag <name>` filtering exists in the seed driver
+(`src/compiler_rust/driver/src/cli/test_runner/args.rs:24`, forwarded at
+`execution.rs:923-925`), and `@tag:qemu` is scanned there for the timeout budget
+(`execution.rs:95`). The pure-Simple runner parses exactly **two** header
+directives — `# @di_test` and `# @exec_limit <N>`
+(`src/app/test_runner_new/test_runner_single.spl:193,209`) — and no `@tag:` at
+all. The skip/count semantics are landing in sibling lanes. Until they land,
+**the tag documents intent and changes nothing at runtime: the spec still runs
+and still fails.** Never report it as skipped without re-verifying at origin.
+
+**Do NOT use it for:**
+
+- a **regression** (used to pass, now fails) — fix or revert; tagging it buries
+  a loud, actionable failure in a debt counter;
+- a failure you have not diagnosed — that is an unfiled bug;
+- **environmental** unavailability (no GPU/board/network) — that is
+  `skip(name, reason)` / `pending(name)`
+  (`src/lib/gc_async_mut/spec/__init__.spl:40-43`) or the host-aware
+  `skip:`/`blocked:` wording;
+- getting a red suite green before a landing;
+- keeping a spec for behaviour nobody intends to build — delete it.
+
+**Promotion:** the moment it passes, delete the tag line and the Tracks line in
+the same commit as the fix, and close the tracked row. A passing spec that is
+still tagged is a stale ratchet: the count stops being a debt figure.
+
 ## Template
 
 ```

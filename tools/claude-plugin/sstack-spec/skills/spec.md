@@ -106,3 +106,22 @@ spec-done
 ## Next Phase
 
 Implementation can now begin -- all specs are in place as the acceptance gate.
+
+## Specs written before the implementation
+
+Specs authored in this phase describe behaviour that does not exist yet, so they
+fail until impl lands. Mark each one:
+
+```simple
+# @tag:in-development
+# Tracks: <TODO id / bug record / plan row>     # MANDATORY
+```
+
+Contract: expected FAIL, SKIPPED in whole-suite runs, COUNTED in the runner
+summary, selected by `simple test --tag in-development`. Delete the tag in the
+same commit as the impl change that makes the spec pass.
+
+**Never** use it for a regression, an undiagnosed failure, or an unavailable
+host (that is `skip()` / `pending()`). Not yet enforced at `origin/main` @
+`3ccf808f6f2` (2026-08-23) — a tagged spec still runs and still fails. Full
+rules: `doc/07_guide/infra/testing.md` § Tags and Filtering.

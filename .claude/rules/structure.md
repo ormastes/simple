@@ -52,3 +52,14 @@ bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
 | Test DB | `doc/08_tracking/test/test_db.sdn` | Every test run |
 | TODOs | `doc/TODO.md` | `bin/simple todo-scan` |
 | Todo DB | `doc/08_tracking/todo/todo_db.sdn` | `bin/simple todo-scan` |
+
+**In-development tag (`@tag:in-development`).** Specs/features marked
+in-development are expected to FAIL, are SKIPPED in whole-suite runs, and are
+**COUNTED** in the runner summary — so the count belongs in `test_result.md` and
+`test_db.sdn`, and an in-development feature belongs in `pending_feature.md`, not
+`feature.md`. Semantics and the anti-use rules: `doc/07_guide/infra/testing.md`
+§ Tags and Filtering. **Not yet enforced at `origin/main` @ `3ccf808f6f2`
+(2026-08-23)** — the pure-Simple runner parses only `# @di_test` and
+`# @exec_limit` (`src/app/test_runner_new/test_runner_single.spl:193,209`); the
+skip/count wiring is landing in sibling lanes. Re-verify before asserting these
+files carry the count.
