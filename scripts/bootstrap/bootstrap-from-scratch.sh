@@ -1,5 +1,34 @@
 #!/bin/sh
 
+# THIS SCRIPT IS THE ONLY SANCTIONED WAY TO RUN THE BOOTSTRAP STAGES.
+#
+#   Do NOT hand-type the stage native-build lines below. Between 2026-08-22 and
+#   2026-08-23 roughly 26 runs were driven by a hand-typed
+#   `native-build --source src/app --entry-closure --entry
+#   src/app/cli/bootstrap_main.spl`, mislabelled "phase 1". All were unusable:
+#   with no --cache-dir the cache could not hit (SIMPLE_CACHE_SCOPE has nothing
+#   to partition; 23,718 log lines, zero cache hits), and with only one --source
+#   root the run livelocked (counter frozen at 389/688 for 2,700s;
+#   module_surface_registry_index.spl parsed 73 times) and was misread as
+#   slowness. Every flag on the Stage-2/Stage-3 invocations is load-bearing.
+#
+#   PHASE 1 IS NOT A NATIVE-BUILD. Phase 1 is the Rust seed, built by cargo
+#   (--profile bootstrap) and preserved as the phase-1 lineage snapshot. The
+#   FIRST native-build of the whole bootstrap is STAGE 2. A command containing
+#   `native-build` is Stage 2 or later, by definition.
+#
+#   --strategy=adhoc is a FAILURE POLICY (fail-fast), not a lighter build; see
+#   scripts/bootstrap/bootstrap-cache-policy.shs. There is no reduced-closure
+#   stage-1 path in this repo.
+#
+#   Running bare exits 64 with `reason-receipt-required`. That is not breakage:
+#   use `--strategy=adhoc --full-bootstrap --stop-after-stage2 --output=<dir>`
+#   (the trust-root exception), or plan a receipt as the error message says.
+#
+#   Record: doc/08_tracking/bug/phase1_mislabelled_as_native_build_2026-08-23.md
+#   Phase table: doc/07_guide/tooling/bootstrap_phase_verification.md
+#   Guard: scripts/check/check-sanctioned-bootstrap-invocation.shs
+
 # PHASE-GATING PRINCIPLE (authoritative doc:
 # doc/07_guide/tooling/bootstrap_phase_verification.md)
 #

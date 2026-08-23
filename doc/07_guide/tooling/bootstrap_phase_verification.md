@@ -332,6 +332,93 @@ scope" from "never existed".
 Together: the bootstrap path is deliberately small, explicitly gated, and
 everything outside it is **visible rather than silently absent**.
 
+## Phase -> artifact map (read this before saying "phase 1")
+
+**"Phase 1" is NOT a native-build.** This is the single most repeated mistake
+against this document; it cost ~26 unusable runs on 2026-08-22/23
+(`doc/08_tracking/bug/phase1_mislabelled_as_native_build_2026-08-23.md`).
+
+| phase | artifact | produced by | is it a `native-build`? |
+|---|---|---|---|
+| 0 | host toolchain / preflight | `scripts/setup/setup.shs` | no |
+| **1** | **Rust seed** — `src/compiler_rust/target/bootstrap/simple` (`bootstrap-from-scratch.sh:1393`) | **cargo**: `build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap` (`:1772-1775`); preserved as the phase-1 lineage snapshot at `:2117` | **NO — never** |
+| **2** | `stage2/<platform>/simple` | the **seed** runs `native-build` (`:2254-2275`) — **the FIRST native-build of the whole bootstrap** | **yes** |
+| 3 | `stage3/simple`, `stage3/<triple>/simple` | the stage2 binary runs `native-build` (`:2551`) | yes |
+| 4 | full CLI / release deploy | stage3 artifacts installed by the script's deploy step | — |
+
+Consequences, stated so they cannot be re-derived the hard way:
+
+- A command containing `native-build` is **Stage 2 or later, by definition**.
+  If a log or a report calls it "phase 1", the label is wrong, not the stage.
+- Phase 1 failing is a **cargo** failure. Phase 1 succeeds routinely (~4m18s
+  measured); a "phase 1 is slow / hanging" report almost always means someone
+  hand-ran a Stage-2 native-build under the wrong name.
+
+### The stage native-build line is never typed by hand
+
+`sh scripts/bootstrap/bootstrap-from-scratch.sh` is the only sanctioned way to
+run any of these stages. The Stage-2 line (`:2254-2275`) carries **three**
+`--source` roots plus `--backend`, `--target`, `--runtime-bundle
+core-c-bootstrap`, `--runtime-path`, `--mode`, `--cache-dir`, `--threads`, and
+the env `SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NO_STUB_FALLBACK=1
+SIMPLE_NO_DEPRECATED_WARNINGS=1`. Every one is load-bearing:
+
+- Drop `--cache-dir` and `SIMPLE_CACHE_SCOPE` has nothing to partition — the
+  cache **cannot hit**, silently. Zero cache-hit lines in a 23,718-line log is
+  the signature.
+- Drop `--source src/compiler --source src/lib` and the closure walker must
+  discover those trees through import edges from one root.
+- Drop `--runtime-bundle` / `--runtime-path` and the stage links against a
+  runtime the stage's provenance snapshots do not describe.
+
+Gated by `scripts/check/check-sanctioned-bootstrap-invocation.shs`.
+
+### `--strategy=adhoc` is a failure policy, not a lighter build
+
+`scripts/bootstrap/bootstrap-cache-policy.shs:22` — `adhoc` maps to `fail-fast`
+(vs `phase-isolated` for `normal`, `inventory-to-end` for `full`). It changes
+**nothing** about what is compiled. **There is no reduced-closure stage-1 path
+in this repo.**
+
+### Frozen progress counter = livelock, not slowness
+
+If a stage's module counter stops advancing while CPU stays high, that is a
+**livelock** (the same modules re-entered), not an O(n^2) throughput problem, and
+the two have opposite fixes. Diagnostic signature from the 2026-08-23 incident:
+counter frozen at 389/688 for 2,700s, `dim_constraints.spl` and `narrowing.spl`
+re-emitting every 11-14s, `module_surface_registry_index.spl` parsed 73 times.
+
+### How to actually run it (or you WILL hand-roll a command)
+
+Running the script bare now fails **before Stage 1** with:
+
+```
+bootstrap-policy-error: reason-receipt-required; run 'simple run src/app/build/bootstrap_receipt_main.spl ...'
+```
+
+exit **64** (`bootstrap-from-scratch.sh:466-483`). A staged bootstrap requires a
+planner-issued receipt. There is exactly one trust-root exception
+(`:468-475`): `--stop-after-stage2` **and** `--full-bootstrap` together, with no
+receipt, reason `stage2-trust-root-refresh` — the first independently admitted
+pure-Simple parent cannot require a receipt produced by that parent.
+
+So the working stage-2 invocation, verified against a live lane run:
+
+```sh
+sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --strategy=adhoc --full-bootstrap --stop-after-stage2 --output=<dir>
+```
+
+`--strategy=adhoc` here is a normal, sanctioned flag (fail-fast failure policy),
+**not** a lighter build. Anyone who hits exit 64, concludes "the script is
+broken", and hand-rolls a `native-build` line has just reproduced the 2026-08-23
+incident.
+
+Flag resolution note: the script passes `--mode "${bootstrap_mode}"`, which
+defaults to `dynload` (`:277`, `SIMPLE_BOOTSTRAP_MODE` override) — so a live run
+shows `--mode dynload` and `--backend llvm`. Read the resolved values off a real
+run; do not paraphrase them from memory.
+
 ## See also
 
 - `.claude/rules/bootstrap.md` — bootstrap architecture, stage semantics, known blockers

@@ -669,3 +669,36 @@ the self-hosted path — enlarging the bootstrap problem this phase exists to
 shrink.
 
 Full statement: `doc/07_guide/tooling/bootstrap_phase_verification.md`.
+
+## "Phase 1" is NOT a native-build (2026-08-23)
+
+The single most repeated bootstrap mistake. Cost ~26 unusable runs on
+2026-08-22/23. Record:
+`doc/08_tracking/bug/phase1_mislabelled_as_native_build_2026-08-23.md`.
+
+| phase | artifact | produced by | native-build? |
+|---|---|---|---|
+| 1 | Rust seed `src/compiler_rust/target/bootstrap/simple` | **cargo**, `--profile bootstrap` | **NO** |
+| 2 | `stage2/<platform>/simple` | seed runs `native-build` — the FIRST one | yes |
+| 3 | `stage3/simple` | stage2 binary runs `native-build` | yes |
+
+Rules:
+
+1. A command containing `native-build` is **Stage 2 or later, by definition**.
+   If someone calls it "phase 1", the label is wrong.
+2. **Never hand-type the stage native-build line.** Run
+   `sh scripts/bootstrap/bootstrap-from-scratch.sh`. Every flag is load-bearing.
+   Bare invocation exits **64** (`reason-receipt-required`) — that is policy, not
+   breakage; use `--strategy=adhoc --full-bootstrap --stop-after-stage2
+   --output=<dir>` (the trust-root exception) or plan a receipt.
+3. **`SIMPLE_CACHE_SCOPE` without `--cache-dir` is a silent no-op.** Zero
+   cache-hit lines in a long log ⇒ check the invocation before "warming".
+4. **`--strategy=adhoc` is a failure policy (fail-fast), not a lighter build**
+   (`scripts/bootstrap/bootstrap-cache-policy.shs:22`). There is no
+   reduced-closure stage-1 path in this repo.
+5. **A frozen progress counter is a LIVELOCK, not slowness.** Opposite fixes.
+   Signature from the incident: counter stuck at 389/688 for 2,700s while
+   `module_surface_registry_index.spl` was parsed 73 times.
+
+Guard: `scripts/check/check-sanctioned-bootstrap-invocation.shs` (ADVISORY, red).
+Phase table: `doc/07_guide/tooling/bootstrap_phase_verification.md`.

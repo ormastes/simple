@@ -1,0 +1,245 @@
+#!/bin/sh
+# check-sanctioned-bootstrap-invocation.shs
+#
+# Guard: a bootstrap-stage `native-build` invocation must carry every mandatory
+# flag. Prevents the 2026-08-23 incident in which ~26 runs used a hand-typed
+#   native-build --source src/app --entry-closure --entry src/app/cli/bootstrap_main.spl
+# labelled "phase 1". With no --cache-dir the cache could not hit; with one
+# --source root the run livelocked. Record:
+#   doc/08_tracking/bug/phase1_mislabelled_as_native_build_2026-08-23.md
+#
+# Scope: tracked SHELL files under scripts/ only. Documentation is deliberately
+# EXCLUDED: bug records and session logs must be free to quote the broken
+# command verbatim — that is their job — and flagging them would make the guard
+# fire on its own evidence. Measured 2026-08-23: a doc-inclusive scan reported
+# 63 invocations / 55 unsanctioned, almost all historical transcripts.
+#
+# Text scan of tracked shell files for `native-build` invocations
+# whose entry is `src/app/cli/bootstrap_main.spl` (that entry IS what makes an
+# invocation a bootstrap stage). Each such invocation must carry, within its
+# line continuation block, ALL of:
+#   --runtime-bundle --runtime-path --cache-dir --mode --backend --target
+#   --source src/compiler --source src/app --source src/lib
+#
+# Verdict line is LAST on stdout:
+#   PASS — <n> invocation(s) checked, 0 unsanctioned      exit 0
+#   FAIL — <n> invocation(s) checked, <k> unsanctioned: … exit 1
+#   ERROR — nothing was checked (<reason>)                exit 2
+# Zero invocations examined is ERROR, never PASS.
+#
+# --selftest runs first, unconditionally, and is fatal.
+#
+# STATUS: ADVISORY — honestly RED on main, not wired into the pre-push hook.
+#   Measured 2026-08-23: FAIL — 13 invocation(s) checked, 7 unsanctioned.
+#   Six of the seven are STAGE 3 invocations (bootstrap-from-scratch.sh,
+#   resume-stage3-from-admitted.sh, manifest-verify.shs), whose source set comes
+#   from the ADMITTED MANIFEST rather than --source roots — so the required-
+#   sources rule is a Stage-2 rule applied too widely. The seventh,
+#   scripts/check/check-memory-budget.shs, is a genuinely bare invocation and is
+#   a real finding. The fix is to distinguish stage2 from stage3 (manifest-
+#   driven) invocations, NOT to drop the source check; per this repo's
+#   convention the guard lands red-and-advisory rather than weakened to green.
+
+set -u
+
+REQUIRED_FLAGS='--runtime-bundle --runtime-path --cache-dir --mode --backend --target'
+REQUIRED_SOURCES='src/compiler src/app src/lib'
+BOOTSTRAP_ENTRY='src/app/cli/bootstrap_main.spl'
+
+# Flatten shell line-continuations so an invocation spanning many lines becomes
+# one logical line, then emit one line per bootstrap native-build invocation.
+extract_invocations() {
+  # $1 = file
+  awk '
+    { line = $0
+      sub(/^[ \t]*/, "", line)
+      if (buf != "") { buf = buf " " line } else { buf = line }
+      if (line ~ /\\$/) { sub(/\\$/, "", buf); next }
+      print buf; buf = ""
+    }
+    END { if (buf != "") print buf }
+  ' "$1" | grep -- 'native-build' | grep -- "${BOOTSTRAP_ENTRY}"
+}
+
+check_invocation() {
+  # $1 = invocation text; prints missing items, empty if sanctioned
+  inv=$1
+  missing=''
+  for f in ${REQUIRED_FLAGS}; do
+    case " ${inv} " in
+      *" ${f} "*) ;;
+      *) missing="${missing}${missing:+,}${f}" ;;
+    esac
+  done
+  for s in ${REQUIRED_SOURCES}; do
+    case " ${inv} " in
+      *" --source ${s} "*) ;;
+      *) missing="${missing}${missing:+,}--source ${s}" ;;
+    esac
+  done
+  printf '%s' "${missing}"
+}
+
+scan_root() {
+  root=$1
+  ev_checked=0
+  ev_bad=0
+  ev_names=''
+  files=$(
+    if [ -d "${root}/.git" ] || git -C "${root}" rev-parse --git-dir >/dev/null 2>&1; then
+      git -C "${root}" ls-files 'scripts/*' 2>/dev/null
+    else
+      ( cd "${root}" && find scripts -type f 2>/dev/null )
+    fi
+  )
+  for rel in ${files}; do
+    case "${rel}" in
+      *.sh|*.shs) ;;
+      *) continue ;;
+    esac
+    f="${root}/${rel}"
+    [ -f "${f}" ] || continue
+    grep -q -- "${BOOTSTRAP_ENTRY}" "${f}" 2>/dev/null || continue
+    invs=$(extract_invocations "${f}" 2>/dev/null)
+    [ -n "${invs}" ] || continue
+    printf '%s\n' "${invs}" | while IFS= read -r inv; do
+      [ -n "${inv}" ] || continue
+      printf '%s\t%s\n' "${rel}" "${inv}"
+    done
+  done > "${TMPDIR_G}/invocations.txt"
+
+  while IFS="$(printf '\t')" read -r rel inv; do
+    [ -n "${inv:-}" ] || continue
+    ev_checked=$((ev_checked + 1))
+    miss=$(check_invocation "${inv}")
+    if [ -n "${miss}" ]; then
+      ev_bad=$((ev_bad + 1))
+      ev_names="${ev_names}${ev_names:+; }${rel} [missing: ${miss}]"
+    fi
+  done < "${TMPDIR_G}/invocations.txt"
+
+  EV_CHECKED=${ev_checked}
+  EV_BAD=${ev_bad}
+  EV_NAMES=${ev_names}
+}
+
+# ---------------------------------------------------------------- selftest ---
+selftest() {
+  st_root="${TMPDIR_G}/selftest"
+  fails=0
+
+  # Fixture 1 (must FAIL): the real 2026-08-23 hand-typed line.
+  mkdir -p "${st_root}/f1/scripts" "${st_root}/f1/doc"
+  cat > "${st_root}/f1/scripts/bad.shs" <<'EOS'
+#!/bin/sh
+simple native-build --source src/app --entry-closure \
+  --entry src/app/cli/bootstrap_main.spl
+EOS
+  scan_root "${st_root}/f1"
+  if [ "${EV_CHECKED}" -ne 1 ] || [ "${EV_BAD}" -ne 1 ]; then
+    echo "selftest: fixture1 (hand-typed line) expected 1 checked / 1 bad, got ${EV_CHECKED}/${EV_BAD}" >&2
+    fails=$((fails + 1))
+  fi
+  case "${EV_NAMES}" in
+    *--cache-dir*) ;;
+    *) echo "selftest: fixture1 did not name --cache-dir as missing" >&2; fails=$((fails + 1)) ;;
+  esac
+  case "${EV_NAMES}" in
+    *--runtime-bundle*) ;;
+    *) echo "selftest: fixture1 did not name --runtime-bundle as missing" >&2; fails=$((fails + 1)) ;;
+  esac
+
+  # Fixture 2 (must PASS): the sanctioned Stage-2 shape.
+  mkdir -p "${st_root}/f2/scripts" "${st_root}/f2/doc"
+  cat > "${st_root}/f2/scripts/good.shs" <<'EOS'
+#!/bin/sh
+"${stage2_seed_absolute}" native-build \
+  --target "${PLATFORM}" \
+  --backend "${backend}" \
+  --runtime-bundle core-c-bootstrap \
+  --source src/compiler --source src/app --source src/lib \
+  --entry-closure \
+  --cache-dir "${stage2_cache_absolute}" \
+  --mode "${bootstrap_mode}" \
+  --entry src/app/cli/bootstrap_main.spl \
+  --runtime-path "${stage_runtime_absolute}" \
+  -o "${stage2_bin}"
+EOS
+  scan_root "${st_root}/f2"
+  if [ "${EV_CHECKED}" -ne 1 ] || [ "${EV_BAD}" -ne 0 ]; then
+    echo "selftest: fixture2 (sanctioned line) expected 1 checked / 0 bad, got ${EV_CHECKED}/${EV_BAD} (${EV_NAMES})" >&2
+    fails=$((fails + 1))
+  fi
+
+  # Fixture 3 (must FAIL): only one --source root, everything else present.
+  mkdir -p "${st_root}/f3/scripts" "${st_root}/f3/doc"
+  cat > "${st_root}/f3/scripts/partial.shs" <<'EOS'
+#!/bin/sh
+simple native-build --target x --backend llvm --runtime-bundle core-c-bootstrap \
+  --source src/app --cache-dir c --mode dynload --runtime-path r \
+  --entry src/app/cli/bootstrap_main.spl
+EOS
+  scan_root "${st_root}/f3"
+  if [ "${EV_BAD}" -ne 1 ]; then
+    echo "selftest: fixture3 (single --source root) expected 1 bad, got ${EV_BAD}" >&2
+    fails=$((fails + 1))
+  fi
+
+  # Fixture 4: empty tree must examine 0 invocations so the caller ERRORs.
+  mkdir -p "${st_root}/f4/scripts" "${st_root}/f4/doc"
+  scan_root "${st_root}/f4"
+  if [ "${EV_CHECKED}" -ne 0 ]; then
+    echo "selftest: fixture4 (empty tree) expected 0 checked, got ${EV_CHECKED}" >&2
+    fails=$((fails + 1))
+  fi
+
+  if [ "${fails}" -ne 0 ]; then
+    echo "ERROR — nothing was checked (selftest failed: ${fails} fixture failure(s))"
+    exit 2
+  fi
+}
+
+# -------------------------------------------------------------------- main ---
+ROOT=$(pwd -P)
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) ROOT=$2; shift 2 ;;
+    --root=*) ROOT=${1#--root=}; shift ;;
+    --selftest) SELFTEST_ONLY=1; shift ;;
+    -h|--help)
+      echo "usage: $0 [--root DIR] [--selftest]"
+      exit 0 ;;
+    *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+  esac
+done
+
+TMPDIR_G=$(mktemp -d 2>/dev/null) || {
+  echo "ERROR — nothing was checked (could not create temp dir)"
+  exit 2
+}
+trap 'rm -rf "${TMPDIR_G}"' EXIT INT TERM
+
+selftest
+if [ "${SELFTEST_ONLY}" -eq 1 ]; then
+  echo "PASS — 4 selftest fixture(s) checked, 0 failures"
+  exit 0
+fi
+
+[ -d "${ROOT}" ] || {
+  echo "ERROR — nothing was checked (root does not exist: ${ROOT})"
+  exit 2
+}
+
+scan_root "${ROOT}"
+
+if [ "${EV_CHECKED}" -eq 0 ]; then
+  echo "ERROR — nothing was checked (no bootstrap native-build invocation found under ${ROOT})"
+  exit 2
+fi
+if [ "${EV_BAD}" -ne 0 ]; then
+  echo "FAIL — ${EV_CHECKED} invocation(s) checked, ${EV_BAD} unsanctioned: ${EV_NAMES}"
+  exit 1
+fi
+echo "PASS — ${EV_CHECKED} invocation(s) checked, 0 unsanctioned"
+exit 0

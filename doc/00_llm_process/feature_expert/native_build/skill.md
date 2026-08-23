@@ -226,3 +226,23 @@ process boundary. Three pieces, three commits:
 - Specs: `test/01_unit/compiler/hir/hir_codec_roundtrip_spec.spl`,
   `test/02_integration/compiler/driver/native_build_hir_sharding_spec.spl`.
 - Record: `doc/08_tracking/bug/native_build_phases_after_parse_single_threaded_2026-08-22.md`.
+
+## A bootstrap-stage native-build is never hand-typed (2026-08-23)
+
+`native-build` on a bootstrap stage is **Stage 2 or later** — phase 1 is the
+Rust seed, built by cargo. ~26 runs on 2026-08-22/23 used a hand-typed
+`native-build --source src/app --entry-closure --entry
+src/app/cli/bootstrap_main.spl` labelled "phase 1"; all were unusable.
+
+- **No `--cache-dir` ⇒ `SIMPLE_CACHE_SCOPE` has nothing to partition and the
+  cache cannot hit.** 23,718 log lines, zero cache hits.
+- **One `--source` root instead of three** (`src/compiler`, `src/app`,
+  `src/lib`) ⇒ the closure walker discovers the other trees only via import
+  edges; the run livelocked (counter frozen at 389/688 for 2,700s,
+  `module_surface_registry_index.spl` parsed 73 times) and this was misread as
+  an O(n^2) throughput problem. **A frozen counter at high CPU is a livelock;
+  the two have opposite fixes.**
+
+Sanctioned path: `sh scripts/bootstrap/bootstrap-from-scratch.sh`. Guard:
+`scripts/check/check-sanctioned-bootstrap-invocation.shs` (ADVISORY).
+Record: `doc/08_tracking/bug/phase1_mislabelled_as_native_build_2026-08-23.md`.
