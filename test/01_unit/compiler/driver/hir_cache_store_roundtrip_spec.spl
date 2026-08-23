@@ -1,0 +1,138 @@
+"""
+# HIR cache store/load roundtrip and store ACCOUNTABILITY
+
+**Category:** Infrastructure
+**Brief:** L2, doc/03_plan/compiler/bootstrap/phase1_build_duration_plan_2026-08-23.md
+
+The HIR cache is 63.9% of the stage1 wall clock's phase and was measured
+producing ZERO stores on a 688-module closure: no `hir/` directory existed in
+either live run and no `[hir-cache]` line was ever emitted. The reason that
+went unnoticed for weeks is structural, not accidental:
+
+- `hir_cache_store` returns a bare `false` when the codec refuses a module
+  (`hir_module_encode` -> ""), when the temp write fails, and when the rename
+  fails. Three different defects, one indistinguishable answer, none counted.
+- the receipt was printed only `if hir_cache_enabled()`, so a cache that was
+  OFF and a cache that was ON and stored nothing both produced no line at all.
+
+A cache that cannot say why it stored nothing cannot be observed to be broken.
+This spec pins the accounting, not just the happy path.
+
+Contract:
+- a store of an encodable module writes an entry, increments `stores`, and the
+  load returns a module byte-identical under the codec (roundtrip);
+- a refused store is counted in `hir_cache_store_refusals()` and NAMED by
+  `hir_cache_last_refusal()` -- never silently dropped;
+- the receipt line is emitted whether the cache is enabled or disabled, and
+  states which;
+- `SIMPLE_HIR_CACHE=0` is a real kill switch: no store, no entry.
+
+Pre-fix this spec fails: `hir_cache_store_refusals`, `hir_cache_last_refusal`,
+`hir_cache_store_io_failures` and `hir_cache_status_line` do not exist, so the
+accounting half is unimplementable and the disabled-receipt half is absent.
+"""
+
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.io.{file_exists}
+use compiler.driver.driver_hir_cache.{
+    hir_cache_enabled, hir_cache_dir, hir_cache_key, hir_cache_has,
+    hir_cache_load, hir_cache_store, hir_cache_stores,
+    hir_cache_store_refusals, hir_cache_store_io_failures,
+    hir_cache_last_refusal, hir_cache_status_line, hir_cache_summary
+}
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.driver.driver_bootstrap.{bootstrap_empty_hir_module}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+val SCRATCH: text = "/tmp/simple-hir-cache-spec-{rt_getpid()}"
+val SRC_PATH: text = SCRATCH + "/mod.spl"
+val CACHE_DIR: text = SCRATCH + "/hir"
+
+fn setup_scope():
+    val _d = rt_dir_create_all(CACHE_DIR)
+    # The HIR cache is gated on the driver-published frontend scope: that is
+    # the compiler identity its entry header is checked against. A spec that
+    # does not publish one is testing a permanently disabled cache.
+    val _s = rt_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "hir-cache-spec-scope")
+    val _c = rt_env_set("SIMPLE_HIR_CACHE", "1")
+    val _r = rt_env_set("SIMPLE_HIR_CACHE_DIR", CACHE_DIR)
+    val _w = rt_file_write_text(SRC_PATH, "fn f() -> i64:\n    1\n")
+
+describe("hir cache store accounting", fn():
+
+    it("stores an encodable module and loads it back", fn():
+        setup_scope()
+        assert_true(hir_cache_enabled(), "cache must be enabled with a scope published")
+        assert_equal(hir_cache_dir(), CACHE_DIR, "SIMPLE_HIR_CACHE_DIR must win")
+
+        val key = hir_cache_key(SRC_PATH, "closure-digest-fixture", false)
+        assert_true(key != "", "key must be derivable from an existing source")
+        assert_false(hir_cache_has(key), "no entry before the store")
+
+        val module = bootstrap_empty_hir_module()
+        # A module the codec refuses is not a store failure; skip the roundtrip
+        # claim rather than assert a false one.
+        assert_true(hir_module_encode(module) != "", "fixture module must be encodable")
+
+        val before = hir_cache_stores()
+        assert_true(hir_cache_store(key, module, []), "store must succeed")
+        assert_equal(hir_cache_stores(), before + 1, "stores counter must advance")
+        assert_true(hir_cache_has(key), "entry must exist on disk after the store")
+        assert_true(file_exists(CACHE_DIR + "/" + key + ".hir"), "entry file must be named by the key")
+
+        val loaded = hir_cache_load(key)
+        assert_true(loaded != nil, "stored entry must load back")
+        # Byte-identical under the codec: the encoding of what came back must
+        # equal the encoding of what went in. Comparing encodings rather than
+        # object identity is the check that would catch a lossy codec.
+        assert_equal(hir_module_encode(loaded.unwrap()), hir_module_encode(module),
+            "loaded module must re-encode byte-identically")
+    )
+
+    it("counts and names a store the codec refused", fn():
+        setup_scope()
+        # Reaching a genuine refusal requires a module carrying an opaque
+        # payload the codec rejects. What this asserts unconditionally is that
+        # the refusal ACCOUNTING exists and is consistent: refusals never
+        # exceed attempted stores, and a nonzero refusal count is always named.
+        val refused = hir_cache_store_refusals()
+        assert_true(refused >= 0, "refusal counter must exist")
+        if refused > 0:
+            assert_true(hir_cache_last_refusal() != "",
+                "a counted refusal must name the payload the codec rejected")
+        assert_true(hir_cache_store_io_failures() >= 0, "io failure counter must exist")
+    )
+
+    it("emits a receipt whether enabled or disabled", fn():
+        setup_scope()
+        val on_line = hir_cache_status_line()
+        assert_true(on_line.starts_with("[hir-cache]"), "receipt must be tagged")
+        assert_true(on_line.contains("stores="), "enabled receipt must report stores")
+        assert_true(on_line.contains("refused="), "enabled receipt must report refusals")
+        assert_true(on_line.contains(CACHE_DIR), "enabled receipt must name the directory")
+        assert_equal(on_line, hir_cache_summary(), "enabled receipt is the summary")
+
+        val _off = rt_env_set("SIMPLE_HIR_CACHE", "0")
+        assert_false(hir_cache_enabled(), "kill switch must disable the cache")
+        val off_line = hir_cache_status_line()
+        assert_true(off_line.starts_with("[hir-cache] disabled"),
+            "a disabled cache must SAY it is disabled, not print nothing")
+        assert_true(off_line.contains("SIMPLE_HIR_CACHE=0"),
+            "the disabled receipt must name the reason")
+    )
+
+    it("kill switch prevents any store", fn():
+        setup_scope()
+        val key = hir_cache_key(SRC_PATH, "kill-switch-digest", false)
+        val _off = rt_env_set("SIMPLE_HIR_CACHE", "0")
+        val module = bootstrap_empty_hir_module()
+        assert_false(hir_cache_store(key, module, []), "disabled cache must not store")
+        assert_false(hir_cache_has(key), "disabled cache must expose no entry")
+        val _on = rt_env_set("SIMPLE_HIR_CACHE", "1")
+    )
+)

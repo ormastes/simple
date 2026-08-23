@@ -30,7 +30,7 @@
 # one.
 
 use compiler.hir.hir_types.{HirModule}
-use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_encode_reason, hir_module_decode, hir_codec_header}
 use compiler.frontend.core.flat_pool_codec.{flat_pool_escape, flat_pool_unescape}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
@@ -58,6 +58,17 @@ val HIR_CACHE_ENTRY_VERSION: text = "spl-hircache-v2"
 var _hir_cache_hits: i64 = 0
 var _hir_cache_misses: i64 = 0
 var _hir_cache_stores: i64 = 0
+# A store the CODEC refused (hir_module_encode returned ""), and the reason the
+# codec gave for the most recent one. Refusals are silent by construction --
+# "a cache that cannot store is a slow build, not a wrong one" -- and that
+# silence is exactly why a cache that stored NOTHING for a 688-module closure
+# looked like a cache with a poor hit rate for weeks. A refusal is now counted
+# and named in the receipt, so zero stores is always attributable.
+var _hir_cache_store_refusals: i64 = 0
+var _hir_cache_last_refusal: text = ""
+# Stores that failed for an I/O reason (write or rename), which is a different
+# defect from a codec refusal and must not be conflated with one.
+var _hir_cache_store_io_failures: i64 = 0
 # Recovered (warning-level) lowering diagnostics of the last loaded entry, so
 # a hit replays exactly what the in-process lowering would have reported.
 var _hir_cache_last_warnings: [text] = []
@@ -174,6 +185,8 @@ fn hir_cache_store(key: text, module: HirModule, warnings: [text]) -> bool:
         return false
     val blob = hir_module_encode(module)
     if blob == "":
+        _hir_cache_store_refusals = _hir_cache_store_refusals + 1
+        _hir_cache_last_refusal = hir_module_encode_reason(module)
         return false
     var warning_parts: [text] = ["W\n{warnings.len()}\n"]
     for w in warnings:
@@ -183,10 +196,12 @@ fn hir_cache_store(key: text, module: HirModule, warnings: [text]) -> bool:
     val final_path = hir_cache_path(key)
     val tmp = final_path + ".{rt_getpid()}.tmp"
     if not rt_file_write_text(tmp, hir_cache_header() + "\n" + warning_parts.join("") + blob):
+        _hir_cache_store_io_failures = _hir_cache_store_io_failures + 1
         return false
     if rt_file_move(tmp, final_path):
         _hir_cache_stores = _hir_cache_stores + 1
         return true
+    _hir_cache_store_io_failures = _hir_cache_store_io_failures + 1
     val _cleaned = rt_file_delete(tmp)
     false
 
@@ -199,8 +214,34 @@ fn hir_cache_misses() -> i64:
 fn hir_cache_stores() -> i64:
     _hir_cache_stores
 
+fn hir_cache_store_refusals() -> i64:
+    _hir_cache_store_refusals
+
+fn hir_cache_store_io_failures() -> i64:
+    _hir_cache_store_io_failures
+
+fn hir_cache_last_refusal() -> text:
+    _hir_cache_last_refusal
+
+# The receipt is the only externally visible proof that this cache did
+# anything. It names refusals and I/O failures separately, and names the
+# directory, so "no hir/ directory exists" can be diagnosed without a rebuild.
 fn hir_cache_summary() -> text:
-    "[hir-cache] hits={_hir_cache_hits} misses={_hir_cache_misses} stores={_hir_cache_stores}"
+    val refusal = if _hir_cache_last_refusal == "": "-" else: _hir_cache_last_refusal
+    "[hir-cache] hits={_hir_cache_hits} misses={_hir_cache_misses} stores={_hir_cache_stores} refused={_hir_cache_store_refusals} io_failed={_hir_cache_store_io_failures} reason={refusal} dir={hir_cache_dir()}"
+
+# Printed even when the cache is OFF, so a disabled cache is a stated fact
+# rather than an absent line indistinguishable from a cache that ran and did
+# nothing. SIMPLE_HIR_CACHE=0 is the kill switch; frontend scope absence is
+# the other way this reaches "off".
+fn hir_cache_status_line() -> text:
+    if hir_cache_enabled():
+        return hir_cache_summary()
+    val why = if (rt_env_get("SIMPLE_HIR_CACHE") ?? "") == "0":
+        "SIMPLE_HIR_CACHE=0"
+    else:
+        "no SIMPLE_FRONTEND_CACHE_SCOPE published"
+    "[hir-cache] disabled reason={why}"
 
 # ===== HIR sharding ==========================================================
 #
@@ -367,5 +408,7 @@ export HIR_CACHE_ENTRY_VERSION
 export hir_cache_enabled, hir_cache_dir, hir_cache_closure_digest, hir_cache_key
 export hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_last_warnings
 export hir_cache_hits, hir_cache_misses, hir_cache_stores, hir_cache_summary
+export hir_cache_store_refusals, hir_cache_store_io_failures, hir_cache_last_refusal
+export hir_cache_status_line
 export hir_shard_spec, hir_shard_active, hir_shard_claimed, hir_shard_owns
 export hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary
