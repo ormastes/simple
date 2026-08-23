@@ -153,3 +153,37 @@ Recorded here for completeness because it was the *lethal* one; the fix is in
 - **Relevance.** Every worker process loads it. It is a floor on the closure size
   that L1 and L5 are both fighting, and it cannot be trimmed without dropping the
   dual (interpret + compile) execution capability the design deliberately keeps.
+
+## L8 — The worker-wrapper "abnormal exit" is an **external earlyoom SIGTERM**, not our allocation failing
+
+- **Measured 2026-08-23**, answering the run18/run22 question directly:
+  - Kernel OOM kills in `dmesg`: **0**.
+  - `journalctl -t earlyoom` last 6 h: **70 entries naming `simple`**; last 12 h:
+    **72 kills, every one `sending SIGTERM`**, none `SIGKILL`.
+  - Sample: `sending SIGTERM to process 402931 uid 1000 "simple": badness 986,
+    VmRSS 3971 MiB` (also 3710, 3695, 3727 MiB).
+- **Therefore:** the death is neither a kernel OOM kill nor a genuine in-process
+  allocation failure. It is an **external SIGTERM from earlyoom**, and `simple`
+  is this box's *designated preferred victim* (`--prefer ^(simple|rustc|...)`),
+  badness 985-986. That has three consequences the wrapper's message hides:
+  1. A worker is killed for **whole-box** pressure it may not have caused — any
+     other lane can trigger the kill of ours.
+  2. Death points therefore differ every run (hir 181/688, 327/688, 2275 s,
+     13/688, 288/688, 509/688). The variance is *timing of external pressure*,
+     which is exactly why it is not module-specific and why bisecting the
+     compiler for it finds nothing.
+  3. It is SIGTERM (15), so the worker dies by signal, and the wrapper reports
+     `signal or wait failure, code -1` — **conflating an external SIGTERM with a
+     wait/EINTR bug in the wrapper**. Those need opposite fixes, and the message
+     cannot distinguish them. A peer fixed waitpid EINTR retry + signal-death
+     reporting in `ce3c2bf6c71`; whether this wrapper path benefits from or
+     bypasses that has **not** been established and is the next concrete step.
+- **What this means for the memory work.** Reducing per-worker RSS and worker
+  count genuinely lowers the kill probability — 4 GiB workers are what earn
+  badness 986 — but it **cannot** eliminate it, because the victim is chosen by
+  preference and whole-box pressure, not by fault. Any measurement lane on this
+  box must expect external kills and must not read them as compiler defects.
+- **Not fixable inside the compiler**, hence recorded here: the tractable pieces
+  are (a) make the wrapper distinguish "killed by signal N" from "wait failed",
+  so the next incident is not misdiagnosed, and (b) treat an earlyoom SIGTERM as
+  an infrastructure event in run reports rather than a build failure.

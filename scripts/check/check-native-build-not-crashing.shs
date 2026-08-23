@@ -1,0 +1,108 @@
+#!/bin/sh
+# check-native-build-not-crashing.shs — end-to-end liveness gate for `native-build`.
+#
+# WHY THIS EXISTS. On 2026-08-23 commit ff095d31591 made EVERY `native-build`
+# abort with `rc=134, fatal runtime error: stack overflow` before a single
+# `[build]` line, on a 3-line hello world. It shipped with a 7-example
+# mechanism-pinned spec that PASSED, because that spec exercised the clamp
+# *function* and never the *call path*. Nothing in the tree ran `native-build`
+# end to end, so nothing caught it; it was found only when stage1 stopped
+# building. Every existing guard was green: they check tree structure, symbols,
+# compilability of C, and source-level mechanism strings — none of them RUNS
+# the compiler driver.
+#
+# This gate runs the real thing on a hello world and asserts it does not crash.
+# It deliberately does NOT require a completed build: a full native-build takes
+# minutes and the failure class here (abort before step 0/6) is visible in
+# seconds. Reaching `[build] ... step 1/6 complete` is the liveness bar; the
+# timeout that follows is expected and is a PASS.
+#
+# Verdict is the LAST line of stdout, same convention as the pre-push guards:
+#   PASS — <n> invocation(s) executed, 0 crashes    exit 0
+#   FAIL — <n> invocation(s) executed, <k> crashed  exit 1
+#   ERROR — nothing was checked (<reason>)          exit 2
+# A run that executed 0 invocations is ERROR, never a pass. A missing compiler
+# is ERROR, never a pass — absence of a compiler is absence of evidence.
+#
+# --selftest runs first, unconditionally, and is fatal.
+
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BIN=${SIMPLE_BIN:-"$ROOT/bin/simple"}
+BUDGET=${NATIVE_BUILD_LIVENESS_TIMEOUT:-240}
+EXECUTED=0
+CRASHED=0
+OFFENDERS=""
+
+# selftest: the classifier must call 134/139/124-with-no-progress a crash and a
+# clean progressing run a pass. Exercised on real exit codes, not on strings.
+selftest() {
+    _fail=0
+    for rc in 134 139 132; do
+        if classify "$rc" "yes" >/dev/null; then _fail=1; echo "selftest: rc=$rc must FAIL"; fi
+    done
+    if ! classify 124 "yes" >/dev/null; then _fail=1; echo "selftest: rc=124 with progress must PASS"; fi
+    if classify 124 "no" >/dev/null; then _fail=1; echo "selftest: rc=124 with NO progress must FAIL"; fi
+    if ! classify 0 "yes" >/dev/null; then _fail=1; echo "selftest: rc=0 must PASS"; fi
+    if [ "$_fail" -ne 0 ]; then echo "ERROR — selftest failed"; exit 2; fi
+}
+
+# classify <rc> <progressed:yes|no>  -> exit 0 = ok, 1 = crash
+classify() {
+    _rc=$1; _prog=$2
+    # >=128 is a signal (134 SIGABRT, 139 SIGSEGV). Always a crash.
+    if [ "$_rc" -ge 128 ]; then return 1; fi
+    # 124 is our own timeout: fine ONLY if the driver actually got going.
+    if [ "$_rc" -eq 124 ]; then
+        [ "$_prog" = "yes" ] && return 0
+        return 1
+    fi
+    [ "$_rc" -eq 0 ] && return 0
+    # any other non-zero: a real build error, but not the crash class this
+    # gate exists for; the driver ran. Treat as pass and let other gates judge.
+    return 0
+}
+
+selftest
+
+if [ ! -x "$BIN" ]; then
+    echo "ERROR — nothing was checked (no executable compiler at $BIN; set SIMPLE_BIN)"
+    exit 2
+fi
+
+TMP=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT
+printf 'fn main():\n    print "hi"\n' > "$TMP/hi.spl"
+
+# Two invocations: the default path, and the sharded path with a high thread
+# count. ff095d31591 crashed on BOTH, but the sharded one is where the sizing
+# code that broke actually runs, so a single default-path probe would be weak.
+for threads in 2 16; do
+    LOG="$TMP/run-$threads.log"
+    SIMPLE_TIMEOUT_SECONDS=0 timeout "$BUDGET" "$BIN" native-build \
+        --source "$ROOT/src/app" --entry-closure --entry "$TMP/hi.spl" \
+        --threads "$threads" > "$LOG" 2>&1
+    RC=$?
+    EXECUTED=$((EXECUTED + 1))
+    if grep -aq '\[build\]' "$LOG"; then PROG=yes; else PROG=no; fi
+    if classify "$RC" "$PROG"; then
+        echo "  ok            native-build --threads $threads (rc=$RC, driver progressed=$PROG)"
+    else
+        CRASHED=$((CRASHED + 1))
+        OFFENDERS="$OFFENDERS --threads=$threads(rc=$RC,progressed=$PROG)"
+        echo "  CRASH         native-build --threads $threads (rc=$RC, driver progressed=$PROG)"
+        grep -am1 'stack overflow\|fatal runtime error\|Segmentation' "$LOG" | sed 's/^/                /'
+    fi
+done
+
+echo ""
+if [ "$EXECUTED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no invocation ran)"
+    exit 2
+fi
+if [ "$CRASHED" -ne 0 ]; then
+    echo "FAIL — $EXECUTED invocation(s) executed, $CRASHED crashed:$OFFENDERS"
+    exit 1
+fi
+echo "PASS — $EXECUTED invocation(s) executed, 0 crashes"
+exit 0

@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=131
+ROW_FLOOR=141
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -553,6 +553,26 @@ must_contain     "IMPORTASTMEMO reproduce test pins one parse per module" \
 must_contain     "IMPORTASTMEMO read-site attribution trace kept" \
     "$ROOT/src/compiler_rust/compiler/src/read_trace.rs" \
     "SIMPLE_READ_TRACE"
+
+# --- shard concurrency MemAvailable clamp (2026-08-23, re-landed) ----------
+# doc/08_tracking/bug/shard_threads_no_memavailable_clamp_2026-08-23.md
+# The first landing used file_read("/proc/meminfo") and aborted every
+# native-build with rc=134 (seed file_read infinitely recurses --
+# seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md). The
+# process_run_timeout read is therefore part of the MECHANISM, not an
+# incidental style choice: reintroducing file_read here re-breaks the compiler.
+must_contain     "SHARDCLAMP cap arithmetic present"               "$ROOT/src/app/cli/shard_mem_clamp.spl" "var cap = (avail_kb * 6 / 10) / budget_kb"
+must_contain     "SHARDCLAMP never raises the request"             "$ROOT/src/app/cli/shard_mem_clamp.spl" "if cap >= requested:"
+must_contain     "SHARDCLAMP reads meminfo WITHOUT file_read"      "$ROOT/src/app/cli/shard_mem_clamp.spl" "process_run_timeout(\"awk\""
+must_not_contain "SHARDCLAMP must not reintroduce file_read"       "$ROOT/src/app/cli/shard_mem_clamp.spl" "file_read("
+must_contain     "SHARDCLAMP wired into the shard chooser"         "$ROOT/src/app/cli/native_build_main.spl" "shard_threads_mem_cap(threads, budget_kb)"
+must_contain     "SHARDCLAMP parse phase carries the slim budget"  "$ROOT/src/app/cli/native_build_main.spl" "SIMPLE_PARSE_SHARD_WORKER_KB"
+must_contain     "SHARDCLAMP HIR phase clamped harder"             "$ROOT/src/app/cli/native_build_main.spl" "SIMPLE_HIR_SHARD_WORKER_KB"
+must_contain     "SHARDCLAMP spec pins per-phase asymmetry"        "$ROOT/test/01_unit/app/cli/shard_mem_clamp_spec.spl" "expect(hir_cap < parse_cap).to_be_true()"
+# The end-to-end gate is the thing that would have caught ff095d31591; a unit
+# spec provably would not, and did not.
+must_contain     "NBLIVENESS end-to-end gate exists"               "$ROOT/scripts/check/check-native-build-not-crashing.shs" "native-build"
+must_contain     "NBLIVENESS treats a signal death as a crash"     "$ROOT/scripts/check/check-native-build-not-crashing.shs" "_rc\" -ge 128"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then

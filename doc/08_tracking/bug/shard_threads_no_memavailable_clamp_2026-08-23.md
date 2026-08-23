@@ -1,17 +1,14 @@
 # Shard concurrency was derived from CPU count alone — worker group OOM-reaped mid-HIR
 
 - Date: 2026-08-23
-- Status: **REVERTED 2026-08-23** — the clamp as landed (`ff095d31591`) made
-  every `native-build` abort with `rc=134, fatal runtime error: stack overflow`
-  in <9 s, before a single `[build]` line, on a 3-line hello world with
-  `--threads 2` (so not load-dependent). A/B on the same tree/seed:
-  `SIMPLE_SHARD_MEM_CLAMP=0` progressed normally to
-  `[build] source_closure 1/1 step 1/6 complete`; default crashed. Reverted so
-  main is buildable; the finding below stands and will be re-landed with an
-  end-to-end `native-build` reproduce test. The shipped spec passed while the
-  real path crashed — it exercised the clamp *function* but never the *call
-  path*, which is the lesson.
-- Original status: FIXED (clamp landed); the underlying per-worker footprint is tracked
+- Status: **RE-LANDED 2026-08-23** after a revert. First landing
+  (`ff095d31591`) aborted every `native-build` with `rc=134, fatal runtime
+  error: stack overflow` before step 0/6, on a 3-line hello world with
+  `--threads 2`. Reverted in `765f9d2aad4`; root cause was **not** the clamp
+  logic but `file_read`, which infinitely recurses in the run20-class seed on
+  ANY file — `seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md`.
+  Re-landed reading MemAvailable via `process_run_timeout("awk", ...)`.
+- Underlying finding (unchanged and still correct); the underlying per-worker footprint is tracked
   separately in `doc/09_report/rust-perf-limits.md`.
 - Related: `doc/09_report/build_parallelism_memory_audit_2026-08-23.md` §2, §4
 
@@ -63,6 +60,9 @@ slim parse-lane entry (1.65 GB, the same constant
 spawn the full worker closure (3.0 GB, measured). HIR is therefore clamped
 harder — which matters, since every observed kill was in HIR.
 
+Confirmed live on the real path after the re-land:
+`[shard] threads=11 (requested 16, capped by MemAvailable=32227176 kB / worker budget 1650000 kB)`, build then proceeding past `step 1/6`.
+
 Measured effect on this box at `MemAvailable = 21,958,928 kB`, request 16:
 
 | phase | before | after | asked-for RSS before → after |
@@ -83,9 +83,34 @@ suspending live shards would re-open the orphaned-claim class fixed by
 `SIMPLE_PARSE_SHARD_WORKER_KB` / `SIMPLE_HIR_SHARD_WORKER_KB` override the
 budgets.
 
+## What the first landing got wrong, and the fix to the process
+
+The shipped spec was 7 mechanism-pinned examples and it **passed while the real
+path crashed**: it exercised the clamp *function* and never the *call path*.
+That is the same class as "code that compiled and executed zero times". Nothing
+in the tree ran `native-build` end to end, so nothing could have caught it.
+
+New gate `scripts/check/check-native-build-not-crashing.shs` runs the real
+driver on a hello world at `--threads 2` and `--threads 16` and asserts it does
+not die by signal. Verified in both directions on the run20 seed:
+
+| tree | gate verdict |
+|---|---|
+| the broken `ff095d31591` clamp restored | `FAIL — 2 invocation(s) executed, 2 crashed` (`rc=134`, `progressed=no`) |
+| the re-landed clamp | `PASS — 2 invocation(s) executed, 0 crashes` |
+
+Bisect that isolated it (each step a real `native-build`):
+
+| variant | result |
+|---|---|
+| clamp as landed | rc=134 |
+| `shard_threads_mem_cap` body → `requested` | rc=124, no crash |
+| full body, `/proc` read replaced by a constant | rc=124, no crash |
+| **`file_read` called, result discarded, never parsed** | **rc=134** |
+
 ## Test
 
-`test/01_unit/app/cli/shard_mem_clamp_spec.spl` — 7 examples, 455 ms. Pins the
+`test/01_unit/app/cli/shard_mem_clamp_spec.spl` — 7 examples, 455 ms. **Necessary but provably not sufficient** (see above); the end-to-end bar is `check-native-build-not-crashing.shs`. Pins the
 mechanism (cap arithmetic, per-phase asymmetry, the never-raise and
 never-zero invariants, the unknown-memory skip), not wall-clock. Neuter check:
 replacing the cap computation with `cap = requested` turns 3 of the 7 red;
