@@ -5,8 +5,9 @@
 **Owner files:** `src/lib/nogc_sync_mut/spec/in_development.spl`,
 `src/app/test_runner_new/test_runner_main.spl`,
 `src/app/test_runner_new/test_runner_single.spl`
-**Specs:** `test/01_unit/lib/spec/in_development_tag_spec.spl`,
-`test/02_integration/test_runner/in_development_tag_runner_spec.spl`
+**Specs:** `test/01_unit/lib/spec/in_development_tag_spec.spl` (landed,
+21/21). An end-to-end runner spec is **not** landed — see "Known limits"
+below.
 
 ## Problem
 
@@ -218,3 +219,22 @@ tag-listing CLI are separate lanes. They consume the API above.
 | sweep, 1 failing + 1 passing tagged fixture | `Results: 1 total, 1 passed, 0 failed, 1 skipped` / `All tests passed!` / `In-development: 1 skipped (expected to fail), 1 UNEXPECTED PASS (ready to promote)` |
 | explicit path, failing tagged fixture | `IN-DEVELOPMENT EXPLICIT ...` / `Results: 1 total, 0 passed, 1 failed` / `FAIL`, rc=1 |
 | control dir sweep, untagged specs | rc=1 from the pre-existing `runtime_file_rename` defect above, not from this change |
+
+3. **The end-to-end runner spec is deferred, not written-and-passing.**
+   A `test/02_integration/test_runner/in_development_tag_runner_spec.spl`
+   was written to spawn a real child `simple test` over generated
+   fixtures and assert on its stdout and exit code. It **hangs**: after
+   ~25 minutes it had produced zero examples and its output had stopped
+   growing, with each of its seven scenarios spawning a nested full
+   `simple test` sweep (each of which itself pays a ~10s session setup and
+   contends for the test daemon). It was deliberately NOT landed — a spec
+   that hangs stalls the tree for every other lane, which is worse than
+   an absent spec, and landing an unverified spec would be exactly the
+   unproven-guard shape the process rules forbid.
+
+   The behaviour it would have pinned **is** measured, by the manual runs
+   in the table above; what is missing is the automation, not the
+   evidence. The likely right shape for the retry is a single child sweep
+   over one fixture directory holding both fixtures, asserting all four
+   behaviours from that one invocation's output, rather than seven
+   separate nested sweeps. Filed here rather than silently dropped.
