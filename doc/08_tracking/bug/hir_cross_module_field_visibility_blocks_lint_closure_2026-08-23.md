@@ -89,3 +89,101 @@ reverted while shards were live), so shards may have seen inconsistent
 compiler source. The conclusion is unaffected: every one of the 1512 errors is
 an HIR visibility/resolution error in files this lane never touched, and the
 build died before monomorphization ran at all.
+
+---
+
+## RESOLVED 2026-08-23 — the checker was right, its INPUT was fabricated
+
+The open design question ("are unmarked fields public, or do 44 files need
+markers?") is answered: **an unmarked struct/class field is PUBLIC, gated by
+the composite's own visibility.** Adding markers to 44 files was not merely the
+wrong answer — it was not even expressible.
+
+### Evidence
+
+1. **Per-field visibility is structurally unrepresentable on the main parse
+   path.** The flat AST decl node exposes `decl_get_fields`,
+   `decl_get_field_types`, `decl_get_field_defaults`, `decl_get_field_bits`
+   (`10.frontend/core/_Ast/decl_nodes.spl`) — and **no visibilities array**.
+   `parse_struct_decl` (`_ParserDecls/fn_struct_decls.spl:896-909`) collects
+   `field_names / field_types / field_defaults / field_bits /
+   layer_field_renames` and no visibility list. So `pub trimmed: text` inside a
+   struct body cannot be carried, and a Private default can **never** be
+   overridden from source. A rule with no source-level remedy is not a rule.
+2. **The bridge fabricated the value.**
+   `_FlatAstBridge/module_assembly.spl:360` hardcoded `visibility:
+   Visibility.Private, is_public: false` for every struct/class field. It was
+   never read from the declaration.
+3. **The same function already says Public for enum variant payload fields**
+   (`module_assembly.spl:502`).
+4. **The declaring module's own HIR tables grant every field
+   unconditionally** — `prescan_composite_field_types` and
+   `register_struct_field_types` (`_Items/module_callable_types.spl:45,67`) set
+   `field_access[name] = true` and `constructor_access = true` outright.
+5. **The interface digest treats an undeclared visibility as public** —
+   `35.semantics/interface/compile_interface.spl:62`,
+   `canon_str(sig.declared_visibility ?? "public")`.
+6. **The language has an explicit private marker.** `treesitter_parse_visibility`
+   (`treesitter/outline_decls.spl:79`) accepts `KwPri`. A `pri` keyword is
+   pointless if unmarked already means private.
+7. **Twin check (standing rule): the seed does not implement this at all.**
+   `grep "not visible from this module" src/compiler_rust/` returns **0**. The
+   whole diagnostic exists only in the pure-Simple HIR — a textbook
+   seed-lenient / stage1-strict split. No spec anywhere asserts a field
+   denial (`grep -rln` over `test/` returns 0 files).
+
+The policy engine itself (`00.common/dependency/member_visibility.spl`) is
+correct and is **unchanged** — `member_visibility_allows`,
+`aggregate_constructor_visibility_allows` and every scoped kind
+(Package/Internal/Up/Peer/Private) keep their exact semantics. Only the
+fabricated default feeding them was wrong. Sealing via `pub(...)` on the
+composite still works; nothing was weakened that source could actually express.
+
+### Fix
+
+- `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl` — struct/class
+  fields are built `Visibility.Public / is_public: true`, with the reasoning
+  above recorded inline.
+- `src/compiler/10.frontend/treesitter/outline_members.spl` — same-class sweep:
+  enum struct-variant payload fields were hardcoded `Private` on the outline
+  path while the flat-AST bridge builds them `Public`, so the two paths
+  disagreed about one declaration. Now `Public` on both.
+
+Reproduce spec: `test/01_unit/compiler/frontend/struct_field_default_visibility_spec.spl`
+— **3 failed pre-fix, 3 passed post-fix**, verified by reverting the bridge
+edit alone. Its third case asks the real policy owner the exact HIR question:
+whether `rules_lint.spl` may name `LineContext.trimmed` declared in
+`rules_helpers.spl`.
+
+### Follow-up, recorded not guessed
+
+Per-field visibility remains **unimplementable** on the main path: to honour a
+per-field `pri`/`pub(...)` marker the flat AST needs a visibilities array
+parallel to `decl_get_field_types`, plus parser and bridge support. Until then
+the composite's own visibility is the only field-sealing mechanism, and
+`member_visibility_allows` will only ever see `Public` for a field on this
+path. The treesitter outline path *does* parse a per-field marker
+(`outline_decls.spl:447`) but defaults an unmarked field to `Private`, which
+now disagrees with the semantic answer above; it feeds outlines/LSP, not the
+HIR surface, so it was left alone rather than changed speculatively.
+
+### Real-scale re-measurement status (honest)
+
+The post-fix 140-module `src/app/lint --entry-closure` rerun is **still
+running** and its error count is **NOT yet established**. Recorded so the gap
+is not mistaken for a green result:
+
+- Closure size **reconfirmed at 140 modules** post-fix (`[build] parse N/140`).
+- Host is saturated: `--threads 2` reached `parse 39/140` in 2h33m; a
+  `--threads 4` rerun (matching the original probe's command exactly) reached
+  `parse 5/140` in ~3h. Neither reached step 2/6, where the 1512 errors were
+  raised.
+- What IS established at unit scale: the reproduce spec's third case puts the
+  exact HIR question to the real policy owner — may `rules_lint.spl` name
+  `LineContext.trimmed` declared in `rules_helpers.spl` — and it goes from
+  DENIED pre-fix to ALLOWED post-fix.
+
+Any claim that the lint closure now clears step 2/6 is unsupported until that
+run completes. Whether monomorphization is then reached, and whether
+`E-MONO-030/032/033` fire there, remains exactly as open as this record's
+original section said.
