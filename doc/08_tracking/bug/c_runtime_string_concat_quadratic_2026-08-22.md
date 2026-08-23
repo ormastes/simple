@@ -86,3 +86,16 @@ Re-audited for an in-place append that keeps the `rt_*` ABI and the
 Decision: NOT patched in the runtime. Filed as a lowering feature (option 1
 with an escape check, or option 2 builder-loop lowering). Any runtime-only
 "fix" here would be a silent aliasing bug, which is worse than quadratic.
+
+## 2026-08-23 follow-on from the same audit: dict delete path
+
+The runtime perf lane re-read this record, confirmed the design stop above
+(no ABI-preserving sole-owner path for `RtCoreString`), and left
+`rt_string_concat` untouched. Extending the collection audit to the DELETE
+path — which the 2026-08-22 pass did not exercise — found a real,
+runtime-only, semantics-preserving cost bug of the same class:
+`rt_core_dict_put` resized by doubling ONLY, so tombstones from
+`d[k] = v; d.remove(k)` grew the table without bound (34.9 MB for a dict with
+zero live entries). Fixed by the same-capacity rehash guard the immortal
+registry already had. Record:
+`c_runtime_dict_tombstone_churn_unbounded_growth_2026-08-23.md`.

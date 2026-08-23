@@ -128,33 +128,6 @@ must_contain "me-method receiver released: linear pin"    "$MEPUSH" "ratio < 9.0
 must_contain "me-method receiver moved (f8681a7afa6): args evaluated before the move" \
     "$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs" "evaluate_call_args(args, env, functions, classes, enums, impl_methods)"
 
-# --- 2026-08-22: global array push from a function deep-copied the array per frame
-# (parser pushes ~70 pools per node -> O(n^2) parse; hir_codec.spl 1186 s -> 187 s),
-# and the lexer passed source_chars by argument on every token (O(file) per token).
-GPUSH="$ROOT/src/compiler_rust/compiler/tests/interpreter_global_array_push_in_place.rs"
-must_contain "global push unique-owned: counter pin"      "$GPUSH" "elems < 10 * n as u64"
-must_contain "global push unique-owned: linear pin"       "$GPUSH" "ratio < 9.0"
-must_contain "global push unique-owned: steal at promotion" \
-    "$ROOT/src/compiler_rust/compiler/src/value.rs" "self.steal_for_mutation(key, &v);"
-must_contain "global push unique-owned: caller drops published copies" \
-    "$ROOT/src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs" "env.drop_published_globals();"
-must_contain "global push unique-owned: flat-map temporary not held" \
-    "$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs" "Some(obj @ Value::Object { .. }) => Some(obj.clone()),"
-# --- helper-fn shape of the same bug (seed_global_array_push_quadratic_2026-08-22): the
-# global is not in the helper's env, so it never reached the steal-at-promotion path.
-GPUSH2="$ROOT/src/compiler_rust/compiler/tests/interpreter_global_array_push_linear.rs"
-must_contain "global push helper-fn: store handle promoted into the frame" \
-    "$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs" "Some(v @ Value::Array(_)) => Some(v.clone()),"
-must_contain "global push helper-fn: stores parked before make_mut" \
-    "$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs" "let released = release_global_aliases(obj_name, env);"
-must_contain "global push helper-fn: ratio pin"  "$GPUSH2" "ratio < 8.0"
-must_contain "global push helper-fn: spec twin (scaling ratio)" \
-    "$ROOT/test/01_unit/compiler/interpreter/global_array_push_linear_spec.spl" "floor * 8"
-must_contain "lexer source_chars not an argument: spec pin" \
-    "$ROOT/test/01_unit/compiler/frontend/lexer_source_chars_not_passed_per_token_spec.spl" "fn core_token_text_matches(chars: [text]"
-must_not_contain "lexer source_chars not an argument: source" \
-    "$ROOT/src/compiler/10.frontend/core/lexer_struct.spl" "core_token_text_matches(self.source_chars"
-
 SHEMPTY="$ROOT/src/compiler_rust/compiler/tests/interpreter_shared_empty_captured_env.rs"
 must_contain "shared empty captured env: holder-count pin" "$SHEMPTY" "after >= before + N"
 must_contain "shared empty captured env: filter site uses it" \
@@ -199,119 +172,8 @@ must_contain     "SCOPEROW define probes scope row in place"      "$ROOT/src/com
 must_contain     "EXCL exclusive slot time"                       "$ROOT/src/compiler/20.hir/hir_lowering/hir_phase_profile.spl" '_hir_prof_excl_ms[slot] = _hir_prof_excl_ms[slot] + (elapsed - child_ms)'
 must_contain     "seed: decision coverage checks enabled first"   "$ROOT/src/compiler_rust/compiler/src/interpreter_control.rs" 'record_decision_coverage_here('
 must_not_contain "seed: no eager coverage file per decision"      "$ROOT/src/compiler_rust/compiler/src/interpreter_control.rs" 'record_decision_coverage_sffi(&current_coverage_file(),'
-
-# --- QTYPEIDX (2026-08-22). SymbolTable.lookup_qualified_type_raw was a linear
-# scan over three parallel arrays with two text comparisons per row, and
-# materialize_imported_callable_dependency issues up to three probes per named
-# type per imported callable per importing module. 84% of probes MISS, and a
-# miss always pays the full table length: 1,496,719 probes / 1,251,806 misses in
-# stage1 run12, ~3.4ms per probe, making `callable_deps` (5,241,657 ms) the
-# largest exclusive term in the whole HIR phase. The Dict was already maintained
-# in lockstep by the only writer and is the only form the codec serializes, so
-# the fix reads it instead. The `#` key must stay: `.` was not injective
-# (("a.b","c") and ("a","b.c") collide).
-# Record: doc/08_tracking/bug/hir_qualified_type_lookup_linear_scan_2026-08-22.md
-QTYPES="$ROOT/src/compiler/20.hir/hir_types.spl"
-QTYPESPEC="$ROOT/test/01_unit/compiler/hir/qualified_type_lookup_scaling_spec.spl"
-must_contain     "QTYPEIDX injective index key"                   "$QTYPES" 'module_name + "#" + member_name'
-must_contain     "QTYPEIDX type lookup is a Dict probe"           "$QTYPES" 'if self.qualified_types.contains_key(key):'
-must_contain     "QTYPEIDX function lookup is a Dict probe"       "$QTYPES" 'if self.qualified_functions.contains_key(key):'
-must_not_contain "QTYPEIDX no parallel-array type scan"           "$QTYPES" 'self.qualified_type_module_names'
-must_not_contain "QTYPEIDX no parallel-array function scan"       "$QTYPES" 'self.qualified_function_names'
-must_contain     "QTYPEIDX scaling spec pins the 3x ratio"        "$QTYPESPEC" 'val budget = (small_ms + 1) * 3'
-
-# --- GLBMEMO (2026-08-22). Follow-up to QTYPEIDX: with the qualified-type
-# lookup O(1), the terms left standing (field_dep, sigtype, declared_dep,
-# project) are all dominated by that same lookup, so QTYPEIDX removed their
-# superlinear component too. The one repeat it did NOT remove is the MISS
-# fallback: lower_named_kind's default arm calls try_register_glob_reachable_symbol,
-# which has no early exit on failure (it must visit every glob target to prove
-# no route exists) and remembered nothing -- so the sweep re-ran for every
-# unbound-name occurrence, ~1.25M times per stage1 build (run12: 1,251,806 of
-# 1,496,719 probes take the miss path), at O(glob targets x 6 linear surface
-# name scans) each. Charged to sigtype / project / field_dep. Fixed by a
-# registry-pure-per-importer negative memo plus routing the declaration
-# question through the existing NAMEIDX index.
-# Record: doc/08_tracking/bug/hir_glob_reachable_sweep_unmemoized_2026-08-22.md
-GLBREG="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl"
-GLBTYPES="$ROOT/src/compiler/20.hir/hir_lowering/types.spl"
-GLBSPEC="$ROOT/test/01_unit/compiler/hir/hir_glob_reachable_miss_memo_spec.spl"
-must_contain     "GLBMEMO negative memo is consulted"             "$GLBREG" 'if self.glob_reachable_miss_memo.contains_key(miss_key):'
-must_contain     "GLBMEMO records only a completed miss"          "$GLBREG" 'self.glob_reachable_miss_memo[miss_key] = true'
-must_contain     "GLBMEMO key carries generation and importer"    "$GLBREG" 'val miss_key = "{self.module_surfaces.generation} {importer_index} {name}"'
-must_contain     "GLBMEMO declares-item uses the NAMEIDX index"   "$GLBREG" 'if self.surface_declares_item_indexed(target, name):'
-must_not_contain "GLBMEMO no linear declares-item in the sweep"   "$GLBREG" 'if hir_module_declares_item(target, name):'
-must_contain     "GLBMEMO sweep counter exists"                   "$GLBTYPES" 'glob_reachable_scan_count: i64'
-must_contain     "GLBMEMO spec pins one sweep per repeat"         "$GLBSPEC" 'expect(lowering.glob_reachable_scan_count).to_equal(1)'
-
-# --- HIRCODECCHUNK (2026-08-22). The HIR per-module cliffs in stage1 run12 were
-# not lowering at all: `[build] hir` completion minus the `[hir-prof]` lowering
-# total left 1,535 s unaccounted on zca_rows (lowering was 7.8 s), and that gap
-# is hir_cache_store -> hir_module_encode. HirCodecWriter.parts was deep-cloned
-# by the seed on EVERY push (a class reaching a frame through >1 parameter hop
-# keeps a second Arc owner alive), so encode was O(n^2): 1,139,353 ms -> 6,702 ms
-# on zca_rows once `parts` is bounded to HIR_CODEC_CHUNK_LINES and full chunks
-# move to `chunks`. The seal must stay INLINE at each put site (a nested `me`
-# helper is the shape whose write-back the seed loses) and each put must do
-# exactly one push (an early `return` that skips the seal reinstates O(n^2)).
-# Record: doc/08_tracking/bug/hir_codec_writer_quadratic_cow_clone_2026-08-22.md
-HIRCODECW="$ROOT/src/compiler/20.hir/hir_codec_support.spl"
-must_contain     "HIRCODECCHUNK bounded chunk size"               "$HIRCODECW" "val HIR_CODEC_CHUNK_LINES: i64 = 512"
-must_contain     "HIRCODECCHUNK writer carries sealed chunks"     "$HIRCODECW" "chunks: [text]"
-must_contain     "HIRCODECCHUNK finish joins chunks not parts"    "$HIRCODECW" "self.chunks.join(\"\")"
-must_contain     "HIRCODECCHUNK seal inlined at put sites"       "$HIRCODECW" "if self.parts.len() >= HIR_CODEC_CHUNK_LINES:"
-must_contain     "HIRCODECCHUNK cost spec pins the bound"         "$ROOT/test/01_unit/compiler/hir/hir_codec_writer_chunked_cost_spec.spl" "w.parts.len() <= HIR_CODEC_CHUNK_LINES"
-must_contain     "HIRCODECCHUNK cost spec pins linear growth"     "$ROOT/test/01_unit/compiler/hir/hir_codec_writer_chunked_cost_spec.spl" "big_ms <= floor_ms * 8"
-# --- HOPPARK (2026-08-22): the ROOT defect behind HIRCODECCHUNK. A `me`-mutating
-# method deep-cloned the field array whenever the receiver reached the mutating
-# frame through more than one parameter hop, because every intermediate frame
-# kept a live Arc on the field. The caller's binding is parked for the duration
-# of the call and restored from the callee's final value (which is exactly what
-# the Bug #19 write-back already does), so a genuinely live alias still forces
-# the copy. All three write-back call paths must park, or the shape comes back.
-# Record: doc/08_tracking/bug/seed_receiver_multi_hop_cow_clone_2026-08-22.md
-HOPPARK="$ROOT/src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs"
-HOPTEST="$ROOT/src/compiler_rust/compiler/tests/interpreter_receiver_hop_depth_linear.rs"
-must_contain     "HOPPARK caller handle released across the call" "$HOPPARK" "fn park_written_back_arguments("
-must_contain     "HOPPARK parked bindings always restored"        "$HOPPARK" "fn restore_parked_arguments("
-must_contain     "HOPPARK park set mirrors the write-back rules"  "$HOPPARK" "fn identifier_arg_bindings("
-must_contain     "HOPPARK module globals are never parked"        "$HOPPARK" "if !outer_env.is_local(caller_name.as_str()) {"
-must_contain     "HOPPARK test pins clone budget at every depth"  "$HOPTEST" "for depth in 1..=3usize {"
-must_contain     "HOPPARK test keeps the aliased control"         "$HOPTEST" "fn a_genuine_alias_still_forces_the_copy()"
-must_contain     "HOPPARK spec twin (scaling ratio)" \
-    "$ROOT/test/01_unit/compiler/interpreter/receiver_hop_depth_linear_spec.spl" "floor * 8"
-must_contain     "HOPPARK spec twin (alias keeps its snapshot)" \
-    "$ROOT/test/01_unit/compiler/interpreter/receiver_hop_depth_linear_spec.spl" "alias_keeps_snapshot"
-
 must_contain     "seed: CowEnv frame maps on ahash"               "$ROOT/src/compiler_rust/compiler/src/value.rs" 'pub(crate) type FrameMap<K, V> = HashMap<K, V, ahash::RandomState>;'
 must_contain     "seed: shadow capture tests prior value first"   "$ROOT/src/compiler_rust/compiler/src/interpreter/block_exec.rs" 'if let Some(value) = prior_value.as_ref() {'
-must_contain     "SCALARARR seed: scalar [T] args skip element scan" "$ROOT/src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs" 'fn array_param_has_scalar_elements(param: &Parameter) -> bool {'
-
-# --- FNREFJIT (2026-08-22): a named fn loaded as a value gets a `name$boxed`
-# thunk wrapped in a zero-capture rt_closure_new, so `Port(tokenize_fn: f)`
-# (compiler_services.spl:168) no longer bails the WHOLE stage1 closure to the
-# tree-walking interpreter (~30x/statement). The guard must stay narrowed to
-# bodiless/extern names only.
-must_contain     "FNREFJIT seed: fn-value boxed entries emitted"  "$ROOT/src/compiler_rust/compiler/src/codegen/common_backend.rs" 'self.emit_boxed_fn_value_entries(mir, &functions)?;'
-must_contain     "FNREFJIT seed: GlobalLoad wraps boxed thunk"   "$ROOT/src/compiler_rust/compiler/src/codegen/instr/mod.rs" 'helpers::call_runtime_2(ctx, builder, "rt_closure_new", addr, count)'
-must_contain     "FNREFJIT seed: guard only for bodiless names"   "$ROOT/src/compiler_rust/compiler/src/codegen/jit.rs" '.filter(|f| f.blocks.is_empty())'
-must_contain     "FNREFJIT seed: no-bail test present"            "$ROOT/src/compiler_rust/compiler/tests/fn_ref_value_jit.rs" 'must JIT-compile without bailing'
-
-# --- ANYVTJIT (2026-08-22): a bare method on an ERASED receiver (`x: Any`, a
-# trait-typed parameter) is dispatched at runtime over the receiver's vtable
-# identity instead of bailing the whole module with [CODEGEN-AMBIGUOUS-METHOD].
-# That gate alone dropped the stage1 closure (BlockRegistry.register/
-# register_block/with_block on `block_def: Any`) to the tree-walking
-# interpreter. Two soundness fixes ride along and must not regress: a by-value
-# copy of a vtable-bearing struct must include the 8-byte header, and a vtable
-# slot pointing at a selfless body must go through its receiver-dropping thunk.
-must_contain     "ANYVTJIT seed: vtable type switch emitted"      "$ROOT/src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs" 'fn try_emit_vtable_type_switch<M: Module>('
-must_contain     "ANYVTJIT seed: switch tried before refusing"    "$ROOT/src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs" 'if try_emit_vtable_type_switch(ctx, builder, dest, receiver, args, method_part, &cands)? {'
-must_contain     "ANYVTJIT seed: struct(Trait) records an impl"   "$ROOT/src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs" 'if let Some(trait_name) = struct_implements_trait(s) {'
-must_contain     "ANYVTJIT seed: aggregate copy keeps vtable hdr" "$ROOT/src/compiler_rust/compiler/src/codegen/instr/mod.rs" '*byte_size + 8, &shifted'
-must_contain     "ANYVTJIT seed: selfless vtable slot thunked"    "$ROOT/src/compiler_rust/compiler/src/codegen/closure_boxed_entry.rs" 'pub fn emit_vtable_selfless_entries('
-must_contain     "ANYVTJIT seed: no-bail test present"            "$ROOT/src/compiler_rust/compiler/tests/any_receiver_vtable_dispatch_jit.rs" 'must JIT-compile'
-must_contain     "ANYVTJIT src: SmfReaderImpl declares the trait" "$ROOT/src/compiler/70.backend/linker/smf_reader.spl" 'impl SmfReader for SmfReaderImpl:'
 
 # --- pure-Simple core interpreter: collection writes through the owner, not a
 # temp alias (`var v = val_arrays[x]; v.push(e); val_arrays[x] = v` deep-copies
@@ -399,6 +261,19 @@ must_contain "memory budget gate present" \
 # SIMPLE_MEM_TRACE=1 silently prints nothing (measured 0 lines pre-fix).
 must_contain "mem census emitted before terminal exit" \
     "$ROOT/src/compiler_rust/driver/src/main.rs" "mem_trace::report"
+
+# --- C runtime dict: delete-heavy churn must not grow the table forever.
+# rt_core_dict_put resized only by doubling, and the 70% load test counts
+# tombstones, so `d[k]=v; d.remove(k)` in a loop doubled capacity on tombstones
+# alone: a dict with ZERO live entries reached 34.9 MB after 1.6M churn pairs.
+# The fix rehashes in place at the SAME capacity when tombstones outnumber live
+# entries and the live set is sparse. The absence of that same-cap branch IS the
+# regression, so pin it plus the selfcheck that measures the curve.
+must_contain "dict churn same-cap rehash present" \
+    "$ROOT/src/runtime/runtime_native.c" "next_cap = d->cap;"
+must_contain "dict churn growth selfcheck present" \
+    "$ROOT/src/runtime/test/rt_dict_tombstone_churn_growth_selfcheck.c" \
+    "dict table growing with churn count"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then

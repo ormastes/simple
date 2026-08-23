@@ -8153,7 +8153,23 @@ static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
     if (!d || !d->entries) return 0;
     /* Resize at 70% load (live + tombstones). */
     if ((d->len + d->tombstones + 1) * 10 > d->cap * 7) {
-        rt_core_dict_resize(d, d->cap * 2);
+        /* A delete-heavy workload (`d[k] = v; d.remove(k)` in a loop) drives
+         * the load factor purely with TOMBSTONES while `len` stays tiny.
+         * Doubling on that reclaims the tombstones but never gives them back,
+         * so a dict holding zero live entries grew without bound: measured
+         * 1.6M insert+delete pairs on an empty-at-rest dict peaked at 35 MB.
+         * When tombstones outnumber live entries and the live set is sparse,
+         * rehash IN PLACE at the same capacity instead — the rehash loop in
+         * rt_core_dict_resize already drops tombstones, so this costs the same
+         * O(cap) walk and keeps capacity proportional to the live set.
+         * Same guard, same thresholds, as rt_core_register_immortal_ptr. */
+        int64_t next_cap = d->cap * 2;
+        if (d->cap > RT_CORE_DICT_INIT_CAP &&
+            d->tombstones > d->len &&
+            (d->len + 1) * 10 < d->cap * 5) {
+            next_cap = d->cap;
+        }
+        rt_core_dict_resize(d, next_cap);
     }
     int64_t ck = rt_core_dict_canon_key(key);
     uint64_t h = rt_core_dict_hash(ck);
