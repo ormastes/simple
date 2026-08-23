@@ -138,3 +138,35 @@ describe "struct method vs string-only MIR fallback arm":
         val rep = reg.replace("alpha", "gamma")
         expect(rep.ok).to_equal(true)
         expect(rep.label).to_equal("gamma")
+
+    it "vetoes the string arms for a CROSS-MODULE custom owner":
+        # @req: REQ-COMPILER-MIR-001
+        # Bug: selfhost_struct_method_hijacked_by_string_arm_cross_module_2026-08-23
+        #
+        # The 2026-08-23 fix above widened `predicate_method_shape` so the owner
+        # evidence is computed for every name the string arms claim, but the
+        # evidence itself was still gated on `struct_method_syms`, which is
+        # module.impls-derived and RESET PER MODULE
+        # (_MirLowering/module_lowering.spl:1063). A class declared in ANOTHER
+        # module therefore never has an entry, the veto stayed false, and the
+        # hijack survived for exactly the shape that miscompiles the compiler:
+        # `FrozenNativeModuleCapsuleBatchV1` lives in driver_types.spl while
+        # `batch.find(name)` is called from driver_aot_native_output.spl:1099.
+        #
+        # Discriminating evidence is a native rc pair, not this source check: a
+        # two-file fixture (class in module A, `batch.find(name)` in module B)
+        # built with `native-build` SEGVs rc=139 with one `call rt_string_find`
+        # before the fix and exits rc=0 with zero such calls after it. The test
+        # runner cannot reproduce it because a single-module program registers
+        # the owner method and never takes this path.
+        step("Verify: owner presence alone vetoes the string-only fallback")
+        val source = read_source(
+            "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+        # The module-local method-table test must NOT be what decides the veto.
+        expect(source.contains(
+            "predicate_has_custom_owner = self.struct_method_syms.contains(\"{predicate_owner}::{method}\")")
+        ).to_equal(false)
+        # A user struct/class handle must never reach a rt_string_* symbol.
+        expect(source.contains(
+            "predicate_has_custom_owner = true")
+        ).to_equal(true)

@@ -1256,7 +1256,30 @@ impl MirLowering:
                 if not predicate_receiver_is_text and resolution_is_unresolved:
                     val predicate_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if predicate_owner != nil and predicate_owner != "":
-                        predicate_has_custom_owner = self.struct_method_syms.contains("{predicate_owner}::{method}")
+                        # Bug (selfhost_struct_method_hijacked_by_string_arm_cross_module_2026-08-23):
+                        # this used to require the method to be listed in
+                        # `struct_method_syms`, but that map is module.impls-derived
+                        # and RESET PER MODULE (module_lowering.spl:1063), so a class
+                        # declared in ANOTHER module never has an entry here. The veto
+                        # therefore stayed false for exactly the shape that miscompiles
+                        # the compiler: `FrozenNativeModuleCapsuleBatchV1` lives in
+                        # driver_types.spl and `batch.find(name)` is called from
+                        # driver_aot_native_output.spl:1099.
+                        #
+                        # Having a custom OWNER at all is already the decisive evidence:
+                        # `predicate_owner` comes from `struct_value_syms`, i.e. the
+                        # receiver is a user-defined struct/class handle, and a
+                        # struct/class handle passed to a `rt_string_*` symbol is never
+                        # correct — the raw i64 -1 not-found sentinel gets untagged as a
+                        # tagged pointer and faults. Text receivers can never reach here:
+                        # `predicate_receiver_is_text` is checked above precisely so a
+                        # stale aggregate-owner hint cannot steal `text.starts_with`.
+                        # Keeping the module-local hit as a fast path documents that the
+                        # widening is only about CROSS-MODULE owners.
+                        predicate_has_custom_owner = true
+                        if not self.struct_method_syms.contains("{predicate_owner}::{method}"):
+                            if mir_mc_trace_state == 1:
+                                eprint("[mir-method-call] cross-module custom owner '{predicate_owner}' for method={method}; vetoing string-only fallback\n")
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] predicate-owner method={method}\n")
 
