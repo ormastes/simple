@@ -49,6 +49,12 @@ counters!(
     PARK_ARG_RESTORED,
     FILTERED_DICT_BUILDS,
     FILTERED_DICT_HITS,
+    // import-resolution probe file reads (see module_cache::probe_source_cached)
+    PROBE_SOURCE_READS,
+    PROBE_SOURCE_HITS,
+    // imported-module AST memo (hir::lower::import_loader::parsed_imported_module)
+    IMPORT_AST_PARSES,
+    IMPORT_AST_HITS,
 );
 
 #[inline(always)]

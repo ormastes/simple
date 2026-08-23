@@ -174,6 +174,7 @@ use interpreter_call::{
 #[path = "../module_cache.rs"]
 mod module_cache;
 pub use module_cache::clear_module_cache;
+pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::clear_module_cache_selective;
 pub(crate) use module_cache::normalize_path_key;
 

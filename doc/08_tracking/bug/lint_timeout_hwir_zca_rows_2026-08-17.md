@@ -377,3 +377,128 @@ which is a seed-interpreter issue owned by the Rust lane.
 - Remaining: the seed per-call constant is reduced, not zero; the strategic fix
   stays the self-hosted deploy. zca_rows full-file lint should be re-measured
   next session against the ~99s/decl history.
+
+---
+
+## 2026-08-23 — RESOLVED for the superlinear term; the residue is a different bug
+
+Measured on the deployed seed `bin/release/x86_64-unknown-linux-gnu/simple`
+(size 60,536,008, mtime 2026-08-22 15:29:00,
+md5 `51cd42a27916f8d36f02f31d31fbe390`), host at load 43-53 / 32 cores.
+
+**The superlinear term this record was opened for no longer reproduces.**
+`src/compiler/50.mir/hwir/zca_rows.spl` in full — the file recorded here and in
+`.claude/rules/commands.md` as `>2400s (killed)`, "exceeds any practical budget"
+— now lints **clean in 44.3s**, max RSS 587 MB. Boundary-aligned prefixes of the
+same file (2 / 48 / 293 / 633 / 1,170 / 1,901 lines; 1 / 1 / 5 / 10 / 16 / 30
+top-level functions) cost 37.9 / 36.4 / 39.2 / 39.1 / 37.0 / 44.3s. Every run
+printed `Lint passed: all files clean`, so this is completed work, not an early
+bail. Slope across a ~950x growth in declaration content is ~6.4s total — flat
+within the noise of a loaded box. The `2026-08-18` env-cache + parser redeploy
+that this record already flagged as invalidating the old table removed it.
+
+**Do not keep hunting the superlinear term. It is gone.** Two prior attempts
+were defeated by it; a third would now be chasing a fixed cost.
+
+**What remains is a distinct defect with a distinct mechanism.** ~37s of the
+~44s is FIXED startup, and it is not parsing the file under lint. `strace
+-e trace=openat` on a lint of a TWO-LINE file:
+
+- 3,819 successful `.spl` `openat` calls, **zero** `ENOENT`
+- over **423 distinct files** — 9.0x open amplification
+- `src/compiler/10.frontend/core/ast.spl` opened **866** times,
+  `core/tokens.spl` **848**, `core/types.spl` 191, `core/parser.spl` 147
+- size-weighted: **67.7 MB read for 5.1 MB of distinct content, 13.3x**
+
+Cause: two import-resolution probes in
+`src/compiler_rust/compiler/src/interpreter_module/module_loader.rs` —
+`sibling_might_define_requested_names` and `file_plausibly_provides_names` —
+each did a full `fs::read_to_string` plus a substring scan / whole-file
+identifier tokenize on **every visit**, uncached across call sites. The loader
+already avoided a double read *within one directory scan*, but that scan re-runs
+once per importing module, and the frontend's `core/` package is imported by
+nearly every compiler module — so its largest sibling is re-read once per
+importer. `O(importers x siblings x filesize)`.
+
+This is why the trivial fixture and the 1,901-line fixture cost nearly the same:
+the cost is driven by the COMPILER's own import graph, not by the linted file.
+It taxes every interpreted entry point (`lint`, `test`, `run`), not just lint.
+
+Fix: `module_cache::probe_source_cached()`, a per-process memo of probe file
+content (`None` = over the size cap or unreadable, the same classification the
+probes previously recomputed), cleared by `clear_module_cache()`. Per-process
+only, so a `src/lib/**` edit still needs no build. Pinned by count, not wall
+clock: `PROBE_SOURCE_READS` / `PROBE_SOURCE_HITS` under the existing
+`SIMPLE_PERF_COUNTERS=1` gate, reproduce test
+`src/compiler_rust/compiler/tests/import_probe_source_reads_once.rs`, perf-gate
+rows `PROBEMEMO *` in `scripts/check/check-perf-regression-tests.shs`.
+
+**Also found, and blocking for anyone who follows:** the in-process profiling
+knobs this record recommends do not work on the deployed binary.
+`SIMPLE_INTERP_SAMPLE=1` (the SIGPROF sampler landed at `8c6bfaca127`) and
+`SIMPLE_LOADER_TRACE=1` both exist in `src/compiler_rust` at `origin/main` and
+**neither emits anything** — no `$SIMPLE_INTERP_SAMPLE_OUT.<pid>` file, no
+stderr dump, no loader summary — on runs lasting 37-44s. The deployed seed
+predates them, and attach-based profiling is separately blocked here
+(`ptrace_scope=1`, `perf_event_paranoid=4`). The evidence above came from
+`strace`, which needs no cooperation from the binary. A seed redeploy is needed
+before the documented in-process route is usable at all.
+
+Full audit: `doc/09_report/tooling_latency_audit_2026-08-23.md`.
+
+### 2026-08-23 (same day) — CORRECTION to the attribution above
+
+The interpreter's import-resolution probes are **not** the source of the 3,819
+opens. The memo landed, is correct, and is kept — and the openat count did not
+move by a single call (still 3,819; `ast.spl` still 866). Recorded rather than
+quietly amended, because it is the trap this lane fell into: the code looks like
+the defect, the fix is easy to write, and a wall-clock A/B on a box at load 40+
+produced a 1-4s "improvement" that was pure noise and would have been believed.
+
+Real source, found with a call-site read trace added for the purpose
+(`src/compiler_rust/compiler/src/read_trace.rs`, `SIMPLE_READ_TRACE=1`, kept in
+tree since two lanes have now been defeated by having no attribution). Of 3,522
+traced reads on a lint of a TWO-LINE file, **every one comes from the HIR import
+loader**, not the interpreter module loader:
+
+| call site | reads | of which `core/ast.spl` |
+|---|---|---|
+| `hir/lower/import_loader.rs:700` `preregister_imported_type_names` | 2,672 | 749 |
+| `hir/lower/import_loader.rs:855` `load_imported_types` | 611 | 121 |
+| `hir/lower/import_loader.rs:291` `file_might_define_requested_symbol` | 145 | — |
+| `hir/lower/import_loader.rs:758` | 92 | — |
+| `hir/lower/import_loader.rs:646` | 2 | — |
+
+Those two dominant sites do not merely re-READ — each does
+`read_to_string -> CRLF normalize -> Parser::new -> parse()` on **every `use`
+statement that names the module**. `core/ast.spl` was fully parsed **870 times**
+for a two-line input. Both consume the result immutably (`&imported_module.items`)
+and parsing is deterministic in the file's bytes, so the repeat work is waste.
+
+Fix: `hir::lower::import_loader::parsed_imported_module()`, a per-process memo of
+the PARSED module (`Arc<Module>`); `None` memoizes "unreadable or unparseable",
+which both sites previously recomputed per visit. Cleared by
+`clear_module_cache()`. Per-process, never on disk.
+
+Measured, interleaved so both sides see the same load (the box drifted 38s -> 24s
+for the SAME baseline binary between batches, so only within-batch numbers are
+quoted):
+
+| metric (trivial 2-line lint) | pre-fix | post-fix |
+|---|---|---|
+| successful `.spl` `openat` | 3,819 | **676** (5.65x) |
+| distinct files | 423 | 423 |
+| `core/ast.spl` opens | 866 | <= 4 |
+
+Wall, median of 3: `zca_rows.spl` full **33.86s -> 24.45s (~28%)**; trivial
+fixture 24.18s -> 23.70s, i.e. **within noise, no improvement claimed** (identical
+work varied 15.05-27.95s on this box — which is exactly why the pin is by COUNT).
+**Cost stated not buried: max RSS +~110 MB (+19-27%)**, the retained ASTs of the
+423-module import closure. Bounded by the import closure, not by input size.
+
+Pins: `IMPORT_AST_PARSES`/`IMPORT_AST_HITS` under `SIMPLE_PERF_COUNTERS=1`;
+unit test `imported_module_ast_memo_tests::repeated_import_of_the_same_module_parses_it_exactly_once`
+(20 imports must be 1 parse + 19 hits; a failed import must also be memoized);
+perf-gate rows `IMPORTASTMEMO *` and `PROBEMEMO *` in
+`scripts/check/check-perf-regression-tests.shs`
+(`PASS — 119 mechanism(s) checked, 0 regressed`).

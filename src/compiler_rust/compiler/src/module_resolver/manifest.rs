@@ -193,7 +193,7 @@ impl ModuleResolver {
             return Ok(DirectoryManifest::default());
         }
 
-        let mut source = std::fs::read_to_string(&init_path)
+        let mut source = crate::read_trace::rts(file!(), line!(), &init_path)
             .map_err(|e| crate::error::factory::failed_to_read_file(&init_path, &e))?;
         // Normalize CRLF → LF for cross-platform compatibility
         if source.contains('\r') {

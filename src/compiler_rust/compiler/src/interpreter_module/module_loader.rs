@@ -259,16 +259,12 @@ fn requested_group_import_names(use_stmt: &UseStmt) -> Option<Vec<String>> {
 /// Check if a sibling file might define any of the requested names.
 /// Returns `Some(source)` if it might (caching the read), `None` if not.
 /// When `requested_names` is empty, returns `Some(source)` for all readable files.
-fn sibling_might_define_requested_names(path: &Path, requested_names: &[String]) -> Option<String> {
-    // Skip files larger than configurable limit — unlikely to be simple re-export modules
+fn sibling_might_define_requested_names(path: &Path, requested_names: &[String]) -> Option<Arc<String>> {
+    // Skip files larger than configurable limit — unlikely to be simple re-export modules.
+    // Content is memoized per process: this probe re-visits the same siblings once per
+    // importing module, and the uncached form dominated interpreter startup.
     let max_check_bytes = crate::memory_guard::sibling_max_check_bytes();
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.len() > max_check_bytes {
-            return None;
-        }
-    }
-
-    let source = fs::read_to_string(path).ok()?;
+    let source = super::module_cache::probe_source_cached(path, max_check_bytes)?;
 
     if requested_names.is_empty() {
         return Some(source);
@@ -534,12 +530,7 @@ fn warn_unprovided_use_names(
 /// "package wins" default below, not a wrong resolution.
 fn file_plausibly_provides_names(path: &Path, names: &[String]) -> std::collections::HashSet<String> {
     let max_check_bytes = crate::memory_guard::sibling_max_check_bytes();
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.len() > max_check_bytes {
-            return std::collections::HashSet::new();
-        }
-    }
-    let Ok(source) = fs::read_to_string(path) else {
+    let Some(source) = super::module_cache::probe_source_cached(path, max_check_bytes) else {
         return std::collections::HashSet::new();
     };
     let tokens: std::collections::HashSet<&str> = source.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
@@ -984,7 +975,7 @@ pub fn load_and_merge_module(
     let mem_before_parse = crate::mem_trace::live();
 
     // Read and parse the module
-    let mut source = match fs::read_to_string(&module_path) {
+    let mut source = match crate::read_trace::rts(file!(), line!(), &module_path) {
         Ok(s) => {
             // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
             if s.contains('\r') {
@@ -1078,7 +1069,7 @@ pub fn load_and_merge_module(
                 } else if let Ok(entries) = fs::read_dir(dir) {
                     // Collect siblings with cached source strings to avoid double disk reads.
                     // sibling_might_define_requested_names returns Some(source) on match.
-                    let mut sibling_files: Vec<(std::path::PathBuf, Option<String>)> = entries
+                    let mut sibling_files: Vec<(std::path::PathBuf, Option<Arc<String>>)> = entries
                         .filter_map(|e| e.ok())
                         .map(|e| e.path())
                         .filter(|p| {
@@ -1145,8 +1136,8 @@ pub fn load_and_merge_module(
                         debug!(sibling = ?sibling_path, "Preloading sibling for __init__.spl bare exports");
                         // Use cached source from name-matching step to avoid re-reading from disk
                         let sib_source_result = match cached_source {
-                            Some(s) => Ok(s.clone()),
-                            None => fs::read_to_string(sibling_path),
+                            Some(s) => Ok(s.as_ref().clone()),
+                            None => crate::read_trace::rts(file!(), line!(), sibling_path),
                         };
                         if let Ok(sib_source) = sib_source_result {
                             let mut sib_source = if sib_source.contains('\r') {

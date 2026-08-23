@@ -460,6 +460,59 @@ must_contain     "ANYVTJIT seed: aggregate copy keeps vtable hdr" "$ROOT/src/com
 must_contain     "ANYVTJIT seed: selfless vtable slot thunked"    "$ROOT/src/compiler_rust/compiler/src/codegen/closure_boxed_entry.rs" 'pub fn emit_vtable_selfless_entries('
 must_contain     "ANYVTJIT seed: no-bail test present"            "$ROOT/src/compiler_rust/compiler/tests/any_receiver_vtable_dispatch_jit.rs" 'must JIT-compile'
 must_contain     "ANYVTJIT src: SmfReaderImpl declares the trait" "$ROOT/src/compiler/70.backend/linker/smf_reader.spl" 'impl SmfReader for SmfReaderImpl:'
+# --- PROBEMEMO (2026-08-23): the interpreter's import-resolution probes
+# (`sibling_might_define_requested_names`, `file_plausibly_provides_names`) read
+# the whole sibling file from disk on EVERY visit, and those probes re-run once
+# per importing module. A trivial `bin/simple lint` therefore issued 3,819
+# successful `.spl` openat calls over 423 distinct files -- `10.frontend/core/
+# ast.spl` 866 times -- reading 67.7 MB for 5.1 MB of distinct content (13.3x).
+# That was ~37 s of the ~44 s a lint costs, and it taxes every interpreted entry
+# point. The fix memoizes probe content per process (NOT on disk: a `src/lib`
+# edit must still need no build). Pinned by count, never by wall clock.
+must_contain     "PROBEMEMO seed: probe content memo exists" \
+    "$ROOT/src/compiler_rust/compiler/src/module_cache.rs" \
+    "pub fn probe_source_cached(path: &Path, max_check_bytes: u64) -> Option<Arc<String>> {"
+must_contain     "PROBEMEMO seed: sibling probe uses the memo" \
+    "$ROOT/src/compiler_rust/compiler/src/interpreter_module/module_loader.rs" \
+    "let source = super::module_cache::probe_source_cached(path, max_check_bytes)?;"
+must_contain     "PROBEMEMO seed: name probe uses the memo" \
+    "$ROOT/src/compiler_rust/compiler/src/interpreter_module/module_loader.rs" \
+    "let Some(source) = super::module_cache::probe_source_cached(path, max_check_bytes) else {"
+must_contain     "PROBEMEMO seed: memo cleared with the loader caches" \
+    "$ROOT/src/compiler_rust/compiler/src/module_cache.rs" \
+    "clear_probe_source_cache();"
+must_contain     "PROBEMEMO reproduce test pins one read per path" \
+    "$ROOT/src/compiler_rust/compiler/tests/import_probe_source_reads_once.rs" \
+    "expected one read per DISTINCT path"
+
+# --- IMPORTASTMEMO (2026-08-23): the DOMINANT half of the same lane. The HIR
+# import loader re-READ and fully re-PARSED an imported module on every `use`
+# that named it, at two sites (`preregister_imported_type_names`,
+# `load_imported_types`). A call-site read trace on a lint of a TWO-LINE file
+# attributed 2,672 + 611 of 3,522 traced reads to those two sites, with
+# `10.frontend/core/ast.spl` parsed 749 + 121 times. Memoizing the PARSED module
+# per process took a trivial lint from 3,819 to 676 `.spl` openat calls (5.65x)
+# over the same 423 distinct files. Per-process, never on disk, so a `src/lib`
+# edit still needs no build. Costs ~110 MB RSS; that trade is deliberate.
+must_contain     "IMPORTASTMEMO seed: parsed-module memo exists" \
+    "$ROOT/src/compiler_rust/compiler/src/hir/lower/import_loader.rs" \
+    "pub(crate) fn parsed_imported_module("
+must_contain     "IMPORTASTMEMO seed: preregister site uses the memo" \
+    "$ROOT/src/compiler_rust/compiler/src/hir/lower/import_loader.rs" \
+    "let Some(imported_module) = parsed_imported_module(&resolved.path) else {"
+must_contain     "IMPORTASTMEMO seed: load site uses the memo" \
+    "$ROOT/src/compiler_rust/compiler/src/hir/lower/import_loader.rs" \
+    "let imported_module = parsed_imported_module(&resolved.path).ok_or_else(|| {"
+must_contain     "IMPORTASTMEMO seed: memo cleared with the loader caches" \
+    "$ROOT/src/compiler_rust/compiler/src/module_cache.rs" \
+    "crate::hir::lower::import_loader::clear_imported_module_ast_cache();"
+must_contain     "IMPORTASTMEMO reproduce test pins one parse per module" \
+    "$ROOT/src/compiler_rust/compiler/src/hir/lower/import_loader.rs" \
+    "expected exactly one parse per distinct module path"
+must_contain     "IMPORTASTMEMO read-site attribution trace kept" \
+    "$ROOT/src/compiler_rust/compiler/src/read_trace.rs" \
+    "SIMPLE_READ_TRACE"
+
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
     echo "ERROR — nothing was checked (no mechanism rows ran)"

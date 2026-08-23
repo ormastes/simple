@@ -11,6 +11,57 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use crate::CompileError;
 
+
+thread_local! {
+    /// Per-process memo of PARSED imported modules, keyed by resolved path.
+    ///
+    /// `preregister_imported_type_names` and `load_imported_types` each read AND
+    /// fully re-parsed the imported file on every `use` that names it. Measured
+    /// with a call-site read trace on a lint of a TWO-LINE file: 2,672 reads at
+    /// the pre-register site and 611 at the load site out of 3,522 traced reads
+    /// -- `10.frontend/core/ast.spl` alone parsed 749 + 121 times. Both sites
+    /// consume the result immutably (`&imported_module.items`), and parsing is a
+    /// deterministic function of the file's bytes, so one parse per path per
+    /// process is observationally identical.
+    ///
+    /// `None` memoizes "unreadable or unparseable", which both sites previously
+    /// recomputed on every visit (the pre-register site silently skips, the load
+    /// site reports a module-resolution error).
+    ///
+    /// Per-PROCESS only -- a `src/lib/**` edit is still picked up by the next
+    /// run, so the "edit stdlib, no build needed" property is unchanged.
+    static IMPORTED_MODULE_AST: std::cell::RefCell<
+        std::collections::HashMap<std::path::PathBuf, Option<std::sync::Arc<simple_parser::ast::Module>>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Read + parse an imported module, memoized per process. See `IMPORTED_MODULE_AST`.
+pub(crate) fn parsed_imported_module(
+    path: &std::path::Path,
+) -> Option<std::sync::Arc<simple_parser::ast::Module>> {
+    if let Some(hit) = IMPORTED_MODULE_AST.with(|c| c.borrow().get(path).cloned()) {
+        crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_HITS, 1);
+        return hit;
+    }
+    crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_PARSES, 1);
+    let parsed = match crate::read_trace::rts(file!(), line!(), path) {
+        Ok(mut source) => {
+            if source.contains('\r') {
+                source = source.replace('\r', "");
+            }
+            simple_parser::Parser::new(&source).parse().ok().map(std::sync::Arc::new)
+        }
+        Err(_) => None,
+    };
+    IMPORTED_MODULE_AST.with(|c| c.borrow_mut().insert(path.to_path_buf(), parsed.clone()));
+    parsed
+}
+
+/// Drop the imported-module parse memo.
+pub(crate) fn clear_imported_module_ast_cache() {
+    IMPORTED_MODULE_AST.with(|c| c.borrow_mut().clear());
+}
+
 impl Lowerer {
     fn import_target_cache_key(target: &ImportTarget) -> String {
         format!("{:?}", target)
@@ -288,7 +339,7 @@ impl Lowerer {
             return true;
         }
 
-        let Ok(source) = std::fs::read_to_string(path) else {
+        let Some(source) = crate::interpreter::probe_source_cached(path, u64::MAX) else {
             return false;
         };
 
@@ -643,7 +694,7 @@ impl Lowerer {
             }
             self.loaded_modules.insert(sibling_path.clone());
 
-            let mut source = std::fs::read_to_string(&sibling_path).map_err(|e| {
+            let mut source = crate::read_trace::rts(file!(), line!(), &sibling_path).map_err(|e| {
                 LowerError::ModuleResolution(format!("Failed to read sibling module file {:?}: {}", sibling_path, e))
             })?;
             if source.contains('\r') {
@@ -696,19 +747,10 @@ impl Lowerer {
             Err(_) => return Ok(()), // Silently skip unresolvable modules
         };
 
-        // Read and parse the module file
-        let mut source = match std::fs::read_to_string(&resolved.path) {
-            Ok(s) => s,
-            Err(_) => return Ok(()),
-        };
-        if source.contains('\r') {
-            source = source.replace('\r', "");
-        }
-
-        let mut parser = simple_parser::Parser::new(&source);
-        let imported_module = match parser.parse() {
-            Ok(m) => m,
-            Err(_) => return Ok(()),
+        // Read and parse the module file (memoized per process: this site
+        // re-parsed the same imported module once per `use` that names it).
+        let Some(imported_module) = parsed_imported_module(&resolved.path) else {
+            return Ok(());
         };
 
         let previous_file = self.current_file.clone();
@@ -755,7 +797,7 @@ impl Lowerer {
         sibling_files.sort();
 
         for sibling_path in sibling_files {
-            let mut source = match std::fs::read_to_string(&sibling_path) {
+            let mut source = match crate::read_trace::rts(file!(), line!(), &sibling_path) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
@@ -851,19 +893,14 @@ impl Lowerer {
             return result;
         }
 
-        // Read and parse the module file
-        let mut source = std::fs::read_to_string(&resolved.path).map_err(|e| {
-            LowerError::ModuleResolution(format!("Failed to read module file {:?}: {}", resolved.path, e))
+        // Read and parse the module file (memoized per process, same rationale
+        // as the pre-register site above).
+        let imported_module = parsed_imported_module(&resolved.path).ok_or_else(|| {
+            LowerError::ModuleResolution(format!(
+                "Failed to read or parse module file {:?}",
+                resolved.path
+            ))
         })?;
-        // Normalize CRLF → LF for cross-platform compatibility
-        if source.contains('\r') {
-            source = source.replace('\r', "");
-        }
-
-        let mut parser = simple_parser::Parser::new(&source);
-        let imported_module = parser
-            .parse()
-            .map_err(|e| LowerError::ModuleResolution(format!("Failed to parse module: {}", e)))?;
 
         let previous_file = self.current_file.clone();
         self.current_file = Some(resolved.path.clone());
@@ -1104,7 +1141,7 @@ fn test() -> i64:
         )
         .unwrap();
 
-        let source = fs::read_to_string(&main_path).unwrap();
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
         let mut parser = Parser::new(&source);
         let ast = parser.parse().expect("parse failed");
         let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
@@ -1144,7 +1181,7 @@ fn read_hardware(addr: u64) -> u64:
         )
         .unwrap();
 
-        let source = fs::read_to_string(&main_path).unwrap();
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
         let mut parser = Parser::new(&source);
         let ast = parser.parse().expect("parse failed");
         let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
@@ -1180,7 +1217,7 @@ fn read_hardware(addr: u64) -> u64:
         )
         .unwrap();
 
-        let source = fs::read_to_string(&main_path).unwrap();
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
         let ast = Parser::new(&source).parse().expect("parse failed");
         let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
         let lowered = Lowerer::with_module_resolver(resolver, main_path)
@@ -1232,7 +1269,7 @@ fn build() -> Widget:
         )
         .unwrap();
 
-        let source = fs::read_to_string(&main_path).unwrap();
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
         let mut parser = Parser::new(&source);
         let ast = parser.parse().expect("parse failed");
         let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
@@ -1289,7 +1326,7 @@ fn pressed(backend: InputBackend) -> bool:
         )
         .unwrap();
 
-        let source = fs::read_to_string(&main_path).unwrap();
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
         let mut parser = Parser::new(&source);
         let ast = parser.parse().expect("parse failed");
         let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
@@ -1356,7 +1393,7 @@ fn pressed(backend: InputBackend) -> bool:
         )
         .unwrap();
 
-        let source = fs::read_to_string(&main_path).unwrap();
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
         let ast = Parser::new(&source).parse().expect("parse failed");
         let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
         let lowered = Lowerer::with_module_resolver(resolver, main_path)
@@ -1382,5 +1419,67 @@ fn pressed(backend: InputBackend) -> bool:
             &module_path,
             &ImportTarget::Single("persistent_trie".to_string())
         ));
+    }
+}
+
+#[cfg(test)]
+mod imported_module_ast_memo_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// Mechanism pin for the imported-module re-parse.
+    ///
+    /// Pre-fix, `preregister_imported_type_names` and `load_imported_types` each
+    /// did `read_to_string` + a full `Parser::parse` on EVERY `use` naming the
+    /// module. A call-site read trace on a lint of a TWO-LINE file counted 2,672
+    /// reads at the first site and 611 at the second, out of 3,522 traced reads;
+    /// `10.frontend/core/ast.spl` was parsed 749 + 121 times. End to end that was
+    /// 3,819 successful `.spl` `openat` over 423 distinct files, which the memo
+    /// takes to 676.
+    ///
+    /// Pinned by COUNT, not wall clock: this box runs at load 40+, where a time
+    /// budget is noise. N visits to one path must yield exactly ONE parse.
+    #[test]
+    fn repeated_import_of_the_same_module_parses_it_exactly_once() {
+        crate::perf_counters::set_enabled(true);
+        clear_imported_module_ast_cache();
+        crate::perf_counters::IMPORT_AST_PARSES.store(0, Ordering::Relaxed);
+        crate::perf_counters::IMPORT_AST_HITS.store(0, Ordering::Relaxed);
+
+        let dir = std::env::temp_dir().join(format!("import-ast-memo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let m = dir.join("m.spl");
+        std::fs::write(&m, "pub struct Widget:\n    id: i64\n").expect("write m");
+
+        for _ in 0..20 {
+            let ast = parsed_imported_module(&m).expect("module parses");
+            // Memoization must hand back the SAME parsed items, not an empty stub.
+            assert!(!ast.items.is_empty(), "memoized AST lost its items");
+        }
+        assert_eq!(
+            crate::perf_counters::IMPORT_AST_PARSES.load(Ordering::Relaxed),
+            1,
+            "expected exactly one parse per distinct module path"
+        );
+        assert_eq!(
+            crate::perf_counters::IMPORT_AST_HITS.load(Ordering::Relaxed),
+            19,
+            "expected every repeat import to be a memo hit"
+        );
+
+        // An unparseable/unreadable module memoizes its failure too — pre-fix both
+        // sites re-read and re-parsed it on every visit.
+        let before = crate::perf_counters::IMPORT_AST_PARSES.load(Ordering::Relaxed);
+        let missing = dir.join("does_not_exist.spl");
+        for _ in 0..10 {
+            assert!(parsed_imported_module(&missing).is_none());
+        }
+        assert_eq!(
+            crate::perf_counters::IMPORT_AST_PARSES.load(Ordering::Relaxed) - before,
+            1,
+            "a failed import must be memoized, not retried per visit"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

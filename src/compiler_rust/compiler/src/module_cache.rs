@@ -40,11 +40,53 @@ fn cache_size_report_interval() -> usize {
 }
 
 fn rss_kb() -> u64 {
-    std::fs::read_to_string("/proc/self/statm")
+    crate::read_trace::rts(file!(), line!(), "/proc/self/statm")
         .ok()
         .and_then(|s| s.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()))
         .map(|pages| pages * 4)
         .unwrap_or(0)
+}
+
+thread_local! {
+    /// Process-local memo of file CONTENT used by the import-resolution probes
+    /// (`sibling_might_define_requested_names`, `file_plausibly_provides_names`).
+    ///
+    /// Those probes are pure functions of a file's bytes, but were re-reading the
+    /// same sibling from disk once per importing module: a trivial `lint` run
+    /// issued 3,819 successful `openat` calls over 423 unique `.spl` files
+    /// (`core/ast.spl` 866 times; 67.7 MB read for 5.1 MB of distinct content).
+    /// Memoizing the read collapses that to one read per path per process.
+    ///
+    /// `None` records "not eligible" (over the size cap, or unreadable), which is
+    /// exactly what the probes previously recomputed on every visit.
+    ///
+    /// Per-PROCESS only: a `src/lib/**` edit is still picked up by the next run,
+    /// so the "edit stdlib, no build needed" property is unchanged.
+    static PROBE_SOURCE_CACHE: RefCell<HashMap<PathBuf, Option<Arc<String>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Read `path` for an import-resolution probe, memoized per process.
+///
+/// Returns `None` when the file is larger than `max_check_bytes` or unreadable —
+/// identical to the pre-memo behaviour of both probe call sites.
+pub fn probe_source_cached(path: &Path, max_check_bytes: u64) -> Option<Arc<String>> {
+    if let Some(hit) = PROBE_SOURCE_CACHE.with(|c| c.borrow().get(path).cloned()) {
+        crate::perf_counters::bump(&crate::perf_counters::PROBE_SOURCE_HITS, 1);
+        return hit;
+    }
+    crate::perf_counters::bump(&crate::perf_counters::PROBE_SOURCE_READS, 1);
+    let value = match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > max_check_bytes => None,
+        _ => crate::read_trace::rts(file!(), line!(), path).ok().map(Arc::new),
+    };
+    PROBE_SOURCE_CACHE.with(|c| c.borrow_mut().insert(path.to_path_buf(), value.clone()));
+    value
+}
+
+/// Drop the probe content memo (used by the cache-clearing entry points).
+pub fn clear_probe_source_cache() {
+    PROBE_SOURCE_CACHE.with(|c| c.borrow_mut().clear());
 }
 
 /// Print a one-line breakdown of every never-evicted loader cache.
@@ -145,6 +187,8 @@ pub fn clear_module_cache() {
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
+    clear_probe_source_cache();
+    crate::hir::lower::import_loader::clear_imported_module_ast_cache();
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
     crate::mem_trace::report("clear_module_cache");
