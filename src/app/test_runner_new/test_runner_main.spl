@@ -20,7 +20,7 @@ use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_erro
 use std.test_runner.test_config.{TestConfig, load_test_config}
 use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
 use std.test_runner.mode_filter.{path_mode_matches}
-use std.spec.in_development.{source_is_in_development, in_development_explicitly_targeted, InDevelopmentOutcome, classify_in_development, in_development_skip_line, in_development_unexpected_pass_line, in_development_explicit_line, in_development_broken_line, in_development_summary_line}
+use std.spec.in_development.{source_is_in_development, in_development_explicitly_targeted, InDevelopmentOutcome, classify_in_development, in_development_line, in_development_unexpected_pass_line, in_development_explicit_line, in_development_broken_line, in_development_summary_line}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
@@ -438,7 +438,16 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                     setup_ms: 0,
                     error: "",
                     timed_out: false,
-                    cached: true
+                    cached: true,
+                    # The incremental cache does not persist this field, so
+                    # reconstruct it from the tag. Without this a cached
+                    # in-development replay comes back with zero examples of
+                    # every kind, classifies NOT_RUN, and the exit path reads
+                    # that as Unverified (exit 5) -- turning a cache HIT on a
+                    # parked spec into a failed run. Storing the count in
+                    # `skipped` used to mask this; moving to a separate
+                    # bucket exposed it.
+                    in_development: _cached_in_development(file_path, cached_entry.passed, cached_entry.failed)
                 )
                 print_result(cached_result, updated_options.format)
                 total_passed = total_passed + cached_result.passed
@@ -541,7 +550,16 @@ fn run_tests_parallel_mode(
                     setup_ms: 0,
                     error: "",
                     timed_out: false,
-                    cached: true
+                    cached: true,
+                    # The incremental cache does not persist this field, so
+                    # reconstruct it from the tag. Without this a cached
+                    # in-development replay comes back with zero examples of
+                    # every kind, classifies NOT_RUN, and the exit path reads
+                    # that as Unverified (exit 5) -- turning a cache HIT on a
+                    # parked spec into a failed run. Storing the count in
+                    # `skipped` used to mask this; moving to a separate
+                    # bucket exposed it.
+                    in_development: _cached_in_development(file_path, cached_entry.passed, cached_entry.failed)
                 )
                 cached_results.push(cached_result)
             else:
@@ -809,6 +827,20 @@ fn _requested_paths(options: TestOptions) -> [text]:
     CLI populated it, otherwise the single scalar `path`."""
     if options.paths.len() > 0: options.paths else: [options.path]
 
+fn _cached_in_development(file_path: text, cached_passed: i64, cached_failed: i64) -> i64:
+    """In-development count for a CACHE REPLAY, reconstructed from the tag.
+
+    The incremental cache stores passed/failed/skipped only, so a
+    neutralised result replays with no examples at all. Recomputed here
+    rather than persisted: the tag is the source of truth and may have
+    been removed since the entry was written, in which case the file is no
+    longer in development and must not be reported as such."""
+    if cached_passed > 0 or cached_failed > 0:
+        return 0
+    if file_is_in_development(file_path):
+        return 1
+    0
+
 fn in_development_adjust(file_path: text, options: TestOptions, raw: TestFileResult) -> TestFileResult:
     """Apply the in-development semantics to ONE file's raw result.
 
@@ -877,18 +909,24 @@ fn in_development_adjust(file_path: text, options: TestOptions, raw: TestFileRes
             # totals -- the exact invisible-debt shape this feature exists
             # to prevent.
             val expected = if raw.failed > 0: raw.failed else: 1
-            print in_development_skip_line(file_path, expected)
+            print in_development_line(file_path, expected)
+            # Carried in `in_development`, NOT in `skipped`. The two are
+            # different states and must not be merged: `skipped` means the
+            # environment could not run it; this file RAN and only its
+            # verdict was neutralised. Any genuine skips the file itself
+            # reported are preserved untouched in `raw.skipped`.
             TestFileResult(
                 path: raw.path,
                 passed: 0,
                 failed: 0,
-                skipped: expected,
+                skipped: raw.skipped,
                 pending: raw.pending,
                 duration_ms: raw.duration_ms,
                 setup_ms: raw.setup_ms,
                 error: "",
                 timed_out: false,
-                cached: raw.cached
+                cached: raw.cached,
+                in_development: expected
             )
         case InDevelopmentOutcome.UnexpectedPass:
             # Left as a genuine pass -- it did pass -- but announced, and
@@ -898,19 +936,24 @@ fn in_development_adjust(file_path: text, options: TestOptions, raw: TestFileRes
             raw
 
 fn in_development_totals(results: [TestFileResult]) -> (i64, i64, i64):
-    """(neutralised skips, unexpected passes, BROKEN) across a finished run.
+    """(in_development, unexpected passes, BROKEN) across a finished run.
+
+    **The first bucket is named `in_development`, not `skipped`** — and
+    the values behind it live in `TestFileResult.in_development`, a field
+    separate from `skipped`. That separation is the point: the stats lane
+    must not reintroduce the word downstream, because a tagged spec runs
+    and only its verdict is neutralised.
 
     Re-reads the tag from source rather than trusting a marker in the
     result, so a result that arrived from the daemon or a cache replay --
     paths that never went through `in_development_adjust` in THIS process
     -- is still classified correctly.
 
-    The third bucket is deliberately NOT merged into the first. A broken
-    tagged spec is a defect, and the sibling statistics lanes (`bin/simple
-    tags`, the `test_result.md` In Development row) must be able to report
-    it separately rather than silently absorbing it into the skip count.
+    The three buckets are mutually exclusive and none is merged into
+    another: BROKEN is a defect that fails the run, an unexpected pass is
+    an action item, and in-development is the ordinary parked state.
     """
-    var skipped = 0
+    var in_development = 0
     var unexpected = 0
     var broken = 0
     for r in results:
@@ -919,18 +962,26 @@ fn in_development_totals(results: [TestFileResult]) -> (i64, i64, i64):
                 broken = broken + 1
             elif r.failed == 0 and r.passed > 0:
                 unexpected = unexpected + 1
-            elif r.skipped > 0:
-                skipped = skipped + 1
-    (skipped, unexpected, broken)
+            else:
+                in_development = in_development + 1
+    (in_development, unexpected, broken)
 
 fn print_in_development_summary(results: [TestFileResult]):
-    """Print the in-development row of the run summary.
+    """Print the three-state summary row: pass / fail / in-development.
 
-    Printed whenever either count is non-zero, on the ordinary summary
-    surface and not behind --verbose: a count nobody sees is not a count."""
-    val (skipped, unexpected, broken) = in_development_totals(results)
-    if skipped > 0 or unexpected > 0 or broken > 0:
-        print in_development_summary_line(skipped, unexpected, broken)
+    UNCONDITIONAL, and always carrying all three counts even at zero. A
+    row that appears only when non-empty leaves a reader unable to tell
+    "no in-development work" from "this runner does not track it" -- and
+    the second reading is how a whole category quietly stops being looked
+    at. Printed on the ordinary summary surface, never behind --verbose.
+    """
+    val (in_development, unexpected, broken) = in_development_totals(results)
+    var passed = 0
+    var failed = 0
+    for r in results:
+        passed = passed + r.passed
+        failed = failed + r.failed
+    print in_development_summary_line(passed, failed, in_development, unexpected, broken)
 
 # =========================================================================
 # Session Config Propagation

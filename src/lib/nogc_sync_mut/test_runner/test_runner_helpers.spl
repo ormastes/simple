@@ -236,7 +236,19 @@ fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64) -> 
     val run_id = db.start_run()
 
     for file_result in result.files:
-        val status = if file_result.is_ok(): TestStatus.Passed else: TestStatus.Failed
+        # In-development is checked FIRST, and that order is load-bearing.
+        # A neutralised file has failed == 0, so `is_ok()` returns TRUE and
+        # it was being written to the DB as a plain `passed` row -- which is
+        # why `tests_by_status("in_development")` could never match and the
+        # "In Development" row of test_result.md was structurally zero.
+        # Reporting cannot fix that from its side; the status has to be
+        # written here.
+        val status = if file_result.in_development > 0:
+            TestStatus.InDevelopment
+        elif file_result.is_ok():
+            TestStatus.Passed
+        else:
+            TestStatus.Failed
         db.update_test_result(
             test_name: file_result.path,
             test_file: file_result.path,

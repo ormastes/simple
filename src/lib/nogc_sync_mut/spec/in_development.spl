@@ -72,8 +72,8 @@ constants rather than by matching prose.
         IN_DEVELOPMENT_TAG, spec_tags, source_has_tag,
         source_is_in_development, in_development_explicitly_targeted,
         InDevelopmentOutcome, classify_in_development,
-        IN_DEVELOPMENT_SKIP_MARKER, IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER,
-        in_development_skip_line, in_development_unexpected_pass_line,
+        IN_DEVELOPMENT_MARKER, IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER,
+        in_development_line, in_development_unexpected_pass_line,
         in_development_explicit_line, in_development_summary_line
     }
 """
@@ -87,11 +87,15 @@ val TAG_PREFIX: text = "@tag:"
 
 # Line markers. Machine-readable, stable, and grep-anchorable: the sibling
 # statistics lane keys off these, NOT off the surrounding prose.
-val IN_DEVELOPMENT_SKIP_MARKER: text = "IN-DEVELOPMENT SKIP"
+# Each marker is unambiguous on its own: none is a PREFIX of another, so a
+# tool grepping for one cannot match a line of a different class. (The
+# short form "IN-DEVELOPMENT" was tried and rejected -- it is a prefix of
+# "IN-DEVELOPMENT BROKEN", and the spec caught it.)
+val IN_DEVELOPMENT_MARKER: text = "IN-DEVELOPMENT NEUTRALISED"
 val IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER: text = "IN-DEVELOPMENT UNEXPECTED PASS"
 val IN_DEVELOPMENT_EXPLICIT_MARKER: text = "IN-DEVELOPMENT EXPLICIT"
 val IN_DEVELOPMENT_BROKEN_MARKER: text = "IN-DEVELOPMENT BROKEN"
-val IN_DEVELOPMENT_SUMMARY_MARKER: text = "In-development:"
+val IN_DEVELOPMENT_SUMMARY_MARKER: text = "States:"
 
 # ================================================================
 # TAG EXTRACTION
@@ -277,9 +281,13 @@ fn classify_in_development(
 # REPORT LINES
 # ================================================================
 
-fn in_development_skip_line(path: text, expected_failures: i64) -> text:
-    """Per-file line for a tagged spec that failed as expected."""
-    "{IN_DEVELOPMENT_SKIP_MARKER} {path} ({expected_failures} expected failure(s); @tag:{IN_DEVELOPMENT_TAG})"
+fn in_development_line(path: text, expected_failures: i64) -> text:
+    """Per-file line for a tagged spec that failed as expected.
+
+    Says "in development", never "skipped": the file RAN, and describing a
+    neutralised verdict as a skip is what makes the state read as hidden.
+    """
+    "{IN_DEVELOPMENT_MARKER} {path} ({expected_failures} expected failure(s), verdict neutralised; @tag:{IN_DEVELOPMENT_TAG})"
 
 fn in_development_unexpected_pass_line(path: text, passed: i64) -> text:
     """Per-file line for a tagged spec that PASSED.
@@ -306,29 +314,50 @@ fn in_development_broken_line(path: text, reason: text) -> text:
     back to re-run it by hand. This line accompanies a RED verdict."""
     "{IN_DEVELOPMENT_BROKEN_MARKER} {path} ({reason}) — a spec that cannot load is a DEFECT, not unfinished work; `@tag:{IN_DEVELOPMENT_TAG}` does not excuse it"
 
-fn in_development_summary_line(skipped: i64, unexpected_passes: i64, broken: i64) -> text:
-    """The summary row. Printed whenever EITHER count is non-zero.
+fn in_development_summary_line(
+    passed: i64,
+    failed: i64,
+    in_development: i64,
+    unexpected_passes: i64,
+    broken: i64
+) -> text:
+    """The three-state summary row: pass / fail / in-development.
 
-    Never hidden behind a verbose flag: an in-development test that nobody
-    can see the count of is exactly the invisible debt this feature exists
-    to prevent.
+    ALWAYS printed, and always carrying all three counts even when they
+    are zero — the same contract the runner's `Results:` line already
+    honours. A row that appears only when there is something to report
+    leaves a reader unable to tell "no in-development work" from "this
+    runner does not track it", and the second reading is how a whole
+    category quietly stops being looked at.
+
+    **The word `skipped` is deliberately NOT used here.** A tagged spec
+    EXECUTES; only its verdict is neutralised. Calling that a skip
+    misdescribes the mechanism and reads as if the work is being hidden.
+    `skipped` remains its own genuine, separate state in the runner
+    (host-unavailable, `@tag:qemu`, ...) and in-development is never
+    folded into it — not in this text and not in the counts behind it.
+
+    The two exceptional classes are appended only when non-zero, because
+    they are events rather than states: an unexpected pass is an action
+    item (promote it) and BROKEN is a defect that fails the run.
     """
-    var line = "{IN_DEVELOPMENT_SUMMARY_MARKER} {skipped} skipped (expected to fail)"
+    var line = "States: {passed} passed, {failed} failed, {in_development} in development (expected to fail)"
     if unexpected_passes > 0:
         line = line + ", {unexpected_passes} UNEXPECTED PASS (ready to promote)"
     if broken > 0:
-        # Never suppressed and never merged into the skip count: a broken
-        # tagged spec is the one class here that still fails the run.
+        # Never suppressed and never merged into any other bucket: a broken
+        # tagged spec is the one class here that still fails the run, and it
+        # is a fourth thing, not a variant of in-development.
         line = line + ", {broken} BROKEN (failed to load — FAILS the run)"
     line
 
 export IN_DEVELOPMENT_TAG, TAG_PREFIX
-export IN_DEVELOPMENT_SKIP_MARKER, IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER
+export IN_DEVELOPMENT_MARKER, IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER
 export IN_DEVELOPMENT_EXPLICIT_MARKER, IN_DEVELOPMENT_SUMMARY_MARKER
 export IN_DEVELOPMENT_BROKEN_MARKER
 export spec_tags, source_has_tag, source_is_in_development
 export in_development_explicitly_targeted
 export InDevelopmentOutcome, classify_in_development
-export in_development_skip_line, in_development_unexpected_pass_line
+export in_development_line, in_development_unexpected_pass_line
 export in_development_explicit_line, in_development_summary_line
 export in_development_broken_line
