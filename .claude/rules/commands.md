@@ -6,7 +6,11 @@ alwaysApply: false
 ```bash
 # Build
 bin/simple build                    # Prints bootstrap HELP and exits (~0.02s). Does NOT build.
-bin/simple build bootstrap          # 3-stage self-compilation verification
+bin/simple build bootstrap          # Seed-side Rust 3-stage self-compilation check ONLY.
+                                    # NOT the sanctioned bootstrap: it never invokes
+                                    # scripts/bootstrap/bootstrap-from-scratch.sh, skips the
+                                    # receipt gate and planner admission, and builds no Stage 4
+                                    # full CLI (misc_commands.rs:341). Use the script instead.
 
 # Quality
 bin/simple lint <changed .spl files> # Pure-Simple source linter
@@ -27,11 +31,48 @@ bin/simple bug-add --id=X           # Add bug
 bin/simple bug-gen                  # Generate bug report
 ```
 
+## The CLI `--help` is incomplete and partly wrong (measured 2026-08-23)
+
+Do not treat `simple --help` as the command list. Measured by RUNNING the
+deployed `bin/release/x86_64-unknown-linux-gnu/simple` (60,650,360 bytes,
+2026-08-23 04:47), which announces itself as a **bootstrap seed**:
+
+- **`--help` prints to stderr, not stdout.** `simple --help | grep x` returns
+  nothing (measured: 0 lines on stdout, 226 on stderr). Redirect with `2>&1`.
+- **39 commands listed vs 85 registered** in `src/app/cli/dispatch/table.spl`.
+  Undocumented but working: `run`, `repl`, `fmt`, `check`, `fix`, `search`,
+  `todo-scan`, `todo-gen`, `bug-add`/`bug-gen`/`bug-resolve`, `stats`,
+  `doc-coverage`, `clean`, and ~44 more.
+- **`build` is absent from `--help`** and is not a project build — its
+  subcommands (`bootstrap`/`lint`/`fmt`/`check`) are Rust-workspace tooling.
+  Compiling a program is `compile` / `native-build` / `run`.
+- **`list`, `tree`, `install` are self-referential stubs**: `simple list` prints
+  `Package management is handled by the Simple app. / Run: simple list`
+  (`driver/src/cli/commands/pkg_commands.rs:9`). `update` and `cache` are
+  advertised in `--help` and registered nowhere.
+- **An unknown command is reported as a missing file** — `simple nosuchcmd` says
+  `error: file not found: nosuchcmd`, because the argument falls through to the
+  script-path route. A typo'd subcommand yields a nonsense diagnostic.
+
+`table.spl` carries no help strings at all (`CommandEntry` is
+`(name, app_path, env_override, needs_rust_flags)`); the help text lives in
+`src/compiler_rust/driver/src/cli/help.rs`, which is why the two drift with
+nothing to catch it. Record, REOPENED with these counts:
+`doc/08_tracking/bug/cli_help_dispatch_drift_2026-08-11.md`.
+
 ## A `src/lib/**` change needs NO build (measured 2026-08-09)
 
 Editing the stdlib requires **no build step at all** for `run` / `test` / lint /
 LSP. The stdlib is read as SOURCE on every process start — measured by strace:
-**82 opens of `src/lib/**.spl`, zero `.smf`**. Nothing is baked into the binary
+**82 opens of `src/lib/**.spl`, zero `.smf`**. **The 82 figure was corrected
+2026-08-23 and must not be re-cited for startup cost:** re-measured with
+`strace -f -c -e trace=openat,open,stat,mmap bin/simple run hello.spl`, a
+hello-world run does **89 openat totalling 1.13 ms, of which 5 are `.spl`** —
+file I/O is under 2 ms of a 76-144 ms run, and the startup floor is the 60.6 MB
+binary (page-fault + reloc), not `.spl` reading. The **zero `.smf`** half, which
+is what makes the no-build conclusion true, is unaffected. Evidence:
+`doc/10_metrics/startup/cross_language_startup_benchmark_2026-08-18.md`
+§Re-measurement 2026-08-23. Nothing is baked into the binary
 (no `include_str!` of `src/lib`; only 3 `src/lib` strings, all path literals),
 so no relink is needed either.
 

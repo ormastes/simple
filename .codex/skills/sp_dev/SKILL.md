@@ -626,8 +626,13 @@ imports or calls outside owner modules as a fix-before-done issue.
 For process/signal hardening, also require the
 `doc/07_guide/runtime/process_kill_safety.md` rule: every kill/wait path rejects
 `pid <= 0` before signaling or reaping. Seed runtime changes to that guard need
-`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy` before
-they affect deployed binaries.
+`scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<path>
+--full-bootstrap --deploy` before they affect deployed binaries. The receipt is
+not optional: verified 2026-08-23, that command WITHOUT `--bootstrap-receipt`
+exits **64** with `bootstrap-policy-error: reason-receipt-required` and starts no
+stage. Mint one with `src/app/build/bootstrap_receipt_main.spl`. Option surface
+and the nine positional subcommands (`scripts/bootstrap/` is two files since
+`dc86db785b4`): `doc/07_guide/tooling/bootstrap_options.md`.
 
 Before touching runtime-adjacent code in an existing lane, read that lane's
 recorded `rejected_shortcuts` first; do not retry a rejected `rt_*`, fixture

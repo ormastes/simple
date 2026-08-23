@@ -691,6 +691,17 @@ Rules:
    Bare invocation exits **64** (`reason-receipt-required`) — that is policy, not
    breakage; use `--strategy=adhoc --full-bootstrap --stop-after-stage2
    --output=<dir>` (the trust-root exception) or plan a receipt.
+   `scripts/bootstrap/` is **two files** since `dc86db785b4` (14 -> 2):
+   `bootstrap-from-scratch.sh` and `bootstrap-windows.cmd`. Nine former sibling
+   scripts are now **positional subcommands** (first argument only):
+   `preserve-phase-binary`, `progress-watch`, `planner-admission-v2`,
+   `stage2-sanity-diagnostic`, `rollback-deploy`, `stage4-tooling-matrix`,
+   `stage4-tools-only`, `resume-stage3`, `windows-entry`; the rest are helper
+   functions reachable as
+   `BOOTSTRAP_LIB_ONLY=1 . scripts/bootstrap/bootstrap-from-scratch.sh`. All
+   nine verified in `--help` and verified to dispatch, 2026-08-23. Any path
+   naming another `scripts/bootstrap/*.shs` is stale — the file is gone. Full
+   surface: `doc/07_guide/tooling/bootstrap_options.md`.
 3. **`SIMPLE_CACHE_SCOPE` without `--cache-dir` is a silent no-op.** Zero
    cache-hit lines in a long log ⇒ check the invocation before "warming".
 4. **`--strategy=adhoc` is a failure policy (fail-fast), not a lighter build**

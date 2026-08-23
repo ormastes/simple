@@ -7,10 +7,19 @@ Impl in Simple unless it has big performance differences.
 ```bash
 bin/simple build                  # Prints bootstrap HELP and exits (~0.02s) — does NOT build
                                   # A src/lib/** edit needs NO build: stdlib is read as SOURCE
-                                  # every run (82 .spl opens, 0 .smf). Bootstrap only DEPLOYS a
-                                  # compiler. See .claude/rules/commands.md
+                                  # every run, 0 .smf. Bootstrap only DEPLOYS a compiler.
+                                  # (The old "82 .spl opens" figure was RE-MEASURED 2026-08-23:
+                                  # a hello-world run does 89 openat totalling 1.13ms, of which
+                                  # 5 are .spl. The no-build conclusion is unchanged; the count
+                                  # was not hello-world's. See .claude/rules/commands.md and
+                                  # doc/10_metrics/startup/cross_language_startup_benchmark_2026-08-18.md)
 bin/simple test                   # Run all tests (or: test path/to/spec.spl)
-scripts/setup/setup.shs && bin/simple build bootstrap  # Full bootstrap
+scripts/setup/setup.shs && bin/simple build bootstrap  # NOT the sanctioned bootstrap.
+   # `build bootstrap` is a SEPARATE seed-side Rust reimplementation of a 3-stage
+   # self-compilation check (misc_commands.rs:341 handle_bootstrap). It does not run
+   # scripts/bootstrap/bootstrap-from-scratch.sh, has no receipt gate, no planner
+   # admission, and no Stage 4 / full-CLI relink. The sanctioned bootstrap is the
+   # script — see .claude/rules/bootstrap.md and doc/07_guide/tooling/bootstrap_options.md.
 ```
 
 ## FreeBSD QEMU Bootstrap Check

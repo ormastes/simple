@@ -258,17 +258,38 @@ has soaked. Reaching the <20s kernel-rebuild goal additionally needs incremental
 object cache does not touch (they dominate kernel build wall time).
 
 ## Bootstrap Commands
+
+**Every line below needs a receipt.** Measured 2026-08-23 by running them:
+`--deploy`, `--full-bootstrap --deploy` and `--full-bootstrap` each exit **64**
+with `bootstrap-policy-error: reason-receipt-required` and start no stage. That
+is policy, not breakage. Mint the receipt first with
+`simple run src/app/build/bootstrap_receipt_main.spl --bootstrap-reason=<typed-reason>
+--bootstrap-receipt=<path> --parent-compiler-sha256=... --runtime-snapshot-sha256=...
+--planner-source-closure-sha256=... --planner-sha256=...` and pass it as
+`--bootstrap-receipt=<path>`. The **sole receipt-free lane** is
+`--strategy=adhoc --full-bootstrap --stop-after-stage2 --output=<dir>`.
+
+Full option surface, the nine positional subcommands, and the
+`BOOTSTRAP_LIB_ONLY=1` sourcing contract:
+`doc/07_guide/tooling/bootstrap_options.md`. `scripts/bootstrap/` holds exactly
+two files now (`bootstrap-from-scratch.sh`, `bootstrap-windows.cmd`) — any
+reference to another `scripts/bootstrap/*.shs` is stale.
+
 ```bash
 # Normal pure-Simple bootstrap:
-scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<path> --deploy
 
 # Full Rust + pure-Simple bootstrap:
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
+scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<path> --full-bootstrap --deploy
+
+# Receipt-free lane (Stage 2 trust root only, no Stage 3/4, no deploy):
+scripts/bootstrap/bootstrap-from-scratch.sh --strategy=adhoc --full-bootstrap \
+  --stop-after-stage2 --output=build/bootstrap
 
 # Windows:
-scripts/bootstrap/bootstrap-from-scratch.sh windows-entry --deploy
+scripts/bootstrap/bootstrap-from-scratch.sh windows-entry --bootstrap-receipt=<path> --deploy
 # Manual full-bootstrap seed/runtime rebuild:
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
+scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<path> --full-bootstrap
 
 # Internal stage replay after a full-bootstrap seed exists:
 SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple native-build \

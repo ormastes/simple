@@ -1,7 +1,10 @@
 # `bootstrap-from-scratch.sh` option surface
 
 Authoritative map of every flag of `scripts/bootstrap/bootstrap-from-scratch.sh`,
-read out of the script at `origin/main` (2026-08-23). Companion to
+read out of the script at `origin/main` and re-verified by RUNNING `--help` and
+each subcommand after the 14-scripts-to-2 consolidation (`dc86db785b4`,
+2026-08-23). Covers the positional **subcommands** and the `BOOTSTRAP_LIB_ONLY=1`
+sourcing contract as well as the flags. Companion to
 `doc/07_guide/tooling/bootstrap_phase_verification.md` (phase -> artifact map).
 
 **This script is the only sanctioned way to run any bootstrap stage.** Do not
@@ -34,8 +37,10 @@ reduced-closure stage-1 path in this repo.
 | `normal` | default; reuses incremental caches, schedules isolated phase verification |
 | `full` | inventories every eligible build and test to a terminal summary even after task crashes |
 
-Validated by `bootstrap_strategy_validate` in `scripts/bootstrap/bootstrap-cache-policy.shs`;
-unknown values exit 1. Env: `SIMPLE_BOOTSTRAP_STRATEGY`. Unless
+Validated by `bootstrap_strategy_validate`, which now lives inside
+`bootstrap-from-scratch.sh` itself (line ~104) — the old
+`scripts/bootstrap/bootstrap-cache-policy.shs` no longer exists (see
+"Subcommands" below). Unknown values exit 1. Env: `SIMPLE_BOOTSTRAP_STRATEGY`. Unless
 `SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1`, the script re-execs itself under the
 coordinated strategy supervisor; `--help`, `--validate-bootstrap-receipt`,
 `--stop-after-stage2`, `--stop-after-stage3`, the two `--resume-*` flags,
@@ -51,6 +56,14 @@ coordinated strategy supervisor; `--help`, `--validate-bootstrap-receipt`,
 Unknown values exit 1. Env: `SIMPLE_BOOTSTRAP_MODE`. `SIMPLE_NO_STUB_FALLBACK=1`
 makes staged failures fatal.
 
+**The Rust seed does not implement `--mode=dynload`.** `native_build.rs` defaults
+to `one-binary` and its own `--help` says so verbatim: `(dynload is not
+implemented by the Rust seed and is skipped)`
+(`src/compiler_rust/driver/src/cli/native_build.rs:815-816`; the module header at
+`:26` and `:44` states the same). So a stage driven by the seed silently runs
+one-binary regardless of what you asked for, with that note as the only signal.
+Only pure-Simple stages honour `dynload`.
+
 ## Flags
 
 | flag | effect |
@@ -59,6 +72,7 @@ makes staged failures fatal.
 | `--pure-simple` | Compatibility alias for the default no-Rust-rebuild mode. Conflicts with `--full-bootstrap` (exit 1). |
 | `--deploy` | Copy the resulting compiler artifact into `bin/simple`. Sets `full_cli=1`. |
 | `--release` | `--deploy` plus the release-blocking whole test suite (Stage 6). |
+| `--release-local` | Alias for `--release` (same code path — one `case` arm, script line ~4152). Exists so a local release lane reads differently from CI; it changes nothing. |
 | `--clean-release` | Final release proof: sets execution profile `clean-release`, `--fresh-cache`, release tests, and deploy. Clears every reusable native cache before each batch. |
 | `--stop-after-stage2` | With `--full-bootstrap`: build and admit the measured Stage-2 trust root, then stop. **The sole receipt-free lane.** Excludes Stage 3/4, resume, `--full-cli`, deploy, release and diagnostic options, and requires `--mode=dynload`. Conflicts with `--resume-stage3-from-admitted`. |
 | `--stop-after-stage3` | Stop after producing and independently verifying the provenance-bound Stage 3 compiler. Requires a planner receipt targeting `//bootstrap:stage3`; never starts Stage 4/deploy/release/diagnostics; same exclusion set as above. |
@@ -83,9 +97,57 @@ makes staged failures fatal.
 | `--keep-artifacts`, `--no-verify` | Accepted for compatibility; artifacts are always kept and hash verification always runs. |
 | `--help` / `-h` | Usage. |
 
+## Subcommands (positional, must be the FIRST argument)
+
+`scripts/bootstrap/` was consolidated from **14 scripts to 2**
+(`bootstrap-from-scratch.sh` + `bootstrap-windows.cmd`, commit `dc86db785b4`).
+Thirteen former sibling scripts were folded in. If a doc, script or habit still
+names one of the old `.shs`/`.sh` paths, it is stale — the file is gone.
+
+Nine became positional subcommands. Each was verified to appear in `--help`
+**and** to actually dispatch (2026-08-23; the rc/first-line column is what a
+bare or minimal invocation really prints, which is how each was proved to reach
+its own folded code rather than the unknown-option path):
+
+| subcommand | former script | verified dispatch |
+|---|---|---|
+| `preserve-phase-binary <binary> <phase>` / `--gc <days>` | `preserve-phase-binary.shs` | rc=2 `usage: preserve-phase-binary.shs <binary> <phase>` |
+| `progress-watch --pid=N --progress-log=PATH` | `bootstrap-progress-watch.shs` | rc=2 `error: --pid requires a numeric PID` |
+| `planner-admission-v2 --target=... [--selftest]` | `produce-bootstrap-planner-admission-v2.shs` | rc=0 `PASS — 13 fixture(s) checked` |
+| `stage2-sanity-diagnostic [--selftest]` | `check-stage2-sanity-diagnostic.shs` | rc=0 `PASS — 7 fixture(s) checked` |
+| `rollback-deploy [args]` | `rollback-deploy` script | rc=2 `error: deployment is locked` |
+| `stage4-tooling-matrix [args]` | `stage4-tooling-matrix.shs` | rc=2 `unknown option: --selftest` (it has no `--selftest`; `--help` does not claim one) |
+| `stage4-tools-only [args]` | `stage4-tools-only.sh` | rc=1 `unknown option: --help` (no `--help` of its own) |
+| `resume-stage3 <output>` | `resume-stage3-from-admitted.sh` | rc=2 `usage: resume-stage3-from-admitted.sh OUTPUT_DIR` |
+| `windows-entry [--msvc\|--mingw]` | `bootstrap-windows-entry` | rc=0 `this script is Windows-only ...; nothing to do on Linux` |
+
+Two caveats worth stating rather than leaving to be discovered:
+`stage4-tooling-matrix` and `stage4-tools-only` reject `--selftest`/`--help`
+respectively — the top-level `--help` documents them as `[args]` and does not
+promise either flag. `resume-stage3` is also reachable as the flag
+`--resume-stage3-from-admitted=<output>`, which simply `exec`s this subcommand.
+
+### Library use — `BOOTSTRAP_LIB_ONLY=1`
+
+The remaining folded code is exposed as pure predicate/helper functions with no
+pipeline side effects:
+
+```sh
+BOOTSTRAP_LIB_ONLY=1 . scripts/bootstrap/bootstrap-from-scratch.sh
+```
+
+Verified by running it (2026-08-23): the sourced shell returns **rc=0** and
+`type bootstrap_strategy_validate` reports a defined function, so the helpers are
+live and no stage started. The guard sits at script line ~3860 — *after* the
+subcommand `case` at ~3839, so source it with **no positional arguments**; a
+stray first argument matching a subcommand name would dispatch before the guard
+is reached. Without `BOOTSTRAP_LIB_ONLY=1`, sourcing the file runs the
+bootstrap.
+
 ### `--identity-parent` is NOT a bootstrap flag
 
-`--identity-parent` appears once in the script (line ~117) as an argument the
+`--identity-parent` appears once in the script (line 3906 post-consolidation —
+it was ~117 before `dc86db785b4` moved it) as an argument the
 script passes to `scripts/check/lib/portable-session-exec.pl` when
 `SIMPLE_BOOTSTRAP_SESSION_READY=1`, to read back `pid=`/`pgid=` and keep the
 bootstrap and every non-detached descendant in one dedicated kernel process
