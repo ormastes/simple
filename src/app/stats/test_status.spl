@@ -1,0 +1,55 @@
+# Recorded test-status counts, read from doc/08_tracking/test/test_result.md.
+#
+# One reader for every summary metric, in ONE place, so a category cannot be
+# added to the report and silently missed by a surface. Both the text output
+# and the v2 JSON go through this — they cannot disagree.
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+struct TestStatusCounts:
+    total: i64
+    passed: i64
+    failed: i64
+    skipped: i64
+    pending: i64
+    # Expected-fail, skipped by whole-suite runs. Its own category: never
+    # folded into `passed`, never dropped from the total.
+    in_development: i64
+    # Whatever the report accounts for in no named category. Surfaced rather
+    # than swallowed — a silent remainder is how a category goes missing.
+    unclassified: i64
+
+val TEST_RESULT_PATH = "doc/08_tracking/test/test_result.md"
+
+fn _run_cmd(cmd: text) -> text:
+    val result = process_run("sh", ["-c", cmd])
+    if result.2 == 0:
+        result.0.trim()
+    else:
+        ""
+
+fn test_result_metric(metric: text) -> i64:
+    if not file_exists(TEST_RESULT_PATH):
+        return 0
+    val cmd = "grep -m1 -E '^\\| {metric} \\|' {TEST_RESULT_PATH} | grep -oE '[0-9]+' | head -1"
+    _run_cmd(cmd).to_int() ?? 0
+
+fn read_test_status_counts() -> TestStatusCounts:
+    val total = test_result_metric("Total")
+    val passed = test_result_metric("Passed")
+    val failed = test_result_metric("Failed")
+    val skipped = test_result_metric("Skipped")
+    val pending = test_result_metric("Pending")
+    val indev = test_result_metric("In Development")
+    var other = test_result_metric("Other")
+    if other == 0:
+        val named = passed + failed + skipped + pending + indev
+        if total > named:
+            other = total - named
+    TestStatusCounts(
+        total: total, passed: passed, failed: failed, skipped: skipped,
+        pending: pending, in_development: indev, unclassified: other
+    )
+
+export TestStatusCounts, TEST_RESULT_PATH, test_result_metric, read_test_status_counts

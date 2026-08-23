@@ -69,13 +69,23 @@ the same shape as `targets`, `linkers` and `stats`.
 | Surface | What it shows |
 |---|---|
 | `bin/simple stats` | `In development: <n>` under `Tests:`, plus `Other: <n> (unclassified)` when the categories do not add up |
-| `bin/simple stats --json` | `tests.in_development`, `tests.failed`, `tests.skipped`, `tests.unclassified` |
+| `bin/simple stats --json` | `test_status.{total,passed,failed,skipped,pending,in_development,unclassified}` in the `simple.stats.v2` schema |
 | `doc/08_tracking/test/test_result.md` | `| In Development | <n> |` row, emitted unconditionally |
 | `doc/08_tracking/feature/pending_feature.md` | `| In Development | <n> | Expected-fail, skipped by suite runs |` |
 | `bin/simple tags` | the count **and** the list |
 
 The row in `test_result.md` is emitted even when it is zero. A category that
 disappears when empty is a category nobody notices when it stops being empty.
+
+### A trap worth knowing about
+
+`src/app/stats/dynamic.spl` contains a second, older JSON emitter
+(`format_json`, ~line 708). It is **unreachable**: `run_stats` returns at the
+`is_json` branch (~line 371) after printing the v2 projection, so nothing
+below it ever runs on the `--json` path. Adding a field there looks correct,
+compiles, and does nothing. The live emitter is `app.stats.json_v2`, and the
+counts it prints come from `app.stats.test_status` — the same single reader
+the text output uses, so the two cannot disagree.
 
 ## Reconciliation
 
