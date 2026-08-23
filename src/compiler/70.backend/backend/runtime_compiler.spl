@@ -276,6 +276,46 @@ fn _runtime_dir_not_found_message() -> text:
     msg
 
 # ============================================================================
+# Runtime Object Cache
+# ============================================================================
+
+fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dynload: bool, include_stage4_legacy_compat: bool, target: text, ext: text) -> text:
+    """Directory holding prebuilt C-runtime objects for this exact input set.
+
+    The C runtime was recompiled from source on EVERY native build: 27
+    `clang -c -O3` invocations, serially, into a PID-keyed temp prefix that was
+    then deleted. Measured 2026-08-23 on a hello-world fixture, that was 103s of
+    a 108s build (95%) -- the `link` step's cost is C compilation, not ld.lld
+    (which took under 1s). This is a pure memo: the key covers the compiler, the
+    flag-affecting options, the target, and the size+mtime of every .c/.h under
+    the runtime source tree, so any change to any input misses the cache and
+    recompiles. Returns "" when caching is unavailable or disabled
+    (SIMPLE_RT_OBJ_CACHE=0), in which case the caller compiles as before.
+    """
+    if (rt_env_get("SIMPLE_RT_OBJ_CACHE") ?? "") == "0":
+        return ""
+    if _is_windows():
+        return ""
+    val flag_sig = "v1;cc={cc};opt={opt_level};dyn={include_dynload};legacy={include_stage4_legacy_compat};target={target};ext={ext}"
+    var cmd = "( printf '%s\\n' '" + flag_sig + "'; "
+    cmd = cmd + "find '" + rt_dir + "' -type f -name '*.c' -printf '%p %s %T@\\n' 2>/dev/null; "
+    cmd = cmd + "find '" + rt_dir + "' -type f -name '*.h' -printf '%p %s %T@\\n' 2>/dev/null "
+    cmd = cmd + ") | LC_ALL=C sort | sha256sum 2>/dev/null | cut -c1-40"
+    val (out, err, code) = backend_shell_tuple(cmd)
+    if code != 0:
+        return ""
+    val key = out.trim()
+    if key.len() < 16:
+        return ""
+    val root = rt_env_get("SIMPLE_RT_OBJ_CACHE_DIR") ?? ""
+    val base = if root != "": root else: "{_get_temp_dir()}/simple-rt-objcache"
+    val dir = base + "/" + key
+    val (mout, merr, mcode) = backend_shell_tuple("mkdir -p '" + dir + "'")
+    if mcode != 0:
+        return ""
+    dir
+
+# ============================================================================
 # Runtime Compilation
 # ============================================================================
 
@@ -365,6 +405,11 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         sources = sources.push("runtime_dynload")
         objects = objects.push("{object_prefix}runtime_dynload{ext}")
     var object_count = 0
+    val cache_dir = _runtime_object_cache_dir(
+        rt_dir, cc, opt_level, include_dynload,
+        include_stage4_legacy_compat, target, ext)
+    if trace:
+        print "[RT-COMPILE] object cache dir={cache_dir}"
     if trace:
         print "[RT-COMPILE] starting loop over {sources.len()} sources"
 
@@ -379,6 +424,15 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             return Err("Required runtime source not found: {src_path}")
 
         val obj_path = objects[object_count]
+        val cache_obj = if cache_dir != "": cache_dir + "/" + name + ext else: ""
+        var cache_hit = false
+        if cache_obj != "" and rt_file_exists(cache_obj):
+            val (hit_out, hit_err, hit_code) = backend_shell_tuple(
+                "cp -f '" + cache_obj + "' '" + obj_path + "'")
+            if hit_code == 0:
+                cache_hit = true
+                if trace:
+                    print "[RT-COMPILE] cache hit: {name}.c"
         if trace:
             print "[RT-COMPILE] compiling: {name}.c"
 
@@ -425,12 +479,27 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             comp_args.push(obj_path)
             comp_args.push(src_path)
 
-        val (comp_out, comp_err, comp_code) = rt_process_run(cc, comp_args)
+        var comp_out = ""
+        var comp_err = ""
+        var comp_code = 0
+        if not cache_hit:
+            val (run_out, run_err, run_code) = rt_process_run(cc, comp_args)
+            comp_out = run_out
+            comp_err = run_err
+            comp_code = run_code
         if trace:
             print "[RT-COMPILE] compile result: code={comp_code}"
         if comp_code != 0:
             cleanup_runtime_objects(objects)
             return Err("Failed to compile {name}.c:\n{comp_out}{comp_err}")
+
+        if cache_obj != "" and not cache_hit:
+            # Publish via a private staging name + rename so concurrent builds
+            # never observe a half-written object.
+            val stage = cache_obj + ".tmp." + "{compile_pid}"
+            backend_shell_tuple(
+                "cp -f '" + obj_path + "' '" + stage + "' && mv -f '"
+                + stage + "' '" + cache_obj + "'")
 
         object_count = object_count + 1
 
