@@ -954,6 +954,58 @@ impl MirLowering:
         per-element box/unbox. See
         doc/08_tracking/bug/mir_unresolved_method_call_merge_2026-08-22.md."""
         val mg_other = self.lower_expr(mg_src)
+
+        # SCALAR GUARD (bug: scalar_accumulator_desugared_to_array_merge_2026-08-23).
+        # `collection_desugar.spl` Pattern B rewrites `x = x + other` into
+        # `x.merge(other)` at the AST level, BEFORE type-checking, so it has no
+        # type oracle: its `is_definite_scalar_addend` gate can only suppress
+        # addend SHAPES that are provably scalar (literals, unary, binary), and
+        # its own comment records that it still fires for identifier /
+        # field-access / index / call-result addends. `var s = 0; s = s + x`
+        # with `x` an identifier is exactly that shape, so it arrived here and
+        # was lowered to `rt_array_extend_i64(s, x, -1)` -- measured in the
+        # disassembly, with `s` passed as its still-zero initial value and the
+        # program printing 0 where the interpreter prints the right sum.
+        #
+        # Before `merge` had a MIR lowering (2026-08-22) this shape died LOUDLY
+        # at build time with `unresolved method call: merge`; giving `merge` a
+        # lowering turned a build failure into a SILENT WRONG ANSWER, which is
+        # strictly worse. The AST pass cannot be made type-aware, but the
+        # receiver's type IS known here, so the guard belongs at this end: when
+        # the receiver is provably a scalar or a string, lower the node as the
+        # `x = x + y` it was desugared from. Restoring the loud build error is
+        # NOT an option -- real byte-array concatenation (`a = a + d1`) depends
+        # on the rewrite firing.
+        var mg_recv_is_scalar = self.local_hir_type_is_int(mg_recv)
+        var mg_recv_is_float = false
+        if val mg_recv_mt = self.local_mir_type_of(mg_recv):
+            match mg_recv_mt.kind:
+                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64:
+                    mg_recv_is_scalar = true
+                case MirTypeKind.F32 | MirTypeKind.F64:
+                    # A float receiver never reached a correct lowering: it fell
+                    # through to rt_array_extend_i64 and died at build time with
+                    # `unsupported LLVM value conversion from double to ptr`.
+                    # Loud rather than silent, but still wrong, and the same
+                    # root cause -- so it is fixed by the same guard.
+                    mg_recv_is_scalar = true
+                    mg_recv_is_float = true
+                case _: ()
+        if mg_recv_is_scalar and not self.runtime_array_locals.contains(mg_recv.id):
+            val sc_ty = if mg_recv_is_float: MirType(kind: MirTypeKind.F64) else: MirType.i64()
+            var b_sc = self.builder
+            val sc_sum = b_sc.emit_binop(MirBinOp.Add, mir_operand_copy(mg_recv), mir_operand_copy(mg_other), sc_ty)
+            b_sc.emit_copy(mg_recv, sc_sum)
+            self.builder = b_sc
+            self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, mg_recv)
+            return mg_recv
+        # DELIBERATELY NOT HANDLED HERE: a `text` receiver. `txt = txt + more`
+        # with an identifier addend is the same Pattern-B shape and is also
+        # wrong, but an `emit_raw_strcat` + copy-back arm was tried here and
+        # measured producing "a" instead of "abc" -- so text is left on
+        # EXACTLY the path it was on before this change rather than swapped
+        # for a different wrong answer. Tracked in the bug record.
+
         val mg_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_array_extend_i64"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(
