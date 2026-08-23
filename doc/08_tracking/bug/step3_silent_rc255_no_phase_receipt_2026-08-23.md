@@ -125,3 +125,10 @@ Two things the run DID establish:
 **Next step for whoever picks this up:** re-run on an unloaded box (or with a
 larger `--timeout`); the last `[build]` line will now name the failing
 sub-phase, which is precisely what the previous attempt could not produce.
+
+A 4-hour-timeout retry was launched 2026-08-23 02:51 (host load had fallen from
+46 to 23); its log is `/mnt/fast/step3/logs/lint_retry.log`, same runner
+(`/mnt/fast/step3/run.sh`, cache scope `step3_lint_retry`, worktree
+`/mnt/fast/wt-step3-1`). Read the LAST `[build]` line in it: with the receipts
+landed here, that line names the sub-phase, and the exit status is recorded on
+the final `=== lint_retry rc=` line.
