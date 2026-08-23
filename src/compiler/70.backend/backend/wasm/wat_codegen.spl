@@ -22,6 +22,7 @@ use compiler.backend.wasm.wasm_runtime.{emit_all_wasm_imports}
 use compiler.backend.wasm.wasm_control_flow.{WasmControlFlow}
 use compiler.mir.mir_types.{MirType}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
 
 # ============================================================================
 # MIR to WAT Translator
@@ -390,8 +391,18 @@ class MirToWat:
                 builder.emit(";; UNSUPPORTED: unlowered ConditionProbe '{semantic_id}' reached WAT instruction translation")
                 builder.emit("unreachable")
 
-            case _:
-                builder.emit(";; unhandled instruction")
+                # POLICY (2026-08-23): an unimplemented backend path must ASSERT, or be
+                # explicitly disabled with a TODO -- never silently emit something
+                # plausible. This arm used to drop the instruction and let the build
+                # report success. Same shape as the C and LLVM backends
+                # (`emit_unsupported_panic`), including their
+                # `SIMPLE_ALLOW_UNLOWERED_MIR=1` escape hatch.
+                val wasm_unlowered_name = mir_instkind_variant_name(inst.kind)
+                eprint("[wasm] E-BACKEND-WASM-INST-{wasm_unlowered_name}: Wasm backend does not lower {wasm_unlowered_name}")
+                if (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") != "1":
+                    panic("compile error: E-BACKEND-WASM-INST-{wasm_unlowered_name}: Wasm backend does not lower {wasm_unlowered_name}")
+                builder.emit(";; TODO(unlowered-mir): E-BACKEND-WASM-INST-{wasm_unlowered_name} explicitly disabled via SIMPLE_ALLOW_UNLOWERED_MIR=1")
+                builder.emit("unreachable")
 
     me translate_const(builder: WatBuilder, dest: LocalId, value: MirConstValue, type_: MirType):
         """Translate a constant value."""

@@ -18,6 +18,7 @@ use compiler.backend.gpu_portable_compute.{
 }
 use compiler.backend.spec_const_registry.{spec_const_resolve}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
 
 class OpenClBackendCompileContract:
     source: text
@@ -343,8 +344,17 @@ class OpenClBackend:
                 "// debug value: {name}"
             case Nop:
                 "// nop"
-            case _:
-                "// unsupported MIR instruction for OpenCL subset"
+                # POLICY (2026-08-23): an unimplemented backend path must ASSERT, or be
+                # explicitly disabled with a TODO -- never silently emit something
+                # plausible. This arm used to drop the instruction and let the build
+                # report success. Same shape as the C and LLVM backends
+                # (`emit_unsupported_panic`), including their
+                # `SIMPLE_ALLOW_UNLOWERED_MIR=1` escape hatch.
+                val ocl_unlowered_name = mir_instkind_variant_name(inst.kind)
+                eprint("[opencl] E-BACKEND-OPENCL-INST-{ocl_unlowered_name}: OpenCL backend does not lower {ocl_unlowered_name}")
+                if (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") != "1":
+                    panic("compile error: E-BACKEND-OPENCL-INST-{ocl_unlowered_name}: OpenCL backend does not lower {ocl_unlowered_name}")
+                "// TODO(unlowered-mir): E-BACKEND-OPENCL-INST-{ocl_unlowered_name} explicitly disabled via SIMPLE_ALLOW_UNLOWERED_MIR=1"
 
     static fn emit_operand(func: MirFunction, operand: MirOperand) -> text:
         match operand.kind:

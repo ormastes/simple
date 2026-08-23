@@ -9,6 +9,7 @@ use compiler.mir.mir_types.{LocalId, MirConstValue, MirType, MirTypeKind}
 use compiler.backend.backend.llvm_lib_type_mapper.{LlvmLibTypeMapper}
 use std.sffi.llvm.*
 use std.sffi.llvm.{LLVM_PRIVATE_LINKAGE}
+use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
 
 extern fn rt_array_push_i64_raw(values: [i64], value: i64) -> i8
 
@@ -221,9 +222,17 @@ fn translate_instruction(
         case InlineAsm(_, _, _, _, _, _, _):
             print "[llvm-lib] error: inline assembly not supported by llvm-lib backend"
 
-        # Remaining: SIMD, GPU, VHDL, Async — warn instead of silent
-        case _:
-            print "[llvm-lib] warning: unhandled MIR instruction kind (skipped)"
+        # Remaining: SIMD, GPU, VHDL, Async.
+            # POLICY (2026-08-23): an unimplemented backend path must ASSERT, or be
+            # explicitly disabled with a TODO -- never silently emit something
+            # plausible. This arm used to drop the instruction and let the build
+            # report success. Same shape as the C and LLVM backends
+            # (`emit_unsupported_panic`), including their
+            # `SIMPLE_ALLOW_UNLOWERED_MIR=1` escape hatch.
+            val llvmlib_unlowered_name = mir_instkind_variant_name(inst.kind)
+            eprint("[llvmlib] E-BACKEND-LLVMLIB-INST-{llvmlib_unlowered_name}: LlvmLib backend does not lower {llvmlib_unlowered_name}")
+            if (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") != "1":
+                panic("compile error: E-BACKEND-LLVMLIB-INST-{llvmlib_unlowered_name}: LlvmLib backend does not lower {llvmlib_unlowered_name}")
     local_value_map
 
 # ============================================================================

@@ -614,3 +614,60 @@ Two things this proves beyond the bare discrimination requirement:
 
 **No unproven neuter remains in this lane.** The gate's two real-source neuters
 are in section 8.1; the spec's is here.
+
+## 9. STATUS UPDATE — the five fail-open sites now ASSERT (2026-08-23)
+
+Section 2 describes the state as measured. It has since been **fixed** under the
+standing policy *"add assert or todo; disable what is not completed optional."*
+
+All five sites now raise a named, greppable `E-BACKEND-<NAME>-INST-<Variant>` and
+`panic`, following the shape the C and LLVM backends already used (including
+their `SIMPLE_ALLOW_UNLOWERED_MIR=1` escape hatch) rather than a new diagnostic:
+`E-BACKEND-CRANELIFT-INST-*`, `E-BACKEND-MIRTEXT-INST-*` (the shared base trait),
+`E-BACKEND-LLVMLIB-INST-*`, `E-BACKEND-WASM-INST-*`, `E-BACKEND-OPENCL-INST-*`.
+
+**Nothing was deleted.** The two backends that must return a value also emit a
+`TODO(unlowered-mir)` marker on the escape-hatch path, so "explicitly disabled"
+is visible in the generated artifact rather than a bare skip.
+
+### 9.1 Correction to section 2's wording
+
+Section 2 says these sites "emit nothing and no diagnostic". Verified per site,
+that is exactly true of **two**; the other three left an inert artifact. All five
+were fail-open — build succeeds, instruction absent — but they were not
+identically silent, and the difference is recorded rather than smoothed over:
+
+| site | behaviour BEFORE | truly silent? |
+|---|---|---|
+| `cranelift_codegen_adapter.spl` | `case _: ()` | **yes** |
+| `common/mir_text_codegen.spl` -> `translate_unsupported` | empty method body | **yes** |
+| `llvm_lib_translate_expr.spl` | unnamed `warning: ... (skipped)` | no |
+| `wasm/wat_codegen.spl` | `;; unhandled instruction` (inert WAT comment) | no |
+| `opencl_backend.spl` | `// unsupported ...` (inert C comment) | no |
+
+The census reported each backend's *dispatch* line while the incident brief
+reported the *sink* line; both are correct and describe different points on the
+same path.
+
+### 9.2 Gate and evidence
+
+`scripts/check/check-mir-backend-failclosed.shs` —
+`PASS — 5 site(s) and 126 variant(s) checked, 0 fail-open` (5 fatal selftest
+fixtures). Neuter-verified twice against real source: restoring opencl's silent
+catch-all and deleting the `Drop` arm from the shared name table each flip it to
+FAIL/exit 1, naming the offender; restored and re-verified PASS/exit 0 both
+times. `bin/simple lint`: 0 errors across all six touched files.
+
+Record: `doc/08_tracking/bug/mir_backend_failopen_converted_to_assert_2026-08-23.md`.
+
+### 9.3 Expected fallout
+
+This turns currently-green builds RED wherever the 25 constructs of section 2.3
+are reachable. That is a pre-existing defect becoming visible, not a regression
+introduced by the change.
+
+### 9.4 Still open, deliberately untouched
+
+`MirType.size_bytes()` and the aggregate store-stride reconciliation. Those two
+defects **cancel** for single-field aggregates and must be fixed as a pair, in
+their own commit. No sizing code was modified here.
