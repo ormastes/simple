@@ -189,3 +189,25 @@ RE-READS `SIMPLE_SAFETY_PROFILE` per call while the interpreter latches it at
 `eval_init` — gates must compare `policy_hash()` across components, not env
 text. Migration order M1 driver → M2 loader → M3 interpreter (bool projection
 must be widened first there).
+
+## Warning phase in the driver projection (2026-08-23)
+
+`driver_safety_severity.spl` gained the phased half of the assurance **warning
+phase**: `safety_pass_severity_for_name_phased(raw, warning_phase)` and its
+strictness/policy siblings, plus `safety_pass_severity_downgraded(sev)` and the
+thin env wrappers `safety_pass_warning_phase()` /
+`safety_pass_severity_phased()`.
+
+Ladder: `Deny -> Warn -> Advisory`, clamped at **Advisory** — the lowest rung
+that still reports (log-only via `SIMPLE_SAFETY_WARN`). There is no silent rung
+below it, which is the property the feature requires.
+
+`warning_phase == false` returns exactly what the unphased function returns, so
+"nothing changes unless the knob is set" is a property of the code, not of an
+audit. The env read (`SIMPLE_ASSURANCE_WARNING_PHASE`) stays in its own named
+wrapper so the projection functions remain pure and testable.
+
+The driver still imports only `00.common` for this — `warning_phase.spl` sits
+below 80.driver exactly as `policy_names.spl` does, so no layering inverts.
+
+Guide: `doc/07_guide/compiler/assurance_warning_phase.md`.

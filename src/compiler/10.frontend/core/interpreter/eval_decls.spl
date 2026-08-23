@@ -11,6 +11,8 @@
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 use compiler.core.enum_discriminant_eval.{eval_enum_discriminant_expr}
 use compiler.common.assurance.policy_names.normalize_profile_name
+use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value,
+    warning_phase_env_var_name}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -313,8 +315,41 @@ fn match_fallthrough_profile_is_deny(raw: text) -> bool:
 # var so an unconfigured session behaves exactly as before, but the env read is
 # now only the DEFAULT, not the sole authority.
 pub fn eval_apply_assurance_profile(profile_name: text):
+    eval_apply_assurance_profile_phased(profile_name,
+        warning_phase_enabled_for_value(rt_env_get(warning_phase_env_var_name()) ?? ""))
+
+# WARNING PHASE (2026-08-23) — the interpreter's projection of the one-level
+# severity downgrade, and the one place where the three projections genuinely
+# differ in what they CAN express. Stated plainly rather than papered over:
+#
+#   * The interpreter's projection is a BOOL, not a level. A bool can encode
+#     exactly one step of the ladder — Deny -> Warn — and nothing below it. It
+#     cannot express Warn -> Advisory, and `false` therefore clamps.
+#
+#   * Only flags with a real warn path may be downgraded. Of the three flags
+#     fanned out here, only `match_fallthrough_set_abort` qualifies: `false`
+#     leaves the warn-only fall-through diagnostic still being emitted.
+#
+#   * `match_wildcard_catch_set_enabled` is a VISIBILITY flag, not a severity —
+#     `false` stops the wildcard diagnostic being emitted at all. Downgrading it
+#     would make critical-under-warning-phase report LESS than critical, which
+#     is precisely what this feature forbids. It stays keyed to the raw profile.
+#
+#   * `import_admission_set_deny` is an ADMISSION gate, not a severity —
+#     `false` silently ADMITS the built-in-fallback import
+#     (`module_loader_core.spl:499`) with no diagnostic of any kind. It has no
+#     warn rung to fall to, so it also stays keyed to the raw profile.
+#     TODO [interp][P2][warning-phase]: give import admission a warn rung
+#     (emit the diagnostic, admit the import) so it can participate in the
+#     downgrade instead of being excluded from it.
+#
+# Net effect: under warning phase a `critical` interpreter session stops
+# ABORTING on match fall-through while still reporting it, and reports strictly
+# no less than it did without the phase.
+fn eval_apply_assurance_profile_phased(profile_name: text, warning_phase: bool):
     val deny = match_fallthrough_profile_is_deny(profile_name)
-    match_fallthrough_set_abort(deny)
+    val abort = deny and not warning_phase
+    match_fallthrough_set_abort(abort)
     # Same follow-up: surface the wildcard/bare-binder-catch diagnostic under
     # Deny severity too. Warn-only for now (no abort variant) -- "wild card
     # use even warning later error for compatibility" per the user request;

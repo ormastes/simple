@@ -82,3 +82,38 @@ bin/simple test test/01_unit/compiler/assurance/ --no-cache --no-cover-check
 
 The only authoritative verdict is the final `^Results:` line; take `$?` from the command
 itself, never from a pipe.
+
+## Warning phase — the one-level severity downgrade (2026-08-23)
+
+An assurance profile can be run in a **warning phase**: every diagnostic it
+raises drops **exactly one** severity level. The migration ramp INTO
+mission-critical — see what would fail before the build fails.
+
+Selected by `SIMPLE_ASSURANCE_WARNING_PHASE=1`, `simple lint
+--assurance-warning-phase`, or `warning_phase: true` in the `lints:` SDN
+section. Truthy: `1 true yes on warn warning`; **anything else means full
+severity** — the knob fails closed.
+
+Three things to know before touching it:
+
+1. **It is a MODIFIER, never a profile name.** A `critical:warn` suffix makes
+   `normalize_profile_name` return `""` at any un-updated consumer, which
+   resolves to moderate/Advisory — a suffix fails **open**. A separate knob
+   fails **closed**. Do not "simplify" it into the (frozen) name table, and do
+   not add a field to the (frozen) `ResolvedAssurancePolicyV1`.
+2. **It is a severity transform, not a mute.** The downgrade clamps at the
+   lowest rung that still REPORTS: Advisory for the driver (log-only via
+   `SIMPLE_SAFETY_WARN`), **Warn** for lint (`Allow` is silence, so lint clamps
+   one rung above its enum's bottom).
+3. **The interpreter's bool projection is partial, deliberately.** Only
+   `match_fallthrough_set_abort` is downgraded.
+   `match_wildcard_catch_set_enabled` is a *visibility* flag and
+   `import_admission_set_deny` is an *admission gate* — flipping either would
+   make critical-under-warning-phase report LESS than critical. Both stay keyed
+   to the raw profile; the admission gate carries a
+   `TODO [interp][P2][warning-phase]` to grow a warn rung.
+
+Source: `src/compiler/00.common/assurance/warning_phase.spl` (zero `use` lines,
+zero module-level state — same constraint as `policy_names.spl`).
+Guide: `doc/07_guide/compiler/assurance_warning_phase.md`.
+Spec: `test/01_unit/compiler/assurance/assurance_warning_phase_spec.spl` (18/18).

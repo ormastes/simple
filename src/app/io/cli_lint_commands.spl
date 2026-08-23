@@ -13,6 +13,9 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 use std.nogc_sync_mut.io.mod_stub.{is_dir}
 use app.io.source_discovery.{discover_spl_files, source_path_identity}
 use app.io.cli_ops.{_cli_eprint, _cli_process_run, _cli_run_workspace_root_guard}
+use compiler.common.assurance.warning_phase.warning_phase_env_var_name
+
+extern fn rt_env_set(key: text, value: text) -> bool
 use app.io.cli_fix_options.{fix_option_error}
 use app.io.cli_fmt_options.{fmt_option_error}
 use common.text.{escape_json}
@@ -38,6 +41,12 @@ pub fn lint_option_error(args: [text]) -> text:
         # dependency boundary rule (wm_lane_boundary) and nothing else.
         if arg == "--deny-all" or arg == "--warn-all" or arg == "--json" or arg == "--fix" or arg == "--fix-all" or arg == "--fix-dry-run" or arg == "--mcp-perf" or arg == "--all" or arg == "--simd" or arg == "--wm-lane":
             continue
+        # Assurance WARNING PHASE: drop every diagnostic this profile raises by
+        # exactly one severity level (error -> warning), still reporting all of
+        # them. A MODIFIER, orthogonal to --profile, deliberately not a profile
+        # spelling. See compiler.common.assurance.warning_phase.
+        if arg == "--assurance-warning-phase":
+            continue
         if arg.starts_with("--profile="):
             if arg.len() == "--profile=".len():
                 return "--profile requires a tier"
@@ -62,8 +71,16 @@ fn run_lint_command(args: [text]) -> i64:
             _cli_eprint("Error: {option_error}")
         return 2
 
+    # --assurance-warning-phase is threaded to every projection through the
+    # shared env knob rather than a new parameter on each of them: the driver,
+    # the interpreter and lint all read the SAME knob, so one write here cannot
+    # leave two components disagreeing about the phase (the premise-5b hazard
+    # policy_schema.spl's header describes for the profile itself).
+    if args.contains("--assurance-warning-phase"):
+        val _wp_set = rt_env_set(warning_phase_env_var_name(), "1")
+
     if args.contains("--help") or args.contains("-h"):
-        print "Usage: simple lint <file-or-directory> [more-targets...] [--deny-all] [--warn-all] [--profile=TIER] [--mcp-perf] [--simd]"
+        print "Usage: simple lint <file-or-directory> [more-targets...] [--deny-all] [--warn-all] [--profile=TIER] [--assurance-warning-phase] [--mcp-perf] [--simd]"
         return 0
 
     var files: [text] = []
@@ -129,7 +146,7 @@ fn run_lint_command(args: [text]) -> i64:
         if json_output:
             print "{\"type\":\"lint-error\",\"message\":\"no input files\"}"
             return 2
-        print "Usage: simple lint <file.spl> [file2.spl...] [--deny-all] [--warn-all] [--profile=TIER] [--mcp-perf] [--simd]"
+        print "Usage: simple lint <file.spl> [file2.spl...] [--deny-all] [--warn-all] [--profile=TIER] [--assurance-warning-phase] [--mcp-perf] [--simd]"
         print ""
         print "Runs lint passes on Simple source files."
         print "Checks for:"

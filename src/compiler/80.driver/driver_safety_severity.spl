@@ -33,6 +33,9 @@
 # See doc/08_tracking/bug/safety_checker_pass_never_invoked_2026-07-27.md.
 
 use compiler.common.assurance.policy_names.normalize_profile_name
+use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value,
+    warning_phase_env_var_name, downgrade_severity_rank,
+    severity_rank_advisory, severity_rank_warn, severity_rank_deny}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness, ResolvedAssurancePolicyV1}
 
 extern fn rt_env_get(key: text) -> text
@@ -99,3 +102,68 @@ pub fn safety_pass_severity_for_strictness(strictness: AssuranceStrictness) -> S
 # plumbing, a separate lane, not implemented here.
 pub fn safety_pass_severity() -> SafetyPassSeverity:
     safety_pass_severity_for_name(rt_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
+
+# ---------------------------------------------------------------------------
+# WARNING PHASE (2026-08-23) — the driver's projection of the one-level
+# severity downgrade. See compiler.common.assurance.warning_phase for why this
+# is a MODIFIER with its own env knob rather than a new profile spelling (a
+# suffix spelling fails OPEN at any un-updated projection; a separate knob
+# fails CLOSED).
+#
+# The driver's ladder floor is Advisory, NOT "off": Advisory is log-only via
+# the existing SIMPLE_SAFETY_WARN path, so it still REPORTS. There is no
+# silent rung below it to fall into, which is exactly the property the feature
+# requires — a downgraded diagnostic must never become invisible.
+# ---------------------------------------------------------------------------
+
+fn _safety_severity_rank(sev: SafetyPassSeverity) -> i64:
+    match sev:
+        SafetyPassSeverity.Deny: severity_rank_deny()
+        SafetyPassSeverity.Warn: severity_rank_warn()
+        SafetyPassSeverity.Advisory: severity_rank_advisory()
+
+fn _safety_severity_of_rank(rank: i64) -> SafetyPassSeverity:
+    if rank >= severity_rank_deny():
+        return SafetyPassSeverity.Deny
+    if rank == severity_rank_warn():
+        return SafetyPassSeverity.Warn
+    SafetyPassSeverity.Advisory
+
+# Drop `sev` exactly one level, clamping at Advisory.
+pub fn safety_pass_severity_downgraded(sev: SafetyPassSeverity) -> SafetyPassSeverity:
+    _safety_severity_of_rank(downgrade_severity_rank(_safety_severity_rank(sev),
+                                                     severity_rank_advisory()))
+
+# Pure, parameterised form: the projection of `raw` under an explicit warning
+# phase. `warning_phase == false` returns exactly what
+# safety_pass_severity_for_name returns, so non-warning mode is unchanged by
+# construction rather than by inspection.
+# Non-`pub`: bare-primitive `bool` parameter, same `primitive_api` convention
+# as warning_phase.spl uses; a plain `fn` is still importable cross-module.
+fn safety_pass_severity_for_name_phased(raw: text, warning_phase: bool) -> SafetyPassSeverity:
+    val base = safety_pass_severity_for_name(raw)
+    if not warning_phase:
+        return base
+    safety_pass_severity_downgraded(base)
+
+fn safety_pass_severity_for_strictness_phased(strictness: AssuranceStrictness,
+                                                  warning_phase: bool) -> SafetyPassSeverity:
+    val base = safety_pass_severity_for_strictness(strictness)
+    if not warning_phase:
+        return base
+    safety_pass_severity_downgraded(base)
+
+fn safety_pass_severity_for_policy_phased(policy: ResolvedAssurancePolicyV1,
+                                              warning_phase: bool) -> SafetyPassSeverity:
+    safety_pass_severity_for_strictness_phased(policy.strictness, warning_phase)
+
+# Thin env wrapper — the ONLY process-global read on this path, deliberately
+# separated from the pure functions above so specs never need to mutate the
+# environment. Deserialised at the subprocess boundary exactly like
+# SIMPLE_SAFETY_PROFILE is.
+fn safety_pass_warning_phase() -> bool:
+    warning_phase_enabled_for_value(rt_env_get(warning_phase_env_var_name()) ?? "")
+
+pub fn safety_pass_severity_phased() -> SafetyPassSeverity:
+    safety_pass_severity_for_name_phased(rt_env_get("SIMPLE_SAFETY_PROFILE") ?? "",
+                                         safety_pass_warning_phase())

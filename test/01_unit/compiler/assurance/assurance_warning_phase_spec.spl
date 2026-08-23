@@ -1,0 +1,157 @@
+use std.spec.{step}
+# @cover src/compiler/00.common/assurance/warning_phase.spl
+# @cover src/compiler/80.driver/driver_safety_severity.spl
+# @cover src/compiler/90.tools/lint/_LintMain/config_and_model.spl
+#
+# ASSURANCE WARNING PHASE — the one-level severity downgrade.
+#
+# User requirement: "when set to warning on a mode, one level lower error the
+# level warning." A profile run in warning phase drops every diagnostic it
+# raises by EXACTLY ONE severity level, so a codebase can be migrated INTO
+# mission-critical incrementally: you see what would fail before it fails.
+#
+# The load-bearing assertions here are NOT "downgrade happens" (which a
+# blanket set-everything-to-warn would also satisfy). They are:
+#
+#   1. EXACTLY one level — Deny lands on Warn, not on the bottom of the ladder.
+#   2. Still REPORTED — the downgrade never reaches a silent rung. Lint clamps
+#      at Warn because `Allow` is silence; the driver clamps at Advisory
+#      because Advisory still logs.
+#   3. UNCHANGED when off — every phased function with warning_phase=false is
+#      equal to its unphased original, over the WHOLE canonical ladder, not a
+#      sample.
+#   4. FAIL-CLOSED spelling — an unrecognised knob value means full severity,
+#      never a silent downgrade. This is the property that makes a separate
+#      modifier safer than a `critical:warn` profile-name suffix.
+
+use compiler.common.assurance.warning_phase.{
+    warning_phase_env_var_name, warning_phase_flag_name,
+    warning_phase_enabled_for_value, downgrade_severity_rank,
+    phased_severity_rank, severity_rank_advisory, severity_rank_warn,
+    severity_rank_deny
+}
+use compiler.common.assurance.policy_names.{canonical_profile_names}
+use compiler.driver.driver_safety_severity.{
+    SafetyPassSeverity, safety_pass_severity_for_name,
+    safety_pass_severity_for_name_phased, safety_pass_severity_downgraded
+}
+use compiler.tools.lint.main.{LintConfig, downgrade_lint_level, phased_lint_level}
+use std.tooling.easy_fix.types.{LintLevel}
+
+fn sev_rank(s: SafetyPassSeverity) -> i64:
+    match s:
+        SafetyPassSeverity.Advisory: 0
+        SafetyPassSeverity.Warn: 1
+        SafetyPassSeverity.Deny: 2
+
+describe "assurance warning phase — exactly one severity level lower":
+
+    it "downgrades a mission-critical error to a warning, not to silence":
+        step("the headline requirement: critical DENIES, critical+phase WARNS")
+        expect(safety_pass_severity_for_name("critical"))
+            .to_equal(SafetyPassSeverity.Deny)
+        expect(safety_pass_severity_for_name_phased("critical", true))
+            .to_equal(SafetyPassSeverity.Warn)
+
+    it "the downgraded diagnostic is still REPORTED":
+        step("Warn lands in the compile context; it is not Advisory and not off")
+        val phased = safety_pass_severity_for_name_phased("critical", true)
+        expect(phased).to_not_equal(SafetyPassSeverity.Advisory)
+        expect(sev_rank(phased)).to_be_greater_than(sev_rank(SafetyPassSeverity.Advisory))
+
+    it "drops EXACTLY one rung, never more":
+        step("a blanket set-to-warn would pass 'downgrades' but fail this")
+        for name in canonical_profile_names():
+            val base = sev_rank(safety_pass_severity_for_name(name))
+            val phased = sev_rank(safety_pass_severity_for_name_phased(name, true))
+            val drop = base - phased
+            expect(drop).to_be_less_than_or_equal(1)
+            expect(drop).to_be_greater_than_or_equal(0)
+
+    it "robust drops one rung too — this is per-mode, not critical-only":
+        expect(safety_pass_severity_for_name("robust")).to_equal(SafetyPassSeverity.Warn)
+        expect(safety_pass_severity_for_name_phased("robust", true))
+            .to_equal(SafetyPassSeverity.Advisory)
+
+    it "non-warning mode is byte-identical to today, over the whole ladder":
+        step("regression fence: nothing changes unless the knob is set")
+        for name in canonical_profile_names():
+            expect(safety_pass_severity_for_name_phased(name, false))
+                .to_equal(safety_pass_severity_for_name(name))
+
+describe "the bottom of the ladder":
+
+    it "the driver clamps at Advisory — the lowest rung that still logs":
+        step("Advisory is log-only via SIMPLE_SAFETY_WARN, so it still reports")
+        expect(safety_pass_severity_downgraded(SafetyPassSeverity.Advisory))
+            .to_equal(SafetyPassSeverity.Advisory)
+
+    it "downgrading an already-bottom severity is idempotent":
+        val once = safety_pass_severity_downgraded(SafetyPassSeverity.Deny)
+        val twice = safety_pass_severity_downgraded(once)
+        val thrice = safety_pass_severity_downgraded(twice)
+        expect(twice).to_equal(SafetyPassSeverity.Advisory)
+        expect(thrice).to_equal(SafetyPassSeverity.Advisory)
+
+    it "the rank helper never lowers past its floor and never raises":
+        expect(downgrade_severity_rank(severity_rank_deny(), severity_rank_advisory()))
+            .to_equal(severity_rank_warn())
+        expect(downgrade_severity_rank(severity_rank_advisory(), severity_rank_advisory()))
+            .to_equal(severity_rank_advisory())
+        step("a rank already BELOW the floor is returned untouched, not raised")
+        expect(downgrade_severity_rank(severity_rank_advisory() - 1, severity_rank_advisory()))
+            .to_equal(severity_rank_advisory() - 1)
+
+describe "lint's projection clamps one rung ABOVE its enum bottom":
+
+    it "Deny becomes Warn":
+        expect(downgrade_lint_level(LintLevel.Deny)).to_equal(LintLevel.Warn)
+
+    it "Warn stays Warn — it must NEVER fall through to Allow":
+        step("Allow is silence; this feature is a severity transform, not a mute")
+        expect(downgrade_lint_level(LintLevel.Warn)).to_equal(LintLevel.Warn)
+        expect(downgrade_lint_level(LintLevel.Warn)).to_not_equal(LintLevel.Allow)
+
+    it "a rule the user already turned off stays off — the downgrade never raises":
+        expect(downgrade_lint_level(LintLevel.Allow)).to_equal(LintLevel.Allow)
+
+    it "phased_lint_level is the identity when the phase is off":
+        expect(phased_lint_level(LintLevel.Deny, false)).to_equal(LintLevel.Deny)
+        expect(phased_lint_level(LintLevel.Warn, false)).to_equal(LintLevel.Warn)
+        expect(phased_lint_level(LintLevel.Allow, false)).to_equal(LintLevel.Allow)
+
+    it "a LintConfig in warning phase reports a denied rule as a warning":
+        step("end-to-end through get_level, not just the pure helper")
+        var cfg = LintConfig.new()
+        cfg.set_level("resource_leak", LintLevel.Deny)
+        cfg.set_warning_phase(false)
+        expect(cfg.get_level("resource_leak")).to_equal(LintLevel.Deny)
+        cfg.set_warning_phase(true)
+        expect(cfg.get_level("resource_leak")).to_equal(LintLevel.Warn)
+
+    it "an unknown lint still defaults to a REPORTING level under warning phase":
+        var cfg = LintConfig.new()
+        cfg.set_warning_phase(true)
+        expect(cfg.get_level("no_such_lint_name_at_all")).to_equal(LintLevel.Warn)
+
+describe "the knob is a MODIFIER and fails CLOSED":
+
+    it "names the dedicated env var and CLI flag, not a profile spelling":
+        step("a `critical:warn` suffix would normalise to \"\" -> moderate at any")
+        step("un-updated consumer: a suffix fails OPEN, a separate knob fails CLOSED")
+        expect(warning_phase_env_var_name()).to_equal("SIMPLE_ASSURANCE_WARNING_PHASE")
+        expect(warning_phase_flag_name()).to_equal("--assurance-warning-phase")
+
+    it "accepts the documented truthy spellings":
+        for v in ["1", "true", "yes", "on", "warn", "warning", "TRUE", "Warn"]:
+            expect(warning_phase_enabled_for_value(v)).to_be_true()
+
+    it "an unset or misspelt value means FULL severity, never a silent downgrade":
+        for v in ["", "0", "false", "off", "no", "warnn", "critical", "enabled"]:
+            expect(warning_phase_enabled_for_value(v)).to_be_false()
+
+    it "phased_severity_rank is the identity when the phase is off":
+        expect(phased_severity_rank(severity_rank_deny(), severity_rank_advisory(), false))
+            .to_equal(severity_rank_deny())
+        expect(phased_severity_rank(severity_rank_deny(), severity_rank_advisory(), true))
+            .to_equal(severity_rank_warn())
