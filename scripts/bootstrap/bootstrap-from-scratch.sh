@@ -4380,7 +4380,6 @@ case "${execution_profile}" in
     ;;
 esac
 
-. "${bootstrap_entry_dir}/bootstrap-cache-policy.shs"
 bootstrap_strategy_validate "${bootstrap_strategy}" || {
   echo "error: unknown --strategy '${bootstrap_strategy}' (expected adhoc, normal, or full)" >&2
   exit 1
