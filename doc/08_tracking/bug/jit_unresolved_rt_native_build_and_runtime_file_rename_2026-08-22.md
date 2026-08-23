@@ -227,10 +227,11 @@ post-fix.
 and is silently skipped on `Err(_)`. That silent skip is a second defect of the
 same family and is NOT addressed by this change.
 
-## STATUS CORRECTION — the interpreter half is NOT fixed as of 2026-08-23
+## STATUS CORRECTION — the interpreter half is NOW FIXED (`aac03e9d65a`, 2026-08-23)
 
-The `**Status:** FIXED` at the top of this record is **correct for the JIT /
-codegen path and wrong for the interpreter path**. Treat it as OPEN. Evidence,
+The `**Status:** FIXED` at the top of this record was **correct for the JIT /
+codegen path and wrong for the interpreter path** until `aac03e9d65a`. Both
+halves are now fixed. Kept as history because the window was real. Evidence,
 so this is not a matter of opinion: a seed rebuilt from clean `HEAD` — a tree
 that demonstrably CONTAINS `c0c4e707789` — reproduces the original symptom
 byte-for-byte. The fix is incomplete, not undeployed. Anyone reading only the
@@ -289,11 +290,17 @@ partially written, so regenerating the DB destroys no information that is not
 already reproducible from a test run. Once the interpreter half lands,
 regenerate rather than attempting a repair.
 
-## Second defect, same family, NOT fixed here
+## RETRACTED — the "second defect" was a phantom
 
-`test_result.md` was still not written even on a run where `test_db.sdn` WAS
-successfully rewritten. Its write (`test_runner_main.spl:1193`) sits under
-`match db { Ok(database) => ... , Err(_) => () }` — an `Err` silently skips the
-report with no diagnostic. That silent skip is its own defect and needs its own
-fix; a swallowed write failure is exactly how this whole situation stayed
-invisible for a day.
+An earlier revision of this record filed `test_result.md`'s write
+(`test_runner_main.spl:1193`, under `match db { Ok(database) => ...,
+Err(_) => () }`) as an independent second defect, on the evidence that it
+stayed unwritten on a run where `test_db.sdn` succeeded. That was wrong: on the
+FIXED seed both files write. The `Err(_)` arm was being taken because
+`update_test_database` had died — it was downstream of the same abort, not a
+separate bug. Retracted rather than left standing, because a phantom defect
+record costs the next reader real time.
+
+The `Err(_) => ()` arm is still silent, and that remains a legitimate
+robustness concern worth a future look — but it is NOT what caused this
+incident and should not be filed as though it were.

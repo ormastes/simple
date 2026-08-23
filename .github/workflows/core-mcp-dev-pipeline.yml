@@ -300,3 +300,32 @@ jobs:
           SIMPLE_BIN: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
         run: |
           bash scripts/check/check-scalar-accumulator-not-array-merge.shs
+
+      # Test-DB write gate (blocking).
+      #
+      # A fully passing `simple test <dir>` printed `All tests passed!` and then
+      # exited 1: update_test_database (test_runner_main.spl:1144) died with
+      # `error[E1002]: function 'runtime_file_rename' not found` AFTER
+      # print_summary (:1125) had printed the clean `Results:` block. Every run
+      # wrote NO test DB, which is why test_result.md froze at 770/0/0.
+      # Fixed in aac03e9d65a; this gate keeps it fixed.
+      #
+      # No other guard can see this class: they all check trees, ranges or
+      # source text, and the two that run a toolchain run it over SOURCE. A
+      # runner that exits non-zero on a green suite is well-formed by all of
+      # them. This one EXECUTES the runner and asserts exit 0 AND that the DB
+      # was really rewritten.
+      #
+      # Lives HERE and not in repo-hygiene's advisory-gates job for a concrete
+      # reason: it needs a built bin/simple. repo-hygiene only checks out the
+      # repo, so there the guard would exit 2 (ERROR -- "absence of a runner is
+      # absence of evidence") on every run and never actually test anything.
+      # This job builds the bootstrap seed and symlinks bin/simple above.
+      - name: Test-DB write gate
+        if: ${{ !cancelled() }}
+        env:
+          SIMPLE_BINARY: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
+        run: |
+          ln -sfn "$SIMPLE_BINARY" bin/simple
+          sh scripts/check/check-test-db-write-succeeds.shs --selftest
+          sh scripts/check/check-test-db-write-succeeds.shs
