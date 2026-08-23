@@ -1,0 +1,61 @@
+# @Feature G9: NDArray Bool-dtype guards fire from every ndarray module
+# @Description: REPRODUCING spec for
+# doc/08_tracking/bug/enum_variant_expr_resolves_wrong_when_enum_not_in_module_scope_2026-08-23.md
+#
+# Pre-fix failing output, verbatim (Rust seed, interpreter engine):
+#     NDArray sort
+#       ✗ returns UnsupportedDType for Bool argsort
+#         expected false to equal true
+#     NDArray stack
+#       ✗ returns UnsupportedDType for Bool stack in this 1-D v1 slice
+#         expected false to equal true
+#
+# The guards were implemented and present at ndarray_impl_ops.spl:187 and
+# ndarray_generators.spl:171 -- they simply never fired, because the expression
+# `DType.Bool` inside those two modules did not evaluate to DType::Bool. Neither
+# module can import std.ndarray.mod (mod.spl imports THEM), so the bare name
+# `DType` was resolved through the interpreter's flat global enum table, where
+# three distinct enums are named DType. Fixed by moving `enum DType` into
+# src/lib/common/science_math/ndarray.spl, which every ndarray module already
+# imports. Variants and order unchanged.
+#
+# This is a genuine defect, NOT unimplemented work: nothing here qualifies for
+# @tag:in-development. The guards exist in source; only their resolution was
+# wrong.
+#
+# ENGINE: interpreter. `bin/simple run` on identical source got this RIGHT via a
+# lenient dynamic fallback, so only the spec/test path was red. Do not "verify"
+# this class with `run`.
+
+use std.ndarray.*
+
+describe "Bool dtype is rejected by the guards that own it":
+
+    it "try_argsort rejects Bool -- the filed failing case":
+        val a = array_bool([Bool.new(true), Bool.new(false)])
+        expect(a.try_argsort().is_err()).to_equal(true)
+
+    it "try_stack rejects Bool -- the second filed failing case":
+        val a = array_bool([Bool.new(true), Bool.new(false)])
+        expect(try_stack([a, a]).is_err()).to_equal(true)
+
+    it "the DType.Bool expression itself compares equal -- the root cause":
+        val a = array_bool([Bool.new(true)])
+        expect(a.dtype == DType.Bool).to_equal(true)
+
+    it "the three non-Bool variants still compare equal -- no regression":
+        expect(array([Float64.new(1.0)]).dtype == DType.F64).to_equal(true)
+        expect(array_f32([Float32.new(1.0f32)]).dtype == DType.F32).to_equal(true)
+        expect(array_i64([Int64.new(1)]).dtype == DType.I64).to_equal(true)
+
+    it "a non-Bool dtype is NOT wrongly rejected -- the guard stays narrow":
+        val a = array([Float64.new(2.0), Float64.new(1.0)])
+        expect(a.try_argsort().is_err()).to_equal(false)
+        expect(try_stack([a, a]).is_err()).to_equal(false)
+
+    it "match-position resolution agrees with expression position":
+        val a = array_bool([Bool.new(true)])
+        val tag = match a.dtype:
+            case DType.Bool: "bool"
+            case _: "other"
+        expect(tag).to_equal("bool")

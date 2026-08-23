@@ -68,6 +68,7 @@ fn validate_raw_span(ptr: i64, len: i64, symbol: &str) -> Result<(), CompileErro
 fn expect_f64(args: &[Value], index: usize, symbol: &str) -> Result<f64, CompileError> {
     match args.get(index) {
         Some(Value::Float(value)) => Ok(*value),
+        Some(Value::Float32(value)) => Ok(f64::from(*value)),
         Some(Value::Int(value)) => Ok(*value as f64),
         _ => Err(CompileError::runtime(format!(
             "{symbol}: argument {index} must be numeric"

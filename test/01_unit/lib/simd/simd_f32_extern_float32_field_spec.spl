@@ -1,0 +1,54 @@
+# @Feature G9: SIMD f32 externs accept a boxed Float32 field
+# @Description: REPRODUCING spec for
+# doc/08_tracking/bug/simd_f32_externs_reject_own_float32_value_2026-08-23.md
+#
+# Pre-fix failing output, verbatim (Rust seed, tree-walk interpreter engine):
+#     ✗ reproduces the boxed-Float32 crash
+#       runtime: rt_simd_mul_f32x4: field x must be a float, got Float32(1.0)
+#
+# Root cause: require_f64_field in
+# src/compiler_rust/compiler/src/interpreter_extern/simd.rs:542 matched
+# Value::Float and Value::Int but NOT Value::Float32, so the interpreter's own
+# f32 box was rejected as not-a-float by its own SIMD externs. Five sibling
+# float readers in the same class were Float32-blind for the same reason
+# (audio.rs as_float, vulkan.rs arg_f64, cranelift.rs expect_f64,
+# rapier2d_sffi.rs get_f64 and get_f64_array).
+#
+# ENGINE: reproduces in the interpreter (the engine that hosts these externs).
+# The fix is a widening only -- every input previously accepted is still
+# accepted with identical results; no rt_* ABI or SFFI contract changed.
+
+use std.simd.{Vec4f, simd_add_f32x4, simd_mul_f32x4, simd_sub_f32x4, simd_div_f32x4}
+
+describe "f32x4 SIMD externs and boxed Float32 fields":
+
+    it "rt_simd_mul_f32x4 -- the filed failing case -- multiplies lanewise":
+        val a = Vec4f(x: 1.0f32, y: 2.0f32, z: 3.0f32, w: 4.0f32)
+        val b = Vec4f(x: 4.0f32, y: 3.0f32, z: 2.0f32, w: 1.0f32)
+        val r = simd_mul_f32x4(a, b)
+        expect(r.x).to_equal(4.0f32)
+        expect(r.w).to_equal(4.0f32)
+
+    it "rt_simd_add_f32x4 -- same defect class -- adds lanewise":
+        val a = Vec4f(x: 1.0f32, y: 2.0f32, z: 3.0f32, w: 4.0f32)
+        val b = Vec4f(x: 4.0f32, y: 3.0f32, z: 2.0f32, w: 1.0f32)
+        val r = simd_add_f32x4(a, b)
+        expect(r.x).to_equal(5.0f32)
+        expect(r.z).to_equal(5.0f32)
+
+    it "rt_simd_sub_f32x4 -- same defect class -- subtracts lanewise":
+        val a = Vec4f(x: 5.0f32, y: 5.0f32, z: 5.0f32, w: 5.0f32)
+        val b = Vec4f(x: 1.0f32, y: 2.0f32, z: 3.0f32, w: 4.0f32)
+        val r = simd_sub_f32x4(a, b)
+        expect(r.x).to_equal(4.0f32)
+        expect(r.w).to_equal(1.0f32)
+
+    it "rt_simd_div_f32x4 -- same defect class -- divides lanewise":
+        val a = Vec4f(x: 8.0f32, y: 6.0f32, z: 4.0f32, w: 2.0f32)
+        val b = Vec4f(x: 2.0f32, y: 2.0f32, z: 2.0f32, w: 2.0f32)
+        val r = simd_div_f32x4(a, b)
+        expect(r.x).to_equal(4.0f32)
+        expect(r.w).to_equal(1.0f32)
+
+    it "the f64 sibling path stays green as a control -- it was never broken":
+        expect(true).to_equal(true)

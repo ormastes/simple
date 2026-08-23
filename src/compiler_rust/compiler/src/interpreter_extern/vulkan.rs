@@ -221,6 +221,7 @@ fn arg_i64(args: &[Value], idx: usize, name: &str) -> Result<i64, CompileError> 
 fn arg_f64(args: &[Value], idx: usize, name: &str) -> Result<f64, CompileError> {
     match args.get(idx) {
         Some(Value::Float(v)) => Ok(*v),
+        Some(Value::Float32(v)) => Ok(f64::from(*v)),
         #[allow(clippy::cast_precision_loss)]
         Some(Value::Int(v)) => Ok(*v as f64),
         other => Err(CompileError::runtime(format!(

@@ -94,6 +94,7 @@ fn get_i64(args: &[Value], index: usize, func: &str) -> Result<i64, CompileError
 fn get_f64(args: &[Value], index: usize, func: &str) -> Result<f64, CompileError> {
     match args.get(index) {
         Some(Value::Float(v)) => Ok(*v),
+        Some(Value::Float32(v)) => Ok(f64::from(*v)),
         Some(Value::Int(v)) => Ok(*v as f64),
         _ => Err(wrong_arg_type(func, index, "float")),
     }
@@ -113,6 +114,7 @@ fn get_f64_array(args: &[Value], index: usize, func: &str) -> Result<Vec<f64>, C
             for value in values.iter() {
                 match value {
                     Value::Float(v) => out.push(*v),
+                    Value::Float32(v) => out.push(f64::from(*v)),
                     Value::Int(v) => out.push(*v as f64),
                     _ => return Err(wrong_arg_type(func, index, "[f64]")),
                 }

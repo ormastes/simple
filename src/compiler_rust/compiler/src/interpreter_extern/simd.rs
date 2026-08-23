@@ -543,6 +543,7 @@ fn require_i64_field(name: &str, fields: &HashMap<String, Value>, field: &str) -
 fn require_f64_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<f64, CompileError> {
     match fields.get(field) {
         Some(Value::Float(n)) => Ok(*n),
+        Some(Value::Float32(n)) => Ok(f64::from(*n)),
         Some(Value::Int(n)) => Ok(*n as f64),
         Some(other) => Err(CompileError::runtime(format!(
             "{name}: field {field} must be a float, got {:?}",
