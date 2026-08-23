@@ -288,14 +288,77 @@ fn test_explicit_self_field_access_is_valid_simple() {
 }
 
 #[test]
-fn test_typescript_arrow_function_detection() {
+fn java_new_is_flagged_only_when_a_type_name_follows() {
+    // D4. The rule used to be "flag `new` unless the PREVIOUS token is on a
+    // denylist", which had to enumerate every position `new` can legally
+    // appear in as an ordinary identifier — and silently missed several. The
+    // one that surfaced was `for new in [1, 2]`, whose previous token is `for`:
+    // a valid program was rejected outright with "Common mistake detected".
+    //
+    // The rule now keys on a positive LOOKAHEAD instead, mirroring the
+    // neighbouring `function` rule: the Java mistake is `new Type(...)`, so it
+    // is a mistake only when a type NAME follows. Both directions are pinned
+    // here, because asserting only the negative would pass equally well if the
+    // rule were deleted outright.
+    // doc/08_tracking/bug/
+    // seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
+    use simple_parser::token::{NamePattern, Span, Token, TokenKind};
+
+    let new_tok = Token::new(TokenKind::New, Span::new(0, 3, 1, 1), "new".to_string());
+    // Statement-start `new Point(...)` — the actual Java shape the rule targets.
+    // NOT `= new Point`: `Assign` has always been on the rule's previous-token
+    // denylist, so that form was never flagged and this change does not alter it.
+    let stmt_start = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "\n".to_string());
+    let type_name = Token::new(
+        TokenKind::Identifier {
+            name: "Point".to_string(),
+            pattern: NamePattern::TypeName,
+        },
+        Span::new(4, 9, 1, 5),
+        "Point".to_string(),
+    );
+    let in_kw = Token::new(TokenKind::In, Span::new(4, 6, 1, 5), "in".to_string());
+    let for_kw = Token::new(TokenKind::For, Span::new(0, 3, 1, 1), "for".to_string());
+
+    // POSITIVE: statement-start `new Point` is still the Java mistake and must still be caught.
+    assert_eq!(
+        detect_common_mistake(&new_tok, &stmt_start, Some(&type_name)),
+        Some(CommonMistake::JavaNew)
+    );
+    // NEGATIVE: `for new in ...` — `new` as an ordinary loop binding. This is
+    // the exact shape that used to abort a valid program.
+    assert_eq!(detect_common_mistake(&new_tok, &for_kw, Some(&in_kw)), None);
+}
+
+#[test]
+fn test_typescript_arrow_function_no_longer_flagged_after_arrow_lambda_landed() {
+    // INVERTED 2026-08-23, deliberately, because the GRAMMAR changed under it.
+    //
+    // This used to assert `) =>` reports `CommonMistake::TsArrowFunction`. The
+    // rule's premise was that the TypeScript text `(a, b) => a + b` is not
+    // Simple. It now IS Simple: the parenthesised arrow lambda is a supported
+    // production in both parsers (`try_arrow_lambda_from_paren_list`,
+    // expressions/primary/collections.rs). `) =>` therefore matches only valid
+    // code — an arrow lambda, or a match arm after a tuple/call-shaped pattern
+    // — so the rule could no longer discriminate anything and was removed.
+    //
+    // The assertion is kept and inverted rather than deleted, so that
+    // reinstating the rule fails loudly here instead of silently re-emitting a
+    // "this is a TypeScript mistake" hint on correct Simple.
+    //
+    // The `TsArrowFunction` VARIANT survives on purpose: its guidance text is
+    // still the right advice for the BARE `x => e` form, which is
+    // unimplemented in both parsers.
+    // doc/08_tracking/bug/
+    // seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
     use simple_parser::token::{NamePattern, Span, Token, TokenKind};
 
     let fat_arrow = Token::new(TokenKind::FatArrow, Span::new(8, 10, 1, 9), "=>".to_string());
     let rparen = Token::new(TokenKind::RParen, Span::new(7, 8, 1, 8), ")".to_string());
 
     let mistake = detect_common_mistake(&fat_arrow, &rparen, None);
-    assert_eq!(mistake, Some(CommonMistake::TsArrowFunction));
+    assert_eq!(mistake, None);
+    // The variant and its guidance text remain available for the bare form.
     assert!(CommonMistake::TsArrowFunction.message().contains("lambda"));
 }
 

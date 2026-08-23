@@ -1,5 +1,86 @@
 # Seed parser: three grammar gaps blocking 5 specs at parse time (2026-08-23)
 
+## Status update 2026-08-23 (second pass) — D1/D3/D4/D5 FIXED, D2 still OPEN
+
+Everything below this box is the original filing and is left intact for
+history; it is accurate about the defects, and one of its per-parser guesses is
+corrected here by measurement rather than by inference.
+
+**Twin check, measured in both implementations** (per the standing "a defect
+found in one parser requires checking the other" rule). The pure-Simple
+frontend was probed through `parse_full_frontend` on source strings; the Rust
+seed through `<seed> run` on the minimal repros. Both halves are now pinned by
+`test/01_unit/compiler/frontend/parser_arrow_lambda_and_continuation_indent_spec.spl`.
+
+| gap | Rust seed (pre-fix) | pure-Simple frontend (pre-fix) | fixed in |
+|---|---|---|---|
+| D1 `(x) => e`, `(x, y) => e` | broken | broken | **both** |
+| D1 `() => e` (zero-param) | already worked | **broken** — the original filing did not test this half | frontend |
+| D1 bare `x => e` | broken | broken | **neither** — see below |
+| D2 braced block expr | broken | broken | neither — still OPEN |
+| D3 wrapped return type | broken | **twin ABSENT (parses fine)** — filing said "unverified"; now measured | seed |
+| D4 `new` over-reserved | broken | **twin ABSENT (parses fine)** | seed |
+| D5 wrapped `if` condition | broken | **twin ABSENT (parses fine)** | seed |
+
+**D4 root cause was not what the filing guessed.** It is not a dispatch-order
+problem and `TokenKind::New` is not consumed early: `identifiers.rs` reaches
+its `parse_keyword_identifier("new")` arm normally. The abort came from the
+COMMON-MISTAKE detector, `error_recovery.rs:386` (`CommonMistake::JavaNew`),
+which flagged any `new` whose PREVIOUS token was not on a hand-maintained
+denylist. `for new in [...]` has `for` as its previous token, which the list
+never listed. Fixed by giving the rule the positive lookahead the neighbouring
+`function` rule already uses — the Java mistake is `new Type(...)`, so it is
+only flagged when an identifier FOLLOWS. That strictly narrows the heuristic:
+every real `new Type(...)` diagnosis is kept.
+
+**D3 and D5 are the same defect class**, not two: a header (a function
+signature, or an `if` condition) wrapped onto a continuation line that sits at
+exactly the BODY's column consumes the only INDENT the lexer emits, and the
+body then starts with no INDENT of its own while the parser still demands one.
+D5 turned out to have **two** shapes in that one product file, failing through
+different code paths and needing two edits: the BLOCK then-branch at
+`riscv_scalar_csr_owner.spl:48-52` ("expected Indent, found FString") and the
+INLINE then/else at `:139-141` ("expected expression, found Dedent" — the
+inline path never reconciled the continuation's pseudo-INDENT at all, whereas
+the block path at least drained the "Deep" case). Fixing only the first moved
+the error from line 50 to line 141 and left the spec at `executed=0`, which is
+why both are fixed here. With both fixed, `formal_verification_2_0_spec.spl`
+goes **executed 0 -> 81, passed 73, failed 8** — the 8 are ordinary assertion
+failures in a spec that had never executed at all, not parse errors, and are
+outside this record's scope. The
+`for`/`while` statement forms already carried a guard for this exact shape
+(`header_continuation_is_equal_column`, from
+`seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md`); the
+fixes bring the function-signature and if-EXPRESSION forms in line with it
+rather than inventing a new rule. One extension was needed: the shared
+`is_statement_start()` predicate lists only statement keywords and identifiers,
+so an expression block starting with a literal (`"completion_" + field[0]`) was
+not recognised as a body start; that widening is local to the if-expression
+path so the loop guards are untouched.
+
+**D1 landed in BOTH parsers, as the filing required** — the parenthesised form
+only. Bare `x => e` is implemented in NEITHER, deliberately: it needs an
+identifier-position lookahead sitting next to live match-arm `=>` handling
+(seed `is_spurious_match_arm_fat_arrow`; frontend `parser_stmts.spl:1828`), and
+`=>` is a real match-arm separator in product code (e.g.
+`src/lib/nogc_sync_mut/engine/render/any_backend3d.spl:34-64`). The blocked
+specs need only `(x) => x + 1`.
+
+**D2 is a documented refusal, not an oversight.** A braced block in expression
+position collides with four live productions that all begin with `{`: dict
+literal `{k: v}`, empty dict `{}`, and dict comprehension
+(frontend `_ParserPrimary/primary_expr.spl:797-885`; seed `parse_dict_literal`,
+`primary/collections.rs:312`), plus the seed's brace-postfix method-call form
+guarded by `no_brace_postfix`. Distinguishing them needs a real disambiguation
+rule and a new AST node (or a `DoBlock` reuse) in both parsers, not a lookahead
+tuned until the two blocked specs pass. The shape a future fix should
+generalise is the seed's existing `peek_brace_is_lambda_block()`
+(`primary/lambdas.rs:138`), today used only for `\`/`|` lambda bodies. D2 stays
+OPEN and still blocks `nested_fn_capture_class_spec.spl` and
+`parser_framework_spec.spl`.
+
+---
+
 Status: OPEN. Found while fixing the four "seed parser gaps" named by the
 4,394-spec sweep (`PHASE1_SEED_CORE_SWEEP_2026-08-23.md`). Three of the eleven
 blocked specs turned out to be **one** defect each in the Rust seed parser

@@ -401,6 +401,17 @@ pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&To
                 | TokenKind::Star
                 | TokenKind::Slash
         )
+        // Positive lookahead, mirroring the `function` check below: the Java
+        // mistake is `new Type(...)`, so it is only a mistake when a TYPE NAME
+        // follows. Without this, the previous-token denylist had to enumerate
+        // every position `new` can legally appear in as an ordinary
+        // identifier, and it silently missed several — `for new in [...]`
+        // (previous = `for`), `new` as a loop/collection element, `f(new)`
+        // after a non-listed token — turning a *hint* into a hard parse
+        // failure for valid programs. Requiring the following token to be an
+        // identifier keeps every real `new Type(...)` diagnosis and drops
+        // exactly the false positives.
+        && next.is_some_and(|token| matches!(token.kind, TokenKind::Identifier { .. }))
     {
         return Some(CommonMistake::JavaNew);
     }
@@ -460,10 +471,18 @@ pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&To
         }
     }
 
-    // Check for TypeScript arrow function: ) =>
-    if matches!(current.kind, TokenKind::FatArrow) && matches!(previous.kind, TokenKind::RParen) {
-        return Some(CommonMistake::TsArrowFunction);
-    }
+    // NOTE: the `) =>` shape used to be reported here as
+    // `CommonMistake::TsArrowFunction` ("'=>' is not used"). That is no longer
+    // true: `() => e`, `(x) => e` and `(x, y) => e` are supported arrow-lambda
+    // productions (see `try_arrow_lambda_from_paren_list`,
+    // expressions/primary/collections.rs), and the documented syntax reference
+    // uses the form. `) =>` matched EXACTLY the now-valid production and
+    // nothing else, so the rule can only misfire on correct code; it is
+    // removed rather than narrowed. The `TsArrowFunction` variant itself is
+    // kept — it still carries the guidance text for the BARE `x => e` form,
+    // which remains unimplemented in both parsers.
+    // doc/08_tracking/bug/
+    // seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
 
     // Check for wrong brackets in generics: identifier[
     if matches!(current.kind, TokenKind::LBracket) && matches!(previous.kind, TokenKind::Identifier { .. }) {

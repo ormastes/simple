@@ -38,6 +38,9 @@ use compiler.core.ast.{expr_block, expr_tuple}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
 use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_dict_lit}
+# D1 arrow lambda: a parenthesised element list is a PARAMETER list only when
+# every element is a bare identifier, which needs the arena tag directly.
+use compiler.core.ast_expr.{EXPR_IDENT, expr_tag}
 use compiler.core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
 use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_new_alloc}
 use compiler.core.ast.{expr_list_comp, expr_dict_comp}
@@ -504,6 +507,17 @@ fn parse_primary_expr() -> i64:
         parser_advance()
         if par_kind_get() == 141:
             parser_advance()
+            # D1: zero-parameter arrow lambda — `() => expr`. The Rust seed has
+            # accepted this form since expressions/primary/collections.rs:32;
+            # without it here the two parsers disagreed about a construct the
+            # seed already compiles, which breaks self-hosting asymmetrically.
+            # doc/08_tracking/bug/
+            # seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
+            if par_kind_get() == 168:
+                parser_advance()
+                var zero_body: [i64] = []
+                zero_body.push(parse_expr())
+                return expr_lambda([], zero_body, 0)
             return expr_unit(0)
         val inner = parse_expr()
         # G29: tuple literal — (e1, e2, ...)
@@ -516,8 +530,33 @@ fn parse_primary_expr() -> i64:
                     break
                 tup_elems.push(parse_expr())
             parser_expect(141)
+            # D1: multi-parameter arrow lambda — `(x, y) => expr`. Same
+            # production as the zero-parameter form above, only with a
+            # non-empty parameter list. The parenthesised element list has
+            # already been parsed as expressions; it is a parameter list only
+            # when EVERY element is a bare identifier, so a real tuple such as
+            # `(a.b, 1)` can never be mistaken for one.
+            if par_kind_get() == 168:
+                var tup_all_idents = true
+                for te in tup_elems:
+                    if te < 0 or te >= expr_tag.len() or expr_tag[te] != EXPR_IDENT:
+                        tup_all_idents = false
+                if tup_all_idents:
+                    parser_advance()
+                    var multi_body: [i64] = []
+                    multi_body.push(parse_expr())
+                    return expr_lambda(tup_elems, multi_body, 0)
             return expr_tuple(tup_elems, 0)
         parser_expect(141)
+        # D1: single-parameter arrow lambda — `(x) => expr`.
+        if par_kind_get() == 168:
+            if inner >= 0 and inner < expr_tag.len() and expr_tag[inner] == EXPR_IDENT:
+                parser_advance()
+                var one_params: [i64] = []
+                one_params.push(inner)
+                var one_body: [i64] = []
+                one_body.push(parse_expr())
+                return expr_lambda(one_params, one_body, 0)
         return inner
 
     if par_kind_get() == 144:

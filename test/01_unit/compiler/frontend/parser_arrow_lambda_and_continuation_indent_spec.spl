@@ -1,0 +1,172 @@
+# Parser parity + regression spec for the five gaps filed in
+# doc/08_tracking/bug/seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
+#
+# Two halves, deliberately:
+#
+#   1. The RUST SEED is exercised by the spec's own SOURCE. Every construct
+#      below that appears as real code (not inside a string) must parse for
+#      this file to be read at all — pre-fix the whole file reported
+#      `executed=0 reason=parse-error`, which is exactly the evidence bar for
+#      a parse defect.
+#   2. The PURE-SIMPLE FRONTEND is exercised through `parse_full_frontend` on
+#      source strings, because the two parsers are separate implementations
+#      and a fix in one is not a fix in the other. Each `it` calls
+#      `parse_full_frontend` INLINE rather than through a shared helper —
+#      routing it through a module-level fn has been shown to lose recorded
+#      parser state when read back (see enum_payload_capture_spec.spl).
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_has_errors}
+
+# --- Seed-side fixtures: these are REAL code, so they only compile if the
+# --- Rust seed parser accepts the construct.
+
+# D1: arrow lambda with a parameter list.
+fn apply_one(f: (i64) -> i64) -> i64:
+    f(1)
+
+# D3: return type wrapped onto continuation lines after a trailing `->`.
+fn d3_pair(a: i64) ->
+    (i64,
+     i64):
+    val z = a
+    (z, z)
+
+# D5: `if` condition wrapped onto a continuation line at the BODY's column.
+fn d5_pick(a: i64) -> text:
+    val n = if a == 1 or
+        a == 2:
+        "yes_"
+    else:
+        "no_"
+    n
+
+# D5, second shape: the SAME wrapped condition with an INLINE then/else. This
+# is the shape at src/compiler/50.mir/hwir/riscv_scalar_csr_owner.spl:139-141,
+# and it failed differently from the block form above ("expected expression,
+# found Dedent" rather than "expected Indent"), through a different code path.
+fn d5_pick_inline(a: i64) -> text:
+    val n = if a == 1 or
+        a == 2: "yes_" else: "no_"
+    n
+
+# D4: `new` is a soft keyword and must stay usable as an ordinary identifier.
+fn d4_sum() -> i64:
+    var t = 0
+    for new in [1, 2]:
+        t = t + new
+    t
+
+describe "seed parser accepts the five filed constructs (this file's own source)":
+    it "D1 parses and evaluates a single-parameter arrow lambda":
+        val f = (x) => x + 1
+        assert_equal(f(1), 2)
+
+    it "D1 parses a multi-parameter arrow lambda":
+        val g = (x, y) => x + y
+        assert_equal(g(2, 3), 5)
+
+    it "D1 keeps the pre-existing zero-parameter arrow lambda working":
+        val h = () => 7
+        assert_equal(h(), 7)
+
+    it "D1 accepts an arrow lambda in argument position":
+        assert_equal(apply_one((x) => x + 41), 42)
+
+    it "D1 does NOT reinterpret a real tuple as a parameter list":
+        val t = (1, 2)
+        assert_equal(t[0], 1)
+        assert_equal(t[1], 2)
+
+    it "D1 leaves plain grouping alone":
+        assert_equal((2 + 3) * 4, 20)
+
+    it "D3 parses a wrapped return type":
+        assert_equal(d3_pair(2)[0], 2)
+
+    it "D4 uses `new` as a loop binding and an operand":
+        assert_equal(d4_sum(), 3)
+
+    it "D5 parses a wrapped if-condition whose continuation shares the body column":
+        assert_equal(d5_pick(1), "yes_")
+        assert_equal(d5_pick(9), "no_")
+
+    it "D5 parses the INLINE then/else form of the same wrapped condition":
+        assert_equal(d5_pick_inline(1), "yes_")
+        assert_equal(d5_pick_inline(9), "no_")
+
+    it "D5 control: the same if on one line still works":
+        val a = 1
+        val n = if a == 1: "yes_" else: "no_"
+        assert_equal(n, "yes_")
+
+    it "D5 control: a continuation DEEPER than the body still works":
+        val a = 1
+        val n = if a == 1 or
+                a == 2:
+            "deep_"
+        else:
+            "no_"
+        assert_equal(n, "deep_")
+
+describe "pure-Simple frontend parses the same constructs":
+    it "D1 single-parameter arrow lambda":
+        val src = "fn main():\n    val f = (x) => x + 1\n    print(f(1))\n"
+        parse_full_frontend(src, "testdata/parity_d1_one.spl", "parity_d1_one", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "D1 multi-parameter arrow lambda":
+        val src = "fn main():\n    val g = (x, y) => x + y\n    print(g(2, 3))\n"
+        parse_full_frontend(src, "testdata/parity_d1_two.spl", "parity_d1_two", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "D1 zero-parameter arrow lambda":
+        val src = "fn main():\n    val f = () => 1\n    print(f())\n"
+        parse_full_frontend(src, "testdata/parity_d1_zero.spl", "parity_d1_zero", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "D1 a real tuple is still a tuple":
+        val src = "fn main():\n    val t = (1, 2)\n    print(t[0])\n"
+        parse_full_frontend(src, "testdata/parity_d1_tuple.spl", "parity_d1_tuple", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "D3 wrapped return type (frontend twin verified ABSENT, pinned so it stays absent)":
+        val src = "fn pair(a: i64) ->\n    (i64,\n     i64):\n    val z = a\n    (z, z)\n"
+        parse_full_frontend(src, "testdata/parity_d3.spl", "parity_d3", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "D4 `new` as an ordinary identifier (frontend twin verified ABSENT, pinned)":
+        val src = "fn main():\n    var t = 0\n    for new in [1, 2]:\n        t = t + new\n    print(t)\n"
+        parse_full_frontend(src, "testdata/parity_d4.spl", "parity_d4", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "D5 wrapped if-condition at the body column (frontend twin verified ABSENT, pinned)":
+        val src = "fn f(a: i64) -> text:\n    val n = if a == 1 or\n        a == 2:\n        \"yes_\"\n    else:\n        \"no_\"\n    n\n"
+        parse_full_frontend(src, "testdata/parity_d5.spl", "parity_d5", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "D5 inline then/else after a wrapped condition (frontend twin verified ABSENT, pinned)":
+        val src = "fn f(a: i64) -> text:\n    val n = if a == 1 or\n        a == 2: \"yes_\" else: \"no_\"\n    n\n"
+        parse_full_frontend(src, "testdata/parity_d5_inline.spl", "parity_d5_inline", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+describe "still-open forms from the same bug record":
+    # TODO(seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23):
+    # the BARE arrow lambda `x => e` is unimplemented in BOTH parsers on
+    # purpose. Adding it needs an identifier-position lookahead sitting next
+    # to the match-arm `=>` handling (seed: `is_spurious_match_arm_fat_arrow`;
+    # frontend: parser_stmts.spl:1828), and `=>` is a live match-arm separator
+    # in product code (e.g. src/lib/nogc_sync_mut/engine/render/any_backend3d.spl).
+    # Skipped, not deleted, and not asserted-as-correct.
+    it.skip "D1 bare arrow lambda `x => e` (unimplemented in both parsers)":
+        pass
+
+    # TODO(seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23):
+    # D2, a braced statement block in expression position, needs a new AST node
+    # plus a `{` disambiguation against dict literal / empty dict / dict
+    # comprehension in BOTH parsers. Filed rather than patched with a lookahead
+    # that would merely pass these examples.
+    it.skip "D2 braced block as an expression (unimplemented in both parsers)":
+        pass

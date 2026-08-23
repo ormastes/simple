@@ -1,4 +1,4 @@
-use crate::ast::{Expr, MoveMode, TupleExprField};
+use crate::ast::{Expr, LambdaParam, MoveMode, TupleExprField};
 use crate::error::ParseError;
 use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
@@ -129,12 +129,60 @@ impl<'a> Parser<'a> {
                 }
             }
             self.expect(&TokenKind::RParen)?;
+            if let Some(lambda) = self.try_arrow_lambda_from_paren_list(&elements)? {
+                return Ok(lambda);
+            }
             Ok(Expr::Tuple(elements))
         } else {
             // Grouping
             self.expect(&TokenKind::RParen)?;
+            if let Some(lambda) = self.try_arrow_lambda_from_paren_list(std::slice::from_ref(&first))? {
+                return Ok(lambda);
+            }
             Ok(first)
         }
+    }
+
+    /// D1: arrow lambda with a non-empty parameter list — `(x) => e`,
+    /// `(x, y) => e`. The zero-parameter form `() => e` is handled inline
+    /// above and predates this; this is the SAME production, only with
+    /// parameters, so it reuses `Expr::Lambda` / `LambdaParam` unchanged.
+    ///
+    /// The parenthesised list has already been parsed as expressions. It is a
+    /// parameter list only when the very next token is `=>` AND every element
+    /// is a bare identifier, so a genuine tuple (`(a.b, 1)`) or a grouping can
+    /// never be reinterpreted as one. Deliberately does NOT cover the bare
+    /// `x => e` form: that needs an identifier-position lookahead next to the
+    /// match-arm `=>` handling (`is_spurious_match_arm_fat_arrow`), which is
+    /// tracked separately.
+    ///
+    /// doc/08_tracking/bug/
+    /// seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
+    fn try_arrow_lambda_from_paren_list(
+        &mut self,
+        elements: &[Expr],
+    ) -> Result<Option<Expr>, ParseError> {
+        if !self.check(&TokenKind::FatArrow) {
+            return Ok(None);
+        }
+        let mut params = Vec::with_capacity(elements.len());
+        for element in elements {
+            match element {
+                Expr::Identifier(name) => params.push(LambdaParam {
+                    name: name.clone(),
+                    ty: None,
+                }),
+                _ => return Ok(None),
+            }
+        }
+        self.advance(); // consume '=>'
+        let body = self.parse_expression()?;
+        Ok(Some(Expr::Lambda {
+            params,
+            body: Box::new(body),
+            move_mode: MoveMode::Copy,
+            capture_all: false, // Fat arrow syntax doesn't auto-capture
+        }))
     }
 
     fn parse_array_literal(&mut self) -> Result<Expr, ParseError> {

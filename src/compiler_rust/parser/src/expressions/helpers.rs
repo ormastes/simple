@@ -186,6 +186,9 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // See the inline-form branch below: pseudo-INDENTs left by a wrapped
+        // condition that the inline path must reconcile itself.
+        let mut inline_then_deferred_dedents = 0usize;
         // Support both inline and block-form syntax for then branch
         let then_branch = if use_braces {
             // Curly brace form: if cond { body } else { body }
@@ -203,12 +206,71 @@ impl<'a> Parser<'a> {
             // "expected Indent, found Dedent", so `val x = if <multi-line
             // cond>:` could not be written at all.
             self.drain_available_deferred_dedents();
+            let deferred_before = self.deferred_dedent_count;
+            self.deferred_dedent_count = 0;
 
             // Empty then-branch: `if cond:\nelse: ...` or `if cond:\nelif ...:`
             if self.check(&TokenKind::Else) || self.check(&TokenKind::Elif) {
+                self.deferred_dedent_count += deferred_before;
                 Expr::Tuple(vec![]) // unit value
             } else {
-                self.expect(&TokenKind::Indent)?;
+                // EQUAL-column shape, the twin of the "Deep" case drained just
+                // above: when the condition's continuation line sits at exactly
+                // the body's column, the continuation already consumed the only
+                // INDENT the lexer emits, and the body starts with no INDENT of
+                // its own. Demanding one here made
+                //   val n = if a == 1 or
+                //       a == 2:
+                //       "yes"
+                //   else:
+                //       "no"
+                // fail with "expected Indent, found FString" — the exact shape
+                // in src/compiler/50.mir/hwir/riscv_scalar_csr_owner.spl:48-52
+                // that blocked formal_verification_2_0_spec. `parse_for` /
+                // `parse_while_with_label` already carry this same guard for
+                // their statement forms; this brings the if-EXPRESSION form in
+                // line with them rather than inventing a new rule.
+                // `is_statement_start()` (shared with the for/while guards)
+                // deliberately lists only statement KEYWORDS and identifiers.
+                // An if-EXPRESSION's then-branch is an expression block, whose
+                // first item is very often a bare literal (`"completion_" + f`),
+                // so the shared predicate alone reports "not a statement start"
+                // and the equal-column shape goes undetected. Widening the
+                // shared predicate would change the loop guards too; this local
+                // extension covers exactly the literal/opening-bracket starts an
+                // expression block can begin with.
+                let body_starts_here = self.is_statement_start()
+                    || matches!(
+                        self.current.kind,
+                        TokenKind::Integer(_)
+                            | TokenKind::Float(_)
+                            | TokenKind::TypedInteger(_, _)
+                            | TokenKind::TypedFloat(_, _)
+                            | TokenKind::String(_)
+                            | TokenKind::FString(_)
+                            | TokenKind::RawString(_)
+                            | TokenKind::TypedString(_, _)
+                            | TokenKind::TypedRawString(_, _)
+                            | TokenKind::Bool(_)
+                            | TokenKind::Nil
+                            | TokenKind::Symbol(_)
+                            | TokenKind::LParen
+                            | TokenKind::LBracket
+                            | TokenKind::Minus
+                            | TokenKind::Not
+                    );
+                let equal_column =
+                    deferred_before > 0 && !self.check(&TokenKind::Indent) && body_starts_here;
+                if equal_column {
+                    // The body's terminating DEDENT and the pseudo-INDENT's
+                    // compensating DEDENT are the SAME token, consumed by the
+                    // block loop below — so exactly one is reconciled here.
+                    // Same accounting as `header_continuation_dedents_to_reconcile`.
+                    self.deferred_dedent_count += deferred_before.saturating_sub(1);
+                } else {
+                    self.deferred_dedent_count += deferred_before;
+                    self.expect(&TokenKind::Indent)?;
+                }
 
                 let mut statements = Vec::new();
                 while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
@@ -239,7 +301,21 @@ impl<'a> Parser<'a> {
             let stmt = self.parse_item()?;
             Expr::DoBlock(vec![stmt])
         } else {
-            // Inline form: parse as expression
+            // Inline form: parse as expression.
+            //
+            // A condition wrapped onto a continuation line leaves a pseudo-INDENT
+            // whose compensating DEDENT nothing on this path reconciles — the
+            // block-form branch above drains it, the inline branch never did. The
+            // stray DEDENT then surfaces after the whole if-expression as
+            // "expected expression, found Dedent", which is what
+            // src/compiler/50.mir/hwir/riscv_scalar_csr_owner.spl:139-141 hits:
+            //   val output_name = if field[0] == "a" or
+            //       field[0] == "b": "completion_" + field[0] else: field[0]
+            // Recorded here and reconciled after the else-branch, using the same
+            // Newline+Dedent pair consumption the `continuation_indents` block
+            // below already performs for the elif/else peek.
+            inline_then_deferred_dedents = self.deferred_dedent_count;
+            self.deferred_dedent_count = 0;
             self.parse_expression()?
         };
 
@@ -350,6 +426,23 @@ impl<'a> Parser<'a> {
                 } else if self.check(&TokenKind::Dedent) {
                     self.advance(); // consume Dedent
                 }
+            }
+        }
+
+        // Reconcile the wrapped-condition pseudo-INDENT(s) the INLINE then-form
+        // left pending (see the inline branch above). Same Newline+Dedent pair
+        // shape as the `continuation_indents` loop, and a no-op when the
+        // condition was on one line, so single-line `if c: a else: b` is
+        // untouched.
+        for _ in 0..inline_then_deferred_dedents {
+            if self.check(&TokenKind::Newline) {
+                let next = self.peek_next();
+                if matches!(next.kind, TokenKind::Dedent) {
+                    self.advance(); // consume Newline
+                    self.advance(); // consume Dedent
+                }
+            } else if self.check(&TokenKind::Dedent) {
+                self.advance(); // consume Dedent
             }
         }
 

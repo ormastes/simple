@@ -328,22 +328,36 @@ fn match_arm_with_tuple_shaped_pattern_is_not_a_ts_arrow_function() {
 }
 
 #[test]
-fn ts_arrow_detection_rule_itself_is_untouched() {
-    // The two tests above suppress the hint CONTEXTUALLY (only inside a match
-    // arm list); they must not have removed the underlying rule. The detector
-    // is asserted directly — `) =>` still classifies as TsArrowFunction — so a
-    // future change that guts the rule instead of scoping it fails here rather
-    // than silently passing the suppression tests.
-    // See also tests/error_recovery_test.rs::test_typescript_arrow_function_detection.
-    use simple_parser::error_recovery::{detect_common_mistake, CommonMistake};
+fn ts_arrow_detection_rule_was_retired_when_the_arrow_lambda_landed() {
+    // This test previously asserted the OPPOSITE — that `) =>` still
+    // classifies as `TsArrowFunction` — as a guard against "a future change
+    // that guts the rule instead of scoping it". That guard did its job: it is
+    // what forced this change to be justified rather than slipped through.
+    //
+    // The guard's PREMISE, not its wiring, is what expired. It assumed the
+    // TypeScript text `(a, b) => a + b` is not Simple. As of 2026-08-23 it is:
+    // the parenthesised arrow lambda `(x) => e` / `(x, y) => e` is a supported
+    // production in BOTH parsers (seed `try_arrow_lambda_from_paren_list`,
+    // expressions/primary/collections.rs; frontend
+    // 10.frontend/core/_ParserPrimary/primary_expr.spl). After that, every
+    // token sequence the rule could still match is VALID code — an arrow
+    // lambda, or a match arm after a tuple/call-shaped pattern — so it was
+    // removed rather than narrowed, and the seed no longer prints "this is a
+    // TypeScript mistake" over a correct `val f = (x) => x + 1`.
+    //
+    // Kept and inverted, not deleted: reinstating the rule must fail loudly
+    // here. The two suppression tests above are now redundant belt-and-braces
+    // and are deliberately left in place — they pin the same 0-hint outcome
+    // through the real parser rather than the detector.
+    // See also tests/error_recovery_test.rs.
+    // doc/08_tracking/bug/
+    // seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
+    use simple_parser::error_recovery::detect_common_mistake;
     use simple_parser::token::{Span, Token, TokenKind};
 
     let fat_arrow = Token::new(TokenKind::FatArrow, Span::new(8, 10, 1, 9), "=>".to_string());
     let rparen = Token::new(TokenKind::RParen, Span::new(7, 8, 1, 8), ")".to_string());
-    assert_eq!(
-        detect_common_mistake(&fat_arrow, &rparen, None),
-        Some(CommonMistake::TsArrowFunction)
-    );
+    assert_eq!(detect_common_mistake(&fat_arrow, &rparen, None), None);
 }
 
 #[test]

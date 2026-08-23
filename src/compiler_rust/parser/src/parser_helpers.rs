@@ -141,6 +141,17 @@ impl<'a> Parser<'a> {
     /// here instead, leaving the diagnostic intact everywhere `=>` is NOT a
     /// valid arm separator. bug doc:
     /// doc/08_tracking/bug/match_arm_comma_separator_rejected_2026-08-02.md
+    ///
+    /// TODO(seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23):
+    /// this filter is currently VESTIGIAL. `detect_common_mistake` no longer
+    /// emits `TsArrowFunction` for `) =>` at all — the parenthesised arrow
+    /// lambda became valid grammar on 2026-08-23, so the lexical rule could
+    /// only match correct code and was retired — which means this predicate
+    /// can no longer return true. It is kept, not deleted, because it is the
+    /// correct scoping the moment any `=>` diagnostic is reintroduced (the
+    /// bare `x => e` form is still unimplemented and would want exactly this
+    /// arm-context guard). Remove it only together with the decision that no
+    /// `=>` diagnostic will ever return.
     fn is_spurious_match_arm_fat_arrow(&self, mistake: &CommonMistake) -> bool {
         matches!(mistake, CommonMistake::TsArrowFunction) && self.match_arm_depth > 0
     }
