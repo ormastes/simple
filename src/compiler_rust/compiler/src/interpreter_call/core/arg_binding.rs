@@ -193,7 +193,7 @@ pub(crate) fn bind_args_with_injected(
     // Check if there's a variadic parameter (should be last)
     let variadic_param_idx = params_to_bind.iter().position(|p| p.variadic);
 
-    let mut bound = HashMap::new();
+    let mut bound = HashMap::with_capacity(params_to_bind.len());
     let mut positional_idx = 0usize;
     let mut variadic_values = Vec::new();
 
@@ -438,8 +438,7 @@ pub(crate) fn bind_args_with_injected(
         bound.insert(param.name.clone(), Value::Tuple(variadic_values));
     }
 
-    let dbg_all_param_names_tmp: Vec<String> = params_to_bind.iter().map(|p| p.name.clone()).collect();
-    for param in params_to_bind {
+    for param in &params_to_bind {
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
                 let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
@@ -454,10 +453,15 @@ pub(crate) fn bind_args_with_injected(
                 bound.insert(param.name.clone(), injected_val.clone());
             } else {
                 if std::env::var("SIMPLE_DEBUG_ARG_BINDING").is_ok() {
+                    // Built HERE, on the error path only: hoisted out of the
+                    // loop it allocated one Vec plus one String per parameter
+                    // on EVERY call, for a diagnostic that is off by default.
+                    let all_param_names: Vec<&str> =
+                        params_to_bind.iter().map(|p| p.name.as_str()).collect();
                     eprintln!(
                         "[DEBUG arg_binding TMP] missing param '{}'; full param list={:?}; args given={}",
                         param.name,
-                        dbg_all_param_names_tmp,
+                        all_param_names,
                         args.len()
                     );
                 }

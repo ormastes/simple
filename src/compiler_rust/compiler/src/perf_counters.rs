@@ -47,6 +47,10 @@ counters!(
     // park_written_back_arguments (caller handle released across a nested call)
     PARK_ARG_OK,
     PARK_ARG_RESTORED,
+    // f(obj.field) write-back: object field-map copy-on-write against a handle
+    // the suspended caller frame is about to overwrite (dead alias).
+    FIELD_WRITEBACK_CALLS,
+    FIELD_WRITEBACK_MAP_CLONES,
     FILTERED_DICT_BUILDS,
     FILTERED_DICT_HITS,
     // import-resolution probe file reads (see module_cache::probe_source_cached)

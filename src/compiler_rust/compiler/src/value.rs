@@ -554,6 +554,25 @@ impl CowEnv {
         EMPTY.with(Arc::clone)
     }
 
+    /// The process-wide (per thread) EMPTY `global_bindings` map.
+    ///
+    /// Sibling of `shared_empty()` for the map INSIDE a `CowEnv`. Every
+    /// `CowEnv::new()` / `from_map()` / `with_base()` -- i.e. every function
+    /// call frame -- used to `Arc::new(HashMap::new())` here, a fresh heap
+    /// allocation (Arc control block + `HashMap` header) for a map that is
+    /// empty in the overwhelming majority of frames: `global_bindings` is
+    /// populated only by selective lambda capture and tests, and the module
+    /// scope answers the same question lazily for every other name. Every
+    /// mutation already goes through `Arc::make_mut`, which clones a shared
+    /// Arc before writing, so sharing one empty map is semantics-preserving:
+    /// an empty map has no observable identity.
+    pub fn shared_empty_global_bindings() -> Arc<HashMap<String, (Arc<str>, String)>> {
+        thread_local! {
+            static EMPTY_GB: Arc<HashMap<String, (Arc<str>, String)>> = Arc::new(HashMap::new());
+        }
+        EMPTY_GB.with(Arc::clone)
+    }
+
     /// Create an empty environment.
     pub fn new() -> Self {
         CowEnv {
@@ -565,7 +584,7 @@ impl CowEnv {
             block_local_bindings: FrameMap::default(),
             refreshed_globals: FrameSet::default(),
             forwarded_globals: FrameMap::default(),
-            global_bindings: Arc::new(HashMap::new()),
+            global_bindings: CowEnv::shared_empty_global_bindings(),
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
         }
@@ -792,6 +811,29 @@ impl CowEnv {
             self.tombstones.insert(key.to_string());
         }
         shared
+    }
+
+    /// Take `key` out of THIS frame's own overlay, but only when the frame is
+    /// its sole home -- no shared base/scope layer binds it and no tombstone is
+    /// pending. Returns `None`, leaving the env byte-identical, whenever the
+    /// removal would be observable (`remove` would have to plant a tombstone,
+    /// or would clone out of a shared layer for nothing).
+    ///
+    /// Purpose: a caller that is about to overwrite `key` anyway must not hold
+    /// a second handle to the value while it mutates it, or `Arc::make_mut`
+    /// deep-copies against an alias that is already dead. Pair with
+    /// `restore_frame_owned` on the paths that decide not to write.
+    pub fn take_frame_owned(&mut self, key: &str) -> Option<Value> {
+        if self.tombstones.contains(key) || self.shared_contains(key) {
+            return None;
+        }
+        self.overlay.remove(key)
+    }
+
+    /// Put back a value obtained from `take_frame_owned` without recording a
+    /// frame write: the exact state that existed before the take.
+    pub fn restore_frame_owned(&mut self, key: String, value: Value) {
+        self.overlay.insert(key, value);
     }
 
     /// Check if a key exists in the environment.
@@ -1078,7 +1120,7 @@ impl CowEnv {
             block_local_bindings: FrameMap::default(),
             refreshed_globals: FrameSet::default(),
             forwarded_globals: FrameMap::default(),
-            global_bindings: Arc::new(HashMap::new()),
+            global_bindings: CowEnv::shared_empty_global_bindings(),
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
         }
@@ -1095,7 +1137,7 @@ impl CowEnv {
             block_local_bindings: FrameMap::default(),
             refreshed_globals: FrameSet::default(),
             forwarded_globals: FrameMap::default(),
-            global_bindings: Arc::new(HashMap::new()),
+            global_bindings: CowEnv::shared_empty_global_bindings(),
             dirty_names: FrameSet::default(),
             uninit_names: FrameSet::default(),
         }
@@ -1124,7 +1166,7 @@ impl CowEnv {
         self.forwarded_globals.clear();
         self.local_bindings.clear();
         self.block_local_bindings.clear();
-        self.global_bindings = Arc::new(HashMap::new());
+        self.global_bindings = CowEnv::shared_empty_global_bindings();
         self.dirty_names.clear();
         self.uninit_names.clear();
     }

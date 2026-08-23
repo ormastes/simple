@@ -1432,9 +1432,24 @@ fn write_back_mutable_arguments(
                         // Value-type struct: fields stay value-copied, but its
                         // container-valued fields are shared handles. See
                         // merge_shared_collection_fields.
-                        if let Some(mut caller_val) = outer_env.get(&caller_name).cloned() {
+                        // Take the caller's handle OUT of the frame before
+                        // mutating: `get().cloned()` leaves `outer_env` holding
+                        // the same `Arc`, so the `Arc::make_mut` inside
+                        // merge_shared_collection_fields ALWAYS deep-copies the
+                        // struct's whole field map -- copy-on-write against an
+                        // alias that is dead, since the binding is overwritten
+                        // immediately after. `take_frame_owned` fires only when
+                        // this frame is the value's sole home, and the
+                        // no-change path restores it exactly.
+                        let taken = outer_env.take_frame_owned(&caller_name);
+                        let took = taken.is_some();
+                        if let Some(mut caller_val) =
+                            taken.or_else(|| outer_env.get(&caller_name).cloned())
+                        {
                             if merge_shared_collection_fields(&mut caller_val, callee_val) {
                                 outer_env.insert(caller_name, caller_val);
+                            } else if took {
+                                outer_env.restore_frame_owned(caller_name, caller_val);
                             }
                         }
                     }
@@ -1457,10 +1472,36 @@ fn write_back_mutable_arguments(
                             Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                         )
                     {
-                        if let Some(obj_val) = outer_env.get(&obj_name).cloned() {
-                            if let Value::Object { class, mut fields } = obj_val {
-                                Arc::make_mut(&mut fields).insert(field_name, callee_val);
-                                outer_env.insert(obj_name, Value::Object { class, fields });
+                        // Same dead-alias copy-on-write as the value-type path
+                        // above: with `get().cloned()` the frame still holds the
+                        // other handle, so `Arc::make_mut` is guaranteed to copy
+                        // the object's whole field map on every `f(obj.field)`
+                        // write-back. Take it when this frame owns it outright.
+                        let taken = outer_env.take_frame_owned(&obj_name);
+                        let took = taken.is_some();
+                        if let Some(obj_val) = taken.or_else(|| outer_env.get(&obj_name).cloned()) {
+                            match obj_val {
+                                Value::Object { class, mut fields } => {
+                                    if crate::perf_counters::enabled() {
+                                        crate::perf_counters::bump(
+                                            &crate::perf_counters::FIELD_WRITEBACK_CALLS,
+                                            1,
+                                        );
+                                        if Arc::strong_count(&fields) > 1 {
+                                            crate::perf_counters::bump(
+                                                &crate::perf_counters::FIELD_WRITEBACK_MAP_CLONES,
+                                                1,
+                                            );
+                                        }
+                                    }
+                                    Arc::make_mut(&mut fields).insert(field_name, callee_val);
+                                    outer_env.insert(obj_name, Value::Object { class, fields });
+                                }
+                                other => {
+                                    if took {
+                                        outer_env.restore_frame_owned(obj_name, other);
+                                    }
+                                }
                             }
                         }
                     }
