@@ -232,16 +232,23 @@ pub(package) fn module_surfaces_frozen_alignment_error(
            authority_count != surface.declaration_authority_index.source_names.len() or
            authority_count != surface.declaration_authority_index.visibilities.len():
             return "surface declaration-authority arrays invalid: index={surface_index} count={authority_count}"
-        # The compatibility Dict is a construction-time accelerator, not an
-        # authority: under native codegen `Dict.len()` reports -1 (see the same
-        # tolerance in `module_surface_registry_index` above and in
-        # `module_surface_export_origin_index_position`), and the staged
-        # transient teardown can invalidate that carrier while deep promotion
-        # retains the aligned scalar arrays. Comparing against it
-        # unconditionally rejected every natively built compiler's own frozen
-        # registry. Compare only when the carrier reports a usable count.
+        # The Dict carrier IS load-bearing here, unlike in the sibling indexes.
+        # Tolerance of a dead carrier is only safe where the reader has a scalar
+        # fallback: `module_surface_export_origin_index_position` has one, so it
+        # tolerates `len() == -1`. `module_surface_declaration_authority_lookup`
+        # has NONE -- when its carrier is dead every frozen lookup returns
+        # `found: false`, which is silent, not loud. Measured 2026-08-23: with
+        # this comparison relaxed, phase-2 retention passes and stage 3 then
+        # emits 17 HIR lowering errors (`unresolved type: HirClass/HirEnum/
+        # HirConst/HirBitfield/HirAopAdvice`, `field 'hir_modules'/'logger'/
+        # 'sources' is not visible from this module`) and runs away to 12.5 GB.
+        # So a dead carrier means the registry is UNUSABLE, and refusing is
+        # correct. Fail closed, and name the actual state rather than blaming
+        # the arrays -- they are aligned and fine.
         val authority_dict_count = surface.declaration_authority_index.index_by_name.len()
-        if authority_dict_count >= 0 and authority_count != authority_dict_count:
+        if authority_dict_count < 0:
+            return "surface declaration-authority dict carrier is dead after transient teardown: index={surface_index} arrays aligned at count={authority_count}, dict={authority_dict_count}; the authority lookup has no scalar fallback, so proceeding silently misses every frozen lookup and corrupts HIR lowering (see doc/08_tracking/bug/stage3_hir_imports_memory_explosion_driver_riscv_gen2_2026-08-23.md)"
+        if authority_count != authority_dict_count:
             return "surface declaration-authority dict misaligned: index={surface_index} count={authority_count} dict={authority_dict_count}"
         if surface.physical_index != surface_index:
             return "surface physical index mismatch: position={surface_index} value={surface.physical_index}"

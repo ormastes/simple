@@ -121,3 +121,30 @@ without that caller would be gate-weakening and must not be done.
    `[verify]` step, now discovered fail-closed; and `OUTPUT` is now overridable via
    `$SIMPLEOS_PAYLOAD_OUTPUT` (`:28`, default unchanged) so a lane forbidden from writing
    under `bin/release/**` can stage the payload elsewhere.
+
+
+## Confirmed 2026-08-23: stage 4 emits NO admission receipt — a separate gap
+
+Answered from `scripts/bootstrap/bootstrap-from-scratch.sh` rather than
+inferred. The bootstrap writes `<stage4-binary>.provenance.env` **adjacent to
+the binary** (`:7113`), plus `<output>/stage4-continuation.env` with
+`schema=simple-bootstrap-stage4-continuation-v1`, `status=prepared` -> `pass`
+(`:389,429`).
+
+There is **no** file named `admission.env` beside the stage-4 binary, and **no**
+`simple-bootstrap-stage2-admission-v1` schema is emitted for stage 4 at all.
+
+So a full-CLI stage 4, on its own, will NOT satisfy
+`provision_simpleos_guest_simple_fs.shs`: it will have the capability the
+stage-2 builder lacks, and lack the receipt the stage-2 builder has. The two
+halves still will not coexist.
+
+Two ways to close it, and the choice is a POLICY CALL, not a mechanical fix:
+either teach the provisioner to accept `.provenance.env` /
+`stage4-continuation.env` as an authority of equal standing, or teach the
+bootstrap to emit a stage-4 admission receipt in the stage-2 schema. The first
+widens what counts as provenance; the second duplicates a schema. Neither
+should be chosen silently.
+
+Not verified empirically: stage 4 has never been reached on this host, so the
+above is read from the producing source, not from an artifact on disk.
