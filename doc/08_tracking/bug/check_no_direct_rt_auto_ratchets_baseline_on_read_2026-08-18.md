@@ -1,8 +1,12 @@
 # `check-no-direct-rt.shs` rewrites its tracked baseline as a side effect of merely running
 
-- **Status:** **REOPENED 2026-08-23** — the auto-write path is still live in
-  `scripts/check/check-no-direct-rt.shs:224` and fired twice in one session. See
-  § Regression 2026-08-23 at the end of this record.
+- **Status:** **RESOLVED 2026-08-23** (second closure) — verification is now
+  strictly read-only; the write is gated behind an explicit
+  `--generate-baseline`, and three selftest fixtures fence it. See
+  § Fix 2026-08-23 at the end of this record.
+- Previous status: REOPENED 2026-08-23 — the auto-write path was still live in
+  `scripts/check/check-no-direct-rt.shs` (baseline-ratchet block, line 224 at
+  the time) and fired three times in one day across different lanes.
 - Previous status: RESOLVED 2026-08-18 (fix + selftest fixtures landed same day)
 - **Date:** 2026-08-18
 - **Area:** `scripts/check/check-no-direct-rt.shs`, `scripts/check/no_direct_rt_baseline.txt`
@@ -197,3 +201,90 @@ Re-verification for whoever closes this: assert on the **file**, not the verdict
 — run the gate on a tree where `forbidden < baseline` and require
 `git diff --exit-code -- scripts/check/no_direct_rt_baseline.txt` to be clean.
 The 2026-08-18 closure evidently did not, which is how it regressed unnoticed.
+
+
+## Fix 2026-08-23 (second closure)
+
+**Two writes existed, both on paths reached by a plain verification run:**
+
+1. missing-baseline branch — wrote the current count to the tracked file and
+   PASSed ("baseline recorded"), so a fresh/renamed baseline was silently
+   invented instead of failing closed;
+2. improvement branch (`forbidden -lt baseline`) — rewrote the tracked file
+   whenever the count had gone down. This is the one that fired repeatedly:
+   it is on the **success path** and on direct invocation, which is why the
+   three REJECTED pushes left the file clean — the hook chain aborts before
+   this gate runs.
+
+**Change** (`scripts/check/check-no-direct-rt.shs`):
+
+- new `--generate-baseline` opt-in flag; `GENERATE_BASELINE=0` by default;
+- both writes are now inside `if [ $GENERATE_BASELINE -eq 1 ]`;
+- a missing baseline on a verification run is now
+  `ERROR — nothing was checked: no baseline at ... (run with --generate-baseline to record one)`
+  exit 2, never a write-and-PASS;
+- an improvement on a verification run prints a `note:` line above the verdict
+  and PASSes without writing.
+
+Checking behaviour is unchanged: same offender classification, same allowlist,
+same threshold, same `PASS`/`FAIL`/`ERROR` verdict-last contract, same baseline
+contents (11815, untouched by this change).
+
+**Regression fence — three new `--selftest` fixtures** (total 6 -> 9), all of
+which invoke the real script recursively against a fixture root
+(`NO_DIRECT_RT_SELFTEST_CHILD=1` suppresses the nested selftest):
+
+- fixture 6: a plain verification run leaves the fixture's tracked baseline
+  **byte-identical** — this is the assertion the 2026-08-18 closure lacked;
+- fixture 7: `--generate-baseline` **does** update it;
+- fixture 8: a missing baseline on a verification run exits 2 and creates no file.
+
+**Measured evidence** (worktree at `origin/main` 36a0be8787c):
+
+| step | sha256 of `no_direct_rt_baseline.txt` |
+|---|---|
+| before, baseline forced to `99999` (so the improvement branch is taken) | `27f8d822ea64f5bdb9564c533195e35d21689b84bf074d83bb2d7a866b5276d4` |
+| after plain `sh scripts/check/check-no-direct-rt.shs` | `27f8d822…6d4` — **unchanged** |
+| after `sh scripts/check/check-no-direct-rt.shs --generate-baseline` | `f87445056498673866d1cf96f4524d4f59b88e11b49f8e88d7fbffa4c1cbae08` (content `11816`) |
+
+Plain run verdict on the forced baseline:
+`PASS — 15212 file(s) scanned, forbidden=11816 (baseline 99999)`, preceded by
+the `note:` line. `--selftest-only` reports
+`PASS — 9 selftest fixture(s) checked` and leaves the real baseline unchanged
+(`8c9b772948be591b646e3bca8559f756` md5 before and after).
+
+Unrelated pre-existing red, recorded so it is not mistaken for this change:
+on real `origin/main` the gate FAILs with `forbidden=11816 exceeds baseline
+11815` — one new offender landed without the baseline being raised. No `.spl`
+file was touched here.
+
+## Survey: same defect class in other `scripts/check/` guards (2026-08-23)
+
+Method: for every `scripts/check/*.shs`, flag redirections whose target is a
+tracked baseline/allowlist variable (not a temp dir).
+
+- **`check-reachable-unsupported.shs` — same defect, FIXED in this change.**
+  Line 241 auto-lowered `reachable_unsupported_baseline.txt` on the success
+  path (`# Progress is locked in: the ratchet only ever tightens`), and the
+  missing-baseline branch wrote-and-continued. Both are now behind a new
+  `--generate-baseline`; a missing baseline is ERROR. Not executed end-to-end
+  here (it requires `bin/simple`, absent in this worktree — it correctly says
+  `ERROR — nothing was checked ... absence of a compiler is absence of
+  evidence`); verified with `sh -n`.
+- **Benign — write is already inside an explicit opt-in branch:**
+  `check-any-escape-census`, `check-any-inventory-ratchet`,
+  `check-duplicate-pub-fn-names`, `check-guard-wiring`,
+  `check-hardening-perf-baseline`, `check-no-new-fail-open`,
+  `check-no-phantom-deep-stdlib-imports`, `check-no-phantom-module-imports`,
+  `check-silent-default-baseline`, `check-spec-comment-cheat`,
+  `check-spec-vacuity-semantic`, `check-unbacked-extern-ratchet`,
+  `check-use-target-resolves`, `check-cpu-hotloop-idiom`.
+- **Filed, not fixed (low severity, no-op on a healthy tree):**
+  `check-cpu-hotloop-idiom.shs:368`, `check-silent-default-baseline.shs:119`
+  and `check-use-target-resolves.shs:601` each do
+  `[ -f "$BASELINE" ] || : >"$BASELINE"` on the verification path — creating an
+  empty tracked baseline rather than failing closed if it is ever missing. That
+  is both a write side effect and a fail-open (an empty baseline compares as
+  "no known debt"). It never fires while the tracked file exists, so it was left
+  alone rather than sweep-refactored; it should become ERROR on the same
+  argument as the fix above.

@@ -17,9 +17,18 @@ SELFTEST_ONLY=0
 # then promotes critical behavior everywhere).
 CRITICAL=0
 [ "${SIMPLE_RT_CRITICAL:-0}" != "0" ] && CRITICAL=1
+# A VERIFICATION run must NEVER write the tracked baseline file. Only an
+# explicit, opt-in --generate-baseline may update it. Until 2026-08-23 the
+# ratchet rewrote scripts/check/no_direct_rt_baseline.txt as a side effect of
+# a plain (success-path) run whenever the count had improved, leaving a
+# modified tracked file in whatever working copy ran it — which a later
+# `git commit -a` from any lane then silently landed. See
+# doc/08_tracking/bug/no_direct_rt_baseline_auto_write_2026-08-18.md
+GENERATE_BASELINE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --selftest-only) SELFTEST_ONLY=1 ;;
+    --generate-baseline) GENERATE_BASELINE=1 ;;
     --critical) CRITICAL=1 ;;
     --root) shift; ROOT="$1" ;;
     *) echo "ERROR — unknown argument: $1"; exit 2 ;;
@@ -149,12 +158,32 @@ selftest() {
   # fixture 5: traversal failure is an error, never an empty successful scan
   r=$(scan_dir "$st_dir/missing" /dev/null 2>/dev/null)
   if [ "$r" != "ERR" ]; then echo "ERROR — selftest failed: find error did not fail closed (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 6: a plain VERIFICATION run must not modify the tracked baseline;
+  # only --generate-baseline may. Regression fence for the recurring
+  # baseline-auto-write defect (2026-08-23).
+  mkdir -p "$st_dir/b/src/lib" "$st_dir/b/scripts/check"
+  printf 'fn f(): rt_a()\n' > "$st_dir/b/src/lib/a.spl"
+  printf '99\n' > "$st_dir/b/scripts/check/no_direct_rt_baseline.txt"
+  st_before=$(cat "$st_dir/b/scripts/check/no_direct_rt_baseline.txt")
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/b" >/dev/null 2>&1
+  st_after=$(cat "$st_dir/b/scripts/check/no_direct_rt_baseline.txt")
+  if [ "$st_before" != "$st_after" ]; then echo "ERROR — selftest failed: verification run rewrote the tracked baseline ($st_before -> $st_after)"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 7: the explicit opt-in flag DOES update it
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/b" --generate-baseline >/dev/null 2>&1
+  st_gen=$(cat "$st_dir/b/scripts/check/no_direct_rt_baseline.txt")
+  if [ "$st_gen" = "$st_before" ]; then echo "ERROR — selftest failed: --generate-baseline did not update the baseline (still '$st_gen')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 8: a missing baseline on a verification run is ERROR, never a
+  # silent write-and-PASS.
+  rm -f "$st_dir/b/scripts/check/no_direct_rt_baseline.txt"
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/b" >/dev/null 2>&1
+  st_rc=$?
+  if [ "$st_rc" != "2" ] || [ -f "$st_dir/b/scripts/check/no_direct_rt_baseline.txt" ]; then echo "ERROR — selftest failed: missing baseline on verification run did not fail closed (rc=$st_rc)"; rm -rf "$st_dir"; exit 2; fi
   rm -rf "$st_dir"
 }
 
-selftest
+if [ "${NO_DIRECT_RT_SELFTEST_CHILD:-0}" = "0" ]; then selftest; fi
 if [ $SELFTEST_ONLY -eq 1 ]; then
-  echo "PASS — 6 selftest fixture(s) checked"
+  echo "PASS — 9 selftest fixture(s) checked"
   exit 0
 fi
 
@@ -199,11 +228,17 @@ if [ $CRITICAL -eq 1 ] && [ "$forbidden" -gt 0 ]; then
 fi
 
 # ---- baseline ratchet ----
+# Read-only unless --generate-baseline was passed.
 if [ ! -f "$BASELINE_FILE" ]; then
-  echo "$forbidden" > "$BASELINE_FILE"
+  if [ $GENERATE_BASELINE -eq 1 ]; then
+    echo "$forbidden" > "$BASELINE_FILE"
+    rm -f "$OFF_FILE"
+    echo "PASS — $scanned file(s) scanned, forbidden=$forbidden (baseline recorded)"
+    exit 0
+  fi
   rm -f "$OFF_FILE"
-  echo "PASS — $scanned file(s) scanned, forbidden=$forbidden (baseline recorded)"
-  exit 0
+  echo "ERROR — nothing was checked: no baseline at $BASELINE_FILE (run with --generate-baseline to record one)"
+  exit 2
 fi
 baseline=$(head -1 "$BASELINE_FILE" | tr -cd '0-9')
 if [ -z "$baseline" ]; then rm -f "$OFF_FILE"; echo "ERROR — baseline file unreadable: $BASELINE_FILE"; exit 2; fi
@@ -220,9 +255,14 @@ if [ "$forbidden" -gt "$baseline" ]; then
   echo "FAIL — forbidden direct rt_* count $forbidden exceeds baseline $baseline; top offenders: $top"
   exit 1
 fi
-if [ "$forbidden" -lt "$baseline" ]; then
-  echo "$forbidden" > "$BASELINE_FILE"
-fi
 rm -f "$OFF_FILE"
+if [ $GENERATE_BASELINE -eq 1 ]; then
+  echo "$forbidden" > "$BASELINE_FILE"
+  echo "PASS — $scanned file(s) scanned, forbidden=$forbidden (baseline updated $baseline -> $forbidden)"
+  exit 0
+fi
+if [ "$forbidden" -lt "$baseline" ]; then
+  echo "note: forbidden count improved ($forbidden < baseline $baseline); tighten deliberately with --generate-baseline."
+fi
 echo "PASS — $scanned file(s) scanned, forbidden=$forbidden (baseline $baseline)"
 exit 0

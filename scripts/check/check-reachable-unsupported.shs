@@ -45,10 +45,17 @@ BASELINE="$ROOT_DIR/scripts/check/reachable_unsupported_baseline.txt"
 SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
 SELFTEST_ONLY=0
 LIST_ROWS=""
+# A VERIFICATION run must NEVER write the tracked baseline file; only the
+# explicit --generate-baseline opt-in may. Same defect class as
+# check-no-direct-rt.shs (fixed 2026-08-23): a guard that rewrites a tracked
+# debt record while merely reading it leaves a modified file in whatever
+# working copy ran it, which a later `git commit -a` from any lane lands.
+GENERATE_BASELINE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) SELFTEST_ONLY=1; shift ;;
+        --generate-baseline) GENERATE_BASELINE=1; shift ;;
         --list-rows) LIST_ROWS="--list-rows"; shift ;;
         --tables) TABLE_DIR="$2"; shift 2 ;;
         --baseline) BASELINE="$2"; shift 2 ;;
@@ -216,11 +223,16 @@ if [ "$ROWS" -eq 0 ] || [ "$NTAB" -eq 0 ]; then
 fi
 
 if [ ! -f "$BASELINE" ]; then
-    printf '# reachable-unsupported ratchet baseline (hardening plan Phase 9).\n' > "$BASELINE"
-    printf '# Recorded by the first run of check-reachable-unsupported.shs.\n' >> "$BASELINE"
-    printf '# NEVER raise this number. A run that measures fewer lowers it automatically.\n' >> "$BASELINE"
-    printf '%s\n' "$COUNT" >> "$BASELINE"
-    echo "baseline recorded: $BASELINE = $COUNT"
+    if [ "$GENERATE_BASELINE" -eq 1 ]; then
+        printf '# reachable-unsupported ratchet baseline (hardening plan Phase 9).\n' > "$BASELINE"
+        printf '# Recorded by check-reachable-unsupported.shs --generate-baseline.\n' >> "$BASELINE"
+        printf '# NEVER raise this number. Tighten it deliberately with --generate-baseline.\n' >> "$BASELINE"
+        printf '%s\n' "$COUNT" >> "$BASELINE"
+        echo "baseline recorded: $BASELINE = $COUNT"
+    else
+        echo "ERROR — nothing was checked (no baseline at $BASELINE; run with --generate-baseline to record one)"
+        exit 2
+    fi
 fi
 
 BASE_N=$(grep -v '^#' "$BASELINE" | grep -E '^[0-9]+$' | head -1)
@@ -237,10 +249,13 @@ if [ "$COUNT" -gt "$BASE_N" ]; then
 fi
 
 if [ "$COUNT" -lt "$BASE_N" ]; then
-    # Progress is locked in: the ratchet only ever tightens.
-    sed "s/^$BASE_N\$/$COUNT/" "$BASELINE" > "$BASELINE.tmp" && mv -f "$BASELINE.tmp" "$BASELINE"
-    echo "baseline lowered: $BASE_N -> $COUNT"
-    BASE_N="$COUNT"
+    if [ "$GENERATE_BASELINE" -eq 1 ]; then
+        sed "s/^$BASE_N\$/$COUNT/" "$BASELINE" > "$BASELINE.tmp" && mv -f "$BASELINE.tmp" "$BASELINE"
+        echo "baseline lowered: $BASE_N -> $COUNT"
+        BASE_N="$COUNT"
+    else
+        echo "note: count improved ($COUNT < baseline $BASE_N); tighten deliberately with --generate-baseline."
+    fi
 fi
 
 VERDICT="PASS — $ROWS transition row(s) checked, reachable-unsupported=$COUNT (baseline $BASE_N)"
