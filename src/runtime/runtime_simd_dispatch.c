@@ -9,6 +9,15 @@
 
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
+
+/* Tagged-value constants for the f32x4 lane ops below (same scheme as
+ * runtime_value.h TAG_MASK/TAG_HEAP; named locally to avoid clashing with the
+ * macros other translation units define). */
+#define RT_VALUE_TAG_MASK_F32X4 0x7ULL
+#define RT_VALUE_TAG_HEAP_F32X4 0x1ULL
+
+void* rt_alloc(int64_t size);
 
 #if defined(_WIN32) || defined(_WIN64)
 #  include <windows.h>
@@ -2211,3 +2220,41 @@ void simd_crypto_init(void) {
 }
 
 #endif
+
+/* ---------------------------------------------------------------------------
+ * f32x4 lane ops (std.simd Vec4f externs, src/lib/nogc_sync_mut/simd.spl:285).
+ *
+ * Boxed-value ABI, determined empirically against the stage2 native lane: a
+ * Vec4f argument arrives as a heap-tagged pointer (`ptr | RT_VALUE_TAG_HEAP`)
+ * to four consecutive 8-byte slots, one per field in declaration order, and
+ * each slot holds the RAW IEEE-754 **double** bit pattern of the field -- it is
+ * NOT tagged, NOT heap-boxed as an RtCoreFloat, and NOT an f32 bit pattern in
+ * the low 32 bits. Probe evidence: Vec4f-shaped struct built with
+ * x: 1.5f32, y: 0.1f32 produced slot0 = 0x3ff8000000000000 (f64 1.5) and
+ * slot1 = 0x3fb999999999999a (f64 0.1, not the f32-widened 0x3fb99999a0000000).
+ * The result is a freshly rt_alloc'd 4-slot block returned the same way.
+ *
+ * Lane semantics mirror the reference implementation
+ * src/compiler_rust/compiler/src/interpreter_extern/simd.rs:888 `binop_f32x4`:
+ * each lane is narrowed to f32, the operation is performed in f32, and the
+ * f32 result is widened back for storage.
+ * ------------------------------------------------------------------------- */
+
+static double rt_simd_vec4f_lane(int64_t vec, int index) {
+    const int64_t* slots = (const int64_t*)(uintptr_t)(((uint64_t)vec) & ~RT_VALUE_TAG_MASK_F32X4);
+    double lane = 0.0;
+    memcpy(&lane, &slots[index], sizeof(lane));
+    return lane;
+}
+
+int64_t rt_simd_add_f32x4(int64_t a, int64_t b) {
+    int64_t* out = (int64_t*)rt_alloc(4 * (int64_t)sizeof(int64_t));
+    if (!out) return 0;
+    for (int i = 0; i < 4; i++) {
+        float lane = (float)rt_simd_vec4f_lane(a, i) + (float)rt_simd_vec4f_lane(b, i);
+        double widened = (double)lane;
+        memcpy(&out[i], &widened, sizeof(out[i]));
+    }
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP_F32X4);
+}
+
