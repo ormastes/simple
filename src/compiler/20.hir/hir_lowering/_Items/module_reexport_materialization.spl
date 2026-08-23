@@ -240,6 +240,13 @@ impl HirLowering:
                     val facade_package = self.cached_surface_package_name(facade_mod.module_name)
                     if facade_package != "":
                         val sibling_names = self.package_sibling_registry_names(facade_package)
+                        # DISTINCT-OWNER dedup. The earlier form compared only
+                        # against the LAST match (`sibling_match_index !=
+                        # candidate`), which is order-dependent: an A, B, A
+                        # sibling ordering recorded three matches for two
+                        # owners. Keep the full set of owner indices seen so the
+                        # uniqueness test below is a real distinct count.
+                        var sibling_match_indices: [i64] = []
                         var sibling_match_index = -1
                         var sibling_match_count = 0
                         var sibling_idx = 0
@@ -251,7 +258,8 @@ impl HirLowering:
                                sibling_index != facade_index:
                                 val sibling = self.module_surfaces.surfaces[sibling_index]
                                 if hir_module_declares_item(sibling, wanted):
-                                    if sibling_match_index != sibling_index:
+                                    if not hir_i64_list_contains(sibling_match_indices, sibling_index):
+                                        sibling_match_indices.push(sibling_index)
                                         sibling_match_count = sibling_match_count + 1
                                         sibling_match_index = sibling_index
                                 else:
@@ -264,7 +272,8 @@ impl HirLowering:
                                     val via_sibling = self.find_reexport_source_walk(
                                         sibling_index, wanted, depth + 1, state)
                                     if via_sibling.found and
-                                       sibling_match_index != via_sibling.module_index:
+                                       not hir_i64_list_contains(sibling_match_indices, via_sibling.module_index):
+                                        sibling_match_indices.push(via_sibling.module_index)
                                         sibling_match_count = sibling_match_count + 1
                                         sibling_match_index = via_sibling.module_index
                             sibling_idx = sibling_idx + 1
@@ -1121,6 +1130,16 @@ impl HirLowering:
                                     trait_method, trait_module.module_name,
                                     Some(local_owner))
                                 self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
+
+# Concrete i64 membership scan: the native build path has no generic
+# monomorphization, so a `[i64].contains` method call is not available here.
+fn hir_i64_list_contains(values: [i64], needle: i64) -> bool:
+    var idx = 0
+    while idx < values.len():
+        if values[idx] == needle:
+            return true
+        idx = idx + 1
+    false
 
 fn hir_payload_origin_miss_key(owner_key: text, dependency: text) -> text:
     """Memo key for a FAILED payload-origin search: `{owner key} {name}`.
