@@ -1,0 +1,119 @@
+#!/bin/sh
+# check-runtime-object-cache.shs
+#
+# Mechanism pin for the C-runtime object cache (bug record:
+# doc/08_tracking/bug/native_build_relinks_recompiles_c_runtime_every_build_2026-08-23.md).
+#
+# Defect: every `native-build` recompiled the whole C runtime from source --
+# 27 sequential `clang -c -O3` invocations into a PID-keyed temp prefix that
+# was deleted afterwards. Measured 2026-08-23 on a hello-world fixture that was
+# 102,564 ms of a 108,003 ms build (95%). The step is *named* `link`, which is
+# why the cost was mis-attributed to ld.lld -- ld.lld itself took under 1 s.
+#
+# What this pins is the MECHANISM, not wall-clock: the number of C-compiler
+# process executions on a WARM second build. Cold build must still compile the
+# runtime (27); warm build must compile none of it.
+#
+# Verdict is the last line of stdout:
+#   PASS  — <n> build(s) executed, warm C-compiler execs <= <cap>   exit 0
+#   FAIL  — ...                                                     exit 1
+#   ERROR — nothing was checked (<reason>)                          exit 2
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE="$ROOT/bin/simple"
+CAP=6            # compiler-probe execs only (`gcc -print-file-name`, `cc`/`clang --version`);
+                 # measured warm=3, cold=29 -- any real runtime rebuild is 27+ and blows this
+COLD_MIN=5       # a cold build must genuinely compile runtime objects
+
+fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
+oops() { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+
+# --------------------------------------------------------------------------
+# selftest: the counter itself must discriminate. Fatal, runs before the scan.
+# --------------------------------------------------------------------------
+selftest() {
+    st_dir=$(mktemp -d) || return 1
+    ( cd "$st_dir" && strace -f -e trace=execve -o st.log /bin/sh -c \
+        'true; true' >/dev/null 2>&1 )
+    if [ ! -s "$st_dir/st.log" ]; then rm -rf "$st_dir"; return 1; fi
+    # fixture A: zero cc execs must count 0
+    a=$(count_cc "$st_dir/st.log")
+    [ "$a" = "0" ] || { rm -rf "$st_dir"; return 1; }
+    # fixture B: a log with two synthetic clang execs must count 2
+    {
+      echo '1 execve("/usr/bin/clang", ["/usr/bin/clang", "-c"], 0x0) = 0'
+      echo '1 execve("/usr/bin/clang", ["/usr/bin/clang", "-c"], 0x0) = 0'
+      echo '1 execve("/usr/bin/ld.lld", ["/usr/bin/ld.lld"], 0x0) = 0'
+    } > "$st_dir/synth.log"
+    b=$(count_cc "$st_dir/synth.log")
+    rm -rf "$st_dir"
+    [ "$b" = "2" ]
+}
+
+count_cc() {
+    # Counts successful execve of a C compiler driver. Read into a variable on
+    # the line after the pipeline -- never trust a pipeline's own $?.
+    grep -E 'execve\("[^"]*/(clang|clang-[0-9]+|gcc|cc)", .*= 0$' "$1" 2>/dev/null | wc -l | tr -d ' '
+}
+
+command -v strace >/dev/null 2>&1 || oops "strace not available; absence of a counter is absence of evidence"
+selftest || oops "selftest failed: the C-compiler exec counter does not discriminate"
+
+[ -x "$SIMPLE" ] || oops "no runnable $SIMPLE"
+
+WORK=$(mktemp -d) || oops "cannot create work dir"
+trap 'rm -rf "$WORK"' EXIT
+CACHE="$WORK/objcache"
+
+cat > "$WORK/hello.spl" <<'EOF'
+fn main():
+    var s = 0
+    var i = 0
+    while i < 10:
+        s = s + i * 2
+        i = i + 1
+    print "{s}"
+EOF
+
+export SIMPLE_TIMEOUT_SECONDS=0
+export SIMPLE_RT_OBJ_CACHE_DIR="$CACHE"
+
+BUILDS=0
+
+run_build() {
+    out=$1; log=$2
+    ( cd "$ROOT" && strace -f -e trace=execve -o "$log" \
+        "$SIMPLE" native-build "$WORK/hello.spl" -o "$out" --entry-closure \
+        >"$log.out" 2>&1 )
+    rc=$?
+    BUILDS=$((BUILDS + 1))
+    return $rc
+}
+
+run_build "$WORK/cold.bin" "$WORK/cold.strace"
+[ $? -eq 0 ] || fail "cold native-build failed (see build output)"
+COLD=$(count_cc "$WORK/cold.strace")
+
+run_build "$WORK/warm.bin" "$WORK/warm.strace"
+[ $? -eq 0 ] || fail "warm native-build failed (see build output)"
+WARM=$(count_cc "$WORK/warm.strace")
+
+[ "$BUILDS" -eq 2 ] || oops "expected 2 builds, executed $BUILDS"
+
+if [ "$COLD" -lt "$COLD_MIN" ]; then
+    fail "cold build ran only $COLD C-compiler exec(s) (< $COLD_MIN): the cache was pre-warmed, so this run proves nothing"
+fi
+if [ "$WARM" -gt "$CAP" ]; then
+    fail "warm build ran $WARM C-compiler exec(s) (> $CAP); cold was $COLD — the runtime object cache is not being reused"
+fi
+
+# Correctness gate: caching must not change the produced binary.
+if ! cmp -s "$WORK/cold.bin" "$WORK/warm.bin"; then
+    fail "cold and warm builds produced DIFFERENT binaries — the cache changed codegen output"
+fi
+
+printf 'PASS — %d build(s) executed, cold C-compiler execs=%d, warm=%d (cap %d), outputs byte-identical\n' \
+    "$BUILDS" "$COLD" "$WARM" "$CAP"
+exit 0
