@@ -176,20 +176,22 @@ class RawRtLexState:
             return raw_line
         var pieces: [text] = []
         var i = 0
-        while i < raw_line.len():
-            val ch = raw_line.substring(i, i + 1)
-            val triple = i + 2 < raw_line.len() and raw_line.substring(i, i + 3) == "\"\"\""
+        val line_len = raw_line.len()
+        while i < line_len:
             if self.in_triple:
-                if triple:
-                    pieces.push(" ")
-                    pieces.push(" ")
-                    pieces.push(" ")
-                    i = i + 3
-                    self.in_triple = false
+                # Blank in one run to the closing `\"\"\"` instead of one interpreted
+                # `substring` + `push` per character. `index_of` matches only a
+                # complete 3-char sequence, exactly like the old bounds test.
+                val close = raw_line.index_of("\"\"\"", i)
+                if close < 0:
+                    pieces.push(" ".repeat(line_len - i))
+                    i = line_len
                 else:
-                    pieces.push(" ")
-                    i = i + 1
+                    pieces.push(" ".repeat(close - i + 3))
+                    i = close + 3
+                    self.in_triple = false
                 continue
+            val ch = raw_line.substring(i, i + 1)
             if self.in_string:
                 pieces.push(" ")
                 if self.escaped:
@@ -201,24 +203,32 @@ class RawRtLexState:
                 i = i + 1
                 continue
             if ch == "#":
-                while i < raw_line.len():
-                    pieces.push(" ")
-                    i = i + 1
+                pieces.push(" ".repeat(line_len - i))
+                i = line_len
                 break
-            if triple:
-                pieces.push(" ")
-                pieces.push(" ")
-                pieces.push(" ")
-                i = i + 3
-                self.in_triple = true
-                continue
+            # A `\"\"\"` can only start at a quote, so the 3-char probe is taken
+            # there instead of once per character.
             if ch == "\"":
+                if i + 2 < line_len and raw_line.substring(i, i + 3) == "\"\"\"":
+                    pieces.push("   ")
+                    i = i + 3
+                    self.in_triple = true
+                    continue
                 pieces.push(" ")
                 i = i + 1
                 self.in_string = true
                 continue
-            pieces.push(ch)
-            i = i + 1
+            # Ordinary text: copy the whole run up to the next `\"` or `#` in one
+            # slice. Every character in it takes the verbatim-copy branch of the
+            # original per-character walk, so the join is unchanged.
+            var nq = raw_line.index_of("\"", i + 1)
+            var nh = raw_line.index_of("#", i + 1)
+            if nq < 0: nq = line_len
+            if nh < 0: nh = line_len
+            var run_end = nq
+            if nh < run_end: run_end = nh
+            pieces.push(raw_line.substring(i, run_end))
+            i = run_end
         pieces.join("")
 
     me scan_line(raw_line: text) -> text:
