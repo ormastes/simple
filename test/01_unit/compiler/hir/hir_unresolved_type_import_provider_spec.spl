@@ -1,0 +1,87 @@
+"""
+# HIR `unresolved type`: the named provider module does not provide the type
+
+Stage1 run16 (tree `ec13c319250`) ended at step 2/6 with 15 distinct HIR
+fatals. Three of them share one shape, and it is the TYPE-position sibling of
+the already-fixed `unresolved name` import-reachability class:
+
+    use <provider>.{TypeName}
+
+...where `<provider>` neither DECLARES `TypeName` nor re-exports it. The Rust
+seed resolves this leniently, so the edge sat in the tree invisibly; pure-Simple
+HIR lowering enforces it, fails to resolve the type annotation, and poisons the
+module. The compiler already prints the evidence itself as
+`[use-warning] '<Name>' is named in `use <provider>.{...}` but module '<file>'
+does not provide it`.
+
+Measured providers on the pre-fix tree:
+
+| caller | type | named provider | actually declared in |
+|---|---|---|---|
+| `70.backend/backend/vhdl_type_mapper.spl` | `VhdlPortDirection` | (no import at all) | `50.mir/mir_instruction_support.spl` |
+| `70.backend/backend/vhdl/vhdl_design_catalog.spl` | `HirFunction` | `compiler.hir.hir_types` | `20.hir/hir_definitions.spl` |
+| `80.driver/driver_pipeline_execution.spl` | `CompiledModule` | `compiler.backend.codegen` | `70.backend/backend/backend_types.spl` |
+
+The fix is the same one the `unresolved name` lane used: repair the import edge
+at its root by importing from the DECLARING module — never from a facade
+re-exporter, which is the shape that regressed run15 50x.
+
+This spec is a static import-edge guard. Every assertion below fails on the
+pre-fix tree.
+
+See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+"""
+
+# @cover src/compiler/70.backend/backend/vhdl_type_mapper.spl 5%
+# @cover src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl 5%
+# @cover src/compiler/80.driver/driver_pipeline_execution.spl 5%
+
+use std.io_runtime.{read_file}
+
+fn module_imports_naming(path: text, fragment: text) -> bool:
+    """True when a MODULE-LEVEL `use` line (column 0) in `path` contains `fragment`."""
+    var found = false
+    for line in read_file(path).split("\n"):
+        if not (line.starts_with("use ") or line.starts_with("export use ")):
+            continue
+        if line.contains(fragment):
+            found = true
+    found
+
+fn declares(path: text, symbol: text) -> bool:
+    """True when `path` DECLARES `symbol` as a struct/class/enum/trait."""
+    var found = false
+    for kw in ["struct ", "class ", "enum ", "trait "]:
+        if read_file(path).contains("\n{kw}{symbol}:"):
+            found = true
+    found
+
+describe "HIR unresolved-type import provider":
+
+    it "the three named providers really do declare the types (controlled comparison)":
+        expect(declares("src/compiler/50.mir/mir_instruction_support.spl",
+                        "VhdlPortDirection")).to_be_true()
+        expect(declares("src/compiler/20.hir/hir_definitions.spl",
+                        "HirFunction")).to_be_true()
+        expect(declares("src/compiler/70.backend/backend/backend_types.spl",
+                        "CompiledModule")).to_be_true()
+        # ...and the modules the pre-fix tree named do NOT declare them.
+        expect(declares("src/compiler/20.hir/hir_types.spl", "HirFunction")).to_be_false()
+        expect(declares("src/compiler/70.backend/codegen.spl", "CompiledModule")).to_be_false()
+
+    it "vhdl_type_mapper imports VhdlPortDirection from its declaring module":
+        val p = "src/compiler/70.backend/backend/vhdl_type_mapper.spl"
+        expect(module_imports_naming(
+            p, "use compiler.mir.mir_instruction_support.{{VhdlPortDirection}}")).to_be_true()
+
+    it "vhdl_design_catalog takes HirFunction from hir_definitions, not hir_types":
+        val p = "src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl"
+        expect(module_imports_naming(
+            p, "use compiler.hir.hir_definitions.{{HirFunction}}")).to_be_true()
+        expect(read_file(p).contains("hir_types.{{HirModule, HirFunction")).to_be_false()
+
+    it "driver_pipeline_execution takes CompiledModule from backend_types, not codegen":
+        val p = "src/compiler/80.driver/driver_pipeline_execution.spl"
+        expect(module_imports_naming(
+            p, "use compiler.backend.backend.backend_types.{{CompiledModule}}")).to_be_true()
+        expect(read_file(p).contains("codegen.{{CodegenPipeline, CompiledModule}}")).to_be_false()

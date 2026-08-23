@@ -782,3 +782,91 @@ clearance prediction in follow-up (b) of this record.
 What run16 does NOT establish: which of the two reverted lanes caused run15.
 It removed both at once. This lane re-lands ALONE so `run17` can measure it in
 isolation; `run17`, not run16, is what decides whether this fix stays.
+
+## Follow-up (h) 2026-08-22 — FOURTH mechanism: the named provider module simply does not provide the type
+
+Lane scope: the run16 census names `HirModule 2`, `VhdlPortDirection 2`,
+`HirFunction 1`, `CompiledModule 1` (`error_census16.md`, tree `ec13c319250`,
+15 distinct HIR fatals / 21 poisoned). AsmLocation/AsmConstraintKind belong to a
+sibling lane and are untouched here.
+
+### Mechanism (3 of the 4 names)
+
+Three of them are **not** a projection defect at all. They are the TYPE-position
+sibling of the already-fixed `unresolved name` import-reachability class
+(`hir_unresolved_name_import_reachability_2026-08-22.md`): the caller writes
+
+    use <provider>.{TypeName}
+
+against a `<provider>` that neither DECLARES `TypeName` nor re-exports it, so
+there is nothing to project, the annotation falls to `lower_type` in the
+importer's scope, and HIR hard-errors. The seed resolves this leniently, which
+is why the edges accumulated invisibly.
+
+The compiler already prints the evidence itself, unprompted:
+`[use-warning] '<Name>' is named in \`use <provider>.{...}\` but module '<file>'
+does not provide it (imported from <caller>)`. That warning — not a new probe —
+is the cheap oracle for this class, and a full stage-1 build is not needed to
+find or verify a member of it.
+
+| caller | type | named provider (pre-fix) | actually DECLARED in |
+|---|---|---|---|
+| `70.backend/backend/vhdl_type_mapper.spl` | `VhdlPortDirection` | *no import at all*; relied on `compiler.mir.mir_data.*` | `50.mir/mir_instruction_support.spl:104` |
+| `70.backend/backend/vhdl/vhdl_design_catalog.spl` | `HirFunction` | `compiler.hir.hir_types` | `20.hir/hir_definitions.spl:35` |
+| `80.driver/driver_pipeline_execution.spl` | `CompiledModule` | `compiler.backend.codegen` | `70.backend/backend/backend_types.spl:333` |
+
+Controlled comparison, measured not inferred: `hir_types.spl` exports
+`HirModule` (line 690) but nowhere declares or exports `HirFunction`;
+`70.backend/codegen.spl` declares `CodegenPipeline` (line 673) but no
+`CompiledModule` at all — the same `use` line carries one symbol that resolves
+and one that cannot.
+
+The `HirFunction` case is NOT the cycle the lane brief anticipated. The
+declaration does not have to move: `hir_definitions.spl` does
+`use compiler.hir.hir_types.*` for its own benefit, but `vhdl_design_catalog.spl`
+is a BACKEND module, so importing `compiler.hir.hir_definitions.{HirFunction}`
+there adds no edge into `20.hir` that does not already exist.
+
+### Fix
+
+Import each type from its DECLARING module. No resolver change, no diagnostic
+suppressed, and — unlike the run15 lane — no facade hop is introduced, so the
+50x flood shape is impossible by construction here.
+
+### Evidence (runtime, isolated, minutes not 72 min)
+
+`native-build` of the single failing file under
+`SIMPLE_HIR_UNRESOLVED_TYPE_TRACE=1`, pristine `340d54e97bb` vs fixed tree:
+
+| file | pre-fix `[hir-fatal]` | post-fix |
+|---|---|---|
+| `vhdl_type_mapper.spl` | `unresolved type: VhdlPortDirection` (x2) | **0** |
+| `vhdl/vhdl_design_catalog.spl` | `unresolved type: HirFunction` | **0** |
+
+`driver_pipeline_execution.spl` does not reach the fatal in an isolated
+single-file closure (0 both sides) — stated rather than papered over; its
+provider gap is proven statically by the table above and by `codegen.spl`
+having no `CompiledModule` declaration or export.
+
+### `HirModule` — NOT cleared, and it is a different shape
+
+Recorded rather than guessed at. `src/compiler/mono/instantiation.spl`, the file
+the run16 fatal names (`source_idx=683`, `errors=0->2`), **does not contain the
+string `HirModule` anywhere**, and neither does anything it imports
+(`00.common/compilation_context.spl` — no `use` lines at all, no `HirModule`) nor
+its package `__init__`. A tree-wide sweep of every `use`/`export use` line naming
+`HirModule` returns 13 sites and **all 13** import it from `compiler.hir.hir_types`,
+which does declare (line 21) and export (line 690) it. So `HirModule` is NOT an
+instance of the mechanism above, and there is no provider gap to repair.
+
+Two facts constrain the next step: an isolated `native-build` of
+`instantiation.spl` does not reproduce it (the errors it does produce are MIR
+`unresolved method call`, not HIR), so the fatal needs a wider closure; and
+run16 was recorded without `SIMPLE_HIR_UNRESOLVED_TYPE_TRACE`, so no
+`[ist-proj-miss]`/`[field-dep-unresolved]` line exists for it anywhere. The
+open hypothesis, untested: the reported NAME is wrong rather than the
+resolution — `HirModule` is the FIRST declaration in `hir_types.spl`, i.e. the
+index-0 entry of that module's type table, which is what a default/stale symbol
+index would print. Next experiment: re-run a stage-1 build (or the smallest
+closure that reaches `source_idx=683`) WITH the trace on, and read the
+`lowering=src/compiler/mono/instantiation.spl` lines.
