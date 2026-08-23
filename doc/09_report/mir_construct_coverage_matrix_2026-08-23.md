@@ -37,6 +37,61 @@ The interpreter and the native/JIT path resolve independently, so an assertion p
 | `MirBorrowKind` | `src/compiler/50.mir/mir_instruction_support.spl` | 2 | 2 |
 | `MirTypeDefKind` | `src/compiler/50.mir/mir_types.spl` | 3 | 2 |
 
+## 1.5 TWO FINDINGS THAT GENERALISE BEYOND MIR
+
+These are stated here, before the construct tables, because they are not facts
+about MIR — they are facts about how coverage and totality gates fail, and both
+were hit independently by other lanes today.
+
+### F1. Apparent coverage is not real coverage: 175 mentions, 0 value assertions
+
+Existing tests under `test/01_unit` + `test/unit` **mention** 175 of the 225 core
+MIR constructs. That number looks like 78% coverage. It is not coverage at all.
+
+Before this lane, **zero** of those tests asserted a VALUE produced by a named
+MIR construct through a named engine. A construct's name appearing in a test
+file is usually an incidental fixture constructor — something built in order to
+test something else. It proves the name parses, not that the construct computes
+the right answer.
+
+This distinction is exactly the blind spot the defect class exploits. Every MIR
+defect this lane was chartered against — the stepped range ignoring its step,
+named-argument reordering returning -35 for 35, nested parens giving 8 instead
+of 6, `self` field access returning 0 instead of 42 — is code that RUNS and
+returns a WRONG NUMBER. A test that constructs the node and checks nothing about
+its value passes on all of them.
+
+**Rule this implies:** a coverage figure derived from symbol mentions is
+unfalsifiable and should never be reported as coverage. Count assertions that
+would FAIL if the value were wrong, and name the engine each one covers. That is
+why every row of the matrix in section 3 reads `verified: no` even where a test
+mention exists, and why section 0 defines "mentioned" and "verified" as separate
+columns rather than collapsing them.
+
+### F2. A totality gate built on an incomplete enumeration reports PASS over the gap
+
+The `compiler_schema` registry generator reads **one variant per line**, so
+`compiler.mir.MirTypeKind.sdn` records **29 of 36** variants (section 6.1). The
+7 it drops are exactly the non-first tokens of comma-separated declarations.
+
+The registry is the declared **producer universe** for the transition tables in
+`spec/compiler_schema/transitions/` — `mir_inst_to_llvm.sdn` says so in its own
+header. So the universe those tables check totality against is smaller than the
+real enum, and a backend that silently dropped `I32`, `I64` or `F64` would be
+compared against a universe that does not contain them and reported **PASS**.
+
+This is worse than having no gate, because a green totality gate is read as
+proof of totality. It is the mechanism by which the 25-construct hole in section
+2.3 could persist unnoticed alongside a schema surface that looked healthy: the
+five fail-open backends were outside the modelled set entirely, and the modelled
+set was itself under-enumerated.
+
+**Rule this implies:** any gate asserting totality must first prove its universe
+is complete against the source of truth, and that proof must be part of the gate,
+not an assumption behind it. `check-mir-backend-coverage.shs` derives its
+universe from `mir_instruction_kinds.spl` directly rather than from the registry,
+for exactly this reason.
+
 ## 2. HIGHEST-VALUE FINDING — constructs reaching a silent fail-open catch-all
 
 Each site below dispatches `match inst_kind:` and terminates in `case _:` that emits **nothing, with no diagnostic**. A construct outside its handled set is *deleted* from the generated code. That is a wrong answer, not an error — the exact defect class this lane exists for.
@@ -515,27 +570,47 @@ The 16 green examples use the same helpers and the same matcher, so the RED trio
 is direct evidence that these assertions discriminate on VALUE rather than on
 absence-of-crash.
 
-### 8.3 Spec neuter attempt — BLOCKED, stated rather than claimed
+### 8.3 Spec neuter — PROVED (2026-08-23, second attempt)
 
-A source-level neuter of a GREEN assertion was attempted: `primitive_size()`'s
-`case I8 | U8 | Bool: Some(1)` was changed to `Some(99)`, which must flip the
-"gives each integer width its exact size in bytes" example to FAIL. The run was
-**starved by host load** (load average 51, ~20 concurrent `simple` processes from
-other lanes) and was killed by its own 1500 s timeout while still in session
-setup, producing no verdict. The source was restored and verified clean
-(`git status --porcelain src/` empty, 0 occurrences of the neuter token).
+The first attempt was starved by host load (avg 51) and killed by its own
+timeout in session setup with no verdict. It was **re-run on a quieter box**
+(load avg 37.6) and completed.
 
-This is recorded as **not proved**, not as proved. What IS proved for the spec is
-weaker but real: the 3 RED examples fail with `expected 8 to equal 16/32` through
-the same `ty(...).size_bytes()` helper and the same matcher as the 16 green ones,
-so the assertions demonstrably discriminate on VALUE. Re-run the neuter on an
-idle host to close this gap:
+Neuter: `MirType.primitive_size()`'s `case I8 | U8 | Bool: Some(1)` -> `Some(99)`,
+in real source, in the live file.
 
-```sh
-sed -i 's/case I8 | U8 | Bool: Some(1)/case I8 | U8 | Bool: Some(99)/' src/compiler/50.mir/mir_types.spl
-bin/simple test test/01_unit/compiler/mir/mir_construct_matrix_spec.spl   # expect 4 failures, not 3
-git checkout -- src/compiler/50.mir/mir_types.spl
+| | examples | passed | failed |
+|---|---|---|---|
+| baseline (source intact) | 19 | 16 | **3** (the filed SIMD defect) |
+| neutered | 19 | 12 | **7** |
+
+The 4 additional failures and their messages:
+
+```
+expected 99 to equal 1      # I8 size
+expected 99 to equal 1      # U8 size
+expected 99 to equal 8      # propagated through a recursive aggregate rule
+expected 99 to equal 8      # propagated through a recursive aggregate rule
+expected 8 to equal 16      # pre-existing SIMD defect, unchanged
+expected 8 to equal 32      # pre-existing SIMD defect, unchanged
+expected 8 to equal 32      # pre-existing SIMD defect, unchanged
+19 examples, 7 failures
 ```
 
-The GATE's neuter evidence (section 8.1) is unaffected — it runs in 0.8 s and was
-proved twice against real source.
+Source was restored and verified (`git status --porcelain src/` empty, 0
+occurrences of the neuter token, gate back to `PASS — 749 pairs`).
+
+Two things this proves beyond the bare discrimination requirement:
+
+1. **The assertions discriminate on VALUE.** A one-token change to a single
+   lowering arm flips 4 previously-green examples to FAIL, across 4 different
+   `it` blocks.
+2. **It independently corroborates the "compounds recursively" claim** in
+   `mir_type_simd_vector_size_bytes_returns_8_2026-08-23.md`: two of the four new
+   failures are in the *aggregate* rules, not the primitive ones. A wrong
+   primitive width propagates through `Tuple`/`Union` alignment by construction,
+   which is exactly the mechanism that makes the SIMD residual a general-layout
+   problem rather than a vector-only one.
+
+**No unproven neuter remains in this lane.** The gate's two real-source neuters
+are in section 8.1; the spec's is here.
