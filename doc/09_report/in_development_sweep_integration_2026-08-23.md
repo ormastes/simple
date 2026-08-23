@@ -101,20 +101,61 @@ rather than extrapolated.
   is therefore not currently possible; the row the brief expects has not reached
   this tip.
 
+
+## Second batch — 27 further failures, same verdict
+
+The sweep continued past the first classification pass and reached 260 specs. Every
+one of the 27 additional failures is again a defect, not unfinished work. They fall
+into three families:
+
+**Wrong computed values** (the most serious family — silent wrong answers, not errors):
+
+| Spec | Symptom |
+|---|---|
+| `usage/loops_spec.spl` | `iterates with positive step` — a stepped range yields `[0,1,2,…,10]` instead of `[0,2,4,6,8]`. **The step is ignored entirely.** |
+| `usage/named_arguments_spec.spl` | `reorders method arguments` — expected `35`, got **`-35`**. Reordering named arguments inverts the result. |
+| `usage/decorators_spec.spl` | `applies basic decorator` — expected 12, got 6: the decorator does not apply. |
+| `usage/implicit_mul_spec.spl` | `chains multiple groups` — expected 8, got 4. |
+| `usage/parser_type_annotations_spec.spl` | `parses mutable reference` — expected 42, got 41. |
+| `usage/math_render_spec.spl` | `renders power right-assoc with unary` — `Pow(Id(x), Id(?))` instead of `Pow(Id(x), Neg(Num(2)))`. |
+| `usage/context_managers_spec.spl` | `__exit__` is not called after the block completes. |
+| `usage/futures_promises_spec.spl`, `usage/future_body_execution_spec.spl` | promise resolution and exception propagation both return falsy. |
+| `usage/exists_check_spec.spl` | `returns false for None` — expected `false`, got `nil`. |
+
+**Name / member resolution failures** (~8 specs, one family):
+`config_for_version` not found (`usage/cmm_lsp/cmm_v2025_spec.spl`); `variable value`
+not found (`collections_spec`); `ComponentType` not found (`component_spec`); `ct`
+not found (`contract_persistence_feature_spec`); `undefined field … 'Mat4' on Dict`
+(`mat4_spec` — a type resolving to a module dict, the same shape as
+`usage/actor_model_spec`'s `Vec3`); `unknown static method from_data on class Tensor`
+(`math_autograd_runtime_spec`). These are misresolutions, not absent features.
+
+**Harness / spec-rot debt — reported separately, never tagged:**
+`usage/parser_declarations_spec.spl` fails with `semantic: function `step` not found`
+and `usage/parser_error_recovery_spec.spl` with `function `read_file` not found`. The
+spipe `step()` helper and a file-reading helper are unimported or renamed. This is
+annotation/rot debt in the same category as missing `@cover` headers, and matches
+slice 1's finding that its only two failures were spec rot and another lane's
+uncommitted edits. `usage/networking_spec.spl` (real sockets under
+`SIMPLE_EXECUTION_MODE=jit`) is environmental.
+
+Still **zero** specs qualified for the tag.
+
 ## Counts
 
 | metric | value |
 |---|---|
 | specs in slice | 1720 (`02_integration` 776, `integration` 592, `feature` 352) |
 | unique specs needing execution | **1128** (`integration` is a strict subset mirror of `02_integration` — see Method) |
-| specs actually run | **117**, all in `test/feature/` (33% of that directory; 10% of the unique set) |
-| passed | 96 |
-| **failed** | **21** (18% of what ran) |
+| specs actually run | **260**, all in `test/feature/` (74% of that directory; 23% of the unique set) |
+| passed | 212 |
+| **failed** | **48** (18% of what ran) |
 | timed out / inconclusive / NO-EXEC | 0 |
 | **tagged `@tag:in-development`** | **0** |
-| left red, with reason | **21 — every single failure** |
-| distinct root causes behind the 21 | **~12** (the six SIMD specs share one runtime bug) |
+| left red, with reason | **48 — every single failure** |
+| distinct root causes behind the 48 | **~20** (the six SIMD specs share one runtime bug; ~8 more share a name-resolution failure mode) |
 | `test/02_integration` / `test/integration` executed | 0 — not reached in the available window |
 
-The sweep is still running single-job against the remaining 1011 specs; this report
-covers what was executed and verified, and claims nothing about the rest.
+The sweep was stopped single-job at 260 specs on the coordinator's memory-pressure
+instruction (run21 in flight, ~16 GB free). This report covers what was executed and
+verified, and claims nothing about the remaining 868 unique specs.
