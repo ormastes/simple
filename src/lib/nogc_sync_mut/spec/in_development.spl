@@ -90,6 +90,7 @@ val TAG_PREFIX: text = "@tag:"
 val IN_DEVELOPMENT_SKIP_MARKER: text = "IN-DEVELOPMENT SKIP"
 val IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER: text = "IN-DEVELOPMENT UNEXPECTED PASS"
 val IN_DEVELOPMENT_EXPLICIT_MARKER: text = "IN-DEVELOPMENT EXPLICIT"
+val IN_DEVELOPMENT_BROKEN_MARKER: text = "IN-DEVELOPMENT BROKEN"
 val IN_DEVELOPMENT_SUMMARY_MARKER: text = "In-development:"
 
 # ================================================================
@@ -209,35 +210,67 @@ enum InDevelopmentOutcome:
     ExpectedFailure       # tagged and failed: neutralised, counted, printed
     UnexpectedPass        # tagged and passed: reported loudly, ready to promote
     ExplicitRun           # tagged but named on the command line: honest verdict
+    LoadFailure           # tagged and could not LOAD: BROKEN, loud, still RED
 
 fn classify_in_development(
     is_tagged: bool,
     explicitly_targeted: bool,
     failed: i64,
     passed: i64,
-    errored: bool
+    errored: bool,
+    load_failed: bool
 ) -> InDevelopmentOutcome:
     """The single classifier. Both the per-file and the summary surfaces
     route through this rather than re-deriving the rule, for the same
     reason `test_file_result_outcome_class` exists in the runner types:
     two spellings of one rule is how the two surfaces come to disagree.
 
-    `errored` folds in `timed_out` and a non-empty `error`: a WIP spec that
-    crashes or times out is still just failing, and must not escape through
-    the error channel into a suite-level red.
+    `errored` folds in `timed_out` and a generic non-empty `error`: a WIP
+    spec that crashes or times out is still just failing, and must not
+    escape through the error channel into a suite-level red.
+
+    `load_failed` is the runner's `is_load_failure(error)` — a spec that
+    never LOADED (syntax error, broken import, unresolvable module). It is
+    checked BEFORE the failure branch, because it is the one thing the tag
+    does NOT grant amnesty to. See `LoadFailure` below.
     """
     if not is_tagged:
         return InDevelopmentOutcome.NotInDevelopment
     if explicitly_targeted:
         return InDevelopmentOutcome.ExplicitRun
+    # BROKEN beats EXPECTED-FAILURE, deliberately.
+    #
+    # `# @tag:in-development` is a claim about the CODE UNDER TEST: "this
+    # feature is not finished yet". It is not a claim about the spec file
+    # itself. A spec that cannot be loaded at all is not unfinished work,
+    # it is a DEFECT IN THE SPEC — and a defect that no assertion inside
+    # the file can ever be reached to demonstrate.
+    #
+    # Folding it into the skip count (which is what happened before this
+    # branch existed) makes a spec with a typo'd import indistinguishable
+    # from one whose subject merely does not work yet. At a few dozen tags
+    # that is a nuisance; across a tree-wide tagging sweep it is exactly
+    # the "protection that hides debt" shape — the tag would become a
+    # place broken files go to stop being counted.
+    #
+    # So it stays RED and it is named. The tag buys amnesty for failing
+    # ASSERTIONS, never for a file the loader could not read.
+    #
+    # This does NOT weaken Decision 5: a file that loads cleanly and
+    # simply declares no examples still classifies as ExpectedFailure and
+    # is still not a promotion signal. `is_load_failure` is precisely the
+    # predicate that separates those two — it is
+    # `unrun_reason(error) != "zero-examples"`.
+    if load_failed:
+        return InDevelopmentOutcome.LoadFailure
     if failed > 0 or errored:
         return InDevelopmentOutcome.ExpectedFailure
     if passed > 0:
         return InDevelopmentOutcome.UnexpectedPass
-    # Tagged, nothing failed, nothing passed: the file executed no example
-    # at all. That is NOT a promotion signal — treating it as one would let
-    # an empty WIP file announce itself as ready. It is the expected
-    # not-working-yet state.
+    # Tagged, nothing failed, nothing passed, and it LOADED: the file
+    # executed no example. That is NOT a promotion signal — treating it as
+    # one would let an empty WIP file announce itself as ready. It is the
+    # expected not-working-yet state.
     InDevelopmentOutcome.ExpectedFailure
 
 # ================================================================
@@ -265,22 +298,37 @@ fn in_development_explicit_line(path: text) -> text:
     """
     "{IN_DEVELOPMENT_EXPLICIT_MARKER} {path} — `@tag:{IN_DEVELOPMENT_TAG}`; explicit-path run reports the honest verdict (the suite would neutralise it)"
 
-fn in_development_summary_line(skipped: i64, unexpected_passes: i64) -> text:
+fn in_development_broken_line(path: text, reason: text) -> text:
+    """Per-file line for a tagged spec that could not be LOADED.
+
+    Names the reason (the runner's `unrun_reason`, e.g.
+    `unresolved-module`) because "broken" without a cause sends the reader
+    back to re-run it by hand. This line accompanies a RED verdict."""
+    "{IN_DEVELOPMENT_BROKEN_MARKER} {path} ({reason}) — a spec that cannot load is a DEFECT, not unfinished work; `@tag:{IN_DEVELOPMENT_TAG}` does not excuse it"
+
+fn in_development_summary_line(skipped: i64, unexpected_passes: i64, broken: i64) -> text:
     """The summary row. Printed whenever EITHER count is non-zero.
 
     Never hidden behind a verbose flag: an in-development test that nobody
     can see the count of is exactly the invisible debt this feature exists
     to prevent.
     """
+    var line = "{IN_DEVELOPMENT_SUMMARY_MARKER} {skipped} skipped (expected to fail)"
     if unexpected_passes > 0:
-        return "{IN_DEVELOPMENT_SUMMARY_MARKER} {skipped} skipped (expected to fail), {unexpected_passes} UNEXPECTED PASS (ready to promote)"
-    "{IN_DEVELOPMENT_SUMMARY_MARKER} {skipped} skipped (expected to fail)"
+        line = line + ", {unexpected_passes} UNEXPECTED PASS (ready to promote)"
+    if broken > 0:
+        # Never suppressed and never merged into the skip count: a broken
+        # tagged spec is the one class here that still fails the run.
+        line = line + ", {broken} BROKEN (failed to load — FAILS the run)"
+    line
 
 export IN_DEVELOPMENT_TAG, TAG_PREFIX
 export IN_DEVELOPMENT_SKIP_MARKER, IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER
 export IN_DEVELOPMENT_EXPLICIT_MARKER, IN_DEVELOPMENT_SUMMARY_MARKER
+export IN_DEVELOPMENT_BROKEN_MARKER
 export spec_tags, source_has_tag, source_is_in_development
 export in_development_explicitly_targeted
 export InDevelopmentOutcome, classify_in_development
 export in_development_skip_line, in_development_unexpected_pass_line
 export in_development_explicit_line, in_development_summary_line
+export in_development_broken_line

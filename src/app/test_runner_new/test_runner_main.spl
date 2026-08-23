@@ -20,7 +20,7 @@ use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_erro
 use std.test_runner.test_config.{TestConfig, load_test_config}
 use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
 use std.test_runner.mode_filter.{path_mode_matches}
-use std.spec.in_development.{source_is_in_development, in_development_explicitly_targeted, InDevelopmentOutcome, classify_in_development, in_development_skip_line, in_development_unexpected_pass_line, in_development_explicit_line, in_development_summary_line}
+use std.spec.in_development.{source_is_in_development, in_development_explicitly_targeted, InDevelopmentOutcome, classify_in_development, in_development_skip_line, in_development_unexpected_pass_line, in_development_explicit_line, in_development_broken_line, in_development_summary_line}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
@@ -826,7 +826,14 @@ fn in_development_adjust(file_path: text, options: TestOptions, raw: TestFileRes
     val explicit = in_development_explicitly_targeted(
         file_path, options.path_explicit, _requested_paths(options))
     val errored = raw.timed_out or raw.error != ""
-    match classify_in_development(true, explicit, raw.failed, raw.passed, errored):
+    # Load failure is read from the RAW error, before any neutralisation
+    # below clears it. Getting this order wrong is not hypothetical: the
+    # first cut of this function cleared `error` first, so by the time
+    # `emit_spec_file_verdicts` ran its own `is_load_failure(r.error)` test
+    # the evidence was already gone and every broken tagged spec printed a
+    # bare `outcome=NOT_RUN`.
+    val load_failed = raw.error != "" and is_load_failure(raw.error)
+    match classify_in_development(true, explicit, raw.failed, raw.passed, errored, load_failed):
         case InDevelopmentOutcome.NotInDevelopment:
             raw
         case InDevelopmentOutcome.ExplicitRun:
@@ -834,6 +841,34 @@ fn in_development_adjust(file_path: text, options: TestOptions, raw: TestFileRes
             # red is not the red the suite would have shown.
             print in_development_explicit_line(file_path)
             raw
+        case InDevelopmentOutcome.LoadFailure:
+            # BROKEN. Returned essentially UNCHANGED -- error preserved, so
+            # `emit_spec_file_verdicts` still routes it through
+            # `unrun_verdict_line` and the greenwash gates still see it --
+            # and forced to at least one failure so the sweep goes RED.
+            #
+            # This is the one in-development class that still fails the
+            # run. Rationale in the library's classifier: the tag is a
+            # claim about the code under test, not a licence for a spec
+            # file that cannot be parsed. Across a tree-wide tagging sweep,
+            # absorbing these into the skip count would turn the tag into a
+            # place broken files go to stop being counted.
+            print in_development_broken_line(file_path, unrun_reason(raw.error))
+            if raw.failed > 0:
+                raw
+            else:
+                TestFileResult(
+                    path: raw.path,
+                    passed: raw.passed,
+                    failed: 1,
+                    skipped: raw.skipped,
+                    pending: raw.pending,
+                    duration_ms: raw.duration_ms,
+                    setup_ms: raw.setup_ms,
+                    error: raw.error,
+                    timed_out: raw.timed_out,
+                    cached: raw.cached
+                )
         case InDevelopmentOutcome.ExpectedFailure:
             # Count at least 1 even when the failure arrived as a timeout or
             # a crash (failed == 0 on those paths): a neutralised file that
@@ -862,31 +897,40 @@ fn in_development_adjust(file_path: text, options: TestOptions, raw: TestFileRes
             print in_development_unexpected_pass_line(file_path, raw.passed)
             raw
 
-fn in_development_totals(results: [TestFileResult]) -> (i64, i64):
-    """(neutralised skips, unexpected passes) across a finished run.
+fn in_development_totals(results: [TestFileResult]) -> (i64, i64, i64):
+    """(neutralised skips, unexpected passes, BROKEN) across a finished run.
 
     Re-reads the tag from source rather than trusting a marker in the
     result, so a result that arrived from the daemon or a cache replay --
     paths that never went through `in_development_adjust` in THIS process
-    -- is still classified correctly."""
+    -- is still classified correctly.
+
+    The third bucket is deliberately NOT merged into the first. A broken
+    tagged spec is a defect, and the sibling statistics lanes (`bin/simple
+    tags`, the `test_result.md` In Development row) must be able to report
+    it separately rather than silently absorbing it into the skip count.
+    """
     var skipped = 0
     var unexpected = 0
+    var broken = 0
     for r in results:
         if file_is_in_development(r.path):
-            if r.failed == 0 and r.passed > 0:
+            if r.error != "" and is_load_failure(r.error):
+                broken = broken + 1
+            elif r.failed == 0 and r.passed > 0:
                 unexpected = unexpected + 1
             elif r.skipped > 0:
                 skipped = skipped + 1
-    (skipped, unexpected)
+    (skipped, unexpected, broken)
 
 fn print_in_development_summary(results: [TestFileResult]):
     """Print the in-development row of the run summary.
 
     Printed whenever either count is non-zero, on the ordinary summary
     surface and not behind --verbose: a count nobody sees is not a count."""
-    val (skipped, unexpected) = in_development_totals(results)
-    if skipped > 0 or unexpected > 0:
-        print in_development_summary_line(skipped, unexpected)
+    val (skipped, unexpected, broken) = in_development_totals(results)
+    if skipped > 0 or unexpected > 0 or broken > 0:
+        print in_development_summary_line(skipped, unexpected, broken)
 
 # =========================================================================
 # Session Config Propagation
