@@ -1,0 +1,72 @@
+# native-cache-clear.shs — sourceable helper for clearing a native-build cache
+# lane WITHOUT throwing away the content-keyed frontend parse cache.
+#
+# WHY THIS EXISTS
+# `prepare_native_cache()` in scripts/bootstrap/bootstrap-from-scratch.sh wipes
+# the whole lane dir (`build/bootstrap/native_cache/<lane>/`) whenever
+# `bootstrap_wide_inputs_hash` moves. That dir contains `frontend/` (the
+# per-module parse cache, src/compiler/10.frontend/frontend_parse_cache.spl) and
+# `hir/`, so the wipe also destroys every `.fpc` entry. A build that dies late
+# and is started again therefore reparses the entire closure from cold — the
+# repeated ~4672s of work observed across run17's three attempts.
+#
+# WHY PRESERVING `frontend/` IS SOUND
+# The frontend cache is independently and completely keyed; it does not rely on
+# this directory being wiped for its correctness. An entry is only read back
+# when BOTH match:
+#   * the filename, which is sha256 of the module source bytes
+#     (frontend_parse_cache_key), so a source edit cannot hit a stale entry; and
+#   * the entry header, which folds FRONTEND_CACHE_ENTRY_VERSION,
+#     FLAT_POOL_CODEC_VERSION and the driver-published scope key
+#     (native_build_cache_scope_key = lane;backend;cpu;features;opt;compiler),
+#     where `compiler` is native_build_compiler_identity() — the compiler
+#     executable hash PLUS the src/compiler/** source fingerprint, the runtime
+#     provider fingerprint and the runtime bundle.
+# Every axis `bootstrap_wide_inputs_hash` protects (platform, backend, mode,
+# seed inputs, src/compiler/** contents) is therefore already inside the entry
+# header. A mismatch on any of them is a header mismatch, which the cache treats
+# as a MISS that reparses — it fails closed by construction. Wiping the
+# directory as well buys no additional safety and is exactly what makes a
+# retried build start cold.
+#
+# WHAT IS NOT PRESERVED
+# `hir/` and every object/scope dir are removed exactly as before. The HIR cache
+# is keyed over a whole-closure digest and is owned by a different lane; this
+# helper deliberately does not change its behaviour.
+#
+# Cross-lane isolation is untouched: this only ever operates INSIDE one
+# already-selected per-lane directory, so one lane can still never see another
+# lane's entries, and the `.cache_scope` ownership marker
+# (scripts/check/check-cache-scope-ownership.shs) is re-stamped by the caller.
+#
+# Guarded by scripts/check/check-frontend-cache-survives-context-change.shs.
+
+# Clear a native cache lane dir for a BUILD-CONTEXT change, keeping `frontend/`.
+#
+# Returns 0 when it cleared an existing directory, 2 when there was nothing to
+# clear (missing/empty argument or absent directory) so a caller can tell
+# "cleared" from "nothing was there" instead of reading a vacuous success.
+native_cache_clear_context_change() {
+    nccc_dir=$1
+    [ -n "${nccc_dir}" ] || return 2
+    [ -d "${nccc_dir}" ] || return 2
+    for nccc_entry in "${nccc_dir}"/* "${nccc_dir}"/.[!.]*; do
+        [ -e "${nccc_entry}" ] || continue
+        case "${nccc_entry##*/}" in
+            frontend) continue ;;
+        esac
+        rm -rf "${nccc_entry}" || return 1
+    done
+    return 0
+}
+
+# Full wipe, including `frontend/`. Used for the paths that express explicit
+# operator intent to start from nothing (--fresh-cache, clean-release profile,
+# one-binary mode), where honouring the request matters more than warm caches.
+native_cache_clear_all() {
+    ncca_dir=$1
+    [ -n "${ncca_dir}" ] || return 2
+    [ -d "${ncca_dir}" ] || return 2
+    rm -rf "${ncca_dir}/" || return 1
+    return 0
+}

@@ -1,0 +1,172 @@
+#!/bin/sh
+# check-frontend-cache-survives-context-change.shs
+#
+# Pins the L3 fix: a native-cache clear triggered by a BUILD-CONTEXT change must
+# NOT destroy the content-keyed frontend parse cache.
+#
+# THE DEFECT THIS REPLAYS
+# `prepare_native_cache()` (scripts/bootstrap/bootstrap-from-scratch.sh) wipes
+# `build/bootstrap/native_cache/<lane>/` whenever `bootstrap_wide_inputs_hash`
+# moves. That directory holds `frontend/` (the .fpc parse cache) and `hir/`, so
+# the wipe threw away every parse entry and a re-started build reparsed the
+# entire closure from cold — the repeated ~4672s across run17's three attempts.
+# Preserving `frontend/` is sound because each entry is keyed by source-content
+# sha256 AND a header folding the whole scope key (compiler executable hash,
+# src/compiler/** source fingerprint, runtime fingerprint, backend, cpu, opt,
+# lane) plus the codec/entry versions; any mismatch is a header mismatch, which
+# the cache treats as a miss that reparses. It fails closed by construction.
+#
+# WHAT IS CHECKED
+#   1. The helper library exists and defines both entry points.
+#   2. A context-change clear removes object/scope/hir state but keeps
+#      `frontend/` and its .fpc entries byte-for-byte.
+#   3. An explicit full clear (--fresh-cache / clean-release / one-binary) still
+#      removes everything, including `frontend/` — operator intent is honoured.
+#   4. bootstrap-from-scratch.sh actually CALLS the helper on the context-change
+#      path and no longer `rm -rf`s the whole lane dir there. A fix that is not
+#      wired is not a fix.
+#   5. Cross-lane isolation is preserved: the helper only ever touches the one
+#      lane dir it is handed, and never its siblings.
+#
+# Verdict is the last line of stdout:
+#   PASS — <n> invariant(s) checked, ...        exit 0
+#   FAIL — ...                                  exit 1
+#   ERROR — nothing was checked                 exit 2
+# A run that checked 0 invariants is ERROR, never a pass.
+#
+# --selftest runs first and is fatal: it drives the REAL helper over real
+# directories, including a pre-fix replay (a plain `rm -rf` of the lane dir)
+# that MUST be observed to destroy the parse cache, so a vacuous fixture cannot
+# masquerade as a passing check.
+
+set -u
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+lib="${repo_root}/scripts/bootstrap/native-cache-clear.shs"
+bootstrap="${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh"
+
+checked=0
+failures=""
+
+fail() { failures="${failures}${failures:+; }$1"; }
+
+# Build a realistic lane dir: frontend/ with two .fpc entries, plus hir/ and an
+# object scope dir that a context change legitimately invalidates.
+make_lane() {
+    ml_dir=$1
+    rm -rf "${ml_dir}"
+    mkdir -p "${ml_dir}/frontend" "${ml_dir}/hir" "${ml_dir}/backend=llvm;opt=2/object"
+    printf 'spl-fecache-v1 codec scope\nPOOLA\n' > "${ml_dir}/frontend/aaa.fpc"
+    printf 'spl-fecache-v1 codec scope\nPOOLB\n' > "${ml_dir}/frontend/bbb.fpc"
+    printf 'hirblob\n' > "${ml_dir}/hir/entry.hir"
+    printf 'obj\n' > "${ml_dir}/backend=llvm;opt=2/object/mod.o"
+    printf 'lane=selftest\n' > "${ml_dir}/.cache_scope"
+    printf 'deadbeef\n' > "${ml_dir}/bootstrap-wide-inputs.sha256"
+}
+
+fpc_count() { find "$1/frontend" -name '*.fpc' 2>/dev/null | wc -l | tr -d ' '; }
+
+selftest() {
+    st_root=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    st_fail=0
+    st_n=0
+
+    . "${lib}" || { echo "ERROR — nothing was checked (cannot source ${lib})"; rm -rf "${st_root}"; exit 2; }
+
+    # Fixture 1 — PRE-FIX REPLAY. The old behaviour (rm -rf the lane dir) must
+    # be observed to destroy the parse cache. If this fixture ever "passes",
+    # the fixture is wrong and every other result here is meaningless.
+    make_lane "${st_root}/pre"
+    [ "$(fpc_count "${st_root}/pre")" = "2" ] || st_fail=1
+    rm -rf "${st_root}/pre/"
+    [ "$(fpc_count "${st_root}/pre")" = "0" ] || { echo "selftest: pre-fix replay did not destroy the cache" >&2; st_fail=1; }
+    st_n=$((st_n + 1))
+
+    # Fixture 2 — context-change clear keeps frontend/ byte-for-byte.
+    make_lane "${st_root}/ctx"
+    before=$(cat "${st_root}/ctx/frontend/aaa.fpc")
+    native_cache_clear_context_change "${st_root}/ctx"
+    rc=$?
+    [ "${rc}" = "0" ] || { echo "selftest: context clear rc=${rc}, want 0" >&2; st_fail=1; }
+    [ "$(fpc_count "${st_root}/ctx")" = "2" ] || { echo "selftest: frontend entries not preserved" >&2; st_fail=1; }
+    [ "$(cat "${st_root}/ctx/frontend/aaa.fpc")" = "${before}" ] || { echo "selftest: frontend entry mutated" >&2; st_fail=1; }
+    st_n=$((st_n + 1))
+
+    # Fixture 3 — the same clear DOES remove hir/, object scope dirs and stamps.
+    [ ! -d "${st_root}/ctx/hir" ] || { echo "selftest: hir/ survived a context clear" >&2; st_fail=1; }
+    [ ! -d "${st_root}/ctx/backend=llvm;opt=2" ] || { echo "selftest: object scope dir survived" >&2; st_fail=1; }
+    [ ! -f "${st_root}/ctx/bootstrap-wide-inputs.sha256" ] || { echo "selftest: stale stamp survived" >&2; st_fail=1; }
+    [ ! -f "${st_root}/ctx/.cache_scope" ] || { echo "selftest: dotfile not swept" >&2; st_fail=1; }
+    st_n=$((st_n + 1))
+
+    # Fixture 4 — explicit full clear still removes everything.
+    make_lane "${st_root}/all"
+    native_cache_clear_all "${st_root}/all"
+    [ "$(fpc_count "${st_root}/all")" = "0" ] || { echo "selftest: full clear kept frontend entries" >&2; st_fail=1; }
+    st_n=$((st_n + 1))
+
+    # Fixture 5 — cross-lane isolation: clearing lane A leaves lane B untouched.
+    make_lane "${st_root}/laneA"
+    make_lane "${st_root}/laneB"
+    native_cache_clear_context_change "${st_root}/laneA"
+    [ "$(fpc_count "${st_root}/laneB")" = "2" ] || { echo "selftest: sibling lane disturbed" >&2; st_fail=1; }
+    [ -d "${st_root}/laneB/hir" ] || { echo "selftest: sibling lane hir removed" >&2; st_fail=1; }
+    st_n=$((st_n + 1))
+
+    # Fixture 6 — non-vacuity: absent dir and empty argument are rc=2, not a
+    # silent success a caller could read as "cleared".
+    native_cache_clear_context_change "${st_root}/does-not-exist"
+    [ "$?" = "2" ] || { echo "selftest: absent dir did not return 2" >&2; st_fail=1; }
+    native_cache_clear_context_change ""
+    [ "$?" = "2" ] || { echo "selftest: empty arg did not return 2" >&2; st_fail=1; }
+    st_n=$((st_n + 1))
+
+    rm -rf "${st_root}"
+    if [ "${st_fail}" -ne 0 ]; then
+        echo "FAIL — selftest failed (${st_n} fixture(s))"
+        exit 1
+    fi
+    [ "${st_n}" -ge 6 ] || { echo "ERROR — nothing was checked (selftest ran ${st_n} fixtures)"; exit 2; }
+}
+
+selftest
+
+# ---- real scan -------------------------------------------------------------
+
+[ -f "${lib}" ] || { echo "ERROR — nothing was checked (missing ${lib})"; exit 2; }
+[ -f "${bootstrap}" ] || { echo "ERROR — nothing was checked (missing ${bootstrap})"; exit 2; }
+
+# 1. helper defines both entry points
+grep -q '^native_cache_clear_context_change()' "${lib}" || fail "native_cache_clear_context_change not defined"
+checked=$((checked + 1))
+grep -q '^native_cache_clear_all()' "${lib}" || fail "native_cache_clear_all not defined"
+checked=$((checked + 1))
+
+# 2. bootstrap sources the helper
+grep -q 'scripts/bootstrap/native-cache-clear.shs' "${bootstrap}" || fail "bootstrap-from-scratch.sh does not source native-cache-clear.shs"
+checked=$((checked + 1))
+
+# 3. the context-change path CALLS the helper. An unwired fix is not a fix.
+grep -q 'native_cache_clear_context_change "\${native_cache_dir}"' "${bootstrap}" \
+    || fail "context-change path does not call native_cache_clear_context_change"
+checked=$((checked + 1))
+
+# 4. and no longer wipes the whole lane dir on that path. Count the remaining
+#    whole-dir wipes: they are only legitimate on the explicit-intent paths
+#    (clean-release, one-binary, --fresh-cache) — three of them.
+wipes=$(grep -c 'rm -rf "\${native_cache_dir}/"' "${bootstrap}")
+if [ "${wipes}" -gt 3 ]; then
+    fail "bootstrap-from-scratch.sh still has ${wipes} whole-lane wipes (want <=3, explicit-intent paths only)"
+fi
+checked=$((checked + 1))
+
+if [ -n "${failures}" ]; then
+    echo "FAIL — ${checked} invariant(s) checked: ${failures}"
+    exit 1
+fi
+if [ "${checked}" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+echo "PASS — ${checked} invariant(s) checked, frontend parse cache survives a build-context clear"
+exit 0

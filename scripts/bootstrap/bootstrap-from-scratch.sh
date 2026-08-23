@@ -1002,6 +1002,10 @@ bootstrap_native_cache_prune() {
 # Design: doc/05_design/compiler/incremental_build/per_lane_private_caches.md
 native_cache_base_dir="${native_cache_dir}"
 bootstrap_cache_scope_guard="${repo_root:-.}/scripts/check/check-cache-scope-ownership.shs"
+# Cache-clearing helpers. Sourced (not exec'd) so prepare_native_cache can call
+# native_cache_clear_context_change, which keeps the content-keyed frontend
+# parse cache across a build-context change.
+. "${repo_root:-.}/scripts/bootstrap/native-cache-clear.shs"
 
 bootstrap_select_cache_lane() {
   bscl_label=$1
@@ -1049,8 +1053,14 @@ prepare_native_cache() {
     return
   fi
   if [ ! -f "${native_cache_stamp}" ] || [ "$(cat "${native_cache_stamp}" 2>/dev/null)" != "${current_hash}" ]; then
-    echo "  ${label}: clearing native cache (platform/backend/AOP build context changed)"
-    rm -rf "${native_cache_dir}/"
+    # Keep `frontend/`: the parse cache is keyed by source-content sha256 plus a
+    # header folding the full scope key (compiler exe hash + src/compiler/**
+    # fingerprint + backend/cpu/opt/lane), so every axis this stamp guards is
+    # already inside the entry and a mismatch fails closed to a reparse. Wiping
+    # it too is what made a retried build reparse the whole closure from cold.
+    # See scripts/bootstrap/native-cache-clear.shs.
+    echo "  ${label}: clearing native cache (platform/backend/AOP build context changed; frontend parse cache preserved)"
+    native_cache_clear_context_change "${native_cache_dir}" || true
     mkdir -p "${native_cache_dir}"
     printf '%s\n' "${current_hash}" > "${native_cache_stamp}"
   else
