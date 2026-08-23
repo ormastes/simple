@@ -25,16 +25,23 @@ That's the whole feature. No decorator, no wrapper, no per-example call.
 - Each tagged file that failed prints one line:
 
   ```
-  IN-DEVELOPMENT SKIP test/01_unit/thing_spec.spl (1 expected failure(s); @tag:in-development)
+  IN-DEVELOPMENT NEUTRALISED test/01_unit/thing_spec.spl (1 expected failure(s), verdict neutralised; @tag:in-development)
   ```
 
-- The summary carries a count, right under `Results:`:
+- The summary **always** carries all three states, right under `Results:`
+  — even when the in-development count is zero, so you can always tell
+  "nothing parked" apart from "not tracked":
 
   ```
-  Results: 412 total, 412 passed, 0 failed, 3 skipped
+  Results: 412 total, 412 passed, 0 failed
   All tests passed!
-  In-development: 3 skipped (expected to fail)
+  States: 412 passed, 0 failed, 3 in development (expected to fail)
   ```
+
+**It is not a "skip".** The spec *runs*; only its verdict is neutralised.
+`skipped` stays a separate state for work the environment genuinely could
+not run (no GPU, wrong OS, `@tag:qemu`), and in-development is never
+folded into it — not in the wording and not in the counts behind it.
 
 **When you name the file** (`bin/simple test test/01_unit/thing_spec.spl`):
 
@@ -66,7 +73,7 @@ unresolvable module — it is reported as BROKEN and **still fails the run**:
 
 ```
 IN-DEVELOPMENT BROKEN test/01_unit/thing_spec.spl (unresolved-module) — a spec that cannot load is a DEFECT, not unfinished work; `@tag:in-development` does not excuse it
-In-development: 2 skipped (expected to fail), 1 BROKEN (failed to load — FAILS the run)
+States: 88 passed, 1 failed, 2 in development (expected to fail), 1 BROKEN (failed to load — FAILS the run)
 ```
 
 This is on purpose. The tag says *the feature isn't finished*; it does not
@@ -112,9 +119,10 @@ visible; that number is a to-do list, not a shrug.
 ## Reading the counts in a tool
 
 Don't grep for prose. The markers are stable constants exported from
-`std.spec.in_development`: `IN_DEVELOPMENT_SKIP_MARKER`,
+`std.spec.in_development`, and they are **prefix-disjoint** so matching one
+can never match another: `IN_DEVELOPMENT_MARKER`,
 `IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER`, `IN_DEVELOPMENT_EXPLICIT_MARKER`,
-`IN_DEVELOPMENT_SUMMARY_MARKER`. To ask whether a source is tagged, call
+`IN_DEVELOPMENT_BROKEN_MARKER`, `IN_DEVELOPMENT_SUMMARY_MARKER`. To ask whether a source is tagged, call
 `source_is_in_development(source)`; for the whole tag set of a file,
 `spec_tags(source)`.
 

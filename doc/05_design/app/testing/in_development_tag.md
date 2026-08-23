@@ -198,6 +198,58 @@ So a sweep report's "tagged" count is not a count of neutralised specs.
 Any tagged file that turns up in the BROKEN bucket is a spec defect that
 still needs fixing, not unfinished feature work that has been parked.
 
+### Decision 8: always print all three states, and never call it "skipped"
+
+User directive, 2026-08-23: *"Always show all 3 states: pass, fail,
+in-development — do not skip."* Two separate corrections.
+
+**(a) The row is now unconditional.** It previously appeared only when
+there was something to report, so a reader could not distinguish "no
+in-development work" from "this runner does not track it" — and the
+second reading is how a whole category quietly stops being looked at. The
+row now always carries all three counts, even at zero, the same contract
+the runner's `Results:` line already honours:
+
+```
+States: 412 passed, 0 failed, 0 in development (expected to fail)
+```
+
+The two exceptional classes are still appended only when non-zero,
+because they are **events**, not resting states: an unexpected pass is an
+action item (promote it) and BROKEN is a defect that fails the run.
+
+**(b) It is no longer called a skip, in the wording OR in the bucket.**
+This is a real mechanism correction, not a relabel. Decision 1 says a
+tagged spec *executes* and only its verdict is neutralised, so "skipped"
+misdescribed what happens and read as if the work were being hidden.
+
+The carrier changed with the wording. Previously the neutralised count
+was stored in `TestFileResult.skipped`, which put in-development into the
+runner's genuine skip bucket and made it show up in `Results: … N
+skipped`. A **new field `TestFileResult.in_development: i64 = 0`** now
+carries it. `skipped` remains its own distinct state for work the
+environment could not run (no GPU, wrong OS, `@tag:qemu`), the two are
+never merged, and any genuine skips a tagged file itself reported are
+preserved untouched.
+
+That field is the one edit outside this lane's files. It is additive and
+**defaulted**, so none of the ~85 existing `TestFileResult(...)`
+constructor sites change; the only other edit there is adding it to the
+`examples` sum in `test_file_result_outcome_class`, which is required —
+without it a neutralised file has zero examples and classifies `NOT_RUN`,
+which the exit-code path reads as `Unverified` (exit 5). Storing the
+count in `skipped` was what had been satisfying that check before.
+
+**Marker naming.** `IN_DEVELOPMENT_SKIP_MARKER` → `IN_DEVELOPMENT_MARKER`
+and `in_development_skip_line` → `in_development_line`, so the word does
+not survive in the API the stats lane consumes. The markers are also
+**prefix-disjoint**: a short `"IN-DEVELOPMENT"` was tried and rejected
+because it is a prefix of `"IN-DEVELOPMENT BROKEN"`, so a tool grepping
+for one matched the other. The spec caught that, and now pins it.
+
+**BROKEN is unchanged** — still red, still its own fourth class, still
+printed whenever non-zero. It is not a variant of in-development.
+
 ## API exposed for the sibling lanes
 
 `src/lib/nogc_sync_mut/spec/in_development.spl` is **pure** — text in,
@@ -214,15 +266,20 @@ Re-exported from `std.spec`.
 | `source_is_in_development(source) -> bool` | the predicate |
 | `in_development_explicitly_targeted(path, path_explicit, requested) -> bool` | explicit-target rule |
 | `InDevelopmentOutcome`, `classify_in_development(is_tagged, explicit, failed, passed, errored, load_failed)` | the single classifier — the rule lives here and is not re-derived by any surface. Four outcome classes plus `NotInDevelopment`; `LoadFailure` is checked before the failure branch |
-| `IN_DEVELOPMENT_SKIP_MARKER`, `IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER`, `IN_DEVELOPMENT_EXPLICIT_MARKER`, `IN_DEVELOPMENT_BROKEN_MARKER`, `IN_DEVELOPMENT_SUMMARY_MARKER` | stable line anchors — key off these, never off the surrounding prose |
-| `in_development_skip_line`, `in_development_unexpected_pass_line`, `in_development_explicit_line`, `in_development_broken_line`, `in_development_summary_line(skipped, unexpected, broken)` | the emitted lines |
+| `IN_DEVELOPMENT_MARKER`, `IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER`, `IN_DEVELOPMENT_EXPLICIT_MARKER`, `IN_DEVELOPMENT_BROKEN_MARKER`, `IN_DEVELOPMENT_SUMMARY_MARKER` | stable line anchors — key off these, never off the surrounding prose |
+| `in_development_line`, `in_development_unexpected_pass_line`, `in_development_explicit_line`, `in_development_broken_line`, `in_development_summary_line(passed, failed, in_development, unexpected, broken)` | the emitted lines; markers are prefix-disjoint |
 
 The runner additionally exposes, in `test_runner_main.spl`:
-`file_is_in_development(path)`, `in_development_totals(results) -> (skipped,
-unexpected, broken)` and `print_in_development_summary(results)`.
+`file_is_in_development(path)`, `in_development_totals(results) ->
+(in_development, unexpected, broken)` and
+`print_in_development_summary(results)`.
 
-**Note for the statistics lane:** `in_development_totals` returns **three**
-buckets, not two. `bin/simple tags` and the `test_result.md` "In
+**Note for the statistics lane — the first bucket is NOT `skipped`.** It
+was renamed from `skipped` to `in_development`, and the values behind it
+now live in `TestFileResult.in_development`, a field separate from
+`TestFileResult.skipped`. Do not reintroduce the word downstream: a
+tagged spec runs, and only its verdict is neutralised. `in_development_totals`
+returns **three** buckets, not two. `bin/simple tags` and the `test_result.md` "In
 Development" row need a separate BROKEN bucket — a broken tagged spec must
 not be silently absorbed into the skip count on those surfaces either,
 for the same reason it is not absorbed here.
