@@ -412,7 +412,26 @@ impl MirToLlvm:
         global_name
 
     me emit_unsupported_panic(message: text):
-        """Emit a hard runtime panic instead of silently lowering unsupported ops."""
+        """FAIL THE BUILD on a MIR construct the LLVM backend cannot lower.
+
+        Until 2026-08-23 this only emitted an `@rt_panic` call into the
+        generated IR, so the build reported rc=0 / step 6/6 / linked and the
+        defect surfaced as a RUNTIME panic in the shipped binary -- a
+        fail-OPEN. Measured live: an ordinary `Result` + `?` program linked
+        green and then died with
+        `E-BACKEND-LLVM-INST-ResultMatchSemantic`. A code path the backend
+        cannot lower is a compile error, so it is now raised as one, naming
+        the kind and the site. Matches the pre-existing treatment of
+        DecisionProbe/ConditionProbe in core_codegen.spl, which already
+        panicked at COMPILE time.
+
+        `SIMPLE_ALLOW_UNLOWERED_MIR=1` restores the old emit-and-hope
+        behaviour for anyone deliberately exercising the runtime-panic path.
+        See doc/08_tracking/bug/llvm_backend_unlowered_mir_kind_fails_open_2026-08-23.md
+        """
+        if (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") != "1":
+            eprint("error: {message}")
+            panic("compile error: {message}")
         val global_name = self.add_string_global(message)
         val msg_len = escaped_string_byte_len(message)
         val str_len = msg_len + 1
