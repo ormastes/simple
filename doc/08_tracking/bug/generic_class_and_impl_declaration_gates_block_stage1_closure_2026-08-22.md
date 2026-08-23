@@ -285,3 +285,44 @@ that is still open.
 evidence of a working binary), not a monomorphization defect — mono reported
 `unresolved=0` and the post-mono verifier was clean. Recorded here so the
 green build receipt is not mistaken for a green program.
+
+## CORRECTION (same day): the "67 sites now resolve" claim was NOT measured
+
+The section above says 67 of the ~76 root generic call sites in the stage1
+closure are match-arm bindings in `20.hir/generated/hir_hash.spl`. **The count
+is solid — it is a grep. Whether those 67 now RESOLVE is not established, and
+the earlier wording implied it was.** Recording the correction rather than
+quietly restating it.
+
+What was actually checked, and what it showed:
+
+1. `hir_hash.spl` scrutinises `match node.kind:` — a `Field(base, field, _)`
+   expression. `infer_expr_type` has **no `Field` arm**, so the reasoning went:
+   the scrutinee is untyped, `match_enum_hint` is empty, and the fallback key
+   `"::IntLit::0"` is ambiguous because **4 in-tree enums declare `IntLit`**
+   (`hir_definitions.spl`, `parser_types_expr.spl`, `bidirectional_types.spl`,
+   `macro_def.spl`). On that reasoning the 67 sites would still fail closed.
+2. A `Field` arm plus a `field_types` table was written to fix it, and a third
+   spec case was added reproducing the exact shape (match on a FIELD, variant
+   name declared by two enums with DIFFERENT payload types, so a wrong
+   resolution yields `mix$text` instead of `mix$i64`).
+3. **The spec passed 3/3 — and it also passed 3/3 with the `Field` arm
+   surgically neutered** (`if true: return nil` inside it). So the arm changed
+   no outcome and was reverted under "never add unused code". The resolution
+   comes from somewhere earlier: `infer_expr_type` returns at its top whenever
+   `expr.has_type_` holds a concrete type, so HIR evidently *does* record the
+   type of `n.kind` even though it emits `HirTypeKind.Error` for the arm
+   PATTERN. The two facts sit oddly together and were not reconciled.
+
+Consequence for the headline: the reproduce spec proves the three shapes
+(match-arm payload, for-loop variable, field scrutinee under variant-name
+ambiguity) resolve. It does **not** prove the 67 `_hir_mix_prim` sites resolve,
+because those live in a module the spec does not compile. Establishing that
+needs a closure that actually contains `hir_hash.spl` — the `src/app/lint`
+140-module probe does not, so it cannot settle this either. **Open, and
+deliberately not claimed as done.**
+
+The third spec case is kept regardless: it pins that an ambiguous variant name
+must resolve to the right enum, which is a real invariant whatever the
+mechanism behind it turns out to be. It is pinned by spec, not by a mechanism
+row, precisely because no line of 40.mono can be pointed at.
