@@ -533,6 +533,13 @@ pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<Str
             }
         }
     }));
+    // Engine receipt, emitted on EVERY terminal path of `run` including the
+    // crash path -- a run that died is exactly the run whose engine you most
+    // want named. Off by default (`SIMPLE_ENGINE_RECEIPT=1`), and costs one
+    // environment lookup when off. The engine field it prints was stamped from
+    // inside the engine that actually executed; see
+    // `simple_common::engine_receipt`.
+    simple_common::engine_receipt::emit(&path_for_panic.display().to_string());
     match result {
         Ok(code) => code,
         Err(panic_info) => {

@@ -198,8 +198,15 @@ impl ExecutionManager for LocalExecutionManager {
     }
 
     fn execute(&self, name: &str, args: &[i64]) -> Result<i64, String> {
+        // Engine receipt: stamped from INSIDE the JIT, on the branch that is
+        // about to jump into machine code, so it cannot be produced by the
+        // interpreter and cannot be set by any flag. See
+        // `simple_common::engine_receipt`.
         match &self.backend {
             JitBackendImpl::Cranelift(jit) => {
+                simple_common::engine_receipt::stamp(
+                    simple_common::engine_receipt::Engine::CraneliftJit,
+                );
                 // Dispatch based on argument count
                 unsafe {
                     match args.len() {
@@ -216,7 +223,12 @@ impl ExecutionManager for LocalExecutionManager {
                 }
             }
             #[cfg(feature = "llvm")]
-            JitBackendImpl::Llvm(jit) => jit.execute(name, args).map_err(|e| format!("{}", e)),
+            JitBackendImpl::Llvm(jit) => {
+                simple_common::engine_receipt::stamp(
+                    simple_common::engine_receipt::Engine::LlvmJit,
+                );
+                jit.execute(name, args).map_err(|e| format!("{}", e))
+            }
         }
     }
 

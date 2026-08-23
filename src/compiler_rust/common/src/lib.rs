@@ -193,6 +193,10 @@ pub mod target;
 pub use target::{LinkerFlavor, PointerSize, Target, TargetArch, TargetConfig, TargetOS, TargetParseError};
 
 pub mod diagnostic;
+
+/// Non-forgeable engine receipt: which engine ACTUALLY executed, and whether it
+/// was silently demoted from the one that was requested.
+pub mod engine_receipt;
 pub use diagnostic::{Diagnostic, EasyFix, FixConfidence, Label, Replacement, Severity, Span};
 
 pub mod fix_applicator;
