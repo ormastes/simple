@@ -152,3 +152,51 @@ find <cache-dir> -name '*.o' | wc -l
 ```
 
 Ignore warning-only output unless it is the only changed behavior.
+
+## Field notes 2026-08-23 (macOS arm64)
+
+- Symptom: stage2 native-build exit 1, "Stage4 runtime capsule defines
+  owner-provided runtime symbols STRONGLY (the outer runtime could not override
+  them): _rt_heap_live_bytes, _rt_heap_peak_bytes". Cause: Apple llvm-nm prints
+  weak *definitions* as `T` in POSIX `-g -p` output; the weakness only appears
+  in the `-m` flag field as `weak external`. The seed's
+  `archive_weak_global_symbols`
+  (src/compiler_rust/compiler/src/pipeline/native_project/tools.rs) and
+  `read_global_symbol_types`
+  (src/compiler_rust/compiler/src/pipeline/native_project/linker.rs) accepted
+  only GNU/ELF `W`/`V`, so every `__attribute__((weak))` C fallback was misread
+  as STRONG and the stage-4 capsule gate refused the link. Fix: pass `-m` to nm
+  on macOS hosts and normalize `weak external`/`weak reference` lines to weak in
+  both parsers. Verify: `nm -m` shows `weak external _f` where `nm -g -p` shows
+  `T _f` for the same weak definition.
+- Symptom: "FAILED FILES (1): src/compiler/10.frontend/core/__init__.spl =>
+  timeout (300s)", "native-build aborted: 1 file(s) failed to compile". The
+  300s is a hard default `file_timeout: 300` in
+  src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:537 (config
+  builder `.timeout(secs)`); there is no env var or CLI flag override. The
+  `--timeout` flag in `simple native-build --help` is the *worker subprocess*
+  timeout (default 7200), a different knob owned by
+  src/app/cli/native_build_main.spl. `--jobs=full` on a 10-core/24GB host
+  saturates CPU (~950%) and can push big files past 300s; retry with
+  `--jobs=half` — the native cache resumes and only failed/uncached files
+  recompile. Same file passing with fewer jobs = contention, not a compile hang.
+- Stale bootstrap locks: a killed bootstrap leaves
+  `build/.simple-bootstrap-locks/.output-*.lock`/`.claim-*` files; the next run
+  fails fast with "timed out waiting for bootstrap output ownership". Kill the
+  stale process tree (verify PPID first) and remove the stale lock files.
+- Killing a bootstrap wrapper does NOT kill its children: orphaned
+  cargo/rustc/native-build processes survive with PPID 1. Check `ps -o pid,ppid`
+  before killing anything mid-build; killing the wrong child aborts a healthy
+  build.
+- native-build buffers stdout/stderr to non-tty until completion: a 0-byte
+  stage2-native-build.log does NOT mean stalled. Judge liveness by
+  `build/bootstrap/bootstrap-progress.log` milestones and `ps` CPU, not the log.
+  Progress-monitor `tree_processes=0` samples are an artifact during
+  single-child phases; rustc/simple at ~950% CPU means `--jobs=full` is working.
+- jj colocated-repo pitfalls: `jj rebase -r X -d Y` rebases X and its
+  DESCENDANTS only, re-parenting X directly onto Y — ancestors of X are left
+  behind (stack silently dropped). Move a stack with
+  `jj rebase -s <stack-root> -d Y`. A commit showing `(empty)` after rebase
+  means its diff collapsed (e.g. a revert whose target files do not exist on the
+  new base) — re-apply it. `git worktree remove/prune` in a colocated repo does
+  not snapshot jj state; prefer jj-native operations.
