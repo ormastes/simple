@@ -334,3 +334,68 @@ jobs:
           sh scripts/check/check-llm-runtime-torch-setup-contract.shs
           sh scripts/check/check-llm-finetune-setup-contract.shs
           sh scripts/check/check-llm-strict-host-prereq-doctor-contract.shs
+
+      # ---------------------------------------------------------------------
+      # Guard-wiring debt paydown, batch 4 (2026-08-23).
+      #
+      # Three guards landed by today's lanes were reachable from nothing, which
+      # made check-guard-wiring.shs itself red and blocked EVERY push -- lanes
+      # were reaching for `--no-verify`, which silently disables all the other
+      # gates too. That is a strictly worse failure than the three guards being
+      # unwired, so they are wired here by their honest state: green gates
+      # block, red gates land advisory and are named as such.
+      # ---------------------------------------------------------------------
+
+      # Engine-receipt guard, SCORER SELF-TEST only -- this half is green and
+      # therefore blocks.
+      #
+      # The full gate needs a built Simple binary and is honestly RED (verified
+      # 2026-08-23 against a real seed: no [engine-receipt] line is emitted for
+      # either fixture, the documented pre-fix state), so it is wired ADVISORY
+      # in the Core + MCP Dev Pipeline where a binary exists. What gates HERE is
+      # the part that needs no binary: --selftest drives 8 assertions through
+      # the real receipt parser and proves it DISCRIMINATES -- a receipt saying
+      # the same thing for both halves of the pair must FAIL. If that parser
+      # ever regresses to accepting a hardcoded "jit", this step goes red.
+      #
+      # Same split as the runnable-probe scorer self-test above, for the same
+      # reason: wire the falsifiable half now rather than wire nothing.
+      - name: Engine-receipt discrimination scorer self-test
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-engine-receipt-discriminates.shs --selftest
+
+  # Advisory gates: honestly RED on the current tree.
+  #
+  # Separate job, exactly like the repo-hygiene job at the top of this file and
+  # for the same reason: a gate that is red on pre-existing debt must not mask
+  # the per-gate signal of the green ratchets in code-idiom-gates. The job is
+  # marked continue-on-error so it reports its own status without blocking the
+  # workflow -- the guards themselves are UNCHANGED and unweakened, and none of
+  # them is opted out. Promote a gate out of this job into code-idiom-gates the
+  # day the underlying defect is fixed and it goes green.
+  advisory-gates:
+    name: Advisory Gates (honestly RED, not yet blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Test-summary reconciliation.
+      #
+      # doc/08_tracking/test/test_result.md was found reading Total 770 /
+      # Passed 0 / Failed 0 -- a tracker that knows about 770 tests and holds a
+      # verdict for none of them, published as if it were a report. Every other
+      # guard was green over it because they all check trees, ranges or source;
+      # none of them ever read the numbers.
+      #
+      # ADVISORY because it is RED right now, on exactly that incident:
+      # measured 2026-08-23 at origin/main it reports
+      #   FAIL — 9 metric(s) checked: 770 test(s) recorded, 0 with a verdict.
+      # Needs nothing but grep and runs in milliseconds. Promote to blocking in
+      # code-idiom-gates once the summary reconciles.
+      - name: Test-summary reconciliation gate (advisory, currently RED)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-test-summary-reconciles.shs

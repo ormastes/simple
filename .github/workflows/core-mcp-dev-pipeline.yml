@@ -15,6 +15,9 @@ on:
       - 'scripts/check/check-cranelift-aot-aggregates.shs'
       - 'scripts/check/check-cranelift-aot-aggregate-cross.shs'
       - 'scripts/check/check-runnable-probes.shs'
+      - 'scripts/check/check-scalar-accumulator-not-array-merge.shs'
+      - 'scripts/check/check-engine-receipt-discriminates.shs'
+      - 'scripts/check/check-codegen-unlowered-mir-fails-build.shs'
       - 'scripts/check/check-build-defaults-collect-all-and-incremental.shs'
       - 'scripts/check/check-render-perf-v-lane-suite.shs'
       - 'test/**/*_jit_probe.spl'
@@ -47,6 +50,9 @@ on:
       - 'scripts/check/check-cranelift-aot-aggregates.shs'
       - 'scripts/check/check-cranelift-aot-aggregate-cross.shs'
       - 'scripts/check/check-runnable-probes.shs'
+      - 'scripts/check/check-scalar-accumulator-not-array-merge.shs'
+      - 'scripts/check/check-engine-receipt-discriminates.shs'
+      - 'scripts/check/check-codegen-unlowered-mir-fails-build.shs'
       - 'scripts/check/check-build-defaults-collect-all-and-incremental.shs'
       - 'scripts/check/check-render-perf-v-lane-suite.shs'
       - 'test/**/*_jit_probe.spl'
@@ -202,3 +208,88 @@ jobs:
           SIMPLE_BINARY: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
         run: |
           sh scripts/check/check-gpu-runnable.shs
+
+      # ---------------------------------------------------------------------
+      # Guard-wiring debt paydown, batch 4 (2026-08-23). Both guards below need
+      # a built Simple compiler and so cannot live in the Repo Hygiene workflow
+      # (which has none); they use the same bootstrap seed as the steps above.
+      #
+      # Both are wired ADVISORY (continue-on-error) because both are honestly
+      # RED or unproven on the current tree. The guards themselves are
+      # UNCHANGED and unweakened, and neither is opted out -- an advisory wiring
+      # makes the number visible on every run, which a guard reachable from
+      # nothing never did. Promote each to enforcing the day it goes green.
+      # ---------------------------------------------------------------------
+
+      # Engine-receipt discrimination, FULL gate.
+      #
+      # A single unsupported operation silently demotes a whole program to the
+      # tree-walk interpreter and no engine receipt is printed anywhere, so
+      # every claim of the form "this behaves the same on both engines" is
+      # currently unfalsifiable (SIMPLE_NO_JIT=1 is a decoy with no reader in
+      # src/compiler_rust at all). This guard is the falsifier: a receipt that
+      # says the SAME thing for both halves of the pair is a FAIL, not a pass.
+      #
+      # ADVISORY: verified 2026-08-23 against a real seed binary, it reports
+      #   FAIL — 2 assertion(s) checked ... no [engine-receipt] line ...
+      #   (pre-fix state: no receipt is emitted anywhere)
+      # which is the documented pre-fix state, not a regression. Its scorer
+      # self-test is separately wired as a BLOCKING gate in repo-hygiene.yml.
+      - name: Engine-receipt discrimination (advisory, currently RED)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          SIMPLE_BIN: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
+        run: |
+          sh scripts/check/check-engine-receipt-discriminates.shs \
+            --binary "$SIMPLE_BIN"
+
+      # Unlowered-MIR fail-open gate.
+      #
+      # An ordinary Result<i64,text> + `?` program built rc=0, linked, reported
+      # step 6/6 and then died at RUN time with
+      #   PANIC: E-BACKEND-LLVM-INST-ResultMatchSemantic
+      # because MirToLlvm.emit_unsupported_panic emitted an @rt_panic call into
+      # the generated IR instead of raising a compile error. 33 MirInstKind
+      # variants reach that helper, so an unknown number of defects can ship
+      # silently. See doc/08_tracking/bug/
+      # llvm_backend_unlowered_mir_kind_fails_open_2026-08-23.md.
+      #
+      # ADVISORY: the incident it pins is from 2026-08-23 and is not fixed, and
+      # the gate builds native fixtures (minutes, not seconds), so its state
+      # here is red-or-slow rather than proven green. Wired advisory so the
+      # verdict is produced on every run instead of never.
+      - name: Unlowered-MIR fail-open gate (advisory)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          SIMPLE_BIN: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
+        run: |
+          sh scripts/check/check-codegen-unlowered-mir-fails-build.shs
+
+      # Scalar-accumulator vs array-merge desugar gate (batch 4 continued,
+      # landed by a parallel lane 2026-08-23 while this wiring was in flight).
+      #
+      # collection_desugar.spl Pattern B rewrites `x = x + other` into
+      # `x.merge(other)` at the AST level, BEFORE type-checking. Its scalar gate
+      # can only suppress addend shapes that are provably scalar, so
+      # `var s = 0; s = s + x` with `x` an identifier was rewritten and lowered
+      # to rt_array_extend_i64 -- the build reported rc=0 / step 6/6 / linked,
+      # and the program printed 0. Native only: the interpreter is right, so
+      # this is caught by comparing the two ENGINES, never by rc. See
+      # doc/08_tracking/bug/scalar_accumulator_desugared_to_array_merge_2026-08-23.md.
+      #
+      # Invoked with `bash`, not `sh`: its shebang is #!/bin/bash and it uses
+      # bash-only syntax (verified -- under dash it dies at line 71 with
+      # `Syntax error: "(" unexpected`, which would ERROR rather than gate).
+      #
+      # ADVISORY: needs a built compiler, and the sibling `text` receiver case
+      # is documented in the guard as still broken and deliberately not
+      # asserted. Promote to enforcing once the desugar is fixed.
+      - name: Scalar-accumulator desugar gate (advisory)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          SIMPLE_BIN: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
+        run: |
+          bash scripts/check/check-scalar-accumulator-not-array-merge.shs
