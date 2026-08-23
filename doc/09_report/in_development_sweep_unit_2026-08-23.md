@@ -84,12 +84,12 @@ A directory-shaped sweep of this tree must pass `--no-cover-check`
 
 | | count |
 |---|---|
-| specs executed and verdicted | **133** |
-| of the 9,458-spec work set | **1.4 %** |
-| green (`0 failed`) | 103 |
-| failing | 29 |
+| specs executed and verdicted | **248** |
+| of the 9,458-spec work set | **2.6 %** |
+| green (`0 failed`) | 194 |
+| failing | 53 |
 | tagged `@tag:in-development` | **0** |
-| left RED | 30 |
+| left RED | 54 |
 | inconclusive / hung / ABORT | 1 |
 
 Throughput was ~18.5 s/spec at the start and then collapsed: the memory gate
@@ -147,7 +147,7 @@ is a spec that has drifted from a renamed or re-scoped implementation.
 | `app/desugar/context_params_spec.spl` | 15/16 passed | Plain `expected false to equal true`; no missing symbol. Needs its own triage — not evidence of an unwritten feature. |
 | `app/compile/cli_compile_surface_spec.spl` | **ABORT rc=124** | **Inconclusive, not a failure.** Hit the 900 s wall timeout. This is the spec that also hung an orphaned worker earlier, so the hang is reproducible and is worth its own bug record. |
 
-**Running total across the whole slice: 133 specs executed, 30 not green, 0 tagged.**
+**Running total across the whole slice: 248 specs executed, 54 not green, 0 tagged.**
 Nine for nine, the failures were rename drift, import/visibility defects, a spec
 bug, a concurrent lane's in-flight work, an ambiguous unwrap, or a hang. A
 bulk-tag pass would have neutralised all nine and hidden every one of them.
@@ -251,6 +251,62 @@ case what was broken was the shipped source. A bulk-tag pass over these trees
 would have neutralised 30 red specs, hidden a real stdlib bug, and buried five
 incomplete renames.
 
+
+### Fifth harvest — 248 specs, 54 not green, still zero tagged
+
+The sweep reached **248 specs: 194 green, 53 failing, 1 hung — a 21.8 % failure
+rate**, statistically unchanged from the 22 % measured at 133 specs. The rate is
+now stable across a sample nearly twice as large and spanning `app/`,
+`browser/`, `browser_engine/`, `bugs/` and `compiler/`. **Extrapolated to the
+9,458-spec work set that is roughly 2,000 failing specs** in the unit trees.
+
+Coverage reached `compiler/` — the territory where an unfinished-feature tag was
+most plausible. It did not change the answer. Twenty-three more failures were
+triaged; **none qualified**, and the same two classes dominate.
+
+**More rename / move drift (3 more, 8 total).** `compiler/ffi_gen/backend_gating_spec.spl`
+fails `Cannot resolve module: compiler.tools.ffi_gen.main` — the module is
+`sffi_gen`, not `ffi_gen` (`src/compiler/90.tools/sffi_gen/`), a one-letter
+naming drift. `browser_engine/anonymous_block_spec.spl` fails
+`function layout_context_new not found`, but that function exists **twice** —
+`src/lib/gc_async_mut/gpu/browser_engine/layout_m14_types.spl:17` (`pub`) and
+`src/lib/blink/layout/block_flow.spl:215`. Capability present, reference stale.
+
+**A `bugs/` spec doing exactly its job — must stay RED.**
+`test/01_unit/bugs/cast_else_swallows_outer_if_spec.spl` fails
+`nil is forbidden by the non-optional return contract of '_naked_cast_else'`.
+Its own docstring says it exists to "Prove that CastElse-swallows-outer-else
+grammar pin" and it carries `# @req: REQ-BUGS-001`. The whole `test/01_unit/bugs/`
+tree is, by construction, specs that document real defects. **Nothing under
+`bugs/` is ever a candidate for this tag**, and a future sweep should exclude
+that directory from tagging outright rather than re-deciding it per file.
+
+**The most plausible tag candidate in the whole sweep, disproven (1).** Of 248
+specs, the single best case for "the feature simply is not written yet" was
+`compiler/mir_opt/auto_vectorize_spec.spl`, failing
+`function LoopInfo not found` — an unimplemented MIR auto-vectorisation pass is
+exactly the shape this tag exists for. It is implemented.
+`src/compiler/60.mir_opt/mir_opt/auto_vectorize_analysis.spl` carries the
+analysis (`is_simple_loop`, `detect_loop_bounds`, `analyze_loop_dependencies`),
+with `_AutoVectorize/recipe.spl` and `_AutoVectorize/rewrite.spl` alongside it.
+The type is named **`VectorLoopInfo`** (`auto_vectorize_types`), not `LoopInfo`.
+Eighth instance of the same rename drift, and the one that settles the question:
+even where an unwritten feature was most likely a priori, the feature was
+present and the spec's reference was stale.
+
+**Ambiguous, left RED (rest).** `method to_bytes not found on type str`
+(`to_bytes` exists on several types but not `str` — possibly a real stdlib gap,
+undecided); more `cannot index value of type enum`; and a long tail of plain
+assertion mismatches (`expected 7 to equal 88`, `expected Any to equal
+SiblingBox`, `expected true to equal false`, `expected 3 to equal 1`) that show
+no evidence of an unwritten feature.
+
+**Fifty-four for fifty-four, nothing qualified as `@tag:in-development`.** The
+final tag count for this slice is **0**, and that is the finding, not a
+shortfall: across 248 specs spanning five top-level areas, the unit trees'
+redness is overwhelmingly stale references and real defects, not unbuilt
+features.
+
 ## Left RED — with reasons (the honest state)
 
 All nine failures found were classified and **none is unfinished feature work**,
@@ -341,7 +397,8 @@ pairs (or get them baselined deliberately) before tagging anything under
 `/mnt/data/tmp/test_tree_divergence_preexisting.txt` (copy:
 `/mnt/fast/tagsweep/preexisting.txt`).
 
-## Full non-green list (133 specs executed)
+
+## Full non-green list (248 specs executed)
 
 ```
 test/01_unit/multi_mode_test_runner_spec.spl  ::  Results: 34 total, 0 passed, 34 failed
@@ -376,4 +433,31 @@ test/01_unit/app/web_packaging/advanced_packaging_spec.spl  ::  Results: 35 tota
 test/01_unit/browser_engine/anonymous_block_spec.spl  ::  Results: 4 total, 0 passed, 4 failed
 test/01_unit/browser/script/canvas_api_spec.spl  ::  Results: 71 total, 70 passed, 1 failed
 test/01_unit/bugs/cast_else_swallows_outer_if_spec.spl  ::  Results: 4 total, 3 passed, 1 failed
+test/01_unit/compiler/bootstrap/ast_native_arena_spec.spl  ::  Results: 5 total, 1 passed, 4 failed
+test/01_unit/compiler/codegen/any_typed_value_consumption_class_spec.spl  ::  Results: 5 total, 3 passed, 2 failed
+test/01_unit/compiler/concurrent/concurrent_backend_store_parity_class_spec.spl  ::  Results: 1 total, 0 passed, 1 failed
+test/01_unit/compiler/extern/rt_file_read_bytes_single_extern_signature_spec.spl  ::  Results: 7 total, 6 passed, 1 failed
+test/01_unit/compiler/ffi_gen/backend_gating_spec.spl  ::  Results: 1 total, 0 passed, 1 failed
+test/01_unit/compiler/hir/alias_static_call_resolution_spec.spl  ::  Results: 2 total, 0 passed, 2 failed
+test/01_unit/compiler/interpreter/aliased_param_writeback_spec.spl  ::  Results: 4 total, 3 passed, 1 failed
+test/01_unit/compiler/irdsl/parser_validator_spec.spl  ::  Results: 1 total, 0 passed, 1 failed
+test/01_unit/compiler/linker/assurance_object_note_spec.spl  ::  Results: 5 total, 4 passed, 1 failed
+test/01_unit/compiler/mir_opt/auto_vectorize_spec.spl  ::  Results: 64 total, 57 passed, 7 failed
+test/01_unit/compiler/mir_opt/cipher/cipher_intrinsics_spec.spl  ::  Results: 30 total, 27 passed, 3 failed
+test/01_unit/compiler/mono/verify/post_mono_verify_spec.spl  ::  Results: 9 total, 8 passed, 1 failed
+test/01_unit/compiler/pipeline/cross_module_collision_detection_spec.spl  ::  Results: 2 total, 1 passed, 1 failed
+test/01_unit/compiler/runtime/hosted_extern_mode_agreement_class_spec.spl  ::  Results: 1 total, 0 passed, 1 failed
+test/01_unit/compiler/schema/generated_visitor_coverage_spec.spl  ::  Results: 11 total, 9 passed, 2 failed
+test/01_unit/compiler/semantics/alloc_checker_spec.spl  ::  Results: 28 total, 27 passed, 1 failed
+test/01_unit/compiler/tools/verify/allocator_symbol_scan_spec.spl  ::  Results: 13 total, 12 passed, 1 failed
+test/01_unit/compiler/traits/conformance/trait_conformance_enforced_class_spec.spl  ::  Results: 5 total, 3 passed, 2 failed
+test/01_unit/compiler/type_infer/method_call_inference_spec.spl  ::  Results: 4 total, 2 passed, 2 failed
+test/01_unit/compiler/types/declared_return_type_enforced_spec.spl  ::  Results: 3 total, 1 passed, 2 failed
+test/01_unit/coupling/coupling_metrics_spec.spl  ::  Results: 109 total, 104 passed, 5 failed
+test/01_unit/doc/de10nano_quartus_setup_spec.spl  ::  Results: 1 total, 0 passed, 1 failed
+test/01_unit/examples/graphics_2d_showcase_wm_client_events_spec.spl  ::  Results: 3 total, 2 passed, 1 failed
+test/01_unit/hal/hal_traits_spec.spl  ::  Results: 30 total, 26 passed, 4 failed
+test/01_unit/hardware/riscv_common/riscv_formal_contract_spec.spl  ::  Results: 1 total, 0 passed, 1 failed
+test/01_unit/hardware/rv32i/rv32_sv32_walker_spec.spl  ::  Results: 1 total, 0 passed, 1 failed
+test/01_unit/hardware/rv32imac/rv32_alu_spec.spl  ::  Results: 1 total, 0 passed, 1 failed
 ```
