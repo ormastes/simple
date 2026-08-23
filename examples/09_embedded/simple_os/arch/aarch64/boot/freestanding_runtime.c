@@ -2148,3 +2148,787 @@ spl_u64 rt_limine_hhdm_response(void) {
 spl_u64 rt_limine_kernel_addr_response(void) {
     return (spl_u64)g_limine_kernel_addr_request.response;
 }
+
+/* ===========================================================================
+ * P10 — the mechanical half of the MCP module graph's freestanding runtime ABI
+ * ===========================================================================
+ *
+ * Design: doc/05_design/os/simpleos/mcp_in_guest_qemu_2026-08-23.md, "P10
+ * INVENTORY". The transitive `use` closure of src/app/mcp/main.spl declares
+ * 151 extern symbols; 11 were already defined above (P8 `stdin_read_char`, P9
+ * `print_raw`, and nine string/hash helpers). This section adds the buckets
+ * that are pure computation or have a defined "unavailable" answer:
+ *
+ *     text / utf8 / string-index    19  real implementations
+ *     rt_simd_* capability probes    8  real answers for this lane
+ *     rt_simd_* arithmetic kernels  41  NAMED TRAPS (see the policy note below)
+ *     atomics / atexit / signal      7  real atomics; signals honestly absent
+ *     env / exit / args              5  honestly empty freestanding answers
+ *     stdio siblings of print_raw    3  real, out the same PL011
+ *     sqrt                           1  real (AArch64 FSQRT)
+ *
+ * DELIBERATELY NOT HERE — these need real subsystems, not shims, and a stub
+ * for any of them would be a lie the caller cannot detect: filesystem
+ * (rt_file_* / rt_dir_*, 29), process (rt_process_* / rt_shell_exec /
+ * rt_getpid / spl_thread_cpu_count, 18), rt_mmap/munmap/madvise/msync (4),
+ * time/thread (3), rt_browser_renderer_* (2). They belong to a later
+ * milestone; leaving them undefined keeps the link honest about the gap.
+ *
+ * ---------------------------------------------------------------------------
+ * THE HONESTY RULE THIS SECTION FOLLOWS
+ * ---------------------------------------------------------------------------
+ * Three outcomes are allowed per symbol, and nothing here invents a fourth:
+ *   (1) REAL SEMANTICS — the computation is performed for real.
+ *   (2) A DEFINED "UNAVAILABLE" ANSWER, but only where the CALLER is written
+ *       to recognise it (e.g. rt_swi_build returning 0 makes
+ *       src/lib/common/encoding/width_index.spl:49 stay in its linear-scan
+ *       mode; rt_signal_install returning 0 makes signal_stubs.spl's
+ *       signal_handler_install return false).
+ *   (3) A NAMED LOUD TRAP — rt_trap_unimplemented("rt_x") prints the symbol
+ *       over the UART and parks the core. A STUB, not an implementation:
+ *       strictly better than a NULL GOT slot (you learn WHICH call died) and
+ *       strictly worse than the real thing (the guest still stops).
+ * A plausible-looking wrong value is never allowed. This mirrors
+ * src/runtime/runtime_native.c:11596-11631.
+ */
+
+/* Freestanding twin of src/runtime/runtime_native.c:11623. The host version
+ * uses fprintf/abort; this file is libc-free by charter (see the file header),
+ * so the trap writes over PL011 and then parks the core in a WFE spin, exactly
+ * like rt_aarch64_wfe_spin above. It MUST print: a silent park is
+ * indistinguishable from any other guest wedge, which would defeat the whole
+ * point of a named trap. */
+static void uart_write_cstr(const char *s) {
+    spl_u64 n = 0;
+    if (!s) {
+        return;
+    }
+    while (s[n] != 0 && n < 4096ULL) {
+        n = n + 1ULL;
+    }
+    uart_write_bytes(s, n);
+}
+
+void rt_trap_unimplemented(const char *symbol) {
+    uart_write_cstr("\r\n[TRAP] simple runtime: unimplemented entrypoint `");
+    uart_write_cstr(symbol ? symbol : "(null)");
+    uart_write_cstr("` was called.\r\n[TRAP] This is a NAMED TRAP stub, not an "
+                    "implementation. Core parked.\r\n");
+    for (;;) {
+        __asm__ __volatile__("wfe");
+    }
+}
+
+/* ---- stdio siblings of print_raw (3) --------------------------------------
+ * The guest has ONE PL011. stderr and stdout are therefore the same sink here;
+ * that is a real property of this lane, not a stub. Flushes are no-ops because
+ * uart_put_byte stores straight to DR — there is no buffer that could hold a
+ * byte back, so "flushed" is already true on return from every write. */
+void rt_stderr_write(spl_i64 value) {
+    RtString *text = rt_as_string(value);
+    spl_i64 rendered;
+    if (!text) {
+        rendered = rt_to_string(value);
+        text = rt_as_string(rendered);
+    }
+    if (text) {
+        uart_write_bytes(text->data, text->len);
+    }
+}
+
+void rt_stderr_flush(void) {
+    /* Unbuffered by construction — see the note above. */
+}
+
+void rt_stdout_flush(void) {
+    /* Unbuffered by construction — see the note above. */
+}
+
+/* ---- env / exit / args (5) ------------------------------------------------
+ * A freestanding kernel has no environment block, no argv, and no process to
+ * exit from. Each answer below is the TRUE one for this lane, not a placeholder:
+ *   rt_env_get  -> "" is exactly what the host returns for an unset variable,
+ *                  and every caller in the closure spells it `env_get(k) ?? ""`.
+ *   rt_env_set  -> false, i.e. "the set did not happen". Reporting true would
+ *                  be the lie, because a later rt_env_get could never see it.
+ *   sys_get_args-> an empty [text]; the guest was not handed an argv.
+ *   rt_exit     -> there is no parent to report a code to, so it prints the
+ *                  code and parks. Returning would let the caller continue past
+ *                  an exit(), which is worse than stopping. */
+spl_i64 rt_env_get(spl_i64 key_value) {
+    (void)key_value;
+    return rt_string_new(0, 0);
+}
+
+spl_i64 rt_env_set(spl_i64 key_value, spl_i64 value_value) {
+    (void)key_value;
+    (void)value_value;
+    return 0;
+}
+
+spl_i64 rt_platform_name(void) {
+    static const char name[] = "simpleos";
+    return rt_string_new((spl_i64)(spl_u64)name, 8);
+}
+
+spl_i64 sys_get_args(void) {
+    return rt_array_new(0);
+}
+
+void rt_exit(spl_i64 code) {
+    char buf[20];
+    spl_u64 len = 0;
+    spl_i64 raw = rt_index_arg(code);
+    uart_write_cstr("\r\n[EXIT] rt_exit(");
+    if (raw < 0) {
+        uart_put_byte('-');
+    }
+    rt_write_decimal(buf, &len, raw < 0 ? (spl_u64)(-raw) : (spl_u64)raw);
+    uart_write_bytes(buf, len);
+    uart_write_cstr(") - no process model in this lane; core parked.\r\n");
+    for (;;) {
+        __asm__ __volatile__("wfe");
+    }
+}
+
+/* ---- atomics / atexit / signal (7) ----------------------------------------
+ * The atomics are REAL: __atomic_* are clang builtins, not libc, and lower to
+ * AArch64 LDAXR/STLXR (or LSE) inline — they need no runtime support and are
+ * correct on this target today, single-core or not. The handle is a pointer to
+ * an 8-byte cell from the bump allocator, matching how every other handle in
+ * this file is minted.
+ *
+ * Signals and atexit are honestly ABSENT. SimpleOS has no POSIX signal
+ * delivery and no process teardown, and the caller
+ * (src/lib/nogc_sync_mut/io/signal_stubs.spl:29,37) reads `installed <= 0` as
+ * "not installed" and returns false. Returning 1 here would register a handler
+ * that could never fire — a silent lie — so 0 is the honest answer, and
+ * rt_signal_check/rt_atexit_check correspondingly report nothing pending. */
+spl_i64 rt_atomic_int_new(spl_i64 initial) {
+    spl_i64 *cell = (spl_i64 *)rt_alloc((spl_i64)sizeof(spl_i64));
+    if (!cell) {
+        return 0;
+    }
+    *cell = rt_index_arg(initial);
+    return (spl_i64)(spl_u64)cell;
+}
+
+spl_i64 rt_atomic_int_load(spl_i64 handle) {
+    spl_i64 *cell = (spl_i64 *)(spl_u64)handle;
+    if (!cell) {
+        return 0;
+    }
+    return __atomic_load_n(cell, __ATOMIC_SEQ_CST);
+}
+
+spl_i64 rt_atomic_int_compare_exchange(spl_i64 handle, spl_i64 current, spl_i64 new_value) {
+    spl_i64 *cell = (spl_i64 *)(spl_u64)handle;
+    spl_i64 expected = rt_index_arg(current);
+    if (!cell) {
+        return 0;
+    }
+    return __atomic_compare_exchange_n(cell, &expected, rt_index_arg(new_value),
+                                       0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ? 1 : 0;
+}
+
+spl_i64 rt_signal_install(spl_i64 signal_num) {
+    (void)signal_num;
+    return 0;
+}
+
+spl_i64 rt_signal_check(spl_i64 signal_num) {
+    (void)signal_num;
+    return 0;
+}
+
+spl_i64 rt_atexit_install(void) {
+    return 0;
+}
+
+spl_i64 rt_atexit_check(void) {
+    return 0;
+}
+
+/* ---- text / utf8 / string index (19) --------------------------------------
+ * Pure computation. No host C file implements the rt_utf8_* array forms (they
+ * live only in the Rust seed), so these follow the byte-structure table
+ * documented in src/lib/common/encoding/utf8.spl:6-10 and the lead-byte
+ * classification in its utf8_seq_len() at :45-60, which IS the tree's
+ * authority for this codec.
+ *
+ * SIGNATURE NOTE, worth reading before editing: the rt_utf8_* family takes
+ * `[i64]`, NOT `[u8]` — src/lib/common/encoding/utf8.spl:14-16. The arrays are
+ * RtArray of TAGGED ints (rt_int(byte)), exactly what rt_text_to_bytes above
+ * produces, so every element must go through rt_index_arg. `rt_bytes_to_text`
+ * is declared BOTH ways in the closure (`[u8]` at utf8.spl:18, `[i64]` at
+ * width_index.spl:19); one C body satisfies both because both are the same
+ * RtArray-of-tagged-ints at the ABI. */
+
+static spl_i64 utf8_seq_len_of(spl_u32 lead) {
+    if (lead < 0x80U) return 1;
+    if (lead < 0xC0U) return 0;   /* continuation byte — invalid as lead */
+    if (lead < 0xE0U) return 2;
+    if (lead < 0xF0U) return 3;
+    if (lead < 0xF8U) return 4;
+    return 0;                     /* 5+ byte forms are not UTF-8 */
+}
+
+/* Scan `len` bytes and return the index of the first byte that begins (or is
+ * part of) an ill-formed sequence, or -1 when the whole range is valid UTF-8.
+ * Rejects over-long encodings, surrogates (U+D800..U+DFFF) and values above
+ * U+10FFFF, matching the constraints utf8.spl encodes. */
+static spl_i64 utf8_scan_invalid(const spl_u8 *data, spl_u64 len) {
+    spl_u64 i = 0;
+    while (i < len) {
+        spl_u32 b0 = data[i];
+        spl_i64 need = utf8_seq_len_of(b0);
+        spl_u32 cp;
+        if (need == 0) {
+            return (spl_i64)i;
+        }
+        if (i + (spl_u64)need > len) {
+            return (spl_i64)i;
+        }
+        if (need == 1) {
+            i = i + 1ULL;
+            continue;
+        }
+        for (spl_i64 k = 1; k < need; k = k + 1) {
+            if ((data[i + (spl_u64)k] & 0xC0U) != 0x80U) {
+                return (spl_i64)i;
+            }
+        }
+        if (need == 2) {
+            cp = ((b0 & 0x1FU) << 6) | (data[i + 1] & 0x3FU);
+            if (cp < 0x80U) return (spl_i64)i;
+        } else if (need == 3) {
+            cp = ((b0 & 0x0FU) << 12) | ((data[i + 1] & 0x3FU) << 6) | (data[i + 2] & 0x3FU);
+            if (cp < 0x800U) return (spl_i64)i;
+            if (cp >= 0xD800U && cp <= 0xDFFFU) return (spl_i64)i;
+        } else {
+            cp = ((b0 & 0x07U) << 18) | ((data[i + 1] & 0x3FU) << 12) |
+                 ((data[i + 2] & 0x3FU) << 6) | (data[i + 3] & 0x3FU);
+            if (cp < 0x10000U || cp > 0x10FFFFU) return (spl_i64)i;
+        }
+        i = i + (spl_u64)need;
+    }
+    return -1;
+}
+
+/* Codepoints == bytes that are not UTF-8 continuation bytes. This is the
+ * standard O(n) count and is exact for well-formed input; for ill-formed input
+ * it degrades the same way the host's SIMD counter does. */
+static spl_i64 utf8_count_cp(const spl_u8 *data, spl_u64 len) {
+    spl_i64 count = 0;
+    for (spl_u64 i = 0; i < len; i = i + 1ULL) {
+        if ((data[i] & 0xC0U) != 0x80U) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+spl_i64 rt_text_count_codepoints(spl_i64 value) {
+    RtString *s = rt_as_string(value);
+    return s ? utf8_count_cp((const spl_u8 *)s->data, s->len) : 0;
+}
+
+/* No cache: the host's cached variant memoises into the string's spare header
+ * word, which this file's RtString does not carry (its `hash` field is owned by
+ * rt_hash_text). The ANSWER is identical — only the complexity differs, so this
+ * is a real implementation of the contract, not a stub. */
+spl_i64 rt_text_count_codepoints_cached(spl_i64 value) {
+    return rt_text_count_codepoints(value);
+}
+
+spl_i64 rt_text_is_ascii(spl_i64 value) {
+    RtString *s = rt_as_string(value);
+    if (!s) {
+        return 1;
+    }
+    for (spl_u64 i = 0; i < s->len; i = i + 1ULL) {
+        if ((spl_u8)s->data[i] >= 0x80U) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+spl_i64 rt_text_validate_utf8(spl_i64 value) {
+    RtString *s = rt_as_string(value);
+    if (!s) {
+        return 1;
+    }
+    return utf8_scan_invalid((const spl_u8 *)s->data, s->len) < 0 ? 1 : 0;
+}
+
+spl_i64 rt_text_to_upper_ascii(spl_i64 value) {
+    RtString *s = rt_as_string(value);
+    spl_i64 out;
+    RtString *dst;
+    if (!s) {
+        return rt_string_new(0, 0);
+    }
+    out = rt_string_new((spl_i64)(spl_u64)s->data, (spl_i64)s->len);
+    dst = rt_as_string(out);
+    if (!dst) {
+        return out;
+    }
+    for (spl_u64 i = 0; i < dst->len; i = i + 1ULL) {
+        char c = dst->data[i];
+        if (c >= 'a' && c <= 'z') {
+            dst->data[i] = (char)(c - 32);
+        }
+    }
+    return out;
+}
+
+spl_i64 rt_text_to_lower_ascii(spl_i64 value) {
+    RtString *s = rt_as_string(value);
+    spl_i64 out;
+    RtString *dst;
+    if (!s) {
+        return rt_string_new(0, 0);
+    }
+    out = rt_string_new((spl_i64)(spl_u64)s->data, (spl_i64)s->len);
+    dst = rt_as_string(out);
+    if (!dst) {
+        return out;
+    }
+    for (spl_u64 i = 0; i < dst->len; i = i + 1ULL) {
+        char c = dst->data[i];
+        if (c >= 'A' && c <= 'Z') {
+            dst->data[i] = (char)(c + 32);
+        }
+    }
+    return out;
+}
+
+/* The rt_utf8_* trio works on an RtArray of tagged bytes rather than on an
+ * RtString, so it reads elements directly instead of going through a copy. */
+spl_i64 rt_utf8_count_codepoints(spl_i64 array_value) {
+    RtArray *array = rt_as_array(array_value);
+    spl_i64 count = 0;
+    if (!array) {
+        return 0;
+    }
+    for (spl_u64 i = 0; i < array->len; i = i + 1ULL) {
+        if (((spl_u32)(rt_index_arg(array->data[i]) & 0xFF) & 0xC0U) != 0x80U) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+/* Returns the byte index of the first ill-formed byte, or -1 when the array is
+ * entirely valid UTF-8. No host C body exists to port from (the array forms
+ * live only in the Rust seed), so the -1-means-valid convention is taken from
+ * the name and from how utf8.spl's own scanners report "nothing wrong". Stated
+ * here rather than left implicit, because a caller that expected 0-means-valid
+ * would silently invert. */
+spl_i64 rt_utf8_find_invalid(spl_i64 array_value) {
+    RtArray *array = rt_as_array(array_value);
+    spl_u64 i = 0;
+    if (!array) {
+        return -1;
+    }
+    while (i < array->len) {
+        spl_u32 b0 = (spl_u32)(rt_index_arg(array->data[i]) & 0xFF);
+        spl_i64 need = utf8_seq_len_of(b0);
+        spl_u32 cp;
+        if (need == 0 || i + (spl_u64)need > array->len) {
+            return (spl_i64)i;
+        }
+        if (need == 1) {
+            i = i + 1ULL;
+            continue;
+        }
+        for (spl_i64 k = 1; k < need; k = k + 1) {
+            spl_u32 bk = (spl_u32)(rt_index_arg(array->data[i + (spl_u64)k]) & 0xFF);
+            if ((bk & 0xC0U) != 0x80U) {
+                return (spl_i64)i;
+            }
+        }
+        {
+            spl_u32 b1 = need > 1 ? (spl_u32)(rt_index_arg(array->data[i + 1]) & 0xFF) : 0U;
+            spl_u32 b2 = need > 2 ? (spl_u32)(rt_index_arg(array->data[i + 2]) & 0xFF) : 0U;
+            spl_u32 b3 = need > 3 ? (spl_u32)(rt_index_arg(array->data[i + 3]) & 0xFF) : 0U;
+            if (need == 2) {
+                cp = ((b0 & 0x1FU) << 6) | (b1 & 0x3FU);
+                if (cp < 0x80U) return (spl_i64)i;
+            } else if (need == 3) {
+                cp = ((b0 & 0x0FU) << 12) | ((b1 & 0x3FU) << 6) | (b2 & 0x3FU);
+                if (cp < 0x800U) return (spl_i64)i;
+                if (cp >= 0xD800U && cp <= 0xDFFFU) return (spl_i64)i;
+            } else {
+                cp = ((b0 & 0x07U) << 18) | ((b1 & 0x3FU) << 12) |
+                     ((b2 & 0x3FU) << 6) | (b3 & 0x3FU);
+                if (cp < 0x10000U || cp > 0x10FFFFU) return (spl_i64)i;
+            }
+        }
+        i = i + (spl_u64)need;
+    }
+    return -1;
+}
+
+spl_i64 rt_utf8_validate(spl_i64 array_value) {
+    return rt_utf8_find_invalid(array_value) < 0 ? 1 : 0;
+}
+
+/* Inverse of rt_text_to_bytes above: RtArray of tagged bytes -> RtString.
+ * Byte-for-byte copy with no re-encoding, which is the documented contract at
+ * src/lib/common/encoding/utf8.spl:18. */
+spl_i64 rt_bytes_to_text(spl_i64 array_value) {
+    RtArray *array = rt_as_array(array_value);
+    RtString *out;
+    spl_i64 value;
+    if (!array) {
+        return rt_string_new(0, 0);
+    }
+    value = rt_string_new(0, (spl_i64)array->len);
+    out = rt_as_string(value);
+    if (!out) {
+        return value;
+    }
+    for (spl_u64 i = 0; i < array->len; i = i + 1ULL) {
+        out->data[i] = (char)(rt_index_arg(array->data[i]) & 0xFF);
+    }
+    out->data[array->len] = 0;
+    return value;
+}
+
+/* Bulk i64 copy: dst[0..count) <- src[0..count). Returns 1 on a full copy, 0
+ * when either side is not an array or is too short — never a partial success
+ * reported as success. Elements are copied as RAW SLOTS (already-tagged
+ * values), which is what the declaring comment at
+ * src/lib/nogc_sync_mut/simd.spl:38-40 means by "copies count i64 elements at
+ * the runtime level". */
+spl_i64 rt_array_extend_i64(spl_i64 dst_value, spl_i64 src_value, spl_i64 count_value) {
+    RtArray *dst = rt_as_array(dst_value);
+    RtArray *src = rt_as_array(src_value);
+    spl_i64 count = rt_index_arg(count_value);
+    if (!dst || !src || count < 0) {
+        return 0;
+    }
+    if ((spl_u64)count > src->len) {
+        return 0;
+    }
+    for (spl_i64 i = 0; i < count; i = i + 1) {
+        if (!rt_array_push(dst_value, src->data[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* ---- Segmented Width Index / rank-select ----------------------------------
+ * Both handle families answer the SAME question — the byte<->codepoint index
+ * mapping — and differ on the host only in the acceleration structure they
+ * build. Here the handle is a small record pinning the string, and the queries
+ * scan. The RESULTS are exactly the host's; only the complexity is O(n)
+ * instead of O(log B) / O(1). That is a real implementation of the contract,
+ * which is a mapping, not a complexity guarantee — stated explicitly so nobody
+ * later mistakes it for a stub and deletes it.
+ *
+ * `*_free` is a no-op: rt_alloc above is a bump allocator with no reclaim (see
+ * rt_free at :133, which is already a no-op for every other object here).
+ * Handles are raw pointers, so a caller's `handle > 0` test behaves. */
+typedef struct RtTextIndex {
+    RtString *s;
+} RtTextIndex;
+
+static spl_i64 rt_text_index_build(spl_i64 value) {
+    RtString *s = rt_as_string(value);
+    RtTextIndex *idx;
+    if (!s) {
+        return 0;
+    }
+    idx = (RtTextIndex *)rt_alloc((spl_i64)sizeof(RtTextIndex));
+    if (!idx) {
+        return 0;
+    }
+    idx->s = s;
+    return (spl_i64)(spl_u64)idx;
+}
+
+/* char_idx -> byte offset. -1 when out of range, which both callers
+ * (width_index.spl:68,74) treat as "ask the other structure / fall back". */
+static spl_i64 rt_text_index_char_to_byte(spl_i64 handle, spl_i64 char_idx_value) {
+    RtTextIndex *idx = (RtTextIndex *)(spl_u64)handle;
+    spl_i64 want = rt_index_arg(char_idx_value);
+    spl_i64 seen = 0;
+    if (!idx || !idx->s || want < 0) {
+        return -1;
+    }
+    for (spl_u64 i = 0; i < idx->s->len; i = i + 1ULL) {
+        if (((spl_u8)idx->s->data[i] & 0xC0U) != 0x80U) {
+            if (seen == want) {
+                return (spl_i64)i;
+            }
+            seen = seen + 1;
+        }
+    }
+    return -1;
+}
+
+/* byte offset -> number of whole codepoints before it (the rank). -1 when the
+ * offset is past the end. */
+static spl_i64 rt_text_index_byte_to_char(spl_i64 handle, spl_i64 byte_idx_value) {
+    RtTextIndex *idx = (RtTextIndex *)(spl_u64)handle;
+    spl_i64 want = rt_index_arg(byte_idx_value);
+    spl_i64 seen = 0;
+    if (!idx || !idx->s || want < 0) {
+        return -1;
+    }
+    if ((spl_u64)want > idx->s->len) {
+        return -1;
+    }
+    for (spl_i64 i = 0; i < want; i = i + 1) {
+        if (((spl_u8)idx->s->data[i] & 0xC0U) != 0x80U) {
+            seen = seen + 1;
+        }
+    }
+    return seen;
+}
+
+spl_i64 rt_swi_build(spl_i64 value) {
+    return rt_text_index_build(value);
+}
+
+spl_i64 rt_swi_char_to_byte(spl_i64 handle, spl_i64 char_idx) {
+    return rt_text_index_char_to_byte(handle, char_idx);
+}
+
+spl_i64 rt_swi_byte_to_char(spl_i64 handle, spl_i64 byte_idx) {
+    return rt_text_index_byte_to_char(handle, byte_idx);
+}
+
+void rt_swi_free(spl_i64 handle) {
+    (void)handle;   /* bump allocator: no reclaim — see rt_free at :133 */
+}
+
+spl_i64 rt_rank_select_build(spl_i64 value) {
+    return rt_text_index_build(value);
+}
+
+spl_i64 rt_rank_query(spl_i64 handle, spl_i64 byte_pos) {
+    return rt_text_index_byte_to_char(handle, byte_pos);
+}
+
+spl_i64 rt_select_query(spl_i64 handle, spl_i64 char_idx) {
+    return rt_text_index_char_to_byte(handle, char_idx);
+}
+
+void rt_rank_select_free(spl_i64 handle) {
+    (void)handle;
+}
+
+/* ---- sqrt (1) -------------------------------------------------------------
+ * libm's name, but no libm is needed: AArch64 has FSQRT as a single
+ * instruction and clang lowers __builtin_sqrt to it with -ffreestanding. */
+double sqrt(double x) {
+    return __builtin_sqrt(x);
+}
+
+/* ---- rt_simd_* (49) -------------------------------------------------------
+ * SPLIT DELIBERATELY, and the split is the whole point of this block.
+ *
+ * (a) CAPABILITY PROBES AND STRING SEARCH — real answers.
+ *     The probes report SCALAR / no-accelerator. That is not a claim about the
+ *     CPU (a cortex-a72 obviously has NEON); it is a claim about THIS LANE,
+ *     which ships no vector kernels at all — see (b). Reporting NEON available
+ *     would route std.simd's dispatchers straight into the traps below, which
+ *     is precisely the failure the probes exist to prevent. Tier codes are
+ *     std.simd's own: 0=scalar, 1=SSE2, 2=AVX2, 4=NEON, 7=RVV
+ *     (src/lib/nogc_sync_mut/simd.spl:55-60).
+ *     rt_simd_str_search is a real scalar substring search with the host's
+ *     exact contract (src/runtime/runtime_simd_search.c:550): byte offset of
+ *     the first occurrence, 0 for an empty needle, -1 when absent.
+ *
+ * (b) ARITHMETIC / LANE KERNELS — NAMED TRAPS, on purpose.
+ *     These take and return Vec4f/Vec8i/... — CLASS values whose native
+ *     representation this freestanding runtime cannot construct: it knows only
+ *     String/Array/Tuple/Enum (RT_HEAP_* above), and the seed's own authority
+ *     for the type is a field-bearing object
+ *     (src/compiler_rust/compiler/src/interpreter_extern/simd.rs:619-636,
+ *     class "Vec4f" with x/y/z/w). Guessing that layout and returning a
+ *     plausible vector would be silent numeric corruption, which the tree
+ *     already has a written policy against — see
+ *     src/compiler/70.backend/backend/simpleos_native_symbols.spl:158-163:
+ *     "`rt_simd_` ... is dominated by ARITHMETIC kernels ... where nil is
+ *     silent numeric corruption, not 'unavailable'". Only the capability
+ *     probes are allowlisted there, by exact name, and that is exactly the
+ *     line drawn here.
+ *     Note also that on the native path most of these names never become calls
+ *     at all: src/compiler/60.mir_opt/mir_opt/simd_lowering.spl:96-160 rewrites
+ *     them into MIR SIMD instructions. The trap bodies are the link surface for
+ *     the paths where lowering does NOT fire, and are meant never to execute. */
+spl_i64 rt_simd_has_sse(void) { return 0; }
+spl_i64 rt_simd_has_avx(void) { return 0; }
+spl_i64 rt_simd_has_avx2(void) { return 0; }
+spl_i64 rt_simd_has_neon(void) { return 0; }
+spl_i64 rt_simd_has_rvv(void) { return 0; }
+
+spl_i64 rt_simd_detect_profile(void) {
+    return 0;   /* SimdTier.scalar */
+}
+
+spl_i64 rt_simd_profile_name(void) {
+    static const char name[] = "scalar";
+    return rt_string_new((spl_i64)(spl_u64)name, 6);
+}
+
+spl_i64 rt_simd_str_search(spl_i64 haystack_value, spl_i64 needle_value) {
+    RtString *h = rt_as_string(haystack_value);
+    RtString *n = rt_as_string(needle_value);
+    if (!h) {
+        return -1;
+    }
+    if (!n || n->len == 0) {
+        return 0;
+    }
+    if (n->len > h->len) {
+        return -1;
+    }
+    for (spl_u64 i = 0; i + n->len <= h->len; i = i + 1ULL) {
+        spl_u64 k = 0;
+        while (k < n->len && h->data[i + k] == n->data[k]) {
+            k = k + 1ULL;
+        }
+        if (k == n->len) {
+            return (spl_i64)i;
+        }
+    }
+    return -1;
+}
+
+/* The 41 vector kernels. Each is a distinct named trap so a serial transcript
+ * names the exact operation that was reached. Arity is irrelevant to an
+ * AAPCS64 trap that never returns, so one macro shape covers all of them. */
+#define SPL_SIMD_TRAP(name)                                   \
+    spl_i64 name(spl_i64 a, spl_i64 b, spl_i64 c) {           \
+        (void)a; (void)b; (void)c;                            \
+        rt_trap_unimplemented(#name);                         \
+        return 0;                                             \
+    }
+
+SPL_SIMD_TRAP(rt_simd_add_f32x4)
+SPL_SIMD_TRAP(rt_simd_sub_f32x4)
+SPL_SIMD_TRAP(rt_simd_mul_f32x4)
+SPL_SIMD_TRAP(rt_simd_div_f32x4)
+SPL_SIMD_TRAP(rt_simd_fma_f32x4)
+SPL_SIMD_TRAP(rt_simd_add_f32x8)
+SPL_SIMD_TRAP(rt_simd_sub_f32x8)
+SPL_SIMD_TRAP(rt_simd_mul_f32x8)
+SPL_SIMD_TRAP(rt_simd_div_f32x8)
+SPL_SIMD_TRAP(rt_simd_fma_f32x8)
+SPL_SIMD_TRAP(rt_simd_add_f64x4)
+SPL_SIMD_TRAP(rt_simd_sub_f64x4)
+SPL_SIMD_TRAP(rt_simd_mul_f64x4)
+SPL_SIMD_TRAP(rt_simd_div_f64x4)
+SPL_SIMD_TRAP(rt_simd_fma_f64x4)
+SPL_SIMD_TRAP(rt_simd_add_i32x4)
+SPL_SIMD_TRAP(rt_simd_sub_i32x4)
+SPL_SIMD_TRAP(rt_simd_mul_i32x4)
+SPL_SIMD_TRAP(rt_simd_and_i32x4)
+SPL_SIMD_TRAP(rt_simd_or_i32x4)
+SPL_SIMD_TRAP(rt_simd_xor_i32x4)
+SPL_SIMD_TRAP(rt_simd_shl_i32x4)
+SPL_SIMD_TRAP(rt_simd_shr_i32x4)
+SPL_SIMD_TRAP(rt_simd_add_i32x8)
+SPL_SIMD_TRAP(rt_simd_sub_i32x8)
+SPL_SIMD_TRAP(rt_simd_mul_i32x8)
+SPL_SIMD_TRAP(rt_simd_and_i32x8)
+SPL_SIMD_TRAP(rt_simd_or_i32x8)
+SPL_SIMD_TRAP(rt_simd_xor_i32x8)
+SPL_SIMD_TRAP(rt_simd_shl_i32x8)
+SPL_SIMD_TRAP(rt_simd_shr_i32x8)
+SPL_SIMD_TRAP(rt_simd_add_i64x4)
+SPL_SIMD_TRAP(rt_simd_sub_i64x4)
+SPL_SIMD_TRAP(rt_simd_add_u32x4)
+SPL_SIMD_TRAP(rt_simd_sub_u32x4)
+SPL_SIMD_TRAP(rt_simd_and_u32x4)
+SPL_SIMD_TRAP(rt_simd_or_u32x4)
+SPL_SIMD_TRAP(rt_simd_xor_u32x4)
+SPL_SIMD_TRAP(rt_simd_hadd_f32x4)
+SPL_SIMD_TRAP(rt_simd_hmax_f32x4)
+SPL_SIMD_TRAP(rt_simd_hmin_f32x4)
+
+#undef SPL_SIMD_TRAP
+
+/* ---- --gc-sections keepalive ----------------------------------------------
+ * WHY THIS EXISTS, and why deleting it silently undoes this whole section:
+ * the link runs with --gc-sections and -ffunction-sections, so a symbol that
+ * nothing live REFERENCES is discarded from kernel.elf even though it compiled
+ * cleanly. Measured during P8: nm showed stdin_read_char present while
+ * rt_stdin_read_char and rt_aarch64_uart_try_get had been GC'd, the difference
+ * being solely that the boot probe called one of them.
+ *
+ * Nothing in the current kernel calls any P10 symbol — the MCP module graph is
+ * not built into this kernel yet (that is P6/P11) — so without a root, every
+ * function above would vanish and the nm evidence would be empty.
+ *
+ * It takes ADDRESSES and never calls them. Calling would be wrong twice over:
+ * rt_exit parks the core, and the 41 SIMD entries are traps. A volatile read
+ * of the table defeats constant-folding, so the references survive -O2.
+ * Returns the number of symbols pinned, which the boot probe prints. */
+static void *const g_p10_keepalive[] = {
+    (void *)rt_trap_unimplemented,
+    (void *)rt_stderr_write, (void *)rt_stderr_flush, (void *)rt_stdout_flush,
+    (void *)rt_env_get, (void *)rt_env_set, (void *)rt_platform_name,
+    (void *)sys_get_args, (void *)rt_exit,
+    (void *)rt_atomic_int_new, (void *)rt_atomic_int_load,
+    (void *)rt_atomic_int_compare_exchange,
+    (void *)rt_signal_install, (void *)rt_signal_check,
+    (void *)rt_atexit_install, (void *)rt_atexit_check,
+    (void *)rt_text_count_codepoints, (void *)rt_text_count_codepoints_cached,
+    (void *)rt_text_is_ascii, (void *)rt_text_validate_utf8,
+    (void *)rt_text_to_upper_ascii, (void *)rt_text_to_lower_ascii,
+    (void *)rt_utf8_count_codepoints, (void *)rt_utf8_validate,
+    (void *)rt_utf8_find_invalid, (void *)rt_bytes_to_text,
+    (void *)rt_array_extend_i64,
+    (void *)rt_swi_build, (void *)rt_swi_char_to_byte,
+    (void *)rt_swi_byte_to_char, (void *)rt_swi_free,
+    (void *)rt_rank_select_build, (void *)rt_rank_query,
+    (void *)rt_select_query, (void *)rt_rank_select_free,
+    (void *)sqrt,
+    (void *)rt_simd_has_sse, (void *)rt_simd_has_avx, (void *)rt_simd_has_avx2,
+    (void *)rt_simd_has_neon, (void *)rt_simd_has_rvv,
+    (void *)rt_simd_detect_profile, (void *)rt_simd_profile_name,
+    (void *)rt_simd_str_search,
+    (void *)rt_simd_add_f32x4, (void *)rt_simd_sub_f32x4,
+    (void *)rt_simd_mul_f32x4, (void *)rt_simd_div_f32x4,
+    (void *)rt_simd_fma_f32x4,
+    (void *)rt_simd_add_f32x8, (void *)rt_simd_sub_f32x8,
+    (void *)rt_simd_mul_f32x8, (void *)rt_simd_div_f32x8,
+    (void *)rt_simd_fma_f32x8,
+    (void *)rt_simd_add_f64x4, (void *)rt_simd_sub_f64x4,
+    (void *)rt_simd_mul_f64x4, (void *)rt_simd_div_f64x4,
+    (void *)rt_simd_fma_f64x4,
+    (void *)rt_simd_add_i32x4, (void *)rt_simd_sub_i32x4,
+    (void *)rt_simd_mul_i32x4, (void *)rt_simd_and_i32x4,
+    (void *)rt_simd_or_i32x4, (void *)rt_simd_xor_i32x4,
+    (void *)rt_simd_shl_i32x4, (void *)rt_simd_shr_i32x4,
+    (void *)rt_simd_add_i32x8, (void *)rt_simd_sub_i32x8,
+    (void *)rt_simd_mul_i32x8, (void *)rt_simd_and_i32x8,
+    (void *)rt_simd_or_i32x8, (void *)rt_simd_xor_i32x8,
+    (void *)rt_simd_shl_i32x8, (void *)rt_simd_shr_i32x8,
+    (void *)rt_simd_add_i64x4, (void *)rt_simd_sub_i64x4,
+    (void *)rt_simd_add_u32x4, (void *)rt_simd_sub_u32x4,
+    (void *)rt_simd_and_u32x4, (void *)rt_simd_or_u32x4,
+    (void *)rt_simd_xor_u32x4,
+    (void *)rt_simd_hadd_f32x4, (void *)rt_simd_hmax_f32x4,
+    (void *)rt_simd_hmin_f32x4,
+};
+
+spl_i64 rt_aarch64_p10_keepalive(void) {
+    spl_u64 n = sizeof(g_p10_keepalive) / sizeof(g_p10_keepalive[0]);
+    spl_i64 live = 0;
+    for (spl_u64 i = 0; i < n; i = i + 1ULL) {
+        void *const volatile *slot = &g_p10_keepalive[i];
+        if (*slot) {
+            live = live + 1;
+        }
+    }
+    return live;
+}

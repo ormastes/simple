@@ -13,6 +13,97 @@
 - **Context:** There is no MCP-on-SimpleOS artifact anywhere in this repo or in
   any of the 223 GitHub remote branches. This is net-new work.
 
+## STATUS UPDATE 2026-08-24 — P10's MECHANICAL HALF IS BUILT (84 of 140)
+
+The ~90 "mechanical" symbols the inventory below identified are implemented in
+`examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c` and
+present in a real, gate-passing `kernel.elf`. **P10's remainder is now 56.**
+(84 = 83 symbols from the reproduced 139-missing set, plus `sqrt`, which is the
+140th symbol of the recorded set and is absent from the closure reproduced
+below. 140 - 84 = 56 either way.)
+
+**Inventory reproduced first, independently.** A fresh transitive-`use` closure
+of `src/app/mcp/main.spl` gives 49 modules / **150** declared externs, of which
+exactly the **same 11** the table below names were already defined. The 1-symbol
+gap against the recorded 151/140 is **`sqrt`**, which this closure never
+reaches; it was implemented anyway (AArch64 `FSQRT` via `__builtin_sqrt`), so
+the gap is closed rather than argued about.
+
+**What was implemented, and how honestly.** The split is deliberate:
+
+| bucket | n | outcome |
+|---|---|---|
+| text / utf8 / string-index | 19 | REAL implementations |
+| `rt_simd_*` capability probes + `rt_simd_str_search` | 8 | REAL answers for this lane |
+| `rt_simd_*` arithmetic / lane kernels | 41 | **NAMED TRAPS** |
+| atomics / atexit / signal | 7 | real atomics; signals honestly absent |
+| env / exit / args | 5 | honestly empty freestanding answers |
+| stdio siblings of `print_raw` | 3 | REAL, out the same PL011 |
+| `sqrt` | 1 | REAL |
+
+The 41 SIMD kernels take `Vec4f`/`Vec8i`/... — **class** values whose native
+layout this freestanding runtime cannot construct (it knows only
+String/Array/Tuple/Enum), and whose only authority in the tree is a
+field-bearing object (`interpreter_extern/simd.rs:619-636`). Fabricating a
+vector would be silent numeric corruption, which
+`src/compiler/70.backend/backend/simpleos_native_symbols.spl:158-163` already
+forbids by name for exactly this family. They therefore get a **freestanding
+`rt_trap_unimplemented`** — a libc-free twin of `runtime_native.c:11623` that
+prints the symbol over the UART and parks the core. The capability probes
+report **scalar / no accelerator**: not a claim about the CPU, a claim about
+this lane, which ships no vector kernels — reporting NEON would route
+`std.simd`'s dispatchers straight into those traps.
+
+Two signature surprises worth recording: `rt_utf8_count_codepoints` /
+`_validate` / `_find_invalid` take **`[i64]`, not `[u8]`**
+(`src/lib/common/encoding/utf8.spl:14-16`), and `rt_bytes_to_text` is declared
+**both ways** in the same closure (`[u8]` at `utf8.spl:18`, `[i64]` at
+`width_index.spl:19`) — one C body satisfies both, because both are the same
+RtArray-of-tagged-ints at the ABI.
+
+**`--gc-sections` tax: ZERO of 86 written symbols, and that took work.** Nothing
+in this kernel calls a P10 symbol (the MCP graph is not built in until P6/P11),
+so without a root every one would have been discarded. A keepalive table takes
+their ADDRESSES — never calls them; `rt_exit` parks and 41 entries are traps —
+and is rooted from the boot path after the last gate marker:
+
+```
+[BOOT] SIMPLEOS-AARCH64-LIMINE-P10-ABI-PINNED symbols=85
+```
+
+`nm` on the linked kernel: **86 of 86 written symbols present, 0 GC'd**;
+T-symbol count 106 -> 199; image 103 KB -> 121 KB. The *pre-existing* 11 show
+the tax this avoided: 9 of them (`rt_hash_text`, the five
+`rt_string_builder_*`, `rt_string_bytes`, `rt_string_len`, `rt_text_to_bytes`)
+are defined in the C source but **absent from `kernel.elf`**, kept out by
+having no live reference. Only `print_raw` and `stdin_read_char` survive, and
+only because the P8/P9 probes call them.
+
+**Boot gate not regressed**, verbatim last line:
+
+```
+PASS — 4 boot-stage marker(s) checked, EDK2/AAVMF pflash real-firmware aarch64
+boot verified via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit),
+95 serial line(s) captured
+```
+
+One anomaly, named rather than absorbed: the line count stayed at the baseline
+95 despite this change adding one serial line. The PASS does not rest on that
+number — it rests on the four markers, and the new P10 marker was verified
+present in the transcript by direct `grep`. EDK2 chatter varies run to run.
+
+**The remainder, counted: 56 of the 150.** Nothing mechanical is left — every
+one needs a real subsystem: filesystem `rt_file_*`/`rt_dir_*` (29), process
+`rt_process_*`/`rt_shell_exec`/`rt_getpid`/`spl_thread_cpu_count` (18),
+`rt_mmap`/`munmap`/`madvise`/`msync` (4), time/thread (3),
+`rt_browser_renderer_*` (2, dead weight from a tool-table import). The
+design decision flagged below — in-process handlers instead of CLI passthrough
+— now removes 18 of those 56, and is the single largest remaining lever.
+
+The caveat below still stands unchanged: 150 is the DECLARED-extern surface,
+not the total ABI bill. Codegen-emitted calls that no `extern` declares surface
+only under P6.
+
 ## STATUS UPDATE 2026-08-23 (2) — P9 IS DONE, and P10 is now INVENTORIED
 
 P9 (guest stdout) is implemented and proven by a real boot. With P8, the byte

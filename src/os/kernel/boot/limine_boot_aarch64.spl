@@ -82,6 +82,23 @@ extern fn rt_aarch64_stdin_probe(rounds: u64) -> u64
 # byte count handed to print_raw.
 extern fn rt_aarch64_stdout_probe(msg: text) -> u64
 
+# P10 (the mechanical half of the MCP module graph's freestanding runtime ABI:
+# text/utf8, string index, SIMD capability probes + named traps, atomics,
+# env/exit, the stdio siblings of print_raw, sqrt). Backed by
+# rt_aarch64_p10_keepalive() in
+# examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c.
+#
+# This call is NOT test scaffolding and must not be deleted. The link runs with
+# --gc-sections, so a symbol nothing live REFERENCES is discarded from
+# kernel.elf even though it compiled: measured during P8, nm showed
+# stdin_read_char kept and its uncalled siblings rt_stdin_read_char /
+# rt_aarch64_uart_try_get gone. Nothing in this kernel calls a P10 symbol yet
+# (the MCP module graph is not built in until P6/P11), so this is their only
+# root. The C side takes their ADDRESSES and never calls them -- calling would
+# park the core (rt_exit) or hit a named trap (the 41 SIMD kernels). Returns
+# the number of symbols pinned.
+extern fn rt_aarch64_p10_keepalive() -> u64
+
 fn halt_loop():
     """Halt forever (aarch64: WFE spin loop, no interrupt controller set up yet)."""
     rt_aarch64_wfe_spin()
@@ -530,6 +547,12 @@ fn memory_init(boot_info: BootOutputPort):
     # print_raw() executing in the guest.
     val stdout_bytes = rt_aarch64_stdout_probe("[STDOUT-PROBE] via-print_raw nonce=0df360d912b0")
     log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-STDOUT-PROBE-DONE bytes={stdout_bytes}")
+
+    # P10 keepalive root. Also deliberately AFTER every marker the
+    # real-firmware boot gate greps for, so it cannot turn that gate's PASS
+    # into a FAIL.
+    val p10_symbols = rt_aarch64_p10_keepalive()
+    log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-P10-ABI-PINNED symbols={p10_symbols}")
 
     halt_loop()
 
