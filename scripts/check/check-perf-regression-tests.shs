@@ -249,6 +249,25 @@ must_not_contain "PAYLOADMISS builtin filter stays lowercase-only"       "$RXMAT
 must_contain     "PAYLOADMISS O(1)-per-name spec"                        "$PLMSPEC" "expect(lowering.payload_origin_miss_skip_count).to_equal(2)"
 must_contain     "PAYLOADMISS declared-Result control fixture"           "$PLMSPEC" 'decl.enum_names = ["Result"]'
 
+# --- HIR closure cache re-key: the interface digest must stay COMPLETE before
+# anyone keys the HIR closure digest on it. `hir_cache_closure_digest` folds raw
+# file content_hash, so the incremental HIR hit rate is 0% by construction on a
+# ~60min phase. The obvious fix (key on interface_digest_of_source) is BLOCKED:
+# the textual v1 extractor under-captures struct/class FIELD lines, and an
+# under-capture is a stale cache HIT, i.e. a silently wrong compiler binary.
+# The differential spec ran RED at 6/12 pre-fix; extend decls and re-export
+# aliases were closed, fields could not be. These rows pin BOTH halves: the two
+# closed constructs must stay closed, and the closure digest must stay keyed on
+# content_hash while the field gap is open.
+# Record: doc/08_tracking/bug/hir_closure_digest_rekey_blocked_by_incomplete_interface_digest_2026-08-23.md
+AKEY="$ROOT/src/compiler/80.driver/cache/action_key.spl"
+IFDIFF="$ROOT/test/01_unit/compiler/driver/interface_digest_differential_spec.spl"
+must_contain "interface digest captures extend headers"        "$AKEY" 't.starts_with("extend ")'
+must_contain "interface digest captures use/re-export aliases" "$AKEY" 't.starts_with("use ")'
+must_contain "interface-digest differential spec present"      "$IFDIFF" "struct fields are NOT yet part of the interface (blocking gap)"
+must_contain "differential spec pins the extend construct"     "$IFDIFF" "changes the digest when the extended type changes"
+must_contain "HIR closure digest still keyed on content_hash"  "$ROOT/src/compiler/80.driver/driver_hir_cache.spl" "content_hash"
+
 # --- memory: peak-RSS budget gate must exist and self-test.
 # Pins the 2026-08-21 survey (interpreter lint 12-13.6 GB -> 0.69 GB; JIT lint
 # 0.45 GB). Both headline cases were fixed once and re-reported later by another

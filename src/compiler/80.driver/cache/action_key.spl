@@ -208,15 +208,27 @@ fn interface_digest_of(parts: [text]) -> text:
 # Body statements are not headers, so a body-only edit leaves the part set
 # (and therefore interface_digest_of_source) unchanged, while a signature
 # edit changes it. Known, stated limits of the textual v1 extractor:
-#   - struct/class FIELD lines are not captured (field rename won't change it)
+#   - struct/class FIELD lines are NOT captured (a field rename, retype or
+#     addition leaves the digest unchanged). Field layout IS downstream-visible,
+#     so this is an UNDER-capture: the one direction that can produce a stale
+#     cache HIT. It is why the HIR closure digest may NOT be re-keyed onto this
+#     digest — see doc/08_tracking/bug/
+#     hir_closure_digest_rekey_blocked_by_incomplete_interface_digest_2026-08-23.md
 #   - a nested `fn` inside a body IS captured (rare; over-invalidates, safe)
+#   - `use ` lines are captured wholesale (2026-08-23): a re-export alias
+#     (`use m.{a as b}` + `export b`) changes the exported symbol without
+#     changing any other header line. Capturing every import over-invalidates
+#     on a plain import edit, which is the SAFE direction.
+#   - `extend ` headers are captured (2026-08-23): the extended TYPE is
+#     downstream-visible and every method line can be identical across a
+#     retarget.
 # The semantic replacement is 35.semantics/interface/compile_interface.spl;
 # until that is wired, this textual form is the honest first consumer.
 fn source_interface_parts(source: text) -> [text]:
     var parts: [text] = []
     for line in source.split("\n"):
         val t = line.trim()
-        if t.starts_with("fn ") or t.starts_with("pub fn ") or t.starts_with("me ") or t.starts_with("extern fn ") or t.starts_with("struct ") or t.starts_with("class ") or t.starts_with("enum ") or t.starts_with("trait ") or t.starts_with("type ") or t.starts_with("export ") or t.starts_with("impl "):
+        if t.starts_with("fn ") or t.starts_with("pub fn ") or t.starts_with("me ") or t.starts_with("extern fn ") or t.starts_with("struct ") or t.starts_with("class ") or t.starts_with("enum ") or t.starts_with("trait ") or t.starts_with("type ") or t.starts_with("export ") or t.starts_with("impl ") or t.starts_with("extend ") or t.starts_with("use "):
             parts.push(t)
     parts
 
