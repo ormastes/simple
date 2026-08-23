@@ -536,3 +536,68 @@ prime remaining suspect to isolate.**
 
 Stage 4 and Stage 5/MCP were not reached: there is no admitted stage-3 artifact
 while stage 3 SIGSEGVs. `--no-mcp` was NOT passed.
+
+
+---
+
+## RUN 8 — the runtime owner-table change is NOT the SIGSEGV cause (bisect, 3 runs per arm)
+
+`c530678f8ba` is exonerated. Arm validity is proven, not assumed: the two arms'
+runtime archive hashes and stage-2 binaries differ
+(`deps` `3ed388ce…` vs `a0abe98e…`, stage2 `7af1af9ae867…` vs `3e779d9df28a…`).
+
+| arm | run | depth | fault |
+|---|---|---|---|
+| B (origin runtime) | B1 | **phase 2**, `flat_ast_to_module` | `0x2d0f22ea648ffd20` |
+| B | B2 | HIR 180/692 `vhdl_backend.spl` | `0x50`, peak 442.6 MB |
+| B | B3 | HIR 69/692 `aop.spl` | `0x638`, peak 310.4 MB |
+| A (`runtime_memory.c` reverted) | A1 | HIR 42/692 `hwir/aspects.spl` | `0x5000000000`, peak 274.9 MB |
+| A | A2 | HIR **237/692** `driver_compile_vhdl_util.spl` | `0x260`, peak 504.5 MB |
+| A | A3 | HIR 96/692 `watcher/smf_manifest.spl` | `0x6e0`, peak 375.1 MB |
+
+6/6 crashed, same function, same instruction, overlapping depth ranges — and
+arm A went DEEPER than arm B's best (237 vs 180). The change is not necessary
+for the crash. n=3 per arm cannot exclude a frequency or depth effect, but
+nothing in the data suggests one.
+
+**Scope caveat:** arm A reverted only the `runtime_memory.c` half. Reverting the
+`runtime_native.c` half fails to compile against the working tree's
+`unix_common.h` (`conflicting types for 'rt_msync'` / `'rt_file_lock'`) — a
+tree-mixing trap. That half is inert regardless:
+`build/simple-core/libsimple_runtime.a` predates the commit and
+`rt_core_register_immortal_ptr` is absent from the stage-2 binary, so
+**`runtime_native.c`'s half has never been compiled into any artifact**. Its
+first real exercise arrives when a lane rebuilds the capsule.
+
+**The uncommitted-edits confound theory is DEAD.** B1 reproduced the phase-2
+`flat_ast_to_module` wild-pointer crash on a tree with the HIR read-side edits
+already reverted. So is "only a runtime allocator change can cause a phase-2
+crash" — the earlier reasoning in RUN 7 was wrong on that point.
+
+## The actual crash, measured from register state
+
+Faulting instruction is `lower_hir_block` **+0x80c** (function base
+`0x1000de940`). Note the `.ips` `imageOffset` (`0xdf14c` / `0xdfc8c`) is an
+IMAGE offset — do not feed it to `atos`.
+
+```
+1000df13c  ands x9, x24, #0xfffffffffffffff8   ; untag
+1000df148  csel x8, x9, x0, ne
+1000df14c  ldr  x9, [x8]                        <-- FAULT
+1000df154  str  x9, [x0]
+1000df158  ldr  x8, [x8, #0x8]                  ; 16-byte value copy
+```
+
+From `threadState`, not inference: `x24 = 0x261 / 0x6e1 / 0x5000000001` — always
+with the **low bit set (tag)** — and `x24 & ~7` equals the fault address exactly
+in every run. So a **tagged value whose tag claims heap-pointer but whose payload
+is a small int or garbage** reaches a 16-byte value copy in `lower_hir_block`.
+All six faults are derefs of non-pointer values; plausibly ONE defect class
+landing wherever heap state puts it (inference).
+
+Every `.ips` carries only 2 frames — there is no usable backtrace, so do not
+chase the unwinder. The crash is always immediately after
+`phase3:hir:declare:done`, on a different module every run.
+
+Operational: a warm `--stop-after-stage2` is ~90 s and each stage-3 run is
+~4-5 min, so repetitions are cheap once an arm is built.
