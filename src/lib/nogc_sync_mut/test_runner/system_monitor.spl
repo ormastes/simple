@@ -10,6 +10,7 @@ use std.io_runtime.{file_exists}
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 
 use std.io_runtime.{thread_sleep}
+use std.io_runtime.{getpid}
 
 # ============================================================================
 # Data Structures
@@ -157,6 +158,96 @@ fn system_exceeds_threshold(cpu_limit: f64, mem_limit: f64) -> (bool, text):
     if cpu_over and mem_over:
         return (true, "cpu={sys.cpu_percent}%>{cpu_limit}% AND memory={sys.memory_percent}%>{mem_limit}%")
 
+    (false, "")
+
+# ============================================================================
+# Self (process-tree) resource measurement
+# ============================================================================
+#
+# `system_exceeds_threshold` above samples the WHOLE BOX. On a shared
+# machine that means the runner aborts its own suite because of other
+# people's processes: measured 2026-08-23, the system tree was unrunnable
+# at 88% memory used, none of it the runner's. A watchdog that stops your
+# run for someone else's memory is not self-protection, it is a denial of
+# service with extra steps.
+#
+# These functions measure only the runner's OWN process group -- the
+# runner plus every child it spawned, which is exactly the footprint it is
+# responsible for and the only thing it can act on by stopping.
+
+fn self_tree_rss_mb() -> i64:
+    """Resident memory of this runner's own process group, in MB.
+
+    Returns -1 when it cannot be measured, which callers MUST treat as
+    "unknown", never as zero.
+    """
+    if not is_linux():
+        return -1
+    # Keyed on the runner's REAL pid, obtained in-process.
+    #
+    # Two earlier shapes were tried and MEASURED WRONG, recorded so they
+    # are not retried: (a) `ps -o pgid= -p $$` in one shell_int and
+    # `ps -o rss= -g <pgid>` in another returns ~0, because each shell_int
+    # spawns its own shell in its own process group, so by the second call
+    # the group captured in the first has no members left; (b) `ps --pgid`
+    # measured 0 on this host where `-g` measured non-zero, so the two
+    # flags are not interchangeable. A single `ps` call keyed on our own
+    # pid avoids both traps.
+    val self_pid = getpid()
+    if self_pid <= 0:
+        return -1
+    val rss_kb = shell_int("ps -o rss= -p {self_pid} --ppid {self_pid} 2>/dev/null | awk '{{t+=$1}} END {{print t+0}}'", -1)
+    if rss_kb <= 0:
+        return -1
+    rss_kb / 1024
+
+fn self_tree_cpu_percent() -> f64:
+    """Aggregate CPU% of this runner's own process group.
+
+    Returns -1.0 when it cannot be measured.
+    """
+    if not is_linux():
+        return -1.0
+    val self_pid = getpid()
+    if self_pid <= 0:
+        return -1.0
+    # x10 then /10 because shell_int is integer-only; one decimal place is
+    # far more precision than a percentage threshold needs.
+    val tenths = shell_int("ps -o pcpu= -p {self_pid} --ppid {self_pid} 2>/dev/null | awk '{{t+=$1}} END {{printf \"%d\", (t*10)+0.5}}'", -1)
+    if tenths < 0:
+        return -1.0
+    tenths.to_f64() / 10.0
+
+fn self_tree_exceeds_threshold(cpu_limit: f64, mem_limit: f64) -> (bool, text):
+    """Watchdog predicate over the runner's OWN process tree.
+
+    Same AND semantics as `system_exceeds_threshold` (both CPU and memory
+    must be exceeded), for the same reason: a compile spike with healthy
+    memory is not a reason to destroy a run.
+
+    **Scope, stated rather than implied:** the runner's own process plus
+    its DIRECT children -- the spec processes it spawns, which is where
+    the footprint actually lives. A grandchild (a spec that itself spawns
+    a process) is not counted. That is a real limitation and still
+    enormously closer to the truth than sampling the whole machine.
+
+    **Fails OPEN on unmeasurable data, deliberately.** If the tree cannot
+    be measured we do NOT abort. Aborting on data we could not read is the
+    exact failure this function exists to remove, and the real bound on the
+    runner's footprint is the per-test memory clamp, not this sampler. An
+    unmeasurable watchdog that stays quiet loses a safety net; one that
+    fires blindly loses the whole run.
+    """
+    val rss_mb = self_tree_rss_mb()
+    val cpu = self_tree_cpu_percent()
+    if rss_mb < 0 or cpu < 0.0:
+        return (false, "")
+    val total_mb = get_system_memory_total_mb()
+    if total_mb <= 0:
+        return (false, "")
+    val mem_pct = (rss_mb.to_f64() / total_mb.to_f64()) * 100.0
+    if cpu > cpu_limit and mem_pct > mem_limit:
+        return (true, "runner process tree: cpu={cpu}%>{cpu_limit}% AND memory={mem_pct}% ({rss_mb}MB of {total_mb}MB)>{mem_limit}%")
     (false, "")
 
 fn get_system_free_memory_gb() -> i64:

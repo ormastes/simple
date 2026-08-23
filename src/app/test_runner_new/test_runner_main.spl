@@ -53,7 +53,7 @@ use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_new, incremental_test_state_load}
 # GROUP 6: Self-protection imports
 use std.test_runner.checkpoint.{checkpoint_load, checkpoint_exists, checkpoint_skip_completed, checkpoint_save, checkpoint_delete}
-use std.test_runner.system_monitor.{system_exceeds_threshold, ensure_kill_monitor_running, is_linux}
+use std.test_runner.system_monitor.{self_tree_exceeds_threshold, ensure_kill_monitor_running, is_linux}
 use std.test_runner.shutdown.{shutdown_graceful}
 # GROUP 7: Parallel execution imports
 use std.test_runner.test_runner_async.{run_tests_parallel_with_monitoring, get_cpu_count}
@@ -410,9 +410,17 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     for file_path in files:
         # Only check system thresholds every 20 tests (avoids 100ms CPU sleep per check)
         if updated_options.self_protect and tests_run % 20 == 0:
-            val (violated, reason) = system_exceeds_threshold(updated_options.cpu_threshold, updated_options.mem_threshold)
+            # The runner's OWN process tree, not the whole box. Sampling
+            # system-wide meant the suite aborted because of OTHER people's
+            # processes on a shared machine (measured 2026-08-23: the system
+            # tree was unrunnable at 88% memory used, none of it the
+            # runner's). Fails open when unmeasurable -- see the predicate.
+            val (violated, reason) = self_tree_exceeds_threshold(updated_options.cpu_threshold, updated_options.mem_threshold)
             if violated:
-                shutdown_graceful(reason, completed_files, total_passed, total_failed, total_skipped)
+                # Pass the DENOMINATOR so the abort banner can state the
+                # truncation as a fraction. Without it the banner reports a
+                # bare completed-count that reads like a finished run.
+                shutdown_graceful(reason, completed_files, total_passed, total_failed, total_skipped, files.len())
 
         if updated_options.self_protect and tests_run % 50 == 0 and tests_run > 0:
             checkpoint_save(completed_files, total_passed, total_failed, total_skipped, "periodic")
