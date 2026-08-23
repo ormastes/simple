@@ -2274,23 +2274,42 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     return -1;
 }
 #else
+/* An EINTR-interrupted waitpid() is NOT a failed wait: the child is untouched
+   and the wait must simply be retried. Returning -1 there made a healthy,
+   still-running worker read as "exited abnormally" and (via
+   process_run_timeout_live) got its whole session killed, costing a ~70min
+   stage1 attempt. Likewise, a signal-terminated child now reports 128+signo
+   (shell convention) instead of the same -1 the error path uses, so the real
+   cause is visible. -1 is reserved for a genuinely indeterminate wait.
+   See doc/08_tracking/bug/native_build_wrapper_wait_eintr_misreported_as_abnormal_2026-08-23.md */
+static int64_t rt_process_status_to_code(int status) {
+    if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return (int64_t)(128 + WTERMSIG(status));
+    return -1;
+}
+
 int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     if (pid <= 0) return -1;
     if (timeout_ms <= 0) {
-        int status = 0;
-        if (waitpid((pid_t)pid, &status, 0) < 0) return -1;
-        if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
-        return -1;
+        for (;;) {
+            int status = 0;
+            pid_t r = waitpid((pid_t)pid, &status, 0);
+            if (r < 0) {
+                if (errno == EINTR) continue;   /* retry, never report abnormal */
+                return -1;
+            }
+            return rt_process_status_to_code(status);
+        }
     }
     int64_t waited_ms = 0;
     for (;;) {
         int status = 0;
         pid_t r = waitpid((pid_t)pid, &status, WNOHANG);
-        if (r < 0) return -1;
-        if (r > 0) {
-            if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+        if (r < 0) {
+            if (errno == EINTR) continue;       /* retry, never report abnormal */
             return -1;
         }
+        if (r > 0) return rt_process_status_to_code(status);
         if (waited_ms >= timeout_ms) return -2;
         usleep(10 * 1000);
         waited_ms += 10;

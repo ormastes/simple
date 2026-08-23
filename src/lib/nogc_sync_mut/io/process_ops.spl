@@ -429,11 +429,25 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var stderr_relayed = 0
     var exit_code: i64 = -2
     var relay_error = ""
+    var indeterminate_waits: i64 = 0
     while exit_code == -2 and elapsed_ms < effective_timeout:
         val remaining = effective_timeout - elapsed_ms
         val quantum = if remaining < poll_quantum_ms: remaining else: poll_quantum_ms
         exit_code = _process_wait_raw(pid, quantum)
         elapsed_ms = elapsed_ms + quantum
+        # An INDETERMINATE wait (-1) is not an exit. rt_process_wait returns -1
+        # for an interrupted/errored/untracked wait as well as for a child it
+        # could not classify -- and the old loop broke out on it, reported
+        # "worker wrapper exited abnormally (code -1)", and then killed the
+        # whole session via _process_kill_group. When the spawned session is
+        # demonstrably STILL ALIVE that is a healthy worker being executed for
+        # the wrapper's own bookkeeping failure: three lanes each lost a ~70min
+        # stage1 attempt to it. Keep polling instead; only a session that is
+        # actually gone is treated as a terminal -1.
+        # doc/08_tracking/bug/native_build_wrapper_wait_eintr_misreported_as_abnormal_2026-08-23.md
+        if exit_code == -1 and _process_group_alive(pgid_file):
+            indeterminate_waits = indeterminate_waits + 1
+            exit_code = -2
         val out_size = file_size(stdout_file)
         if out_size > stdout_relayed:
             match file_read_text_at(stdout_file, stdout_relayed, out_size - stdout_relayed):
@@ -465,7 +479,10 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     if timed_out:
         _process_kill_raw(pid)
     proc_slot_release()
-    if exit_code != 0:
+    # Never tear down a session on a bookkeeping-only failure: a terminal -1
+    # whose session is still alive means we lost the child's status, not that
+    # the child died. Reap the group for a real non-zero exit or a timeout.
+    if exit_code != 0 and (timed_out or not _process_group_alive(pgid_file)):
         _process_kill_group(pgid_file)
     if file_exists(pgid_file):
         file_delete(pgid_file)
@@ -481,6 +498,8 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
 
     if relay_error != "":
         (stdout, stderr + "\n[ERROR: {relay_error}]", -1)
+    elif exit_code == -1 and indeterminate_waits > 0:
+        (stdout, stderr + "\n[WAIT-INDETERMINATE: lost the child's exit status after {indeterminate_waits} retried wait(s); its session was left intact]", -1)
     elif timed_out:
         val timeout_secs = (effective_timeout + 999) / 1000
         (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
@@ -738,6 +757,25 @@ fn process_kill(pid: i64) -> bool:
 # See doc/08_tracking/bug/eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md
 fn eprint(msg: text):
     rt_stderr_write("{msg}\n")
+
+fn _process_group_alive(pgid_file: text) -> bool:
+    """
+    True when the session recorded in `pgid_file` still has live members.
+
+    Companion to `_process_kill_group`: it answers "is the spawned tree still
+    there?" using the SAME session id (`pkill -0 -s`) the kill path uses, so a
+    wrapper that lost track of its direct child can still tell a live worker
+    from a dead one instead of guessing. Fail-safe direction is deliberate: an
+    unreadable/absent pgid file returns false, i.e. we never claim a session is
+    alive without evidence.
+    """
+    if not file_exists(pgid_file):
+        return false
+    val pgid = rt_file_read_text(pgid_file).trim()
+    if pgid == "":
+        return false
+    val (_out, _err, code) = _process_run_bounded_raw("pkill", ["-0", "-s", "{pgid}"], 2000, 4096)
+    code == 0
 
 fn _process_kill_group(pgid_file: text):
     # Best effort: the session leader recorded its pid (= the SESSION id of the

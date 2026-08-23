@@ -983,6 +983,28 @@ pub extern "C" fn rt_process_exists(pid: i64) -> bool {
     process_exists_os(pid)
 }
 
+/// Map an ExitStatus to the runtime's wait code.
+///
+/// A signal-terminated child reports `128 + signo` (shell convention) instead
+/// of collapsing onto `-1`, which is reserved for an *indeterminate* wait. The
+/// old `status.code().unwrap_or(-1)` made "killed by SIGKILL" and "the wait
+/// itself failed" the same value, so `native-build` reported a healthy worker
+/// as "exited abnormally ... code -1" and then tore down its whole session.
+/// See doc/08_tracking/bug/native_build_wrapper_wait_eintr_misreported_as_abnormal_2026-08-23.md
+fn exit_status_to_code(status: std::process::ExitStatus) -> i64 {
+    if let Some(code) = status.code() {
+        return code as i64;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig as i64;
+        }
+    }
+    -1
+}
+
 /// Wait for a previously spawned async process to finish.
 /// If timeout_ms <= 0, waits indefinitely.
 /// If timeout_ms > 0, polls in a loop up to the timeout.
@@ -991,30 +1013,38 @@ pub extern "C" fn rt_process_exists(pid: i64) -> bool {
 #[no_mangle]
 pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
     if timeout_ms <= 0 {
-        // Wait indefinitely
-        if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
-            if let Some(mut child) = map.remove(&pid) {
+        // Wait indefinitely. A poisoned mutex is recovered rather than turned
+        // into a permanent -1: the child map is plain data, and refusing to
+        // ever wait again is strictly worse than reading a possibly-stale map.
+        let mut map = SPAWNED_CHILDREN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(mut child) = map.remove(&pid) {
+            loop {
                 match child.wait() {
-                    Ok(status) => status.code().unwrap_or(-1) as i64,
-                    Err(_) => -1,
+                    Ok(status) => return exit_status_to_code(status),
+                    // EINTR is not a failed wait: the child is untouched and
+                    // the wait must be retried, never reported as abnormal.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => return -1,
                 }
-            } else {
-                -1
             }
-        } else {
-            -1
         }
+        -1
     } else {
         // Poll with timeout
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
         loop {
-            if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
+            {
+                let mut map = SPAWNED_CHILDREN
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if let Some(child) = map.get_mut(&pid) {
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             // Process exited, remove from map
                             map.remove(&pid);
-                            return status.code().unwrap_or(-1) as i64;
+                            return exit_status_to_code(status);
                         }
                         Ok(None) => {
                             // Still running, check timeout
@@ -1022,16 +1052,23 @@ pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
                                 return -2; // Timeout; child remains tracked.
                             }
                         }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                            // Retry: the child is still ours and still tracked.
+                            if std::time::Instant::now() >= deadline {
+                                return -2;
+                            }
+                        }
                         Err(_) => {
-                            map.remove(&pid);
+                            // Indeterminate. Keep the child TRACKED so a later
+                            // wait (and rt_process_is_running) can still see
+                            // it -- dropping it here is what let a live worker
+                            // look dead to the caller.
                             return -1;
                         }
                     }
                 } else {
                     return -1; // Not found
                 }
-            } else {
-                return -1; // Lock failed
             }
             // Sleep briefly before next poll
             std::thread::sleep(std::time::Duration::from_millis(10));
