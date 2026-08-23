@@ -66,10 +66,11 @@ BASELINE="$ROOT/scripts/check/cow_alias_hotpath_baseline.txt"
 # sorted. Also writes the scanned-file count to $COUNT_FILE.
 scan() {
   s_root="$1"
+  s_prefix="${2:-}"
   s_count=0
   for f in $(find "$s_root" -name '*.spl' -type f 2>/dev/null | sort); do
     s_count=$((s_count + 1))
-    rel="${f#"$s_root"/}"
+    rel="$s_prefix${f#"$s_root"/}"
     awk -v rel="$rel" '
       # Function boundary: a top-level "fn "/"pub fn " resets the per-function
       # state, so a `val t = self.x` in one function cannot pair with a
@@ -280,6 +281,12 @@ EOF
   COUNT_FILE="$st_empty/count"
   scan "$st_empty" >/dev/null
   [ "$(cat "$COUNT_FILE")" -eq 0 ] || { echo "selftest: empty tree must scan 0 files"; st_fail=1; }
+
+  # Fixture 9: the lib half of the scan is live and its rows carry the "lib/"
+  # prefix. Without this, dropping the second scan() call would go unnoticed.
+  COUNT_FILE="$st_dir/count"
+  st_pref="$(scan "$st_dir" "lib/")"
+  echo "$st_pref" | grep -q "^ROUNDTRIP	lib/src/roundtrip.spl" || { echo "selftest: prefixed scan did not emit lib/-prefixed rows"; st_fail=1; }
   rm -rf "$st_empty"
 
   rm -rf "$st_dir"; trap - EXIT
@@ -291,25 +298,43 @@ if ! selftest; then
   exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-  echo "PASS — selftest only, 8 fixture(s) checked"
+  echo "PASS — selftest only, 9 fixture(s) checked"
   exit 0
 fi
 
 # ---------------------------------------------------------------- real scan
+# Two trees are scanned, not one. src/lib was unscanned until 2026-08-23 and
+# carried 211 offenders the ratchet could never see -- a ratchet with a hole
+# that big is not a ratchet. Lib offenders are recorded with a "lib/" prefix so
+# they cannot collide with a compiler-relative path of the same name.
 SRC="$ROOT/src/compiler"
+LIBSRC="$ROOT/src/lib"
 if [ ! -d "$SRC" ]; then
   echo "ERROR — nothing was checked (no $SRC)"
+  exit 2
+fi
+if [ ! -d "$LIBSRC" ]; then
+  echo "ERROR — nothing was checked (no $LIBSRC)"
   exit 2
 fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-COUNT_FILE="$TMP/count"
-scan "$SRC" | sort > "$TMP/current"
-FILES="$(cat "$COUNT_FILE")"
+COUNT_FILE="$TMP/count_c"
+scan "$SRC" "" | sort > "$TMP/cur_c"
+FILES_C="$(cat "$COUNT_FILE")"
+COUNT_FILE="$TMP/count_l"
+scan "$LIBSRC" "lib/" | sort > "$TMP/cur_l"
+FILES_L="$(cat "$COUNT_FILE")"
+cat "$TMP/cur_c" "$TMP/cur_l" | sort > "$TMP/current"
+FILES=$((FILES_C + FILES_L))
 
-if [ "$FILES" -eq 0 ]; then
+if [ "$FILES_C" -eq 0 ]; then
   echo "ERROR — nothing was checked (0 .spl files under $SRC)"
+  exit 2
+fi
+if [ "$FILES_L" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 .spl files under $LIBSRC)"
   exit 2
 fi
 

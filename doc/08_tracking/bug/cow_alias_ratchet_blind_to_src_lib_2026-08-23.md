@@ -2,7 +2,7 @@
 
 - **Date:** 2026-08-23
 - **Class:** performance / memory-efficiency (COW-alias antipattern, `.claude/rules/code-style.md`)
-- **Status:** FIXED (scanner scope) + 1 hot-path offender fixed; remaining 211 frozen in baseline
+- **Status:** FIXED (scanner scope) + 3 hot-path functions fixed (21 offender rows); remaining 198 frozen in baseline
 - **Related:** `doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md`
 
 ## Defect
@@ -11,7 +11,7 @@
 (line 299 pre-fix) and scanned **only** the compiler tree — 1,567 files. The
 standard library, `src/lib`, is **7,864 `.spl` files** and was never scanned at
 all. The ratchet therefore reported `PASS — ... 7 offender(s)` while the tree
-actually carried **218**.
+actually carried **219**.
 
 This is not a coverage nicety. A ratchet exists to stop a defect class from
 growing; a ratchet with 83% of the source tree outside its scope does not stop
@@ -54,7 +54,7 @@ mutating through the single owner (`self.prop_obj_ids.push(...)`), which is
 exactly semantics-preserving: no other live binding observes the field between
 the alias and the store-back, so the copy was never serving value semantics.
 
-Offender count for that file: 7 -> 0.
+Offender rows removed by this fix: 21 (7 arrays x 3 functions).
 
 ## Fix
 
@@ -63,7 +63,9 @@ Offender count for that file: 7 -> 0.
    `src/lib` (prefixed `lib/`, so a lib path can never collide with a
    compiler-relative path of the same name). Both trees are fail-closed: 0
    files under **either** is `ERROR`, never a pass.
-2. Baseline regenerated (reviewed): 7 compiler rows + 211 lib rows.
+2. Baseline regenerated (reviewed): `PASS — 9674 file(s) scanned, baseline
+   regenerated with 198 offender(s)` — 7 compiler rows + 191 lib rows. The
+   compiler-only ratchet's verdict had been `7`.
 3. Selftest gains a 9th fixture asserting the prefixed scan emits
    `lib/`-prefixed rows — without it, deleting the second `scan()` call would
    silently restore the blind spot and every fixture would still pass.
