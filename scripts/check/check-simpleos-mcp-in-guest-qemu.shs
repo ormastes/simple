@@ -1,0 +1,182 @@
+#!/bin/sh
+# Gate: an MCP server running INSIDE a SimpleOS aarch64 guest under QEMU
+# answers a JSON-RPC request with a response bound to a host-injected nonce.
+#
+# STATUS: SCAFFOLD. THE HARNESS IS NOT IMPLEMENTED.
+#
+# This script can NEVER report a pass. That is deliberate and is enforced by
+# --selftest, which greps this file and fails if any reachable PASS path is
+# ever introduced without the prerequisite chain being satisfied first.
+#
+# Design: doc/05_design/os/simpleos/mcp_in_guest_qemu_2026-08-23.md
+#
+# Verdict contract (last line of stdout):
+#   PASS  — <n> ...                        exit 0   (UNREACHABLE TODAY)
+#   FAIL  — ...                            exit 1   (UNREACHABLE TODAY)
+#   ERROR — nothing was checked: <reason>  exit 2
+# A run that asserted zero things is ERROR, never a pass.
+#
+# HONESTY RULES this script must keep if it is ever implemented:
+#   1. It must never invoke a host `simple mcp`. If the guest produced no
+#      evidence, that is FAIL or ERROR -- never a host measurement.
+#   2. A response missing the fw_cfg nonce is FAIL, not a warning.
+#   3. Exit status is read into a variable on the line AFTER the invocation,
+#      never through a pipe.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$ROOT_DIR"
+
+SELF="scripts/check/check-simpleos-mcp-in-guest-qemu.shs"
+DESIGN_DOC="doc/05_design/os/simpleos/mcp_in_guest_qemu_2026-08-23.md"
+
+# The only verdict emitters. There is intentionally no pass()/fail() here:
+# adding one is the exact change --selftest is designed to catch.
+oops() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+
+usage() {
+    cat <<'USAGE'
+usage: sh scripts/check/check-simpleos-mcp-in-guest-qemu.shs [--selftest] [--help]
+
+Scaffold only. Always exits 2 (ERROR - nothing was checked).
+See doc/05_design/os/simpleos/mcp_in_guest_qemu_2026-08-23.md
+USAGE
+}
+
+# --- prerequisite probes -------------------------------------------------
+# Each probe is a pure existence check on the tree. None of them boots
+# anything, and none of them can produce evidence about the guest.
+
+prereq_missing() {
+    # Echoes the first unsatisfied prerequisite, or nothing if all are met.
+    # Ordered by the dependency chain in the design doc.
+
+    # P6: a full-CLI, non-seed `simple` built for aarch64-unknown-simpleos.
+    # The bootstrap CLI exposes only compile/native-build; `mcp` lives in the
+    # full dispatch table (src/app/cli/dispatch/table.spl:225).
+    found_payload=""
+    for candidate in \
+        build/os/aarch64-unknown-simpleos/simple \
+        build/os/guest/aarch64-unknown-simpleos/simple
+    do
+        [ -f "$candidate" ] || continue
+        found_payload="$candidate"
+        break
+    done
+    if [ -z "$found_payload" ]; then
+        printf 'P6-no-aarch64-unknown-simpleos-full-cli-payload'
+        return 0
+    fi
+
+    # P7: an admitted guest payload receipt (Stage-2 chain, pure-Simple
+    # builder provenance). scripts/os/provision_simpleos_guest_simple_fs.shs
+    # rejects rust/seed builders outright.
+    if [ ! -f "${found_payload}.build_stamp" ]; then
+        printf 'P7-payload-has-no-admission-build-stamp'
+        return 0
+    fi
+
+    # P8: freestanding rt_stdin_read_char wired to PL011 RX. Today it is a
+    # hard stub returning empty forever.
+    stub_file="examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"
+    if [ -f "$stub_file" ]; then
+        set +e
+        grep -q 'rt_stdin_read_char(RuntimeValue a) { (void)a; return rt_string_from_cstr("")' \
+            "$stub_file" 2>/dev/null
+        stub_rc=$?
+        set -e
+        if [ "$stub_rc" -eq 0 ]; then
+            printf 'P8-rt_stdin_read_char-is-still-a-stub-guest-stdin-is-permanent-EOF'
+            return 0
+        fi
+    else
+        printf 'P8-arm64-boot-stubs-absent'
+        return 0
+    fi
+
+    # P11: a guest boot path that actually invokes the in-guest server.
+    printf 'P11-no-guest-boot-path-invokes-an-in-guest-mcp-server'
+    return 0
+}
+
+# --- selftest ------------------------------------------------------------
+# A NEGATIVE assertion: prove this file has no reachable pass path.
+run_selftest() {
+    failures=0
+
+    # (a) No PASS emitter may exist while the harness is unimplemented.
+    # Needle spliced so this line cannot match itself.
+    needle_pass="print""f .PASS"
+    set +e
+    grep -n "$needle_pass" "$SELF" >/dev/null 2>&1
+    rc_a=$?
+    set -e
+    if [ "$rc_a" -eq 0 ]; then
+        printf 'selftest: FAIL (a) a PASS emitter exists in %s\n' "$SELF" >&2
+        failures=$((failures + 1))
+    fi
+
+    # (b) No `exit 0` may be reachable from the scan path. The only exit 0 in
+    #     this file belongs to the selftest itself and to --help.
+    set +e
+    n_exit0=$(grep -c '^[[:space:]]*exit 0' "$SELF")
+    set -e
+    if [ "${n_exit0:-0}" -gt 2 ]; then
+        printf 'selftest: FAIL (b) %s reachable "exit 0" sites, expected <=2\n' \
+            "${n_exit0}" >&2
+        failures=$((failures + 1))
+    fi
+
+    # (c) The scan path must not reference a host MCP server binary or a host
+    #     `simple mcp` invocation -- honesty rule 1.
+    # Needles spliced so this line cannot match itself.
+    needle_host="simple_mcp""_server|bin/simple[[:space:]]+mc""p"
+    set +e
+    grep -nE "$needle_host" "$SELF" >/dev/null 2>&1
+    rc_c=$?
+    set -e
+    if [ "$rc_c" -eq 0 ]; then
+        printf 'selftest: FAIL (c) %s references a HOST mcp server\n' "$SELF" >&2
+        failures=$((failures + 1))
+    fi
+
+    # (d) prereq_missing must always report something while unimplemented.
+    probe=$(prereq_missing)
+    if [ -z "$probe" ]; then
+        printf 'selftest: FAIL (d) prereq_missing reported all prerequisites met, but the harness is unimplemented\n' >&2
+        failures=$((failures + 1))
+    fi
+
+    # (e) The design doc must exist -- a gate with no design is not reviewable.
+    if [ ! -f "$DESIGN_DOC" ]; then
+        printf 'selftest: FAIL (e) design doc missing: %s\n' "$DESIGN_DOC" >&2
+        failures=$((failures + 1))
+    fi
+
+    if [ "$failures" -ne 0 ]; then
+        printf 'simpleos_mcp_in_guest_selftest=fail checks=5 failures=%s\n' \
+            "$failures" >&2
+        exit 1
+    fi
+    printf 'simpleos_mcp_in_guest_selftest=pass checks=5 failures=0\n'
+    printf '(selftest result only -- this is NOT a gate verdict)\n'
+    exit 0
+}
+
+# --- main ----------------------------------------------------------------
+case "${1:-}" in
+    --selftest|--self-test) run_selftest ;;
+    --help|-h) usage; exit 0 ;;
+    '') : ;;
+    *) oops "unknown argument: $1" ;;
+esac
+
+MISSING=$(prereq_missing)
+if [ -n "$MISSING" ]; then
+    oops "$MISSING (harness unimplemented; see $DESIGN_DOC)"
+fi
+
+# Unreachable today, and must stay unreachable until the harness genuinely
+# boots a guest and reads guest-produced, nonce-bound evidence. Implementing
+# this branch means implementing the whole of section 4.1 of the design doc.
+oops "all tree-level prerequisites appear present, but the QEMU harness itself is unimplemented (see $DESIGN_DOC section 4.1)"
