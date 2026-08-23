@@ -23,7 +23,11 @@
 //!   --cpu <name>        CPU profile: default, native, x86-64-v1..v4
 //!   --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap)
 //!   --mode <name>       Pure-Simple build mode name accepted for bootstrap compatibility:
-//!                        dynload or one-binary (seed still emits native bootstrap artifacts)
+//!                        one-binary (default) or dynload. The Rust seed NEVER builds
+//!                        dynload -- it always emits a single native artifact -- so an
+//!                        explicit `--mode dynload` is SKIPPED with a named notice
+//!                        (E-SEED-NATIVE-BUILD-MODE-DYNLOAD-UNSUPPORTED) rather than
+//!                        silently ignored. See `seed_build_mode_notice`.
 //!   --emit-archive      Emit a static archive from Simple objects instead of linking an executable
 //!   --entry-closure     Compile only modules reachable from --entry
 //!   --help              Show help
@@ -34,6 +38,38 @@ use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizati
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
 use simple_compiler::is_native_codegen_backend_available;
 use simple_common::target::{NativeCodegenBackend, TargetCpu};
+
+/// Default `--mode` for the Rust seed.
+///
+/// The seed is bootstrap-only tooling and does not implement the dynload build
+/// mode: `build_mode` is parsed and validated here and then consumed by nothing
+/// -- every seed native-build emits a single native artifact. The default is
+/// therefore `one-binary`, which names what the seed actually does. Optional
+/// features are not built by the seed unless explicitly requested.
+pub(crate) const SEED_DEFAULT_BUILD_MODE: &str = "one-binary";
+
+/// Named skip notice for a build mode the Rust seed cannot honour.
+///
+/// Policy: an unimplemented optional path is disabled *visibly*, never silently
+/// half-working and never deleted. An explicit `--mode dynload` is accepted for
+/// bootstrap-script compatibility but is a no-op in the seed, so it emits a
+/// named code instead of passing unremarked.
+///
+/// TODO(seed-dynload): if phase 2 ever genuinely needs the seed to produce
+/// dynload artifacts, implement it here and drop this notice. Until then the
+/// dynload lane belongs to the pure-Simple compiler only.
+pub(crate) fn seed_build_mode_notice(mode: &str) -> Option<String> {
+    if mode == "dynload" {
+        Some(format!(
+            "note: E-SEED-NATIVE-BUILD-MODE-DYNLOAD-UNSUPPORTED: --mode '{}' is not \
+             implemented by the Rust seed and is SKIPPED; emitting a single native \
+             artifact (--mode {}) instead",
+            mode, SEED_DEFAULT_BUILD_MODE
+        ))
+    } else {
+        None
+    }
+}
 
 fn is_valid_runtime_bundle(value: &str) -> bool {
     matches!(
@@ -105,7 +141,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut target_triple: Option<String> = None;
     let mut linker_script: Option<PathBuf> = None;
     let mut opt_level = NativeOptimizationLevel::default_for_native_executable();
-    let mut build_mode = String::from("dynload");
+    let mut build_mode = String::from(SEED_DEFAULT_BUILD_MODE);
     // M4 (LLVM mem-infra lane): `--sanitize` and `--mem-infra=asan` are two
     // spellings of the same request; both fold into one bool. See
     // `NativeBuildConfig::sanitize` and `doc/05_design/compiler/backend/m4_llvm_mem_infra_design.md`.
@@ -342,7 +378,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             other if other.starts_with("--mode=") => {
                 let value = other.strip_prefix("--mode=").unwrap_or("");
                 build_mode = if value.is_empty() {
-                    "dynload".to_string()
+                    SEED_DEFAULT_BUILD_MODE.to_string()
                 } else {
                     value.to_string()
                 };
@@ -351,7 +387,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             other if other.starts_with("--build-mode=") => {
                 let value = other.strip_prefix("--build-mode=").unwrap_or("");
                 build_mode = if value.is_empty() {
-                    "dynload".to_string()
+                    SEED_DEFAULT_BUILD_MODE.to_string()
                 } else {
                     value.to_string()
                 };
@@ -433,6 +469,9 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     if build_mode != "dynload" && build_mode != "one-binary" {
         eprintln!("error: invalid --mode '{}'. Expected dynload or one-binary", build_mode);
         return 1;
+    }
+    if let Some(notice) = seed_build_mode_notice(&build_mode) {
+        eprintln!("{}", notice);
     }
 
     let bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
@@ -683,7 +722,24 @@ pub fn handle_native_build(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_allowed_runtime_bundle, normalize_backend};
+    use super::{
+        is_allowed_runtime_bundle, normalize_backend, seed_build_mode_notice,
+        SEED_DEFAULT_BUILD_MODE,
+    };
+
+    #[test]
+    fn seed_default_build_mode_is_not_dynload() {
+        assert_eq!(SEED_DEFAULT_BUILD_MODE, "one-binary");
+        assert_ne!(SEED_DEFAULT_BUILD_MODE, "dynload");
+        assert!(seed_build_mode_notice(SEED_DEFAULT_BUILD_MODE).is_none());
+    }
+
+    #[test]
+    fn explicit_dynload_is_skipped_with_named_notice() {
+        let notice = seed_build_mode_notice("dynload").expect("dynload must emit a named notice");
+        assert!(notice.contains("E-SEED-NATIVE-BUILD-MODE-DYNLOAD-UNSUPPORTED"), "{}", notice);
+        assert!(notice.contains("SKIPPED"), "{}", notice);
+    }
 
     #[test]
     fn permits_rust_hosted_only_for_bootstrap() {
@@ -756,7 +812,8 @@ fn print_help() {
     println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
     println!("  --list-optimizations Print implemented optimization groups and levels");
     println!("  --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap)");
-    println!("  --mode <name>       Pure-Simple build mode: dynload (default) or one-binary");
+    println!("  --mode <name>       Pure-Simple build mode: one-binary (default) or dynload");
+    println!("                       (dynload is not implemented by the Rust seed and is skipped)");
     println!("  --emit-archive     Emit a static archive from Simple objects instead of linking an executable");
     println!("  --entry-closure     Compile only modules reachable from --entry");
     println!("  --help, -h          Show this help");
