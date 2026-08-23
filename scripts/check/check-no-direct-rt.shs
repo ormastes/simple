@@ -33,21 +33,64 @@ BASELINE_FILE="$ROOT/scripts/check/no_direct_rt_baseline.txt"
 # comment and never a call site (measured false positive: js/builtins/date.spl).
 RT_RE='^[^#]*\brt_[a-z0-9_]*\('
 
-# scan_dir <dir> <allowlist-file>
+# scan_dir <dir> <allowlist-file> [offender-output]
 # stdout: "scanned direct allowed forbidden" counts.
 scan_dir() {
-  sd_root="$1"; sd_allow="$2"
+  sd_root="$1"; sd_allow="$2"; sd_off="${3:-}"
   sd_scanned=0; sd_allowed=0; sd_forbidden=0
-  tmp_files=$(mktemp)
-  find "$sd_root" -name '*.spl' -type f ! -path '*/vendor/*' > "$tmp_files"
+  if ! command -v rg >/dev/null 2>&1; then
+    echo "ERR"
+    return
+  fi
+  sd_scan_root="$sd_root"
+  if [ -d "$sd_root/src" ]; then sd_scan_root="$sd_root/src"; fi
+  # Build and compare NUL-delimited manifests before scanning. This proves the
+  # fast rg traversal sees the exact find-defined file set; hidden/ignored files
+  # cannot disappear, and either traversal fails closed instead of looking empty.
+  tmp_scan=$(mktemp -d) || { echo "ERR"; return; }
+  tmp_find_raw="$tmp_scan/find.raw"
+  tmp_rg_raw="$tmp_scan/rg.raw"
+  tmp_find="$tmp_scan/find.sorted"
+  tmp_rg="$tmp_scan/rg.sorted"
+  tmp_matches="$tmp_scan/matches"
+  if ! find "$sd_scan_root" -name '*.spl' -type f ! -path '*/vendor/*' -print0 > "$tmp_find_raw"; then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  rg --files --null --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$sd_scan_root" > "$tmp_rg_raw"
   st=$?
-  if [ $st -ne 0 ]; then rm -f "$tmp_files"; echo "ERR"; return; fi
-  while IFS= read -r f; do
-    sd_scanned=$((sd_scanned + 1))
-    n=$(grep -cE "$RT_RE" "$f")
-    # grep exit 1 just means zero matches; only treat >1 as error
-    [ "$n" -gt 0 ] || continue
-    rel=${f#"$sd_root"/}
+  # `rg --files` uses 1 for an empty but successful traversal.
+  if [ $st -gt 1 ]; then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  if ! LC_ALL=C sort -z "$tmp_find_raw" > "$tmp_find" || ! LC_ALL=C sort -z "$tmp_rg_raw" > "$tmp_rg" || ! cmp -s "$tmp_find" "$tmp_rg"; then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  if ! sd_scanned=$(awk 'BEGIN { RS = "\0" } END { print NR + 0 }' "$tmp_find"); then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$RT_RE" "$sd_scan_root" > "$tmp_matches"
+  st=$?
+  # rg exit 1 means no matches; >1 is a scanner error.
+  if [ $st -gt 1 ]; then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  while IFS=: read -r f n; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      "$sd_root"/*) rel=${f#"$sd_root"/} ;;
+      ./*) rel=${f#./} ;;
+      *) rel=$f ;;
+    esac
     allowed=0
     if [ -f "$sd_allow" ]; then
       while IFS= read -r pre; do
@@ -59,10 +102,11 @@ scan_dir() {
       sd_allowed=$((sd_allowed + n))
     else
       sd_forbidden=$((sd_forbidden + n))
-      echo "$n $rel" >> "$tmp_files.off"
+      if [ -n "$sd_off" ]; then echo "$n $rel" >> "$sd_off"; fi
     fi
-  done < "$tmp_files"
-  rm -f "$tmp_files"
+  done < "$tmp_matches"
+  rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"
+  rmdir "$tmp_scan"
   echo "$sd_scanned $((sd_allowed + sd_forbidden)) $sd_allowed $sd_forbidden"
 }
 
@@ -94,47 +138,47 @@ selftest() {
   r=$(scan_dir "$st_dir/c" /dev/null)
   set -- $r
   if [ "${1:-x}" != "0" ]; then echo "ERROR — selftest failed: empty tree scanned nonzero (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 4: explicit manifest includes hidden and gitignored source files
+  mkdir -p "$st_dir/d/src/lib/.hidden" "$st_dir/d/src/lib/ignored"
+  printf 'src/lib/ignored/\n' > "$st_dir/d/.gitignore"
+  printf 'fn f(): rt_hidden_call()\n' > "$st_dir/d/src/lib/.hidden/hidden.spl"
+  printf 'fn f(): rt_ignored_call()\n' > "$st_dir/d/src/lib/ignored/ignored.spl"
+  r=$(scan_dir "$st_dir/d" /dev/null)
+  set -- $r
+  if [ "${1:-x}" != "2" ] || [ "${2:-x}" != "2" ] || [ "${4:-x}" != "2" ]; then echo "ERROR — selftest failed: hidden/ignored files not scanned equivalently (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 5: traversal failure is an error, never an empty successful scan
+  r=$(scan_dir "$st_dir/missing" /dev/null 2>/dev/null)
+  if [ "$r" != "ERR" ]; then echo "ERROR — selftest failed: find error did not fail closed (got '$r')"; rm -rf "$st_dir"; exit 2; fi
   rm -rf "$st_dir"
 }
 
 selftest
 if [ $SELFTEST_ONLY -eq 1 ]; then
-  echo "PASS — 4 selftest fixture(s) checked"
+  echo "PASS — 6 selftest fixture(s) checked"
   exit 0
 fi
 
 # ---- real scan ----
 if [ ! -d "$ROOT/src" ]; then echo "ERROR — nothing was checked: no src/ under $ROOT"; exit 2; fi
 OFF_FILE="$(mktemp).off"
-# scan_dir writes offenders next to its own tmp; re-run capturing offenders here instead
-scanned=0; allowed=0; forbidden=0
-FILES=$(mktemp)
-find "$ROOT/src" -name '*.spl' -type f ! -path '*/vendor/*' > "$FILES"
-st=$?
-if [ $st -ne 0 ]; then rm -f "$FILES"; echo "ERROR — nothing was checked: find failed"; exit 2; fi
 : > "$OFF_FILE"
-while IFS= read -r f; do
-  scanned=$((scanned + 1))
-  n=$(grep -cE "$RT_RE" "$f")
-  [ "$n" -gt 0 ] || continue
-  rel=${f#"$ROOT"/}
-  is_allowed=0
-  if [ -f "$ALLOWLIST" ]; then
-    while IFS= read -r pre; do
-      case "$pre" in ''|'#'*) continue ;; esac
-      case "$pre" in suffix:*) sfx=${pre#suffix:}; case "$rel" in *"$sfx") is_allowed=1; break ;; esac ;; *) case "$rel" in "$pre"*) is_allowed=1; break ;; esac ;; esac
-    done < "$ALLOWLIST"
-  fi
-  if [ $is_allowed -eq 1 ]; then
-    allowed=$((allowed + n))
-  else
-    forbidden=$((forbidden + n))
-    echo "$n $rel" >> "$OFF_FILE"
-  fi
-done < "$FILES"
-rm -f "$FILES"
+counts=$(scan_dir "$ROOT" "$ALLOWLIST" "$OFF_FILE")
+set -- $counts
+if [ "${1:-ERR}" = "ERR" ] || [ $# -ne 4 ]; then
+  rm -f "$OFF_FILE"
+  echo "ERROR — nothing was checked: direct runtime scan failed"
+  exit 2
+fi
+scanned=$1
+direct_total=$2
+allowed=$3
+forbidden=$4
 
-direct_total=$((allowed + forbidden))
+if [ $((allowed + forbidden)) -ne "$direct_total" ]; then
+  rm -f "$OFF_FILE"
+  echo "ERROR — count arithmetic does not balance"
+  exit 2
+fi
 
 echo "rt_boundary:"
 echo "  scanner_ran: true"
@@ -144,7 +188,6 @@ echo "  allowed_provider: $allowed"
 echo "  forbidden_product: $forbidden"
 
 if [ "$scanned" -eq 0 ]; then rm -f "$OFF_FILE"; echo "ERROR — nothing was checked"; exit 2; fi
-if [ $((allowed + forbidden)) -ne "$direct_total" ]; then rm -f "$OFF_FILE"; echo "ERROR — count arithmetic does not balance"; exit 2; fi
 
 # ---- critical mode: phase-A error, no ratchet grace ----
 if [ $CRITICAL -eq 1 ] && [ "$forbidden" -gt 0 ]; then

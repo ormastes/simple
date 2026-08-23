@@ -23,7 +23,9 @@ use compiler.semantics.lint.raw_rt_access.{
     check_raw_rt_access,
     check_raw_rt_access_with_allowlist,
     raw_rt_provider_allowlist_allows,
-    raw_rt_wrapper_replacement
+    raw_rt_wrapper_replacement,
+    raw_rt_wrapper_module,
+    raw_rt_wrapper_binding_is_unshadowed
 }
 
 
@@ -125,6 +127,18 @@ describe "RAW-RT-002: direct raw runtime use":
         expect(findings[0].code).to_equal("RAW-RT-002")
         expect(findings[0].name).to_equal("rt_file_read_text")
         expect(findings[0].note).to_contain("file_read_text")
+        expect(findings[0].note).to_contain("std.nogc_sync_mut.io.file_ops")
+        expect(findings[0].note).to_contain("no automatic edit")
+
+    it "warns on rt_remove and names its status-preserving provider wrapper":
+        step("Verify: rt_remove has an exact, actionable replacement")
+        val source = "fn remove(path: text): r" + "t_remove(path)\n"
+        val findings = check_raw_rt_access(source, "src/app/cleaner.spl")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].code).to_equal("RAW-RT-002")
+        expect(findings[0].name).to_equal("rt_remove")
+        expect(findings[0].note).to_contain("directory_remove")
+        expect(findings[0].note).to_contain("std.nogc_sync_mut.io.dir_entry_ops")
         expect(findings[0].note).to_contain("simple lint --fix")
 
     it "accepts a call contained by a minimal ffi-unsafe block":
@@ -155,6 +169,35 @@ describe "RAW-RT-002: direct raw runtime use":
         val findings = check_raw_rt_access(source, "src/app/product/native_copy.spl")
         expect(findings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(findings[0].code).to_equal("RAW-RT-002")
+
+    it "warns on unbraced exported and aliased direct imports":
+        step("Verify: unbraced import grammar cannot bypass the boundary")
+        val exported = "export u" + "se runtime.primitive.r" + "t_remove\n"
+        val aliased = "u" + "se runtime.primitive.r" + "t_remove as delete_path\n"
+        val exported_findings = check_raw_rt_access(exported, "src/app/exported.spl")
+        val aliased_findings = check_raw_rt_access(aliased, "src/app/aliased.spl")
+        expect(exported_findings.len()).to_equal(1)
+        expect(exported_findings[0].name).to_equal("rt_remove")
+        expect(aliased_findings.len()).to_equal(1)
+        expect(aliased_findings[0].name).to_equal("rt_remove")
+
+    it "warns on single-line and multiline parenthesized direct imports":
+        step("Verify: parenthesized import grammar cannot bypass the boundary")
+        val single = "u" + "se runtime.primitive (r" + "t_remove as delete_path)\n"
+        val multiline = "u" + "se runtime.primitive (\n    r" + "t_remove as delete_path\n)\n"
+        val single_findings = check_raw_rt_access(single, "src/app/single.spl")
+        val multiline_findings = check_raw_rt_access(multiline, "src/app/multiline.spl")
+        expect(single_findings.len()).to_equal(1)
+        expect(single_findings[0].name).to_equal("rt_remove")
+        expect(multiline_findings.len()).to_equal(1)
+        expect(multiline_findings[0].name).to_equal("rt_remove")
+        expect(multiline_findings[0].line_num).to_equal(2)
+
+    it "does not confuse an rt-looking owner path with an imported binding":
+        step("Verify: only the final unbraced import component is classified")
+        val source = "u" + "se runtime.r" + "t_provider.SafeFacade\n"
+        val findings = check_raw_rt_access(source, "src/app/product.spl")
+        expect(findings.len()).to_equal(0)
 
     it "allows that alias only when the canonical policy sanctions its provider path":
         step("Verify: allows that alias only when the canonical policy sanctions its provider path")
@@ -199,6 +242,9 @@ describe "raw rt wrapper fix lookup":
     it "returns safe known replacements and no invented replacement":
         step("Verify: returns safe known replacements and no invented replacement")
         expect(raw_rt_wrapper_replacement("rt_process_run")).to_equal("process_run")
+        expect(raw_rt_wrapper_replacement("rt_remove")).to_equal("directory_remove")
+        expect(raw_rt_wrapper_module("rt_remove")).to_equal("std.nogc_sync_mut.io.dir_entry_ops")
+        expect(raw_rt_wrapper_replacement("rt_mkdir")).to_equal("")
         expect(raw_rt_wrapper_replacement("rt_unknown_device_op")).to_equal("")
 
     it "uses exact canonical prefix and suffix allowlist semantics":
@@ -209,9 +255,58 @@ describe "raw rt wrapper fix lookup":
         expect(raw_rt_provider_allowlist_allows("/repo/src/lib/providerish/x.spl", policy)).to_equal(false)
 
 describe "RAW-RT-002 auto-fix":
+    it "withholds an rt_mkdir rename across incompatible contracts":
+        step("Verify: bool/default-mode and raw mode/status calls need a semantic choice")
+        val source = "u" + "se std.nogc_sync_mut.io.dir_entry_ops.{directory_" + "create_mode}\nfn make(path: text):\n    rt_mkdir(path)\n"
+        var warned = false
+        var note = ""
+        var replacements = 0
+        for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_mkdir_fix.spl", source):
+            if result.lint.code == "RAW-RT-002" and result.line == 3:
+                warned = true
+                match result.lint.fix_hint:
+                    case Some(hint): note = hint
+                    case nil: val _ = 0
+                match result.lint.easy_fix:
+                    case Some(fix): replacements = replacements + easyfix_replacements(fix).len()
+                    case nil: val _ = 0
+        expect(warned).to_equal(true)
+        expect(note).to_contain("directory_create_mode(path, mode)")
+        expect(note).to_contain("dir_create")
+        expect(note).to_contain("no automatic edit")
+        expect(replacements).to_equal(0)
+
+    it "withholds Safe confidence when a local binding shadows the imported wrapper":
+        step("Verify: import presence alone is not proof of call-site binding")
+        val source = "u" + "se app.io.mod.{process_" + "run}\nfn run(process_run: fn(text, [text])):\n    rt_process_run(cmd, args)\n"
+        expect(raw_rt_wrapper_binding_is_unshadowed(source, "process_run")).to_equal(false)
+
+    it "accepts one imported wrapper when no local binding shadows it":
+        step("Verify: the conservative shadow proof admits the mechanical case")
+        val source = "u" + "se app.io.mod.{process_" + "run}\nfn run():\n    rt_process_run(cmd, args)\n"
+        expect(raw_rt_wrapper_binding_is_unshadowed(source, "process_run")).to_equal(true)
+
+    it "offers the rt_remove rename when its exact provider wrapper is in scope":
+        step("Verify: the status-preserving directory wrapper is machine-applicable")
+        val source = "u" + "se std.nogc_sync_mut.io.dir_entry_ops.{directory_" + "remove}\nfn clean(path: text):\n    rt_remove(path)\n"
+        var replacements = 0
+        var applied = ""
+        for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_remove_fix.spl", source):
+            if result.lint.code == "RAW-RT-002" and result.line == 3:
+                match result.lint.easy_fix:
+                    case Some(fix):
+                        for rep in easyfix_replacements(fix):
+                            replacements = replacements + 1
+                            applied = source.slice(0, rep.start) + rep.new_text + source.slice(rep.end)
+                    case nil:
+                        val _ = 0
+        expect(replacements).to_equal(1)
+        expect(applied).to_contain("    directory_remove(path)")
+        expect(applied).to_not_contain("    rt_remove(path)")
+
     it "offers a safe rename only when the canonical wrapper facade is in scope":
         step("Verify: offers a safe rename only when the canonical wrapper facade is in scope")
-        val source = "u" + "se app.io.mod.{process_run}\nfn run():\n    rt_process_run(cmd, args)\n"
+        val source = "u" + "se app.io.mod.{process_" + "run}\nfn run():\n    rt_process_run(cmd, args)\n"
         var replacements = 0
         var applied = ""
         for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_fix.spl", source):
@@ -229,7 +324,7 @@ describe "RAW-RT-002 auto-fix":
 
     it "targets the lexical call rather than an earlier string decoy":
         step("Verify: targets the lexical call rather than an earlier string decoy")
-        val source = "u" + "se app.io.mod.{process_run}\nfn run():\n    sink(\"r" + "t_process_run(x, y)\", rt_process_run(cmd, args))\n"
+        val source = "u" + "se app.io.mod.{process_" + "run}\nfn run():\n    sink(\"r" + "t_process_run(x, y)\", rt_process_run(cmd, args))\n"
         var applied = ""
         for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_decoy_fix.spl", source):
             if result.lint.code == "RAW-RT-002" and result.line == 3:
@@ -259,7 +354,7 @@ describe "RAW-RT-002 auto-fix":
 
     it "recognizes the canonical std.io_runtime selective import":
         step("Verify: recognizes the canonical std.io_runtime selective import")
-        val source = "u" + "se std.io_runtime.{process_run}\nfn run():\n    rt_process_run(cmd, args)\n"
+        val source = "u" + "se std.io_runtime.{process_" + "run}\nfn run():\n    rt_process_run(cmd, args)\n"
         var replacements = 0
         for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_std_fix.spl", source):
             if result.lint.code == "RAW-RT-002" and result.line == 3:

@@ -1,4 +1,8 @@
-use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access, check_raw_rt_access_with_allowlist, raw_rt_provider_allowlist_allows}
+use compiler.semantics.lint.raw_rt_access.{
+    check_raw_rt_access, check_raw_rt_access_with_allowlist,
+    raw_rt_provider_allowlist_allows, raw_rt_wrapper_replacement,
+    raw_rt_wrapper_module, raw_rt_wrapper_binding_is_unshadowed
+}
 
 extern fn rt_exit(code: i32)
 
@@ -22,6 +26,20 @@ require(multiline_import_findings[0].code == "RAW-RT-002")
 require(multiline_import_findings[0].line_num == 2)
 require(multiline_import_findings[0].column == 5)
 
+val exported_import = check_raw_rt_access("export u" + "se runtime.primitive.r" + "t_remove\n", "src/app/f.spl")
+require(exported_import.len() == 1)
+require(exported_import[0].name == "rt_remove")
+val aliased_import = check_raw_rt_access("u" + "se runtime.primitive.r" + "t_remove as delete_path\n", "src/app/f.spl")
+require(aliased_import.len() == 1)
+require(aliased_import[0].name == "rt_remove")
+val parenthesized_import = check_raw_rt_access("u" + "se runtime.primitive (r" + "t_remove as delete_path)\n", "src/app/f.spl")
+require(parenthesized_import.len() == 1)
+require(parenthesized_import[0].name == "rt_remove")
+val multiline_parenthesized = check_raw_rt_access("u" + "se runtime.primitive (\n    r" + "t_remove as delete_path\n)\n", "src/app/f.spl")
+require(multiline_parenthesized.len() == 1)
+require(multiline_parenthesized[0].line_num == 2)
+require(check_raw_rt_access("u" + "se runtime.r" + "t_provider.SafeFacade\n", "src/app/f.spl").len() == 0)
+
 val multiline = "val docs = \"\"\"\nr" + "t_process_run(cmd, args)\n@runtime_intrinsics\n\"\"\"\nfn f(): 1\n"
 require(check_raw_rt_access(multiline, "src/app/f.spl").len() == 0)
 
@@ -30,5 +48,23 @@ require(raw_rt_provider_allowlist_allows("/repo/src/app/provider/x.spl", policy)
 require(raw_rt_provider_allowlist_allows("/repo/src/app/io/file_sffi.spl", policy))
 require(not raw_rt_provider_allowlist_allows("/repo/src/app/providerish/x.spl", policy))
 require(check_raw_rt_access_with_allowlist("fn f(): r" + "t_raw()\n", "src/app/provider/x.spl", policy).len() == 0)
+
+val remove_finding = check_raw_rt_access("fn clean(path: text): r" + "t_remove(path)\n", "src/app/clean.spl")
+require(remove_finding.len() == 1)
+require(remove_finding[0].name == "rt_remove")
+require(remove_finding[0].note.contains("directory_remove"))
+require(remove_finding[0].note.contains("std.nogc_sync_mut.io.dir_entry_ops"))
+require(raw_rt_wrapper_replacement("rt_remove") == "directory_remove")
+require(raw_rt_wrapper_module("rt_remove") == "std.nogc_sync_mut.io.dir_entry_ops")
+val mkdir_finding = check_raw_rt_access("fn make(path: text): r" + "t_mkdir(path)\n", "src/app/make.spl")
+require(mkdir_finding.len() == 1)
+require(mkdir_finding[0].note.contains("directory_create_mode(path, mode)"))
+require(mkdir_finding[0].note.contains("dir_create"))
+require(mkdir_finding[0].note.contains("no automatic edit"))
+require(raw_rt_wrapper_replacement("rt_mkdir") == "")
+val unshadowed = "u" + "se app.io.mod.{process_" + "run}\nfn run(): rt_process_run(cmd, args)\n"
+val shadowed = "u" + "se app.io.mod.{process_" + "run}\nfn run(process_run): rt_process_run(cmd, args)\n"
+require(raw_rt_wrapper_binding_is_unshadowed(unshadowed, "process_run"))
+require(not raw_rt_wrapper_binding_is_unshadowed(shadowed, "process_run"))
 
 rt_exit(0)

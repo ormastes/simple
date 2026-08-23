@@ -26,7 +26,10 @@ use lazy nogc_sync_mut.ui.theme_package.{validate_default_theme_package}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
 use compiler.semantics.lint.param_tag.{check_param_tag}
 use compiler.semantics.lint.module_init_literal.{check_module_init_literal}
-use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access_with_allowlist, raw_rt_lexical_code_lines, raw_rt_wrapper_replacement}
+use compiler.semantics.lint.raw_rt_access.{
+    check_raw_rt_access_with_allowlist, raw_rt_lexical_code_lines,
+    raw_rt_wrapper_replacement, raw_rt_wrapper_binding_is_unshadowed
+}
 use compiler.semantics.lint.silent_default.{check_silent_default}
 use compiler.semantics.lint.dynamic_capability_acquire.{check_dynamic_capability_acquire}
 use std.critical.capability_manifest.{load_critical_mode_config}
@@ -49,17 +52,23 @@ fn _raw_rt_canonical_allowlist() -> text:
         _RAW_RT_ALLOWLIST_LOADED = true
     _RAW_RT_ALLOWLIST
 
-fn _raw_rt_wrapper_is_in_scope(content: text, wrapper: text) -> bool:
+fn _raw_rt_wrapper_is_in_scope(content: text, module_name: text, wrapper: text) -> bool:
     # Auto-fix requires an exact selective import of this symbol. Broad module
     # imports, comments, strings, lookalike module names, and unrelated wrapper
     # symbols are intentionally insufficient evidence for a Safe edit.
-    val modules = ["app.io.mod", "std.io_runtime"]
+    if not raw_rt_wrapper_binding_is_unshadowed(content, wrapper):
+        return false
+    var modules = [module_name]
+    if module_name == "app.io.mod":
+        modules.push("std.io_runtime")
     for raw_line in raw_rt_lexical_code_lines(content):
         val line = raw_line.trim()
         if not line.starts_with("use "):
             continue
-        for module_name in modules:
-            val brace_form = "use {module_name}.{{"
+        for candidate_module in modules:
+            # Build the literal opener without depending on doubled-brace
+            # interpolation escaping.
+            val brace_form = "use " + candidate_module + ".{"
             if line.starts_with(brace_form) and line.ends_with("}"):
                 val body = line.substring(brace_form.len(), line.len() - 1)
                 for item in body.split(","):
@@ -400,12 +409,33 @@ impl Linter:
 
     me check_raw_rt_access_spl(path: String, content: String):
         val findings = check_raw_rt_access_with_allowlist(content, path, _raw_rt_canonical_allowlist())
-        # There is currently one signature-proven mechanical mapping. Resolve
-        # its import evidence once per file, not once per finding.
-        val process_run_fixable = if findings.len() > 0: _raw_rt_wrapper_is_in_scope(content, "process_run") else: false
+        # Resolve import/shadow evidence once per mapped wrapper per file, not
+        # once per finding. This keeps generated violation fixtures linear.
+        var needs_process_run = false
+        var needs_stream_open = false
+        var needs_stream_count = false
+        var needs_stream_entry = false
+        var needs_stream_close = false
+        var needs_directory_remove = false
+        for finding in findings:
+            val wrapper = raw_rt_wrapper_replacement(finding.name)
+            if wrapper == "process_run": needs_process_run = true
+            elif wrapper == "directory_stream_open": needs_stream_open = true
+            elif wrapper == "directory_stream_count": needs_stream_count = true
+            elif wrapper == "directory_stream_entry": needs_stream_entry = true
+            elif wrapper == "directory_stream_close": needs_stream_close = true
+            elif wrapper == "directory_remove": needs_directory_remove = true
+        val process_run_fixable = needs_process_run and _raw_rt_wrapper_is_in_scope(content, "app.io.mod", "process_run")
+        val stream_open_fixable = needs_stream_open and _raw_rt_wrapper_is_in_scope(content, "std.nogc_sync_mut.io.dir_entry_ops", "directory_stream_open")
+        val stream_count_fixable = needs_stream_count and _raw_rt_wrapper_is_in_scope(content, "std.nogc_sync_mut.io.dir_entry_ops", "directory_stream_count")
+        val stream_entry_fixable = needs_stream_entry and _raw_rt_wrapper_is_in_scope(content, "std.nogc_sync_mut.io.dir_entry_ops", "directory_stream_entry")
+        val stream_close_fixable = needs_stream_close and _raw_rt_wrapper_is_in_scope(content, "std.nogc_sync_mut.io.dir_entry_ops", "directory_stream_close")
+        val directory_remove_fixable = needs_directory_remove and _raw_rt_wrapper_is_in_scope(content, "std.nogc_sync_mut.io.dir_entry_ops", "directory_remove")
+        val any_fixable = (process_run_fixable or stream_open_fixable or stream_count_fixable or
+            stream_entry_fixable or stream_close_fixable or directory_remove_fixable)
         var fix_lines: [text] = []
         var fix_line_starts: [i64] = []
-        if process_run_fixable:
+        if any_fixable:
             fix_lines = content.split("\n")
             var next_start = 0
             for fix_line in fix_lines:
@@ -415,7 +445,13 @@ impl Linter:
             var lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
                 .with_fix(finding.note)
             val wrapper = raw_rt_wrapper_replacement(finding.name)
-            if finding.code == "RAW-RT-002" and wrapper == "process_run" and process_run_fixable:
+            val wrapper_fixable = ((wrapper == "process_run" and process_run_fixable) or
+                (wrapper == "directory_stream_open" and stream_open_fixable) or
+                (wrapper == "directory_stream_count" and stream_count_fixable) or
+                (wrapper == "directory_stream_entry" and stream_entry_fixable) or
+                (wrapper == "directory_stream_close" and stream_close_fixable) or
+                (wrapper == "directory_remove" and directory_remove_fixable))
+            if finding.code == "RAW-RT-002" and wrapper_fixable:
                 val line_idx = finding.line_num - 1
                 if line_idx >= 0 and line_idx < fix_lines.len():
                     val source_line = fix_lines[line_idx]
