@@ -1,0 +1,86 @@
+"""
+## Purpose and audience
+Purpose: Verify interpreter assignment through an indexed field receiver.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-COMPILER-INTERPRETER-001
+doc/01_research/local/REQ-COMPILER-INTERPRETER-001.md
+doc/03_plan/sys_test/REQ-COMPILER-INTERPRETER-001.md
+doc/04_architecture/REQ-COMPILER-INTERPRETER-001.md
+doc/05_design/REQ-COMPILER-INTERPRETER-001.md
+"""
+# @req: REQ-COMPILER-INTERPRETER-001
+
+use std.spec
+
+# Generalization spec for the interpreter's "complex indexed field receiver"
+# gap.
+#
+# Bug: doc/08_tracking/bug/pool_linked_list_push_fails_complex_indexed_field_receiver_2026-08-07.md
+# Fix: src/compiler_rust/compiler/src/interpreter/node_exec.rs
+#      `exec_assignment`'s field-target branch hand-wrote exactly ONE indexed
+#      shape — `ident[i].field = v` — and rejected every other indexed receiver
+#      with "invalid assignment: complex indexed field receiver is not
+#      supported", even though `interpreter/place.rs` already models arbitrary
+#      projection chains and the sibling index-target branch already routed
+#      through it.
+#
+# The bug was reported for `self.nodes[idx].next = v` (PoolLinkedList.push_back)
+# but the hole covers a CLASS of lvalues, so this spec pins the class: a field
+# under an indexed FIELD, a field under an index-of-index, and — critically —
+# that copy-on-write value semantics are preserved rather than bypassed.
+
+class Node:
+    next: i64
+    value: i64
+
+class Pool:
+    nodes: [Node]
+
+class Grid:
+    rows: [[Node]]
+
+describe "assignment through an indexed field receiver":
+
+    it "writes a field through `self.nodes[i].f` — the reported shape":
+        val pool = Pool(nodes: [Node(next: -1, value: 0), Node(next: -1, value: 0)])
+        pool.nodes[1].next = 7
+        pool.nodes[1].value = 42
+        expect(pool.nodes[1].next).to_equal(7)
+        expect(pool.nodes[1].value).to_equal(42)
+
+    it "leaves sibling elements untouched":
+        val pool = Pool(nodes: [Node(next: -1, value: 0), Node(next: -1, value: 0)])
+        pool.nodes[1].next = 7
+        expect(pool.nodes[0].next).to_equal(-1)
+        expect(pool.nodes[0].value).to_equal(0)
+
+    it "writes a field through an index-of-index receiver":
+        val grid = Grid(rows: [[Node(next: 0, value: 0), Node(next: 0, value: 0)]])
+        grid.rows[0][1].value = 5
+        expect(grid.rows[0][1].value).to_equal(5)
+        expect(grid.rows[0][0].value).to_equal(0)
+
+    it "preserves copy-on-write value semantics for an aliased intermediate":
+        val pool = Pool(nodes: [Node(next: -1, value: 0)])
+        val alias = pool.nodes
+        pool.nodes[0].value = 99
+        expect(pool.nodes[0].value).to_equal(99)
+        expect(alias[0].value).to_equal(0)
+
+    it "supports the real PoolLinkedList link-fixup loop shape":
+        val pool = Pool(nodes: [Node(next: -1, value: 10), Node(next: -1, value: 20), Node(next: -1, value: 30)])
+        var i = 0
+        while i < 2:
+            pool.nodes[i].next = i + 1
+            i = i + 1
+        expect(pool.nodes[0].next).to_equal(1)
+        expect(pool.nodes[1].next).to_equal(2)
+        expect(pool.nodes[2].next).to_equal(-1)

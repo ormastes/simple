@@ -1030,6 +1030,15 @@ pub(crate) fn exec_assignment(
                         }
                     }
                 } else {
+                    // Not a local array binding (dict-rooted, module global,
+                    // class instance, ...). It may still be a writable place.
+                    if let Some(place) =
+                        super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
+                    {
+                        if super::place::write_place(env, &place, value) {
+                            return Ok(Control::Next);
+                        }
+                    }
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_ASSIGNMENT)
                         .with_help("indexed field assignment requires an array identifier");
@@ -1039,11 +1048,25 @@ pub(crate) fn exec_assignment(
                     ))
                 }
             } else {
+                // The indexed receiver is itself a projection (`self.rows[i].f = v`,
+                // `a.b[i].c = v`, `grid[i][j].c = v`). These are ordinary places;
+                // `place::resolve_place` + `write_place` walk an arbitrary
+                // projection chain with `Arc::make_mut`, preserving the COW
+                // value-semantics contract. Rejecting them forced a
+                // read-modify-write workaround whose intermediate binding
+                // aliases the inner container, making every write O(n).
+                if let Some(place) =
+                    super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
+                {
+                    if super::place::write_place(env, &place, value) {
+                        return Ok(Control::Next);
+                    }
+                }
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_ASSIGNMENT)
-                    .with_help("indexed field assignment requires a simple array identifier");
+                    .with_help("indexed field assignment requires a variable followed by field/index projections");
                 Err(CompileError::semantic_with_context(
-                    "invalid assignment: complex indexed field receiver is not supported",
+                    "invalid assignment: indexed field assignment target is not a writable place",
                     ctx,
                 ))
             }
@@ -3123,5 +3146,153 @@ mod nested_assignment_target_tests {
         );
         let err = exec(&assign(target, Expr::Integer(1)), &mut env);
         assert!(err.is_err(), "a call-result index target is not a place and must be an error");
+    }
+}
+
+/// Regression: FIELD assignment whose receiver is an INDEX whose own receiver
+/// is not a bare identifier — `self.rows[i].f = v`, `a.b[i].c = v`,
+/// `grid[i][j].c = v`. `exec_assignment`'s field-target branch hand-wrote only
+/// `ident[i].field = v` and rejected everything else outright with
+/// "invalid assignment: complex indexed field receiver is not supported",
+/// even though `place::resolve_place` already models exactly these chains.
+/// One seed gap, six unrelated specs across five areas.
+#[cfg(test)]
+mod indexed_field_receiver_tests {
+    use super::*;
+    use simple_parser::Span;
+
+    fn obj(class: &str, fields: Vec<(&str, Value)>) -> Value {
+        let mut map: HashMap<String, Value> = HashMap::new();
+        for (k, v) in fields {
+            map.insert(k.to_string(), v);
+        }
+        Value::Object { class: class.to_string(), fields: Arc::new(map) }
+    }
+    fn ident(name: &str) -> Expr {
+        Expr::Identifier(name.to_string())
+    }
+    fn field(recv: Expr, name: &str) -> Expr {
+        Expr::FieldAccess { receiver: Box::new(recv), field: name.to_string() }
+    }
+    fn index(recv: Expr, i: Expr) -> Expr {
+        Expr::Index { receiver: Box::new(recv), index: Box::new(i) }
+    }
+    fn exec(target: Expr, value: Expr, env: &mut Env) -> Result<Control, CompileError> {
+        let stmt = simple_parser::ast::AssignmentStmt {
+            span: Span::new(0, 0, 0, 0),
+            target,
+            op: AssignOp::Assign,
+            value,
+        };
+        exec_assignment(
+            &stmt,
+            env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+    }
+    fn read(env: &Env, root: &str, path: &[&str]) -> Value {
+        let mut cur = env.get(root).expect("root").clone();
+        for step in path {
+            cur = match (&cur, step.parse::<usize>()) {
+                (Value::Array(items), Ok(i)) => items[i].clone(),
+                (Value::Object { fields, .. }, _) => fields.get(*step).expect("field").clone(),
+                (Value::Dict(entries), _) => entries.get(*step).expect("key").clone(),
+                (other, _) => panic!("cannot project {step} out of {:?}", other),
+            };
+        }
+        cur
+    }
+
+    /// `s.rows[1].n = 7` — the exact shape the rejected message named.
+    #[test]
+    fn field_under_indexed_field_assignment_lands() {
+        let mut env = Env::new();
+        let mk = |n: i64| obj("Row", vec![("n", Value::Int(n))]);
+        env.insert(
+            "s".to_string(),
+            obj("S", vec![("rows", Value::array(vec![mk(0), mk(0)]))]),
+        );
+        exec(
+            field(index(field(ident("s"), "rows"), Expr::Integer(1)), "n"),
+            Expr::Integer(7),
+            &mut env,
+        )
+        .expect("`s.rows[1].n = 7` must be accepted");
+        assert_eq!(read(&env, "s", &["rows", "1", "n"]), Value::Int(7));
+        assert_eq!(
+            read(&env, "s", &["rows", "0", "n"]),
+            Value::Int(0),
+            "the sibling element must be untouched"
+        );
+    }
+
+    /// `grid[0][1].n = 3` — index-of-index under a field write.
+    #[test]
+    fn field_under_index_of_index_assignment_lands() {
+        let mut env = Env::new();
+        let mk = |n: i64| obj("Cell", vec![("n", Value::Int(n))]);
+        env.insert(
+            "grid".to_string(),
+            Value::array(vec![Value::array(vec![mk(0), mk(0)])]),
+        );
+        exec(
+            field(index(index(ident("grid"), Expr::Integer(0)), Expr::Integer(1)), "n"),
+            Expr::Integer(3),
+            &mut env,
+        )
+        .expect("`grid[0][1].n = 3` must be accepted");
+        assert_eq!(read(&env, "grid", &["0", "1", "n"]), Value::Int(3));
+    }
+
+    /// Value semantics: an alias of the intermediate array must NOT observe the
+    /// nested write — copy-on-write is preserved, not bypassed.
+    #[test]
+    fn aliased_intermediate_still_copies_on_write() {
+        let mut env = Env::new();
+        let mk = |n: i64| obj("Row", vec![("n", Value::Int(n))]);
+        env.insert(
+            "s".to_string(),
+            obj("S", vec![("rows", Value::array(vec![mk(0)]))]),
+        );
+        let alias = read(&env, "s", &["rows"]);
+        env.insert("alias".to_string(), alias);
+        exec(
+            field(index(field(ident("s"), "rows"), Expr::Integer(0)), "n"),
+            Expr::Integer(42),
+            &mut env,
+        )
+        .expect("nested assignment must be accepted");
+        assert_eq!(read(&env, "s", &["rows", "0", "n"]), Value::Int(42));
+        assert_eq!(
+            read(&env, "alias", &["0", "n"]),
+            Value::Int(0),
+            "the aliased intermediate must not observe the write — value semantics"
+        );
+    }
+
+    /// A genuine non-place receiver must still be a loud error, never a
+    /// silently dropped write.
+    #[test]
+    fn non_place_indexed_field_target_is_still_rejected() {
+        let mut env = Env::new();
+        let target = field(
+            index(
+                Expr::MethodCall {
+                    receiver: Box::new(ident("nothing")),
+                    method: "f".to_string(),
+                    args: vec![],
+                    generic_args: vec![],
+                },
+                Expr::Integer(0),
+            ),
+            "n",
+        );
+        assert!(
+            exec(target, Expr::Integer(1), &mut env).is_err(),
+            "a call-result indexed field target is not a place and must be an error"
+        );
     }
 }

@@ -3,10 +3,38 @@
 **Filed:** 2026-08-07
 **Severity:** high — shipped, exported code is non-functional; masked by a
 text-scan-only spec
-**Status:** LIBRARY BUG FIXED (2026-08-07, level b — restructured
-`PoolLinkedList`). The underlying language limitation stays OPEN — it could
-not be fixed at the interpreter level from `.spl` source; see "Root-cause
-finding" below.
+**Status:** RESOLVED (2026-08-23). Library workaround landed 2026-08-07
+(level b — restructured `PoolLinkedList`); the underlying interpreter
+limitation is now fixed as well, see "Interpreter fix (2026-08-23)".
+
+## Interpreter fix (2026-08-23)
+
+`exec_assignment` (`src/compiler_rust/compiler/src/interpreter/node_exec.rs`)
+hand-wrote exactly ONE indexed field-assignment shape — `ident[i].field = v` —
+and rejected every other indexed receiver outright with
+`invalid assignment: complex indexed field receiver is not supported`.
+
+This was never a missing capability: `src/compiler_rust/compiler/src/interpreter/place.rs`
+(`resolve_place` + `write_place`) already walks an arbitrary field/index
+projection chain with `Arc::make_mut`, and the SIBLING index-target branch of
+the same function already routed through it. Only the field-target branch was
+left on the hand-written cascade. The fix routes its two dead-end error arms
+through the same place machinery.
+
+Semantics are unchanged: a uniquely-owned container mutates in place, a
+genuinely aliased intermediate still copies first (copy-on-write value
+semantics), and a receiver that is not a place (a call result, a literal) is
+still a loud error rather than a silently dropped write. All four properties
+are pinned by Rust tests in `interpreter/node_exec.rs`
+(`mod indexed_field_receiver_tests`) and by the language-level spec
+`test/01_unit/compiler/interpreter/indexed_field_receiver_assignment_spec.spl`,
+both of which FAIL on the pre-fix tree.
+
+Note the performance dimension: the workaround the rejection forced is a
+read-modify-write round trip (`var row = self.rows[i]; row.f = v;
+self.rows[i] = row`) whose intermediate binding ALIASES the inner container,
+so the first write deep-copies it — O(n) per outer operation. That is the
+COW-alias hot-path class in `.claude/rules/code-style.md`.
 
 ## Fix (2026-08-07)
 
