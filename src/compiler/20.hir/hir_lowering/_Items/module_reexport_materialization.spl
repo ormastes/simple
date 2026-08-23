@@ -1074,18 +1074,36 @@ impl HirLowering:
         hir_phase_profile_add(HIR_PROF_RIS_METHODS, started)
         self.imported_type_methods_in_progress_pop(reentry_key)
 
-    me imported_impl_positions(imported_mod: ModuleSurface, imported_name: text) -> [i64]:
-        """IMPLIDX: positions in `imported_mod.impls` whose implemented type is
-        `imported_name`, in declaration order. Built once per frozen surface
-        (`generation physical_index`) by a single sweep; every later query is
-        a Dict probe. Keyed on the frozen registry only, so the answer is the
-        same for every importer and is never cleared per module."""
+    me ensure_impl_index(imported_mod: ModuleSurface) -> text:
+        """IMPLIDX: build, once per frozen surface, the three projections the
+        method-registration loop reads, and return the `{generation}
+        {physical_index}` key every probe is prefixed with.
+
+        Returns the KEY, not an array. The previous shape returned `[i64]` and
+        so allocated -- on EVERY call -- either a copy of the positions row or,
+        for the overwhelmingly common type-with-no-impls query, a fresh empty
+        array (`val none: [i64] = []`). Stage-3 `sample` on 2026-08-23 put ~100%
+        of hits in `rt_alloc -> rt_transient_raw_register` reached from exactly
+        that statement; the transient scope stays ACTIVE across the whole module
+        lowering, so each of those allocations was retained, not reclaimed.
+        Handing back the key lets the caller answer "has any impl at all?" with
+        a pure `contains_key` probe and allocate nothing on the empty path.
+
+        IMPLROWCACHE: the same sweep also records, per impl position, the impl's
+        method NAMES and (only when `has_trait_`) its trait name, so the hot
+        loop never has to materialize a `ModuleSurfaceImpl` row. All three dicts
+        are pure functions of the frozen registry, so they are shared across
+        importers and never cleared per module."""
         val surface_key = "{self.module_surfaces.generation} {imported_mod.physical_index}"
         if not self.impl_index_built.contains_key(surface_key):
             self.impl_index_build_count = self.impl_index_build_count + 1
             var position = 0
             while position < imported_mod.impls.len():
-                val implemented = parser_type_kind_named_name(imported_mod.impls[position].type_.kind)
+                # The ONE place a whole impl row is read. Bounded by the impls
+                # in the surface, once per surface, instead of once per row per
+                # registration call.
+                val impl_row = imported_mod.impls[position]
+                val implemented = parser_type_kind_named_name(impl_row.type_.kind)
                 val rows_key = surface_key + " " + implemented
                 if self.impl_index_positions.contains_key(rows_key):
                     # One-time build over a few rows per type: the temporary
@@ -1096,15 +1114,30 @@ impl HirLowering:
                 else:
                     val first_rows: [i64] = [position]
                     self.impl_index_positions[rows_key] = first_rows
+                val row_key = surface_key + " #" + position.to_text()
+                self.impl_method_name_index[row_key] = impl_row.methods.keys()
+                if impl_row.has_trait_:
+                    self.impl_trait_name_index[row_key] = parser_type_kind_named_name(impl_row.trait_.kind)
                 position = position + 1
             self.impl_index_built[surface_key] = true
-        val wanted_key = surface_key + " " + imported_name
-        if self.impl_index_positions.contains_key(wanted_key):
-            return self.impl_index_positions[wanted_key]
-        val none: [i64] = []
-        none
+        surface_key
 
     me register_imported_type_methods_inner(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span, materialize_enum: bool):
+        # IMPLIDX: visit only the impls that implement `imported_name`, in
+        # declaration order, instead of sweeping (and copying) every impl row
+        # of the declaring module per registration.
+        #
+        # ORDER MATTERS: the zero-impl answer is the dominant one, and nothing
+        # below the early return is needed to produce it. Computing the owner
+        # module and the symbol prefix first cost four text allocations per
+        # call on a path that then did no work at all.
+        val surface_key = self.ensure_impl_index(imported_mod)
+        val wanted_key = surface_key + " " + imported_name
+        # Zero-impl types are the common case, and the previous shape allocated
+        # a fresh empty `[i64]` for every one of them. Answer with a pure probe.
+        if not self.impl_index_positions.contains_key(wanted_key):
+            return
+        val impl_positions = self.impl_index_positions[wanted_key]
         var local_owner_module: text = imported_mod_name
         var local_owner_defining_module: text? = nil
         if val owner_symbol = self.symbols.get_symbol(local_owner):
@@ -1117,26 +1150,29 @@ impl HirLowering:
         # fragments are loop-invariant for the whole call, so interpolate them
         # once here instead of once per method per impl row.
         val symbol_name_prefix = "{owner_module}.{imported_name}::"
-        # IMPLIDX: visit only the impls that implement `imported_name`, in
-        # declaration order, instead of sweeping (and copying) every impl row
-        # of the declaring module per registration.
-        val impl_positions = self.imported_impl_positions(imported_mod, imported_name)
         var impl_cursor = 0
         while impl_cursor < impl_positions.len():
-            val impl_ = imported_mod.impls[impl_positions[impl_cursor]]
+            val impl_position = impl_positions[impl_cursor]
             impl_cursor = impl_cursor + 1
             self.impl_rows_visited = self.impl_rows_visited + 1
+            val impl_row_key = surface_key + " #" + impl_position.to_text()
             # Hoist the key projection: `.keys()` materializes the whole
             # collection, and this is also the probe point for the retained
             # `ModuleSurfaceImpl.methods` Dict carrier -- the one
             # aggregate-valued Dict that crosses the staged transient teardown.
             # Measured 2026-08-23: stage 3 spends unbounded time in this loop.
-            val impl_method_names = impl_.methods.keys()
+            # IMPLROWCACHE: read the method NAMES out of the per-surface index
+            # instead of `imported_mod.impls[pos]`, which deep-copies the whole
+            # `ModuleSurfaceImpl` -- signatures Dict included -- per row per
+            # call. The row itself is now materialized only in the
+            # symbol-missing branch below, which in the steady state is never
+            # taken.
+            val impl_method_names = self.impl_method_name_index[impl_row_key]
             # Level-gated per .claude/rules/code-style.md, default OFF.
             # Flip HIR_REEXPORT_IMPL_TRACE below to re-enable.
             if HIR_REEXPORT_IMPL_TRACE and _hir_reexport_impl_probe_budget > 0:
                 _hir_reexport_impl_probe_budget = _hir_reexport_impl_probe_budget - 1
-                print "[reexport-probe] owner={imported_name} module={imported_mod_name} impl_rows={impl_positions.len()} methods_dict_len={impl_.methods.len()} methods_keys={impl_method_names.len()} visited={self.impl_rows_visited}"
+                print "[reexport-probe] owner={imported_name} module={imported_mod_name} impl_rows={impl_positions.len()} methods_keys={impl_method_names.len()} visited={self.impl_rows_visited}"
             for method_name in impl_method_names:
                 # SYMNAMEHOIST (2026-08-23): build the invariant prefix ONCE
                 # per call instead of re-interpolating three fragments per
@@ -1155,6 +1191,13 @@ impl HirLowering:
                 # module ends.
                 val symbol_name = symbol_name_prefix + method_name
                 if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
+                    # Deferred into the cold branch on purpose: this is the only
+                    # statement that materializes a whole `ModuleSurfaceImpl`
+                    # row (its `Dict<text, ModuleSurfaceCallable>` included),
+                    # and in the steady state it never executes. Kept as two
+                    # statements rather than one chained index expression --
+                    # the two-step form is the shape this file has always used.
+                    val impl_ = imported_mod.impls[impl_position]
                     val method = impl_.methods[method_name]
                     val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
                     self.materialize_imported_callable_type_dependencies(imported_mod, imported_mod_name, method, import_span, materialize_enum)
@@ -1163,8 +1206,11 @@ impl HirLowering:
                         method, imported_mod.module_name, Some(local_owner))
                     hir_phase_profile_add(HIR_PROF_RIS_SIGTYPE, sig_started)
                     self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
-            if impl_.has_trait_:
-                val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
+            # IMPLROWCACHE: `contains_key` IS the `has_trait_` test -- the index
+            # stores a row only for impls that carry a trait -- so a trait whose
+            # name projects to "" is still distinguished from "no trait".
+            if self.impl_trait_name_index.contains_key(impl_row_key):
+                val trait_name = self.impl_trait_name_index[impl_row_key]
                 var trait_module = imported_mod
                 var trait_module_found = true
                 var trait_source_name = trait_name

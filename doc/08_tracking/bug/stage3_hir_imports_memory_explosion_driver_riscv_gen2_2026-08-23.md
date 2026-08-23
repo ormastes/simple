@@ -447,3 +447,92 @@ is carried verbatim, so the OWNED bit and size survive.
 UNVERIFIED: the real 34 -> 38 GB explosion. Evidence here is C-level only; no
 bootstrap was run. Three `rt_mem_guard_*` selfchecks trap at rc=133 and are
 PRE-EXISTING — they reproduce identically on a `git archive HEAD` export.
+
+
+---
+
+## RUN 7 — RESOLVED. The allocation storm is fixed: ~60x, and 610 ms where it once ran 31 minutes
+
+The dominant cost was never the bytes; it was the ALLOCATION COUNT, which is what
+`rt_transient_raw_register` hotness actually measures.
+
+**Site 1, dominant by count** — `imported_impl_positions`, old
+`_Items/module_reexport_materialization.spl:1101-1105`. Every call allocated: a
+copy of the `[i64]` row on a hit, or a **fresh empty array** (`val none: [i64] = []`,
+old `:1104`) on a MISS. Types with zero impl rows are the common query, so the
+sampled offset was literally the empty-array allocation. The profile pointed
+exactly here.
+
+**Site 2, dominant by bytes** — `val impl_ = imported_mod.impls[...]`, old `:1126`,
+deep-clones a whole `ModuleSurfaceImpl` INCLUDING its
+`Dict<text, ModuleSurfaceCallable>` of full signatures, once per impl row per
+call, repeated many times per importer (re-entrancy-guarded, not memoized).
+
+**Site 3** — `impl_.methods.keys()` materialized per impl row per call; subsumed
+by the site-2 fix.
+
+### Fix
+
+`imported_impl_positions` becomes `ensure_impl_index(imported_mod) -> text`,
+returning the surface KEY rather than an array, so the caller answers "any
+impls?" with a pure `contains_key` and **allocates nothing on the empty path**.
+IMPLROWCACHE extends the existing one-sweep-per-surface index to record, per impl
+position, the impl's method names and (only when `has_trait_`) its trait name;
+the hot loop reads those instead of materializing a row, and the whole row is
+materialized only in the cold symbol-missing branch. `contains_key` is the
+`has_trait_` test, so a trait projecting to `""` stays distinguishable from "no
+trait". Both dicts are pure functions of the frozen registry, exactly like
+`impl_index_positions`.
+
+### A memo that was tried and REMOVED — recorded so nobody re-adds it
+
+A "proven no-op" completion memo (probe-rechecked, importer-scoped) made things
+strictly WORSE: with it, stage 3 crashed at HIR file 40/692; with it gated off,
+157/692. It also silently suppressed the 27 `driver_riscv_gen2_product` errors
+and then SEGV'd — under-registration. Fully removed; `grep` for its identifiers
+returns zero hits.
+
+### Measured
+
+| run | footprint peak |
+|---|---|
+| RUN 5 baseline | 34.3 -> 35.8 -> 36.9 -> 38.1 GB, +0.45 GB/min, SIGTERM'd |
+| post-fix | 369.4 -> 449.4 -> 473.3 -> **600.3 MB** |
+
+**~60x reduction, and the monotone growth is gone.**
+
+`backend/interpreter.spl` — the module that ran away for 31 minutes — now:
+
+```
++231923ms phase3:hir:file:start src/compiler/backend/backend/interpreter.spl
+          imports:start / imports:done / declare:start / declare:done
+[hir-fatal-count] path=.../interpreter.spl count=2 shown=2  (field `symbols` is not visible)
++232533ms phase3:hir:file:start src/compiler/backend/backend/sdn.spl   dt=610ms
+```
+
+**610 ms.** Stage 3 continued to HIR 104/692, and 157/692 in the best run.
+Stage 2 remains green: `Build complete: 750 compiled, 0 cached, 0 failed`,
+`Time: 619.3s compile + 10.1s link`, `Stage 2 admitted`.
+
+## NEXT BLOCKER (new, profiled, NOT fixed) — SIGSEGV in `lower_hir_block`
+
+Stage 3 now SIGSEGVs in `HirLowering.lower_hir_block`
+(`_Expressions/block_and_asm_lowering`), always just after
+`phase3:hir:declare:done` — i.e. in BODY lowering — at tiny offsets off a
+nil/garbage base: `0x298`, `0x370`, `0x698`, `0x18` across runs. Crash DEPTH
+varies run to run on the SAME binary (phase 2, file 9, 40, 104, 157), so it is
+**heap-state-dependent, not deterministic logic**.
+
+**Attribution is UNRESOLVED, and that is stated rather than guessed.** The tree
+used for those runs carried several agents' uncommitted edits, all present in
+every binary built: `hir_symbol_table_methods.spl` (+-35), `hir_types.spl` (+-7),
+`module_surface_registry*.spl`, `runtime_memory.c` (+-46), `runtime_native.c`
+(+-44). One attempt crashed in `flat_ast_to_module` during PHASE 2 with a wild
+pointer `0x20f0010f3a884ba8`, before any HIR lowering runs at all — the reexport
+changes have no mechanism to cause that, but in-flight `runtime_memory.c` work
+does. **The two unverified read-side CoW edits have since been reverted out of
+the tree to remove that confound; the runtime table change is landed and is the
+prime remaining suspect to isolate.**
+
+Stage 4 and Stage 5/MCP were not reached: there is no admitted stage-3 artifact
+while stage 3 SIGSEGVs. `--no-mcp` was NOT passed.
