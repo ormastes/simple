@@ -175,8 +175,24 @@ bool rt_dir_remove_all_cpath(const char* path) {
  * File Locking
  * ---------------------------------------------------------------- */
 
-int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
-    if (!path) return -1;
+/* ABI corrected 2026-08-23: a Simple `text` argument is lowered by codegen to
+ * TWO arguments (rt_string_data, rt_string_len) -- verified by objdump -dr on
+ * the emitted call site. The old `const char* path` / `void* addr` shapes here
+ * matched no caller and no declaration, and none of these symbols had a
+ * definition in any ARCHIVE-MEMBER translation unit (this header is included
+ * only by runtime.c, which is deliberately not an archive member), so every
+ * one of them linked as a NULL GOT slot. */
+static int rt_unix_text_to_path(const uint8_t* ptr, uint64_t len, char* buf, size_t buf_size) {
+    if (!ptr && len != 0) return 0;
+    if (len >= (uint64_t)buf_size) return 0;
+    if (len != 0) memcpy(buf, ptr, (size_t)len);
+    buf[(size_t)len] = '\0';
+    return 1;
+}
+
+int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
+    char path[4096];
+    if (!rt_unix_text_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
 
     int fd = open(path, O_RDWR | O_CREAT, 0644);
     if (fd < 0) return -1;
@@ -301,30 +317,32 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
  * Memory-Mapped File I/O
  * ---------------------------------------------------------------- */
 
-void* rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly) {
-    if (!path || size <= 0 || offset < 0) return NULL;
+int64_t rt_mmap(const uint8_t* path_ptr, uint64_t path_len, int64_t size, int64_t offset, int64_t readonly) {
+    char path[4096];
+    if (!rt_unix_text_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    if (size <= 0 || offset < 0) return 0;
 
     int prot = readonly != 0 ? PROT_READ : (PROT_READ | PROT_WRITE);
     int flags = MAP_SHARED;
     int open_flags = readonly != 0 ? O_RDONLY : O_RDWR;
 
     int fd = open(path, open_flags);
-    if (fd < 0) return NULL;
+    if (fd < 0) return 0;
 
     void* addr = mmap(NULL, (size_t)size, prot, flags, fd, (off_t)offset);
     close(fd);
 
-    if (addr == MAP_FAILED) return NULL;
-    return addr;
+    if (addr == MAP_FAILED) return 0;
+    return (int64_t)(uintptr_t)addr;
 }
 
-bool rt_munmap(void* addr, int64_t size) {
-    if (!addr || size <= 0) return false;
-    return munmap(addr, (size_t)size) == 0;
+bool rt_munmap(int64_t addr, int64_t size) {
+    if (addr == 0 || size <= 0) return false;
+    return munmap((void*)(uintptr_t)addr, (size_t)size) == 0;
 }
 
-bool rt_madvise(void* addr, int64_t size, int64_t advice) {
-    if (!addr || size <= 0) return false;
+bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
+    if (addr == 0 || size <= 0) return false;
 
     /* Convert advice codes: 0=NORMAL, 1=RANDOM, 2=SEQUENTIAL, 3=WILLNEED, 4=DONTNEED */
     int posix_advice;
@@ -337,12 +355,12 @@ bool rt_madvise(void* addr, int64_t size, int64_t advice) {
         default: return false;
     }
 
-    return madvise(addr, (size_t)size, posix_advice) == 0;
+    return madvise((void*)(uintptr_t)addr, (size_t)size, posix_advice) == 0;
 }
 
-bool rt_msync(void* addr, int64_t size) {
+bool rt_msync(int64_t addr, int64_t size) {
     if (!addr || size <= 0) return false;
-    return msync(addr, (size_t)size, MS_SYNC) == 0;
+    return msync((void*)(uintptr_t)addr, (size_t)size, MS_SYNC) == 0;
 }
 
 /* ----------------------------------------------------------------
