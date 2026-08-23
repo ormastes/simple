@@ -1,0 +1,295 @@
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl 55%
+"""
+# AST -> HIR construct coverage census
+
+**Category:** Compiler / completeness proofs
+**Plan:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md (section 27)
+**Matrix:** doc/09_report/hir_construct_coverage_matrix_2026-08-23.md
+
+## Purpose
+
+`spec/compiler_schema/transitions/` carries tables for `flat_* -> ast_*` and
+`hir_* -> mir_*`, but there is NO table for the AST -> HIR boundary. That is the
+one un-tabulated hop in the pipeline, and it is exactly where this session's
+stage1 failures lived (hardcoded field visibility, facade-hop re-export
+materialization, type-alias resolution gaps, `unresolved type: HirModule`).
+
+This spec is the missing census. For each surface construct it runs the REAL
+lowering path -- `parse_full_frontend` -> `hirlowering_for_module` ->
+`lower_module` -> `walk_hir_*` -- and pins the HIR node kind actually produced.
+
+Each row is discriminating: it names the kind the real lowering emits today, so
+neutering or rewriting the responsible arm changes the emitted kind and turns
+the row red rather than drifting silently.
+
+## Scope
+
+Observed behaviour, not intended behaviour. Where the emitted kind is NOT the
+registry variant of the same name (e.g. a char literal emits `StringLit`, a
+struct literal emits `Call`), the row pins the observed kind and the matrix doc
+records the registry variant as NEVER PRODUCED. Defects found this way are filed
+separately and get their own red specs; this file stays green so that a change
+in behaviour is what makes it red.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.ParserModule
+use compiler.hir.hir_types.HirModule
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_block, walk_hir_type, hir_walk_expr_kind_name, hir_walk_stmt_kind_name, hir_walk_type_kind_name, hir_walk_pattern_kind_name}
+
+fn collect(node: HirWalkNode, acc: [text]) -> [text]:
+    """Tag every visited HIR node with its layer and variant name."""
+    var out = acc
+    match node:
+        case Expr(e): out = out.push("E:" + hir_walk_expr_kind_name(e))
+        case Stmt(s): out = out.push("S:" + hir_walk_stmt_kind_name(s))
+        case Type_(t): out = out.push("T:" + hir_walk_type_kind_name(t))
+        case Pattern(p): out = out.push("P:" + hir_walk_pattern_kind_name(p))
+    out
+
+fn kinds_of(source: text) -> [text]:
+    """Lower `source` through the real HIR lowering and list every node kind."""
+    val log = Logger(level: 0)
+    val parsed = parse_full_frontend(source, "src/probe/mod.spl", "probe.mod", log)
+    var modules: Dict<text, ParserModule> = {}
+    val sr = module_surfaces_from_modules(modules, [])
+    if sr.is_err():
+        return ["surface error: " + sr.unwrap_err()]
+    var lowering = hirlowering_for_module("src/probe/mod.spl", sr.unwrap())
+    val hm: HirModule = lowering.lower_module(parsed)
+    var acc: [text] = []
+    for fnsym in hm.functions.keys():
+        val fdecl = hm.functions[fnsym]
+        for prm in fdecl.params:
+            acc = walk_hir_type(prm.type_, acc, collect)
+        acc = walk_hir_type(fdecl.return_type, acc, collect)
+        acc = walk_hir_block(fdecl.body, acc, collect)
+    acc
+
+fn emits(source: text, wanted: text) -> bool:
+    """True when lowering `source` produces at least one node of kind `wanted`."""
+    for k in kinds_of(source):
+        if k == wanted:
+            return true
+    false
+
+describe "AST -> HIR construct coverage census":
+    it "an integer literal lowers to IntLit":
+        expect(emits("fn f() -> i64:\n    1", "E:IntLit")).to_be(true)  # construct: HirExprKind.IntLit
+
+    it "a float literal lowers to FloatLit":
+        expect(emits("fn f() -> f64:\n    1.5", "E:FloatLit")).to_be(true)  # construct: HirExprKind.FloatLit
+
+    it "a string literal lowers to StringLit":
+        expect(emits("fn f() -> text:\n    \"a\"", "E:StringLit")).to_be(true)  # construct: HirExprKind.StringLit
+
+    it "a bool literal lowers to BoolLit":
+        expect(emits("fn f() -> bool:\n    true", "E:BoolLit")).to_be(true)  # construct: HirExprKind.BoolLit
+
+    it "nil lowers to NilLit":
+        expect(emits("fn f() -> i64?:\n    nil", "E:NilLit")).to_be(true)  # construct: HirExprKind.NilLit
+
+    it "an array literal lowers to ArrayLit":
+        expect(emits("fn f() -> [i64]:\n    [1, 2]", "E:ArrayLit")).to_be(true)  # construct: HirExprKind.ArrayLit
+
+    it "a repeat array literal lowers to ArrayRepeat":
+        expect(emits("fn f() -> [i64]:\n    [0; 4]", "E:ArrayRepeat")).to_be(true)  # construct: HirExprKind.ArrayRepeat
+
+    it "a tuple literal lowers to TupleLit":
+        expect(emits("fn f() -> (i64, i64):\n    (1, 2)", "E:TupleLit")).to_be(true)  # construct: HirExprKind.TupleLit
+
+    it "a dict literal lowers to DictLit":
+        expect(emits("fn f() -> Dict<text, i64>:\n    {\"a\": 1}", "E:DictLit")).to_be(true)  # construct: HirExprKind.DictLit
+
+    it "a char literal lowers to StringLit; HirExprKind.CharLit is never produced":
+        expect(emits("fn f() -> char:\n    'a'", "E:StringLit")).to_be(true)  # construct: char literal emits StringLit not CharLit
+
+    it "a local variable read lowers to NamedVar":
+        expect(emits("fn f() -> i64:\n    val x = 1\n    x", "E:NamedVar")).to_be(true)  # construct: HirExprKind.NamedVar
+
+    it "an index read lowers to Index":
+        expect(emits("fn f(a: [i64]) -> i64:\n    a[0]", "E:Index")).to_be(true)  # construct: HirExprKind.Index
+
+    it "`t.0` lowers to Index; HirExprKind.TupleIndex is never produced":
+        expect(emits("fn f(t: (i64, i64)) -> i64:\n    t.0", "E:Index")).to_be(true)  # construct: tuple index emits Index not TupleIndex
+
+    it "a struct field read lowers to Field":
+        expect(emits("struct S:\n    a: i64\nfn f(s: S) -> i64:\n    s.a", "E:Field")).to_be(true)  # construct: HirExprKind.Field
+
+    it "`s?.a` lowers to Field; HirExprKind.OptionalChain is never produced":
+        expect(emits("struct S:\n    a: i64\nfn f(s: S?) -> i64?:\n    s?.a", "E:Field")).to_be(true)  # construct: optional chain emits Field not OptionalChain
+
+    it "`??` lowers to NullCoalesce":
+        expect(emits("fn f(a: i64?) -> i64:\n    a ?? 0", "E:NullCoalesce")).to_be(true)  # construct: HirExprKind.NullCoalesce
+
+    it "a trailing `?` lowers to Try; HirExprKind.ExistsCheck is never produced":
+        expect(emits("fn f(a: i64?) -> bool:\n    a?", "E:Try")).to_be(true)  # construct: exists check emits Try not ExistsCheck
+
+    it "`!` lowers to Unwrap":
+        expect(emits("fn f(a: i64?) -> i64:\n    a!", "E:Unwrap")).to_be(true)  # construct: HirExprKind.Unwrap
+
+    it "a binary operator lowers to Binary":
+        expect(emits("fn f() -> i64:\n    1 + 2", "E:Binary")).to_be(true)  # construct: HirExprKind.Binary
+
+    it "a unary operator lowers to Unary":
+        expect(emits("fn f() -> i64:\n    -1", "E:Unary")).to_be(true)  # construct: HirExprKind.Unary
+
+    it "a free function call lowers to Call":
+        expect(emits("fn g() -> i64:\n    1\nfn f() -> i64:\n    g()", "E:Call")).to_be(true)  # construct: HirExprKind.Call
+
+    it "a method call lowers to MethodCall":
+        expect(emits("fn f(x: i64) -> text:\n    x.to_text()", "E:MethodCall")).to_be(true)  # construct: HirExprKind.MethodCall
+
+    it "`S.make()` lowers to MethodCall; HirExprKind.StaticCall is never produced":
+        expect(emits("struct S:\n    a: i64\nimpl S:\n    fn make() -> i64:\n        1\nfn f() -> i64:\n    S.make()", "E:MethodCall")).to_be(true)  # construct: static call emits MethodCall not StaticCall
+
+    it "`S(a: 1)` lowers to Call; HirExprKind.StructLit is never produced":
+        expect(emits("struct S:\n    a: i64\nfn f() -> S:\n    S(a: 1)", "E:Call")).to_be(true)  # construct: struct literal emits Call not StructLit
+
+    it "`E.A` lowers to Field; HirExprKind.EnumLit is never produced":
+        expect(emits("enum E:\n    A\n    B\nfn f() -> E:\n    E.A", "E:Field")).to_be(true)  # construct: enum literal emits Field not EnumLit
+
+    it "`as` lowers to Cast":
+        expect(emits("fn f(x: i64) -> f64:\n    x as f64", "E:Cast")).to_be(true)  # construct: HirExprKind.Cast
+
+    it "`is` lowers to TypeTest":
+        expect(emits("fn f(x: Any) -> bool:\n    x is i64", "E:TypeTest")).to_be(true)  # construct: HirExprKind.TypeTest
+
+    it "if/else lowers to IfChain; HirExprKind.If is not produced by a plain if/else":
+        expect(emits("fn f(c: bool) -> i64:\n    if c:\n        1\n    else:\n        2", "E:IfChain")).to_be(true)  # construct: if/else emits IfChain not If
+
+    it "match lowers to MatchCase":
+        expect(emits("fn f(x: i64) -> i64:\n    match x:\n        case _: 1", "E:MatchCase")).to_be(true)  # construct: HirExprKind.MatchCase
+
+    it "`loop:` lowers to While(true); HirExprKind.Loop is never produced":
+        expect(emits("fn f():\n    loop:\n        break", "E:While")).to_be(true)  # construct: loop emits While not Loop
+
+    it "while lowers to While":
+        expect(emits("fn f(c: bool):\n    while c:\n        break", "E:While")).to_be(true)  # construct: HirExprKind.While
+
+    it "for lowers to For":
+        expect(emits("fn f(a: [i64]):\n    for i in a:\n        pass", "E:For")).to_be(true)  # construct: HirExprKind.For
+
+    it "break lowers to Break":
+        expect(emits("fn f():\n    loop:\n        break", "E:Break")).to_be(true)  # construct: HirExprKind.Break
+
+    it "continue lowers to Continue":
+        expect(emits("fn f(c: bool):\n    while c:\n        continue", "E:Continue")).to_be(true)  # construct: HirExprKind.Continue
+
+    it "return lowers to Return":
+        expect(emits("fn f() -> i64:\n    return 1", "E:Return")).to_be(true)  # construct: HirExprKind.Return
+
+    it "yield lowers to Yield":
+        expect(emits("fn f():\n    yield 1", "E:Yield")).to_be(true)  # construct: HirExprKind.Yield
+
+    it "a lambda lowers to Lambda":
+        expect(emits("fn f():\n    val g = fn(a: i64) -> i64: a", "E:Lambda")).to_be(true)  # construct: HirExprKind.Lambda
+
+    it "a struct-pattern match desugars into a Block":
+        expect(emits("struct S:\n    a: i64\nfn f(s: S) -> i64:\n    match s:\n        case S(a): a", "E:Block")).to_be(true)  # construct: HirExprKind.Block
+
+    it "a range expression lowers to Range":
+        expect(emits("fn f():\n    for i in 0..3:\n        pass", "E:Range")).to_be(true)  # construct: HirExprKind.Range
+
+    it "a comprehension lowers to Comprehension":
+        expect(emits("fn f(a: [i64]) -> [i64]:\n    [x for x in a]", "E:Comprehension")).to_be(true)  # construct: HirExprKind.Comprehension
+
+    it "an unsafe block lowers to UnsafeBlock":
+        expect(emits("fn f():\n    unsafe:\n        pass", "E:UnsafeBlock")).to_be(true)  # construct: HirExprKind.UnsafeBlock
+
+    it "desugared match binders read through Var":
+        expect(emits("struct S:\n    a: i64\nfn f(s: S) -> i64:\n    match s:\n        case S(a): a", "E:Var")).to_be(true)  # construct: HirExprKind.Var
+
+    it "a val binding lowers to Let":
+        expect(emits("fn f():\n    val x = 1", "S:Let")).to_be(true)  # construct: HirStmtKind.Let
+
+    it "an assignment lowers to Assign":
+        expect(emits("fn f():\n    var x = 1\n    x = 2", "S:Assign")).to_be(true)  # construct: HirStmtKind.Assign
+
+    it "an expression statement lowers to Expr":
+        expect(emits("fn f():\n    print \"a\"", "S:Expr")).to_be(true)  # construct: HirStmtKind.Expr
+
+    it "`_` lowers to Wildcard":
+        expect(emits("fn f(x: i64) -> i64:\n    match x:\n        case _: 1", "P:Wildcard")).to_be(true)  # construct: HirPatternKind.Wildcard
+
+    it "a literal pattern lowers to Literal":
+        expect(emits("fn f(x: i64) -> i64:\n    match x:\n        case 1: 1\n        case _: 0", "P:Literal")).to_be(true)  # construct: HirPatternKind.Literal
+
+    it "a name pattern lowers to Binding":
+        expect(emits("fn f(x: i64) -> i64:\n    match x:\n        case n: n", "P:Binding")).to_be(true)  # construct: HirPatternKind.Binding
+
+    it "an or-pattern lowers to Or":
+        expect(emits("fn f(x: i64) -> i64:\n    match x:\n        case 1 | 2: 1\n        case _: 0", "P:Or")).to_be(true)  # construct: HirPatternKind.Or
+
+    it "an enum pattern lowers to Enum":
+        expect(emits("enum E:\n    A(v: i64)\n    B\nfn f(e: E) -> i64:\n    match e:\n        case A(v): v\n        case B: 0", "P:Enum")).to_be(true)  # construct: HirPatternKind.Enum
+
+    it "a tuple pattern is desugared to a Block of Let+Index; HirPatternKind.Tuple is never produced":
+        expect(emits("fn f(x: (i64, i64)) -> i64:\n    match x:\n        case (a, b): a + b", "E:Block")).to_be(true)  # construct: tuple pattern desugars away from HirPatternKind.Tuple
+
+    it "a struct pattern is desugared to a Block of Let+Field; HirPatternKind.Struct is never produced":
+        expect(emits("struct S:\n    a: i64\nfn f(s: S) -> i64:\n    match s:\n        case S(a): a", "E:Block")).to_be(true)  # construct: struct pattern desugars away from HirPatternKind.Struct
+
+    it "a range pattern is desugared to a comparison If; HirPatternKind.Range is never produced":
+        expect(emits("fn f(x: i64) -> i64:\n    match x:\n        case 1..3: 1\n        case _: 0", "E:If")).to_be(true)  # construct: range pattern desugars away from HirPatternKind.Range
+
+    it "i64 lowers to Int":
+        expect(emits("fn f(a: i64) -> i64:\n    a", "T:Int")).to_be(true)  # construct: HirTypeKind.Int
+
+    it "f64 lowers to Float":
+        expect(emits("fn f(a: f64) -> f64:\n    a", "T:Float")).to_be(true)  # construct: HirTypeKind.Float
+
+    it "bool lowers to Bool":
+        expect(emits("fn f(a: bool) -> bool:\n    a", "T:Bool")).to_be(true)  # construct: HirTypeKind.Bool
+
+    it "char lowers to Char":
+        expect(emits("fn f(a: char) -> char:\n    a", "T:Char")).to_be(true)  # construct: HirTypeKind.Char
+
+    it "text lowers to Str":
+        expect(emits("fn f(a: text) -> text:\n    a", "T:Str")).to_be(true)  # construct: HirTypeKind.Str
+
+    it "an absent return type lowers to Unit":
+        expect(emits("fn f():\n    pass", "T:Unit")).to_be(true)  # construct: HirTypeKind.Unit
+
+    it "a tuple type lowers to Tuple":
+        expect(emits("fn f(a: (i64, i64)) -> i64:\n    0", "T:Tuple")).to_be(true)  # construct: HirTypeKind.Tuple
+
+    it "an array type lowers to Array":
+        expect(emits("fn f(a: [i64]) -> i64:\n    0", "T:Array")).to_be(true)  # construct: HirTypeKind.Array
+
+    it "a dict type lowers to Dict":
+        expect(emits("fn f(a: Dict<text, i64>) -> i64:\n    0", "T:Dict")).to_be(true)  # construct: HirTypeKind.Dict
+
+    it "an optional type lowers to Optional":
+        expect(emits("fn f(a: i64?) -> i64:\n    0", "T:Optional")).to_be(true)  # construct: HirTypeKind.Optional
+
+    it "a user struct type lowers to Named":
+        expect(emits("struct S:\n    a: i64\nfn f(s: S) -> i64:\n    0", "T:Named")).to_be(true)  # construct: HirTypeKind.Named
+
+    it "a reference type lowers to Ref":
+        expect(emits("fn f(a: &i64) -> i64:\n    0", "T:Ref")).to_be(true)  # construct: HirTypeKind.Ref
+
+    it "a pointer type lowers to Ptr":
+        expect(emits("fn f(a: *i64) -> i64:\n    0", "T:Ptr")).to_be(true)  # construct: HirTypeKind.Ptr
+
+    it "a union type lowers to Union":
+        expect(emits("fn f(a: i64 | text) -> i64:\n    0", "T:Union")).to_be(true)  # construct: HirTypeKind.Union
+
+    it "Any lowers to Any":
+        expect(emits("fn f(a: Any) -> i64:\n    0", "T:Any")).to_be(true)  # construct: HirTypeKind.Any
+
+    it "`[T]` lowers to Array; HirTypeKind.Slice is never produced":
+        expect(emits("fn f(a: [i64]) -> i64:\n    0", "T:Array")).to_be(true)  # construct: slice type emits Array not Slice
+
+    it "a generic type parameter lowers to Named, NOT TypeParam; see matrix doc":
+        expect(emits("fn f<T>(a: T) -> i64:\n    0", "T:Named")).to_be(true)  # construct: type parameter emits Named not TypeParam
+
+    it "`dyn Tr` lowers to Named; HirTypeKind.DynTrait is never produced":
+        expect(emits("trait Tr:\n    fn m(me) -> i64\nfn f(a: dyn Tr) -> i64:\n    0", "T:Named")).to_be(true)  # construct: dyn trait emits Named not DynTrait
+

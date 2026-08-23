@@ -1,0 +1,97 @@
+# @cover src/compiler/20.hir/hir_lowering/types.spl 35%
+"""
+# HIR lowering type/expression gaps found by the AST -> HIR construct census
+
+**Category:** Compiler / defect regression
+**Bug:** doc/08_tracking/bug/hir_lowering_construct_gaps_2026-08-23.md
+**Matrix:** doc/09_report/hir_construct_coverage_matrix_2026-08-23.md
+
+## Purpose
+
+The census spec (`ast_to_hir_construct_coverage_spec.spl`) pins what the real
+AST -> HIR lowering emits today. Five of those observations are not design
+choices but defects: a well-formed program is lowered into `HirTypeKind.Error`
+or `HirExprKind.Error` nodes, or has a declared type silently erased to `Any`.
+
+These are the same defect CLASS that cost this session hours of 3-hour stage1
+builds -- `unresolved type: HirModule`, `String`/`Option`/`int` unresolved --
+found only at the far end of the pipeline because nothing asserted at the HIR
+boundary that a valid program lowers without Error nodes.
+
+Each `it` here asserts the CORRECT behaviour and is expected to FAIL until the
+filed defect is fixed. Do not weaken these to match the current output.
+"""
+
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.ParserModule
+use compiler.hir.hir_types.HirModule
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.generated.hir_visitor.{HirWalkNode, walk_hir_block, walk_hir_type, hir_walk_expr_kind_name, hir_walk_stmt_kind_name, hir_walk_type_kind_name, hir_walk_pattern_kind_name}
+
+fn collect(node: HirWalkNode, acc: [text]) -> [text]:
+    """Tag every visited HIR node with its layer and variant name."""
+    var out = acc
+    match node:
+        case Expr(e): out = out.push("E:" + hir_walk_expr_kind_name(e))
+        case Stmt(s): out = out.push("S:" + hir_walk_stmt_kind_name(s))
+        case Type_(t): out = out.push("T:" + hir_walk_type_kind_name(t))
+        case Pattern(p): out = out.push("P:" + hir_walk_pattern_kind_name(p))
+    out
+
+fn kinds_of(source: text) -> [text]:
+    """Lower `source` through the real HIR lowering and list every node kind."""
+    val log = Logger(level: 0)
+    val parsed = parse_full_frontend(source, "src/probe/mod.spl", "probe.mod", log)
+    var modules: Dict<text, ParserModule> = {}
+    val sr = module_surfaces_from_modules(modules, [])
+    if sr.is_err():
+        return ["surface error: " + sr.unwrap_err()]
+    var lowering = hirlowering_for_module("src/probe/mod.spl", sr.unwrap())
+    val hm: HirModule = lowering.lower_module(parsed)
+    var acc: [text] = []
+    for fnsym in hm.functions.keys():
+        val fdecl = hm.functions[fnsym]
+        for prm in fdecl.params:
+            acc = walk_hir_type(prm.type_, acc, collect)
+        acc = walk_hir_type(fdecl.return_type, acc, collect)
+        acc = walk_hir_block(fdecl.body, acc, collect)
+    acc
+
+fn emits(source: text, wanted: text) -> bool:
+    """True when lowering `source` produces at least one node of kind `wanted`."""
+    for k in kinds_of(source):
+        if k == wanted:
+            return true
+    false
+
+describe "HIR lowering construct gaps (RED until filed defects are fixed)":
+    it "a `never` return type must not lower to HirTypeKind.Error":
+        # HirTypeKind.Never exists in the registry but `never` resolves to Error
+        expect(emits("fn f() -> never:\n    loop:\n        pass", "T:Error")).to_be(false)
+
+    it "a declared function type must not be erased to Any":
+        # HirTypeKind.Function exists but `fn(i64) -> i64` erases to Any
+        expect(emits("fn f(g: fn(i64) -> i64) -> i64:\n    0", "T:Any")).to_be(false)
+
+    it "an enum payload pattern binder must not get an Error type":
+        # the payload binder `v` is typed HirTypeKind.Error
+        expect(emits("enum E:\n    A(v: i64)\n    B\nfn f(e: E) -> i64:\n    match e:\n        case A(v): v\n        case B: 0", "T:Error")).to_be(false)
+
+    it "a well-formed array pattern must not emit HirExprKind.Error":
+        # array-pattern desugaring emits an Error expression node
+        expect(emits("fn f(x: [i64]) -> i64:\n    match x:\n        case [a, b]: a + b\n        case _: 0", "E:Error")).to_be(false)
+
+    it "a set literal must not lower to an Error type":
+        # `#{...}` lowers to HirTypeKind.Error + NilLit; HirExprKind.SetLit is never produced
+        expect(emits("fn f():\n    val s = #{1, 2}", "T:Error")).to_be(false)
+
+    it "`throw` in a well-formed function must not emit HirExprKind.Error":
+        # throw lowering emits an Error expression node
+        expect(emits("fn f() -> i64!:\n    throw \"bad\"", "E:Error")).to_be(false)
+
