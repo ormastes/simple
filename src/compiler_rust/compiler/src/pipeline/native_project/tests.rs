@@ -2084,6 +2084,13 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         "core-c runtime archive must include runtime_simd_utf8.c because runtime_native.c calls simd_text_init"
     );
     assert!(
+        core_c_symbols.contains("rt_text_is_ascii"),
+        "core-c runtime archive must include runtime_simd_case.c because the tool \
+         source closure (src/app/mcp/main.spl and friends) reaches std text helpers \
+         that emit rt_text_is_ascii; without it the native link leaves the symbol \
+         undefined and the binary SEGVs on first call"
+    );
+    assert!(
         core_c_symbols.contains("rt_thread_available_parallelism"),
         "core-c runtime archive must include the thread parallelism ABI used by std.thread_sffi"
     );

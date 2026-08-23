@@ -360,6 +360,17 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // would create duplicate pool definitions.
         "runtime_thread.c",
         "runtime_simd_utf8.c",
+        // ASCII/case SIMD kernels backing rt_text_is_ascii (std.common.encoding
+        // simd_text_ffi). Same never-an-archive-member class as
+        // runtime_terminal.c below: the pure-Simple backend's own source list
+        // (src/compiler/70.backend/backend/runtime_compiler.spl) has always
+        // carried runtime_simd_case, but this seed-side list never did, so a
+        // core-C native link of any tool whose closure reaches std text
+        // helpers left rt_text_is_ascii undefined -- the tolerated-undefined
+        // then NULL-GOT SIGSEGV class of rt_unwrap_or_trap
+        // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
+        // Compiles with zero symbol collisions against the existing members.
+        "runtime_simd_case.c",
         // engine2d SIMD row kernels (C/NEON) backing rt_engine2d_simd_*_row_u32;
         // replaces the Rust-seed engine2d_simd_ops backing for native builds.
         "runtime_simd_dispatch.c",
