@@ -1,0 +1,230 @@
+#!/bin/sh
+# check-signature-type-import-provenance.shs
+#
+# Fail-closed ratchet for the FIFTH mechanism in the stage-1 `unresolved type`
+# lane (doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+# follow-up (i)).
+#
+# THE DEFECT.  A module names a cross-module type in SIGNATURE position while
+# reaching that name only through `use X.*`.  The imported-surface projection
+# accepts exactly three things as an ORIGIN for a name -- a declaration, a
+# re-export hop, or an explicit import -- and a glob is none of them.  So the
+# projected surface carries no origin, the IMPORTER resolves the name in its own
+# scope, and HIR lowering hard-errors.  The give-away in the trace is a
+# SYNTHESIZED span: `[hir-unresolved-type-origin] name=X lowering_module=<the
+# importer> span_file= span_line=0 span_col=0` -- an empty span_file proves the
+# type node was never parsed from any source and was rebuilt by projection.
+#
+# WHY NO EXISTING ORACLE CATCHES IT.  `[use-warning]` reports a brace-list import
+# naming a symbol its provider lacks; here there is no import statement at all to
+# report, so it is silent BY CONSTRUCTION.  `[hir-callable-dep-origin-unresolved]`
+# is silent too (0 lines for HirModule across a reproducing build), the same
+# silence recorded for MirType in follow-up (b).  And a full stage-1 build is ~72
+# minutes, so nothing cheap was watching this class.
+#
+# THE PREDICATE MUST BE HEADER-SCOPED.  A whole-file grep for an import is NOT
+# evidence that the import exists.  Two real incidents, one in each direction:
+#   * the sibling Asm lane's owner had its two `use` lines INSIDE A TRIPLE-QUOTED
+#     DOCSTRING -- string content, never statements -- and a grep said they were
+#     there;
+#   * a first version of this lane's own sweep did not join multi-line brace-list
+#     continuations and so FALSELY flagged backend_helpers.spl, whose import is
+#     real but wraps across lines.
+# Both directions are covered by the selftest fixtures below.
+#
+# Scope note: like check-c-runtime-compiles-push.shs and unlike the range-based
+# guards, this checks a TREE (--root DIR, default the working tree), not a
+# BASE..NEW delta -- import provenance is a property of a tree, and a push that
+# edits only the DECLARING module can strand an importer it never touched.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS  — <n> file(s) checked, 0 offender(s)                       exit 0
+#   FAIL  — <n> file(s) checked, <k> offender(s): <names>            exit 1
+#   ERROR — nothing was checked (<reason>)                           exit 2
+# A run that examined 0 files is ERROR, never a pass.  A missing or empty types
+# table is ERROR, never a pass: absence of rows is absence of evidence.
+
+set -u
+
+ROOT="."
+TYPES_FILE=""
+SELFTEST_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --root=*)  ROOT=${arg#--root=} ;;
+        --types=*) TYPES_FILE=${arg#--types=} ;;
+        --selftest) SELFTEST_ONLY=1 ;;
+        *) echo "unknown argument: $arg" >&2; echo "ERROR — nothing was checked (bad argument)"; exit 2 ;;
+    esac
+done
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ -n "$TYPES_FILE" ] || TYPES_FILE="$SCRIPT_DIR/signature_type_import_provenance_types.txt"
+
+# ---------------------------------------------------------------------------
+# The predicate, as a standalone awk program.
+#
+# State machine per file:
+#   * triple-quote parity tracks docstrings; anything inside one is CONTENT.
+#   * a line whose first non-space char is '#' is a comment, never a statement.
+#   * a `use`/`export use`/`export` line whose braces are unbalanced starts a
+#     CONTINUATION that is joined until the closing brace, so a wrapped
+#     brace-list counts as the single import it is.
+#   * everything else is CODE.
+# A file is an OFFENDER for type T when CODE has T in a type position
+# (preceded by one of : [ < , ( ) and no joined import statement names T.
+# ---------------------------------------------------------------------------
+AWKPROG='
+function emit(   i,j,T,hit,found) {
+  if (fname=="") return
+  for (j=1;j<=ntypes;j++) {
+    T=types[j]; hit=0
+    for (i=1;i<=ncode;i++) if (code[i] ~ ("[:\\[<,(][ \t]*" T "([^A-Za-z0-9_]|$)")) { hit=1; break }
+    if (!hit) continue
+    found=0
+    for (i=1;i<=nuse;i++) if (uses[i] ~ ("(^|[^A-Za-z0-9_])" T "([^A-Za-z0-9_]|$)")) { found=1; break }
+    if (!found) print fname "\t" T
+  }
+}
+BEGIN { ntypes=split(typelist,types,",") }
+FNR==1 { emit(); fname=FILENAME; instr=0; cont=0; buf=""; delete uses; delete code; nuse=0; ncode=0 }
+{
+  n=0; t=$0; while (match(t,/"""/)) { n++; t=substr(t,RSTART+3) }
+  if (instr) { if (n%2==1) instr=0; next }
+  s=$0; sub(/^[ \t]+/,"",s); sub(/[ \t]+$/,"",s)
+  if (cont) { buf=buf " " s; if (index(s,"}")>0) { uses[++nuse]=buf; cont=0 } ; if (n%2==1) instr=1; next }
+  if (substr(s,1,1)=="#") { if (n%2==1) instr=1; next }
+  if (s ~ /^use / || s ~ /^export use / || s ~ /^export /) {
+    ob=0; t=s; while (match(t,/{/)) { ob++; t=substr(t,RSTART+1) }
+    cb=0; t=s; while (match(t,/}/)) { cb++; t=substr(t,RSTART+1) }
+    if (ob>cb) { buf=s; cont=1 } else { uses[++nuse]=s }
+  } else { code[++ncode]=$0 }
+  if (n%2==1) instr=1
+}
+END { emit() }
+'
+
+run_scan() {
+    scan_root=$1; scan_types=$2
+    typelist=$(grep -v '^[[:space:]]*#' "$scan_types" 2>/dev/null | grep -v '^[[:space:]]*$' | awk '{print $1}' | paste -sd, -)
+    [ -n "$typelist" ] || return 3
+    # Deduplicate by realpath: src/compiler/mono is a SYMLINK to 40.mono, so a
+    # naive walk visits every mirrored file twice and double-counts offenders.
+    files=$(find "$scan_root" -name '*.spl' -not -path '*/vendor/*' -type f 2>/dev/null \
+            | while IFS= read -r f; do realpath "$f"; done | sort -u)
+    [ -n "$files" ] || return 4
+    printf '%s\n' "$files" | wc -l | tr -d ' ' > "$COUNT_FILE"
+    printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 awk -v typelist="$typelist" "$AWKPROG"
+    return 0
+}
+
+# --------------------------- selftest (fatal) ------------------------------
+selftest() {
+    tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    trap 'rm -rf "$tmp"' EXIT
+    mkdir -p "$tmp/src" "$tmp/cfg"
+    printf 'Widget cfg.widgets\n' > "$tmp/cfg/types.txt"
+
+    # 1. clean: real single-line brace import -> must NOT be an offender
+    cat > "$tmp/src/clean.spl" <<'EOF'
+use cfg.widgets.{Widget}
+fn f(w: Widget) -> Widget: w
+EOF
+    # 2. glob only -> MUST be an offender (the incident's shape)
+    cat > "$tmp/src/globonly.spl" <<'EOF'
+use cfg.widgets.*
+fn f(w: Widget) -> Widget: w
+EOF
+    # 3. import-shaped line inside a docstring -> MUST be an offender
+    cat > "$tmp/src/docstring.spl" <<'EOF'
+"""Docs.
+
+use cfg.widgets.{Widget}
+"""
+use cfg.other.*
+fn f(w: Widget) -> Widget: w
+EOF
+    # 4. commented-out import -> MUST be an offender
+    cat > "$tmp/src/commented.spl" <<'EOF'
+# use cfg.widgets.{Widget}
+use cfg.other.*
+fn f(w: Widget) -> Widget: w
+EOF
+    # 5. REAL multi-line brace-list import -> must NOT be an offender
+    cat > "$tmp/src/multiline.spl" <<'EOF'
+use cfg.widgets.{Gadget, Doohickey,
+    Widget, Thing}
+fn f(w: Widget) -> Widget: w
+EOF
+    # 6. type never used in signature position -> must NOT be an offender
+    cat > "$tmp/src/unused.spl" <<'EOF'
+use cfg.other.*
+# Widget is only named in this comment
+fn f(x: i64) -> i64: x
+EOF
+
+    COUNT_FILE="$tmp/count"
+    out=$(run_scan "$tmp/src" "$tmp/cfg/types.txt"); rc=$?
+    if [ $rc -ne 0 ]; then
+        echo "selftest: scan failed rc=$rc"; return 1
+    fi
+    fail=0
+    for must in globonly docstring commented; do
+        printf '%s\n' "$out" | grep -q "/$must\.spl" || { echo "selftest FAIL: $must.spl not flagged"; fail=1; }
+    done
+    for mustnot in clean multiline unused; do
+        printf '%s\n' "$out" | grep -q "/$mustnot\.spl" && { echo "selftest FAIL: $mustnot.spl wrongly flagged"; fail=1; }
+    done
+    # 7. empty tree must yield 0 files so the caller is forced to ERROR
+    mkdir -p "$tmp/empty"
+    run_scan "$tmp/empty" "$tmp/cfg/types.txt" >/dev/null 2>&1
+    [ $? -eq 4 ] || { echo "selftest FAIL: empty tree did not report 'nothing scanned'"; fail=1; }
+    # 8. empty types table must be ERROR, never a pass
+    : > "$tmp/cfg/empty.txt"
+    run_scan "$tmp/src" "$tmp/cfg/empty.txt" >/dev/null 2>&1
+    [ $? -eq 3 ] || { echo "selftest FAIL: empty types table did not report 'no rows'"; fail=1; }
+    if [ $fail -eq 0 ]; then
+        echo "check-signature-type-import-provenance: selftest 8/8 fixtures correct (3 must-fail, 3 must-pass, 2 non-vacuity)"
+        return 0
+    fi
+    return 1
+}
+
+COUNT_FILE=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+if ! selftest; then
+    rm -f "$COUNT_FILE"
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+[ $SELFTEST_ONLY -eq 1 ] && { rm -f "$COUNT_FILE"; exit 0; }
+
+if [ ! -s "$TYPES_FILE" ]; then
+    rm -f "$COUNT_FILE"
+    echo "ERROR — nothing was checked (types table missing or empty: $TYPES_FILE)"
+    exit 2
+fi
+
+SCAN_ROOT="$ROOT/src/compiler"
+[ -d "$SCAN_ROOT" ] || SCAN_ROOT="$ROOT"
+offenders=$(run_scan "$SCAN_ROOT" "$TYPES_FILE"); rc=$?
+nfiles=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
+rm -f "$COUNT_FILE"
+
+case $rc in
+  3) echo "ERROR — nothing was checked (types table has no rows)"; exit 2 ;;
+  4) echo "ERROR — nothing was checked (no .spl files under $SCAN_ROOT)"; exit 2 ;;
+  0) : ;;
+  *) echo "ERROR — nothing was checked (scan failed rc=$rc)"; exit 2 ;;
+esac
+
+[ "${nfiles:-0}" -gt 0 ] 2>/dev/null || { echo "ERROR — nothing was checked (0 files scanned)"; exit 2; }
+
+if [ -n "$offenders" ]; then
+    printf '%s\n' "$offenders" | sed 's/^/  offender: /'
+    k=$(printf '%s\n' "$offenders" | wc -l | tr -d ' ')
+    names=$(printf '%s\n' "$offenders" | awk -F'\t' '{n=split($1,a,"/"); printf "%s(%s) ", a[n], $2}')
+    echo "FAIL — $nfiles file(s) checked, $k offender(s): $names"
+    exit 1
+fi
+echo "PASS — $nfiles file(s) checked, 0 offender(s)"
+exit 0

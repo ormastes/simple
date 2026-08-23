@@ -85,3 +85,93 @@ describe "HIR unresolved-type import provider":
         expect(module_imports_naming(
             p, "use compiler.backend.backend.backend_types.{{CompiledModule}}")).to_be_true()
         expect(read_file(p).contains("codegen.{{CodegenPipeline, CompiledModule}}")).to_be_false()
+
+
+# ===========================================================================
+# Follow-up (i): the FIFTH mechanism -- the OWNER reaches the type only
+# through a glob, so the projected surface has no origin for it.
+# ===========================================================================
+#
+# `unresolved type: HirModule` was attributed to `mono/instantiation.spl`,
+# which does not contain the string `HirModule` at all, and neither does
+# anything it imports. Measured with the landed probe at the single emit site
+# (`20.hir/hir_lowering/types.spl:957`), the span is SYNTHESIZED:
+#
+#   [hir-unresolved-type-origin] name=HirModule
+#       lowering_module=src/compiler/mono/instantiation.spl
+#       span_file= span_line=0 span_col=0
+#
+# An empty span_file means the type node was never parsed from any source --
+# it was rebuilt by the imported-surface projection. The real owner is
+# `40.mono/monomorphize_integration.spl`, whose re-exported
+# `run_monomorphization` / `MonomorphizationPass` name `Dict<text, HirModule>`
+# in their signatures while the module reaches `HirModule` ONLY through
+# `use compiler.hir.hir_types.*`. A glob is not a declaration, a re-export
+# hop, or an explicit import, so the projection finds no origin, the importer
+# resolves the name in ITS own scope, and hard-errors.
+#
+# `[use-warning]` is silent for this class BY CONSTRUCTION: there is no
+# brace-list import statement to warn about. So is `[hir-callable-dep-origin-
+# unresolved]` (0 lines for HirModule across the reproducing build), the same
+# silence follow-up (b) recorded for MirType.
+#
+# DURABLE LESSON (shared with the Asm lane, which hit the same silence with
+# two `use` lines sitting inside a triple-quoted docstring): a whole-file grep
+# for an import is NOT evidence that the import exists. The predicate must be
+# HEADER-SCOPED -- module level, outside docstrings and comments.
+
+fn _triple_quote_count(line: text) -> i64:
+    line.split("\"\"\"").len() - 1
+
+fn header_use_lines(path: text) -> [text]:
+    """Module-level `use`/`export use` statements only.
+
+    Skips anything inside a triple-quoted docstring and anything commented
+    out, so a line that merely LOOKS like an import does not count as one.
+    """
+    var out: [text] = []
+    var in_doc = false
+    for line in read_file(path).split("\n"):
+        val n = _triple_quote_count(line)
+        if in_doc:
+            if n % 2 == 1:
+                in_doc = false
+            continue
+        val s = line.trim()
+        if (s.starts_with("use ") or s.starts_with("export use ")):
+            out.push(s)
+        if n % 2 == 1:
+            in_doc = true
+    out
+
+fn header_imports_naming(path: text, symbol: text) -> bool:
+    """True when a REAL module-level import statement names `symbol`."""
+    var found = false
+    for s in header_use_lines(path):
+        if s.contains(symbol):
+            found = true
+    found
+
+describe "HIR unresolved-type: header-scoped import predicate":
+
+    it "the predicate ignores an import-shaped line inside a docstring":
+        val f = "test/01_unit/compiler/hir/fixtures/docstring_use_fixture.spl"
+        # A whole-file grep matches the docstring line...
+        expect(read_file(f).contains("DocstringOnlyType")).to_be_true()
+        # ...the header-scoped predicate must not.
+        expect(header_imports_naming(f, "DocstringOnlyType")).to_be_false()
+        # ...and it must still see the real one (guard against a vacuous pass).
+        expect(header_imports_naming(f, "RealHeaderType")).to_be_true()
+
+describe "HIR unresolved-type: glob-only owner of a re-exported signature":
+
+    it "monomorphize_integration names HirModule in a real import, not only a glob":
+        val p = "src/compiler/40.mono/monomorphize_integration.spl"
+        # It DOES use HirModule in re-exported signatures...
+        expect(read_file(p).contains("Dict<text, HirModule>")).to_be_true()
+        # ...and it must reach the name by an explicit import, not `hir_types.*`.
+        expect(header_imports_naming(p, "HirModule")).to_be_true()
+
+    it "the symbols carrying that signature really are re-exported by the package":
+        val i = "src/compiler/40.mono/__init__.spl"
+        expect(header_imports_naming(i, "run_monomorphization")).to_be_true()

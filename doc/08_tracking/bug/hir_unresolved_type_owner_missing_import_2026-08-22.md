@@ -924,3 +924,169 @@ header-scoped import predicate for the reason above.
 
 Not claimed: this is a SOURCE fix. The facade-hop owner-scope resolution defect
 from follow-up (e) is untouched and still open.
+
+## Follow-up (i) 2026-08-23 — FIFTH mechanism: the OWNER reaches the type only through a glob (`HirModule`)
+
+Follow-up (h) closed three of the four names in this lane's scope and left
+`HirModule` open with an explicit "open hypothesis, untested" (a misreported
+name via an index-0 symbol table). **That hypothesis is now refuted by
+measurement, and the real mechanism is a fifth one.**
+
+### The decisive evidence is the span, and it is EMPTY
+
+There is exactly ONE fatal emit site in the tree —
+`20.hir/hir_lowering/types.spl:957`, `self.error("unresolved type: {name}", span)` —
+and it already carries a landed, level-gated probe whose comment states the
+attribution caveat outright: *"the hard `unresolved type: X` is attributed to
+the module being lowered, which is NOT necessarily the file the annotation came
+from; the span carries the real file."*
+
+Reproduced in **~40 minutes**, not a 72-minute full build, with a targeted
+closure — `native-build --source src/compiler --entry-closure --entry
+src/compiler/40.mono/__init__.spl` under `SIMPLE_HIR_UNRESOLVED_TYPE_TRACE=1`:
+
+    [hir-unresolved-type-origin] name=HirModule
+        lowering_module=src/compiler/mono/instantiation.spl span_file= span_line=0 span_col=0
+    [hir-unresolved-type-origin] name=HirModule
+        lowering_module=src/compiler/40.mono/__init__.spl   span_file= span_line=0 span_col=0
+
+`span_file` is **empty** and `span_line=0`. The type node was never parsed from
+any source file — it was **rebuilt by the imported-surface projection**. That is
+the complete explanation for a name that appears nowhere in `instantiation.spl`,
+nowhere in anything it imports, and nowhere in its package `__init__`.
+
+Refuting the (h) hypothesis directly: `name` at that site is the same string the
+failed symbol lookup used, so `HirModule` genuinely IS the name being resolved.
+It is not an index-0 table entry printed in place of some other name, and the
+`5c38b388a53` id-0 family does not apply.
+
+### Root cause
+
+The owner is `40.mono/monomorphize_integration.spl`. Its re-exported symbols
+
+    fn run_monomorphization(modules: Dict<text, HirModule>) -> (Dict<text, HirModule>, MonoStats)
+    class MonomorphizationPass   # me process_modules(modules: Dict<text, HirModule>) -> ...
+
+name `HirModule` in their signatures, while the module reaches that name **only
+through `use compiler.hir.hir_types.*`**. A glob is not a declaration, not a
+re-export hop, and not an explicit import — the exact three-way test the
+projection walk applies — so the projected surface carries no ORIGIN for
+`HirModule`. The importer (`40.mono/__init__.spl`, which re-exports both symbols
+at line 5/8, and `mono/instantiation.spl` through that package) then resolves the
+name in ITS OWN scope, where it was never imported, and hard-errors.
+
+This is the owner-missing-import class of this record's first section reached
+from a new direction: previous instances had a *wrong* explicit import; this one
+has *no* import statement at all, only a glob.
+
+### Why both oracles were silent — and the durable lesson
+
+`[use-warning]` (the cheap oracle follow-up (h) contributed) is silent **by
+construction** here: it reports a brace-list import that names a symbol its
+provider lacks, and there is no import statement at all to report.
+`[hir-callable-dep-origin-unresolved]` is also silent — 0 lines for `HirModule`
+across the reproducing build — the same silence follow-up (b) recorded for
+`MirType`, and for the same reason (the projection walk never consults the
+materialization walk).
+
+The sibling Asm lane (`3858062cab6`) hit the identical silence from a third
+surface form: its owner's two `use` lines sat **inside a triple-quoted
+docstring**, i.e. string content, never statements. Shared durable lesson, now
+enforced by this lane's spec:
+
+> **A whole-file grep for an import is NOT evidence that the import exists.**
+> The predicate must be HEADER-SCOPED — module level, outside docstrings and
+> comments.
+
+This lane's own earlier sweep made exactly that error (`^ *use .*HirModule`
+matched 13 files and was read as "all 13 import it correctly"), which is why the
+first pass concluded there was no provider gap. A tree-wide header-scoped sweep
+finds **28** owners naming `HirModule` or `CompiledModule` in a type position
+with no real import — a population, not a one-off. (A first version of that
+sweep also mis-flagged `70.backend/backend/backend_helpers.spl`, whose
+`CompiledModule` import is real but spans multiple lines: a predicate that does
+not join brace-list continuations produces false positives in the other
+direction. Both directions are recorded so the next lane inherits a correct
+predicate.)
+
+### Fix attempted — and the NEGATIVE RESULT, recorded not buried
+
+Giving the owner the explicit import alongside its glob
+(`use compiler.hir.hir_types.{HirModule}` in
+`40.mono/monomorphize_integration.spl`) **did NOT clear the fatal.** Re-running
+the same reproducing closure post-fix under the same trace:
+
+    HIR lowering error in src/compiler/mono/instantiation.spl: unresolved type: HirModule
+    HIR lowering error in src/compiler/40.mono/__init__.spl:  unresolved type: HirModule
+    [hir-unresolved-type-origin] name=HirModule lowering_module=... span_file= span_line=0 span_col=0
+
+Both fatals and both synthesized-span probe lines survive unchanged. So the
+glob-only origin gap in `monomorphize_integration.spl` is **real and worth
+fixing on its own terms** — the predicate below proves it, and it is a genuine
+latent instance of this class — but it is **not** what produces these two
+`HirModule` fatals. `HirModule` therefore stays OPEN, with the span evidence
+above as the durable finding and the owner NOT yet identified.
+
+What the negative result does establish, and what the next lane should start
+from: the failing node is projection-built (empty span) and the name is
+genuinely `HirModule` (single emit site, same string as the failed lookup), so
+the remaining question is purely *which* surface projection builds it. The
+existing `[ist-proj-miss]` / `[hir-callable-dep-origin-unresolved]` probes are
+both silent for this name across the reproducing build, so the next step is a
+probe at the projection site that prints the OWNER being projected, not another
+static sweep. A candidate not yet excluded is the trait-typed field
+`TemplateInstantiator.context: CompilationContext`, whose only implementing
+class is `80.driver/pipeline/compiler_context.spl:16
+class CompilerCompilationContext(CompilationContext)`.
+
+### The population fix (landed regardless of the above)
+
+The header-scoped sweep found **29** owners naming `HirModule` or
+`CompiledModule` in signature position with no real import — reaching the name
+only through a glob. These are latent fatals: they surface the moment their
+importers lower far enough, the same "counts rise as more modules lower" effect
+follow-up (b) measured when `HirModule` went 6 -> 8 while total fatals fell 81%.
+All 29 now carry an explicit import from the DECLARING module. Verified not to
+change behaviour: `simple compile` output is **byte-identical pre/post** on a
+sample of the edited files (all pre-existing `runtime_file_rename` /
+`char_code` / standalone-SMF limits, unchanged).
+
+### `CompiledModule` — REOPENED, not closed by follow-up (h)
+
+The Asm lane's run18 probe reports that importing `CompiledModule` from
+`backend_types` did **not** clear `driver_pipeline_execution`. Follow-up (h)
+already recorded that this name never reproduced in an isolated single-file
+closure (0 fatals both sides) and that its gap was argued statically — that
+caveat is now load-bearing, and the name is treated as OPEN. The static defect
+(h) repaired is real and independently verifiable — `70.backend/codegen.spl`
+declares `CodegenPipeline` at line 673 and no `CompiledModule` anywhere, so the
+old import named a symbol its provider does not have — but it is evidently not
+the whole cause. Next evidence: the `name=CompiledModule` line from the traced
+run19 full build, read the same way as above.
+
+### Ratchet
+
+`scripts/check/check-signature-type-import-provenance.shs` — fail-closed, house
+style, verdict as the last line of stdout, `--selftest` fatal and
+non-optional. Measured: `PASS — 1809 file(s) checked, 0 offender(s)` on the
+fixed tree in **5 seconds**, and `FAIL — 1809 file(s) checked, 29 offender(s)`
+on the pristine tree, so it is proven to discriminate rather than merely be
+green. Types are data (`signature_type_import_provenance_types.txt`, `<Type>
+<declaring-module>` rows), so extending it to a newly-found type is a one-line
+change.
+
+The 8 selftest fixtures encode both directions of the header-scoping lesson,
+because both directions have already cost a lane real time:
+must-FAIL — glob-only (the incident shape), an import-shaped line **inside a
+docstring** (the Asm lane's shape), and a **commented-out** import;
+must-PASS — a real single-line import, a real **multi-line brace-list**
+continuation (the false positive this lane's own first sweep produced), and a
+type named only in a comment;
+non-vacuity — an empty tree must scan 0 files and an empty types table must
+have 0 rows, each forcing ERROR rather than a pass.
+
+Scope note: like the C-runtime guard and unlike the range-based guards, this
+checks a TREE, not a `BASE..NEW` delta — import provenance is a property of a
+tree, and a push that edits only the DECLARING module can strand an importer it
+never touched. It also de-duplicates by realpath, because `src/compiler/mono` is
+a SYMLINK to `40.mono` and a naive walk double-counts every mirrored file.
