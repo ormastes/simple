@@ -1,0 +1,135 @@
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl 5%
+# @cover src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl 5%
+"""
+# `HirSymbol.type_` holds a bare `HirType`, never a heap `Some` box
+
+**Category:** Compiler / HIR
+**Bug:** doc/08_tracking/bug/selfhost_hir_cache_encode_hir_type_segv_2026-08-22.md
+
+## Overview
+
+`declared_callable_type` is declared `-> HirType?` and used to end with an
+explicit `Some(callable_type)` tail. On the self-hosted native lane an explicit
+`Some(...)` does NOT lift the bare value into the optional slot -- it allocates
+a heap Option BOX whose second word is the inline enum word
+`hash("Some") << 32 | 1 == 0xf198715900000001`. That box was handed to
+`SymbolTable.define(..., type_: HirType?, ...)` and stored verbatim in
+`HirSymbol.type_`.
+
+Every consumer that reads that field AS a `HirType` then reads the box's header
+word as `.kind` and the enum word as `.span`. The generated HIR-cache encoder
+`hc_enc_hir_type` does exactly that, and its value-semantics copy-in prologue
+untags the enum word and dereferences it:
+
+```
+mov 0x8(%rax),%r12            ; r12 = node.span  -> 0xf198715900000001
+and $0xfffffffffffffff8,%rcx  ; untag            -> 0xf198715900000000
+mov (%rcx),%rsi               ; SIGSEGV
+```
+
+That made `native-build` of *any* program exit 139 at step 2/6, in
+`hir_cache_store`. Seven sibling sites passed `Some(...)` into the same
+`HirType?` parameter for parameters, `self`, class fields, lambda parameters
+and contract bindings; all were corrected to the bare-lift form that the
+sibling `declared_surface_callable_type` already used.
+
+## Contract
+
+- lowering a module through the real `parse_full_frontend -> lower_module`
+  pipeline leaves every symbol's `type_` a directly readable `HirType`: its
+  `kind` matches a real `HirTypeKind` arm and its `span` is a readable `Span`;
+- the resulting module survives `hir_module_encode` -- the exact call that
+  crashed -- and encodes to a non-empty payload.
+
+## Compatibility and limitations
+
+The corruption is a NATIVE-lane value-representation defect: the tree-walking
+seed interpreter treats `Some(x)` and a bare lifted `x` alike.
+
+**Measured, not assumed (2026-08-23):** on the Rust seed this spec reports
+`3 total, 3 passed, 0 failed` BOTH with the fix applied AND with the primary
+`Some(callable_type)` tail restored. So on the seed lane this spec does **not**
+discriminate pre-fix from post-fix, and must not be cited as if it did.
+
+It is therefore a portable REGRESSION PIN for the lowering shape, not the
+reproduce. The authoritative gate for this bug is `native-build` performed by a
+self-hosted stage-2 compiler, where the unpatched compiler exits rc=139 in
+`hc_enc_hir_type` and the patched one does not.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirTypeKind, HirModule}
+use compiler.hir.hir_codec.{hir_module_encode}
+
+fn make_logger() -> Logger:
+    Logger(level: 0)
+
+# Exercises every corrected site in one module:
+#   typed free function      -> declared_callable_type (the primary producer)
+#   typed parameter          -> declaration_lowering param define
+#   class field + method     -> declaration_lowering field define, implicit self
+#   lambda with typed param  -> expression_core lambda param define
+val FIXTURE_SRC: text = "fn typed_free_fn(a: i64) -> i64:\n    a + 1\n\nclass BareLiftHolder:\n    var count: i64 = 0\n\n    me bump(step: i64) -> i64:\n        self.count + step\n\nfn uses_lambda() -> i64:\n    val f = fn(x: i64) -> i64: x * 2\n    f(3)\n"
+
+val FIXTURE_PATH: text = "src/hir_symbol_type_bare_lift_fixture.spl"
+
+fn lower_fixture() -> HirModule:
+    val log = make_logger()
+    val module = parse_full_frontend(FIXTURE_SRC, FIXTURE_PATH, "hir_symbol_type_bare_lift_fixture", log)
+    var lowering = HirLowering.with_filename(FIXTURE_PATH)
+    lowering.lower_module(module)
+
+describe "HirSymbol.type_ is a bare HirType, not a heap Some box":
+    it "a typed free function's symbol type is a readable HirType with a Function kind":
+        val hir = lower_fixture()
+        match hir.symbols.lookup("typed_free_fn"):
+            case Some(fn_id):
+                match hir.symbols.get_symbol_type(fn_id):
+                    case Some(fn_type):
+                        # Reading `.kind` and `.span` is the discriminator: on a
+                        # heap Some box these read the box header and the inline
+                        # enum word instead of the real fields.
+                        val is_function_kind = match fn_type.kind:
+                            case HirTypeKind.Function(_, _, _): true
+                            case _: false
+                        expect(is_function_kind).to_equal(true)
+                        # A real Span carries a 1-indexed line; the enum word
+                        # 0xf198715900000001 does not survive this read.
+                        expect(fn_type.span.line >= 0).to_equal(true)
+                    case nil:
+                        # A declared, fully typed free function must carry a type.
+                        expect(false).to_equal(true)
+            case nil:
+                expect(false).to_equal(true)
+
+    it "the lowered module survives hir_module_encode, the call that segfaulted":
+        val hir = lower_fixture()
+        # `hir_module_encode` -> hc_enc_hir_module -> hc_enc_symbol_table ->
+        # hc_enc_hir_symbol -> hc_enc_hir_type is the exact backtrace of the
+        # rc=139 native-build crash this spec pins.
+        val encoded = hir_module_encode(hir)
+        expect(encoded != "").to_equal(true)
+
+    it "every symbol carrying a type exposes a readable kind and span":
+        val hir = lower_fixture()
+        var checked = 0
+        # Hoist `.keys()` above the loop: reading it in the loop body deep-copies
+        # the whole Dict per iteration under value semantics (code-style rule).
+        val sym_ids = hir.symbols.symbols.keys()
+        for sym_id in sym_ids:
+            # `symbols` is keyed by the RAW i64 id, so use the raw accessor.
+            match hir.symbols.get_symbol_type_raw(sym_id):
+                case Some(sym_type):
+                    # Both field reads must land on real payloads. A box makes
+                    # `.span` an untagged non-pointer.
+                    expect(sym_type.span.line >= 0).to_equal(true)
+                    checked = checked + 1
+                case nil:
+                    ()
+        # Non-vacuity: the fixture declares typed functions, a typed field and a
+        # typed lambda parameter, so at least one symbol must carry a type.
+        expect(checked > 0).to_equal(true)

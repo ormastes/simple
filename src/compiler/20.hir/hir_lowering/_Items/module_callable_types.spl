@@ -146,7 +146,19 @@ impl HirLowering:
             kind: HirTypeKind.Function(param_types, return_type, []),
             span: fn_decl.span
         )
-        Some(callable_type)
+        # Bare-lift: an explicit `Some(...)` tail in a `-> HirType?` function
+        # allocates a heap Option BOX on the native lane instead of lifting the
+        # bare value into the optional slot (same defect the 2026-07-23
+        # bare-lift notes describe in module_declarations_bootstrap.spl:433).
+        # The box then lands in `HirSymbol.type_`, and every consumer that
+        # reads it AS a HirType -- notably the generated HIR-cache encoder
+        # `hc_enc_hir_type` -- reads the box header as `.kind` and the box's
+        # second word as `.span`, untags that non-pointer and dereferences it:
+        # deterministic SIGSEGV on `native-build` of any program (bug
+        # hir_cache_encode_segv_some_box_in_symbol_type_2026-08-23).
+        # The sibling `declared_surface_callable_type` below already returns the
+        # bare value from its `-> HirType?` tail; match it.
+        callable_type
 
     me declared_surface_callable_type(callable: ModuleSurfaceCallable, owner_symbol: SymbolId?) -> HirType?:
         if callable.type_params.len() > 0 or not callable.has_return_type:

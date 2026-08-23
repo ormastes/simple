@@ -200,3 +200,115 @@ binary" proof is NOT claimed. A behavioural encode/decode/re-encode round-trip
 would only be a real regression pin on the NATIVE lane; under the tree-walk
 interpreter it would likely pass either way, so it was not written as a false
 assurance.
+
+## 2026-08-23 — ROOT CAUSE FOUND AND FIXED
+
+Status: **FIXED** (producer removed). Reproduced 1/1 on
+`/mnt/data/worktrees/redeploy-1/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple`
+(132,936,568 bytes, built from source byte-identical to `origin/main`
+`dc86db785b4`), `native-build /tmp/hircodec_hw.spl` -> **rc=139**, dying at
+step 2/6. gdb exit status read directly into a variable, never through a pipe.
+
+### The value is GARBAGE, not nil
+
+The earlier "nil `HirType`" hypothesis is **ruled out**. Every load in
+`hc_enc_hir_type`'s copy-in prologue is paired with a `cmove` that substitutes
+0 when the source is nil, so a nil `span` or a nil `HirType` is safe. `r12` is
+a *non-nil, non-pointer* word that carries heap tag 1:
+
+```
+r12 0xf198715900000001   ; node.span
+rcx 0xf198715900000000   ; r12 & ~7
+=> mov (%rcx),%rsi       ; SIGSEGV  (rip 0x56bcd5, valid)
+```
+
+Classification: **untagged-non-pointer** (the third class), confirming and
+refining the 2026-08-22 entry above.
+
+### What `node` actually was
+
+`0xf1987159_00000001` is exactly the inline enum word `hash("Some") << 32 | 1`
+that `codec_gen.spl:468-479` already names. Dumping the object passed as
+`node: HirType` showed it is **not a `HirType` at all**:
+
+```
+node        = {0x0000001800000007, 0xf198715900000001}   ; box header, Some word
+node+0x10   = 0x72408f1 -> {0x7240891, 0x72408b1}        ; the REAL HirType
+  its span  = {0, 0x23, 1, 1, <text*>, 0x23}             ; a valid 6-field Span
+```
+
+So `HirSymbol.type_` — declared `type_: HirType?`
+(`src/compiler/20.hir/hir_types.spl:100-110`) — held a **heap `Some` box**
+wrapping the real `HirType`, instead of the bare pointer the flat optional
+representation requires. `hc_enc_hir_type` read the box header as `.kind` and
+the `Some` word as `.span`, untagged it and dereferenced it.
+
+### The producer
+
+Breaking at `SymbolTable.define` showed the box already present in the `type_`
+argument **at entry** — so the boxing happens in the caller, not in `define`
+and not in codegen at the store boundary:
+
+```
+define name='main' type_=0x7240911 w0=0x1800000007
+#1 module_declarations_bootstrap.HirLowering.declare_module_symbols
+#2 module_build.HirLowering.lower_module
+```
+
+That call is `module_declarations_bootstrap.spl:137`, passing
+`self.declared_callable_type(fn_decl, nil)`. `declared_callable_type`
+(`module_callable_types.spl:97`) is declared `-> HirType?` and its **tail
+expression was `Some(callable_type)`**. On the native lane an explicit
+`Some(...)` allocates a heap Option box rather than lifting the bare value
+into the optional slot — the "bare-lift" defect this repo already documents at
+`module_declarations_bootstrap.spl:433` ("explicit `Some(...)` builds a heap
+Option box on the stage4 native lane", 2026-07-23). Every other exit of that
+same function returns a bare `nil`, and the sibling
+`declared_surface_callable_type` four lines below already returns its value
+bare — the `Some` tail was the odd one out.
+
+Only ONE `hc_enc_hir_type` call ever executed before the crash: `main`, the
+first symbol carrying a type. The defect is systematic, not data-dependent.
+
+### Fix
+
+Bare-lift, semantics-preserving, **no wire-format change**:
+
+- `module_callable_types.spl` — `Some(callable_type)` -> `callable_type` (the
+  primary producer).
+- Six sibling sites passed a bare `HirType` wrapped in an explicit `Some(...)`
+  into the same `type_: HirType?` parameter of `define`, poisoning the symbols
+  for parameters, `self`, class fields, lambda parameters and contract
+  bindings: `class_declaration_lowering.spl:15`,
+  `declaration_lowering.spl:118,349,645`,
+  `verification_contract_lowering.spl:19`, `expression_core.spl:602`.
+- `declaration_lowering.spl:217` wrapped an *already* `HirType?` value in
+  `Some(...)` — a double box; now a bare assignment.
+
+### Still open (filed, not fixed here)
+
+1. **The underlying codegen defect.** Explicit `Some(x)` in a `-> T?` position
+   still produces a heap box on the native lane for USER code; this change only
+   removes the compiler's own use of the pattern. Any Simple program written as
+   `fn f() -> T?: Some(x)` remains exposed.
+2. **The generated decoder** emits `f_type_ = Some(ov{k})` for `opt`-of-node
+   fields (`codec_gen.spl:485-490`, 5 sites in `generated/hir_codec.spl`),
+   which installs this same box shape on a cache HIT. Whether that re-poisons
+   `HirType?` on the native lane must be checked by running a cached build
+   twice; the generator, never the generated file, is the place to fix it.
+3. `driver_aot_native_output._compile_frozen_module_capsule` SEGVs at step 5/6
+   under `SIMPLE_HIR_CACHE=0`. Separate defect, separate lane.
+4. `origin/main` `dc86db785b4` **cannot bootstrap from a fresh worktree**: it
+   deleted `scripts/bootstrap/bootstrap-cache-policy.shs` while
+   `bootstrap-from-scratch.sh:4383` still sources it (`exit 2`, "cannot open").
+
+### Reproduce-spec honesty note (measured 2026-08-23)
+
+`test/01_unit/compiler/hir/hir_symbol_type_bare_lift_encode_spec.spl` reports
+`3 total, 3 passed, 0 failed` on the Rust seed **both** with the fix applied and
+with the primary `Some(callable_type)` tail restored (verified by reverting that
+one edit alone and re-running). The seed interpreter treats `Some(x)` and a bare
+lifted `x` alike, so the spec does **not** discriminate pre-fix from post-fix on
+that lane and must not be cited as if it did. It is a portable regression pin
+for the lowering shape. The discriminating evidence for this bug is the
+`native-build` rc on a self-hosted stage-2 compiler.
