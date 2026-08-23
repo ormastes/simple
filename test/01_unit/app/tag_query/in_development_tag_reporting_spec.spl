@@ -27,6 +27,7 @@ use std.tag_query.{
     tag_index_tag_counts, tag_index_has, TaggedItem
 }
 use std.io.{dir_create_all, file_write}
+use app.stats.test_status.{TestStatusCounts, read_test_status_counts, test_result_metric}
 
 val FIXTURE_DIR = "build/test-fixtures/tag_query_spec"
 
@@ -117,3 +118,62 @@ describe "in-development tag: count, listing, and reconciliation":
                 indev_item = item
         assert_true(tag_index_has(indev_item, IN_DEVELOPMENT_TAG))
         assert_false(tag_index_has(indev_item, "passed"))
+
+describe "all three states print unconditionally, and BROKEN stays out of the count":
+
+    # User directive 2026-08-23: "always show all 3 states: pass, fail,
+    # in-development — do not skip." A surface that omits a category when it
+    # is zero leaves the reader unable to tell "zero in-development" from
+    # "this surface does not track in-development". Those mean opposite
+    # things, so zero must be PRINTED, not suppressed.
+
+    it "carries a distinct field for each of the three states plus the two in-development sub-states":
+        val c = TestStatusCounts(
+            total: 0, passed: 0, failed: 0, skipped: 0, pending: 0,
+            in_development: 0, in_development_unexpected: 0,
+            in_development_broken: 0, unclassified: 0
+        )
+        # Every one readable at zero — the struct cannot represent
+        # "not tracked", which is the point.
+        assert_equal(c.passed, 0)
+        assert_equal(c.failed, 0)
+        assert_equal(c.in_development, 0)
+        assert_equal(c.in_development_unexpected, 0)
+        assert_equal(c.in_development_broken, 0)
+
+    it "keeps BROKEN out of the in-development count":
+        # A tagged spec that could not LOAD is a spec DEFECT, not unfinished
+        # work, and it FAILS the run. Absorbing it into in_development is
+        # exactly the hole the core lane flagged: the tag would become a
+        # place broken files go to stop being counted.
+        val c = TestStatusCounts(
+            total: 10, passed: 6, failed: 2, skipped: 1, pending: 0,
+            in_development: 1, in_development_unexpected: 0,
+            in_development_broken: 2, unclassified: 0
+        )
+        assert_equal(c.in_development, 1)
+        assert_equal(c.in_development_broken, 2)
+        # Broken is already inside `failed`, so it is NOT a separate addend.
+        assert_equal(c.passed + c.failed + c.skipped + c.pending + c.in_development + c.in_development_unexpected, c.total)
+
+    it "keeps an unexpected pass out of the in-development count and in the sum":
+        val c = TestStatusCounts(
+            total: 10, passed: 5, failed: 2, skipped: 1, pending: 0,
+            in_development: 1, in_development_unexpected: 1,
+            in_development_broken: 0, unclassified: 0
+        )
+        assert_equal(c.in_development, 1)
+        assert_equal(c.in_development_unexpected, 1)
+        assert_equal(c.passed + c.failed + c.skipped + c.pending + c.in_development + c.in_development_unexpected, c.total)
+
+    it "keeps a genuine host-unavailable skip separate from in-development":
+        # A tagged spec EXECUTES; only its verdict is neutralised. A genuine
+        # skip never ran at all. Merging them would misdescribe both.
+        val c = TestStatusCounts(
+            total: 4, passed: 1, failed: 0, skipped: 2, pending: 0,
+            in_development: 1, in_development_unexpected: 0,
+            in_development_broken: 0, unclassified: 0
+        )
+        assert_equal(c.skipped, 2)
+        assert_equal(c.in_development, 1)
+        assert_false(c.skipped == c.in_development)
