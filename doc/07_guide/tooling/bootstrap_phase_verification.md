@@ -424,3 +424,124 @@ run; do not paraphrase them from memory.
 - `.claude/rules/bootstrap.md` — bootstrap architecture, stage semantics, known blockers
 - `.claude/rules/commands.md` — build/test fast paths, cache scope
 - `.claude/rules/vcs.md` — the seven pre-push guards (a different, push-time regime)
+
+## Bootstrap failure classes ported from the macOS aarch64 lane (2026-08-23)
+
+Ported from `origin/codex/stage3-hir-owner-fixes` (`c9ce33e2234`). **Each entry
+is labelled with the platform its evidence came from.** A Darwin-only finding is
+not a general claim; two entries below were re-measured on Linux and one of them
+came back materially different — read the correction, not the original.
+
+### The two `--timeout` flags are different knobs — and the "no override" claim is WRONG on the seed path
+
+*macOS lane finding, CORRECTED by Linux re-measurement — the correction is the
+portable part.*
+
+The macOS lane recorded `FAILED FILES (1): ... => timeout (300s)` and concluded
+that the per-file 300 s budget is "a hard default with no env var or CLI flag
+override". Half of that is right and half is not:
+
+- **Right, and confirmed on Linux:** `file_timeout: 300` is the struct default
+  at `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:537`, and
+  the `--timeout` flag of the **pure-Simple** `simple native-build`
+  (`src/app/cli/native_build_main.spl`) is a *different* knob — the worker
+  subprocess timeout, `DEFAULT_TIMEOUT_MS = 7200000` (7200 s) at
+  `native_build_main.spl:89`. Confusing the two costs a debugging session.
+- **Wrong:** an override does exist on the path the bootstrap actually uses.
+  The **Rust seed driver** CLI, `src/compiler_rust/driver/src/cli/native_build.rs`,
+  parses its own `--timeout <secs>` (`:229-240`) into `let mut timeout: u64 = 300`
+  (`:129`) and assigns it straight to `file_timeout` (`:584`); the SFFI entry
+  does the same at `src/compiler_rust/compiler/src/native_build_sffi.rs:598`.
+  Since the bootstrap runs the Rust driver (`SIMPLE_NATIVE_BUILD_RUST=1`),
+  `--timeout 900` on that invocation *does* raise the per-file budget.
+- **Latent doc bug found while checking this:** the same file's header comment
+  (`:17`) and its `--help` text (`:805`) both say "default: 60", while the code
+  says 300. Two out of three statements in one file are wrong; trust `:129`.
+
+Operationally the macOS advice still holds and is platform-neutral: `--jobs=full`
+on a small host saturates CPU and can push a big file (there,
+`src/compiler/10.frontend/core/__init__.spl`) past the budget. Retry with
+`--jobs=half` — the native cache resumes and only failed/uncached files
+recompile. **Same file passing with fewer jobs means contention, not a compile
+hang** — the opposite diagnosis to the frozen-progress livelock recorded above,
+and the two must not be confused.
+
+### Bootstrap ops hygiene (macOS lane; mechanism is platform-neutral, not re-measured here)
+
+- **Stale locks.** A killed bootstrap leaves
+  `build/.simple-bootstrap-locks/.output-*.lock` / `.claim-*`; the next run
+  fails fast with `timed out waiting for bootstrap output ownership`. Verify the
+  holder is genuinely dead (PPID first), then remove the stale lock files.
+- **Killing a wrapper does not kill its children.** Orphaned cargo / rustc /
+  native-build processes survive with PPID 1. Check `ps -o pid,ppid` before
+  killing anything mid-build; killing the wrong child aborts a *healthy* build.
+- **A 0-byte log does not mean stalled.** `native-build` buffers stdout/stderr
+  to a non-tty until completion. Judge liveness by
+  `build/bootstrap/bootstrap-progress.log` milestones and `ps` CPU, never by log
+  size. Progress-monitor `tree_processes=0` samples are an artifact during
+  single-child phases.
+
+### `jj` colocated-repo pitfalls (macOS lane; VCS-level, host-independent)
+
+- `jj rebase -r X -d Y` rebases X **and its descendants only**, re-parenting X
+  directly onto Y — ancestors of X are left behind and the stack is silently
+  dropped. Move a stack with `jj rebase -s <stack-root> -d Y`.
+- A commit showing `(empty)` after a rebase means its diff collapsed (e.g. a
+  revert whose target files do not exist on the new base) — re-apply it.
+- `git worktree remove/prune` in a colocated repo does not snapshot jj state;
+  prefer jj-native operations.
+
+### Fresh-seed requirement (macOS lane; CONFIRMED portable on Linux)
+
+Current `src/` uses `unsafe(...)`. Any seed or deployed binary older than
+~2026-08-19 fails with `error[E1002]: function 'unsafe' not found`. Verified on
+Linux at `origin/main`: `src/lib/**` contains **2,245** `unsafe(` uses, so this
+is a property of the source era, not of Darwin. A `--full-bootstrap` rebuild of
+the Rust seed from current `src/compiler_rust` is the only way to compile
+current source.
+
+### Deliberately NOT ported
+
+- **Mach-O weak-definition detection** (`2857d5f7346`). Apple `llvm-nm` prints
+  weak *definitions* as `T` in POSIX `-g -p` output; the weakness appears only
+  in the `-m` flag field as `weak external`, so the seed parsers
+  (`native_project/tools.rs::archive_weak_global_symbols`,
+  `native_project/linker.rs::read_global_symbol_types`), which accept only
+  GNU/ELF `W`/`V`, misread every `__attribute__((weak))` C fallback as STRONG
+  and the stage-4 capsule gate refused the link. **Darwin-only and inert on
+  Linux** — ELF `nm` reports `W`/`V` correctly, so the Linux path was never
+  affected. Recorded here so the symptom string ("Stage4 runtime capsule defines
+  owner-provided runtime symbols STRONGLY … `_rt_heap_live_bytes`,
+  `_rt_heap_peak_bytes`") is searchable, not because a Linux fix is owed.
+- **The streaming-owner test fence** (`ddfbc573eee`) — reverted on its own
+  branch by `23490cf9b5d`. Not resurrected.
+- **`rt_heap_ref_wellformed` + fail-closed driver guards** (`4dd2f956a83`) —
+  already on `main` as `57271d9ba49`, reconciled with this tree's assert policy
+  and with a double-entry defect in `RUNTIME_SYMBOL_NAMES` fixed. Re-verified
+  2026-08-23: all eight mirrors present
+  (`src/runtime/runtime_native.c`, `runtime.h`,
+  `src/runtime/test/rt_heap_ref_wellformed_selfcheck.c`,
+  `src/runtime/simple_core/core_enum.spl`,
+  `src/compiler_rust/runtime/src/value/{objects.rs,mod.rs}`,
+  `src/compiler_rust/common/src/runtime_symbols.rs`) plus the
+  `E-DRIVER-HIR-OWNER-MALFORMED` guard at
+  `src/compiler/80.driver/driver_hir_pipeline_lowering.spl`. No drift.
+
+### Where the two lanes' SEGVs agree — and why that matters
+
+Both lanes hit "self-hosted stage binary SIGSEGVs on a three-line hello world",
+and they are **two different defects**: the macOS crash is a *zeroed Option
+payload* (`x0 == 0` into a live `hir_cache_closure_digest`), the Linux crash was
+*NULL-GOT* (`rip == 0`, undefined `rt_unwrap_or_trap` left a zero GOT slot,
+root-caused at `c4b84dc9aaf`). The macOS lane states the distinction explicitly.
+**Classify a hello-world SEGV by `rip == 0` vs `arg == 0` before concluding
+anything** — fixing one class leaves the other untouched, and a green NULL-GOT
+gate is no evidence about the payload class. Detail:
+`doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md`.
+
+**Note on skill/spipe homes:** the macOS lane also wrote these notes into
+`.codex/skills/unstable-build-fixes/SKILL.md` and
+`.spipe/bootstrap-pure-simple-dynload/state.md`. The `.spipe` submodule is
+unpopulated at `origin/main` (`.spipe/spipe/doc/.../template/` does not exist
+here), so the portable content lives under `doc/07_guide/` and
+`doc/00_llm_process/` instead; nothing was written into `.spipe/`.
