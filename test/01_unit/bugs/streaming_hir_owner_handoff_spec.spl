@@ -1,0 +1,103 @@
+"""
+## Purpose and audience
+Purpose: Prove the streaming HIR surface-owner handoff semantics.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-BUGS-001 — stable requirement identity for this spec.
+
+"""
+# Streaming HIR surface-owner handoff Specification
+
+**Feature IDs:** #STAGE3-STREAMING-OWNER-001
+**Category:** Runtime / Bootstrap
+**Status:** In Progress
+**Research:** doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md
+
+## Overview
+
+The Stage-3 streaming lane stores the frozen `ModuleSurfacesByName` owner in
+`CompilerDriver.streaming_module_surfaces_owner` (an `Option`) during phase 2
+and unwraps it at the phase-3 HIR entry. Retained 2026-08-22/23 evidence
+(simple-2026-08-22-021119.ips, lldb on the 2026-08-22 stage-2 candidate)
+shows the native lane reading back a Some-tagged Option with payload word 0:
+the readiness scalar and `== nil` guard both pass, `.unwrap()` yields 0, and
+the first field load SIGSEGVs (`KERN_INVALID_ADDRESS at 0x0`).
+
+This spec pins the CORRECT semantics as an interpreter regression fence: the
+tree-walk interpreter never mis-transports enum payloads. The native lane is
+exercised by `scripts/check/check-streaming-hir-owner-handoff.shs`, which
+drives a stage binary directly (same reasoning as
+`test/01_unit/bugs/native_unwrap_enum_receiver_spec.spl` and
+`scripts/check/check-native-unwrap-enum-receiver.shs`).
+"""
+
+use std.spec
+
+
+class FakeRegistry:
+    items: [i64]
+    frozen: bool
+
+fn freeze_registry(r: FakeRegistry) -> Result<FakeRegistry, text>:
+    if r.frozen:
+        return Err("already frozen")
+    r.frozen = true
+    Ok(r)
+
+# The original failing shape: unwrap the inner Ok and rewrap the class
+# through the outer Result boundary. Semantically this MUST preserve the
+# payload; the native miscompile dropped it to 0.
+fn build_via_unwrap_rewrap() -> Result<FakeRegistry, text>:
+    var r = FakeRegistry(items: [], frozen: false)
+    r.items = r.items.push(11)
+    r.items = r.items.push(22)
+    val fr = freeze_registry(r)
+    if fr.is_err():
+        return Err(fr.unwrap_err())
+    Ok(fr.unwrap())
+
+class FakeDriver:
+    owner: FakeRegistry?
+    ready: bool
+
+    me store(r: FakeRegistry) -> bool:
+        self.owner = Some(r)
+        self.ready = true
+        self.ready
+
+    me load_len() -> i64:
+        if not self.ready or self.owner == nil:
+            return -1
+        val s = self.owner.unwrap()
+        if s == nil:
+            return -2
+        s.items.len()
+
+
+describe "streaming HIR surface-owner handoff":
+
+    context "Result<class, text> transport across two boundaries":
+        it "unwrap+rewrap preserves the class payload":
+            step("Verify: unwrap+rewrap preserves the class payload")
+            # @req: REQ-BUGS-001
+            val br = build_via_unwrap_rewrap()
+            expect(br.is_err()).to_equal(false)
+            val reg = br.unwrap()
+            expect(reg == nil).to_equal(false)
+            expect(reg.frozen).to_equal(true)
+            expect(reg.items.len()).to_equal(2)
+            expect(reg.items[0]).to_equal(11)
+            expect(reg.items[1]).to_equal(22)
+
+    context "Option class-field handoff across mutable methods":
+        it "guarded unwrap returns the stored owner":
+            step("Verify: guarded unwrap returns the stored owner")
+            val reg = build_via_unwrap_rewrap().unwrap()
+            var d = FakeDriver(owner: nil, ready: false)
+            expect(d.store(reg)).to_equal(true)
+            expect(d.load_len()).to_equal(2)
+
+        it "absent owner fails closed, never dereferences":
+            step("Verify: absent owner fails closed, never dereferences")
+            var d = FakeDriver(owner: nil, ready: false)
+            expect(d.load_len()).to_equal(-1)

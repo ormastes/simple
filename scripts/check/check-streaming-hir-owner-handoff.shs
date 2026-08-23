@@ -1,0 +1,82 @@
+#!/bin/sh
+# check-streaming-hir-owner-handoff.shs
+#
+# Regression fence for the Stage-3 streaming HIR owner crash:
+#   doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md
+#
+# Incident signature: a self-hosted stage binary segfaults (exit 139)
+# immediately after the streaming parse phase succeeds and HIR typechecking
+# starts, on ANY input — including a three-line hello world. lldb evidence
+# (2026-08-23): `hir_cache_closure_digest` receives arg0 == 0, i.e.
+# `CompilerDriver.streaming_module_surfaces_owner.unwrap()` read back a
+# Some-tagged Option whose payload word is 0 — the readiness scalar and the
+# `== nil` guard both pass, and the first field load faults at address 0x0.
+#
+# WHAT THIS MEASURES. A candidate stage binary is asked to compile a
+# three-line hello world to SMF. PASS requires exit 0 AND the output file to
+# exist. A crash (signal exit > 128) or a missing output is a real FAIL.
+#
+# DEFAULT BINARY / PROVENANCE. The default target is `readlink -f bin/simple`
+# — the currently DEPLOYED binary. Override with $1 or $SIMPLE_BIN to test a
+# specific stage candidate (e.g. build/bootstrap/stage3/<triple>/simple).
+#
+# EXIT CODES (repo pre-push guard convention)
+#   0  PASS   — hello world compiled to SMF
+#   1  FAIL   — crash or missing output (the incident signature)
+#   2  ERROR  — nothing was actually measured (no binary, missing fixture)
+#
+# Usage: sh scripts/check/check-streaming-hir-owner-handoff.shs [path-to-binary]
+set -u
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+FIXTURE="test/fixtures/streaming_hir_owner_handoff/hello.spl"
+OUT_DIR="build/check-streaming-hir-owner-handoff"
+OUT_SMF="$OUT_DIR/hello.smf"
+
+BIN="${1:-${SIMPLE_BIN:-}}"
+if [ -z "$BIN" ]; then
+    if [ -e "$REPO_ROOT/bin/simple" ]; then
+        BIN="$(readlink -f "$REPO_ROOT/bin/simple" 2>/dev/null)"
+    fi
+fi
+
+[ -n "$BIN" ] && [ -x "$BIN" ] || {
+    echo "ERROR — nothing was checked (no runnable binary found; pass a path as"
+    echo "  \$1, set \$SIMPLE_BIN, or ensure bin/simple resolves to an executable)"
+    exit 2
+}
+[ -f "$FIXTURE" ] || { echo "ERROR — nothing was checked (missing fixture $FIXTURE)"; exit 2; }
+
+mkdir -p "$OUT_DIR" || exit 2
+rm -f "$OUT_SMF"
+
+echo "check-streaming-hir-owner-handoff — binary: $BIN"
+echo "  fixture: $FIXTURE (three-line hello world)"
+
+log="$OUT_DIR/compile.log"
+"$BIN" compile "$FIXTURE" -o "$OUT_SMF" >"$log" 2>&1
+status=$?
+
+if [ "$status" -gt 128 ]; then
+    sig=$((status - 128))
+    echo "FAIL  stage binary crashed with signal $sig compiling hello world"
+    echo "  (incident signature: streaming HIR owner payload loss — see the bug doc)"
+    tail -5 "$log" | sed 's/^/  log: /'
+    exit 1
+fi
+if [ "$status" -ne 0 ]; then
+    echo "FAIL  compile exited $status (no crash, but no clean compile either)"
+    tail -5 "$log" | sed 's/^/  log: /'
+    exit 1
+fi
+if [ ! -s "$OUT_SMF" ]; then
+    echo "FAIL  compile exited 0 but produced no output '$OUT_SMF'"
+    tail -5 "$log" | sed 's/^/  log: /'
+    exit 1
+fi
+
+echo "PASS  hello world compiled to SMF (1 checked)"
+exit 0
