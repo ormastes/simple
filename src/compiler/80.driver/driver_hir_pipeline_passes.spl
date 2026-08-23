@@ -3,7 +3,7 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.hir.hir.*
-use compiler.driver.driver_log_helpers.{log_debug}
+use compiler.driver.driver_log_helpers.{log_debug, log_build_progress}
 use compiler.semantics.resolve.{resolve_methods}
 use compiler.mono.monomorphize_integration.*
 use compiler.driver.driver_safety_severity.{
@@ -67,6 +67,12 @@ impl CompilerDriver:
         rewritten to use the mangled names of specialized definitions.
         """
         log_debug("running monomorphization")
+        # Step-3 receipt. Monomorphization used to emit nothing at all until
+        # its `[mono]` summary line, so a build that died inside it -- or that
+        # never entered it because admission was already false -- left no trace
+        # between `hir N/N step 2/6` and the process exit status.
+        log_build_progress("monomorphize", "modules", 0,
+            self.ctx.hir_modules.len(), "start", 3, 6, 0, 0, "running")
         # Phase admission is produced only after HIR lowering and every
         # post-HIR validator succeeds. Do not reconstruct that authority by
         # rereading CompileContext.error_count_value after a 609-module
@@ -74,6 +80,9 @@ impl CompilerDriver:
         # that adjacent scalar even though the canonical owner completed with
         # zero errors.
         if not hir_phase_admitted:
+            print "error[E-DRV-MONO-001]: monomorphization refused: phase 3 (HIR lowering + post-HIR validators) did not admit this build; {self.ctx.error_count_value} recorded error(s), {self.ctx.hir_modules.len()} HIR module(s)"
+            log_build_progress("monomorphize", "modules", -1,
+                self.ctx.hir_modules.len(), "not-admitted", 3, 6, 1, 0, "failed")
             return false
         val skip_mono = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MONO") ?? ""
         # SIMPLE_BOOTSTRAP=1 used to skip the pass too. That was only safe while
@@ -82,9 +91,17 @@ impl CompilerDriver:
         # MIR. Only the explicit SIMPLE_BOOTSTRAP_SKIP_MONO=1 escape remains.
         if skip_mono == "1":
             print "[bootstrap] skipping monomorphization (SIMPLE_BOOTSTRAP_SKIP_MONO=1)"
+            log_build_progress("monomorphize", "modules", 0,
+                self.ctx.hir_modules.len(), "skipped-by-env", 3, 6, 0, 0, "running")
             return true
+        log_build_progress("monomorphize", "modules", 0,
+            self.ctx.hir_modules.len(), "specialize", 3, 6, 0, 0, "running")
         val (mono_modules, mono_stats, mono_diags) =
             run_monomorphization_with_diagnostics(self.ctx.hir_modules)
+        log_build_progress("monomorphize", "modules",
+            self.ctx.hir_modules.len(), self.ctx.hir_modules.len(),
+            "specializations={mono_stats.specializations_created}",
+            3, 6, 0, 0, "running")
         # Phase B receipt: printed so a stage log proves the pass ran and what
         # it did (the pass was a no-op for months while looking wired).
         print "[mono] generic_fns={mono_stats.generic_functions_found} call_sites={mono_stats.call_sites_found} specializations={mono_stats.specializations_created} unresolved={mono_stats.unresolved_generic_calls}"
@@ -111,12 +128,16 @@ impl CompilerDriver:
         ))
         if mono_pass_errors > 0:
             print "error[E-MONO-033]: monomorphization left {mono_pass_errors} generic call site(s) unspecialized; refusing to lower non-monomorphic HIR to MIR"
+            log_build_progress("monomorphize", "modules", -1,
+                self.ctx.hir_modules.len(), "E-MONO-033", 3, 6, 1, 0, "failed")
             return false
         # Section 9.5 post-monomorphization invariants (E-MONO-031). Runs on
         # the MONOMORPHIZED modules -- the whole point is that nothing generic,
         # unsubstituted, or type-erased survived, so it cannot run before this
         # assignment. Under `critical` ANY non-zero counter is fatal; every
         # other profile warns, so the inventory is visible during migration.
+        log_build_progress("post_mono_verify", "modules", 0,
+            self.ctx.hir_modules.len(), "invariants", 3, 6, 0, 0, "running")
         val mono_report = post_mono_verify_modules(self.ctx.hir_modules)
         val mono_total = post_mono_report_total(mono_report)
         val mono_strictness = self.ctx.assurance_policy.strictness
@@ -143,7 +164,12 @@ impl CompilerDriver:
         log_debug("monomorphization done")
         if mono_critical and mono_total > 0:
             print "error[E-MONO-031]: post-monomorphization invariants violated: {mono_total} diagnostic(s) across {self.ctx.hir_modules.len()} module(s) under profile {mono_strictness.name()}; refusing to lower to MIR"
+            log_build_progress("post_mono_verify", "modules", -1,
+                self.ctx.hir_modules.len(), "E-MONO-031", 3, 6, 1, 0, "failed")
             return false
+        log_build_progress("post_mono_verify", "modules",
+            self.ctx.hir_modules.len(), self.ctx.hir_modules.len(),
+            "diagnostics={mono_total}", 3, 6, 0, 0, "running")
         true
 
 pub fn run_typecheck_warn_pass(

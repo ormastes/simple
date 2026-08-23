@@ -383,8 +383,17 @@ impl CompilerDriver:
                 2, 6, 0, 0, "running")
             hir_loop_pos = hir_loop_pos + 1
 
+        # Step-3 receipts. Everything from here to the phase-3 admission line
+        # in driver_orchestration used to be UNRECEIPTED: a 140-module closure
+        # printed `hir 140/140 step 2/6` and then died with rc=255 and not one
+        # further byte. A phase that can fail mute will fail mute again, so
+        # every sub-phase below now emits a start and a terminal receipt.
+        log_build_progress("hir_finalize", "modules", streaming_hir_module_count,
+            streaming_hir_module_count, "memory-snapshot", 2, 6, 0, 0, "running")
         if not mem_snapshot_finish():
             self.ctx.add_error("durable memory snapshot terminal write failed")
+            log_build_progress("hir_finalize", "modules", -1, -1,
+                "memory-snapshot", 2, 6, 1, 0, "failed")
             return (self.ctx, false)
         if hir_cache_enabled():
             print hir_cache_summary()
@@ -413,7 +422,12 @@ impl CompilerDriver:
         # Poisoned/error-bearing HIR is deliberately excluded from every
         # downstream aggregate pass. Validate layouts only for a clean phase.
         if self.ctx.has_errors():
+            log_build_progress("hir_finalize", "modules", -1, -1,
+                "hir-errors", 2, 6, 1, 0, "failed")
             return (self.ctx, false)
+        log_build_progress("post_hir_validate", "modules", 0,
+            validation_module_keys.len(), "value-struct-layout",
+            2, 6, 0, 0, "running")
         var validation_error_count: i64 = 0
         for validation_error in driver_validate_value_struct_layouts(
                 validation_module_keys, validation_module_values,
@@ -428,7 +442,15 @@ impl CompilerDriver:
                 validation_errors_shown = 10
             eprint("[post-hir-validation-fatal-count] count={validation_error_count} shown={validation_errors_shown}")
         if self.ctx.has_errors():
+            log_build_progress("post_hir_validate", "modules", -1,
+                validation_module_keys.len(), "value-struct-layout",
+                2, 6, 1, 0, "failed")
             return (self.ctx, false)
+        log_build_progress("post_hir_validate", "modules",
+            validation_module_keys.len(), validation_module_keys.len(),
+            "value-struct-layout", 2, 6, 0, 0, "running")
+        log_build_progress("hir_reclaim", "modules", 0, -1,
+            "ast-reset", 2, 6, 0, 0, "running")
         ast_reset()
         self.ctx.modules = {}
         lexer_release_parse_source_globals()
@@ -436,6 +458,8 @@ impl CompilerDriver:
         log_phase("phase3:streaming_source_reclaim:done reclaimed={reclaimed_sources}")
         self.ctx.evict_sources()
         self.ctx.module_surfaces = nil
+        log_build_progress("hir_reclaim", "modules", -1, -1,
+            "sources-evicted", 2, 6, 0, 0, "running")
         (self.ctx, true)
 
     me lower_and_check_impl() -> (CompileContext, bool):
@@ -913,8 +937,13 @@ impl CompilerDriver:
             rt_exit(0)
         log_debug("HIR lowering complete")
 
+        # Step-3 receipts -- see the streaming path above for why.
+        log_build_progress("hir_finalize", "modules", retained_hir_module_count,
+            retained_hir_module_count, "memory-snapshot", 2, 6, 0, 0, "running")
         if not mem_snapshot_finish():
             self.ctx.add_error("durable memory snapshot terminal publication failed")
+            log_build_progress("hir_finalize", "modules", -1, -1,
+                "memory-snapshot", 2, 6, 1, 0, "failed")
             return (self.ctx, false)
 
         # Collect-all summary. This line is also the PROVENANCE MARKER for the
@@ -940,13 +969,24 @@ impl CompilerDriver:
         phase_ctx.hir_module_count_value = retained_hir_module_count
         phase_ctx.bootstrap_entry_hir = phase_entry_hir
         if phase_ctx.has_errors():
+            log_build_progress("hir_finalize", "modules", -1, -1,
+                "hir-errors", 2, 6, 1, 0, "failed")
             return (phase_ctx, false)
+        log_build_progress("post_hir_validate", "modules", 0,
+            validation_module_keys.len(), "value-struct-layout",
+            2, 6, 0, 0, "running")
         for validation_error in driver_validate_value_struct_layouts(
                 validation_module_keys, validation_module_values,
                 phase_ctx.hir_modules):
             phase_ctx.add_error(validation_error)
         if phase_ctx.has_errors():
+            log_build_progress("post_hir_validate", "modules", -1,
+                validation_module_keys.len(), "value-struct-layout",
+                2, 6, 1, 0, "failed")
             return (phase_ctx, false)
+        log_build_progress("post_hir_validate", "modules",
+            validation_module_keys.len(), validation_module_keys.len(),
+            "value-struct-layout", 2, 6, 0, 0, "running")
 
         # Profile-gated HM type inference and visibility diagnostics. Advisory
         # remains log-only; robust warns; critical/verified fail the build.
@@ -954,7 +994,13 @@ impl CompilerDriver:
             case TypecheckPassSeverity.Advisory: false
             case _: true
         if ((rt_env_get("SIMPLE_TYPECHECK_WARN") ?? "") == "1") or typecheck_enforcing:
+            log_build_progress("typecheck", "modules", 0,
+                phase_hir_modules.len(), "hm-infer+visibility",
+                2, 6, 0, 0, "running")
             val tc_warnings = run_typecheck_warn_pass(phase_ctx, phase_hir_modules)
+            log_build_progress("typecheck", "modules",
+                phase_hir_modules.len(), phase_hir_modules.len(),
+                "diagnostics={tc_warnings.len()}", 2, 6, 0, 0, "running")
             log_warn("typecheck warn-only pass: {tc_warnings.len()} diagnostic(s)")
             var tcw_idx = 0
             while tcw_idx < tc_warnings.len():
@@ -967,7 +1013,13 @@ impl CompilerDriver:
             case SafetyPassSeverity.Advisory: false
             case _: true
         if ((rt_env_get("SIMPLE_SAFETY_WARN") ?? "") == "1") or safety_enforcing:
+            log_build_progress("safety", "modules", 0,
+                phase_hir_modules.len(), "unsafe-context",
+                2, 6, 0, 0, "running")
             val safety_warnings = run_safety_warn_pass(phase_ctx, phase_hir_modules)
+            log_build_progress("safety", "modules",
+                phase_hir_modules.len(), phase_hir_modules.len(),
+                "diagnostics={safety_warnings.len()}", 2, 6, 0, 0, "running")
             log_warn("safety warn-only pass: {safety_warnings.len()} diagnostic(s)")
             var sw_idx = 0
             while sw_idx < safety_warnings.len():
@@ -980,14 +1032,24 @@ impl CompilerDriver:
         # Severity is still profile-gated inside each pass -- `critical` raises
         # errors, every other profile raises warnings -- and each records a
         # receipt whether or not it found anything.
+        log_build_progress("any_escape", "modules", 0,
+            phase_hir_modules.len(), "any-escape", 2, 6, 0, 0, "running")
         val any_escape_warnings = run_any_escape_pass(phase_ctx, phase_hir_modules)
+        log_build_progress("any_escape", "modules", phase_hir_modules.len(),
+            phase_hir_modules.len(), "diagnostics={any_escape_warnings.len()}",
+            2, 6, 0, 0, "running")
         log_warn("any-escape pass: {any_escape_warnings.len()} diagnostic(s)")
         var ae_idx = 0
         while ae_idx < any_escape_warnings.len():
             log_warn(any_escape_warnings[ae_idx])
             ae_idx = ae_idx + 1
 
+        log_build_progress("enum_contract", "modules", 0,
+            phase_hir_modules.len(), "enum-contract", 2, 6, 0, 0, "running")
         val enum_contract_warnings = run_enum_contract_pass(phase_ctx, phase_hir_modules)
+        log_build_progress("enum_contract", "modules", phase_hir_modules.len(),
+            phase_hir_modules.len(), "diagnostics={enum_contract_warnings.len()}",
+            2, 6, 0, 0, "running")
         log_warn("enum-contract pass: {enum_contract_warnings.len()} diagnostic(s)")
         var ec_idx = 0
         while ec_idx < enum_contract_warnings.len():

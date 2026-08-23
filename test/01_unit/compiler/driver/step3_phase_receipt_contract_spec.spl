@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+Purpose: Pin that step 3/6 (post-HIR validation, typecheck, monomorphization)
+and the step 4->5 post-MIR pass chain each emit a `[build]` receipt and a coded
+diagnostic, so a failure there can never again be a bare non-zero exit code.
+Audience: compiler and tooling engineers who maintain the driver.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the sub-phase that went back to failing mute.
+## Compatibility and limitations
+Source-contract spec (same shape as hir_progress_cadence_contract_spec): it
+pins the emitters, not a live build, because reproducing the mute exit needs a
+140-module closure. Background:
+doc/08_tracking/bug/step3_silent_rc255_no_phase_receipt_2026-08-23.md
+# @manual: primary
+REQ-COMPILER-DRIVER-001
+doc/01_research/local/REQ-COMPILER-DRIVER-001.md
+doc/03_plan/sys_test/REQ-COMPILER-DRIVER-001.md
+doc/04_architecture/REQ-COMPILER-DRIVER-001.md
+doc/05_design/REQ-COMPILER-DRIVER-001.md
+"""
+# @req: REQ-COMPILER-DRIVER-001
+
+use std.io_runtime.{file_read}
+
+use std.spec.step
+
+describe "step 3 phase receipts":
+    it "receipts every post-HIR sub-phase on both lowering paths":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: post-HIR finalize/validate sub-phases emit receipts")
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        expect(src).to_contain("log_build_progress(\"hir_finalize\"")
+        expect(src).to_contain("log_build_progress(\"post_hir_validate\"")
+        expect(src).to_contain("log_build_progress(\"hir_reclaim\"")
+        expect(src).to_contain("log_build_progress(\"typecheck\"")
+        expect(src).to_contain("log_build_progress(\"safety\"")
+        expect(src).to_contain("log_build_progress(\"any_escape\"")
+        expect(src).to_contain("log_build_progress(\"enum_contract\"")
+
+    it "receipts monomorphization start, specialize and verify":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: monomorphize and post_mono_verify emit receipts")
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_passes.spl")
+        expect(src).to_contain("log_build_progress(\"monomorphize\"")
+        expect(src).to_contain("log_build_progress(\"post_mono_verify\"")
+        expect(src).to_contain("error[E-DRV-MONO-001]")
+
+    it "never returns a failing phase-3/4 verdict without a diagnostic":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: zero-error phase failures name themselves with a code")
+        val src = file_read("src/compiler/80.driver/driver_orchestration.spl")
+        expect(src).to_contain("error[E-DRV-PHASE3-000]")
+        expect(src).to_contain("error[E-DRV-PHASE4-000]")
+        # The phase-3 error preview must not be env-gated: that gate is what
+        # made the real 140-module failure print nothing at all.
+        expect(src.contains("[bootstrap-phase3-errors] count=")).to_equal(false)
+
+    it "receipts the post-MIR pass chain in the aot pipeline":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: borrow_check/process_async/optimize_mir/weave_aop receipted")
+        val src = file_read("src/compiler/80.driver/driver_aot_pipeline.spl")
+        expect(src).to_contain("log_build_progress(\"borrow_check\"")
+        expect(src).to_contain("log_build_progress(\"process_async\"")
+        expect(src).to_contain("log_build_progress(\"optimize_mir\"")
+        expect(src).to_contain("log_build_progress(\"weave_aop\"")
+
+    it "emits a terminal receipt on every step 5/6 failure return":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Verify: native_compile refusal, zero-objects and link errors receipt")
+        val src = file_read("src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(src).to_contain("\"module-outcome-verdict\", 5, 6, 1")
+        expect(src).to_contain("\"no-object-files\", 5, 6, 1")
+        expect(src).to_contain("\"link-failed\", 6, 6, 1")

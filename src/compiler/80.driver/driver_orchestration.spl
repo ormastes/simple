@@ -170,15 +170,23 @@ impl CompilerDriver:
             self.ctx = analyzed_ctx
         log_trace("AFTER phase 3")
         if not analyze_ok:
-            log_error("phase 3 FAILED")
-            if (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1":
-                val phase3_error_count = self.ctx.errors.len()
-                eprint("[bootstrap-phase3-errors] count={phase3_error_count}")
-                var phase3_error_index = 0
-                while phase3_error_index < phase3_error_count and phase3_error_index < 20:
-                    val phase3_error = self.ctx.error_message_at(phase3_error_index)
-                    eprint("[bootstrap-phase3-error] index={phase3_error_index} len={phase3_error.len()} text={phase3_error}")
-                    phase3_error_index = phase3_error_index + 1
+            # The error preview used to be gated on SIMPLE_BOOTSTRAP_DEBUG, so
+            # the default-configuration failure printed the bare line above and
+            # nothing else -- the same shape as the phase-2 defect handled a few
+            # lines up. Print it ALWAYS, and say explicitly when the failure
+            # carries zero recorded errors (an internal invariant break, not a
+            # source error).
+            val phase3_error_count = self.ctx.errors.len()
+            log_error("phase 3 FAILED ({phase3_error_count} recorded error(s))")
+            if phase3_error_count == 0:
+                log_error("error[E-DRV-PHASE3-000]: phase 3 (HIR typecheck admission + post-HIR validators) returned a failing verdict with ZERO recorded errors -- internal invariant break, not a source error; the last `[build]` receipt names the sub-phase that failed")
+            var phase3_error_index = 0
+            while phase3_error_index < phase3_error_count and phase3_error_index < 20:
+                val phase3_error = self.ctx.error_message_at(phase3_error_index)
+                log_error("  {phase3_error}")
+                phase3_error_index = phase3_error_index + 1
+            if phase3_error_count > 20:
+                log_error("  ... {phase3_error_count - 20} more")
             log_build_progress("hir", "modules", -1, -1,
                 "failed", 2, 6, 1, 0, "failed")
             if self.ctx.has_errors():
@@ -203,7 +211,16 @@ impl CompilerDriver:
         log_debug("phase 4: monomorphization...")
         val mono_ok = self.monomorphize_impl(analyze_ok)
         if not mono_ok:
-            log_error("phase 4 FAILED")
+            val phase4_error_count = self.ctx.errors.len()
+            log_error("phase 4 FAILED ({phase4_error_count} recorded error(s))")
+            if phase4_error_count == 0:
+                log_error("error[E-DRV-PHASE4-000]: phase 4 (monomorphization) returned a failing verdict with ZERO recorded errors -- internal invariant break, not a source error; the last `[build]` receipt names the sub-phase that failed")
+            var phase4_error_index = 0
+            while phase4_error_index < phase4_error_count and phase4_error_index < 20:
+                log_error("  {self.ctx.error_message_at(phase4_error_index)}")
+                phase4_error_index = phase4_error_index + 1
+            if phase4_error_count > 20:
+                log_error("  ... {phase4_error_count - 20} more")
             log_build_progress("monomorphize", "modules", -1, -1,
                 "failed", 3, 6, 1, 0, "failed")
             return CompileResult.TypeError(self.ctx.errors)

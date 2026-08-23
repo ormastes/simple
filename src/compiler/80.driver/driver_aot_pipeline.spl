@@ -1,7 +1,7 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_pipeline.*
 use compiler.driver.driver_aot_output.*
-use compiler.driver.driver_log_helpers.{log_debug, log_error, log_phase, log_bootstrap_flat_warning}
+use compiler.driver.driver_log_helpers.{log_debug, log_error, log_phase, log_bootstrap_flat_warning, log_build_progress}
 # NOTE: these two MUST stay at module scope. A function-body-scoped
 # `use <path>.{name}` is a silent no-op for symbol resolution, which made the
 # both-format branch below die post-link with `error[E1002]: function
@@ -60,6 +60,12 @@ impl CompilerDriver:
     me aot_compile() -> CompileResult:
         val log = self.ctx.logger
 
+        # Step 4->5 receipts. `log_phase` is env-gated and off by default, so
+        # the whole post-MIR pass chain (borrow_check / process_async /
+        # optimize_mir / weave_aop) was invisible in `[build]` receipts -- the
+        # same mute-failure class as step 3. These are unconditional.
+        log_build_progress("mir", "modules", 0, self.ctx.hir_modules.len(),
+            "lower_to_mir", 4, 6, 0, 0, "running")
         log_phase("aot:lower_to_mir:start")
         var mir_ok = false
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
@@ -89,8 +95,12 @@ impl CompilerDriver:
             # Dict case). See
             # doc/08_tracking/bug/array_first_unresolved_native_codegen_core_dump_2026-08-06.md.
             val msg = if self.ctx.has_errors(): self.ctx.error_message_at(0) else: "MIR lowering failed"
+            log_build_progress("mir", "modules", -1, -1, "lower_to_mir",
+                4, 6, 1, 0, "failed")
             return CompileResult.CodegenError(msg)
         log_phase("aot:lower_to_mir:done")
+        log_build_progress("mir", "modules", self.ctx.mir_modules.len(),
+            self.ctx.mir_modules.len(), "lower_to_mir", 4, 6, 0, 0, "running")
 
         if self.ctx.options.low_memory and self.ctx.options.backend != "vhdl":
             log_debug("low-memory: evicting HIR modules")
@@ -102,16 +112,30 @@ impl CompilerDriver:
             log_bootstrap_flat_warning("aot:flat_mir_passes:skipped")
         else:
             log_phase("aot:borrow_check:start")
+            log_build_progress("borrow_check", "modules", 0,
+                self.ctx.mir_modules.len(), "start", 4, 6, 0, 0, "running")
             if not self.borrow_check():
                 for err in self.ctx.errors:
                     log_error("Borrow error: {err}")
+                log_build_progress("borrow_check", "modules", -1,
+                    self.ctx.mir_modules.len(), "start", 4, 6, 1, 0, "failed")
                 return CompileResult.BorrowError(self.ctx.errors)
             log_phase("aot:borrow_check:done")
+            log_build_progress("borrow_check", "modules",
+                self.ctx.mir_modules.len(), self.ctx.mir_modules.len(),
+                "done", 4, 6, 0, 0, "running")
 
             log_phase("aot:process_async:start")
+            log_build_progress("process_async", "modules", 0,
+                self.ctx.mir_modules.len(), "start", 4, 6, 0, 0, "running")
             val async_state_machines = self.process_async()
             log_phase("aot:process_async:done")
+            log_build_progress("process_async", "modules",
+                self.ctx.mir_modules.len(), self.ctx.mir_modules.len(),
+                "done", 4, 6, 0, 0, "running")
 
+            log_build_progress("optimize_mir", "modules", 0,
+                self.ctx.mir_modules.len(), "start", 4, 6, 0, 0, "running")
             log_phase("aot:optimize_mir:start")
             val skip_mir_opt = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? ""
             if skip_mir_opt == "1":
@@ -120,10 +144,18 @@ impl CompilerDriver:
                 val mir_opt_level = self.ctx.options.opt_level ?? 0
                 self.optimize_mir_level(mir_opt_level)
             log_phase("aot:optimize_mir:done")
+            log_build_progress("optimize_mir", "modules",
+                self.ctx.mir_modules.len(), self.ctx.mir_modules.len(),
+                "done", 4, 6, 0, 0, "running")
 
             log_phase("aot:weave_aop:start")
+            log_build_progress("weave_aop", "modules", 0,
+                self.ctx.mir_modules.len(), "start", 4, 6, 0, 0, "running")
             self.weave_aop()
             log_phase("aot:weave_aop:done")
+            log_build_progress("weave_aop", "modules",
+                self.ctx.mir_modules.len(), self.ctx.mir_modules.len(),
+                "done", 4, 6, 0, 0, "running")
 
             log_phase("aot:debug_trace:start")
             self.apply_debug_trace()
