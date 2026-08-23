@@ -2094,14 +2094,18 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_unwrap_or_trap",
     "rt_expect_or_trap",
     "rt_unwrap_or_value",
-    // 2026-08-11: these three are EMITTED by codegen (instr/mod.rs UnboxInt,
-    // the native struct-receiver guard, and dict insert) and DEFINED in the
-    // runtime, but were never listed here. `runtime/build.rs` generates
+    // 2026-08-11/22: these five are EMITTED by codegen (instr/mod.rs UnboxInt,
+    // struct/global allocation, receiver-polymorphic find, the native
+    // struct-receiver guard, and dict insert) and DEFINED in the runtime, but
+    // were never listed here.
+    // `runtime/build.rs` generates
     // RUNTIME_SYMBOL_ENTRIES purely from this list, so an unlisted symbol is
     // never registered with the JIT -> "unresolved external symbol" at run
     // time and a silent fallback to the interpreter. Listing is the whole
     // registration mechanism; do not emit a call to a symbol absent here.
     "rt_dict_insert",
+    "rt_find",
+    "rt_struct_alloc",
     "rt_struct_receiver_valid",
     "rt_value_unbox_int",
     "rt_value_format_string",
@@ -2362,6 +2366,11 @@ mod tests {
             assert!(CORE_REQUIRED_RUNTIME_SYMBOLS.contains(&symbol));
             assert!(RUNTIME_SYMBOL_NAMES.contains(&symbol));
         }
+    }
+
+    #[test]
+    fn receiver_polymorphic_find_is_present_in_full_manifest() {
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_find"));
     }
 
     #[test]
