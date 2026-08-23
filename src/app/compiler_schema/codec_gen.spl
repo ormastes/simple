@@ -58,6 +58,11 @@ fn codec_opaque_types() -> [text]:
 fn codec_use_lines() -> text:
     var out = "use compiler.hir.hir_definitions.*\n"
     out = out + "use compiler.hir.hir_types.*\n"
+    # This explicit import was hand-added to the GENERATED file and was
+    # therefore silently dropped by every regeneration. Emitting it here keeps
+    # it. The glob above does not subsume it: a glob is not an import-origin
+    # for surface projection, so HirModule must be named explicitly.
+    out = out + "use compiler.hir.hir_types.{{HirModule}}  # explicit: a glob is not an import-origin for surface projection\n"
     out = out + "use compiler.hir.hir_operators.{{HirBinOp, HirUnaryOp, HirAssignOp}}\n"
     out = out + "use compiler.common.diagnostics.span.{{Span}}\n"
     out = out + "use compiler.common.dependency.visibility.{{Visibility}}\n"
@@ -460,7 +465,22 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         return indent + "val " + target + " = hc_read_f64(r)\n"
     if s.cat == "node" or s.cat == "opaque":
         val callee = if s.cat == "node": dec_fn_name(s.name) else: "hc_dec_opaque_" + _codec_snake(s.name)
-        return indent + "val " + target + " = if r.next_i64() == 1: " + callee + "(r) else: nil\n"
+        # Bug (selfhost_hir_cache_encode_hir_type_segv_2026-08-22): the
+        # if-EXPRESSION form unifies both arms at `T?`, so the taken arm is
+        # boxed as an inline `Some` enum word (hash("Some")<<32 | 1). Stored
+        # into a NON-optional field -- HirType.span is declared `span: Span`
+        # (src/compiler/20.hir/hir_types.spl:489-492) -- that enum word is then
+        # deep-copied as a tagged `Span` pointer by the next callee's
+        # value-semantics copy-in prologue, faulting on 0xf198715900000000 in
+        # hc_enc_hir_type. Same defect class the scalar note above records as
+        # already hit once and fixed by inlining; the node/opaque case was left
+        # unmitigated. The statement form assigns the bare value without
+        # boxing -- which is exactly why the `opt` branch below must write
+        # `Some(...)` explicitly. Wire format is unchanged.
+        var out = indent + "var " + target + ": " + decl_type + "? = nil\n"
+        out = out + indent + "if r.next_i64() == 1:\n"
+        out = out + indent + "    " + target + " = " + callee + "(r)\n"
+        return out
     val k = c.next()
     if s.cat == "opt":
         var out = indent + "var " + target + ": " + decl_type + " = nil\n"

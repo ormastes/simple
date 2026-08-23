@@ -112,3 +112,91 @@ optional-typed span source is
 Secondary hardening (separate concern): the untag guard checks tag and nonzero
 but never validates that the base is a real heap pointer -- the same weakness
 noted for `rt_unwrap_or_trap` in `src/runtime/simple_core/core_values.spl:79-100`.
+
+## 2026-08-23 -- ROOT CAUSE FOUND AND FIXED
+
+### The construction site (VERIFIED)
+
+Not a hand-written `HirType(...)` call: the **generated decoder**.
+`src/compiler/20.hir/generated/hir_codec.spl` (pre-fix):
+
+```
+fn hc_dec_hir_type(r: FlatPoolReader) -> HirType:
+    val f_kind = if r.next_i64() == 1: hc_dec_hir_type_kind(r) else: nil
+    val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil
+    HirType(kind: f_kind, span: f_span)
+```
+
+The if-**expression** unifies its two arms at `Span?`, so the taken arm is boxed
+as an inline `Some` enum word (`hash("Some") << 32 | 1` = `0xf198715900000001`
+-- exactly the observed `r12`). That word is stored into `HirType.span`, which is
+declared **non-optional** (`src/compiler/20.hir/hir_types.spl:489-492`). The next
+`hc_enc_hir_type(w, o0)` (`hir_codec.spl:4326`) then deep-copies `node.span` as a
+tagged `Span` pointer in its parameter copy-in prologue -> SEGV.
+
+This also explains cleanly why `SIMPLE_HIR_CACHE=0` bypassed D1: with the cache
+off the **decoder never runs**, so the malformed `HirType` is never built.
+
+The candidate flagged earlier, `module_declarations_bootstrap.spl:180`, is
+**REFUTED** (VERIFIED): it passes `span: decl_span` where `decl_span = Span.empty()`
+(line 46), a plain non-optional `Span`. Clean.
+
+### Generator (VERIFIED)
+
+`src/app/compiler_schema/codec_gen.spl`, `_emit_dec`, the `node`/`opaque` branch.
+The comment immediately above it (the `prim_*` branch) records that **this exact
+defect class was already hit and fixed for scalars** by inlining; the node/opaque
+case was left unmitigated. 374 emitted sites carried the bug.
+
+### Fix
+
+Emit the **statement** form instead of the if-expression:
+
+```
+var <target>: <T>? = nil
+if r.next_i64() == 1:
+    <target> = <dec_fn>(r)
+```
+
+Plain assignment does not auto-box -- which is precisely why the sibling `opt`
+branch in the same function must write `Some(...)` explicitly. **Wire format is
+unchanged**; only the in-memory representation of the decoded local changes.
+
+Fixed in the GENERATOR and regenerated (374 sites). Diff verified to contain
+nothing else: 375 removed / 1123 added lines = 374 x (1 removed -> 3 added) plus
+one relocated import line, with zero unexplained churn.
+
+### Second defect found while regenerating (FIXED here)
+
+Regeneration silently DROPPED a hand-added import from the generated file:
+
+```
+use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+```
+
+Someone had edited the GENERATED file directly, so every regeneration wiped it.
+The generator now emits it, and the spec pins that it survives.
+
+### Third defect (reported, NOT fixed)
+
+The type checker accepts a `Span?`-typed expression as the `span: Span` argument
+of a struct literal. Had it rejected that, this SEGV could not have been written.
+Site of the missing check is **ASSUMED/unlocated** -- deliberately no file:line is
+quoted here rather than guess one.
+
+### Reproduce test
+
+`test/01_unit/compiler/hir/hir_codec_optional_node_decode_source_spec.spl`
+(mirrored in `test/unit/`): **pre-fix 4 total / 0 passed / 4 failed** (374
+if-expression occurrences), **post-fix 4/4 passed**. Verified by reverting both
+source edits and re-running.
+
+### Limit (honest)
+
+Mechanism-level verification only. **stage2 remains miscompiled** -- it was built
+before this fix -- so the SEGV persists in the existing binary until a bootstrap
+redeploy. An end-to-end "hello world compiles AND runs under a self-hosted
+binary" proof is NOT claimed. A behavioural encode/decode/re-encode round-trip
+would only be a real regression pin on the NATIVE lane; under the tree-walk
+interpreter it would likely pass either way, so it was not written as a false
+assurance.

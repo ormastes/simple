@@ -1,0 +1,87 @@
+"""
+## Purpose and audience
+Purpose: Pin that the generated HIR codec decodes node/opaque fields with the
+statement form, never the boxing if-expression form.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-COMPILER-HIR-001
+doc/01_research/local/REQ-COMPILER-HIR-001.md
+doc/03_plan/sys_test/REQ-COMPILER-HIR-001.md
+doc/04_architecture/REQ-COMPILER-HIR-001.md
+doc/05_design/REQ-COMPILER-HIR-001.md
+"""
+# @req: REQ-COMPILER-HIR-001
+
+# Bug: selfhost_hir_cache_encode_hir_type_segv_2026-08-22
+#
+# `_emit_dec` emitted node/opaque field decodes as an if-EXPRESSION:
+#     val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil
+# The expression unifies both arms at `T?`, so the taken arm is boxed as an
+# inline `Some` enum word (hash("Some")<<32 | 1 = 0xf198715900000001). Assigned
+# into a NON-optional field -- `HirType.span: Span`, hir_types.spl:489-492 --
+# that enum word is then deep-copied as a tagged `Span` pointer by the next
+# callee's value-semantics copy-in prologue, faulting on 0xf198715900000000
+# inside hc_enc_hir_type. That was the default-config bootstrap SEGV;
+# SIMPLE_HIR_CACHE=0 bypassed it precisely because the decoder never ran.
+#
+# The statement form assigns the bare value without boxing -- which is exactly
+# why the sibling `opt` branch in the same generator function has to write
+# `Some(...)` explicitly. Wire format is unchanged.
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+use std.spec.step
+
+describe "generated HIR codec optional node decode":
+    it "emits no boxing if-expression decode in the generated codec":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: generated codec has zero if-expression node decodes")
+        val gen = read_source("src/compiler/20.hir/generated/hir_codec.spl")
+        expect(gen.contains("fn hc_dec_hir_type(")).to_equal(true)
+        # Pre-fix this exact shape occurred 374 times.
+        expect(gen.contains("= if r.next_i64() == 1: hc_dec_")).to_equal(false)
+
+    it "decodes HirType.span with the non-boxing statement form":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: the crash site itself uses the statement form")
+        val gen = read_source("src/compiler/20.hir/generated/hir_codec.spl")
+        expect(gen.contains("var f_span: Span? = nil")).to_equal(true)
+        expect(gen.contains("        f_span = hc_dec_span(r)")).to_equal(true)
+        expect(gen.contains(
+            "val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil")
+        ).to_equal(false)
+
+    it "generates the statement form from the codec generator":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: the GENERATOR is fixed, not just its output")
+        val g = read_source("src/app/compiler_schema/codec_gen.spl")
+        expect(g.contains(
+            "= if r.next_i64() == 1: \" + callee + \"(r) else: nil")
+        ).to_equal(false)
+        expect(g.contains("\"? = nil\\n\"")).to_equal(true)
+
+    it "emits the explicit HirModule import that regeneration used to drop":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: hand-added import survives regeneration")
+        # This import was hand-added to the GENERATED file and was therefore
+        # silently dropped by every regeneration. A glob is not an
+        # import-origin for surface projection, so it must be named.
+        # Brace-free substrings: `{` is an interpolation escape in Simple
+        # string literals, so matching the generator's doubled braces directly
+        # is not worth the escaping. The comment text is unambiguous.
+        val marker = "explicit: a glob is not an import-origin for surface projection"
+        val g = read_source("src/app/compiler_schema/codec_gen.spl")
+        expect(g.contains(marker)).to_equal(true)
+        val gen = read_source("src/compiler/20.hir/generated/hir_codec.spl")
+        expect(gen.contains(marker)).to_equal(true)
+        expect(gen.contains("use compiler.hir.hir_types.")).to_equal(true)
