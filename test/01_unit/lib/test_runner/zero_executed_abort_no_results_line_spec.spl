@@ -1,0 +1,78 @@
+"""
+## Purpose and audience
+Purpose: Prove a run that executed ZERO specs never emits a `Results:` line.
+Audience: compiler and tooling engineers who maintain the test runner.
+"""
+# @req: REQ-LIB-TEST-RUNNER-002 — stable requirement identity for this spec.
+
+use std.nogc_sync_mut.test_runner.test_runner_output.{run_aborted_before_execution}
+use std.nogc_sync_mut.test_runner.test_runner_types.{TestFileResult, TestRunResult}
+
+# REPRODUCING SPEC for
+# doc/08_tracking/bug/test_runner_preflight_abort_reads_as_mass_failure_2026-08-23.md
+#
+# Measured RED (bin/simple test test/03_system/feature):
+#
+#   ERROR: System test(s) missing required # @cover annotation:
+#   ...
+#   Results: 587 total, 0 passed, 587 failed
+#   Time:    0ms
+#
+# 3,037 lines of output, `Time: 0ms`, `[MEM] AFTER_RUN_0_files`, and NOT ONE
+# `PASS`/`FAIL`/`SPEC FILE VERDICT:` line -- zero specs executed. Yet the
+# authoritative `Results:` line is byte-indistinguishable from a real mass
+# failure of 587 healthy specs, and four sweep lanes were about to classify
+# specs from it. Missing annotation is ANNOTATION DEBT, not a test failure.
+#
+# Invariant pinned here: a run in which zero units executed must never produce
+# output that reads as a completed run with failures.
+
+fn ok_file(path: text) -> TestFileResult:
+    TestFileResult(
+        path: path, passed: 3, failed: 0, skipped: 0, pending: 0,
+        duration_ms: 12, setup_ms: 0, error: "",
+        timed_out: false, cached: false
+    )
+
+fn run_of(files: [TestFileResult], passed: i64, failed: i64) -> TestRunResult:
+    TestRunResult(
+        files: files, total_passed: passed, total_failed: failed,
+        total_skipped: 0, total_pending: 0, total_timed_out: 0,
+        total_duration_ms: 0, total_setup_ms: 0, total_cached: 0
+    )
+
+use std.spec.step
+
+describe "a preflight abort must not read as a completed run":
+    it "detects the @cover gate abort shape as zero-executed":
+        step("Verify: detects the @cover gate abort shape as zero-executed")
+        # @req: REQ-LIB-TEST-RUNNER-002
+        # Exactly what test_runner_main.spl returns when the gate fires:
+        # files: [], total_failed: <count of un-annotated specs>.
+        val result = run_of([], 0, 587)
+        expect(run_aborted_before_execution(result)).to_equal(true)
+
+    it "detects any future preflight abort, not just the @cover gate":
+        step("Verify: detects any future preflight abort, not just the @cover gate")
+        # The rule is structural -- no file results, nothing passed, failures
+        # claimed -- so a new gate cannot reintroduce the defect by returning
+        # the same shape under a different message.
+        expect(run_aborted_before_execution(run_of([], 0, 1))).to_equal(true)
+
+    it "does not misclassify a genuine empty selection":
+        step("Verify: does not misclassify a genuine empty selection")
+        # 0 files, 0 failures is "No tests selected." and must keep printing
+        # its normal summary. Negative control.
+        expect(run_aborted_before_execution(run_of([], 0, 0))).to_equal(false)
+
+    it "does not misclassify a real run that failed":
+        step("Verify: does not misclassify a real run that failed")
+        # Positive control: a run that DID execute specs still reports through
+        # the normal `Results:` path, so the fix cannot suppress real failures.
+        val executed = run_of([ok_file("a_spec.spl")], 3, 2)
+        expect(run_aborted_before_execution(executed)).to_equal(false)
+
+    it "does not misclassify a run that executed and passed":
+        step("Verify: does not misclassify a run that executed and passed")
+        val green = run_of([ok_file("a_spec.spl")], 3, 0)
+        expect(run_aborted_before_execution(green)).to_equal(false)
