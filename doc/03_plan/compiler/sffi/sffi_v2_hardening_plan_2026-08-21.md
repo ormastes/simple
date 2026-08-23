@@ -1309,3 +1309,10 @@ declaration rows (867 tagged, 377 minimized, 10,945 untouched, zero signed or
 admitted). Next harden `cache/gc/mark_sweep.spl`, then `admission.spl`, using
 the same confirmed move/delete rule. Self-hosted verification remains pending
 because the available executable reports that it is the Rust bootstrap seed.
+
+Mark-sweep now preserves its one-read/one-walk call bounds and reports only
+confirmed moves. Current totals are 21,382 calls (2,079 explicit, 19,303
+missing) and 12,077 declarations (875 tagged, 380 minimized, 10,937 untouched,
+zero signed/admitted). Next harden `cache/gc/admission.spl`: keep its single
+tree traversal and size probes, and do not interpret absent/inaccessible/provider
+failure as proof that capacity is available.

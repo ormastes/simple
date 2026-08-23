@@ -22,13 +22,21 @@
 # the reverse. It must never produce a dangling hit: nothing in trash/ is
 # served (cas_get / action_get never look there).
 
+@unsafe(reason: "raw file read; empty text is valid data and also the unreadable or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw file probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw file move status; false means the move was not confirmed", capabilities: [ffi])
 extern fn rt_file_move(old_path: text, new_path: text) -> bool
+@unsafe(reason: "raw directory creation status; false means the directory was not established", capabilities: [ffi])
 extern fn rt_dir_create_all(path: text) -> bool
+@unsafe(reason: "raw directory probe; false includes non-directory, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_dir_exists(path: text) -> bool
+@unsafe(reason: "raw directory walk; empty data includes an empty tree or provider failure", capabilities: [ffi])
 extern fn rt_dir_walk(root: text) -> [text]
+@unsafe(reason: "raw process identity; non-positive values are invalid/provider-failure sentinels", capabilities: [ffi])
 extern fn rt_getpid() -> i64
+@unsafe(reason: "raw wall clock; negative values are invalid/provider-failure sentinels", capabilities: [ffi])
 extern fn rt_time_now_unix_micros() -> i64
 
 use compiler.driver.cache.cas_store.{ActionManifest, action_manifest_parse, cas_blob_path, cas_action_path}
@@ -44,10 +52,19 @@ fn trash_dir(root: text) -> text:
     "{root}/trash"
 
 fn move_to_trash(root: text, path: text) -> bool:
-    rt_dir_create_all(trash_dir(root))
-    val stamp = "{rt_getpid()}-{rt_time_now_unix_micros()}"
+    var dir_ready = false
+    var pid: i64 = -1
+    var now: i64 = -1
+    unsafe(capabilities: [ffi]):
+        dir_ready = rt_dir_create_all(trash_dir(root))
+        pid = rt_getpid()
+        now = rt_time_now_unix_micros()
+    if not dir_ready or pid <= 0 or now < 0:
+        return false
+    val stamp = "{pid}-{now}"
     val name = path.replace("/", "_")
-    rt_file_move(path, "{trash_dir(root)}/{name}-{stamp}")
+    unsafe(capabilities: [ffi]):
+        rt_file_move(path, "{trash_dir(root)}/{name}-{stamp}")
 
 fn contains_digest(digests: [text], digest: text) -> bool:
     for d in digests:
@@ -58,23 +75,31 @@ fn contains_digest(digests: [text], digest: text) -> bool:
 # Collect every action-manifest file path under root/actions.
 fn list_action_paths(root: text) -> [text]:
     val dir = "{root}/actions"
-    if not rt_file_exists(dir):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(dir)
+    if not exists:
         return []
     var out: [text] = []
-    for path in rt_dir_walk(dir):
-        if not rt_dir_exists(path):
-            out = out.push(path)
+    unsafe(capabilities: [ffi]):
+        for path in rt_dir_walk(dir):
+            if not rt_dir_exists(path):
+                out = out.push(path)
     out
 
 # Collect every blob file path under root/cas.
 fn list_blob_paths(root: text) -> [text]:
     val dir = "{root}/cas"
-    if not rt_file_exists(dir):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(dir)
+    if not exists:
         return []
     var out: [text] = []
-    for path in rt_dir_walk(dir):
-        if not rt_dir_exists(path):
-            out = out.push(path)
+    unsafe(capabilities: [ffi]):
+        for path in rt_dir_walk(dir):
+            if not rt_dir_exists(path):
+                out = out.push(path)
     out
 
 # Explicit pins: a flat digest list at root/pins (one digest per line). No
@@ -84,9 +109,14 @@ fn list_blob_paths(root: text) -> [text]:
 # needs pin metadata beyond membership.
 fn read_pins(root: text) -> [text]:
     val path = "{root}/pins"
-    if not rt_file_exists(path):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(path)
+    if not exists:
         return []
-    val content = rt_file_read_text(path) ?? ""
+    var content = ""
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_text(path) ?? ""
     var out: [text] = []
     for line in content.split("\n"):
         if line.trim() != "":
@@ -119,7 +149,9 @@ fn gc_mark_and_sweep(root: text) -> MarkSweepResult:
     var manifests_trashed: i64 = 0
 
     for path in action_paths:
-        val content = rt_file_read_text(path) ?? ""
+        var content = ""
+        unsafe(capabilities: [ffi]):
+            content = rt_file_read_text(path) ?? ""
         match action_manifest_parse(content):
             case Some(manifest):
                 manifests_kept = manifests_kept + 1
@@ -128,8 +160,8 @@ fn gc_mark_and_sweep(root: text) -> MarkSweepResult:
                         marked_artifacts = marked_artifacts.push(d)
             case nil:
                 # unparseable manifest: not reachable, trash it
-                move_to_trash(root, path)
-                manifests_trashed = manifests_trashed + 1
+                if move_to_trash(root, path):
+                    manifests_trashed = manifests_trashed + 1
 
     var trashed_blobs: i64 = 0
     for blob_path in list_blob_paths(root):
@@ -138,8 +170,8 @@ fn gc_mark_and_sweep(root: text) -> MarkSweepResult:
             if blob_path == cas_blob_path(root, digest):
                 referenced = true
         if not referenced:
-            move_to_trash(root, blob_path)
-            trashed_blobs = trashed_blobs + 1
+            if move_to_trash(root, blob_path):
+                trashed_blobs = trashed_blobs + 1
 
     MarkSweepResult(
         marked_manifests: manifests_kept,

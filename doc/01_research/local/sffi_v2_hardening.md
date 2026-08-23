@@ -2195,3 +2195,24 @@ The declaration census reports 12,077 unsafe rows: 867 tagged, 642 contract-
 documented, 377 minimized, 10,945 untouched, and zero evidence-verified,
 signature-verified, or admitted. Implementation definition counts are Simple
 558, Rust 2,166, C 2,327, and C++ 219. These remain inventory counts, not proof.
+
+## Mark-sweep mutation authority
+
+`cache/gc/mark_sweep.spl` now documents its eight raw declarations and scopes
+all 13 live calls. It counts a manifest or blob as trashed only when the
+provider confirms the move. Trash-directory creation, PID, and clock sentinels
+fail closed before the destination path is constructed.
+
+The owner retains one action-tree walk, one blob-tree walk, one read per
+manifest, and its existing arrays and nested digest matching. No retry, lookup,
+copy, allocation, or additional provider call was introduced. Optimizer general
+findings remain four existing collection-preallocation suggestions. The shared
+focused spec passes 11/11 at 5.99 s / 173,636 KiB under the bootstrap seed. Its
+elapsed comparison includes a newly added eleventh authority example and is not
+a runtime-path regression measurement; RSS decreased from the preceding
+10-example observation.
+
+The authoritative totals are now 21,382 raw calls, 2,079 explicit, and 19,303
+missing. Of 12,077 declaration rows, 875 are tagged, 645 contract-documented,
+380 minimized, 10,937 untouched, and zero evidence-verified, signature-
+verified, or admitted.
