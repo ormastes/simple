@@ -378,3 +378,72 @@ The read-side CoW fixes did not only change speed: `[hir-fatal-count]` for
 `driver_riscv_gen2_product.spl` went **45 -> 24** and `driver.spl` reports 8.
 The `unresolved type` / `field not visible` class is therefore also NOT explained
 by the surface registry, and is a third open thread.
+
+
+---
+
+## RUN 6 — the "retention" explanation was WRONG; it is the owner TABLE
+
+Two corrections to what earlier sections (and commit `5cfc9d13c66`) asserted,
+both with file:line:
+
+1. **The transient scope is NOT held across the whole lowering.**
+   `rt_transient_array_scope_begin()` is at `driver_hir_pipeline_lowering.spl:72`
+   and `driver_end_transient_parse_scope()` at `:113`, both inside
+   `lower_streaming_surface_source`, which handles ONE `SourceFile`. Between them
+   sit four fail-closed promotion guards (`:86` HIR module, `:92` diagnostics,
+   `:96-102` flat HIR row, `:103` frontend registries), each rolling back and
+   ending the scope on failure. `rt_transient_array_scope_pause()` at `:82`
+   clears the OWNED bit for post-lowering allocations.
+2. **Retention is not the mechanism.** `rt_free` frees IMMEDIATELY even inside an
+   active scope — `runtime_memory.c:543-566` erases the table entry, then calls
+   `free(ptr)`. Per-module churn does not become retained user memory.
+
+So "every alloc is recorded OWNED and freed only at scope end" was wrong, and the
+narrowing it implied is both unnecessary and unsafe: the current boundary is
+already the narrowest that keeps the four promotion handoffs atomic, and
+splitting it would place a scope end between lowering and
+`rt_transient_heap_promote` — exactly the zeroed-payload/UAF class of
+`stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md`. **Do not
+narrow this scope.**
+
+### What is actually hot
+
+`rt_transient_raw_insert` (`runtime_memory.c:53`) is open-addressed with
+tombstones, amortized O(1) — not a linear scan. Two STRUCTURAL defects make it
+dominate the profile:
+
+- **Tombstone-driven doubling.** The grow trigger counts tombstones as occupancy
+  (`runtime_memory.c:113-115`, `runtime_native.c:1343-1344`), but
+  `rt_transient_raw_grow` only ever DOUBLED. Since `rt_realloc` (`:495-536`)
+  frees the old block on every array/dict growth, a long scope accumulates
+  tombstones and capacity tracks CUMULATIVE CHURN rather than the live set.
+- **High-water capacity retained across scopes.** `rt_transient_raw_scope_end`
+  (`:182`) and `rt_core_transient_raw_clear` memset but never release, so one
+  large module charges every later module an O(cap) scan, a full memset, and a
+  random probe into a huge sparse array on EVERY `rt_alloc`. That is what
+  `rt_transient_raw_register` at ~100% of samples looks like.
+
+The exact fix already existed in-repo, unported: `rt_core_register_immortal_ptr`
+(`runtime_native.c:1487-1495`), whose comment describes this incident shape
+verbatim.
+
+### Fix and measurements
+
+`grow()` becomes `resize(next_cap)` — a same-capacity rehash is the only way to
+purge tombstones under linear probing; the register path selects same-cap when
+`tombs > len && (len+1)*10 < cap*5`, mirroring the precedent; and scope-end
+RELEASES the table when `cap > 4096` instead of memsetting it. The `bytes` word
+is carried verbatim, so the OWNED bit and size survive.
+
+- realloc-shaped churn: steady-state capacity **16384 -> 1024**, identical live sets
+- one 4M-node module then 300 small ones: those 300 follow-on scopes
+  **1.043 s -> 0.022 s (47x)**, and 128 MiB of table returned rather than retained
+- pure monotone live growth: **identical** before and after — the fix correctly
+  does NOT fire on legitimate sizing
+- `rt_transient_heap_scope_selfcheck` (the ownership fence): **77 checks, 0
+  failures**, against an archive built from the modified sources
+
+UNVERIFIED: the real 34 -> 38 GB explosion. Evidence here is C-level only; no
+bootstrap was run. Three `rt_mem_guard_*` selfchecks trap at rc=133 and are
+PRE-EXISTING — they reproduce identically on a `git archive HEAD` export.

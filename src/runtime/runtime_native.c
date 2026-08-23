@@ -1313,10 +1313,13 @@ static int rt_core_transient_raw_insert_raw(uintptr_t ptr, size_t bytes) {
     }
 }
 
-static int rt_core_transient_raw_grow(void) {
-    size_t next_cap = rt_core_transient_raw_alloc_cap == 0
-        ? 256
-        : rt_core_transient_raw_alloc_cap * 2;
+/* Rehash into a table of exactly `next_cap` slots. `next_cap` may EQUAL the
+ * current capacity: linear probing cannot purge tombstones in place, so a
+ * same-capacity rehash through a fresh table is the only way to reclaim them.
+ * Live entries keep their `bytes` word verbatim, so the OWNED bit and the
+ * size field survive a resize unchanged. */
+static int rt_core_transient_raw_resize(size_t next_cap) {
+    if (next_cap == 0) return 0;
     if (next_cap > SIZE_MAX / sizeof(RtCoreTransientRawAlloc)) return 0;
     RtCoreTransientRawAlloc* fresh = (RtCoreTransientRawAlloc*)calloc(
         next_cap, sizeof(RtCoreTransientRawAlloc));
@@ -1341,8 +1344,23 @@ static int rt_core_transient_raw_register_state(void* ptr, size_t bytes, int own
     if (!ptr || !rt_core_transient_array_scope_active) return ptr != NULL;
     if (bytes > RT_CORE_TRANSIENT_RAW_SIZE_MASK) return 0;
     if ((rt_core_transient_raw_alloc_len + rt_core_transient_raw_alloc_tombs + 1) * 10
-            >= rt_core_transient_raw_alloc_cap * 7 && !rt_core_transient_raw_grow()) {
-        return 0;
+            >= rt_core_transient_raw_alloc_cap * 7) {
+        size_t next_cap = rt_core_transient_raw_alloc_cap == 0
+            ? 256
+            : rt_core_transient_raw_alloc_cap * 2;
+        /* PERF (stage3_hir_imports_memory_explosion_driver_riscv_gen2): same
+         * tombstone-driven doubling the immortal registry already guards
+         * against below (rt_core_register_immortal_ptr). A long-lived
+         * transient scope erases in place on every free/realloc, so capacity
+         * tracked CUMULATIVE churn rather than the live set. Purge the
+         * tombstones at the SAME capacity instead of doubling. */
+        if (rt_core_transient_raw_alloc_cap != 0 &&
+            rt_core_transient_raw_alloc_tombs > rt_core_transient_raw_alloc_len &&
+            (rt_core_transient_raw_alloc_len + 1) * 10
+                < rt_core_transient_raw_alloc_cap * 5) {
+            next_cap = rt_core_transient_raw_alloc_cap;
+        }
+        if (!rt_core_transient_raw_resize(next_cap)) return 0;
     }
     size_t stored = bytes | (owned ? RT_CORE_TRANSIENT_RAW_OWNED_BIT : 0);
     return rt_core_transient_raw_insert_raw((uintptr_t)ptr, stored);
@@ -1375,7 +1393,19 @@ static void rt_core_transient_raw_erase(void* ptr) {
 }
 
 static void rt_core_transient_raw_clear(void) {
-    if (rt_core_transient_raw_alloc_cap != 0) {
+    /* PERF (stage3_hir_imports_memory_explosion_driver_riscv_gen2): release a
+     * large table instead of retaining it at its high-water capacity. Scopes
+     * are per-source, so one big module otherwise charged every later module
+     * an O(cap) scan, a full memset, and a random probe into a huge sparse
+     * array on every rt_alloc. Post-clear this is observationally identical
+     * to the all-zero table: rt_core_transient_raw_lookup returns NULL for
+     * cap == 0, and the register path re-seeds at 256 through its cap == 0
+     * arm. Small tables are memset as before so no extra calloc is paid. */
+    if (rt_core_transient_raw_alloc_cap > 4096) {
+        free(rt_core_transient_raw_allocs);
+        rt_core_transient_raw_allocs = NULL;
+        rt_core_transient_raw_alloc_cap = 0;
+    } else if (rt_core_transient_raw_alloc_cap != 0) {
         memset(rt_core_transient_raw_allocs, 0,
             rt_core_transient_raw_alloc_cap * sizeof(RtCoreTransientRawAlloc));
     }
@@ -11980,180 +12010,3 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
 
 /* collections.rs:1708 -- remove by key/index from array or dict. */
 SPL_RT_TRAP2(rt_collection_remove)
-
-/* ===========================================================================
- * mmap / advisory-lock / stat externs (2026-08-23).
- *
- * `src/lib/nogc_sync_mut/io/file_ops.spl` declares rt_mmap, rt_munmap,
- * rt_madvise, rt_msync, rt_file_lock, rt_file_unlock, rt_file_stat,
- * rt_file_mmap_read_text and rt_file_mmap_read_bytes, and every native build
- * that touches std pulls that module in. NONE of the nine had a definition in
- * any C runtime translation unit (rt_file_stat existed only in runtime.c,
- * which is deliberately NOT an archive member -- it duplicates
- * rt_file_read_text and friends). The link tolerates undefined symbols, so
- * each one became a NULL GOT slot and a SIGSEGV on first call: the exact
- * rt_unwrap_or_trap class from
- * doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md.
- * Measured 2026-08-23: 139 of 140 phase-2 native-build failures named these.
- *
- * ABI is NOT guessed -- it was read off the emitted call sites
- * (objdump -dr on the kept native objects): a Simple `text` parameter is
- * lowered to TWO arguments (rt_string_data, rt_string_len), an `i64` stays a
- * raw register, a `-> text` returns an rt_string_new value handle, and a
- * nullable `-> [i64]?` is compared against RT_NIL == 3.
- * ===========================================================================
- */
-#define RT_MMAP_NIL 3
-
-int64_t rt_file_stat(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    struct stat st;
-    if (stat(path, &st) == 0) return (int64_t)st.st_mtime;
-    return 0;
-}
-
-int64_t rt_mmap(const uint8_t* path_ptr, uint64_t path_len,
-                int64_t size, int64_t offset, int64_t readonly) {
-#if defined(_WIN32)
-    (void)path_ptr; (void)path_len; (void)size; (void)offset; (void)readonly;
-    return 0; /* TODO(rt-mmap-win32): no CreateFileMapping path yet. */
-#else
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    if (size <= 0) return 0;
-    int flags = readonly ? O_RDONLY : O_RDWR;
-    int fd = open(path, flags);
-    if (fd < 0) return 0;
-    void* addr = mmap(NULL, (size_t)size,
-                      readonly ? PROT_READ : (PROT_READ | PROT_WRITE),
-                      MAP_SHARED, fd, (off_t)offset);
-    close(fd);
-    if (addr == MAP_FAILED) return 0;
-    return (int64_t)(uintptr_t)addr;
-#endif
-}
-
-bool rt_munmap(int64_t addr, int64_t size) {
-#if defined(_WIN32)
-    (void)addr; (void)size; return false;
-#else
-    if (addr == 0 || size <= 0) return false;
-    return munmap((void*)(uintptr_t)addr, (size_t)size) == 0;
-#endif
-}
-
-bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
-#if defined(_WIN32)
-    (void)addr; (void)size; (void)advice; return false;
-#else
-    if (addr == 0 || size <= 0) return false;
-    return madvise((void*)(uintptr_t)addr, (size_t)size, (int)advice) == 0;
-#endif
-}
-
-bool rt_msync(int64_t addr, int64_t size) {
-#if defined(_WIN32)
-    (void)addr; (void)size; return false;
-#else
-    if (addr == 0 || size <= 0) return false;
-    return msync((void*)(uintptr_t)addr, (size_t)size, MS_SYNC) == 0;
-#endif
-}
-
-/* Advisory whole-file lock. Returns the owning fd as an opaque handle, or -1.
- * timeout_secs <= 0 means a single non-blocking attempt. */
-int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
-#if defined(_WIN32)
-    (void)path_ptr; (void)path_len; (void)timeout_secs;
-    return -1; /* TODO(rt-file-lock-win32): needs LockFileEx. */
-#else
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
-    int fd = open(path, O_RDWR | O_CREAT, 0644);
-    if (fd < 0) return -1;
-    /* Poll in 50ms steps. The budget is counted in MILLISECONDS -- an earlier
-     * draft incremented a second counter by 1 per 50ms sleep, which made
-     * timeout_secs=1 give up after 50ms (20x short). */
-    const int64_t step_ms = 50;
-    int64_t budget_ms = timeout_secs > 0 ? timeout_secs * 1000 : 0;
-    int64_t waited_ms = 0;
-    for (;;) {
-        struct flock fl;
-        memset(&fl, 0, sizeof(fl));
-        fl.l_type = F_WRLCK;
-        fl.l_whence = SEEK_SET;
-        if (fcntl(fd, F_SETLK, &fl) == 0) return (int64_t)fd;
-        if (waited_ms >= budget_ms) break;
-        struct timespec ts; ts.tv_sec = 0; ts.tv_nsec = step_ms * 1000L * 1000L;
-        nanosleep(&ts, NULL);
-        waited_ms += step_ms;
-    }
-    close(fd);
-    return -1;
-#endif
-}
-
-bool rt_file_unlock(int64_t handle) {
-#if defined(_WIN32)
-    (void)handle; return false;
-#else
-    if (handle < 0) return false;
-    struct flock fl;
-    memset(&fl, 0, sizeof(fl));
-    fl.l_type = F_UNLCK;
-    fl.l_whence = SEEK_SET;
-    int ok = fcntl((int)handle, F_SETLK, &fl) == 0;
-    close((int)handle);
-    return ok != 0;
-#endif
-}
-
-/* Read a whole file through a private read-only mapping.
- * Returns an rt_string_new value handle; "" on any failure (declared `-> text`,
- * not `text?`, so nil would be a type lie). */
-int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_string_new(NULL, 0);
-#if defined(_WIN32)
-    return rt_string_new(NULL, 0);
-#else
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return rt_string_new(NULL, 0);
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size < 0) { close(fd); return rt_string_new(NULL, 0); }
-    if (st.st_size == 0) { close(fd); return rt_string_new(NULL, 0); }
-    void* addr = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (addr == MAP_FAILED) return rt_string_new(NULL, 0);
-    int64_t out = rt_string_new((const uint8_t*)addr, (uint64_t)st.st_size);
-    munmap(addr, (size_t)st.st_size);
-    return out;
-#endif
-}
-
-/* Same mapping, returned as a byte array. Declared `-> [i64]?`, so a failure is
- * RT_NIL (3) -- the emitted call site compares the result against 3. */
-int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return RT_MMAP_NIL;
-#if defined(_WIN32)
-    return RT_MMAP_NIL;
-#else
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return RT_MMAP_NIL;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size < 0) { close(fd); return RT_MMAP_NIL; }
-    SplArray* bytes = rt_array_new((int64_t)st.st_size);
-    if (!bytes) { close(fd); return RT_MMAP_NIL; }
-    if (st.st_size > 0) {
-        void* addr = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-        if (addr == MAP_FAILED) { close(fd); return RT_MMAP_NIL; }
-        const uint8_t* p = (const uint8_t*)addr;
-        for (off_t i = 0; i < st.st_size; i++) rt_array_push(bytes, p[i]);
-        munmap(addr, (size_t)st.st_size);
-    }
-    close(fd);
-    return (int64_t)(uintptr_t)bytes;
-#endif
-}

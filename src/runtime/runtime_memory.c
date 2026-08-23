@@ -73,8 +73,13 @@ static int rt_transient_raw_insert(uintptr_t ptr, size_t bytes) {
     }
 }
 
-static int rt_transient_raw_grow(void) {
-    size_t next_cap = rt_transient_raw_cap == 0 ? 256 : rt_transient_raw_cap * 2;
+/* Rehash into a table of exactly `next_cap` slots. `next_cap` may EQUAL the
+ * current capacity: linear probing cannot purge tombstones in place, so a
+ * same-capacity rehash through a fresh table is the only way to reclaim them.
+ * Live entries keep their `bytes` word verbatim, so the OWNED bit and the
+ * size field survive a resize unchanged. */
+static int rt_transient_raw_resize(size_t next_cap) {
+    if (next_cap == 0) return 0;
     if (next_cap > SIZE_MAX / sizeof(RtTransientRawAlloc)) return 0;
     RtTransientRawAlloc* fresh = (RtTransientRawAlloc*)calloc(
         next_cap, sizeof(RtTransientRawAlloc));
@@ -111,8 +116,24 @@ static int rt_transient_raw_register(void* ptr, size_t bytes) {
     if (!ptr || !rt_transient_raw_active) return ptr != NULL;
     if (bytes > RT_TRANSIENT_RAW_SIZE_MASK) return 0;
     if ((rt_transient_raw_len + rt_transient_raw_tombs + 1) * 10
-            >= rt_transient_raw_cap * 7 && !rt_transient_raw_grow()) {
-        return 0;
+            >= rt_transient_raw_cap * 7) {
+        size_t next_cap = rt_transient_raw_cap == 0 ? 256 : rt_transient_raw_cap * 2;
+        /* PERF (stage3_hir_imports_memory_explosion_driver_riscv_gen2):
+         * tombstones count as occupancy above because they lengthen probe
+         * chains exactly as live entries do -- but rt_free erases in place
+         * (see rt_free below) and rt_realloc frees the old block on EVERY
+         * array/dict growth, so a long-lived transient scope accumulates
+         * millions of tombstones while very few blocks are live. Doubling on
+         * those made capacity track CUMULATIVE churn instead of the live set,
+         * and every rt_alloc then probed an ever-larger sparse table. Purge
+         * them at the SAME capacity instead. Identical guard, and identical
+         * reason, to rt_core_register_immortal_ptr in runtime_native.c. */
+        if (rt_transient_raw_cap != 0 &&
+            rt_transient_raw_tombs > rt_transient_raw_len &&
+            (rt_transient_raw_len + 1) * 10 < rt_transient_raw_cap * 5) {
+            next_cap = rt_transient_raw_cap;
+        }
+        if (!rt_transient_raw_resize(next_cap)) return 0;
     }
     size_t stored = bytes |
         (rt_transient_raw_paused ? 0 : RT_TRANSIENT_RAW_OWNED_BIT);
@@ -167,7 +188,22 @@ int32_t rt_transient_raw_scope_end(void) {
             rt_free((uint8_t*)entry->ptr);
         }
     }
-    if (rt_transient_raw_cap != 0) {
+    /* PERF (stage3_hir_imports_memory_explosion_driver_riscv_gen2): the table
+     * used to be memset and RETAINED at its high-water capacity. Scopes are
+     * per-source (driver_hir_pipeline_lowering.spl:72..113), so one large
+     * module's capacity was then paid by EVERY later module: an O(cap) scan
+     * plus a full memset per scope end, and -- the part the profile shows --
+     * one random probe into a huge sparse array on every single rt_alloc.
+     * Release it instead. Post-end this is observationally identical to the
+     * all-zero table: rt_transient_raw_lookup returns NULL for cap == 0
+     * (:98), which is what every erase/promote/words caller already handles,
+     * and rt_transient_raw_register re-seeds at 256 through the cap == 0 arm.
+     * A small table is kept as-is so an ordinary module pays no extra calloc. */
+    if (rt_transient_raw_cap > 4096) {
+        free(rt_transient_raw_allocs);
+        rt_transient_raw_allocs = NULL;
+        rt_transient_raw_cap = 0;
+    } else if (rt_transient_raw_cap != 0) {
         memset(rt_transient_raw_allocs, 0,
             rt_transient_raw_cap * sizeof(RtTransientRawAlloc));
     }
