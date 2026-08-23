@@ -1,0 +1,196 @@
+"""
+## Purpose and audience
+Pins dev ids: the `@tag:dev-id-<id>` spelling that makes one in-development
+workstream addressable by name, the id parser, the default-include /
+`--no-in-development` selection rule, and the id listing with counts.
+## Operator workflow
+Run `bin/simple test test/01_unit/lib/tag_query/dev_id_spec.spl`; read the
+per-scenario verdicts in the `Results:` summary.
+## Compatibility and limitations
+Covers the pure layer in `src/lib/nogc_sync_mut/tag_query/dev_id.spl`
+(text and index in, selection out). The `bin/simple tags` surface that
+renders these queries is pinned separately.
+"""
+# @manual: primary
+# doc-path: doc/05_design/app/testing/in_development_dev_ids.md
+
+use std.spec.{step}
+use std.spec.in_development.{spec_tags}
+use std.tag_query.tag_index.{
+    IN_DEVELOPMENT_TAG, TaggedItem, TagIndex, tag_index_items_with
+}
+use std.tag_query.dev_id.{
+    DEV_ID_PREFIX,
+    dev_id_tag,
+    dev_id_from_tag,
+    dev_id_of_tags,
+    item_dev_id,
+    item_is_in_development,
+    DevSelection,
+    dev_selection_includes,
+    dev_selection_parse,
+    dev_selection_parse_id,
+    tag_index_items_with_dev_id,
+    tag_index_selected,
+    tag_index_dev_ids,
+    tag_index_unnamed_in_development
+}
+
+fn _fixture() -> TagIndex:
+    # Two workstreams plus one unnamed WIP spec plus one ordinary spec.
+    TagIndex(
+        items: [
+            TaggedItem(path: "test/a_spec.spl", tags: ["in-development", "dev-id-auth-rework"]),
+            TaggedItem(path: "test/b_spec.spl", tags: ["dev-id-auth-rework", "in-development"]),
+            TaggedItem(path: "test/c_spec.spl", tags: ["in-development", "dev-id-parser-hir"]),
+            TaggedItem(path: "test/d_spec.spl", tags: ["in-development"]),
+            TaggedItem(path: "test/e_spec.spl", tags: ["stdlib"])
+        ],
+        scanned: 5
+    )
+
+describe "Dev ids: the syntax reuses the existing tag channel":
+    it "spells a dev id as an ordinary @tag: name with a reserved prefix":
+        step("Verify the reserved prefix constant")
+        expect(DEV_ID_PREFIX).to_equal("dev-id-")
+        expect(dev_id_tag("auth-rework")).to_equal("dev-id-auth-rework")
+
+    it "is parsed by the EXISTING canonical extractor with no grammar change":
+        step("spec_tags sees the dev id as just another tag")
+        # evidence(pinned oracle): `-` is already a tag character in
+        # in_development.spl:_is_tag_char, so no parser had to change.
+        val src = "# @tag:in-development\n# @tag:dev-id-auth-rework\n"
+        val tags = spec_tags(src)
+        expect(tags.len()).to_equal(2)
+        expect(tags[0]).to_equal("in-development")
+        expect(tags[1]).to_equal("dev-id-auth-rework")
+
+    it "recovers the id from the tag, and rejects a non-dev-id tag":
+        step("Strip the prefix")
+        expect(dev_id_from_tag("dev-id-auth-rework")).to_equal("auth-rework")
+        expect(dev_id_from_tag("in-development")).to_equal("")
+        expect(dev_id_from_tag("stdlib")).to_equal("")
+
+    it "treats a bare prefix with no id as NOT an id":
+        step("`dev-id-` alone would be a nameless bucket, not an address")
+        expect(dev_id_from_tag("dev-id-")).to_equal("")
+
+    it "folds the underscore spelling onto the hyphenated canonical form":
+        step("tag_normalize applies to ids exactly as to every other tag")
+        expect(dev_id_from_tag("DEV_ID_AUTH_REWORK")).to_equal("auth-rework")
+        expect(dev_id_tag("auth_rework")).to_equal("dev-id-auth-rework")
+
+    it "does not double the prefix when the caller already supplied one":
+        step("A copied-and-pasted full tag name still resolves")
+        expect(dev_id_tag("dev-id-auth-rework")).to_equal("dev-id-auth-rework")
+
+    it "reads the id out of a tag set regardless of tag order":
+        step("The dev id may precede or follow the in-development tag")
+        expect(dev_id_of_tags(["in-development", "dev-id-x"])).to_equal("x")
+        expect(dev_id_of_tags(["dev-id-x", "in-development"])).to_equal("x")
+        expect(dev_id_of_tags(["in-development"])).to_equal("")
+        expect(dev_id_of_tags([])).to_equal("")
+
+describe "Dev ids: selecting exactly one workstream":
+    it "selects exactly the specs carrying one id, and nothing else":
+        step("Run-one-id over the fixture index")
+        val got = tag_index_items_with_dev_id(_fixture(), "auth-rework")
+        expect(got.len()).to_equal(2)
+        expect(got[0]).to_equal("test/a_spec.spl")
+        expect(got[1]).to_equal("test/b_spec.spl")
+
+    it "selects the other workstream without leaking the first":
+        step("A second id is disjoint from the first")
+        val got = tag_index_items_with_dev_id(_fixture(), "parser-hir")
+        expect(got.len()).to_equal(1)
+        expect(got[0]).to_equal("test/c_spec.spl")
+
+    it "returns nothing for an id that no spec carries":
+        step("An unknown id is empty, not everything")
+        expect(tag_index_items_with_dev_id(_fixture(), "nope").len()).to_equal(0)
+
+    it "never selects an untagged or non-in-development spec by id":
+        step("An id names a slice OF the in-development set")
+        val idx = TagIndex(
+            items: [TaggedItem(path: "test/z_spec.spl", tags: ["dev-id-auth-rework"])],
+            scanned: 1
+        )
+        expect(tag_index_items_with_dev_id(idx, "auth-rework").len()).to_equal(0)
+
+describe "Dev ids: default-include versus the --no- switch":
+    it "includes in-development specs BY DEFAULT, matching the landed sweep rule":
+        step("Default mode executes everything")
+        # evidence(pinned oracle): the landed semantics run a tagged spec and
+        # neutralise its VERDICT; selection must not quietly stop it running,
+        # or the unexpected-pass promotion signal is lost.
+        expect(dev_selection_includes(DevSelection.Default, true, "auth-rework", "")).to_equal(true)
+        expect(dev_selection_includes(DevSelection.Default, false, "", "")).to_equal(true)
+        expect(tag_index_selected(_fixture(), DevSelection.Default, "").len()).to_equal(5)
+
+    it "excludes in-development specs from EXECUTION only when switched off":
+        step("--no-in-development drops the tagged set")
+        expect(dev_selection_includes(DevSelection.Exclude, true, "auth-rework", "")).to_equal(false)
+        expect(dev_selection_includes(DevSelection.Exclude, false, "", "")).to_equal(true)
+        val got = tag_index_selected(_fixture(), DevSelection.Exclude, "")
+        expect(got.len()).to_equal(1)
+        expect(got[0]).to_equal("test/e_spec.spl")
+
+    it "narrows to the whole in-development set with --in-development":
+        step("Only mode: a dev session running all of its WIP")
+        val got = tag_index_selected(_fixture(), DevSelection.Only, "")
+        expect(got.len()).to_equal(4)
+        expect(got[3]).to_equal("test/d_spec.spl")
+
+    it "narrows to one workstream with --in-development=<id>":
+        step("OnlyId mode over the same index")
+        val got = tag_index_selected(_fixture(), DevSelection.OnlyId, "auth-rework")
+        expect(got.len()).to_equal(2)
+        expect(got[0]).to_equal("test/a_spec.spl")
+        expect(got[1]).to_equal("test/b_spec.spl")
+
+    it "parses each switch spelling onto its mode":
+        step("CLI argument to selection mode")
+        expect(dev_selection_parse("--no-in-development") == DevSelection.Exclude).to_equal(true)
+        expect(dev_selection_parse("--in-development") == DevSelection.Only).to_equal(true)
+        expect(dev_selection_parse("--in-development=auth-rework") == DevSelection.OnlyId).to_equal(true)
+        expect(dev_selection_parse("--verbose") == DevSelection.Default).to_equal(true)
+
+    it "extracts the id out of the =<id> form, normalised":
+        step("--in-development=AUTH_REWORK addresses the same workstream")
+        expect(dev_selection_parse_id("--in-development=AUTH_REWORK")).to_equal("auth-rework")
+        expect(dev_selection_parse_id("--in-development")).to_equal("")
+
+describe "Dev ids: listing what exists":
+    it "lists every id with its spec count, highest count first":
+        step("The listing a dev session reads to find its workstream")
+        val rows = tag_index_dev_ids(_fixture())
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].0).to_equal("auth-rework")
+        expect(rows[0].1).to_equal(2)
+        expect(rows[1].0).to_equal("parser-hir")
+        expect(rows[1].1).to_equal(1)
+
+    it "counts an id only on specs that are actually in development":
+        step("A promoted spec must stop inflating its old workstream")
+        val idx = TagIndex(
+            items: [
+                TaggedItem(path: "test/a_spec.spl", tags: ["in-development", "dev-id-x"]),
+                TaggedItem(path: "test/b_spec.spl", tags: ["dev-id-x"])
+            ],
+            scanned: 2
+        )
+        val rows = tag_index_dev_ids(idx)
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].1).to_equal(1)
+
+    it "reports unnamed in-development specs as their own category":
+        step("WIP reachable by no --in-development=<id> run is still countable")
+        val orphans = tag_index_unnamed_in_development(_fixture())
+        expect(orphans.len()).to_equal(1)
+        expect(orphans[0]).to_equal("test/d_spec.spl")
+
+    it "leaves the pre-existing whole-tag query untouched":
+        step("dev ids are additive; --tag in-development still works")
+        expect(tag_index_items_with(_fixture(), IN_DEVELOPMENT_TAG).len()).to_equal(4)
+        expect(item_is_in_development(_fixture().items[4])).to_equal(false)
+        expect(item_dev_id(_fixture().items[0])).to_equal("auth-rework")
