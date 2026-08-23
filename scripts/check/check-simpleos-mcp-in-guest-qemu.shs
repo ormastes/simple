@@ -76,21 +76,27 @@ prereq_missing() {
         return 0
     fi
 
-    # P8: freestanding rt_stdin_read_char wired to PL011 RX. Today it is a
-    # hard stub returning empty forever.
-    stub_file="examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"
-    if [ -f "$stub_file" ]; then
-        set +e
-        grep -q 'rt_stdin_read_char(RuntimeValue a) { (void)a; return rt_string_from_cstr("")' \
-            "$stub_file" 2>/dev/null
-        stub_rc=$?
-        set -e
-        if [ "$stub_rc" -eq 0 ]; then
-            printf 'P8-rt_stdin_read_char-is-still-a-stub-guest-stdin-is-permanent-EOF'
-            return 0
-        fi
-    else
-        printf 'P8-arm64-boot-stubs-absent'
+    # P8: freestanding guest stdin wired to PL011 RX.
+    #
+    # ERRATUM, corrected 2026-08-23: this probe originally read
+    # arch/arm64/boot/baremetal_stubs.c. That stub is real, but it belongs to
+    # the unified/desktop arm64 lane, which the REAL-FIRMWARE lane never
+    # compiles. Boot-object autodiscovery keys off the entry file's sibling
+    # boot/ dir, and the real-firmware entry is arch/aarch64/limine_entry.spl,
+    # so the linked C file is arch/aarch64/boot/freestanding_runtime.c. The
+    # symbol is also the 0-arg `stdin_read_char`, which is what the MCP/LSP
+    # externs bind to -- not the rt_-prefixed spelling.
+    fs_rt="examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c"
+    if [ ! -f "$fs_rt" ]; then
+        printf 'P8-aarch64-freestanding-runtime-absent'
+        return 0
+    fi
+    set +e
+    grep -q 'stdin_read_char' "$fs_rt" 2>/dev/null
+    stdin_rc=$?
+    set -e
+    if [ "$stdin_rc" -ne 0 ]; then
+        printf 'P8-guest-stdin-unwired-in-aarch64-freestanding-runtime'
         return 0
     fi
 

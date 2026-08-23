@@ -1,13 +1,77 @@
 # Design: MCP server running inside SimpleOS under QEMU
 
 - **Date:** 2026-08-23
-- **Status:** DESIGN ONLY. Nothing in this document has been built, and no
-  artifact described here exists. No gate reports a pass for it.
+- **Status:** DESIGN, with P8 BUILT AND PROVEN (see the status update below).
+  The end-to-end capability does NOT exist: no MCP server has run inside a
+  SimpleOS guest, and no gate reports a pass for it. What is proven is one
+  prerequisite — a byte now crosses from the host into the guest over PL011,
+  evidenced by a nonce-matched serial log from a real-firmware boot.
 - **Scope:** aarch64 (`aarch64-unknown-simpleos`) under QEMU `virt` with real
   firmware. x86_64 and riscv64 are out of scope for milestone 1 — see
   Prerequisites.
 - **Context:** There is no MCP-on-SimpleOS artifact anywhere in this repo or in
   any of the 223 GitHub remote branches. This is net-new work.
+
+## STATUS UPDATE 2026-08-23 — P8 IS DONE, and this doc had the wrong file
+
+P8 (guest stdin) is implemented and proven by a real boot. Three errata in the
+text below, corrected here rather than silently edited out:
+
+1. **Wrong lane.** Every P8 reference below names
+   `arch/arm64/boot/baremetal_stubs.c:2552`. That stub is real, but it belongs
+   to the **unified/desktop** arm64 lane. The **real-firmware** lane never
+   compiles it: boot-object autodiscovery keys off the ENTRY FILE's sibling
+   `boot/` dir, and the real-firmware entry is `arch/aarch64/limine_entry.spl`,
+   so the linked C file is `arch/aarch64/boot/freestanding_runtime.c` — which
+   had no stdin symbol at all. Absent, not stubbed.
+2. **Wrong symbol.** The Simple extern is the 0-arg `stdin_read_char()`, not
+   `rt_stdin_read_char` (host impl: `runtime_native.c:2210`). Only the
+   un-prefixed spelling satisfies the MCP/LSP externs.
+3. **Wrong detector.** `check-simpleos-mcp-in-guest-qemu.shs` probed the same
+   wrong path; corrected in the same change.
+
+**Evidence a byte crossed into the guest.** Nonce `eb53846c4143`, ASCII hex
+`656235333834366334313433`, fed through a pipe (not a tty, so no local echo):
+
+```
+[STDIN-PROBE] armed rounds=300
+[STDIN-ECHO] len=12 hex=656235333834366334313433
+[BOOT] SIMPLEOS-AARCH64-LIMINE-STDIN-PROBE-DONE bytes=12
+```
+
+The real-firmware boot gate is not regressed: `PASS — 4 boot-stage marker(s)
+checked ... 93 serial line(s) captured`, rc 0 (90 baseline + 3 probe markers).
+
+**Implementation is bounded non-blocking**: `uart_try_get_byte()` polls FR bit 4
+(RXFE) up to 100000 spins, then reads `DR & 0xFF`; no data yields an empty
+string, matching how the host reports EOF. It mirrors `serial_putchar`'s
+existing 100000-iteration TXFF bound and the only live RX consumer
+(`gui_entry_desktop.spl:364-365`, which polls `uart_data_ready()` first).
+Blocking was rejected deliberately: every existing aarch64 gate runs
+`-serial file:` (TX-only), so a byte can never arrive and a blocking read would
+wedge the guest before it printed its boot markers. MCP's blocking-read
+semantics belong in the P10 transport shim, not in the UART primitive.
+
+**PACING IS A DESIGN INPUT, not an implementation detail.** The first attempt
+sent the nonce once at t=0 and got `[STDIN-PROBE] no-data`: bytes sent before
+the kernel runs are consumed by EDK2/Limine's own console. Success required a
+continuous feed overlapping the guest's polling window — exactly the hazard §2.3
+predicted from the riscv64 precedent. **P12's host driver must feed DURING the
+window, not at VM start.**
+
+**Do not delete the boot probe as test scaffolding.** `nm` shows
+`stdin_read_char` present while `rt_stdin_read_char` and
+`rt_aarch64_uart_try_get` were GC'd — `--gc-sections` keeps only what is
+referenced, and `stdin_read_char` survives *only because the probe calls it*.
+Strip the probe and the symbol silently vanishes again.
+
+**P9 (`print_raw`) re-scoped down.** Verified absent from the linked kernel
+(`nm | grep -c print_raw` -> 0), but the TX plumbing it needs already exists:
+`rt_print_str` / `rt_println_str` / `rt_print_value` all route to
+`uart_write_bytes`. P9 is a symbol shim structurally identical to P8, plus a
+live reference to survive `--gc-sections`. The large unknown remains P10, the
+rest of the MCP module graph's runtime ABI.
+
 
 ## 1. Acceptance criterion
 

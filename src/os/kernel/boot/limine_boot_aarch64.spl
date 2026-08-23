@@ -62,6 +62,16 @@ extern fn rt_arm64_mrs_sctlr_el1() -> u64
 # examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c.
 extern fn rt_aarch64_wfe_spin()
 
+# P8 (doc/05_design/os/simpleos/mcp_in_guest_qemu_2026-08-23.md): guest stdin
+# over PL011 RX. Backed by rt_aarch64_stdin_probe() in
+# examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c,
+# which exercises the real freestanding stdin_read_char() and emits a
+# hex-framed [STDIN-ECHO]/[STDIN-PROBE] marker line. Bounded and
+# non-blocking: with `-serial file:` (what every existing aarch64 gate uses)
+# no byte can ever arrive, so this MUST terminate on its own. Returns the
+# number of bytes received.
+extern fn rt_aarch64_stdin_probe(rounds: u64) -> u64
+
 fn halt_loop():
     """Halt forever (aarch64: WFE spin loop, no interrupt controller set up yet)."""
     rt_aarch64_wfe_spin()
@@ -496,6 +506,13 @@ fn memory_init(boot_info: BootOutputPort):
         log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-MEMORY-INIT-FAIL: no free page available")
 
     log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-KERNEL-OK")
+
+    # Deliberately AFTER every marker the real-firmware boot gate greps for
+    # (check-simpleos-arm64-efi-real-firmware-boot.shs), so a probe that finds
+    # nothing cannot turn that gate's PASS into a FAIL.
+    val stdin_bytes = rt_aarch64_stdin_probe(300u64)
+    log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-STDIN-PROBE-DONE bytes={stdin_bytes}")
+
     halt_loop()
 
 # Named `limine_aarch64_boot_main` (not `kernel_main`) because native-build

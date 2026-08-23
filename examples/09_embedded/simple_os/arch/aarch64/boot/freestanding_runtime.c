@@ -1375,6 +1375,67 @@ void rt_aarch64_uart_put(spl_u64 byte) {
     uart_put_byte((spl_u8)byte);
 }
 
+/* ---- PL011 UART0 RX: guest stdin (P8) ------------------------------------
+ * The TX path above deliberately does no FR busy-wait. RX cannot be that
+ * casual: reading DR while the receive FIFO is empty returns stale/garbage
+ * data rather than blocking, so RXFE (FR bit 4) MUST be consulted first.
+ *
+ * BOUNDED, NON-BLOCKING BY DESIGN. The spin bound mirrors serial_putchar()'s
+ * TXFF bound in ../../common/baremetal_pl011_serial.h (100000 iterations), and
+ * the "poll for readiness, then read" contract mirrors the only other live RX
+ * consumer in the tree: gui_entry_desktop.spl:364-365 tests
+ * uart_data_ready() == 1 before calling uart_read_char(). An unbounded block
+ * here would wedge every existing aarch64 boot gate, all of which run with
+ * `-serial file:` (TX-only) and therefore never deliver a byte -- the guest
+ * would spin forever and the four boot markers would never be reached.
+ * "No data" is reported as an empty string, exactly as the hosted
+ * stdin_read_char() (src/runtime/runtime_native.c:2210) reports EOF. */
+#define PL011_FR_OFFSET 0x018ULL
+#define PL011_FR_RXFE (1U << 4)
+
+#ifndef SIMPLEOS_STDIN_RX_SPIN
+#define SIMPLEOS_STDIN_RX_SPIN 100000U
+#endif
+
+static spl_i64 uart_try_get_byte(void) {
+    for (spl_u32 spin = 0; spin < SIMPLEOS_STDIN_RX_SPIN; spin = spin + 1) {
+        spl_u32 fr = *(volatile spl_u32 *)(PL011_UART0_BASE + PL011_FR_OFFSET);
+        if ((fr & PL011_FR_RXFE) == 0U) {
+            spl_u32 dr = *(volatile spl_u32 *)(PL011_UART0_BASE + PL011_DR_OFFSET);
+            return (spl_i64)(dr & 0xFFU);
+        }
+    }
+    return -1;
+}
+
+/* Raw byte reader for Simple callers that want the no-data case as a value
+ * rather than as an empty string: byte 0..255, or -1 when the window expired. */
+spl_i64 rt_aarch64_uart_try_get(void) {
+    return uart_try_get_byte();
+}
+
+static spl_i64 stdin_read_char_impl(void) {
+    spl_i64 byte = uart_try_get_byte();
+    if (byte < 0) {
+        return rt_string_new(0, 0);
+    }
+    spl_u8 raw = (spl_u8)byte;
+    return rt_string_new((spl_i64)(spl_u64)(spl_u8 *)&raw, 1);
+}
+
+/* `stdin_read_char` is the symbol the Simple `extern fn stdin_read_char() ->
+ * text` declarations actually bind to (src/lib/nogc_sync_mut/mcp_sdk/transport/
+ * stdio.spl:15, lsp_protocol.spl:5) -- it is NOT rt_-prefixed on the host
+ * either. `rt_stdin_read_char` is provided alongside it for the rt_* naming
+ * convention used by the other freestanding arch stubs. */
+spl_i64 stdin_read_char(void) {
+    return stdin_read_char_impl();
+}
+
+spl_i64 rt_stdin_read_char(void) {
+    return stdin_read_char_impl();
+}
+
 static void uart_write_bytes(const char *data, spl_u64 len) {
     if (!data) {
         return;
@@ -1388,6 +1449,76 @@ static void uart_write_hex_byte(spl_u8 value) {
     static const char hex[] = "0123456789abcdef";
     uart_put_byte((spl_u8)hex[(value >> 4) & 0x0fU]);
     uart_put_byte((spl_u8)hex[value & 0x0fU]);
+}
+
+/* ---- P8 evidence probe ----------------------------------------------------
+ * Exercises the REAL stdin_read_char() above (not a private byte reader) and
+ * reports the result as a hex-framed marker line, per the framing decision in
+ * doc/05_design/os/simpleos/mcp_in_guest_qemu_2026-08-23.md section 2.3: QEMU
+ * `virt` has a single PL011, so kernel log lines and payload share one wire and
+ * the payload must survive interleaving. Hex does that.
+ *
+ * Emits exactly one of:
+ *     [STDIN-PROBE] armed rounds=<n>
+ *     [STDIN-ECHO] len=<n> hex=<...>      (at least one byte crossed in)
+ *     [STDIN-PROBE] no-data               (window expired, nothing received)
+ * The armed/no-data pair is what makes a negative result precise: it
+ * distinguishes "the stub was never reached" from "reached, but RX stayed
+ * empty". Reads until LF or the byte cap, so a line-oriented host feed frames
+ * naturally. Returns the number of bytes received. */
+#define SIMPLEOS_STDIN_PROBE_CAP 64U
+
+spl_i64 rt_aarch64_stdin_probe(spl_i64 rounds) {
+    spl_u8 buf[SIMPLEOS_STDIN_PROBE_CAP];
+    spl_u64 len = 0;
+    spl_i64 max_rounds = rounds > 0 ? rounds : 1;
+
+    uart_write_bytes("[STDIN-PROBE] armed rounds=", 27);
+    {
+        char dec[21];
+        spl_u64 dlen = 0;
+        rt_write_decimal(dec, &dlen, (spl_u64)max_rounds);
+        uart_write_bytes(dec, dlen);
+    }
+    uart_put_byte('\r');
+    uart_put_byte('\n');
+
+    for (spl_i64 round = 0; round < max_rounds && len < SIMPLEOS_STDIN_PROBE_CAP; round = round + 1) {
+        spl_i64 value = stdin_read_char();
+        RtString *s = rt_as_string(value);
+        if (!s || s->len == 0) {
+            continue;
+        }
+        spl_u8 byte = (spl_u8)s->data[0];
+        if (byte == (spl_u8)'\n') {
+            break;
+        }
+        if (byte == (spl_u8)'\r') {
+            continue;
+        }
+        buf[len] = byte;
+        len = len + 1;
+    }
+
+    if (len == 0) {
+        uart_write_bytes("[STDIN-PROBE] no-data\r\n", 23);
+        return 0;
+    }
+
+    uart_write_bytes("[STDIN-ECHO] len=", 17);
+    {
+        char dec[21];
+        spl_u64 dlen = 0;
+        rt_write_decimal(dec, &dlen, len);
+        uart_write_bytes(dec, dlen);
+    }
+    uart_write_bytes(" hex=", 5);
+    for (spl_u64 i = 0; i < len; i = i + 1) {
+        uart_write_hex_byte(buf[i]);
+    }
+    uart_put_byte('\r');
+    uart_put_byte('\n');
+    return (spl_i64)len;
 }
 
 static void uart_line_tcp_read5(const spl_u8 *data, spl_u64 len) {
