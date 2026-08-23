@@ -10,17 +10,29 @@
 # safe to do speculatively — a false-positive move only costs a recompute,
 # never a dangling hit.
 
+@unsafe(reason: "raw file probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw file delete status; false means deletion was not confirmed", capabilities: [ffi])
 extern fn rt_file_delete(path: text) -> bool
+@unsafe(reason: "raw file size; nil includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> usize?
+@unsafe(reason: "raw modification time; negative values are invalid/provider-failure sentinels", capabilities: [ffi])
 extern fn rt_file_modified_time(path: text) -> i64
+@unsafe(reason: "raw file move status; false means the move was not confirmed", capabilities: [ffi])
 extern fn rt_file_move(old_path: text, new_path: text) -> bool
+@unsafe(reason: "raw directory creation status; false means the directory was not established", capabilities: [ffi])
 extern fn rt_dir_create_all(path: text) -> bool
+@unsafe(reason: "raw directory probe; false includes non-directory, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_dir_exists(path: text) -> bool
+@unsafe(reason: "raw directory listing; empty data includes an empty directory or provider failure", capabilities: [ffi])
 extern fn rt_dir_list(path: text) -> [text]
+@unsafe(reason: "raw directory walk; empty data includes an empty tree or provider failure", capabilities: [ffi])
 extern fn rt_dir_walk(root: text) -> [text]
+@unsafe(reason: "raw recursive delete status; false means removal was not confirmed", capabilities: [ffi])
 extern fn rt_dir_remove_all(path: text) -> bool
+@unsafe(reason: "raw wall clock; negative values are invalid/provider-failure sentinels", capabilities: [ffi])
 extern fn rt_time_now_unix_micros() -> i64
+@unsafe(reason: "raw process identity; non-positive values are invalid/provider-failure sentinels", capabilities: [ffi])
 extern fn rt_getpid() -> i64
 
 use compiler.driver.cache.metadata.cache_limits.{CacheLimits, cache_limits_low_watermark_bytes}
@@ -28,30 +40,44 @@ use compiler.driver.cache.lease.lease.{lease_list_active, CacheLease}
 use compiler.driver.cache.cas_store.{cas_action_path}
 
 fn now_secs() -> i64:
-    rt_time_now_unix_micros() / 1000000
+    unsafe(capabilities: [ffi]):
+        rt_time_now_unix_micros() / 1000000
 
 fn trash_dir(root: text) -> text:
     "{root}/trash"
 
 fn move_to_trash(root: text, path: text) -> bool:
-    rt_dir_create_all(trash_dir(root))
-    val stamp = "{rt_getpid()}-{rt_time_now_unix_micros()}"
+    var dir_ready = false
+    var pid: i64 = -1
+    var now: i64 = -1
+    unsafe(capabilities: [ffi]):
+        dir_ready = rt_dir_create_all(trash_dir(root))
+        pid = rt_getpid()
+        now = rt_time_now_unix_micros()
+    if not dir_ready or pid <= 0 or now < 0:
+        return false
+    val stamp = "{pid}-{now}"
     val name = path.replace("/", "_")
-    rt_file_move(path, "{trash_dir(root)}/{name}-{stamp}")
+    unsafe(capabilities: [ffi]):
+        rt_file_move(path, "{trash_dir(root)}/{name}-{stamp}")
 
 # Sum bytes of every regular file under root (excluding nothing — caller
 # passes a specific subtree). Uses rt_dir_walk which enumerates recursively.
 fn dir_total_bytes(root: text) -> i64:
-    if not rt_file_exists(root):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(root)
+    if not exists:
         return 0
     var total: i64 = 0
-    for path in rt_dir_walk(root):
-        if not rt_dir_exists(path):
-            match rt_file_size(path):
-                case Some(sz):
-                    total = total + sz.to_i64()
-                case nil:
-                    pass_do_nothing
+    unsafe(capabilities: [ffi]):
+        for path in rt_dir_walk(root):
+            if not rt_dir_exists(path):
+                match rt_file_size(path):
+                    case Some(sz):
+                        total = total + sz.to_i64()
+                    case nil:
+                        pass_do_nothing
     total
 
 fn cache_total_bytes(root: text) -> i64:
@@ -63,16 +89,21 @@ fn cache_total_bytes(root: text) -> i64:
 # published objects, not staging).
 fn gc_expire_tmp(root: text, tmp_hours: i64) -> i64:
     val dir = "{root}/tmp"
-    if not rt_file_exists(dir):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(dir)
+    if not exists:
         return 0
     val cutoff = now_secs() - (tmp_hours * 3600)
     var count = 0
-    for name in rt_dir_list(dir):
-        val path = "{dir}/{name}"
-        if not rt_dir_exists(path):
-            if rt_file_modified_time(path) < cutoff:
-                rt_file_delete(path)
-                count = count + 1
+    unsafe(capabilities: [ffi]):
+        for name in rt_dir_list(dir):
+            val path = "{dir}/{name}"
+            if not rt_dir_exists(path):
+                val modified = rt_file_modified_time(path)
+                if modified >= 0 and modified < cutoff:
+                    if rt_file_delete(path):
+                        count = count + 1
     count
 
 # Expire quarantine/ entries older than quarantine_days. Quarantined bytes
@@ -80,16 +111,21 @@ fn gc_expire_tmp(root: text, tmp_hours: i64) -> i64:
 # delete outright after the grace window.
 fn gc_expire_quarantine(root: text, quarantine_days: i64) -> i64:
     val dir = "{root}/quarantine"
-    if not rt_file_exists(dir):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(dir)
+    if not exists:
         return 0
     val cutoff = now_secs() - (quarantine_days * 86400)
     var count = 0
-    for name in rt_dir_list(dir):
-        val path = "{dir}/{name}"
-        if not rt_dir_exists(path):
-            if rt_file_modified_time(path) < cutoff:
-                rt_file_delete(path)
-                count = count + 1
+    unsafe(capabilities: [ffi]):
+        for name in rt_dir_list(dir):
+            val path = "{dir}/{name}"
+            if not rt_dir_exists(path):
+                val modified = rt_file_modified_time(path)
+                if modified >= 0 and modified < cutoff:
+                    if rt_file_delete(path):
+                        count = count + 1
     count
 
 # Delete everything already sitting in trash/ (the grace period has already
@@ -97,11 +133,16 @@ fn gc_expire_quarantine(root: text, quarantine_days: i64) -> i64:
 # grace_period -> delete).
 fn gc_delete_trash(root: text) -> i64:
     val dir = trash_dir(root)
-    if not rt_file_exists(dir):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(dir)
+    if not exists:
         return 0
-    val names = rt_dir_list(dir)
-    rt_dir_remove_all(dir)
-    names.len().to_i64()
+    unsafe(capabilities: [ffi]):
+        val names = rt_dir_list(dir)
+        if rt_dir_remove_all(dir):
+            return names.len().to_i64()
+    0
 
 # Fast-path sweep: expire tmp + quarantine, delete existing trash, then evict
 # unpinned action mappings oldest-first (by mtime) until at or below the low
@@ -126,18 +167,22 @@ fn gc_fast_sweep(root: text, limits: CacheLimits) -> i64:
             protected = protected.push(d)
 
     val actions_dir = "{root}/actions"
-    if not rt_file_exists(actions_dir):
+    var actions_exist = false
+    unsafe(capabilities: [ffi]):
+        actions_exist = rt_file_exists(actions_dir)
+    if not actions_exist:
         return 0
 
     var candidates: [text] = []
-    for path in rt_dir_walk(actions_dir):
-        if not rt_dir_exists(path):
-            var is_protected = false
-            for d in protected:
-                if path == cas_action_path(root, d):
-                    is_protected = true
-            if not is_protected:
-                candidates = candidates.push(path)
+    unsafe(capabilities: [ffi]):
+        for path in rt_dir_walk(actions_dir):
+            if not rt_dir_exists(path):
+                var is_protected = false
+                for d in protected:
+                    if path == cas_action_path(root, d):
+                        is_protected = true
+                if not is_protected:
+                    candidates = candidates.push(path)
 
     # Oldest-first: simple selection sort by mtime (candidate lists here are
     # small relative to the whole CAS — full sort avoided per ponytail: no
@@ -145,19 +190,24 @@ fn gc_fast_sweep(root: text, limits: CacheLimits) -> i64:
     var freed: i64 = 0
     var remaining = candidates
     while total > low_bytes and remaining.len() > 0:
-        var oldest_idx = 0
-        var oldest_time = rt_file_modified_time(remaining[0])
-        var i = 1
-        while i < remaining.len():
-            val t = rt_file_modified_time(remaining[i])
-            if t < oldest_time:
-                oldest_time = t
-                oldest_idx = i
-            i = i + 1
+        var oldest_idx = -1
+        var oldest_time: i64 = 0
+        var i = 0
+        unsafe(capabilities: [ffi]):
+            while i < remaining.len():
+                val t = rt_file_modified_time(remaining[i])
+                if t >= 0 and (oldest_idx < 0 or t < oldest_time):
+                    oldest_time = t
+                    oldest_idx = i
+                i = i + 1
+        if oldest_idx < 0:
+            return freed
         val victim = remaining[oldest_idx]
-        val sz = match rt_file_size(victim):
-            case Some(v): v.to_i64()
-            case nil: 0
+        var sz: i64 = 0
+        unsafe(capabilities: [ffi]):
+            sz = match rt_file_size(victim):
+                case Some(v): v.to_i64()
+                case nil: 0
         if move_to_trash(root, victim):
             total = total - sz
             freed = freed + sz

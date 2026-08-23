@@ -2165,3 +2165,33 @@ zero, and lint moves from 17 raw-runtime warnings to zero errors/warnings for
 the touched boundary. The call census is 21,329 raw, 2,018 explicit, and 19,311
 missing. Declaration totals remain 12,052; 846 are tagged, 370 minimized,
 10,941 untouched, and zero signed/admitted.
+
+## Fast-GC mutation authority
+
+`cache/gc/fast_gc.spl` now documents all 12 raw provider declarations and
+places every live call under lexical `unsafe(ffi)` authority. Destructive
+accounting no longer fabricates success: tmp/quarantine counters advance only
+after confirmed file deletion, trash counts require confirmed recursive
+removal, and move-to-trash rejects failed directory creation plus invalid PID
+or clock sentinels. Negative modification-time sentinels cannot expire or
+select a candidate.
+
+The candidate-selection algorithm remains the existing O(n²) selection scan,
+with the same arrays and no new lookup, retry, payload copy, or provider call.
+The valid-mtime scan calls the provider at most once per remaining candidate,
+matching the prior call bound. Optimizer general findings remain six (three
+existing collection preallocation suggestions and three length hoists).
+
+The focused cache-GC spec passes 10/10 after repairing the lease authority
+oracle's stale scope count and whitespace-sensitive assertion. The executable
+still identifies itself as the Rust bootstrap seed, so this is seed-only
+evidence rather than the required self-hosted verification. The measured
+baseline was 6.25 s / 175,104 KiB; the final run was 5.09 s / 175,624 KiB.
+Timing improved and peak RSS remained within 0.30%, with no source-level memory
+growth mechanism introduced.
+
+The current call census is 21,382 raw, 2,066 explicit, and 19,316 missing.
+The declaration census reports 12,077 unsafe rows: 867 tagged, 642 contract-
+documented, 377 minimized, 10,945 untouched, and zero evidence-verified,
+signature-verified, or admitted. Implementation definition counts are Simple
+558, Rust 2,166, C 2,327, and C++ 219. These remain inventory counts, not proof.

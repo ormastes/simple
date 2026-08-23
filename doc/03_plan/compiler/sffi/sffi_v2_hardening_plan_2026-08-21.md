@@ -1298,3 +1298,14 @@ read observation sequence and retry bound retained. Next take `cache/lease`:
 preserve one directory listing per sweep, one liveness query per parsed lease,
 and one write/delete per state transition. Do not turn its empty read, false
 write/delete, negative clock/PID, or empty listing sentinels into success.
+
+The lease owner and fast-GC owner are now unsafe-minimized at their raw call
+sites. Fast GC must retain confirmed-mutation accounting and reject negative
+mtime/PID/clock sentinels. Its hot path remains O(n²) oldest-first selection,
+one mtime observation per remaining candidate, and the existing collection
+shape; do not add retries, generic dispatch, or per-item wrapper allocation.
+Current inventory is 21,382 calls (2,066 explicit, 19,316 missing) and 12,077
+declaration rows (867 tagged, 377 minimized, 10,945 untouched, zero signed or
+admitted). Next harden `cache/gc/mark_sweep.spl`, then `admission.spl`, using
+the same confirmed move/delete rule. Self-hosted verification remains pending
+because the available executable reports that it is the Rust bootstrap seed.
