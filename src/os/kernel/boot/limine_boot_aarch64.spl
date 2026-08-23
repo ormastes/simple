@@ -72,6 +72,16 @@ extern fn rt_aarch64_wfe_spin()
 # number of bytes received.
 extern fn rt_aarch64_stdin_probe(rounds: u64) -> u64
 
+# P9 (guest stdout). Drives the freestanding `print_raw`
+# (examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c) --
+# the symbol `extern fn print_raw(s: text)` binds to in src/app/mcp/
+# main_transport.spl:1. Calling it from this live boot path is also what keeps
+# --gc-sections from discarding print_raw: after P8, nm showed the uncalled
+# siblings rt_stdin_read_char and rt_aarch64_uart_try_get discarded while
+# stdin_read_char survived only because the boot probe called it. Returns the
+# byte count handed to print_raw.
+extern fn rt_aarch64_stdout_probe(msg: text) -> u64
+
 fn halt_loop():
     """Halt forever (aarch64: WFE spin loop, no interrupt controller set up yet)."""
     rt_aarch64_wfe_spin()
@@ -512,6 +522,14 @@ fn memory_init(boot_info: BootOutputPort):
     # nothing cannot turn that gate's PASS into a FAIL.
     val stdin_bytes = rt_aarch64_stdin_probe(300u64)
     log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-STDIN-PROBE-DONE bytes={stdin_bytes}")
+
+    # P9 stdout probe. Also deliberately AFTER every marker the real-firmware
+    # boot gate greps for, so it cannot turn that gate's PASS into a FAIL.
+    # The nonce is a build-time random tag: it exists nowhere else in the tree,
+    # so its appearance in a serial transcript can only have come from
+    # print_raw() executing in the guest.
+    val stdout_bytes = rt_aarch64_stdout_probe("[STDOUT-PROBE] via-print_raw nonce=0df360d912b0")
+    log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-STDOUT-PROBE-DONE bytes={stdout_bytes}")
 
     halt_loop()
 

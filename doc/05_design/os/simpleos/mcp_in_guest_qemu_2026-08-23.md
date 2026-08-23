@@ -1,16 +1,104 @@
 # Design: MCP server running inside SimpleOS under QEMU
 
 - **Date:** 2026-08-23
-- **Status:** DESIGN, with P8 BUILT AND PROVEN (see the status update below).
+- **Status:** DESIGN, with P8 AND P9 BUILT AND PROVEN (see the status updates below).
   The end-to-end capability does NOT exist: no MCP server has run inside a
-  SimpleOS guest, and no gate reports a pass for it. What is proven is one
-  prerequisite — a byte now crosses from the host into the guest over PL011,
-  evidenced by a nonce-matched serial log from a real-firmware boot.
+  SimpleOS guest, and no gate reports a pass for it. What is proven is two
+  prerequisites — the guest byte channel in BOTH directions, evidenced by
+  nonce-matched serial logs from real-firmware boots. P10 is now inventoried:
+  151 declared externs, 11 present, 140 missing, of which ~90 are mechanical.
 - **Scope:** aarch64 (`aarch64-unknown-simpleos`) under QEMU `virt` with real
   firmware. x86_64 and riscv64 are out of scope for milestone 1 — see
   Prerequisites.
 - **Context:** There is no MCP-on-SimpleOS artifact anywhere in this repo or in
   any of the 223 GitHub remote branches. This is net-new work.
+
+## STATUS UPDATE 2026-08-23 (2) — P9 IS DONE, and P10 is now INVENTORIED
+
+P9 (guest stdout) is implemented and proven by a real boot. With P8, the byte
+channel itself is off the prerequisite list.
+
+**Another erratum in this doc, corrected.** §2 says `rt_print_str` /
+`rt_println_str` / `rt_print_value` "all route to `uart_write_bytes`". They do
+NOT — all four print families are `(void)value;` NO-OPS at
+`freestanding_runtime.c:445-478`. The only working TX path is `log_raw_println`
+(`:1537`), which is what `print_raw` was modelled on. The no-op stubs were left
+alone.
+
+**Signature, taken from the declaration rather than guessed:**
+`extern fn print_raw(s: text)` — 1 arg, `text`, no return — at
+`src/app/mcp/main_transport.spl:1` (NOT `main.spl`, which holds only the P8
+`stdin_read_char` at `:24`). The LSP server declares it identically
+(`simple_lsp_mcp/json_helpers.spl:13`); two other sites declare it returning
+`i64` (`app/io/cli_ops.spl:31`, `app/dashboard/framework_policy.spl:22`). One C
+symbol satisfies all four — an AAPCS64 caller that declared void just ignores x0.
+
+**Link set confirmed exact:** `arch/aarch64/boot/` holds exactly ONE `.c`
+(`freestanding_runtime.c`) plus `linker_limine.ld`, so the P10 diff below is a
+complete diff, not a sample.
+
+**Evidence.** `nm` on the linked kernel went from `0` matches for `print_raw` to
+`T print_raw` / `T rt_aarch64_stdout_probe` / `T stdin_read_char`. Nonce
+`0df360d912b0` appears 0 times in the old `kernel.elf` and 1 in the new one, and
+the guest emitted it through the real `print_raw`:
+
+```
+[STDOUT-PROBE] via-print_raw nonce=0df360d912b0
+[BOOT] SIMPLEOS-AARCH64-LIMINE-STDOUT-PROBE-DONE bytes=47
+```
+
+`bytes=47` is the exact length of that string, so the byte count round-trips.
+Boot gate not regressed: `PASS — 4 boot-stage marker(s) checked ... 95 serial
+line(s) captured` (93 -> 95; the delta is exactly the two probe lines). The probe
+is called AFTER every marker the gate greps, so a probe failure cannot flip the
+verdict.
+
+### P10 INVENTORY — the number nobody had
+
+Transitive `use` closure of `src/app/mcp/main.spl`: **56 modules, 0 unresolved**,
+covering 20 of the 34 `src/app/mcp/*.spl` files, declaring **151 distinct
+`extern fn`** symbols. Diffed against the 151 functions defined in
+`freestanding_runtime.c`:
+
+**Present (11):** `print_raw`, `stdin_read_char`, `rt_hash_text`,
+`rt_string_len`, `rt_string_bytes`, `rt_text_to_bytes`,
+`rt_string_builder_{new,push,finish,len,free}`.
+
+**Missing (140):**
+
+| bucket | n | assessment |
+|---|---|---|
+| `rt_simd_*` | 49 | stubbable — scalar fallbacks; dragged in by `src/lib/nogc_sync_mut/simd.spl` for one string search |
+| filesystem `rt_file_*` / `rt_dir_*` | 29 | **critical path** — needs a guest FS |
+| process `rt_process_*`, `rt_shell_exec`, `rt_getpid`, `spl_thread_cpu_count` | 18 | **critical path, largest unknown** — `cli_passthrough` shells out to `bin/simple` |
+| text/utf8 `rt_text_*`, `rt_utf8_*`, `rt_swi_*`, `rt_rank_*`/`rt_select_*` | 19 | pure computation, straightforward ports |
+| atomics / atexit / signal | 7 | stubbable |
+| env/exit `rt_env_*`, `rt_exit`, `rt_platform_name`, `sys_get_args` | 5 | trivial freestanding stubs |
+| `rt_mmap` / `munmap` / `madvise` / `msync` | 4 | tied to the FS work |
+| stdio rest `rt_stderr_write/flush`, `rt_stdout_flush` | 3 | trivial — direct siblings of `print_raw` |
+| time / thread | 3 | needs a timer source |
+| `rt_browser_renderer_*` | 2 | dead weight from a tool-table import; not needed |
+| `sqrt` | 1 | libm |
+
+**Estimate:** ~90 of the 140 are stubs or pure-computation ports — mechanical.
+The genuine engineering is the **47** filesystem + mmap + process symbols, and
+within those the process group is the one that implies a guest PROCESS MODEL,
+because MCP's CLI passthrough spawns a child `simple`. **Reducing that dependency
+— in-process handlers instead of passthrough — is the cheapest way to shrink
+P10**, and is a design decision worth making before anyone starts porting.
+
+**Caveat, and it matters:** 140 is the DECLARED-extern surface. This repo has a
+documented second axis — codegen-emitted runtime calls that no extern declares
+(the `rt_unwrap_or_trap` NULL-GOT SEGV class,
+`doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`).
+Those surface only when the MCP graph is actually compiled for the target, i.e.
+under P6. **Do not read 140 as the total ABI bill.**
+
+Remaining before `simple mcp` runs in-guest: P6 (full-CLI Stage 4 for
+`aarch64-unknown-simpleos` — which also gates discovery of the undeclared-symbol
+axis), P7 (admission receipt), P10 as inventoried, P11 (a guest boot path that
+invokes the server), P12 (the gate).
+
 
 ## STATUS UPDATE 2026-08-23 — P8 IS DONE, and this doc had the wrong file
 

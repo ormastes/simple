@@ -1551,6 +1551,56 @@ void serial_println(spl_i64 msg) {
     log_raw_println(msg);
 }
 
+/* ---- P9: freestanding stdout ---------------------------------------------
+ * `print_raw` is the symbol the Simple `extern fn print_raw(s: text)`
+ * declarations actually bind to -- it is NOT rt_-prefixed on the host either
+ * (src/runtime/runtime_native.c:2226). Declaring sites:
+ *     src/app/mcp/main_transport.spl:1        extern fn print_raw(s: text)
+ *     src/app/simple_lsp_mcp/json_helpers.spl:13   extern fn print_raw(s: text)
+ *     src/app/io/cli_ops.spl:31               extern fn print_raw(value: text) -> i64
+ *     src/app/dashboard/framework_policy.spl:22    (same, -> i64)
+ * The two spellings disagree on the return; one C symbol satisfies both,
+ * because an AAPCS64 caller that declared void simply ignores x0. Returns 0,
+ * matching the host implementation.
+ *
+ * RAW means raw: no framing and no implicit newline. Per
+ * doc/05_design/os/simpleos/mcp_in_guest_qemu_2026-08-23.md section 2.3, the
+ * hex marker-line framing that makes a single shared PL011 safe is the
+ * PROTOCOL layer's job, not this sink's.
+ *
+ * NOTE (corrects an earlier assumption): rt_print_str / rt_println_str /
+ * rt_print_value in this file are `(void)value;` no-ops (:445-478) and route
+ * nowhere. The working TX path is log_raw_println above. This is modelled on
+ * that, minus the trailing CR/LF. */
+spl_i64 print_raw(spl_i64 value) {
+    RtString *text = rt_as_string(value);
+    spl_i64 rendered;
+    if (!text) {
+        rendered = rt_to_string(value);
+        text = rt_as_string(rendered);
+    }
+    if (text) {
+        uart_write_bytes(text->data, text->len);
+    }
+    return 0;
+}
+
+/* P9 evidence probe. Mirrors the P8 stdin probe: exercises the REAL print_raw()
+ * above (not uart_write_bytes directly), so a surviving nonce in the serial log
+ * proves that symbol executed. Also the --gc-sections root: after P8, nm showed
+ * rt_stdin_read_char and rt_aarch64_uart_try_get discarded and stdin_read_char
+ * kept solely because a live boot path called it. Emits its own CRLF, since
+ * print_raw deliberately adds none. Returns the byte count it handed to
+ * print_raw. */
+spl_i64 rt_aarch64_stdout_probe(spl_i64 msg) {
+    RtString *text = rt_as_string(msg);
+    spl_i64 len = text ? (spl_i64)text->len : 0;
+    print_raw(msg);
+    uart_put_byte(13);
+    uart_put_byte(10);
+    return len;
+}
+
 spl_i64 rt_string_len(spl_i64 value) {
     RtString *string = rt_as_string(value);
     return string ? (spl_i64)string->len : 0;
