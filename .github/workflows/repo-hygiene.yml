@@ -365,6 +365,25 @@ jobs:
         run: |
           sh scripts/check/check-engine-receipt-discriminates.shs --selftest
 
+      # PID/clock-keyed build-artifact ratchet.
+      #
+      # Neighbour sweep of the C-runtime recompile (71347b901b6): keying a
+      # DURABLE build artifact by pid, wall-clock, or randomness makes reuse
+      # structurally impossible -- no later run can ever name the path, so no
+      # cache policy can rescue it. That defect cost 102,564 ms of a 108,003 ms
+      # hello-world build and was invisible to every other gate, because a
+      # pid-keyed path is perfectly well-formed source.
+      #
+      # Blocking, not advisory: measured green on this tree
+      # (PASS -- 32 candidate(s) checked, 0 new, 0 stale), needs nothing but
+      # grep/find/comm, and runs in seconds. Fails on a NEW offender and on a
+      # STALE baseline entry, because a baseline that no longer describes the
+      # tree is how a ratchet silently stops ratcheting.
+      - name: PID/clock-keyed build artifact ratchet
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-no-pid-keyed-build-artifacts.shs
+
   # Advisory gates: honestly RED on the current tree.
   #
   # Separate job, exactly like the repo-hygiene job at the top of this file and
@@ -424,3 +443,32 @@ jobs:
         run: |
           sh scripts/check/check-test-db-write-succeeds.shs --selftest
           sh scripts/check/check-test-db-write-succeeds.shs
+
+      # native-build end-to-end runnability gate.
+      #
+      # ff095d31591 made EVERY native-build abort rc=134 'stack overflow' before
+      # a single [build] line, on a 3-line hello world -- and it shipped WITH a
+      # passing spec, because that spec called the clamp FUNCTION while the
+      # crash lived on the CALL PATH (mutual recursion between two file-read
+      # forwarders under last-definition-wins dispatch, so the first read of any
+      # file aborted). This gate runs the real command and asserts no death by
+      # signal AND that a '[build] ... step 1/6' line appears; rc=0 alone and a
+      # clean --version are both rejected, since the incident printed a healthy
+      # banner and then aborted.
+      #
+      # ADVISORY, and honestly so: it is fail-closed on provenance and returns
+      #   ERROR - nothing was checked
+      # wherever bin/simple is the Rust seed, because the seed serves
+      # native-build from its own Rust implementation and never executes
+      # src/app/cli/native_build_main.spl. Verified by checking out the pre-fix
+      # tree ff095d31591 (clamp present) and watching the seed PASS on it -- the
+      # seed is provably blind to this defect, so a PASS there would be a false
+      # green. No CI runner has a deployed pure-Simple bin/simple today, so this
+      # will report ERROR until one exists; the 9 fatal selftest fixtures still
+      # run and still discriminate, including the exact incident shape. Promote
+      # into code-idiom-gates the day a pure-Simple binary is deployed -- the
+      # guard itself needs no edit.
+      - name: native-build hello-world runnability gate (advisory, ERROR without a pure-Simple binary)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-native-build-hello-world-runs.shs
