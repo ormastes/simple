@@ -160,6 +160,29 @@ fn function_module_owner(func: &Arc<FunctionDef>) -> Option<Arc<str>> {
         })
 }
 
+/// Every registered definition of `name`: the overload set plus the flat-map
+/// entry (which is not always in the overload set).
+fn all_candidates(name: &str, functions: &HashMap<String, Arc<FunctionDef>>) -> Vec<Arc<FunctionDef>> {
+    let mut out = FUNCTION_OVERLOADS.with(|cell| cell.borrow().get(name).cloned()).unwrap_or_default();
+    if let Some(flat) = functions.get(name) {
+        if !out.iter().any(|c| Arc::ptr_eq(c, flat)) {
+            out.push(Arc::clone(flat));
+        }
+    }
+    out
+}
+
+/// The definition of `name` DECLARED BY `owner`, if exactly that one exists.
+fn candidate_declared_by(
+    owner: &str,
+    name: &str,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+) -> Option<Arc<FunctionDef>> {
+    all_candidates(name, functions)
+        .into_iter()
+        .find(|candidate| function_module_owner(candidate).is_some_and(|o| *o == *owner))
+}
+
 /// True when `func`'s owning module matches the module of the function whose
 /// body is currently executing. False (never preferred) when either side is
 /// unknown, so callers with no module info behave exactly as before.
@@ -611,6 +634,128 @@ pub(crate) fn evaluate_call(
         let context_obj = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
         if let Some(ctx) = context_obj {
             return dispatch_context_method(&ctx, name, args, env, functions, classes, enums, impl_methods);
+        }
+
+        // An aliased import (`use m.{f as g}`) binds `g` in the IMPORTING
+        // module only. Flattening already records that edge as an owner
+        // binding (`record_flattened_import_binding`), but until now ONLY
+        // globals ever consulted it: a CALL of `g` looked `g` up in
+        // `functions`, missed, and fell straight through to E1002. That is why
+        // `use std.io_runtime.{file_rename as runtime_file_rename}`
+        // (src/lib/nogc_sync_mut/io/file_ops.spl:218) made every module
+        // reaching `io/file_ops` die with
+        // `function `runtime_file_rename` not found` -- including
+        // `update_test_database`, which is why a fully passing
+        // `simple test <dir>` still exited 1 and wrote no test DB.
+        //
+        // This is the interpreter-side half of the HIR fix in
+        // `hir/lower/lowerer.rs::collect_flattened_import_aliases`
+        // (c0c4e707789); that one taught CODEGEN to resolve the alias, this
+        // teaches the INTERPRETER, and both read the SAME recorded binding so
+        // they cannot disagree about which definition an alias names.
+        //
+        // Selection is by module OWNER, never by bare name. Flattening mangles
+        // only `main`, so all four `file_rename` definitions share one bare
+        // key; binding the alias to `functions["file_rename"]` picks whichever
+        // landed there -- for `runtime_file_rename` that is `io/file_ops`'s own
+        // one-line wrapper, i.e. the alias resolves back to its own caller and
+        // recurses until `stack overflow: recursion depth 1000 exceeded in
+        // function 'file_rename'`. Measured, not hypothetical. Matching
+        // `function_module_owner` against the binding's owner is what makes the
+        // choice unambiguous; when no candidate matches we fall through to
+        // E1002 rather than guess, because guessing is the defect above.
+        if let Some(current) = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone()) {
+            if let Some((source_owner, source_name)) = crate::interpreter::owner_bindings(&current)
+                .and_then(|bindings| bindings.get(name).cloned())
+            {
+                if std::env::var("SIMPLE_DEBUG_ALIAS").is_ok() {
+                    eprintln!("[alias] name={name} current={current} source_owner={source_owner} source_name={source_name}");
+                    for c in all_candidates(&source_name, functions) {
+                        eprintln!("[alias]   cand {} owner={:?}", c.name, function_module_owner(&c));
+                    }
+                    eprintln!("[alias]   mangled={} present={}",
+                        crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name),
+                        functions.contains_key(&crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name)));
+                    if let Some(b) = crate::interpreter::owner_bindings(&source_owner).and_then(|x| x.get(&source_name).cloned()) {
+                        eprintln!("[alias]   next-hop={:?}", b);
+                    } else {
+                        eprintln!("[alias]   next-hop=NONE");
+                    }
+                }
+                // MEASURED shape of this lookup (SIMPLE_DEBUG_ALIAS=1), for
+                // `use std.io_runtime.{file_rename as runtime_file_rename}`:
+                //
+                //   current      = .../nogc_sync_mut/io/file_ops.spl
+                //   source_owner = .../src/lib/io_runtime.spl        <- FACADE
+                //   source_name  = file_rename
+                //   candidates   = file_rename @ io/file_ops.spl     <- the CALLER's own wrapper
+                //                  file_rename @ nogc_sync_mut/io_runtime.spl   <- the real one
+                //                  (each registered twice)
+                //   mangled(facade, file_rename) -> absent
+                //   next hop from the facade -> (io/file_ops.spl, file_rename)
+                //
+                // Two facts drive the rule below, and both are why the earlier
+                // attempts failed. (a) `source_owner` is the FACADE
+                // `src/lib/io_runtime.spl`, never the declaring module, so
+                // owner equality alone never matches. (b) The facade's own
+                // binding for `file_rename` points BACK at `io/file_ops.spl`,
+                // so following the chain walks straight into the caller's
+                // wrapper and recurses until the stack overflows. The chain is
+                // therefore NOT trustworthy here and is deliberately not walked.
+                let mut target: Option<Arc<FunctionDef>> = functions
+                    .get(&crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name))
+                    .cloned()
+                    .or_else(|| candidate_declared_by(&source_owner, &source_name, functions));
+
+                if target.is_none() {
+                    // An alias in module M can never legitimately denote M's own
+                    // same-named function -- that is the wrapper whose body
+                    // issued this very call -- so candidates owned by `current`
+                    // are rejected outright. A candidate whose owner is UNKNOWN
+                    // is also rejected: accepting unknown owners is exactly how
+                    // the wrapper slipped back in through an `is_none_or` filter.
+                    //
+                    // Among what survives, prefer the module whose file stem
+                    // matches the facade's (`src/lib/io_runtime.spl` ->
+                    // `.../nogc_sync_mut/io_runtime.spl`), which is what a
+                    // re-export facade actually names. Duplicate registrations
+                    // of one module are common (see the dump above: two rows per
+                    // owner), so this selects a MODULE, not a unique candidate.
+                    let facade_stem = std::path::Path::new(&*source_owner).file_stem().map(|s| s.to_owned());
+                    let mut outside: Vec<Arc<FunctionDef>> = all_candidates(&source_name, functions)
+                        .into_iter()
+                        .filter(|candidate| {
+                            function_module_owner(candidate)
+                                .is_some_and(|owner| *owner != *current)
+                        })
+                        .collect();
+                    if let Some(stem) = facade_stem {
+                        let matching: Vec<Arc<FunctionDef>> = outside
+                            .iter()
+                            .filter(|candidate| {
+                                function_module_owner(candidate).is_some_and(|owner| {
+                                    std::path::Path::new(&*owner).file_stem() == Some(stem.as_os_str())
+                                })
+                            })
+                            .cloned()
+                            .collect();
+                        if !matching.is_empty() {
+                            outside = matching;
+                        }
+                    }
+                    // All survivors owned by ONE module means the choice is
+                    // unambiguous even when that module registered several.
+                    let owners: Vec<Arc<str>> =
+                        outside.iter().filter_map(function_module_owner).collect();
+                    if !owners.is_empty() && owners.iter().all(|o| *o == owners[0]) {
+                        target = outside.into_iter().next();
+                    }
+                }
+
+                if let Some(func) = target {
+                    return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                }
+            }
         }
 
         // If we reach here with an identifier name, the function is not found
