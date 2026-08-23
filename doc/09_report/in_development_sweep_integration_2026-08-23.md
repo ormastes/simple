@@ -141,21 +141,63 @@ uncommitted edits. `usage/networking_spec.spl` (real sockets under
 
 Still **zero** specs qualified for the tag.
 
+
+## Closest thing to a tag candidate found anywhere in this slice — and why it still stays red
+
+`test/feature/usage/tensor_spec.spl` (and its neighbour `tensor_bridge_spec.spl`)
+fails with:
+
+    semantic: panic: torch SFFI backend not yet wired
+
+This is the only failure across all 316 executed specs whose message *asserts its own
+unfinishedness*, and it is therefore the strongest tag candidate the sweep produced.
+It is still left **red**, deliberately, on the rule "unsure ⇒ leave red and list it":
+
+- The sibling spec `scilib/linalg_torch_backend_spec.spl` proves this codebase
+  *already has* a typed vocabulary for an unwired backend —
+  `Err(BackendError.BackendUnavailable(name))`, which that spec explicitly accepts as
+  a pass. A path that **panics** where a typed unavailable error is contractually
+  available is a defect in the error contract, not merely an unimplemented feature.
+- `@tag:in-development` neutralises *failing assertions*. It does not, and should
+  not, launder a panic.
+
+If a future lane decides the panic is acceptable interim behaviour, this is the first
+file to revisit — but that decision should change the *code* to return
+`BackendUnavailable`, at which point the spec goes green on its own and no tag is
+needed at all.
+
+## Second batch (final) — 16 further failures, same verdict
+
+The 56 specs run after the first correction added 16 failures, none taggable:
+`semantic: variable `value` not found` (`pattern_matching_advanced`); `cannot convert
+function to int` (`placeholder_lambda`); `method `sorted_by` not found on type
+`array`` (`table`); wrong values — `expected 0 to equal 20` (`struct_shorthand`),
+`0 to equal 42` (`structs`), `5 to equal 5000` (`unit_types` — a unit conversion off
+by 1000), `1 to equal 2` (`rust_simple_ffi`), `20 to equal TokenKind::KwFn`
+(`treesitter_lexer`); plus the six-spec `treesitter_*` cluster failing together.
+
 ## Counts
 
 | metric | value |
 |---|---|
 | specs in slice | 1720 (`02_integration` 776, `integration` 592, `feature` 352) |
 | unique specs needing execution | **1128** (`integration` is a strict subset mirror of `02_integration` — see Method) |
-| specs actually run | **260**, all in `test/feature/` (74% of that directory; 23% of the unique set) |
-| passed | 212 |
-| **failed** | **48** (18% of what ran) |
+| specs actually run | **316**, all in `test/feature/` (90% of that directory; 28% of the unique set) |
+| passed | 252 |
+| **failed** | **64** (20% of what ran) |
 | timed out / inconclusive / NO-EXEC | 0 |
 | **tagged `@tag:in-development`** | **0** |
-| left red, with reason | **48 — every single failure** |
-| distinct root causes behind the 48 | **~20** (the six SIMD specs share one runtime bug; ~8 more share a name-resolution failure mode) |
+| left red, with reason | **64 — every single failure** |
+| distinct root causes behind the 64 | **~26** (the six SIMD specs share one runtime bug; ~8 more share a name-resolution failure mode) |
 | `test/02_integration` / `test/integration` executed | 0 — not reached in the available window |
 
-The sweep was stopped single-job at 260 specs on the coordinator's memory-pressure
+The sweep was stopped single-job at 316 specs on the coordinator's memory-pressure
 instruction (run21 in flight, ~16 GB free). This report covers what was executed and
-verified, and claims nothing about the remaining 868 unique specs.
+verified, and claims nothing about the remaining 812 unique specs.
+
+**Resume state:** `/mnt/fast/tagsweep/` — deliberately left in place, not cleaned up.
+`run.sh` is the driver, `rest3o.txt` the remaining work list (feature-first, then
+`test/02_integration`), `all_res.tsv` + `d.tsv` the results so far, `logA`–`logD` the
+failing-spec logs (passing logs are deleted as they go). A future lane can continue
+from it on a quiet box by re-running `run.sh <list> <out.tsv> <logdir>` after
+subtracting the already-swept paths.
