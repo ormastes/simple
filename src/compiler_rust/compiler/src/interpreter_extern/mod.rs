@@ -3005,6 +3005,56 @@ mod tests {
         assert!(EXTERN_DISPATCH.contains_key("rt_cli_run_tests_process_args"));
     }
 
+    /// Regression guard for
+    /// doc/08_tracking/bug/seed_interpreter_extern_missing_rt_heap_ref_wellformed_2026-08-23.md.
+    ///
+    /// `rt_heap_ref_wellformed` was defined in the C runtime, the Rust runtime,
+    /// `simple_core`, and `runtime_symbols.rs` -- and MISSING here. Because
+    /// `native-build` interprets the pure-Simple driver under this table, and
+    /// `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:55` declares it,
+    /// EVERY host native-build died with
+    /// `semantic: unknown extern function: rt_heap_ref_wellformed`, on a
+    /// three-line no-import hello world. Registration alone is the invariant.
+    #[test]
+    fn dispatch_registers_heap_ref_wellformed() {
+        assert!(simple_common::RUNTIME_SYMBOL_NAMES.contains(&"rt_heap_ref_wellformed"));
+        assert!(
+            EXTERN_DISPATCH.contains_key("rt_heap_ref_wellformed"),
+            "interpreter_extern must register every rt_* the compiler's own sources declare"
+        );
+    }
+
+    /// The adapter is a FORMATION probe over the interpreter's `Value`, not a
+    /// tag-bit read over a raw word. Cloning `rt_value_is_heap_fn`'s
+    /// `.as_int()?` shape would error on the class instances real call sites
+    /// pass (`self.ctx.module_surfaces.unwrap()`), trading "unknown extern" for
+    /// a mid-build type error. `objects.rs` documents the contract as
+    /// "can never false-reject a live object".
+    #[test]
+    fn heap_ref_wellformed_adapter_semantics() {
+        use super::sffi_value::rt_heap_ref_wellformed_fn;
+
+        // nil: nothing to probe
+        assert_eq!(rt_heap_ref_wellformed_fn(&[Value::Nil]).unwrap(), Value::Bool(false));
+
+        // scalar carrier: delegated to the real runtime probe, which reports 0
+        // for a non-heap-tagged word by design.
+        assert_eq!(rt_heap_ref_wellformed_fn(&[Value::Int(3)]).unwrap(), Value::Bool(false));
+
+        // a live interpreter object is well-formed by construction, and must
+        // never be false-rejected.
+        assert_eq!(
+            rt_heap_ref_wellformed_fn(&[Value::Array(std::sync::Arc::new(vec![Value::Int(1)]))]).unwrap(),
+            Value::Bool(true)
+        );
+
+        // arity is enforced, and NOT as a generic "unknown extern function".
+        let err = rt_heap_ref_wellformed_fn(&[]).unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains("rt_heap_ref_wellformed expects 1 argument"), "got: {text}");
+        assert!(!text.contains("unknown extern function"), "got: {text}");
+    }
+
     #[test]
     fn actor_hosted_symbols_keep_dynamic_fallback() {
         for name in ["rt_actor_spawn", "rt_actor_send", "rt_actor_stop", "rt_actor_try_send", "rt_actor_recv"] {
