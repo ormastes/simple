@@ -32,6 +32,24 @@ verify_builder_authority() {
         "$tool_authority" "$build_args_sha" "$sanity" "$receiver" ||
         fail "builder admission authority chain invalid"
 }
+# Host-portable readelf discovery.  macOS ships no `readelf`; the LLVM
+# toolchain's `llvm-readelf` is a drop-in for the -h/-l uses below but is not
+# on PATH under a Homebrew keg-only install.  Discovery order is explicit and
+# the fallback is fail-CLOSED: a host with no ELF reader gets an error, never
+# a skipped check.
+discover_readelf() {
+    for cand in \
+        "${READELF:-}" readelf llvm-readelf eu-readelf \
+        /opt/homebrew/opt/llvm/bin/llvm-readelf \
+        /usr/local/opt/llvm/bin/llvm-readelf; do
+        [ -n "$cand" ] || continue
+        case "$cand" in
+            /*) [ -x "$cand" ] && { printf '%s\n' "$cand"; return 0; } ;;
+            *) command -v "$cand" >/dev/null 2>&1 && { command -v "$cand"; return 0; } ;;
+        esac
+    done
+    return 1
+}
 target_platform() {
     case "$1" in
         x86_64-unknown-simpleos) printf '%s\n' x86_64 ;;
@@ -55,9 +73,9 @@ validate_target_elf() {
     [ "$#" -eq 2 ] || fail "payload machine field unavailable"
     expected_machine=$(target_machine "$target") || fail "unsupported target"
     [ "$(( $1 + 256 * $2 ))" -eq "$expected_machine" ] || fail "payload machine mismatch"
-    command -v readelf >/dev/null 2>&1 || fail "readelf is required"
-    readelf -h "$elf" >/dev/null 2>&1 || fail "invalid ELF header"
-    program_headers=$(readelf -l "$elf" 2>/dev/null) || fail "invalid ELF program headers"
+    readelf_bin=$(discover_readelf) || fail "readelf is required (none of readelf/llvm-readelf/eu-readelf found)"
+    "$readelf_bin" -h "$elf" >/dev/null 2>&1 || fail "invalid ELF header"
+    program_headers=$("$readelf_bin" -l "$elf" 2>/dev/null) || fail "invalid ELF program headers"
     ! printf '%s\n' "$program_headers" | grep -q 'INTERP' || fail "dynamic-interpreter payload forbidden"
 }
 default_image() {
@@ -117,7 +135,16 @@ validate_receipt() {
 run_self_test() {
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-simple-authority.XXXXXX")
     trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-    cp /bin/true "$tmp/simple"
+    # macOS has no /bin/true (it lives in /usr/bin); discover any small real
+    # executable for the forged-receipt fixture.  Fail CLOSED -- a self-test
+    # that cannot build its fixture must error, never silently pass.
+    fixture_src=$(command -v true 2>/dev/null)
+    case "$fixture_src" in /*) ;; *) fixture_src= ;; esac
+    [ -n "$fixture_src" ] || for c in /usr/bin/true /bin/true; do
+        [ -x "$c" ] && { fixture_src=$c; break; }
+    done
+    [ -n "$fixture_src" ] || fail "self-test fixture executable unavailable"
+    cp "$fixture_src" "$tmp/simple"
     : >"$tmp/source.snapshot"
     : >"$tmp/runtime.snapshot"
     : >"$tmp/tool.snapshot"

@@ -22,7 +22,10 @@ cd "$REPO_ROOT"
 
 TARGET="aarch64-unknown-simpleos"
 SYSROOT="${SIMPLEOS_SYSROOT_AARCH64:-build/os/sysroot-aarch64}"
-OUTPUT="bin/release/${TARGET}/simple"
+# Output location is overridable so a lane that must not write under
+# bin/release/** can stage the payload elsewhere; the provisioner binds the
+# payload by path from the receipt, so any location is equally authoritative.
+OUTPUT="${SIMPLEOS_PAYLOAD_OUTPUT:-bin/release/${TARGET}/simple}"
 ENTRY="src/app/simpleos_tool/main.spl"
 BACKEND="${SIMPLE_NATIVE_BACKEND:-cranelift}"
 TARGET_RUNTIME="build/os/simple-core-simpleos-aarch64/libsimple_runtime.a"
@@ -81,8 +84,20 @@ SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 "$COMPILER" native-build \
 
 echo ""
 echo "[verify] readelf..."
-readelf -h "$OUTPUT" | grep -E "Class|Type|Machine|Entry"
-readelf -l "$OUTPUT" | grep -E "LOAD" | head -5
+# Host-portable: macOS has no `readelf`; llvm-readelf is a drop-in for -h/-l.
+# Fail CLOSED -- no ELF reader means no verification, which is never a pass.
+READELF_BIN=""
+for cand in "${READELF:-}" readelf llvm-readelf eu-readelf \
+    /opt/homebrew/opt/llvm/bin/llvm-readelf /usr/local/opt/llvm/bin/llvm-readelf; do
+  [ -n "$cand" ] || continue
+  case "$cand" in
+    /*) [ -x "$cand" ] && { READELF_BIN="$cand"; break; } ;;
+    *) command -v "$cand" >/dev/null 2>&1 && { READELF_BIN="$(command -v "$cand")"; break; } ;;
+  esac
+done
+[ -n "$READELF_BIN" ] || { echo "error: no readelf/llvm-readelf on this host; cannot verify $OUTPUT" >&2; exit 1; }
+"$READELF_BIN" -h "$OUTPUT" | grep -E "Class|Type|Machine|Entry"
+"$READELF_BIN" -l "$OUTPUT" | grep -E "LOAD" | head -5
 FILE_INFO=$(file "$OUTPUT")
 case "$FILE_INFO" in
   *ELF*aarch64*"statically linked"*) ;;
