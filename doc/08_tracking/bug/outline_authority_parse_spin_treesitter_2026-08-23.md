@@ -1,24 +1,71 @@
 # Parse spin in the treesitter outline-authority path (phase 1 blocker)
 
-Filed 2026-08-23. Status: **root cause localized with a cheap reproducer; fix NOT landed.**
+Filed 2026-08-23. Status: **FIXED** (`treesitter_is_at_end`, `outline_lexer.spl`).
 
 ## Symptom
 
-stage1 runs 21 and 23 hang forever in step 1/6 at `parse 144/688` on
-`src/compiler/10.frontend/treesitter_types.spl`, on a fully repaired tree.
-All 8 parse shards burn ~65-83% CPU each with **exactly flat RSS** and
-**zero `rchar`/`wchar` delta** -- a bounded-memory infinite loop, not slow
-progress and not an I/O livelock.
+stage1 runs 21, 23 and 24 all hang in step 1/6 at `parse 144/688` (run23
+`144/689`) on `src/compiler/10.frontend/treesitter_types.spl`. All 8 parse
+shards burn 65-87% CPU each with **byte-identical RSS** across sampling
+windows and **zero `rchar`+`wchar` delta** — a bounded-memory infinite loop,
+not slow progress and not an I/O livelock. run24 froze at
+`+439476ms dt=0ms`, log line count 5758 -> 5758 over 60 s.
 
-## Reproducer -- no stage1 needed
+## Root cause: an exit condition that can never be reached
 
-`sh scripts/check/repro-outline-parse-spin.shs <seed> [timeout_s]`
+`Token.kind` carries the **raw CoreLexer numeric kind**, not a `TokenKind`
+ordinal. That numeric space is fixed by `core/lexer_types.spl`:
 
-Reproduces on a **one-file source set** in ~2.5 s of parse time. Measured
-pre-fix: reaches `[build] parse 0/28 ... treesitter_types.spl` at **+2464 ms**,
-then produces no further output while burning 95+ s CPU (utime 1567 -> 3211
-ticks over 30 s = ~55% of a core) with RSS flat/falling
-(383640 kB -> 378604 kB) and `wchar` frozen at 19919.
+```
+fn lex_token_eof(line: i64) -> Token:   return lex_token_new(190, "", line, 0)
+fn lex_token_error(msg, line, col):     return lex_token_new(191, msg, line, col)
+fn token_is_keyword(t: Token) -> bool:  return t.kind >= 20 and t.kind <= 59
+```
+
+So EOF is **190**. `lex_next()` also returns 190 when it fails closed on a dead
+lexer.
+
+`TokenKind`, by contrast, is a **bare positional enum** in
+`10.frontend/lexer_types.spl` — 142 variants, no explicit discriminants (the
+`=` characters in it are inside `# ==` comments), so its ordinals span only
+`0..141` and `Eof` sits at **133**. The raw value 190 is therefore
+**unreachable by any `TokenKind` ordinal**.
+
+`treesitter_is_at_end` compared the two spaces directly:
+
+```
+fn treesitter_is_at_end(self: TreeSitter) -> bool:
+    val kind = self.current.kind
+    kind == TokenKind.Eof          # 190 == 133 -- never true
+```
+
+It could never return true. `outline.spl`'s top-level loop
+(`while not self.treesitter_is_at_end():`) therefore had an exit condition
+that could never be reached, and `treesitter_synchronize`'s inner
+`while not self.treesitter_is_at_end():` had the same. Zero allocation, zero
+I/O, pure CPU — exactly the measured signature.
+
+**Direct evidence.** Instrumenting the loop with a SOUND probe
+(`self.current.kind`, not `span.start` — see the landmine below) gave
+`kind=190 line=1 col=0` on every one of 29 consecutive iterations: the parser
+was sitting on EOF, correctly lexed, and simply not recognising it.
+
+## The fix
+
+`src/compiler/10.frontend/treesitter/outline_lexer.spl`, `treesitter_is_at_end`:
+
+```
+kind == 190 or kind == TokenKind.Eof
+```
+
+Testing the raw value is what makes the loop terminable. The `TokenKind`
+comparison is kept alongside it so a Token that does carry an ordinal is still
+recognised. The change is **strictly additive**: it can neither make a
+previously-terminating parse spin, nor cause a token to be skipped — which is
+the failure mode that would turn a hang into a silent wrong parse.
+
+Post-fix the file parses to completion in **~3.8 s** with **0 parse errors**,
+and the shard proceeds to the rest of its closure.
 
 ## Trigger: a substring, not the module count
 
@@ -27,104 +74,79 @@ ticks over 30 s = ~55% of a core) with RSS flat/falling
 fn frontend_has_outline_authority(source: text) -> bool:
     source.contains("friend ") or source.contains("internal_export")
 ```
-Any file containing either substring **anywhere** -- including in a struct
-field name or a comment -- takes the outline-authority path at
-`frontend.spl:133-140` (`treesitter_new(...)` then `.parse_outline()`) before
-the real parser runs.
+Any file containing either substring **anywhere** — including in a struct field
+name or a comment — takes the outline-authority path (`treesitter_new(...)`
+then `.parse_outline()`) before the real parser runs. That is why the bug is
+reproducible on a **one-file** source set and needs no stage1 build.
 
-This explains the whole affected file set, and it is a clean discriminator:
+Clean discriminator:
 
 | file | occurrences | stalls |
 |---|---|---|
-| `treesitter_types.spl` | 1 (field `internal_exports:`) | yes |
-| `outline.spl` | 9 | yes (reported by a second lane) |
-| `outline_members.spl` | 0 | no |
-| `outline_decls.spl` | 0 | no |
-| `outline_types.spl` | 0 | no |
-| `outline_lexer.spl` | 0 | no |
+| `treesitter_types.spl` | 1 (its own field `internal_exports:`) | yes |
+| `outline.spl` | 9 | yes |
+| `outline_members` / `_decls` / `_types` / `_lexer` | 0 | no |
 
-`treesitter_types.spl` matches on its own field name -- the file that DEFINES
-the outline types is caught by the naive substring test for those types.
+`treesitter_types.spl` — the file that DEFINES the outline types — is caught by
+the naive substring test for those very types.
 
-## Localization (positional, from the build's own receipts)
+### Recorded design concern (not fixed here; someone's call)
 
-With `SIMPLE_COMPILER_TRACE=1` the last receipt is
-`phase2:parse:file:start .../treesitter_types.spl chars=11201`, and
-`[frontend] parse_and_build:start` (`frontend.spl:145`) **never appears**.
-That marker sits immediately after the outline-authority block and immediately
-before `frontend_parse_or_restore`, so the spin is inside
-`authority_tree.parse_outline()` and nowhere else.
+Routing the parser by **unanchored `contains()` over whole file text** is
+fragile by construction. Even with the loop fixed, any file that merely
+mentions `friend ` or `internal_export` in a comment, a string literal, or an
+identifier silently takes a different parse path than its neighbours. This
+should be a deliberate decision, not an accident of substring matching; an
+anchored/token-aware test would make routing a property of declarations rather
+than of arbitrary text.
 
-## Where it spins
+## Landmine hit during investigation — filed separately
 
-`outline.spl`, `parse_outline()` top-level loop:
-```
-while not self.treesitter_is_at_end():
-    self.treesitter_skip_newlines()
-    if self.treesitter_is_at_end(): break
-    val item = self.treesitter_parse_top_level_item()
-    match item: ... case _: pass
-    # no progress guard, no Dedent handling
-```
-The loop has **no progress guarantee**. Unrecognised tokens reach the
-`case _:` arm of `treesitter_parse_top_level_item`, whose only recovery is
-`treesitter_synchronize()` -- and synchronize (`outline_lexer.spl`) **returns
-without consuming** when the current token is `Dedent`:
-```
-me treesitter_synchronize(self: TreeSitter):
-    while not self.treesitter_is_at_end():
-        if self.treesitter_check(TokenKind.Newline):
-            self.treesitter_advance(); return
-        if self.treesitter_check(TokenKind.Dedent):
-            return          # consumes NOTHING
-        self.treesitter_advance()
-```
-The member loops in `outline_decls` / `outline_members` are safe from this
-because they `break` on `Dedent` themselves. The top-level loop has no such
-check.
+`lexer_next_token` (`core/lexer.spl:91`) **hardcodes `span.start = 0`** for
+every token. A probe built on `self.current.span.start` therefore cannot
+distinguish "cursor stuck" from "spans are degenerate", and a progress guard
+written against it compares `0 == 0` and fires unconditionally. One such guard
+was written here, produced a plausible-looking but meaningless reading, and was
+reverted. Switching the probe to `kind` gave the answer immediately.
+See `doc/08_tracking/bug/lexer_next_token_hardcodes_span_start_zero_2026-08-23.md`.
 
-## What is NOT the cause (ruled out with evidence)
+## Hypotheses ruled out with evidence
 
+- **Stray `Dedent` / `treesitter_synchronize` recovery.** It is true that
+  `synchronize` returns without consuming on `Dedent` while the member loops in
+  `outline_decls`/`outline_members` are safe only because they `break` on
+  Dedent themselves — but that is **not** this bug. Fixing it was tried first
+  and **did not stop the hang**; the probe then showed the parser never reaches
+  any Dedent because it never gets past EOF-recognition. (The `synchronize`
+  asymmetry remains a latent sharp edge, but with `is_at_end` correct its inner
+  loop now terminates.)
 - **`d6fce96e530`** ("self.<stripped>() call sites", 563 rewrites across the
   outline family) is **exonerated**: it rewrote all five outline files roughly
-  equally, but only the two containing the trigger substring stall. Its diff
-  also touches no lexer/`next_token` line in `outline_lexer.spl`.
-- **The shard work queue** is exonerated: a claim involves file I/O, and the
-  measured `rchar+wchar` delta is zero. The spin is inside a single
-  `parse_full_frontend` call, not the loop over files.
-- **The open-addressed `parsed_entry_index` probe loops**
-  (`driver_source_pipeline_parsing.spl:619,686`) are exonerated: capacity is
-  `2n+1`, so load factor never exceeds 0.5 and the probe always finds a hole.
-- **`lex_next()` dead-lexer death** is exonerated: it already fails closed,
-  reporting `[lexer_fatal] dead lexer` and returning kind 190 (Eof).
+  equally, yet only the two containing the trigger substring stall, and its
+  diff touches no lexer or `next_token` line.
+- **The shard work queue**: a claim does file I/O, and the measured
+  `rchar`+`wchar` delta is 0. The spin is inside one `parse_full_frontend` call.
+- **`parsed_entry_index` probe loops** (`driver_source_pipeline_parsing.spl`
+  :619, :686): capacity is `2n+1`, so load factor never exceeds 0.5.
+- **`lex_next()` dead-lexer death**: already fails closed, reporting
+  `[lexer_fatal] dead lexer` and returning kind 190.
 
-## Open question blocking the fix
+## Guard
 
-An instrumented run shows the loop re-dispatching with `self.current.span.start`
-pinned at 0 and `text` empty for 400 consecutive iterations. **`span.start` is
-not usable as a cursor probe**: `lexer_next_token` (`core/lexer.spl:85-92`)
-hardcodes it --
-```
-val span = lex_span_new(0, text.len(), line, col)   # start is ALWAYS 0
-```
--- so that measurement cannot distinguish "cursor stuck" from "spans are
-degenerate", and a progress guard written against `span.start` is therefore
-invalid. Two candidate fixes were tried and **neither resolved the hang**:
-skipping stray `Indent`/`Dedent` at top level, and a `span.start`-based
-progress guard (the latter is unsound for the reason just given).
+`scripts/check/check-outline-parse-terminates.shs` — executes the real parse of
+every outline-authority fixture under a clock and fails if a parse is entered
+but never returns. Verdict convention `PASS`/`FAIL`/`ERROR-on-zero`, fatal
+`--selftest` (5 fixtures over the classification logic). Wired **advisory** in
+`config/check/must_check_gates.sdn`: it runs real compiles (~8 min), and a
+blocking multi-minute gate on every push is one that gets routed around with
+`--no-verify`, which protects nothing.
 
-Note also that `lexer_next_token` is the **only** non-threading token wrapper
-in the tree, and `treesitter_advance` is its **only** caller. Every other
-consumer uses `core_lexer_next_token(lexer) -> (CoreLexer, i64)` and threads
-the returned lexer explicitly. That asymmetry is why only the outline parser
-is affected and is the first place to look next.
+Neuter-verified both directions on the real seed:
+- with the fix: `PASS — 2 fixture(s) parsed, outline-authority path terminated for all`
+- fix reverted: `FAIL — 2 fixture(s) parsed, outline-authority path did not terminate for: treesitter_types.spl(rc=124) outline.spl(rc=124)`
 
-## Next steps
-
-1. Instrument with a real cursor (token index or `lex_token_line`/`col`), not
-   `span.start`, to establish whether `treesitter_advance` advances at all.
-2. Fix `lexer_next_token`'s hardcoded `span.start = 0` regardless -- it makes
-   every outline span degenerate and defeats
-   `frontend_strip_outline_authority_spans`, which orders spans by `.start`.
-3. Add an unconditional progress guarantee to the `parse_outline` top-level
-   loop once a sound cursor exists.
+No existing guard could have caught this: every other guard checks trees,
+ranges, or source text, and the two that run a compiler run it over source or
+check that a binary does not crash. A parser that spins forever is well-formed
+as bytes, compiles cleanly, crashes nothing, and returns no wrong answer — it
+simply never returns. Only executing the parse under a clock can see it.

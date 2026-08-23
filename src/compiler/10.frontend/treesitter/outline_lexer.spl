@@ -177,8 +177,30 @@ me treesitter_expect(self: TreeSitter, kind: TokenKind, message: text) -> bool:
 
 fn treesitter_is_at_end(self: TreeSitter) -> bool:
         """Check if at end of input (Eof or nil token)."""
+        # `Token.kind` carries the RAW CoreLexer numeric kind, NOT a TokenKind
+        # ordinal. That numeric space is fixed by lexer_types.spl: lex_token_eof
+        # builds `lex_token_new(190, ...)`, lex_token_error uses 191, and
+        # token_is_keyword tests `kind >= 20 and kind <= 59`. lex_next() also
+        # returns 190 when it fails closed on a dead lexer.
+        #
+        # TokenKind, by contrast, is a bare positional enum: 142 variants, so
+        # its ordinals only span 0..141 and Eof's is 133. The raw Eof value 190
+        # is therefore unreachable by ANY TokenKind ordinal, and the original
+        # `kind == TokenKind.Eof` could never be true for a token produced by
+        # lexer_next_token. The outline parser's top-level loop in outline.spl
+        # (`while not self.treesitter_is_at_end()`) consequently had an exit
+        # condition that could never be reached: it spun forever, burning CPU
+        # at flat RSS with zero I/O, on every file that takes the
+        # outline-authority path. See
+        # doc/08_tracking/bug/outline_authority_parse_spin_treesitter_2026-08-23.md.
+        #
+        # Testing the raw value is what makes the loop terminable. The
+        # TokenKind comparison is kept alongside it so a Token that does carry
+        # an ordinal is still recognised: this is strictly additive, so it can
+        # neither make a previously-terminating parse spin nor cause a token to
+        # be skipped.
         val kind = self.current.kind
-        kind == TokenKind.Eof
+        kind == 190 or kind == TokenKind.Eof
 
 
 me treesitter_error(self: TreeSitter, message: text):
