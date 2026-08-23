@@ -156,3 +156,24 @@ editing it. See `feature_expert/compiler_hardening/skill.md` and
 
 **Open 2026-08-21:** `standalone_hir_lowering_aborts_on_real_compiler_files_2026-08-21.md`,
 `declare_globals_fallback_debug_print_ungated_2026-08-21.md`.
+
+## Seed interpreter extern dispatch is a THIRD registry (2026-08-23)
+
+When the driver runs under `native-build`, it is **interpreted by the seed**, so
+every `extern fn rt_*` it declares must exist in
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs`. That table is
+independent of `common/src/runtime_symbols.rs` (codegen/link) and of the
+C/Rust runtime definitions, and nothing keeps them in sync.
+
+Concretely: `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:55` declares
+`extern fn rt_heap_ref_wellformed(value: Any) -> bool` and calls it at `:142`
+and `:505`. The symbol existed in all four other registries and was missing from
+this one — which killed **every** host `native-build` with
+`error: semantic: unknown extern function: rt_heap_ref_wellformed`, on a
+three-line no-import program. Fixed 2026-08-23; class defect and TODO in
+`doc/08_tracking/bug/seed_interpreter_extern_missing_rt_heap_ref_wellformed_2026-08-23.md`.
+
+**Rule for this layer: adding an `extern rt_*` to any file under
+`src/compiler/80.driver/` (or anything else on the worker's interpreted path)
+requires an `interpreter_extern` adapter in the same change.** There is no gate
+that will tell you otherwise; you find out when a build dies.

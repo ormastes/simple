@@ -2115,6 +2115,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_value_int", sffi_value::rt_value_int_fn);
     insert_simple!("rt_value_is_bool", sffi_value::rt_value_is_bool_fn);
     insert_simple!("rt_value_is_float", sffi_value::rt_value_is_float_fn);
+    insert_simple!("rt_heap_ref_wellformed", sffi_value::rt_heap_ref_wellformed_fn);
     insert_simple!("rt_value_is_heap", sffi_value::rt_value_is_heap_fn);
     insert_simple!("rt_value_is_int", sffi_value::rt_value_is_int_fn);
     insert_simple!("rt_value_is_nil", sffi_value::rt_value_is_nil_fn);

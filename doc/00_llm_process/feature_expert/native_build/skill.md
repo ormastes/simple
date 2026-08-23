@@ -246,3 +246,42 @@ src/app/cli/bootstrap_main.spl` labelled "phase 1"; all were unusable.
 Sanctioned path: `sh scripts/bootstrap/bootstrap-from-scratch.sh`. Guard:
 `scripts/check/check-sanctioned-bootstrap-invocation.shs` (ADVISORY).
 Record: `doc/08_tracking/bug/phase1_mislabelled_as_native_build_2026-08-23.md`.
+
+## 2026-08-23: every host `native-build` was dead, and why
+
+`bin/simple native-build --entry hello.spl` failed on a three-line no-import
+program with `error: semantic: unknown extern function: rt_heap_ref_wellformed`
+— reproducibly, on a seed built from the tree itself (so **not** a stale-binary
+artifact). Fixed in this commit.
+
+**The mechanism is worth internalising, because it will recur.** `native-build`
+spawns a worker that runs the pure-Simple compiler **under the seed's
+interpreter**. Interpreted `extern rt_*` calls resolve through
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs`, which is a table
+**completely separate** from `src/compiler_rust/common/src/runtime_symbols.rs`
+(codegen/link) and from the C/Rust runtimes. A symbol can be defined in all four
+of those and still be "unknown" to the worker.
+
+`rt_heap_ref_wellformed` was in `runtime_native.c:7441`, `runtime.h:587`,
+`core_enum.spl:73`, `objects.rs:395` and `runtime_symbols.rs:663` — and absent
+from `interpreter_extern/`. `driver_hir_pipeline_lowering.spl:55` declares it and
+`:142`/`:505` call it, so the worker died on every build.
+
+**No parity gate exists.** `grep -rn "unknown extern function" src/lib/` shows
+the same failure historically for `rt_slice`, `rt_sdl2_init`, `rt_opengl_init`,
+`rt_image_load`, `rt_webgpu_create_device`, `rt_socket_set_nonblocking`,
+`rt_io_file_*`. TODO(seed-extern-parity) is filed in
+`doc/08_tracking/bug/seed_interpreter_extern_missing_rt_heap_ref_wellformed_2026-08-23.md` §4.
+
+**Adapter semantics matter.** Do not clone `rt_value_is_heap_fn`'s `.as_int()?`
+shape for an `(value: Any)` extern — real call sites pass class instances and it
+would fail at run time. Match the documented runtime contract instead.
+
+### Still open after the fix
+- One stdlib import (`use std.common.text.{trim}`) fails with
+  `MIR lowering error: unresolved method call: index_of`.
+- `--mode dynload` produces a **byte-identical** one-binary artifact with **no
+  diagnostic**:
+  `doc/08_tracking/bug/aspect_dynload_producer_absent_and_mode_silent_downgrade_2026-08-23.md`.
+- Timing for context (loaded box): hello-world native-build ~96 s wall; the
+  resulting 22 KB binary starts in 9.8 ms, beating Go's.

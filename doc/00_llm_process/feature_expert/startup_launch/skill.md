@@ -76,3 +76,34 @@ Gates: `scripts/check/check-startup-perf-budget.shs`,
 `check-coupling-budget.shs`. Lint/parse cost root cause + mitigations:
 `doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`. Benchmarks:
 `doc/10_metrics/startup/cross_language_startup_benchmark_2026-08-18.md`.
+
+## Launch-overhead numbers (measured 2026-08-23, extends the 2026-08-18 doc)
+
+Full table + load context:
+`doc/10_metrics/startup/cross_language_startup_benchmark_2026-08-18.md`
+§"Re-measurement 2026-08-23". Medians from the one internally-comparable block
+(load 46.0/38.6/34.6, 30 runs each, no `hyperfine` on this host):
+
+| lane | median ms | RSS KB | artifact |
+|---|---:|---:|---:|
+| **Simple native binary** | **9.8** | 1,280 | 22 KB |
+| Go native binary | 14.5 | 1,536 | 1.9 MB |
+| python3 | 82.6 | 10,496 | — |
+| bun | 85.8 | 32,256 | — |
+| `simple --version` (process floor) | 89.3 | 14,080 | 60.6 MB |
+| `simple run hello.spl` | 143.6 | 27,392 | — |
+
+**A natively-built Simple binary beats Go on startup, RSS and size.** Launch
+overhead is not a Simple problem — until 2026-08-23 the lane simply could not be
+built (`doc/08_tracking/bug/seed_interpreter_extern_missing_rt_heap_ref_wellformed_2026-08-23.md`).
+
+### Correction: the "82 `src/lib/**.spl` opens on every process start" figure
+That number (from `.claude/rules/commands.md`) is about **stdlib edits not
+needing a build**, and does **not** describe hello-world startup. Measured:
+`strace -c` on `bin/simple run hello.spl` shows **89 openat totalling 1.13 ms**,
+of which **5** are `.spl`; one stdlib import makes it 7. File I/O is under 2 ms
+of a 76-144 ms run. **Do not cite the 82-open figure as a startup cost.**
+
+The real `run` floor is the **60.6 MB binary** — `--version` compiles nothing and
+still costs 30-89 ms, scaling with load (p95 256 ms at load 46). Page-fault +
+dynamic-relocation cost, not parsing and not I/O.
