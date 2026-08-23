@@ -543,6 +543,9 @@ fn require_i64_field(name: &str, fields: &HashMap<String, Value>, field: &str) -
 fn require_f64_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<f64, CompileError> {
     match fields.get(field) {
         Some(Value::Float(n)) => Ok(*n),
+        // f32 is a float: Value::matches_type("float") is true for Float32, so
+        // rejecting it here contradicted the runtime's own type predicate and
+        // made every f32 SIMD entry point reject its own element type.
         Some(Value::Float32(n)) => Ok(f64::from(*n)),
         Some(Value::Int(n)) => Ok(*n as f64),
         Some(other) => Err(CompileError::runtime(format!(

@@ -146,7 +146,7 @@ pub(crate) use bitfield_runtime::{instantiate_bitfield, register_bitfield, updat
 mod interpreter_helpers;
 pub(crate) use interpreter_helpers::{
     bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object,
-    create_range_object_opt, eval_arg, eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter,
+    create_range_object_opt, create_range_object_step, expand_range_fields, eval_arg, eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter,
     eval_array_find, eval_array_map, eval_array_reduce, eval_dict_filter, eval_dict_for_each, eval_dict_map_values, eval_option_and_then,
     eval_option_filter, eval_option_map, eval_option_or_else, eval_result_and_then, eval_result_map,
     eval_result_map_err, eval_result_or_else, find_and_exec_method, handle_functional_update,

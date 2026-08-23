@@ -174,20 +174,7 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         }
         Value::Object { class, fields } => {
             if class == "Range" || class == BUILTIN_RANGE {
-                let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
-                let end = fields.get("end").and_then(|v| v.as_int().ok()).unwrap_or(0);
-                let inclusive = fields.get("inclusive").map(|v| v.truthy()).unwrap_or(false);
-                let mut values = Vec::new();
-                if inclusive {
-                    for i in start..=end {
-                        values.push(Value::Int(i));
-                    }
-                } else {
-                    for i in start..end {
-                        values.push(Value::Int(i));
-                    }
-                }
-                return Ok(values);
+                return Ok(crate::interpreter::expand_range_fields(fields));
             }
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)

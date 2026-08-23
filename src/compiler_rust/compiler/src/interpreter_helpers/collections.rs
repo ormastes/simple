@@ -545,15 +545,7 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
             .collect()),
         Value::Object { class, fields } if class == BUILTIN_RANGE => {
             // Range object
-            let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
-            let end = fields.get("end").and_then(|v| v.as_int().ok()).unwrap_or(0);
-            let inclusive = fields.get("inclusive").map(|v| v.truthy()).unwrap_or(false);
-            let items: Vec<Value> = if inclusive {
-                (start..=end).map(Value::Int).collect()
-            } else {
-                (start..end).map(Value::Int).collect()
-            };
-            Ok(items)
+            Ok(crate::interpreter::expand_range_fields(fields))
         }
         _ => {
             let ctx = ErrorContext::new()

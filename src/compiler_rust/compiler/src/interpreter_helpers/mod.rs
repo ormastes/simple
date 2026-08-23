@@ -21,7 +21,7 @@ pub(crate) use method_dispatch::{
     build_method_missing_args, call_method_on_value, find_and_exec_method, try_method_missing,
 };
 
-pub(crate) use objects::{create_range_object, create_range_object_opt, spawn_actor_with_expr};
+pub(crate) use objects::{create_range_object, create_range_object_opt, create_range_object_step, expand_range_fields, spawn_actor_with_expr};
 
 pub(crate) use lambda_body::eval_lambda_body;
 

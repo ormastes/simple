@@ -14,15 +14,47 @@ use super::super::{
 };
 
 pub(crate) fn create_range_object(start: i64, end: i64, bound: RangeBound) -> Value {
+    create_range_object_step(start, end, bound, 1)
+}
+
+/// Create a range object carrying an explicit iteration step.
+///
+/// `range(start, end, step)` must honour `step`; before this existed the third
+/// argument was misread as an "inclusive" flag, so `range(0, 10, 2)` silently
+/// produced `0..=10` (step dropped, bound flipped) in comprehensions.
+pub(crate) fn create_range_object_step(start: i64, end: i64, bound: RangeBound, step: i64) -> Value {
     let mut fields = HashMap::new();
     fields.insert("start".into(), Value::Int(start));
     fields.insert("end".into(), Value::Int(end));
     // Store as boolean for runtime iteration compatibility
     fields.insert("inclusive".into(), Value::Bool(bound.is_inclusive()));
+    fields.insert("step".into(), Value::Int(step));
     Value::Object {
         class: BUILTIN_RANGE.into(),
         fields: Arc::new(fields),
     }
+}
+
+/// Expand a range object's `start`/`end`/`inclusive`/`step` fields into values.
+///
+/// Single source of truth so the comprehension path and the statement-loop path
+/// cannot drift apart again. A zero step yields no values rather than looping
+/// forever.
+pub(crate) fn expand_range_fields(fields: &HashMap<String, Value>) -> Vec<Value> {
+    let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
+    let end = fields.get("end").and_then(|v| v.as_int().ok()).unwrap_or(0);
+    let inclusive = fields.get("inclusive").map(|v| v.truthy()).unwrap_or(false);
+    let step = fields.get("step").and_then(|v| v.as_int().ok()).unwrap_or(1);
+    let mut values = Vec::new();
+    if step == 0 {
+        return values;
+    }
+    let mut i = start;
+    while (step > 0 && (i < end || (inclusive && i == end))) || (step < 0 && (i > end || (inclusive && i == end))) {
+        values.push(Value::Int(i));
+        i += step;
+    }
+    values
 }
 
 /// Create a range object with optional start/end values.
