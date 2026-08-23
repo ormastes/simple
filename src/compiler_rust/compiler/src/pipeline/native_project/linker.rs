@@ -225,17 +225,35 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
-        let output = nm_command()
-            .arg("-g")
-            .arg("-p")
-            .arg(obj)
-            .output()
-            .map_err(|e| format!("nm: {e}"))?;
+        // Mach-O POSIX nm prints weak *definitions* as 'T'; weakness only
+        // appears in the `-m` flag field as `weak external`. Request `-m` on
+        // macOS and normalize those lines to "W" so weak/strong classification
+        // matches the GNU/ELF lanes.
+        let output = {
+            let mut cmd = nm_command();
+            cmd.arg("-g").arg("-p");
+            if cfg!(target_os = "macos") {
+                cmd.arg("-m");
+            }
+            cmd.arg(obj).output()
+        }
+        .map_err(|e| format!("nm: {e}"))?;
         if !output.status.success() {
             return Ok(Vec::new());
         }
         let mut symbols = Vec::new();
         for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if line.contains(" weak external ") || line.contains(" weak reference ") {
+                if let Some(raw_name) = line.split_whitespace().next_back() {
+                    let name = if cfg!(target_os = "macos") {
+                        raw_name.strip_prefix('_').unwrap_or(raw_name).to_string()
+                    } else {
+                        raw_name.to_string()
+                    };
+                    symbols.push(("W".to_string(), name));
+                }
+                continue;
+            }
             let parts: Vec<&str> = line.split_whitespace().collect();
             let parsed = match parts.as_slice() {
                 [sym_type, name] => Some((*sym_type, *name)),
