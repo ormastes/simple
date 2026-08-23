@@ -1,7 +1,17 @@
 # Shard concurrency was derived from CPU count alone — worker group OOM-reaped mid-HIR
 
 - Date: 2026-08-23
-- Status: FIXED (clamp landed); the underlying per-worker footprint is tracked
+- Status: **REVERTED 2026-08-23** — the clamp as landed (`ff095d31591`) made
+  every `native-build` abort with `rc=134, fatal runtime error: stack overflow`
+  in <9 s, before a single `[build]` line, on a 3-line hello world with
+  `--threads 2` (so not load-dependent). A/B on the same tree/seed:
+  `SIMPLE_SHARD_MEM_CLAMP=0` progressed normally to
+  `[build] source_closure 1/1 step 1/6 complete`; default crashed. Reverted so
+  main is buildable; the finding below stands and will be re-landed with an
+  end-to-end `native-build` reproduce test. The shipped spec passed while the
+  real path crashed — it exercised the clamp *function* but never the *call
+  path*, which is the lesson.
+- Original status: FIXED (clamp landed); the underlying per-worker footprint is tracked
   separately in `doc/09_report/rust-perf-limits.md`.
 - Related: `doc/09_report/build_parallelism_memory_audit_2026-08-23.md` §2, §4
 
