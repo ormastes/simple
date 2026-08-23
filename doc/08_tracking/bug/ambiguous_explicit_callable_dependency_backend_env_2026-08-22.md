@@ -409,3 +409,37 @@ declines is a separate behaviour change; filed here rather than fixed blind.
   precedence precedent.
 - `doc/08_tracking/bug/hir_qualified_type_lookup_linear_scan_2026-08-22.md` (QTYPEIDX).
 - `doc/08_tracking/bug/hir_glob_reachable_sweep_unmemoized_2026-08-22.md` (GLBMEMO).
+
+## Resolution 2026-08-23 — `sibling_match_index` dedup fixed (`038b379541f`)
+
+`find_reexport_source_walk`'s bare-`export Name` package-sibling chase
+(`20.hir/hir_lowering/_Items/module_reexport_materialization.spl`) deduped a
+candidate owner only against the **immediately preceding** match
+(`sibling_match_index != sibling_index`, and the same test against
+`via_sibling.module_index` on the re-export branch). An A, B, A sibling ordering
+therefore recorded `sibling_match_count = 3` for two distinct owners.
+
+Fixed by keeping the full set of owner indices seen (`sibling_match_indices`)
+and testing membership with a concrete `hir_i64_list_contains` — concrete
+because the native build path has no generic monomorphization, so a
+`[i64].contains` method call is not available in this layer.
+
+### Why no failing-pre-fix witness exists, and why the fix landed anyway
+
+The requested A, B, A fixture was built on paper first and the arithmetic kills
+it. The count is consumed by exactly one test, `sibling_match_count == 1`, so
+the only thing that matters is *whether the true distinct-owner count is 1*.
+When it is 1, every recorded index is equal, so last-match dedup already
+collapses them and the buggy counter also reads 1. When it is >= 2, both the
+buggy counter (>= 2) and the true count (>= 2) fail the `== 1` test. There is no
+sibling ordering for which the buggy over-count changes the decline decision —
+so no fixture can be red pre-fix, and the "makes the chase decline where it
+should resolve" framing in the original filing is **wrong**, not merely
+unwitnessed.
+
+What remains is real: the counter did not mean what its name and its
+`== 1`-uniqueness reading claim, and it becomes load-bearing the moment anything
+reads the count for any purpose other than the `== 1` test (for example a
+future "N owners, name them" diagnostic, or a rank-based tie-break — precisely
+the "Next steps" item 2 above). Landed as correctness/clarity hardening with the
+non-witnessability recorded here rather than a fabricated spec.
