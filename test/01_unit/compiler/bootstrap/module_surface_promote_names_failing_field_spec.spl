@@ -1,0 +1,54 @@
+# Regression: Stage 3 aborted with only
+#   "module surface promotion failed for src/app/cli/bootstrap_main.spl"
+# while the actual cause was a single nil field (`surface.friends`, left nil by
+# an omitted trailing default argument on `parser_module_new`). Thirty distinct
+# promotion failures were collapsed into one bare `false`, so recovering the
+# cause cost a full bootstrap-plus-gdb cycle. Promotion now records which field
+# failed and the driver names it. See
+# doc/08_tracking/bug/stage3_module_surface_promote_nil_authority_arrays_2026-08-23.md
+#
+# Source-text assertions on purpose: this spec runs inside a deployed `simple`
+# that carries its own compiled copy of src/compiler, so it cannot execute the
+# edited compiler code. The behavioural guard is
+# scripts/check/check-parser-module-authority-args-explicit.shs.
+use std.spec
+use std.io.{file_read}
+
+val REGISTRY = "src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+val SURFACE = "src/compiler/20.hir/hir_lowering/module_surface.spl"
+val DRIVER = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
+val CONVERT = "src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl"
+val ASSEMBLY = "src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl"
+val CENTRY = "src/compiler/70.backend/backend/compile_c_entry.spl"
+
+describe "module surface promotion reports which field failed":
+    it "records the failing field name in the registry":
+        val registry = file_read(REGISTRY)
+        expect(registry).to_contain("fn module_surface_promote_last_failure()")
+        expect(registry).to_contain("_module_surface_promote_last_failure = \"surface.friends\"")
+        expect(registry).to_contain("_module_surface_promote_last_failure = \"surface.internal_exports\"")
+
+    it "re-exports the accessor so the driver can read it":
+        val surface = file_read(SURFACE)
+        expect(surface).to_contain("module_surface_promote_last_failure")
+
+    it "names the field in the driver's error message":
+        val driver = file_read(DRIVER)
+        expect(driver).to_contain("module_surface_promote_last_failure()")
+        expect(driver).to_contain("(field: {promote_failure})")
+
+describe "ParserModule authority arrays are constructed explicitly":
+    it "passes friends and internal_exports at the flat-AST bridge sites":
+        val convert = file_read(CONVERT)
+        expect(convert).to_contain("friends: []")
+        expect(convert).to_contain("internal_exports: []")
+        val assembly = file_read(ASSEMBLY)
+        expect(assembly).to_contain("friends: []")
+        expect(assembly).to_contain("internal_exports: []")
+
+    it "passes them at the driver and C-entry sites too":
+        val driver = file_read(DRIVER)
+        expect(driver).to_contain("internal_exports: []")
+        val centry = file_read(CENTRY)
+        expect(centry).to_contain("friends: []")
+        expect(centry).to_contain("internal_exports: []")
