@@ -1,0 +1,163 @@
+#!/bin/sh
+# check-bodyless-block-parity.shs — the two front ends must agree on a BODYLESS
+# block header, and neither may accept one.
+#
+# Bug: doc/08_tracking/bug/seed_accepts_bodyless_if_native_build_rejects_2026-08-22.md
+#
+# The seed's Rust parser (`run`) and the pure-Simple front end (`native-build`,
+# src/compiler/10.frontend) diverged in BOTH directions on `if cond:` with no
+# body, and the pure-Simple side additionally MISCOMPILED one accepted shape
+# (printed 2147483652 where 7 is correct). Four shapes, both paths:
+#
+#   A  bodyless `if`, next line DEDENTs              -> both must REJECT
+#   B  bodyless `if`, next line same-column `if`     -> both ACCEPT, print 7
+#                                                       (deliberate flat-body)
+#   C  bodyless `if`, next line same-column integer  -> both must REJECT
+#   D  control, real indented body                   -> both ACCEPT, print 2
+#
+# Rows B and D are non-vacuity: a parser that rejects everything cannot pass.
+# Verdict is the LAST line of stdout:
+#   PASS — <n> case(s) checked, 0 divergent      exit 0
+#   FAIL — ...                                   exit 1
+#   ERROR — nothing was checked (<reason>)       exit 2
+# A run that checked 0 cases is ERROR, never a pass; a missing binary is ERROR.
+
+set -u
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+SIMPLE_TIMEOUT_SECONDS=0
+export SIMPLE_TIMEOUT_SECONDS
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+  echo "ERROR — nothing was checked (no executable at $SIMPLE_BIN)"
+  exit 2
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+cat > "$WORK/shapeA.spl" <<'SPL'
+class Probe:
+    n: i64
+
+impl Probe:
+    me first():
+        self.n = 1
+        if self.n > 0:
+
+    me second() -> i64:
+        self.n
+
+fn main() -> i64:
+    var p = Probe(n: 0)
+    p.first()
+    print p.second()
+    0
+SPL
+
+cat > "$WORK/shapeB.spl" <<'SPL'
+fn probe(flag: bool) -> i64:
+    if flag:
+    if not flag:
+        return 3
+    7
+
+fn main() -> i64:
+    print probe(true)
+    0
+SPL
+
+cat > "$WORK/shapeC.spl" <<'SPL'
+fn probe(flag: bool) -> i64:
+    if flag:
+
+    7
+
+fn main() -> i64:
+    print probe(true)
+    0
+SPL
+
+cat > "$WORK/shapeD.spl" <<'SPL'
+fn probe(flag: bool) -> i64:
+    if flag:
+        return 2
+    7
+
+fn main() -> i64:
+    print probe(true)
+    0
+SPL
+
+CHECKED=0
+OFFENDERS=""
+
+note_fail() {
+  OFFENDERS="$OFFENDERS $1"
+  echo "  FAIL $1: $2"
+}
+
+# --- seed `run` path -------------------------------------------------------
+# A `run` that parse-errors still exits 0 (it prints the error and falls back),
+# so the verdict is read from the OUTPUT, never from the exit status alone.
+run_seed() {
+  "$SIMPLE_BIN" run "$1" 2>&1
+}
+
+for shape in A B C D; do
+  out=$(run_seed "$WORK/shape$shape.spl")
+  CHECKED=$((CHECKED + 1))
+  case "$shape" in
+    A|C)
+      case "$out" in
+        *"parse"*|*"expected Indent"*|*"Unexpected token"*) : ;;
+        *) note_fail "run/shape$shape" "accepted a bodyless if (output: $(echo "$out" | tail -1))" ;;
+      esac
+      ;;
+    B)
+      case "$out" in *"7"*) : ;; *) note_fail "run/shapeB" "flat body broke (output: $(echo "$out" | tail -1))" ;; esac
+      ;;
+    D)
+      case "$out" in *"2"*) : ;; *) note_fail "run/shapeD" "control broke (output: $(echo "$out" | tail -1))" ;; esac
+      ;;
+  esac
+done
+
+# --- pure-Simple `native-build` path ---------------------------------------
+for shape in A B C D; do
+  bin="$WORK/shape$shape.bin"
+  rm -f "$bin"
+  log="$WORK/shape$shape.native.log"
+  "$SIMPLE_BIN" native-build "$WORK/shape$shape.spl" -o "$bin" > "$log" 2>&1
+  rc=$?
+  CHECKED=$((CHECKED + 1))
+  case "$shape" in
+    A|C)
+      if [ "$rc" -eq 0 ] && [ -x "$bin" ]; then
+        note_fail "native-build/shape$shape" "accepted a bodyless if (binary printed: $("$bin" 2>&1))"
+      fi
+      ;;
+    B|D)
+      if [ "$rc" -ne 0 ] || [ ! -x "$bin" ]; then
+        note_fail "native-build/shape$shape" "build failed rc=$rc (see $log)"
+      else
+        got=$("$bin" 2>&1)
+        want=7
+        [ "$shape" = D ] && want=2
+        [ "$got" = "$want" ] || note_fail "native-build/shape$shape" "printed '$got', want '$want'"
+      fi
+      ;;
+  esac
+done
+
+if [ "$CHECKED" -eq 0 ]; then
+  echo "ERROR — nothing was checked (no cases ran)"
+  exit 2
+fi
+
+if [ -n "$OFFENDERS" ]; then
+  echo "FAIL — $CHECKED case(s) checked, divergent:$OFFENDERS"
+  exit 1
+fi
+
+echo "PASS — $CHECKED case(s) checked, 0 divergent"
+exit 0

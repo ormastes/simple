@@ -1,7 +1,7 @@
 # Bodyless `if` block: the two front ends disagree in BOTH directions, and one silently miscompiles
 
 - **Filed:** 2026-08-22
-- **Status:** OPEN — evidence complete, fix proposed but NOT landed (parser changes on both sides; see "Why not fixed here")
+- **Status:** RESOLVED 2026-08-23 — fixed on BOTH front ends; see "Resolution" at the end.
 - **Class:** front-end divergence between the seed's Rust parser (`run`/`test`/interpreter)
   and the pure-Simple front end (`native-build`, `src/compiler/10.frontend`).
   Related but NOT the same shape as `hir_unresolved_name_import_reachability_2026-08-22.md`
@@ -158,3 +158,104 @@ landing an unverified parser change mid-session is the clobber pattern
 `.../scratchpad/mt/bodyless/{shapeA,shapeB,bodyless,control}.spl` — promote to
 `test/01_unit/language/` when the fix lands, as a parity spec asserting that
 BOTH paths reject rows A and C and agree on B and the control.
+
+## Resolution (2026-08-23)
+
+Both halves landed. The agreed rule is the one this record proposed: a
+**bodyless block header is a parse error on both paths**, `pass` is the way to
+write a deliberate no-op, and the flat-body feature (row B) keeps working.
+
+### Row C — pure-Simple, root cause
+
+`parse_block()` (`src/compiler/10.frontend/core/parser_stmts.spl`) called
+`parser_skip_newlines()` unconditionally and then, on anything that was not an
+`Indent`, fell straight into "single-line body: parse one statement". It had **no
+statement-start gate at all** — the seed's equivalent
+(`parse_block_after_newline` -> `is_statement_start`) has one, which is the whole
+reason the seed rejects row C and the pure-Simple side did not. So `7` on the
+line after a bodyless `if flag:` was swallowed as the if's flat body.
+
+**Where `0x80000004` came from:** nothing was uninitialised in the parser. With
+`7` consumed as the if's body, `probe`'s function body is a single `if`
+statement and the function has **no tail expression left**, so its `-> i64`
+return slot is never written; the caller reads whatever the ABI return register
+holds. `2147483652` is that stale value, not a decoded AST node. The AST was
+well-formed the whole way down — which is exactly why nothing downstream
+complained.
+
+**Fix:** record whether `parse_block()` actually crossed a `Newline` before
+skipping. A body on the SAME line as the `:` is untouched (that is the ordinary
+`fn f() -> i64: 42` one-liner and it never crosses a newline). A body on a LATER
+line at the same column is a flat body and now must open with a real
+statement-start token — `parse_block_flat_body_can_start`, mirroring the seed's
+`is_statement_start`. Anything else (a literal, a `Dedent`, `Eof`) calls
+`parser_expect(181)`, producing `expected Indent, got IntLit '7'` — the same
+diagnosis the seed gives.
+
+### Row A — seed
+
+`allow_empty_body` threaded exactly as proposed, with one correction the record
+could not have known: match-arm bodies do **not** reach the empty-block arm
+through `parse_block`. They arrive via `parse_inline_or_block`
+(`parser_helpers.rs`) -> `parse_condition_block`, the same entry point the
+conditionals use. Gating only `parse_condition_block` therefore broke trailing
+empty `case nil:` arms on the first attempt. The landed shape is
+`parse_condition_block_allowing_empty(allow)`: the seven conditional call sites
+in `stmt_parsing/control_flow.rs` pass `false` through `parse_condition_block()`,
+`parse_inline_or_block` passes `true`, so match arms keep the empty arm.
+
+Also learned while fixturing: an empty `case nil:` arm followed by ANOTHER
+`case` has never parsed on either front end (verified against the pre-fix seed:
+`expected Indent, found Case`). Only a TRAILING empty arm, i.e. one followed by a
+`Dedent`, was ever legal, and that is the shape the regression test pins.
+
+### Post-fix truth table (measured, both paths, program output not exit code)
+
+| # | shape | `run` (seed) | `native-build` (pure-Simple) |
+|---|---|---|---|
+| A | bodyless `if`, next line DEDENTs | parse error `expected Indent, found Dedent` | parse error `expected Indent, got Dedent ''` |
+| B | bodyless `if`, next line same-column `if` | prints `7` | prints `7` |
+| C | bodyless `if`, next line same-column integer | parse error `expected Indent, found Integer(7)` | parse error `expected Indent, got IntLit '7'` |
+| — | control (real body) | prints `2` | prints `2` |
+| — | trailing empty `case nil:` arm | prints `1` (unchanged) | — |
+
+### Blast radius — verified, not assumed
+
+The record's "0 sites in 15,190 owned `.spl`" was re-derived and found **not
+directly checkable by text scan**: a naive column heuristic returns 1,702
+apparent hits, essentially all of them wrapped multi-line signatures whose
+docstring sits at a lower text column than the continuation line but which the
+lexer indents normally. Column arithmetic on source text does not model
+Indent/Dedent emission, so that scan proves nothing in either direction.
+
+What was measured instead:
+- `cargo test --release -p simple-parser`: 302 + ~350 tests green.
+  `expression_tests::test_danger_block_is_unsafe_boundary_not_call` fails, and
+  was verified failing on the unmodified tree too (pre-existing, unrelated:
+  `danger(1)` errors `expected Colon, found Eof`).
+- `native-build` with the REBUILT seed: this parses the entire pure-Simple
+  compiler and the pulled-in stdlib with the new Rust parser, and the target
+  with the new pure-Simple parser. A multi-module fixture (`std.common.text`,
+  `std.nogc_sync_mut.fs`, `std.common.json`) reached MIR lowering with **0
+  `parser_error` lines**; its failure is a pre-existing unrelated
+  `unresolved method call: index_of`.
+
+Residual risk, stated rather than hidden: no full stage1 bootstrap was run, so
+the pure-Simple gate has not been exercised over every `src/**.spl`. The gate
+only fires for a body on a LATER line at the header's column that opens with a
+non-statement token, so a same-line one-liner body — by far the common form —
+cannot be affected.
+
+### Gates
+
+- `scripts/check/check-bodyless-block-parity.shs` — runs all four shapes on BOTH
+  paths and compares program OUTPUT, not exit status (`run` exits 0 even on a
+  parse error). Rows B and D are the non-vacuity guard: a parser that rejects
+  everything cannot pass. Verdict convention as in `.claude/rules/vcs.md`:
+  `PASS — <n> case(s) checked, 0 divergent` / `FAIL` / `ERROR — nothing was
+  checked`; 0 cases or a missing binary is ERROR, never a pass. Measured:
+  `PASS — 8 case(s) checked, 0 divergent`.
+- `src/compiler_rust/parser/tests/bodyless_condition_block_gate.rs` — six tests:
+  bodyless `if` before Dedent / at Eof / before a same-column integer, bodyless
+  `while` and `for`, plus POSITIVE assertions that a trailing empty `case nil:`
+  arm, the flat body and a real body all still parse.

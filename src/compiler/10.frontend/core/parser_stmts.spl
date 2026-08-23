@@ -260,8 +260,59 @@ fn parse_trailing_colon_block_arg(call_expr: i64) -> i64:
     expr_call_args_set(call_expr, cb_args, cb_names)
     call_expr
 
+# Can `kind` legally open a FLAT body — a block body written on the NEXT line at
+# the SAME column as its header (`if c:` / newline / `return v`)? Mirrors the
+# Rust seed's `is_statement_start` in parser_impl/core.rs, which gates the same
+# feature there. Without this gate the pure-Simple parser swallowed ANY following
+# token as the flat body, so a BODYLESS `if c:` followed by a same-column
+# expression (`7`) parsed as `if c: 7` and the enclosing function lost its tail
+# expression — accepted, then miscompiled to garbage (0x80000004 instead of 7).
+# See doc/08_tracking/bug/seed_accepts_bodyless_if_native_build_rejects_2026-08-22.md
+fn parse_block_flat_body_can_start(kind: i64) -> bool:
+    if kind == 6: return true         # Ident (call / assignment statement)
+    if kind == 40: return true        # if
+    if kind == 43: return true        # match
+    if kind == 45: return true        # for
+    if kind == 46: return true        # while
+    if kind == 47: return true        # break
+    if kind == 48: return true        # continue
+    if kind == 49: return true        # return
+    if kind == 51: return true        # loop
+    if kind == 52: return true        # pass
+    if kind == 20: return true        # fn
+    if kind == 21: return true        # val
+    if kind == 22: return true        # var
+    if kind == 25: return true        # extern
+    if kind == 26: return true        # export
+    if kind == 27: return true        # use
+    if kind == 28: return true        # import
+    if kind == 34: return true        # me
+    if kind == 183: return true       # pass_todo
+    if kind == 184: return true       # pass_do_nothing
+    if kind == 185: return true       # pass_dn
+    if kind == 186: return true       # defer
+    if kind == 187: return true       # errdefer
+    if kind == 188: return true       # const
+    if kind == 192: return true       # 'label
+    if kind == 201: return true       # static_for
+    if kind == 202: return true       # comptime
+    if kind == 204: return true       # bind
+    if kind == 206: return true       # receive
+    if kind == 37: return true        # yield
+    if kind == 38: return true        # self
+    if kind == 53: return true        # async
+    if kind == 54: return true        # await
+    if kind == 169: return true       # _ (discard assignment)
+    if kind == 195: return true       # do
+    if kind == 197: return true       # spawn
+    if kind == 203: return true       # mixin
+    if kind == 205: return true       # ce
+    if kind == 211: return true       # new
+    false
+
 fn parse_block() -> [i64]:
     var stmts: [i64] = []
+    val crossed_newline = par_kind_get() == 180
     parser_skip_newlines()
     var kind = par_kind_get()
     if kind == 181:
@@ -284,6 +335,14 @@ fn parse_block() -> [i64]:
             val s = parse_statement()
             stmts.push(s)
             parser_skip_newlines_and_semicolons()
+        return stmts
+    # Flat body: the block body sits on a LATER line at the same column as its
+    # header. Only real statement-start tokens qualify; anything else (an
+    # expression, a Dedent, Eof) means the header has NO body at all, which is a
+    # parse error — Simple has `pass` for a deliberate no-op. A body on the SAME
+    # line as the `:` never crossed a newline and is always allowed.
+    if crossed_newline and not parse_block_flat_body_can_start(kind):
+        parser_expect(181)
         return stmts
     # Single-line body (no indent): parse one statement
     val s = parse_statement()

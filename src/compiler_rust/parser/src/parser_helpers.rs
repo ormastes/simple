@@ -170,7 +170,9 @@ impl<'a> Parser<'a> {
             self.reconcile_inline_body_deferred_dedents();
             Ok(block)
         } else {
-            self.parse_condition_block()
+            // Match-arm and other inline-or-block bodies keep the empty-body
+            // arm (`case nil:`); only the conditional headers lose it.
+            self.parse_condition_block_allowing_empty(true)
         }
     }
 
