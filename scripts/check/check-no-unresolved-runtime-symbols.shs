@@ -35,12 +35,19 @@
 # Runtime prefixes are DERIVED from src/runtime/runtime.h's declarations, not
 # hardcoded to rt_ (measured: rt_, spl_, simple_).
 #
-# Verdict (always the last line of stdout):
+# Verdict (always the last line of stdout), preceded by two status lines
+# `binaries=<status>` and `archive=<status>` so a PASS can never be mistaken for
+# a stronger claim than what was actually inspected:
 #   PASS  — <n> symbol(s) checked across <k> binary(ies) + archive, 0 unresolved
 #   FAIL  — ... <m> unresolved: <bin>:<sym> ...
 #   ERROR — nothing was checked (<reason>)
-# 0 binaries, missing `nm`, or an unreadable artifact is ERROR, never a pass:
-# absence of evidence is not evidence of absence.
+# Missing `nm`, an unreadable/stripped artifact, or a STALE archive is ERROR,
+# never a pass: absence of evidence is not evidence of absence. Inspecting ZERO
+# artifacts IN TOTAL is likewise ERROR -- but zero *binaries* alone is not,
+# since the stage blobs stopped being git-tracked and `git ls-files bootstrap`
+# now returns 0 rows; the old hard exit there made the guard ERROR before it
+# ever ran the archive half, reporting "nothing was checked" while a perfectly
+# checkable archive sat in the tree (fixed 2026-08-23, fixture (f)).
 #
 # Exit-status discipline: every command's status is read on the line AFTER the
 # command, into a variable -- never through a pipe, whose $? is the LAST
@@ -50,6 +57,7 @@
 #   sh scripts/check/check-no-unresolved-runtime-symbols.shs            # tracked stage blobs (working tree)
 #   sh scripts/check/check-no-unresolved-runtime-symbols.shs --rev <sha> # committed content
 #   sh scripts/check/check-no-unresolved-runtime-symbols.shs --bin <path> [--bin ...]
+#   sh scripts/check/check-no-unresolved-runtime-symbols.shs --archive-only
 #   sh scripts/check/check-no-unresolved-runtime-symbols.shs --selftest-only
 
 set -u
@@ -307,6 +315,40 @@ EOF
         echo "selftest fixture (d) empty-tracked-set: FAILED (rc=$st_rc)"; st_fail=1
     else echo "selftest fixture (d) empty-tracked-set: ok (ERROR, 0 checked)"; fi
 
+
+    # (f) NO tracked stage binary, but a checkable archive (2026-08-23). Before
+    # this, the guard hard-exited ERROR the moment `git ls-files bootstrap`
+    # returned 0 rows -- which is now always -- and never ran the archive half at
+    # all. A guard that reports "nothing was checked" while a checkable artifact
+    # sits in the tree is not fail-closed, it is blind. Both directions are
+    # asserted: a satisfied archive must PASS and must say binaries=none, and an
+    # archive missing an emitted name must still FAIL naming it.
+    st_f="$TMPROOT/archonly"
+    mkdir -p "$st_f/src/compiler_rust/compiler/src/codegen" "$st_f/build/simple-core" "$st_f/src/runtime"
+    ( cd "$st_f" && git init -q . >/dev/null 2>&1 )
+    cat > "$st_f/src/compiler_rust/compiler/src/codegen/x.rs" <<'EOF'
+fn f() { call_runtime("rt_fixture_arch_ok"); }
+EOF
+    cat > "$st_f/o.c" <<'EOF'
+long rt_fixture_arch_ok(long x) { return x; }
+EOF
+    "$st_cc" -c -o "$st_f/o.o" "$st_f/o.c" >/dev/null 2>&1         && ar rcs "$st_f/build/simple-core/libsimple_runtime.a" "$st_f/o.o" >/dev/null 2>&1
+    if [ ! -s "$st_f/build/simple-core/libsimple_runtime.a" ]; then
+        echo "selftest fixture (f) archive-without-binaries: FAILED (could not build fixture)"; st_fail=1
+    else
+        st_out=$(ROOT_DIR="$ROOT_DIR" sh "$st_self" --root "$st_f" 2>&1); st_rc=$?
+        if [ "$st_rc" -ne 0 ] || ! echo "$st_out" | "$GREP" -q '^PASS' \
+           || ! echo "$st_out" | "$GREP" -q '^binaries=none'; then
+            echo "selftest fixture (f) archive-without-binaries: FAILED (rc=$st_rc) $st_out"; st_fail=1
+        else
+            echo 'fn g() { call_runtime("rt_fixture_arch_gone"); }' >> "$st_f/src/compiler_rust/compiler/src/codegen/x.rs"
+            st_out=$(ROOT_DIR="$ROOT_DIR" sh "$st_self" --root "$st_f" 2>&1); st_rc=$?
+            if [ "$st_rc" -ne 1 ] || ! echo "$st_out" | "$GREP" -q 'rt_fixture_arch_gone'; then
+                echo "selftest fixture (f) archive-without-binaries: FAILED negative control (rc=$st_rc) $st_out"; st_fail=1
+            else echo "selftest fixture (f) archive-without-binaries: ok (PASS with binaries=none; FAIL names rt_fixture_arch_gone)"; fi
+        fi
+    fi
+
     return $st_fail
 }
 
@@ -319,15 +361,29 @@ if [ -z "$EXPLICIT_BINS" ] && [ "$SCAN_ROOT" = "$ROOT_DIR" ]; then
         echo "ERROR — nothing was checked (selftest failed)"
         exit 2
     fi
-    [ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — selftest only, 5 fixture(s) checked"; exit 0; }
+    [ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — selftest only, 6 fixture(s) checked"; exit 0; }
 fi
 
 # ------------------------------------------------------------------- scan ----
 BINS=""
+BIN_STATUS="skipped(--archive-only)"
 [ "$ARCHIVE_ONLY" -eq 1 ] || BINS=$(collect_binaries)
-if [ "$ARCHIVE_ONLY" -eq 0 ] && [ -z "$BINS" ]; then
-    echo "ERROR — nothing was checked (no tracked bootstrap stage binary found)"
-    exit 2
+# No tracked stage binary is NOT an error on its own any more (2026-08-23).
+# `git ls-files bootstrap` returns 0 rows since the stage blobs stopped being
+# tracked, and the old hard exit here made this guard ERROR *before* it ever ran
+# the archive half -- so the half that CAN be judged was never judged, and the
+# verdict said "nothing was checked" while the archive was sitting right there.
+# That is its own honesty defect: an ERROR that reports on a checkable artifact
+# as if it were uncheckable. Fail-closed is preserved by the non-vacuity rule at
+# the bottom: if the archive half also inspected nothing, the verdict is still
+# ERROR. The binary-half status is printed on its own line so a PASS can never
+# be read as "the stage binaries were clean" when none were examined.
+if [ "$ARCHIVE_ONLY" -eq 0 ]; then
+    if [ -z "$BINS" ]; then
+        BIN_STATUS="none(no tracked bootstrap stage binary)"
+    else
+        BIN_STATUS="pending"
+    fi
 fi
 
 for b in $BINS; do
@@ -362,6 +418,8 @@ if [ "$BIN_COUNT" -eq 0 ] && [ "$ARCHIVE_CHECKED" -eq 0 ]; then
     exit 2
 fi
 
+[ "$BIN_STATUS" = "pending" ] && BIN_STATUS="checked($BIN_COUNT binary(ies))"
+echo "binaries=$BIN_STATUS"
 echo "archive=$ARCHIVE_STATUS"
 if [ "$TOTAL_OFFENDERS" -gt 0 ]; then
     echo "FAIL — $TOTAL_CHECKED symbol(s) checked across $BIN_COUNT binary(ies) + archive, $TOTAL_OFFENDERS unresolved:$OFFENDERS$ARCHIVE_MISSING"
