@@ -1196,8 +1196,42 @@ impl MirLowering:
         # starts_with/ends_with/contains keeps normal custom-method precedence.
         var predicate_has_custom_owner = false
         var predicate_receiver_is_text = false
+        # Bug (selfhost_struct_method_hijacked_by_string_arm_2026-08-23): this
+        # shape used to list ONLY starts_with/ends_with/contains, but
+        # `predicate_has_custom_owner` -- the flag this block computes -- is
+        # consumed as a veto by EVERY string-only fallback arm below:
+        # starts_with (:1962), ends_with (:2059), contains/find/rfind (:2300),
+        # index_of (:2339), and the 11-name text-special arm (:2382, which maps
+        # trim/strip/lower/to_lower/to_upper/split/replace/rfind/find/contains/
+        # parse_f64 onto rt_string_* symbols). For every name outside the old
+        # three-name shape the veto therefore consulted a flag that was
+        # STRUCTURALLY always false: the guard was written, but the evidence
+        # feeding it was never computed. A user struct/class method with one of
+        # those names was silently hijacked into a rt_string_* call with the
+        # struct handle passed as a string pointer.
+        #
+        # This miscompiled the compiler itself. `FrozenNativeModuleCapsuleBatchV1
+        # .find(module_name: text) -> FrozenNativeModuleCapsuleV1`
+        # (src/compiler/80.driver/driver_types.spl:97), called at
+        # driver_aot_native_output.spl:1099 as `batch.find(name)`, lowered to
+        # `rt_string_find`, which returns a plain i64 -1 for not-found. Codegen
+        # then untagged that -1 as a tagged pointer (`and $~7,%r14; mov (%r14)`)
+        # to read the returned struct's enum tag, faulting on 0xfffffffffffffff8
+        # -- the AOT-codegen SEGV that blocked bootstrap phase 3.
+        #
+        # The fix is to compute the owner evidence for the SAME name/arity set
+        # the arms below can claim, so a genuine custom method keeps normal
+        # custom-method precedence (the stated intent of this block) instead of
+        # losing to a text fallback. Arities mirror each arm's own gate.
         val predicate_method_shape =
-            (method == "starts_with" or method == "ends_with" or method == "contains") and args.len() == 1
+            ((method == "starts_with" or method == "ends_with" or method == "contains"
+                or method == "find" or method == "rfind") and args.len() == 1)
+            or (method == "index_of" and args.len() == 2)
+            or (method == "replace" and args.len() == 2)
+            or (method == "split" and (args.len() == 1 or args.len() == 2))
+            or ((method == "trim" or method == "strip" or method == "lower"
+                or method == "to_lower" or method == "to_upper"
+                or method == "parse_f64") and args.len() == 0)
         # Only unresolved calls and resolved instance methods can carry the
         # stale aggregate-owner shape seen in the freestanding CSS failure.
         # Trait/UFCS/free-function methods keep their explicit resolution, and
@@ -2417,7 +2451,14 @@ impl MirLowering:
                 # variable cases this arm has to serve.
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] text-special-receiver-before method={method}\n")
-                val ts_recv_raw = if method == "contains": prelowered_method_receiver else: self.lower_expr(receiver)
+                # Reuse the already-lowered receiver whenever the owner probe
+                # above produced one. This used to key off `method == "contains"`
+                # because only the three predicate names were ever pre-lowered;
+                # now that the probe covers this whole arm's name set, keying off
+                # the method name would lower the receiver a SECOND time and
+                # duplicate its side effects. Same `has_prelowered_method_receiver`
+                # pattern already used by the array probe above.
+                val ts_recv_raw = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] text-special-receiver-after method={method}\n")
                 val ts_recv = self.ensure_tagged_str(ts_recv_raw)

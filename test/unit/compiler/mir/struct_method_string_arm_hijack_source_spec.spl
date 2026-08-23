@@ -1,0 +1,140 @@
+"""
+## Purpose and audience
+Purpose: Pin that a user struct/class method is never hijacked by a string-only
+MIR fallback arm. Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-COMPILER-MIR-001
+doc/01_research/local/REQ-COMPILER-MIR-001.md
+doc/03_plan/sys_test/REQ-COMPILER-MIR-001.md
+doc/04_architecture/REQ-COMPILER-MIR-001.md
+doc/05_design/REQ-COMPILER-MIR-001.md
+"""
+# @req: REQ-COMPILER-MIR-001
+
+# Bug: selfhost_struct_method_hijacked_by_string_arm_2026-08-23
+#
+# Every string-only fallback arm in method_calls_literals.spl vetoes itself with
+# `not predicate_has_custom_owner`, so that a genuine user struct/class method
+# keeps normal custom-method precedence. But that flag was only ever COMPUTED for
+# the three names starts_with/ends_with/contains. For every other name the arms
+# claim -- find, rfind, index_of, split, replace, trim, strip, lower, to_lower,
+# to_upper, parse_f64 -- the veto consulted a flag that was structurally always
+# false. The guard existed; the evidence feeding it did not.
+#
+# Consequence (VERIFIED against the stage2 bootstrap binary): the compiler
+# miscompiled ITSELF. `FrozenNativeModuleCapsuleBatchV1.find(module_name: text)
+# -> FrozenNativeModuleCapsuleV1` (src/compiler/80.driver/driver_types.spl:97),
+# called as `batch.find(name)` in driver_aot_native_output.spl, lowered to
+# `rt_string_find`, which returns a plain i64 -1 for not-found. Codegen untagged
+# that -1 as a tagged pointer (`and $~7,%rN; mov (%rN),..`) to read the returned
+# struct's tag and faulted on 0xfffffffffffffff8 -- the AOT SEGV that blocked
+# bootstrap phase 3.
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+use std.spec.step
+
+# --- Behavioural fixture: a class owning names the string arms also claim. ---
+
+class Item:
+    ok: bool
+    label: text
+
+class Registry:
+    entries: [text]
+
+    fn find(name: text) -> Item:
+        for e in self.entries:
+            if e == name:
+                return Item(ok: true, label: e)
+        Item(ok: false, label: "")
+
+    fn contains(name: text) -> bool:
+        self.find(name).ok
+
+    fn replace(name: text, other: text) -> Item:
+        if self.find(name).ok:
+            return Item(ok: true, label: other)
+        Item(ok: false, label: "")
+
+describe "struct method vs string-only MIR fallback arm":
+    it "computes custom-owner evidence for every name the string arms veto on":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: predicate_method_shape covers every vetoed method name")
+        val source = read_source(
+            "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+        expect(source.contains("val predicate_method_shape")).to_equal(true)
+
+        # The shape block must positively name each method that a string-only
+        # arm can claim. Pre-fix this listed only starts_with/ends_with/contains.
+        val shape_start = source.index_of("val predicate_method_shape")
+        val shape_end = source.index_of("val predicate_owner_recovery_allowed")
+        expect(shape_start).to_be_greater_than(-1)
+        expect(shape_end).to_be_greater_than(shape_start)
+        val shape = source.substring(shape_start, shape_end)
+
+        expect(shape.contains("\"starts_with\"")).to_equal(true)
+        expect(shape.contains("\"ends_with\"")).to_equal(true)
+        expect(shape.contains("\"contains\"")).to_equal(true)
+        expect(shape.contains("\"find\"")).to_equal(true)
+        expect(shape.contains("\"rfind\"")).to_equal(true)
+        expect(shape.contains("\"index_of\"")).to_equal(true)
+        expect(shape.contains("\"split\"")).to_equal(true)
+        expect(shape.contains("\"replace\"")).to_equal(true)
+        expect(shape.contains("\"trim\"")).to_equal(true)
+        expect(shape.contains("\"strip\"")).to_equal(true)
+        expect(shape.contains("\"lower\"")).to_equal(true)
+        expect(shape.contains("\"to_lower\"")).to_equal(true)
+        expect(shape.contains("\"to_upper\"")).to_equal(true)
+        expect(shape.contains("\"parse_f64\"")).to_equal(true)
+
+    it "reuses the pre-lowered receiver in the text-special arm":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: text-special arm does not lower the receiver twice")
+        val source = read_source(
+            "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+        # Keying this off the method name lowered the receiver a second time
+        # once the owner probe began pre-lowering for this arm's whole name set,
+        # duplicating the receiver expression's side effects.
+        expect(source.contains(
+            "val ts_recv_raw = if method == \"contains\": prelowered_method_receiver")
+        ).to_equal(false)
+        expect(source.contains(
+            "val ts_recv_raw = if has_prelowered_method_receiver: prelowered_method_receiver")
+        ).to_equal(true)
+
+    it "returns the struct from a class method named find":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: Registry.find returns its declared struct, not an i64")
+        val reg = Registry(entries: ["alpha", "beta"])
+        val hit = reg.find("beta")
+        expect(hit.ok).to_equal(true)
+        expect(hit.label).to_equal("beta")
+
+    it "returns a miss struct rather than a -1 string sentinel":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: a miss yields the declared struct, not rt_string_find -1")
+        val reg = Registry(entries: ["alpha"])
+        val miss = reg.find("absent")
+        expect(miss.ok).to_equal(false)
+        expect(miss.label).to_equal("")
+
+    it "keeps custom precedence for other names the string arms claim":
+        # @req: REQ-COMPILER-MIR-001
+        step("Verify: contains/replace on a class reach the class methods")
+        val reg = Registry(entries: ["alpha", "beta"])
+        expect(reg.contains("alpha")).to_equal(true)
+        expect(reg.contains("absent")).to_equal(false)
+        val rep = reg.replace("alpha", "gamma")
+        expect(rep.ok).to_equal(true)
+        expect(rep.label).to_equal("gamma")
