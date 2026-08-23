@@ -122,3 +122,63 @@ restoring it turns them green. Ratcheted by
 The clamp bounds the damage; it does not reduce the 2.5-3.3 GB per worker.
 Everything about that footprint that cannot be fixed without changing the
 architecture is recorded in `doc/09_report/rust-perf-limits.md`.
+
+## Reproduce guard (added 2026-08-23)
+
+`scripts/check/check-native-build-hello-world-runs.shs` is the missing test the
+revert commit promised. It runs the real `native-build` on a real 3-line hello
+world with `--threads 2` and asserts the two properties the incident violated:
+
+1. the process does not die by signal (rc >= 128; 134 = abort/stack overflow), and
+2. a `[build] ... step 1/6` line actually appears.
+
+`rc=0` alone is deliberately NOT accepted, and `--version` answering cleanly is
+deliberately NOT accepted — the incident printed a healthy banner and then
+aborted, which is precisely why it looked fine. Once the step line appears the
+guard stops the child *it* started; a full hello-world `native-build` measured
+>5 min under the seed on this host, and a guard too slow to run protects nothing.
+
+Discrimination, measured 2026-08-23 (fixtures driven through the shipping probe):
+
+```
+--- PRE-FIX SHAPE (aborts 134 before any [build] line):
+FAIL — native-build crashed on a 3-line hello world (rc=134, signal 6) before reaching '[build] ... step 1/6'   rc=1
+--- POST-FIX SHAPE (reaches step 1/6):
+PASS — 1 invocation(s) executed, '[build] ... step 1/6' reached without a crash  rc=0
+```
+
+Nine selftest fixtures, fatal and run before every scan: healthy, the incident
+shape (banner then SIGABRT), SEGV, plain non-zero exit, silent `exit 0` with no
+pipeline line, hang, delayed step line, plus two provenance fixtures.
+
+### Honest limitation: the seed cannot reproduce this, so the seed is REFUSED
+
+The pre-fix tree was checked out (`ff095d31591`, clamp present) and driven with
+the same guard against the Rust seed. It **passed** — reaching
+`[build] ... step 1/6` with no crash — because the seed serves `native-build`
+from its own compiled-in Rust implementation and never executes
+`src/app/cli/native_build_main.spl`, hence never calls the clamp. Running
+`src/app/cli/native_build_main.spl` under `simple run` instead was measured at
+rc=124 with **0** `[build]` lines in 120 s: the interpreted path is far too slow
+to serve as a gate.
+
+Rather than ship a guard that green-lights a binary it cannot observe, the guard
+now detects the seed banner and exits **`ERROR — nothing was checked`** (exit 2),
+never PASS. Absence of a real tool binary is absence of evidence. On this host
+today that is what it reports, which is the truthful state: no full-CLI
+pure-Simple binary is deployed (see `.claude/rules/commands.md`). The guard goes
+live the day one is, with no edit.
+
+### Root cause of the rc=134, corrected 2026-08-23
+
+Not procfs and not a zero-`st_size` read. `std.io_runtime.read_file_text` and
+`src/lib/nogc_sync_mut/io/file_ops.spl:76 file_read` were two one-line
+forwarders closing into unbounded **mutual recursion** under
+last-definition-wins dispatch, so the first read of *any* file aborted the
+process. The clamp was simply the first caller on that path to read a file.
+Record: `seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md`.
+
+This strengthens rather than weakens the guard's rationale: the failure was a
+property of the *deployed build's* dispatch, not of the source, so no
+source-level assertion and no unit test of the clamp could have seen it. Only
+executing the real command could — which is what the guard does.

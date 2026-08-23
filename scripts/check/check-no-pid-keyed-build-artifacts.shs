@@ -1,0 +1,152 @@
+#!/bin/sh
+# check-no-pid-keyed-build-artifacts.shs
+#
+# Ratchet on the "structurally unreusable build artifact" defect class.
+#
+# Origin: doc/08_tracking/bug/native_build_link_step_recompiles_whole_c_runtime_2026-08-23.md
+# (fixed 71347b901b6). `native-build` recompiled the whole C runtime on every
+# build -- 27 `clang -c -O3` execs, 95% of a hello-world build -- because the
+# objects were written into a PID-keyed temp prefix
+# (`{tmp}/simple_rt_{getpid()}_{target}_`) that was then deleted. The cost was
+# not a missing cache POLICY: keying an artifact by the producing process's pid,
+# by a timestamp, or by a random token makes reuse *structurally impossible*,
+# because no later run can ever name the same path.
+#
+# That fix was one instance. This guard fences the CLASS so the next one is
+# caught at review time rather than by a 95%-of-wall profile months later.
+#
+# What counts as an offender: a string literal in build-path Simple source that
+# interpolates a pid, a wall-clock time, or a random token into an artifact
+# path. What does NOT count, and is filtered out mechanically:
+#
+#   * `....{pid}.tmp` / `.tmp.{pid}` staging names -- the write-temp-then-rename
+#     idiom. The DURABLE name there is the rename target and is content-keyed;
+#     the pid only prevents two concurrent writers colliding. Removing it would
+#     be a correctness regression, not a fix.
+#   * pure log/diagnostic interpolation (`print "... pid={pid}"`).
+#
+# Everything else is baselined in scripts/check/pid_keyed_build_artifact_baseline.txt.
+# The guard fails when the tree grows a NEW offender, and -- same rule as the
+# other ratchets in this repo, in both directions -- when a baselined line no
+# longer exists, because a baseline that no longer describes the tree is how a
+# ratchet silently stops ratcheting.
+#
+# Deliberate-update path: --generate-baseline, for REVIEWED updates only. A FAIL
+# naming new offenders is real new debt; regenerating hides it.
+#
+# Verdict is the last line of stdout:
+#   PASS  — <n> candidate(s) checked, 0 new, 0 stale     exit 0
+#   FAIL  — ... <names>                                  exit 1
+#   ERROR — nothing was checked (<reason>)               exit 2
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BASELINE="$ROOT/scripts/check/pid_keyed_build_artifact_baseline.txt"
+SCAN_DIRS="src/compiler/70.backend src/compiler/80.driver src/compiler/10.frontend src/app/cli"
+
+fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
+oops() { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+
+# Core detector. $1 = root dir to scan. Emits `path:content` lines, path
+# relative to $1, sorted. Kept as one function so the selftest exercises the
+# exact code that ships.
+scan() {
+    _root=$1
+    ( cd "$_root" 2>/dev/null || exit 0
+      for d in $SCAN_DIRS; do
+          [ -d "$d" ] || continue
+          find "$d" -name '*.spl' -type f -print
+      done | sort | while read -r f; do
+          # candidate lines: a double-quoted literal interpolating pid / clock /
+          # random into something that looks like a path
+          grep -nE '"[^"]*\{[^}]*((rt_)?getpid\(\)|_pid|\bpid\b|time_now_unix_micros\(\)|time_now_nanos\(\)|_ts\b|rt_random)[^}]*\}[^"]*"' "$f" 2>/dev/null |
+          while IFS= read -r hit; do
+              content=${hit#*:}
+              # filter 1: staging temp names (write-temp-then-rename)
+              case "$content" in
+                  *.tmp\"*|*'".tmp"'*|*.tmp\ *|*'.tmp.'*|*'.{rt_getpid()}.tmp'*|*'.{getpid()}.tmp'*) continue ;;
+              esac
+              printf '%s\n' "$content" | grep -q '\.tmp' && continue
+              # filter 2: pure diagnostics
+              case "$content" in
+                  *print\ *|*println*|*log_*|*'set_field("pid"'*) continue ;;
+              esac
+              # must actually look like a path: contain a '/' or a known
+              # artifact extension inside the literal
+              printf '%s\n' "$content" | grep -qE '/|\.(o|ll|bc|a|c|so|obj|lib|sdn|exe)"' || continue
+              # normalise whitespace so reindentation is not a false positive
+              norm=$(printf '%s\n' "$content" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//')
+              printf '%s|%s\n' "$f" "$norm"
+          done
+      done | sort -u )
+}
+
+# --------------------------------------------------------------------------
+# selftest: fatal, runs before the scan.
+# --------------------------------------------------------------------------
+selftest() {
+    st=$(mktemp -d) || return 1
+    rc=0
+    mkdir -p "$st/src/compiler/70.backend/backend"
+    # offender: durable object path keyed by pid
+    cat > "$st/src/compiler/70.backend/backend/bad.spl" <<'EOF'
+fn f():
+    val object_prefix = "{tmp_dir}/simple_rt_{compile_pid}_{target}_"
+EOF
+    # non-offender: write-temp-then-rename staging name
+    cat > "$st/src/compiler/70.backend/backend/ok_tmp.spl" <<'EOF'
+fn f():
+    val tmp = final_path + ".{rt_getpid()}.tmp"
+EOF
+    # non-offender: diagnostic print
+    cat > "$st/src/compiler/70.backend/backend/ok_log.spl" <<'EOF'
+fn f():
+    print "[LLVM-LINK] pid={pid} for /some/path"
+EOF
+    # non-offender: content-keyed path, no pid/clock at all
+    cat > "$st/src/compiler/70.backend/backend/ok_hash.spl" <<'EOF'
+fn f():
+    val p = "{root}/{digest}/runtime.o"
+EOF
+    out=$(scan "$st")
+    echo "$out" | grep -q 'bad.spl|' || { echo "selftest: offender not detected" >&2; rc=1; }
+    echo "$out" | grep -q 'ok_tmp.spl|'  && { echo "selftest: .tmp staging false-positived" >&2; rc=1; }
+    echo "$out" | grep -q 'ok_log.spl|'  && { echo "selftest: diagnostic false-positived" >&2; rc=1; }
+    echo "$out" | grep -q 'ok_hash.spl|' && { echo "selftest: content-keyed path false-positived" >&2; rc=1; }
+    # empty tree must yield zero candidates so the caller is forced to ERROR
+    empty=$(mktemp -d); n=$(scan "$empty" | grep -c . ); rm -rf "$empty"
+    [ "$n" = "0" ] || { echo "selftest: empty tree yielded $n" >&2; rc=1; }
+    rm -rf "$st"
+    return $rc
+}
+
+selftest || oops "selftest failed"
+
+CUR=$(mktemp) || oops "cannot create temp file"
+trap 'rm -f "$CUR"' EXIT INT TERM
+scan "$ROOT" > "$CUR"
+N=$(grep -c . "$CUR" 2>/dev/null || echo 0)
+
+if [ "${1:-}" = "--generate-baseline" ]; then
+    cp "$CUR" "$BASELINE"
+    printf 'baseline regenerated: %s (%s entries)\n' "$BASELINE" "$N"
+    printf 'PASS — %s candidate(s) checked, baseline regenerated\n' "$N"
+    exit 0
+fi
+
+[ "$N" -gt 0 ] || oops "0 candidate lines found — the scan matched nothing, which is not credible for this tree"
+[ -f "$BASELINE" ] || oops "no baseline at $BASELINE"
+
+NEW=$(comm -23 "$CUR" "$BASELINE" | sed 's/|.*//' | sort -u | tr '\n' ' ')
+STALE=$(comm -13 "$CUR" "$BASELINE" | sed 's/|.*//' | sort -u | tr '\n' ' ')
+
+if [ -n "$(printf '%s' "$NEW")" ] || [ -n "$(printf '%s' "$STALE")" ]; then
+    msg="$N candidate(s) checked in $ROOT"
+    [ -n "$(printf '%s' "$NEW")" ]   && msg="$msg; NEW pid/clock-keyed build artifact(s): $NEW"
+    [ -n "$(printf '%s' "$STALE")" ] && msg="$msg; STALE baseline entr(ies) no longer present: $STALE"
+    fail "$msg"
+fi
+
+printf 'PASS — %s candidate(s) checked, 0 new, 0 stale\n' "$N"
+exit 0
