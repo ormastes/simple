@@ -68,11 +68,11 @@ the same shape as `targets`, `linkers` and `stats`.
 
 | Surface | What it shows |
 |---|---|
-| `bin/simple stats` | `In development: <n>` under `Tests:`, plus `Other: <n> (unclassified)` when the categories do not add up |
-| `bin/simple stats --json` | `test_status.{total,passed,failed,skipped,pending,in_development,unclassified}` in the `simple.stats.v2` schema |
+| `bin/simple stats` | `Passed` / `Failed` / `In development` always, even at zero and even with no recorded run; `unexpected pass` and `BROKEN` when non-zero; `Skipped (host-unavailable)` as its own separate count; `Other: <n> (unclassified)` when the categories do not add up |
+| `bin/simple stats --json` | `test_status.{total,passed,failed,skipped,pending,in_development,in_development_unexpected,in_development_broken,unclassified}` in the `simple.stats.v2` schema — every field always emitted |
 | `doc/08_tracking/test/test_result.md` | `| In Development | <n> |` row, emitted unconditionally |
 | `doc/08_tracking/feature/pending_feature.md` | `| In Development | <n> | Expected-fail, skipped by suite runs |` |
-| `bin/simple tags` | the count **and** the list |
+| `bin/simple tags` | the count (always, even at zero) **and** the list, labelled source-derived |
 
 The row in `test_result.md` is emitted even when it is zero. A category that
 disappears when empty is a category nobody notices when it stops being empty.
@@ -89,7 +89,10 @@ the text output uses, so the two cannot disagree.
 
 ## Reconciliation
 
-`passed + failed + skipped + pending + in-development + other == total`.
+`passed + failed + skipped + pending + in-development + unexpected-pass + other == total`.
+
+`BROKEN` is **not** an addend: it already counts inside `failed`, because it
+fails the run. Adding it again would manufacture a phantom remainder.
 
 This is enforced, not merely hoped for:
 
@@ -103,10 +106,18 @@ no metrics is ERROR, never a pass. Its selftest is fatal (4 fixtures).
 **It is currently ADVISORY because it is honestly RED:** `test_result.md`
 reads Total 770 / Passed 0 / Failed 0, and `test_db.sdn` has a broken
 file→name join. Filed as
-`doc/08_tracking/bug/test_db_incoherent_totals_and_broken_file_name_join_2026-08-23.md`.
-Until that is fixed, **the DB-sourced counts are only as trustworthy as the
-DB, which is currently not trustworthy**; the `simple tags` counts are read
-from source annotations and are independent of it.
+`doc/08_tracking/bug/test_db_incoherent_totals_and_broken_file_name_join_2026-08-23.md`,
+and other lanes have since found two further reasons the numbers lie: a
+post-run `runtime_file_rename` error forcing rc=1 on passing runs, and a
+`@cover` preflight gate that manufactures hundreds of phantom failures with a
+fully-formed `Results:` line and **zero specs executed**.
+
+So, plainly:
+
+| count | source | trustworthy today |
+|---|---|---|
+| `bin/simple tags` | `@tag:` annotations in source | **yes** |
+| `stats`, `test_result.md`, `stats --json` | the test DB | **no** — see the records above |
 
 ## Dev ids — running exactly your own in-development set
 

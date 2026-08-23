@@ -68,3 +68,36 @@ share a cause (one bad index/offset in the V3 SDN table parse at
 skewed column association) or are two defects is **not established** and must
 not be assumed. Both need to be reproduced against a freshly written DB
 before anything is changed.
+
+## Update 2026-08-23 — a third defect: in-development is absorbed into `skipped`
+
+Found while wiring the three-state reporting surfaces.
+
+`src/app/test_runner_new/test_runner_main.spl` neutralises an in-development
+file by returning a `TestFileResult` with `passed: 0, failed: 0, skipped:
+expected` (the `InDevelopmentOutcome.ExpectedFailure` arm). The count is
+therefore stored **in the `skipped` field**, and **no per-test DB status
+distinguishes an in-development file from a genuine host-unavailable skip.**
+
+Consequences for the reporting surfaces:
+
+- `db.tests_by_status("in_development")` can never match anything, so
+  `test_result.md`'s `| In Development |` row is **structurally 0** — not
+  measured, and not a real zero.
+- The `| Skipped (host-unavailable) |` row **silently contains** the
+  in-development files, which is exactly the "absorbed into skipped" hole the
+  category was created to close.
+
+This is not something the reporting lane can fix from its own side: it needs
+either a per-test status recorded by the runner, or a distinct field on
+`TestFileResult`. Both belong to the runner lane. Until then:
+
+- `test_result.md` prints an explicit caveat under the summary whenever the
+  in-development count is 0, rather than publishing a confident zero.
+- **`bin/simple tags --tag in-development` is the real number.** It is
+  source-derived (read from `@tag:` annotations) and independent of the DB.
+
+The runner-side classification itself is correct and was NOT the problem —
+`classify_in_development` distinguishes ExpectedFailure / UnexpectedPass /
+LoadFailure properly. The loss happens at the point the outcome is written
+back into a `TestFileResult` that has no field to hold it.
