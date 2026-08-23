@@ -917,12 +917,20 @@ fn canonical_archive_symbol(symbol: &str) -> &str {
 /// is how runtime_memtrack.c's rt_heap_* fallbacks yield to the Rust runtime
 /// accounting (93e0b028ffb). `archive_global_symbols` counts these as defined.
 pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
-    let output = nm_command()
-        .arg("-g")
-        .arg("-p")
-        .arg(path)
-        .output()
-        .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
+    // Mach-O POSIX nm prints weak *definitions* as 'T' — the weakness only
+    // appears in the `-m` flag field as `weak external`. GNU/ELF nm prints
+    // them as 'W'/'V'. Request the Mach-O flag field on macOS hosts and
+    // accept BOTH formats below, so the stage-4 runtime capsule check does
+    // not misread Apple weak fallbacks (e.g. rt_heap_live_bytes) as STRONG.
+    let output = {
+        let mut cmd = nm_command();
+        cmd.arg("-g").arg("-p");
+        if cfg!(target_os = "macos") {
+            cmd.arg("-m");
+        }
+        cmd.arg(path).output()
+    }
+    .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
     if !output.status.success() {
         return Err(format!(
             "failed to inspect archive {}: {}",
@@ -932,6 +940,13 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
     }
     let mut weak = BTreeSet::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
+        // Mach-O `-m` form: `0000000000000000 (__TEXT,__text) weak external _f`
+        if line.contains(" weak external ") || line.contains(" weak reference ") {
+            if let Some(name) = line.split_whitespace().next_back() {
+                weak.insert(name.to_string());
+            }
+            continue;
+        }
         let fields: Vec<&str> = line.split_whitespace().collect();
         let (kind, name) = match fields.as_slice() {
             [kind, name] if kind.len() == 1 => (*kind, *name),
