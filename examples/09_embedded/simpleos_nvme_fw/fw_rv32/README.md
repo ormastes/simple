@@ -20,10 +20,12 @@ The scalar logic is `bin/simple check`-clean and host-verified:
 ## Integration
 
 `entry.spl` exposes `nvme_fw_rv32_selftest()`, delegates to `logic.spl`, and exports the strong
-`rt_rv32_boot_optional_nvme_fw_selftest` hook consumed by the rv32 boot chain:
+`rt_rv32_boot_optional_nvme_fw_selftest` hook consumed through the rv32 HAL provider:
 
-1. `src/os/kernel/arch/riscv32/boot.spl` calls `rt_rv32_boot_optional_nvme_fw_selftest()` after
-   `riscv_noalloc_log_init()`.
+1. `src/os/kernel/arch/riscv32/boot.spl` calls
+   `hal_rv32_boot_optional_nvme_fw_selftest()` after `riscv_noalloc_log_init()`.
+   `optional_firmware_provider.spl` alone owns the raw extern; the C boot shim
+   supplies the weak default and this firmware entry supplies the strong override.
 2. Build the rv32 OS ELF: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`.
 3. Boot + check the marker: `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs <elf>`.
 4. Check the boot wrapper fail-closed contract without QEMU:

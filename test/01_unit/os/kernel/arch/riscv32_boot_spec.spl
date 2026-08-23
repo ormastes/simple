@@ -1,6 +1,28 @@
 use std.spec
+use std.io_runtime.{process_run}
 use os.kernel.arch.riscv32.boot_info.{Rv32Boot}
 use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.riscv32.smp_policy.{hal_rv32_smp_should_wait}
+
+fn prepare_hal_fixture() -> text:
+    "mkdir -p build/test-artifacts/rv32-hal-coverage && clang-20 -O0 -fprofile-instr-generate -fcoverage-mapping test/fixtures/os/kernel/arch/riscv32/rv32_smp_wait_ref.c -o build/test-artifacts/rv32-hal-coverage/rv32_smp_wait_ref"
+
+fn run_c_hal_case(command: text) -> (text, text, i64):
+    val coverage_command = command + " && LLVM_PROFILE_FILE=build/test-artifacts/rv32-hal-coverage/rv32_smp_wait_ref.profraw build/test-artifacts/rv32-hal-coverage/rv32_smp_wait_ref && llvm-profdata-20 merge -sparse build/test-artifacts/rv32-hal-coverage/rv32_smp_wait_ref.profraw -o build/test-artifacts/rv32-hal-coverage/rv32_smp_wait_ref.profdata && llvm-cov-20 report build/test-artifacts/rv32-hal-coverage/rv32_smp_wait_ref -instr-profile=build/test-artifacts/rv32-hal-coverage/rv32_smp_wait_ref.profdata test/fixtures/os/kernel/arch/riscv32/rv32_smp_wait_ref.c | tail -n 1 | tr -s ' '"
+    process_run("/bin/sh", ["-c", coverage_command])
+
+fn run_simple_hal_case(online_harts: u32, spins: u32) -> bool:
+    hal_rv32_smp_should_wait(online_harts, spins, 3, 100)
+
+fn assert_hal_parity(c_output: text):
+    expect(c_output).to_contain("cases=1,0,0")
+    expect(run_simple_hal_case(2, 10)).to_equal(true)
+    expect(run_simple_hal_case(3, 10)).to_equal(false)
+    expect(run_simple_hal_case(2, 100)).to_equal(false)
+
+fn assert_hal_branch_coverage(c_output: text):
+    expect(c_output).to_contain("TOTAL 4 0 100.00% 2 0 100.00%")
+    expect(c_output.trim()).to_end_with("4 0 100.00%")
 
 describe "rv32 boot bootstrap trap runtime":
     it "records boot arguments":
@@ -21,3 +43,19 @@ describe "rv32 boot bootstrap trap runtime":
         expect(boot_output.serial_base).to_equal(0x10000000)
         expect(boot_output.kernel_phys_base.addr).to_equal(0x80000000)
         expect(boot_output.memory_map.len()).to_equal(2)
+
+    it "continues while both the hart target and spin budget remain open":
+        expect(hal_rv32_smp_should_wait(2, 10, 3, 100)).to_equal(true)
+
+    it "stops when the expected hart count is reached":
+        expect(hal_rv32_smp_should_wait(3, 10, 3, 100)).to_equal(false)
+
+    it "stops when the spin budget is exhausted":
+        expect(hal_rv32_smp_should_wait(2, 100, 3, 100)).to_equal(false)
+
+    it "matches the retained C oracle with nonzero 100 percent branch coverage":
+        val (c_output, c_error, c_code) = run_c_hal_case(prepare_hal_fixture())
+        expect(c_code).to_equal(0)
+        expect(c_error).to_equal("")
+        assert_hal_parity(c_output)
+        assert_hal_branch_coverage(c_output)

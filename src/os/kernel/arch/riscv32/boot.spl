@@ -12,13 +12,13 @@ use os.kernel.boot.riscv_noalloc_log.{riscv_noalloc_log_init, riscv_noalloc_log_
 use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
 use os.kernel.boot.os_main.{os_main}
 use os.kernel.arch.riscv32.console.{serial_shell_main}
+use os.kernel.arch.riscv32.smp_provider.{hal_rv32_smp_wait}
+use os.kernel.arch.riscv32.optional_firmware_provider.{hal_rv32_boot_optional_nvme_fw_selftest}
 
 extern fn rt_riscv_uart_put(byte: u64)
 extern fn rt_riscv_qemu_heap_start() -> u64
 extern fn rt_riscv_qemu_heap_size() -> u64
 extern fn rt_riscv_noalloc_pmm_init_default() -> bool
-extern fn rt_rv32_smp_online_count() -> u64
-extern fn rt_rv32_boot_optional_nvme_fw_selftest() -> i64
 
 @section(".text.entry")
 @naked
@@ -224,15 +224,10 @@ fn _line_smp(n: u64):
     _crlf()
 
 # Briefly spin so secondary harts have a window to atomically check in, then
-# return the count. Re-reads the extern counter every iteration so the loop is
-# not optimized away and exits early once all 3 harts are online.
+# return the count. The provider performs a volatile linker-symbol load every
+# iteration, so the loop cannot cache the counter and exits once 3 harts arrive.
 fn _smp_wait_online() -> u64:
-    var c: u64 = rt_rv32_smp_online_count()
-    var i: u64 = 0
-    while c < 3 and i < 2000000:
-        c = rt_rv32_smp_online_count()
-        i = i + 1
-    c
+    hal_rv32_smp_wait(3, 2000000)
 
 fn _qemu_exit_success():
     asm volatile:
@@ -251,7 +246,7 @@ fn boot_main(_hart_id: u32, _dtb_addr: u32):
     # in _start, so this proves multi-core boot regardless of later subsystems.
     _line_smp(_smp_wait_online())
     riscv_noalloc_log_init()
-    rt_rv32_boot_optional_nvme_fw_selftest()
+    hal_rv32_boot_optional_nvme_fw_selftest()
     riscv_noalloc_handoff(_hart_id as u64, _dtb_addr as u64)
     rt_riscv_noalloc_pmm_init_default()
     riscv_noalloc_heap_init(rt_riscv_qemu_heap_start(), rt_riscv_qemu_heap_size())

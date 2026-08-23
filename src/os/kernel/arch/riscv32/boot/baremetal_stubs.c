@@ -8,16 +8,9 @@
  */
 #include "../../riscv64/boot/freestanding_runtime.c"
 
-/* SMP: per-hart atomic check-in counter, storage defined by linker.ld's .smp
- * section (outside the BSS-clear range). Each hart amoadd's it in _start;
- * hart 0 reads it via this accessor to report how many harts came online.
- * rv32-only — lives here (after the shared include) so the rv64 lane, which
- * has no _smp_online_count symbol, is unaffected. */
-extern volatile unsigned int _smp_online_count;
-unsigned long long rt_rv32_smp_online_count(void) {
-    return (unsigned long long)_smp_online_count;
-}
-
+/* The linker-owned SMP counter is read by the Pure-Simple RV32 provider.
+ * This file retains only the shared freestanding runtime and the weak optional
+ * firmware override ABI that cannot be expressed as an ordinary Simple call. */
 long long rt_rv32_boot_optional_nvme_fw_selftest(void) __attribute__((weak));
 long long rt_rv32_boot_optional_nvme_fw_selftest(void) {
     return 0;
