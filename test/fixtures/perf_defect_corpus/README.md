@@ -61,6 +61,23 @@ rather than silently drifting.
 Every negative fixture emits no perf diagnostic, verified through the real CLI
 (`bin/simple lint <file>`), not only through the rule function.
 
+## Cross-implementation check (pure Simple <-> Rust seed)
+
+A defect class usually exists in both halves. Each row states which
+implementation the fixture exercises and the verdict on the other half — twin
+found, or twin verified absent WITH the evidence. Where the twin is Rust-side,
+the pin is the existing mechanism row in
+`scripts/check/check-perf-regression-tests.shs`, not a `.spl` fixture: this
+corpus is `.spl` and the rule that reads it is a `.spl` linter, so a Rust
+fixture here would be undetectable by construction and would only look like
+coverage.
+
+| class | fixture exercises | twin in the other half? |
+|---|---|---|
+| COW round trip / by-value / keys-in-loop | pure Simple **source shape** | **Twin FOUND, already fixed and pinned, and it is a different shape.** Rust `Vec` has no copy-on-write, so the source shape cannot occur in the seed. The seed's twin is shape (d) of the class — an *interpreter-created* temporary where the `.spl` source looks correct — in `handle_method_call_with_self_update` (`src/compiler_rust/compiler/src/interpreter/interpreter_helpers.rs`, used from `interpreter_eval.rs:1512` and `interpreter/block_exec.rs:22`). Measured and fixed: distinct backing buffers over a 2,000-push loop went 1321 -> <64. It is pinned by runtime buffer-identity mechanism tests, not by a lint, because no source lint can see it. |
+| CHARWALK per-character walk | pure Simple **source** (`lint_text.spl`, `raw_rt_access.spl` — the files the CHARWALK rows pin) | **Twin verified ABSENT.** `grep -rn "lexical_code_lines" src/compiler_rust --include=*.rs` returns **zero hits**: this lint text-walking machinery exists only in pure Simple, so there is no seed counterpart to regress. |
+| Unbounded memory retention | pure Simple fixture, but the **measured defect is Rust-seed-side** | **Twin FOUND on the Rust side and it is the primary one** — `parsed_imported_module` in `src/compiler_rust/compiler/src/hir/lower/import_loader.rs` plus `module_cache.rs` (the IMPORTASTMEMO rows). **The pure-Simple twin is verified ABSENT with evidence:** `grep -rn "parsed_imported_module\|IMPORTED_MODULE_AST" src/compiler --include=*.spl` returns zero hits, and the pure-Simple import path (`10.frontend/core/interpreter/module_loader_resolve.spl:33-34`) caches resolved **paths** — short strings, one per module — not parsed ASTs, and exposes an explicit `module_resolve_cache_reset()`. Different magnitude, different object, bounded, and clearable. |
+
 ## Why the two undetected classes are not "just missing a rule"
 
 **CHARWALK** (an interpreted `substring(i, i+1)` per character with no native
