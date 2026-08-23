@@ -343,6 +343,16 @@ pub fn exec_function_with_self_return_values(
         },
     );
     let self_mode = simple_parser::ast::SelfMode::SkipSelf;
+    // Named arguments must be permuted into parameter order BEFORE binding:
+    // bind_args_with_values takes bare values and binds positionally, so
+    // without this `m.subtract(subtrahend=15, minuend=50)` computed 15 - 50.
+    let reordered = crate::interpreter::interpreter_call::reorder_named_arg_values(
+        &func.params,
+        arg_vals,
+        arg_exprs,
+        self_mode,
+    );
+    let arg_vals: &[Value] = reordered.as_deref().unwrap_or(arg_vals);
     let bound = crate::interpreter::interpreter_call::bind_args_with_values(
         &func.params,
         arg_vals,

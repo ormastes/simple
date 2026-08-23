@@ -709,3 +709,63 @@ mod scalar_array_param_tests {
         }
     }
 }
+
+/// Permute pre-evaluated argument VALUES into parameter order using the
+/// argument expressions' names.
+///
+/// `bind_args_with_values` takes a bare `&[Value]` and therefore binds purely
+/// positionally -- the names are already gone by the time it runs. Method
+/// calls evaluate their arguments up front and so went through that path,
+/// which silently ignored named-argument reordering: given
+/// `fn subtract(self, minuend, subtrahend)`, the call
+/// `m.subtract(subtrahend=15, minuend=50)` bound 15 to `minuend` and 50 to
+/// `subtrahend` and returned -35 instead of 35. Plain function calls were
+/// unaffected because they keep the `Argument` list and bind by name.
+///
+/// Returns `None` when there is nothing to do (no named arguments) or when the
+/// permutation would not produce a dense prefix -- e.g. a named argument
+/// targeting a defaulted parameter beyond the supplied count. Falling back to
+/// the previous positional behaviour in that case keeps this change strictly
+/// additive.
+pub(crate) fn reorder_named_arg_values(
+    params: &[Parameter],
+    arg_vals: &[Value],
+    arg_exprs: &[Argument],
+    self_mode: SelfMode,
+) -> Option<Vec<Value>> {
+    if arg_exprs.len() != arg_vals.len() || !arg_exprs.iter().any(|a| a.name.is_some()) {
+        return None;
+    }
+    let params_to_bind: Vec<_> = params
+        .iter()
+        .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
+        .collect();
+
+    let mut slots: Vec<Option<Value>> = vec![None; params_to_bind.len()];
+    let mut positional_idx = 0usize;
+    for (i, arg) in arg_exprs.iter().enumerate() {
+        let target = match &arg.name {
+            Some(name) => params_to_bind.iter().position(|p| &p.name == name)?,
+            None => {
+                // Positional arguments fill the first free slots in order.
+                while positional_idx < slots.len() && slots[positional_idx].is_some() {
+                    positional_idx += 1;
+                }
+                let t = positional_idx;
+                positional_idx += 1;
+                t
+            }
+        };
+        if target >= slots.len() || slots[target].is_some() {
+            return None;
+        }
+        slots[target] = Some(arg_vals[i].clone());
+    }
+
+    // Only a dense prefix is safe: bind_args_with_values still binds by index.
+    let filled = slots.iter().take_while(|s| s.is_some()).count();
+    if filled != arg_vals.len() {
+        return None;
+    }
+    Some(slots.into_iter().take(filled).map(|s| s.expect("dense prefix")).collect())
+}

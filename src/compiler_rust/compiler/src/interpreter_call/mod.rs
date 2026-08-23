@@ -16,7 +16,7 @@ pub(crate) use bdd::{
     BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{
-    bind_args, bind_args_with_injected, bind_args_with_values, captured_env_with_live_globals, exec_function, exec_function_with_bound_args,
+    bind_args, bind_args_with_injected, bind_args_with_values, reorder_named_arg_values, captured_env_with_live_globals, exec_function, exec_function_with_bound_args,
     exec_function_with_captured_env, exec_function_with_values, exec_function_with_values_and_self, exec_lambda,
     execute_function_body, instantiate_class, publish_and_repoint, publish_live_bound_globals, refresh_live_bound_globals,
     sync_live_bound_globals, sync_owned_captured_globals, ProceedContext, IN_NEW_METHOD,

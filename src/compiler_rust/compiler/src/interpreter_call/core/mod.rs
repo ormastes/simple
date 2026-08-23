@@ -32,7 +32,7 @@ pub(crate) mod di_injection;
 pub(crate) mod aop_advice;
 
 // Re-export public interface for backward compatibility
-pub(crate) use arg_binding::{bind_args, bind_args_with_injected, bind_args_with_values};
+pub(crate) use arg_binding::{bind_args, bind_args_with_injected, bind_args_with_values, reorder_named_arg_values};
 pub(crate) use arg_eval::{eval_arg, eval_arg_int};
 pub(crate) use class_instantiation::instantiate_class;
 pub(crate) use function_exec::{
