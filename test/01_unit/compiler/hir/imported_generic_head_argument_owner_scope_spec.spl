@@ -1,0 +1,258 @@
+"""
+# Imported Generic HEAD + ARGUMENT Projection Resolve in the OWNER's Scope
+
+Follow-up (e) of `hir_unresolved_type_owner_missing_import_2026-08-22.md` and the
+re-land condition of `hir_generic_projection_regression_run15_2026-08-22.md`.
+
+## The defect, in the shape this fixture builds
+
+`imported_surface_type` projects an imported callable's signature through the
+OWNER's qualified scope. Its scalar arm reads
+`parser_type_kind_named_name(type_.kind)`, which for `Dict<text, Payload>`
+answers **`Dict`** -- the OUTER generic constructor, not the argument. `Dict`,
+`Option` and `Result` are BUILTIN generics: nothing ever calls
+`bind_qualified_type` for them, so `lookup_qualified_type_raw(owner, "Dict")`
+misses **every time**. The arm then fell through to `self.lower_type(type_)`,
+which re-lowers the WHOLE type in the **IMPORTER's** scope and recurses into the
+generic ARGUMENT there. `Payload` -- which the importer never imported and never
+names -- is what hard-errors, with a synthesized span blaming the importer.
+
+Measured on the real tree by the `[ist-scalar-fallthrough]` probe:
+
+    [ist-scalar-fallthrough] name=Dict owner=compiler.mono.monomorphize_integration
+                             lowering=src/compiler/mono/instantiation.spl
+
+Note the name is `Dict`. That is why every OWNER-side repair failed: 75
+owner-side imports across `40.mono` left the fatal count completely unchanged,
+because once the type reaches `lower_type` in the importer's scope what the owner
+imports is irrelevant.
+
+## Why the previous two attempts did not settle it
+
+* `d481f15e1ac` recursed into the ARGUMENTS but left the HEAD falling through, so
+  the importer-scope re-lowering still happened. Stage-1 went 48 -> 3716 fatals /
+  437 poisoned modules. Reverted at `ec13c319250`.
+* The predecessor fixture
+  `imported_optional_argument_reexport_hop_regression_spec.spl` is GREEN on both
+  sides of that regression -- a four-module `export use` facade hop does not
+  reach the miss. It is kept, labelled a non-reproducer in its own docstring.
+
+**This fixture discriminates**, and the discrimination was verified by running it
+against the pristine tree and against the fixed tree rather than assumed. The
+shape that makes it work is not the facade depth -- it is that the OUTER
+constructor is a builtin generic, which misses the qualified lookup
+unconditionally, so no amount of import plumbing in the owner can mask it.
+
+## The fix this pins
+
+Project a generic HEAD-AND-ARGUMENTS: recurse each argument through
+`imported_surface_type` in the OWNER's scope (which is exactly where
+`materialize_imported_callable_dependency` bound it, via
+`bind_qualified_type(imported_mod.module_name, dep, symbol)`), then hand those
+ALREADY-LOWERED `HirType`s to `lower_named_kind`, which resolves the head by name
+and has real arms for `Option`/`Result`/`Dict`. `lower_type` is never reached for
+a generic, so the importer's scope is never consulted for an argument.
+
+This restores the symmetry that is the root theme of the parent record: the
+MATERIALIZATION walk already recurses Array -> Tuple -> Named and binds every
+argument correctly; only PROJECTION failed to consult what it bound.
+
+## The silent drop is NOT an acceptable alternative
+
+`case 5` pins the argument identity, not merely the absence of an error. Before
+the generic-argument lane the argument was DROPPED (`Named(id, [])`), which made
+the miss unreachable at the cost of silently erasing `Dict<text, MirType>` to
+`Dict<any, any>` in the importer's symbol table with ZERO diagnostics. A future
+change that "fixes" a regression by restoring the drop must fail this spec.
+"""
+
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolKind}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn head_arg_surfaces(mods: Dict<text, Module>, srcs: [SourceFile]) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(mods, srcs):
+        case Ok(value): value
+        case Err(error):
+            assert_true(false)
+            ModuleSurfacesByName.empty()
+
+fn head_arg_lower(owner_decl: text) -> HirLowering:
+    """Three modules, the minimal shape that reaches the defect.
+
+    `decl.payload_types` DECLARES `Payload`.
+    `svc.provider` explicitly imports it and exposes one callable naming it
+    inside a generic constructor.
+    `svc.consumer` imports ONLY the callable -- it never names `Payload`, which
+    is precisely the innocent-importer position the parent record describes.
+    """
+    val log = Logger(level: 0)
+    val decl_src = "struct Payload:\n    tag: text\n"
+    val prov_src = "use decl.payload_types.\{Payload\}\n\n" + owner_decl
+    val cons_src = "use svc.provider.\{provide\}\n\nfn go() -> i64:\n    1"
+    var mods: Dict<text, Module> = {}
+    mods["decl.payload_types"] = parse_full_frontend(decl_src, "decl.payload_types", "decl.payload_types", log)
+    mods["svc.provider"] = parse_full_frontend(prov_src, "svc.provider", "svc.provider", log)
+    val cons = parse_full_frontend(cons_src, "svc.consumer", "svc.consumer", log)
+    mods["svc.consumer"] = cons
+    val srcs = [
+        SourceFile(path: "decl/payload_types.spl", content: decl_src, module_name: "decl.payload_types"),
+        SourceFile(path: "svc/provider.spl", content: prov_src, module_name: "svc.provider"),
+        SourceFile(path: "svc/consumer.spl", content: cons_src, module_name: "svc.consumer")
+    ]
+    var lowering = hirlowering_for_module("svc.consumer", head_arg_surfaces(mods, srcs))
+    val hir = lowering.lower_module(cons)
+    lowering
+
+fn head_arg_unresolved_payload(lowering: HirLowering) -> i64:
+    """Count of `unresolved type: Payload` blamed on the consumer.
+
+    This is the exact diagnostic the parent record tracks as `[hir-fatal]`.
+    """
+    var count = 0
+    for error in lowering.errors:
+        if error.message.contains("unresolved type: Payload") or
+           error.message.contains("unresolved name: Payload"):
+            eprint("[head-arg-unresolved] {error.message}")
+            count = count + 1
+    count
+
+fn head_arg_dict_value_shape(lowering: HirLowering) -> text:
+    """Shape of the VALUE argument of `provide`'s projected `Dict` return.
+
+    Returns a descriptor rather than a HirType so the assertion names the
+    failure: `erased-any` is the silent defect, `named` is correct.
+    """
+    val sym_id = lowering.symbols.lookup_or_invalid("provide")
+    if not sym_id.is_valid():
+        return "no-symbol"
+    if not lowering.symbols.symbols.has(sym_id.id):
+        return "no-entry"
+    val sym = lowering.symbols.symbols[sym_id.id]
+    if val t = sym.type_:
+        match t.kind:
+            case HirTypeKind.Function(params, ret, effects):
+                match ret.kind:
+                    case HirTypeKind.Dict(key, value):
+                        match value.kind:
+                            case HirTypeKind.Named(symbol, args): "named"
+                            case HirTypeKind.Any: "erased-any"
+                            case _: "erased-other"
+                    case _: "not-dict"
+            case _: "not-function"
+    else:
+        "no-type"
+
+val DICT_RETURN: text =
+    "fn provide(d: Dict<text, Payload>) -> Dict<text, Payload>:\n    d\n"
+val OPTIONAL_RETURN: text =
+    "fn provide() -> Payload?:\n    nil\n"
+val RESULT_RETURN: text =
+    "fn provide(p: Payload) -> Result<Payload, text>:\n    Ok(p)\n"
+val PLAIN_RETURN: text =
+    "fn provide(p: Payload) -> Payload:\n    p\n"
+
+
+fn field_lower(field_decl: text) -> HirLowering:
+    """The FIELD twin of `head_arg_lower`.
+
+    `verification_contract: HirContractBlock?` -- an OPTIONAL FIELD of an
+    imported composite -- is the single largest run15 population (501 fatals),
+    and it runs through a DIFFERENT materialization site than callable params
+    (`module_import_registration.spl`, not `module_reexport_materialization.spl`).
+    Both sites had the identical scalar-head gap, so the field path needs its
+    own case; a callable-only fixture would have passed while fields flooded.
+    """
+    val log = Logger(level: 0)
+    val decl_src = "struct Payload:\n    tag: text\n"
+    val prov_src = "use decl.payload_types.\{Payload\}\n\n" + field_decl
+    val cons_src = "use svc.provider.\{Holder\}\n\nfn go() -> i64:\n    1"
+    var mods: Dict<text, Module> = {}
+    mods["decl.payload_types"] = parse_full_frontend(decl_src, "decl.payload_types", "decl.payload_types", log)
+    mods["svc.provider"] = parse_full_frontend(prov_src, "svc.provider", "svc.provider", log)
+    val cons = parse_full_frontend(cons_src, "svc.consumer", "svc.consumer", log)
+    mods["svc.consumer"] = cons
+    val srcs = [
+        SourceFile(path: "decl/payload_types.spl", content: decl_src, module_name: "decl.payload_types"),
+        SourceFile(path: "svc/provider.spl", content: prov_src, module_name: "svc.provider"),
+        SourceFile(path: "svc/consumer.spl", content: cons_src, module_name: "svc.consumer")
+    ]
+    var lowering = hirlowering_for_module("svc.consumer", head_arg_surfaces(mods, srcs))
+    val hir = lowering.lower_module(cons)
+    lowering
+
+val OPTIONAL_FIELD: text =
+    "struct Holder:\n    slot: Payload?\n"
+val DICT_FIELD: text =
+    "struct Holder:\n    slots: Dict<text, Payload>\n"
+
+describe "imported generic head and arguments resolve in the owner's scope":
+    it "does not blame the consumer for a Dict VALUE argument it never names":
+        # GUARD, not the reproducer -- green on both sides here, and said so
+        # rather than left to imply otherwise. In THIS fixture the head miss
+        # routes through `imported_surface_type_projected`, which drops the
+        # arguments SILENTLY, so no error is raised pre-fix and this case
+        # cannot discriminate. The discriminating case is the erasure one
+        # below.
+        #
+        # Its value is as a REGRESSION guard on the repair: projecting
+        # arguments WITHOUT the materialization half makes exactly this case
+        # fail with `unresolved type: Payload` -- the `d481f15e1ac` flood shape,
+        # measured here in seconds instead of a 72-minute build.
+        expect(head_arg_unresolved_payload(head_arg_lower(DICT_RETURN))).to_equal(0)
+
+    it "does not blame the consumer for an OPTIONAL argument (`Payload?`)":
+        # `X?` reaches HIR as `Named("Option", [X])`, so the head is the builtin
+        # `Option` and the mechanism is identical. This is the shape that carried
+        # the largest run15 population (HirContractBlock 501, SymbolId 444).
+        expect(head_arg_unresolved_payload(head_arg_lower(OPTIONAL_RETURN))).to_equal(0)
+
+    it "does not blame the consumer for a Result OK argument":
+        expect(head_arg_unresolved_payload(head_arg_lower(RESULT_RETURN))).to_equal(0)
+
+    it "still projects the non-generic sibling that already worked":
+        # CONTROL. A bare `Payload` head is looked up in the owner's scope and
+        # HITS, so this passed before the fix too. It proves the defect is the
+        # GENERIC head, not the three-module shape itself -- without it a broken
+        # fixture that errors on everything would look like a reproducer.
+        expect(head_arg_unresolved_payload(head_arg_lower(PLAIN_RETURN))).to_equal(0)
+
+    it "keeps the Dict VALUE argument resolved instead of erasing it to Any":
+        # THE DISCRIMINATING ASSERTION -- verified RED pre-fix, GREEN post-fix.
+        #
+        # Both projection exits for a scalar head discarded the generic
+        # arguments, so `Dict<text, Payload>` reached the importer's symbol
+        # table as `Dict<any, any>` with ZERO diagnostics: no error, no probe
+        # line, nothing. That is why the four error-count cases above pass on
+        # BOTH sides here and cannot be the reproducer -- this fixture routes
+        # through `imported_surface_type_projected`, whose miss path
+        # (`[ist-proj-miss] name=Dict owner=svc.provider`, observed) drops the
+        # arguments silently rather than falling through to `lower_type`.
+        #
+        # A future change that "fixes" a regression by restoring the drop must
+        # fail HERE. That is this case's entire purpose.
+        expect(head_arg_dict_value_shape(head_arg_lower(DICT_RETURN))).to_equal("named")
+
+    it "reports no lowering error at all for any generic shape":
+        expect(head_arg_lower(DICT_RETURN).errors.len()).to_equal(0)
+        expect(head_arg_lower(OPTIONAL_RETURN).errors.len()).to_equal(0)
+        expect(head_arg_lower(RESULT_RETURN).errors.len()).to_equal(0)
+
+    it "does not blame the consumer for an OPTIONAL FIELD argument":
+        # THE LARGEST run15 POPULATION, and a SEPARATE materialization site from
+        # every case above (`module_import_registration.spl`). Without the field
+        # half of the fix, projecting field arguments in the owner's scope
+        # reproduces the flood here even with the callable half landed.
+        expect(head_arg_unresolved_payload(field_lower(OPTIONAL_FIELD))).to_equal(0)
+
+    it "does not blame the consumer for a Dict FIELD argument":
+        expect(head_arg_unresolved_payload(field_lower(DICT_FIELD))).to_equal(0)
+
+    it "reports no lowering error for either generic FIELD shape":
+        expect(field_lower(OPTIONAL_FIELD).errors.len()).to_equal(0)
+        expect(field_lower(DICT_FIELD).errors.len()).to_equal(0)
