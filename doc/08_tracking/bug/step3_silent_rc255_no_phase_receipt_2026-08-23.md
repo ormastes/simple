@@ -92,3 +92,36 @@ See `EVIDENCE` section appended below for the measured run on the current tree.
   ancestor of the tree measured here.
 - phase36 forecast items #2 (E-MONO-033), #3 (generic struct gate), #4
   (`emit_unsupported_panic` fails open) remain open and are NOT addressed here.
+
+## EVIDENCE — measured run 2026-08-23 (receipts landed, rc=255 NOT yet reproduced)
+
+Run: `native-build --source src/app --entry-closure --entry src/app/lint/main.spl
+--threads 4`, seed `/mnt/data/worktrees/goal-main-1/bin/release/x86_64-unknown-linux-gnu/simple`,
+worktree at `0c085525541`. Log `/mnt/fast/step3/logs/lint_base.log`.
+
+**Result: rc=124 (my own 2400s wall timeout), NOT rc=255.** The build never
+reached step 3 in the window: host load average was 46 (other lanes), and parse
+alone consumed 620s on the post-shard pass. So the rc=255 root cause is **not
+diagnosed** — it is not confirmed as the `ce3c2bf6c71` waitpid-EINTR twin, and
+not confirmed as a distinct in-phase abort either. Do not report it as either.
+
+Two things the run DID establish:
+
+1. The receipts are live and correctly ordered on the real pipeline
+   (`source_closure 0/1 step 0/6` -> `parse N/140 step 1/6` -> `hir N/140 step
+   2/6`), and the HIR shard workers exit via `rt_exit(0)` in `hir_shard_mode`
+   BEFORE `hir_finalize`, which is correct — shards are cache-fillers, not the
+   real build.
+2. **HIR is NOT clean on this tree for the `src/app/lint` closure**, contrary to
+   the phase36 forecast's "140/140 clean" (measured on an older tree). This run
+   recorded `[hir-fatal]` / `[hir-poisoned]` for at least
+   `src/compiler/semantics/lint/_SimdOpportunityLint/byte_checks.spl` (186
+   errors) and `.../dispatch.spl` — all `aggregate constructor
+   `SimdOpportunity...` is not visible from this module`, the same visibility
+   defect class as forecast rung 1 (`ProcessResult` in `process_ops.spl`).
+   With errors recorded, phase 3 will now take the *populated* preview branch and
+   print them unconditionally, not the `E-DRV-PHASE3-000` zero-error branch.
+
+**Next step for whoever picks this up:** re-run on an unloaded box (or with a
+larger `--timeout`); the last `[build]` line will now name the failing
+sub-phase, which is precisely what the previous attempt could not produce.
