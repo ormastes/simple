@@ -625,3 +625,47 @@ must not publish a phase PASS until its exact receipt has been validated and
 hashed; the bounded push consumer only verifies that retained state.
 A bare recorder invocation is invalid: automated rows may be promoted only by
 `--record-bootstrap-success` with exact admitted Stage 4 binary/provenance.
+
+## Phase-gating principle (2026-08-23)
+
+**What each phase tests is that the NEXT phase's prerequisites are properly
+implemented — not optional features.** A phase gate is a prerequisite check, not
+exhaustive coverage; it deliberately excludes optional/feature-surface tests no
+later phase consumes. A gate that runs everything (21,228 specs) is too slow to
+run and too noisy to read, so it gets skipped, and a skipped gate protects
+nothing.
+
+Corollaries you must honour when touching any bootstrap gate:
+
+- The verdict line names counts **and** scope —
+  `PASS — N phase-gate spec(s) run, 0 failed (M out-of-scope deferred, see <record>)`.
+  Silent narrowing is the failure mode being eliminated.
+- Excluded-but-incomplete work becomes a TODO and is explicitly disabled or made
+  to assert; never left silently half-working.
+- Zero items examined ⇒ `ERROR`, never `PASS`.
+- Optional-feature failures are held as TODOs — not fixed in-phase, not skipped
+  in source (CLAUDE.md forbids skipping failing tests without approval).
+
+Scope numbers, per-phase prerequisite table, ineligible trees
+(`test/01_unit/bugs/`, `test/fixtures/`, `test/tmp_repro/`), and the open gap
+(`check-post-bootstrap-stage4-sspec.shs` reporting capabilities it never
+exercises) are in
+`doc/07_guide/tooling/bootstrap_phase_verification.md`.
+
+## Companion rules (2026-08-23)
+
+**The bootstrap path contains exactly what the next step requires.**
+
+| policy | statement |
+|---|---|
+| **Scope** | Each phase's tests verify the next phase's prerequisites, not optional features. |
+| **Incomplete work** | Disable with skip or assert plus a TODO — **never delete**, never silently half-working. Skip is the authorised mechanism for excluding out-of-scope optional surface; it lives in the gate's scope declaration, not anonymously in spec files. In the Rust seed the equivalent is `#[ignore]` or an assert, plus a TODO. |
+| **rust simple** | For the Rust seed (`src/compiler_rust/**`): **do not implement optional features unless requested, or needed to build phase 2.** The phase-2 exception requires a demonstrable build failure the feature resolves — "phase 2 will probably want this" is not it — and whoever invokes it records what broke. Simple is the default implementation language per CLAUDE.md. Applies to new work; existing optional seed surface is an observation, not a defect. |
+
+Rationale for the seed rule: it is bootstrap-only tooling whose single job is to
+compile Simple until the self-hosted compiler takes over. Every optional feature
+added to it must then be maintained in two languages and eventually replicated on
+the self-hosted path — enlarging the bootstrap problem this phase exists to
+shrink.
+
+Full statement: `doc/07_guide/tooling/bootstrap_phase_verification.md`.

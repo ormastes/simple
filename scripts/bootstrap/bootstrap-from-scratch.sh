@@ -1,5 +1,48 @@
 #!/bin/sh
 
+# PHASE-GATING PRINCIPLE (authoritative doc:
+# doc/07_guide/tooling/bootstrap_phase_verification.md)
+#
+#   Each phase's test gate exists to verify that the capabilities the NEXT phase
+#   depends on are correctly implemented. It is a prerequisite check, not
+#   exhaustive coverage, and it deliberately excludes optional / feature-surface
+#   tests that no later phase consumes.
+#
+# Consequences for every gate invoked from this driver:
+#   * the verdict line names counts AND scope, e.g.
+#       PASS - N phase-gate spec(s) run, 0 failed (M out-of-scope deferred, see <record>)
+#     so a reader can see it checked a subset and exactly which one;
+#   * excluded-but-incomplete work is recorded as a TODO and explicitly disabled
+#     or made to assert -- never left silently half-working;
+#   * a gate that examined zero items reports ERROR, never PASS;
+#   * optional-feature failures are held as TODOs, not fixed inside the phase:
+#     disabled with a skip or an assert PLUS a TODO, recorded in the gate's scope
+#     declaration -- never deleted, never anonymous in spec files. Skip is the
+#     authorised mechanism for this case only; CLAUDE.md's prohibition on
+#     skipping failing tests without approval governs everything else.
+#
+# COMPANION RULE -- rust simple (the Rust seed, src/compiler_rust/**):
+#   Do not implement optional features unless requested, or needed to build
+#   phase 2. The phase-2 exception requires a demonstrable phase-2 build failure
+#   that the feature resolves; whoever invokes it records what broke. Simple is
+#   the default implementation language (CLAUDE.md). The seed is bootstrap-only
+#   tooling: every optional feature in it must be maintained in two languages and
+#   eventually replicated on the self-hosted path, enlarging the very bootstrap
+#   problem this driver exists to shrink. Applies to new work only.
+#
+# One sentence covering both: the bootstrap path contains exactly what the next
+# step requires -- tests verify what the NEXT phase depends on, and the seed
+# carries what the NEXT phase needs and nothing else.
+#
+# Measured scope at origin/main 2026-08-23 (do not re-derive): 21,228 spec files
+# total; compiler/interpreter/loader scope 2,106 (test/01_unit/compiler 2,063 +
+# test/02_integration/compiler 43 + test/01_unit/app/cli 69 +
+# test/01_unit/app/compile 4). Stage-1 build closure is 689 modules of 15,221
+# .spl files because --entry-closure follows imports from the entry, so
+# --source src does not widen it beyond --source src/app. Categorically
+# ineligible for any gate, in every tree: test/01_unit/bugs/, test/fixtures/,
+# test/tmp_repro/.
+#
 # The coordinated strategy supervisor is the default entry for an ordinary
 # multi-stage bootstrap. Single-stage recovery, receipt validation, help, and
 # diagnostic sweeps keep their direct fail-closed paths. The supervisor sets

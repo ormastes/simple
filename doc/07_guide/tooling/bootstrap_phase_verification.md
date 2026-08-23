@@ -155,6 +155,183 @@ documented mechanism by which a tree wipe went undetected. The umbrella
 therefore returns `FAIL` on a clean checkout of `origin/main`, which is the
 correct and honest result.
 
+## The phase-gating principle (authoritative)
+
+> **"What each phase tests is to check next phase related properly impled. Not
+> optional features."** — user, 2026-08-23
+
+Rendered precisely: **each bootstrap phase's test gate exists to verify that the
+capabilities the NEXT phase depends on are correctly implemented.** It is a
+*prerequisite check*, not exhaustive coverage, and it deliberately excludes
+optional / feature-surface tests that no later phase consumes.
+
+This is not a concession to time budgets, it is what makes the gate mean
+anything. A phase gate that runs everything is both too slow to run (21,228
+spec files) and too noisy to read, so in practice it is skipped — and a gate
+that is skipped protects nothing. A phase gate scoped to the next phase's
+prerequisites is both fast and meaningful: when it goes red, the next phase is
+genuinely unable to proceed.
+
+### Corollaries (each learned the hard way)
+
+1. **A gate must name what it covered — counts and scope.** The verdict line
+   states how many items were checked *and* that the set was a subset, so a
+   reader can see exactly which subset. Silent narrowing is the failure mode
+   being eliminated: a gate that quietly stopped covering something looks
+   identical to one that covers everything.
+   Recommended shape:
+   `PASS — N phase-gate spec(s) run, 0 failed (M out-of-scope deferred, see <record>)`
+2. **Excluded-but-incomplete work is recorded as a TODO and explicitly disabled
+   or made to assert** — never left silently half-working. (Standing policy:
+   *"add assert or todo; disable what not completed optional."*)
+3. **A gate that examined zero items reports `ERROR`, never `PASS`.** Absence of
+   evidence is not evidence. This is the same non-vacuity rule the pre-push
+   guards carry (`.claude/rules/vcs.md`).
+4. **Optional-feature failures are held as TODOs — not fixed inside the phase.**
+   They are disabled with a skip or an assert *and* a TODO, recorded in the
+   gate's **scope declaration**, never sprinkled anonymously through spec files
+   and never deleted. Skip is the authorised mechanism for this case; CLAUDE.md's
+   prohibition on skipping failing tests without approval still governs
+   everything else. See
+   [incomplete work is disabled, never deleted](#companion-rule-incomplete-work-is-disabled-never-deleted).
+
+### Measured scope data (at `origin/main`, 2026-08-23 — do not re-derive)
+
+Simple test trees, **21,228** spec files total. The compiler / interpreter /
+loader-related scope is **2,106**:
+
+| tree | specs |
+|---|---|
+| `test/01_unit/compiler/**` | 2,063 |
+| `test/02_integration/compiler/**` | 43 |
+| `test/01_unit/app/cli/` (driver/loader path) | 69 |
+| `test/01_unit/app/compile/` (driver/loader path) | 4 |
+
+Within the compiler tree: backend 272, driver 159, interpreter 159, codegen 147,
+hir 143, mir 110, loader 104, frontend 91, linker 83.
+
+Rust seed suite: in scope is compiler / interpreter / loader / tester. **Out of
+scope and held as TODOs:** SIMD, graphics / audio / GPU / ML wrappers, engine2d,
+browser / UI, and anything behind an optional cargo feature or an external SDK.
+
+Stage 1 build closure is **689 modules** of 15,221 `.spl` files, because
+`--entry-closure` follows imports from the entry — so `--source src` does **not**
+widen it beyond `--source src/app`.
+
+### Categorically ineligible for any gate, in every tree
+
+| path | why |
+|---|---|
+| `test/01_unit/bugs/` | specs that document defects by construction and are *expected* to fail |
+| `test/fixtures/` | the test runner's own deliberate red inputs — gating or tagging them would neutralise the fixtures that prove the runner reports failure at all |
+| `test/tmp_repro/` | scratch reproduction material |
+
+### Per-phase prerequisite scope
+
+| phase | what the NEXT phase needs from it | in scope for the gate | out of scope (TODO-held) |
+|---|---|---|---|
+| 0 Preflight | a parseable, lane-isolated shell environment | shell portability, cache-scope ownership, cache policy | everything else |
+| Rust seed | a seed that can compile Simple | compiler / interpreter / loader / tester in the seed suite | SIMD, graphics/audio/GPU/ML, engine2d, browser/UI, optional cargo features, external SDKs |
+| 1 Stage 1 | a stage1 binary able to build the stage2 closure | the **689-module** entry closure; driver/loader specs (`test/01_unit/app/cli/` 69, `test/01_unit/app/compile/` 4) | the other 14,532 `.spl` files, which stage1 never compiles |
+| 2 Stage 2 | codegen features stage3 self-compilation depends on | struct-receiver methods, non-entry module globals — the two probes that exist | full feature surface |
+| 3 Stage 3 | a self-hosting compiler | self-verification, diagnostic sweep, compiler-tree specs (2,106) | app/UI/ML/graphics specs |
+| 4 Stage 4 | a deployable tooling binary | essential-tool subcommands, provenance canonicality | the whole 21,228-spec suite |
+| 5 Deploy | a binary the repo can run | platform-handoff readiness | — |
+
+### Gap 5: a gate that reports capabilities it never exercised
+
+`scripts/check/check-post-bootstrap-stage4-sspec.shs` prints
+`post_bootstrap_stage4_test_runner=true`, `post_bootstrap_stage4_lint=true`,
+`post_bootstrap_stage4_duplicate_check=true` and
+`post_bootstrap_stage4_acceptance=true` **unconditionally**, after verifying only
+provenance canonicality and smoke-log stability. No test runner, linter, or
+duplicate check is invoked anywhere in the script. Its name promises an sspec
+run it does not perform.
+
+This directly contradicts corollary 1 (a gate must name what it *covered*) and
+corollary 3 (zero items examined must be `ERROR`). It is **filed, not silently
+re-scoped here** — changing what it asserts is a behavioural change and belongs
+in its own reviewed commit:
+`doc/08_tracking/bug/stage4_sspec_gate_reports_unexercised_capabilities_2026-08-23.md`.
+
+## Companion rule: what belongs in rust simple (the Rust seed)
+
+**The bootstrap path contains exactly what the next step requires.** That single
+sentence covers testing and implementation alike:
+
+- **Tests** — each phase's gate verifies what the *next* phase depends on.
+- **Implementation** — the seed carries what the *next* phase needs, and nothing
+  else.
+
+### The rule
+
+**For rust simple (the Rust seed, `src/compiler_rust/**`): do not implement
+optional features unless requested, or needed to build phase 2.**
+
+Two exceptions, and only these two:
+
+1. **Requested** — the user asks for it.
+2. **Needed to build phase 2** — the next phase genuinely cannot be built
+   without it.
+
+The second exception is not a loophole. The need must be **demonstrable**: a
+concrete phase-2 build failure that the feature resolves. *"Phase 2 will probably
+want this"* is not the exception; *"phase 2 does not build without this"* is.
+Anyone invoking it records what broke.
+
+Simple is the default implementation language, per CLAUDE.md's
+*"Impl in Simple unless it has big performance differences."* This rule sharpens
+that line for the optional-feature case rather than replacing it.
+
+### Why the seed specifically
+
+The Rust seed is bootstrap-only tooling whose single job is to compile Simple
+until the self-hosted compiler takes over. Every optional feature added to it
+must then be maintained in two languages and eventually replicated on the
+self-hosted path — so it directly enlarges the bootstrap problem this phase
+exists to shrink.
+
+Concrete supporting fact: the seed's own test suite **could not even build**
+until 2026-08-23 — `simple-native-all` (lib test) never linked, because
+`rt_mem_snapshot_open` / `rt_mem_snapshot_close` / `rt_mem_snapshot_record` and
+`rt_file_atomic_write` were defined in both `native_all` and the
+`simple_runtime` rlib **with different signatures**. Any claim about seed test
+health before that fix was unfounded. The more surface the seed carries, the
+more of this there is.
+
+### Scope of the rule
+
+Applies to **new** work. It is not a mandate to retroactively strip existing
+optional surface from the seed — record anything you find as an **observation**,
+not a defect.
+
+## Companion rule: incomplete work is disabled, never deleted
+
+Optional or incomplete work that a phase gate excludes is **disabled with a skip
+or an assert, plus a TODO. Never deleted, never left silently half-working.**
+
+Skip is the authorised mechanism *for this case specifically* — excluding
+out-of-scope optional surface from a phase gate — and it is recorded in the
+gate's scope declaration and a TODO, not sprinkled anonymously through spec
+files. CLAUDE.md's prohibition on skipping failing tests without approval still
+governs everything else. In the Rust seed the equivalent is `#[ignore]` (or an
+assert) plus a TODO.
+
+Deleting the excluded work would make it invisible, which is the same failure
+mode as a silently narrowed gate: nothing distinguishes "deliberately out of
+scope" from "never existed".
+
+## The three policies together
+
+| policy | statement |
+|---|---|
+| **Scope** | Each phase's tests verify the next phase's prerequisites, not optional features. |
+| **Incomplete work** | Disable with skip or assert plus a TODO — never delete, never silently half-working. |
+| **rust simple** | Do not implement optional features unless requested, or needed to build phase 2. Simple is the default implementation language. |
+
+Together: the bootstrap path is deliberately small, explicitly gated, and
+everything outside it is **visible rather than silently absent**.
+
 ## See also
 
 - `.claude/rules/bootstrap.md` — bootstrap architecture, stage semantics, known blockers
