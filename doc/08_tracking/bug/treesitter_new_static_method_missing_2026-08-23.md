@@ -89,6 +89,69 @@ simply the first one the semantic phase reaches in file order, so the whole
 family is likely unresolved. This still blocks the `--source src/compiler`
 oracle and needs its own record.
 
+### RESOLVED 2026-08-23 — `d6fce96e530` (spec `7dd1fafaae8`)
+
+The "whole family is likely unresolved" read above was correct, and the class is
+wider than the treesitter package. Two facts were established BY MEASUREMENT,
+and they point opposite ways to how the error message reads:
+
+1. **UFCS is real.** A free `fn f(self: T)` IS callable as `x.f()`. It resolves
+   ACROSS modules *without importing `f`* — the type carries the method. So the
+   sibling files' bare `use ...outline_lexer.{TreeSitter}` was never the
+   problem, and the fix needed no new `use` lines. (Fixture: a two-module
+   `Box`/`box_get` pair, called as `b.box_get()` from a module importing only
+   `{Box}` — prints `7`.)
+2. **There is no type-prefix stripping.** `x.get()` against
+   `box_get(self: Box)` fails with the identical
+   `method `get` not found on type `Box`` for BOTH `me` and `fn`
+   declarations. `me` vs `fn` is irrelevant to method-call resolution — the
+   earlier framing that `fn` (not `me`) was the suspicious part is a red
+   herring, killed here so nobody re-runs it.
+
+So the declared name IS the method name, the language is right, and the call
+sites were wrong: every site wrote the *stripped* name (`self.is_at_end()`)
+against a declaration that carries the type prefix (`treesitter_is_at_end`).
+Someone authored these files expecting a lowercased-type-prefix-stripping rule
+that the language does not have.
+
+**Fix:** call the declared names. Declarations were deliberately NOT renamed to
+the stripped forms: they are module-scope free functions, and the type prefix is
+exactly what keeps `parse_identifier`, `advance`, `error`, `check` etc. from
+colliding across the treesitter package and with the real parser. Renaming decls
+would trade a resolution defect for a namespace collision.
+
+**Class sweep (tree-wide).** Of 18,828 `me` declarations in `src/`, only 86 take
+an explicit `self:` first parameter — the normal style is `me name(args)` inside
+a type body with implicit self. 39 files use the explicit-self shape. Exactly 7
+of them called the stripped name, totalling **579 call sites**:
+
+| file | sites | type prefix |
+|---|---|---|
+| `10.frontend/treesitter/outline.spl` | 185 | `treesitter_` |
+| `10.frontend/treesitter/outline_members.spl` | 159 | `treesitter_` |
+| `10.frontend/treesitter/outline_decls.spl` | 151 | `treesitter_` |
+| `10.frontend/treesitter/outline_types.spl` | 48 | `treesitter_` |
+| `10.frontend/treesitter/outline_lexer.spl` | 20 | `treesitter_` |
+| `60.mir_opt/mir_opt/copy_prop.spl` | 15 | `copypropagation_` |
+| `70.backend/linker/lazy_instantiator.spl` | 1 | `lazyinstantiator_` |
+
+The rewrite is type-scoped — the prefix must be the lowercased name of that
+file's *sole* `self:` type, and the target must actually be declared with
+`self: T` — so it is 1:1 and line-count neutral (568 insertions, 568 deletions).
+A first, looser heuristic (any global name ending `_<call>`) produced 114 hits
+including a false positive at `35.semantics/safety_checker_transfer.spl`
+(`self.error()` matching `treesitter_error`); that is why the applied rule is
+type-scoped and not suffix-only. Four files with multiple `self:` types
+(`15.blocks/blocks/registry.spl`, `35.semantics/macro_check/hygiene.spl`,
+`40.mono/monomorphize/engine.spl`, `os/kernel/ipc/syscall_scheduler.spl`) were
+skipped by that rule and inspected as non-offenders.
+
+**Reproduce:** `test/01_unit/compiler/frontend/treesitter_self_method_resolution_spec.spl`
+— RED pre-fix (4 examples, 3 failures), GREEN post-fix (4/4). The single example
+that passes on both sides is the behavioural one, deliberately: it is the
+positive evidence that UFCS works, not a reproducer, and says so in its own
+docstring.
+
 ## Follow-up
 
 Arity-aware sweep for other `Struct.new(...)` call sites whose argument count
