@@ -1,0 +1,71 @@
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl
+# Class A (owner-side import gap) regression for
+# doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+# Follow-up (i). Scope: AsmConstraintKind + AsmLocation only -- 12 of the 15
+# stage1 HIR fatals left at run16 (tree ec13c319250), 8 of the 14 file x type
+# pairs.
+#
+# NOT the `use-warning` provider-does-not-provide mechanism the sibling lane
+# found, and NOT the rejected `type_params > 0` bail. Measured: run16's log
+# contains ZERO `[use-warning]` lines naming either asm type, and
+# `10.frontend/parser_types_expr.spl:803,809` really does declare both -- the
+# named provider was always correct.
+#
+# The mechanism is that the two `use` lines were never `use` STATEMENTS.
+# `_CBackendTranslate/class_core.spl` carried them at lines 371-372, in the
+# middle of a triple-quoted docstring body attached to the `bulk_copy` arm, so
+# they were string CONTENT. The module surface bound neither name, and
+# `asm_constraint_for_c(kind: AsmConstraintKind, location: AsmLocation)` had two
+# unbindable dependencies. That also explains why there is no use-warning: a
+# missing statement cannot warn about its provider.
+#
+# The only `[hir-callable-dep-origin-unresolved]` line in run16 naming either
+# type named this owner. The four victims that HARD-ERRORED
+# (c_backend_translate, c_codegen_adapter, export_wrappers, instruction_lowering)
+# import MirToC and never name the types themselves -- the "blamed on an
+# innocent third party" behaviour this record opened with.
+#
+# FAILS pre-fix: 2 of 2.
+use std.spec.{describe, it, expect}
+
+fn file_lines(path: text) -> [text]:
+    (rt_file_read_text(path) ?? "").split("\n")
+
+fn header_imports_name(path: text, module_prefix: text, name: text) -> bool:
+    # Only the HEADER counts. A `use` line after the first declaration is either
+    # dead text or, as here, string content inside a docstring -- so a
+    # whole-file scan would have passed pre-fix and pinned nothing.
+    # NOTE: no `{` in any literal -- braces are string INTERPOLATION in Simple.
+    for line in file_lines(path):
+        if line.starts_with("fn ") or line.starts_with("class ") or line.starts_with("struct ") or line.starts_with("enum ") or line.starts_with("impl "):
+            return false
+        if line.starts_with("use " + module_prefix) and line.contains(name):
+            return true
+    false
+
+fn names_type(path: text, needle: text) -> bool:
+    # Guards the guard: the pin must not pass vacuously if the use site moves.
+    for line in file_lines(path):
+        if line.contains(needle):
+            return true
+    false
+
+describe "asm owner modules bind AsmConstraintKind and AsmLocation":
+    it "class_core imports both from the HEADER, not from inside a docstring":
+        expect(names_type(
+            "src/compiler/70.backend/backend/_CBackendTranslate/class_core.spl",
+            "asm_constraint_for_c")).to_be_true()
+        expect(header_imports_name(
+            "src/compiler/70.backend/backend/_CBackendTranslate/class_core.spl",
+            "compiler.frontend.parser_types_expr", "AsmConstraintKind")).to_be_true()
+        expect(header_imports_name(
+            "src/compiler/70.backend/backend/_CBackendTranslate/class_core.spl",
+            "compiler.frontend.parser_types_expr", "AsmLocation")).to_be_true()
+
+    it "instruction_lowering, which names AsmConstraintKind in four arms, imports it":
+        expect(names_type(
+            "src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl",
+            "AsmConstraintKind")).to_be_true()
+        expect(header_imports_name(
+            "src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl",
+            "compiler.frontend.parser_types_expr", "AsmConstraintKind")).to_be_true()

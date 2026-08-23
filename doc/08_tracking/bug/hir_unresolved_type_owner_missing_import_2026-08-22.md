@@ -870,3 +870,57 @@ index-0 entry of that module's type table, which is what a default/stale symbol
 index would print. Next experiment: re-run a stage-1 build (or the smallest
 closure that reaches `source_idx=683`) WITH the trace on, and read the
 `lowering=src/compiler/mono/instantiation.spl` lines.
+## Follow-up (i) — AsmConstraintKind / AsmLocation: a `use` line inside a docstring
+
+Scope: the 12 of run16's 15 `[hir-fatal]` occurrences (8 of 14 file x type
+pairs) carrying these two names. Sibling lane `49d764f48ae` took
+VhdlPortDirection / HirFunction / CompiledModule; those are not claimed here.
+
+**Not** the `use-warning` provider-does-not-provide mechanism that lane found,
+and **not** the `type_params > 0` bail rejected in follow-up (d). Both were
+tested and both are negative:
+
+- `/usr/bin/grep -a use-warning stage1_build16.log | grep -E 'AsmLocation|AsmConstraintKind'`
+  returns **zero lines**. There was never a provider complaint.
+- `10.frontend/parser_types_expr.spl:803,809` really does declare
+  `enum AsmConstraintKind` and `enum AsmLocation`, so the module the import
+  named was correct all along.
+
+**Mechanism: the two imports were never `use` STATEMENTS.**
+`70.backend/backend/_CBackendTranslate/class_core.spl` carried
+`use compiler.frontend.parser_types_expr.{AsmConstraintKind}` and `{AsmLocation}`
+at lines **371-372**, in the middle of a triple-quoted docstring body attached to
+the `bulk_copy` arm of `translate_intrinsic`. They are string CONTENT. The module
+surface bound neither name, so `asm_constraint_for_c(kind: AsmConstraintKind,
+location: AsmLocation)` had two unbindable signature dependencies. This also
+explains the missing use-warning: a statement that does not exist cannot warn
+about its provider, which is why the sibling lane's oracle is silent here and
+why this needed its own lane.
+
+The only `[hir-callable-dep-origin-unresolved]` line in run16 naming either type
+named exactly this owner
+(`owner=compiler.backend.backend._CBackendTranslate.class_core`). The four
+modules that HARD-ERRORED — `70.backend/backend/c_backend_translate.spl`,
+`c_codegen_adapter.spl`, `_CBackendTranslate/export_wrappers.spl`,
+`instruction_lowering.spl` — import `MirToC` and (except the last) never name
+either type: the "blamed on an innocent third party" behaviour this record
+opened with, one owner accounting for all 8 pairs.
+
+Second, smaller gap in the same family:
+`_CBackendTranslate/instruction_lowering.spl` names `AsmConstraintKind` in four
+match arms with no import at all (plain class A). Both fixed by putting a real
+`use` line in the header; no resolver change, so the run15 generic-projection
+flood shape is impossible by construction.
+
+**Durable lesson this adds:** a whole-file grep for an import is not evidence the
+import exists. `class_core.spl` would have passed any such check for months.
+Import checks must be header-scoped.
+
+Reproduce spec: `test/01_unit/compiler/hir/asm_owner_import_inside_docstring_spec.spl`
+— 2 examples, **2/2 FAIL pre-fix, 2/2 PASS post-fix** on the deployed seed, with
+a `names_type` guard-the-guard per example so the pin cannot pass vacuously if
+`asm_constraint_for_c` or the match arms are refactored away, and a
+header-scoped import predicate for the reason above.
+
+Not claimed: this is a SOURCE fix. The facade-hop owner-scope resolution defect
+from follow-up (e) is untouched and still open.
