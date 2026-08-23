@@ -325,6 +325,37 @@ must_contain "CHARWALK ratio pin spec present" \
     "$LEXWALKSPEC" 'expect(runs_us * 3 < dense_us).to_equal(true)'
 must_contain "CHARWALK byte-identity reference walk kept in the spec" \
     "$LEXWALKSPEC" 'fn reference_lexical_code_lines(source: text) -> [text]:'
+# --- mono type-arg inference from pattern/loop bindings (2026-08-23). The
+# inference environment was seeded only from params and `let`s, so a call whose
+# argument is a match-arm payload binding or a for-loop variable fail-closed to
+# E-MONO-032 -> E-MONO-033 ("refusing to lower non-monomorphic HIR to MIR").
+# 67 of the ~76 real root generic call sites in the whole stage1 closure are
+# match-arm bindings in `20.hir/generated/hir_hash.spl`, so losing this is
+# losing the whole step-3 phase again. Pin the three mechanisms plus the spec.
+MONOINT="$ROOT/src/compiler/40.mono/monomorphize_integration.spl"
+must_contain "MONO match-arm pattern bindings enter env" \
+    "$MONOINT" "self.collect_pattern_bindings(mt.pattern)"
+must_contain "MONO enum payload types collected" \
+    "$MONOINT" 'self.enum_payload_types["{en.name}::{vt.name}::{ti}"] = tt'
+must_contain "MONO for-loop variable bound from element type" \
+    "$MONOINT" "self.bind_iteration_var(var_, fit)"
+# The class was swept, not just the instance: EVERY binding form that carries
+# no `let` and is not a parameter must enter the environment.
+must_contain "MONO comprehension for-clause bound" \
+    "$MONOINT" "self.bind_iteration_var(cvar, ci)"
+must_contain "MONO with-item target bound" \
+    "$MONOINT" "self.env[ws.id] = wtt"
+must_contain "MONO scrutinee-derived enum name hint" \
+    "$MONOINT" "self.match_enum_hint = scrut_enum"
+must_contain "MONO pattern/loop inference spec pinned" \
+    "$ROOT/test/01_unit/compiler/mono/mono_pattern_bound_type_arg_inference_spec.spl" \
+    "expect(stats.unresolved_generic_calls).to_equal(0)"
+# --- generic STRUCT declaration gate stays OPEN (2026-08-23, #158 Phase C
+# extended to structs). Re-adding the declaration-site fatal would re-block
+# every generic-struct fixture; loudness lives at the use site instead.
+must_not_contain "generic struct declaration fatal not reintroduced" \
+    "$ROOT/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl" \
+    "generic structs are not supported on the native build path yet"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then

@@ -1,0 +1,93 @@
+"""
+## Purpose and audience
+Purpose: Prove mono infers a generic call's type arguments from MATCH-ARM and
+FOR-LOOP bound variables, not only from `let`s and parameters.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-MONO-001 — stable requirement identity for this spec.
+
+"""
+# Type-argument inference from pattern and loop bindings
+
+Hardening plan section 9.4 ("local annotations", "enum payloads") / bug
+`doc/08_tracking/bug/generic_class_and_impl_declaration_gates_block_stage1_closure_2026-08-22.md`.
+
+`MonomorphizationPass.env` — the environment `infer_call_type_args` consults —
+was seeded ONLY from function parameters and from `let` statements
+(`collect_lets_stmt`). Two binding forms carry neither:
+
+- a match arm's pattern variables (`case Int(a): mix(h, a)`);
+- a `for` loop's variable (`for t in types: mix(h, t)`).
+
+`collect_lets_expr` descended into both BODIES but never bound the names, so
+`infer_expr_type` returned nil, `infer_call_type_args` fail-closed to `[]`, and
+every such call raised `E-MONO-032` -> `E-MONO-033` ("refusing to lower
+non-monomorphic HIR to MIR").
+
+This is not a corner case on the stage1 closure. The generated
+`src/compiler/20.hir/generated/hir_hash.spl` calls the generic
+`_hir_mix_prim<T>` 67 times and EVERY argument is a match-arm payload binding,
+so the stage1 closure could not survive monomorphization at all.
+
+Pre-fix verdict: both `it` blocks FAIL (`specializations_created == 0`,
+`unresolved_generic_calls > 0`).
+
+## Harness landmine
+The parse -> HIR pipeline is inlined in each `it` block on purpose, mirroring
+`mono_source_inference_fixed_point_spec.spl`: the same code in a module-level
+helper loses recorded lowering state.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization}
+use compiler.verify.post_mono_verify.*
+
+fn count_named(m: HirModule, name: text) -> i64:
+    var n = 0
+    for k in m.functions.keys():
+        val f: HirFunction = m.functions[k]
+        if f.name == name:
+            n = n + 1
+    n
+
+describe "mono type-argument inference from pattern and loop bindings":
+    it "infers a type argument from an enum match-arm payload binding":
+        step("Verify: infers a type argument from an enum match-arm payload binding")
+        # @req: REQ-COMPILER-MONO-001
+        val src = "enum Lit:\n    Int(i64)\n\nfn mix<T>(v: T) -> i64:\n    1\n\nfn hash_lit(l: Lit) -> i64:\n    match l:\n        case Int(a):\n            mix(a)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_match_bind.spl", "mono_match_bind", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_match_bind.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.unresolved_generic_calls).to_equal(0)  # oracle: 0 — no call site may stay unspecialized
+        expect(stats.specializations_created).to_equal(1)  # oracle: 1 — exactly `mix$i64`
+        val om: HirModule = out["m"]
+        expect(count_named(om, "mix$i64")).to_equal(1)
+        expect(count_named(om, "mix")).to_equal(0)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)  # oracle: 0 — section 9.5 invariants clean
+
+    it "infers a type argument from a for-loop variable over a typed array":
+        step("Verify: infers a type argument from a for-loop variable over a typed array")
+        # @req: REQ-COMPILER-MONO-001
+        val src = "fn mix<T>(v: T) -> i64:\n    1\n\nfn total(xs: [i64]) -> i64:\n    var h = 0\n    for x in xs:\n        h = h + mix(x)\n    h\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_for_bind.spl", "mono_for_bind", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_for_bind.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats) = run_monomorphization(mods)
+        expect(stats.unresolved_generic_calls).to_equal(0)  # oracle: 0 — no call site may stay unspecialized
+        expect(stats.specializations_created).to_equal(1)  # oracle: 1 — exactly `mix$i64`
+        val om: HirModule = out["m"]
+        expect(count_named(om, "mix$i64")).to_equal(1)
+        val r = post_mono_verify_modules(out)
+        expect(post_mono_report_total(r)).to_equal(0)  # oracle: 0 — section 9.5 invariants clean

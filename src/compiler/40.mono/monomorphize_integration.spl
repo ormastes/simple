@@ -75,6 +75,19 @@ class MonomorphizationPass:
     # specialization is mangled by the TYPE NAME, not a module-local symbol
     # id that two modules can both hand out.
     named_symbol_names: Dict<text, text>
+    # "<EnumName>::<Variant>" -> declared payload types, tuple payloads in
+    # positional order and struct payloads keyed "<Enum>::<Variant>::<field>".
+    # Match-arm pattern bindings are the ONLY binding form that carries no
+    # `let` and no param, so without this table `infer_expr_type` returns nil
+    # for every pattern-bound variable and `infer_call_type_args` fail-closes
+    # to `[]` -> E-MONO-032 -> E-MONO-033. That is not a corner case: the
+    # generated `hir_hash.spl` calls the generic `_hir_mix_prim<T>` 67 times
+    # and EVERY argument is a match-arm binding, so the stage1 closure could
+    # not survive monomorphization until these were bound (plan §9.4
+    # "local annotations" / "enum payloads").
+    enum_payload_types: Dict<text, HirType>
+    # Enum name derived from the scrutinee of the match currently being walked.
+    match_enum_hint: text
     # Module whose function bodies are being rewritten right now (scopes the
     # two maps above).
     current_module: text
@@ -125,6 +138,8 @@ impl MonomorphizationPass:
             named_types: {},
             named_ambiguous: {},
             named_symbol_names: {},
+            enum_payload_types: {},
+            match_enum_hint: "",
             fn_returns: {},
             spec_queue: [],
             spec_symbols: {},
@@ -261,6 +276,34 @@ impl MonomorphizationPass:
                 self.generic_structs[s.name] = s
                 self.monomorphizer.register_generic_struct(s.name, s)
                 self.stats.generic_structs_found = self.stats.generic_structs_found + 1
+
+        # Collect enum variant payload types. Enums were not collected at all
+        # before: nothing in the pass needed them until match-arm pattern
+        # bindings had to be typed (see `enum_payload_types`). Generic enums
+        # are recorded too -- their payload types stay `TypeParam(...)`, which
+        # `hir_type_is_concrete` rejects downstream, so recording them cannot
+        # manufacture a wrong binding, only a correctly-refused one.
+        val enums = module.enums
+        for sym_id in enums.keys():
+            val en: HirEnum = enums[sym_id]
+            self.record_named_type(module_name, en.symbol, en.name, en.type_params.len() == 0)
+            for v in en.variants:
+                val vt: HirVariant = v
+                match vt.kind:
+                    case HirVariantKind.Unit:
+                        pass_do_nothing("no payload")
+                    case HirVariantKind.Tuple(types):
+                        var ti = 0
+                        for t in types:
+                            val tt: HirType = t
+                            self.enum_payload_types["{en.name}::{vt.name}::{ti}"] = tt
+                            if mono_diag_enabled():
+                                eprint("[mono-diag] enum payload {en.name}::{vt.name}::{ti} concrete={hir_type_is_concrete(tt)}")
+                            ti = ti + 1
+                    case HirVariantKind.Struct(fields):
+                        for f in fields:
+                            val ft: HirField = f
+                            self.enum_payload_types["{en.name}::{vt.name}::{ft.name}"] = ft.type_
 
         # Collect generic classes
         val classes = module.classes
@@ -694,9 +737,31 @@ impl MonomorphizationPass:
                     val at: HirIfArm = arm
                     self.collect_lets_block(at.then_)
                 self.collect_lets_block_opt(else_)
-            case HirExprKind.MatchCase(_, arms):
+            case HirExprKind.MatchCase(scrutinee, arms):
+                # The arm PATTERN often carries no resolved type (`case Int(a)`
+                # never spells its enum), so derive the enum name from the
+                # SCRUTINEE and pass it down as a hint.
+                var scrut_enum = ""
+                val sc: HirExpr = scrutinee
+                val sct = self.infer_expr_type(sc)
+                if sct != nil:
+                    val scc: HirType = sct
+                    match scc.kind:
+                        case HirTypeKind.Named(ssym, _):
+                            scrut_enum = self.named_type_name(ssym, scc)
+                        case _:
+                            pass_do_nothing("not a named scrutinee")
+                self.match_enum_hint = scrut_enum
                 for arm in arms:
                     val mt: HirMatchArm = arm
+                    # Bind the arm's pattern variables BEFORE descending, so a
+                    # generic call in the arm body can infer its type args from
+                    # a payload binding (plan §9.4). Without this the whole
+                    # generated-visitor / generated-hash family fail-closes to
+                    # E-MONO-032.
+                    if mono_diag_enabled():
+                        eprint("[mono-diag] match arm pattern kind={mt.pattern.kind}")
+                    self.collect_pattern_bindings(mt.pattern)
                     self.collect_lets_block(mt.body)
             case HirExprKind.Loop(body, _):
                 val lb: HirBlock = body
@@ -704,10 +769,40 @@ impl MonomorphizationPass:
             case HirExprKind.While(_, body, _):
                 val wb: HirBlock = body
                 self.collect_lets_block(wb)
-            case HirExprKind.For(_, _, body, _):
+            case HirExprKind.Comprehension(_, cexpr, clauses):
+                # Same class as `for`/`with`: a comprehension's `for` clause
+                # binds a name with no `let`.
+                for c in clauses:
+                    val cc: HirCompClause = c
+                    match cc.kind:
+                        case HirCompClauseKind.For(cvar, citer):
+                            val ci: HirExpr = citer
+                            self.bind_iteration_var(cvar, ci)
+                        case _:
+                            pass_do_nothing("filter clause binds nothing")
+                val ce: HirExpr = cexpr
+                self.collect_lets_expr(ce)
+            case HirExprKind.For(var_, iter, body, _):
+                # Same gap as a match-arm binding: the loop variable has no
+                # `let`, so `for t in types: mix(h, t)` could not infer `T`.
+                # Bound from the iterable's ELEMENT type when the iterable
+                # itself is locally inferable; unbound otherwise (fail-closed).
+                val fit: HirExpr = iter
+                self.bind_iteration_var(var_, fit)
                 val fb: HirBlock = body
                 self.collect_lets_block(fb)
-            case HirExprKind.With(_, body):
+            case HirExprKind.With(items, body):
+                # `with X as t:` binds `t` with no `let` either.
+                for wi in items:
+                    val wit: HirWithItem = wi
+                    if wit.has_target:
+                        val ct: HirExpr = wit.context_expr
+                        val wt = self.infer_expr_type(ct)
+                        if wt != nil:
+                            val wtt: HirType = wt
+                            if hir_type_is_concrete(wtt):
+                                val ws: SymbolId = wit.target
+                                self.env[ws.id] = wtt
                 val wbb: HirBlock = body
                 self.collect_lets_block(wbb)
             case HirExprKind.Lambda(params, body, _):
@@ -728,6 +823,137 @@ impl MonomorphizationPass:
                 self.collect_lets_block(nb)
             case _:
                 pass
+
+    me bind_iteration_var(var_: SymbolId, iter: HirExpr):
+        """Bind a `for` / comprehension-`for` variable to the ELEMENT type of
+        its iterable, when the iterable is locally inferable and the element
+        type is concrete. Fail-closed otherwise."""
+        val itt = self.infer_expr_type(iter)
+        if itt == nil:
+            return
+        val itc: HirType = itt
+        match itc.kind:
+            case HirTypeKind.Array(elem, _):
+                val et: HirType = elem
+                if et != nil and hir_type_is_concrete(et):
+                    val fv: SymbolId = var_
+                    self.env[fv.id] = et
+            case HirTypeKind.Slice(selem):
+                val st: HirType = selem
+                if st != nil and hir_type_is_concrete(st):
+                    val sv: SymbolId = var_
+                    self.env[sv.id] = st
+            case _:
+                pass_do_nothing("not an array/slice iterable")
+
+    me collect_pattern_bindings(pat: HirPattern):
+        """Seed `env` with every variable a pattern binds.
+
+        A pattern binding carries no `let` and is not a parameter, so it was
+        invisible to the inference environment. Types come from, in order:
+        the pattern's own recorded type when concrete; the enclosing enum
+        variant's DECLARED payload type. Anything else is left unbound --
+        fail-closed, exactly like `infer_call_type_args`: an unbound name
+        still yields the loud E-MONO-032, never a guessed specialization."""
+        if pat == nil:
+            return
+        match pat.kind:
+            case HirPatternKind.Binding(sym, _):
+                if pat.has_type_:
+                    val bt: HirType = pat.type_
+                    if bt != nil and hir_type_is_concrete(bt):
+                        val bs: SymbolId = sym
+                        self.env[bs.id] = bt
+            case HirPatternKind.Tuple(elements):
+                for e in elements:
+                    val et: HirPattern = e
+                    self.collect_pattern_bindings(et)
+            case HirPatternKind.Array(elements, _):
+                for e in elements:
+                    val at: HirPattern = e
+                    self.collect_pattern_bindings(at)
+            case HirPatternKind.Or(patterns):
+                for e in patterns:
+                    val ot: HirPattern = e
+                    self.collect_pattern_bindings(ot)
+            case HirPatternKind.Struct(_, fields):
+                for f in fields:
+                    val (_fname, fpat) = f
+                    val fp: HirPattern = fpat
+                    self.collect_pattern_bindings(fp)
+            case HirPatternKind.Enum(ty, variant, payload):
+                val ety: HirType = ty
+                var ename = ""
+                if ety != nil:
+                    match ety.kind:
+                        case HirTypeKind.Named(nsym, _):
+                            ename = self.named_type_name(nsym, ety)
+                        case _:
+                            pass_do_nothing("not a named enum type")
+                if mono_diag_enabled():
+                    eprint("[mono-diag] enum pattern name='{ename}' variant='{variant}'")
+                if ename == "":
+                    ename = self.match_enum_hint
+                self.collect_enum_payload_bindings(ename, variant, payload)
+            case _:
+                pass_do_nothing("binds nothing")
+
+    me collect_enum_payload_bindings(enum_name: text, variant: text, payload: HirPatternPayload?):
+        """Bind an enum arm's payload variables by DECLARED payload type."""
+        match payload:
+            Some(pp):
+                match pp:
+                    case HirPatternPayload.Tuple(patterns):
+                        var i = 0
+                        for sp in patterns:
+                            val spt: HirPattern = sp
+                            self.bind_payload_pattern(spt, "{enum_name}::{variant}::{i}")
+                            i = i + 1
+                    case HirPatternPayload.Struct(fields):
+                        for f in fields:
+                            val (fname, fpat) = f
+                            val fp: HirPattern = fpat
+                            self.bind_payload_pattern(fp, "{enum_name}::{variant}::{fname}")
+            nil:
+                pass_do_nothing("unit variant")
+
+    me bind_payload_pattern(pat: HirPattern, key: text):
+        """Bind one payload sub-pattern, preferring the declared payload type
+        over the pattern's own (often absent) recorded type."""
+        if pat == nil:
+            return
+        match pat.kind:
+            case HirPatternKind.Binding(sym, _):
+                val bs: SymbolId = sym
+                if mono_diag_enabled():
+                    eprint("[mono-diag] bind payload key='{key}' known={self.enum_payload_types.has(key)} sym={bs.id}")
+                if self.enum_payload_types.has(key):
+                    val dt: HirType = self.enum_payload_types[key]
+                    if dt != nil and hir_type_is_concrete(dt):
+                        self.env[bs.id] = dt
+                        return
+                # Last resort when the enum NAME could be recovered from
+                # neither the pattern nor the scrutinee: a variant+slot suffix
+                # that is declared by exactly ONE enum in the whole program is
+                # unambiguous. Two or more matches -> leave unbound, so the
+                # loud E-MONO-032 stands rather than a coin flip.
+                val suffix = mono_payload_key_suffix(key)
+                var found: HirType? = nil
+                var hits = 0
+                for k in self.enum_payload_types.keys():
+                    val kt: text = k
+                    if kt.ends_with(suffix):
+                        hits = hits + 1
+                        found = self.enum_payload_types[kt]
+                if hits == 1:
+                    if found != nil:
+                        val ft: HirType = found
+                        if hir_type_is_concrete(ft):
+                            self.env[bs.id] = ft
+                            return
+                self.collect_pattern_bindings(pat)
+            case _:
+                self.collect_pattern_bindings(pat)
 
     me collect_lets_block_opt(block: HirBlock?):
         match block:
@@ -1492,6 +1718,13 @@ fn run_monomorphization_with_diagnostics(modules: Dict<text, HirModule>) -> (Dic
 # Level-gated probe (default off): SIMPLE_MONO_DIAG=1 traces every function,
 # statement and expression the pass visits and every argument it could not
 # type, so a "call_sites=0" receipt can be explained from a log.
+fn mono_payload_key_suffix(key: text) -> text:
+    """`"<Enum>::<Variant>::<slot>"` -> `"::<Variant>::<slot>"`."""
+    val i = key.index_of("::")
+    if i < 0:
+        return key
+    key.substring(i, key.len())
+
 fn mono_diag_enabled() -> bool:
     env_get("SIMPLE_MONO_DIAG") == "1"
 
