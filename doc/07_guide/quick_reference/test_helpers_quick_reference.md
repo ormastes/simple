@@ -462,3 +462,18 @@ testing.with_cleanup(\: setup(), \x: teardown(x), \x: test(x))
 ---
 
 **Happy Testing! 🎉**
+
+## In-development dev ids
+
+| Want | Type |
+|------|------|
+| Mark a spec as WIP in a named workstream | `# @tag: in-development, dev-id-<id>` |
+| List workstream ids with spec counts | `bin/simple tags --dev-ids` |
+| List one workstream's specs | `bin/simple tags --dev-id <id>` |
+| Run exactly one workstream | `bin/simple test $(bin/simple tags --dev-id <id> --paths)` |
+| Run all in-development specs | `bin/simple test $(bin/simple tags --in-development --paths)` |
+| Run with WIP excluded | `bin/simple test $(bin/simple tags --no-in-development --paths)` |
+
+In-development specs are **included by default**; `--no-in-development` is the
+opt-in switch that excludes them. Guide:
+`doc/07_guide/testing/tags_and_in_development.md`.

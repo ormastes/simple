@@ -107,3 +107,55 @@ file→name join. Filed as
 Until that is fixed, **the DB-sourced counts are only as trustworthy as the
 DB, which is currently not trustworthy**; the `simple tags` counts are read
 from source annotations and are independent of it.
+
+## Dev ids — running exactly your own in-development set
+
+`# @tag:in-development` says a spec is work-in-progress. It does not say
+*whose*. With several lanes tagging at once, `--tag in-development` returns
+everybody's WIP. A **dev id** names one workstream:
+
+```
+# @tag: in-development, dev-id-auth-rework
+```
+
+The id is whatever follows the reserved `dev-id-` prefix. It is an ordinary
+`@tag:` name — no new grammar, no new parser, and visible to every tag
+consumer (including the Rust runner's `--tag`) the moment you write it.
+
+### What a dev session types
+
+```sh
+bin/simple tags --dev-ids                                      # ids + counts
+bin/simple tags --dev-id auth-rework                           # the specs
+bin/simple test $(bin/simple tags --dev-id auth-rework --paths)   # run just those
+bin/simple test $(bin/simple tags --in-development --paths)       # run all WIP
+bin/simple test $(bin/simple tags --no-in-development --paths)    # run WIP-free
+```
+
+`--paths` prints bare newline-separated paths so the selection composes with
+`$( )`. That is deliberate: it works identically on both engines, whereas a
+filter flag living in one runner only would be a trap.
+
+### Default is include
+
+| flag | executes |
+|---|---|
+| *(none)* | everything — in-development **included** |
+| `--in-development` | only in-development specs |
+| `--in-development=<id>` | only that workstream |
+| `--no-in-development` | everything except in-development specs |
+
+Including by default is the landed rule, not a new one: a tagged spec always
+executed, and it is only its **verdict** that a sweep neutralises. Selection
+changes what runs; it never changes how a verdict counts. `--no-in-development`
+is the only mode that stops a tagged spec running, and it is opt-in, so
+nothing silently loses the `IN-DEVELOPMENT UNEXPECTED PASS … ready to promote`
+signal that running them exists to produce.
+
+`--dev-ids` also prints an **Unnamed** category: in-development specs with no
+dev id. Those are reachable by no id-scoped run, so they are shown rather than
+hidden. A `dev-id-` tag on a spec that is no longer in-development is not
+counted, so promoting a spec removes it from its workstream automatically.
+
+Design record, including the four rejected syntaxes:
+`doc/05_design/app/testing/in_development_dev_ids.md`.
