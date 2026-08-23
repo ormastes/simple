@@ -114,6 +114,28 @@ fn get_pass_count() -> i64:
     val output = run_cmd(cmd)
     parse_count(output)
 
+# Extract a `| <Metric> | <n> |` row from test_result.md. One reader for
+# every summary metric so a new category cannot be added to the report and
+# silently missed here.
+fn _test_result_metric(metric: text) -> i64:
+    if not file_exists("doc/08_tracking/test/test_result.md"):
+        return 0
+    val cmd = "grep -m1 -E '^\\| {metric} \\|' doc/08_tracking/test/test_result.md | grep -oE '[0-9]+' | head -1"
+    parse_count(run_cmd(cmd))
+
+fn get_fail_count() -> i64:
+    _test_result_metric("Failed")
+
+fn get_skip_count() -> i64:
+    _test_result_metric("Skipped")
+
+# In-development tests are EXPECTED to fail and are skipped by whole-suite
+# runs. They are their own category: never folded into "passed", never
+# dropped from the total. A backlog you cannot see is a backlog nobody
+# burns down.
+fn get_in_development_count() -> i64:
+    _test_result_metric("In Development")
+
 fn get_bug_total() -> i64:
     if not file_exists("doc/08_tracking/bug/bug_db.sdn"):
         return 0
@@ -340,6 +362,9 @@ fn run_stats(args: [text]):
     # Test statistics
     val test_count = get_test_count()
     val pass_count = get_pass_count()
+    val fail_count = get_fail_count()
+    val skip_count = get_skip_count()
+    val indev_count = get_in_development_count()
 
     # Test spec file counts (always shown, fast)
     val unit_specs = count_spec_files("test/unit")
@@ -358,8 +383,17 @@ fn run_stats(args: [text]):
             print "Tests:"
             print "  Total:   {test_count} tests"
             print "  Passed:  {pass_count} ({pass_rate}%)"
+            print "  Failed:  {fail_count}"
+            print "  Skipped: {skip_count}"
+            print "  In development: {indev_count}"
             if pass_count == test_count:
                 print "  Status:  ALL PASSING"
+            # Totals must reconcile. An unaccounted remainder means a
+            # category exists in the report that this summary does not
+            # know about — say so rather than publishing a partial view.
+            val accounted = pass_count + fail_count + skip_count + indev_count
+            if accounted != test_count:
+                print "  Other:   {test_count - accounted} (unclassified)"
             print ""
         else:
             print "Tests:"
@@ -501,7 +535,7 @@ fn run_stats(args: [text]):
             test_files, total_lines, code_lines, comment_lines, blank_lines,
             compiler_sloc, app_sloc, lib_sloc, test_sloc, md_example_lines, spl_sdoctest_lines,
             rust_files, rust_sloc,
-            test_count, pass_count,
+            test_count, pass_count, fail_count, skip_count, indev_count,
             unit_specs, integration_specs, system_specs,
             sdoctest_code, sdoctest_md,
             feat_total, feat_complete, feat_progress, feat_planned,

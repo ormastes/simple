@@ -1,0 +1,149 @@
+"""
+# Tag index — which tests/specs carry which `@tag:<name>`
+
+@tag:stdlib
+@tag:testing
+
+## Why this exists
+
+`@tag:<name>` annotations already exist in-tree (1,786 occurrences at
+2026-08-23) and `std.test_runner.extract_tags` already knows how to parse
+every accepted spelling (`tag: "x"`, `# @tag: a, b`, `@tag: a, b` inside a
+docstring, bracketed and/or quoted). What did NOT exist was any way to ASK
+the tree a question about them: how many items carry a tag, and which ones.
+
+That gap is what makes an "in development" backlog invisible. A count with
+no way to enumerate it is a number nobody can act on, so this module
+provides both, and the count is derived from the same parser the test
+runner uses rather than from a second, drifting one.
+"""
+
+use std.io.{dir_walk_native}
+use std.io_runtime.{read_file_text}
+use std.test_runner.test_manifest_scanner.{extract_tags}
+
+# The canonical tag for "expected to fail, skipped by whole-suite runs".
+# Single source of truth so the runner lane, the reporting lane and the CLI
+# cannot drift onto three different spellings. The applied form in-tree is
+# the hyphenated `@tag: in-development`, matching the 69 existing `@tag:`
+# specs; `tag_normalize` below folds the underscore spelling onto it so a
+# lane that writes `in_development` is still counted rather than silently
+# dropped. Silently dropping is the exact failure this whole surface exists
+# to prevent, so tolerating both spellings is the point, not sloppiness.
+val IN_DEVELOPMENT_TAG = "in-development"
+
+# Fold a tag onto its canonical form: lowercase, `_` -> `-`. Comparison and
+# grouping both go through this, so `In_Development`, `in_development` and
+# `in-development` are ONE category with ONE count.
+fn tag_normalize(t: text) -> text:
+    t.to_lower().replace("_", "-")
+
+struct TaggedItem:
+    path: text
+    tags: [text]
+
+struct TagIndex:
+    items: [TaggedItem]
+    scanned: i64
+
+fn tag_index_new() -> TagIndex:
+    TagIndex(items: [], scanned: 0)
+
+fn _split_tags(joined: text) -> [text]:
+    var out: [text] = []
+    if joined == "":
+        return out
+    for part in joined.split(","):
+        val t = tag_normalize(part.trim())
+        if t != "":
+            out.push(t)
+    out
+
+# Scan one file. Returns an item only when the file actually carries a tag —
+# an untagged file is counted as scanned but not indexed, so `scanned` stays
+# an honest denominator.
+fn tag_scan_file(path: text) -> [TaggedItem]:
+    var out: [TaggedItem] = []
+    val content = read_file_text(path)
+    if content == "":
+        return out
+    val tags = _split_tags(extract_tags(content))
+    if tags.len() > 0:
+        out.push(TaggedItem(path: path, tags: tags))
+    out
+
+fn tag_index_scan(roots: [text]) -> TagIndex:
+    var idx = tag_index_new()
+    for root in roots:
+        for path in dir_walk_native(root):
+            if not path.ends_with(".spl"):
+                continue
+            idx.scanned = idx.scanned + 1
+            for item in tag_scan_file(path):
+                idx.items.push(item)
+    idx
+
+fn tag_index_has(item: TaggedItem, tag: text) -> bool:
+    val want = tag_normalize(tag)
+    for t in item.tags:
+        if t == want:
+            return true
+    false
+
+# Every item carrying `tag`, in scan order.
+fn tag_index_items_with(idx: TagIndex, tag: text) -> [text]:
+    var out: [text] = []
+    for item in idx.items:
+        if tag_index_has(item, tag):
+            out.push(item.path)
+    out
+
+fn tag_index_count(idx: TagIndex, tag: text) -> i64:
+    tag_index_items_with(idx, tag).len()
+
+# Number of items carrying the in-development tag. This is the count every
+# statistics surface must report as its OWN category — never folded into
+# "passed", never dropped from totals.
+fn tag_index_in_development_count(idx: TagIndex) -> i64:
+    tag_index_count(idx, IN_DEVELOPMENT_TAG)
+
+# All distinct tags with their counts, sorted by descending count then name.
+fn tag_index_tag_counts(idx: TagIndex) -> [(text, i64)]:
+    var names: [text] = []
+    var counts: [i64] = []
+    for item in idx.items:
+        for t in item.tags:
+            var found = -1
+            var i = 0
+            while i < names.len():
+                if names[i] == t:
+                    found = i
+                i = i + 1
+            if found >= 0:
+                counts[found] = counts[found] + 1
+            else:
+                names.push(t)
+                counts.push(1)
+    var rows: [(text, i64)] = []
+    var used: [bool] = []
+    var k = 0
+    while k < names.len():
+        used.push(false)
+        k = k + 1
+    var emitted = 0
+    while emitted < names.len():
+        var best = -1
+        var j = 0
+        while j < names.len():
+            if not used[j]:
+                if best < 0:
+                    best = j
+                elif counts[j] > counts[best]:
+                    best = j
+                elif counts[j] == counts[best] and names[j] < names[best]:
+                    best = j
+            j = j + 1
+        used[best] = true
+        rows.push((names[best], counts[best]))
+        emitted = emitted + 1
+    rows
