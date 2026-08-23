@@ -38,6 +38,7 @@ fn outcome_name(o: InDevelopmentOutcome) -> text:
         case InDevelopmentOutcome.ExpectedFailure: "ExpectedFailure"
         case InDevelopmentOutcome.UnexpectedPass: "UnexpectedPass"
         case InDevelopmentOutcome.ExplicitRun: "ExplicitRun"
+        case InDevelopmentOutcome.LoadFailure: "LoadFailure"
 
 describe "In-development tag: the tag name and its extraction":
     it "uses the hyphenated in-development spelling that matches the tree convention":
@@ -76,24 +77,24 @@ describe "In-development tag: the tag name and its extraction":
 describe "In-development tag (a): a failing in-development test does not fail the suite":
     it "classifies a tagged failing spec as ExpectedFailure, not a suite failure":
         step("Classify: tagged, swept (not explicitly targeted), 3 failures")
-        val o = classify_in_development(true, false, 3, 0, false)
+        val o = classify_in_development(true, false, 3, 0, false, false)
         expect(outcome_name(o)).to_equal("ExpectedFailure")
 
     it "classifies a tagged spec that crashed or timed out as ExpectedFailure too":
         step("A WIP spec that dies must not escape through the error channel")
         # evidence(pinned oracle): errored folds timed_out and a non-empty
         # error; without this a crashing WIP spec would still redden the suite.
-        val o = classify_in_development(true, false, 0, 0, true)
+        val o = classify_in_development(true, false, 0, 0, true, false)
         expect(outcome_name(o)).to_equal("ExpectedFailure")
 
     it "classifies a tagged spec that executed nothing as ExpectedFailure, never a promotion signal":
         step("Zero passed, zero failed, tagged, swept")
-        val o = classify_in_development(true, false, 0, 0, false)
+        val o = classify_in_development(true, false, 0, 0, false, false)
         expect(outcome_name(o)).to_equal("ExpectedFailure")
 
     it "leaves an UNTAGGED failing spec alone so ordinary reds stay red":
         step("Classify: untagged, 3 failures")
-        val o = classify_in_development(false, false, 3, 0, false)
+        val o = classify_in_development(false, false, 3, 0, false, false)
         expect(outcome_name(o)).to_equal("NotInDevelopment")
 
 describe "In-development tag (b): the skip is counted and printed, never invisible":
@@ -106,18 +107,18 @@ describe "In-development tag (b): the skip is counted and printed, never invisib
 
     it "renders a summary row stating the in-development skip count":
         step("Render the summary row with skips only")
-        val line = in_development_summary_line(7, 0)
+        val line = in_development_summary_line(7, 0, 0)
         expect(line).to_contain(IN_DEVELOPMENT_SUMMARY_MARKER)
         expect(line).to_contain("7 skipped")
 
     it "renders the summary row even when the count is zero unexpected passes":
         step("The row must not silently vanish when only skips exist")
-        expect(in_development_summary_line(1, 0)).to_contain("1 skipped")
+        expect(in_development_summary_line(1, 0, 0)).to_contain("1 skipped")
 
 describe "In-development tag (c): explicit-path invocation still runs the test honestly":
     it "classifies an explicitly targeted tagged spec as ExplicitRun, not a skip":
         step("Classify: tagged, explicitly targeted, 3 failures")
-        val o = classify_in_development(true, true, 3, 0, false)
+        val o = classify_in_development(true, true, 3, 0, false, false)
         expect(outcome_name(o)).to_equal("ExplicitRun")
 
     it "treats naming the file itself as explicit targeting":
@@ -149,7 +150,7 @@ describe "In-development tag (c): explicit-path invocation still runs the test h
 describe "In-development tag (d): an unexpectedly passing test is reported distinctly":
     it "classifies a tagged passing spec as UnexpectedPass, distinct from a plain pass":
         step("Classify: tagged, swept, 4 passed, 0 failed")
-        val o = classify_in_development(true, false, 0, 4, false)
+        val o = classify_in_development(true, false, 0, 4, false, false)
         expect(outcome_name(o)).to_equal("UnexpectedPass")
 
     it "renders an unexpected-pass line with its own marker and the promotion action":
@@ -166,6 +167,54 @@ describe "In-development tag (d): an unexpectedly passing test is reported disti
 
     it "surfaces the unexpected-pass count in the summary row":
         step("Render the summary row with both counts")
-        val line = in_development_summary_line(7, 2)
+        val line = in_development_summary_line(7, 2, 0)
         expect(line).to_contain("7 skipped")
         expect(line).to_contain("2 UNEXPECTED PASS")
+
+describe "In-development tag (e): a spec that cannot LOAD is BROKEN, not unfinished":
+    it "classifies a tagged spec that failed to load as LoadFailure, not ExpectedFailure":
+        step("Classify: tagged, swept, executed nothing, load_failed=true")
+        # evidence(pinned oracle): the tag is a claim about the CODE UNDER
+        # TEST. A spec that cannot be parsed is a defect in the SPEC, and
+        # folding it into the skip count is how a tree-wide tagging sweep
+        # would turn the tag into a place broken files go to stop being
+        # counted.
+        val o = classify_in_development(true, false, 0, 0, true, true)
+        expect(outcome_name(o)).to_equal("LoadFailure")
+
+    it "prefers LoadFailure over ExpectedFailure even when failures were also reported":
+        step("Classify: tagged, swept, 3 failures AND a load failure")
+        val o = classify_in_development(true, false, 3, 0, true, true)
+        expect(outcome_name(o)).to_equal("LoadFailure")
+
+    it "still classifies a clean zero-example file as ExpectedFailure, preserving Decision 5":
+        step("Classify: tagged, swept, executed nothing, but it LOADED fine")
+        # evidence(pinned oracle): is_load_failure is exactly
+        # `unrun_reason(error) != "zero-examples"`, so a file that loads and
+        # simply declares no examples is NOT broken -- and is still not a
+        # promotion signal.
+        val o = classify_in_development(true, false, 0, 0, false, false)
+        expect(outcome_name(o)).to_equal("ExpectedFailure")
+
+    it "renders a broken line naming the marker, the path and the load reason":
+        step("Render the broken line")
+        val line = in_development_broken_line("test/01_unit/broken_spec.spl", "unresolved-module")
+        expect(line).to_contain(IN_DEVELOPMENT_BROKEN_MARKER)
+        expect(line).to_contain("test/01_unit/broken_spec.spl")
+        expect(line).to_contain("unresolved-module")
+
+    it "keeps the broken marker distinct from the skip marker":
+        step("A broken spec must never read as a routine expected failure")
+        expect(in_development_broken_line("a_spec.spl", "parse-error").contains(IN_DEVELOPMENT_SKIP_MARKER)).to_equal(false)
+
+    it "surfaces the broken count in the summary and says it FAILS the run":
+        step("Render the summary row with all three buckets")
+        val line = in_development_summary_line(7, 2, 3)
+        expect(line).to_contain("7 skipped")
+        expect(line).to_contain("2 UNEXPECTED PASS")
+        expect(line).to_contain("3 BROKEN")
+        expect(line).to_contain("FAILS the run")
+
+    it "omits the broken clause entirely when nothing is broken":
+        step("The common case must not carry a noisy zero")
+        expect(in_development_summary_line(4, 0, 0).contains("BROKEN")).to_equal(false)
