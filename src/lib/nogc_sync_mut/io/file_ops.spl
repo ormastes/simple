@@ -3,7 +3,7 @@
 
 # Extern fn declarations (runtime resolves at file level)
 
-use std.io_runtime.{read_file_text, read_file_text_result, file_delete, file_copy}
+use std.io_runtime.{read_file_text, read_file_text_result, file_read_result, file_delete, file_copy}
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_mmap_read_text(path: text) -> text
 @unsafe(reason: "raw nullable mmap byte-array ABI; nil means mapping or read failure", capabilities: [ffi])
@@ -73,9 +73,18 @@ fn file_is_regular_no_follow(path: text) -> bool:
 fn file_size_raw(path: text) -> i64:
     rt_file_size(path)
 
+# Do NOT forward to `read_file_text`: it lived in std.io_runtime and forwarded
+# back to `file_read`, which has a second co-compiled definition (this one), so
+# last-definition-wins dispatch closed the pair into unbounded mutual recursion
+# and aborted the process with a native stack overflow on the FIRST read of any
+# file. std.io_runtime.read_file_text no longer routes through `file_read`; this
+# side is pinned to the uniquely-named `file_read_result` as well so neither
+# half of the pair can re-close the cycle.
+# doc/08_tracking/bug/seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md
 fn file_read(path: text) -> text:
-    # rt_file_read_text returns Option in bootstrap runtime — unwrap with ??
-    read_file_text(path)
+    match file_read_result(path):
+        case Ok(content): content
+        case Err(_): ""
 
 # reason positional io file_ops API
 fn file_write(path: text, content: text) -> bool:
@@ -137,8 +146,14 @@ fn file_unlock(handle: i64) -> bool:
         released = rt_file_unlock(handle)
     released
 
+# Call the extern directly, not the sibling forwarder: `file_size_raw` also has
+# a definition in std.io_runtime that forwards back to `file_size`, and both
+# names are duplicated across co-compiled modules, so the pair can close into
+# infinite mutual recursion under last-definition-wins dispatch. Same defect
+# class as file_read/read_file_text -- see
+# doc/08_tracking/bug/seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md
 fn file_size(path: text) -> i64:
-    file_size_raw(path)
+    rt_file_size(path)
 
 # --- Memory-Mapped File I/O (SFFI wrappers) ---
 

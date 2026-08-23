@@ -157,11 +157,26 @@ pub fn file_read_result(path: text) -> Result<text, text>:
         # value; it only removes the optional type wrapper.
         Ok(content ?? "")
 
+# Do NOT forward these through `file_read`. The name `file_read` has a second
+# co-compiled definition (src/lib/nogc_sync_mut/io/file_ops.spl:76) whose body
+# is `read_file_text(path)`. When cross-module symbol resolution falls back to
+# last-definition-wins (warning
+# `compiler_cross_module_private_symbol_collision`), the call below binds to
+# THAT copy and the pair becomes unbounded mutual recursion with no base case:
+# file_ops.file_read -> read_file_text -> file_read -> ... -> SIGABRT
+# "fatal runtime error: stack overflow" on the very first read of ANY file.
+# Delegating to `file_read_result`, whose name has exactly one definition in
+# the tree, breaks the cycle whichever copy dispatch picks.
+# doc/08_tracking/bug/seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md
 pub fn read_file(path: text) -> text:
-    file_read(path)
+    match file_read_result(path):
+        case Ok(content): content
+        case Err(_): ""
 
 pub fn read_file_text(path: text) -> text:
-    file_read(path)
+    match file_read_result(path):
+        case Ok(content): content
+        case Err(_): ""
 
 pub fn read_file_text_result(path: text) -> Result<text, text>:
     file_read_result(path)
@@ -229,8 +244,17 @@ pub fn file_size(path: text) -> i64:
         return 0
     size
 
+# Same cycle hazard as read_file_text above: `file_size` has 10 co-compiled
+# definitions in src/lib alone, one of which
+# (src/lib/nogc_sync_mut/io/file_ops.spl:140) forwards straight back to
+# `file_size_raw`. Under last-definition-wins fallback dispatch that pair is
+# unbounded mutual recursion. Inline the body (identical semantics to the
+# `file_size` directly above) so no ambiguous name is on the path.
 pub fn file_size_raw(path: text) -> i64:
-    file_size(path)
+    val size = rt_file_size(path)
+    if size < 0:
+        return 0
+    size
 
 # ============================================================================
 # Process Execution

@@ -1,0 +1,90 @@
+# Regression spec for seed_file_read_infinite_recursion_stack_overflow_2026-08-23.
+#
+# `std.io_runtime.read_file_text` forwarded to the bare name `file_read`, and
+# `src/lib/nogc_sync_mut/io/file_ops.spl` defines a SECOND `file_read` whose
+# body forwarded straight back to `read_file_text`. Both names are co-compiled
+# duplicates, so on a build where cross-module resolution falls back to
+# last-definition-wins (warning `compiler_cross_module_private_symbol_collision`)
+# the pair closed into unbounded mutual recursion with no base case: the FIRST
+# read of ANY file aborted the whole process with
+#   thread 'simple-main' has overflowed its stack
+#   fatal runtime error: stack overflow, aborting
+# rc=134, core dumped, before any output. It is NOT procfs-specific -- a plain
+# regular file fails identically. It took `main` down via ff095d31591 (every
+# `native-build` rc=134) and was only worked around, not fixed, at that one call
+# site.
+#
+# The same shape existed a second time in the same module family:
+# `io_runtime.file_size_raw` -> `file_size` -> (file_ops) `file_size` ->
+# `file_size_raw`. `file_size` has 10 co-compiled definitions under src/lib.
+# That pair had not fired yet on any measured build -- it is pinned here as a
+# latent instance of the same defect class, not as a reproduced crash.
+#
+# Both forwarders now route through uniquely-named callees / the extern
+# directly, so no ambiguous name sits on the path and no dispatch outcome can
+# re-close the cycle. Every `it` below is an ABORT test: pre-fix the process
+# died with SIGABRT rather than failing an expectation.
+
+use std.io_runtime.{file_read, file_read_result, read_file, read_file_text}
+use std.io_runtime.{file_size, file_size_raw, file_write, file_delete}
+
+describe "std.io_runtime file forwarders terminate":
+    it "file_read returns content instead of recursing forever":
+        val path = "/tmp/simple_file_read_forwarder_spec.txt"
+        file_write(path, "abc")
+        expect(file_read(path)).to_equal("abc")
+        file_delete(path)
+
+    it "read_file_text terminates (the forwarder that closed the cycle)":
+        val path = "/tmp/simple_read_file_text_forwarder_spec.txt"
+        file_write(path, "abcd")
+        expect(read_file_text(path)).to_equal("abcd")
+        file_delete(path)
+
+    it "read_file terminates (sibling forwarder, same callee)":
+        val path = "/tmp/simple_read_file_forwarder_spec.txt"
+        file_write(path, "abcde")
+        expect(read_file(path)).to_equal("abcde")
+        file_delete(path)
+
+    it "file_read_result is the uniquely-named base and terminates":
+        val path = "/tmp/simple_file_read_result_forwarder_spec.txt"
+        file_write(path, "xy")
+        match file_read_result(path):
+            case Ok(content): expect(content).to_equal("xy")
+            case Err(_): expect("err").to_equal("ok")
+        file_delete(path)
+
+    it "reads a zero-st_size pseudo file without recursing":
+        # /proc/meminfo reports st_size 0 and still yields content; it was the
+        # first sighting and briefly made a size-keyed read loop the suspect.
+        # Kept as a neighbour case, NOT as the cause.
+        expect(file_read("/proc/meminfo").len() > 0).to_equal(true)
+
+    it "file_size terminates (latent second instance of the same class)":
+        val path = "/tmp/simple_file_size_forwarder_spec.txt"
+        file_write(path, "abc")
+        expect(file_size(path)).to_equal(3)
+        file_delete(path)
+
+    # The behavioural cases above pass on BOTH sides of the fix under
+    # `simple test` -- that harness resolves the duplicate names correctly, so
+    # it never reproduced the abort. The load-bearing pre-fix proof was
+    # `simple run` on the run20-class seed (rc=134). These two source
+    # invariants close that gap: they fail pre-fix on EVERY engine, because the
+    # cycle is a static property of the two bodies, not of one dispatch outcome.
+    it "std.io_runtime.read_file_text does not forward to the ambiguous name file_read":
+        val src = file_read("src/lib/nogc_sync_mut/io_runtime.spl")
+        val marker = "pub fn read_file_text(path: text) -> text:\n    file_read(path)"
+        expect(src.contains(marker)).to_equal(false)
+
+    it "io.file_ops.file_read does not forward to the ambiguous name read_file_text":
+        val src = file_read("src/lib/nogc_sync_mut/io/file_ops.spl")
+        expect(src.contains("fn file_read(path: text) -> text:") and
+               src.contains("    read_file_text(path)\n\n# reason positional io file_ops API")).to_equal(false)
+
+    it "file_size_raw terminates (the other half of that pair)":
+        val path = "/tmp/simple_file_size_raw_forwarder_spec.txt"
+        file_write(path, "abcd")
+        expect(file_size_raw(path)).to_equal(4)
+        file_delete(path)
