@@ -144,3 +144,62 @@ the tier blind.
 - `compiler/linker/assurance_object_note_spec.spl`, 1/5 —
   `semantic: type mismatch: cannot convert array to int` in
   `add_assurance_note_section`.
+
+## Pre-existing test-tree divergence at landing time (required record)
+
+`sh scripts/check/check-test-tree-divergence.shs --ref HEAD` verdict on the
+tip of this range:
+
+```
+5957 pairs compared, 5100 identical, 857 diverged
+baseline has 854 known-diverged entries
+NEW divergence(s) not in baseline:
+  + integration:storage/dbfs/dbfs_no_regression_spec.spl
+  + unit:os/kernel/arch/riscv32_boot_spec.spl
+  + unit:os/kernel/loader/executable_source_vfs_spec.spl
+FAIL — 857 diverged vs 854 baselined (3 new, 0 fixed-but-still-baselined);
+1 mirror-only (0 unallowlisted, 0 stale-allowlist)
+```
+
+**All three are pre-existing and none is introduced by this range.** Verified
+by comparing each pair's blob hashes at BASE (`origin/main`) and at NEW
+(this tip) directly with `git cat-file blob` — committed content on both
+sides, never the shared working copy:
+
+| pair | at `origin/main` | at this tip |
+|---|---|---|
+| `dbfs_no_regression_spec.spl` | DIVERGED | DIVERGED |
+| `riscv32_boot_spec.spl` | DIVERGED | DIVERGED |
+| `executable_source_vfs_spec.spl` | DIVERGED | DIVERGED |
+
+Identical status on both sides, so the offender list is unchanged across the
+range. Three independent checks agree:
+
+1. This range touches exactly **four** files under `test/` — the two members
+   of `compiler/ffi_gen/backend_gating_spec.spl` and the two of
+   `compiler/mir_opt/auto_vectorize_spec.spl` — and nothing else, so no other
+   pair can have moved.
+2. Both pairs are **byte-identical** between `test/01_unit` and `test/unit` at
+   this tip (sha256 `b30573663aa57736` and `7873d8ec2bb2ff7f` respectively),
+   so neither introduces divergence.
+3. **Neither pair appears in** `scripts/check/test_tree_divergence_baseline.txt`
+   (854 rows), so neither can be a stale-baseline flip in the other direction
+   either.
+
+### Deviation from the documented escape, stated rather than glossed
+
+`vcs.md` specifies `check-test-tree-divergence-delta.shs <BASE> <NEW>` for this
+situation. That helper runs the full guard **twice**. It was attempted three
+times on this range and **never produced a verdict**: ~45 min at load 59, then
+~140 min at load 46-48, then the single-sided form at ~180 min. Total ~5.5 h of
+guard runtime, zero verdicts, while `origin/main` advanced 3 commits in 14
+minutes — i.e. the base goes stale roughly ten times faster than the delta
+helper can validate a range on this box. The single-sided guard eventually
+terminated and is the verdict quoted above; the BASE side was then established
+by targeted blob comparison of exactly the three named pairs rather than by a
+second full scan. That is narrower than the helper but sound for the question
+asked, and it is recorded here so the shortcut is visible rather than implied.
+
+Worth filing separately: a mandatory pre-push guard that cannot finish inside
+the repo's own merge cadence is a landing blocker for every lane, not just
+this one.
