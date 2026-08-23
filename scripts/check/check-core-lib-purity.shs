@@ -9,47 +9,189 @@
 # Existing debt is baselined in core_purity_baseline.txt (one path per line).
 # The gate RATCHETS: any violating file NOT in the baseline fails the check.
 # Shrink the baseline as files are cleaned; never add to it without a plan note.
-set -eu
+#
+# HARDENED 2026-08-23 — guard-vacuity audit, doc/09_report/guard_vacuity_audit_2026-08-23.md.
+# Three defects of the class that has bitten repeatedly (check-cow-alias-hotpath
+# 50a379f83b7, check-untyped-return-value da90106fcd6):
+#
+#   1. VACUOUS PASS. The scan never counted what it looked AT, only what it
+#      found. Run against a tree with no src/lib/common the guard printed
+#      "core_purity_ok=true" and exited 0 — measured. Zero files scanned is not
+#      cleanliness, it is a moved tree or a broken extractor. Now: fewer than
+#      MIN_FILES scanned is ERROR (exit 2).
+#   2. MISSING TOOL => PASS. Both scans were `rg ... 2>/dev/null || true`, so a
+#      host without ripgrep produced no output and a green verdict. Absence of a
+#      tool is absence of evidence. `rg` is now required (ERROR if missing) and
+#      its exit status is read DIRECTLY into a variable on the line after the
+#      invocation — never through a pipe, whose $? is the last stage's — with
+#      rg's documented 0=match / 1=no-match / >1=error tri-state honoured, so a
+#      genuine rg failure can no longer masquerade as "no violations".
+#   3. ONE-DIRECTIONAL RATCHET. A baseline entry that is now clean was PRINTED
+#      as core_purity_baseline_stale= and then ignored, exit 0. A baseline that
+#      no longer describes the tree is how a ratchet silently stops ratcheting,
+#      so a stale entry is now a FAIL, matching check-test-tree-divergence.shs.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS  — <n> file(s) scanned, 0 new, 0 stale     exit 0
+#   FAIL  — <n> file(s) scanned, ...                exit 1
+#   ERROR — nothing was checked (<reason>)          exit 2
+#
+# --selftest is fatal and runs before every real scan (must-fail fixtures
+# included; a selftest built only from must-pass fixtures proves nothing).
+set -u
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-cd "$ROOT_DIR"
-BASELINE="scripts/check/core_purity_baseline.txt"
+
+MODE=real
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE=selftest; shift ;;
+        *) echo "unknown argument: $1" >&2
+           echo "ERROR — nothing was checked (bad argument)"; exit 2 ;;
+    esac
+done
 
 IMPURE_EXTERN='\brt_(file|dir|process|env|io|net|tcp|udp|stdin|stdout|cli|exit|time|socket|http)[a-z0-9_]*'
 IMPURE_IMPORT='^use (std\.)?(nogc_sync_mut|nogc_async_mut|gc_async_mut|gc_sync_mut)'
 
-tmp_violations="$(mktemp)"
-trap 'rm -f "$tmp_violations"' EXIT INT TERM
+# Non-vacuity floor. The core tier held 933 .spl files at 74f2b254081; a scan
+# that sees fewer than this many is not a clean tree, it is a broken scan.
+# Deliberately far below the real count so ordinary churn never trips it.
+MIN_FILES=${CORE_PURITY_MIN_FILES:-50}
 
-rg -l "$IMPURE_EXTERN" src/lib/common/ 2>/dev/null | sort >"$tmp_violations" || true
-rg -l "$IMPURE_IMPORT" src/lib/common/ 2>/dev/null | sort >>"$tmp_violations" || true
-sort -u "$tmp_violations" -o "$tmp_violations"
+# scan <tree-root> <baseline-path> <workdir> -> report + verdict, rc 0/1/2
+scan() {
+    _root=$1; _base=$2; _w=$3
+    _dir="$_root/src/lib/common"
 
-total=$(wc -l <"$tmp_violations" | tr -d ' ')
-new_count=0
-while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    if ! grep -qxF "$f" "$BASELINE" 2>/dev/null; then
-        echo "core_purity_new_violation=$f"
-        new_count=$((new_count + 1))
+    if [ ! -d "$_dir" ]; then
+        echo "ERROR — nothing was checked (core tier not found: $_dir)"
+        return 2
     fi
-done <"$tmp_violations"
 
-baseline_total=$(grep -c . "$BASELINE" 2>/dev/null || echo 0)
-echo "core_purity_baselined=$baseline_total"
-echo "core_purity_current=$total"
-echo "core_purity_new=$new_count"
-
-# Report baseline entries that are now clean (candidates for removal)
-while IFS= read -r b; do
-    [ -n "$b" ] || continue
-    if ! grep -qxF "$b" "$tmp_violations"; then
-        echo "core_purity_baseline_stale=$b"
+    _files=$(find "$_dir" -name '*.spl' -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$_files" -lt "$MIN_FILES" ]; then
+        echo "ERROR — nothing was checked (only $_files .spl file(s) under $_dir, floor is $MIN_FILES: moved tree or broken scan)"
+        return 2
     fi
-done <"$BASELINE"
 
-if [ "$new_count" -gt 0 ]; then
-    echo "core_purity_ok=false"
-    exit 1
+    # rg's exit status is tri-state: 0 match, 1 no match, >1 real error.
+    # Captured directly, not through a pipe, so an rg failure cannot be read as
+    # "no violations". This is the defect that made a missing rg a green run.
+    rg -l "$IMPURE_EXTERN" "$_dir" >"$_w/a" 2>"$_w/aerr"; _rc_a=$?
+    rg -l "$IMPURE_IMPORT" "$_dir" >"$_w/b" 2>"$_w/berr"; _rc_b=$?
+    if [ "$_rc_a" -gt 1 ] || [ "$_rc_b" -gt 1 ]; then
+        echo "ERROR — nothing was checked (rg failed: $(cat "$_w/aerr" "$_w/berr" | head -1))"
+        return 2
+    fi
+
+    # Paths are recorded relative to the tree root so the baseline is portable.
+    cat "$_w/a" "$_w/b" | sed "s|^$_root/||" | sort -u >"$_w/cur"
+
+    if [ ! -f "$_base" ]; then
+        echo "ERROR — nothing was checked (missing baseline: $_base)"
+        return 2
+    fi
+    grep -v '^[[:space:]]*$' "$_base" | sort -u >"$_w/base"
+
+    comm -13 "$_w/base" "$_w/cur" >"$_w/new"
+    comm -23 "$_w/base" "$_w/cur" >"$_w/stale"
+
+    sed 's/^/core_purity_new_violation=/'  "$_w/new"
+    sed 's/^/core_purity_baseline_stale=/' "$_w/stale"
+    echo "core_purity_files_scanned=$_files"
+    echo "core_purity_baselined=$(wc -l <"$_w/base" | tr -d ' ')"
+    echo "core_purity_current=$(wc -l <"$_w/cur" | tr -d ' ')"
+
+    _n=$(wc -l <"$_w/new" | tr -d ' ')
+    _s=$(wc -l <"$_w/stale" | tr -d ' ')
+    if [ "$_n" -gt 0 ] || [ "$_s" -gt 0 ]; then
+        echo "core_purity_ok=false"
+        echo "FAIL — $_files file(s) scanned, $_n new violation(s), $_s stale baseline entry(ies): $(cat "$_w/new" "$_w/stale" | tr '\n' ' ')"
+        return 1
+    fi
+    echo "core_purity_ok=true"
+    echo "PASS — $_files file(s) scanned, 0 new, 0 stale"
+    return 0
+}
+
+# --- selftest ---------------------------------------------------------------
+mkcore() {
+    _d=$1; _n=$2
+    mkdir -p "$_d/src/lib/common"
+    _i=0
+    while [ "$_i" -lt "$_n" ]; do
+        printf 'fn pure_%s(x: i64) -> i64:\n    return x + 1\n' "$_i" >"$_d/src/lib/common/f$_i.spl"
+        _i=$((_i + 1))
+    done
+    : >"$_d/base.txt"
+}
+
+run_selftest() {
+    command -v rg >/dev/null 2>&1 || { echo "ERROR — nothing was checked (ripgrep not installed; a missing tool is not a pass)"; exit 2; }
+    _st=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    _f=0
+
+    # 1. clean core tier above the floor MUST PASS
+    mkcore "$_st/f1" 60; mkdir -p "$_st/w1"
+    scan "$_st/f1" "$_st/f1/base.txt" "$_st/w1" >"$_st/o1" 2>&1
+    [ $? -eq 0 ] || { echo "selftest FAIL(1): clean tree did not PASS: $(tail -1 "$_st/o1")"; _f=1; }
+
+    # 2. MUST-FAIL: an unbaselined impure extern
+    mkcore "$_st/f2" 60
+    printf 'extern fn rt_file_read(p: text) -> text\n' >"$_st/f2/src/lib/common/bad.spl"
+    mkdir -p "$_st/w2"
+    scan "$_st/f2" "$_st/f2/base.txt" "$_st/w2" >"$_st/o2" 2>&1
+    [ $? -eq 1 ] && grep -q 'bad.spl' "$_st/o2" \
+        || { echo "selftest FAIL(2): impure extern did not FAIL naming it: $(tail -1 "$_st/o2")"; _f=1; }
+
+    # 3. MUST-FAIL: an unbaselined host-tier import
+    mkcore "$_st/f3" 60
+    printf 'use std.nogc_sync_mut.io\n' >"$_st/f3/src/lib/common/imp.spl"
+    mkdir -p "$_st/w3"
+    scan "$_st/f3" "$_st/f3/base.txt" "$_st/w3" >"$_st/o3" 2>&1
+    [ $? -eq 1 ] && grep -q 'imp.spl' "$_st/o3" \
+        || { echo "selftest FAIL(3): host-tier import did not FAIL naming it: $(tail -1 "$_st/o3")"; _f=1; }
+
+    # 4. MUST-FAIL: stale baseline entry (was only printed, exit 0, before this fix)
+    mkcore "$_st/f4" 60; printf 'src/lib/common/departed.spl\n' >"$_st/f4/base.txt"
+    mkdir -p "$_st/w4"
+    scan "$_st/f4" "$_st/f4/base.txt" "$_st/w4" >"$_st/o4" 2>&1
+    [ $? -eq 1 ] && grep -q 'departed.spl' "$_st/o4" \
+        || { echo "selftest FAIL(4): stale baseline entry did not FAIL: $(tail -1 "$_st/o4")"; _f=1; }
+
+    # 5. MUST-ERROR: no core tier at all — the vacuous-pass shape this fix closes
+    mkdir -p "$_st/f5/src" "$_st/w5"; : >"$_st/f5/base.txt"
+    scan "$_st/f5" "$_st/f5/base.txt" "$_st/w5" >"$_st/o5" 2>&1
+    [ $? -eq 2 ] && grep -q 'nothing was checked' "$_st/o5" \
+        || { echo "selftest FAIL(5): absent core tier did not ERROR: $(tail -1 "$_st/o5")"; _f=1; }
+
+    # 6. MUST-ERROR: core tier present but far below the non-vacuity floor
+    mkcore "$_st/f6" 3; mkdir -p "$_st/w6"
+    scan "$_st/f6" "$_st/f6/base.txt" "$_st/w6" >"$_st/o6" 2>&1
+    [ $? -eq 2 ] \
+        || { echo "selftest FAIL(6): below-floor scan did not ERROR: $(tail -1 "$_st/o6")"; _f=1; }
+
+    # 7. MUST-ERROR: missing baseline
+    mkcore "$_st/f7" 60; rm -f "$_st/f7/base.txt"; mkdir -p "$_st/w7"
+    scan "$_st/f7" "$_st/f7/base.txt" "$_st/w7" >"$_st/o7" 2>&1
+    [ $? -eq 2 ] \
+        || { echo "selftest FAIL(7): missing baseline did not ERROR: $(tail -1 "$_st/o7")"; _f=1; }
+
+    rm -rf "$_st"
+    [ "$_f" -eq 0 ] || return 1
+    echo "selftest: 7 fixture(s) OK (3 must-fail, 3 must-error, 1 must-pass)"
+    return 0
+}
+
+run_selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+
+if [ "$MODE" = selftest ]; then
+    echo "PASS — selftest only, 7 fixture(s) checked, no tree scanned"
+    exit 0
 fi
-echo "core_purity_ok=true"
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+scan "$ROOT_DIR" "$ROOT_DIR/scripts/check/core_purity_baseline.txt" "$WORK"
+exit $?
