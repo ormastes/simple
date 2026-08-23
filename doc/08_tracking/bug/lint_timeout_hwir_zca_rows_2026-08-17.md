@@ -1,4 +1,38 @@
-# Lint cost on src/compiler/50.mir/hwir/zca_rows.spl — dominant term is an interpreted frontend, not a superlinear parser
+# RESOLVED (2026-08-23) — Lint cost on src/compiler/50.mir/hwir/zca_rows.spl
+
+> **STATUS: RESOLVED 2026-08-23.** The symptom this record was opened for is
+> gone, and the residual fixed cost has been root-caused and fixed. Everything
+> below is retained as history; read this box first.
+>
+> **Symptom gone.** `zca_rows.spl` in full (1,901 lines, 30 row-builder
+> functions) — recorded here and in `.claude/rules/commands.md` as
+> `>2400s (killed)` and "exceeds any practical budget" — lints **clean in 44.3s**
+> on the deployed seed. Cost is **flat** across prefixes of 2 / 48 / 293 / 633 /
+> 1,170 / 1,901 lines (37.9 / 36.4 / 39.2 / 39.1 / 37.0 / 44.3s). The superlinear
+> term does not exist any more; the 2026-08-18 redeploy removed it. **Do not hunt
+> it again** — two attempts were spent on it, and a third would be chasing a
+> fixed cost.
+>
+> **Residual cost root-caused and FIXED in `617b58a9ffa`.** ~37s of the ~44s is
+> startup, and it is neither the linter nor the linted file: the HIR import
+> loader re-PARSED imported modules once per `use` naming them
+> (`preregister_imported_type_names`, `load_imported_types`). A lint of a
+> **two-line** file issued **3,819 successful `.spl` `openat` over 423 distinct
+> files**, with `10.frontend/core/ast.spl` **parsed 866 times**.
+> `parsed_imported_module()` memoizes the parsed module per process:
+> **3,819 -> 676 opens (5.65x)**, `ast.spl` 866 -> <=4, heavy-file wall median
+> 33.86s -> 24.45s (~28%), cost **+~110 MB max RSS**. Not felt until a seed
+> redeploy.
+>
+> **Trap, and it cost this lane real time:** `SIMPLE_INTERP_SAMPLE` and
+> `SIMPLE_LOADER_TRACE` emit **nothing** from the deployed seed. Use
+> `SIMPLE_READ_TRACE=1` (added for this investigation) and `strace`.
+>
+> Evidence and the full narrative — including a **wrong first attribution** that
+> a wall-clock A/B would have confirmed — are in the two 2026-08-23 sections at
+> the end of this file and in
+> `doc/09_report/tooling_latency_audit_2026-08-23.md`.
+
 
 > **2026-08-18 — CAUSE FOUND, and it is not the one this row hunts for.**
 > `simple lint` never JITs: `src/app/cli/lint_entry.spl` imports
