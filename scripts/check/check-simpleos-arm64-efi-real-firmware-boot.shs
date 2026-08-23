@@ -75,21 +75,26 @@ command -v "$QEMU_BIN" >/dev/null 2>&1 || oops "missing $QEMU_BIN"
 # Real EDK2/AAVMF firmware must be present. If it is not, this gate ERRORs.
 # It does NOT degrade to `-kernel`: a QEMU-only boot would prove nothing about
 # board-runnability, which is the entire point of the gate.
+# Discovery mirrors scripts/os/build-simpleos-aarch64-efi-esp.shs verbatim,
+# including the Homebrew/`/usr/local` QEMU share dirs — a macOS host has no
+# /usr/share/AAVMF at all and ships the aarch64 CODE blob as
+# /opt/homebrew/share/qemu/edk2-aarch64-code.fd. Nothing here is weakened: an
+# unfound blob is still ERROR, and `-kernel` is still never a fallback.
+find_fw() {
+    for _c in "$@"; do
+        [ -f "$_c" ] && { printf '%s\n' "$_c"; return 0; }
+    done
+    return 1
+}
 if [ -z "${AAVMF_CODE:-}" ]; then
-    for c in "$ART_DIR/AAVMF_CODE.fd" \
+    AAVMF_CODE=$(find_fw "$ART_DIR/AAVMF_CODE.fd" \
              /usr/share/AAVMF/AAVMF_CODE.fd \
              /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd \
-             /usr/share/qemu-efi-aarch64/QEMU_EFI.fd; do
-        [ -f "$c" ] && { AAVMF_CODE=$c; break; }
-    done
-fi
-if [ -z "${AAVMF_VARS:-}" ]; then
-    for c in "$ART_DIR/AAVMF_VARS.fd" /usr/share/AAVMF/AAVMF_VARS.fd; do
-        [ -f "$c" ] && { AAVMF_VARS=$c; break; }
-    done
+             /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+             /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
+             /usr/local/share/qemu/edk2-aarch64-code.fd) || AAVMF_CODE=
 fi
 [ -n "${AAVMF_CODE:-}" ] || oops "no EDK2/AAVMF aarch64 firmware found (install qemu-efi-aarch64, or set AAVMF_CODE)"
-[ -n "${AAVMF_VARS:-}" ] || oops "no AAVMF_VARS.fd found (set AAVMF_VARS)"
 
 # --- build the ESP (or accept a prebuilt one) -------------------------------
 # Default is to REBUILD, so the gate measures something reproducible rather
@@ -99,6 +104,21 @@ if [ "${SKIP_ESP_BUILD:-0}" != "1" ]; then
         || oops "ESP build failed (see $WORK/esp-build.log): $(tail -1 "$WORK/esp-build.log" 2>/dev/null)"
 fi
 [ -s "$ART_DIR/esp.img" ] || oops "missing $ART_DIR/esp.img after build"
+
+# VARS is resolved AFTER the ESP build, not before it. A pflash VARS region is
+# just blank NVRAM that EDK2 initialises on first boot, and some QEMU
+# distributions (notably Homebrew's) ship a CODE blob with no matching VARS
+# blob at all; the ESP builder is the single place that knows how to synthesize
+# one, and it stages the result at $ART_DIR/AAVMF_VARS.fd. Resolving here means
+# a host with no system VARS blob is served by the builder instead of ERRORing
+# before the builder ever runs. Still fail-closed: no VARS anywhere is ERROR.
+if [ -z "${AAVMF_VARS:-}" ]; then
+    AAVMF_VARS=$(find_fw "$ART_DIR/AAVMF_VARS.fd" \
+             /usr/share/AAVMF/AAVMF_VARS.fd \
+             /opt/homebrew/share/qemu/edk2-aarch64-vars.fd \
+             /usr/local/share/qemu/edk2-aarch64-vars.fd) || AAVMF_VARS=
+fi
+[ -n "${AAVMF_VARS:-}" ] || oops "no AAVMF_VARS.fd found (set AAVMF_VARS)"
 
 cp "$AAVMF_VARS" "$WORK/VARS.fd"
 chmod u+w "$WORK/VARS.fd"
