@@ -162,3 +162,118 @@ stage 3 refused with **no diagnostic text at all** (silent rc=1). Index
 mutations abort stage 3 exactly like commits do. Note that landing via git
 plumbing with `GIT_INDEX_FILE` pointed at a scratch index does NOT trip this —
 it never touches `.git/index`.
+
+---
+
+## RUN 3 (2026-08-23) — ROOT CAUSE, from a `sample(1)` of the live stalled process
+
+The first direct measurement of the runaway, rather than inference from where it
+stalled. `sample 88115 4` on the in-flight stage-3 process (pid 88115, launched
+21:36:52, stalled at module 10/692) — read-only, no bootstrap started.
+
+Physical footprint at sample time: **45.7 GB** (peak 47.2 GB), RSS 5.35 GB,
+87.6% CPU. `sample` output preserved outside the tree.
+
+### Where the CPU actually is
+
+Of 3,288 samples on the single main thread:
+
+| frame | samples | share |
+|---|---|---|
+| `HirLowering.register_imported_type_methods_inner` | 1,900 | 58% |
+| `SymbolTable.lookup_or_invalid` | 1,142 | 35% |
+| `SymbolId.is_valid` | 246 | 7% |
+
+Collapsed **by top of stack**, one leaf dominates everything:
+
+```
+rt_transient_raw_register (in simple)   2550     (77.6% of ALL samples)
+hashbrown ... HashMap::insert            447
+```
+
+Every one of the three Simple frames above spends its samples in
+`rt_alloc` -> `rt_transient_raw_register`. This is an allocation storm, not a
+computation.
+
+### The mechanism, in two layers
+
+**Layer 1 — the defect: read-side value-semantics clones.**
+`SymbolTable.lookup`/`lookup_or_invalid` bound the scope row by value:
+
+```
+val scope = self.scopes[scope_id.id]        # copies the WHOLE Scope value,
+if rt_dict_contains(scope.symbols, name):   # including symbols: Dict<text,i64>
+```
+
+At module/root scope that Dict holds every symbol in the closure, and the copy
+happened on EVERY lookup. `define()` already carried the fix for the same rows
+(`hir_types.spl`, "SCOPEROW ... `val scope = self.scopes[id]` copied the Scope
+value (VT_OBJECT_FIELD_CLONES exactly 1 per define on the seed)", 2026-08-22) —
+the two lookups, which are far hotter than define, were left behind.
+`register_imported_type_methods_inner` calls `lookup_or_invalid` once per
+imported method name, and is re-entrancy-guarded but NOT memoized, so the same
+(module, type) pair is re-walked many times per importing module.
+
+**Layer 2 — the amplifier: the streaming-HIR transient arena.**
+`CompilerDriver.lower_streaming_surface_source`
+(`80.driver/driver_hir_pipeline_lowering.spl:71-84`) opens
+`rt_transient_array_scope_begin()` and deliberately keeps it **ACTIVE through
+`lower_parser_module_unstub`** ("Keep the scope active through the complete
+lowering"). While active, `rt_transient_raw_register`
+(`src/runtime/runtime_memory.c:110`) records every `rt_alloc` as OWNED in a
+thread-local open-addressing table and **nothing is freed until scope end**.
+
+So churn becomes retention: each clone is retained for the whole module, the
+table grows monotonically, and its doubling/rehash makes each further insert
+more expensive. That is exactly the observed signature — monotone, accelerating
+(~150 -> ~310 MB/min), 93% CPU, no log output.
+
+**This is NOT a second defect and the arena is NOT the bug.** The arena's
+retention is by design (ownership handoff); the fix belongs in the allocation
+traffic, not in the pause/promote protocol.
+
+### Why the CoW ratchet is blind to it
+
+`scripts/check/check-cow-alias-hotpath.shs` reports
+`PASS — 9682 file(s) scanned, 198 offender(s) checked, 0 new, 0 stale`, with
+**zero offenders anywhere under `20.hir/`**. Its `BYVALUE` detector matches the
+*write* side of the value-semantics class (`self.x = f(self.x, v)`). The defect
+here is the *read* side — `val row = self.rows[i]` cloning a collection-bearing
+row per probe. That shape is a detector gap, not a clean bill of health.
+
+### Fixes landed (UNVERIFIED against the explosion)
+
+- `20.hir/hir_symbol_table_methods.spl` `lookup` / `lookup_or_invalid`: probe the
+  scope row IN PLACE (`self.scopes[id].symbols`), same transform `define()`
+  already uses. `rt_dict_contains` + bracket read kept exactly — `.get` is
+  forbidden on this path (false nil on present tagged ints).
+- `20.hir/hir_types.spl` `pop_scope`: read `.parent` in place.
+- `20.hir/hir_lowering/_Items/module_reexport_materialization.spl`
+  `register_imported_type_methods_inner`: hoist the invariant
+  `"{owner_module}.{imported_name}::"` prefix out of both method loops, and
+  defer the `impl_.methods[name]` row read into the symbol-missing branch.
+
+Verified, INTERPRETER-LEVEL ONLY: the four introduced syntactic shapes parse and
+evaluate on the seed, and parse + semantic analysis of the edited lines is clean.
+NOT verified: native codegen of these lines (chained bracket-reads have the
+SCOPEROW precedent in `define()`; a `match` on a chained index+field subject does
+NOT, and is exercised natively for the first time by the next bootstrap), and the
+actual explosion.
+
+**How to verify — do NOT re-run only the stage-3 leg.** The exploding code runs
+inside the *stage2-admitted* binary
+(`build/bootstrap/stage3/<triple>/stage2-admitted/simple`), which was compiled
+from the PRE-edit tree. Re-running the stage-3 leg alone re-executes the old
+code and would falsely read as "fix ineffective". Verification requires a full
+re-bootstrap so stages 1-2 are rebuilt from this tree first
+(`sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap`), and only
+then the stage-3 leg.
+
+### Still ranked, deliberately NOT changed
+
+- `var trait_module = imported_mod` (same file, trait-impl branch) binds a whole
+  `ModuleSurface` per trait-impl row — same read-side clone class, but off the
+  sampled hot offsets and invasive to restructure.
+- Whole-call memoization of `register_imported_type_methods` was considered and
+  rejected: a first call may run before its dependencies resolve, so caching the
+  outcome is not sound.
