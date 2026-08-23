@@ -459,3 +459,97 @@ count and enumerates the messages via `error_message_at`.
   — defect-class sweep pinning that no parse-pipeline verdict returns to the
   staged-local shape, with a positive control so an absence check cannot pass
   vacuously.
+
+---
+
+## 2026-08-23 — B3 "83 codegen-emitted names undefined in the archive" re-measured: **0**, and the link no longer tolerates the class
+
+Phase-2 blocker B3 (`doc/03_plan/compiler/bootstrap/phase2_gate_and_blockers_2026-08-23.md`)
+ranked "83 codegen-emitted runtime symbol names are undefined in
+`build/simple-core/libsimple_runtime.a`" as the most likely concrete cause of
+"links but does not run". **That number is stale.** Re-measured at
+`dec27456176` by BUILDING a fresh core-C runtime capsule rather than reading a
+months-old artifact:
+
+```
+sh scripts/check/build-core-c-bootstrap-runtime-capsule.shs --output /mnt/fast/rtcapsule
+  core_c_runtime_capsule_selfcheck=pass, checks_executed=33
+  archive sha256 0da6442d4d7cec746ddb5c710a3700ab25adbfa5afb865dadcb3f53b56f014d9
+```
+
+- codegen-emitted runtime entry names (the guard's narrow, emitter-anchored
+  extraction): **196**
+- symbols defined in the fresh archive (`nm`, types `TWtiIRD`): **1219**
+- emitted names with no definition: **0**
+
+The same comparison against the *old* `build/simple-core/libsimple_runtime.a`
+(2026-08-21 12:44, 1118 defined symbols) is also 0. So the 83 were closed by
+landings between the 2026-08-18 incident and now, not by anything in this pass.
+**Why the number looked alive:** the guard could never report it, because it
+hard-exited `ERROR — nothing was checked (no tracked bootstrap stage binary
+found)` *before* running the archive half — see the guard fix below — and the
+`--archive-only` path ERRORs on the stale archive in the shared worktree. Both
+paths produce an ERROR that is easy to read as "still broken".
+
+### The deeper fix (item 3) was already landed, and is not this lane's
+
+`267db6eb0ca` made the native link **fail closed** on undefined runtime-prefixed
+symbols: `pipeline/native_project/stubs.rs` collects `undefined - defined`,
+filters to runtime-prefixed names that are not optional/compiler-provided/
+linker-provided/system, and returns an `Err` that NAMES every symbol and states
+the fix paths. Verified present at `dec27456176`. Opt-out
+`SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1` downgrades it to a warning; bootstrap lanes
+(`SIMPLE_BOOTSTRAP=1` / `SIMPLE_STUB_MISSING_RT=1`) are exempt because they
+deliberately weak-stub the gap so the binary can LOAD. That opt-out **is**
+warranted, on the same reasoning as `SIMPLE_ALLOW_UNLOWERED_MIR=1`: bringing up
+a runtime by definition passes through states where a symbol is not yet
+implemented, and a lane with no way to say so would be routed around with
+`--no-verify` instead. Unit reproduce:
+`pipeline/native_project/tests.rs` (`rt_fixture_missing`, asserts the verdict
+names the symbol *and* states the escape hatch).
+
+### Guard honesty defect fixed here — `54e12925034`
+
+`git ls-files bootstrap` returns **0 rows**: the stage blobs are no longer
+tracked. `check-no-unresolved-runtime-symbols.shs` treated that as a fatal
+`ERROR — nothing was checked` and exited *before* the archive half ran. A guard
+whose only possible verdict is a permanently uninformative ERROR is
+indistinguishable from one nobody wired up — fail-open wearing fail-closed's
+clothes. Zero binaries is now a reported **status** (`binaries=none(...)`), not
+a verdict; fail-closed is preserved by the pre-existing non-vacuity rule (0
+artifacts **in total** is still ERROR, fixture (d) still proves it).
+
+New fatal selftest fixture **(f)**, with a negative control: a repo with no
+tracked stage binary but a satisfied archive must PASS and must print
+`binaries=none`; appending a codegen-emitted name the archive does not define
+must still FAIL naming it. **Verified failing pre-fix** — run against the
+unmodified script it reports
+`FAILED (rc=2) ERROR — nothing was checked (no tracked bootstrap stage binary found)`.
+
+### Post-fix verdict (measured, not read)
+
+```
+binaries=none(no tracked bootstrap stage binary)
+archive=checked(196 codegen-emitted names)
+PASS — 196 symbol(s) checked across 0 binary(ies) + archive, 0 unresolved
+```
+
+No baseline or ratchet was needed: the archive half is genuinely at zero.
+
+### What remains open (stated, not papered over)
+
+1. **The binary half has no artifact to judge.** It is not red, it is *empty* —
+   the stage blobs are untracked, and the ones that were tracked were stripped
+   (no symbol table), which fixture (e) already pins as ERROR rather than PASS.
+   The half only becomes evidence again once a redeploy produces an unstripped
+   stage binary the guard can point at with `--bin`.
+2. **The archive half is a lower bound, by construction.** Its extraction is
+   anchored to emitters (`call_runtime(`, `get_rt*(`, `=> "rt_..."`) and cannot
+   see a name built by concatenation. A broad sweep of every
+   `"rt_|spl_|simple_*"` literal under `codegen/` yields 1508 strings of which
+   970 are undefined in the archive — but that set is dominated by prefix
+   fragments (`rt_actor_`, `rt_array_`, `rt_async_`), table keys, and names owned
+   by other lanes (Rust runtime, `native_all`), so it is noise, not a backlog.
+   The correct authority for "was this name actually emitted" is the **link**,
+   which is exactly what `267db6eb0ca` now enforces per-program with the name in
+   the message. A static regex cannot decide emission; the linker can.
