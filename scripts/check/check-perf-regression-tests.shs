@@ -294,6 +294,38 @@ must_contain "dict churn growth selfcheck present" \
     "$ROOT/src/runtime/test/rt_dict_tombstone_churn_growth_selfcheck.c" \
     "dict table growing with churn count"
 
+
+# --- lint per-character lexical walk (2026-08-23).
+# The sampler's two largest interpreted-lint frames, `count_triple_quotes`
+# (5.8%) and `raw_rt_lexical_code_lines` (5.5%), paid one interpreted
+# `substring` + one array push PER CHARACTER on characters no branch of the
+# scanner can act on. Run-based scanning cut ARR_MUT_CALLS by 4.2x over 150
+# real src/**/*.spl files with byte-identical output.
+# Each needle below IS the fix; its absence IS the regression.
+# See doc/08_tracking/bug/lint_per_char_lexical_walk_2026-08-23.md
+LINTTEXT="$ROOT/src/compiler/35.semantics/lint/lint_text.spl"
+RAWRT="$ROOT/src/compiler/35.semantics/lint/raw_rt_access.spl"
+LEXWALKSPEC="$ROOT/test/05_perf/lint/lint_lexical_char_walk_perf_spec.spl"
+
+must_contain "CHARWALK triple-quote scan rejects lines with no \"\"\"" \
+    "$LINTTEXT" 'if line.index_of("\"\"\"") < 0: return 0'
+must_contain "CHARWALK clean line skips the per-char walk entirely" \
+    "$RAWRT" 'if not self.in_string and not self.in_triple and not raw_line.contains("\"") and not raw_line.contains("#"):'
+must_contain "CHARWALK ordinary text copied one run at a time" \
+    "$RAWRT" 'pieces.push(raw_line.substring(i, run_end))'
+must_contain "CHARWALK comment tail blanked in one repeat" \
+    "$RAWRT" 'pieces.push(" ".repeat(line_len - i))'
+must_contain "CHARWALK triple-quoted span blanked in one repeat" \
+    "$RAWRT" 'val close = raw_line.index_of("\"\"\"", i)'
+# The 3-char probe must stay behind the quote test: taking it unconditionally
+# was half the per-character cost.
+must_not_contain "CHARWALK no unconditional 3-char probe per character" \
+    "$RAWRT" 'val triple = i + 2 < raw_line.len()'
+must_contain "CHARWALK ratio pin spec present" \
+    "$LEXWALKSPEC" 'expect(runs_us * 3 < dense_us).to_equal(true)'
+must_contain "CHARWALK byte-identity reference walk kept in the spec" \
+    "$LEXWALKSPEC" 'fn reference_lexical_code_lines(source: text) -> [text]:'
+
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
     echo "ERROR — nothing was checked (no mechanism rows ran)"
