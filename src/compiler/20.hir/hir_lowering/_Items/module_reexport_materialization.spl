@@ -927,6 +927,33 @@ impl HirLowering:
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name, param.type_name,
                     import_span, materialize_enum)
+            # GENERIC ARGUMENTS of a scalar HEAD must be materialized too.
+            #
+            # `type_name` is the pre-captured scalar head, so for
+            # `Dict<text, Payload>` it is `Dict` -- a builtin that materializes
+            # to nothing -- and this branch then RETURNED without ever walking
+            # the arguments. `parser_type_named_dependencies` already recurses
+            # Named -> args correctly; it was simply never called on this path,
+            # because the `else` that calls it is only reached when NO scalar
+            # head was captured. So the argument was never bound in the owner's
+            # qualified scope at all.
+            #
+            # THIS is the asymmetry that made both previous attempts fail.
+            # `d481f15e1ac` taught PROJECTION to recurse into generic arguments
+            # while this walk still bound nothing for them, so every recursed
+            # argument missed the owner-scope lookup and fell through to
+            # `lower_type` in the importer's scope -- stage-1 48 -> 3716 fatals.
+            # Reproduced in miniature on the three-module fixture in
+            # `imported_generic_head_argument_owner_scope_spec.spl`: projecting
+            # arguments without this call yields `unresolved type: Payload`,
+            # exactly the flood shape, in seconds instead of 72 minutes.
+            # Projection can only resolve what materialization has bound.
+            # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+                if parser_type_kind_named_args(param.type_.kind).len() > 0:
+                    for arg_dependency in parser_type_named_dependencies(param.type_):
+                        self.materialize_imported_callable_dependency(
+                            imported_mod, imported_mod_name, arg_dependency,
+                            import_span, materialize_enum)
             elif param.array_element_name != "":
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name, param.array_element_name,
@@ -941,6 +968,12 @@ impl HirLowering:
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name, callable.return_type_name,
                     import_span, materialize_enum)
+                # Same generic-argument gap as the param branch above.
+                if parser_type_kind_named_args(callable.return_type.kind).len() > 0:
+                    for arg_dependency in parser_type_named_dependencies(callable.return_type):
+                        self.materialize_imported_callable_dependency(
+                            imported_mod, imported_mod_name, arg_dependency,
+                            import_span, materialize_enum)
             elif callable.return_array_element_name != "":
                 self.materialize_imported_callable_dependency(
                     imported_mod, imported_mod_name,

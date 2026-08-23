@@ -188,6 +188,77 @@ impl HirLowering:
         if source_name != "":
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, source_name)
+            # GENERIC CONSTRUCTOR (`Dict<K,V>`, `Option<T>` (`T?`), `Result<A,B>`)
+            # must be projected HEAD-AND-ARGUMENTS, in the OWNER's scope.
+            #
+            # Both halves of this arm are load-bearing and neither works alone.
+            #
+            # 1. ARGUMENTS WERE DROPPED ON A HIT. The `Named(id, [])` return
+            #    below discards `parser_type_kind_named_args` entirely, so a
+            #    projected `Dict<text, MirType>` reached the importer's symbol
+            #    table erased to `Dict<any, any>` with ZERO diagnostics. That
+            #    silent erasure is the ORIGINAL defect and must not be restored
+            #    as a "safe" fallback; `d481f15e1ac` measured it directly.
+            #
+            # 2. THE OUTER HEAD FELL THROUGH ON A MISS. `Dict`/`Option`/`Result`
+            #    are BUILTIN generics: nothing ever calls `bind_qualified_type`
+            #    for them, so `lookup_qualified_type_raw(owner, "Dict")` always
+            #    misses, and the fall-through then handed the WHOLE type to
+            #    `self.lower_type` -- which re-lowers in the IMPORTER's scope and
+            #    recurses into the ARGUMENTS there. `HirModule`, which the
+            #    importer never imported, is what then hard-errors, with a
+            #    synthesized span naming the innocent importer. Measured by the
+            #    `[ist-scalar-fallthrough]` probe:
+            #      name=Dict owner=compiler.mono.monomorphize_integration
+            #      lowering=src/compiler/mono/instantiation.spl
+            #    Note the name is `Dict`, the OUTER generic -- not the argument.
+            #
+            # This is why fixing only (1) made things catastrophically WORSE:
+            # `d481f15e1ac` recursed into arguments while the head still fell
+            # through to `lower_type`, so the importer-scope re-lowering happened
+            # anyway and stage-1 went 48 -> 3716 fatals / 437 poisoned modules.
+            # It is also why the owner-side import sweep could not help: once the
+            # type reaches `lower_type` in the importer's scope, what the OWNER
+            # imports is irrelevant (75 owner-side imports across `40.mono` left
+            # the fatal count completely unchanged; one IMPORTER-side binding
+            # cleared it).
+            #
+            # The fix is to never reach `lower_type` for a generic at all.
+            # `lower_named_kind` takes ALREADY-LOWERED `hir_args` and resolves
+            # the HEAD by name -- it has real arms for `Option`, `Result`, `Dict`
+            # and every builtin. So projecting the arguments HERE, through
+            # `imported_surface_type` in the owner's scope (which is exactly
+            # where `materialize_imported_callable_dependency` bound them via
+            # `bind_qualified_type(imported_mod.module_name, dep, symbol)`), and
+            # handing those HirTypes to `lower_named_kind`, resolves head and
+            # arguments each in the scope that actually declares them.
+            #
+            # This restores the symmetry that is this bug's root theme: the
+            # MATERIALIZATION walk (`parser_type_named_dependencies`) already
+            # recurses Array -> Tuple -> Named and binds every argument
+            # correctly; only this PROJECTION failed to consult what it bound.
+            #
+            # Scoped deliberately to `named_args.len() > 0`: a true scalar keeps
+            # byte-identical behaviour, so the blast radius is exactly the types
+            # that carry generic arguments.
+            # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+            # and doc/08_tracking/bug/hir_generic_projection_regression_run15_2026-08-22.md
+            val named_args = parser_type_kind_named_args(type_.kind)
+            if named_args.len() > 0:
+                var projected_args: [HirType] = []
+                for named_arg in named_args:
+                    projected_args = projected_args.push(
+                        self.imported_surface_type(
+                            named_arg, imported_module_name, bound_type_params))
+                if raw_symbol_id >= 0:
+                    return HirType(
+                        kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), projected_args),
+                        span: type_.span)
+                if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
+                    eprint("[ist-generic-head-projected] name={source_name} args={named_args.len()} owner={imported_module_name} lowering={self.module_filename}")
+                return HirType(
+                    kind: self.lower_named_kind(source_name, projected_args, type_.span),
+                    span: type_.span)
             if raw_symbol_id >= 0:
                 return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
             # Level-gated OWNER probe (default off). This fall-through hands the
@@ -348,6 +419,25 @@ impl HirLowering:
         # nested Dict/array boundary.  The retained Type remains the complete
         # fallback for shapes not yet affected by the staged-native ABI bug.
         if type_name != "":
+            # GENERIC CONSTRUCTOR -- delegate to the head-and-arguments arm.
+            #
+            # `type_name` is the pre-captured scalar HEAD name, so for
+            # `Dict<text, Payload>` it is `Dict`. Both exits below discard the
+            # arguments (`Named(id, [])` on a hit, `lower_named_kind(name, [],
+            # ...)` on a miss), which SILENTLY erases `Dict<text, MirType>` to
+            # `Dict<any, any>` in the importer's symbol table -- no error, no
+            # probe line, nothing. Measured on the three-module fixture in
+            # `imported_generic_head_argument_owner_scope_spec.spl`, where this
+            # path (not the `imported_surface_type` fall-through) is the one
+            # that fires: `[ist-proj-miss] name=Dict owner=svc.provider`.
+            #
+            # `imported_surface_type` now projects head AND arguments in the
+            # OWNER's scope, so delegate rather than duplicating that logic.
+            # Guarded on the retained parser Type actually carrying arguments,
+            # which keeps a true scalar byte-identical.
+            # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
+            if parser_type_kind_named_args(type_.kind).len() > 0:
+                return self.imported_surface_type(type_, imported_module_name, bound_type_params)
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, type_name)
             if raw_symbol_id >= 0:
