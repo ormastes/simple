@@ -136,6 +136,16 @@ These surfaces query both `in_development` and `in-development`, so they
 begin reporting correctly as soon as a run is recorded by a runner carrying
 the new status — no further change here.
 
+**The reconciliation gate cannot catch this class.** Folding in-development
+into `passed` moves a count from one addend to another; the sum is
+unchanged, so `check-test-summary-reconciles.shs` stays green throughout.
+A passing reconciliation is evidence that no category was *dropped*. It is
+**not** evidence that every category was *classified correctly*, and the two
+are easy to confuse. This is pinned by an example in
+`in_development_tag_reporting_spec.spl` that asserts the folded numbers
+still reconcile — the first draft of that example asserted the opposite and
+failed, which is how the limit was found.
+
 ### Adding a new status? Read this first
 
 `str_to_status` (`test_db_types.spl:132`) ends in

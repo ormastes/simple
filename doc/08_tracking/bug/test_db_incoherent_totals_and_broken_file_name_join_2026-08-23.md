@@ -121,6 +121,23 @@ The reporting surfaces here query both spellings
 reporting correctly the moment a run is recorded by a runner carrying that
 status, with no further change.
 
+### The reconciliation gate is blind to this class — stated, not glossed
+
+`check-test-summary-reconciles.shs` was added by this lane as the safety net
+for exactly this family of defects. **It cannot catch this one.** Folding
+in-development into `passed` moves a count between addends; the total is
+unchanged, so the gate stays green.
+
+That is worth stating plainly because the gate has been cited as the reason
+these numbers can be trusted. What it actually proves is that no category
+was **dropped**. It proves nothing about whether each category was
+**classified correctly**, and a defect that misclassifies while preserving
+the sum is invisible to it.
+
+Found the honest way: the first draft of the regression example asserted
+that the folded numbers would fail to reconcile. It failed. The assertion
+was wrong, not the code.
+
 ### Related trap, one level lower — unrecognised status silently becomes Skipped
 
 `str_to_status` ends in `case _: TestStatus.Skipped`
