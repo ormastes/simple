@@ -1,0 +1,51 @@
+# Reproduce spec for: `self.<stripped>()` call sites against free functions
+# declared as `fn <type>_<stripped>(self: T)`.
+#
+# Pre-fix, src/compiler/10.frontend/treesitter/outline_lexer.spl:178 declared
+# `fn treesitter_is_at_end(self: TreeSitter) -> bool` while 20+ sites called it
+# as `self.is_at_end()`. `native-build --entry-closure` aborted with
+#   error: semantic: method `is_at_end` not found on type `TreeSitter`
+# killing every `--source src/compiler` closure right after the
+# `TreeSitter.new` fix (d82a9a5021d).
+#
+# Measured, not assumed:
+#   * UFCS IS a real rule -- `fn f(self: T)` is callable as `x.f()`, and it
+#     resolves ACROSS modules without importing `f` (the type carries it).
+#   * There is NO type-prefix stripping. `x.get()` against `box_get(self: Box)`
+#     fails identically for BOTH `me` and `fn` declarations. So the declared
+#     name is the method name, and the call sites -- not the language -- were
+#     wrong.
+# The whole affected family is 579 call sites across 7 files; the treesitter
+# rows below are the canary for the class.
+
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+struct SelfMethodBox:
+    v: i64
+
+fn selfmethodbox_double(self: SelfMethodBox) -> i64:
+    self.v * 2
+
+describe "free fn with a self: first parameter":
+    it "is callable as a method under its DECLARED name":
+        val b = SelfMethodBox(v: 21)
+        expect(b.selfmethodbox_double()).to_equal(42)
+
+    it "keeps treesitter call sites on the declared, prefixed names":
+        val src = file_read("src/compiler/10.frontend/treesitter/outline_lexer.spl") ?? ""
+        expect(src.len() > 0).to_be_true()
+        expect(src.contains("fn treesitter_is_at_end(self: TreeSitter)")).to_be_true()
+        expect(src.contains("self.is_at_end(")).to_be_false()
+        expect(src.contains("self.treesitter_is_at_end(")).to_be_true()
+
+    it "fixes the siblings of is_at_end, not just the first reported name":
+        val src = file_read("src/compiler/10.frontend/treesitter/outline_lexer.spl") ?? ""
+        expect(src.contains("self.peek(")).to_be_false()
+        expect(src.contains("self.check(")).to_be_false()
+        expect(src.contains("self.advance(")).to_be_false()
+
+    it "fixes the whole class, not only the treesitter package":
+        val cp = file_read("src/compiler/60.mir_opt/mir_opt/copy_prop.spl") ?? ""
+        expect(cp.len() > 0).to_be_true()
+        expect(cp.contains("self.propagate_operand(")).to_be_false()
+        expect(cp.contains("self.copypropagation_propagate_operand(")).to_be_true()
