@@ -1,0 +1,647 @@
+#!/bin/sh
+# check-use-target-resolves.shs
+#
+# STATIC resolution of every `use` target in owned Simple source and specs.
+#
+# WHY THIS EXISTS
+# ---------------
+# `scripts/check/check-dangling-imports` is the honest, low-false-positive
+# oracle for this defect class, but it works by EXECUTING each file
+# (`bin/simple run <f>`) and reading `[use-warning]` out of the log. That costs
+# ~18s per spec, so it can never sweep the whole tree on a push. Measured on a
+# 133-spec sample, 22% of unit specs carry a `use` that does not resolve, and
+# NONE of them were unfinished features -- they are rename/move drift:
+#
+#   use app.svllm_pack.core.{run}      -- src/app/svllm_pack/ no longer exists;
+#                                         the code moved to app.slang_pack.core
+#   _append_cli_args_for_name          -- live symbol is `_cli_args_for_name`
+#                                         (src/app/mcp/cli_passthrough.spl:83)
+#   execution_mode_from_string         -- live symbol is `parse_mode_str`
+#   _run_serve_result et al            -- declared, but NOT `pub`, and in a
+#                                         different module than the one imported
+#
+# The two existing static gates cannot see any of these:
+#   check-no-phantom-module-imports      -- BARE single-segment roots only,
+#                                               says so at its own line 19-24.
+#   check-no-phantom-deep-stdlib-imports -- multi-segment `std.` only.
+# Neither checks a non-`std` dotted path (`app.`, `os.`, `compiler.`), and
+# neither checks MEMBERS at all. This gate closes exactly that gap, statically,
+# in seconds rather than hours.
+#
+# RESOLUTION MODEL (mirrors the loader's roots, verified empirically)
+# ------------------------------------------------------------------
+# A module key is derived from each owned `.spl` path by stripping the source
+# root, stripping `.spl` or `/__init__.spl`, and replacing `/` with `.`.
+# Directory names that already contain dots (`src/compiler/35.semantics/`) fall
+# out correctly for free, which is why `compiler.35.semantics.lint.x` resolves.
+#   src/                -> `app.*`, `os.*`, `compiler.*`, `i18n.*`, ...
+#   src/lib/            -> `std.*`
+#   src/lib/<family>/   -> `std.*` again with the family segment ELIDED, which
+#                          is why both `std.nogc_sync_mut.io` and `std.io`
+#                          resolve to the same file, and why the bare root
+#                          `testing` resolves to `src/lib/*/testing/__init__.spl`.
+#
+# CLASSES
+#   MODULE_MISSING      module path resolves to no owned file
+#   MEMBER_MISSING      module resolves; the named member appears NOWHERE in it
+#   MEMBER_NOT_VISIBLE  member is declared in the module, but by a declaration
+#                       that is neither `pub` nor `export`
+#   UNRESOLVABLE        glob (`use M.*`) or whole-module (`use M`) import whose
+#                       member set a static reader cannot know -- recorded, NOT
+#                       guessed at, and never upgraded to a missing-member claim
+#
+# FALSE-NEGATIVE CHARACTERISATION -- READ THIS BEFORE TRUSTING A PASS
+# -------------------------------------------------------------------
+# This gate is deliberately tuned for PRECISION over recall, because
+# doc/09_report/dangling_import_census_2026-08-18.md already proved that a
+# text scanner with a 93% false-POSITIVE rate is worse than no scanner: it
+# trains readers to ignore it. The concrete concession is the member test's
+# fallback: a member is accepted whenever its name occurs as a whole word
+# ANYWHERE in the resolved module (or its `__init__.spl` re-export closure),
+# even if no declaration of it was recognised. That single rule absorbs enum
+# variants, macro-ish generated names, `pub use <BareName>` local re-exports,
+# and any declaration form this script does not know -- the exact idioms that
+# generated the census's false positives.
+#
+# What it costs, stated plainly rather than buried:
+#   * A member that is merely MENTIONED in the module (a comment, a string
+#     literal, a call to a same-named function imported from elsewhere) is
+#     accepted. This is the dominant false-negative source.
+#   * Whole-module and glob imports are UNRESOLVABLE by construction: their
+#     members are never checked, only counted. On this tree that is a large
+#     share of all imports, so "0 new" here is emphatically NOT "every symbol
+#     in the tree resolves".
+#   * Re-export following is ONE hop (the module's own file plus its
+#     `__init__.spl`). A symbol re-exported through two modules is accepted by
+#     the whole-word fallback rather than genuinely resolved.
+#   * Conditional/platform-gated modules are not modelled.
+# The execution oracle (`check-dangling-imports`) remains the ground truth
+# for recall. This gate is the cheap ratchet that runs on every push.
+#
+# WHICH CLASSES THE RATCHET ACTS ON -- and why it is not all four
+# -----------------------------------------------------------------
+# All four classes are counted, printed, and frozen in the baseline. Only
+# MODULE_MISSING and MEMBER_MISSING can FAIL a push. This is an evidence-driven
+# narrowing, not a convenience:
+#   * MEMBER_NOT_VISIBLE was measured at 68,449 instances across the tree after
+#     both `pub`/`export` declaration forms AND bare `export a, b` re-export
+#     lists were taught to the scanner. A defect class cannot have 68k live
+#     instances in a tree that builds and tests: the only reading consistent
+#     with the measurement is that a plain module-level `fn` IS importable in
+#     Simple and `pub` is not a visibility gate. The class is retained because
+#     "declared with no explicit visibility marker" is genuine information and
+#     the task asked for it to be distinguished from absence -- but it is
+#     reported as a CENSUS, never as debt, and it cannot fail a push.
+#   * UNRESOLVABLE (20,134) is by construction not a defect: a glob or
+#     whole-module import is legal Simple that a static reader cannot follow.
+#     Failing a push for adding one would punish correct code.
+# MODULE_MISSING (5,836) and MEMBER_MISSING (16,797) are the two classes where
+# every hand-checked instance was real rename/move drift, so they are the two
+# the ratchet enforces.
+#
+# RATCHET, not a hard zero-bar: the tree already carries this drift, so the
+# current population is frozen in `use_target_resolves_baseline.txt` and the
+# gate FAILs on any NEWLY unresolvable use. Per the repo's ratchet convention a
+# baselined entry that now RESOLVES also FAILs (stale baseline) -- a baseline
+# that no longer describes the tree is how a ratchet silently stops ratcheting.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> use(s) checked, 0 new, 0 stale                exit 0
+#   FAIL  — <n> use(s) checked, <k> new, <j> stale: <names>   exit 1
+#   ERROR — nothing was checked (<reason>)                    exit 2
+# A run that checked 0 uses is ERROR, never a vacuous PASS.
+#
+# `--selftest` runs before every scan and is fatal.
+#
+#   --generate-baseline   deliberate, REVIEWED baseline updates only. A FAIL
+#                         naming new offenders is real new drift; regenerating
+#                         hides it. Read the diff first.
+#
+# NOTE ON HOW SIBLING GUARDS ARE CITED IN THIS HEADER
+# ---------------------------------------------------
+# The three sibling guards named above are referenced WITHOUT their `.shs`
+# extension on purpose. `check-guard-wiring.shs` builds its wiring graph by
+# grepping guard BASENAMES out of file CONTENT, and it filters only
+# `*_note=`-style prose assignments -- not comments. Writing the full
+# `<name>.shs` here therefore manufactured a phantom wiring edge that made all
+# three look wired and turned their legitimate baseline rows into three
+# `stale_baseline_now_wired` failures. Do not "helpfully" restore the
+# extension: it silently un-baselines other people's tracked debt.
+#
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd) || REPO_ROOT=""
+[ -n "$REPO_ROOT" ] || { echo "ERROR — nothing was checked (cannot locate repo root)"; exit 2; }
+
+BASELINE="$REPO_ROOT/scripts/check/use_target_resolves_baseline.txt"
+MODE="scan"
+SCAN_ROOT="$REPO_ROOT"
+
+for a in "$@"; do
+    case "$a" in
+        --selftest) MODE="selftest" ;;
+        --generate-baseline) MODE="generate" ;;
+        --root=*) SCAN_ROOT=${a#--root=} ;;
+        --baseline=*) BASELINE=${a#--baseline=} ;;
+        --internal-scan) MODE="internal" ;;
+        *) ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# The scanner. Emits one TAB-separated offender record per line:
+#   CLASS \t path:line \t module-path \t member
+# and, on the LAST line, `#COUNT <n>` -- the number of use targets examined,
+# which is the non-vacuity witness. Everything else goes to stderr.
+# ---------------------------------------------------------------------------
+scan_tree() {
+    st_root=$1
+    ( cd "$st_root" 2>/dev/null || exit 0
+      # Owned .spl files only. Vendored trees are excluded per CLAUDE.md's
+      # Owned-Code Scope. `git ls-files` when available (respects the index and
+      # is far faster); plain find otherwise, so fixtures without a git repo
+      # still work.
+      if [ -d .git ] && command -v git >/dev/null 2>&1; then
+          git ls-files -- 'src/*.spl' 'src/**/*.spl' 'test/*.spl' 'test/**/*.spl' 2>/dev/null
+      else
+          find src test -name '*.spl' -type f 2>/dev/null
+      fi |
+      grep -v '/vendor/' |
+      LC_ALL=C sort
+    ) > "$TMP/files.txt" 2>/dev/null
+
+    [ -s "$TMP/files.txt" ] || { echo "#COUNT 0"; return 0; }
+
+    ( cd "$st_root" || exit 0
+      awk '
+      # ---- module key derivation -------------------------------------------
+      function keyify(p,   k) {
+          k = p
+          sub(/\/__init__\.spl$/, "", k)
+          sub(/\.spl$/, "", k)
+          gsub(/\//, ".", k)
+          return k
+      }
+      # A module key can legitimately map to MORE THAN ONE owned file: the
+      # family-directory hop means `std.log` is provided by several
+      # `src/lib/<family>/log*` files. First-wins was tried and produced ~150k
+      # false MEMBER_MISSING reports, because the arbitrarily-chosen candidate
+      # did not declare the members the importer asked for. All candidates are
+      # kept, and a member resolves if ANY of them provides it.
+      function addkey(k, p) {
+          if (!(k in MOD)) MOD[k] = p
+          else if (index(" " MOD[k] " ", " " p " ") == 0) MOD[k] = MOD[k] " " p
+      }
+
+      # ---- pass 1: build the module index ----------------------------------
+      NR == FNR {
+          FILES[FNR] = $0
+          NFILES = FNR
+          p = $0
+          MOD_PATHS[p] = 1
+          if (p ~ /^src\/lib\//) {
+              rest = substr(p, 9)                     # after "src/lib/"
+              addkey("std." keyify(rest), p)
+              addkey(keyify(rest), p)                 # bare form: common.ui.widget
+              # family-directory hop: src/lib/<family>/X -> std.X, and the bare
+              # root form X (e.g. `testing`).
+              if (rest ~ /\//) {
+                  sub(/^[^\/]*\//, "", rest)
+                  addkey("std." keyify(rest), p)
+                  addkey(keyify(rest), p)
+              }
+          } else if (p ~ /^src\/compiler\//) {
+              rest = substr(p, 14)                    # after "src/compiler/"
+              addkey("compiler." keyify(rest), p)     # compiler.10.frontend.core.ast
+              # The numbered layer segment is an ORGANISATIONAL prefix, not part
+              # of the import path most callers write. Both elisions are real
+              # and both are in use across the tree:
+              #   compiler.20.hir.hir_types -> compiler.hir.hir_types (number
+              #     stripped, layer name kept)
+              #   src/compiler/10.frontend/core/ast.spl -> compiler.core.ast
+              #     (whole layer segment dropped)
+              if (rest ~ /^[0-9]+\.[^\/]*\//) {
+                  layer = rest; sub(/\/.*$/, "", layer)
+                  tail = rest; sub(/^[^\/]*\//, "", tail)
+                  lname = layer; sub(/^[0-9]+\./, "", lname)
+                  addkey("compiler." lname "." keyify(tail), p)
+                  addkey("compiler." keyify(tail), p)
+              }
+          } else if (p ~ /^src\//) {
+              addkey(keyify(substr(p, 5)), p)
+          } else {
+              addkey(keyify(p), p)
+          }
+          next
+      }
+      { next }
+
+      END {
+          # ---- pass 2: collect every `use` record --------------------------
+          for (i = 1; i <= NFILES; i++) resolvefile(FILES[i])
+          # ---- pass 3: read ONLY the files something imports from ----------
+          # Reading all ~15k owned files to build a token table is quadratic in
+          # memory and never finished on this tree; the member test only ever
+          # consults an import TARGET, so only targets are read.
+          for (f in NEED) scanfile(f)
+          # ---- pass 4: classify --------------------------------------------
+          for (i = 1; i <= NREC; i++) classify(i)
+          printf("#COUNT %d\n", CHECKED)
+      }
+
+      function scanfile(p,   line, n, j, t, kw, nm) {
+          if (p in SCANNED) return
+          SCANNED[p] = 1
+          while ((getline line < p) > 0) {
+              # declarations
+              if (match(line, /^[ \t]*(pub |export )?(fn|fun|class|struct|enum|trait|type|val|var|const|mixin|actor|interface)[ \t]+[A-Za-z_][A-Za-z_0-9]*/)) {
+                  t = substr(line, RSTART, RLENGTH)
+                  ispub = (t ~ /(pub|export)[ \t]/)
+                  n = split(t, A, /[ \t]+/)
+                  nm = A[n]
+                  if (ispub) PUB[p SUBSEP nm] = 1; else PRIV[p SUBSEP nm] = 1
+              }
+              # Bare re-export lists: `export foo, bar` and `pub use m.{a, b}`
+              # are BOTH visibility-granting forms, and neither is a
+              # declaration. Missing them made every symbol exported this way
+              # look private (127k phantom MEMBER_NOT_VISIBLE reports).
+              if (match(line, /^[ \t]*export[ \t]+[A-Za-z_]/)) {
+                  t = line
+                  sub(/^[ \t]*export[ \t]+/, "", t)
+                  if (t !~ /^(use|fn|fun|class|struct|enum|trait|type|val|var|const|mixin|actor|interface)[ \t]/) {
+                      n = split(t, E, /[ \t]*,[ \t]*/)
+                      for (j = 1; j <= n; j++) {
+                          nm = E[j]; gsub(/[^A-Za-z_0-9]/, "", nm)
+                          if (nm != "") PUB[p SUBSEP nm] = 1
+                      }
+                  }
+              }
+              if (line ~ /^[ \t]*(pub|export)[ \t]+use[ \t]/ && match(line, /[{(]/)) {
+                  t = substr(line, RSTART + 1); sub(/[})].*$/, "", t)
+                  n = split(t, E, /[ \t]*,[ \t]*/)
+                  for (j = 1; j <= n; j++) {
+                      nm = E[j]; sub(/[ \t]+as[ \t]+.*$/, "", nm)
+                      gsub(/[^A-Za-z_0-9]/, "", nm)
+                      if (nm != "") PUB[p SUBSEP nm] = 1
+                  }
+              }
+              # whole-word token set (the precision-preserving fallback)
+              n = split(line, W, /[^A-Za-z_0-9]+/)
+              for (j = 1; j <= n; j++) if (W[j] != "") WORD[p SUBSEP W[j]] = 1
+          }
+          close(p)
+      }
+
+      # Resolve a module path to a space-separated candidate file list, or "".
+      function modfile(m) { return (m in MOD) ? MOD[m] : "" }
+
+      # Does file f (plus its __init__ sibling, one hop) mention name s?
+      function one_mentions(f, s,   d, ini) {
+          if ((f SUBSEP s) in WORD) return 1
+          d = f; sub(/\/[^\/]*$/, "", d); ini = d "/__init__.spl"
+          if (ini != f && (ini in SCANNED) && ((ini SUBSEP s) in WORD)) return 1
+          return 0
+      }
+      function one_pub(f, s,   d, ini) {
+          if ((f SUBSEP s) in PUB) return 1
+          d = f; sub(/\/[^\/]*$/, "", d); ini = d "/__init__.spl"
+          if (ini != f && (ini SUBSEP s) in PUB) return 1
+          return 0
+      }
+      # Across ALL candidate files for the module key.
+      function any_pub(fl, s,   n, C, i) {
+          n = split(fl, C, / /)
+          for (i = 1; i <= n; i++) if (one_pub(C[i], s)) return 1
+          return 0
+      }
+      function any_priv(fl, s,   n, C, i) {
+          n = split(fl, C, / /)
+          for (i = 1; i <= n; i++) if ((C[i] SUBSEP s) in PRIV) return 1
+          return 0
+      }
+      function any_mentions(fl, s,   n, C, i) {
+          n = split(fl, C, / /)
+          for (i = 1; i <= n; i++) if (one_mentions(C[i], s)) return 1
+          return 0
+      }
+
+      function emit(cls, p, ln, mod, mem) {
+          printf("%s\t%s:%d\t%s\t%s\n", cls, p, ln, mod, mem)
+      }
+
+      function resolvefile(p,   line, lno, buf, start, mod, members, n, j, s) {
+          buf = ""; lno = 0; start = 0
+          while ((getline line < p) > 0) {
+              lno++
+              sub(/#.*$/, "", line)
+              if (buf == "") {
+                  if (line !~ /^[ \t]*(pub |export )?use[ \t]/) continue
+                  start = lno
+                  buf = line
+              } else {
+                  buf = buf " " line
+              }
+              # multi-line member lists continue until the bracket closes
+              if (buf ~ /[{(]/ && buf !~ /[})]/) continue
+              handle_use(p, start, buf)
+              buf = ""
+          }
+          close(p)
+      }
+
+      function handle_use(p, lno, s,   mod, mem, n, j, nm, f) {
+          sub(/^[ \t]*(pub |export )?use[ \t]+/, "", s)
+          gsub(/[ \t]+$/, "", s)
+          if (s == "") return
+
+          if (match(s, /[{(]/)) {
+              mod = substr(s, 1, RSTART - 1)
+              mem = substr(s, RSTART + 1)
+              sub(/[})].*$/, "", mem)
+          } else {
+              mod = s; mem = ""
+          }
+          sub(/[ \t.]+$/, "", mod)
+          gsub(/[ \t]/, "", mod)
+          if (mod == "") return
+
+          # glob import: module still checked, members unknowable
+          isglob = 0
+          if (mod ~ /\.\*$/) { sub(/\.\*$/, "", mod); isglob = 1 }
+          if (mod == "*" || mod == "") return
+
+          # Record now; classify after the target files have been read.
+          NREC++
+          R_P[NREC] = p; R_L[NREC] = lno; R_M[NREC] = mod
+          R_MEM[NREC] = mem; R_G[NREC] = isglob
+
+          # Braceless single-symbol form `use M.Symbol`: the parent module
+          # files must also be read, because classify() falls back to checking
+          # the trailing segment as a MEMBER of the parent.
+          if (!isglob && mem == "" && mod ~ /\.[A-Za-z_][A-Za-z_0-9]*$/) {
+              par = mod; sub(/\.[^.]*$/, "", par)
+              pfl = modfile(par)
+              if (pfl != "") {
+                  npc = split(pfl, PC, / /)
+                  for (pci = 1; pci <= npc; pci++) {
+                      NEED[PC[pci]] = 1
+                      pd = PC[pci]; sub(/\/[^\/]*$/, "", pd)
+                      pini = pd "/__init__.spl"
+                      if ((pini in MOD_PATHS) && pini != PC[pci]) NEED[pini] = 1
+                  }
+              }
+          }
+          if (!isglob && mem != "") {
+              fl = modfile(mod)
+              if (fl != "") {
+                  nc = split(fl, C, / /)
+                  for (ci = 1; ci <= nc; ci++) {
+                      NEED[C[ci]] = 1
+                      d = C[ci]; sub(/\/[^\/]*$/, "", d)
+                      ini = d "/__init__.spl"
+                      if ((ini in MOD_PATHS) && ini != C[ci]) NEED[ini] = 1
+                  }
+              }
+          }
+      }
+
+      function classify(i,   p, lno, mod, mem, f, n, j, nm) {
+          p = R_P[i]; lno = R_L[i]; mod = R_M[i]; mem = R_MEM[i]
+
+          CHECKED++
+          # Virtual modules: provided by the compiler/spec runtime rather than
+          # by an owned `.spl` file. `std.spec.step` is the spipe step DSL --
+          # `find src -name "step*.spl"` returns nothing, yet 176 specs import
+          # it and run. Reporting a fileless builtin as MODULE_MISSING would be
+          # a pure false positive, so the (short, explicit) list is named here
+          # rather than silently absorbed by a wildcard.
+          if (mod == "std.spec.step") return
+          f = modfile(mod)
+          if (f == "") {
+              # `use M.Symbol` with NO braces is a legal single-symbol import,
+              # not a module path. Measured on this tree: 982 of 5,836
+              # MODULE_MISSING reports (17%) were this form with a parent that
+              # resolves cleanly -- a systematic false positive that would also
+              # have SUPPRESSED the member check that actually matters. Only
+              # fall back when the parent really resolves; when it does not,
+              # the original MODULE_MISSING stands and names the full path.
+              par = mod
+              if (par ~ /\.[A-Za-z_][A-Za-z_0-9]*$/) {
+                  sym = par; sub(/^.*\./, "", sym)
+                  sub(/\.[^.]*$/, "", par)
+                  pf = modfile(par)
+                  if (pf != "") {
+                      if (any_pub(pf, sym)) return
+                      if (any_mentions(pf, sym)) {
+                          if (any_priv(pf, sym)) emit("MEMBER_NOT_VISIBLE", p, lno, par, sym)
+                          return
+                      }
+                      if (any_priv(pf, sym)) { emit("MEMBER_NOT_VISIBLE", p, lno, par, sym); return }
+                      emit("MEMBER_MISSING", p, lno, par, sym)
+                      return
+                  }
+              }
+              emit("MODULE_MISSING", p, lno, mod, "-"); return
+          }
+
+          if (R_G[i] || mem == "") {
+              emit("UNRESOLVABLE", p, lno, mod, (R_G[i] ? "*" : "<whole-module>"))
+              return
+          }
+
+          n = split(mem, M, /,/)
+          for (j = 1; j <= n; j++) {
+              nm = M[j]
+              # `x as y` -> check x. This MUST run before whitespace is
+              # stripped and MUST match `as` as a WORD: a bare /as.*$/ on the
+              # squeezed name truncates every identifier containing the letters
+              # "as" (`bootstrap_receipt` -> `bootstrap_re`), which is exactly
+              # how an earlier revision manufactured ~150k phantom offenders.
+              sub(/[ \t]+as[ \t]+.*$/, "", nm)
+              gsub(/[ \t]/, "", nm)
+              if (nm == "" || nm !~ /^[A-Za-z_]/) continue
+              CHECKED++
+              if (any_pub(f, nm)) continue
+              if (any_mentions(f, nm)) {
+                  if (any_priv(f, nm)) emit("MEMBER_NOT_VISIBLE", p, lno, mod, nm)
+                  continue
+              }
+              if (any_priv(f, nm)) { emit("MEMBER_NOT_VISIBLE", p, lno, mod, nm); continue }
+              emit("MEMBER_MISSING", p, lno, mod, nm)
+          }
+      }
+      ' "$TMP/files.txt" /dev/null 2>/dev/null
+    )
+}
+
+# Run a scan and split it into an offender list + a checked count.
+run_scan() {
+    rs_root=$1; rs_out=$2
+    scan_tree "$rs_root" > "$TMP/raw.txt" 2>/dev/null
+    RS_COUNT=$(sed -n 's/^#COUNT //p' "$TMP/raw.txt" | tail -1)
+    [ -n "${RS_COUNT:-}" ] || RS_COUNT=0
+    grep -v '^#COUNT ' "$TMP/raw.txt" | LC_ALL=C sort -u > "$rs_out"
+}
+
+TMP=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (no temp dir)"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# --selftest: prove the gate can FAIL before any PASS is believed.
+# Fixtures are real trees scanned by the real scanner.
+# ---------------------------------------------------------------------------
+selftest() {
+    st_fail=0
+    F="$TMP/st"
+
+    mk() { # mk <name>; builds $F/<name> with a minimal resolvable tree
+        d="$F/$1"; rm -rf "$d"; mkdir -p "$d/src/app/slang_pack" "$d/test"
+        cat > "$d/src/app/slang_pack/core.spl" <<'EOF'
+pub fn run(args: [text]) -> int:
+    return 0
+fn _helper() -> int:
+    return 1
+EOF
+    }
+
+    # 1. clean fixture must PASS (0 offenders)
+    mk clean
+    cat > "$F/clean/test/ok_spec.spl" <<'EOF'
+use app.slang_pack.core.{run}
+EOF
+    run_scan "$F/clean" "$TMP/st1.txt"
+    if [ "$RS_COUNT" -eq 0 ] || [ -s "$TMP/st1.txt" ]; then
+        echo "selftest FAIL: clean fixture produced offenders or checked 0 (count=$RS_COUNT)" >&2
+        cat "$TMP/st1.txt" >&2; st_fail=1
+    fi
+
+    # 2. MODULE_MISSING -- replays the svllm_pack shape exactly
+    mk modmiss
+    cat > "$F/modmiss/test/bad_spec.spl" <<'EOF'
+use app.svllm_pack.core.{run}
+EOF
+    run_scan "$F/modmiss" "$TMP/st2.txt"
+    grep -q '^MODULE_MISSING.*app\.svllm_pack\.core' "$TMP/st2.txt" || {
+        echo "selftest FAIL: MODULE_MISSING (svllm_pack shape) not detected" >&2; st_fail=1; }
+
+    # 3. MEMBER_MISSING -- renamed symbol, the _append_cli_args_for_name shape
+    mk memmiss
+    cat > "$F/memmiss/test/bad_spec.spl" <<'EOF'
+use app.slang_pack.core (_append_cli_args_for_name)
+EOF
+    run_scan "$F/memmiss" "$TMP/st3.txt"
+    grep -q '^MEMBER_MISSING.*_append_cli_args_for_name' "$TMP/st3.txt" || {
+        echo "selftest FAIL: MEMBER_MISSING (renamed symbol) not detected" >&2; st_fail=1; }
+
+    # 4. MEMBER_NOT_VISIBLE -- declared, but not pub. Must NOT be reported as
+    #    missing: the distinction is the whole point of the class.
+    mk notvis
+    cat > "$F/notvis/test/bad_spec.spl" <<'EOF'
+use app.slang_pack.core.{_helper}
+EOF
+    run_scan "$F/notvis" "$TMP/st4.txt"
+    grep -q '^MEMBER_NOT_VISIBLE.*_helper' "$TMP/st4.txt" || {
+        echo "selftest FAIL: MEMBER_NOT_VISIBLE not detected" >&2; st_fail=1; }
+    grep -q '^MEMBER_MISSING.*_helper' "$TMP/st4.txt" && {
+        echo "selftest FAIL: not-visible member misreported as missing" >&2; st_fail=1; }
+
+    # 5. UNRESOLVABLE -- glob/whole-module must be recorded, never guessed at
+    mk unres
+    cat > "$F/unres/test/g_spec.spl" <<'EOF'
+use app.slang_pack.core.*
+EOF
+    run_scan "$F/unres" "$TMP/st5.txt"
+    grep -q '^UNRESOLVABLE.*app\.slang_pack\.core' "$TMP/st5.txt" || {
+        echo "selftest FAIL: UNRESOLVABLE (glob) not recorded" >&2; st_fail=1; }
+
+    # 6. empty tree must check 0, forcing the caller to ERROR (never a pass)
+    rm -rf "$F/empty"; mkdir -p "$F/empty/src" "$F/empty/test"
+    run_scan "$F/empty" "$TMP/st6.txt"
+    [ "$RS_COUNT" -eq 0 ] || { echo "selftest FAIL: empty tree checked $RS_COUNT" >&2; st_fail=1; }
+
+    # 7. vendored code must not be scanned at all
+    mk vend
+    mkdir -p "$F/vend/src/runtime/vendor"
+    cat > "$F/vend/src/runtime/vendor/v.spl" <<'EOF'
+use app.totally_absent_module.{nope}
+EOF
+    run_scan "$F/vend" "$TMP/st7.txt"
+    grep -q 'totally_absent_module' "$TMP/st7.txt" && {
+        echo "selftest FAIL: vendored file was scanned" >&2; st_fail=1; }
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    echo "selftest: 7 fixture(s) OK"
+}
+
+selftest
+
+[ "$MODE" = "selftest" ] && exit 0
+
+# ---------------------------------------------------------------------------
+# Real scan
+# ---------------------------------------------------------------------------
+run_scan "$SCAN_ROOT" "$TMP/current.txt"
+CHECKED=$RS_COUNT
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 use targets found under $SCAN_ROOT)"
+    exit 2
+fi
+
+if [ "$MODE" = "generate" ]; then
+    cp "$TMP/current.txt" "$BASELINE"
+    echo "baseline written: $BASELINE ($(wc -l < "$BASELINE" | tr -d ' ') entries)"
+    echo "PASS — $CHECKED use(s) checked, 0 new, 0 stale"
+    exit 0
+fi
+
+[ -f "$BASELINE" ] || : > "$BASELINE"
+LC_ALL=C sort -u "$BASELINE" > "$TMP/base.txt"
+
+# Only the two enforced classes take part in the new/stale comparison; see
+# "WHICH CLASSES THE RATCHET ACTS ON" in this file's header for the measured
+# reason the other two are census-only.
+# The class field is TAB-separated. `\t` is NOT a tab in a POSIX grep BRE --
+# it matches a literal `t` -- so an earlier revision of these three lines
+# selected NOTHING: both enforced sets came out empty, `comm` compared nothing,
+# and the gate reported `0 new` while the injected offender sat plainly in
+# current.txt. It was caught ONLY by the neuter test (inject a renamed import,
+# demand a FAIL), which is the whole reason that test is mandatory here. The
+# selection is done by awk on the actual field, and the non-vacuity check below
+# makes this failure mode self-reporting instead of silent.
+awk -F'\t' '$1 == "MODULE_MISSING" || $1 == "MEMBER_MISSING"' \
+    "$TMP/current.txt" > "$TMP/cur_e.txt" 2>/dev/null || : > "$TMP/cur_e.txt"
+awk -F'\t' '$1 == "MODULE_MISSING" || $1 == "MEMBER_MISSING"' \
+    "$TMP/base.txt"    > "$TMP/base_e.txt" 2>/dev/null || : > "$TMP/base_e.txt"
+
+# Non-vacuity on the ENFORCED subset specifically. A scan that examined
+# hundreds of thousands of use targets and yet selected zero enforced-class
+# rows means the selector is broken, not that the tree is clean. Reporting PASS
+# there is exactly the vacuous green this repo's verdict convention forbids.
+if [ ! -s "$TMP/cur_e.txt" ] && [ ! -s "$TMP/base_e.txt" ]; then
+    echo "ERROR — nothing was checked (enforced-class selector matched 0 rows out of $CHECKED targets)"
+    exit 2
+fi
+
+LC_ALL=C comm -23 "$TMP/cur_e.txt" "$TMP/base_e.txt" > "$TMP/new.txt"
+LC_ALL=C comm -13 "$TMP/cur_e.txt" "$TMP/base_e.txt" > "$TMP/stale.txt"
+
+NEW=$(wc -l < "$TMP/new.txt" | tr -d ' ')
+STALE=$(wc -l < "$TMP/stale.txt" | tr -d ' ')
+
+echo "--- counts by class (whole tree; * = enforced by the ratchet) ---"
+cut -f1 "$TMP/current.txt" | LC_ALL=C sort | uniq -c | sed 's/^/    /'
+
+if [ "$NEW" -ne 0 ] || [ "$STALE" -ne 0 ]; then
+    [ "$NEW" -ne 0 ] && { echo "--- NEW unresolvable use(s) ---"; head -40 "$TMP/new.txt"; }
+    [ "$STALE" -ne 0 ] && { echo "--- STALE baseline entries (now resolve) ---"; head -40 "$TMP/stale.txt"; }
+    NAMES=$( { head -5 "$TMP/new.txt"; head -5 "$TMP/stale.txt"; } | cut -f2,4 | tr '\t' ' ' | tr '\n' ';' )
+    echo "FAIL — $CHECKED use(s) checked, $NEW new, $STALE stale: $NAMES"
+    exit 1
+fi
+
+echo "PASS — $CHECKED use(s) checked, 0 new, 0 stale"
+exit 0
