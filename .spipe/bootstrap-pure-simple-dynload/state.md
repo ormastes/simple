@@ -47,3 +47,35 @@ verify-warn
 - verify: `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-driver` passed after fixing the existing unconditional `RefCell` import; existing runtime extern signature warnings remain.
 - verify: `bin/simple spipe-docgen test/03_system/feature/app/native_build_smf_spec.spl --output doc/06_spec --no-index` generated 0 stubs; duplicate generated path was discarded in favor of the existing canonical manual path.
 - blocked: `bin/simple check src/app/io/_CliCompile/compile_targets.spl` terminated twice with exit 143 during dependency loading; not re-run to avoid a runaway loop.
+
+## Findings 2026-08-23
+
+- Mach-O weak definitions misread as STRONG (stage-2 blocker, fixed): stage2
+  native-build exit 1 with "Stage4 runtime capsule defines owner-provided
+  runtime symbols STRONGLY ... _rt_heap_live_bytes, _rt_heap_peak_bytes". Apple
+  llvm-nm prints weak *definitions* as `T` in POSIX `-g -p` output; the weakness
+  only appears in the `-m` flag field as `weak external`. The seed's
+  `archive_weak_global_symbols`
+  (src/compiler_rust/compiler/src/pipeline/native_project/tools.rs) and
+  `read_global_symbol_types`
+  (src/compiler_rust/compiler/src/pipeline/native_project/linker.rs) accepted
+  only GNU/ELF `W`/`V`, so every `__attribute__((weak))` C fallback looked
+  STRONG and the stage-4 runtime capsule gate refused the link. Fix: pass `-m`
+  to nm on macOS hosts and normalize `weak external`/`weak reference` lines to
+  weak in both parsers. Verify: `nm -m` shows `weak external _f` where
+  `nm -g -p` shows `T _f` for the same weak definition.
+- Per-file 300s timeout is a hard default, not tunable: `file_timeout: 300` in
+  src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:537 (config
+  builder `.timeout(secs)`); no env var or CLI flag override exists. The
+  `--timeout` flag of `simple native-build` is the *worker subprocess* timeout
+  (default 7200), owned by src/app/cli/native_build_main.spl — a different knob.
+  On a saturated 10-core/24GB host (`--jobs=full`, ~950% CPU) big files (e.g.
+  src/compiler/10.frontend/core/__init__.spl) can exceed 300s; retry with
+  `--jobs=half` — the native cache resumes and only failed/uncached files
+  recompile. Same file passing with fewer jobs = contention, not a hang.
+- Fresh-seed requirement for current source: current `src/` uses `unsafe(...)`;
+  seeds/deployed binaries older than ~2026-08-19 fail with `error[E1002]:
+  function 'unsafe' not found`. A `--full-bootstrap` rebuild of the Rust seed
+  from current `src/compiler_rust` is the only way to compile current source;
+  there is no working prebuilt compiler for a red/green loop on this host right
+  now.

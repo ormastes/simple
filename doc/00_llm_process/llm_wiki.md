@@ -335,6 +335,40 @@ verify that the caller actually crosses the worker/library boundary.
   identity separately from the seed/driver.
 - Guide: `doc/07_guide/compiler/build.md#bootstrap-debug-and-test-modes`.
 
+## Bootstrap native-build failure classes
+
+- **"stage2 capsule STRONGLY" (Mach-O weak definitions):** stage2 exit 1,
+  "Stage4 runtime capsule defines owner-provided runtime symbols STRONGLY ...
+  _rt_heap_live_bytes, _rt_heap_peak_bytes". Apple nm prints weak definitions
+  as `T` in `-g -p`; only `-m` shows `weak external`. Seed nm parsers accepted
+  only GNU/ELF `W`/`V`, so weak C fallbacks blocked the stage-4 capsule link.
+  Owners: `archive_weak_global_symbols`
+  (`src/compiler_rust/compiler/src/pipeline/native_project/tools.rs`),
+  `read_global_symbol_types`
+  (`src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`).
+- **"timeout (300s)" per-file abort:** hard default `file_timeout: 300`
+  (`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:537`), no
+  env/CLI override; `--timeout` is the separate worker-subprocess knob
+  (default 7200, `src/app/cli/native_build_main.spl`). `--jobs=full` CPU
+  saturation pushes big files past 300s; retry `--jobs=half`, cache resumes.
+- **Streaming HIR owner payload loss:** self-hosted stage SIGSEGVs (exit 139)
+  on any input at `hir ... pending`; lldb `hir_cache_closure_digest+36` with
+  x0=0 — `CompilerDriver.streaming_module_surfaces_owner.unwrap()` read a
+  Some-tagged Option whose payload word is 0 (nil is 3, so discriminant guards
+  pass). NOT the 2026-08-21 NULL-GOT incident (fail-closed in
+  `pipeline/native_project/stubs.rs` ~line 1004). Analysis:
+  `doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md`.
+- **`rt_heap_ref_wellformed`:** formation-only probe for heap-typed
+  enum/Option payloads at fail-closed handoffs — 1 only for a tag==1 heap
+  pointer with addr>=4096; deliberately no registry/liveness probe, scalar
+  payloads report 0 by design. Mirrors: `src/runtime/runtime_native.c` +
+  `runtime.h`, `src/runtime/simple_core/core_enum.spl`,
+  `src/compiler_rust/runtime/src/value/objects.rs` (+ `value/mod.rs` export,
+  `common/runtime_symbols.rs` registries). Driver guards:
+  `src/compiler/80.driver/driver_hir_pipeline_lowering.spl` — the streaming
+  owner unwrap and the non-streaming `ctx.module_surfaces` unwrap now fail
+  closed with a named error instead of SIGSEGV.
+
 ## Spec run verdict / "did the tests pass?"
 
 - **Canonical verdict for one spec FILE:** the `SPEC FILE VERDICT: <path>
