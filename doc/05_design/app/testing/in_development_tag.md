@@ -220,21 +220,48 @@ tag-listing CLI are separate lanes. They consume the API above.
 | explicit path, failing tagged fixture | `IN-DEVELOPMENT EXPLICIT ...` / `Results: 1 total, 0 passed, 1 failed` / `FAIL`, rc=1 |
 | control dir sweep, untagged specs | rc=1 from the pre-existing `runtime_file_rename` defect above, not from this change |
 
-3. **The end-to-end runner spec is deferred, not written-and-passing.**
-   A `test/02_integration/test_runner/in_development_tag_runner_spec.spl`
-   was written to spawn a real child `simple test` over generated
-   fixtures and assert on its stdout and exit code. It **hangs**: after
-   ~25 minutes it had produced zero examples and its output had stopped
-   growing, with each of its seven scenarios spawning a nested full
-   `simple test` sweep (each of which itself pays a ~10s session setup and
-   contends for the test daemon). It was deliberately NOT landed — a spec
-   that hangs stalls the tree for every other lane, which is worse than
-   an absent spec, and landing an unverified spec would be exactly the
-   unproven-guard shape the process rules forbid.
+3. **The end-to-end runner spec is written but NOT landed — and an
+   earlier version of this section was WRONG.** It first claimed the spec
+   "hangs": at the time of writing, the run had produced no examples for
+   ~25 minutes and its log had stopped growing, and that was recorded as
+   a hang. It was not one. The run completed: **7 executed, 5 passed, 2
+   failed** — it is merely very slow, because each of its seven scenarios
+   spawns a nested full `simple test` sweep that itself pays a ~10s
+   session setup. The wrong claim is left visible here rather than
+   quietly overwritten, because "I waited and nothing happened" is not
+   evidence of a hang, and treating it as such is the same
+   absence-of-evidence mistake the push guards in this repo exist to
+   forbid.
 
-   The behaviour it would have pinned **is** measured, by the manual runs
-   in the table above; what is missing is the automation, not the
-   evidence. The likely right shape for the retry is a single child sweep
-   over one fixture directory holding both fixtures, asserting all four
-   behaviours from that one invocation's output, rather than seven
-   separate nested sweeps. Filed here rather than silently dropped.
+   The 2 real failures are both in the unexpected-pass scenarios, and
+   their cause is worth recording because it is NOT a flaw in the
+   classification:
+
+   ```
+   IN-DEVELOPMENT SKIP build/test_fixtures/in_development_d_.../wip_passing_spec.spl (1 expected failure(s))
+   SPEC FILE VERDICT: .../wip_passing_spec.spl outcome=NOT_RUN declared>=0 executed=0 passed=0 failed=0
+   ```
+
+   The fixture written under `build/` **executed zero examples** in the
+   child, so it never passed, so no `IN-DEVELOPMENT UNEXPECTED PASS` was
+   emitted and the assertion correctly failed. The byte-identical fixture
+   placed under `test/` passes and does emit the line (measured, see the
+   table above). So the spec's fixture LOCATION is wrong, not the feature.
+
+   **The genuine limitation this exposed, and it is a real one:** a tagged
+   spec that fails to LOAD — syntax error, broken import, unresolvable
+   module — produces `executed=0`, classifies as `ExpectedFailure` per
+   Decision 5, and is neutralised into a counted skip. That is
+   indistinguishable from a spec that merely does not pass yet. A WIP
+   spec can therefore be silently broken rather than merely unfinished.
+   Decision 5 is still right (an empty file must not announce itself as
+   ready to promote), but the two cases deserve to be told apart — most
+   likely by reporting a load failure on a tagged file as its own class
+   rather than folding it into the skip count. Filed here; not fixed in
+   this change.
+
+   The spec is not landed until its fixtures are relocated and it is
+   green, because landing a red spec reddens the tree for every other
+   lane. The retry should also collapse the seven nested sweeps into one
+   sweep over a single fixture directory asserting all four behaviours
+   from that one invocation, which removes most of the runtime.
