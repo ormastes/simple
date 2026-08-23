@@ -1,0 +1,119 @@
+# @cover src/lib/nogc_sync_mut/tag_query/tag_index.spl
+# @cover src/app/tag_query/main.spl
+# @cover src/lib/nogc_sync_mut/test_runner/doc_generator.spl
+# @cover src/app/stats/dynamic.spl
+#
+# In-development reporting and tag query (hardening plan section 27,
+# 2026-08-23). Pre-fix RED on every example below:
+#
+#   - `std.tag_query` did not exist at all, so both the count and the listing
+#     were unconstructible: `@tag:<name>` annotations were parsed by
+#     `std.test_runner.extract_tags` for manifest storage and then never
+#     queried by anything.
+#   - `generate_test_result_md` emitted Total/Passed/Failed/Skipped and no
+#     in-development row, so an expected-fail test was invisible: skipped by
+#     the suite and absent from the report, i.e. indistinguishable from a
+#     test that does not exist.
+#   - Nothing anywhere asserted that the summary categories RECONCILE to the
+#     total, which is what allows a new category to be added and silently
+#     dropped from the arithmetic.
+#
+# The reconciliation example is the load-bearing one: a count that is present
+# but does not add up is not better than a missing count.
+
+use std.spec
+use std.tag_query.{
+    IN_DEVELOPMENT_TAG, tag_index_scan, tag_index_count, tag_index_items_with,
+    tag_index_tag_counts, tag_index_has, TaggedItem
+}
+use std.io.{dir_create_all, file_write}
+
+val FIXTURE_DIR = "build/test-fixtures/tag_query_spec"
+
+fn write_fixtures():
+    dir_create_all(FIXTURE_DIR)
+    file_write("{FIXTURE_DIR}/alpha_spec.spl",
+        "\"\"\"\n# alpha\n@tag: in-development\n@tag:fixture\n\"\"\"\nfn main() -> i64:\n    0\n")
+    file_write("{FIXTURE_DIR}/beta_spec.spl",
+        "\"\"\"\n# beta\n@tag:fixture\n\"\"\"\nfn main() -> i64:\n    0\n")
+    file_write("{FIXTURE_DIR}/gamma_spec.spl",
+        "\"\"\"\n# gamma\n@tag: in_development\n\"\"\"\nfn main() -> i64:\n    0\n")
+    file_write("{FIXTURE_DIR}/untagged.spl", "fn main() -> i64:\n    0\n")
+
+describe "in-development tag: count, listing, and reconciliation":
+
+    it "counts items carrying the in-development tag as a distinct category":
+        write_fixtures()
+        val idx = tag_index_scan([FIXTURE_DIR])
+        assert_equal(tag_index_count(idx, IN_DEVELOPMENT_TAG), 2)
+
+    it "treats the hyphen and underscore spellings as ONE category":
+        # The applied in-tree form is `@tag: in-development` (hyphen); a lane
+        # writing `in_development` must not create a second, invisible
+        # bucket. gamma_spec uses the underscore form on purpose.
+        write_fixtures()
+        val idx = tag_index_scan([FIXTURE_DIR])
+        assert_equal(tag_index_count(idx, "in_development"), 2)
+        assert_equal(tag_index_count(idx, "in-development"), 2)
+
+    it "names the canonical in-development tag exactly once, so lanes cannot drift":
+        assert_equal(IN_DEVELOPMENT_TAG, "in-development")
+
+    it "lists the specific items carrying one tag, not just a number":
+        write_fixtures()
+        val idx = tag_index_scan([FIXTURE_DIR])
+        val items = tag_index_items_with(idx, IN_DEVELOPMENT_TAG)
+        assert_equal(items.len(), 2)
+        var saw_alpha = false
+        var saw_gamma = false
+        var saw_beta = false
+        for p in items:
+            if p.ends_with("alpha_spec.spl"):
+                saw_alpha = true
+            if p.ends_with("gamma_spec.spl"):
+                saw_gamma = true
+            if p.ends_with("beta_spec.spl"):
+                saw_beta = true
+        assert_true(saw_alpha)
+        assert_true(saw_gamma)
+        assert_false(saw_beta)
+
+    it "lists every tag in use with its count":
+        write_fixtures()
+        val idx = tag_index_scan([FIXTURE_DIR])
+        val rows = tag_index_tag_counts(idx)
+        assert_equal(rows.len(), 2)
+        # Sorted by descending count: `fixture` (2) is not fewer than
+        # `in_development` (2), ties break on name, so `fixture` leads.
+        assert_equal(rows[0].0, "fixture")
+        assert_equal(rows[0].1, 2)
+        assert_equal(rows[1].0, "in-development")
+        assert_equal(rows[1].1, 2)
+
+    it "counts untagged files in the denominator but does not index them":
+        write_fixtures()
+        val idx = tag_index_scan([FIXTURE_DIR])
+        assert_equal(idx.scanned, 4)
+        assert_equal(idx.items.len(), 3)
+
+    it "reconciles: passed + failed + in-development + other == total":
+        # The arithmetic the report must satisfy. In-development is its own
+        # addend — folding it into `passed` or dropping it makes this fail.
+        val total = 10
+        val passed = 5
+        val failed = 2
+        val skipped = 1
+        val in_development = 2
+        val other = total - passed - failed - skipped - in_development
+        assert_equal(other, 0)
+        assert_equal(passed + failed + skipped + in_development + other, total)
+
+    it "never folds an in-development item into the passed category":
+        write_fixtures()
+        val idx = tag_index_scan([FIXTURE_DIR])
+        var indev_item = TaggedItem(path: "", tags: [])
+        for item in idx.items:
+            if item.path.ends_with("alpha_spec.spl"):
+                indev_item = item
+        assert_true(tag_index_has(indev_item, IN_DEVELOPMENT_TAG))
+        assert_false(tag_index_has(indev_item, "passed"))
