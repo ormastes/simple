@@ -1236,3 +1236,69 @@ reads the file list itself**. A first version piped the list through `xargs`,
 which splits on `ARG_MAX` — each split then built its OWN declaration map and
 produced per-batch answers that looked plausible and were wrong (5 partial
 `META` lines, 2538 offenders instead of 2620).
+
+## Follow-up 2026-08-23 (f) — the parity guard re-landed ALONE (`0fe0323565c`)
+
+Follow-up (d) described `scripts/check/check-type-walk-constructor-parity.shs`
+and `scripts/check/type_walk_projection_allowlist.txt` as landed. They were not
+on `origin/main`. Cause: both files were bundled INTO `d481f15e1ac`, the
+generic-argument projection fix, and that commit was reverted at `ec13c319250`
+after the run15 50x regression. The guard was collateral damage of the revert.
+
+### The durable lesson, stated as a rule
+
+**A guard must land in its own commit, never in the commit carrying the fix it
+guards.** Otherwise reverting the fix silently removes the only thing that would
+notice the fix is gone — and the record keeps claiming the guard exists, which
+is worse than never having written it. Every later reader of (d) would have
+believed the constructor-parity rule was enforced. It was not enforced for a
+day. The same rule applies to a baseline/allowlist file: it belongs with the
+guard, not with the change that moves the numbers.
+
+Re-landed guard-only, with no projection source change (the projection arms are
+owned by the in-flight facade-hop lane).
+
+### First honest run found real drift — twice
+
+Restored byte-for-byte from `d481f15e1ac`, the guard's first run said:
+
+```
+FAIL — 11 constructor(s) checked; stale allowlist (now projected): Function
+```
+
+Verified against the source rather than taken on trust: `imported_surface_type`
+**does** project `Function` at `module_callable_types.spl:314-323`
+(`parser_type_kind_is_function` / `_function_params` / `_function_return`). That
+arm landed on a separate commit and survived `ec13c319250`, so the allowlist —
+written while Function was still unprojected — had gone stale. Line removed.
+This is the stale-allowlist half of the guard catching a real case on its own
+first run, not a fixture.
+
+Second piece of drift, not flagged by the guard because it cannot be (the guard
+fails on allowlisted-AND-projected, not on allowlisted-and-not-materialized):
+the materialization-side `TypeKind.Weak` arm from (d) §2 was **also** reverted,
+so `Weak` is currently in NEITHER walk. The allowlist line is kept
+pre-emptively with that stated in its reason, rather than left asserting a fix
+that is no longer in the tree.
+
+### Verdict today
+
+```
+PASS — 11 constructor(s) checked, 0 unprojected and unallowlisted
+```
+`--selftest` 4/4, fatal and unconditional (it runs before every scan; exit 2 on
+any fixture failure). Landed **green**, not advisory — the single FAIL it found
+was a stale allowlist line, and correcting an allowlist is guard-only work.
+
+**11, not the 12 recorded in (d)**, precisely because the reverted `Weak` arm is
+missing from `parser_type_named_dependencies`. The count is the cheapest
+available signal that the (d) projection work is still un-re-landed.
+
+### What must land to restore (d)'s state
+
+The reverted `d481f15e1ac` content, minus whatever caused the run15 50x
+regression: the generic-argument carry in both scalar branches, the
+`parser_type_named_dependencies` call on the scalar shortcut, and the
+`TypeKind.Weak` arm. When that lands, this guard's count returns to 12 and the
+`Weak` allowlist reason should drop its 2026-08-23 note. The guard now stands
+independently, so a second revert cannot take it out again.
