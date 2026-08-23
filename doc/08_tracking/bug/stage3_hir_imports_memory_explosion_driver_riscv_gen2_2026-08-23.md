@@ -716,3 +716,270 @@ type" path needs the `Any`-parameter runtime probe described above.
 measured here: `check-no-direct-rt.shs` aborts on this host with
 `ERROR — selftest failed: hidden/ignored files not scanned equivalently (got '1 2 0 2')`,
 which is a pre-existing environment failure, not caused by this change.
+
+---
+
+## RUN 10 (2026-08-24) — the containment confound is QUANTIFIED (~0), and the dominant HIR-semantic population is FIXED: stage 3 now reaches 692/692
+
+### 1. The carried caveat is discharged: the containment manufactures ~no unresolved types
+
+Three independent discriminators, all computed from the RUN 9 logs (no new runs
+needed — `f_run1..3` and `v2_run1..3` were retained):
+
+**(a) Cross-tab, per module, 6 runs / 2 binaries.** `E-HIR-BLOCK-VALUE-*` names
+the module it fired in, so every reached module is classifiable. Rate of
+`unresolved type` fatal errors per module:
+
+| run | fired mods | unres/mod (fired) | not-fired mods | unres/mod (not fired) |
+|---|---|---|---|---|
+| f_run1 | 103 | 1.262 | 495 | 1.129 |
+| f_run2 | 91 | 0.934 | 508 | 1.189 |
+| f_run3 | 104 | 0.865 | 482 | 1.191 |
+| v2_run1 | 77 | 0.649 | 509 | 1.202 |
+| v2_run2 | 98 | 0.878 | 534 | 1.154 |
+| v2_run3 | 79 | 0.734 | 518 | 1.203 |
+
+In **5 of 6 runs the containment-fired modules carry FEWER unresolved types per
+module than the modules it never touched**, and the one exception is +0.13. If
+the dropped `type_` were manufacturing unresolved types the sign would be
+consistently the other way.
+
+**(b) Same-module prefix comparison.** Over the 71 modules that produced fatal
+errors in BOTH the pre-containment runs (`A1..A3`, `B2..B3`) and the
+post-containment runs, mean total errors were **717.0 pre vs 751.3 post
+(+4.8%)**, and the per-module deltas are BIDIRECTIONAL (largest increase
+`driver_types.spl` +15.8, largest decrease `retirement_composition.spl` -6.0).
+That is drift, not a new population.
+
+**(c) Structural — there is no mechanism.** `unresolved type: {name}` has exactly
+one emitter, `20.hir/hir_lowering/types.spl:1011`, in `lower_named_kind`'s final
+`else`: it requires a NAMED type annotation whose symbol lookup failed. The
+containment installs `has_type_: false, type_: nil` — a nameless placeholder that
+never reaches `lower_type` at all.
+
+**Conclusion: essentially 0% of the unresolved-type population is caused by the
+containment.** The rise from 761/295 to ~2050/~590 is reach plus module mix. The
+`Any`-parameter C-side probe is therefore NOT needed to unblock stage 3; it
+remains the right design if a validated-type path is ever restored.
+
+**Correction to a RUN 9 number.** "~2050 over ~590 modules" overcounts: the log
+prints every fatal twice (`[hir-fatal]` and `error: in-process native-build:`).
+The authoritative totals are the `[hir-fatal-count] count=` sums: **1362 / 1445 /
+1351** for f_run1..3.
+
+**And the reach figure was budget-bound, not error-bound.** All six RUN 9 runs
+reported **exactly 200 error modules**. That is `poison_budget()`
+(`80.driver/driver_types.spl:1048`): the HIR phase stops after 200 poisoned
+modules. So "586-632 modules" was the point at which the budget ran out, and the
+error inventory was truncated.
+
+### 2. Root cause of the unresolved-type population — glob imports are not a materialization route
+
+Two owner modules, one mechanism, ~1,660 of the ~1,700 unresolved-type
+occurrences:
+
+* `[hir-payload-origin-unresolved] owner=compiler.hir.hir_definitions
+  payload=MethodResolution` — `hir_definitions.spl` declares
+  `HirExprKind.MethodCall(..., resolution: MethodResolution)` and reaches
+  `MethodResolution` only through `use compiler.hir.hir_types.*`. Result: 493
+  `unresolved type: MethodResolution` blamed on importers of `HirExprKind`.
+* `[hir-callable-dep-origin-unresolved] owner=compiler.hir.hir_types
+  dependency=HirClass` (+12 siblings) — `HirModule` types 13 of its fields with
+  declarations in `hir_definitions.spl`, and `hir_types.spl` carried **no import
+  of that module at all**; the names were reachable only because
+  `hir_definitions` globs `hir_types` back. Result: HirClass 93, HirStruct 93,
+  HirTrait 93, HirStaticAssert 93, HirImpl 93, HirConst 93, HirBitfield 93,
+  HirEnum 92, HirFunction 91, HirAopAdvice 91, HirDiBinding 52, HirArchRule 52,
+  HirMockDecl 51.
+
+`resolve_materialized_enum_payload_origin`
+(`_Items/module_reexport_materialization.spl:294`) accepts only three routes —
+a declaration in the owner, an `export use` hop, or an **explicit named** import
+— and says so: *"Glob imports stay excluded here: resolving them while
+recursively materializing enum payloads corrupts staged native HIR state."*
+This is the same defect class already fixed in this very file for
+`AsmConstraintKind`/`AsmLocation`, and the fix is the same: name the dependency
+explicitly in the OWNER.
+
+A third, smaller instance: `compiler.blocks.blocks.builtin_blocks_{data,math,
+shell}` use `BlockExample`/`HighlightToken`/`HighlightKind`/`Completion`/
+`CompletionKind`/`BlockType` in declaration position while importing only
+`{BlockDefinition}`/`{ConstValue}` from `compiler.blocks.definition`
+(BlockExample 43, HighlightToken 42, plus the `unresolved name:` twins).
+
+### What changed (5 files, imports only — no logic, no codegen)
+
+| file | change |
+|---|---|
+| `src/compiler/20.hir/hir_definitions.spl` | `use compiler.hir.hir_types.{MethodResolution, HirType, SymbolId, Effect}` |
+| `src/compiler/20.hir/hir_types.spl` | `use compiler.hir.hir_definitions.{HirFunction, HirClass, HirStruct, HirEnum, HirBitfield, HirTrait, HirImpl, HirConst, HirStaticAssert, HirAopAdvice, HirDiBinding, HirArchRule, HirMockDecl}` |
+| `src/compiler/15.blocks/blocks/builtin_blocks_data.spl` | + 6 names from `compiler.blocks.definition` |
+| `src/compiler/15.blocks/blocks/builtin_blocks_math.spl` | + 3 names |
+| `src/compiler/15.blocks/blocks/builtin_blocks_shell.spl` | + 3 names |
+
+Stage 2 recompiled **8 modules** and produced a stage-2 binary whose sha256 is
+`fa21bde58b9e6f64f8abec0e316f10333d193557da45eff7a7def04f16d45ff1` — **byte
+identical to the RUN 9 "final" binary**. Imports change no emitted code, so the
+RUN 9 logs are an exact control and every stage-3 difference below is caused by
+the SOURCE input alone.
+
+### Measured
+
+| run | HIR modules | SIGSEGV | error modules | total fatal | `unresolved type` (distinct names) |
+|---|---|---|---|---|---|
+| RUN 9 f_run1 | 586-632 (budget-bound) | 0 | **200 (budget)** | 1362 | MethodResolution 493 + 13 `Hir*` + … |
+| RUN 9 f_run2 | " | 0 | 200 (budget) | 1445 | " |
+| RUN 9 f_run3 | " | 0 | 200 (budget) | 1351 | " |
+| RUN 10 run1 | 0 | **1** (phase 2, surface parse of `driver.spl`) | — | — | — |
+| RUN 10 run2 | **692 / 692** | 0 | **72** | **506** | 5 names, 19 occurrences |
+| RUN 10 run3 | **692 / 692** | 0 | **63** | **587** | — |
+
+**Every HIR module in the build is now reached, and the poison budget is no
+longer exhausted — so the remaining error inventory is complete rather than
+truncated.** `MethodResolution` and all 13 `Hir*` names are gone from the log
+entirely. The RUN 10 run-1 crash is the pre-existing stochastic phase-2
+`flat_ast_to_module` class already recorded in RUN 8 arm B1; the binary is
+byte-identical to one that did not crash in 6 RUN 9 runs, so it cannot be
+attributed to this change.
+
+### Stage 3 still does not complete — the remaining blocker is FIELD VISIBILITY, a SEPARATE root cause
+
+This answers the open question directly: the two populations do **not** share a
+root. Fixing the materialization route removed the unresolved-type population
+almost entirely and left field visibility **untouched** (191 shown occurrences in
+run 2 vs 123/142/170 in RUN 9 — i.e. it is now the dominant class):
+
+```
+191  field `X` is not visible from this module
+ 19  unresolved type: {ModuleSurfaceEnum 7, ReturnScan 4, BackendCompileOptions 4, CodegenTarget 3, TreeSitter 1}
+  ~40 unresolved name: ... at <import span>   (var_reassign_local_id_value, methods_push, …)
+   2  ambiguous explicit callable dependency `AopWeaver` / `DiContainer`
+```
+
+Top field names: `symbols` 13, `span` 11, `name` 11, `mir_modules` 10,
+`surfaces` 9, `id` 9, `bit_width` 9. Top modules: `mir/hwir/types.spl`,
+`loader/jit_instantiator.spl`, `hir_lowering/module_surface_declarations.spl`,
+`hir/generated/hir_codec.spl`, `frontend/treesitter/outline.spl`,
+`driver/driver_types.spl`, `driver/driver_aot_pipeline.spl` (10 each).
+
+What is established about the mechanism, and what is not:
+
+* The single emitter is `_Expressions/expression_core.spl:293`, gated on
+  `self.field_access_for_expr(base, field) == 0`.
+  `field_access_for_expr` (`_Expressions/expression_support.spl:307`) returns 0
+  from THREE places, and they are not the same failure:
+  1. base symbol is in `local_struct_types` but that composite name has no
+     entry in `struct_field_access_by_name`;
+  2. a nominal owner resolved but its composite name is "" or unregistered —
+     *"a malformed compiler boundary, not permission to bypass visibility"*;
+  3. the retained per-field bool is genuinely `false`.
+* Path 3 is UNLIKELY to be the bulk: the flat-AST bridge stamps every
+  undecorated struct/class field `Visibility.Public`
+  (`10.frontend/_FlatAstBridge/module_assembly.spl:381`, with a comment
+  recording that a Private default previously produced 1512 errors across 44
+  files), and `member_visibility_allows(Public, _)` is unconditionally true.
+* A live suspect for path 2/3 is `member_owner_consistent`
+  (`_Items/module_import_registration.spl:~300`): `member_owner` is chosen from
+  `composite.fields[0].declaring_module` via `surface_index_for_name`, and when
+  that lookup fails `member_owner` silently falls back to the IMPORTING surface;
+  any composite reached through a facade then has every field denied at once.
+  **Not confirmed** — the three failing modules sampled (`interpreter.spl`,
+  `hir_codec.spl`, `const_eval.spl`) all import `HirModule` *explicitly* from
+  `compiler.hir.hir_types`, which argues against a pure facade explanation.
+* Discriminating the three requires one level-gated probe at the 0-returns
+  printing the branch, the composite key, the owner module, and the six
+  `MemberAccessScope` bits. That is the next step and it is NOT yet done.
+
+Stage 4 / Stage 5 / MCP remain unreached: there is still no admitted stage-3
+artifact. `--no-mcp` was NOT passed.
+
+---
+
+## RUN 11 (2026-08-24) — field visibility, mechanism established by probe: it is NOT visibility, it is owner misresolution
+
+### The probe
+
+`HIR_MEMBER_VIS_TRACE` (module-local `val`, default `false`, no `rt_env_get` —
+the ratchet baseline is 11818 and this adds no direct `rt_*` site) in
+`20.hir/hir_lowering/_Expressions/expression_support.spl` prints, at each of the
+four places `field_access_for_expr` can answer "denied", which branch fired plus
+the composite key, the owner symbol's name and its defining module.
+
+### Probe run A — every denial is a lookup failure
+
+Full 692/692-module stage-3 run, **313 denials, 313 of them the same branch**:
+
+```
+313 branch=owner-metadata-missing ... composite=  owner_name=<no-symbol> owner_module=<no-module>
+  0 branch=retained-false
+  0 branch=local-composite-unregistered
+  0 branch=local-field-denied
+```
+
+`composite=` EMPTY and `owner_name=<no-symbol>` in **all 313**: the owner id was
+non-negative, so the function treated it as a nominal owner, but it names no
+symbol in this module's table. `branch=retained-false` — the only verdict that
+means "the field really is not accessible" — fired **zero** times.
+
+**Fix 1 (landed).** `named_owner_raw_for_expr`'s first branch reads
+`HirTypeKind.Named(owner, _).id` straight out of the expression's `type_`, and a
+type projected from an IMPORTED surface carries a SymbolId minted in the
+DECLARING module's numbering, which need not name anything in the importer's
+table. An owner id that resolves to no symbol now answers **unknown (-1)**
+instead of **denied (0)**.
+
+### Probe run B — the residue is misresolution to the wrong symbol
+
+Same probe, after fix 1: **215 `owner-symbol-absent`** (now correctly unknown)
+plus **33 `owner-metadata-missing`**, and again **0 `retained-false`**. The 33
+name their own defect:
+
+| module | field | resolved owner | what that owner actually is |
+|---|---|---|---|
+| `module_reexport_materialization.spl` | `symbols` | `hir_phase_profile_count_qtype` | a FUNCTION |
+| `mir_opt/loop_opt.spl` | `loops` | `HirBinOp` | an unrelated enum |
+| `hwir/retirement_composition.spl` | `config` | `destination_owner` | a local variable |
+| `loader/compiler_sffi.spl` | `cache_hits` | `compiler_create_context` | a FUNCTION |
+
+Same family as the 78 "enum payload dependency conflicts" documented in
+`claim_materialized_payload_binding` (a symbol id that resolves to a record
+sharing no name with the request). **So not one field-visibility error in the
+entire compiler is a real private-field violation** — the flat-AST bridge stamps
+undecorated fields `Visibility.Public` anyway
+(`_FlatAstBridge/module_assembly.spl:381`), and `member_visibility_allows` can
+only say yes for those.
+
+### NEGATIVE RESULT — the metadata-missing arm must KEEP denying (3/3 runs)
+
+Making that arm return -1 as well, to match its sibling `field_access_for_base_raw`
+which returns -1 on the byte-identical condition, was built and run three times.
+Field-visibility errors went to **0** and everything else got much worse:
+
+| | reach | error modules | total fatal | profile |
+|---|---|---|---|---|
+| deny (0) | **692/692** | 45-49 | 285-365 | field-vis dominant |
+| unknown (-1) | 395/402/395 | **200 (budget)** | **6517/6515/6517** | 447 `ambiguous explicit callable dependency`, ExportAttr 98, LayoutAttr 93, MirModule 89, FunctionAttr 70, MirFunction 63, MirBlock 56, DriverManifestAttr 54 |
+
+Letting a Field expression continue past the gate on an owner the lowerer cannot
+describe cascades into the import/materialization path — ~20x the cost of what
+it saves. **Reverted.** The comment at that arm now records this so it is not
+re-attempted. The real fix is upstream, in whatever mints/resolves the owner
+SymbolId, not in the gate.
+
+### Cumulative measurement across this session (stage 2 green every cycle: `Build complete: 750 compiled, 0 cached, 0 failed`)
+
+| tree | run | HIR modules | SIGSEGV | error modules | total fatal |
+|---|---|---|---|---|---|
+| RUN 9 baseline | f_run1..3 | 586 / 599 / 598 (budget-bound) | 0 | 200 / 200 / 200 | 1362 / 1445 / 1351 |
+| + explicit imports | run1 | 0 | 1 (phase-2, pre-existing class) | — | — |
+| + explicit imports | run2..5 | **692 / 692 / 692 / 692** | 0 | 72 / 63 / 80 / 80 | 506 / 587 / 454 / 454 |
+| + owner-symbol-absent guard | q_run1..3 | **692 / 692 / 692** | 0 | 49 / 47 / 42 | 365 / 312 / 285 |
+| final (guard kept, -1 reverted) | t_run1..3 | **692 / 692 / 692** | 0 | 45 / 42 / 42 | 312 / 300 / 300 |
+
+Stage 3 does **not** complete: rc=1 on ~45 poisoned modules / ~312 HIR semantic
+errors, now dominated by the owner-misresolution field class above plus a small
+tail (`unresolved name:` at import spans — `var_reassign_local_id_value`,
+`methods_push`, `module_surface_name_position`, `format_shape`; `unresolved type:`
+ModuleSurfaceEnum 7, ReturnScan 4, BackendCompileOptions 4, CodegenTarget 3;
+2 `ambiguous explicit callable dependency`). Stage 4 / Stage 5 / MCP remain
+unreached; `--no-mcp` was NOT passed.

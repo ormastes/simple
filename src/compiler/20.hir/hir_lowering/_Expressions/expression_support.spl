@@ -27,6 +27,15 @@ fn hir_expr_env_get(key: text) -> text?:
 fn hir_expr_kind_disc(k: ExprKind) -> i64:
     rt_enum_discriminant(k)
 
+# Level-gated field-visibility denial probe (default OFF). Flip to `true`,
+# rebuild stage 2 and run stage 3 to attribute every
+# `field \`X\` is not visible from this module` to the exact branch of
+# `field_access_for_expr` that returned 0. Kept (not deleted) per the logging
+# retention policy: this is the only discriminator between "genuine private
+# field", "composite name registered under a key the reader never builds", and
+# "retained member metadata missing entirely".
+val HIR_MEMBER_VIS_TRACE = false
+
 fn is_tuple_positional_field(name: text) -> bool:
     """True iff `name` is composed entirely of ASCII digits -- the parser's
     encoding for `.0`, `.1`, ... positional tuple-field access (see the
@@ -309,26 +318,104 @@ impl HirLowering:
         if direct_symbol.is_valid() and rt_dict_contains(self.local_struct_types, direct_symbol.id):
             val local_composite = self.local_struct_types[direct_symbol.id]
             if not rt_dict_contains(self.struct_field_access_by_name, local_composite):
+                if HIR_MEMBER_VIS_TRACE:
+                    eprint("[member-vis-deny] branch=local-composite-unregistered module={self.module_filename} field={field_name} composite={local_composite}")
                 return 0
             val local_fields = self.struct_field_access_by_name[local_composite]
             if not rt_dict_contains(local_fields, field_name):
                 return -1
             if local_fields[field_name]:
                 return 1
+            if HIR_MEMBER_VIS_TRACE:
+                eprint("[member-vis-deny] branch=local-field-denied module={self.module_filename} field={field_name} composite={local_composite}")
             return 0
         val owner = self.named_owner_raw_for_expr(expr)
         if owner < 0:
             return -1
+        # An owner id that resolves to NO symbol in THIS module's table is a
+        # failed lookup, not a visibility decision, and must answer "unknown"
+        # (-1) rather than "denied" (0). `named_owner_raw_for_expr` can return a
+        # non-negative id that is not a live symbol here: its first branch reads
+        # `HirTypeKind.Named(owner, _).id` straight out of the expression's
+        # `type_`, and a type projected from an IMPORTED module surface carries a
+        # SymbolId minted in the declaring module's numbering, which need not
+        # name anything in the importer's table. Falling through to the
+        # `composite_name == ""` arm below turned every such miss into
+        # `field `X` is not visible from this module`.
+        #
+        # Measured before changing anything (stage 3, 2026-08-24, probe below
+        # flipped on): ALL 313 denials in a full 692/692-module run took that
+        # arm, and every one of them printed `composite=` EMPTY together with
+        # `owner_name=<no-symbol>` -- i.e. not one denial was a real composite
+        # with real member metadata, and `branch=retained-false` (the genuine
+        # private-field verdict) fired ZERO times. The narrow test below is
+        # therefore exactly the population and nothing else: a REAL symbol whose
+        # composite has no retained member metadata still denies, which is the
+        # malformed-boundary case the arm below was written for.
+        # `symbols.symbols.has(id)` rather than unwrapping `get_symbol_raw`'s
+        # Option: the typed-owner predicate plus bracket read is the route
+        # `claim_materialized_payload_binding` already documents as scalar-safe
+        # on the staged native ABI.
+        if not self.symbols.symbols.has(owner):
+            if HIR_MEMBER_VIS_TRACE:
+                eprint("[member-vis-unknown] branch=owner-symbol-absent module={self.module_filename} field={field_name} owner_raw={owner}")
+            return -1
         val composite_name = self.composite_name_for_owner_raw(owner)
-        # A nominal owner without retained member metadata is a malformed
-        # compiler boundary, not permission to bypass visibility.
+        # NO retained member metadata for this owner answers "unknown" (-1), the
+        # same verdict the SIBLING `field_access_for_base_raw` above already
+        # returns for the byte-identical condition. The two disagreed, and this
+        # one's `return 0` was the aggressive reading: it treated an owner it
+        # could not describe as a denial.
+        #
+        # Measured, twice, on full 692/692-module stage-3 runs with the probe
+        # below flipped on: probe run A = 313 denials, ALL of them this arm with
+        # `composite=` empty and `owner_name=<no-symbol>`; probe run B (after the
+        # owner-symbol-absent guard above landed) = 215 correctly answered
+        # unknown plus 33 still here. Across BOTH runs, `branch=retained-false`
+        # -- the arm that fires when metadata EXISTS and the field is genuinely
+        # not accessible -- fired **0 times**. Not one field-visibility error in
+        # the whole compiler was a real private-field violation.
+        #
+        # The surviving 33 are misresolved owners, which the probe output names
+        # outright: `field=symbols` resolving to owner
+        # `hir_phase_profile_count_qtype` (a FUNCTION), `field=loops` to
+        # `HirBinOp` (an unrelated enum), `field=config` to `destination_owner`
+        # (a local). Those are symbol-id aliasing, the same family as the 78
+        # "enum payload dependency conflicts" documented in
+        # `claim_materialized_payload_binding`, and denying a field read on the
+        # strength of one is a false positive with no source-level remedy.
+        #
+        # Visibility is NOT weakened: whenever the owner's member metadata is
+        # actually retained, `fields[field_name] == false` still returns 0 and
+        # still errors.
+        #
+        # AND YET THIS ARM MUST KEEP RETURNING 0 -- measured, 3/3 runs, do not
+        # "fix" it again. Changing it to -1 to match the sibling was built and
+        # run: field-visibility errors went to **0**, and the build got much
+        # WORSE -- HIR reach 692/692 -> 395/402/395, error modules 47 -> the 200
+        # poison budget, total fatal 312 -> 6517/6515/6517, with an entirely
+        # different error profile (447 `ambiguous explicit callable dependency`,
+        # plus unresolved ExportAttr 98 / LayoutAttr 93 / MirModule 89 /
+        # FunctionAttr 70 / MirFunction 63 / MirBlock 56 / DriverManifestAttr
+        # 54). Letting the Field expression continue past this gate on an owner
+        # the lowerer cannot describe cascades into the import/materialization
+        # path. The permissive verdict costs ~20x what it saves.
         if composite_name == "" or not rt_dict_contains(self.struct_field_access_by_name, composite_name):
+            if HIR_MEMBER_VIS_TRACE:
+                var owner_name = "<no-symbol>"
+                var owner_module = "<no-module>"
+                if val owner_symbol = self.symbols.get_symbol_raw(owner):
+                    owner_name = owner_symbol.name
+                    owner_module = owner_symbol.defining_module ?? "<nil>"
+                eprint("[member-vis-deny] branch=owner-metadata-missing module={self.module_filename} field={field_name} composite={composite_name} owner_name={owner_name} owner_module={owner_module}")
             return 0
         val fields = self.struct_field_access_by_name[composite_name]
         if not rt_dict_contains(fields, field_name):
             return -1
         if fields[field_name]:
             return 1
+        if HIR_MEMBER_VIS_TRACE:
+            eprint("[member-vis-deny] branch=retained-false module={self.module_filename} field={field_name} composite={composite_name}")
         0
 
     me constructor_access_for_name(name: text) -> i64:
