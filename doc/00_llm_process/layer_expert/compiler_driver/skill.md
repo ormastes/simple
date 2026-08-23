@@ -177,3 +177,15 @@ three-line no-import program. Fixed 2026-08-23; class defect and TODO in
 `src/compiler/80.driver/` (or anything else on the worker's interpreted path)
 requires an `interpreter_extern` adapter in the same change.** There is no gate
 that will tell you otherwise; you find out when a build dies.
+
+## Assurance warning phase touches this layer (planned 2026-08-23)
+
+`driver_safety_severity.spl` holds the driver's projection
+(`SafetyPassSeverity` Advisory/Warn/Deny) of the frozen profile-name table in
+`00.common/assurance/policy_names.spl`. The planned warning phase (Wave 5 of
+`doc/03_plan/agent_tasks/mission_critical_infra_hardening_v2.md`) downgrades
+Deny→Warn one rung while still reporting. Trap for implementers: the driver
+RE-READS `SIMPLE_SAFETY_PROFILE` per call while the interpreter latches it at
+`eval_init` — gates must compare `policy_hash()` across components, not env
+text. Migration order M1 driver → M2 loader → M3 interpreter (bool projection
+must be widened first there).
