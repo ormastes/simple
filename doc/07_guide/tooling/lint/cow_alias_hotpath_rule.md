@@ -82,6 +82,18 @@ seven `interpreter_types.spl` rows this change fixed (198 -> 191 offenders), a
 strict tightening. `PASS — 9681 file(s) scanned, 191 offender(s) checked, 0 new,
 0 stale`.
 
+## Detection corpus
+
+`test/fixtures/perf_defect_corpus/` holds a durable, tracked, deliberately-
+defective sample for every perf/memory class, each paired with a near-identical
+correct file, plus its own README. It is excluded from every scanner **by
+construction** (the ratchet's roots are `$ROOT/src/compiler` and `$ROOT/src/lib`;
+`test/fixtures/` is under neither), verified by re-running the ratchet with all
+fixtures present and getting a byte-identical verdict. The matrix is executable:
+`test/01_unit/compiler/lint/perf_defect_corpus_detection_spec.spl` (11 examples)
+asserts what is caught AND asserts zero for the two classes that are not, so a
+future rule cannot start catching one without turning the spec red.
+
 ## Known limits
 
 - Text heuristics, not dataflow: a round trip whose take and store-back are

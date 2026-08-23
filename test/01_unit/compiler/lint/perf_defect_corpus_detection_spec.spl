@@ -1,0 +1,245 @@
+"""
+## Purpose and audience
+Purpose: Executable detection matrix — for every perf/memory defect class in the
+corpus, assert what the linter actually DETECTS, positive and negative.
+Audience: compiler and tooling engineers who maintain the perf lint rules.
+"""
+# @req: REQ-COMPILER-LINT-001 — stable requirement identity for this spec.
+
+# Detection matrix over test/fixtures/perf_defect_corpus/.
+#
+# WHY THIS EXISTS
+# ---------------
+# "A rule exists" is not evidence a class is caught. Only a fixture that is
+# actually flagged is. Every row below runs the real rule over a durable, tracked
+# fixture and asserts the exact outcome — including the classes that are NOT
+# detected, which are asserted to produce ZERO findings so that a future rule
+# which starts catching them turns this spec red and forces the matrix to be
+# updated rather than silently drifting.
+#
+# The positive/negative PAIR is the load-bearing part: a rule that fires on
+# everything would pass every positive row and fail every negative one.
+#
+# Corpus and its exclusion: test/fixtures/perf_defect_corpus/README.md.
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops (file_read)
+use compiler.semantics.lint.cow_alias_hotpath.{
+    CowAliasFinding,
+    check_cow_alias_hotpath
+}
+
+
+fn _corpus(name: text) -> [CowAliasFinding]:
+    val path = "test/fixtures/perf_defect_corpus/{name}"
+    check_cow_alias_hotpath(file_read(path), path)
+
+
+fn _codes(findings: [CowAliasFinding]) -> [text]:
+    var out: [text] = []
+    for f in findings:
+        out.push(f.code)
+    out
+
+
+# ============================================================================
+# Class 1: COW alias hot path — DETECTED
+# ============================================================================
+
+describe "Detection matrix — COW round trip (PERF-COW-001)":
+    """
+    ## Class: take / mutate / store-back through a local
+
+    Fixtures: `cow_roundtrip_positive.spl` / `cow_roundtrip_negative.spl`
+    Expected: DETECTED.
+    """
+
+    context "when the positive fixture is linted":
+        """
+        ### Scenario: the defect must be flagged
+        """
+
+        it "reports exactly one PERF-COW-001":
+            step("Verify: cow_roundtrip_positive.spl is flagged PERF-COW-001")
+            # @req: REQ-COMPILER-LINT-001
+            val findings = _corpus("cow_roundtrip_positive.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — one round trip
+            expect(findings[0].code).to_equal("PERF-COW-001")
+
+    context "when the negative fixture is linted":
+        """
+        ### Scenario: the correct form must NOT be flagged
+        """
+
+        it "reports nothing":
+            step("Verify: cow_roundtrip_negative.spl is clean")
+            val findings = _corpus("cow_roundtrip_negative.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — owner-mutation + unmutated take
+
+
+describe "Detection matrix — COW by-value helper (PERF-COW-002)":
+    """
+    ## Class: `self.xs = helper(self.xs, v)`
+
+    Fixtures: `cow_byvalue_positive.spl` / `cow_byvalue_negative.spl`
+    Expected: DETECTED.
+    """
+
+    context "when the positive fixture is linted":
+        """
+        ### Scenario: the defect must be flagged
+        """
+
+        it "reports exactly one PERF-COW-002":
+            step("Verify: cow_byvalue_positive.spl is flagged PERF-COW-002")
+            # @req: REQ-COMPILER-LINT-001
+            val findings = _corpus("cow_byvalue_positive.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — one by-value store-back
+            expect(findings[0].code).to_equal("PERF-COW-002")
+
+    context "when the negative fixture is linted":
+        """
+        ### Scenario: a different source field is not a self-alias
+        """
+
+        it "reports nothing":
+            step("Verify: cow_byvalue_negative.spl is clean")
+            val findings = _corpus("cow_byvalue_negative.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — no self-aliasing
+
+
+describe "Detection matrix — keys()/values() in a loop (PERF-COW-003)":
+    """
+    ## Class: materialized view rebuilt every iteration
+
+    Fixtures: `cow_keysinloop_positive.spl` / `cow_keysinloop_negative.spl`
+    Expected: DETECTED, and the loop-VARYING receiver exempt.
+    """
+
+    context "when the receiver is loop-invariant":
+        """
+        ### Scenario: the defect must be flagged
+        """
+
+        it "reports exactly one PERF-COW-003":
+            step("Verify: cow_keysinloop_positive.spl is flagged PERF-COW-003")
+            # @req: REQ-COMPILER-LINT-001
+            val findings = _corpus("cow_keysinloop_positive.spl")
+            expect(findings.len()).to_equal(1)  # oracle: 1 — one invariant materialization
+            expect(findings[0].code).to_equal("PERF-COW-003")
+
+    context "when the call is hoisted or the receiver is rebound":
+        """
+        ### Scenario: both correct shapes must stay clean
+
+        A rebound receiver materializes a DIFFERENT dict each iteration, so the
+        total is O(total entries) — flagging it was a measured false positive.
+        """
+
+        it "reports nothing":
+            step("Verify: cow_keysinloop_negative.spl is clean")
+            val findings = _corpus("cow_keysinloop_negative.spl")
+            expect(findings.len()).to_equal(0)  # oracle: 0 — hoisted + loop-varying
+
+
+# ============================================================================
+# Class 2: per-character interpreted walk (CHARWALK) — NOT DETECTED
+# ============================================================================
+
+describe "Detection matrix — per-character walk (CHARWALK): NOT detected":
+    """
+    ## Class: interpreted `substring(i, i+1)` per character with no native reject
+
+    Fixtures: `charwalk_positive.spl` / `charwalk_negative.spl`
+    Expected: **NOT DETECTED — no rule exists, deliberately.**
+
+    The identical loop is correct and unavoidable wherever a character genuinely
+    must be classified one at a time (this repo's own lint helpers do it), so a
+    rule on the shape alone fires on every correct use. Discriminating requires
+    knowing whether a native scan could have replaced the loop — a dataflow
+    question a text lint cannot answer. Pinned by MECHANISM instead, in
+    `scripts/check/check-perf-regression-tests.shs` (CHARWALK rows).
+
+    This row asserts ZERO so that a future rule which starts catching the class
+    turns the spec red and forces the matrix to be updated.
+    """
+
+    context "when both fixtures are linted":
+        """
+        ### Scenario: the perf lint is silent on this class
+        """
+
+        it "reports nothing for the defective form":
+            step("Verify: charwalk_positive.spl is undetected, as documented")
+            # @req: REQ-COMPILER-LINT-001
+            expect(_corpus("charwalk_positive.spl").len()).to_equal(0)  # oracle: 0 — no rule
+
+        it "reports nothing for the corrected form":
+            step("Verify: charwalk_negative.spl is likewise silent")
+            expect(_corpus("charwalk_negative.spl").len()).to_equal(0)  # oracle: 0 — no rule
+
+
+# ============================================================================
+# Class 3: unbounded memory retention — NOT STATICALLY DETECTABLE
+# ============================================================================
+
+describe "Detection matrix — unbounded memory retention: NOT statically detectable":
+    """
+    ## Class: accumulation that climbs to peak and releases nothing
+
+    Fixtures: `memory_retention_positive.spl` / `memory_retention_negative.spl`
+    Expected: **NOT DETECTED — and this one cannot be fixed by adding a rule.**
+
+    Every line of the positive fixture is individually correct: the accumulator
+    is mutated through its owner, there is no COW alias and no quadratic loop.
+    Whether the growth is bounded is a LIFETIME property of a whole run — it
+    depends on how much the caller feeds in and whether any consumer releases —
+    and the source shape is identical to every legitimate builder. Detection
+    belongs to a runtime RSS budget, not a static rule. See
+    `doc/08_tracking/bug/native_build_worker_rss_unbounded_953mb_from_oom_kill_2026-08-23.md`
+    (peak 2.77 GiB, still climbing ~40 MB/s, ~953 MB below the earlyoom kill).
+    """
+
+    context "when both fixtures are linted":
+        """
+        ### Scenario: the perf lint cannot separate bounded from unbounded
+        """
+
+        it "reports nothing for the unbounded form":
+            step("Verify: memory_retention_positive.spl is undetected, as documented")
+            # @req: REQ-COMPILER-LINT-001
+            expect(_corpus("memory_retention_positive.spl").len()).to_equal(0)  # oracle: 0
+
+        it "reports nothing for the bounded form either":
+            step("Verify: the bounded form is indistinguishable to a source lint")
+            expect(_corpus("memory_retention_negative.spl").len()).to_equal(0)  # oracle: 0
+
+
+# ============================================================================
+# Corpus integrity
+# ============================================================================
+
+describe "Detection matrix — corpus integrity":
+    """
+    ## The corpus must stay outside every scanner
+
+    `scripts/check/check-cow-alias-hotpath.shs` scans `$ROOT/src/compiler` and
+    `$ROOT/src/lib` and nothing else, so a corpus under `test/fixtures/` is
+    excluded BY CONSTRUCTION rather than by an allowlist that can rot. This
+    example pins that construction: if either scan root ever widened to `test/`
+    or to the repo root, the deliberately-defective fixtures would start
+    polluting the baseline.
+    """
+
+    context "when the ratchet's scan roots are read":
+        """
+        ### Scenario: the scan roots are still src-only
+        """
+
+        it "scans only src/compiler and src/lib":
+            step("Verify: the COW ratchet's scan roots exclude test/ by construction")
+            # @req: REQ-COMPILER-LINT-001
+            val gate = file_read("scripts/check/check-cow-alias-hotpath.shs")
+            expect(gate.contains("SRC=\"$ROOT/src/compiler\"")).to_be_true()
+            expect(gate.contains("LIBSRC=\"$ROOT/src/lib\"")).to_be_true()
+            expect(gate.contains("$ROOT/test")).to_be_false()
