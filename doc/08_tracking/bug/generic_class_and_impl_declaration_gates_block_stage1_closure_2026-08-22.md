@@ -326,3 +326,22 @@ The third spec case is kept regardless: it pins that an ambiguous variant name
 must resolve to the right enum, which is a real invariant whatever the
 mechanism behind it turns out to be. It is pinned by spec, not by a mechanism
 row, precisely because no line of 40.mono can be pointed at.
+
+## Real-scale probe: NEGATIVE — the closure never reaches mono
+
+`--entry-closure` on `src/app/lint`, **closure size 140 modules** (the cheap
+real-scale ladder rung): `hir 140/140` completes, then rc=1 at **step 2/6**
+with **1512 HIR lowering errors across 44 files** — 1238 ``field `X` is not
+visible from this module``, 174 ``aggregate constructor `X` is not visible``,
+80 `unresolved type`, 20 `unresolved name`. **No `[mono]` receipt is emitted
+and E-MONO-030/032/033 are all zero: control never reaches monomorphization.**
+`generic structs are not supported` appears 0 times.
+
+Filed as `hir_cross_module_field_visibility_blocks_lint_closure_2026-08-23.md`.
+
+So the mono fix landed at `75f554903ff` is proven at **closure size 1** and by
+call-site enumeration, and is **unvalidated at real closure scale** — not
+because it failed there, but because no real closure currently gets far enough
+to exercise it. The honest status of "does stage1 now survive
+monomorphization?" is **unknown**, and the next thing standing in the way is
+an HIR visibility defect with no generics content whatsoever.
