@@ -1,0 +1,155 @@
+"""
+## Purpose and audience
+Purpose: Pin `Dict.len()` across every receiver shape, and hold the struct-field
+row visibly red until the native `.len()` lowering stops degrading it.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-COMPILER-NATIVE-001
+doc/01_research/local/REQ-COMPILER-NATIVE-001.md
+doc/03_plan/sys_test/REQ-COMPILER-NATIVE-001.md
+doc/04_architecture/REQ-COMPILER-NATIVE-001.md
+doc/05_design/REQ-COMPILER-NATIVE-001.md
+"""
+# @req: REQ-COMPILER-NATIVE-001
+
+"""
+Dict.len() by Receiver Shape — the STRUCT FIELD row is red
+
+Bug doc: doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md
+Sibling: doc/08_tracking/bug/native_dict_get_struct_value_corrupt_option_2026-07-27.md
+
+That bug record was re-measured green on 2026-08-01 for two receiver shapes —
+a LOCAL and a PARAMETER — and explicitly left the third, a STRUCT FIELD,
+unmeasured: "Do not close this bug on the strength of the two rows above
+alone." This spec measures all three in one file so the discriminating row
+cannot be lost again.
+
+The struct-field row was finally measured on 2026-08-23 by the stage-3
+bootstrap itself, which died in phase-2 retention on
+`... count=26; surfaces=691 names=946 indices=946 dict=-1`, where `dict` is a
+`Dict<text, i64>` read as a struct field. An independent measurement in the
+same lane found a field dict freshly filled with 26 entries reporting
+`len() == -1` while every one of its keys answered `contains_key` correctly:
+the entries are live, only `len()` lies.
+
+Mechanism (source, `origin/main` 2026-08-23):
+  - C `rt_len` (src/runtime/runtime_native.c:2976) dispatches string, then
+    array, then `else 0` — it has NO dict arm.
+  - Pure-Simple MIR (50.mir/_MirLoweringExpr/method_calls_literals.spl:1853-1866)
+    selects `rt_dict_len` only when `local_is_runtime_dict` proves dict-ness,
+    which it does for locals and parameters but NOT for a field read; it then
+    rewrites the fallback `rt_len` to `rt_string_len`, which returns -1.
+  - The Rust seed's LLVM codegen (codegen/llvm/functions.rs:2528,
+    functions/calls.rs:2064,2234) emits plain `rt_len` and so degrades to a
+    silent 0 for the same shape.
+
+EXPECTED RED (the struct-field and class-field scenarios only). Per repo
+convention for filed defects (precedent: dict_get_struct_value_spec.spl,
+nil_dict_receiver_phantom_option_spec.spl), they must stay VISIBLY red — do
+NOT skip() them. Every other scenario pins behavior that is correct today and
+must stay green; those are the prevention rows for the defect CLASS (a
+generic runtime accessor whose dispatch enumerates string and array and
+silently drops dict — same class as
+doc/08_tracking/bug/stage3_dict_clear_no_dict_branch_in_rt_clear_2026-08-17.md).
+"""
+
+use std.spec
+use std.spec.step
+
+struct Registry:
+    index_by_name: Dict<text, i64>
+
+class Carrier:
+    var index_by_name: Dict<text, i64>
+
+fn make_dict() -> Dict<text, i64>:
+    var d: Dict<text, i64> = {}
+    d["alpha"] = 0
+    d["beta"] = 1
+    d["gamma"] = 2
+    d
+
+fn len_of_param(d: Dict<text, i64>) -> i64:
+    d.len()
+
+describe "Dict.len() on the receiver shapes already measured green":
+    it "reports the true count for a LOCAL receiver":
+        # @req: REQ-COMPILER-NATIVE-001
+        step("Verify: a local Dict reports its true entry count")
+        val d = make_dict()
+        expect(d.len()).to_equal(3)
+
+    it "reports the true count for a PARAMETER receiver":
+        # @req: REQ-COMPILER-NATIVE-001
+        step("Verify: a Dict passed as a parameter reports its true count")
+        expect(len_of_param(make_dict())).to_equal(3)
+
+    it "reports 0 for an empty LOCAL receiver, never -1":
+        # @req: REQ-COMPILER-NATIVE-001
+        step("Verify: an empty local Dict reports 0, not the -1 sentinel")
+        val d: Dict<text, i64> = {}
+        expect(d.len()).to_equal(0)
+
+describe "Dict.len() on a STRUCT FIELD receiver (EXPECTED RED — filed defect)":
+    it "reports the true count for a populated struct-field receiver":
+        # @req: REQ-COMPILER-NATIVE-001
+        step("Verify: a struct-field Dict reports its true entry count")
+        val r = Registry(index_by_name: make_dict())
+        expect(r.index_by_name.len()).to_equal(3)
+
+    it "reports 0 for an empty struct-field receiver, never -1":
+        # @req: REQ-COMPILER-NATIVE-001
+        step("Verify: an empty struct-field Dict reports 0, not -1 and not a strlen result")
+        val r = Registry(index_by_name: {})
+        expect(r.index_by_name.len()).to_equal(0)
+
+    it "never reports a negative length for a struct-field receiver":
+        # @req: REQ-COMPILER-NATIVE-001
+        step("Verify: a struct-field Dict length is non-negative — the -1 sentinel defeats every len() guard")
+        val r = Registry(index_by_name: make_dict())
+        expect(r.index_by_name.len() >= 0).to_equal(true)
+
+describe "Dict.len() on a CLASS FIELD receiver (EXPECTED RED — same class)":
+    it "reports the true count for a populated class-field receiver":
+        # @req: REQ-COMPILER-NATIVE-001
+        step("Verify: a class-field Dict reports its true entry count")
+        val c = Carrier(index_by_name: make_dict())
+        expect(c.index_by_name.len()).to_equal(3)
+
+describe "The field carrier is LIVE even while len() lies (prevention rows)":
+    it "answers contains_key for every key of a struct-field dict":
+        # @req: REQ-COMPILER-NATIVE-001
+        step("Verify: entries are intact — len() is wrong, the dict is not")
+        val r = Registry(index_by_name: make_dict())
+        expect(r.index_by_name.contains_key("alpha")).to_equal(true)
+        expect(r.index_by_name.contains_key("beta")).to_equal(true)
+        expect(r.index_by_name.contains_key("gamma")).to_equal(true)
+        expect(r.index_by_name.contains_key("missing")).to_equal(false)
+
+    it "answers the index read for every key of a struct-field dict":
+        # @req: REQ-COMPILER-NATIVE-001
+        step("Verify: d[k] on a struct-field dict returns the stored positions")
+        val r = Registry(index_by_name: make_dict())
+        expect(r.index_by_name["alpha"]).to_equal(0)
+        expect(r.index_by_name["beta"]).to_equal(1)
+        expect(r.index_by_name["gamma"]).to_equal(2)
+
+    it "agrees with keys().len() on a struct-field dict":
+        # @req: REQ-COMPILER-NATIVE-001
+        step("Verify: the array-valued keys() route and the dict len() route agree")
+        val r = Registry(index_by_name: make_dict())
+        expect(r.index_by_name.keys().len()).to_equal(3)
+
+    it "copying the field into a local restores a correct len()":
+        # @req: REQ-COMPILER-NATIVE-001
+        step("Verify: the defect is the RECEIVER SHAPE, not the dict — the same dict read through a local is correct")
+        val r = Registry(index_by_name: make_dict())
+        val local_copy = r.index_by_name
+        expect(local_copy.len()).to_equal(3)
