@@ -1,0 +1,104 @@
+# @Feature B7: f32 struct fields read back the value that was stored
+# @Description: REPRODUCING spec for
+# doc/08_tracking/bug/stage2_native_f32_struct_field_read_returns_zero_2026-08-23.md
+#
+# Pre-fix failing output, verbatim (stage-2 pure-Simple compiler, native
+# codegen, `native-build --entry ... --entry-closure --runtime-bundle auto`):
+#
+#     val a = P4(x: 1.0f32, y: 2.5f32, z: 3.0f32, w: 4.0f32)
+#     print a.x   ->  0.0     (expected 1.0)
+#     print a.y   ->  0.0     (expected 2.5)
+#     print a.w   ->  0.0     (expected 4.0)
+#
+# ENGINE DIVERGENCE, not a shared defect. Measured 2026-08-23:
+#   - stage-2 pure-Simple NATIVE codegen : 0.0 / 0.0 / 0.0   WRONG
+#   - Rust seed INTERPRETER (`seed run`) : 1.0 / 2.5 / 4.0   correct
+# The identical file with every `f32` replaced by `f64` prints correctly on
+# stage-2 native, so the defect is specific to the f32 field-read path and is
+# not a general struct-field or float defect.
+#
+# Root cause (from the object code): the constructor STORES an f32 field as a
+# raw IEEE-754 *double* bit pattern in the full 8-byte slot (1.0f32 is stored
+# as 0x3FF0000000000000), but the field READ emits `vcvttss2si (%rbx),%rdi` --
+# a 32-bit *single* load combined with a float->signed-int truncation --
+# against that same slot. Reading the low 4 bytes of an f64 bit pattern is ~0,
+# so every f32 field reads back 0.0. Store and read disagree on both the width
+# and the operation.
+#
+# This is a SILENT wrong-data defect: nothing crashes and no diagnostic is
+# emitted, so any code path that round-trips an f32 through a struct field
+# quietly computes on zeros.
+
+describe "f32 struct fields round-trip through native codegen":
+
+    it "reads back each f32 field as the value the constructor stored":
+        struct P4:
+            x: f32
+            y: f32
+            z: f32
+            w: f32
+
+        val a = P4(x: 1.0f32, y: 2.5f32, z: 3.0f32, w: 4.0f32)
+        expect(a.x).to_equal(1.0f32)
+        expect(a.y).to_equal(2.5f32)
+        expect(a.z).to_equal(3.0f32)
+        expect(a.w).to_equal(4.0f32)
+
+    # --- neighbouring shapes of the same defect class -----------------------
+    # Derived from the class (f32 crossing a storage boundary), not from the
+    # one reported instance, so a fix that only special-cases a 4-field struct
+    # cannot make this file green.
+
+    it "reads back an f32 field from a single-field struct":
+        struct One:
+            v: f32
+
+        val o = One(v: 7.5f32)
+        expect(o.v).to_equal(7.5f32)
+
+    it "reads back an f32 field sitting beside non-float fields":
+        struct Mixed:
+            tag: i64
+            ratio: f32
+            name: text
+
+        val m = Mixed(tag: 3, ratio: 0.5f32, name: "m")
+        expect(m.tag).to_equal(3)
+        expect(m.ratio).to_equal(0.5f32)
+        expect(m.name).to_equal("m")
+
+    it "keeps f64 fields correct -- the control that already passes":
+        struct D4:
+            x: f64
+            y: f64
+
+        val d = D4(x: 1.0, y: 2.5)
+        expect(d.x).to_equal(1.0)
+        expect(d.y).to_equal(2.5)
+
+    it "round-trips an f32 field through arithmetic":
+        struct Acc:
+            total: f32
+
+        val a = Acc(total: 1.5f32)
+        val b = Acc(total: a.total + 2.0f32)
+        expect(b.total).to_equal(3.5f32)
+
+    it "reads back an f32 field after the struct is copied by value":
+        struct P2:
+            x: f32
+            y: f32
+
+        val p = P2(x: 1.25f32, y: 2.75f32)
+        val q = p
+        expect(q.x).to_equal(1.25f32)
+        expect(q.y).to_equal(2.75f32)
+
+    it "reads back an f32 field from a struct nested in another struct":
+        struct Inner:
+            v: f32
+        struct Outer:
+            inner: Inner
+
+        val o = Outer(inner: Inner(v: 9.5f32))
+        expect(o.inner.v).to_equal(9.5f32)
