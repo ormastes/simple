@@ -17,7 +17,12 @@
  *      src/runtime/test/rt_io_runtime_fs_shell_core_c_selfcheck.c rn.o lc.o \
  *      -lpthread -lm -ldl -o fs_shell && ./fs_shell
  */
+/* Darwin: defining _XOPEN_SOURCE lowers __DARWIN_C_LEVEL to the pure POSIX
+ * namespace, which HIDES mkdtemp (used below) from <unistd.h>. glibc needs
+ * the define for the same declarations, so scope it to non-Darwin hosts. */
+#ifndef __APPLE__
 #define _XOPEN_SOURCE 700
+#endif
 #include "runtime.h"
 
 #include <stdio.h>
