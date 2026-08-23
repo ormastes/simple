@@ -1,0 +1,124 @@
+#!/bin/sh
+# Gate: `simple test <all-passing-dir>` must exit 0 AND write the test DB.
+#
+# Incident 2026-08-23, doc/08_tracking/bug/
+# jit_unresolved_rt_native_build_and_runtime_file_rename_2026-08-22.md:
+# the runner printed `All tests passed!` and then exited 1, because
+# `update_test_database` (test_runner_main.spl:1144) died with
+#   error[E1002]: function `runtime_file_rename` not found
+# AFTER print_summary (:1125) had printed a clean `Results:` block. Every run
+# for a full day therefore wrote NO test DB at all, which is why
+# doc/08_tracking/test/test_result.md froze at a stale 770/0/0 snapshot.
+#
+# Why this guard is not covered by any existing one: every pre-push guard
+# checks trees, ranges, or source text, and the two that run a toolchain run it
+# over SOURCE. A runner that exits non-zero on a green suite is well-formed by
+# every one of those measures. Only EXECUTING it finds this.
+#
+# Verdict convention matches the other guards: the verdict line is the LAST
+# line of stdout, a passing run states how much it actually checked, and a run
+# that checked nothing is ERROR (exit 2), never a pass.
+
+set -u
+
+# --selftest runs BEFORE any real scan and is fatal. Each fixture drives the
+# real classifier below via a fake runner, so a broken classifier cannot pass.
+if [ "${1:-}" = "--selftest" ]; then
+    st_tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    trap 'rm -rf "$st_tmp"' EXIT
+    st_fail=0
+
+    # classify <rc> <output-file> <db-file> <before-epoch> -> echoes PASS/FAIL
+    st_classify() {
+        _rc=$1; _out=$2; _db=$3; _before=$4
+        grep -q 'Results:' "$_out" || { echo ERROR; return; }
+        [ "$_rc" -eq 0 ] || { echo FAIL; return; }
+        [ -f "$_db" ] || { echo FAIL; return; }
+        _after=$(date -r "$_db" +%s)
+        [ "$_after" -gt "$_before" ] || { echo FAIL; return; }
+        echo PASS
+    }
+
+    st_expect() {
+        _label=$1; _want=$2; _got=$3
+        if [ "$_want" != "$_got" ]; then
+            echo "selftest: $_label expected $_want, got $_got"
+            st_fail=1
+        fi
+    }
+
+    # 1. green run that rewrites the DB -> PASS
+    printf 'Results: 1 total, 1 passed\nAll tests passed!\n' > "$st_tmp/a.out"
+    : > "$st_tmp/a.db"; touch -t 200001010000 "$st_tmp/a.db"; a_before=$(date -r "$st_tmp/a.db" +%s)
+    touch "$st_tmp/a.db"
+    st_expect "green+rewritten" PASS "$(st_classify 0 "$st_tmp/a.out" "$st_tmp/a.db" "$a_before")"
+
+    # 2. THE INCIDENT: green text, non-zero exit -> FAIL
+    printf 'Results: 1 total, 1 passed\nAll tests passed!\nerror[E1002]: function `runtime_file_rename` not found\n' > "$st_tmp/b.out"
+    : > "$st_tmp/b.db"; touch -t 200001010000 "$st_tmp/b.db"; b_before=$(date -r "$st_tmp/b.db" +%s)
+    st_expect "green-text-but-rc1" FAIL "$(st_classify 1 "$st_tmp/b.out" "$st_tmp/b.db" "$b_before")"
+
+    # 3. exit 0 but the DB was NOT rewritten -> FAIL (silent write failure)
+    printf 'Results: 1 total, 1 passed\n' > "$st_tmp/c.out"
+    : > "$st_tmp/c.db"; touch -t 200001010000 "$st_tmp/c.db"; c_before=$(date -r "$st_tmp/c.db" +%s)
+    st_expect "rc0-but-db-stale" FAIL "$(st_classify 0 "$st_tmp/c.out" "$st_tmp/c.db" "$c_before")"
+
+    # 4. exit 0 but the DB does not exist at all -> FAIL
+    printf 'Results: 1 total, 1 passed\n' > "$st_tmp/d.out"
+    st_expect "rc0-but-db-missing" FAIL "$(st_classify 0 "$st_tmp/d.out" "$st_tmp/d.missing" 0)"
+
+    # 5. runner produced no Results: line -> ERROR, never a pass
+    printf 'total nonsense\n' > "$st_tmp/e.out"
+    : > "$st_tmp/e.db"; touch "$st_tmp/e.db"
+    st_expect "no-results-line" ERROR "$(st_classify 0 "$st_tmp/e.out" "$st_tmp/e.db" 0)"
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "FAIL — selftest failed"
+        exit 1
+    fi
+    echo "PASS — 5 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+ROOT=${ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}
+FIXTURE_DIR=${FIXTURE_DIR:-test/01_unit/tools/test_db_write}
+DB=doc/08_tracking/test/test_db.sdn
+SIMPLE=${SIMPLE:-bin/simple}
+
+fail()  { printf 'FAIL — %s\n' "$1"; exit 1; }
+oops()  { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+
+[ -n "$ROOT" ] || oops "not inside a git repository"
+cd "$ROOT" || oops "cannot enter repo root"
+[ -d "$FIXTURE_DIR" ] || oops "fixture directory $FIXTURE_DIR is missing"
+[ -x "$SIMPLE" ] || oops "no runnable $SIMPLE (absence of a runner is absence of evidence)"
+
+# Count what we are about to execute, so a vacuous run cannot pass.
+SPECS=$(find "$FIXTURE_DIR" -name '*_spec.spl' | wc -l | tr -d ' ')
+[ "$SPECS" -gt 0 ] || oops "fixture directory contains 0 spec files"
+
+# Mark the DB so "was it rewritten" is a fact, not an inference.
+BEFORE=0
+[ -f "$DB" ] && { touch -d '2000-01-01' "$DB" 2>/dev/null || touch -t 200001010000 "$DB"; BEFORE=$(date -r "$DB" +%s); }
+
+OUT=$(mktemp) || oops "cannot create temp file"
+trap 'rm -f "$OUT"' EXIT
+
+SIMPLE_TIMEOUT_SECONDS=0 "$SIMPLE" test "$FIXTURE_DIR" >"$OUT" 2>&1
+# Read the status DIRECTLY into a variable on the next line -- never through a
+# pipe, whose $? is the last stage's status and has produced false greens here.
+RC=$?
+
+grep -q 'Results:' "$OUT" || oops "runner produced no Results: line"
+
+if [ "$RC" -ne 0 ]; then
+    WHY=$(grep -m1 -E 'error\[E[0-9]+\]' "$OUT" || echo "exit $RC with no error line")
+    fail "$SPECS spec(s) all passed but the runner exited $RC: $WHY"
+fi
+
+[ -f "$DB" ] || fail "$SPECS spec(s) passed and runner exited 0, but $DB was never created"
+AFTER=$(date -r "$DB" +%s)
+[ "$AFTER" -gt "$BEFORE" ] || fail "$SPECS spec(s) passed and runner exited 0, but $DB was not rewritten (a silent write failure is how the DB got stale)"
+
+printf 'PASS — %s spec(s) executed, runner exited 0, %s rewritten\n' "$SPECS" "$DB"
+exit 0

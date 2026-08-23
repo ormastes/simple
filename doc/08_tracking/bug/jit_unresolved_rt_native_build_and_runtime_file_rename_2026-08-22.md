@@ -113,3 +113,187 @@ unresolvable name fails, and a baselined name that became resolvable fails as a
 discriminates (non-empty, every listed name has an address, a nonexistent name
 is refused); and the ratcheted sweep with its own non-vacuity assertions.
 Fails pre-fix on `rt_native_build`, passes post-fix.
+
+---
+
+# REOPENED 2026-08-23 — symbol 2's fix was only half the compiler
+
+**Status:** FIXED (second half)
+
+The `runtime_file_rename` fix above was landed in **HIR lowering**
+(`hir/lower/lowerer.rs::collect_flattened_import_aliases`). That is the
+**codegen/JIT** path, and it is genuinely correct for that path. But the alias
+is resolved *independently* by the **interpreter**, which `c0c4e707789` never
+touched — and `simple test` runs specs in interpreter mode
+(`Running N test file(s) [mode: interpreter]`). So on the path that matters most
+to the project, the symbol stayed unresolved.
+
+## Symptom (three lanes, same day)
+
+```
+Results: 1 total, 1 passed, 0 failed
+All tests passed!
+error[E1002]: function `runtime_file_rename` not found
+$ echo $?
+1
+```
+
+A **fully green** suite exits 1. `print_summary`
+(`test_runner_main.spl:1125`) prints the clean `Results:` block first; then
+`update_test_database` (`:1144`) dies. Everything after that point — including
+the `test_result.md` write at `:1193` — never runs.
+
+## Why the first fix did not cover it
+
+`E1002` here is `codes::UNDEFINED_FUNCTION` emitted at
+`compiler/src/interpreter_call/mod.rs`, not by HIR lowering. Flattening *does*
+record the alias edge — `record_flattened_import_binding` writes
+`local alias -> (defining owner, defining name)` into
+`MODULE_GLOBAL_BINDINGS_BY_OWNER` — but that table was only ever consulted for
+**globals**. A *call* of `runtime_file_rename` looked the bare alias up in the
+interpreter's `functions` map, missed, and fell straight through to E1002.
+
+Hypothesis explicitly tested and **refuted**: "the deployed seed simply predates
+`c0c4e707789`". A seed rebuilt from clean HEAD (which contains `c0c4e707789`)
+reproduced the failure byte-for-byte. The fix was incomplete, not undeployed.
+
+## Fix (interpreter-side counterpart; not a stub, nothing swallowed)
+
+Immediately before the E1002 emission, resolve the name through
+`owner_bindings(CURRENT_EXEC_MODULE)` to `(source_owner, source_name)` and
+dispatch to the owner-mangled symbol (`flatten_owner_mangled_name`), or else to
+the candidate whose `function_module_owner` **equals `source_owner`**.
+Resolution is **delegated to the same recorded binding the HIR side uses**, so
+codegen and the interpreter cannot disagree about which of the four
+`file_rename` definitions an alias names. When no candidate matches the owner we
+fall through to E1002 rather than guess.
+
+### Why selection MUST be by owner, not by bare name (first attempt, measured)
+
+The first version of this fix fell back to `functions[source_name]` when the
+mangled symbol was absent, guarded only by `source_name != name`. That guard is
+insufficient and the attempt **failed on the runner**:
+
+```
+All tests passed!
+error: stack overflow: recursion depth 1000 exceeded limit 1000 in function 'file_rename'
+```
+
+Flattening mangles only `main`, so all four `file_rename` definitions share the
+one bare key. For `runtime_file_rename` the bare key holds `io/file_ops`'s own
+one-line wrapper — the very function whose body issued the call — so the alias
+resolved back into its own caller and recursed. The name-inequality guard cannot
+see this, because the two names genuinely differ; only the OWNER distinguishes
+the wrapper from the definition it wraps. This is the same ambiguity the HIR
+side had to solve, and it has to be solved the same way.
+
+Deliberately NOT done: stubbing the symbol (that is the
+`unregistered_extern_silent_nil_2026-08-01.md` defect class), and making the
+runner tolerate a failed DB write (a silent write failure is precisely how the
+DB became stale).
+
+## Measured, same all-passing fixture, pre-fix seed vs post-fix seed
+
+| | exit | E1002 | `test_db.sdn` |
+|---|---|---|---|
+| pre-fix | **1** (on `All tests passed!`) | yes | **not written** |
+| post-fix | **0** | none | **rewritten** |
+
+## Consequence — this is what froze the test DB
+
+`doc/08_tracking/test/test_result.md` read `Total 770 / Passed 0 / Failed 0`
+with `test_db.sdn` last written **2026-08-22 09:43**. That is a **stale
+snapshot, not a corrupted write**: every run after the bad seed aborted before
+writing anything, so nothing was half-written and regeneration is safe. This
+also explains the incoherent joins reported separately — those rows are simply
+old.
+
+## Regression gate
+
+`scripts/check/check-test-db-write-succeeds.shs` over
+`test/01_unit/tools/test_db_write/`. It EXECUTES the runner: no existing guard
+could catch this, because every one of them checks trees, ranges, or source
+text, and the two that run a toolchain run it over SOURCE. A runner that exits
+non-zero on a green suite is well-formed by all of those measures. Asserts exit
+0 AND that the DB was actually rewritten (mtime forced backwards first, so
+"rewritten" is a fact rather than an inference); the runner's exit status is
+read directly into a variable, never through a pipe. Fails pre-fix, passes
+post-fix.
+
+## Known gap, not fixed here
+
+`test_result.md` still did not update in the post-fix run even though
+`test_db.sdn` did. The `:1193` write sits under `match db { Ok(database) => ...`
+and is silently skipped on `Err(_)`. That silent skip is a second defect of the
+same family and is NOT addressed by this change.
+
+## STATUS CORRECTION — the interpreter half is NOT fixed as of 2026-08-23
+
+The `**Status:** FIXED` at the top of this record is **correct for the JIT /
+codegen path and wrong for the interpreter path**. Treat it as OPEN. Evidence,
+so this is not a matter of opinion: a seed rebuilt from clean `HEAD` — a tree
+that demonstrably CONTAINS `c0c4e707789` — reproduces the original symptom
+byte-for-byte. The fix is incomplete, not undeployed. Anyone reading only the
+header will lose hours re-deriving that.
+
+## Approaches TRIED AND FAILED — do not retry these
+
+All three compiled, all three looked right in review, all three failed when
+actually executed against the runner. Recorded because each is the obvious next
+idea.
+
+1. **Bare-name fallback**, guarded on `source_name != name`.
+   → `stack overflow: recursion depth 1000 exceeded in function 'file_rename'`.
+   Flattening mangles only `main`, so all four `file_rename` definitions share
+   one bare key, and that key holds `io/file_ops`'s own wrapper — the very
+   function issuing the call. The name-inequality guard cannot see this because
+   the two names genuinely differ; only the OWNER separates wrapper from wrapped.
+
+2. **Match `function_module_owner(candidate) == source_owner`.**
+   → never matched; fell through to the original E1002. `source_owner` names the
+   **facade** `src/lib/io_runtime.spl`, not the declaring module
+   `src/lib/nogc_sync_mut/io_runtime.spl`.
+
+3. **Facade chain-walk (bounded 16 hops) + last-resort "not owned by the current
+   module" filter.**
+   → `stack overflow` again. The filter used `is_none_or(...)`, which KEEPS
+   candidates whose owner is unknown — and the wrapper is one of them, so it
+   survived the filter. Any future filter here must treat "unknown owner" as
+   *reject*, not *accept*.
+
+The next attempt should start from the `SIMPLE_DEBUG_ALIAS=1` dump (see below)
+rather than from another inference.
+
+## Instrumentation kept on purpose
+
+`SIMPLE_DEBUG_ALIAS=1` dumps, at the resolution point: the calling module, the
+binding's `source_owner`/`source_name`, every candidate's
+`function_module_owner`, whether the owner-mangled symbol is present, and the
+next hop in the binding chain. Default OFF, retained per
+`doc/07_guide/infra/logging/log_retention_policy.md` and following the
+`SIMPLE_AMBIGDBG` precedent for this same defect class. Alias resolution has now
+cost four separate investigations; the next person should not have to rebuild
+this from scratch.
+
+## The test DB is STALE, not corrupt — regeneration is SAFE
+
+Recorded explicitly because fear of destroying data has been blocking
+regeneration. `doc/08_tracking/test/test_result.md` reading
+`Total 770 / Passed 0 / Failed 0`, and `test_db.sdn` with counter rows whose
+`tests -> suites -> files` joins disagree, are **an old snapshot from
+2026-08-22 09:43 that simply stopped being updated**. They are not a
+half-written or torn file. The abort happens INSIDE `update_test_database`
+(`test_runner_main.spl:1144`) — measured by forcing both files' mtimes to a
+sentinel and observing that a failing run leaves BOTH untouched. Nothing is
+partially written, so regenerating the DB destroys no information that is not
+already reproducible from a test run. Once the interpreter half lands,
+regenerate rather than attempting a repair.
+
+## Second defect, same family, NOT fixed here
+
+`test_result.md` was still not written even on a run where `test_db.sdn` WAS
+successfully rewritten. Its write (`test_runner_main.spl:1193`) sits under
+`match db { Ok(database) => ... , Err(_) => () }` — an `Err` silently skips the
+report with no diagnostic. That silent skip is its own defect and needs its own
+fix; a swallowed write failure is exactly how this whole situation stayed
+invisible for a day.
