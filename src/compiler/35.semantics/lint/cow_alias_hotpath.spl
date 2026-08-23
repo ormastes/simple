@@ -1,0 +1,403 @@
+# Copy-On-Write Alias Hot-Path Lint
+#
+# Simple has value semantics implemented as copy-on-write: a collection is an
+# Arc-backed container and every mutation goes through `Arc::make_mut`, which
+# deep-copies the WHOLE container whenever the Arc is aliased. That is correct
+# — two live bindings must not observe each other's writes — but catastrophic
+# when the alias is an accidental temporary the code never needed: the copy
+# then fires on EVERY write, and building an n-element collection costs O(n^2).
+#
+# PERF-COW-001: round trip through a local                                WARNING
+#               `val t = self.f` ... `t.push(x)` ... `self.f = t`
+# PERF-COW-002: by-value helper store-back                                WARNING
+#               `self.xs = helper(self.xs, v)`
+# PERF-COW-003: `.keys()` / `.values()` on a loop-INVARIANT receiver
+#               inside a `while`/`for` body                                WARNING
+#
+# Why this is a lint and not only a ratchet: `scripts/check/check-cow-alias-hotpath.shs`
+# freezes the existing population across `src/compiler/**` and blocks additions
+# at push time. This rule reports the same three shapes at AUTHORING time, over
+# every file the linter is pointed at (`src/lib/**`, `src/app/**`, tests), which
+# the ratchet never scans. Detection semantics are deliberately identical to the
+# ratchet so the two cannot disagree — including both of its documented
+# false-positive fixes (see below).
+#
+# Severity is WARNING, never Deny: the tree already carries offenders, and the
+# precedent (RAW-RT-00x, LEADOP001) is that a rule is not escalated before its
+# population is converted.
+#
+# Analysis is line-based text heuristics (no AST dependency) so it runs in
+# interpreter-mode specs and costs one linear pass over the file.
+#
+# Background: doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md
+
+use compiler.semantics.lint.lint_text.{iter_code_lines}
+
+# ============================================================================
+# Finding Struct
+# ============================================================================
+
+pub struct CowAliasFinding:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} — {self.message} — {self.hint}"
+
+# ============================================================================
+# Character Classification
+# ============================================================================
+
+fn _cow_is_ident_char(ch: text) -> bool:
+    if ch == "_": return true
+    if ch >= "a" and ch <= "z": return true
+    if ch >= "A" and ch <= "Z": return true
+    if ch >= "0" and ch <= "9": return true
+    false
+
+fn _cow_indent_of(raw: text) -> i64:
+    """Leading-space count; a blank/whitespace-only line gets a sentinel that
+    keeps it from closing any enclosing loop scope."""
+    var i = 0
+    val n = raw.len()
+    while i < n:
+        val ch = raw.substring(i, i + 1)
+        if ch != " " and ch != "\t":
+            return i
+        i = i + 1
+    999
+
+fn _cow_take_ident(s: text, start: i64) -> text:
+    """Read the identifier beginning at `start`; empty if none."""
+    var i = start
+    val n = s.len()
+    while i < n and _cow_is_ident_char(s.substring(i, i + 1)):
+        i = i + 1
+    if i == start: return ""
+    s.substring(start, i)
+
+fn _cow_strip_trailing_comment(raw: text) -> text:
+    """Cut a trailing `# ...` comment, respecting string-literal boundaries."""
+    var in_str = false
+    var i = 0
+    val n = raw.len()
+    while i < n:
+        val ch = raw.substring(i, i + 1)
+        if ch == "\\":
+            i = i + 2
+            continue
+        if ch == "\"":
+            in_str = not in_str
+        elif ch == "#" and not in_str:
+            return raw.substring(0, i).trim()
+        i = i + 1
+    raw.trim()
+
+# ============================================================================
+# Shape Parsers
+# ============================================================================
+
+fn _cow_is_fn_header(trimmed: text) -> bool:
+    if trimmed.starts_with("fn "): return true
+    if trimmed.starts_with("pub fn "): return true
+    if trimmed.starts_with("me "): return true
+    if trimmed.starts_with("pub me "): return true
+    if trimmed.starts_with("static fn "): return true
+    if trimmed.starts_with("pub static fn "): return true
+    false
+
+fn _cow_fn_name(trimmed: text) -> text:
+    """Extract the declared name from a function header line."""
+    var rest = trimmed
+    if rest.starts_with("pub "): rest = rest.substring(4, rest.len())
+    if rest.starts_with("static "): rest = rest.substring(7, rest.len())
+    if rest.starts_with("fn "): rest = rest.substring(3, rest.len())
+    elif rest.starts_with("me "): rest = rest.substring(3, rest.len())
+    _cow_take_ident(rest.trim(), 0)
+
+fn _cow_decl_lhs(trimmed: text) -> text:
+    """For a `val NAME ...` / `var NAME ...` line, the declared NAME; else ""."""
+    var rest = ""
+    if trimmed.starts_with("val "):
+        rest = trimmed.substring(4, trimmed.len())
+    elif trimmed.starts_with("var "):
+        rest = trimmed.substring(4, trimmed.len())
+    else:
+        return ""
+    _cow_take_ident(rest.trim(), 0)
+
+fn _cow_take_field(trimmed: text) -> text:
+    """`val X = self.FIELD` (bare, whole-line) -> FIELD; else "".
+
+    An optional `: Type` annotation between the name and `=` is tolerated; a
+    trailing member/call/index chain after the field is NOT (`self.a.b`,
+    `self.a[i]`, `self.a.clone()` are not bare field takes)."""
+    val lhs = _cow_decl_lhs(trimmed)
+    if lhs == "": return ""
+    val eq = trimmed.index_of("=")
+    if eq < 0: return ""
+    val rhs = trimmed.substring(eq + 1, trimmed.len()).trim()
+    if not rhs.starts_with("self."): return ""
+    val field = _cow_take_ident(rhs, 5)
+    if field == "": return ""
+    if rhs.len() != 5 + field.len(): return ""
+    field
+
+fn _cow_store_back(trimmed: text) -> [text]:
+    """`self.FIELD = NAME` (bare, whole-line) -> [FIELD, NAME]; else []."""
+    if not trimmed.starts_with("self."): return []
+    val field = _cow_take_ident(trimmed, 5)
+    if field == "": return []
+    val after = trimmed.substring(5 + field.len(), trimmed.len()).trim()
+    if not after.starts_with("="): return []
+    val rhs = after.substring(1, after.len()).trim()
+    val name = _cow_take_ident(rhs, 0)
+    if name == "": return []
+    if rhs.len() != name.len(): return []
+    [field, name]
+
+fn _cow_byvalue_field_of(trimmed: text) -> text:
+    """`self.F = helper(self.F, ...)` -> F when both sides name the SAME field;
+    else "". This is the by-value helper shape: the field still holds the Arc
+    while the parameter binding holds it too."""
+    if not trimmed.starts_with("self."): return ""
+    val field = _cow_take_ident(trimmed, 5)
+    if field == "": return ""
+    val after = trimmed.substring(5 + field.len(), trimmed.len()).trim()
+    if not after.starts_with("="): return ""
+    var rhs = after.substring(1, after.len()).trim()
+    # Callee: an identifier / dotted path immediately followed by `(`.
+    val open = rhs.index_of("(")
+    if open <= 0: return ""
+    val callee = rhs.substring(0, open).trim()
+    if callee == "": return ""
+    var ci = 0
+    while ci < callee.len():
+        val ch = callee.substring(ci, ci + 1)
+        if not _cow_is_ident_char(ch) and ch != ".":
+            return ""
+        ci = ci + 1
+    val arg = rhs.substring(open + 1, rhs.len()).trim()
+    if not arg.starts_with("self."): return ""
+    val arg_field = _cow_take_ident(arg, 5)
+    if arg_field != field: return ""
+    field
+
+fn _cow_mutates(trimmed: text, name: text) -> bool:
+    """Does this line mutate the local `name` in place?
+
+    Matches the local followed by one of `.push(` / `.set(` / `.insert(` /
+    `.add(` / `.append(` / `.remove(`, and the indexed-assignment form
+    `<local>[...] =`, requiring a non-identifier char (or line start) before the
+    local so a longer name ending in it does not match."""
+    var from = 0
+    while from < trimmed.len():
+        val rel = trimmed.substring(from, trimmed.len()).index_of(name)
+        if rel < 0: return false
+        val at = from + rel
+        var boundary_ok = true
+        if at > 0:
+            if _cow_is_ident_char(trimmed.substring(at - 1, at)): boundary_ok = false
+            if trimmed.substring(at - 1, at) == ".": boundary_ok = false
+        if boundary_ok:
+            val rest = trimmed.substring(at + name.len(), trimmed.len())
+            if rest.starts_with(".push(") or rest.starts_with(".set(") or
+               rest.starts_with(".insert(") or rest.starts_with(".add(") or
+               rest.starts_with(".append(") or rest.starts_with(".remove("):
+                return true
+            if rest.starts_with("["):
+                val close = rest.index_of("]")
+                if close > 0:
+                    val tail = rest.substring(close + 1, rest.len()).trim()
+                    if tail.starts_with("=") and not tail.starts_with("=="):
+                        return true
+        from = at + 1
+    false
+
+fn _cow_is_loop_header(trimmed: text) -> bool:
+    if not trimmed.ends_with(":"): return false
+    if trimmed.starts_with("while "): return true
+    if trimmed.starts_with("for "): return true
+    false
+
+fn _cow_for_pattern_names(trimmed: text) -> [text]:
+    """Binding names introduced by a `for` header pattern."""
+    var names: [text] = []
+    if not trimmed.starts_with("for "): return names
+    var rest = trimmed.substring(4, trimmed.len())
+    val in_at = rest.index_of(" in ")
+    if in_at < 0: return names
+    var pat = rest.substring(0, in_at).trim()
+    pat = pat.replace("(", "").replace(")", "")
+    for part in pat.split(","):
+        val nm = _cow_take_ident(part.trim(), 0)
+        if nm != "" and nm.len() == part.trim().len():
+            names.push(nm)
+    names
+
+fn _cow_keys_receiver_root(trimmed: text) -> text:
+    """Leading identifier of the receiver chain to the left of the FIRST
+    `.keys()` / `.values()` on the line; "" when the line has neither."""
+    var call_at = trimmed.index_of(".keys()")
+    val values_at = trimmed.index_of(".values()")
+    if call_at < 0 or (values_at >= 0 and values_at < call_at):
+        call_at = values_at
+    if call_at < 0: return ""
+    # Walk left over the member/index chain to its first character.
+    var start = call_at
+    while start > 0:
+        val ch = trimmed.substring(start - 1, start)
+        if _cow_is_ident_char(ch) or ch == "." or ch == "[" or ch == "]":
+            start = start - 1
+        else:
+            break
+    _cow_take_ident(trimmed, start)
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+pub fn check_cow_alias_hotpath(source: text, file_path: text) -> [CowAliasFinding]:
+    """Report PERF-COW-001/002/003 for the three COW-alias hot-path shapes.
+
+    One linear pass over the file's code lines. Per-function state is reset at
+    every function header, so a take in one function cannot pair with a
+    store-back in the next (ratchet selftest fixture `crossfn.spl`)."""
+    var findings: [CowAliasFinding] = []
+
+    # ROUNDTRIP state: parallel arrays, not a Dict — this lint must not itself
+    # commit the defect it detects.
+    var taken_names: [text] = []
+    var taken_fields: [text] = []
+    var taken_lines: [i64] = []
+    var taken_mutated: [bool] = []
+    var fn_name = "<module>"
+
+    # KEYSINLOOP state: a stack of enclosing loop-header indents, plus the
+    # names bound INSIDE the innermost loop (loop-varying receivers).
+    var loop_indents: [i64] = []
+    var varying_names: [text] = []
+    var varying_depths: [i64] = []
+
+    for cl in iter_code_lines(source):
+        val raw = cl.raw
+        val trimmed = _cow_strip_trailing_comment(raw)
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        if _cow_is_fn_header(trimmed):
+            taken_names = []
+            taken_fields = []
+            taken_lines = []
+            taken_mutated = []
+            loop_indents = []
+            varying_names = []
+            varying_depths = []
+            fn_name = _cow_fn_name(trimmed)
+            continue
+
+        # ---- ROUNDTRIP part 1: val/var X = self.FIELD
+        val field = _cow_take_field(trimmed)
+        if field != "":
+            taken_names.push(_cow_decl_lhs(trimmed))
+            taken_fields.push(field)
+            taken_lines.push(cl.line_num)
+            taken_mutated.push(false)
+
+        # ---- ROUNDTRIP part 2: in-place mutation of a taken local
+        var ti = 0
+        while ti < taken_names.len():
+            if not taken_mutated[ti] and _cow_mutates(trimmed, taken_names[ti]):
+                taken_mutated[ti] = true
+            ti = ti + 1
+
+        # ---- ROUNDTRIP part 3: self.FIELD = X closes the round trip
+        val store = _cow_store_back(trimmed)
+        if store.len() == 2:
+            var si = 0
+            while si < taken_names.len():
+                if taken_names[si] == store[1] and taken_fields[si] == store[0] and taken_mutated[si]:
+                    findings.push(CowAliasFinding(
+                        code: "PERF-COW-001",
+                        severity: "warning",
+                        message: "COW round trip: `self.{store[0]}` is taken into local `{store[1]}`, mutated, and stored back (in `{fn_name}`)",
+                        hint: "The field and the local alias the same buffer across the write, so every mutation deep-copies the whole collection: O(n) per write, O(n^2) overall. Mutate through the owner instead: `self.{store[0]}.push(...)`.",
+                        line_num: taken_lines[si],
+                        file_path: file_path))
+                    taken_mutated[si] = false
+                    taken_names[si] = ""
+                si = si + 1
+
+        # ---- BYVALUE: self.F = helper(self.F, ...)
+        val bv = _cow_byvalue_field_of(trimmed)
+        if bv != "":
+            findings.push(CowAliasFinding(
+                code: "PERF-COW-002",
+                severity: "warning",
+                message: "COW by-value helper: `self.{bv}` is passed by value and stored back (in `{fn_name}`)",
+                hint: "The field still holds the buffer while the parameter binding holds it too, so each call deep-copies the whole collection. Mutate `self.{bv}` in place instead of returning a rebuilt copy.",
+                line_num: cl.line_num,
+                file_path: file_path))
+
+        # ---- KEYSINLOOP: loop scope tracking
+        val indent = _cow_indent_of(raw)
+        while loop_indents.len() > 0 and indent <= loop_indents[loop_indents.len() - 1]:
+            val closing = loop_indents[loop_indents.len() - 1]
+            var keep_names: [text] = []
+            var keep_depths: [i64] = []
+            var vi = 0
+            while vi < varying_names.len():
+                # Strictly deeper than the closing header = bound in its body.
+                # A binding at the SAME indent is a sibling in the ENCLOSING
+                # body and must survive.
+                if varying_depths[vi] <= closing:
+                    keep_names.push(varying_names[vi])
+                    keep_depths.push(varying_depths[vi])
+                vi = vi + 1
+            varying_names = keep_names
+            varying_depths = keep_depths
+            loop_indents.pop()
+
+        if _cow_is_loop_header(trimmed):
+            # For-pattern names are recorded one notch deeper than the header
+            # so they are dropped when that loop closes, while siblings of the
+            # header in the enclosing body are not.
+            for nm in _cow_for_pattern_names(trimmed):
+                varying_names.push(nm)
+                varying_depths.push(indent + 1)
+            loop_indents.push(indent)
+            continue
+
+        if loop_indents.len() > 0:
+            val decl = _cow_decl_lhs(trimmed)
+            if decl != "":
+                varying_names.push(decl)
+                varying_depths.push(indent)
+
+            val root = _cow_keys_receiver_root(trimmed)
+            if root != "":
+                var is_varying = false
+                var wi = 0
+                while wi < varying_names.len():
+                    if varying_names[wi] == root: is_varying = true
+                    wi = wi + 1
+                if not is_varying:
+                    findings.push(CowAliasFinding(
+                        code: "PERF-COW-003",
+                        severity: "warning",
+                        # The literals below deliberately omit the leading dot
+                        # of the method call: the sibling ratchet
+                        # scripts/check/check-cow-alias-hotpath.shs matches
+                        # `.keys()` textually and does not exclude string
+                        # literals, so spelling it in full here would make this
+                        # very rule a false offender in that scan.
+                        message: "keys()/values() on loop-invariant receiver `{root}` inside a loop body (in `{fn_name}`)",
+                        hint: "Materializes a fresh vector of every key on each iteration: O(n) per iteration, O(n^2) per loop. Hoist the call above the loop.",
+                        line_num: cl.line_num,
+                        file_path: file_path))
+
+    findings

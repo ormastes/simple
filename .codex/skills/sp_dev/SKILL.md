@@ -116,6 +116,19 @@ Use `bin/simple lint <changed .spl files>` and
 pure-Simple gates. `bin/simple build lint` and `build check` are Rust workspace
 clippy/rustfmt commands, not substitutes.
 
+`bin/simple lint` also carries the PERFORMANCE rules. Treat
+`warning[PERF-COW-001]` (take/mutate/store-back round trip),
+`[PERF-COW-002]` (by-value helper store-back) and `[PERF-COW-003]`
+(`.keys()`/`.values()` on a loop-INVARIANT receiver inside a loop) as blocking
+for code you are authoring, even though the rule is warn-level for the tree's
+existing population: they mark an O(n) copy per write under copy-on-write value
+semantics, which is invisible on fixtures and catastrophic at scale. Mutate
+through the single owner and hoist `.keys()` above the loop. A receiver rebound
+each iteration is exempt by design and must not be "fixed". Rule doc
+`doc/07_guide/tooling/lint/cow_alias_hotpath_rule.md`; the push-time half is
+`sh scripts/check/check-cow-alias-hotpath.shs`, whose baseline must never be
+regenerated to get green.
+
 An explicitly admitted Stage 2 or Stage 3 Simple binary may run focused
 pure-Simple compiler/interpreter/loader work under the canonical minimal-
 bootstrap guide. Record exact path, hash, stage, provenance, supported commands,
