@@ -5,6 +5,8 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.types.{hir_heap_ref_wellformed}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
     me strip_discarded_string_interps(s: Stmt) -> Stmt:
@@ -89,7 +91,50 @@ impl HirLowering:
                                     stmts = stmts.push(lowered)
                                 else:
                                     block_has_value = true
-                                    block_value_expr = expr
+                                    # PROBE A / containment (E-HIR-BLOCK-VALUE-TYPE-*).
+                                    # `block_value_expr` is VALUE-COPIED into the
+                                    # HirBlock below, and that copy deep-clones
+                                    # `HirExpr.type_` (a 2-word HirType) after a
+                                    # guard that only tests tag==HEAP && !=0 — a
+                                    # heap-tagged word like 0x261 passes it and
+                                    # SIGSEGVs on the first `ldr [x24 & ~7]`
+                                    # (measured: lower_hir_block+0x80c, x24 =
+                                    # 0x261 / 0x6e1 / 0x5000000001, x24&~7 == the
+                                    # fault address in every run).
+                                    # `has_type_` is the authoritative presence
+                                    # bit (see HirExpr's docstring): when it is
+                                    # false the `type_` word is a placeholder that
+                                    # must never be interpreted, so re-form it as
+                                    # a known-good one rather than carrying an
+                                    # arbitrary word into a deref.
+                                    val type_ok = expr.has_type_ and hir_heap_ref_wellformed(expr.type_)
+                                    if expr.has_type_ and not type_ok:
+                                        eprint("E-HIR-BLOCK-VALUE-TYPE-MALFORMED: block tail expression claims has_type_ but its type_ word is not a well-formed heap reference")
+                                    # CONTAINMENT: never carry a FOREIGN HirType
+                                    # through this value copy. Validating one
+                                    # level is provably not enough — with only
+                                    # `type_` validated, a run reached HIR 295
+                                    # and then SIGSEGV'd one field DEEPER, in
+                                    # the 6-word Span clone: x24 (the HirType)
+                                    # was a sound pointer 0xbd8f2f721 but
+                                    # x25 = HirType.span = 0x11, so `ldr [0x10]`
+                                    # faulted (KERN_INVALID_ADDRESS at 0x10,
+                                    # lower_hir_block image offset 0xdf690).
+                                    # Recursive validation is not expressible
+                                    # here, so re-form the tail expression with
+                                    # a FRESH placeholder type instead. That is
+                                    # the contract-correct way to say "no type"
+                                    # (HirExpr's docstring: `has_type_` is
+                                    # authoritative) and is already the common
+                                    # case — 88 of 141 HirExpr constructions in
+                                    # src/compiler pass `type_: nil`.
+                                    val span_ok = hir_heap_ref_wellformed(expr.span)
+                                    if not span_ok:
+                                        eprint("E-HIR-BLOCK-VALUE-SPAN-MALFORMED: block tail expression span word is not a well-formed heap reference; falling back to the block span")
+                                    if span_ok:
+                                        block_value_expr = HirExpr(kind: expr.kind, has_type_: false, type_: nil, span: expr.span)
+                                    else:
+                                        block_value_expr = HirExpr(kind: expr.kind, has_type_: false, type_: nil, span: b.span)
                             case _:
                                 stmts = stmts.push(lowered)
                     else:
@@ -105,6 +150,19 @@ impl HirLowering:
         # be set: MIR lower_block gates the tail value on `block.has`, so without
         # it the extracted last expression-statement is silently dropped (every
         # function body lowered to an empty MIR block in the AOT/native path).
+        # PROBE B (E-HIR-BLOCK-VALUE-TYPE-DECAYED). Probe A validates at CAPTURE;
+        # `pop_scope` above and the `rt_pool_safepoint` inside the loop are both
+        # reclamation points between capture and this copy, so re-probe here.
+        # A fires-at-A / passes-at-B split says the value was malformed at
+        # formation; a passes-at-A / fires-at-B split says it decayed in this
+        # function (transient scope end), which is the streaming-HIR-owner class.
+        if block_has_value and not (hir_heap_ref_wellformed(block_value_expr.type_) and hir_heap_ref_wellformed(block_value_expr.span)):
+            eprint("E-HIR-BLOCK-VALUE-TYPE-DECAYED: block tail expression type_ word became a non-well-formed heap reference between capture and HirBlock construction; substituting a placeholder")
+            # `b.span` unconditionally: probe B also covers the span word, so
+            # re-reading `block_value_expr.span` here could be the very thing
+            # that is malformed.
+            block_value_expr = HirExpr(kind: block_value_expr.kind, has_type_: false, type_: nil, span: b.span)
+
         if block_has_value:
             HirBlock(stmts: stmts, has: true, value: block_value_expr, span: b.span)
         else:

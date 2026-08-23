@@ -601,3 +601,118 @@ chase the unwinder. The crash is always immediately after
 
 Operational: a warm `--stop-after-stage2` is ~90 s and each stage-3 run is
 ~4-5 min, so repetitions are cheap once an arm is built.
+
+---
+
+## RUN 9 — the `lower_hir_block` SIGSEGV is ELIMINATED (0/6 crashes, two binaries, six runs)
+
+### The faulting construct, mapped from the disassembly (not inferred)
+
+`lower_hir_block` is a `HirBlock` **constructor**, and the fault is the inlined
+copy-on-write clone the codegen emits for `HirBlock.value`. `HirExpr` is 4 words
+`{kind, has_type_, type_, span}`; `HirType` is 2 words `{kind, span}`; `Span` is 6.
+The emitted clone recurses `HirExpr -> type_ (2 words) -> span (6 words)`, and
+each level is guarded by nothing but `tag == HEAP && (v & ~7) != 0`:
+
+```
+and  x8, x24, #0x7      ; tag
+cmp  x8, #0x1           ; == HEAP?
+ands x9, x24, #~7       ; != 0?
+csel x8, x9, x0, ne
+ldr  x9, [x8]           <-- FAULT
+```
+
+A word like `0x261` satisfies both tests, so the guard is a SHAPE test, not a
+validity test. That is the whole defect at this site.
+
+### Where it comes from — narrowed to a class, NOT to a producer
+
+Not found, and stated as not found. What is established:
+
+* The malformed word already exists when `lower_hir_stmt_multi` returns. Probes
+  at capture and at construction bracket only that window; `DECAYED` fired **0**
+  times in 6 runs, which bounds the window, it does not prove formation.
+* The firing MODULE SET is largely non-deterministic: 75 / 91 / 76 modules across
+  three runs of one binary, only **18 common to all three**, union **169**. A
+  content-dependent producer would give a stable set. (Discriminator, measured.)
+* The second crash signature is the strongest evidence: `x24 = 0xbd8f2f721` — a
+  sound heap address — whose interior `HirType.span` word was `0x11`, faulting at
+  `ldr [0x10]` (`KERN_INVALID_ADDRESS at 0x10`, image offset `0xdf690`). A sound
+  object with a garbage interior word is a reuse/half-reclamation artifact;
+  constructors write either a real span or `nil`, and `nil` codegens to a fresh
+  zeroed `rt_alloc`. **Inference**, but it is the streaming-HIR-owner class
+  (`stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md`), not a
+  constructor bug.
+* `c530678f8ba` stays exonerated (RUN 8). `_Expressions/expression_core.spl` is
+  ALSO exonerated as the producer: its `has_type_` fix was already in the binary
+  that still fired the probe 43 times.
+
+### What changed — CONTAINMENT, not a cure
+
+1. **`expression_core.spl` (hardening, real but not the cure).** Index lowering
+   tested `lowered_base.type_ != nil` and then interpreted `base_type.kind`.
+   `has_type_` is the authoritative presence bit, and a `has_type_: false`
+   placeholder is a non-nil fresh allocation, so the nil test let a placeholder
+   be read and its enum payload extracted into a stored `type_`. Now gated on
+   `lowered_base.has_type_`.
+2. **`block_and_asm_lowering.spl` (containment).** Formation probes
+   (`rt_heap_ref_wellformed`) at the capture site and again before the HirBlock
+   construction, plus: the tail expression is re-formed with a FRESH placeholder
+   type (`has_type_: false, type_: nil`) so a foreign `HirType` never reaches the
+   clone, and a malformed `span` falls back to `b.span`. Named diagnostics
+   `E-HIR-BLOCK-VALUE-TYPE-MALFORMED` / `-SPAN-MALFORMED` / `-DECAYED`.
+
+**One level of validation is provably not enough** — that was measured, not
+assumed: with only `type_` validated a run reached HIR 295 and then SIGSEGV'd one
+field deeper in the Span clone.
+
+### TRAP — a formation probe must never take a struct PARAMETER
+
+`fn hir_type_span_wellformed(t: HirType) -> bool: rt_heap_ref_wellformed(t.span)`
+was written, built, and **reverted**. A struct-typed parameter is DEEP-CLONED on
+entry and the clone recurses into the nested `span` behind the same tag-only
+guard — `rt_alloc #0x30` then `ldr [x8]` on the very word being validated. The
+probe crashes exactly where it is meant to guard. Verified in the disassembly of
+`_compiler__hir__hir_lowering__types__hir_type_span_wellformed` at
+`0x100153818`. An `Any` parameter is passed verbatim with no clone (also
+verified: every live probe compiles to `ldr x0, [reg, #0x10]` feeding the `bl`).
+A deeper check must take the raw word as `Any` and do the field read in C.
+
+### Measured — 6 stage-3 runs, 2 binaries, 0 SIGSEGV
+
+| binary | run | HIR modules reached | SIGSEGV | MALFORMED | SPAN | DECAYED |
+|---|---|---|---|---|---|---|
+| containment v1 | 1 | 586 | 0 | 97 | 96 | 0 |
+| containment v1 | 2 | 632 | 0 | 157 | 155 | 0 |
+| containment v1 | 3 | 597 | 0 | 111 | 106 | 0 |
+| final (`fa21bde5…`) | 1 | 598 | 0 | 149 | 148 | 0 |
+| final | 2 | 599 | 0 | 131 | 128 | 0 |
+| final | 3 | 586 | 0 | 172 | 171 | 0 |
+
+Prior best before this change was **237** modules, and 6/6 crashed. No new
+`.ips` was produced by any of the six runs.
+
+### Stage 3 still does not COMPLETE — different, pre-existing blocker
+
+Every run now reaches a phase never reached before, `phase3:hir_typecheck`, then
+fails (rc=1) on accumulated HIR **semantic** errors, led by the already-known
+`driver_riscv_gen2_product.spl` set (`field 'source_map' is not visible from this
+module`, …) and a large `unresolved type: MethodResolution` / `unresolved name:
+BlockExample` population. These are name/visibility resolution failures, not the
+crash, and they are the next blocker. Stage 4 and Stage 5/MCP remain unreachable:
+there is no admitted stage-3 artifact. `--no-mcp` was NOT passed.
+
+**Caveat to carry forward:** the containment drops the tail expression's `type_`
+unconditionally, and `unresolved type` counts rose (761 over 295 modules -> ~2050
+over ~590). Most of that is reaching twice as many modules, but it is not proven
+that none of it is the dropped type. Restoring a narrow "keep a fully validated
+type" path needs the `Any`-parameter runtime probe described above.
+
+### Ratchet note
+
+`hir_heap_ref_wellformed` in `20.hir/hir_lowering/types.spl` adds **one** direct
+`rt_*` call site under `src/compiler` (not an allowlisted provider), so
+`scripts/check/no_direct_rt_baseline.txt` (11816) may need +1. It could not be
+measured here: `check-no-direct-rt.shs` aborts on this host with
+`ERROR — selftest failed: hidden/ignored files not scanned equivalently (got '1 2 0 2')`,
+which is a pre-existing environment failure, not caused by this change.

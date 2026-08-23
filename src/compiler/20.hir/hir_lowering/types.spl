@@ -14,6 +14,27 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_enum_discriminant(value: TypeKind) -> i64
 extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
+
+# FORMATION probe for a heap-typed field word, wrapped once here so consumers
+# in layer 20 do not each add a direct `rt_*` call site (no_direct_rt ratchet).
+# Answers 1 only for a HEAP-tagged word whose payload is outside the zero page
+# — see runtime_native.c rt_heap_ref_wellformed. It is a formation check, NOT
+# a liveness proof, so it can never false-reject a live object; equally it
+# cannot catch a wild pointer that happens to be large.
+fn hir_heap_ref_wellformed(value: Any) -> bool:
+    rt_heap_ref_wellformed(value)
+
+# DO NOT add a second-level probe that takes the struct BY VALUE. It was tried
+# (`fn hir_type_span_wellformed(t: HirType) -> bool: rt_heap_ref_wellformed(t.span)`)
+# and is actively unsafe: a struct-typed PARAMETER is deep-cloned on entry, and
+# the emitted clone recurses into the nested `span` behind nothing but the
+# tag==HEAP && !=0 test — `rt_alloc #0x30` then `ldr [x8]` on the very word the
+# probe exists to validate. The probe therefore crashes exactly where it is
+# meant to guard. Any deeper formation check must take the raw word as `Any`
+# (which is passed verbatim, no clone — verified in the disassembly of the
+# probes in _Expressions/block_and_asm_lowering.spl) and do the field read on
+# the runtime side.
 
 # `rt_env_get` yields nil for an UNSET variable, so both the extern and this
 # wrapper are OPTIONAL — every call site below already uses the optional-safe
