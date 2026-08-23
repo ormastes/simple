@@ -15,7 +15,7 @@ use crate::value::Value;
 // Thread-local references needed by this module
 use crate::interpreter::{
     BASE_UNIT_DIMENSIONS, COMPOUND_UNIT_DIMENSIONS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
-    UNIT_SUFFIX_TO_FAMILY,
+    UNIT_SUFFIX_TO_FAMILY, USER_SI_BASE_UNITS, USER_UNIT_SUFFIXES,
 };
 
 /// SI prefix definitions: (prefix_char, multiplier)
@@ -56,13 +56,28 @@ pub(crate) fn decompose_si_prefix(suffix: &str) -> Option<(f64, String, String)>
                 let base = &suffix[prefix.len()..];
 
                 // Special case: avoid "m" + "m" = "mm" being parsed as milli-meter
-                // when "mm" might be a directly defined unit
-                // Check if the full suffix is directly registered first
-                if UNIT_SUFFIX_TO_FAMILY.with(|c| c.borrow().contains_key(suffix)) {
+                // when "mm" is a directly DECLARED unit.
+                //
+                // Only the program's own `unit` declarations suppress SI
+                // decomposition. Suffixes merely seeded from the on-disk unit
+                // catalog (`src/unit/simple-lang/**`, e.g. `km`, `ms`, `ns`)
+                // must NOT: the catalog registers them without applying their
+                // `scale_to_base` at the literal, so bailing out here made
+                // `5_km` evaluate to 5 instead of 5000 — a silently wrong
+                // number, not an error.
+                if USER_UNIT_SUFFIXES.with(|c| c.borrow().contains(suffix)) {
                     return None;
                 }
 
-                // Check if base unit is registered for SI prefixes
+                // Check if base unit is registered for SI prefixes.
+                //
+                // Only a base the PROGRAM declared counts: the on-disk unit
+                // catalog also seeds `SI_BASE_UNITS`, and decomposing against
+                // those would rewrite a plain catalog literal (`42_km`) into
+                // base units nobody asked for.
+                if !USER_SI_BASE_UNITS.with(|c| c.borrow().contains(base)) {
+                    continue;
+                }
                 if let Some(family) = base_units.get(base) {
                     return Some((multiplier, base.to_string(), family.clone()));
                 }

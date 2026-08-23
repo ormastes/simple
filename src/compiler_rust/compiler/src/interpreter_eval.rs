@@ -406,6 +406,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     // Clear unit family info from previous runs
     UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
     UNIT_FAMILY_CONVERSIONS.with(|cell| cell.borrow_mut().clear());
+    crate::interpreter::USER_UNIT_SUFFIXES.with(|cell| cell.borrow_mut().clear());
+    crate::interpreter::USER_SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     UNIT_FAMILY_ARITHMETIC.with(|cell| cell.borrow_mut().clear());
     COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
@@ -1301,6 +1303,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     UNIT_SUFFIX_TO_FAMILY.with(|cell| {
                         cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
                     });
+                    crate::interpreter::USER_UNIT_SUFFIXES.with(|cell| {
+                        cell.borrow_mut().insert(variant.suffix.clone());
+                    });
                 }
                 // Store the family with all conversion factors
                 unit_families.insert(
@@ -1351,6 +1356,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     if (variant.factor - 1.0).abs() < f64::EPSILON {
                         SI_BASE_UNITS.with(|cell| {
                             cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
+                        });
+                        crate::interpreter::USER_SI_BASE_UNITS.with(|cell| {
+                            cell.borrow_mut().insert(variant.suffix.clone());
                         });
                         break; // Only one base unit per family
                     }

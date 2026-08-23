@@ -384,6 +384,19 @@ thread_local! {
     pub(crate) static BASE_UNIT_DIMENSIONS: RefCell<HashMap<String, Dimension>> = RefCell::new(HashMap::new());
     /// Maps base unit suffix -> family name for SI prefix detection (e.g., "m" -> "length")
     pub(crate) static SI_BASE_UNITS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Unit suffixes declared by the PROGRAM's own `unit` declarations.
+    ///
+    /// Distinguishes a user declaration (`unit length: m = 1.0, km = 1000.0`)
+    /// from a suffix seeded out of the on-disk unit catalog
+    /// (`src/unit/simple-lang/**`). Only a user declaration suppresses SI
+    /// prefix decomposition — see `interpreter_unit::decompose_si_prefix`.
+    pub(crate) static USER_UNIT_SUFFIXES: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// Base unit suffixes registered by the PROGRAM's own `unit` declarations.
+    ///
+    /// SI prefix decomposition applies only to a family the program declared:
+    /// the on-disk catalog also seeds `SI_BASE_UNITS`, and treating those as
+    /// SI bases would turn a plain catalog literal like `42_km` into 42000.
+    pub(crate) static USER_SI_BASE_UNITS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     /// Tracks variables that have been moved (for unique pointer move semantics)
     /// When a unique pointer is used (moved out), its name is added here.
     /// Any subsequent access to a moved variable results in a compile error.
@@ -990,6 +1003,8 @@ pub fn clear_interpreter_state() {
     COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
+    USER_UNIT_SUFFIXES.with(|cell| cell.borrow_mut().clear());
+    USER_SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
 
     // Clear literal functions
     LITERAL_FUNCTIONS.with(|cell| cell.borrow_mut().clear());

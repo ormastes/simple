@@ -55,6 +55,12 @@ pub fn suffix_to_type_names(suffix: &str) -> Vec<String> {
     result
 }
 
+/// True when `suffix` came from the program's own `unit` declaration rather
+/// than from the on-disk unit catalog.
+fn suffix_is_user_declared(suffix: &str) -> bool {
+    crate::interpreter::USER_UNIT_SUFFIXES.with(|cell| cell.borrow().contains(suffix))
+}
+
 /// Look up the family name for a unit suffix from the thread-local registry
 pub(super) fn lookup_unit_family(suffix: &str) -> Option<String> {
     // Lazily seed the thread-local unit state from the on-disk unit tree
@@ -63,12 +69,16 @@ pub(super) fn lookup_unit_family(suffix: &str) -> Option<String> {
     crate::units::ensure_loaded();
 
     // First try direct lookup
-    if let Some(family) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
-        return Some(family);
+    let direct = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned());
+    if direct.is_some() && suffix_is_user_declared(suffix) {
+        return direct;
     }
     // Try SI prefix decomposition
     if let Some((_multiplier, _base, family)) = decompose_si_prefix(suffix) {
         return Some(family);
+    }
+    if direct.is_some() {
+        return direct;
     }
     // Seed-only fallback: minimal hard-coded table so the Rust bootstrap
     // recognises a small set of well-known units (km, m, s, kg, h, kmph, mps,
@@ -86,13 +96,26 @@ pub(super) fn lookup_unit_family_with_si(suffix: &str) -> (Option<String>, Optio
     // (`src/unit/simple-lang/`). See `crate::units::registry`.
     crate::units::ensure_loaded();
 
-    // First try direct lookup
-    if let Some(family) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
-        return (Some(family), None, None);
+    // First try direct lookup.
+    //
+    // A suffix DECLARED by the program (`unit length: m = 1.0, km = 1000.0`)
+    // wins outright: the declaration is authoritative and its literal keeps
+    // its raw value. A suffix merely seeded from the on-disk unit catalog
+    // (`src/unit/simple-lang/**`) must NOT short-circuit SI decomposition —
+    // nothing applies the catalog `scale_to_base` at the literal, so
+    // returning the catalog family here made `5_km` evaluate to 5 instead of
+    // 5000. Catalog-only suffixes that do not decompose still fall back to
+    // the catalog family below.
+    let direct = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned());
+    if direct.is_some() && suffix_is_user_declared(suffix) {
+        return (direct, None, None);
     }
     // Try SI prefix decomposition
     if let Some((multiplier, base, family)) = decompose_si_prefix(suffix) {
         return (Some(family), Some(multiplier), Some(base));
+    }
+    if direct.is_some() {
+        return (direct, None, None);
     }
     // Seed-only fallback (see `lookup_unit_family` for rationale).
     if let Some((_name, family)) = lookup_seed_unit(suffix) {

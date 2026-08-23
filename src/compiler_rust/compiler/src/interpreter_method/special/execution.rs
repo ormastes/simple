@@ -187,6 +187,22 @@ pub fn find_and_exec_method_with_self_owned(
 
 /// Execute a function and return both result and modified self
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
+/// Mirror a method-argument write-back into `MODULE_GLOBALS`.
+///
+/// Identifier evaluation prefers `MODULE_GLOBALS` for non-local names
+/// (`interpreter/expr/literals.rs`), so writing only `outer_env` left a
+/// module-level `let out = []` still empty after `obj.m(out)` pushed into it.
+fn sync_module_global_writeback(name: &str, value: &Value) {
+    crate::interpreter::MODULE_GLOBALS.with(|cell| {
+        // Peek before taking the write borrow: borrow_mut() on this
+        // generation-tracked cell invalidates owned-env templates.
+        if !cell.borrow().contains_key(name) {
+            return;
+        }
+        cell.borrow_mut().insert(name.to_string(), value.clone());
+    });
+}
+
 pub fn exec_function_with_self_return(
     func: &FunctionDef,
     args: &[Argument],
@@ -248,6 +264,7 @@ pub fn exec_function_with_self_return(
                     updated_arg,
                     Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                 ) {
+                    sync_module_global_writeback(var_name, &updated_arg);
                     outer_env.insert(var_name.clone(), updated_arg);
                 }
             }
@@ -386,6 +403,7 @@ pub fn exec_function_with_self_return_values(
                     updated_arg,
                     Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                 ) {
+                    sync_module_global_writeback(var_name, &updated_arg);
                     outer_env.insert(var_name.clone(), updated_arg);
                 }
             }

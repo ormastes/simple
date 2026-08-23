@@ -1289,6 +1289,26 @@ fn restore_parked_arguments(parked: &[ParkedArg], outer_env: &mut Env, local_env
     }
 }
 
+/// Mirror an argument write-back into `MODULE_GLOBALS`.
+///
+/// For a module-level binding, `env` is not authoritative on read: identifier
+/// evaluation prefers `MODULE_GLOBALS` for non-local names
+/// (`interpreter/expr/literals.rs`), and the generic assignment path keeps the
+/// two in sync (`interpreter/place.rs::sync_module_global`). Writing only
+/// `outer_env` here left the caller reading the pre-call value, so a
+/// module-level `let out = []` never saw `f(out)`'s `out.push(42)` — the
+/// subsequent `out[0]` failed with "index is 0 but length is 0".
+pub(crate) fn sync_module_global_writeback(name: &str, value: &Value) {
+    crate::interpreter::MODULE_GLOBALS.with(|cell| {
+        // Peek before taking the write borrow: borrow_mut() on this
+        // generation-tracked cell invalidates owned-env templates.
+        if !cell.borrow().contains_key(name) {
+            return;
+        }
+        cell.borrow_mut().insert(name.to_string(), value.clone());
+    });
+}
+
 // Bug #19 fix: write back mutable-container parameters to caller's bindings.
 //
 // When a function is called with a simple identifier argument (e.g., `f(a)`)
@@ -1427,6 +1447,7 @@ fn write_back_mutable_arguments(
                         if param_is_mut {
                             mut_written.insert(caller_name.clone());
                         }
+                        sync_module_global_writeback(&caller_name, &new_val);
                         outer_env.insert(caller_name, new_val);
                     } else if is_value_type_struct(callee_val, classes) {
                         // Value-type struct: fields stay value-copied, but its
@@ -1495,7 +1516,9 @@ fn write_back_mutable_arguments(
                                         }
                                     }
                                     Arc::make_mut(&mut fields).insert(field_name, callee_val);
-                                    outer_env.insert(obj_name, Value::Object { class, fields });
+                                    let updated = Value::Object { class, fields };
+                                    sync_module_global_writeback(&obj_name, &updated);
+                                    outer_env.insert(obj_name, updated);
                                 }
                                 other => {
                                     if took {
