@@ -1,0 +1,294 @@
+#!/bin/sh
+# Frozen-baseline ratchet for the SEED's interpreter extern registry.
+#
+# Closes the open item filed with the fix for
+# doc/08_tracking/bug/seed_interpreter_extern_missing_rt_heap_ref_wellformed_2026-08-23.md:
+# "no parity gate between interpreter_extern and runtime_symbols.rs".
+#
+# WHAT IT GATES
+# -------------
+# `src/compiler_rust/compiler/src/interpreter_extern/mod.rs` is a THIRD,
+# independent registry, separate from `common/src/runtime_symbols.rs` and from
+# the C/Rust runtimes. A symbol can be defined in the C runtime, declared in
+# runtime.h, listed in RUNTIME_SYMBOL_NAMES, and STILL be unknown here — which
+# is exactly what happened to `rt_heap_ref_wellformed`: the seed rejected the
+# compiler's own driver source with
+#     error: semantic: unknown extern function: rt_heap_ref_wellformed
+# and, because stage1 is produced by the seed, the whole bootstrap chain was
+# blocked at phase 1 by one missing row.
+#
+# The gated set is the one that can reproduce that exact rc=1:
+#     gap := { `extern fn rt_*` declared under src/compiler/**/*.spl }
+#            MINUS { names registered in interpreter_extern/mod.rs }
+# i.e. externs the seed must resolve in order to interpret the compiler's own
+# sources. It is scoped to src/compiler/** deliberately: those are the
+# declarations the bootstrap walks.
+#
+# WHY THIS IS NOT FULL runtime_symbols.rs PARITY (measured, not assumed)
+# ---------------------------------------------------------------------
+# Full parity is the wrong invariant and would be red on day one for reasons
+# that are not defects. Measured on this tree: RUNTIME_SYMBOL_NAMES carries
+# 1,745 names, the interpreter registry 1,504, and 800 RUNTIME_SYMBOL_NAMES
+# entries are absent from the interpreter registry. Most of those are
+# codegen-only runtime entry points that the interpreter never dispatches, so
+# "every runtime symbol must be interpreter-registered" is false as a
+# requirement, and a guard asserting it would be noise that gets routed around.
+# The 800 figure is RECORDED here rather than gated. If a future change makes
+# the interpreter lane responsible for those families, widen this guard
+# deliberately — do not silently reinterpret the baseline.
+#
+# RULES (mirrors the unbacked-extern ratchet guard in this directory; its
+# basename is deliberately not spelled in full here, because
+# check-guard-wiring.shs uses a BROAD textual reachability model and a prose
+# mention would manufacture a phantom wiring edge to it)
+#   * any gap symbol NOT in the baseline              -> FAIL (new debt: a new
+#     extern was declared in compiler sources without a registry row, which is
+#     the rt_heap_ref_wellformed shape)
+#   * any baselined symbol that is no longer a gap    -> FAIL (stale baseline;
+#     it got registered, or its declaration was removed. A baseline that no
+#     longer describes the tree is how a ratchet silently stops ratcheting.)
+#   * 0 symbols compared                              -> ERROR, never a pass
+#
+# KNOWN LIMIT, stated rather than papered over: registration is read
+# STATICALLY from the `insert*!("rt_name", ...)` rows. The dispatcher also has
+# prefix families (rt_driver_, rt_vulkan_), a capability-gap arm, and a final
+# `dynamic_sffi::try_call_dynamic` dlopen fallback, so a baselined name is not
+# proof the seed fails on it — only that it has no static row. That is why the
+# baseline exists as a frozen set instead of the guard asserting the gap is
+# empty. The load-bearing direction is unaffected: a NEW unregistered extern in
+# compiler sources is always flagged.
+#
+# Usage:
+#   sh scripts/check/check-interpreter-extern-registry-gap.shs            # scan
+#   sh scripts/check/check-interpreter-extern-registry-gap.shs --root DIR
+#   sh scripts/check/check-interpreter-extern-registry-gap.shs --generate-baseline
+#   sh scripts/check/check-interpreter-extern-registry-gap.shs --selftest
+#
+# --generate-baseline is for DELIBERATE, REVIEWED updates only. Do not use it
+# to make a FAIL go away: a FAIL naming new symbols is real new debt.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$self_dir/../.." && pwd)
+
+BASELINE_DEFAULT="$repo_root/scripts/check/interpreter_extern_gap_baseline.txt"
+
+# --- extraction -------------------------------------------------------------
+# $1 = tree root, $2 = out file. Declarations of `extern fn rt_*` in the
+# compiler's own Simple sources.
+extract_declared() {
+  _root=$1; _out=$2
+  if [ -d "$_root/src/compiler" ]; then
+    find "$_root/src/compiler" -name '*.spl' -type f -exec \
+      grep -hoE '^[[:space:]]*extern fn rt_[A-Za-z0-9_]+' {} + 2>/dev/null \
+      | sed -E 's/^[[:space:]]*extern fn //' | sort -u > "$_out"
+  else
+    : > "$_out"
+  fi
+}
+
+# $1 = tree root, $2 = out file. Names carrying a static registry row. The
+# `insert*!(` macro call may be wrapped across lines by rustfmt, so newlines
+# are folded before matching — a single-line regex silently under-counts by
+# ~150 rows on the real tree and would manufacture false offenders. The name is
+# taken from the QUOTED argument, not by a bare rt_ match: the macro name
+# `insert_simple!` itself contains the substring `rt_simple`, which a naive
+# `grep -oE 'rt_[A-Za-z0-9_]+'` picks up as a phantom registration (caught by
+# selftest fixture 6).
+extract_registered() {
+  _root=$1; _out=$2
+  _mod="$_root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+  if [ -f "$_mod" ]; then
+    tr '\n' ' ' < "$_mod" \
+      | grep -oE 'insert[A-Za-z0-9_]*!\([[:space:]]*"rt_[A-Za-z0-9_]+"' \
+      | sed -E 's/.*"(rt_[A-Za-z0-9_]+)"$/\1/' | sort -u > "$_out"
+  else
+    : > "$_out"
+  fi
+}
+
+read_baseline() {
+  _f=$1; _out=$2
+  if [ -f "$_f" ]; then
+    grep -vE '^[[:space:]]*(#|$)' "$_f" | sort -u > "$_out"
+  else
+    : > "$_out"
+  fi
+}
+
+# Scan one tree. Echoes "verdict-kind<TAB>checked<TAB>new<TAB>stale<TAB>names".
+scan_tree() {
+  _root=$1; _baseline=$2; _w=$3
+  mkdir -p "$_w"
+  extract_declared "$_root" "$_w/declared"
+  extract_registered "$_root" "$_w/registered"
+  comm -23 "$_w/declared" "$_w/registered" > "$_w/gap"
+  read_baseline "$_baseline" "$_w/base"
+
+  _checked=$(wc -l < "$_w/declared" | tr -d ' ')
+  if [ "$_checked" -eq 0 ]; then
+    printf 'ERROR\t0\t0\t0\tno extern declarations found under src/compiler\n'
+    return 0
+  fi
+  _reg=$(wc -l < "$_w/registered" | tr -d ' ')
+  if [ "$_reg" -eq 0 ]; then
+    printf 'ERROR\t0\t0\t0\tinterpreter_extern/mod.rs absent or has no registry rows\n'
+    return 0
+  fi
+
+  comm -23 "$_w/gap" "$_w/base" > "$_w/new"
+  comm -13 "$_w/gap" "$_w/base" > "$_w/stale"
+  _n=$(wc -l < "$_w/new" | tr -d ' ')
+  _s=$(wc -l < "$_w/stale" | tr -d ' ')
+  _names=''
+  [ "$_n" -gt 0 ] && _names="new: $(tr '\n' ' ' < "$_w/new")"
+  if [ "$_s" -gt 0 ]; then
+    [ -n "$_names" ] && _names="$_names; "
+    _names="${_names}stale: $(tr '\n' ' ' < "$_w/stale")"
+  fi
+  if [ "$_n" -gt 0 ] || [ "$_s" -gt 0 ]; then
+    printf 'FAIL\t%s\t%s\t%s\t%s\n' "$_checked" "$_n" "$_s" "$_names"
+  else
+    printf 'PASS\t%s\t0\t0\t\n' "$_checked"
+  fi
+}
+
+# --- selftest ---------------------------------------------------------------
+# Runs before every scan and is fatal. Each fixture is a real miniature tree
+# driven through the real scanner, never a mocked result.
+mk_fixture() {
+  _d=$1; _decls=$2; _regs=$3
+  mkdir -p "$_d/src/compiler" "$_d/src/compiler_rust/compiler/src/interpreter_extern"
+  : > "$_d/src/compiler/a.spl"
+  for _s in $_decls; do printf 'extern fn %s() -> bool\n' "$_s" >> "$_d/src/compiler/a.spl"; done
+  _m="$_d/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+  : > "$_m"
+  for _s in $_regs; do
+    # deliberately wrapped across lines: the real file is rustfmt-wrapped, and
+    # a single-line extractor must not pass this fixture.
+    printf 'insert_simple!(\n    "%s",\n    memory::%s\n);\n' "$_s" "$_s" >> "$_m"
+  done
+}
+
+selftest() {
+  _w=$(mktemp -d)
+  _fail=0
+  _report() { printf '  selftest %-44s %s\n' "$1" "$2"; }
+
+  # 1. clean tree: everything declared is registered -> PASS
+  mk_fixture "$_w/f1" "rt_a rt_b" "rt_a rt_b"
+  : > "$_w/base1"
+  _r=$(scan_tree "$_w/f1" "$_w/base1" "$_w/w1" | cut -f1)
+  if [ "$_r" = PASS ]; then _report clean-tree-must-pass OK; else _report clean-tree-must-pass "FAIL($_r)"; _fail=1; fi
+
+  # 2. a new unregistered extern -> FAIL naming it (the incident's shape)
+  mk_fixture "$_w/f2" "rt_a rt_heap_ref_wellformed" "rt_a"
+  : > "$_w/base2"
+  _out=$(scan_tree "$_w/f2" "$_w/base2" "$_w/w2")
+  _r=$(printf '%s' "$_out" | cut -f1)
+  if [ "$_r" = FAIL ] && printf '%s' "$_out" | grep -q rt_heap_ref_wellformed; then
+    _report new-unregistered-must-fail OK
+  else _report new-unregistered-must-fail "FAIL($_r)"; _fail=1; fi
+
+  # 3. baselined symbol that is now registered -> FAIL as stale
+  mk_fixture "$_w/f3" "rt_a rt_b" "rt_a rt_b"
+  printf 'rt_b\n' > "$_w/base3"
+  _out=$(scan_tree "$_w/f3" "$_w/base3" "$_w/w3")
+  _r=$(printf '%s' "$_out" | cut -f1)
+  if [ "$_r" = FAIL ] && printf '%s' "$_out" | grep -q stale; then
+    _report stale-baseline-must-fail OK
+  else _report stale-baseline-must-fail "FAIL($_r)"; _fail=1; fi
+
+  # 4. baselined gap still present -> PASS (the ratchet holds, does not zero)
+  mk_fixture "$_w/f4" "rt_a rt_b" "rt_a"
+  printf 'rt_b\n' > "$_w/base4"
+  _r=$(scan_tree "$_w/f4" "$_w/base4" "$_w/w4" | cut -f1)
+  if [ "$_r" = PASS ]; then _report baselined-gap-must-pass OK; else _report baselined-gap-must-pass "FAIL($_r)"; _fail=1; fi
+
+  # 5. empty tree -> ERROR, never a pass
+  mkdir -p "$_w/f5"
+  : > "$_w/base5"
+  _r=$(scan_tree "$_w/f5" "$_w/base5" "$_w/w5" | cut -f1)
+  if [ "$_r" = ERROR ]; then _report empty-tree-must-error OK; else _report empty-tree-must-error "FAIL($_r)"; _fail=1; fi
+
+  # 6. rustfmt-wrapped registration must still count as registered. Fixture 1
+  #    already writes wrapped rows, so a single-line extractor fails it; this
+  #    checks the extractor directly so the reason is unambiguous.
+  extract_registered "$_w/f1" "$_w/regs6"
+  if [ "$(wc -l < "$_w/regs6" | tr -d ' ')" -eq 2 ]; then
+    _report wrapped-macro-rows-counted OK
+  else _report wrapped-macro-rows-counted FAIL; _fail=1; fi
+
+  rm -rf "$_w"
+  return $_fail
+}
+
+# --- main -------------------------------------------------------------------
+ROOT="$repo_root"
+BASELINE="$BASELINE_DEFAULT"
+MODE=scan
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftest) MODE=selftest ;;
+    --generate-baseline) MODE=generate ;;
+    --root) ROOT=$2; shift ;;
+    --baseline) BASELINE=$2; shift ;;
+    -h|--help) sed -n '1,70p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+echo "check-interpreter-extern-registry-gap: selftest"
+if ! selftest; then
+  echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (selftest failed)"
+  exit 2
+fi
+
+if [ "$MODE" = selftest ]; then
+  echo "check-interpreter-extern-registry-gap: PASS — 6 fixture(s) checked, selftest only"
+  exit 0
+fi
+
+W=$(mktemp -d); trap 'rm -rf "$W"' EXIT INT TERM
+
+if [ "$MODE" = generate ]; then
+  extract_declared "$ROOT" "$W/declared"
+  extract_registered "$ROOT" "$W/registered"
+  comm -23 "$W/declared" "$W/registered" > "$W/gap"
+  _n=$(wc -l < "$W/gap" | tr -d ' ')
+  if [ "$_n" -eq 0 ]; then
+    echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (empty gap; refusing to write an empty baseline)"
+    exit 2
+  fi
+  {
+    echo "# Frozen baseline for check-interpreter-extern-registry-gap.shs."
+    echo "# Externs declared under src/compiler/**/*.spl with no static row in"
+    echo "# src/compiler_rust/compiler/src/interpreter_extern/mod.rs."
+    echo "# Regenerate ONLY as a deliberate, reviewed update."
+    cat "$W/gap"
+  } > "$BASELINE"
+  echo "check-interpreter-extern-registry-gap: PASS — $_n symbol(s) checked, baseline written to $BASELINE"
+  exit 0
+fi
+
+OUT=$(scan_tree "$ROOT" "$BASELINE" "$W")
+KIND=$(printf '%s' "$OUT" | cut -f1)
+CHECKED=$(printf '%s' "$OUT" | cut -f2)
+NEW=$(printf '%s' "$OUT" | cut -f3)
+STALE=$(printf '%s' "$OUT" | cut -f4)
+NAMES=$(printf '%s' "$OUT" | cut -f5)
+
+case "$KIND" in
+  PASS)
+    echo "check-interpreter-extern-registry-gap: PASS — $CHECKED symbol(s) checked, 0 new, 0 stale"
+    exit 0 ;;
+  FAIL)
+    echo "check-interpreter-extern-registry-gap: FAIL — $CHECKED symbol(s) checked, $NEW new, $STALE stale — $NAMES"
+    exit 1 ;;
+  *)
+    echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked ($NAMES)"
+    exit 2 ;;
+esac
