@@ -8,6 +8,11 @@ ENTRY="$ROOT_DIR/examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.sp
 CORE="$ROOT_DIR/src/os/compositor/engine2d_baremetal_core.spl"
 COMPAT="$ROOT_DIR/scripts/check/check-simpleos-x86-64-wm-render-event-evidence.shs"
 CANONICAL="$ROOT_DIR/scripts/check/check-simpleos-wm-fullscreen-evidence.shs"
+# The canonical wrapper was refactored into sourced components; the properties
+# asserted below now live in the component that owns them, not in the wrapper.
+CANONICAL_LIB="$ROOT_DIR/scripts/check/lib/simpleos-wm-fullscreen"
+CANONICAL_ADMISSION="$CANONICAL_LIB/admission.shs"
+CANONICAL_RUNTIME="$CANONICAL_LIB/runtime.shs"
 X86_STUBS="$ROOT_DIR/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
 HDA_SERVICE="$ROOT_DIR/src/os/services/audio/audio_service.spl"
 
@@ -21,6 +26,10 @@ fail() {
 [ -f "$CORE" ] || fail "engine2d-core-missing"
 [ -x "$COMPAT" ] || fail "x86-compat-wrapper-missing-or-not-executable"
 [ -x "$CANONICAL" ] || fail "canonical-wrapper-missing-or-not-executable"
+[ -f "$CANONICAL_ADMISSION" ] || fail "canonical-wrapper-admission-component-missing"
+[ -f "$CANONICAL_RUNTIME" ] || fail "canonical-wrapper-runtime-component-missing"
+grep -q '\. "\$WM_FULLSCREEN_ADMISSION"' "$CANONICAL" || fail "canonical-wrapper-admission-not-sourced"
+grep -q '\. "\$WM_FULLSCREEN_RUNTIME"' "$CANONICAL" || fail "canonical-wrapper-runtime-not-sourced"
 [ -f "$X86_STUBS" ] || fail "x86-simd-runtime-source-missing"
 [ -f "$HDA_SERVICE" ] || fail "hda-service-missing"
 [ -x "$(command -v clang 2>/dev/null || true)" ] || fail "clang-not-on-PATH"
@@ -61,17 +70,22 @@ grep -q 'check-simpleos-wm-fullscreen-evidence.shs' "$COMPAT" || fail "x86-wrapp
 if grep -Eq '(^|[[:space:]])ENTRY=.*arch/x86_64/wm_entry\.spl' "$COMPAT"; then
     fail "legacy-wm-entry-still-routed"
 fi
-grep -q 'ENTRY="examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"' "$CANONICAL" || fail "canonical-wrapper-entry-mismatch"
-grep -q 'input-send-event' "$CANONICAL" || fail "canonical-wrapper-qmp-input-missing"
-grep -q 'pmemsave' "$CANONICAL" || fail "canonical-wrapper-framebuffer-readback-missing"
-grep -q 'scancode=87 kind=press' "$CANONICAL" || fail "canonical-wrapper-f11-press-receipt-missing"
-grep -q 'scancode=215 kind=release' "$CANONICAL" || fail "canonical-wrapper-f11-release-receipt-missing"
-grep -q 'wait_release_receipt' "$CANONICAL" || fail "canonical-wrapper-release-correlation-missing"
-grep -q -- '-device intel-hda' "$CANONICAL" || fail "canonical-wrapper-hda-device-missing"
-grep -q -- '-device hda-output' "$CANONICAL" || fail "canonical-wrapper-hda-output-missing"
-grep -q 'guest-hda-repeated-irq-missing' "$CANONICAL" || fail "canonical-wrapper-hda-irq-gate-missing"
+grep -q 'ENTRY="examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"' "$CANONICAL_ADMISSION" || fail "canonical-wrapper-entry-mismatch"
+grep -q 'input-send-event' "$CANONICAL_RUNTIME" || fail "canonical-wrapper-qmp-input-missing"
+grep -q 'pmemsave' "$CANONICAL_RUNTIME" || fail "canonical-wrapper-framebuffer-readback-missing"
+grep -q 'scancode=87 kind=press' "$CANONICAL_RUNTIME" || fail "canonical-wrapper-f11-press-receipt-missing"
+grep -q 'scancode=215 kind=release' "$CANONICAL_RUNTIME" || fail "canonical-wrapper-f11-release-receipt-missing"
+grep -q 'wait_release_receipt' "$CANONICAL_RUNTIME" || fail "canonical-wrapper-release-correlation-missing"
+grep -q -- '-device intel-hda' "$CANONICAL_RUNTIME" || fail "canonical-wrapper-hda-device-missing"
+grep -q -- '-device hda-output' "$CANONICAL_RUNTIME" || fail "canonical-wrapper-hda-output-missing"
+grep -q 'guest-hda-repeated-irq-missing' "$CANONICAL_RUNTIME" || fail "canonical-wrapper-hda-irq-gate-missing"
 grep -q 'pending_fullscreen_release_sequence' "$ROOT_DIR/src/os/compositor/compositor.spl" || fail "canonical-guest-f11-release-state-missing"
-grep -q 'scancode=215 kind=release' "$ROOT_DIR/src/os/desktop/shell.spl" || fail "canonical-guest-f11-release-receipt-missing"
+# shell.spl was split into os.desktop._DesktopShell.* components it re-exports;
+# the F11 release receipt is emitted by the runtime-methods component now.
+SHELL_RUNTIME="$ROOT_DIR/src/os/desktop/_DesktopShell/shell_runtime_methods.spl"
+[ -f "$SHELL_RUNTIME" ] || fail "canonical-guest-shell-runtime-component-missing"
+grep -q 'export use os.desktop._DesktopShell.shell_runtime_methods' "$ROOT_DIR/src/os/desktop/shell.spl" || fail "canonical-guest-shell-runtime-not-reexported"
+grep -q 'scancode=215 kind=release' "$SHELL_RUNTIME" || fail "canonical-guest-f11-release-receipt-missing"
 
 # Compile only the x86_64 C runtime to target assembly. The older shared
 # checker also compiles ARM64 and disassembles ELF objects with the host's
