@@ -3,6 +3,15 @@
 Status: DUPLICATE of lsp_mcp_integer_position_args_corrupted_2026-06-14.md
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
+**2026-08-23 — defect 1 is NOT reproducible from current source.** Running
+`src/app/simple_lsp_mcp/main.spl` under the freshly built seed with the exact
+Stage 5 framed input returns a correct `lsp_symbols` result and
+`scripts/check/validate_mcp_native_smoke.spl` reports
+`lsp_main_feature_call_valid=true`. Every artifact that still says
+`Missing tool name` predates the 2026-07-16 `json_helpers.spl` correction.
+See `lsp_mcp_native_failure_is_stale_artifacts_not_source_2026-08-23.md`.
+Defect 2 (`process_run` deadlock) is untouched by that finding.
+
 - **Filed:** 2026-06-18
 - **Severity:** P1 (LSP MCP tools unusable on native; diagnostics unusable in source mode)
 - **Components:** `src/app/simple_lsp_mcp/`, native AOT codegen, interpreter `process_run`
