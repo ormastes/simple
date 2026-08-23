@@ -1,0 +1,88 @@
+#!/bin/sh
+# check-test-summary-reconciles.shs — the recorded test summary must ADD UP.
+#
+# Why this exists (2026-08-23): `doc/08_tracking/test/test_result.md` was
+# found reading **Total 770 / Passed 0 / Failed 0** — a tracker that knows
+# about 770 tests and holds a verdict for none of them, published as if it
+# were a report. Every existing guard was green over it, because they all
+# check trees, ranges, or source; none of them ever read the numbers.
+#
+# A count that is present but does not reconcile is not better than a
+# missing count, and adding an in-development category to a summary that
+# already reports `Passed 0 of 770` would be building on sand. So the
+# reconciliation is a GATE, not merely a spec assertion.
+#
+# Invariant: passed + failed + skipped + pending + in-development + other
+#            == total, and total > 0 implies at least one verdict exists.
+#
+# Verdict convention (last line of stdout, same as the other guards):
+#   PASS  — <n> metric(s) checked, summary reconciles   exit 0
+#   FAIL  — ...                                          exit 1
+#   ERROR — nothing was checked (<reason>)               exit 2
+# A run that read 0 metrics is ERROR, never a pass: absence of a report is
+# absence of evidence.
+
+ROOT=${ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}
+REPORT=${REPORT:-"$ROOT/doc/08_tracking/test/test_result.md"}
+
+metric() {
+    # $1 = row label. Reads `| <label> | <n> |` from the summary table.
+    v=$(grep -m1 -E "^\| $1 \|" "$REPORT" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+    [ -n "$v" ] || v=0
+    echo "$v"
+}
+
+selftest() {
+    d=$(mktemp -d)
+    # fixture 1: reconciling report must PASS
+    printf '| Metric | Count |\n| Total | 10 |\n| Passed | 7 |\n| Failed | 1 |\n| Skipped | 1 |\n| In Development | 1 |\n' > "$d/ok.md"
+    out=$(REPORT="$d/ok.md" sh "$0" --no-selftest 2>&1); rc=$?
+    [ $rc -eq 0 ] || { echo "SELFTEST FAIL: reconciling fixture did not pass ($out)"; rm -rf "$d"; exit 2; }
+    # fixture 2: the real incident — 770/0/0 must FAIL
+    printf '| Metric | Count |\n| Total | 770 |\n| Passed | 0 |\n| Failed | 0 |\n| Skipped | 0 |\n' > "$d/bad.md"
+    out=$(REPORT="$d/bad.md" sh "$0" --no-selftest 2>&1); rc=$?
+    [ $rc -eq 1 ] || { echo "SELFTEST FAIL: 770/0/0 incident fixture was not FAILed ($out)"; rm -rf "$d"; exit 2; }
+    # fixture 3: in-development folded away (total 10, categories sum 8) must FAIL
+    printf '| Metric | Count |\n| Total | 10 |\n| Passed | 7 |\n| Failed | 1 |\n| Skipped | 0 |\n' > "$d/fold.md"
+    out=$(REPORT="$d/fold.md" sh "$0" --no-selftest 2>&1); rc=$?
+    [ $rc -eq 1 ] || { echo "SELFTEST FAIL: unreconciled remainder was not FAILed ($out)"; rm -rf "$d"; exit 2; }
+    # fixture 4: missing report must ERROR, never pass
+    out=$(REPORT="$d/nope.md" sh "$0" --no-selftest 2>&1); rc=$?
+    [ $rc -eq 2 ] || { echo "SELFTEST FAIL: missing report was not an ERROR ($out)"; rm -rf "$d"; exit 2; }
+    rm -rf "$d"
+}
+
+[ "$1" = "--no-selftest" ] || selftest
+
+if [ ! -f "$REPORT" ]; then
+    echo "ERROR — nothing was checked (no report at $REPORT)"
+    exit 2
+fi
+
+TOTAL=$(metric "Total")
+PASSED=$(metric "Passed")
+FAILED=$(metric "Failed")
+SKIPPED=$(metric "Skipped")
+PENDING=$(metric "Pending")
+INDEV=$(metric "In Development")
+OTHER=$(metric "Other")
+
+if ! grep -qE '^\| Total \|' "$REPORT"; then
+    echo "ERROR — nothing was checked (no '| Total |' row in $REPORT)"
+    exit 2
+fi
+
+SUM=$((PASSED + FAILED + SKIPPED + PENDING + INDEV + OTHER))
+
+if [ "$TOTAL" -gt 0 ] && [ "$SUM" -eq 0 ]; then
+    echo "FAIL — 7 metric(s) checked: $TOTAL test(s) recorded, 0 with a verdict. This report is not evidence of a run."
+    exit 1
+fi
+
+if [ "$SUM" -ne "$TOTAL" ]; then
+    echo "FAIL — 7 metric(s) checked: total=$TOTAL but passed+failed+skipped+pending+in-development+other=$SUM (remainder $((TOTAL - SUM)) unaccounted)"
+    exit 1
+fi
+
+echo "PASS — 7 metric(s) checked, summary reconciles (total=$TOTAL passed=$PASSED failed=$FAILED skipped=$SKIPPED pending=$PENDING in-development=$INDEV other=$OTHER)"
+exit 0
