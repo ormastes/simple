@@ -93,3 +93,20 @@ owned by this feature expert until such dirs are created.)
 
 Update this file whenever a hardening lane lands, a gate's verdict shape changes, a baseline
 file is regenerated, or a 2026-08-21 bug above is closed.
+
+## Mission-critical alloc-diagnostic config (2026-08-23)
+
+- Module: `src/compiler/00.common/mission_critical/alloc_diagnostic_config.spl`
+  (`McAllocDiagnosticConfig`, `parse_alloc_allowances`, env
+  `SIMPLE_MC_ALLOC_ALLOW`). Zero `use` lines, zero module state — same
+  discipline as `00.common/assurance/policy_names.spl`.
+- Applied by `35.semantics/noalloc_checker.spl`'s new
+  `check_steady_state_gate_with_config` / `steady_state_findings`;
+  `check_steady_state_gate` is unchanged and delegates with the empty default.
+- It is a SCOPED, JUSTIFIED opt-out, never a global off-switch: allowances name
+  individual symbols (or dot-bounded module prefixes) with a mandatory reason,
+  and suppressed findings are still reported as `allowed[steady-state]`.
+- Reminder for future work: the steady-state gate is still LATENT (no production
+  call site — see `flight_rules.spl:295`, `effect_verifier.spl:376`).
+- Guide: `doc/07_guide/language/mission_critical_alloc_diagnostic_config.md`.
+- Spec: `test/01_unit/compiler/semantics/mission_critical_alloc_config_spec.spl`.

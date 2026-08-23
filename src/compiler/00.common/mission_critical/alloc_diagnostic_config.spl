@@ -1,0 +1,107 @@
+# Mission-critical memory-allocation diagnostic CONFIG (2026-08-23).
+#
+# WHAT THIS CONFIGURES
+# --------------------
+# `35.semantics/noalloc_checker.spl`'s steady-state gate rejects any symbol
+# whose `AllocClass` is not `is_steady_state_safe()` once the startup seal has
+# closed -- and the seal closes automatically when the resolved safety profile
+# is at least `critical`, i.e. in MISSION-CRITICAL MODE. That gate has no
+# configuration at all today: it is all-or-nothing.
+#
+# The underlying safety property -- mission-critical code must not dynamically
+# allocate memory -- is exactly why the check must keep EXISTING. So this
+# module deliberately does NOT provide a global off-switch. What it provides is
+# a SCOPED, EXPLICIT, JUSTIFIED opt-out: a build names the individual symbols
+# (or dot-bounded module prefixes) whose allocation it accepts, and every other
+# symbol stays hard-rejected. A suppressed finding is still PRODUCED and
+# reported, tagged `allowed` with its justification -- it is never deleted.
+#
+# WHY THIS FILE HAS NO `use` LINES AND NO MODULE-LEVEL STATE
+# ----------------------------------------------------------
+# Same discipline as `00.common/assurance/policy_names.spl`: it lives in
+# 00.common so 35.semantics/80.driver/90.tools may all import it without
+# inverting layering, and it keeps no `var`, no module-level dict, and no
+# environment access -- pure functions of their arguments. A caller that wants
+# the env knob reads `SIMPLE_MC_ALLOC_ALLOW` itself and hands the raw string to
+# `parse_alloc_allowances`, so nothing here can contaminate an interpreter
+# session (the failure mode documented in policy_names.spl's header).
+#
+# ENV KNOB (read by the caller, parsed here)
+#   SIMPLE_MC_ALLOC_ALLOW="sym_or_prefix=justification,other=justification"
+# An entry with an empty justification is REJECTED, not silently accepted:
+# an unjustified opt-out from a mission-critical safety property is a defect.
+#
+# DEFAULT: empty allowance set -- byte-identical behaviour to the pre-config
+# gate. The config can only ever narrow the gate at named symbols; it can
+# never widen the accepted `AllocClass` set and has no severity dimension
+# (severity is a separate feature, owned elsewhere).
+
+# One accepted allocation site.
+#
+# Fields:
+#   scope:          exact symbol name, or a module/namespace prefix matched on
+#                   a dot boundary (never a bare substring prefix -- WP-11
+#                   fixed exactly that bug in `is_bounded_pool_family`).
+#   justification:  why allocation is acceptable here. Must be non-empty.
+struct McAllocAllowance:
+    scope: text
+    justification: text
+
+# The configuration value itself. `allowances` empty == the unconfigured
+# mission-critical default: every non-steady-state-safe symbol is rejected.
+struct McAllocDiagnosticConfig:
+    allowances: [McAllocAllowance]
+
+impl McAllocDiagnosticConfig:
+    # The default: no opt-out at all. An unconfigured mission-critical build
+    # behaves exactly as it did before this config existed.
+    static fn default() -> McAllocDiagnosticConfig:
+        McAllocDiagnosticConfig(allowances: [])
+
+    # True when the config grants no opt-out whatsoever.
+    fn is_empty() -> bool:
+        self.allowances.len() == 0
+
+# Exact-or-dot-boundary match, mirroring `noalloc_checker.is_bounded_pool_family`.
+# A bare `starts_with` would silently swallow sibling symbols whose names merely
+# share a textual prefix (`boot_init` vs `boot_init_unsafe`).
+fn mc_alloc_scope_matches(scope: text, symbol: text) -> bool:
+    if scope == "":
+        return false
+    symbol == scope or symbol.starts_with(scope + ".")
+
+# The justification for `symbol`, or "" when no allowance covers it.
+# Returning the justification rather than a bool is deliberate: the caller
+# reports it alongside the suppressed finding, so an opt-out is always visible
+# in the diagnostic output rather than being an invisible hole.
+fn mc_alloc_allowance_for(config: McAllocDiagnosticConfig, symbol: text) -> text:
+    for a in config.allowances:
+        if a.justification != "" and mc_alloc_scope_matches(a.scope, symbol):
+            return a.justification
+    ""
+
+# True when `symbol` has an explicit, justified allowance.
+fn mc_alloc_is_allowed(config: McAllocDiagnosticConfig, symbol: text) -> bool:
+    mc_alloc_allowance_for(config, symbol) != ""
+
+# Parse `SIMPLE_MC_ALLOC_ALLOW`-shaped text into a config.
+# Grammar: `scope=justification` entries separated by `,`. Entries with an
+# empty scope or an empty justification are DROPPED (fail-closed: an
+# unparseable opt-out grants nothing rather than granting everything).
+fn parse_alloc_allowances(raw: text) -> McAllocDiagnosticConfig:
+    var out: [McAllocAllowance] = []
+    if raw == "":
+        return McAllocDiagnosticConfig(allowances: out)
+    for part in raw.split(","):
+        val trimmed = part.trim()
+        if trimmed == "":
+            continue
+        val eq = trimmed.find("=")
+        if eq < 0:
+            continue
+        val scope = trimmed[0:eq].trim()
+        val why = trimmed[eq + 1:trimmed.len()].trim()
+        if scope == "" or why == "":
+            continue
+        out.push(McAllocAllowance(scope: scope, justification: why))
+    McAllocDiagnosticConfig(allowances: out)

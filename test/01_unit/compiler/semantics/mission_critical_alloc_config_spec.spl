@@ -1,0 +1,101 @@
+"""
+## Purpose and audience
+Purpose: Prove the mission-critical memory-allocation diagnostic CONFIG is a
+scoped, justified opt-out — never a global off-switch.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-SEMANTICS-001 — stable requirement identity for this spec.
+
+# Feature: `McAllocDiagnosticConfig`
+# (src/compiler/00.common/mission_critical/alloc_diagnostic_config.spl)
+# applied to the WP-12 steady-state gate in
+# src/compiler/35.semantics/noalloc_checker.spl.
+#
+# Drives the REAL modules, not replicas. Symbols reused from
+# `noalloc_alloc_class_spec.spl` so the classifications stay real:
+#   - `rt_alloc` (src/runtime/simple_core/core_memory.spl:16) -> Unbounded.
+#   - an unregistered callee                                  -> Unknown.
+
+use std.spec.*
+use compiler.semantics.noalloc_checker.{
+    NoallocCapabilityManifest, AllocClass,
+    check_steady_state_gate, check_steady_state_gate_with_config,
+    steady_state_findings
+}
+use compiler.common.mission_critical.alloc_diagnostic_config.{
+    McAllocAllowance, McAllocDiagnosticConfig,
+    mc_alloc_scope_matches, mc_alloc_is_allowed, parse_alloc_allowances
+}
+
+fn unbounded_manifest() -> NoallocCapabilityManifest:
+    val m = NoallocCapabilityManifest.new()
+    m.register("rt_alloc", false, true, "")
+    m.register("other_alloc", false, true, "")
+    m
+
+describe "mission-critical alloc diagnostic config":
+    it "defaults to an empty allowance set — the check is fully live":
+        step("Verify: default config grants no opt-out")
+        # @req: REQ-COMPILER-SEMANTICS-001
+        val cfg = McAllocDiagnosticConfig.default()
+        expect(cfg.is_empty()).to_equal(true)
+        expect(mc_alloc_is_allowed(cfg, "rt_alloc")).to_equal(false)
+
+    it "leaves the unconfigured gate byte-identical (old entry point)":
+        step("Verify: check_steady_state_gate still rejects both symbols")
+        val m = unbounded_manifest()
+        val v = check_steady_state_gate(m, ["rt_alloc", "other_alloc"])
+        expect(v.len()).to_equal(2)
+
+    it "suppresses EXACTLY the named symbol and nothing else":
+        step("Verify: allowance is scoped, not global")
+        val m = unbounded_manifest()
+        val cfg = McAllocDiagnosticConfig(allowances: [
+            McAllocAllowance(scope: "rt_alloc", justification: "init-time arena only")
+        ])
+        val v = check_steady_state_gate_with_config(m, ["rt_alloc", "other_alloc"], cfg)
+        expect(v.len()).to_equal(1)
+        expect(v[0].fn_name).to_equal("other_alloc")
+
+    it "still REPORTS the suppressed finding, tagged allowed with its reason":
+        step("Verify: an opt-out is visible, never silently dropped")
+        val m = unbounded_manifest()
+        val cfg = McAllocDiagnosticConfig(allowances: [
+            McAllocAllowance(scope: "rt_alloc", justification: "init-time arena only")
+        ])
+        val findings = steady_state_findings(m, ["rt_alloc", "other_alloc"], cfg)
+        expect(findings.len()).to_equal(2)
+        expect(findings[0].allowed).to_equal(true)
+        expect(findings[0].justification).to_equal("init-time arena only")
+        expect(findings[1].allowed).to_equal(false)
+
+    it "keeps rejecting every Unknown-class symbol the config does not name":
+        step("Verify: Unknown stays rejected unless exactly named and justified")
+        # An unregistered callee classifies `Unknown`. A scoped allowance may
+        # cover it (a build that has audited that specific symbol), but an
+        # unrelated symbol stays rejected — the config never widens the class
+        # set, only names individual symbols.
+        val m = NoallocCapabilityManifest.new()
+        val cfg = McAllocDiagnosticConfig(allowances: [
+            McAllocAllowance(scope: "audited_cb", justification: "audited indirect call")
+        ])
+        val v = check_steady_state_gate_with_config(m, ["audited_cb", "mystery_cb"], cfg)
+        expect(v.len()).to_equal(1)
+        expect(v[0].fn_name).to_equal("mystery_cb")
+        expect(v[0].alloc_class).to_equal(AllocClass.Unknown)
+
+    it "matches on a dot boundary, never a bare textual prefix":
+        step("Verify: scope matching discipline mirrors is_bounded_pool_family")
+        expect(mc_alloc_scope_matches("boot_init", "boot_init")).to_equal(true)
+        expect(mc_alloc_scope_matches("boot", "boot.stage1")).to_equal(true)
+        expect(mc_alloc_scope_matches("boot_init", "boot_init_unsafe")).to_equal(false)
+        expect(mc_alloc_scope_matches("", "anything")).to_equal(false)
+
+    it "parses SIMPLE_MC_ALLOC_ALLOW and drops unjustified entries fail-closed":
+        step("Verify: an unjustified opt-out grants nothing")
+        val cfg = parse_alloc_allowances("a=reason one, b=, =why, c=reason two")
+        expect(cfg.allowances.len()).to_equal(2)
+        expect(mc_alloc_is_allowed(cfg, "a")).to_equal(true)
+        expect(mc_alloc_is_allowed(cfg, "b")).to_equal(false)
+        expect(mc_alloc_is_allowed(cfg, "c")).to_equal(true)
+        expect(parse_alloc_allowances("").is_empty()).to_equal(true)

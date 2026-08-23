@@ -174,3 +174,24 @@ RV32/RV64 NVMe wrapper set. Completion or release claims must run the same
 command with `--strict`. After changing wrapper coverage classification, run
 `sh scripts/check/check-nvme-baremetal-wrapper-coverage.shs --self-test` so
 fake missing RV32/RV64 wrapper and spec fixtures prove the audit fails closed.
+
+## Memory-allocation diagnostic config (2026-08-23)
+
+Mission-critical code must not dynamically allocate memory. The steady-state
+allocation gate (`35.semantics/noalloc_checker.spl`) enforces that once the
+startup seal closes — which happens automatically at profile `critical`.
+
+That gate is now configurable, but **only as a scoped, justified opt-out**, never
+a global off-switch:
+
+```
+SIMPLE_MC_ALLOC_ALLOW="rt_arena_init=init-time arena, boot.stage1=audited"
+```
+
+Each entry names one symbol (or a dot-bounded module prefix) and MUST carry a
+justification; an unjustified entry grants nothing. Every suppressed finding is
+still reported, as `allowed[steady-state]: ... — permitted by mission-critical
+alloc config: <why>`, so a release audit can enumerate every allocation the
+build tolerates. Default is empty: the gate is fully live.
+
+Contract: `doc/07_guide/language/mission_critical_alloc_diagnostic_config.md`.

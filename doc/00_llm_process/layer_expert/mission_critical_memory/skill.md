@@ -24,3 +24,17 @@ Rules:
   contexts always reject.
 - New runtime imports are prohibited unless a recorded owner-boundary decision
   proves no existing facade can supply the capability.
+
+## Alloc-diagnostic config knob (2026-08-23)
+
+`src/compiler/00.common/mission_critical/alloc_diagnostic_config.spl` configures
+the WP-12 steady-state allocation gate in `35.semantics/noalloc_checker.spl`.
+
+- `McAllocDiagnosticConfig.default()` is EMPTY — the gate is fully live by
+  default, and `check_steady_state_gate` is behaviourally unchanged.
+- Opt-outs are per-symbol (or dot-bounded module prefix) and require a
+  justification; `SIMPLE_MC_ALLOC_ALLOW="scope=why,..."` is parsed by
+  `parse_alloc_allowances` (caller reads the env; the module stays state-free).
+- Suppressed findings are still produced by `steady_state_findings` and printed
+  as `allowed[steady-state]` — the check is disabled at a scope, never deleted.
+- Guide: `doc/07_guide/language/mission_critical_alloc_diagnostic_config.md`.

@@ -44,6 +44,9 @@ use compiler.semantics.gc_boundary_check.{
 }
 use compiler.common.assurance.policy.{strictness_for_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.mission_critical.alloc_diagnostic_config.{
+    McAllocDiagnosticConfig, mc_alloc_allowance_for
+}
 
 # ============================================================================
 # Allocation-Class Lattice (WP-12)
@@ -355,13 +358,63 @@ fn check_steady_state_gate(manifest: NoallocCapabilityManifest, symbol_names: [t
     `manifest` and reject unless `alloc_class.is_steady_state_safe()`.
     `Unbounded` (real heap growth) and `Unknown` (unresolvable callee, e.g.
     an indirect call through a function pointer, or a name the manifest
-    never registered) both reject; `None`/`InitOnly`/`BoundedPool` pass."""
-    var violations: [SteadyStateViolation] = []
+    never registered) both reject; `None`/`InitOnly`/`BoundedPool` pass.
+
+    Unchanged entry point: delegates to the configurable gate with the
+    DEFAULT (empty) allowance set, which grants no opt-out at all -- so this
+    function's behaviour is byte-identical to its pre-config self."""
+    check_steady_state_gate_with_config(manifest, symbol_names, McAllocDiagnosticConfig.default())
+
+struct SteadyStateFinding:
+    """One steady-state gate outcome for a symbol that is NOT
+    `is_steady_state_safe()`. `allowed` is true when the mission-critical
+    alloc-diagnostic config carries an explicit, justified allowance for this
+    symbol; `justification` then repeats that reason.
+
+    Findings exist so that a configured opt-out is still VISIBLE: the check is
+    never deleted and the finding is never silently dropped -- it is reported
+    as accepted, with its stated reason, so an audit can enumerate every
+    allocation a mission-critical build tolerates."""
+    fn_name: text
+    alloc_class: AllocClass
+    allowed: bool
+    justification: text
+
+fn steady_state_findings(manifest: NoallocCapabilityManifest, symbol_names: [text], config: McAllocDiagnosticConfig) -> [SteadyStateFinding]:
+    """Every non-steady-state-safe symbol, each tagged allowed/rejected by
+    `config`. Superset of `check_steady_state_gate_with_config`'s result."""
+    var findings: [SteadyStateFinding] = []
     for name in symbol_names:
         val entry = manifest.lookup(name)
         if not entry.alloc_class.is_steady_state_safe():
-            violations.push(SteadyStateViolation(fn_name: name, alloc_class: entry.alloc_class))
+            val why = mc_alloc_allowance_for(config, name)
+            findings.push(SteadyStateFinding(
+                fn_name: name,
+                alloc_class: entry.alloc_class,
+                allowed: why != "",
+                justification: why
+            ))
+    findings
+
+fn check_steady_state_gate_with_config(manifest: NoallocCapabilityManifest, symbol_names: [text], config: McAllocDiagnosticConfig) -> [SteadyStateViolation]:
+    """The steady-state gate, with the mission-critical alloc-diagnostic
+    config applied. A symbol is dropped from the rejection list ONLY when the
+    config carries an explicit, justified allowance whose scope matches it
+    exactly or on a dot boundary. Everything else -- including `Unknown` --
+    still rejects. The config can never widen the accepted `AllocClass` set,
+    and an empty config is exactly the unconfigured gate."""
+    var violations: [SteadyStateViolation] = []
+    for f in steady_state_findings(manifest, symbol_names, config):
+        if not f.allowed:
+            violations.push(SteadyStateViolation(fn_name: f.fn_name, alloc_class: f.alloc_class))
     violations
+
+fn format_steady_state_finding(f: SteadyStateFinding) -> text:
+    """Format one finding. An allowed finding is reported as `allowed`, with
+    its justification, rather than being suppressed into silence."""
+    if f.allowed:
+        return "allowed[steady-state]: symbol '{f.fn_name}' allocates (class: {f.alloc_class.name()}) — permitted by mission-critical alloc config: {f.justification}"
+    "error[steady-state]: symbol '{f.fn_name}' is not steady-state safe (class: {f.alloc_class.name()})"
 
 fn format_steady_state_violation(v: SteadyStateViolation) -> text:
     """Format one steady-state gate rejection as a compiler diagnostic string."""
