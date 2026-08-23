@@ -32,6 +32,7 @@ BIN=${SIMPLE_BIN:-"$ROOT/bin/simple"}
 BUDGET=${NATIVE_BUILD_LIVENESS_TIMEOUT:-240}
 EXECUTED=0
 CRASHED=0
+INCONCLUSIVE=0
 OFFENDERS=""
 
 # selftest: the classifier must call 134/139/124-with-no-progress a crash and a
@@ -39,11 +40,12 @@ OFFENDERS=""
 selftest() {
     _fail=0
     for rc in 134 139 132; do
-        if classify "$rc" "yes" >/dev/null; then _fail=1; echo "selftest: rc=$rc must FAIL"; fi
+        classify "$rc" "yes"; [ $? -eq 1 ] || { _fail=1; echo "selftest: rc=$rc must be CRASH(1)"; }
     done
-    if ! classify 124 "yes" >/dev/null; then _fail=1; echo "selftest: rc=124 with progress must PASS"; fi
-    if classify 124 "no" >/dev/null; then _fail=1; echo "selftest: rc=124 with NO progress must FAIL"; fi
-    if ! classify 0 "yes" >/dev/null; then _fail=1; echo "selftest: rc=0 must PASS"; fi
+    classify 124 "yes"; [ $? -eq 0 ] || { _fail=1; echo "selftest: rc=124 with progress must PASS(0)"; }
+    # the false-positive guard: too-short budget must be INCONCLUSIVE, not FAIL
+    classify 124 "no";  [ $? -eq 2 ] || { _fail=1; echo "selftest: rc=124 without progress must be INCONCLUSIVE(2)"; }
+    classify 0 "yes";   [ $? -eq 0 ] || { _fail=1; echo "selftest: rc=0 must PASS(0)"; }
     if [ "$_fail" -ne 0 ]; then echo "ERROR — selftest failed"; exit 2; fi
 }
 
@@ -52,10 +54,16 @@ classify() {
     _rc=$1; _prog=$2
     # >=128 is a signal (134 SIGABRT, 139 SIGSEGV). Always a crash.
     if [ "$_rc" -ge 128 ]; then return 1; fi
-    # 124 is our own timeout: fine ONLY if the driver actually got going.
+    # 124 is our own timeout. With progress, the driver ran: PASS. WITHOUT
+    # progress we learned NOTHING -- a slow seed on a loaded box can spend
+    # minutes loading its closure before the first [build] line, and calling
+    # that a crash is a false positive that would make this gate untrustworthy
+    # and therefore routed around. Absence of evidence is ERROR (rc 2), never
+    # FAIL and never PASS. The incident this gate exists for is rc=134, a
+    # signal, which is caught above regardless of the budget.
     if [ "$_rc" -eq 124 ]; then
         [ "$_prog" = "yes" ] && return 0
-        return 1
+        return 2
     fi
     [ "$_rc" -eq 0 ] && return 0
     # any other non-zero: a real build error, but not the crash class this
@@ -85,7 +93,11 @@ for threads in 2 16; do
     RC=$?
     EXECUTED=$((EXECUTED + 1))
     if grep -aq '\[build\]' "$LOG"; then PROG=yes; else PROG=no; fi
-    if classify "$RC" "$PROG"; then
+    classify "$RC" "$PROG"; VERDICT=$?
+    if [ "$VERDICT" -eq 2 ]; then
+        INCONCLUSIVE=$((INCONCLUSIVE + 1))
+        echo "  inconclusive  native-build --threads $threads (rc=$RC, no [build] line within ${BUDGET}s; raise NATIVE_BUILD_LIVENESS_TIMEOUT)"
+    elif [ "$VERDICT" -eq 0 ]; then
         echo "  ok            native-build --threads $threads (rc=$RC, driver progressed=$PROG)"
     else
         CRASHED=$((CRASHED + 1))
@@ -104,5 +116,9 @@ if [ "$CRASHED" -ne 0 ]; then
     echo "FAIL — $EXECUTED invocation(s) executed, $CRASHED crashed:$OFFENDERS"
     exit 1
 fi
-echo "PASS — $EXECUTED invocation(s) executed, 0 crashes"
+if [ "$INCONCLUSIVE" -eq "$EXECUTED" ]; then
+    echo "ERROR — nothing was checked ($EXECUTED invocation(s) timed out before the driver printed a [build] line; raise NATIVE_BUILD_LIVENESS_TIMEOUT, currently ${BUDGET}s)"
+    exit 2
+fi
+echo "PASS — $EXECUTED invocation(s) executed, 0 crashes, $INCONCLUSIVE inconclusive"
 exit 0
