@@ -102,7 +102,7 @@ scripts/bootstrap/bootstrap-from-scratch.sh --deploy
 scripts/setup/setup.shs
 
 # Windows (Git Bash / MSYS2)
-scripts/bootstrap/bootstrap-windows.sh --deploy
+scripts/bootstrap/bootstrap-from-scratch.sh windows-entry --deploy
 scripts/setup/setup.shs
 ```
 

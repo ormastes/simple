@@ -266,7 +266,7 @@ scripts/bootstrap/bootstrap-from-scratch.sh --deploy
 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
 
 # Windows:
-scripts/bootstrap/bootstrap-windows.sh --deploy
+scripts/bootstrap/bootstrap-from-scratch.sh windows-entry --deploy
 # Manual full-bootstrap seed/runtime rebuild:
 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
 

@@ -68,7 +68,7 @@ So each registry entry declares a mode:
 |---|-------|------|------|-----------------|
 | 0 | Preflight: shell portability | `check-bootstrap-portability.shs` | run | Every bootstrap shell/Perl helper is parseable POSIX; process-lock behavioural tests; immutable bootstrap-authority publication |
 | 0 | Preflight: cache lane ownership | `check-cache-scope-ownership.shs` | run | A native build cache dir is not reused across lanes; `.cache_scope` marker matches the owning lane (has its own `--selftest`) |
-| 0 | Preflight: cache policy | `scripts/bootstrap/bootstrap-cache-policy.shs` | static | Cache scope/dir policy sourced by `bootstrap-from-scratch.sh` |
+| 0 | Preflight: cache policy | `scripts/bootstrap/bootstrap-from-scratch.sh` | static | Cache scope/dir policy sourced by `bootstrap-from-scratch.sh` |
 | 1 | Seed: typed-reason receipt | `check-bootstrap-reason-receipt-guard.shs` | static | Bootstrap refuses to start without a typed-reason receipt |
 | 1 | Seed: planner admission bound | `verify-bootstrap-planner-admission-bound.shs` | static | A planner-admission-v2 receipt is well-formed and bounded before execution is attempted |
 | 2 | Stage 2 capability probe | `check-bootstrap-stage2-struct-receiver.shs` | static | A freshly built stage2 compiler can compile a struct-receiver method (fail-fast capability probe) |
@@ -375,7 +375,7 @@ Gated by `scripts/check/check-sanctioned-bootstrap-invocation.shs`.
 
 ### `--strategy=adhoc` is a failure policy, not a lighter build
 
-`scripts/bootstrap/bootstrap-cache-policy.shs:22` — `adhoc` maps to `fail-fast`
+`scripts/bootstrap/bootstrap-from-scratch.sh:22` — `adhoc` maps to `fail-fast`
 (vs `phase-isolated` for `normal`, `inventory-to-end` for `full`). It changes
 **nothing** about what is compiled. **There is no reduced-closure stage-1 path
 in this repo.**

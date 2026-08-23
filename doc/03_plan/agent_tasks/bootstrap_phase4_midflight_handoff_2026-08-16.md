@@ -33,13 +33,13 @@ The diagnostic protocol's exact-once condition was violated: the probe owner and
 4. Only after W1.5 PASS, run exactly one canonical Stage 3 resume:
 
    ```sh
-   sh scripts/bootstrap/resume-stage3-from-admitted.sh build/bootstrap
+   sh scripts/bootstrap/bootstrap-from-scratch.sh resume-stage3 build/bootstrap
    ```
 
 5. Require `Stage3AdmissionReceiptV1` with `admission_status=PASS`, exact compiler/runtime/interface/archive hashes, and the frozen source identity. Then build the CLI, MCP, and LSP journals in isolated caches and run:
 
    ```sh
-   sh scripts/bootstrap/stage4-tooling-matrix.shs \
+   sh scripts/bootstrap/bootstrap-from-scratch.sh stage4-tooling-matrix \
      --matrix-id=<frozen-id> \
      --compiler-manifest=<stage3-compiler-manifest> \
      --cli-journal=<cli-journal> \

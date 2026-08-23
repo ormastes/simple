@@ -45,7 +45,7 @@ The rules file does not mention this. Findings:
 - The ONLY receipt-free entry is the trust root: `--full-bootstrap --stop-after-stage2 --mode=dynload`.
 - The planner (`bootstrap_receipt_main.spl`) must NOT be invoked by hand; it only records
   hashes. The verifier wants a 29-field admission emitted solely by
-  `scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs`.
+  `scripts/bootstrap/bootstrap-from-scratch.sh planner-admission-v2`.
 - Working invocation:
   `produce-bootstrap-planner-admission-v2.shs --target=//bootstrap:stage4
    --reason=self-host-convergence-check --parent-compiler=build/bootstrap/stage2/<triple>/simple --out=<path>`

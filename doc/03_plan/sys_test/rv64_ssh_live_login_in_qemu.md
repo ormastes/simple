@@ -234,7 +234,7 @@ env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
   --bootstrap-receipt=build/bootstrap/planner-admission/restart12-riscv-current-head/admission.env \
   --resume-stage4-from-admitted=build/restart12-riscv-current-head --deploy --jobs=1
 # after B--F/Q, unless they used TODO667's isolated immutable bundle:
-sh scripts/bootstrap/rollback-bootstrap-deploy.shs x86_64-unknown-linux-gnu
+sh scripts/bootstrap/bootstrap-from-scratch.sh rollback-deploy x86_64-unknown-linux-gnu
 ```
 
 ### WP-B — Pure boot-gate state machine

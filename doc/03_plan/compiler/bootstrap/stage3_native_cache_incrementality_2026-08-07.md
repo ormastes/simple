@@ -14,7 +14,7 @@ is not a flag flip; no opt-in gate exists on the exercised path today.
 resetting provenance evidence (~line 1300, before Stage 2 even starts) and
 again immediately before invoking Stage 3 (~line 1582). Every run therefore
 started stage2 and stage3 from an empty cache dir regardless of whether any
-source had changed since the previous run. `scripts/bootstrap/resume-stage3-from-admitted.sh`
+source had changed since the previous run. `scripts/bootstrap/bootstrap-from-scratch.sh resume-stage3`
 had the same unconditional `rm -rf "$stage3_cache"` at line 89, even though
 that script exists specifically to *resume* stage3 from an already-admitted
 stage2 binary.

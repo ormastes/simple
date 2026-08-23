@@ -107,7 +107,7 @@ The successful cycle-3 transaction runs the canonical essential-tools smoke
 internally exactly once and retains `stage4-essential-tools-smoke.log`; do not
 repeat it as a standalone smoke. Keep that deployment active through the
 source-matched focused/live rows; only afterward use the existing
-`sh scripts/bootstrap/rollback-bootstrap-deploy.shs x86_64-unknown-linux-gnu`
+`sh scripts/bootstrap/bootstrap-from-scratch.sh rollback-deploy x86_64-unknown-linux-gnu`
 and retain its rollback receipt. Earlier rollback requires TODO667's isolated
 immutable bundle and all downstream rows must execute from that bundle.
 

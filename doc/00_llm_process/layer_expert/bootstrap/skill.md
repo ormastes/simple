@@ -694,7 +694,7 @@ Rules:
 3. **`SIMPLE_CACHE_SCOPE` without `--cache-dir` is a silent no-op.** Zero
    cache-hit lines in a long log ⇒ check the invocation before "warming".
 4. **`--strategy=adhoc` is a failure policy (fail-fast), not a lighter build**
-   (`scripts/bootstrap/bootstrap-cache-policy.shs:22`). There is no
+   (`scripts/bootstrap/bootstrap-from-scratch.sh:22`). There is no
    reduced-closure stage-1 path in this repo.
 5. **A frozen progress counter is a LIVELOCK, not slowness.** Opposite fixes.
    Signature from the incident: counter stuck at 389/688 for 2,700s while

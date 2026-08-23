@@ -403,7 +403,7 @@ B-HOST-CLI produces and adopts a Stage 4 CLI, so the canonical bootstrap
 handoff contract is applicable rather than N/A. Preserve Gate 1 Stage 3
 admission, Gate 2 x86_64 Linux Stage 4, Gate 3 frozen candidate sanity/hash,
 Gate 4 all four essential-tool markers, and Gate 5 deploy plus the rollback
-receipt produced by `sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>`
+receipt produced by `sh scripts/bootstrap/bootstrap-from-scratch.sh rollback-deploy <canonical-triple>`
 and arithmetic receipts. Then call
 `step_bootstrap_platform_handoff_readiness` through
 `sh scripts/check/check-bootstrap-platform-handoff-readiness.shs`.

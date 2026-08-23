@@ -17,10 +17,8 @@ mkdir -p "$fake_root/scripts/bootstrap" "$fake_root/scripts/check/cert/redeploy_
   "$fake_root/src/compiler" "$fake_root/src/lib" "$fake_root/bin" \
   "$fake_root/build/authority" "$fake_root/build/journals" "$fake_root/build/objects"
 
-cp "$repo_root/scripts/bootstrap/stage4-tools-only.sh" "$fake_root/scripts/bootstrap/"
-cp "$repo_root/scripts/bootstrap/stage4-tooling-matrix.shs" "$fake_root/scripts/bootstrap/"
-chmod +x "$fake_root/scripts/bootstrap/stage4-tools-only.sh" \
-  "$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs"
+cp "$repo_root/scripts/bootstrap/bootstrap-from-scratch.sh" "$fake_root/scripts/bootstrap/"
+chmod +x "$fake_root/scripts/bootstrap/bootstrap-from-scratch.sh"
 
 fail() {
   echo "bootstrap_stage4_tooling_matrix_test: $*" >&2
@@ -287,13 +285,13 @@ printf 'fake spec\n' >"$fake_root/test/02_integration/app/mcp_stdio_integration_
 printf 'fake spec\n' >"$fake_root/test/02_integration/app/simple_lsp_mcp_stdio_spec.spl"
 printf 'fake spec\n' >"$fake_root/test/02_integration/app/simple_lsp_mcp_log_modes_spec.spl"
 
-runner="$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs"
+runner="$fake_root/scripts/bootstrap/bootstrap-from-scratch.sh"
 common_args="--source-root=$fake_root --compiler-manifest=$manifest --cli-journal=$fake_root/build/journals/cli.env --mcp-journal=$fake_root/build/journals/mcp.env --lsp-journal=$fake_root/build/journals/lsp.env --linker=$fake_linker --timeout-seconds=30"
 
 # shellcheck disable=SC2086
 expected_full_status=1
 full_status=0
-"$runner" --matrix-id=full $common_args || full_status=$?
+"$runner" stage4-tooling-matrix --matrix-id=full $common_args || full_status=$?
 [ "$full_status" -eq "$expected_full_status" ] || fail "full fail-closed matrix returned $full_status"
 summary="$fake_root/build/mini_builds/stage4_tooling_full/summary.env"
 grep -Fxq 'overall=BLOCKED' "$summary" || fail "unfinished required rows did not remain fail-closed"
@@ -376,7 +374,7 @@ for negative_mode in zero missing fail omit focused-wrong; do
   negative_status=0
   export FAKE_TEST_MODE="$negative_mode"
   # shellcheck disable=SC2086
-  "$runner" --matrix-id="negative-$negative_mode" $common_args || negative_status=$?
+  "$runner" stage4-tooling-matrix --matrix-id="negative-$negative_mode" $common_args || negative_status=$?
   unset FAKE_TEST_MODE
   [ "$negative_status" -eq 1 ] || fail "$negative_mode test evidence was accepted"
   negative_summary="$fake_root/build/mini_builds/stage4_tooling_negative-$negative_mode/summary.env"
@@ -389,7 +387,7 @@ done
 essential_status=0
 export FAKE_ESSENTIAL_FAIL=1
 # shellcheck disable=SC2086
-"$runner" --matrix-id=essential-fail $common_args || essential_status=$?
+"$runner" stage4-tooling-matrix --matrix-id=essential-fail $common_args || essential_status=$?
 unset FAKE_ESSENTIAL_FAIL
 [ "$essential_status" -eq 1 ] || fail "essential runner failure was accepted"
 for blocked_test in format_fixed_focused_regression compiler_bootstrap_tests compiler_core_tests compiler_full_tests; do
@@ -403,7 +401,7 @@ first_gate_count=$(wc -l <"$FAKE_GATE_COUNT" | tr -d ' ')
 # A byte-identical resume must reuse all valid PASS and UNSUPPORTED rows.
 # shellcheck disable=SC2086
 resume_status=0
-"$runner" --matrix-id=full --resume $common_args || resume_status=$?
+"$runner" stage4-tooling-matrix --matrix-id=full --resume $common_args || resume_status=$?
 [ "$resume_status" -eq 1 ] || fail "blocked resume returned $resume_status"
 [ "$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')" -eq "$resume_link_count" ] || fail "resume relinked a valid PASS"
 [ "$(wc -l <"$FAKE_GATE_COUNT" | tr -d ' ')" -eq "$first_gate_count" ] || fail "resume reran a green gate"
@@ -412,7 +410,7 @@ run_blocked_resume() {
   resume_label=$1
   resume_rc=0
   # shellcheck disable=SC2086
-  "$runner" --matrix-id=full --resume $common_args || resume_rc=$?
+  "$runner" stage4-tooling-matrix --matrix-id=full --resume $common_args || resume_rc=$?
   [ "$resume_rc" -eq 1 ] || fail "$resume_label resume returned $resume_rc"
   grep -Fxq 'overall=BLOCKED' "$summary" || fail "$resume_label escaped fail-closed summary"
   grep -Fxq 'admission_eligible=false' "$summary" || fail "$resume_label exposed admission"
@@ -448,7 +446,7 @@ run_blocked_resume 'receipt tamper'
 printf 'fn journal_helper() -> i64: 2\n' >"$fake_root/src/app/journal_support/nonentry.spl"
 source_drift_status=0
 # shellcheck disable=SC2086
-"$runner" --matrix-id=full --resume $common_args || source_drift_status=$?
+"$runner" stage4-tooling-matrix --matrix-id=full --resume $common_args || source_drift_status=$?
 [ "$source_drift_status" -eq 2 ] || fail "non-entry source drift returned $source_drift_status"
 grep -Fxq 'overall=FAIL' "$summary" || fail "source drift retained a stale aggregate"
 grep -Fxq 'admission_eligible=false' "$summary" || fail "source drift exposed admission"
@@ -462,7 +460,7 @@ link_before_output_tamper=$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')
 printf 'tampered\n' >>"$fake_root/build/stage4-tools/full_cli/simple"
 # shellcheck disable=SC2086
 tamper_status=0
-"$runner" --matrix-id=full --resume $common_args || tamper_status=$?
+"$runner" stage4-tooling-matrix --matrix-id=full --resume $common_args || tamper_status=$?
 [ "$tamper_status" -eq 1 ] || fail "tampered blocked resume returned $tamper_status"
 [ "$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')" -eq "$((link_before_output_tamper + 1))" ] || fail "tampered CLI was not relinked once"
 [ -d "$fake_root/build/mini_builds/stage4_tooling_full/quarantine/cli.1" ] || fail "invalid publication was not retained"
@@ -479,7 +477,7 @@ original_path=$PATH
 PATH="$fake_root/bin:$PATH"
 export PATH
 # shellcheck disable=SC2086
-"$runner" --matrix-id=optional-fail $common_args || optional_status=$?
+"$runner" stage4-tooling-matrix --matrix-id=optional-fail $common_args || optional_status=$?
 PATH=$original_path
 export PATH
 unset FAKE_VSCODE_FAIL
@@ -493,7 +491,7 @@ grep -Fxq 'result=FAIL' "$fake_root/build/mini_builds/stage4_tooling_optional-fa
 # are not silently omitted and the scoped matrix is not admission-eligible.
 blocked_status=0
 # shellcheck disable=SC2086
-"$runner" --matrix-id=blocked --scope=link-only --source-root="$fake_root" \
+"$runner" stage4-tooling-matrix --matrix-id=blocked --scope=link-only --source-root="$fake_root" \
   --compiler-manifest="$manifest" --cli-journal="$fake_root/build/journals/cli.env" \
   --mcp-journal="$fake_root/build/journals/missing.env" \
   --lsp-journal="$fake_root/build/journals/lsp.env" --linker="$fake_linker" \

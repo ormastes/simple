@@ -2,7 +2,7 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-watcher="${repo_root}/scripts/bootstrap/bootstrap-progress-watch.shs"
+watcher="${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh"
 test_tmp=$(mktemp -d)
 owned_pids=
 
@@ -42,7 +42,7 @@ done
 [ -n "${nested_child}" ] || fail "nested child did not start"
 owned_pids="${nested_child} ${owned_pids}"
 nested_log="${test_tmp}/nested.log"
-sh "${watcher}" --pid="${nested_root}" --progress-log="${nested_log}" --once
+sh "${watcher}" progress-watch --pid="${nested_root}" --progress-log="${nested_log}" --once
 nested_line=$(tail -n 1 "${nested_log}")
 [ "$(field pid "${nested_line}")" = "${nested_root}" ] || fail "root PID changed"
 [ "$(field tree_processes "${nested_line}")" -eq 2 ] || fail "nested tree count is not exactly two"
@@ -56,7 +56,7 @@ nested_line=$(tail -n 1 "${nested_log}")
 # 67.4 GB stage-3 compile logged tree_rss_kb=34753460 (34.7 GB), a total
 # smaller than one live process. The process-group sum cannot lose a subtree to
 # re-parenting, so it bounds the chain sum from below. NEGATIVE CONTROL: revert
-# the pgrp tracking in bootstrap-progress-watch.shs and all three fields report
+# the pgrp tracking in the folded progress-watch subcommand and all three fields report
 # `unknown`, failing the numeric comparisons below.
 nested_pg=$(field tree_rss_pgroup_kb "${nested_line}")
 nested_misses=$(field tree_scan_misses "${nested_line}")
@@ -75,7 +75,7 @@ owned_pids="${leaf_pid} ${owned_pids}"
 leaf_log="${test_tmp}/leaf.log"
 event_log="${test_tmp}/build-progress.events"
 printf '%s\n' 'event=build_progress phase=parse unit_kind=files done=64 total=130 remaining=999 tasks_done=1 tasks_total=6 tasks_remaining=999 failed=0 cached=7 current=file64 terminal=running' >>"${event_log}"
-sh "${watcher}" --pid="${leaf_pid}" --progress-log="${leaf_log}" \
+sh "${watcher}" progress-watch --pid="${leaf_pid}" --progress-log="${leaf_log}" \
   --event-file="${event_log}" --once
 leaf_line=$(tail -n 1 "${leaf_log}")
 [ "$(field tree_processes "${leaf_line}")" -eq 1 ] || fail "leaf tree count is not one"
@@ -86,7 +86,7 @@ leaf_line=$(tail -n 1 "${leaf_log}")
 [ "$(field tasks_remaining "${leaf_line}")" -eq 5 ] || fail "task remaining was not recomputed"
 
 printf '%s\n' 'event=build_progress phase=parse unit_kind=files done=128 total=130 remaining=2 tasks_done=2 tasks_total=6 tasks_remaining=4 failed=0 cached=7 current=file128 terminal=running' >>"${event_log}"
-sh "${watcher}" --pid="${leaf_pid}" --progress-log="${leaf_log}" \
+sh "${watcher}" progress-watch --pid="${leaf_pid}" --progress-log="${leaf_log}" \
   --event-file="${event_log}" --once
 monotonic_line=$(tail -n 1 "${leaf_log}")
 [ "$(field done "${monotonic_line}")" -gt "$(field done "${leaf_line}")" ] ||
@@ -95,7 +95,7 @@ monotonic_line=$(tail -n 1 "${leaf_log}")
   fail "task count did not advance monotonically"
 
 printf '%s\n' 'event=build_progress phase=parse done=broken total=130 current=partial' >>"${event_log}"
-sh "${watcher}" --pid="${leaf_pid}" --progress-log="${leaf_log}" \
+sh "${watcher}" progress-watch --pid="${leaf_pid}" --progress-log="${leaf_log}" \
   --event-file="${event_log}" --once
 malformed_line=$(tail -n 1 "${leaf_log}")
 [ "$(field done "${malformed_line}")" = "unknown" ] || fail "malformed done was accepted"
@@ -103,7 +103,7 @@ malformed_line=$(tail -n 1 "${leaf_log}")
 [ "$(field terminal "${malformed_line}")" = "unknown" ] || fail "partial terminal was fabricated"
 
 printf '%s\n' 'event=build_progress phase=link unit_kind=objects done=130 total=130 remaining=0 tasks_done=6 tasks_total=6 tasks_remaining=0 failed=0 cached=7 current=output terminal=succeeded' >>"${event_log}"
-sh "${watcher}" --pid="${leaf_pid}" --progress-log="${leaf_log}" \
+sh "${watcher}" progress-watch --pid="${leaf_pid}" --progress-log="${leaf_log}" \
   --event-file="${event_log}" --once
 terminal_line=$(tail -n 1 "${leaf_log}")
 [ "$(field remaining "${terminal_line}")" -eq 0 ] || fail "terminal remaining is not zero"
@@ -116,7 +116,7 @@ sleep 0 &
 exited_pid=$!
 wait "${exited_pid}"
 exited_log="${test_tmp}/exited.log"
-sh "${watcher}" --pid="${exited_pid}" --progress-log="${exited_log}" --once
+sh "${watcher}" progress-watch --pid="${exited_pid}" --progress-log="${exited_log}" --once
 exited_line=$(tail -n 1 "${exited_log}")
 [ "$(field status "${exited_line}")" = "exited" ] || fail "exited PID was not reported exited"
 [ "$(field terminal "${exited_line}")" = "exited" ] || fail "exited terminal state missing"

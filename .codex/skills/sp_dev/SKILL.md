@@ -1154,7 +1154,7 @@ must not be reported as admission or platform success.
 
 Gate order is fixed: 1) Stage 3 admission, 2) x86_64 Linux Stage 4, 3) frozen
 candidate sanity/hash, 4) four essential-tool smoke markers, 5) deployment then
-`sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>` with
+`sh scripts/bootstrap/bootstrap-from-scratch.sh rollback-deploy <canonical-triple>` with
 rollback receipt, and 6) the selected native/QEMU/target platform acceptance.
 The rollback receipt includes command, exit status, pre/post/restored hashes,
 receipt path, and arithmetic smoke output.

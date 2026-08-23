@@ -2,11 +2,18 @@
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 wrapper="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
-helper="$root/scripts/bootstrap/resume-stage4-from-admitted.sh"
+# The resume-stage4 helper is now folded into the wrapper. Scan ONLY its folded
+# region, so the negative Rust/fallback-authority assertion below keeps testing
+# the helper rather than the whole wrapper (which legitimately mentions cargo).
+helper=$(mktemp)
+trap 'rm -f "$helper"' EXIT INT TERM
+awk '/^# --- folded: resume-stage4-from-admitted\.sh/{f=1;next} f&&/^# --- folded:/{f=0} f' \
+  "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$helper"
+[ -s "$helper" ] || { echo "FAIL: folded resume-stage4 region not found" >&2; exit 1; }
 provenance="$root/scripts/check/lib/stage4-candidate-provenance.shs"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-sh -n "$wrapper" "$helper" "$provenance" || fail "shell syntax"
+sh -n "$wrapper" "$provenance" || fail "shell syntax"
 grep -Fq -- '--resume-stage4-from-admitted=' "$wrapper" || fail "option missing"
 grep -Fq "bootstrap_receipt_target='//bootstrap:stage4'" "$wrapper" || fail "planner target missing"
 grep -Fq 'bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate"' "$helper" || fail "Stage 3 admission missing"
@@ -48,7 +55,7 @@ if ROOT="$root" OUT="$tmp/out" PLAN="$tmp/planner.env" sh -c '
   bootstrap_planner_v2_verify() { return 0; }
   bootstrap_planner_v2_field() { [ "$1" = target ] && echo //bootstrap:stage4; }
   backend=cranelift bootstrap_mode=dynload
-  . "$ROOT/scripts/bootstrap/resume-stage4-from-admitted.sh"
+  BOOTSTRAP_LIB_ONLY=1 . "$ROOT/scripts/bootstrap/bootstrap-from-scratch.sh"
   resume_stage4_prepare "$OUT" "$ROOT" p "$PLAN"
 ' >/dev/null 2>&1; then
   fail "pre-existing Stage 4 output was admitted"

@@ -81,7 +81,7 @@ candidate between gates.
    returns host identity, toolchain, source/compiler hashes, artifact hashes,
    logs, sanity, and essential-marker receipts.
 7. **Gate 7, rollback:** only after all selected Gate 6 evidence, run
-   `sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>`.
+   `sh scripts/bootstrap/bootstrap-from-scratch.sh rollback-deploy <canonical-triple>`.
    Retain the command, exit status, receipt path, restored hash, and
    post-rollback arithmetic smoke. An earlier rollback is valid only when
    Gate 6 ran from TODO667's isolated immutable bundle. Publication of that
