@@ -138,6 +138,66 @@ timeout (where `failed == 0`), because a neutralised file reporting
 `skipped=0` would be indistinguishable from a file that was never in
 development, and would vanish from the totals.
 
+### Decision 7: a tagged spec that cannot LOAD is BROKEN, and still fails the run
+
+Added after the tree-wide tagging sweep made it urgent. Three lanes are
+tagging every genuinely-unfinished failure across ~21,000 specs; without
+this, every tagged spec with a syntax error, a broken import or an
+unresolvable module would have become `executed=0` → `ExpectedFailure` →
+a silent counted skip, **indistinguishable from a spec that merely does
+not pass yet**. At a few dozen tags that is a nuisance; at that scale it
+is precisely the "protection that hides debt" failure mode.
+
+`InDevelopmentOutcome.LoadFailure` is a third class, checked **before**
+the failure branch:
+
+```
+IN-DEVELOPMENT BROKEN <path> (unresolved-module) — a spec that cannot load is a DEFECT, not unfinished work; `@tag:in-development` does not excuse it
+In-development: 1 skipped (expected to fail), 3 BROKEN (failed to load — FAILS the run)
+```
+
+**It still FAILS the run.** That call is deliberate. `@tag:in-development`
+is a claim about the **code under test** — "this feature is not finished
+yet". It is not a claim about the spec file. A spec that cannot be loaded
+at all is not unfinished work, it is a **defect in the spec**, and a
+defect that no assertion inside the file can ever be reached to
+demonstrate. The tag buys amnesty for failing **assertions**; it must
+never become a place broken files go to stop being counted.
+
+The obvious counter-argument — a WIP spec may legitimately fail to load
+because the module it imports *does not exist yet* — was considered and
+rejected. That case is textually identical to a typo, so honouring it
+would re-open the exact hole. The author's remedy is cheap and explicit:
+stub the import, or leave the spec untagged until it loads.
+
+Mechanically the result is returned **essentially unchanged** — the
+`error` is preserved so `emit_spec_file_verdicts` still routes it through
+`unrun_verdict_line` and the existing greenwash gates still see it — and
+forced to at least one failure so the sweep goes red.
+
+**Decision 5 is intact.** The discriminator is the runner's existing
+`is_load_failure(error)`, which is exactly
+`unrun_reason(error) != "zero-examples"`. A file that loads cleanly and
+simply declares no examples is *not* broken, still classifies as
+`ExpectedFailure`, and still never announces itself as ready to promote.
+
+Ordering note, learned the hard way: `load_failed` must be read from the
+RAW error **before** the `ExpectedFailure` branch clears it. The first cut
+cleared `error` first, so by the time `emit_spec_file_verdicts` ran its
+own `is_load_failure(r.error)` test the evidence was already gone and
+every broken tagged spec printed a bare `outcome=NOT_RUN`.
+
+## Tagging is only safe for load-clean specs
+
+**Read this before acting on a tagging sweep report.** `@tag:in-development`
+is only meaningful on a spec that **loads**. Tagging a spec that fails to
+load does not neutralise it and never will — it will be reported as
+`IN-DEVELOPMENT BROKEN` and will fail the run, by design (Decision 7).
+
+So a sweep report's "tagged" count is not a count of neutralised specs.
+Any tagged file that turns up in the BROKEN bucket is a spec defect that
+still needs fixing, not unfinished feature work that has been parked.
+
 ## API exposed for the sibling lanes
 
 `src/lib/nogc_sync_mut/spec/in_development.spl` is **pure** — text in,
@@ -153,13 +213,19 @@ Re-exported from `std.spec`.
 | `source_has_tag(source, tag) -> bool` | exact-name membership (never substring) |
 | `source_is_in_development(source) -> bool` | the predicate |
 | `in_development_explicitly_targeted(path, path_explicit, requested) -> bool` | explicit-target rule |
-| `InDevelopmentOutcome`, `classify_in_development(...)` | the single classifier — the rule lives here and is not re-derived by any surface |
-| `IN_DEVELOPMENT_SKIP_MARKER`, `IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER`, `IN_DEVELOPMENT_EXPLICIT_MARKER`, `IN_DEVELOPMENT_SUMMARY_MARKER` | stable line anchors — key off these, never off the surrounding prose |
-| `in_development_skip_line`, `in_development_unexpected_pass_line`, `in_development_explicit_line`, `in_development_summary_line` | the emitted lines |
+| `InDevelopmentOutcome`, `classify_in_development(is_tagged, explicit, failed, passed, errored, load_failed)` | the single classifier — the rule lives here and is not re-derived by any surface. Four outcome classes plus `NotInDevelopment`; `LoadFailure` is checked before the failure branch |
+| `IN_DEVELOPMENT_SKIP_MARKER`, `IN_DEVELOPMENT_UNEXPECTED_PASS_MARKER`, `IN_DEVELOPMENT_EXPLICIT_MARKER`, `IN_DEVELOPMENT_BROKEN_MARKER`, `IN_DEVELOPMENT_SUMMARY_MARKER` | stable line anchors — key off these, never off the surrounding prose |
+| `in_development_skip_line`, `in_development_unexpected_pass_line`, `in_development_explicit_line`, `in_development_broken_line`, `in_development_summary_line(skipped, unexpected, broken)` | the emitted lines |
 
 The runner additionally exposes, in `test_runner_main.spl`:
 `file_is_in_development(path)`, `in_development_totals(results) -> (skipped,
-unexpected)` and `print_in_development_summary(results)`.
+unexpected, broken)` and `print_in_development_summary(results)`.
+
+**Note for the statistics lane:** `in_development_totals` returns **three**
+buckets, not two. `bin/simple tags` and the `test_result.md` "In
+Development" row need a separate BROKEN bucket — a broken tagged spec must
+not be silently absorbed into the skip count on those surfaces either,
+for the same reason it is not absorbed here.
 
 ## Where the rule is enforced
 
@@ -219,6 +285,8 @@ tag-listing CLI are separate lanes. They consume the API above.
 | sweep, 1 failing + 1 passing tagged fixture | `Results: 1 total, 1 passed, 0 failed, 1 skipped` / `All tests passed!` / `In-development: 1 skipped (expected to fail), 1 UNEXPECTED PASS (ready to promote)` |
 | explicit path, failing tagged fixture | `IN-DEVELOPMENT EXPLICIT ...` / `Results: 1 total, 0 passed, 1 failed` / `FAIL`, rc=1 |
 | control dir sweep, untagged specs | rc=1 from the pre-existing `runtime_file_rename` defect above, not from this change |
+| unit spec after Decision 7 | `28 total, 28 passed, 0 failed`, rc=0 |
+| sweep, 1 BROKEN + 1 merely-failing tagged fixture | `IN-DEVELOPMENT BROKEN .../wip_broken_spec.spl (unresolved-module)` / `IN-DEVELOPMENT SKIP .../wip_failing_spec.spl (1 expected failure(s))` / `Results: 1 total, 0 passed, 1 failed, 1 skipped` / `In-development: 1 skipped (expected to fail), 1 BROKEN (failed to load — FAILS the run)` — **no `All tests passed!`**: the run is red, and the two classes are named and counted separately |
 
 3. **The end-to-end runner spec is written but NOT landed — and an
    earlier version of this section was WRONG.** It first claimed the spec
@@ -248,17 +316,7 @@ tag-listing CLI are separate lanes. They consume the API above.
    placed under `test/` passes and does emit the line (measured, see the
    table above). So the spec's fixture LOCATION is wrong, not the feature.
 
-   **The genuine limitation this exposed, and it is a real one:** a tagged
-   spec that fails to LOAD — syntax error, broken import, unresolvable
-   module — produces `executed=0`, classifies as `ExpectedFailure` per
-   Decision 5, and is neutralised into a counted skip. That is
-   indistinguishable from a spec that merely does not pass yet. A WIP
-   spec can therefore be silently broken rather than merely unfinished.
-   Decision 5 is still right (an empty file must not announce itself as
-   ready to promote), but the two cases deserve to be told apart — most
-   likely by reporting a load failure on a tagged file as its own class
-   rather than folding it into the skip count. Filed here; not fixed in
-   this change.
+   **The genuine limitation this exposed is now FIXED — see Decision 7.**
 
    The spec is not landed until its fixtures are relocated and it is
    green, because landing a red spec reddens the tree for every other

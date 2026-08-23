@@ -59,6 +59,27 @@ Do what it says: delete the tag line. The suite does **not** go red on an
 unexpected pass — making it work is good news, not a violation — but the
 line will keep appearing on every run until you remove the tag.
 
+## The tag does NOT excuse a spec that can't load
+
+If your tagged spec fails to **load** — syntax error, broken import,
+unresolvable module — it is reported as BROKEN and **still fails the run**:
+
+```
+IN-DEVELOPMENT BROKEN test/01_unit/thing_spec.spl (unresolved-module) — a spec that cannot load is a DEFECT, not unfinished work; `@tag:in-development` does not excuse it
+In-development: 2 skipped (expected to fail), 1 BROKEN (failed to load — FAILS the run)
+```
+
+This is on purpose. The tag says *the feature isn't finished*; it does not
+say *this file is allowed to be broken*. Without the distinction, a typo'd
+import would be indistinguishable from honest unfinished work, and the tag
+would become a place broken specs go to stop being counted.
+
+If the module you need genuinely doesn't exist yet, **stub the import**, or
+leave the spec untagged until it loads.
+
+A spec that loads fine and simply declares no examples is *not* broken — it
+counts as an ordinary expected failure.
+
 ## When to use it, and when not to
 
 Use it for a test whose **subject** is unfinished — you are building the
@@ -72,6 +93,7 @@ Do **not** use it for:
 | the example is an empty placeholder | `pending()` — nothing is written yet |
 | the test is flaky | neither; fix the flake or file it. A flaky test tagged in-development hides a real defect |
 | the code is done and the test just fails | neither. That is a bug — fix it or file it |
+| the spec won't load at all | neither — fix the load error first. Tagging it will NOT neutralise it |
 
 Do not use it to silence a test you have stopped working on. The counts are
 printed on every run precisely so that a growing in-development number is
