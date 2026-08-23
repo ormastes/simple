@@ -151,3 +151,39 @@ seed: `unsafe` E1002 on current `src/lib`; deployed
 `bin/release/aarch64-apple-darwin-macho/simple`: SMF compile "reported
 success without creating" output; both stage-2 binaries: SIGSEGV as above.
 All validation of source repairs must go through the staged bootstrap.
+
+## Triage 2026-08-23 (3) — fresh stage 2: HIR handoff FIXED, crash moved to the MIR boundary
+
+A fresh stage-2 compiler built from current `main` (plus the nm weak-def
+fix) at 15:13 (`build/bootstrap/stage2/aarch64-apple-darwin/simple`, 748/748
+files, `--jobs=half`) **no longer crashes at the streaming HIR entry**: the
+phase-2/3 owner handoff round-trips correctly on current source. The
+`rt_heap_ref_wellformed` guards do not fire (zero guard errors in the log).
+
+The SAME binary still SIGSEGVs on the three-line hello world (exit 139),
+one phase later:
+
+```
+[build] mir 0/0 step 4/6 +362ms dt=0ms lower_to_mir
+[build] mir 1/1 step 4/6 +563ms dt=201ms build.check_streaming_hir_owner_handoff.hello
+Segmentation fault: 11
+```
+
+lldb: `EXC_BAD_ACCESS (code=1, address=0xb8)` in
+`CompileContext.has_errors + 4` — a field load at offset 0xb8 through a
+null `this`. The call path is the MIR-phase epilogue
+(`driver_pipeline_lowering.spl:290`, `not self.ctx.has_errors()`):
+`self.ctx` evaluates to 0 immediately after the per-module MIR completion
+receipt. Same handle-loss class as the fixed HIR-owner incident, one
+receiver handoff deeper: the driver's `ctx` field is intact through
+parse/HIR/mono and is lost inside the MIR module loop.
+
+The stage-2 sanity run reports the same shape from the outside:
+`[bootstrap-error-count] count=21` with no flushed diagnostic text, then
+`refused incomplete Stage 2 admission provenance` (exit 4).
+
+**Build-series note.** Two intervening blockers were cleared to get this
+far: (1) macOS nm POSIX output hides weak *definitions* as `T` (fixed in
+`tools.rs`/`linker.rs`: parse `nm -m` `weak external`); (2) the per-file
+300 s timeout on `core/__init__.spl` under `--jobs=full` was CPU contention,
+not a hang (`--jobs=half` compiles all 748 files in 975.9 s).
