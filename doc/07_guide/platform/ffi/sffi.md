@@ -679,3 +679,33 @@ try {
 - Interop support matrix: `doc/06_spec/app/compiler/sffi_interop_support_matrix.md`
 - Bidirectional interop design: `doc/05_design/sffi_bidirectional_interop.md`
 - **Hardware SFFI (VHDL):** `doc/07_guide/hardware/misc/sffi_vhdl_guide.md` — Simple-to-VHDL compilation, GHDL/Yosys tool bindings, FPGA synthesis workflow
+
+## Verification and signing contract (measured 2026-08-23)
+
+**There is no signing, attestation, or provenance check for SFFI bindings —
+cryptographic or otherwise.** "Signature" everywhere in this tree means an ABI
+arity/type signature, never a cryptographic one. Loader admission, where such a
+gate would live, is still *planned* (`doc/00_llm_process/layer_expert/sffi_boundary/skill.md`,
+P3/P4). Do not describe a binding as "signed" or "verified"; it is at best
+*backed* (a defined symbol in a real link artifact).
+
+What actually exists:
+
+| mechanism | where | state |
+|---|---|---|
+| `@unsafe(reason: ..., capabilities: [ffi])` boundary tag | HIR `UnsafeCapability.Ffi`; 112 files | live, but voluntary |
+| `raw_sffi_call` / RAW-RT-001 lint (requires that tag on raw extern calls) | `35.semantics/lint/raw_sffi_call.spl` | wired, **`allow` by default** (`_LintMain/config_and_model.spl:230`); `deny` only under Robust/Critical |
+| `FfiManifest` / `validate_library` arity check for `dlopen`'d providers | `src/lib/nogc_sync_mut/ffi/ffi_signature.spl` | implemented and tested, **zero production callers** |
+| unbacked-extern ratchet + `rt_*` call ratchet + unresolved-symbol guard | `scripts/check/` | live, but they FREEZE debt; they verify nothing |
+
+Consequence: **an extern with no runtime backing silently returns nil instead
+of failing** (`doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md`).
+As of 2026-08-23, 1,501 of 3,959 distinct extern symbols (37.9%) are neither
+backed nor `@unsafe`-tagged. Audit and full list:
+`doc/09_report/sffi_signing_audit_2026-08-23.md`; open items:
+`doc/08_tracking/bug/sffi_no_signing_raw_sffi_call_default_allow_2026-08-23.md`.
+
+When adding a binding: put the raw call in the smallest function carrying an
+explicit `@unsafe(reason: "...", capabilities: [ffi])`, and confirm it is backed
+with `sh scripts/check/extern-backing-census.shs` — the single source of truth,
+which reads `nm` off real link artifacts rather than grepping text.

@@ -23,3 +23,15 @@ The SFFI boundary is a layered validation pipeline, not a name-based dispatcher.
   forbidden.
 - Hot calls use typed direct/immutable slots plus retained boundary checks.
 For P0/P1 IDs and evidence, use the feature-expert note and canonical design.
+
+## Verification state (measured 2026-08-23)
+
+Loader admission (P3/P4) is **planned, not built**, so nothing signs, attests,
+or verifies a binding at admission. `UnsafeCapability.Ffi` tagging is voluntary:
+the enforcing lint `raw_sffi_call`/RAW-RT-001 is `allow` on the default profile
+(`90.tools/lint/_LintMain/config_and_model.spl:230`). `FfiManifest` arity
+validation exists at `src/lib/nogc_sync_mut/ffi/ffi_signature.spl` with zero
+production callers. Result: 1,501 of 3,959 extern symbols are neither backed
+nor tagged, and an unbacked extern returns nil silently.
+Audit: `doc/09_report/sffi_signing_audit_2026-08-23.md`.
+Open items: `doc/08_tracking/bug/sffi_no_signing_raw_sffi_call_default_allow_2026-08-23.md`.

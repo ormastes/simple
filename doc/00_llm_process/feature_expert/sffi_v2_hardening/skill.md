@@ -28,3 +28,14 @@ provider loading, generated bindings, or SFFI assurance.
 
 Start with the existing RED return/weak-stub/byte-array fixtures. Preserve
 positive controls and require cross-lane category parity.
+
+## Measured baseline (2026-08-23)
+
+P4 signing/provenance confirmed still unimplemented: no signing, attestation,
+or provenance check exists on any SFFI binding. Two further gaps measured in
+the same pass: `raw_sffi_call`/RAW-RT-001 is `allow` on the default lint profile
+(`90.tools/lint/_LintMain/config_and_model.spl:230`), and `FfiManifest` arity
+validation has zero production callers. 1,501 of 3,959 distinct extern symbols
+(37.9%) are neither runtime-backed nor `@unsafe([ffi])`-tagged; 1,224 have live
+call sites. Audit + full list: `doc/09_report/sffi_signing_audit_2026-08-23.md`.
+Open items: `doc/08_tracking/bug/sffi_no_signing_raw_sffi_call_default_allow_2026-08-23.md`.
