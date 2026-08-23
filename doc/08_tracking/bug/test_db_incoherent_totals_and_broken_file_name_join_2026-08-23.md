@@ -69,35 +69,75 @@ skewed column association) or are two defects is **not established** and must
 not be assumed. Both need to be reproduced against a freshly written DB
 before anything is changed.
 
-## Update 2026-08-23 — a third defect: in-development is absorbed into `skipped`
+## Update 2026-08-23 — a third defect: neutralised in-development specs were recorded as PASSED
 
-Found while wiring the three-state reporting surfaces.
+**This section supersedes an earlier version of itself that was WRONG. The
+earlier text is not preserved because it would read as a competing
+explanation; what it claimed, and why it was wrong, is stated below instead.**
 
-`src/app/test_runner_new/test_runner_main.spl` neutralises an in-development
-file by returning a `TestFileResult` with `passed: 0, failed: 0, skipped:
-expected` (the `InDevelopmentOutcome.ExpectedFailure` arm). The count is
-therefore stored **in the `skipped` field**, and **no per-test DB status
-distinguishes an in-development file from a genuine host-unavailable skip.**
+### What I claimed, and why it was wrong
 
-Consequences for the reporting surfaces:
+I originally reported that in-development was being *absorbed into
+`skipped`*, reasoning from the runner source: the
+`InDevelopmentOutcome.ExpectedFailure` arm returns a `TestFileResult` with
+`passed: 0, failed: 0, skipped: expected`, and no per-test DB status existed
+to distinguish it. The inference — "so the `Skipped` row must contain them" —
+was **wrong**, because it stopped at the struct and never followed the value
+to the DB **write site**.
 
-- `db.tests_by_status("in_development")` can never match anything, so
-  `test_result.md`'s `| In Development |` row is **structurally 0** — not
-  measured, and not a real zero.
-- The `| Skipped (host-unavailable) |` row **silently contains** the
-  in-development files, which is exactly the "absorbed into skipped" hole the
-  category was created to close.
+### What actually happened (measured, by the runner lane)
 
-This is not something the reporting lane can fix from its own side: it needs
-either a per-test status recorded by the runner, or a distinct field on
-`TestFileResult`. Both belong to the runner lane. Until then:
+`update_test_database` chose the row status with `if file_result.is_ok()`.
+A neutralised in-development file has `failed == 0`, so **`is_ok()` returned
+true** and the row was written as **`passed`**.
 
-- `test_result.md` prints an explicit caveat under the summary whenever the
-  in-development count is 0, rather than publishing a confident zero.
-- **`bin/simple tags --tag in-development` is the real number.** It is
-  source-derived (read from `@tag:` annotations) and independent of the DB.
+Measured on the real path: `neutralised_is_ok=true in_development=2` →
+after the fix, `written_status=in_development`.
 
-The runner-side classification itself is correct and was NOT the problem —
-`classify_in_development` distinguishes ExpectedFailure / UnexpectedPass /
-LoadFailure properly. The loss happens at the point the outcome is written
-back into a `TestFileResult` that has no field to hold it.
+### Why the corrected version is worse, not merely different
+
+An omission is a gap; an overcount is a number that actively misleads in the
+reassuring direction.
+
+- Pre-fix DB rows **understate in-development** *and* **overstate passed**,
+  by exactly the same specs.
+- So **any historical DB-derived pass rate is an OVERCOUNT** — every
+  `Passed` figure in a pre-fix `test_result.md`, and every `pass_rate` in a
+  pre-fix `stats --json`, is inflated by the in-development population.
+- This is not visible by subtraction from the report, because the totals
+  still reconcile perfectly. A green-looking, self-consistent summary was
+  the symptom.
+
+### The fix, and where it lives
+
+`TestStatus.InDevelopment` (`test_db_types.spl`), status string
+`in_development`; `str_to_status` also accepts `"in-development"`. The new
+check is ordered **ahead of** `is_ok()` — which is precisely why this was
+unfixable from the reporting side: by the time any reporting surface saw the
+row, the status was already `passed` and the evidence was gone.
+
+The reporting surfaces here query both spellings
+(`tests_by_status("in_development")` and `"in-development"`), so they begin
+reporting correctly the moment a run is recorded by a runner carrying that
+status, with no further change.
+
+### Related trap, one level lower — unrecognised status silently becomes Skipped
+
+`str_to_status` ends in `case _: TestStatus.Skipped`
+(`test_db_types.spl:132`). Any status string it does not recognise is
+**silently relabelled a skip** — no error, no warning. Both in-development
+spellings are now explicit cases, so they cannot hit it; but **a future
+status added without touching that function will be silently mislabelled**,
+and will look like a legitimately-skipped test. A fallback that quietly
+picks a real, meaningful status is strictly worse than one that fails loudly
+or maps to an explicit `Unknown`.
+
+### Still open on the runner lane's side — do not build on it
+
+`Results:` still shows a `skipped` count for tagged files (3 failing
+examples → `3 skipped`) while `States:` reports correctly. The runner lane
+has ruled out the struct, the write site and the printer, and is running an
+untagged 3-failure control to establish whether that count is pre-existing
+behaviour from a different lane rather than the tag path. It will be filed
+as its own defect rather than folded into this one. **No surface here reads
+that `Results:` skipped count.**

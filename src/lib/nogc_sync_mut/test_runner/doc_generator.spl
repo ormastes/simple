@@ -77,23 +77,30 @@ fn generate_test_result_md(db: RunnerTestDb) -> text:
     # 1. A row that disappears at zero leaves the reader unable to tell
     #    "zero in-development" from "this report does not track it".
     #
-    # 2. THIS COUNT IS CURRENTLY STRUCTURALLY ZERO, and saying so beats
-    #    publishing a confident 0. The runner encodes a neutralised
-    #    in-development file as `TestFileResult.skipped` (see
-    #    `test_runner_main.spl`, the `ExpectedFailure` arm) and records NO
-    #    per-test status distinguishing it, so `tests_by_status` can never
-    #    match one, and the `Skipped` row above silently CONTAINS them.
-    #    That is precisely the "absorbed into skipped" hole this category
-    #    exists to close, so it is named here rather than left for a reader
-    #    to discover by subtraction. Filed:
-    #    test_db_incoherent_totals_and_broken_file_name_join_2026-08-23.md
+    # 2. A zero here may mean the runner that wrote the DB PREDATES the
+    #    `TestStatus.InDevelopment` per-test status, in which case it is not
+    #    a measurement at all. Saying so beats publishing a confident 0.
+    #
+    # CORRECTED 2026-08-23 — the earlier comment here was WRONG and the
+    # truth is worse. It claimed neutralised files were absorbed into
+    # `Skipped`. Measured on the real path, they were written as **PASSED**:
+    # `update_test_database` chose the row status with `if
+    # file_result.is_ok()`, and a neutralised file has `failed == 0`, so
+    # `is_ok()` returned true. So a pre-fix DB does not merely UNDERSTATE
+    # in-development — it OVERSTATES passed by the same specs, which makes
+    # any historical DB-derived pass rate an OVERCOUNT, not an omission.
+    # That distinction matters: an omission is a gap, an overcount is a
+    # number that actively misleads in the reassuring direction.
+    # Filed: test_db_incoherent_totals_and_broken_file_name_join_2026-08-23.md
     lines.push("In-development backlog: `bin/simple tags --tag in-development` (source-derived, independent of this DB).")
     lines.push("")
     if in_development == 0:
-        lines.push("> **Caveat — the `In Development` row above is not yet a measurement.** The runner")
-        lines.push("> encodes a neutralised in-development file into the `skipped` field and records no")
-        lines.push("> distinguishing per-test status, so this count reads 0 while the `Skipped` row")
-        lines.push("> contains them. Use `bin/simple tags --tag in-development` for the real number.")
+        lines.push("> **Caveat — a zero here may not be a measurement.** If the runner that wrote this")
+        lines.push("> DB predates the `TestStatus.InDevelopment` per-test status, neutralised specs were")
+        lines.push("> recorded as **passed** (the write site chose the status with `is_ok()`, and a")
+        lines.push("> neutralised file has `failed == 0`). Rows from such a run therefore understate")
+        lines.push("> in-development **and overstate passed** — the pass rate is an overcount, not just")
+        lines.push("> an omission. Use `bin/simple tags --tag in-development` for the real number.")
         lines.push("")
     # A tracker that knows about N tests but holds a verdict for none of them
     # is broken, not green. Say so instead of publishing 0/0/0 as if healthy.

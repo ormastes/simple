@@ -119,6 +119,32 @@ So, plainly:
 | `bin/simple tags` | `@tag:` annotations in source | **yes** |
 | `stats`, `test_result.md`, `stats --json` | the test DB | **no** — see the records above |
 
+### A pre-fix pass rate is an OVERCOUNT, not just a gap
+
+Until `TestStatus.InDevelopment` existed, the DB write site picked a row's
+status with `if file_result.is_ok()`. A neutralised in-development file has
+`failed == 0`, so `is_ok()` was **true** and the row was written as
+**`passed`**.
+
+So a DB written before that fix does not merely omit in-development — it
+**counts those specs as passing**. Every `Passed` figure and every
+`pass_rate` from such a run is inflated by the in-development population,
+and the totals still reconcile perfectly, so nothing in the report looks
+wrong. Treat any historical pass rate accordingly.
+
+These surfaces query both `in_development` and `in-development`, so they
+begin reporting correctly as soon as a run is recorded by a runner carrying
+the new status — no further change here.
+
+### Adding a new status? Read this first
+
+`str_to_status` (`test_db_types.spl:132`) ends in
+`case _: TestStatus.Skipped`. An unrecognised status string is **silently
+relabelled a skip** — no error, no warning, and the result looks like a
+legitimately-skipped test. Both in-development spellings are explicit cases
+so they cannot hit it, but any *new* status added without touching that
+function will be silently mislabelled.
+
 ## Dev ids — running exactly your own in-development set
 
 `# @tag:in-development` says a spec is work-in-progress. It does not say
