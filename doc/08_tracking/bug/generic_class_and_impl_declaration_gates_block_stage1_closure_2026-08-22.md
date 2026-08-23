@@ -238,3 +238,50 @@ equal 0` x2). It is red at `origin/main` and is filed separately.
 Gate: `sh scripts/check/check-perf-regression-tests.shs` ->
 `PASS — 81 mechanism(s) checked, 0 regressed` (up from 78; 8 new rows pinning
 each binding form, the scrutinee hint, and the struct gate staying open).
+
+## End-to-end fixture A/B (completed after the fix landed at `75f554903ff`)
+
+Both fixtures are self-contained single-file programs; **closure SIZE = 1
+module** each. Built with `native-build --source <dir> --entry-closure --entry
+<f> --threads 4` on the deployed seed
+`/mnt/data/worktrees/goal-main-1/bin/release/x86_64-unknown-linux-gnu/simple`,
+`SIMPLE_TIMEOUT_SECONDS=0`, `SIMPLE_CACHE_SCOPE=mono1_<name>` (no other lane's
+cache touched).
+
+| fixture | pre-fix | post-fix |
+|---|---|---|
+| `f13_mono_match` — enum + `mix<T>` called from two match arms | step **3/6 failed**: `[mono] generic_fns=1 call_sites=2 specializations=0 unresolved=2`, `error[E-MONO-033]`, rc=1 | **step 6/6, rc=0, linked**: `[mono] generic_fns=1 call_sites=2 specializations=2 unresolved=0`, zero E-MONO diagnostics |
+| `f01_generics` — `fn ident<T>` + `struct Box<T>` (forecast fixture f01) | step **2/6 failed**: `hir-fatal: generic structs are not supported on the native build path yet`, rc=1 | **step 4/6**: HIR clean, mono clean (`specializations=1 unresolved=0`), reaches MIR, then `MIR lowering error: unresolved method call: to_text` |
+
+So the phases this unblocks, measured rather than predicted:
+
+- **f13 advanced 3/6 -> 6/6.** Steps 3 (typecheck/mono), 4 (mir), 5 (codegen)
+  and 6 (link) all now execute on input that previously could not leave step 3.
+  Combined with the phase36 baseline (hello reaching 6/6), the mono gate was
+  the only thing standing between real generic-using code and the backend.
+- **f01 advanced 2/6 -> 4/6.** The generic *function* specializes and the
+  generic *struct* declaration no longer fatals, so the program now reaches
+  MIR — where it meets the NEXT, genuinely different wall.
+
+### The f01 MIR error is the documented unfixed gap, reproduced concretely
+
+`unresolved method call: to_text` on `b.v.to_text()` where `b: Box<T>` is
+exactly the "struct instantiation not repointed" gap named in the section
+above: `rewrite_expr`'s `StructLit` arm rewrites the field EXPRESSIONS but
+never repoints the constructed TYPE at a specialization, so the field `v`
+still has type `T` at MIR and no method resolves on it. This is now a loud
+MIR-time error rather than a silent truncation, which is the behaviour the old
+declaration gate was protecting against — the protection survived the gate
+being opened, at the use site, as intended. Fixing it needs struct
+specialization proper (collect instantiations from `StructLit` types and type
+annotations, `request_specialization` for structs, repoint by mangled name);
+that is still open.
+
+### f13 links but its binary SEGVs — a DIFFERENT lane's defect
+
+`/mnt/fast/mono1/out/f13_fix` builds rc=0 at step 6/6 and then dies
+`SIGSEGV` (rc=139) when run. That is the phase36 forecast's item 4/5 class
+(`emit_unsupported_panic` / codegen fails open: a step 6/6 rc=0 is not
+evidence of a working binary), not a monomorphization defect — mono reported
+`unresolved=0` and the post-mono verifier was clean. Recorded here so the
+green build receipt is not mistaken for a green program.
