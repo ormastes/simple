@@ -1090,3 +1090,63 @@ checks a TREE, not a `BASE..NEW` delta — import provenance is a property of a
 tree, and a push that edits only the DECLARING module can strand an importer it
 never touched. It also de-duplicates by realpath, because `src/compiler/mono` is
 a SYMLINK to `40.mono` and a naive walk double-counts every mirrored file.
+
+## Follow-up (j) 2026-08-23 — CompiledModule IS cleared; a CORRECTION, a reconciliation, and a third name
+
+### Correction to follow-up (h)
+
+Follow-up (h) recorded that `driver_pipeline_execution.spl` "does not reach the
+fatal in an isolated single-file closure (0 both sides)". **That was wrong, and
+the error was mine: I read the logs while both runs were still in flight** (they
+later exited `rc=124`, i.e. they had not finished when I inspected them). The
+completed runs say the opposite, and they are unambiguous:
+
+| | `unresolved type: CompiledModule` | `unresolved type: LocalId` |
+|---|---|---|
+| pre-fix (`340d54e97bb`) | **1** (`driver_pipeline_execution.spl`) | 20 (`mir_target_context_provider.spl` 10, `runtime_compiler.spl` 10) |
+| post-fix | **0** | 30 (the same 20, **plus `backend_types.spl` 10**) |
+
+So the follow-up (h) fix **does clear `CompiledModule`**, and the isolated
+single-file `native-build` *is* a valid oracle for it. The caveat (h) attached to
+that name should never have been written.
+
+### CompiledModule was projection-built too
+
+Its origin probe carries the same signature as `HirModule`:
+
+    [hir-unresolved-type-origin] name=CompiledModule
+        lowering_module=src/compiler/80.driver/driver_pipeline_execution.spl
+        span_file= span_line=0 span_col=0
+
+`span_file` empty. So the wrong-provider import of follow-up (h) and the
+projection path of follow-up (i) are not two unrelated defects: they are the
+same failure reached from two sides. Repairing the importer's provider gave the
+projection an origin it could resolve, and the fatal went away.
+
+### Reconciling the Asm lane's run18 observation
+
+The Asm lane measured that importing `CompiledModule` from `backend_types` did
+**not** clear `driver_pipeline_execution`. Both observations are correct and
+they do not conflict. Clearing `CompiledModule` lets `backend_types.spl` lower
+further than it ever had, and it then hits **10 `LocalId` fatals of its own**
+that were previously masked — total `LocalId` 20 -> 30. The *lane* still reports
+red; the *name* is cleared. This is exactly the "counts rise as more modules
+lower" effect follow-up (b) measured when `HirModule` went 6 -> 8 while total
+fatals fell 81%, and it is why a per-name total is not a monotone progress
+metric. Recording it rather than presenting 20 -> 30 as a regression.
+
+### `LocalId`: a third name, same class, and it shares HirModule's open sub-shape
+
+`LocalId` is declared once (`50.mir/mir_types.spl:27`) and appears in the run16
+census's unresolved-dependency list. Its fatals have the same empty span, and —
+decisively — `70.backend/backend/backend_types.spl` contains **zero**
+occurrences of the string `LocalId`, precisely the property that made `HirModule`
+unattributable to the file it was reported against. So `LocalId` and `HirModule`
+share one still-unidentified sub-mechanism, and whatever probe finds one will
+find the other.
+
+The header-scoped ratchet extended to `LocalId` by a **single data row** and
+immediately found **44** owners naming it in signature position with no real
+import. All 44 now import from the declaring module; the guard is back to
+`PASS — 1809 file(s) checked, 0 offender(s)`. Running total for this class:
+**73 latent owners repaired** across three types.

@@ -190,6 +190,16 @@ impl HirLowering:
                 imported_module_name, source_name)
             if raw_symbol_id >= 0:
                 return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
+            # Level-gated OWNER probe (default off). This fall-through hands the
+            # type to `lower_type`, which resolves in the IMPORTER's scope; the
+            # resulting `unresolved type: X` carries a SYNTHESIZED span
+            # (span_file empty, line 0) and is attributed to the importer, so
+            # nothing in the diagnostic names the owner whose surface asked for
+            # it. `[ist-proj-miss]` does not cover this path -- it fires only in
+            # `imported_surface_type_projected` -- which is why HirModule and
+            # LocalId produced zero probe lines of any kind.
+            if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
+                eprint("[ist-scalar-fallthrough] name={source_name} owner={imported_module_name} lowering={self.module_filename}")
             return self.lower_type(type_)
         # COMPOSITE shapes must be projected ELEMENTWISE.
         #
@@ -314,6 +324,12 @@ impl HirLowering:
                         imported_module_name, bound_type_params),
                     []),
                 span: type_.span)
+        # Level-gated OWNER probe (default off) on the CATCH-ALL fall-through --
+        # the shape that matched none of the projected constructors. Same
+        # rationale as the scalar probe above: without it the importer-scope
+        # failure is anonymous.
+        if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
+            eprint("[ist-catchall-fallthrough] owner={imported_module_name} lowering={self.module_filename}")
         self.lower_type(type_)
 
     me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_module_name: text, bound_type_params: [text]) -> HirType:
