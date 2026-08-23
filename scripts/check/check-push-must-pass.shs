@@ -185,6 +185,35 @@ ledger_is_unpromoted_at_rev() {
     ! printf '%s\n' "$_text" | awk -F, '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*pass,/ {found=1} END {exit !found}'
 }
 
+# run_push_gate <id> <push_blocking> <script> [args...]
+#
+# Honours the manifest's push_blocking column, which until 2026-08-23 was parsed
+# and then ignored: every push-tier row was hard-blocking, so the only two states
+# a guard could have were "blocks every push" and "runs nowhere at all". That is
+# why .claude/rules/vcs.md described several guards as "wired into the pre-push
+# hook" while they appeared in no enforcement surface — there was no tier a slow
+# or honestly-RED guard could occupy, so they occupied none.
+#
+# push_blocking=false runs the guard and RECORDS its verdict on stderr without
+# failing the push. An advisory verdict is not a pass and is never silent: the
+# line is emitted with the guard's real exit status so a human or a log scrape
+# can see it. The exit status is read directly into a variable on the line after
+# the invocation, never through a pipe — a pipeline's $? is the last command's.
+run_push_gate() {
+    _gate_id=$1; _gate_blocking=$2; shift 2
+    sh "$@"
+    _gate_rc=$?
+    if [ "$_gate_rc" -eq 0 ]; then
+        return 0
+    fi
+    if [ "$_gate_blocking" = true ]; then
+        echo "push-must-check: BLOCKING gate $_gate_id failed (exit $_gate_rc)" >&2
+        return 1
+    fi
+    echo "push-must-check: ADVISORY $_gate_id verdict exit=$_gate_rc (recorded, not blocking)" >&2
+    return 0
+}
+
 run_manifest_push_gates() {
     _manifest=$1
     _range=$2
@@ -197,17 +226,34 @@ run_manifest_push_gates() {
         _mode=$(printf '%s' "$_mode" | tr -d ' ')
         _command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
         [ -n "$_command" ] || { rm -f "$_push_rows"; return 2; }
+        _blocking=$(printf '%s' "$_blocking" | tr -d ' ')
         case "$_id:$_mode:$_command" in
             'push-conflict-tree:range:sh scripts/check/check-no-conflict-tree-push.shs')
-                sh "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-tree-size:range:sh scripts/check/check-tree-size-push.shs')
-                sh "$ROOT/scripts/check/check-tree-size-push.shs" --push-tip "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-tree-size-push.shs" --push-tip "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-conflict-markers:range:sh scripts/check/check-no-conflict-markers-push.shs')
-                sh "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-rules-quick:ref:sh scripts/check/check-rules-sdl.shs --group quick --ref')
-                sh "$ROOT/scripts/check/check-rules-sdl.shs" --group quick --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rules-sdl.shs" --group quick --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-interpreter-module-owners:ref:sh scripts/check/check-interpreter-module-owners.shs --ref')
-                sh "$ROOT/scripts/check/check-interpreter-module-owners.shs" --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-interpreter-module-owners.shs" --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-runtime-api-regression:range:sh scripts/check/check-runtime-api-regression-push.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-api-regression-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-direct-rt:tree:sh scripts/check/check-no-direct-rt.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-direct-rt.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-signature-type-import-provenance:tree:sh scripts/check/check-signature-type-import-provenance.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-signature-type-import-provenance.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-type-walk-constructor-parity:tree:sh scripts/check/check-type-walk-constructor-parity.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-type-walk-constructor-parity.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-perf-regression-tests:tree:sh scripts/check/check-perf-regression-tests.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-perf-regression-tests.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-guard-wiring:tree:sh scripts/check/check-guard-wiring.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-guard-wiring.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-c-runtime-compiles:tree:sh scripts/check/check-c-runtime-compiles-push.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-c-runtime-compiles-push.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-process-wait-eintr-retry:tree:sh scripts/check/check-process-wait-eintr-retry.shs')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-process-wait-eintr-retry.shs" || { rm -f "$_push_rows"; return 1; } ;;
             *) rm -f "$_push_rows"; return 2 ;;
         esac
     done < "$_push_rows"

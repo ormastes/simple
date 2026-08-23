@@ -234,13 +234,26 @@ selftest() {
     _assert "reasonless opt-out detected" yes \
         "$($GREP -qx 'st-orphan.shs' "$_w2/optout_noreason" && echo yes || echo no)"
 
+    # RATCHET fixtures. The set arithmetic that decides "new unwired" vs "known
+    # debt" vs "stale baseline" lives outside scan_wiring, so it is exercised
+    # here on explicit sets rather than inferred from the real tree.
+    printf 'st-orphan.shs\n' | sort -u > "$_w/fx_base"
+    printf 'st-orphan.shs\nst-brandnew.shs\n' | sort -u > "$_w/fx_unjust"
+    _assert "baselined orphan is not NEW debt" "st-brandnew.shs" \
+        "$(comm -23 "$_w/fx_unjust" "$_w/fx_base" | tr '\n' ' ' | sed 's/ *$//')"
+    printf 'st-direct.shs\n' | sort -u > "$_w/fx_base2"
+    _assert "baselined guard that became wired is stale" "st-direct.shs" \
+        "$(comm -12 "$_w/fx_base2" "$_w/reached" | tr '\n' ' ' | sed 's/ *$//')"
+    _assert "baselined guard that no longer exists is stale" "st-gone.shs" \
+        "$(printf 'st-gone.shs\n' | comm -23 - "$_w/guards" | tr '\n' ' ' | sed 's/ *$//')"
+
     rm -rf "$_t" "$_w" "$_w2"
     if [ "$_fail" -ne 0 ]; then
         echo "check-guard-wiring: SELFTEST FAILED -- the wiring scan is broken."
         echo "Fix the scan. Do NOT delete these fixtures."
         return 1
     fi
-    echo "check-guard-wiring: selftest 8/8 fixtures correct"
+    echo "check-guard-wiring: selftest 11/11 fixtures correct"
     return 0
 }
 
@@ -298,6 +311,27 @@ case "$HERE_PHYS" in
 esac
 
 OPTOUT="$ROOT/scripts/check/guard_wiring_optout.txt"
+# UNWIRED RATCHET (2026-08-23)
+# ----------------------------
+# This script sat permanently RED (414 unwired) for weeks, which is the worst of
+# both worlds: the debt was real but the verdict carried no information, so every
+# reader learned to ignore it -- and a genuinely NEW unwired guard was
+# indistinguishable from the standing backlog. That is exactly how
+# check-type-walk-constructor-parity.shs went unenforced for a day while its bug
+# record claimed it existed.
+#
+# The backlog is frozen here instead of being moved into the OPT-OUT file. The
+# distinction is deliberate and load-bearing: an opt-out line asserts "this guard
+# is deliberately not a gate"; a baseline line asserts only "this guard is not
+# wired YET, and that is known debt". Laundering 414 unwired guards through the
+# opt-out file would have made the debt permanent and honest-looking. Growth
+# fails; the count stays printed; shrinking is the follow-up program.
+#
+# Regeneration is DELETIONS-ONLY by construction: an entry that becomes wired is
+# reported as a stale baseline and fails, so the file cannot silently keep
+# describing a tree that has moved on. --generate-baseline exists for reviewed
+# updates only; do not reach for it to turn a FAIL green.
+BASELINE="$ROOT/scripts/check/guard_wiring_unwired_baseline.txt"
 
 WD=$(mktemp -d) || exit 2
 trap 'rm -rf "$WD"' EXIT
@@ -321,6 +355,32 @@ comm -23 "$WD/orphans" "$WD/optout" > "$WD/unjustified"
 comm -12 "$WD/optout" "$WD/reached" > "$WD/optout_now_wired"
 comm -23 "$WD/optout" "$WD/guards" > "$WD/optout_gone"
 
+: > "$WD/baseline"
+if [ -f "$BASELINE" ]; then
+    $GREP -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$BASELINE" 2>/dev/null |
+        awk '{print $1}' | sort -u > "$WD/baseline" || :
+fi
+if [ "${1:-}" = --generate-baseline ]; then
+    {
+        echo "# Frozen backlog of guards that nothing invokes yet (NOT an opt-out:"
+        echo "# an opt-out means 'deliberately not a gate'; a line here means"
+        echo "# 'unwired debt, known'). Regenerated $(date -u +%Y-%m-%d) for a"
+        echo "# REVIEWED update only. Growth fails; entries that become wired fail"
+        echo "# as stale. Shrinking this file is the follow-up program."
+        cat "$WD/unjustified"
+    } > "$BASELINE"
+    echo "check-guard-wiring: wrote $(wc -l < "$WD/unjustified" | tr -d ' ') baselined guard(s) to $BASELINE"
+    exit 0
+fi
+comm -23 "$WD/unjustified" "$WD/baseline" > "$WD/unjustified_new"
+# A baselined guard that is now wired (or gone) means the baseline is lying about
+# the tree -- the same staleness rule the opt-out file is held to.
+comm -12 "$WD/baseline" "$WD/reached" > "$WD/baseline_now_wired"
+comm -23 "$WD/baseline" "$WD/guards" > "$WD/baseline_gone"
+n_unjust_new=$(wc -l < "$WD/unjustified_new" | tr -d ' ')
+n_baselined=$(wc -l < "$WD/baseline" | tr -d ' ')
+n_base_wired=$(wc -l < "$WD/baseline_now_wired" | tr -d ' ')
+n_base_gone=$(wc -l < "$WD/baseline_gone" | tr -d ' ')
 n_unjust=$(wc -l < "$WD/unjustified" | tr -d ' ')
 n_wired_now=$(wc -l < "$WD/optout_now_wired" | tr -d ' ')
 n_gone=$(wc -l < "$WD/optout_gone" | tr -d ' ')
@@ -330,6 +390,8 @@ echo "guard_total=$n_guards"
 echo "guard_invoked=$n_reached"
 echo "guard_orphaned=$n_orphan"
 echo "guard_optout_listed=$(wc -l < "$WD/optout" | tr -d ' ')"
+echo "guard_unwired_baselined=$n_baselined"
+echo "guard_unwired_new=$n_unjust_new"
 
 # ---------------------------------------------------------------------------
 # Installed-hook shape. A copy goes stale silently; a symlink cannot.
@@ -385,17 +447,32 @@ fi
 
 status=0
 
-if [ "$n_unjust" -gt 0 ]; then
+if [ "$n_unjust_new" -gt 0 ]; then
     echo "guard_wiring_ok=false"
-    echo "== guards invoked by nothing and not listed in the opt-out =="
+    echo "== guards invoked by nothing, not opted out, and NOT in the frozen baseline =="
     while IFS= read -r b; do
         [ -n "$b" ] && echo "unwired_guard=$b"
-    done < "$WD/unjustified"
+    done < "$WD/unjustified_new"
     echo ""
     echo "A guard that no hook and no CI job runs is decoration. Wire it into"
     echo ".github/workflows/ or scripts/hooks/, or add it to"
     echo "scripts/check/guard_wiring_optout.txt WITH A REASON. Do not weaken the"
     echo "guard, and do not add an opt-out line merely to make this pass."
+    status=1
+fi
+
+if [ "$n_base_wired" -gt 0 ] || [ "$n_base_gone" -gt 0 ]; then
+    echo "guard_wiring_ok=false"
+    echo "== stale unwired-baseline entries (ratchet: remove them) =="
+    while IFS= read -r b; do
+        [ -n "$b" ] && echo "stale_baseline_now_wired=$b"
+    done < "$WD/baseline_now_wired"
+    while IFS= read -r b; do
+        [ -n "$b" ] && echo "stale_baseline_missing=$b"
+    done < "$WD/baseline_gone"
+    echo "Wiring a baselined guard is progress -- delete its line in the same"
+    echo "commit. A baseline that no longer describes the tree is how a ratchet"
+    echo "silently stops ratcheting."
     status=1
 fi
 
@@ -443,12 +520,15 @@ if [ "$n_badhooks" -gt 0 ]; then
 fi
 
 if [ "$status" -ne 0 ]; then
-    echo "check-guard-wiring: FAIL — $n_guards guard(s) checked, $n_unjust unwired," \
-         "$((n_wired_now + n_gone + n_noreason)) bad opt-out(s), $n_badhooks copied hook(s)"
+    echo "check-guard-wiring: FAIL — $n_guards guard(s) checked, $n_unjust_new NEW unwired" \
+         "($n_baselined baselined as known debt)," \
+         "$((n_wired_now + n_gone + n_noreason + n_base_wired + n_base_gone)) stale/bad baseline or opt-out line(s)," \
+         "$n_badhooks copied hook(s)"
     exit 1
 fi
 
 echo "guard_wiring_ok=true"
 echo "check-guard-wiring: PASS — $n_guards guard(s) checked, $n_reached invoked," \
-     "$n_orphan orphaned (all justified), $n_badhooks copied hook(s)"
+     "$n_orphan orphaned ($n_baselined baselined as known unwired debt, rest justified)," \
+     "0 NEW unwired, $n_badhooks copied hook(s)"
 exit 0
