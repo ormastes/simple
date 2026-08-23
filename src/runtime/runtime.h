@@ -207,7 +207,10 @@ void     rt_dir_list_free(const char** entries, int64_t count);
 
 /* ===== File Locking ===== */
 
-int64_t  rt_file_lock(const char* path, int64_t timeout_secs);
+/* `text` lowers to (data, len) at the emitted call site -- the old
+ * `const char* path` shape here never matched any caller and nothing defined
+ * it. Corrected 2026-08-23 alongside the definitions in runtime_native.c. */
+int64_t  rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs);
 bool     rt_file_unlock(int64_t handle);
 
 /* ===== Offset-based File I/O ===== */
@@ -222,8 +225,10 @@ int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len);
 
 /* ===== Memory-Mapped File I/O ===== */
 
-void*    rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly);
-bool     rt_munmap(void* addr, int64_t size);
+int64_t  rt_mmap(const uint8_t* path_ptr, uint64_t path_len, int64_t size, int64_t offset, int64_t readonly);
+bool     rt_munmap(int64_t addr, int64_t size);
+int64_t  rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len);
+int64_t  rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len);
 void     rt_invlpg(uint64_t addr);
 uint64_t unsafe_addr_of(int64_t value);
 uint64_t rt_read_cr3(void);
@@ -248,8 +253,8 @@ void     rt_volatile_write_u64(int64_t addr, int64_t value);
 void     rt_memory_barrier(void);
 void     rt_load_barrier(void);
 void     rt_store_barrier(void);
-bool     rt_madvise(void* addr, int64_t size, int64_t advice);
-bool     rt_msync(void* addr, int64_t size);
+bool     rt_madvise(int64_t addr, int64_t size, int64_t advice);
+bool     rt_msync(int64_t addr, int64_t size);
 
 /* ===== Raw mmap/mprotect Syscall Wrappers (address-based, for SMF loader) ===== */
 

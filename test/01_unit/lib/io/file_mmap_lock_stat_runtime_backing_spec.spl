@@ -1,0 +1,83 @@
+# Reproduce + prevention for the unresolved-runtime-symbol class
+# (doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md).
+#
+# rt_mmap / rt_munmap / rt_madvise / rt_msync / rt_file_lock / rt_file_unlock /
+# rt_file_stat / rt_file_mmap_read_text / rt_file_mmap_read_bytes were DECLARED
+# in src/lib/nogc_sync_mut/io/file_ops.spl and defined by no C translation unit
+# in the archive. The native link tolerates that, so each was a NULL GOT slot
+# and a SIGSEGV on first call. Pre-fix this file does not even LINK natively
+# (`9 runtime symbol(s) ... have no definition`); post-fix it links and the
+# calls return real values.
+#
+# The assertions are on VALUES, not on linkage: a wrong-ABI definition links
+# fine and computes garbage, so linkage alone would be a dead test.
+use std.spec
+use std.io.file_ops.{
+    file_stat, file_modified_time,
+    file_mmap, file_munmap, file_madvise, file_msync,
+    file_lock, file_unlock,
+    file_mmap_read_text, file_mmap_read_bytes,
+    file_write, file_remove
+}
+
+fn _fixture(name: text, body: text) -> text:
+    val path = "/tmp/simple_rt_mmap_fixture_${name}.txt"
+    file_write(path, body)
+    path
+
+describe "mmap/lock/stat runtime symbols are backed and return real values":
+    it "file_stat returns a plausible mtime for an existing file":
+        val p = _fixture("stat", "hello")
+        val mtime = file_stat(p)
+        expect(mtime > 1000000000).to_equal(true)
+        expect(file_modified_time(p)).to_equal(mtime)
+        file_remove(p)
+
+    it "file_stat returns 0 for a missing file":
+        expect(file_stat("/tmp/simple_rt_definitely_absent_9f2a")).to_equal(0)
+
+    it "file_mmap_read_text returns the file contents":
+        val p = _fixture("text", "mmapped-content")
+        expect(file_mmap_read_text(p)).to_equal("mmapped-content")
+        file_remove(p)
+
+    it "file_mmap_read_text returns empty text for a missing file":
+        expect(file_mmap_read_text("/tmp/simple_rt_definitely_absent_9f2a")).to_equal("")
+
+    it "file_mmap_read_bytes returns the file bytes":
+        val p = _fixture("bytes", "AB")
+        val got = file_mmap_read_bytes(p)
+        match got:
+            Some(bytes):
+                expect(bytes.len()).to_equal(2)
+                expect(bytes[0]).to_equal(65)
+                expect(bytes[1]).to_equal(66)
+            None:
+                expect("mmap_read_bytes returned nil").to_equal("bytes")
+        file_remove(p)
+
+    it "file_mmap maps a real region and munmap releases it":
+        val p = _fixture("map", "0123456789")
+        val addr = file_mmap(p, 10, 0, true)
+        expect(addr != 0).to_equal(true)
+        expect(file_madvise(addr, 10, 0)).to_equal(true)
+        expect(file_munmap(addr, 10)).to_equal(true)
+        file_remove(p)
+
+    it "file_mmap returns 0 for a missing file":
+        expect(file_mmap("/tmp/simple_rt_definitely_absent_9f2a", 16, 0, true)).to_equal(0)
+
+    it "file_munmap/madvise/msync reject a null address instead of trapping":
+        expect(file_munmap(0, 16)).to_equal(false)
+        expect(file_madvise(0, 16, 0)).to_equal(false)
+        expect(file_msync(0, 16)).to_equal(false)
+
+    it "file_lock returns a usable handle and unlock releases it":
+        val p = _fixture("lock", "x")
+        val h = file_lock(p, 1)
+        expect(h >= 0).to_equal(true)
+        expect(file_unlock(h)).to_equal(true)
+        file_remove(p)
+
+    it "file_unlock rejects an invalid handle instead of trapping":
+        expect(file_unlock(-1)).to_equal(false)
