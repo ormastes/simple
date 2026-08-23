@@ -46,6 +46,15 @@ selftest() {
     printf '| Metric | Count |\n| Total | 10 |\n| Passed | 7 |\n| Failed | 1 |\n| Skipped | 0 |\n' > "$d/fold.md"
     out=$(REPORT="$d/fold.md" sh "$0" --no-selftest 2>&1); rc=$?
     [ $rc -eq 1 ] || { echo "SELFTEST FAIL: unreconciled remainder was not FAILed ($out)"; rm -rf "$d"; exit 2; }
+    # fixture 3b: BROKEN is inside Failed and must NOT be added again —
+    # a report that names it must still reconcile, not go negative.
+    printf '| Metric | Count |\n| Total | 10 |\n| Passed | 6 |\n| Failed | 2 |\n| Skipped | 1 |\n| In Development | 1 |\n| In Development (broken) | 2 |\n' > "$d/broken.md"
+    out=$(REPORT="$d/broken.md" sh "$0" --no-selftest 2>&1); rc=$?
+    [ $rc -eq 0 ] || { echo "SELFTEST FAIL: broken double-counted, report should reconcile ($out)"; rm -rf "$d"; exit 2; }
+    # fixture 3c: an unexpected pass IS its own addend and must reconcile
+    printf '| Metric | Count |\n| Total | 10 |\n| Passed | 5 |\n| Failed | 2 |\n| Skipped | 1 |\n| In Development | 1 |\n| In Development (unexpected pass) | 1 |\n' > "$d/up.md"
+    out=$(REPORT="$d/up.md" sh "$0" --no-selftest 2>&1); rc=$?
+    [ $rc -eq 0 ] || { echo "SELFTEST FAIL: unexpected-pass addend broke reconciliation ($out)"; rm -rf "$d"; exit 2; }
     # fixture 4: missing report must ERROR, never pass
     out=$(REPORT="$d/nope.md" sh "$0" --no-selftest 2>&1); rc=$?
     [ $rc -eq 2 ] || { echo "SELFTEST FAIL: missing report was not an ERROR ($out)"; rm -rf "$d"; exit 2; }
@@ -63,8 +72,15 @@ TOTAL=$(metric "Total")
 PASSED=$(metric "Passed")
 FAILED=$(metric "Failed")
 SKIPPED=$(metric "Skipped")
+[ "$SKIPPED" -ne 0 ] || SKIPPED=$(metric "Skipped \\(host-unavailable\\)")
 PENDING=$(metric "Pending")
 INDEV=$(metric "In Development")
+# Tagged and PASSED: a real, separately-counted outcome, so it is part of
+# the sum. Tagged and UNLOADABLE ("broken") is NOT added: it already counts
+# inside Failed because it fails the run, and adding it twice would
+# manufacture a phantom remainder.
+INDEV_UNEXPECTED=$(metric "In Development \\(unexpected pass\\)")
+INDEV_BROKEN=$(metric "In Development \\(broken\\)")
 OTHER=$(metric "Other")
 
 if ! grep -qE '^\| Total \|' "$REPORT"; then
@@ -72,17 +88,17 @@ if ! grep -qE '^\| Total \|' "$REPORT"; then
     exit 2
 fi
 
-SUM=$((PASSED + FAILED + SKIPPED + PENDING + INDEV + OTHER))
+SUM=$((PASSED + FAILED + SKIPPED + PENDING + INDEV + INDEV_UNEXPECTED + OTHER))
 
 if [ "$TOTAL" -gt 0 ] && [ "$SUM" -eq 0 ]; then
-    echo "FAIL — 7 metric(s) checked: $TOTAL test(s) recorded, 0 with a verdict. This report is not evidence of a run."
+    echo "FAIL — 9 metric(s) checked: $TOTAL test(s) recorded, 0 with a verdict. This report is not evidence of a run."
     exit 1
 fi
 
 if [ "$SUM" -ne "$TOTAL" ]; then
-    echo "FAIL — 7 metric(s) checked: total=$TOTAL but passed+failed+skipped+pending+in-development+other=$SUM (remainder $((TOTAL - SUM)) unaccounted)"
+    echo "FAIL — 9 metric(s) checked: total=$TOTAL but passed+failed+skipped+pending+in-development+unexpected-pass+other=$SUM (remainder $((TOTAL - SUM)) unaccounted)"
     exit 1
 fi
 
-echo "PASS — 7 metric(s) checked, summary reconciles (total=$TOTAL passed=$PASSED failed=$FAILED skipped=$SKIPPED pending=$PENDING in-development=$INDEV other=$OTHER)"
+echo "PASS — 9 metric(s) checked, summary reconciles (total=$TOTAL passed=$PASSED failed=$FAILED skipped=$SKIPPED pending=$PENDING in-development=$INDEV unexpected-pass=$INDEV_UNEXPECTED broken=$INDEV_BROKEN other=$OTHER)"
 exit 0
