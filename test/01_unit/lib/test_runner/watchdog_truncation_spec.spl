@@ -1,0 +1,86 @@
+"""
+## Purpose and audience
+Pins the two halves of the resource-watchdog defect: an aborted run must
+say plainly that it was cut short and at what point, and the watchdog must
+measure the runner's OWN process tree rather than the whole machine.
+## Operator workflow
+Run `bin/simple test test/01_unit/lib/test_runner/watchdog_truncation_spec.spl`.
+## Compatibility and limitations
+The self-tree measurements are Linux-only and are asserted as ranges, not
+exact values, since they sample a live process.
+"""
+# @manual: primary
+# doc-path: doc/05_design/app/testing/in_development_tag.md
+
+use std.spec.{step}
+use std.test_runner.shutdown.{shutdown_truncation_lines}
+use std.test_runner.system_monitor.{self_tree_rss_mb, self_tree_cpu_percent, self_tree_exceeds_threshold, is_linux}
+
+fn joined(lines: [text]) -> text:
+    var out = ""
+    for l in lines:
+        out = out + l + "\n"
+    out
+
+describe "Watchdog truncation: an aborted run must not read like a finished one":
+    it "states the truncation as a fraction, naming how many files never ran":
+        step("Render the abort banner for 20 of 1340 files")
+        # evidence(pinned oracle): the old banner said `Completed tests: 20`
+        # with no denominator, so a sweep trusting it silently measured only
+        # the first ~20 specs per directory.
+        val out = joined(shutdown_truncation_lines("memory", 20, 1340, 15, 5, 0))
+        expect(out).to_contain("RUN ABORTED BEFORE COMPLETION")
+        expect(out).to_contain("Executed: 20 of 1340 test file(s)")
+        expect(out).to_contain("NEVER RUN: 1320 test file(s)")
+
+    it "labels the partial counts as partial and denies they measure the suite":
+        step("Read the counts section of the banner")
+        val out = joined(shutdown_truncation_lines("cpu", 20, 1340, 15, 5, 0))
+        expect(out).to_contain("Partial: 15 passed, 5 failed, 0 skipped")
+        expect(out).to_contain("NOT a measurement of the suite")
+
+    it "never claims a denominator it was not given":
+        step("Render with total_files unknown (0)")
+        # evidence(pinned oracle): inventing a denominator would be a worse
+        # lie than admitting the count is unknown.
+        val out = joined(shutdown_truncation_lines("memory", 20, 0, 15, 5, 0))
+        expect(out).to_contain("(total unknown)")
+        expect(out).to_contain("NEVER RUN: unknown")
+        expect(out.contains("of 0 test file(s)")).to_equal(false)
+
+    it "names the reason the watchdog fired":
+        step("The operator must know whether it was cpu or memory")
+        expect(joined(shutdown_truncation_lines("memory", 1, 2, 1, 0, 0))).to_contain("Reason: memory")
+
+describe "Watchdog scope: measure the runner's own process tree, not the box":
+    it "measures a plausible non-zero resident size for the runner's own tree":
+        step("Sample the runner's own process tree")
+        if is_linux():
+            # evidence(observed): a live sample. Asserted as a range because
+            # the exact figure moves; the point is that it is REAL, not the
+            # 0 that two earlier ps formulations returned.
+            expect(self_tree_rss_mb() > 0).to_equal(true)
+
+    it "does not fire on high thresholds, because the runner's own footprint is small":
+        step("Ask whether the runner's own tree exceeds 90% CPU AND 90% memory")
+        # evidence(pinned oracle): this is the whole fix. The system tree was
+        # unrunnable at 88% box memory used, none of it the runner's; a
+        # self-scoped watchdog must stay quiet in exactly that situation.
+        if is_linux():
+            val (violated, _reason) = self_tree_exceeds_threshold(90.0, 90.0)
+            expect(violated).to_equal(false)
+
+    it "does fire at zero thresholds, proving the predicate is live and not stubbed":
+        step("Ask with thresholds nothing can satisfy")
+        # evidence(pinned oracle): a predicate that never fires would pass
+        # the assertion above for the wrong reason.
+        if is_linux():
+            val (violated, reason) = self_tree_exceeds_threshold(0.0, 0.0)
+            expect(violated).to_equal(true)
+            expect(reason).to_contain("runner process tree")
+
+    it "reports its own footprint against total memory, not the box's usage":
+        step("Read the reason string")
+        if is_linux():
+            val (_v, reason) = self_tree_exceeds_threshold(0.0, 0.0)
+            expect(reason).to_contain("MB of ")
