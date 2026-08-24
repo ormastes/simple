@@ -56,6 +56,7 @@ load_head_blob() {
     _path=$1
     _expected_sha=$2
     _output=$3
+    _max_size=${4:-16777216}
     case "$_path" in ''|/*|..|../*|*/../*|*/..) fail unsafe-evidence-path ;; esac
     require_sha_value "$_expected_sha" evidence-sha256
     _entry=$(git -C "$ROOT" ls-tree HEAD -- "$_path" 2>/dev/null) || fail evidence-ls-tree
@@ -63,16 +64,17 @@ load_head_blob() {
     case "$(printf '%s\n' "$_entry" | awk '{print $1}')" in 100644|100755) ;; *) fail evidence-not-regular ;; esac
     _size=$(git -C "$ROOT" cat-file -s "HEAD:$_path" 2>/dev/null) || fail evidence-size
     case "$_size" in ''|*[!0-9]*) fail evidence-size-invalid ;; esac
-    [ "$_size" -le 16777216 ] || fail evidence-blob-too-large
+    [ "$_size" -le "$_max_size" ] || fail evidence-blob-too-large
     git -C "$ROOT" show "HEAD:$_path" >"$_output" 2>/dev/null || fail evidence-read
     [ "$(sha256sum "$_output" | awk '{print $1}')" = "$_expected_sha" ] || fail evidence-hash-mismatch
 }
 
 load_named_artifact_blob() {
     _kind=$1
+    _max_size=${2:-16777216}
     _path=$(field "$artifact" "${_kind}_path") || fail "missing-or-duplicate-${_kind}_path"
     _sha=$(field "$artifact" "${_kind}_sha256") || fail "missing-or-duplicate-${_kind}_sha256"
-    load_head_blob "$_path" "$_sha" "$work/$_kind"
+    load_head_blob "$_path" "$_sha" "$work/$_kind" "$_max_size"
 }
 
 expected_acceptance_ids() {
@@ -130,6 +132,24 @@ if [ "$expected_gate" = riscv32-riscv64-shared ]; then
         --shared "$work/shared_inventory" \
         --rv32 "$work/rv32_projection" \
         --rv64 "$work/rv64_projection" || fail riscv-ownership-inventory
+fi
+
+if [ "$expected_gate" = binary-size-go-parity ]; then
+    # A stripped full CLI is materially larger than ordinary receipt blobs but
+    # remains below GitHub's 100 MiB single-object limit.
+    load_named_artifact_blob simple_compiler 104857600
+    for _kind in simple_binary go_binary size_measurement semantic_equivalence compile_trace stage4_provenance; do
+        load_named_artifact_blob "$_kind"
+    done
+    sh "$ROOT/scripts/check/check-binary-size-go-parity.shs" \
+        --root "$ROOT" --fingerprint "$expected_fingerprint" --run-id "$run_id" \
+        --measurement "$work/size_measurement" \
+        --equivalence "$work/semantic_equivalence" \
+        --compile-trace "$work/compile_trace" \
+        --stage4-provenance "$work/stage4_provenance" \
+        --simple-compiler "$work/simple_compiler" \
+        --simple-binary "$work/simple_binary" --go-binary "$work/go_binary" \
+        || fail binary-size-semantic-evidence
 fi
 
 require_eq_in "$work/command_receipt" evidence_schema simple.must-check-command/v1

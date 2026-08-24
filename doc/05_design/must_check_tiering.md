@@ -74,6 +74,15 @@ dedicated ownership checker over shared, RV32, and RV64 attachments. The three
 sorted inventories must form an exact disjoint partition of the committed
 RISC-V-named source universe; shared entries bind existing bilateral consumer
 paths and sibling-only entries bind explicit specialization reasons.
+The binary-size oracle receives the committed Stage 4 compiler, stripped Simple/Go artifacts, plus
+closed measurement, equivalence, compile-trace, and canonical Stage 4
+provenance blobs. It binds the compiler bytes to the canonical receipt and
+recomputes its source and repository-helper authority fields. Promotion occurs
+only on the producer host while the complete canonical Stage-3/Stage-4 tree is
+available; durable committed copies must match those live files byte-for-byte.
+It compares exact hashes and bytes, checks ELF target identity, binds committed
+semantic sources/oracle and output hashes, rejects Rust-seed/compiler-process
+contamination, and derives `Simple <= Go` rather than trusting a producer flag.
 In completion mode, automated dispatch receives the canonical validated Stage 4
 candidate as both `SIMPLE_BINARY` and `SIMPLE_BIN`; these assignments override
 any ambient value. The

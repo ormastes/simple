@@ -1350,6 +1350,9 @@ bootstrap-owned and must not be added to the interactive push path.
 Source-decidable external lanes add a narrow registry-owned semantic oracle;
 RISC-V sharing requires an exhaustive disjoint committed-tree inventory with
 bilateral and specialization evidence.
+Performance external gates use narrow numeric validators over retained raw
+artifacts; binary-size parity recomputes committed stripped bytes and derives
+`Simple <= Go` rather than trusting a PASS field.
 When a push guard's default command also runs mutation fixtures, wire its
 scan-only mode into push and retain the self-test as a required bootstrap row.
 

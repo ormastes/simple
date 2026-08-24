@@ -51,6 +51,10 @@ gate-specific semantic oracles. The RISC-V sharing oracle compares three
 reviewed ownership attachments with the exhaustive committed HEAD path
 universe and rejects missing bilateral or specialization rationale; it does not
 promote runtime or board evidence.
+Performance semantic oracles remain lane-specific rather than becoming a
+configurable threshold engine. Binary-size parity loads the actual committed
+stripped artifacts and recomputes identity, size, equivalence bindings, and the
+comparison after common signature/hash validation.
 Automated source-sensitive results still invalidate on fingerprint changes.
 After Stage 1-4 admission succeeds, the bootstrap owner canonicalizes the exact
 validated Stage 4 path and injects it as `SIMPLE_BINARY` and the established

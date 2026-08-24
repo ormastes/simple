@@ -170,6 +170,19 @@ RISC-V/RV32/RV64. Shared reasons name existing bilateral consumers as
 `bilateral:rv32=<path>;rv64=<path>`; sibling-only rows require a nonempty
 `specialization:` reason. This proves review scope and inventory integrity, not
 runtime/FPGA readiness or completion of the broader sharing target.
+`binary-size-go-parity` adds committed `simple_compiler`, `simple_binary`, `go_binary`,
+`size_measurement`, `semantic_equivalence`, `compile_trace`, and
+`stage4_provenance` blobs. Its checker independently recomputes binary SHA-256
+and byte counts, requires matching ELF class/endianness/machine, canonical
+positive sizes, zero strip/compile/compressor failures, matching semantic
+output hashes, committed oracle/source hashes, and `simple_bytes <= go_bytes`.
+The compiler hash must match the committed compiler blob and the canonical
+21-field `simple-bootstrap-stage4-provenance-v1` receipt. The checker
+recomputes the source snapshot and repository producer/helper hashes, requires
+the committed compiler/provenance copies to match the producer host's live
+canonical files, and runs the full canonical Stage-3/Stage-4 verifier there.
+Detached or custom `admitted=true` summaries are not provenance. Rust-seed,
+Cargo, or rustc process evidence fails.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.
 It cross-checks registry and ledger structure in one linear parser pass. Only

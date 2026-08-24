@@ -8,6 +8,7 @@ HOOK="$ROOT/scripts/check/pre-push-conflict-tree-guard.shs"
 INSTALL_UNIX="$ROOT/scripts/setup/install-must-check-hooks.shs"
 INSTALL_WINDOWS="$ROOT/scripts/setup/install-must-check-hooks.ps1"
 SETUP_HOOKS="$ROOT/scripts/setup/setup-hooks.shs"
+PERF_PROFILE="$ROOT/scripts/check/check-cross-language-perf.shs"
 ZERO=0000000000000000000000000000000000000000
 
 start=$(date +%s)
@@ -24,6 +25,8 @@ grep -q 'cmp -s "$LOCAL_HOOK" "$CANONICAL_GUARD"' "$ROOT/scripts/hooks/pre-push"
 grep -q -- '--install' "$INSTALL_UNIX"
 grep -q 'Move-Item' "$INSTALL_WINDOWS"
 grep -q 'scripts/setup/setup-hooks.shs' "$ROOT/scripts/setup/setup.shs"
+grep -q 'go build -o hello_go hello.go' "$PERF_PROFILE"
+grep -q 'measure_size "Go" "$BUILD_DIR/hello_go" "$BUILD_DIR/fib_go"' "$PERF_PROFILE"
 
 fixture=$(mktemp -d)
 rules_fixture=$(mktemp -d)
@@ -32,9 +35,17 @@ trap 'rm -rf "$fixture" "$fixture-hook-repo" "$fixture-hook-peer" "$rules_fixtur
 
 # The production external-evidence validator owns the acceptance matrix. Prove
 # one valid row and adjacent semantic mutations before testing recorder wiring.
-mkdir -p "$external_fixture/evidence" "$external_fixture/scripts/check" "$external_fixture/config/check"
+mkdir -p "$external_fixture/evidence" "$external_fixture/scripts/check/lib" \
+    "$external_fixture/scripts/bootstrap" "$external_fixture/config/check" \
+    "$external_fixture/src/compiler" "$external_fixture/src/lib" "$external_fixture/src/app" \
+    "$external_fixture/src/runtime" "$external_fixture/examples/10_tooling"
 cp "$ROOT/scripts/check/check-external-must-check-receipt.shs" "$external_fixture/scripts/check/"
 cp "$ROOT/scripts/check/check-riscv32-riscv64-template-ownership.shs" "$external_fixture/scripts/check/"
+cp "$ROOT/scripts/check/check-binary-size-go-parity.shs" "$external_fixture/scripts/check/"
+cp "$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs" "$external_fixture/scripts/check/lib/"
+cp -R "$ROOT/scripts/check/lib/bootstrap-stage3" "$external_fixture/scripts/check/lib/"
+cp "$ROOT/scripts/check/lib/stage4-candidate-provenance.shs" "$external_fixture/scripts/check/lib/"
+cp "$ROOT/scripts/bootstrap/bootstrap-from-scratch.sh" "$external_fixture/scripts/bootstrap/"
 external_validator="$external_fixture/scripts/check/check-external-must-check-receipt.shs"
 git -C "$external_fixture" init -q
 git -C "$external_fixture" config user.name must-check-test
@@ -343,6 +354,232 @@ sh "$external_fixture/scripts/check/check-riscv32-riscv64-template-ownership.shs
     --rv32 "$external_fixture/evidence/rv32.valid" \
     --rv64 "$external_fixture/evidence/rv64.valid" >/dev/null 2>&1 && {
         echo 'FAIL: same/cross-class bilateral RISC-V references were accepted'
+        exit 1
+    }
+
+# Binary-size parity must recompute exact committed artifact sizes and the
+# inequality; signed numeric labels alone are not evidence.
+mkdir -p "$external_fixture/test/fixtures/binary_size"
+printf '%s\n' 'print canonical answer 42' > "$external_fixture/test/fixtures/binary_size/oracle.txt"
+printf '%s\n' 'fn main(): print("42")' > "$external_fixture/test/fixtures/binary_size/main.spl"
+printf '%s\n' 'package main' 'import "fmt"' 'func main() { fmt.Println("42") }' > "$external_fixture/test/fixtures/binary_size/main.go"
+cp /bin/true "$external_fixture/evidence/simple.stripped"
+cp /bin/true "$external_fixture/evidence/go.stripped"
+cp /bin/true "$external_fixture/evidence/stage4-simple"
+printf x >> "$external_fixture/evidence/go.stripped"
+for kind in command target toolchain; do
+    git -C "$external_fixture" show "$riscv_valid_commit:evidence/$kind.env" > "$external_fixture/evidence/$kind.env"
+    sed -i 's/riscv32-riscv64-shared/binary-size-go-parity/g' "$external_fixture/evidence/$kind.env"
+done
+cat > "$external_fixture/evidence/observations.env" <<EOF
+evidence_schema=simple.must-check-observations/v1
+gate_id=binary-size-go-parity
+source_fingerprint=$external_fp
+run_id=$external_run
+acceptance_ids=semantic-equivalence,simple-binary,go-binary,toolchains,stripped-size,simple-le-go
+acceptance.semantic-equivalence=PASS
+acceptance.simple-binary=PASS
+acceptance.go-binary=PASS
+acceptance.toolchains=PASS
+acceptance.stripped-size=PASS
+acceptance.simple-le-go=PASS
+final_verdict=PASS
+EOF
+git -C "$external_fixture" add test/fixtures/binary_size evidence/command.env evidence/target.env evidence/toolchain.env evidence/observations.env evidence/simple.stripped evidence/go.stripped evidence/stage4-simple scripts/bootstrap scripts/check/lib src examples
+git -C "$external_fixture" commit -qm binary-size-parity-raw-blobs
+simple_bin_sha=$(sha256sum "$external_fixture/evidence/simple.stripped" | awk '{print $1}')
+go_bin_sha=$(sha256sum "$external_fixture/evidence/go.stripped" | awk '{print $1}')
+simple_bin_bytes=$(wc -c < "$external_fixture/evidence/simple.stripped" | tr -d ' ')
+go_bin_bytes=$(wc -c < "$external_fixture/evidence/go.stripped" | tr -d ' ')
+machine_hex=$(od -An -t x1 -j 18 -N 2 "$external_fixture/evidence/simple.stripped" | tr -d ' \n')
+compiler_sha=$(sha256sum "$external_fixture/evidence/stage4-simple" | awk '{print $1}')
+oracle_sha=$(sha256sum "$external_fixture/test/fixtures/binary_size/oracle.txt" | awk '{print $1}')
+simple_source_sha=$(sha256sum "$external_fixture/test/fixtures/binary_size/main.spl" | awk '{print $1}')
+go_source_sha=$(sha256sum "$external_fixture/test/fixtures/binary_size/main.go" | awk '{print $1}')
+stdout_sha=$(printf '42\n' | sha256sum | awk '{print $1}')
+cat > "$external_fixture/evidence/size.env" <<EOF
+measurement_schema=simple.binary-size-go-parity/v1
+gate_id=binary-size-go-parity
+source_fingerprint=$external_fp
+run_id=$external_run
+fixture_id=hello-42
+simple_artifact_sha256=$simple_bin_sha
+go_artifact_sha256=$go_bin_sha
+simple_stripped_bytes=$simple_bin_bytes
+go_stripped_bytes=$go_bin_bytes
+simple_artifact_kind=native-pure-simple-stage4
+go_artifact_kind=native-go
+simple_strip_exit=0
+go_strip_exit=0
+compression_tool_count=0
+target_format=ELF
+target_machine_id_hex=$machine_hex
+final_verdict=PASS
+EOF
+cat > "$external_fixture/evidence/equivalence.env" <<EOF
+equivalence_schema=simple.binary-size-equivalence/v1
+gate_id=binary-size-go-parity
+source_fingerprint=$external_fp
+run_id=$external_run
+fixture_id=hello-42
+semantic_oracle_path=test/fixtures/binary_size/oracle.txt
+semantic_oracle_sha256=$oracle_sha
+simple_source_path=test/fixtures/binary_size/main.spl
+simple_source_sha256=$simple_source_sha
+go_source_path=test/fixtures/binary_size/main.go
+go_source_sha256=$go_source_sha
+expected_stdout_sha256=$stdout_sha
+simple_stdout_sha256=$stdout_sha
+go_stdout_sha256=$stdout_sha
+simple_exit=0
+go_exit=0
+final_verdict=PASS
+EOF
+cat > "$external_fixture/evidence/compile-trace.env" <<EOF
+trace_schema=simple.binary-size-compile-trace/v1
+gate_id=binary-size-go-parity
+source_fingerprint=$external_fp
+run_id=$external_run
+simple_compiler_path=/fixture/bin/release/x86_64/simple
+simple_compiler_sha256=$compiler_sha
+simple_compiler_kind=pure-simple-stage4
+stage4_admitted=true
+rust_seed_process_count=0
+cargo_process_count=0
+rustc_process_count=0
+simple_compile_exit=0
+go_compile_exit=0
+final_verdict=PASS
+EOF
+BOOTSTRAP_STAGE3_FACADE_PATH="$external_fixture/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$external_fixture/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+fixture_source_revision=$(stage4_source_revision "$external_fixture")
+producer_sha=$(sha256sum "$external_fixture/scripts/bootstrap/bootstrap-from-scratch.sh" | awk '{print $1}')
+helper_sha=$(sha256sum "$external_fixture/scripts/check/lib/stage4-candidate-provenance.shs" | awk '{print $1}')
+cat > "$external_fixture/evidence/stage4-provenance.env" <<EOF
+schema=simple-bootstrap-stage4-provenance-v1
+status=pass
+artifact_kind=pure-simple-full-cli
+output_path=/fixture/bin/release/x86_64/simple
+output_sha256=$compiler_sha
+source_revision_kind=content-sha256
+source_revision=$fixture_source_revision
+source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling
+producer_path=/fixture/scripts/bootstrap/bootstrap-from-scratch.sh
+producer_sha256=$producer_sha
+provenance_helper_path=/fixture/scripts/check/lib/stage4-candidate-provenance.shs
+provenance_helper_sha256=$helper_sha
+parent_compiler_path=/fixture/build/stage3/simple
+parent_compiler_sha256=$compiler_sha
+stage3_provenance_path=/fixture/build/stage3/provenance.env
+stage3_provenance_sha256=$compiler_sha
+build_log_path=/fixture/build/logs/stage4-native-build.log
+build_log_sha256=$compiler_sha
+essential_tools_log_path=/fixture/build/logs/stage4-essential-tools-smoke.log
+essential_tools_log_sha256=$compiler_sha
+completed_gate=stage4-essential-tools-smoke
+EOF
+git -C "$external_fixture" add evidence/size.env evidence/equivalence.env evidence/compile-trace.env evidence/stage4-provenance.env
+git -C "$external_fixture" commit -qm binary-size-parity-structured-evidence
+command_sha=$(sha256sum "$external_fixture/evidence/command.env" | awk '{print $1}')
+target_sha=$(sha256sum "$external_fixture/evidence/target.env" | awk '{print $1}')
+toolchain_sha=$(sha256sum "$external_fixture/evidence/toolchain.env" | awk '{print $1}')
+observations_sha=$(sha256sum "$external_fixture/evidence/observations.env" | awk '{print $1}')
+size_sha=$(sha256sum "$external_fixture/evidence/size.env" | awk '{print $1}')
+equivalence_sha=$(sha256sum "$external_fixture/evidence/equivalence.env" | awk '{print $1}')
+trace_sha=$(sha256sum "$external_fixture/evidence/compile-trace.env" | awk '{print $1}')
+provenance_sha=$(sha256sum "$external_fixture/evidence/stage4-provenance.env" | awk '{print $1}')
+cat > "$external_artifact" <<EOF
+evidence_schema=simple.must-check-external-evidence/v2
+gate_id=binary-size-go-parity
+source_fingerprint=$external_fp
+final_verdict=PASS
+producer_id=perf-producer
+producer_kind=controlled-host
+run_id=$external_run
+produced_at_utc=2000-01-01T00:00:00Z
+reviewer_key_id=fixture-reviewer
+command_receipt_path=evidence/command.env
+command_receipt_sha256=$command_sha
+target_identity_path=evidence/target.env
+target_identity_sha256=$target_sha
+toolchain_identity_path=evidence/toolchain.env
+toolchain_identity_sha256=$toolchain_sha
+observations_path=evidence/observations.env
+observations_sha256=$observations_sha
+simple_binary_path=evidence/simple.stripped
+simple_binary_sha256=$simple_bin_sha
+simple_compiler_path=evidence/stage4-simple
+simple_compiler_sha256=$compiler_sha
+go_binary_path=evidence/go.stripped
+go_binary_sha256=$go_bin_sha
+size_measurement_path=evidence/size.env
+size_measurement_sha256=$size_sha
+semantic_equivalence_path=evidence/equivalence.env
+semantic_equivalence_sha256=$equivalence_sha
+compile_trace_path=evidence/compile-trace.env
+compile_trace_sha256=$trace_sha
+stage4_provenance_path=evidence/stage4-provenance.env
+stage4_provenance_sha256=$provenance_sha
+acceptance_contract=binary-size-go-parity/v1
+acceptance_ids=semantic-equivalence,simple-binary,go-binary,toolchains,stripped-size,simple-le-go
+EOF
+openssl dgst -sha256 -sign "$external_fixture/reviewer-private.pem" -out "$external_fixture/evidence/reviewer.sig" "$external_artifact"
+signature_sha=$(sha256sum "$external_fixture/evidence/reviewer.sig" | awk '{print $1}')
+printf '%s\n' 'reviewer_signature_path=evidence/reviewer.sig' "reviewer_signature_sha256=$signature_sha" > "$external_receipt"
+git -C "$external_fixture" add evidence/summary.env evidence/reviewer.sig evidence/external.receipt
+git -C "$external_fixture" commit -qm signed-binary-size-parity-summary
+binary_size_valid_commit=$(git -C "$external_fixture" rev-parse HEAD)
+MUST_CHECK_ROOT="$external_fixture" MUST_CHECK_RECEIPT_FILE="$external_receipt" \
+MUST_CHECK_ARTIFACT_FILE="$external_artifact" MUST_CHECK_EXPECTED_GATE=binary-size-go-parity \
+MUST_CHECK_EXPECTED_FINGERPRINT="$external_fp" sh "$external_validator" >/dev/null 2>&1 && {
+    echo 'FAIL: signed binary-size summary with fabricated Stage 4 paths was admitted'
+    exit 1
+}
+grep -Fq 'stage4_verify_candidate_provenance "$live_provenance" "$compiler_path" "$ROOT"' \
+    "$external_fixture/scripts/check/check-binary-size-go-parity.shs"
+
+sed '/^stage4_provenance_/d' "$external_artifact" > "$external_fixture/evidence/summary.missing"
+mv "$external_fixture/evidence/summary.missing" "$external_artifact"
+openssl dgst -sha256 -sign "$external_fixture/reviewer-private.pem" -out "$external_fixture/evidence/reviewer.sig" "$external_artifact"
+signature_sha=$(sha256sum "$external_fixture/evidence/reviewer.sig" | awk '{print $1}')
+sed -i "s/reviewer_signature_sha256=.*/reviewer_signature_sha256=$signature_sha/" "$external_receipt"
+git -C "$external_fixture" add evidence/summary.env evidence/reviewer.sig evidence/external.receipt
+git -C "$external_fixture" commit -qm signed-binary-size-summary-missing-provenance
+MUST_CHECK_ROOT="$external_fixture" MUST_CHECK_RECEIPT_FILE="$external_receipt" \
+MUST_CHECK_ARTIFACT_FILE="$external_artifact" MUST_CHECK_EXPECTED_GATE=binary-size-go-parity \
+MUST_CHECK_EXPECTED_FINGERPRINT="$external_fp" sh "$external_validator" >/dev/null 2>&1 && {
+    echo 'FAIL: signed binary-size summary without Stage 4 provenance was admitted'
+    exit 1
+}
+
+for kind in size equivalence compile-trace stage4-provenance; do
+    git -C "$external_fixture" show "$binary_size_valid_commit:evidence/$kind.env" > "$external_fixture/evidence/$kind.valid"
+done
+for bad_size in 0 -1 +1 01 1.0 1e3 n/a 999999999999999999999999999999999999; do
+    sed "s|simple_stripped_bytes=[0-9]*|simple_stripped_bytes=$bad_size|" "$external_fixture/evidence/size.valid" > "$external_fixture/evidence/size.bad"
+    sh "$external_fixture/scripts/check/check-binary-size-go-parity.shs" \
+        --root "$external_fixture" --fingerprint "$external_fp" --run-id "$external_run" \
+        --measurement "$external_fixture/evidence/size.bad" --equivalence "$external_fixture/evidence/equivalence.valid" \
+        --compile-trace "$external_fixture/evidence/compile-trace.valid" --stage4-provenance "$external_fixture/evidence/stage4-provenance.valid" \
+        --simple-compiler "$external_fixture/evidence/stage4-simple" \
+        --simple-binary "$external_fixture/evidence/simple.stripped" --go-binary "$external_fixture/evidence/go.stripped" >/dev/null 2>&1 && {
+            echo "FAIL: invalid binary-size integer was accepted: $bad_size"
+            exit 1
+        }
+done
+sed "s/go_stdout_sha256=$stdout_sha/go_stdout_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/" \
+    "$external_fixture/evidence/equivalence.valid" > "$external_fixture/evidence/equivalence.bad"
+sh "$external_fixture/scripts/check/check-binary-size-go-parity.shs" \
+    --root "$external_fixture" --fingerprint "$external_fp" --run-id "$external_run" \
+    --measurement "$external_fixture/evidence/size.valid" --equivalence "$external_fixture/evidence/equivalence.bad" \
+    --compile-trace "$external_fixture/evidence/compile-trace.valid" --stage4-provenance "$external_fixture/evidence/stage4-provenance.valid" \
+    --simple-compiler "$external_fixture/evidence/stage4-simple" \
+    --simple-binary "$external_fixture/evidence/simple.stripped" --go-binary "$external_fixture/evidence/go.stripped" >/dev/null 2>&1 && {
+        echo 'FAIL: divergent binary-size semantic output was accepted'
         exit 1
     }
 

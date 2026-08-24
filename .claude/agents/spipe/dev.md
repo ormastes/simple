@@ -158,6 +158,8 @@ with the mutation self-test retained as a required bootstrap-owned row.
 Source-decidable external gates also require a lane-specific committed-tree
 oracle after common signature/hash validation; a signed PASS label is not
 enough.
+Performance external-gate criteria require raw retained artifacts and a narrow
+numeric oracle; precomputed PASS or ratio fields are not the verdict.
 
 For ordinary feature development, first apply
 `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: name
