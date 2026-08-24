@@ -336,6 +336,8 @@ int64_t  rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t 
 int64_t  rt_host_dynlib_close(int64_t handle);
 int64_t  rt_gpu_provider_loaded(int64_t backend_bit);
 int64_t  rt_gpu_provider_abi_version(int64_t backend_bit);
+int64_t  rt_gpu_provider_backend_bits(int64_t backend_bit);
+const char* rt_gpu_provider_path(int64_t backend_bit);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);
 void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);

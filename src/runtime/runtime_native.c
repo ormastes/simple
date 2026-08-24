@@ -239,6 +239,8 @@ typedef struct {
     atomic_int valid;
     int64_t backend_bit;
     const char *path_env;
+    char admitted_path[4096];
+    int64_t admitted_backend_bits;
 } spl_gpu_provider_slot;
 
 #define SPL_GPU_PROVIDER_ABI_V1 1
@@ -248,18 +250,53 @@ typedef struct {
 
 static spl_gpu_provider_slot spl_cuda_provider = {
     ATOMIC_FLAG_INIT, NULL, ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0), SPL_GPU_PROVIDER_CUDA_BIT,
-    "SIMPLE_CUDA_PROVIDER_PATH"
+    "SIMPLE_CUDA_PROVIDER_PATH", {0}, 0
 };
 static spl_gpu_provider_slot spl_vulkan_provider = {
     ATOMIC_FLAG_INIT, NULL, ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0), SPL_GPU_PROVIDER_VULKAN_BIT,
-    "SIMPLE_VULKAN_PROVIDER_PATH"
+    "SIMPLE_VULKAN_PROVIDER_PATH", {0}, 0
 };
 static spl_gpu_provider_slot spl_metal_provider = {
     ATOMIC_FLAG_INIT, NULL, ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0), SPL_GPU_PROVIDER_METAL_BIT,
-    "SIMPLE_METAL_PROVIDER_PATH"
+    "SIMPLE_METAL_PROVIDER_PATH", {0}, 0
 };
 
 typedef int64_t (*spl_gpu_provider_metadata_fn)(void);
+static void *spl_gpu_provider_resolve(void *handle, const char *symbol);
+
+static int spl_gpu_provider_surface_complete(
+        int64_t backend_bit, void *handle) {
+    static const char *vulkan_required[] = {
+        "rt_vulkan_provider_is_available", "rt_vulkan_provider_device_count",
+        "rt_vk_provider_available", "rt_vulkan_init", "rt_vulkan_shutdown",
+        "rt_vulkan_select_device", "rt_vulkan_alloc_buffer", "rt_vulkan_free_buffer",
+        "rt_vulkan_copy_to_buffer_raw", "rt_vulkan_copy_from_buffer_raw",
+        "rt_vulkan_copy_from_buffer_strided_raw", "rt_vulkan_copy_from_buffer_regions_raw",
+        "rt_vulkan_compile_spirv_raw", "rt_vulkan_destroy_shader",
+        "rt_vulkan_create_compute_pipeline_raw", "rt_vulkan_destroy_pipeline",
+        "rt_vulkan_create_descriptor_set", "rt_vulkan_bind_buffer",
+        "rt_vulkan_destroy_descriptor_set", "rt_vulkan_begin_compute",
+        "rt_vulkan_bind_pipeline", "rt_vulkan_bind_descriptors",
+        "rt_vulkan_push_constants_raw", "rt_vulkan_dispatch", "rt_vulkan_end_compute",
+        "rt_vulkan_discard_command", "rt_vulkan_fence_submission_supported",
+        "rt_vulkan_accepted_compute_submit_count", "rt_vulkan_submit_and_wait_fence",
+        "rt_vulkan_submit_no_wait", "rt_vulkan_wait_fence", "rt_vulkan_destroy_fence",
+        "rt_vulkan_wait_idle", "rt_vulkan_device_name", "rt_vulkan_device_type",
+        "rt_vulkan_selected_device_type", "rt_vulkan_device_driver_identity",
+        "rt_vulkan_selected_device_driver_identity",
+        "rt_vulkan_selected_device_driver_identity_hash", "rt_vulkan_get_last_error",
+        "rt_vulkan_init_headless_present", "rt_vulkan_init_window_present",
+        "rt_vulkan_init_external_window_present", "rt_vulkan_present_buffer",
+        "rt_vulkan_present_buffer_regions_raw", "rt_vulkan_last_present_copy_bytes",
+        "rt_vulkan_last_present_copy_rects", "rt_vulkan_destroy_swapchain"
+    };
+    size_t i;
+    if (backend_bit != SPL_GPU_PROVIDER_VULKAN_BIT) return 1;
+    for (i = 0; i < sizeof(vulkan_required) / sizeof(vulkan_required[0]); i++) {
+        if (!spl_gpu_provider_resolve(handle, vulkan_required[i])) return 0;
+    }
+    return 1;
+}
 
 static spl_gpu_provider_slot *spl_gpu_provider_for_bit(int64_t backend_bit) {
     if (backend_bit == SPL_GPU_PROVIDER_CUDA_BIT) return &spl_cuda_provider;
@@ -299,7 +336,7 @@ static int spl_gpu_provider_admit_locked(
     void *handle;
     spl_gpu_provider_metadata_fn abi_version;
     spl_gpu_provider_metadata_fn backend_bits;
-    if (!slot || !path || !*path ||
+    if (!slot || !path || !*path || strlen(path) >= sizeof(slot->admitted_path) ||
             atomic_load_explicit(&slot->attempted, memory_order_relaxed)) {
         return slot && atomic_load_explicit(&slot->valid, memory_order_acquire);
     }
@@ -312,7 +349,8 @@ static int spl_gpu_provider_admit_locked(
         handle, "rt_simple_gpu_provider_backend_bits");
     if (!abi_version || !backend_bits ||
             abi_version() != SPL_GPU_PROVIDER_ABI_V1 ||
-            (backend_bits() & slot->backend_bit) == 0) {
+            (backend_bits() & slot->backend_bit) == 0 ||
+            !spl_gpu_provider_surface_complete(slot->backend_bit, handle)) {
         spl_gpu_provider_close_invalid(handle);
         return 0;
     }
@@ -320,6 +358,8 @@ static int spl_gpu_provider_admit_locked(
      * outlive any one Simple session, so unloading here would invalidate
      * function pointers and device resources behind the core trampolines. */
     slot->handle = handle;
+    memcpy(slot->admitted_path, path, strlen(path) + 1);
+    slot->admitted_backend_bits = backend_bits();
     atomic_store_explicit(&slot->valid, 1, memory_order_release);
     return 1;
 }
@@ -351,6 +391,18 @@ int64_t rt_gpu_provider_abi_version(int64_t backend_bit) {
     spl_gpu_provider_slot *slot = spl_gpu_provider_for_bit(backend_bit);
     if (!spl_gpu_provider_ensure(slot)) return 0;
     return SPL_GPU_PROVIDER_ABI_V1;
+}
+
+int64_t rt_gpu_provider_backend_bits(int64_t backend_bit) {
+    spl_gpu_provider_slot *slot = spl_gpu_provider_for_bit(backend_bit);
+    if (!spl_gpu_provider_ensure(slot)) return 0;
+    return slot->admitted_backend_bits;
+}
+
+const char *rt_gpu_provider_path(int64_t backend_bit) {
+    spl_gpu_provider_slot *slot = spl_gpu_provider_for_bit(backend_bit);
+    if (!spl_gpu_provider_ensure(slot)) return "";
+    return slot->admitted_path;
 }
 
 static int64_t spl_hosted_provider_i64_probe(int64_t backend_bit, const char* symbol) {
@@ -442,6 +494,28 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void) {
             SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
         return fn ? fn(a0, a1, a2, a3, a4) : 0; \
     }
+#define SPL_VULKAN_DISPATCH6(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name( \
+            int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5) { \
+        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
+            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
+        return fn ? fn(a0, a1, a2, a3, a4, a5) : 0; \
+    }
+#define SPL_VULKAN_DISPATCH_CSTR0(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK const char *name(void) { \
+        typedef const char *(*fn_t)(void); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
+            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
+        return fn ? fn() : ""; \
+    }
+#define SPL_VULKAN_DISPATCH_CSTR1(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK const char *name(int64_t a0) { \
+        typedef const char *(*fn_t)(int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
+            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
+        return fn ? fn(a0) : ""; \
+    }
 
 SPL_VULKAN_DISPATCH0(rt_vulkan_init)
 SPL_VULKAN_DISPATCH0(rt_vulkan_shutdown)
@@ -474,6 +548,14 @@ SPL_VULKAN_DISPATCH1(rt_vulkan_last_present_copy_bytes)
 SPL_VULKAN_DISPATCH1(rt_vulkan_last_present_copy_rects)
 SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_swapchain)
 SPL_VULKAN_DISPATCH5(rt_vulkan_present_buffer)
+SPL_VULKAN_DISPATCH6(rt_vulkan_init_external_window_present)
+SPL_VULKAN_DISPATCH4(rt_vulkan_create_compute_pipeline_raw)
+SPL_VULKAN_DISPATCH_CSTR1(rt_vulkan_device_name)
+SPL_VULKAN_DISPATCH_CSTR1(rt_vulkan_device_type)
+SPL_VULKAN_DISPATCH_CSTR0(rt_vulkan_selected_device_type)
+SPL_VULKAN_DISPATCH_CSTR1(rt_vulkan_device_driver_identity)
+SPL_VULKAN_DISPATCH_CSTR0(rt_vulkan_selected_device_driver_identity)
+SPL_VULKAN_DISPATCH_CSTR0(rt_vulkan_get_last_error)
 
 #undef SPL_VULKAN_DISPATCH0
 #undef SPL_VULKAN_DISPATCH1
@@ -481,6 +563,9 @@ SPL_VULKAN_DISPATCH5(rt_vulkan_present_buffer)
 #undef SPL_VULKAN_DISPATCH3
 #undef SPL_VULKAN_DISPATCH4
 #undef SPL_VULKAN_DISPATCH5
+#undef SPL_VULKAN_DISPATCH6
+#undef SPL_VULKAN_DISPATCH_CSTR0
+#undef SPL_VULKAN_DISPATCH_CSTR1
 
 static int64_t spl_vulkan_call_raw2(
         const char *symbol, int64_t a0, int64_t a1) {
@@ -609,7 +694,10 @@ static uint8_t *spl_vulkan_encode_i64_array(
     if (!bytes) return NULL;
     for (i = 0; i < count; i++) {
         int64_t field = rt_array_get_i64_raw((SplArray*)(intptr_t)value, i);
-        memcpy(bytes + i * 8, &field, 8);
+        uint64_t raw = (uint64_t)field;
+        int byte;
+        for (byte = 0; byte < 8; byte++)
+            bytes[i * 8 + byte] = (uint8_t)(raw >> (byte * 8));
     }
     return bytes;
 }

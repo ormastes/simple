@@ -28,14 +28,63 @@ int64_t rt_vulkan_init(void) { return 1; }
 int64_t rt_vulkan_alloc_buffer(int64_t size, int64_t usage) {
     return size == 4096 && usage == 3 ? 73 : 0;
 }
+#define STUB(name) int64_t name(void) { return 1; }
+STUB(rt_vulkan_shutdown)
+STUB(rt_vulkan_select_device)
+STUB(rt_vulkan_free_buffer)
+STUB(rt_vulkan_copy_to_buffer_raw)
+STUB(rt_vulkan_copy_from_buffer_raw)
+STUB(rt_vulkan_copy_from_buffer_strided_raw)
+STUB(rt_vulkan_copy_from_buffer_regions_raw)
+STUB(rt_vulkan_compile_spirv_raw)
+STUB(rt_vulkan_destroy_shader)
+#ifndef OMIT_PIPELINE_RAW
+STUB(rt_vulkan_create_compute_pipeline_raw)
+#endif
+STUB(rt_vulkan_destroy_pipeline)
+STUB(rt_vulkan_create_descriptor_set)
+STUB(rt_vulkan_bind_buffer)
+STUB(rt_vulkan_destroy_descriptor_set)
+STUB(rt_vulkan_begin_compute)
+STUB(rt_vulkan_bind_pipeline)
+STUB(rt_vulkan_bind_descriptors)
+STUB(rt_vulkan_push_constants_raw)
+STUB(rt_vulkan_dispatch)
+STUB(rt_vulkan_end_compute)
+STUB(rt_vulkan_discard_command)
+STUB(rt_vulkan_fence_submission_supported)
+STUB(rt_vulkan_accepted_compute_submit_count)
+STUB(rt_vulkan_submit_and_wait_fence)
+STUB(rt_vulkan_submit_no_wait)
+STUB(rt_vulkan_wait_fence)
+STUB(rt_vulkan_destroy_fence)
+STUB(rt_vulkan_wait_idle)
+STUB(rt_vulkan_device_name)
+STUB(rt_vulkan_device_type)
+STUB(rt_vulkan_selected_device_type)
+STUB(rt_vulkan_device_driver_identity)
+STUB(rt_vulkan_selected_device_driver_identity)
+STUB(rt_vulkan_selected_device_driver_identity_hash)
+STUB(rt_vulkan_get_last_error)
+STUB(rt_vulkan_init_headless_present)
+STUB(rt_vulkan_init_window_present)
+STUB(rt_vulkan_init_external_window_present)
+STUB(rt_vulkan_present_buffer)
+STUB(rt_vulkan_present_buffer_regions_raw)
+STUB(rt_vulkan_last_present_copy_bytes)
+STUB(rt_vulkan_last_present_copy_rects)
+STUB(rt_vulkan_destroy_swapchain)
 EOF
 
 cat >"$TMP/harness.c" <<'EOF'
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 int64_t rt_gpu_provider_loaded(int64_t backend_bit);
 int64_t rt_gpu_provider_abi_version(int64_t backend_bit);
+int64_t rt_gpu_provider_backend_bits(int64_t backend_bit);
+const char *rt_gpu_provider_path(int64_t backend_bit);
 int64_t rt_vulkan_is_available(void);
 int64_t rt_vulkan_device_count(void);
 int32_t rt_vk_available(void);
@@ -44,9 +93,11 @@ int64_t rt_vulkan_alloc_buffer(int64_t size, int64_t usage);
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
     if (setenv("SIMPLE_VULKAN_PROVIDER_PATH", argv[1], 1) != 0) return 3;
-    printf("loaded=%lld abi=%lld available=%lld count=%lld vk=%d init=%lld buffer=%lld\n",
+    printf("loaded=%lld abi=%lld bits=%lld path=%d available=%lld count=%lld vk=%d init=%lld buffer=%lld\n",
         (long long)rt_gpu_provider_loaded(2),
         (long long)rt_gpu_provider_abi_version(2),
+        (long long)rt_gpu_provider_backend_bits(2),
+        strcmp(rt_gpu_provider_path(2), argv[1]) == 0,
         (long long)rt_vulkan_is_available(),
         (long long)rt_vulkan_device_count(), (int)rt_vk_available(),
         (long long)rt_vulkan_init(),
@@ -57,6 +108,7 @@ EOF
 
 cc -shared -fPIC "$TMP/provider.c" -o "$TMP/provider.so"
 cc -shared -fPIC -DPROVIDER_ABI=99 "$TMP/provider.c" -o "$TMP/wrong.so"
+cc -shared -fPIC -DOMIT_PIPELINE_RAW "$TMP/provider.c" -o "$TMP/incomplete.so"
 cc -D_GNU_SOURCE -std=gnu11 -O0 -ffunction-sections -fdata-sections \
     -I"$ROOT/src/runtime" -I"$ROOT/src/runtime/platform" \
     -c "$ROOT/src/runtime/runtime_native.c" -o "$TMP/runtime_native.o"
@@ -66,9 +118,11 @@ cc -Wl,--gc-sections "$TMP/harness.c" "$TMP/runtime_native.o" \
 good="$($TMP/harness "$TMP/provider.so")"
 bad="$($TMP/harness "$TMP/wrong.so")"
 missing="$($TMP/harness "$TMP/missing.so")"
-[ "$good" = "loaded=1 abi=1 available=1 count=7 vk=1 init=1 buffer=73" ]
-[ "$bad" = "loaded=0 abi=0 available=0 count=0 vk=0 init=0 buffer=0" ]
-[ "$missing" = "loaded=0 abi=0 available=0 count=0 vk=0 init=0 buffer=0" ]
+incomplete="$($TMP/harness "$TMP/incomplete.so")"
+[ "$good" = "loaded=1 abi=1 bits=2 path=1 available=1 count=7 vk=1 init=1 buffer=73" ]
+[ "$bad" = "loaded=0 abi=0 bits=0 path=0 available=0 count=0 vk=0 init=0 buffer=0" ]
+[ "$missing" = "loaded=0 abi=0 bits=0 path=0 available=0 count=0 vk=0 init=0 buffer=0" ]
+[ "$incomplete" = "loaded=0 abi=0 bits=0 path=0 available=0 count=0 vk=0 init=0 buffer=0" ]
 
 if command -v readelf >/dev/null 2>&1; then
     if readelf -d "$TMP/harness" | grep -Fq 'provider.so'; then
@@ -83,5 +137,7 @@ printf '%s\n' \
     "gpu_provider_scalar_operation_dispatch=true" \
     "gpu_provider_abi_v1_admitted=true" \
     "gpu_provider_wrong_abi_rejected=true" \
+    "gpu_provider_incomplete_surface_rejected=true" \
+    "gpu_provider_provenance_reported=true" \
     "gpu_provider_missing_rejected=true" \
     "gpu_provider_static_dependency=false"
