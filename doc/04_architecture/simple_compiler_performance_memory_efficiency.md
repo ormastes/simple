@@ -692,3 +692,15 @@ Small fixed policy lists remain ordered arrays with linear early exit: their
 bounded contiguous scans preserve diagnostic precedence and avoid request-local
 hash-table construction. Classification refactors must retain empty-segment,
 normalization, warning payload, severity, and emission-order behavior.
+
+### Bulk-memory activation contract
+
+An active bulk-memory rewrite must prove byte-span equivalence, not merely
+different base value identities. Its legality receipt includes source/destination
+regions, byte offsets and lengths, non-overlap or direction-compatible overlap,
+element size, dominance, temporary lifetime, trap behavior, and effect order.
+Unknown alias, malformed def-use, incomplete type facts, or unavailable range
+facts produces a missed remark and leaves MIR unchanged. Environment flags may
+request analysis but must not bypass a Disabled status or any proof obligation.
+Quarantined compatibility adapters return their input without scanning or
+rebuilding functions.

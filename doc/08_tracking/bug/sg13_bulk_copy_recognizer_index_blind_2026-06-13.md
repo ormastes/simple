@@ -1,17 +1,16 @@
 # Bug: SG-1.3 bulk-copy recognizer is index-blind (latent miscompile footgun)
 
 - **ID:** sg13_bulk_copy_recognizer_index_blind
-- **Severity:** P2 (latent — not currently reachable; becomes P0 miscompile if wired)
+- **Severity:** P0 when enabled; legacy flag path quarantined
 - **Area:** compiler / 60.mir_opt (self-hosted), C backend lowering
-- **Status:** RESOLVED 2026-06-13 — a sound, guarded elision producer (`elide_bulk_copy`) was
-  landed and wired into the C-backend perf path (commit 4c8d519). The index-blind
-  `optimize_bulk_copy` is no longer on the pipeline path (kept as a standalone advisory
-  recognizer with guard comments + its own spec).
+- **Status:** REOPENED AND QUARANTINED 2026-08-24 — H1/H2 landed, but the documented M1
+  overlap/alias precondition remained unproved. The direct adapter and module hook are
+  identities, and the legacy environment flag cannot activate the rewrite.
 - **Date:** 2026-06-13
 
 ## Summary
 
-`optimize_bulk_copy` (`src/compiler/60.mir_opt/optimization_passes_part2.spl`) recognizes a
+`optimize_bulk_copy` (`src/compiler/60.mir_opt/_OptimizationPasses/io_passes.spl`) recognizes a
 bulk array-copy pattern and emits an advisory `bulk_copy_hint(src_base, dst_base, count)`
 intrinsic. It is **index-blind**: it counts Stores of the shape
 `dst[anyGEP] = Load(src[anyGEP])` with `src_base != dst_base` and fires at `count >= 2`. It
@@ -29,9 +28,11 @@ lowers to a **NO-OP** in the C backend.
 
 ## The footgun
 
-This session landed a sound `bulk_copy` → `memmove((void*)dst,(void*)src,count*8)` lowering
-in the C backend (`emit_bulk_copy`, `c_backend_translate_ops.spl`). It is correct **only**
-for a producer that guarantees conditions 1–4. The current recognizer does not. A naive
+This session landed a conditional `bulk_copy` → `memmove((void*)dst,(void*)src,count*8)`
+lowering in the C backend (`emit_bulk_copy`, `c_backend_translate_ops.spl`). It is correct
+**only** for a producer that satisfies the complete backend contract: structural conditions
+1–4, H1 temporary dead-out, H2 exact element width, and M1 complete-span non-overlap. The
+current recognizer does not. A naive
 future change that renames/lowers `bulk_copy_hint` → `bulk_copy` (or routes the hint to
 `emit_bulk_copy`) without adding the guard is a **silent miscompile**, e.g.
 `dst[5]=src[2]; dst[9]=src[7]` becomes a copy of `dst[0..1] = src[0..1]`.
@@ -40,20 +41,19 @@ Guard comments are in place at both sites (`optimize_bulk_copy` and `emit_bulk_c
 
 ## Fix (to enable the perf path soundly)
 
-Add a strict, conservative elision pass (C-backend + `SIMPLE_MIR_BULK_OPS=1` only) that
-emits the active `bulk_copy` ONLY when it has positively verified all of: `dst[i]=src[i]`
-for `i=0..k-1`, contiguous from 0, the matched ops are exactly consecutive (only the copy's
-own GEP/Load/Store, nothing interleaved), and `k` constant. Err toward NOT firing (a miss is
-harmless; an over-eager match miscompiles). Verify by MIR module inspection with **non-firing
-tests as the safety proof**: non-contiguous indices, reordered indices, and an intervening
-dst read must all leave the block UNCHANGED with no `bulk_copy` emitted.
+An eventual producer must positively verify all structural conditions (`dst[i]=src[i]`,
+contiguous `0..k-1`, an uninterrupted run, and constant `k`), H1 temporary dead-out, H2 exact
+eight-byte element width, and M1 complete-span non-overlap from region/alias facts. Unknown or
+incomplete facts leave MIR unchanged. Reactivation also requires positive activation witnesses,
+negative cases for every guard, and semantic differential execution covering overlap, traps,
+and partial/zero execution. Structural non-firing tests alone are not a safety proof.
 
 ## Draft elision pass + adversarial review (2026-06-13)
 
 A draft `elide_bulk_copy` was implemented (strict consecutive-unit matcher + firing/non-firing
 specs, all green at unit level) and then put through an adversarial higher-level review BEFORE
 landing. The review found the matcher's structural guard is necessary but **NOT sufficient** —
-two additional HIGH-severity miscompile holes that the non-firing specs did not exercise:
+three additional HIGH-severity miscompile holes that the non-firing specs did not exercise:
 
 - **H1 — temp liveness.** The pass deletes the run's GEP/Load/Store, removing the defs of each
   unit's element pointers and loaded value. It did not verify those temps are dead outside the
@@ -75,15 +75,15 @@ two additional HIGH-severity miscompile holes that the non-firing specs did not 
 Decision: the draft was **NOT landed** — shipping it (even flag-gated/default-off) would be
 known-unsound codegen. A sound producer must implement H1+H2 guards, add non-firing specs that
 exercise BOTH (a temp-used-after case and a sub-8-byte-element case → assert UNCHANGED), and be
-re-reviewed. The backend `emit_bulk_copy` precondition was corrected to list conditions 5 (8-byte)
-and 6 (temp dead-out).
+re-reviewed. The backend `emit_bulk_copy` precondition now lists conditions 5 (8-byte),
+6 (temp dead-out), and 7 (complete-span non-overlap).
 
 ## Verification status
 
 - `bulk_copy` → memmove backend lowering: DONE, seed-verified
   (`test/01_unit/compiler/backend/c_backend_bulk_copy_memmove_spec.spl`, 5/0, pins arg order).
-- sound producer / elision pass: DONE (commit 4c8d519). `elide_bulk_copy` implements the
-  strict matcher + H1 (temp dead-out) + H2 (8-byte element) guards; wired into the C+flag path.
-  Twice adversarially reviewed (2nd pass caught + fixed a real H1 Copy/Move-instruction hole and
-  an H2 default-too-eager). Specs: bulk_copy_elision_spec 11/0 (firing + non-firing safety proof),
-  bulk_ops_flag_spec 4/0 (elision via the wired flag path).
+- sound producer / elision pass: **NOT DONE**. Commit 4c8d519 added the strict matcher plus
+  H1 (temp dead-out) and H2 (8-byte element), but did not prove M1 non-overlap. On 2026-08-24
+  the direct adapter, module hook, and environment flag were quarantined. The retained specs
+  now require canonical witnesses and rejected shapes alike to remain unchanged. Manual
+  execution was intentionally omitted under the user's no-verification instruction.

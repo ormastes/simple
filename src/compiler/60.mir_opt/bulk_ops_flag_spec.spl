@@ -1,13 +1,12 @@
-# Behavioral gate for the SG-1.3 default-OFF, C-backend-scoped bulk-op flag.
+# Behavioral gate for the SG-1.3 quarantined bulk-op flag.
 #
 # Verifies the wiring in optimize_module_for_backend:
-#   - the flag (SIMPLE_MIR_BULK_OPS) is read correctly (default OFF);
-#   - the enabled path (apply_bulk_recognizers) runs the SOUND elision — a canonical copy
-#     run is replaced by an active `bulk_copy` intrinsic and the element ops are removed;
-#   - the disabled path is a no-op — the hook is skipped, module unchanged.
+#   - SIMPLE_MIR_BULK_OPS cannot enable the known-unsound alias rewrite;
+#   - apply_bulk_recognizers is a stable identity compatibility hook;
+#   - the backend path remains unchanged.
 # (The hook is C-backend-scoped: `if backend=="c" and mir_bulk_ops_enabled()`. The full
 #  20-pass pipeline is not runnable on synthetic modules under the seed interpreter, so the
-#  off-path is verified at unit level; see the last `it`. Detailed firing/non-firing safety
+#  off-path is verified at unit level; see the last `it`. Detailed quarantine/identity
 #  coverage lives in bulk_copy_elision_spec.spl.)
 #
 # Run:  bin/simple run src/compiler/60.mir_opt/bulk_ops_flag_spec.spl
@@ -83,20 +82,20 @@ fn _count_kind(module: MirModule, which: text) -> i64:
             bi = bi + 1
     n
 
-describe "SG-1.3 bulk-op flag — default-off, C-backend-scoped":
-    it "reads the flag: enabled when SIMPLE_MIR_BULK_OPS=1":
+describe "SG-1.3 bulk-op flag — quarantined":
+    it "rejects SIMPLE_MIR_BULK_OPS=1 while alias proof is unavailable":
         val _r = rt_env_set("SIMPLE_MIR_BULK_OPS", "1")
-        expect(mir_bulk_ops_enabled()).to_equal(true)
+        expect(mir_bulk_ops_enabled()).to_equal(false)
 
     it "reads the flag: disabled by default (=0)":
         val _r = rt_env_set("SIMPLE_MIR_BULK_OPS", "0")
         expect(mir_bulk_ops_enabled()).to_equal(false)
 
-    it "enabled path elides: apply_bulk_recognizers emits bulk_copy and removes element stores":
+    it "compatibility hook emits no bulk_copy and preserves element stores":
         val m = _module_with_bulk_copy()
         val out = apply_bulk_recognizers(m)
-        expect(_count_kind(out, "bulkcopy")).to_equal(1)
-        expect(_count_kind(out, "store")).to_equal(0)
+        expect(_count_kind(out, "bulkcopy")).to_equal(0)
+        expect(_count_kind(out, "store")).to_equal(2)
 
     it "disabled path is a no-op: apply not invoked → no bulk_copy, stores intact":
         # mir_bulk_ops_enabled()==false ⇒ optimize_module_for_backend's hook is skipped,

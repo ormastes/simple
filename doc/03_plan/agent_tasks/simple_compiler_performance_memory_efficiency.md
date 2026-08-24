@@ -164,6 +164,22 @@ current-head research reconciliation.
 - Manual verification intentionally omitted under the user's explicit
   no-verification instruction.
 
+## Completed bulk-copy quarantine tranche
+
+- Reopen the SG-1.3 bug because H1/H2 did not discharge the documented M1
+  overlap/alias precondition.
+- Make the direct elision adapter and module compatibility hook exact identities.
+- Prevent `SIMPLE_MIR_BULK_OPS=1` from activating the rewrite.
+- Preserve the dormant structural analysis API and backend intrinsic lowering;
+  neither is transformation authority.
+- Update canonical and rejected MIR witnesses to require unchanged element ops.
+- Record reactivation gates: region/span non-overlap, dominance, H1/H2, trap and
+  effect equivalence, activation witnesses, and semantic differential coverage.
+- Remove the enabled-path Theta(I*L + I^2) analysis/rebuild cost by returning
+  before function-key snapshots, local scans, whole-function rescans, or copies.
+- Manual verification intentionally omitted under the user's explicit
+  no-verification instruction.
+
 ## Completed WM module-path snapshot tranche
 
 - Snapshot normalized module-path segments once after existing exemption exits.

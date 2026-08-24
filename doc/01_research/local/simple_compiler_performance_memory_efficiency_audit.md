@@ -2653,6 +2653,30 @@ input with a different lifetime. Complete warning payload/order parity is
 covered using a generated RV64 bundle, but not executed under the user's
 no-verification instruction.
 
+### Quarantined alias-unsafe bulk-copy elision
+
+The default-off C-backend bulk-copy hook was still activatable through
+`SIMPLE_MIR_BULK_OPS=1` and directly through its public adapters. Its matcher
+proved contiguous indices, temporary dead-out (H1), and eight-byte values (H2),
+but compared only source/destination LocalIds. Distinct locals do not prove
+disjoint storage. With overlapping aliases, a forward element loop can load a
+value written by the previous iteration; `memmove` instead preserves the
+original source bytes. The rewrite could therefore change program results.
+
+The direct function adapter and module hook are now identities, and the legacy
+environment flag always reports disabled. This also removes the enabled pass's
+compile-time hot path: H2 scanned all L locals for every matched unit, while H1
+rescanned all I instructions and terminators for every candidate run, reaching
+worst-case Theta(I*L + I^2) work and repeatedly allocating temporary arrays,
+dictionaries, and rebuilt block arrays. The retained structural helpers are analysis-only and
+authorize no transformation.
+
+Reactivation requires a dominance-scoped region/alias proof for the complete
+source and destination spans, existing H1/H2/shape proofs, positive and negative
+activation witnesses, and semantic differential coverage for overlap, traps,
+and zero/partial execution. No manual tests, optimizer runs, benchmarks, or RSS
+measurement were run under the user's explicit no-verification instruction.
+
 ### Single-snapshot WM module-path classification
 
 The WM lane boundary lint classified module roots through `_wml_seg`, which
