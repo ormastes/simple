@@ -63,6 +63,10 @@ implementation-in-progress
 - implementation: Reclassified auto-vectorization as `AnalysisOnly` and canonical collection optimization as `Disabled`; removed hoisting claims, made both hoisting facades fail closed, and excluded unproved collection rewrites pending ownership/alias/effect/differential gates.
 - implementation: Corrected loop exits to retain `(from,to)` edges and made trip counts unknown until SCEV-lite proves initialization, step, direction, branch polarity, nowrap, and finiteness.
 - implementation: AST-only collection findings remain advisory under Robust/Critical profiles with explicit uncertainty and no machine fix; typed proven diagnostics retain the future deny-policy lane.
+- implementation-2026-08-24: Added request-local typed HIR collection facts with
+  generated-child worklist traversal, loop ancestry, resolved-symbol registry
+  evidence, explicit incomplete outcomes, and a fail-closed COLL002 candidate
+  projection. Standard-library registry generation and driver adaptation remain open.
 - review: Parallel warning/error, MIR-safety, tool-hot-path, and completion audits were source-checked by the merge owner. Remaining requirements stay explicitly incomplete.
 - implementation: Added deterministic `simple.opt-pipeline-report/v1` planning evidence, typed backend outcomes, structured `PassRunRecord` integrity checks, stable positive/negative witness contracts for the four admitted active transforms, and fail-closed witness registry validation. Planning counters remain explicitly unavailable rather than implying execution.
 - implementation: Reclassified target narrowing and inline facades as `Skeleton` and read-ahead hoisting as `AnalysisOnly`; updated effective-pipeline and hotspot-plan expectations so quarantined passes are never advertised as runnable.
