@@ -49,3 +49,17 @@ also bind every page to authenticated ELF ranges or the computed RW+NX stack,
 use PMM-issued provenance only, and expose no replayable physical plan. Until
 that transaction is implemented and independently accepted, canonical RV32
 process-image readiness remains false.
+
+## 2026-08-24 loader transaction prerequisite
+
+The loader registry now contains the bounded transaction prerequisite described
+in `doc/05_design/os/loader/rv32_executable_mapping_transaction_owner_v1.md`.
+Generic joint abort, commit, and revoke cannot clear a live RV32 mapping pin;
+no RV32 mapping commit exists before authoritative scheduler adoption; and an
+indeterminate root release remains `ReleaseRetryable` in the original bounded
+slot with a generation-, nonce-, root-, and attempt-bound retry coordinate.
+
+This fail-closes the two cross-capsule lifecycle defects in the rejected design.
+It does not close the overall blocker: the authoritative PMM/Sv32 mapper, its
+root-unreachable producer, and a registry-backed scheduler adoption consumer do
+not yet exist, and readiness remains false.

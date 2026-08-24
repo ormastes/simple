@@ -61,6 +61,9 @@ pub enum ExecutableAuthorityErrorV1:
     InvalidJointLease
     InvalidJointBinding
     InvalidUserEntryLease
+    MappingPinActive
+    InvalidMappingPinLease
+    InvalidMappingReleaseCoordinate
 
 pub struct ExecutableAuthorityTokenV1:
     slot_index: i64
@@ -106,6 +109,33 @@ pub struct ExecutableRiscv32UserEntryReservationV1:
     _entry_lease: ExecutableRiscv32UserEntryLeaseV1
     _state: Riscv32UserSretStateV1
 
+# A mapping pin is not a physical mapping handle. It is an opaque coordinate
+# proving that the loader slot and an RV32 mapping transaction share one
+# canonical lifecycle. Only the registry may change that lifecycle.
+pub struct ExecutableRiscv32MappingPinLeaseV1:
+    _token: ExecutableAuthorityTokenV1
+    _joint_nonce: u64
+    _pin_nonce: u64
+
+pub struct ExecutableRiscv32MappingTransactionV1:
+    _entry: ExecutableRiscv32UserEntryReservationV1
+    _pin: ExecutableRiscv32MappingPinLeaseV1
+
+# Retained retry coordinate for an external root-unreachable operation. The
+# attempt is registry-issued and cannot be replayed after a later attempt.
+pub struct ExecutableRiscv32MappingReleaseCoordinateV1:
+    _pin: ExecutableRiscv32MappingPinLeaseV1
+    _release_attempt: u64
+    _root_id: u64
+    _root_generation: u64
+
+pub enum ExecutableRiscv32MappingPinStateV1:
+    None
+    Held
+    Installed
+    ReleaseInProgress
+    ReleaseRetryable
+
 pub(package) struct ExecutableAuthorityJointReservationV1:
     identity: ExecutableAuthorityArmedIdentityV1
     lease: ExecutableAuthorityJointLeaseV1
@@ -119,6 +149,11 @@ struct ExecutableAuthoritySlotV1:
     rv32_entry_point: u32
     rv32_user_sp: u32
     rv32_sstatus: u32
+    rv32_mapping_pin_state: ExecutableRiscv32MappingPinStateV1
+    rv32_mapping_pin_nonce: u64
+    rv32_mapping_release_attempt: u64
+    rv32_mapping_root_id: u64
+    rv32_mapping_root_generation: u64
     close_attempt: u64
     has_entry_identity: bool
     entry_point: u64
@@ -423,6 +458,12 @@ pub(package) fn executable_authority_issue_verified(
                             rv32_entry_point: 0u32,
                             rv32_user_sp: 0u32,
                             rv32_sstatus: 0u32,
+                            rv32_mapping_pin_state:
+                                ExecutableRiscv32MappingPinStateV1.None,
+                            rv32_mapping_pin_nonce: 0u64,
+                            rv32_mapping_release_attempt: 0u64,
+                            rv32_mapping_root_id: 0u64,
+                            rv32_mapping_root_generation: 0u64,
                             close_attempt: 0u64,
                             has_entry_identity: has_entry_identity,
                             entry_point: entry_point,
@@ -501,6 +542,21 @@ fn _authority_joint_lease_index(
     val slot = state.slots[index]
     if slot.state != ExecutableAuthorityStateV1.JointReserved or
         slot.joint_nonce != lease._joint_nonce:
+        return -1
+    index
+
+fn _authority_rv32_mapping_pin_index(
+    state: ExecutableAuthorityRegistryStateV1,
+    lease: ExecutableRiscv32MappingPinLeaseV1
+) -> i64:
+    val joint = ExecutableAuthorityJointLeaseV1(
+        _token: lease._token, _joint_nonce: lease._joint_nonce)
+    val index = _authority_joint_lease_index(state, joint)
+    if index < 0 or lease._pin_nonce == 0u64:
+        return -1
+    val slot = state.slots[index]
+    if slot.rv32_mapping_pin_nonce != lease._pin_nonce or
+        slot.rv32_mapping_pin_state == ExecutableRiscv32MappingPinStateV1.None:
         return -1
     index
 
@@ -589,13 +645,17 @@ pub(package) fn executable_authority_abort_joint_reservation_v1(
                     error = ExecutableAuthorityErrorV1.InvalidJointLease
                 else:
                     var updated = state.slots[index]
-                    updated.state = ExecutableAuthorityStateV1.Armed
-                    updated.joint_nonce = 0u64
-                    updated.rv32_entry_nonce = 0u64
-                    updated.rv32_entry_point = 0u32
-                    updated.rv32_user_sp = 0u32
-                    updated.rv32_sstatus = 0u32
-                    state.slots[index] = updated
+                    if updated.rv32_mapping_pin_state !=
+                        ExecutableRiscv32MappingPinStateV1.None:
+                        error = ExecutableAuthorityErrorV1.MappingPinActive
+                    else:
+                        updated.state = ExecutableAuthorityStateV1.Armed
+                        updated.joint_nonce = 0u64
+                        updated.rv32_entry_nonce = 0u64
+                        updated.rv32_entry_point = 0u32
+                        updated.rv32_user_sp = 0u32
+                        updated.rv32_sstatus = 0u32
+                        state.slots[index] = updated
             _authority_registry_state = Some(state)
     if not _authority_unlock():
         return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
@@ -703,6 +763,9 @@ pub(package) fn executable_authority_commit_joint_reservation_v1(
                     error = ExecutableAuthorityErrorV1.InvalidJointLease
                 elif state.slots[index].rv32_entry_nonce != 0u64:
                     error = ExecutableAuthorityErrorV1.InvalidUserEntryLease
+                elif state.slots[index].rv32_mapping_pin_state !=
+                    ExecutableRiscv32MappingPinStateV1.None:
+                    error = ExecutableAuthorityErrorV1.MappingPinActive
                 elif not _authority_joint_request_matches(
                     state.slots[index], consumer, entry_point, canonical_path):
                     error = ExecutableAuthorityErrorV1.InvalidJointBinding
@@ -718,6 +781,323 @@ pub(package) fn executable_authority_commit_joint_reservation_v1(
     if error != ExecutableAuthorityErrorV1.None:
         return Err(error)
     Ok(())
+
+pub(package) fn executable_authority_begin_riscv32_mapping_transaction_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    user_sp: u64,
+    inherited_sstatus: u32,
+    canonical_path: text
+) -> Result<ExecutableRiscv32MappingTransactionV1, ExecutableAuthorityErrorV1>:
+    """Atomically reserve loader, U-mode entry, and future Sv32 mapping ownership."""
+    val prepared_state = riscv32_user_sret_state_v1(
+        entry_point, user_sp, inherited_sstatus)
+    if prepared_state == nil:
+        return Err(ExecutableAuthorityErrorV1.InvalidUserEntryLease)
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    var transaction: ExecutableRiscv32MappingTransactionV1? = nil
+    match _authority_registry_state:
+        case nil: error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_token_index(state, token)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidToken
+                else:
+                    val slot = state.slots[index]
+                    if slot.state != ExecutableAuthorityStateV1.Armed:
+                        error = ExecutableAuthorityErrorV1.NotArmed
+                    elif not _authority_rv32_joint_request_matches(
+                        slot, consumer, entry_point, canonical_path):
+                        error = ExecutableAuthorityErrorV1.InvalidJointBinding
+                    elif state.next_nonce_counter >= 18446744073709551613u64:
+                        error = ExecutableAuthorityErrorV1.NonceExhausted
+                    else:
+                        val joint_nonce = _authority_mix64(
+                            _authority_next_nonce(state, slot.generation, index) ^
+                            0x525633324A4F494Eu64)
+                        val entry_nonce = _authority_mix64(
+                            joint_nonce ^ (state.next_nonce_counter + 1u64) ^
+                            0x554D4F4445535245u64)
+                        val pin_nonce = _authority_mix64(
+                            entry_nonce ^ (state.next_nonce_counter + 2u64) ^
+                            0x4D415050494E5049u64)
+                        if joint_nonce == 0u64 or entry_nonce == 0u64 or
+                            pin_nonce == 0u64 or joint_nonce == entry_nonce or
+                            joint_nonce == pin_nonce or entry_nonce == pin_nonce:
+                            error = ExecutableAuthorityErrorV1.NonceExhausted
+                        else:
+                            var updated = slot
+                            updated.state = ExecutableAuthorityStateV1.JointReserved
+                            updated.joint_nonce = joint_nonce
+                            updated.rv32_entry_nonce = entry_nonce
+                            updated.rv32_entry_point = prepared_state.unwrap().sepc
+                            updated.rv32_user_sp = prepared_state.unwrap().sp
+                            updated.rv32_sstatus = prepared_state.unwrap().sstatus
+                            updated.rv32_mapping_pin_state =
+                                ExecutableRiscv32MappingPinStateV1.Held
+                            updated.rv32_mapping_pin_nonce = pin_nonce
+                            updated.rv32_mapping_release_attempt = 0u64
+                            updated.rv32_mapping_root_id = 0u64
+                            updated.rv32_mapping_root_generation = 0u64
+                            state.slots[index] = updated
+                            state.next_nonce_counter =
+                                state.next_nonce_counter + 3u64
+                            val joint = ExecutableAuthorityJointLeaseV1(
+                                _token: token, _joint_nonce: joint_nonce)
+                            val entry = ExecutableRiscv32UserEntryReservationV1(
+                                _joint_lease: joint,
+                                _entry_lease: ExecutableRiscv32UserEntryLeaseV1(
+                                    _token: token, _joint_nonce: joint_nonce,
+                                    _entry_nonce: entry_nonce),
+                                _state: prepared_state.unwrap())
+                            transaction = Some(ExecutableRiscv32MappingTransactionV1(
+                                _entry: entry,
+                                _pin: ExecutableRiscv32MappingPinLeaseV1(
+                                    _token: token, _joint_nonce: joint_nonce,
+                                    _pin_nonce: pin_nonce)))
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error != ExecutableAuthorityErrorV1.None:
+        return Err(error)
+    match transaction:
+        case Some(value): Ok(value)
+        case nil: Err(ExecutableAuthorityErrorV1.InvalidRegistry)
+
+pub(package) fn executable_authority_bind_riscv32_mapping_root_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    pin: ExecutableRiscv32MappingPinLeaseV1,
+    root_id: u64,
+    root_generation: u64
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    """Bind one architecture-owned root before its first reachable PTE is installed."""
+    if root_id == 0u64 or root_generation == 0u64:
+        return Err(ExecutableAuthorityErrorV1.InvalidMappingPinLease)
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    match _authority_registry_state:
+        case nil: error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_rv32_mapping_pin_index(state, pin)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                else:
+                    var slot = state.slots[index]
+                    if slot.rv32_mapping_pin_state !=
+                        ExecutableRiscv32MappingPinStateV1.Held or
+                        slot.rv32_mapping_root_id != 0u64 or
+                        slot.rv32_mapping_root_generation != 0u64:
+                        error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                    else:
+                        slot.rv32_mapping_root_id = root_id
+                        slot.rv32_mapping_root_generation = root_generation
+                        state.slots[index] = slot
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error == ExecutableAuthorityErrorV1.None: Ok(()) else: Err(error)
+
+pub(package) fn executable_authority_mark_riscv32_mapping_installed_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    pin: ExecutableRiscv32MappingPinLeaseV1,
+    root_id: u64,
+    root_generation: u64
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    """Record the architecture owner's exact successful root installation."""
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    match _authority_registry_state:
+        case nil: error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_rv32_mapping_pin_index(state, pin)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                else:
+                    var slot = state.slots[index]
+                    if slot.rv32_mapping_pin_state !=
+                        ExecutableRiscv32MappingPinStateV1.Held or
+                        root_id == 0u64 or root_generation == 0u64 or
+                        slot.rv32_mapping_root_id != root_id or
+                        slot.rv32_mapping_root_generation != root_generation:
+                        error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                    else:
+                        slot.rv32_mapping_pin_state =
+                            ExecutableRiscv32MappingPinStateV1.Installed
+                        state.slots[index] = slot
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error == ExecutableAuthorityErrorV1.None: Ok(()) else: Err(error)
+
+pub(package) fn executable_authority_begin_riscv32_mapping_release_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    pin: ExecutableRiscv32MappingPinLeaseV1
+) -> Result<ExecutableRiscv32MappingReleaseCoordinateV1, ExecutableAuthorityErrorV1>:
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    var coordinate: ExecutableRiscv32MappingReleaseCoordinateV1? = nil
+    match _authority_registry_state:
+        case nil: error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_rv32_mapping_pin_index(state, pin)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                else:
+                    val slot = state.slots[index]
+                    if slot.rv32_mapping_root_id == 0u64 or
+                        slot.rv32_mapping_root_generation == 0u64:
+                        error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                    elif slot.rv32_mapping_pin_state ==
+                        ExecutableRiscv32MappingPinStateV1.ReleaseInProgress:
+                        # Crash/lost-return recovery: canonical state reissues
+                        # the same attempt and never creates a second release.
+                        coordinate = Some(
+                            ExecutableRiscv32MappingReleaseCoordinateV1(
+                                _pin: pin,
+                                _release_attempt:
+                                    slot.rv32_mapping_release_attempt,
+                                _root_id: slot.rv32_mapping_root_id,
+                                _root_generation:
+                                    slot.rv32_mapping_root_generation))
+                    elif slot.rv32_mapping_pin_state !=
+                        ExecutableRiscv32MappingPinStateV1.Held and
+                        slot.rv32_mapping_pin_state !=
+                            ExecutableRiscv32MappingPinStateV1.Installed and
+                        slot.rv32_mapping_pin_state !=
+                            ExecutableRiscv32MappingPinStateV1.ReleaseRetryable:
+                        error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                    elif slot.rv32_mapping_release_attempt ==
+                        18446744073709551615u64:
+                        error = ExecutableAuthorityErrorV1.NonceExhausted
+                    else:
+                        var updated = slot
+                        updated.rv32_mapping_release_attempt =
+                            slot.rv32_mapping_release_attempt + 1u64
+                        updated.rv32_mapping_pin_state =
+                            ExecutableRiscv32MappingPinStateV1.ReleaseInProgress
+                        state.slots[index] = updated
+                        coordinate = Some(
+                            ExecutableRiscv32MappingReleaseCoordinateV1(
+                                _pin: pin,
+                                _release_attempt:
+                                    updated.rv32_mapping_release_attempt,
+                                _root_id: updated.rv32_mapping_root_id,
+                                _root_generation:
+                                    updated.rv32_mapping_root_generation))
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error != ExecutableAuthorityErrorV1.None:
+        return Err(error)
+    match coordinate:
+        case Some(value): Ok(value)
+        case nil: Err(ExecutableAuthorityErrorV1.InvalidRegistry)
+
+pub(package) fn executable_authority_abort_unmaterialized_riscv32_mapping_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    transaction: ExecutableRiscv32MappingTransactionV1
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    """Abort only before an architecture root has ever been bound."""
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    match _authority_registry_state:
+        case nil: error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_rv32_mapping_pin_index(
+                    state, transaction._pin)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                else:
+                    var slot = state.slots[index]
+                    val entry = transaction._entry
+                    if slot.rv32_mapping_pin_state !=
+                        ExecutableRiscv32MappingPinStateV1.Held or
+                        slot.rv32_mapping_root_id != 0u64 or
+                        slot.rv32_mapping_root_generation != 0u64 or
+                        entry._entry_lease._entry_nonce !=
+                            slot.rv32_entry_nonce:
+                        error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                    else:
+                        slot.state = ExecutableAuthorityStateV1.Armed
+                        slot.joint_nonce = 0u64
+                        slot.rv32_entry_nonce = 0u64
+                        slot.rv32_entry_point = 0u32
+                        slot.rv32_user_sp = 0u32
+                        slot.rv32_sstatus = 0u32
+                        slot.rv32_mapping_pin_state =
+                            ExecutableRiscv32MappingPinStateV1.None
+                        slot.rv32_mapping_pin_nonce = 0u64
+                        state.slots[index] = slot
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error == ExecutableAuthorityErrorV1.None: Ok(()) else: Err(error)
+
+pub(package) fn executable_authority_mapping_release_indeterminate_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    coordinate: ExecutableRiscv32MappingReleaseCoordinateV1
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    """Retain the exact bounded retry coordinate; never reopen the loader slot."""
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    match _authority_registry_state:
+        case nil: error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_rv32_mapping_pin_index(
+                    state, coordinate._pin)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                else:
+                    var slot = state.slots[index]
+                    if slot.rv32_mapping_pin_state !=
+                        ExecutableRiscv32MappingPinStateV1.ReleaseInProgress or
+                        slot.rv32_mapping_release_attempt !=
+                            coordinate._release_attempt or
+                        slot.rv32_mapping_root_id != coordinate._root_id or
+                        slot.rv32_mapping_root_generation !=
+                            coordinate._root_generation:
+                        error = ExecutableAuthorityErrorV1.InvalidMappingReleaseCoordinate
+                    else:
+                        slot.rv32_mapping_pin_state =
+                            ExecutableRiscv32MappingPinStateV1.ReleaseRetryable
+                        state.slots[index] = slot
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error == ExecutableAuthorityErrorV1.None: Ok(()) else: Err(error)
 
 pub(package) fn executable_authority_abort_riscv32_user_entry_reservation_v1(
     owner: ExecutableAuthorityRegistryV1,
@@ -748,6 +1128,9 @@ pub(package) fn executable_authority_abort_riscv32_user_entry_reservation_v1(
                         entry._entry_nonce == 0u64 or
                         slot.rv32_entry_nonce != entry._entry_nonce):
                         error = ExecutableAuthorityErrorV1.InvalidUserEntryLease
+                    elif slot.rv32_mapping_pin_state !=
+                        ExecutableRiscv32MappingPinStateV1.None:
+                        error = ExecutableAuthorityErrorV1.MappingPinActive
                     else:
                         var updated = slot
                         updated.state = ExecutableAuthorityStateV1.Armed
@@ -803,6 +1186,9 @@ pub(package) fn executable_authority_commit_riscv32_user_entry_reservation_v1(
                         reservation._state.sp != slot.rv32_user_sp or
                         reservation._state.sstatus != slot.rv32_sstatus):
                         error = ExecutableAuthorityErrorV1.InvalidUserEntryLease
+                    elif slot.rv32_mapping_pin_state !=
+                        ExecutableRiscv32MappingPinStateV1.None:
+                        error = ExecutableAuthorityErrorV1.MappingPinActive
                     elif not _authority_rv32_joint_request_matches(
                         slot, consumer, entry_point, canonical_path):
                         error = ExecutableAuthorityErrorV1.InvalidJointBinding
@@ -846,7 +1232,10 @@ pub(package) fn executable_authority_begin_joint_revoke_v1(
                     error = ExecutableAuthorityErrorV1.InvalidJointLease
                 else:
                     val slot = state.slots[index]
-                    if slot.close_attempt == 18446744073709551615u64:
+                    if slot.rv32_mapping_pin_state !=
+                        ExecutableRiscv32MappingPinStateV1.None:
+                        error = ExecutableAuthorityErrorV1.MappingPinActive
+                    elif slot.close_attempt == 18446744073709551615u64:
                         error = ExecutableAuthorityErrorV1.NonceExhausted
                     else:
                         var updated = slot
@@ -1166,6 +1555,10 @@ export ExecutableAuthorityTokenV1, ExecutableAuthoritySnapshotV1
 export ExecutableAuthorityJointLeaseV1
 export ExecutableRiscv32UserEntryLeaseV1
 export ExecutableRiscv32UserEntryReservationV1
+export ExecutableRiscv32MappingPinLeaseV1
+export ExecutableRiscv32MappingTransactionV1
+export ExecutableRiscv32MappingReleaseCoordinateV1
+export ExecutableRiscv32MappingPinStateV1
 export ExecutableAuthorityRegistryV1
 export executable_authority_registry_max_slots
 export executable_authority_loader_owner_initialize
