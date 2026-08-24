@@ -101,3 +101,27 @@ Deliberately NOT shipped as a lint rule: the shape is not always wrong (four
 files carry it and compile clean), so a rule that flagged all 24 would be noise
 rather than detection. Recorded here so the next lane starts from the census
 instead of rediscovering it.
+
+### Symptom 3, update: two tempting explanations both REFUTED
+
+A third file, `30.types/type_infer/traits.spl`, failed on `HmInferContext` and
+`TypeInferError` while carrying `use type_infer_types.*` and **no brace-import
+of that module at all** — so "the brace-import cancels the wildcard" is wrong.
+
+And "a single-segment relative wildcard binds nothing" is also wrong:
+`30.types/dim_constraints.spl` gets `DimConstraint`/`DimError` **only** from
+`use dim_constraints_types.*` (single-segment, relative) and compiles CLEAN,
+`point=post-lowering count=0`. `type_infer/core.spl` and
+`type_infer/generalization.spl` carry `use type_infer_types.*` and are CLEAN too.
+
+So the bare relative wildcard works for some names and not others, and the
+discriminator is **not yet known**. Tree-wide there are only **22** such lines
+(10 of them `use type_infer_types.*`), 12 inside slice-B — a small, bounded set
+for whoever picks this up. Because clean and broken files are indistinguishable
+by the import line alone, no lint rule is shippable for this yet; that is why
+lane Q fixed the three failing files by naming the missing symbols in an
+explicit absolute brace-import and left the shape itself alone.
+
+Fixed this way, all three now report `point=post-lowering count=0`:
+`inference_expr_calls.spl` (`InferMode`), `inference_expr_ops.spl`
+(`TypeScheme`), `traits.spl` (`HmInferContext`, `TypeInferError`).
