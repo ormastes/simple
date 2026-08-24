@@ -15,6 +15,10 @@ struct QueryEnumFacts:
     variants: [text]
     variant_set: Dict<text, bool>
 
+struct QueryMexhSpan:
+    start_col: i64
+    end_col: i64
+
 fn _query_enum_facts(variants: [text]) -> QueryEnumFacts:
     var variant_set: Dict<text, bool> = {}
     for variant in variants:
@@ -91,16 +95,24 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
             var arm_count = 0
             var arm_patterns: [text] = []
             var arm_pattern_set: Dict<text, bool> = {}
+            var arm_indent = -1
             var ai = li + 1
             while ai < lines.len():
                 val aline = lines[ai]
                 val at = aline.trim()
-                if at == "":
+                if at == "" or at.starts_with("#"):
                     ai = ai + 1
                     continue
                 val aindent = _count_indent(aline)
                 if aindent <= match_indent:
                     break
+
+                # Only sibling lines at the first real arm's indentation are
+                # arms of this match. Nested body statements (including nested
+                # `case` or label-like lines) must not mutate wildcard state.
+                if arm_indent >= 0 and aindent != arm_indent:
+                    ai = ai + 1
+                    continue
 
                 # Extract the pattern name from "case PATTERN:" or "PATTERN:"
                 var pat_name = ""
@@ -108,6 +120,11 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
                     pat_name = at.substring(5).split(":")[0].split("(")[0].trim()
                 elif at.contains(":"):
                     pat_name = at.split(":")[0].split("(")[0].trim()
+                if pat_name == "":
+                    ai = ai + 1
+                    continue
+                if arm_indent < 0:
+                    arm_indent = aindent
 
                 # Classify once, before the first wildcard mutates state. One
                 # arm receives at most one MEXH004, with stable precedence:
@@ -115,13 +132,13 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
                 val duplicate_wildcard = pat_name == "_" and has_wildcard
                 val after_wildcard = has_wildcard and arm_count > wildcard_pos
                 if duplicate_wildcard:
-                    count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                    count = count + _emit_mexh(file, ai + 1, QueryMexhSpan(aindent + 1, aindent + at.len()), "MEXH004",
                         "unreachable match arm: duplicate wildcard '_'", format)
                 elif after_wildcard:
-                    count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                    count = count + _emit_mexh(file, ai + 1, QueryMexhSpan(aindent + 1, aindent + at.len()), "MEXH004",
                         "unreachable match arm after wildcard '_'", format)
                 elif pat_name != "" and pat_name != "_" and arm_pattern_set.has(pat_name):
-                    count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                    count = count + _emit_mexh(file, ai + 1, QueryMexhSpan(aindent + 1, aindent + at.len()), "MEXH004",
                         "unreachable match arm: duplicate pattern '{pat_name}'", format)
 
                 if pat_name == "_" and not has_wildcard:
@@ -163,20 +180,20 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
                                 "Result<T, E>"
                             else:
                                 "enum '{inferred_type}'"
-                            count = count + _emit_mexh(file, line_num, trimmed.len(), warn_code,
+                            count = count + _emit_mexh(file, line_num, QueryMexhSpan(match_indent + 1, match_indent + trimmed.len()), warn_code,
                                 "non-exhaustive match on {type_label}: missing [{missing_text}]", format)
                 else:
                     # Unknown type — generic MEXH002
-                    count = count + _emit_mexh(file, line_num, trimmed.len(), "MEXH002",
+                    count = count + _emit_mexh(file, line_num, QueryMexhSpan(match_indent + 1, match_indent + trimmed.len()), "MEXH002",
                         "match expression has no wildcard/default case", format)
 
         li = li + 1
     count
 
-fn _emit_mexh(file: text, line_num: i64, end_col: i64, code: text, message: text, format: text) -> i64:
+fn _emit_mexh(file: text, line_num: i64, span: QueryMexhSpan, code: text, message: text, format: text) -> i64:
     """Emit a MEXH warning in the requested format. Returns 1."""
     if format == "json":
-        _diag_emit_or_collect("{\"severity\":2,\"code\":\"{code}\",\"message\":\"{message}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{end_col},\"tags\":[],\"source\":\"simple-lint\"}")
+        _diag_emit_or_collect("{\"severity\":2,\"code\":\"{code}\",\"message\":\"{message}\",\"line\":{line_num},\"col\":{span.start_col},\"end_line\":{line_num},\"end_col\":{span.end_col},\"tags\":[],\"source\":\"simple-lint\"}")
     else:
         print "{file}:{line_num}: warning[{code}]: {message}"
     1

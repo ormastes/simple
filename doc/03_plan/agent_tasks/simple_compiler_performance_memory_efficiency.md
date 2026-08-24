@@ -1668,3 +1668,15 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Runtime timing/RSS evidence remains unavailable under the no-verification
   override; only source-level complexity and retained-data bounds are claimed.
 - Parallel semantic, performance, and fixture review remains required.
+# Completed tranche: MEXH sibling boundaries and source spans (2026-08-24)
+
+- Added an exact sibling-arm indentation boundary to the query lint fallback.
+- Prevented multiline bodies, nested cases, blanks, and comments from mutating
+  wildcard/pattern/arm-count state.
+- Preserved MEXH004 precedence and semantic-lint behavior.
+- Extended the JSON emitter with explicit one-based start/end columns for arm
+  and match-level MEXH001-005 diagnostics.
+- Extended canonical/legacy fixtures and the manual with multiline, nested,
+  later-sibling, and exact-span oracles.
+- No manual verification was run under the user override; parallel semantic,
+  performance, and fixture review remains required.

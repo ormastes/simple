@@ -3409,3 +3409,21 @@ one counter per `ANY_CLASSES` entry plus a site count updated while printing. Ou
 and totals remain unchanged; retained driver memory falls from `O(S)` sites to
 `O(K)` counters for the fixed class schema, excluding the per-file census
 already owned by `scan_source`.
+# 2026-08-24 follow-up: match-lint arm boundaries and spans
+
+The query MEXH scanner formerly treated every nonblank descendant of a `match`
+as an arm. After a wildcard, multiline body statements could therefore emit
+false unreachable-arm warnings; nested label/case-like text could also pollute
+pattern state. The scanner now records the first real arm indentation and only
+classifies siblings at that exact level. Blank/comments and deeper bodies are
+skipped before wildcard, deduplication, or arm-count state changes.
+
+The JSON emitter also accepted only an end column and hardcoded `col: 1`.
+MEXH001-005 now pass explicit source columns: arm diagnostics use
+`indent+1 .. indent+trimmed_length`, and match-level diagnostics use the same
+formula for the `match` line. The columns travel as one `QueryMexhSpan`, keeping
+the emitter below the ARG001 parameter threshold. This changes diagnostic
+location metadata only; text output, precedence, and semantic-lint warning
+objects are unchanged. The patch adds no traversal: each match retains its one
+descendant scan, while overall fallback complexity—including overlapping nested
+match scans and enum inference—remains unchanged.

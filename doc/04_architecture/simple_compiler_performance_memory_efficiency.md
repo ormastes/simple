@@ -786,3 +786,10 @@ the existing buffer and allocate no prefix snapshots.
 
 The CLI owns aggregate counts, not aggregate site records: sites are emitted in
 source order and immediately folded into counters derived from `ANY_CLASSES`.
+# Query match-lint structural boundary
+
+The text fallback owns one sibling-arm indentation per match. Only validated
+patterns at that level enter coverage, wildcard, duplicate, and ordering facts;
+nested bodies are outside the arm-fact capsule. Diagnostic serialization takes
+explicit one-based start/end columns from the scanner rather than inventing a
+column-1 span.

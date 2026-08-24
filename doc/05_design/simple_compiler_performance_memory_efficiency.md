@@ -1074,3 +1074,16 @@ non-leading `as`/`is` must have a literal space immediately before it.
 The driver initializes one counter per `ANY_CLASSES` entry and keeps a scalar
 site count. Each printed site updates these values immediately; class
 and summary records retain their established order and format.
+# MEXH text-fallback boundary and span design
+
+During a match scan, `arm_indent` starts unknown. Blank and comment-only lines
+are ignored. The first descendant that yields a real pattern establishes the
+sibling indentation; every line at a different descendant indentation is
+skipped before classification and state mutation. Existing diagnostic
+precedence remains duplicate wildcard, earlier wildcard, duplicate pattern.
+
+`_emit_mexh` accepts one `QueryMexhSpan` containing start/end columns, avoiding
+an ARG001 parameter-count warning. Arm callers translate trimmed
+text back to one-based source columns with `aindent+1` and `aindent+at.len()`;
+match-level callers use `match_indent+1` and
+`match_indent+trimmed.len()`. Plain-text output is intentionally unchanged.
