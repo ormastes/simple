@@ -741,3 +741,28 @@ purely the concurrent-edit artifact described above, not a property of the fix.
 
 Still true, and still the honest bound: **the SIGSEGV this record documents is
 eliminated; Stage 2 does not yet compile a hello world.**
+
+## The `0 MIR instructions` frontier is PRE-EXISTING and already filed — see the other record
+
+Characterised the same day on the admitted Stage 2 `7e45db55…`. Summary only;
+the full evidence lives in
+**`bootstrap_stage2_empty_mir_bodies_2026-07-05.md`** (OPEN P1, this guard's
+owning record), with the sibling mechanism in
+`hir_stmt_expr_payload_extraction_nil_2026-07-17.md` (OPEN P1, "Wall 1").
+
+* **Pre-existing, by documentation and by mechanism.** Both records predate this
+  lane by 5-7 weeks, describe this exact guard, and sit entirely on the
+  bootstrap MIR path — which the seed `if`-merge fix never touches. Nothing here
+  is newly introduced; it was newly *reachable* once the SIGSEGV was cleared.
+* **Not a missing entry, not a stub substitution.** The entry module is found
+  (`functions=1`), `main` is not extern, `lower_function` runs end to end, and
+  the body reports `stmts=1` with the statement visited.
+* **Same class as the `tag -1` fall-through above**, one layer down: a non-nil
+  value that is not the enum the consumer expects. `rt_enum_discriminant` on the
+  incoming `HirStmtKind` returns 4119164143 / 2163764024 — stable per kind,
+  identical across processes, and matching neither the disc pre-dispatch nor any
+  qualified `case` arm, so `lower_stmt_impl` takes `case _: ()` and emits
+  nothing. Every arriving `HirStmt` also has an empty span.
+* **No silent-wrong-output risk.** The guard is loud and fail-closed
+  (`eprint` + `rt_exit(1)`, rc=1, no `.smf` written) — the 2026-07-05 lane added
+  it for precisely this shape.

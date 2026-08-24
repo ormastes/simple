@@ -1209,3 +1209,107 @@ The post-fix worker also passed the subsequently exposed
 `rt_heap_registry_count` dispatcher gap and reached parsing of the 383-source
 closure. Its next distinct failure is tracked in
 `bootstrap_stage2_interpreted_parser_empty_array_2026-07-24.md`.
+
+## 2026-08-24 — STILL FIRING on an ADMITTED Stage 2; localized to the stmt-kind disc pre-dispatch
+
+Reached by clearing the arm64 `hc_enc_hir_module` SIGSEGV
+(`stage2_hir_codec_segv_is_i32_truncated_heap_ref_2026-08-24.md`); with
+`SIMPLE_HIR_CACHE=0` this guard is now the Stage-2 `compile` blocker. Measured
+on the **admitted** Stage 2 `7e45db55a89aed6f04139d157467e1adb6235a3b8a1006f0dacf8221375e9b40`
+(provenance `pure-simple`, sanity `pass`) — no rebuild was needed for any of
+this: every probe below is already compiled in and env-gated.
+
+### It is NOT a missing entry and NOT a stub substitution
+
+Each step verified by its own trace, not inferred:
+
+| evidence | trace |
+|---|---|
+| entry module found, 1 function | `[bootstrap-flat-entry] index=0 modules=1 functions=1` |
+| the function is `main`, not extern | `[mir-flat-prescan-function] ... index=0 name=main` (prescan skips extern) |
+| real lowering runs on it end to end | `[mir-lower] real-lower:start main` … `real-lower:done main` |
+| its body is not empty | `[mir-lower] block:start stmts=1 has=false` |
+| the statement IS walked | `block:stmt 0` … `block:stmt-done 0` |
+
+So the body is present and visited. The instructions are lost *inside* the
+statement walk.
+
+### The statement lowers to nothing, silently
+
+With `SIMPLE_MIR_STMT_CALLER_DEBUG=1` (the probe wrapping `lower_stmt_impl` at
+`mir_lowering_stmts.spl:693-695`) and `SIMPLE_COMPILER_TRACE=1` for maximum MIR
+tracing, the entire window between the two probe calls is:
+
+```
+[mir-stmt-caller] before disc=4119164143 file= line=0 col=0
+[mir-stmt-caller] after  disc=4119164143 file= line=0 col=0
+```
+
+Nothing in between. `lower_stmt_impl` is entered and exited having emitted zero
+MIR and zero diagnostics — the `case _: ()` silent arm.
+
+### Root: the discriminant PRE-DISPATCH is itself defeated
+
+`hir_stmt_expr_payload_extraction_nil_2026-07-17` ("Wall 1") fixed this exact
+symptom by pre-dispatching on `mir_hir_stmt_kind_disc` before the qualified
+match. That fix is still present and even hardened
+(`mir_lowering_stmts.spl:1102-1113`, direct `rt_enum_payload` + a loud nil
+guard). **It no longer helps, because the disc comparison now fails too.**
+
+`mir_hir_stmt_kind_disc` is `rt_enum_discriminant`. Measured values of the
+INCOMING statement kinds:
+
+| source statement | disc |
+|---|---|
+| `print("hi")` | **4119164143** (`0xF58574EF`) |
+| `val a = 1` | **2163764024** |
+| `return 7` | **4119164143** |
+
+These are **stable per kind and byte-identical across separate processes**, so
+they are not ASLR pointers — they are content-derived. But they are not small
+ordinals, and they evidently do not equal the disc of the locally constructed
+probes the code compares against (`HirStmtKind.Expr(fallback_expr)`,
+`HirStmtKind.Let(...)`), because BOTH the `Expr` pre-check and every qualified
+`case` arm miss, for `Expr`, `Let` and `Return` alike. The `empty HIR
+expression-statement payload` guard never fires either, which places the failure
+*before* payload extraction.
+
+Note also `file= line=0 col=0`: every `HirStmt` arriving at MIR carries an empty
+span. The producer is handing over statements with no source location, which is
+a second signal about where these values are being built.
+
+**Class:** a non-nil value that is not the enum the consumer expects, defeating
+both a nil guard and a match — the same disease as the `hir codec: no
+\`HirTypeKind\` arm for tag -1` fall-through recorded in the stage-2 SIGSEGV
+record, at a different layer. Two producers disagreeing on enum identity, not a
+missing arm.
+
+### Reassurance on severity: the guard is loud AND fail-closed
+
+The concern that this shape "compiles to a binary that does nothing and passes a
+naive did-it-produce-an-artifact check" does **not** apply here — which is
+exactly what this bug's original lane added the guard for. It `eprint`s and then
+`rt_exit(1)` (`bootstrap_globals.spl:437-439`), rc=1, and **no `.smf` is
+written** (verified: no artifact in any run). The silent-wrong-output failure
+mode is already prevented; what remains is the real defect behind it.
+
+### Ruled out, cheaply
+
+* **Fixture form.** `fn main()` newline-block, `fn main():`, and
+  `fn main() -> i64:` all fail identically.
+* **Statement kind.** bare call, `val`, and `return` all fail identically.
+* **Flat vs globals MIR path.** `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=0` and `=1`
+  are byte-identical here; the flat path is taken either way for `compile`.
+* **The missing-runtime-symbol class** (`b5afb5579b8`, `char_from_code` /
+  `rt_array_sort`). Nothing is linked on this path — the only match for
+  "unresolved" in a full trace is the counter `[mono] … unresolved=0`, and the
+  failure is well before codegen.
+
+### Next step for whoever takes this
+
+Print the EXPECTED disc next to the incoming one — the code already computes
+`expr_disc` / `let_disc` locally at `mir_lowering_stmts.spl:1102` and `:721`;
+logging both under the existing `SIMPLE_MIR_STMT_CALLER_DEBUG` gate turns this
+from "the comparison fails" into "these two numbers differ, and here is which
+producer is wrong". That is a one-line probe on the Simple side and needs no
+seed rebuild.
