@@ -744,12 +744,41 @@ impl MirLowering:
         if self.is_runtime_value_local(local.id) or self.is_tagged_text_local(local.id) or self.runtime_array_locals.contains(local.id) or self.runtime_dict_locals.contains(local.id):
             return local
         if self.local_is_str(local):
+            # Bug (native_typed_array_text_element_destroyed_at_store_2026-08-24):
+            # the `is_tagged_text_local` guard above is a STATIC claim about
+            # bookkeeping, and it does not hold for every text local that is
+            # ALREADY a tagged handle at runtime -- a plain `a.push("LITERAL")`
+            # on a `[text]` reaches here unmarked. `rt_strlen` is not tag-aware,
+            # so it read the tagged handle as a raw char* and returned
+            # strlen(header+1) == 3 or 4 (the RtCoreString `kind` magic bytes
+            # 0x53545231 -> "1RTS", read from offset 1, plus the `reserved`
+            # flag byte), and `rt_string_new` then COPIED those header bytes as
+            # the element's content. Measured with gdb: rt_interp_cstr on the
+            # stored element returned a perfectly valid registered
+            # RtCoreString whose data was literally "RTS\001" -- the original
+            # text was gone before any read happened, which is why `a[i]`,
+            # `.first()` AND `for x in a` were all wrong at once.
+            #
+            # rt_interp_cstr is the existing representation AUTODETECTOR (it
+            # unwraps a tagged handle to its char* data buffer and passes a raw
+            # char* through unchanged), already used for exactly this purpose on
+            # the read side in decode_runtime_value's Str arm. Normalizing
+            # through it makes the store idempotent for both representations
+            # without needing the static marking to be complete.
+            var cb = self.builder
+            val cstr_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_interp_cstr"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+            ))
+            val cstr_res = cb.emit_call(cstr_op, [mir_operand_copy(local)], MirType(kind: MirTypeKind.Opaque("str")))
+            self.builder = cb
+            val raw_cstr = cstr_res ?? local
             val strlen = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_strlen"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
             ))
             var sb = self.builder
-            val len = sb.emit_call(strlen, [mir_operand_copy(local)], MirType.i64())
+            val len = sb.emit_call(strlen, [mir_operand_copy(raw_cstr)], MirType.i64())
             self.builder = sb
             if val length = len:
                 val string_new = MirOperand(kind: MirOperandKind.Const(
@@ -757,7 +786,7 @@ impl MirLowering:
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
                 ))
                 var nb = self.builder
-                val tagged = nb.emit_call(string_new, [mir_operand_copy(local), mir_operand_copy(length)], MirType.i64())
+                val tagged = nb.emit_call(string_new, [mir_operand_copy(raw_cstr), mir_operand_copy(length)], MirType.i64())
                 self.builder = nb
                 if val value = tagged:
                     self.mark_runtime_value_local(value.id)
@@ -1845,11 +1874,31 @@ impl MirLowering:
                         # GEP+load below still gets emitted.
                         self.error_fatal("tuple index {mir_tuple_lit_idx} is out of range for a {field_types.len()}-element tuple", base.span)
                 case _: ()
-        if not result_type_from_base and self.find_local_hir_type(base_local.id) != nil:
+        # Bug (native_index_read_loses_element_type_2026-08-24): the base's MIR
+        # type is the FIRST source consulted above, and for a container born
+        # from an empty `[]` literal (`var a: [text] = []`) it is the ERASED
+        # `Array(i64)` default -- so `result_type_from_base` was set true with
+        # a bogus i64 element type, which then BLOCKED this HIR-typed fallback
+        # entirely. `a[0]` on a `[text]` decoded through the integer arm and
+        # printed the tagged heap-string handle as a number (measured:
+        # 0x55eaba323b61, a heap pointer with TAG bit 1 -- not a shifted
+        # value); `[bool]` printed 1/0. `.first()`/`.last()`
+        # (method_calls_literals.spl) never had this bug because it consults
+        # `find_local_hir_type` FIRST and refuses to guess at all. Treat a
+        # base-derived i64 element type as "not yet known" so the declared HIR
+        # element type still wins. For a genuine `[i64]` this is a no-op (the
+        # HIR element type is i64 too), which is why `[i64]` was the one case
+        # that always worked and why this cannot regress it.
+        var result_type_is_erased_i64 = rt_enum_discriminant(result_type.kind) == rt_enum_discriminant(MirTypeKind.I64)
+        if (not result_type_from_base or result_type_is_erased_i64) and self.find_local_hir_type(base_local.id) != nil:
             val base_hir_type = self.find_local_hir_type(base_local.id) ?? HirType(kind: HirTypeKind.Error, span: base.span)
             match base_hir_type.kind:
                 case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
-                    result_type = self.lower_type(element_type)
+                    match element_type.kind:
+                        case HirTypeKind.Str:
+                            result_type = self.bootstrap_text_type()
+                        case _:
+                            result_type = self.lower_type(element_type)
                     result_type_from_base = true
                 case _: ()
         if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not result_type_from_base and not is_tuple_base:
