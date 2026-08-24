@@ -76,6 +76,71 @@ STUB(rt_vulkan_last_present_copy_rects)
 STUB(rt_vulkan_destroy_swapchain)
 EOF
 
+cat >"$TMP/cuda_provider.c" <<'EOF'
+#include <stdint.h>
+#include <string.h>
+int64_t rt_simple_gpu_provider_abi_version(void) { return 1; }
+int64_t rt_simple_gpu_provider_backend_bits(void) { return 1; }
+int64_t rt_cuda_provider_available(void) { return 1; }
+int64_t rt_cuda_provider_device_count(void) { return 1; }
+int64_t rt_cuda_init(void) { return 0; }
+int64_t rt_cuda_mem_alloc(int64_t size) { return size == 16 ? 91 : -1; }
+int64_t rt_cuda_memset_d32(int64_t ptr, int64_t pattern, int64_t count) {
+    return ptr == 91 && pattern == 0x5a5a5a5a && count == 4 ? 0 : -1;
+}
+int64_t rt_cuda_memcpy_dtoh(int64_t dst, int64_t src, int64_t size) {
+    if (!dst || src != 91 || size != 16) return -1;
+    memset((void *)(intptr_t)dst, 0x5a, 16);
+    return 0;
+}
+#define STUB(name) int64_t name(void) { return 0; }
+STUB(rt_cuda_device_get)
+STUB(rt_cuda_device_compute_capability)
+STUB(rt_cuda_ctx_create)
+STUB(rt_cuda_ctx_set_current)
+STUB(rt_cuda_ctx_destroy)
+STUB(rt_cuda_ctx_synchronize)
+STUB(rt_cuda_mem_free)
+STUB(rt_cuda_memcpy_htod)
+#ifndef OMIT_CUDA_DTOD
+STUB(rt_cuda_memcpy_dtod)
+#endif
+STUB(rt_cuda_memset)
+STUB(rt_cuda_module_load_data_bytes)
+STUB(rt_cuda_module_unload)
+STUB(rt_cuda_launch_kernel_name)
+STUB(rt_cuda_sync)
+const char *rt_cuda_device_name(int64_t device) { (void)device; return "fake-cuda"; }
+const char *rt_cuda_get_error_string(int64_t code) { (void)code; return "fake-error"; }
+EOF
+
+cat >"$TMP/cuda_harness.c" <<'EOF'
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+int64_t rt_gpu_provider_loaded(int64_t);
+int64_t rt_cuda_available(void);
+int64_t rt_cuda_init(void);
+int64_t rt_cuda_mem_alloc(int64_t);
+int64_t rt_cuda_memset_d32(int64_t, int64_t, int64_t);
+int64_t rt_cuda_memcpy_dtoh(int64_t, int64_t, int64_t);
+int main(int argc, char **argv) {
+    uint32_t words[4] = {0, 0, 0, 0};
+    int64_t ptr;
+    int64_t fill;
+    int64_t dtoh;
+    if (argc != 2 || setenv("SIMPLE_CUDA_PROVIDER_PATH", argv[1], 1) != 0) return 2;
+    ptr = rt_cuda_mem_alloc(16);
+    fill = rt_cuda_memset_d32(ptr, 0x5a5a5a5a, 4);
+    dtoh = rt_cuda_memcpy_dtoh((int64_t)(intptr_t)words, ptr, 16);
+    printf("loaded=%lld available=%lld init=%lld ptr=%lld fill=%lld dtoh=%lld word=%08x\n",
+        (long long)rt_gpu_provider_loaded(1), (long long)rt_cuda_available(),
+        (long long)rt_cuda_init(), (long long)ptr,
+        (long long)fill, (long long)dtoh, words[0]);
+    return 0;
+}
+EOF
+
 cat >"$TMP/harness.c" <<'EOF'
 #include <stdint.h>
 #include <stdio.h>
@@ -109,20 +174,28 @@ EOF
 cc -shared -fPIC "$TMP/provider.c" -o "$TMP/provider.so"
 cc -shared -fPIC -DPROVIDER_ABI=99 "$TMP/provider.c" -o "$TMP/wrong.so"
 cc -shared -fPIC -DOMIT_PIPELINE_RAW "$TMP/provider.c" -o "$TMP/incomplete.so"
+cc -shared -fPIC "$TMP/cuda_provider.c" -o "$TMP/cuda_provider.so"
+cc -shared -fPIC -DOMIT_CUDA_DTOD "$TMP/cuda_provider.c" -o "$TMP/cuda_incomplete.so"
 cc -D_GNU_SOURCE -std=gnu11 -O0 -ffunction-sections -fdata-sections \
     -I"$ROOT/src/runtime" -I"$ROOT/src/runtime/platform" \
     -c "$ROOT/src/runtime/runtime_native.c" -o "$TMP/runtime_native.o"
 cc -Wl,--gc-sections "$TMP/harness.c" "$TMP/runtime_native.o" \
     -ldl -lm -o "$TMP/harness"
+cc -Wl,--gc-sections "$TMP/cuda_harness.c" "$TMP/runtime_native.o" \
+    -ldl -lm -o "$TMP/cuda_harness"
 
 good="$($TMP/harness "$TMP/provider.so")"
 bad="$($TMP/harness "$TMP/wrong.so")"
 missing="$($TMP/harness "$TMP/missing.so")"
 incomplete="$($TMP/harness "$TMP/incomplete.so")"
+cuda_good="$($TMP/cuda_harness "$TMP/cuda_provider.so")"
+cuda_incomplete="$($TMP/cuda_harness "$TMP/cuda_incomplete.so")"
 [ "$good" = "loaded=1 abi=1 bits=2 path=1 available=1 count=7 vk=1 init=1 buffer=73" ]
 [ "$bad" = "loaded=0 abi=0 bits=0 path=0 available=0 count=0 vk=0 init=0 buffer=0" ]
 [ "$missing" = "loaded=0 abi=0 bits=0 path=0 available=0 count=0 vk=0 init=0 buffer=0" ]
 [ "$incomplete" = "loaded=0 abi=0 bits=0 path=0 available=0 count=0 vk=0 init=0 buffer=0" ]
+[ "$cuda_good" = "loaded=1 available=1 init=0 ptr=91 fill=0 dtoh=0 word=5a5a5a5a" ]
+[ "$cuda_incomplete" = "loaded=0 available=0 init=3 ptr=-3 fill=-3 dtoh=-3 word=00000000" ]
 
 if command -v readelf >/dev/null 2>&1; then
     if readelf -d "$TMP/harness" | grep -Fq 'provider.so'; then
@@ -139,5 +212,8 @@ printf '%s\n' \
     "gpu_provider_wrong_abi_rejected=true" \
     "gpu_provider_incomplete_surface_rejected=true" \
     "gpu_provider_provenance_reported=true" \
+    "cuda_provider_operation_dispatch=true" \
+    "cuda_provider_incomplete_surface_rejected=true" \
+    "cuda_provider_missing_operation_fails_closed=true" \
     "gpu_provider_missing_rejected=true" \
     "gpu_provider_static_dependency=false"

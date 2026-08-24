@@ -266,6 +266,17 @@ static void *spl_gpu_provider_resolve(void *handle, const char *symbol);
 
 static int spl_gpu_provider_surface_complete(
         int64_t backend_bit, void *handle) {
+    static const char *cuda_required[] = {
+        "rt_cuda_provider_available", "rt_cuda_provider_device_count",
+        "rt_cuda_init", "rt_cuda_device_get", "rt_cuda_device_name",
+        "rt_cuda_device_compute_capability", "rt_cuda_ctx_create",
+        "rt_cuda_ctx_set_current", "rt_cuda_ctx_destroy",
+        "rt_cuda_ctx_synchronize", "rt_cuda_mem_alloc", "rt_cuda_mem_free",
+        "rt_cuda_memcpy_htod", "rt_cuda_memcpy_dtoh", "rt_cuda_memcpy_dtod",
+        "rt_cuda_memset", "rt_cuda_memset_d32",
+        "rt_cuda_module_load_data_bytes", "rt_cuda_module_unload",
+        "rt_cuda_launch_kernel_name", "rt_cuda_sync", "rt_cuda_get_error_string"
+    };
     static const char *vulkan_required[] = {
         "rt_vulkan_provider_is_available", "rt_vulkan_provider_device_count",
         "rt_vk_provider_available", "rt_vulkan_init", "rt_vulkan_shutdown",
@@ -291,6 +302,12 @@ static int spl_gpu_provider_surface_complete(
         "rt_vulkan_last_present_copy_rects", "rt_vulkan_destroy_swapchain"
     };
     size_t i;
+    if (backend_bit == SPL_GPU_PROVIDER_CUDA_BIT) {
+        for (i = 0; i < sizeof(cuda_required) / sizeof(cuda_required[0]); i++) {
+            if (!spl_gpu_provider_resolve(handle, cuda_required[i])) return 0;
+        }
+        return 1;
+    }
     if (backend_bit != SPL_GPU_PROVIDER_VULKAN_BIT) return 1;
     for (i = 0; i < sizeof(vulkan_required) / sizeof(vulkan_required[0]); i++) {
         if (!spl_gpu_provider_resolve(handle, vulkan_required[i])) return 0;
@@ -430,6 +447,76 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_device_count(void) {
     return spl_hosted_provider_i64_probe(
         SPL_GPU_PROVIDER_CUDA_BIT, "rt_cuda_provider_device_count");
 }
+
+/* CUDA operations use -3 (backend unavailable) when no complete provider was
+ * admitted. Returning zero here would fabricate CUDA success for status APIs. */
+#define SPL_CUDA_DISPATCH0(name, fail) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(void) { \
+        typedef int64_t (*fn_t)(void); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
+        return fn ? fn() : (fail); \
+    }
+#define SPL_CUDA_DISPATCH1(name, fail) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0) { \
+        typedef int64_t (*fn_t)(int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
+        return fn ? fn(a0) : (fail); \
+    }
+#define SPL_CUDA_DISPATCH2(name, fail) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0, int64_t a1) { \
+        typedef int64_t (*fn_t)(int64_t, int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
+        return fn ? fn(a0, a1) : (fail); \
+    }
+#define SPL_CUDA_DISPATCH3(name, fail) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0, int64_t a1, int64_t a2) { \
+        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
+        return fn ? fn(a0, a1, a2) : (fail); \
+    }
+#define SPL_CUDA_DISPATCH10(name, fail) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name( \
+            int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, \
+            int64_t a5, int64_t a6, int64_t a7, int64_t a8, int64_t a9) { \
+        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t, \
+                                int64_t, int64_t, int64_t, int64_t, int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
+        return fn ? fn(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) : (fail); \
+    }
+#define SPL_CUDA_DISPATCH_CSTR1(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK const char *name(int64_t a0) { \
+        typedef const char *(*fn_t)(int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_CUDA_BIT, #name); \
+        return fn ? fn(a0) : "CUDA provider unavailable"; \
+    }
+
+SPL_CUDA_DISPATCH0(rt_cuda_init, 3)
+SPL_CUDA_DISPATCH1(rt_cuda_device_get, -3)
+SPL_CUDA_DISPATCH_CSTR1(rt_cuda_device_name)
+SPL_CUDA_DISPATCH1(rt_cuda_device_compute_capability, 0)
+SPL_CUDA_DISPATCH1(rt_cuda_ctx_create, -3)
+SPL_CUDA_DISPATCH1(rt_cuda_ctx_set_current, -3)
+SPL_CUDA_DISPATCH1(rt_cuda_ctx_destroy, -3)
+SPL_CUDA_DISPATCH0(rt_cuda_ctx_synchronize, -3)
+SPL_CUDA_DISPATCH1(rt_cuda_mem_alloc, -3)
+SPL_CUDA_DISPATCH1(rt_cuda_mem_free, -3)
+SPL_CUDA_DISPATCH3(rt_cuda_memcpy_htod, -3)
+SPL_CUDA_DISPATCH3(rt_cuda_memcpy_dtoh, -3)
+SPL_CUDA_DISPATCH3(rt_cuda_memcpy_dtod, -3)
+SPL_CUDA_DISPATCH3(rt_cuda_memset, -3)
+SPL_CUDA_DISPATCH3(rt_cuda_memset_d32, -3)
+SPL_CUDA_DISPATCH2(rt_cuda_module_load_data_bytes, -3)
+SPL_CUDA_DISPATCH1(rt_cuda_module_unload, -3)
+SPL_CUDA_DISPATCH10(rt_cuda_launch_kernel_name, -3)
+SPL_CUDA_DISPATCH0(rt_cuda_sync, -3)
+SPL_CUDA_DISPATCH_CSTR1(rt_cuda_get_error_string)
+
+#undef SPL_CUDA_DISPATCH0
+#undef SPL_CUDA_DISPATCH1
+#undef SPL_CUDA_DISPATCH2
+#undef SPL_CUDA_DISPATCH3
+#undef SPL_CUDA_DISPATCH10
+#undef SPL_CUDA_DISPATCH_CSTR1
 
 SPL_HOSTED_UNAVAILABLE_WEAK int32_t rt_vk_available(void) {
     return spl_hosted_provider_i32_probe(
