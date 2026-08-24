@@ -149,6 +149,17 @@ current-head research reconciliation.
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed no-allocation closure-index tranche
+
+- Replace processed/queued array membership scans with one insertion-time
+  discovered-path dictionary.
+- Preserve initial directory order, first-import FIFO order, diagnostic order,
+  one read per path, and existing public output.
+- Reduce path-comparison work from O(V^2+E*V) to expected O(V+E), retaining
+  O(V) queue/index storage and no persistent invalidation surface.
+- Manual verification intentionally omitted under the user's explicit
+  no-verification instruction.
+
 ## Completed canonical MIR DAG-validation tranche
 
 - Build the unique block-id index once, retaining duplicate-ID diagnostic
