@@ -1840,3 +1840,16 @@ made, per the standing instruction: if the root is a seed miscompile it should b
 fixed there; if a local restructure is used instead it must be recorded explicitly
 as a workaround for a live seed defect, with the seed defect filed separately, and
 it must not close this record.
+
+## 2026-08-24 — Stage-2 admission now rejects the measured loss
+
+The bootstrap frontend admission helper now compiles and executes
+`stage2_mir_retention.spl` in a fresh, independent cache under both normal and
+`SIMPLE_BOOTSTRAP=1` sanity passes. The fixture is the measured method-call
+shape: `print("abc".len())`. Admission requires the native executable to print
+`3`; a compiler that emits the instructions and then loses them in
+`end_function` cannot publish Stage-2 PASS evidence or start Stage 3.
+
+This closes the admission false-positive, not the compiler defect. The bug
+remains OPEN until the self-compiled predicate/finalization root is fixed and a
+fresh Stage 2 passes this new executable probe.

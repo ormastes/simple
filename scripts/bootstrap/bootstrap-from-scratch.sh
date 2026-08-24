@@ -3711,39 +3711,75 @@ COMPILER_CHECK_KILL_GRACE_SECONDS=1
 . "$root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 bootstrap_stage_sanity() (
   candidate_sanity=$1 evidence=$2 sanity_home=$3 sanity_tmp=$4 sanity_path=$5
+  sanity_repo_root=${repo_root:-${root:-}}
+  sanity_backend=${stage2_backend:-${backend:-}}
   for name in $(env | sed 's/=.*//'); do unset "$name"; done
   HOME=$sanity_home TMPDIR=$sanity_tmp PATH=$sanity_path LC_ALL=C LANG=C
   export HOME TMPDIR PATH LC_ALL LANG
   evidence_tmp="$evidence.tmp.$$" frontend_log="$evidence_tmp.frontend"
   before=$(bootstrap_stage3_hash_file "$candidate_sanity")
+  version_expect_status=0
+  version_expected=
+  if [ -r "$sanity_repo_root/VERSION" ]; then
+    version_expected=$(sed -n '1s/[[:space:]]*$//p' "$sanity_repo_root/VERSION")
+  fi
+  if [ -z "$version_expected" ]; then
+    version_expect_status=1
+  else
+    version_identity=$(sed -n 's/^[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' \
+      "$sanity_repo_root/src/app/cli/bootstrap_identity.spl" | sed -n '1p')
+    if [ -z "$version_identity" ] || [ "$version_identity" != "$version_expected" ]; then
+      version_expect_status=2
+    fi
+  fi
   version_status=0; version=$(run_timeout 10 "$candidate_sanity" --version 2>&1) || version_status=$?
+  version_match_status=1
+  if [ "$version_expect_status" -eq 0 ] &&
+    [ "$version" = "simple-bootstrap $version_expected" ]; then
+    version_match_status=0
+  fi
   unsupported_status=0
   unsupported=$(run_timeout 10 "$candidate_sanity" run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1) || unsupported_status=$?
+  unsupported_match_status=1
+  if [ "$unsupported_status" -eq 1 ]; then
+    case "$unsupported" in *"unknown command 'run'"*) unsupported_match_status=0 ;; esac
+  fi
   frontend_status=0
-  CANDIDATE_FRONTEND_BACKEND="$stage2_backend" \
+  CANDIDATE_FRONTEND_BACKEND="$sanity_backend" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
     candidate_frontend_smoke "$candidate_sanity" >"$frontend_log" 2>&1 || frontend_status=$?
   frontend_bootstrap_status=0
   if [ "$frontend_status" -eq 0 ]; then
-    CANDIDATE_FRONTEND_BACKEND="$stage2_backend" \
+    CANDIDATE_FRONTEND_BACKEND="$sanity_backend" \
       CANDIDATE_FRONTEND_BOOTSTRAP=1 \
       candidate_frontend_smoke "$candidate_sanity" >>"$frontend_log" 2>&1 || \
       frontend_bootstrap_status=$?
     frontend_status=$frontend_bootstrap_status
   fi
   after=$(bootstrap_stage3_hash_file "$candidate_sanity")
+  sha_stable_status=1
+  [ "$before" = "$after" ] && sha_stable_status=0
+  sanity_checks_run=5
   sanity_status=fail
-  if [ "$version_status" -eq 0 ] && [ "$version" = "simple-bootstrap 1.0.0-RC" ] && \
-    [ "$unsupported_status" -eq 1 ] && case "$unsupported" in *"unknown command 'run'"*) true;; *) false;; esac && \
-    [ "$frontend_status" -eq 0 ] && [ "$before" = "$after" ]; then sanity_status=pass; fi
+  if [ "$version_expect_status" -ne 0 ]; then
+    sanity_status=error
+    sanity_checks_run=0
+  elif [ "$version_status" -eq 0 ] && [ "$version_match_status" -eq 0 ] && \
+    [ "$unsupported_match_status" -eq 0 ] && [ "$frontend_status" -eq 0 ] && \
+    [ "$sha_stable_status" -eq 0 ]; then sanity_status=pass; fi
   { echo schema=simple-bootstrap-sanity-evidence-v1; echo status="$sanity_status"; \
     echo candidate_sha256_before="$before"; echo version_status="$version_status"; \
-    echo version_output="$version"; echo unsupported_status="$unsupported_status"; \
+    echo version_output="$version"; echo version_expected="$version_expected"; \
+    echo version_expect_status="$version_expect_status"; \
+    echo version_match_status="$version_match_status"; \
+    echo unsupported_status="$unsupported_status"; \
     printf 'unsupported_output_sha256=%s\n' "$(printf %s "$unsupported" | bootstrap_stage3_hash_stream)"; \
+    echo unsupported_match_status="$unsupported_match_status"; \
     echo frontend_smoke_status="$frontend_status"; \
     echo frontend_smoke_bootstrap_mode_status="$frontend_bootstrap_status"; \
     echo frontend_smoke_output_sha256="$(bootstrap_stage3_hash_file "$frontend_log")"; \
-    echo candidate_sha256_after="$after"; } >"$evidence_tmp"
+    echo candidate_sha256_after="$after"; echo sha_stable_status="$sha_stable_status"; \
+    echo checks_run="$sanity_checks_run"; } >"$evidence_tmp"
   mv "$evidence_tmp" "$evidence"; rm -f "$frontend_log"; [ "$sanity_status" = pass ]
 )
 bootstrap_stage_sanity "$candidate" "$stage3_sanity" "$home" "$tmp" "$path"

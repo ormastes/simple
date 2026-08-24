@@ -15,7 +15,8 @@
 #      its native-build exits 0 and it produces a working binary
 #   C. a candidate that prints the dead-lexer signature is rejected on the same
 #      terms
-#   D. a well-behaved candidate is ACCEPTED (so the checks above are not
+#   D. a candidate that returns the wrong MIR-retention result is rejected
+#   E. a well-behaved candidate is ACCEPTED (so the checks above are not
 #      vacuously rejecting everything)
 #
 # Verdict line is the last line of stdout: PASS / FAIL / ERROR.
@@ -43,6 +44,7 @@ make_candidate() {
     _name=$1
     _noise=$2
     _status=$3
+    _retention_result=${4:-3}
     _path=$work/$_name
     cat >"$_path" <<EOF
 #!/bin/sh
@@ -51,14 +53,18 @@ case "\$1" in
   --version) echo "simple-bootstrap 1.0.0-RC"; exit 0 ;;
   native-build)
     out=""
+    entry=""
     prev=""
     for a in "\$@"; do
       if [ "\$prev" = "--output" ]; then out=\$a; fi
+      if [ "\$prev" = "--entry" ]; then entry=\$a; fi
       prev=\$a
     done
     $_noise
     if [ "$_status" -ne 0 ]; then exit $_status; fi
-    printf '#!/bin/sh\nprintf "5\\\\n"\n' >"\$out"
+    expected=5
+    case "\$entry" in *stage2_mir_retention.spl) expected=$_retention_result ;; esac
+    printf '#!/bin/sh\nprintf "%s\\\\n"\n' "\$expected" >"\$out"
     chmod +x "\$out"
     exit 0
     ;;
@@ -87,7 +93,7 @@ expect_gate() {
     fi
 }
 
-# D — control: a well-behaved candidate must be ACCEPTED. If this fails, every
+# E — control: a well-behaved candidate must be ACCEPTED. If this fails, every
 # rejection below is vacuous.
 good=$(make_candidate good ':' 0)
 expect_gate "well-behaved candidate is admitted" "$good" accept
@@ -116,6 +122,10 @@ deadlex2=$(make_candidate deadlex2 \
 expect_gate "[lexer_fatal] diagnostic is rejected despite a green build" \
     "$deadlex2" reject
 
+# D — both builds succeed, but the exact MIR-retention executable is wrong.
+badretention=$(make_candidate badretention ':' 0 5)
+expect_gate "wrong MIR-retention result is rejected" "$badretention" reject
+
 if [ "$checked" -eq 0 ]; then
     echo "ERROR — nothing was checked"
     exit 2
@@ -124,5 +134,5 @@ if [ "$failures" -ne 0 ]; then
     echo "FAIL — $failures of $checked gate case(s) behaved wrongly"
     exit 1
 fi
-echo "PASS — $checked gate case(s) checked (1 admit, 4 reject)"
+echo "PASS — $checked gate case(s) checked (1 admit, 5 reject)"
 exit 0

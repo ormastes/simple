@@ -83,6 +83,44 @@ candidate_frontend_smoke() (
     probe_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
         "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$probe_output" 2>/dev/null) || exit 1
     [ "$probe_stdout" = 5 ]
+
+    # Exact Stage-2 MIR-retention guard. An admitted self-compiled compiler was
+    # observed emitting two method-call instructions, then losing them when
+    # end_function called finalize_block with an already-empty pending list.
+    # p2_add alone did not distinguish that failure, so keep this fixture and
+    # cache independent and require its native result before admission.
+    retention_output=$probe_dir/stage2_mir_retention
+    SIMPLE_BINARY="$candidate" \
+    SIMPLE_BIN="$candidate" \
+    SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
+    SIMPLE_FRONTEND_DELEGATE="$candidate" \
+    SIMPLE_FRONTEND_DELEGATED=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_EXECUTION_MODE= \
+    SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
+    SIMPLE_BOOTSTRAP="$candidate_bootstrap" \
+    SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
+        "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
+        "${COMPILER_BUILD_TIMEOUT_SECONDS}s" "$candidate" native-build \
+        --backend "$candidate_backend" \
+        --runtime-bundle core-c-bootstrap \
+        --entry-closure \
+        --entry scripts/check/cert/redeploy_gate/fixtures/stage2_mir_retention.spl \
+        --cache-dir "$probe_dir/cache-stage2-mir-retention" \
+        --mode one-binary \
+        --output "$retention_output" >>"$probe_dir/build.log" 2>&1 || {
+            head -c 65536 "$probe_dir/build.log" >&2
+            exit 1
+        }
+    build_log_bytes=$(wc -c <"$probe_dir/build.log" 2>/dev/null || echo 0)
+    [ "$build_log_bytes" -le "$CANDIDATE_FRONTEND_MAX_LOG_BYTES" ] || {
+        echo "candidate_frontend_smoke: candidate exceeded the combined admission log cap" >&2
+        head -c 4096 "$probe_dir/build.log" >&2
+        exit 1
+    }
+    retention_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
+        "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$retention_output" 2>/dev/null) || exit 1
+    [ "$retention_stdout" = 3 ]
 )
 
 candidate_frontend_delegate_fidelity() (
