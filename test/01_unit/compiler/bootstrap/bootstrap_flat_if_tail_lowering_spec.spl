@@ -6,9 +6,16 @@ use compiler.core.ast.{ast_reset, decl_get_body, module_get_decls, stmt_count, s
 use compiler.core.parser.{parser_has_errors, parser_init_with_path}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.hir.hir_definitions.{HirBinOp, HirExprKind, HirStmtKind}
+use compiler.hir.hir_types.{HirTypeKind}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
 
 fn source(path: text) -> text:
     rt_file_read_text(path) ?? ""
@@ -33,6 +40,45 @@ describe "bootstrap-flat if tail lowering":
         expect(entry).to_contain("fn bootstrap_output_from_args(args: [text], i: i64) -> text:")
         expect(entry).to_contain("elif args[i].starts_with(\"--output=\"):")
         expect(entry).to_contain("bootstrap_output_from_args(args, i + 1)")
+
+    it "predeclares bootstrap helpers with their callable type":
+        step("Lower the recursive i64 helper through the live bootstrap module path")
+        val prior_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val target = "fn native_build_has_source_arg(args: [text], i: i64) -> i64:\n" +
+            "    if i >= args.len():\n        0\n" +
+            "    elif args[i] == \"--source\":\n        1\n" +
+            "    elif args[i].starts_with(\"--source=\"):\n        1\n" +
+            "    else:\n        native_build_has_source_arg(args, i + 1)\n"
+        val module = parse_full_frontend(target, "native_build_has_source_arg.spl", "native_build_has_source_arg", Logger(level: 0))
+        var lowering = HirLowering.with_filename("native_build_has_source_arg.spl")
+        val hir = lowering.lower_module(module)
+        match prior_bootstrap:
+            case Some(prior_value):
+                rt_env_set("SIMPLE_BOOTSTRAP", prior_value)
+            case nil:
+                rt_env_remove("SIMPLE_BOOTSTRAP")
+
+        step("Require the predeclared recursive symbol to retain its i64 return")
+        match hir.symbols.lookup("native_build_has_source_arg"):
+            case Some(symbol):
+                val info = hir.symbols.get_symbol_raw(symbol.id)
+                if val present = info:
+                    if val callable = present.type_:
+                        match callable.kind:
+                            case HirTypeKind.Function(_, ret, _):
+                                match ret.kind:
+                                    case HirTypeKind.Int(bits, signed):
+                                        expect(bits).to_equal(64)
+                                        expect(signed).to_equal(true)
+                                    case _: fail("bootstrap helper must retain its i64 return type")
+                            case _: fail("bootstrap helper symbol must remain callable")
+                    else:
+                        fail("bootstrap helper symbol must carry its callable type")
+                else:
+                    fail("bootstrap helper symbol id must resolve")
+            case nil:
+                fail("bootstrap helper must be predeclared")
 
     it "lowers explicit else branch values through the real flat arena":
         step("Parse an if/elif/else tail into the flat arena")
