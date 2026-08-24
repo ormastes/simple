@@ -172,3 +172,73 @@ program, to separate the dict from the struct layout itself).
 - Whether the corruption needs the Dict at all (dv4 answers this).
 - The exact codegen site. Not yet located in `src/compiler_rust`.
 - No fix landed.
+
+## LOCALIZED: only `for x in dict.values()` corrupts (2026-08-24)
+
+`dv4.spl` probes four access paths against one `Dict<i64, Big>` in a single
+native binary. Interpreted, all four are correct. Natively:
+
+| path | result |
+|------|--------|
+| A direct value (`make()`) | CORRECT |
+| B `d[1]` index read | CORRECT |
+| C `for f in d.values()` | **CORRUPT** |
+| D `a[0]` array element | CORRECT |
+
+Disassembly of the built binary shows why. For the correct direct path,
+`{direct.name}` compiles to `mov 0x8(%r15),%rdi` + `rt_interp_cstr` (offset 8,
+text). Inside the `.values()` loop, `{f.name}` compiles to:
+
+```
+3315: mov (%r12),%rdi            # byte offset 0 — WRONG field
+3319: call rt_raw_i64_to_string  # typed i64 — WRONG type
+```
+
+Every field read in the loop collapses to **byte offset 0 and i64 typing**,
+which is why `name` and `entry_block` printed the identical word and
+`symbol.id` printed the dict key.
+
+The C runtime is NOT at fault: a direct C selfcheck of
+`rt_dict_new`/`rt_dict_set`/`rt_dict_values`/`rt_for_iterable`/`rt_index_get`
+against `build/simple-core/libsimple_runtime.a` round-trips the element pointer
+exactly (`MATCH=1`). The defect is in compilation, not the runtime.
+
+This matches the root cause already written down in-tree at
+`src/compiler/70.backend/backend/interpreter.spl:145-175`: the seed erases
+`Dict<K,V>` to `ANY` (`type_resolver.rs`: `"Dict" => TypeId::ANY`), so
+`.values()` yields `ANY`-typed elements (`mod.rs`: `"keys"|"values" =>
+TypeId::ANY`) and field access falls to the seed's "most-fields-wins" global
+field resolver.
+
+## DISPROVEN: the documented typed-binding workaround does NOT fix this
+
+`interpreter.spl:145-175` and `.claude/rules/language.md` both prescribe binding
+the element to a typed local (`val f: Big = f_`) as the remedy. Measured on a
+native build (`dv6.spl`, identical to dv4 except for the binding):
+
+```
+expected:  name=[main] ret=9 nloc=0 nblk=1 entry=3 sym=1
+dv4 (untyped): name=[<ptr>] ret=1 nloc=1 nblk=1 entry=<same ptr> sym=1
+dv6 (typed):   name=[]      ret=0 nloc=0 nblk=0 entry=<ptr>      sym=1
+```
+
+The typed binding CHANGES the corruption (offset-0 collapse becomes a
+mostly-zeroed decode) but does not repair it. **Do not apply the typed-binding
+idiom as a fix for this and do not report it as one.** Five such edits were
+made to `cranelift_codegen_adapter.spl` and `driver_aot_smf_output.spl` during
+this investigation and were REVERTED once dv6 disproved them.
+
+Notably the dv6 shape — mostly-zeroed fields with a few live — matches the
+Stage-2 `MirFunction` observation better than dv4's does, suggesting two
+stacked defects: untyped gives wrong field offsets, typed gives a wrong
+element decode/copy.
+
+### Where the fix goes — still UNDECIDED
+Deciding evidence not yet gathered: whether the emitted MIR already carries
+`byte_offset: 0` / an i64-typed element local. If it does, the fix is
+Simple-side, in the elem-type stamping at
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:1446-1500`
+(which already carries two prior bug comments about exactly this) plus
+`lower_for_iterator` in `mir_lowering_stmts.spl`. If the MIR is correct, the
+fix is in the Rust seed (`access.rs` most-fields-wins resolution /
+`decode_runtime_value`). **No fix has landed.**
