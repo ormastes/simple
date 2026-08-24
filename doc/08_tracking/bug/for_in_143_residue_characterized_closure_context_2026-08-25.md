@@ -104,3 +104,90 @@ they looked uncharacterizable before the names existed:
   executed on this closure. When `#143` does clear, that becomes the frontier,
   and it is a project rather than a patch —
   `LivenessAnalysis.record_use`/`record_def` have no callers at all.
+
+## 2026-08-25 (later) — my "sharpest lead" was WRONG, and the residue is not a compiler defect at all
+
+### Correction: `trim_lines` never had "opposite verdicts"
+
+The section above presents this as the sharpest lead on the board:
+
+> `trim_lines(lines: [text])` is a TYPED array parameter and it still fails — but
+> only in context. Identical source, identical function, opposite verdicts.
+
+**It is not the same function.** `trim_lines` is defined TWICE in this tree:
+
+```
+src/app/utils/parsing.spl:107    fn trim_lines(lines: [text]) -> [text]:   # typed
+src/lib/common/text_advanced.spl:104  fn trim_lines(lines):                # UNTYPED
+```
+
+So are `normalize_indent` (`parsing.spl:169` typed / `text_advanced.spl:465`
+untyped) and `dedent_lines` (`spipe_docgen/parser.spl:533` typed /
+`text_advanced.spl:507` untyped).
+
+The failing one was always `text_advanced`'s untyped copy. The `pp` build that
+"passed" imported only `parsing`'s typed copy, so nothing contradicted anything.
+The contradiction existed only in **my probe**, which printed
+`self.builder.current_function`'s bare NAME and could not distinguish two
+same-named functions in different modules.
+
+Proof: annotating `text_advanced`'s three untyped copies — and touching nothing
+else — removed exactly those three from the failure list (11 -> 8). Renaming
+`parsing.trim_lines`'s parameter, tested first on the "shared parameter name"
+hypothesis, changed nothing and refuted it.
+
+**There is no closure-dependent corruption. There is no shared-registry
+poisoning.** The lead was an artifact of name ambiguity in the diagnostic I built
+to escape name ambiguity.
+
+### What the residue actually is: missing type annotations, all of it
+
+Driving the 4-line reproducer down, one annotation at a time:
+
+| step | annotation added | reproducer |
+|---|---|---|
+| start | — | **11** |
+| duplicate untyped copies | `trim_lines`, `dedent_lines`, `normalize_indent` in `text_advanced` | 8 |
+| untyped params | `prefix_lines`, `suffix_lines`, `remove_empty_lines`, `detect_indent` (`lines: [text]`) | 4 |
+| **missing RETURN type** | `fn extract_words(text: text)` -> `-> [text]` | **2** |
+
+`extract_words` is the one that is not a parameter: it declared no return type at
+all, so `val words = extract_words(text)` had nothing to inherit — which is what
+was failing inside `longest_word` and `most_common_words`, both of which looked
+like "a local from a split" from the outside.
+
+Every annotation added matches the function's own docstring example
+(`prefix_lines(["hello", "world"], "> ")`, `longest_word("The quick brown fox")
+# ("quick", 5)`). None is a guess.
+
+**Remaining 2:** `multi_replace` (untyped `pairs`; its element type is not
+obvious from the signature, so still deliberately not guessed) and
+`most_common_char` (not yet traced). A third, unrelated feature gap becomes
+reachable once these clear: `unsupported array/string slice index a[start:end]`.
+
+### Consequence for the framing
+
+`#143` in this closure is **not a compiler defect**. It is the lowering honestly
+reporting that it has no type to work with, on library code that never declared
+one. The compiler-side type-loss defects in this chain were real and are fixed
+(`9ca094b44ee`, `3dc5b8dd8a2`); what is left is missing annotations in
+`src/lib/common/text_advanced.spl`.
+
+### Not landed
+
+The annotations are measured (11 -> 2) but NOT landed. `text_advanced.spl` is
+widely imported, and the bar this lane has held — fixture differential, a
+native-build corpus, AND a check that the corpus actually enters the changed
+path — was not run for them. The next lane starts from a measured 11 -> 2 and a
+one-line diff per function.
+
+### A pattern worth naming
+
+This is the fourth bare-name ambiguity to cause a wrong answer in this session:
+the parser's `arm_body` local shadowing another module's global (`ec272de6947`),
+a name-only lookup discarding qualifiers in `resolve_name_variants` (sibling
+lane), duplicate function names across modules here, and — the one worth
+admitting — **my own diagnostic**, which printed a bare function name and
+manufactured a false contradiction from it. Shared state and diagnostics keyed by
+bare name are a systemic habit in this compiler, and tooling built to investigate
+it inherits the same flaw unless it prints a qualifier.
