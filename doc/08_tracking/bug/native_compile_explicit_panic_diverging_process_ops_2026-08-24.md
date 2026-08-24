@@ -97,3 +97,112 @@ child can survive as a multi-GB, 100%-CPU orphan. Check
 `pgrep -af native_build_worker.spl` after any interrupted reproduction, and kill
 only the PIDs belonging to your own working directory — other lanes run their
 own workers.
+
+---
+
+## RESOLVED 2026-08-24 — root cause, fix, and measured evidence
+
+**Status:** FIXED. The `explicit panic()` signature is gone from the repro
+(5 occurrences -> **0**, measured on a freshly rebuilt seed). `native-build`
+still exits 1, but on a **different, independent** failure now filed as
+blocker #7 — see "Residual" below. `--require-success` is therefore
+deliberately **NOT** flipped on the staged gates.
+
+### Root cause
+
+The message was never a diagnostic. It is the **reason label** of a
+`MirTerminator.Abort`, written by `terminate_abort(...)` at
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:1651` — the
+lowering of every user `panic()`. That is why it carried no file/line: there
+was no span to carry.
+
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl` lowered
+`case Abort(message)` by calling `emit_unsupported_panic(message)`. That was
+harmless while the helper merely emitted `@rt_panic` + `unreachable` IR —
+which is exactly the correct lowering for a diverging Abort block.
+
+On **2026-08-23**, `emit_unsupported_panic` was converted from "emit the IR"
+into "**FAIL THE BUILD**" (`llvm_backend_unlowered_mir_kind_fails_open`,
+closing a genuine fail-open where an unlowerable MIR kind linked green and
+died at runtime). That change was right for its ~100 genuine
+"backend does not support X" call sites, and **collateral damage** for the one
+call site that was not an unsupported kind at all: `Abort` is a fully
+SUPPORTED terminator, deliberately emitted.
+
+Consequence: every user `panic()` in any co-compiled module became a hard
+compile error, and its abort reason label was printed as `error: ...`. The
+five occurrences were five `panic()` sites in the transitively compiled
+stdlib, not five distinct defects.
+
+**Decisive control — the same construct in sibling backends:**
+
+| backend | `case Abort(message)` lowering | correct? |
+|---|---|---|
+| LLVM (`_MirToLlvm/core_codegen.spl`) | `emit_unsupported_panic(message)` | **NO — the defect** |
+| C (`_CBackendTranslate/instruction_lowering.spl:664`) | `spl_panic("...")` directly | yes |
+| cranelift (`cranelift_codegen_adapter.spl:922`) | `cranelift_trap(ctx, 1)` | yes |
+
+LLVM was the **sole** offender. Two backends lowering the identical
+terminator to a trap is what rules out "Abort is genuinely unsupported".
+
+### Fix (minimal, semantics-preserving)
+
+The ~7 lines of trap IR at the bottom of `emit_unsupported_panic` were
+extracted into `me emit_panic_trap_ir(message)`
+(`_MirToLlvm/asm_constraints_helpers.spl`). The `Abort` arm now calls that
+directly; `emit_unsupported_panic` calls it on its allow-path.
+**`emit_unsupported_panic`'s error semantics are untouched** — the ~100
+genuine unsupported-feature sites still fail the build, so the 2026-08-23
+fail-open stays closed.
+
+### Leads from the previous lane — outcomes
+
+1. *"The error carries no file/line — fix the diagnostic first."* Correct
+   instinct, and the absence was itself the clue: an Abort reason label has no
+   span because it is not a diagnostic. Reading the emission site was enough;
+   no instrumented probe was needed.
+2. *"`env_get` has 3 co-compiled definitions with 2 differing signatures."*
+   **Not implicated.** Pre-existing noise. The mechanism above explains the
+   error, the missing file/line, and the debug-flag heisenbug without it. The
+   warning remains open on its own merits.
+3. *`SIMPLE_BOOTSTRAP_DEBUG=1` is a heisenbug.* Confirmed and consistent: that
+   arm never calls `llvm_bootstrap_ssa_function`, so it never reaches this
+   Abort lowering. Equally, **`SIMPLE_ALLOW_UNLOWERED_MIR=1` must not be used
+   to verify this fix** — it greens the run through the helper's escape hatch
+   without exercising the Abort arm at all. Neither flag was used.
+
+### Measured evidence (fresh seed, exit code read directly into a variable)
+
+```text
+$ timeout 900 "$SEED" native-build lanework/control.spl -o lanework/control.bin
+$ NB_RC=$?
+NB_RC=1
+$ grep -c 'explicit panic() -- diverging' nb.err
+0            # was 5 before the fix
+```
+
+### Residual — blocker #7, NOT this bug
+
+`native-build` now fails with:
+
+```text
+error: build failed: 3 failed, 0 unverified, 0 not run, 3 ok of 6 unit(s)
+  ERROR: std.nogc_sync_mut.io.file_ops, std.nogc_sync_mut.io.process_ops,
+         std.nogc_sync_mut.io_runtime
+```
+
+The three ERROR modules are **exactly** the three owners of the
+`[hir-callable-dep-origin-unresolved] dependency=Option / Result` reports this
+record listed under "Context reported alongside". That answers this record's
+own open question: those reports were **independent**, not a consequence of
+the panic defect, and they are now the blocking failure. Filed as
+`doc/08_tracking/bug/native_compile_unresolved_option_result_io_modules_2026-08-24.md`.
+
+### Gate
+
+`scripts/check/check-llvm-abort-terminator-not-unsupported.shs` —
+`--selftest` first and fatal (7 fixtures), verdict last, PASS/FAIL/ERROR with
+exit 0/1/2, `--build` runs a real `native-build` under `timeout` with
+**rc=124 classified as a distinct HANG** failure. Mutation-tested both
+directions: reverting the Abort arm to the helper must FAIL, and reopening
+the 2026-08-23 fail-open must also FAIL.

@@ -442,6 +442,29 @@ impl MirToLlvm:
         if not allow_unlowered:
             eprint("error: {message}")
             panic("compile error: {message}")
+        self.emit_panic_trap_ir(message)
+
+    me emit_panic_trap_ir(message: text):
+        """Emit `@rt_panic(msg)` + `unreachable` -- a DIVERGING block, no build failure.
+
+        This is the correct lowering of `MirTerminator.Abort`, which is a
+        fully supported terminator deliberately emitted by MIR (see
+        50.mir/mir_data.spl `terminate_abort` and the `panic()` lowering in
+        _MirLoweringExpr/switch_operators_calls.spl). Its `message` is a
+        REASON LABEL describing why the block diverges -- it is not a
+        diagnostic and carries no file/line.
+
+        Extracted 2026-08-24. The Abort arm in core_codegen.spl used to call
+        `emit_unsupported_panic`, which was fine while that helper only
+        emitted this IR. When it was converted to FAIL THE BUILD on
+        2026-08-23 (llvm_backend_unlowered_mir_kind_fails_open), every user
+        `panic()` in any co-compiled module became a hard compile error, and
+        the abort's reason label was printed as `error: explicit panic() --
+        diverging, must not fall through`. The C backend never had this bug
+        -- its Abort arm emits `spl_panic(...)` directly -- and cranelift
+        emits a trap. See
+        doc/08_tracking/bug/native_compile_explicit_panic_diverging_process_ops_2026-08-24.md
+        """
         val global_name = self.add_string_global(message)
         val msg_len = escaped_string_byte_len(message)
         val str_len = msg_len + 1
