@@ -1680,3 +1680,15 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   later-sibling, and exact-span oracles.
 - No manual verification was run under the user override; parallel semantic,
   performance, and fixture review remains required.
+
+# Completed tranche: quarantine unsupported filesystem hints (2026-08-24)
+
+- Reclassified write coalescing and syscall batching as analysis-only.
+- Removed executable construction of backend-unsupported hint intrinsics.
+- Preserved candidate counters for future remarks and rehabilitation.
+- Updated canonical/legacy direct-adapter oracles and recorded-dispatch oracles
+  to require unchanged MIR and explicit analysis-only disposition.
+- Source-level complexity improves from block scans plus rebuilt instruction
+  arrays to constant-time adapter return; candidate analysis remains opt-in.
+- No manual verification was run under the user override; static parallel review
+  is required before the unverified sync.

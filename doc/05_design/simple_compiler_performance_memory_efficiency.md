@@ -1087,3 +1087,13 @@ an ARG001 parameter-count warning. Arm callers translate trimmed
 text back to one-based source columns with `aindent+1` and `aindent+at.len()`;
 match-level callers use `match_indent+1` and
 `match_indent+trimmed.len()`. Plain-text output is intentionally unchanged.
+
+# Filesystem hint quarantine design
+
+`optimize_write_coalesce` and `optimize_syscall_batch` are defensive identity
+adapters. Their descriptors are `AnalysisOnly`, so effective pipelines and
+recorded pass dispatch skip them with an `analysis_only` reason. Candidate
+counts remain available through `count_write_coalesce` and
+`count_syscall_batch`; these analyzers must not imply executable transformation
+support. Re-enabling either adapter requires a first-class MIR representation,
+complete backend/interpreter lowering, and ordering/effect legality tests.

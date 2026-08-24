@@ -770,6 +770,15 @@ The future active capsule must consume the shared `PerfFacts` def-use service on
 per function and attach a receipt covering the sole adjacent consumer,
 dominance, type/lane/comparison legality, `Move` semantics, and chosen source
 span. It must never rebuild def-use for each candidate.
+
+# Filesystem optimization hint boundary
+
+Candidate discovery may report write-coalescing and syscall-batching shapes,
+but executable MIR must not contain advisory-only intrinsics. Until a stable MIR
+operation has verified interpreter and backend lowering, both pass descriptors
+remain `AnalysisOnly`, expose no activation witness, and preserve the input
+function exactly. Reactivation requires semantic ordering/effect proofs plus a
+lowering receipt for every supported backend.
 # Watch dependency fact ownership
 
 The watch request owns one ordered snapshot of changed files and one parallel

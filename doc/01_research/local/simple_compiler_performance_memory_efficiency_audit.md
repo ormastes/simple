@@ -3427,3 +3427,18 @@ location metadata only; text output, precedence, and semantic-lint warning
 objects are unchanged. The patch adds no traversal: each match retains its one
 descendant scan, while overall fallback complexity—including overlapping nested
 match scans and enum inference—remains unchanged.
+
+# 2026-08-24 follow-up: filesystem hint transforms quarantined
+
+`WriteCoalesce` and `SyscallBatch` were advertised as active transforms and
+inserted `bulk_store_hint` and `call_batch_hint` intrinsics. The C backend could
+only spell these as undeclared runtime calls, while Cranelift and the MIR
+interpreter had no executable lowering. A selected optimization could therefore
+turn valid MIR into a backend failure.
+
+Both passes are now `AnalysisOnly`; their public adapters are constant-time
+identities and their activation witnesses are removed. The existing `count_*`
+functions remain the sole candidate-analysis surface. This also removes the
+transform adapters' per-block dictionaries, instruction-array rebuilding, and
+temporary hint operands from normal or direct-call paths. No runtime result is
+claimed because manual execution was explicitly skipped.
