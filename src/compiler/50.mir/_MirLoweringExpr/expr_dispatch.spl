@@ -1675,7 +1675,31 @@ impl MirLowering:
         # crashes at runtime.
         match index.kind:
             case Range(_, _, _, _):
-                self.error("unsupported array/string slice index a[start:end] (no native array-slice lowering; cannot safely lower to a value)", nil)
+                # NAME THE FORM THAT ACTUALLY FAILED, and declare fatality at
+                # the SITE. This arm fires only on a RANGE index (`a[i..]`,
+                # `a[i..j]`) -- `case Range` above is the whole guard. The
+                # message used to say `a[start:end]`, the COLON form, which on
+                # a text receiver is fully implemented and works in every
+                # spelling (literal, variable, open-start, open-end, and
+                # through a parameter). It named the syntax that works and
+                # never mentioned the one that does not. (A COLON slice on an
+                # ARRAY fails elsewhere and differently, as `unresolved method
+                # call: slice` from the slice_recv_is_array guard in
+                # method_calls_literals.spl -- not this site.)
+                #
+                # `error_fatal`, not `error`: fatality here used to come from
+                # `_mir_error_is_fatal`'s message-prefix allowlist in
+                # 80.driver/driver_pipeline_lowering.spl, which that file
+                # itself marks DEPRECATED precisely because "a reworded message
+                # silently changes build semantics -- with no test, type, or
+                # compiler error to catch it". Rewording this string alone was
+                # measured doing exactly that: `a[2..]` went from a clean build
+                # FAILURE to a build that SUCCEEDED and printed the placeholder
+                # `0` this arm returns -- the fail-open shape the guard exists
+                # to prevent. Declaring fatality at the site makes the wording
+                # free to change.
+                # doc/08_tracking/bug/slice_index_range_form_unimplemented_and_misnamed_2026-08-25.md
+                self.error_fatal("unsupported range index a[start..end] / a[start..] (lower_range has no native lowering; cannot safely lower to a value). The colon slice form a[start:end] IS supported on text -- use it instead", nil)
                 return self.builder.emit_const_int(0)
             case _: ()
         # Runtime arrays are tagged handles, not raw element pointers.
