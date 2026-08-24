@@ -1,6 +1,7 @@
 # SimpleOS scheduler address-space quiescence blocker
 
-**Status: BLOCKED — two unsafe prerequisite drafts reverted after review.**
+**Status: BLOCKED — bounded IRQ lease prerequisite landed locally; production
+architecture adapters and scheduler integration remain absent.**
 
 The second draft added bounded epoch/nonce rows, a mutex, one-shot snapshots,
 and canonical scheduler admission, but it still cleared the outgoing CPU lease
@@ -37,6 +38,16 @@ ARM32 needs an interrupt-side TTBR0 receipt provider tied to the scheduler
 residency epoch. RV32/x86 need equivalent SATP/CR3 providers. None exists at the
 current scheduler boundary, so integrating address-space destruction would be
 unsafe. No production support or quiescence proof is claimed.
+
+`cpu_interrupt_quiescence_lease_v1.spl` now supplies the safe owner-side
+state machine needed by those providers: one boot-sized atomic slot per sealed
+logical CPU, exact architecture/hardware identity and generation binding,
+one-shot save-disable/completion/restore transitions, prior-state restoration,
+and terminal quarantine on mismatch or generation exhaustion. Its IRQ-side
+transitions do not allocate, block, or take a mutex. This is not yet a hardware
+quiescence proof: the x86/ARM/RISC-V privileged adapters which atomically read
+the prior interrupt bit, disable, re-read identity/state, and restore are still
+required, and the scheduler has not been wired to the capsule.
 
 The owner also needs an explicit policy for mutex-unlock failure after a
 committed mutation (terminal poison/quarantine or a proven infallible unlock),
