@@ -646,3 +646,17 @@ directly constructed unique-ID sparse or reordered builder fixtures; duplicate
 IDs are invalid builder state. The lookup owns
 no side index, allocation, or invalidation state; all lowering type predicates
 consume the same method so complexity and identity checks cannot diverge.
+
+### Single-record builder metadata mutation
+
+MIR local reads and metadata writes share the same guarded position resolver.
+Canonical dense state performs one bounds/identity check; valid unique-ID
+sparse or reordered fixtures use the same first-match fallback. A metadata
+write constructs one replacement record and assigns one array slot, preserving
+all unrelated fields and table order. It must not explicitly rebuild the local
+array. This lets unique ownership keep updates O(1), while ordinary collection
+COW remains responsible for copying only when the backing array is genuinely
+shared. Metadata-write paths address the authoritative nested builder directly;
+they must not introduce a setter-specific `temporary = self.builder` / mutate /
+store-back alias. Earlier control-flow builder aliases must also be eliminated
+before production merge retyping can claim unconditional O(1) mutation.

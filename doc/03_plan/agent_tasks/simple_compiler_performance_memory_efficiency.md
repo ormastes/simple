@@ -164,6 +164,24 @@ current-head research reconciliation.
 - Manual verification intentionally omitted under the user's explicit
   no-verification instruction.
 
+## Completed MIR local metadata-update tranche
+
+- Share one guarded dense-index/unique-sparse fallback position resolver across
+  local type reads, naming, and retyping.
+- Replace full local-array reconstruction with one record replacement at the
+  resolved position.
+- Preserve missing-ID no-op behavior, field values not being changed, local
+  order, unique sparse/reordered first-match behavior, and invalid duplicate-ID
+  contract.
+- Reduce canonical uniquely owned updates from O(L) forced copies to O(1) work
+  and auxiliary storage; leave COW to copy only genuinely shared arrays.
+- Remove setter-specific builder round-trip aliases from parameter, Vulkan,
+  match, if, and conditional-chain lowering.
+- Record the five merge sites whose earlier live branch-builder aliases can
+  still trigger O(L) COW privatization; do not claim them as fully resolved.
+- Manual verification intentionally omitted under the user's explicit
+  no-verification instruction.
+
 ## Completed MIR-builder local-type index tranche
 
 - Formalize the canonical append-only `LocalId == locals position` builder

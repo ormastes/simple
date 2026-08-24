@@ -2653,6 +2653,30 @@ input with a different lifetime. Complete warning payload/order parity is
 covered using a generated RV64 bundle, but not executed under the user's
 no-verification instruction.
 
+### Indexed MIR local metadata updates
+
+`MirBuilder.set_local_name` and `set_local_type` previously allocated a new
+array, copied every local, replaced the matching record, and rebound the full
+table. Each single metadata update was O(L) work and O(L) transient array
+storage even though canonical LocalIds already identify their positions.
+
+The builder now owns one `_local_position` resolver shared by reads and writes.
+Canonical dense state resolves in O(1); unique-ID sparse or reordered fixtures
+retain a first-match O(L) fallback, while duplicate IDs remain invalid builder
+state. Name and type updates replace exactly one `MirLocal` record at the
+resolved position, preserving id, name/type counterpart, kind, ghost flag,
+missing-ID no-op behavior, and array order. With uniquely owned builder storage,
+canonical updates require O(1) work and auxiliary storage; Simple COW may still
+copy the backing array when an external live alias exists, but the methods no
+longer force that copy. Setter-specific round-trip aliases were removed from
+parameter naming, Vulkan constant retyping, and merge-result retyping. Parameter
+naming may pay one initial privatization for an earlier function-builder alias,
+then updates the remaining parameters in place; the Vulkan path is alias-free.
+Five merge paths can still retain earlier branch-builder aliases and therefore
+remain conditionally O(L). That residual is tracked separately rather than
+claimed as fixed. No manual verification or allocation measurement was run
+under the user's explicit no-verification instruction.
+
 ### Indexed MIR-builder local type queries
 
 `MirBuilder.new_local` assigns the current `next_local_id` and immediately
