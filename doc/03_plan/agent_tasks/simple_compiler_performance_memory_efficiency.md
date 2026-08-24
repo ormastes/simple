@@ -1205,6 +1205,27 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Existing liveness propagation and fail-closed contracts cover behavior;
   verification intentionally not run under the user's no-verify instruction.
 
+## Completed analyzer lookup/dedupe tranche
+
+- Hoist immutable CFG successor lookup from the per-local liveness loop to one
+  resolution per worklist visit.
+- Remove the impossible worklist growth fallback and write into the free slot
+  guaranteed by the queued bitmap and fixed block-count capacity.
+- Replace MEXH006's repeated linear reported-name scan with dictionary
+  membership while preserving first-occurrence warning order and payloads.
+- Existing liveness and match-exhaustiveness contracts cover behavior;
+  verification intentionally not run under the user's no-verify instruction.
+
+## Planned OPTME001 canonical-line tranche
+
+- Add line-owned OPTME001 collection/check kernels and retain source-taking
+  compatibility adapters.
+- Route the lint driver's canonical line snapshot through the combined
+  same-file analysis, eliminating four redundant splits and three duplicate
+  enclosure arrays per file.
+- Preserve parser revision checks, same-file ambiguity behavior, diagnostic
+  line numbers/order, and request-local snapshot lifetime.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
