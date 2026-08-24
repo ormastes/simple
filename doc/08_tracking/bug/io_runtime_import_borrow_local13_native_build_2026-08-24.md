@@ -1,6 +1,7 @@
 # Importing `std.nogc_sync_mut.io_runtime` fails native-build on a borrow-checker error
 
-**Status:** FIXED (2026-08-24) — TWO sequential defects, both fixed. See "Resolution" below.
+**Status:** FIXED (2026-08-24) in `9e3eb1adccd` — TWO sequential defects, both fixed. See "Resolution" below.
+**Still blocked downstream by a THIRD, separate defect:** `doc/08_tracking/bug/llvm_backend_no_result_match_semantic_2026-08-24.md`
 **Was:** Open — blocker for every `native-build` of a module importing `io_runtime`
 **Observed:** 2026-08-24
 **Area:** borrow checker / HIR import dependency resolution
@@ -206,6 +207,8 @@ pipeline in the backend:
 error: E-BACKEND-LLVM-INST-ResultMatchSemantic: LLVM backend does not lower ResultMatchSemantic
 ```
 
+Now filed separately as
+`doc/08_tracking/bug/llvm_backend_no_result_match_semantic_2026-08-24.md`.
 `std.common.text` and `std.nogc_sync_mut.fs` likewise now fail on unrelated
 MIR-lowering gaps (`unresolved method call: index_of`, `undefined variable
 Dir`). These are distinct defects and are NOT this record.
