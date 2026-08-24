@@ -242,3 +242,47 @@ Simple-side, in the elem-type stamping at
 `lower_for_iterator` in `mir_lowering_stmts.spl`. If the MIR is correct, the
 fix is in the Rust seed (`access.rs` most-fields-wins resolution /
 `decode_runtime_value`). **No fix has landed.**
+
+## REFUTED: it is not the "most-fields-wins" wrong-struct resolver either
+
+`dv8.spl` is `dv4.spl` with every field name of `Big` and its nested structs
+renamed to a globally unique `zzq_*` identifier, so no other struct in the
+program (or the stdlib) declares any of them and the ambiguity heuristic in
+`hir/lower/type_resolver.rs:get_field_info` has exactly one candidate.
+
+```
+expected:      name=[main]  ret=9 nloc=0 nblk=1 entry=3          sym=1
+dv4 (colliding names): name=[<ptr>] ret=1 nloc=1 nblk=1 entry=<same ptr> sym=1
+dv8 (unique names):    name=[<ptr>] ret=1 nloc=1 nblk=1 entry=<same ptr> sym=1
+```
+
+Byte-identical corruption. **The resolver is not picking the wrong struct — it
+is not resolving at all, and the field read defaults to byte offset 0 with i64
+typing.** The root-cause explanation recorded at
+`src/compiler/70.backend/backend/interpreter.spl:145-175` ("most-fields-wins
+picks the WRONG struct's field index") therefore does not explain this failure,
+and neither does its typed-binding remedy (disproven above).
+
+Two long-standing in-tree claims about this defect class are now empirically
+disproven. Both should be corrected once the real mechanism is known; until
+then, do not act on either.
+
+### What the seed source says, and why it doesn't match observation
+The seed already threads `HirType::Dict { key, value }`
+(`hir/lower/type_resolver.rs`, "task #104"), `.values()` on a `Dict`-typed
+receiver is already typed `Array { element: V }`
+(`hir/lower/expr/mod.rs:1619`), and `get_iterable_element`
+(`hir/type_registry.rs:188`) already unwraps `Array` to its element for the
+for-loop binding. On paper the element should be typed `Big`. It is not.
+
+Leading remaining hypothesis, NOT yet tested: the receiver `d` is not
+`HirType::Dict` at all — `var d: Dict<i64, Big> = {}` may take its type from
+the empty dict literal and drop the annotation, leaving `dict_kv == None` so
+`.values()` falls to the `TypeId::ANY` arm. A `SIMPLE_TRACE_FIELD_GET=1` build
+(the seed has this env-gated trace at `hir/lower/type_resolver.rs` and
+`codegen/instr/fields.rs:78`) was launched to read out the actual resolution
+decisions; result not yet in at time of writing.
+
+Fixtures, all in `build/lanes_s/`: `dv2` (first repro), `dv4` (access-path
+matrix), `dv6` (typed binding, disproves the remedy), `dv7` (alternative
+iteration forms), `dv8` (unique field names, refutes the resolver story).
