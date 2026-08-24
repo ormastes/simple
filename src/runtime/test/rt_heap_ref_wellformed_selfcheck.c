@@ -7,10 +7,14 @@
  *
  *   doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md
  *
- * Contract: the probe answers FORMATION ONLY — "is this a heap-tagged
- * pointer outside the zero page" — never liveness. It must false-reject
- * nothing a live heap payload can be, so it deliberately does NOT consult
- * the immortal-pointer registry.
+ * Contract: the probe answers FORMATION ONLY - "is this payload word a
+ * plausible object reference rather than 0 or a zero-page address" - never
+ * liveness. It must false-reject nothing a live payload can be, so it
+ * deliberately does NOT consult the immortal-pointer registry, and it does
+ * NOT require the heap tag: a class reference on the native codegen lane is
+ * a RAW UNTAGGED pointer, and requiring the tag false-rejected every live
+ * class instance there (2026-08-24, E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED
+ * fired on a valid hello world at Stage 2/3).
  *
  * The core-C bootstrap runtime capsule compiles and runs this check.
  */
@@ -46,6 +50,15 @@ int main(void) {
         "heap-tagged zero-page address is malformed");
     check(rt_heap_ref_wellformed(heap_tagged) == 1,
         "heap-tagged real address is wellformed without a registry probe");
+
+    /* REGRESSION PIN (2026-08-24): a class reference on the native codegen
+     * lane is a raw UNTAGGED pointer. Requiring the heap tag made the probe
+     * answer 0 for every live class instance, firing the two driver
+     * HIR-entry guards unconditionally. Restoring a tag requirement in any
+     * lane mirror re-breaks Stage 2/3 and must fail here. */
+    int64_t untagged = (int64_t)(uintptr_t)&anchor;
+    check(rt_heap_ref_wellformed(untagged) == 1,
+        "raw untagged pointer (native-lane class reference) is wellformed");
 
     if (failures != 0) {
         printf("rt_heap_ref_wellformed_selfcheck: %d failure(s)\n", failures);

@@ -80,12 +80,33 @@ describe "the probe answers FORMATION, never liveness":
         val check = file_read(SELFCHECK_C)
         expect(check).to_contain("rt_heap_ref_wellformed(24) == 0")
 
-    it "is two masked comparisons, with no registry call in its body":
+    it "is one masked comparison, with no registry call in its body":
         # A registry probe here would break the never-false-reject property
         # above, so the body is pinned verbatim rather than by name only.
         val runtime = file_read(RUNTIME_C)
-        expect(runtime).to_contain("if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;")
         expect(runtime).to_contain("return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;")
+
+    it "does NOT require the heap tag, so a live class reference passes":
+        # 2026-08-24: requiring RT_VALUE_TAG_HEAP false-rejected every live
+        # class instance on the native codegen lane, where a class reference
+        # is a RAW UNTAGGED pointer -- measured as
+        # `class-instance wellformed = false` natively vs `true` on the
+        # interpreter for the same live object. That fired the two driver
+        # HIR-entry guards unconditionally and produced
+        # E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED on a valid hello world at
+        # Stage 2/3. Restoring the tag test in ANY lane mirror re-breaks
+        # self-hosting, so its ABSENCE is pinned here and its behavioural
+        # half is the untagged-pointer case in the C self-check.
+        # Pinned POSITIVELY in both directions rather than by absence: the
+        # tag-test line occurs in OTHER functions in both files (2 more
+        # accessors in runtime_native.c, core_enum.spl:25), so a bare
+        # to_not_contain would false-fail. The C body is fixed verbatim by
+        # the single-comparison case above -- that one line IS the whole
+        # function -- and the pure-Simple mirror is fixed verbatim here.
+        val core = file_read(CORE_ENUM)
+        expect(core).to_contain("pub fn rt_heap_ref_wellformed(value: i64) -> i8:\n    if (value & -8) < 4096:\n        return 0\n    1")
+        val check = file_read(SELFCHECK_C)
+        expect(check).to_contain("raw untagged pointer (native-lane class reference) is wellformed")
 
 describe "the bootstrap capsule executes the probe self-check":
     it "compiles and runs rt_heap_ref_wellformed_selfcheck.c":

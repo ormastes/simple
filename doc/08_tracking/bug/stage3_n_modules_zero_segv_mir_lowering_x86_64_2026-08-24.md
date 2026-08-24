@@ -424,3 +424,116 @@ written in this lane; the confirming run was blocked by
 `bootstrap-admission-error: parent-stage2-sanity-admission-mismatch`
 (`STEP2_RC=64`) — re-minting a receipt fails once Stage 2 has been rebuilt,
 which is the re-invocation defect already recorded above in this file.
+
+---
+
+## ROOT CAUSE FOUND AND FIXED (2026-08-24, lane `lane-retained-surfaces`)
+
+`E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED` fired on a **valid** hello world
+because the formation probe backing it, `rt_heap_ref_wellformed`, **required the
+heap tag** — and on the native codegen lane a **class reference is a raw
+UNTAGGED pointer**, not a `|1`-tagged runtime value. The probe therefore
+answered 0 for **every live class instance** on that lane.
+
+Both driver HIR-entry guards pass a class reference
+(`ModuleSurfacesByName`), so on the native lane they could **never** pass:
+
+- `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:149` → `E-DRIVER-HIR-OWNER-MALFORMED`
+- `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:585` → `E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED`
+
+**The surfaces were never malformed. The CHECK was wrong.** This resolves the
+question deliverable 1 posed: the two branches needed opposite fixes, and the
+evidence picks the second.
+
+### Measured evidence — the discriminating differential
+
+The same live class instance, the same probe, the two lanes. Fixture:
+`extern fn rt_heap_ref_wellformed(value: Any) -> bool`, a two-field class, one
+`print`. Exit codes read directly into a variable on the line after each
+command, never through a pipe.
+
+```
+INTERP_RC=0
+  class-instance wellformed = true      <-- interpreter (Rust runtime): heap-tagged
+  text-value wellformed = true
+
+NATIVEBUILD_RC=0
+NATIVE_RUN_RC=0
+  class-instance wellformed = false     <-- NATIVE lane: THE DEFECT
+  text-value wellformed = true          <-- runtime value types ARE tagged
+```
+
+`text` reporting `true` on both lanes is what isolates the cause to the **class
+representation**, not to the probe being unreachable or unlinked.
+
+### The fix (minimal, semantics-preserving)
+
+Drop the **tag requirement** only; keep zero-page rejection, which is what
+actually catches the 2026-08-22 incident value `0`. One line removed in each of
+the two lanes that had it:
+
+- `src/runtime/runtime_native.c` — probe body is now a single masked comparison
+- `src/runtime/simple_core/core_enum.spl` — same, pure-Simple mirror
+- `src/compiler_rust/runtime/src/value/objects.rs` — **behaviour unchanged**;
+  on the Rust lane every live object is a heap value, so `is_heap()`
+  false-rejects nothing. Contract prose updated only.
+
+**The protection the guard was added for survives**: all five previously pinned
+rejections (`0`, nil `3`, tagged scalar `24`, heap-tagged zero-page `2049`,
+heap-tagged real address) mask below/above 4096 exactly as before and still
+return the same answers. Verified by running the C self-check — 5/5 unchanged,
+plus a new sixth case pinning the untagged pointer.
+
+Call sites were deliberately **not** touched: deleting them would lose the
+zeroed-payload protection and orphan the probe plus its four mirrors, a far
+larger diff. Realigning the probe with its own stated prime directive — *"must
+never false-reject a live object"* — is the smaller and more honest change.
+
+### Why this shipped green
+
+Every test the probe had was **source-text matching**
+(`expect(driver).to_contain(...)`) or a C self-check fed **only synthetic
+heap-TAGGED words**. Nothing ever asked the probe about an untagged pointer, and
+nothing ever ran either driver guard on a real class instance on the native
+lane. The new gate closes exactly that gap by compiling and RUNNING the probe.
+
+### Retired loose thread: the "missing archive symbol"
+
+`rt_heap_ref_wellformed` was reported as **0 occurrences** in
+`build/simple-core/libsimple_runtime.a`, and several lanes hit `unknown extern
+function: rt_heap_ref_wellformed`. **This was stale build directories, not a
+missing archive member.** Measured across five worktrees: every archive is dated
+**2026-08-18**, five days before the probe landed (`57271d9ba49`, 2026-08-23).
+`runtime_native.o` *is* a member, and the probe's immediate source neighbours
+(`rt_enum_payload`, `rt_enum_check_discriminant`) *are* present. A fresh
+`native-build` in this lane linked and ran the symbol with `NATIVEBUILD_RC=0`.
+The precedent-based theory (add a missing archive member, per the 2026-08-21
+three-member fix) was therefore **wrong**, and is recorded here so it is not
+resurrected.
+
+### Still open — a SECOND, separate defect (not fixed here)
+
+The driver symptom "streaming method returns SUCCESS from its middle, zero
+recorded errors, verdict `true`" is **error-propagation loss**, distinct from
+this one: the guard *did* `add_error` and `return (self.ctx, false)`, yet the
+caller saw success and MIR lowering then dereferenced an empty program and
+SEGV'd. Fixing the probe stops the guard from firing spuriously, which makes
+this defect **latent rather than resolved** — a future genuine fail-closed
+return on the native lane may still be swallowed the same way. It needs its own
+investigation and its own reproducer.
+
+### Regression fence
+
+`scripts/check/check-heap-ref-wellformed-accepts-class-refs.shs` — fail-closed,
+`--selftest` first and fatal, verdict last.
+`PASS — 6 case(s) checked, ...` exit 0 / `FAIL` exit 1 / `ERROR` exit 2; a
+compiler-less machine or an unextractable probe is ERROR, never a pass. Unlike
+the existing `.spl` spec it **compiles and runs** the shipped probe.
+Mutation-tested three ways against the real tree:
+
+| mutation | verdict | rc |
+|---|---|---|
+| restore tag test in C probe | `FAIL — 6 case(s) checked, ... C:untagged(want 1, got untagged=0)` | 1 |
+| restore tag test in pure-Simple mirror | `FAIL — 6 case(s) checked, ... simple-mirror:requires-heap-tag` | 1 |
+| delete the probe entirely | `ERROR — nothing was checked (could not extract ...)` | 2 |
+| tree restored | `PASS — 6 case(s) checked, ...` | 0 |

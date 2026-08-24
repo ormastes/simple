@@ -8409,14 +8409,24 @@ int64_t rt_enum_payload(int64_t value) {
 /* Formation probe for heap-typed enum/Option payloads at fail-closed
  * handoffs. The 2026-08-22 stage-3 streaming-owner incident read back a
  * Some-tagged Option whose payload word was 0: every discriminant/nil guard
- * passed and the first field load SIGSEGV'd at 0x0. A heap payload must be a
- * tagged pointer outside the zero page; this answers exactly that, with no
- * registry probe — a FORMATION check, not a liveness proof, so it can never
- * false-reject a live object. Call sites own the payload-type contract
- * (heap/aggregate payloads only; scalar payloads are not heap-tagged by
- * design and report 0 here). */
+ * passed and the first field load SIGSEGV'd at 0x0. This answers exactly
+ * that -- is the payload word a plausible object reference rather than 0 or
+ * a zero-page address -- with no registry probe: a FORMATION check, not a
+ * liveness proof.
+ *
+ * It deliberately does NOT require the HEAP tag. Requiring it made the probe
+ * false-reject every live CLASS instance on the native codegen lane, where a
+ * class reference is a raw (untagged) pointer rather than a |1-tagged runtime
+ * value -- measured 2026-08-24: the same live object reports wellformed on the
+ * interpreter lane and malformed on the native lane. That broke the two
+ * driver HIR-entry guards unconditionally at Stage 2/3
+ * (E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED on a valid hello world). The
+ * probe's prime directive is that it must never false-reject a live object,
+ * so the tag requirement is the part that had to go; zero-page rejection --
+ * which is what actually catches the incident value 0 -- is retained, and
+ * every previously pinned rejection (0, nil 3, tagged scalar 24, heap-tagged
+ * zero-page 2049) still masks below 4096 and is still rejected. */
 int8_t rt_heap_ref_wellformed(int64_t value) {
-    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
     return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;
 }
 

@@ -386,11 +386,14 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
 /// Option read back with payload word 0 passed every discriminant/nil guard
 /// and SIGSEGV'd on the first field load — see
 /// doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md).
-/// Answers FORMATION ONLY — a heap-tagged pointer outside the zero page —
-/// with no registry probe, so it can never false-reject a live object. Call
-/// sites own the payload-type contract: scalar payloads are not heap-tagged
-/// and report 0 by design. Mirrors `rt_heap_ref_wellformed` in
+/// Answers FORMATION ONLY — is the payload a plausible object reference
+/// rather than 0 or a zero-page address — with no registry probe, so it can
+/// never false-reject a live object. Mirrors `rt_heap_ref_wellformed` in
 /// src/runtime/runtime_native.c and src/runtime/simple_core/core_enum.spl.
+/// Those two lanes had to drop their HEAP-tag requirement because a class
+/// reference on the native codegen lane is a raw untagged pointer; on THIS
+/// lane every live object is a heap value, so `is_heap()` false-rejects
+/// nothing and the check below is already contract-correct as written.
 #[no_mangle]
 pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
     if !value.is_heap() {
