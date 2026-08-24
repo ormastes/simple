@@ -1476,3 +1476,11 @@ the paired analyzer sample is 4.70 s / 277,740 KiB before versus 6.80 s /
 270,416 KiB after. Current census is 21,267 calls (2,161 explicit, 19,106
 missing), 12,111 declarations (904 tagged, 385 minimized, 10,941 untouched),
 zero signed/admitted.
+
+The LLVM target module now scopes both normalized target-policy reads without
+changing provider cardinality. Optimizer findings remain 22 and paired analyzer
+evidence is 5.94 s / 271,172 KiB before versus 4.93 s / 270,708 KiB after.
+The target-flow spec is 6/7 due to a recorded pre-existing stale source string;
+all six behavioral cases pass. Current census is 21,267 calls (2,163 explicit,
+19,104 missing), 12,111 declarations (905 tagged, 385 minimized, 10,940
+untouched), zero signed/admitted.

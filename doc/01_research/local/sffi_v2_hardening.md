@@ -2550,3 +2550,20 @@ after; the lower RSS and unchanged findings/source complexity do not establish
 a regression or general speedup. Current census is 21,267 calls (2,161
 explicit, 19,106 missing), 12,111 declarations (904 tagged, 385 minimized,
 10,941 untouched), zero signed/admitted.
+
+## LLVM target-triple policy boundary
+
+The target module's two normalized target reads now share one tagged declaration
+and execute in minimal lexical `unsafe(ffi)` blocks. Both remain one read plus
+the same trim/lower operation at their original hard-float and target-triple
+decision points. No caching, call, allocation path, loop, or dispatch was
+added. Optimizer findings remain 22; isolated analyzer evidence is 5.94 s /
+271,172 KiB before versus 4.93 s / 270,708 KiB after.
+
+The target-flow spec is 6/7. All behavioral target cases pass; its source-order
+case is stale because it searches for `if target == CodegenTarget.SimpleOS_X86_64:`
+although the committed pre-change source already uses `if is_simpleos:`. The
+unrelated test defect is recorded separately and is not laundered into a pass.
+Current census is 21,267 calls (2,163 explicit, 19,104 missing), 12,111
+declarations (905 tagged, 385 minimized, 10,940 untouched), zero
+signed/admitted.
