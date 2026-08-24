@@ -77,6 +77,46 @@ independently so that lane can be *migrated onto it* rather than blessed.
    .../linker_limine.ld`) is not invoked by the builder, which fails loudly
    rather than inventing a kernel. So the ESP is reproducible; the kernel inside
    it is not yet.
+
+   **CLOSED for the Limine kernel, 2026-08-24** by
+   `scripts/os/build-simpleos-aarch64-limine-kernel.shs`, which runs exactly
+   that seed `native-build` command and structurally verifies the result
+   (non-empty, AArch64 ELF, has `.text`, read back with `readelf`). It fails
+   loudly rather than inventing a kernel, same contract as the ESP builder.
+
+   Verified end to end from a WIPED `build/os/aarch64_limine/` — the state a
+   clean clone is in:
+
+   ```
+   $ rm -rf build/os/aarch64_limine
+   $ sh scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs
+   ERROR — nothing was checked: ESP build failed ... missing kernel ELF
+   .../build/os/aarch64_limine/kernel.elf      (exit 2)
+
+   $ sh scripts/os/build-simpleos-aarch64-limine-kernel.shs
+   PASS — aarch64 Limine kernel built: .../kernel.elf (105768 bytes, AArch64 ELF with .text)
+   $ sh scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs
+   PASS — 4 boot-stage marker(s) checked, EDK2/AAVMF pflash real-firmware aarch64
+   boot verified via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit),
+   76 serial line(s) captured; firmware /usr/share/AAVMF/AAVMF_CODE.fd
+   ```
+
+   Note on the compiler: this uses the Rust bootstrap seed deliberately. The
+   aarch64 UNIFIED desktop kernel refuses the seed, but this Limine kernel is a
+   different, much smaller artifact and links cleanly with it.
+
+   Note on a near-miss worth recording, since it is the exact hazard
+   `.claude/rules/vcs.md` warns about: the first attempt at this build failed
+   with `ld.lld: error: undefined symbol: rt_raw_i64_to_string`, and a fix was
+   written for `freestanding_runtime.c` — but that error came from a **stale
+   working copy**. The tracked file already carried `rt_raw_i64_to_string`
+   (landed by another session, found the same way, by a real ld.lld error). The
+   working copy was 1562 lines behind. The file was restored to tracked content
+   and the whole chain re-verified on it; the kernel is byte-identical in size
+   either way. Nothing in this change touches the C runtime.
+
+   The UNIFIED arm64 kernel still has no from-source build here; that half of
+   item 2 stays open, as does item 1.
 3. Physical board bring-up for aarch64 remains filed as before.
 
 ## Evidence — red then green
