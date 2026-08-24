@@ -306,3 +306,86 @@ failing files or the remaining ~322 errors.
   keyed by bare type name, so ANY two same-named composites in one build collide.
 - **E3 (backend/frontend/mir_opt/types):** duplication is NOT your cause;
   `codegen.spl` is refuted above. Proceed independently.
+
+---
+
+# FIX LANDED — the composite field index is now keyed per declaring module
+
+Status for the field-visibility half: **FIXED**. (The `DiContainer` hop defect in
+Part 2 remains OPEN and is unchanged.)
+
+## What was fixed, and why the KEY rather than the duplicate
+
+The root cause is the **keying**, not the `JitInstantiator` twins. Keying a
+per-lowerer composite map by bare type name is a latent defect that bites any two
+same-named types anywhere in the tree; `JitInstantiator` is merely today's
+collision. Renaming or deleting one copy would clear the 83 errors and leave the
+landmine armed for the next pair, so the key was fixed instead.
+
+The consumer side already did the right thing. `composite_name_for_owner_raw`
+(`_Expressions/expression_support.spl`) builds `defining_module + "." + name` and
+only falls back to the bare name when that key is absent, and the IMPORT path
+already registered such a key (`module_import_registration.spl`,
+`canonical_composite_name`). **Local declarations were the only writer that never
+registered one**, so the lookup always fell back to the colliding bare key. The
+fix closes exactly that gap.
+
+`src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl` —
+`prescan_composite_field_types` and `register_struct_field_types` now additionally
+write `self.module_filename + "." + <name>` into all four maps
+(`struct_field_types_by_name`, `struct_field_order_by_name`,
+`struct_field_access_by_name`, `struct_constructor_access_by_name`).
+
+Properties that keep the change safe:
+
+- **Additive.** The bare key is still written, so any consumer that has no owner
+  symbol — and therefore cannot build the qualified key — resolves exactly as
+  before. The only behavioural change is that a reader which *can* build the
+  qualified key now finds it instead of falling through to a possibly-clobbered
+  bare slot.
+- **Spelling matches the reader.** `declare_module_symbols` passes
+  `self.module_filename` as the symbol's `defining_module`, so that exact spelling
+  must be used; a different one would produce a key the reader never looks up.
+  A spec case pins this correspondence so the two sides cannot drift apart.
+- **Guarded on empty.** An empty `module_filename` would produce the bogus key
+  `.Name`, re-colliding everything; the write is skipped in that case, and a spec
+  case pins it.
+- **No COW alias.** Each write mutates the owning map directly
+  (`self.map[key] = value`); no collection is copied through a temporary.
+
+## Spec (fails before the fix, passes after)
+
+`test/01_unit/compiler/hir/composite_field_index_module_qualified_key_spec.spl`,
+5 cases. The collision is reproduced the way it actually occurs — **two registrants
+of the same bare name inside ONE lowerer's map** (each module gets a fresh
+lowerer, so the collision is not cross-lowerer; it happens as soon as a module
+declares a composite and also imports a same-named one, which is precisely
+`jit_instantiator.spl`'s shape).
+
+| | pre-fix | post-fix |
+|---|---|---|
+| `Results:` | **2 total passed, 3 failed** (rc=1) | **5 total, 5 passed, 0 failed** (rc=0) |
+
+Pre-fix, the two core cases fail with `method 'has' not found on type 'nil'` —
+the qualified key does not exist, so the lookup returns nil. The two cases that
+pass in BOTH states are the deliberate no-regression pins (bare-name alias still
+last-writer-wins; no key written when the filename is empty).
+
+## Regression check
+
+Neighbouring HIR specs were run with and without the fix and are **byte-identical
+in both states**, so their failures are pre-existing and unrelated:
+
+| spec | with fix | without fix |
+|---|---|---|
+| `test/03_system/compiler/compiler_module_scoped_hir_lowering_spec.spl` | 2 total, 1 passed, 1 failed | 2 total, 1 passed, 1 failed |
+| `test/02_integration/compiler/hir_method_call_receiver_payload_spec.spl` | 2 total, 0 passed, 2 failed | 2 total, 0 passed, 2 failed |
+
+## What is NOT yet proven
+
+The 83 stage-3 errors are **not** yet measured as cleared. Doing so needs a full
+stage-2 rebuild plus a whole-tree stage-3 run (hours), which this lane did not
+run. What is proven is the mechanism and the fix at the unit level, with a
+pre/post differential. Heed `expression_support.spl:392-402`: a prior permissive
+change in this area drove total fatals 312 -> ~6517, so the next whole-tree run
+must be compared against a recorded baseline rather than assumed to improve.

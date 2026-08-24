@@ -1,0 +1,123 @@
+"""
+# Composite field index must be keyed per declaring module
+
+Regression pin for the stage-3 self-host blocker analysed in
+`doc/08_tracking/bug/duplicate_module_trees_refuted_reexport_hop_item_name_2026-08-24.md`.
+
+`struct_field_access_by_name` (and its `_types_`/`_order_`/`_constructor_`
+siblings) used to be keyed by the BARE composite name. A bare name is not a
+unique key: two modules may declare the same composite name, and when both
+registrations land in ONE lowerer's map -- which is what happens as soon as a
+module declares a composite and also imports a same-named one -- the second
+write silently overwrites the first. Every field read against the loser then
+resolves through the WINNER's field set, so the loser's entire field set reads
+as invisible.
+
+Measured in the stage-3 run: `JitInstantiator` is declared by both
+`src/compiler/99.loader/jit_instantiator.spl` and
+`src/compiler/99.loader/loader/jit_instantiator.spl` -- drifted copies with the
+same field NAMES but different field TYPES -- accounting for 83 of the 405 HIR
+lowering fatals.
+
+The consumer side (`composite_name_for_owner_raw` in
+`_Expressions/expression_support.spl`) already prefers `defining_module + "." +
+name` and only falls back to the bare name when that key is absent, and the
+IMPORT path already registers such a key. Local declarations were the only
+writer that never did, so the lookup always fell back to the colliding bare key.
+
+These cases fail before that fix and pass after it.
+"""
+
+use compiler.hir.hir_lowering.{hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName}
+use compiler.frontend.parser_types.{ParserField}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use app.io.mod.{file_read_text}
+
+fn spec_field(field_name: text) -> ParserField:
+    ParserField(
+        name: field_name,
+        type_: Type(kind: TypeKind.Infer, span: Span.empty()),
+        visibility: Visibility.Public,
+        is_public: true,
+        is_volatile: false,
+        span: Span.empty()
+    )
+
+fn spec_lowering(filename: text):
+    val surfaces_result = ModuleSurfacesByName.from_parts(
+        [ModuleSurface.empty("synthetic")], {"synthetic": 0}, ["synthetic"], [0])
+    hirlowering_for_module(filename, surfaces_result.unwrap())
+
+describe "composite field index keyed per declaring module":
+    """Two same-named composites registered in one lowerer must not erase each other."""
+
+    it "keeps both field sets reachable under module-qualified keys":
+        """This is the whole defect: pre-fix, only `owner_b`'s field set survived."""
+        var lowering = spec_lowering("mod_a.spl")
+        lowering.prescan_composite_field_types("Dup", [spec_field("owner_a")])
+
+        # A second registrant of the SAME bare name, from a different module.
+        lowering.module_filename = "mod_b.spl"
+        lowering.prescan_composite_field_types("Dup", [spec_field("owner_b")])
+
+        val access = lowering.struct_field_access_by_name
+        expect(access.has("mod_a.spl.Dup")).to_equal(true)
+        expect(access.has("mod_b.spl.Dup")).to_equal(true)
+
+        # Each qualified slot retains its OWN field, not the other's.
+        expect(access["mod_a.spl.Dup"].has("owner_a")).to_equal(true)
+        expect(access["mod_a.spl.Dup"].has("owner_b")).to_equal(false)
+        expect(access["mod_b.spl.Dup"].has("owner_b")).to_equal(true)
+        expect(access["mod_b.spl.Dup"].has("owner_a")).to_equal(false)
+
+    it "still records the field TYPES per declaring module":
+        """The types/order siblings are keyed identically, or a field read gets the wrong type."""
+        var lowering = spec_lowering("mod_a.spl")
+        lowering.prescan_composite_field_types("Dup", [spec_field("owner_a")])
+        lowering.module_filename = "mod_b.spl"
+        lowering.prescan_composite_field_types("Dup", [spec_field("owner_b")])
+
+        expect(lowering.struct_field_types_by_name.has("mod_a.spl.Dup")).to_equal(true)
+        expect(lowering.struct_field_types_by_name["mod_a.spl.Dup"].has("owner_a")).to_equal(true)
+        expect(lowering.struct_field_order_by_name["mod_a.spl.Dup"].len()).to_equal(1)
+        expect(lowering.struct_field_order_by_name["mod_b.spl.Dup"][0]).to_equal("owner_b")
+
+    it "preserves the bare-name key as a last-writer-wins alias":
+        """The fix is ADDITIVE. A consumer with no owner symbol cannot build the
+        qualified key, so the bare fallback must behave exactly as before."""
+        var lowering = spec_lowering("mod_a.spl")
+        lowering.prescan_composite_field_types("Dup", [spec_field("owner_a")])
+        lowering.module_filename = "mod_b.spl"
+        lowering.prescan_composite_field_types("Dup", [spec_field("owner_b")])
+
+        val access = lowering.struct_field_access_by_name
+        expect(access.has("Dup")).to_equal(true)
+        expect(access["Dup"].has("owner_b")).to_equal(true)
+
+    it "registers no qualified key when the module filename is unknown":
+        """An empty filename would produce the bogus key `.Dup`, colliding all over again."""
+        var lowering = spec_lowering("")
+        lowering.prescan_composite_field_types("Dup", [spec_field("owner_a")])
+
+        expect(lowering.struct_field_access_by_name.has("Dup")).to_equal(true)
+        expect(lowering.struct_field_access_by_name.has(".Dup")).to_equal(false)
+
+    it "keys the reader and the writer with the same spelling":
+        """`declare_module_symbols` passes `self.module_filename` as the symbol's
+        `defining_module`, and the reader rebuilds `defining_module + "." + name`.
+        If the writer ever used a different spelling the key would never be found."""
+        val writer = file_read_text(
+            "src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl")
+        expect(writer).to_contain("self.module_filename + \".\" + name")
+        expect(writer).to_contain("self.module_filename + \".\" + hir_struct.name")
+
+        val reader = file_read_text(
+            "src/compiler/20.hir/hir_lowering/_Expressions/expression_support.spl")
+        expect(reader).to_contain("owner_module + \".\" + owner_symbol.name")
+
+        val declarer = file_read_text(
+            "src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl")
+        expect(declarer).to_contain("Some(self.module_filename)")

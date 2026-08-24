@@ -48,6 +48,36 @@ impl HirLowering:
         self.struct_field_order_by_name[name] = field_order
         self.struct_field_access_by_name[name] = field_access
         self.struct_constructor_access_by_name[name] = true
+        # MODULE-QUALIFIED KEY (2026-08-24). The bare name is NOT a unique key:
+        # two modules may declare the same composite name, and the second
+        # registration silently overwrites the first, so every field read
+        # against the loser resolves through the winner's field set and the
+        # WHOLE field set reads as invisible. Measured in the stage-3 self-host
+        # run: `JitInstantiator` is declared by both
+        # `src/compiler/99.loader/jit_instantiator.spl` and
+        # `src/compiler/99.loader/loader/jit_instantiator.spl` (drifted copies,
+        # same field NAMES, different field TYPES), producing 83 of the 405 HIR
+        # lowering fatals.
+        #
+        # The consumer side already prefers a module-qualified key --
+        # `composite_name_for_owner_raw` (expression_support.spl) builds
+        # `defining_module + "." + name` and only falls back to the bare name
+        # when that key is absent -- and the IMPORT path already registers one
+        # (`module_import_registration.spl`, `canonical_composite_name`). Local
+        # declarations were the only writer that never registered it, so the
+        # lookup always fell back to the colliding bare key.
+        #
+        # `declare_module_symbols` passes `self.module_filename` as the symbol's
+        # `defining_module`, so that is the spelling the reader reconstructs;
+        # it must be used verbatim here or the key will not be found.
+        # Purely ADDITIVE: the bare key above is still written, so any consumer
+        # that has no owner symbol (and therefore cannot build the qualified
+        # key) keeps resolving exactly as before.
+        if self.module_filename != "":
+            self.struct_field_types_by_name[self.module_filename + "." + name] = field_types
+            self.struct_field_order_by_name[self.module_filename + "." + name] = field_order
+            self.struct_field_access_by_name[self.module_filename + "." + name] = field_access
+            self.struct_constructor_access_by_name[self.module_filename + "." + name] = true
 
     # Nested-field-access support (native --entry path bug, see
     # struct_field_types_by_name doc comment in types.spl): record this
@@ -66,6 +96,13 @@ impl HirLowering:
         self.struct_field_types_by_name[hir_struct.name] = field_types
         self.struct_field_access_by_name[hir_struct.name] = field_access
         self.struct_constructor_access_by_name[hir_struct.name] = true
+        # Module-qualified key -- see the rationale on the twin write in
+        # `prescan_composite_field_types` above. Same reason, same spelling,
+        # same additive stance: the bare key is still written.
+        if self.module_filename != "":
+            self.struct_field_types_by_name[self.module_filename + "." + hir_struct.name] = field_types
+            self.struct_field_access_by_name[self.module_filename + "." + hir_struct.name] = field_access
+            self.struct_constructor_access_by_name[self.module_filename + "." + hir_struct.name] = true
 
     # Untyped-return inference (native --entry path) -- see the `ReturnScan`
     # doc comment in lowering_helpers.spl for the full rationale. Runs over
