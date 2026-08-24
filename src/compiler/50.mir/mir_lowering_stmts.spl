@@ -150,7 +150,25 @@ fn mir_stmt_caller_probe(tag: text, stmt: HirStmt):
             mir_stmt_caller_debug_state = 0
     if mir_stmt_caller_debug_state == 1 and stmt != nil:
         val disc = mir_hir_stmt_kind_disc(stmt.kind)
-        eprint("[mir-stmt-caller] " + tag + " disc=" + disc.to_text() + " file=" + stmt.span.file + " line=" + stmt.span.line.to_text() + " col=" + stmt.span.col.to_text())
+        # Two-disc probe (bootstrap_stage2_empty_mir_bodies_2026-07-05, 2026-08-24).
+        #
+        # The INCOMING disc alone cannot say why `lower_stmt_impl` emits nothing.
+        # `Expr`/`Let` dispatch compares it against the disc of a LOCALLY
+        # constructed variant (`:1102`, `:721`), and on a self-compiled Stage 2 a
+        # statement is silently dropped while the identical source works when the
+        # seed INTERPRETS it. Reconstruct exactly the same reference values here
+        # so the log answers "do the two sides agree" instead of leaving it to
+        # inference. Discriminants are hash-derived `uint32`s
+        # (RtCoreEnum.discriminant), and `rt_enum_discriminant` answers -1 when
+        # the value is not an enum at all -- so -1 on either side is itself the
+        # finding. Default OFF, retained per the log-retention policy.
+        val probe_type = HirType(kind: HirTypeKind.Unit, span: Span.empty())
+        val probe_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: probe_type, span: stmt.span)
+        val ref_expr_disc = mir_hir_stmt_kind_disc(HirStmtKind.Expr(probe_expr))
+        val ref_let_disc = mir_hir_stmt_kind_disc(HirStmtKind.Let(SymbolId(id: -1), probe_type, probe_expr))
+        val hits_expr = if disc == ref_expr_disc: "yes" else: "no"
+        val hits_let = if disc == ref_let_disc: "yes" else: "no"
+        eprint("[mir-stmt-caller] " + tag + " disc=" + disc.to_text() + " ref_expr=" + ref_expr_disc.to_text() + " ref_let=" + ref_let_disc.to_text() + " hits_expr=" + hits_expr + " hits_let=" + hits_let + " file=" + stmt.span.file + " line=" + stmt.span.line.to_text() + " col=" + stmt.span.col.to_text())
 
 fn mir_expr_kind_is_place(k: HirExprKind) -> bool:
     """True when a HIR expression is a PLACE read -- it evaluates to the

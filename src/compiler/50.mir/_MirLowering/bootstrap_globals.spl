@@ -29,6 +29,34 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_exit(code: i64)
 extern fn rt_string_len(value: text) -> i64
 
+fn bootstrap_report_recorded_mir_errors(lowering: MirLowering, context: text):
+    """Surface MIR errors recorded while lowering FUNCTION BODIES.
+
+    Silent-swallow (bootstrap_stage2_empty_mir_bodies_2026-07-05, 2026-08-24):
+    `bootstrap_reject_fatal_mir_errors` runs BEFORE the function loop, and the
+    0-instruction guard below exits after it, with no rejection call in
+    between. So a `self.error(...)` raised while lowering a body was recorded
+    into `lowering.errors` and NEVER printed -- the build died saying only
+    "0 MIR instructions", with the actual reason sitting unread in memory.
+    Every defect on this path was undiagnosable for that reason alone.
+
+    Called on the fatal path only, so it is unconditional rather than
+    level-gated: the process is about to `rt_exit(1)` and there is no such
+    thing as noise in a death message. Non-fatal entries are printed too --
+    on this path a recorded non-fatal error IS the diagnosis.
+
+    The `0 errors recorded` line is load-bearing, not filler: it distinguishes
+    "a handler ran and bailed via a recorded error" from "no handler ever ran",
+    which is exactly the question the 0-instruction guard cannot answer by
+    itself."""
+    var count = 0
+    for err in lowering.errors:
+        count = count + 1
+        val kind = if err.fatal: "fatal" else: "non-fatal"
+        eprint("error: bootstrap MIR lowering ({context}, {kind}): {err.message}\n")
+    if count == 0:
+        eprint("note: bootstrap MIR lowering ({context}): 0 errors recorded\n")
+
 fn bootstrap_reject_fatal_mir_errors(lowering: MirLowering) -> bool:
     var rejected = false
     for err in lowering.errors:
@@ -418,6 +446,11 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     lowered_module = lowering.builder.module
     lowered_module.name = module_name
     bootstrap_mir_modules_add(lowered_module)
+    # Silent-swallow fix: the caller's 0-instruction guard exits without ever
+    # seeing `lowering.errors`, which only exists here. Report before returning
+    # so the death message carries its reason. See the helper's docstring.
+    if is_entry and instruction_total == 0:
+        bootstrap_report_recorded_mir_errors(lowering, "flat entry")
     (lowered_module, instruction_total)
 
 fn bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name: text, target_context: MirTargetContext) -> MirModule:
@@ -624,6 +657,7 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
         # link-clean but non-functional stage-2 binary that silently shipped.
         # Fail closed instead (policy: stub fallbacks intentionally rejected).
         if real_instr_total == 0:
+            bootstrap_report_recorded_mir_errors(lowering, "globals entry")
             eprint("error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)\n")
             eprint("error: refusing to emit a stub-only bootstrap binary; real Simple lowering produced no bodies\n")
             rt_exit(1)
