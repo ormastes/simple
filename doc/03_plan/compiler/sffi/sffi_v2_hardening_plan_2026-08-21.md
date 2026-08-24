@@ -1388,3 +1388,12 @@ the line-oriented masker and marker-free fast path: measured full-scan time is
 30.42 s / 14,432 KiB versus approximately 34 seconds before the correction.
 Historical pre/post-rebase deltas from the old scanner are not comparable; use
 the corrected current snapshot as the next same-tool regression baseline.
+
+Frontend cache eviction now owns seven tagged declarations and seven lexical
+call scopes without changing provider cardinality, array copies, or its O(n)
+scan / O(n^2) bounded eviction selection. Current census: 21,266 calls (2,134
+explicit, 19,132 missing); 12,111 declarations (892 tagged, 383 minimized,
+10,953 untouched), zero signed/admitted. The classifier spec passes 3/3; the
+functional spec remains 5/6 because raw fixture file creation fails before the
+eviction call. Preserve that false result until the file-write provider exposes
+a typed error rather than fabricating test success.

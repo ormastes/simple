@@ -2389,3 +2389,22 @@ approximately 34-second observed run. Complexity remains O(source bytes + call
 sites), with no additional tree scan. Corrected totals are 21,266 raw calls,
 2,127 explicit, 19,139 missing, 3,277 distinct called symbols, and 3,111 caller
 files. Signed and admitted provider evidence remains zero.
+
+## Frontend cache-eviction boundary
+
+The cache-directory eviction owner now tags its seven raw environment,
+directory, file-metadata, deletion, and time declarations with their actual
+sentinel limitations and scopes every call lexically. The unused
+`rt_file_exists` declaration was removed. The early zero-cap/empty-path return
+still prevents directory probing, every provider is called exactly once at its
+former point, the returned directory array is not copied, and the O(n) scan /
+O(n^2) cold-entry selection algorithm is unchanged.
+
+The optimizer-classifier spec passes 3/3 after excluding extern array
+signatures from bounds-check findings. The cache module's paired analyzer sample
+is 4.05 s / 272,384 KiB before versus 3.85 s / 272,612 KiB after. Its functional
+spec passes 5/6; the remaining failure occurs in fixture setup when the raw
+file-write provider returns false before eviction runs, and was not laundered
+into success. Corrected totals are 21,266 raw calls, 2,134 explicit, 19,132
+missing; 12,111 declarations, 892 tagged, 383 minimized, 10,953 untouched, and
+zero signed/admitted.

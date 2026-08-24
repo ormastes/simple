@@ -25,13 +25,19 @@
 # file instead of a scan — at that point adopt 80.driver/cache/gc/ rather than
 # growing this.
 
+@unsafe(reason: "raw environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw directory listing; empty array conflates an empty directory with provider failure", capabilities: [ffi])
 extern fn rt_dir_list(path: text) -> [text]
+@unsafe(reason: "raw directory predicate; false conflates absence with provider failure", capabilities: [ffi])
 extern fn rt_dir_exists(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw file-size probe; non-positive sentinels conflate empty files with provider failure", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> i64
+@unsafe(reason: "raw file timestamp probe; zero conflates the epoch with provider failure", capabilities: [ffi])
 extern fn rt_file_stat(path: text) -> i64
+@unsafe(reason: "raw cache-file deletion; false conflates absence with provider failure", capabilities: [ffi])
 extern fn rt_file_delete(path: text) -> bool
+@unsafe(reason: "raw wall-clock read; provider validity is not cryptographically admitted", capabilities: [ffi])
 extern fn rt_time_now_unix_micros() -> i64
 
 # 4 GiB. Big enough that a full bootstrap closure never evicts (a 688-module
@@ -46,7 +52,9 @@ val CACHE_EVICT_GRACE_SECS: i64 = 300
 val CACHE_EVICT_SWEEP_INTERVAL: i64 = 512
 
 pub fn cache_dir_max_bytes() -> i64:
-    val raw = rt_env_get("SIMPLE_CACHE_MAX_BYTES") ?? ""
+    var raw = ""
+    unsafe(capabilities: [ffi]):
+        raw = rt_env_get("SIMPLE_CACHE_MAX_BYTES") ?? ""
     if raw == "":
         return CACHE_DEFAULT_MAX_BYTES
     val parsed = raw.to_i64() ?? -1
@@ -63,22 +71,37 @@ pub fn cache_dir_evict_due(store_count: i64) -> bool:
 # directory's total entry bytes are at or below `max_bytes`. Returns the number
 # of entries deleted. A `max_bytes` of 0 disables eviction entirely.
 pub fn cache_dir_evict_to_cap(dir: text, suffix: text, max_bytes: i64) -> i64:
-    if max_bytes <= 0 or dir == "" or not rt_dir_exists(dir):
+    if max_bytes <= 0 or dir == "":
         return 0
-    val now_secs = rt_time_now_unix_micros() / 1000000
+    var dir_present = false
+    unsafe(capabilities: [ffi]):
+        dir_present = rt_dir_exists(dir)
+    if not dir_present:
+        return 0
+    var now_micros: i64 = 0
+    unsafe(capabilities: [ffi]):
+        now_micros = rt_time_now_unix_micros()
+    val now_secs = now_micros / 1000000
     var paths: [text] = []
     var sizes: [i64] = []
     var mtimes: [i64] = []
     var total: i64 = 0
-    for name in rt_dir_list(dir):
+    var entries: [text] = []
+    unsafe(capabilities: [ffi]):
+        entries = rt_dir_list(dir)
+    for name in entries:
         if not name.ends_with(suffix):
             continue
         val path = dir + "/" + name
-        val size = rt_file_size(path)
+        var size: i64 = 0
+        unsafe(capabilities: [ffi]):
+            size = rt_file_size(path)
         if size <= 0:
             continue
         total = total + size
-        val mtime = rt_file_stat(path)
+        var mtime: i64 = 0
+        unsafe(capabilities: [ffi]):
+            mtime = rt_file_stat(path)
         if now_secs - mtime < CACHE_EVICT_GRACE_SECS:
             continue
         paths.push(path)
@@ -102,7 +125,10 @@ pub fn cache_dir_evict_to_cap(dir: text, suffix: text, max_bytes: i64) -> i64:
         val victim = paths[oldest]
         paths[oldest] = ""
         remaining = remaining - 1
-        if rt_file_delete(victim):
+        var deleted = false
+        unsafe(capabilities: [ffi]):
+            deleted = rt_file_delete(victim)
+        if deleted:
             total = total - sizes[oldest]
             removed = removed + 1
     removed
