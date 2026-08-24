@@ -54,7 +54,6 @@ pub mod monoio_waker;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 pub mod vulkan_graphics_runtime;
-#[cfg(feature = "metal")]
 pub mod metal_graphics_runtime;
 
 /// Stable metadata queried by the core runtime before it admits this artifact
