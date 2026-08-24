@@ -218,6 +218,31 @@ fn strip_strings_and_comments(line: text) -> text:
         parts.push(line.substring(segment_start, n))
     parts.join("")
 
+fn tier_word_delimiter(byte: i64) -> bool:
+    byte == 32 or byte == 34 or byte == 33 or byte == 36 or byte == 37 or
+    byte == 38 or byte == 40 or byte == 41 or byte == 42 or byte == 43 or
+    byte == 44 or byte == 45 or byte == 46 or byte == 47 or byte == 58 or
+    byte == 59 or byte == 60 or byte == 61 or byte == 62 or byte == 63 or
+    byte == 64 or byte == 91 or byte == 93 or byte == 94 or byte == 96 or
+    byte == 123 or byte == 124 or byte == 125 or byte == 126
+
+fn tier_word_parts(code: text) -> [text]:
+    """Extract the legacy space/punctuation-delimited word spans once."""
+    var parts: [text] = []
+    var word_start = -1
+    var i = 0
+    while i < code.len():
+        if tier_word_delimiter(code.byte_at(i)):
+            if word_start >= 0:
+                parts.push(code.substring(word_start, i))
+                word_start = -1
+        elif word_start < 0:
+            word_start = i
+        i = i + 1
+    if word_start >= 0:
+        parts.push(code.substring(word_start, code.len()))
+    parts
+
 fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
     """Check if a file stays within the given tier's grammar.
     Returns number of violations found."""
@@ -279,41 +304,11 @@ fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
         # Strip string literal contents and inline comments
         val code_only = strip_strings_and_comments(trimmed)
 
-        # Inline word extraction: replace punctuation with spaces, split, filter empties
-        var cleaned = code_only
-        cleaned = cleaned.replace("(", " ")
-        cleaned = cleaned.replace(")", " ")
-        cleaned = cleaned.replace(":", " ")
-        cleaned = cleaned.replace(",", " ")
-        cleaned = cleaned.replace(".", " ")
-        cleaned = cleaned.replace("[", " ")
-        cleaned = cleaned.replace("]", " ")
-        cleaned = cleaned.replace("{", " ")
-        cleaned = cleaned.replace("}", " ")
-        cleaned = cleaned.replace("<", " ")
-        cleaned = cleaned.replace(">", " ")
-        cleaned = cleaned.replace("=", " ")
-        cleaned = cleaned.replace("+", " ")
-        cleaned = cleaned.replace("-", " ")
-        cleaned = cleaned.replace("*", " ")
-        cleaned = cleaned.replace("/", " ")
-        cleaned = cleaned.replace("!", " ")
-        cleaned = cleaned.replace("@", " ")
-        cleaned = cleaned.replace("$", " ")
-        cleaned = cleaned.replace("%", " ")
-        cleaned = cleaned.replace("^", " ")
-        cleaned = cleaned.replace("&", " ")
-        cleaned = cleaned.replace("|", " ")
-        cleaned = cleaned.replace("~", " ")
-        cleaned = cleaned.replace("`", " ")
-        cleaned = cleaned.replace("?", " ")
-        cleaned = cleaned.replace(";", " ")
-        cleaned = cleaned.replace("\"", " ")
-        val parts = cleaned.split(" ")
+        # Extract the same punctuation-delimited words without materializing
+        # roughly thirty full-line replacement strings.
+        val parts = tier_word_parts(code_only)
 
         for word in parts:
-            if word.len() == 0:
-                continue
             if kw_is_any(word, kw):
                 if not kw_is_allowed(word, tier, kw):
                     val word_col = find_word_col(line, word)
