@@ -136,6 +136,10 @@ One registry-integrity invocation owns one immutable descriptor snapshot and
 shares it across status, witness, alias, and fact-preservation phases. Public
 sub-check adapters may construct their own snapshot when invoked independently,
 but nested phases must not rebuild provider-bearing descriptors.
+Likewise, pipeline planning resolves a requested name once and passes the found
+descriptor into backend-policy evaluation. Reports and budget filters reuse
+that descriptor for status, canonical naming, and the decision; they do not
+repeat provider-bearing lookup for the same pass.
 
 ### Diagnostic model
 
