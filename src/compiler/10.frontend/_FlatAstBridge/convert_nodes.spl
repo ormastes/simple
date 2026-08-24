@@ -244,18 +244,7 @@ fn flat_empty_module(path: text) -> ParserModule:
         arch_rules: [],
         mock_decls: [],
         tagged_layer: "",
-        layer_dag_edges: "",
-        # Passed EXPLICITLY, never left to the trailing defaults declared on
-        # parser_module_new. The native trailing-default pad
-        # (50.mir/_MirLoweringExpr/switch_operators_calls.spl
-        # pad_trailing_default_args) did NOT fire for this cross-module callee
-        # in the stage-2 self-hosted compiler, so both slots arrived as nil
-        # instead of []. That nil reached module_surface_promote, whose
-        # rt_transient_heap_promote(nil) returns false, and Stage 3 aborted at
-        # driver_source_pipeline_parsing.spl on the very first source file.
-        # See doc/08_tracking/bug/stage3_module_surface_promote_nil_authority_arrays_2026-08-23.md
-        friends: [],
-        internal_exports: []
+        layer_dag_edges: ""
     )
 
 fn convert_decl_visibility(idx: i64) -> Visibility:
@@ -1764,7 +1753,34 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         val init_idx = stmt_get_expr(idx)
         val type_ = convert_flat_type(type_idx)
         val init_expr = convert_flat_expr(init_idx)
-        return Stmt(kind: StmtKind.Val(name, type_, init_expr), span: span)
+        # `if val x = opt:` / `elif val` / `while val` are parser-desugared into
+        # a plain val decl plus an `x != nil` check (parser_stmts.spl), and the
+        # ONLY thing that distinguishes them from a hand-written `val x = opt`
+        # + `if x != nil:` is the IF_VAL provenance marker recorded by
+        # `stmt_if_val_decl`. The interpreter reads that marker directly
+        # (eval_stmts.spl `eval_option_binding_value`); everything downstream of
+        # this bridge consumes `StmtKind`, which has no marker field, so the
+        # provenance died here and the NATIVE lane bound the Option HANDLE
+        # instead of its payload -- `p.tag` read the enum header, and the
+        # garbage propagated onward as a `T?`.
+        #
+        # Carry the provenance forward as SEMANTICS rather than as a new flag:
+        # `ExistsCheck` ("`.?` -- value if present, nil if absent") is exactly
+        # `eval_option_binding_value`'s contract and is already lowered on every
+        # lane, so the desugared `x != nil` test stays correct for a boxed
+        # `None` too. Deliberately NOT a blanket unwrap at the MIR seam: there
+        # `if val v = e:` and a hand-written `if v != nil:` are indistinguishable.
+        # See doc/08_tracking/bug/native_if_val_binds_option_handle_not_payload_2026-08-24.md
+        val bound_expr = if stmt_is_if_val_decl(idx):
+            match init_expr.kind:
+                # Already `opt.?` in the source -- do not double-wrap.
+                case ExprKind.ExistsCheck(_):
+                    init_expr
+                case _:
+                    Expr(kind: ExprKind.ExistsCheck(init_expr), span: span)
+        else:
+            init_expr
+        return Stmt(kind: StmtKind.Val(name, type_, bound_expr), span: span)
     elif tag == STMT_VAR_DECL:
         val name = stmt_get_name(idx)
         val type_idx = stmt_get_type(idx)

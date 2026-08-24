@@ -1,7 +1,7 @@
 # `if val x = opt:` binds the Option HANDLE, not the payload (native lane)
 
 **Date:** 2026-08-24
-**Status:** Root-caused and pinned by a failing gate; FIX NOT YET LANDED (the first fix attempt targeted the wrong compiler — see "Correction")
+**Status:** RESOLVED 2026-08-24 — fix landed in `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`; gate GREEN (see "Resolution")
 **Severity:** Critical — silent-wrong values, escalating to SIGSEGV in the self-hosted compiler
 **Lane:** V
 
@@ -181,3 +181,76 @@ that must NOT read as present.
   it is the amplifier that turns this bug's silent-wrong value into a SEGV
   rather than a wrong answer.
 - `unwrap_err` has the same shape and no `rt_unwrap_err_or_trap` exists.
+
+
+## Resolution (2026-08-24)
+
+**Fix:** `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`, the
+`STMT_VAL_DECL` arm of the flat-AST -> `StmtKind` bridge.
+
+The parser DOES record the provenance (`stmt_if_val_decl` sets the `IF_VAL`
+marker, `ast_stmt.spl:328-331`) and the interpreter DOES honour it
+(`eval_stmts.spl:191` -> `eval_option_binding_value`). Everything downstream of
+this bridge consumes `parser_types.StmtKind`, which carries no marker field, so
+the provenance died at exactly this line — `StmtKind.Val(name, type_,
+init_expr)` was constructed without ever consulting `stmt_is_if_val_decl`. That
+was verified empirically, not inferred: an instrumented build printed
+`[IFVAL-PROBE] bridge val decl name=a if_val=true` for every `if val` binder in
+the fixture, proving both that this bridge is the live frontend for
+`native-build` and that the marker is intact and readable at that point.
+
+The fix carries the provenance forward as SEMANTICS rather than as a new flag:
+when the marker is set, the initialiser is wrapped in `ExprKind.ExistsCheck`
+(`.?` — "value if present, nil if absent"), which is precisely
+`eval_option_binding_value`'s contract and is already lowered correctly on every
+lane. The parser-desugared `x != nil` test then stays correct for a boxed `None`
+too, because the binder is now nil in that case. An initialiser that is already
+an `ExistsCheck` (the user wrote `if val v = opt.?:`) is not double-wrapped.
+
+Deliberately NOT a blanket unwrap at the MIR seam: at that seam `if val v = e:`
+and a hand-written `if v != nil:` are indistinguishable, so unwrapping there
+would change semantics repo-wide. No `StmtKind`/`HirStmtKind` enum shape churn
+was needed, so nothing had to be threaded through `hir_codec` (generated) or the
+monomorphiser's Let reconstruction.
+
+### Correction to the earlier "Correction"
+
+The gate script header attributes the defect to the Rust seed
+(`src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs`,
+`build_pattern_binding_stmts`). That attribution is **wrong for this lane** and
+should be read as aspirational. A `build_if_let_binding_stmts` routing fix was
+implemented there, built, and measured: the gate output was **byte-identical**
+(`if_val=4 ... int=(false, 0)`), and an `eprintln!` probe inside the new function
+fired **0 times** during the fixture's `native-build`. The Rust HIR lowering is
+not on the default `native-build` path at all; the pure-Simple frontend is.
+Those Rust edits were reverted and are not part of this fix.
+
+### Verdict lines (measured, exit status read directly into a variable)
+
+Before:
+
+```
+FAIL — 7 probe(s) checked, got: if_val=4 unwrap=99 match=99 field=4 raw=4 int=(false, 0) none=ABSENT  (expected if_val=99 unwrap=99 match=99 field=77 raw=55 int=55 none=ABSENT)
+```
+
+After:
+
+```
+PASS — 7 probe(s) checked across 1 native-built fixture, 0 mismatches
+```
+
+Neighbour gates, same working tree, both green after the change:
+
+```
+PASS — 4 engine(s) executed, 0 crashes, unwrap-then-field holds        (check-optional-class-unwrap-field.shs)
+PASS — in-process positional native-build: exit 0, 27736 B binary, ran and printed 'RESULT=42'
+```
+
+### Known remaining (separate defect, NOT introduced here)
+
+`bin/simple run` on the same fixture prints `if_val=103079215111`,
+`field=103079215111`, `int=<enum@0x...>`. That path is the **Rust seed's own
+interpreter**, which does not go through this bridge. Verified pre-existing by
+stashing the fix and re-running: the output is byte-identical with and without
+the change. It is a distinct seed-interpreter defect and is out of scope for
+this record.
