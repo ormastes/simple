@@ -48,6 +48,18 @@ fn subtree_has_placeholder_ident(eid: i64) -> bool:
         i = i + 1
     found
 
+fn ident_count(src: text, wanted: text) -> i64:
+    """Count exact flat-AST identifiers after the core frontend pass."""
+    ast_reset()
+    expect(core_frontend_parse_reset(src, "placeholder_ident_probe.spl")).to_equal(true)
+    var found = 0
+    var idx = 0
+    while idx < expr_count():
+        if expr_tag[idx] == EXPR_IDENT and expr_s_val[idx] == wanted:
+            found = found + 1
+        idx = idx + 1
+    found
+
 fn leaked_placeholder_args(src: text) -> i64:
     """Parse `src` and count call arguments that still leak a bare placeholder.
 
@@ -179,6 +191,17 @@ describe "placeholder lambdas in interpolated-string call arguments":
         expect(is_numbered_placeholder("_1")).to_equal(true)
         expect(is_numbered_placeholder("_10")).to_equal(true)
         expect(parse_placeholder_number("_10")).to_equal(10)
+
+    it "keeps underscore-prefixed profiler locals and `_0` in the core frontend":
+        step("Verify: core frontend never mints __p-1 for non-placeholders")
+        val src = "fn sink(value: i64) -> i64: value\n" +
+            "fn probe() -> i64:\n" +
+            "    var _pp = env_get(\"SIMPLE_PARSE_PROFILE\")\n" +
+            "    val _0 = _pp\n" +
+            "    sink(_pp) + sink(_0)\n"
+        expect(ident_count(src, "__p-1")).to_equal(0)
+        expect(ident_count(src, "_pp")).to_be_greater_than(0)
+        expect(ident_count(src, "_0")).to_be_greater_than(0)
 
     it "leaves no bare `_` in an interpolated-string map argument":
         step("Verify: leaves no bare `_` in an interpolated-string map argument")
