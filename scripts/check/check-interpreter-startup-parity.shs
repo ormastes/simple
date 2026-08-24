@@ -5,6 +5,10 @@ LC_ALL=C
 export LC_ALL
 
 ROOT=""; FINGERPRINT=""; RUN_ID=""; RAW=""; STATS=""; EQUIV=""; ENVIRONMENT=""; COMPILER=""; PROVENANCE=""
+CLOCK_SOURCE=""; CLOCK_COMPILER=""; CLOCK_VERSION=""; CLOCK_HELPER=""; PYTHON=""; PYTHON_VERSION=""; BUN=""; BUN_VERSION=""; GO=""; GO_VERSION=""; GO_HELLO=""
+PRODUCER_SOURCE=""; SAMPLES_CHECKER_SOURCE=""; PARITY_CHECKER_SOURCE=""
+EXTERNAL_CHECKER_SOURCE=""
+SAMPLES_CHECKER=""
 fail() { echo "STATUS: FAIL interpreter-startup-parity — $*" >&2; exit 1; }
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -17,6 +21,22 @@ while [ "$#" -gt 0 ]; do
         --environment) ENVIRONMENT=$2; shift 2 ;;
         --simple-compiler) COMPILER=$2; shift 2 ;;
         --stage4-provenance) PROVENANCE=$2; shift 2 ;;
+        --clock-source) CLOCK_SOURCE=$2; shift 2 ;;
+        --clock-compiler) CLOCK_COMPILER=$2; shift 2 ;;
+        --clock-version) CLOCK_VERSION=$2; shift 2 ;;
+        --clock-helper) CLOCK_HELPER=$2; shift 2 ;;
+        --python) PYTHON=$2; shift 2 ;;
+        --python-version) PYTHON_VERSION=$2; shift 2 ;;
+        --bun) BUN=$2; shift 2 ;;
+        --bun-version) BUN_VERSION=$2; shift 2 ;;
+        --go) GO=$2; shift 2 ;;
+        --go-version) GO_VERSION=$2; shift 2 ;;
+        --go-hello) GO_HELLO=$2; shift 2 ;;
+        --producer-source) PRODUCER_SOURCE=$2; shift 2 ;;
+        --samples-checker-source) SAMPLES_CHECKER_SOURCE=$2; shift 2 ;;
+        --parity-checker-source) PARITY_CHECKER_SOURCE=$2; shift 2 ;;
+        --external-checker-source) EXTERNAL_CHECKER_SOURCE=$2; shift 2 ;;
+        --samples-checker) SAMPLES_CHECKER=$2; shift 2 ;;
         *) fail "unknown-argument-$1" ;;
     esac
 done
@@ -26,7 +46,14 @@ for file in "$RAW" "$STATS" "$EQUIV" "$ENVIRONMENT" "$COMPILER" "$PROVENANCE"; d
     [ -f "$file" ] && [ ! -L "$file" ] || fail missing-evidence-blob
 done
 
-sh "$ROOT/scripts/check/check-interpreter-startup-samples.shs" \
+if [ -z "$SAMPLES_CHECKER" ]; then
+    SAMPLES_CHECKER=$ROOT/scripts/check/check-interpreter-startup-samples.shs
+fi
+[ -f "$SAMPLES_CHECKER" ] && [ ! -L "$SAMPLES_CHECKER" ] || fail missing-samples-checker
+if grep -Fxq 'environment_schema=simple.interpreter-startup-environment/v3' "$ENVIRONMENT"; then
+    [ "$(sha256sum "$SAMPLES_CHECKER" | awk '{print $1}')" = "$(git -C "$ROOT" show HEAD:scripts/check/check-interpreter-startup-samples.shs | sha256sum | awk '{print $1}')" ] || fail samples-checker-head-drift
+fi
+sh "$SAMPLES_CHECKER" \
     --root "$ROOT" --fingerprint "$FINGERPRINT" --run-id "$RUN_ID" \
     --raw-samples "$RAW" --statistics "$STATS" --equivalence "$EQUIV" \
     --environment "$ENVIRONMENT" >/dev/null || fail metric-evidence
@@ -43,6 +70,46 @@ sha_field() {
     printf '%s' "$value"
 }
 eq_field() { value=$(field "$1" "$2") || fail "missing-$2"; [ "$value" = "$3" ] || fail "$2"; }
+
+environment_schema=$(field "$ENVIRONMENT" environment_schema) || fail environment-schema
+if [ "$environment_schema" = simple.interpreter-startup-environment/v2 ]; then
+    for file in "$CLOCK_SOURCE" "$CLOCK_COMPILER" "$CLOCK_VERSION" "$CLOCK_HELPER" "$PYTHON" "$PYTHON_VERSION" "$BUN" "$BUN_VERSION" "$GO" "$GO_VERSION" "$GO_HELLO"; do
+        [ -f "$file" ] && [ ! -L "$file" ] || fail missing-runtime-origin-blob
+    done
+    check_hash() { [ "$(sha_field "$ENVIRONMENT" "$1")" = "$(sha256sum "$2" | awk '{print $1}')" ] || fail "$1-hash"; }
+    check_hash clock_source_sha256 "$CLOCK_SOURCE"
+    check_hash clock_compiler_sha256 "$CLOCK_COMPILER"
+    check_hash clock_compiler_version_sha256 "$CLOCK_VERSION"
+    check_hash clock_tool_sha256 "$CLOCK_HELPER"
+    check_hash python_executable_sha256 "$PYTHON"; check_hash python_version_sha256 "$PYTHON_VERSION"
+    check_hash bun_executable_sha256 "$BUN"; check_hash bun_version_sha256 "$BUN_VERSION"
+    check_hash go_executable_sha256 "$GO"; check_hash go_version_sha256 "$GO_VERSION"
+    check_hash go_hello_sha256 "$GO_HELLO"
+    eq_field "$ENVIRONMENT" clock_source_path scripts/check/lib/rust-go-benchmark-monotonic-ns.c
+    [ "$(sha256sum "$CLOCK_SOURCE" | awk '{print $1}')" = "$(git -C "$ROOT" show HEAD:scripts/check/lib/rust-go-benchmark-monotonic-ns.c | sha256sum | awk '{print $1}')" ] || fail clock-source-head-drift
+fi
+if [ "$environment_schema" = simple.interpreter-startup-environment/v3 ]; then
+    for file in "$CLOCK_SOURCE" "$CLOCK_COMPILER" "$CLOCK_VERSION" "$CLOCK_HELPER" "$PYTHON" "$PYTHON_VERSION" "$BUN" "$BUN_VERSION" "$GO" "$GO_VERSION" "$GO_HELLO" "$PRODUCER_SOURCE" "$SAMPLES_CHECKER_SOURCE" "$PARITY_CHECKER_SOURCE" "$EXTERNAL_CHECKER_SOURCE"; do
+        [ -f "$file" ] && [ ! -L "$file" ] || fail missing-runtime-origin-blob
+    done
+    check_hash() { [ "$(sha_field "$ENVIRONMENT" "$1")" = "$(sha256sum "$2" | awk '{print $1}')" ] || fail "$1-hash"; }
+    check_hash clock_source_sha256 "$CLOCK_SOURCE"; check_hash clock_compiler_sha256 "$CLOCK_COMPILER"
+    check_hash clock_compiler_version_sha256 "$CLOCK_VERSION"; check_hash clock_tool_sha256 "$CLOCK_HELPER"
+    check_hash python_executable_sha256 "$PYTHON"; check_hash python_version_sha256 "$PYTHON_VERSION"
+    check_hash bun_executable_sha256 "$BUN"; check_hash bun_version_sha256 "$BUN_VERSION"
+    check_hash go_executable_sha256 "$GO"; check_hash go_version_sha256 "$GO_VERSION"; check_hash go_hello_sha256 "$GO_HELLO"
+    check_hash producer_source_sha256 "$PRODUCER_SOURCE"; check_hash samples_checker_source_sha256 "$SAMPLES_CHECKER_SOURCE"; check_hash parity_checker_source_sha256 "$PARITY_CHECKER_SOURCE"
+    check_hash external_checker_source_sha256 "$EXTERNAL_CHECKER_SOURCE"
+    for pair in \
+        "scripts/check/produce-interpreter-startup-evidence.shs:$PRODUCER_SOURCE" \
+        "scripts/check/check-interpreter-startup-samples.shs:$SAMPLES_CHECKER_SOURCE" \
+        "scripts/check/check-interpreter-startup-parity.shs:$PARITY_CHECKER_SOURCE" \
+        "scripts/check/check-external-must-check-receipt.shs:$EXTERNAL_CHECKER_SOURCE" \
+        "scripts/check/lib/rust-go-benchmark-monotonic-ns.c:$CLOCK_SOURCE"; do
+        path=${pair%%:*}; blob=${pair#*:}
+        [ "$(sha256sum "$blob" | awk '{print $1}')" = "$(git -C "$ROOT" show "HEAD:$path" | sha256sum | awk '{print $1}')" ] || fail producer-or-checker-head-drift
+    done
+fi
 
 compiler_path=$(field "$ENVIRONMENT" simple_compiler_path) || fail compiler-path
 case "$compiler_path" in /*/bin/release/*) ;; *) fail non-absolute-release-simple-compiler ;; esac

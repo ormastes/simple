@@ -237,4 +237,65 @@ grep -Fq 'stage4_verify_candidate_provenance "$live_provenance" "$compiler_path"
 grep -Fq 'check-interpreter-startup-parity.shs' \
     "$ROOT/scripts/check/check-external-must-check-receipt.shs"
 
+# V2 binds every retained runtime and CLOCK_MONOTONIC producer attachment
+# before canonical Stage 4 verification. A validly shaped but fabricated Stage
+# 4 chain still fails later; mutating an attachment must fail at its exact hash.
+for name in clock-source clock-compiler clock-helper python bun go go-hello; do cp /bin/true "$fixture/$name"; done
+printf 'clock version\n' >"$fixture/clock-version"
+printf 'python version\n' >"$fixture/python-version"
+printf 'bun version\n' >"$fixture/bun-version"
+printf 'go version\n' >"$fixture/go-version"
+cat >"$fixture/environment.v2" <<EOF
+environment_schema=simple.interpreter-startup-environment/v2
+gate_id=interpreter-startup-parity
+source_fingerprint=$fingerprint
+run_id=$run_id
+fixture_id=$fixture_id
+host_id=fixture-host
+boot_id=fixture-boot
+os=linux
+kernel=fixture-kernel
+arch=x86_64
+cpu_model_sha256=$identity_sha
+cpu_count=4
+cpu_governor=performance
+cpuset_sha256=$identity_sha
+isolation=offline-controlled
+clock_source_path=scripts/check/lib/rust-go-benchmark-monotonic-ns.c
+clock_source_sha256=$(hash_file "$fixture/clock-source")
+clock_compiler_sha256=$(hash_file "$fixture/clock-compiler")
+clock_compiler_version_sha256=$(hash_file "$fixture/clock-version")
+clock_tool_sha256=$(hash_file "$fixture/clock-helper")
+python_path=/fixture/python
+python_executable_sha256=$(hash_file "$fixture/python")
+python_version_sha256=$(hash_file "$fixture/python-version")
+bun_path=/fixture/bun
+bun_executable_sha256=$(hash_file "$fixture/bun")
+bun_version_sha256=$(hash_file "$fixture/bun-version")
+go_path=/fixture/go
+go_executable_sha256=$(hash_file "$fixture/go")
+go_version_sha256=$(hash_file "$fixture/go-version")
+go_hello_sha256=$(hash_file "$fixture/go-hello")
+simple_compiler_path=/fixture/bin/release/x86_64/simple
+simple_executable_sha256=$compiler_sha
+warmup_launches=10
+final_verdict=PASS
+EOF
+printf x >>"$fixture/clock-helper"
+v2_error="$fixture/v2.err"
+sh "$fixture/scripts/check/check-interpreter-startup-parity.shs" \
+    --root "$fixture" --fingerprint "$fingerprint" --run-id "$run_id" \
+    --raw-samples "$fixture/raw.env" --statistics "$fixture/statistics.env" \
+    --equivalence "$fixture/equivalence.env" --environment "$fixture/environment.v2" \
+    --simple-compiler "$fixture/stage4-simple" --stage4-provenance "$fixture/stage4-provenance.env" \
+    --clock-source "$fixture/clock-source" --clock-compiler "$fixture/clock-compiler" \
+    --clock-version "$fixture/clock-version" --clock-helper "$fixture/clock-helper" \
+    --python "$fixture/python" --python-version "$fixture/python-version" \
+    --bun "$fixture/bun" --bun-version "$fixture/bun-version" \
+    --go "$fixture/go" --go-version "$fixture/go-version" --go-hello "$fixture/go-hello" \
+    >/dev/null 2>"$v2_error" && { echo 'FAIL: mutated retained clock helper accepted' >&2; exit 1; }
+grep -Fq 'clock_tool_sha256-hash' "$v2_error" || {
+    echo 'FAIL: retained clock mutation did not reach exact v2 hash guard' >&2; exit 1;
+}
+
 echo 'PASS: interpreter startup raw-sample/statistics oracle'

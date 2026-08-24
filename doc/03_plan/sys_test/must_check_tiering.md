@@ -1,5 +1,38 @@
 # Must-Check Tiering Test Plan
 
+## Interpreter startup evidence producer
+
+The bootstrap-only producer must retain exact fixture, runtime, compiler,
+version, timer, raw-sample, statistics, and Stage 4 blobs under an absent
+repository-contained output directory. It measures launches with retained
+`CLOCK_MONOTONIC` under a closed `env -i` launch environment, requires one no-fallback interpreter receipt per timed
+Simple process, recomputes p50/p95, and fails unless Simple is strictly below
+Python, Bun, and Go for both cold and warmed launches. It must reject test
+overrides, HEAD/source drift, attachment drift, and noncanonical Stage 4, and
+must retain and bind the HEAD producer/checker sources, reject their dirty
+worktree forms, and leave signing to an independent reviewer. Runtime-cache
+cold uses fresh per-sample isolated `HOME`/`XDG_CACHE_HOME`/`TMPDIR` directories
+and explicitly is not OS page-cache cold; warm uses stable per-lane isolated
+directories populated by fixed warmups. Focused mutation coverage lives
+in `interpreter_startup_samples_test.shs` and
+`interpreter_startup_producer_test.shs`.
+
+For v3, producer-side validation and external admission execute private
+mode-700 parity and samples-checker snapshots materialized from the retained
+HEAD blobs. They do not execute the live worktree copies. The outer shell
+producer/importer and the canonical Stage 4 provenance helper still execute as
+repository-owned entrypoints; their pre/post HEAD and byte bindings reduce but
+cannot make arbitrary shell-source replacement races impossible. Run this gate
+only in a controlled repository whose write access is excluded during
+production and admission.
+
+External startup admission authenticates the signed summary before loading any
+runtime or executable checker attachment. Before authentication, it may load
+only the committed reviewer signature and the public key selected by the
+repository-pinned reviewer policy. A missing, untrusted, or invalid signature
+therefore fails before checker materialization, permission changes, or
+execution.
+
 - Prove valid fresh compiler phase rows pass ledger validation.
 - Prove stale fingerprints, failed blocking rows, missing rows, duplicate rows,
   and empty manifests fail.

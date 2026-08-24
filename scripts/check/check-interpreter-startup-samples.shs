@@ -63,7 +63,12 @@ decimal_lt_fixed() {
 
 raw_headers=10
 [ "$(sed -n '1,10p' "$RAW" | wc -l | tr -d ' ')" -eq "$raw_headers" ] || fail raw-header-count
-eq_field "$RAW" sample_schema raw simple.interpreter-startup-samples/v1
+raw_schema=$(field "$RAW" sample_schema) || fail raw-missing-sample_schema
+case "$raw_schema" in
+    simple.interpreter-startup-samples/v1) cold_policy=fresh-process-before-runtime-prime; warm_policy=fixed-warmup-launches ;;
+    simple.interpreter-startup-samples/v2) cold_policy=fresh-process-fresh-isolated-runtime-cache; warm_policy=fresh-process-stable-warmed-runtime-cache ;;
+    *) fail raw-schema ;;
+esac
 eq_field "$RAW" gate_id raw interpreter-startup-parity
 eq_field "$RAW" source_fingerprint raw "$FINGERPRINT"
 eq_field "$RAW" run_id raw "$RUN_ID"
@@ -74,12 +79,12 @@ sample_count=$(uint_field "$RAW" sample_count raw)
 [ "$sample_count" -ge 50 ] && [ "$sample_count" -le 1000 ] || fail raw-sample-count-range
 warmups=$(uint_field "$RAW" warmup_launches raw)
 [ "$warmups" -ge 10 ] || fail raw-warmup-count
-eq_field "$RAW" cold_policy raw fresh-process-before-runtime-prime
+eq_field "$RAW" cold_policy raw "$cold_policy"
 
 expected_stdout=$(sha_field "$EQUIV" expected_stdout_sha256 equivalence)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
-tail -n +11 "$RAW" | awk -F'|' -v n="$sample_count" -v out="$expected_stdout" '
+tail -n +11 "$RAW" | awk -F'|' -v n="$sample_count" -v out="$expected_stdout" -v cold_policy="$cold_policy" -v warm_policy="$warm_policy" '
 BEGIN {
   phase[1]="cold"; phase[2]="warm"
   lang[1]="simple"; lang[2]="python"; lang[3]="bun"; lang[4]="go"
@@ -98,7 +103,7 @@ BEGIN {
   if (length($5) != 20 || $5 !~ /^[0-9]+$/ || $5 == zero) exit 13
   if ($6 != "0" || $7 != out || $8 != empty) exit 14
   if (($3 == "simple" && $9 != "1") || ($3 != "simple" && $9 != "0")) exit 15
-  if (($2 == "cold" && $10 != "fresh-process-before-runtime-prime") || ($2 == "warm" && $10 != "fixed-warmup-launches")) exit 16
+  if (($2 == "cold" && $10 != cold_policy) || ($2 == "warm" && $10 != warm_policy)) exit 16
   if (($3 == "simple" && $11 != "requested-interpreter-actual-interpreter-fallback-false") || ($3 != "simple" && $11 != "not-applicable")) exit 17
   print $2 "|" $3 "|" $5
 }
@@ -139,12 +144,52 @@ for kind in semantic_oracle simple_source python_source bun_source go_source; do
     fi
 done
 
+environment_schema=$(field "$ENVIRONMENT" environment_schema) || fail environment-missing-environment_schema
+case "$environment_schema" in
+simple.interpreter-startup-environment/v1)
 closed_fields "$ENVIRONMENT" 23 environment \
     environment_schema gate_id source_fingerprint run_id fixture_id host_id boot_id \
     os kernel arch cpu_model_sha256 cpu_count cpu_governor cpuset_sha256 isolation \
     clock_tool_sha256 python_executable_sha256 bun_executable_sha256 go_executable_sha256 \
     simple_compiler_path simple_executable_sha256 warmup_launches final_verdict
-eq_field "$ENVIRONMENT" environment_schema environment simple.interpreter-startup-environment/v1
+;;
+simple.interpreter-startup-environment/v2)
+closed_fields "$ENVIRONMENT" 34 environment \
+    environment_schema gate_id source_fingerprint run_id fixture_id host_id boot_id \
+    os kernel arch cpu_model_sha256 cpu_count cpu_governor cpuset_sha256 isolation \
+    clock_source_path clock_source_sha256 clock_compiler_sha256 clock_compiler_version_sha256 \
+    clock_tool_sha256 python_path python_executable_sha256 python_version_sha256 \
+    bun_path bun_executable_sha256 bun_version_sha256 go_path go_executable_sha256 \
+    go_version_sha256 go_hello_sha256 simple_compiler_path simple_executable_sha256 \
+    warmup_launches final_verdict
+for key in clock_source_sha256 clock_compiler_sha256 clock_compiler_version_sha256 \
+    python_version_sha256 bun_version_sha256 go_version_sha256 go_hello_sha256; do
+    sha_field "$ENVIRONMENT" "$key" environment >/dev/null
+done
+for key in clock_source_path python_path bun_path go_path; do token_field "$ENVIRONMENT" "$key" environment >/dev/null; done
+;;
+simple.interpreter-startup-environment/v3)
+closed_fields "$ENVIRONMENT" 42 environment \
+    environment_schema gate_id source_fingerprint run_id fixture_id host_id boot_id \
+    os kernel arch cpu_model_sha256 cpu_count cpu_governor cpuset_sha256 isolation \
+    launch_environment clock_source_path clock_source_sha256 clock_compiler_sha256 clock_compiler_version_sha256 \
+    clock_tool_sha256 python_path python_executable_sha256 python_version_sha256 \
+    bun_path bun_executable_sha256 bun_version_sha256 go_path go_executable_sha256 \
+    go_version_sha256 go_hello_sha256 simple_compiler_path simple_executable_sha256 \
+    producer_source_path producer_source_sha256 samples_checker_source_sha256 \
+    parity_checker_source_sha256 external_checker_source_sha256 warmup_launches cold_definition warm_definition final_verdict
+eq_field "$ENVIRONMENT" launch_environment environment env-i-lc-all-c-path-home-xdg-cache-home-tmpdir
+eq_field "$ENVIRONMENT" cold_definition environment fresh-process-fresh-per-sample-runtime-cache-not-os-page-cache-cold
+eq_field "$ENVIRONMENT" warm_definition environment fresh-process-stable-lane-cache-after-fixed-warmups
+for key in clock_source_sha256 clock_compiler_sha256 clock_compiler_version_sha256 \
+    python_version_sha256 bun_version_sha256 go_version_sha256 go_hello_sha256 \
+    producer_source_sha256 samples_checker_source_sha256 parity_checker_source_sha256 external_checker_source_sha256; do
+    sha_field "$ENVIRONMENT" "$key" environment >/dev/null
+done
+for key in clock_source_path python_path bun_path go_path producer_source_path; do token_field "$ENVIRONMENT" "$key" environment >/dev/null; done
+;;
+*) fail environment-schema ;;
+esac
 eq_field "$ENVIRONMENT" gate_id environment interpreter-startup-parity
 eq_field "$ENVIRONMENT" source_fingerprint environment "$FINGERPRINT"
 eq_field "$ENVIRONMENT" run_id environment "$RUN_ID"
