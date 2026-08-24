@@ -1,19 +1,78 @@
 # Canonical mounted-DBFS durability publication.
 
 pub use std.common.contracts.os.dbfs_vfs_mount_capability_v1.{DbfsVfsMountCapabilityV1}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+pub struct DbfsVfsMountCapabilitySnapshotV1:
+    code: i64
+    generation: u64
 
 var _capability: DbfsVfsMountCapabilityV1 = DbfsVfsMountCapabilityV1.Unavailable
+var _capability_generation_v1: u64 = 1u64
+var _capability_quarantined_v1: bool = false
+val _capability_mutex_v1: i64 = mutex_raw_create()
+
+fn _dbfs_capability_lock_v1() -> bool:
+    if _capability_mutex_v1 <= 0 or _capability_quarantined_v1: return false
+    if not mutex_raw_lock(_capability_mutex_v1): return false
+    if _capability_quarantined_v1:
+        _ = mutex_raw_unlock(_capability_mutex_v1)
+        return false
+    true
+
+fn _dbfs_capability_unlock_v1() -> bool:
+    if mutex_raw_unlock(_capability_mutex_v1): return true
+    _capability_quarantined_v1 = true
+    false
+
+fn _dbfs_capability_code_locked_v1() -> i64:
+    match _capability:
+        case DbfsVfsMountCapabilityV1.Unavailable: 0
+        case DbfsVfsMountCapabilityV1.DbfsMountedRecoveryCompleteDurableTransactionalReplace: 1
+
+fn _dbfs_capability_advance_locked_v1() -> bool:
+    if _capability_generation_v1 == 0xffffffffffffffffu64:
+        _capability = DbfsVfsMountCapabilityV1.Unavailable
+        _capability_quarantined_v1 = true
+        return false
+    _capability_generation_v1 = _capability_generation_v1 + 1u64
+    true
 
 fn dbfs_vfs_mount_capability_clear_v1():
+    if not _dbfs_capability_lock_v1(): return
+    if not _dbfs_capability_advance_locked_v1():
+        _ = _dbfs_capability_unlock_v1()
+        return
     _capability = DbfsVfsMountCapabilityV1.Unavailable
+    _ = _dbfs_capability_unlock_v1()
 
 fn dbfs_vfs_mount_capability_publish_driver_v1(ready: bool):
+    if not _dbfs_capability_lock_v1(): return
+    if not _dbfs_capability_advance_locked_v1():
+        _ = _dbfs_capability_unlock_v1()
+        return
     _capability = if ready:
         DbfsVfsMountCapabilityV1.DbfsMountedRecoveryCompleteDurableTransactionalReplace
     else:
         DbfsVfsMountCapabilityV1.Unavailable
+    _ = _dbfs_capability_unlock_v1()
+
+pub fn dbfs_vfs_mount_capability_snapshot_v1() -> DbfsVfsMountCapabilitySnapshotV1:
+    if not _dbfs_capability_lock_v1():
+        return DbfsVfsMountCapabilitySnapshotV1(code: 0, generation: 0u64)
+    val snapshot = DbfsVfsMountCapabilitySnapshotV1(
+        code: _dbfs_capability_code_locked_v1(),
+        generation: _capability_generation_v1)
+    if not _dbfs_capability_unlock_v1():
+        return DbfsVfsMountCapabilitySnapshotV1(code: 0, generation: 0u64)
+    snapshot
+
+pub fn dbfs_vfs_mount_capability_snapshot_current_v1(
+    before: DbfsVfsMountCapabilitySnapshotV1,
+    after: DbfsVfsMountCapabilitySnapshotV1
+) -> bool:
+    before.code == 1 and after.code == 1 and
+        before.generation != 0u64 and before.generation == after.generation
 
 pub fn dbfs_vfs_mount_capability_code_v1() -> i64:
-    match _capability:
-        case DbfsVfsMountCapabilityV1.Unavailable: 0
-        case DbfsVfsMountCapabilityV1.DbfsMountedRecoveryCompleteDurableTransactionalReplace: 1
+    dbfs_vfs_mount_capability_snapshot_v1().code
