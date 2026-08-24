@@ -13,6 +13,115 @@
 - **Context:** There is no MCP-on-SimpleOS artifact anywhere in this repo or in
   any of the 223 GitHub remote branches. This is net-new work.
 
+## STATUS UPDATE 2026-08-24 (2) — THE 56 ARE ON A DIFFERENT LINK SET THAN M1'S ROUTE
+
+Independent verification pass. The 56 figure below is **confirmed exactly**, by
+re-derivation rather than by trusting this doc. But the same pass turned up a
+split this doc does not reconcile, and anyone who reads "56 externs remain"
+without it will implement them against the wrong link set.
+
+### The route split — TWO routes, disjoint C link sets, neither blessed
+
+Read out of the build scripts, not inferred:
+
+| | Route A — kernel-embedded | Route B — guest process (`/usr/bin/simple mcp`) |
+|---|---|---|
+| C link set | `examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c` — the directory holds exactly ONE `.c`, so this is the complete set | `src/os/libc` (~40 `.c`, incl. `simpleos_fs.c`, `simpleos_process.c`, `simpleos_socket.c`, `simpleos_fork.c`) + `libsimple_runtime.a` cross-built from **11** `src/runtime` files (`simpleos-sysroot-aarch64.shs:110-114`) |
+| built by | the same bootstrap `native-build` that already produces `kernel.elf` | `scripts/os/simpleos-native-build-aarch64.shs` |
+| status | boots today, gate-green | **P6-blocked** |
+
+**`freestanding_runtime.c` appears NOWHERE in Route B's path.** Route B resolves
+`rt_file_*` / `rt_process_*` / `rt_mmap` from the cross-built `src/runtime` C
+instead. So **the 56 counted below are Route A's bill, and §4.1's M1 — which
+specifies `/usr/bin/simple mcp` reading fd0 — is Route B.** Route B's extern
+bill is a *different, unmeasured* set; it can only be measured by actually
+linking the payload, which P6 blocks.
+
+This is stated, not resolved. Nothing in the tree says which route is intended,
+and this pass did not establish it. Do not read the table as a recommendation.
+
+### Measured reconciliation of the 56
+
+- Transitive `use` closure of `src/app/mcp/main.spl`: **49 modules, 0
+  unresolved, 150 distinct `extern fn`** — matches the figure below.
+- `clang --target=aarch64-unknown-none-elf -ffreestanding -nostdlib -c` on
+  `freestanding_runtime.c`: 227 defined globals, of which **94** are in the
+  declared set. **150 − 94 = 56.** Delta against this doc: **zero.**
+- 94 = **11 pre-existing + 83 implemented**; `sqrt` is the 84th and lies outside
+  this closure, hence 94 not 95.
+- `nm` on the linked `kernel.elf`: **85 of the 94 survive**; the 9 GC'd are
+  exactly the predicted no-reference set (`rt_hash_text`, the five
+  `rt_string_builder_*`, `rt_string_bytes`, `rt_string_len`,
+  `rt_text_to_bytes`). `kernel.elf` has **0 undefined symbols**, and the boot
+  marker `[BOOT] SIMPLEOS-AARCH64-LIMINE-P10-ABI-PINNED symbols=85` agrees.
+- Bucketing note: this pass puts `rt_thread_sleep` with process (19) and time at
+  2, where the table below splits process 18 / time+thread 3. Same 56 symbols.
+
+### 53 of the 56 are INCIDENTAL to M1 — traced, not inferred
+
+`main()`'s startup, serve loop, and `initialize` path touch only `get_args`,
+`env_get`, `exit`, `stderr_write`/`stderr_flush`, `stdin_read_char`,
+`print_raw`. All six are present in **both** the compiled object and
+`kernel.elf`. `tools/list` is answered from a local static payload
+(`_mcp_tools_list_payload`), pure text. The only `file_exists` consumer,
+`_mcp_find_simple_binary`, is reachable **only from `tools/call`** —
+`cli_passthrough.spl:21`, `dap_bridge.spl:147`,
+`main_lazy_diag_tools.spl:137,261`, `main_lazy_query_tools.spl:335` — never from
+startup or `initialize`.
+
+So FS 29 + process 18 + mmap 4 + browser 2 = **53 are needed for LINK CLOSURE
+ONLY**: a static freestanding link must resolve a symbol whose call site is
+emitted even when it is never executed. The honest pattern for that already
+exists in this lane — the 41 `rt_trap_unimplemented` SIMD traps. `rt_thread_sleep`
+and the 2 `rt_time_*` are the only plausible serve-loop wants, and none of the
+three is required for one round trip.
+
+### Route A shortest path
+
+1. Trap-body the remaining 56 for link closure, using the existing 41 SIMD traps
+   as the pattern. Mechanical.
+2. **UNTESTED.** Build an MCP-graph entry with the same bootstrap `native-build`
+   that already produces `kernel.elf`, and call `main()` from the boot path after
+   the existing markers. This is where the **undeclared-symbol axis** surfaces —
+   the `rt_unwrap_or_trap` NULL-GOT SEGV class,
+   `doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`.
+   That cost is genuinely unestimated; step 1's 56 is not the total ABI bill.
+3. Switch the gate from `-serial file:` to `-serial stdio` and feed the request
+   **during** the guest's polling window, per the pacing finding recorded in the
+   P8 update below.
+
+Route A sidesteps P6, P7, and P11 entirely. Route B remains blocked on all
+three: P6 (`doc/08_tracking/bug/admitted_stage2_builder_cannot_cross_build_simpleos_payload_2026-08-23.md`
+— the only Stage-2-admitted builder is the bootstrap CLI, advertising none of
+`--target` / `--runtime-bundle` / `--linker-script` / `--entry-closure`), P7
+downstream of it, and P11 (`GUEST_WORKFLOW_READY=0`, hardcoded).
+
+### Gate inventory note
+
+`scripts/check/check-simpleos-x86-64-wm-qemu-preflight.shs` has **no
+`PASS —`/`FAIL —`/`ERROR —` verdict-line emitter at all**, and it **boots
+nothing**: it reports `simpleos_x86_64_wm_qemu_preflight_live_qemu=not-started-host-gate`
+alongside `..._status=pass` and exits 0. A reader who sees rc 0 will assume a
+boot happened; it did not. Observed, not changed — it belongs to another lane.
+
+### NOT verified by this pass
+
+- **No P6 build was attempted.** The aarch64 sysroot and the `simple-core`
+  archive are absent on this host; nothing was built to test Route B.
+- **Guest stdin RX was not re-proven.** The boot in this pass shows
+  `[STDIN-PROBE] no-data`, the documented expectation for a TX-only
+  `-serial file:` gate. P8's proof rests on the earlier nonce run, unreproduced
+  here.
+- A grep found 48 of the 56 named somewhere in `src/runtime` C. That figure is
+  **indicative only** — it scanned all 103 non-vendor `src/runtime` `.c` files,
+  whereas Route B links exactly **11** of them. The 8 mmap/file-lock symbols
+  (`rt_mmap`, `rt_munmap`, `rt_madvise`, `rt_msync`, `rt_file_lock`,
+  `rt_file_unlock`, `rt_file_mmap_read_bytes`, `rt_file_mmap_read_text`) are
+  absent from `src/runtime` C **entirely**.
+- The `freestanding_runtime.c` compile used this pass's own flags, not the lane's
+  exact ones. The number is anchored by the `kernel.elf` cross-check (85 of 94
+  present, 0 undefined), not by the compile alone.
+
 ## STATUS UPDATE 2026-08-24 — P10's MECHANICAL HALF IS BUILT (84 of 140)
 
 The ~90 "mechanical" symbols the inventory below identified are implemented in
