@@ -41,6 +41,15 @@ fn pf_lookup(resolution: MethodResolution) -> HirExpr:
             value: pf_expr(HirExprKind.IntLit(7, nil), pf_i64_type(), 4),
             span: pf_span(4))], resolution), pf_bool_type(), 4)
 
+fn pf_named_lookup(
+    receiver: HirExpr, method_name: text, result_type: HirType,
+    argument: HirExpr, resolution: MethodResolution, line: i64
+) -> HirExpr:
+    pf_expr(HirExprKind.MethodCall(
+        receiver, method_name, [HirCallArg(
+            has_name: false, name: "", value: argument,
+            span: pf_span(line))], resolution), result_type, line)
+
 fn pf_function_with_expr(expr: HirExpr) -> HirFunction:
     HirFunction(
         symbol: SymbolId(id: 20), name: "scan", type_params: [], params: [],
@@ -208,3 +217,27 @@ describe "typed HIR collection performance facts":
         expect(facts.collection_ops.len()).to_equal(1)
         expect(facts.incomplete_ops).to_equal(1)
         expect(typed_coll002_linear_lookup_findings(facts).len()).to_equal(0)
+
+    it "preserves parent receiver and argument preorder without counting wrappers":
+        val resolution = MethodResolution.InstanceMethod(
+            SymbolId(id: 10), SymbolId(id: 30))
+        val leaf_receiver = pf_expr(
+            HirExprKind.NamedVar(SymbolId(id: 71), "leaf"),
+            pf_array_type(), 20)
+        val receiver_lookup = pf_named_lookup(
+            leaf_receiver, "receiver_lookup", pf_array_type(),
+            pf_expr(HirExprKind.IntLit(1, nil), pf_i64_type(), 21),
+            resolution, 21)
+        val argument_lookup = pf_named_lookup(
+            leaf_receiver, "argument_lookup", pf_bool_type(),
+            pf_expr(HirExprKind.IntLit(2, nil), pf_i64_type(), 22),
+            resolution, 22)
+        val parent_lookup = pf_named_lookup(
+            receiver_lookup, "parent_lookup", pf_bool_type(),
+            argument_lookup, resolution, 23)
+        val facts = collect_hir_function_perf_facts(
+            pf_function_with_expr(parent_lookup), pf_registry(30, true))
+        expect(facts.collection_ops.len()).to_equal(3)
+        expect(facts.collection_ops[0].method_name).to_equal("parent_lookup")
+        expect(facts.collection_ops[1].method_name).to_equal("receiver_lookup")
+        expect(facts.collection_ops[2].method_name).to_equal("argument_lookup")

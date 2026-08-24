@@ -3,35 +3,41 @@
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, MethodResolution}
 use compiler.hir.hir_definitions.{HirFunction, HirExpr, HirExprKind}
 use compiler.hir.generated.hir_children.{
-    HirNode, hir_children_of, hir_children_of_block}
+    HirChildFrame, HirChildFrameSink, hir_expand_child_frames_reverse}
 use compiler.semantics.perf_facts.types.*
 
 struct HirPerfWorkItem:
-    node: HirNode
+    frame: HirChildFrame
     loop_depth: i64
 
 class HirPerfWorkStack:
     items: [HirPerfWorkItem]
+    active_loop_depth: i64
 
 impl HirPerfWorkStack:
     static fn new() -> HirPerfWorkStack:
-        HirPerfWorkStack(items: [])
+        HirPerfWorkStack(items: [], active_loop_depth: 0)
 
     me push(item: HirPerfWorkItem):
         self.items.push(item)
 
-    me push_children(children: [HirNode], loop_depth: i64):
-        var index = children.len()
-        while index > 0:
-            index = index - 1
-            self.items.push(HirPerfWorkItem(
-                node: children[index], loop_depth: loop_depth))
+    me push_frame(frame: HirChildFrame, loop_depth: i64):
+        self.items.push(HirPerfWorkItem(frame: frame, loop_depth: loop_depth))
+
+    me expand_reverse(frame: HirChildFrame, loop_depth: i64):
+        self.active_loop_depth = loop_depth
+        hir_expand_child_frames_reverse(frame, self)
 
     fn len() -> i64:
         self.items.len()
 
     me pop() -> HirPerfWorkItem:
         self.items.pop()
+
+impl HirChildFrameSink for HirPerfWorkStack:
+    me push_hir_child_frame(frame: HirChildFrame):
+        self.items.push(HirPerfWorkItem(
+            frame: frame, loop_depth: self.active_loop_depth))
 
 class HirPerfAccumulator:
     collection_ops: [ResolvedCollectionOp]
@@ -222,14 +228,14 @@ fn hir_perf_scan_function(
     accumulator: HirPerfAccumulator
 ):
     var work = HirPerfWorkStack.new()
-    work.push_children(hir_children_of_block(function.body), 0)
+    work.push_frame(HirChildFrame.Block(function.body), 0)
     while work.len() > 0:
         val item = work.pop()
-        accumulator.nodes_scanned = accumulator.nodes_scanned + 1
-        var children: [HirNode] = []
         var child_loop_depth = item.loop_depth
-        match item.node:
-            case HirNode.Expr(expr):
+        var expand_generic = true
+        match item.frame:
+            case HirChildFrame.Expr(expr):
+                accumulator.nodes_scanned = accumulator.nodes_scanned + 1
                 match expr.kind:
                     case HirExprKind.MethodCall(receiver, method, args, resolution):
                         val fact = hir_perf_method_fact(
@@ -244,9 +250,9 @@ fn hir_perf_scan_function(
                             accumulator.unclassified_method_calls =
                                 accumulator.unclassified_method_calls + 1
                     case HirExprKind.Loop(body, _):
-                        work.push_children(
-                            hir_children_of_block(body), item.loop_depth + 1)
-                        children = []
+                        work.push_frame(
+                            HirChildFrame.Block(body), item.loop_depth + 1)
+                        expand_generic = false
                         accumulator.unknown_execution_domains =
                             accumulator.unknown_execution_domains + 1
                         accumulator.coverage_complete = false
@@ -265,12 +271,9 @@ fn hir_perf_scan_function(
                             item.loop_depth
                         else:
                             item.loop_depth + 1
-                        work.push_children(
-                            hir_children_of_block(body), body_loop_depth)
-                        work.push(HirPerfWorkItem(
-                            node: HirNode.Expr(iter),
-                            loop_depth: item.loop_depth))
-                        children = []
+                        work.push_frame(HirChildFrame.Block(body), body_loop_depth)
+                        work.push_frame(HirChildFrame.Expr(iter), item.loop_depth)
+                        expand_generic = false
                     case HirExprKind.Lambda(_, _, _):
                         # A closure body is a distinct execution domain. Its
                         # lexical placement inside a loop is not execution
@@ -288,16 +291,16 @@ fn hir_perf_scan_function(
                         accumulator.coverage_complete = false
                     case _:
                         pass_do_nothing
-                if children.len() == 0:
-                    match expr.kind:
-                        case HirExprKind.Loop(_, _): pass_do_nothing
-                        case HirExprKind.For(_, _, _, _): pass_do_nothing
-                        case _: children = hir_children_of(item.node)
-                else:
-                    children = hir_children_of(item.node)
+            case HirChildFrame.Stmt(_):
+                accumulator.nodes_scanned = accumulator.nodes_scanned + 1
+            case HirChildFrame.Type_(_):
+                accumulator.nodes_scanned = accumulator.nodes_scanned + 1
+            case HirChildFrame.Pattern(_):
+                accumulator.nodes_scanned = accumulator.nodes_scanned + 1
             case _:
-                children = hir_children_of(item.node)
-        work.push_children(children, child_loop_depth)
+                pass_do_nothing
+        if expand_generic:
+            work.expand_reverse(item.frame, child_loop_depth)
     accumulator.functions_scanned = accumulator.functions_scanned + 1
 
 fn collect_hir_perf_facts(
