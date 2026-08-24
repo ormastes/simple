@@ -2751,19 +2751,51 @@ impl MirLowering:
         # index-read path `arr[i]` already reads element type off
         # `base_mir_type.kind` (see expr_dispatch.spl `case Index`). Mirror
         # that here so `for x in arr` and `arr[i]` agree on the element type.
+        # Bug (native_typed_array_text_element_destroyed_at_store_2026-08-24,
+        # "still open" item `for x in a`): the two type sources below were
+        # applied in the WRONG ORDER and the second unconditionally clobbered
+        # the first. A container born from an empty `[]` literal
+        # (`var a: [text] = []`) carries the ERASED `Array(i64, 0)` MIR type,
+        # so the authoritative declared HIR element type (`Str`) recovered by
+        # the first block was immediately overwritten with `i64` by the second.
+        # The loop variable was then typed i64, `local_is_str` said false, and
+        # `coerce_concat_operand` rendered the element's tagged heap-string
+        # handle through `rt_raw_i64_to_string` -- `for s in a: print "{s}"`
+        # printed a pointer. Measured on that fixture: `s.len()` returned the
+        # CORRECT 10 while `"{s}"` printed 110173329386353, proving the element
+        # itself was intact and this is a pure element-TYPE propagation gap,
+        # not a data defect (the STORE-side half was fixed in 7d657439fa8).
+        #
+        # Same erased-`Array(i64)` shape, and the same repair, as
+        # `lower_index_expr`'s landed HIR-fallback fix in that commit
+        # (expr_dispatch.spl): let the declared HIR element type win, and map a
+        # `Str` element through `bootstrap_text_type()` -- the Opaque("str")
+        # form `mir_type_is_str`/`local_is_str` and the rest of the text path
+        # key off -- rather than `lower_type`'s fat-pointer tuple, exactly as
+        # the `.first()`/`.last()` lowering already does.
+        #
+        # For a genuine `[i64]` both sources agree on i64, so this is a no-op
+        # there -- which is why `[i64]` for-in was the one case that worked.
+        var element_type_from_hir = false
         if val collection_hir_type = self.find_local_hir_type(collection_local.id):
             match collection_hir_type.kind:
                 case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):
-                    element_type = self.lower_type(elem_t)
+                    match elem_t.kind:
+                        case HirTypeKind.Str:
+                            element_type = self.bootstrap_text_type()
+                        case _:
+                            element_type = self.lower_type(elem_t)
+                    element_type_from_hir = true
                 case _: ()
-        if val coll_mir_type = self.local_mir_type_of(collection_local):
-            match coll_mir_type.kind:
-                case MirTypeKind.Array(elem_t, _):
-                    element_type = elem_t
-                case MirTypeKind.Slice(elem_t):
-                    element_type = elem_t
-                case _:
-                    ()
+        if not element_type_from_hir:
+            if val coll_mir_type = self.local_mir_type_of(collection_local):
+                match coll_mir_type.kind:
+                    case MirTypeKind.Array(elem_t, _):
+                        element_type = elem_t
+                    case MirTypeKind.Slice(elem_t):
+                        element_type = elem_t
+                    case _:
+                        ()
 
         # Text iteration reuses the canonical Unicode splitter, then the same
         # counted array loop used by `text.chars()`. Do not index bytes here:

@@ -3738,6 +3738,50 @@ impl MirLowering:
                 # fallback once right_local exists, below.
                 var result_struct_name = ""
                 if val nc_inner_type = self.option_inner_hir_type_for_local(left, left_local):
+                    # Bug (native_typed_array_text_element_destroyed_at_store,
+                    # "still open" item `.first()`/`.last()`): `result_type`
+                    # above is derived ONLY from the `??` expression's own HIR
+                    # annotation, which is frequently nil on the flat
+                    # native-build path -- so it silently defaulted to i64 for
+                    # `a.first() ?? "MISS"` on a `[text]`. `result_local` was
+                    # then typed i64, `local_is_str` said false, and
+                    # `coerce_concat_operand` rendered the payload's tagged
+                    # heap-string handle through `rt_raw_i64_to_string`.
+                    # Measured: `?? 0` on an `[i64]` was already CORRECT, so
+                    # the Option machinery itself is sound -- only the text
+                    # element type was being dropped.
+                    #
+                    # The Option's declared INNER type is already looked up
+                    # here for the struct case; reuse it for `Str` too, mapping
+                    # to `bootstrap_text_type()` (Opaque("str")) exactly as the
+                    # `.first()`/`.last()` lowering and the landed
+                    # `lower_index_expr` repair (7d657439fa8) do. Guarded on
+                    # the current `result_type` NOT already being a string form
+                    # so a correctly-annotated expression is never clobbered,
+                    # and confined to the `Str` arm so no other payload type
+                    # changes.
+                    val nc_result_is_erased_i64 = rt_enum_discriminant(result_type.kind) == rt_enum_discriminant(MirTypeKind.I64)
+                    match nc_inner_type.kind:
+                        case HirTypeKind.Str:
+                            if not self.mir_type_is_str(result_type):
+                                result_type = self.bootstrap_text_type()
+                        # Bool and Float payloads lose their type through the
+                        # SAME hole, and were measured failing the same way:
+                        # `a.first() ?? d` on a `[bool]` printed `1` instead of
+                        # `true`, and on an `[f64]` printed
+                        # 4609434218613702656 -- the IEEE-754 bit pattern of
+                        # 1.5 rendered by rt_raw_i64_to_string, the exact
+                        # signature of an f64 that reached the concat path
+                        # typed i64. Only ever widened FROM the erased i64
+                        # default, so a result_type the expression's own HIR
+                        # annotation already pinned down is never overridden.
+                        case HirTypeKind.Bool:
+                            if nc_result_is_erased_i64:
+                                result_type = MirType.bool()
+                        case HirTypeKind.Float(_):
+                            if nc_result_is_erased_i64:
+                                result_type = self.lower_type(nc_inner_type)
+                        case _: ()
                     match nc_inner_type.kind:
                         case HirTypeKind.Named(nc_struct_symbol, _):
                             val nc_type_symbol = self.symbols.get_symbol_raw(nc_struct_symbol.id)

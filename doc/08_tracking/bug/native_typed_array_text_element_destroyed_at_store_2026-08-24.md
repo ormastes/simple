@@ -1,9 +1,18 @@
 # native lane: a `text` element is DESTROYED at the STORE, not lost at the read
 
-- Status: FIXED (2026-08-24) for `[i64]` / `[text]` / `[bool]` / `[f64]`.
-- Gate: `scripts/check/check-native-array-element-type.shs`
-  - before: `FAIL — 4 case(s) checked, 3 diverged: text bool f64`
-  - after:  `PASS — 4 case(s) checked, 0 diverged`
+- Status: PARTIALLY FIXED. `a[i]`, `.first()`/`.last()` and `for x in a` are
+  fixed for all four element types. **Nested `[[text]]` / `[[bool]]` remain
+  BROKEN** and the gate is deliberately left RED for them (root cause measured,
+  see "Still open" below).
+- Gate: `scripts/check/check-native-array-element-type.shs` — widened
+  2026-08-24 from 4 cases (one access path) to **20** (4 element types x 5
+  access paths: `index`, `first`, `last`, `for`, `nested`).
+  - origin/main `16383395b5a`: `FAIL — 20 case(s) checked, 8 diverged:
+    text/first text/last text/nested bool/first bool/last bool/nested
+    f64/first f64/last`
+  - now: `FAIL — 20 case(s) checked, 2 diverged: text/nested bool/nested`
+  - The gate is NOT wired into any pre-push hook, precisely because it is
+    honestly red. Promote it once nested is fixed.
 - Lane: `native-build --backend=cranelift`, x86_64-unknown-linux-gnu. Interpreter
   was always correct.
 
@@ -100,13 +109,104 @@ Measured on the same fixture at origin/main and after the fix, `.first()` and
 not decode at all. **Still open** (tracked below); the fix above only repairs
 what they read, not how they read it.
 
-## Still open (measured, not caused by this change)
+## Round 2 (2026-08-24): the residual paths were READ-side, and not one defect
 
-- `.first()` / `.last()` on a `[text]`: prints the raw tagged handle as an
-  integer. Read path never calls `decode_runtime_value`.
-- `for x in a` on a `[text]`: same.
-- Nested `[[text]]`: `nested[0][0]` prints a raw word. Equally wrong before
-  (`N=100461412424641`) and after (`N=97182983609281`) this change.
+The store fix above repaired WHAT was read. It did not repair HOW the other
+paths read it. Measured on the fixed build, `[text]`, one array, one push:
+
+```
+a[0]                -> ABCDEFGHIJ        (fixed in round 1)
+a.first() ?? d      -> 103104798067584   raw tagged handle rendered as an int
+for s in a: "{s}"   -> 110173329386353   same
+n[0][0]             -> 105218053549009   same
+```
+
+**The decisive measurement — and the reason none of this is a data defect:**
+inside the broken `for` loop, `s.len()` returned the CORRECT **10** while
+`"{s}"` printed a pointer, and `s + "!"` concatenated onto the pointer. The
+element was a perfectly good tagged heap string the whole time. Every residual
+failure is an element-TYPE propagation gap, never a corrupted value. `[i64]` was
+correct on every path throughout, which is the control.
+
+Three independent sites, all reached by the same question ("does this local end
+up satisfying `local_is_str`, so `coerce_concat_operand` passes it through
+instead of calling `rt_raw_i64_to_string`?"):
+
+### A. `for x in a` — FIXED (`mir_lowering_stmts.spl`, `lower_for`)
+
+Two element-type sources were consulted in the WRONG ORDER and the second
+clobbered the first unconditionally: the declared HIR element type (`Str`) was
+recovered correctly and then immediately overwritten by the base's **erased**
+`Array(i64, 0)` MIR type, which is what a container born from `var a: [text] =
+[]` carries. This is the identical erased-`Array(i64)` shape, and the identical
+repair, as round 1's `lower_index_expr` fix: let the declared HIR type win, and
+map `Str` through `bootstrap_text_type()` (the `Opaque("str")` form) rather than
+`lower_type`'s fat-pointer tuple. No-op for a genuine `[i64]`.
+
+### B. `.first()` / `.last()` — FIXED (`expr_dispatch.spl`, `NullCoalesce`)
+
+Not in the `.first()` lowering at all — that one is correct. The loss was in the
+`??` arm that consumes its Option: `result_type` there was derived ONLY from the
+`??` expression's own HIR annotation, which is routinely nil on the flat
+native-build path, so it silently defaulted to i64. The Option's declared INNER
+type was already being looked up two lines above (for the struct case) and was
+simply not used for anything else. Extending that existing lookup to `Str`,
+`Bool` and `Float` fixed six gate cases at once. The bit-level signature that
+identified it: `[f64]` printed **4609434218613702656**, the IEEE-754 pattern of
+1.5 rendered by `rt_raw_i64_to_string`.
+
+**`.first()` is probed through `?? <default>`, never as bare `{a.first()}`, and
+that is deliberate.** The two lanes disagree on what `.first()` RETURNS: the
+interpreter yields the bare element, native yields an Option handle. A bare
+interpolation therefore compares two different things and says nothing about
+element typing. (The interpreter renders a hand-built `Some(77)` as
+`<enum@0x...>`, so it has no consistent bare-Option rendering to compare
+against either.) That divergence is real but is a separate question from this
+bug.
+
+## Still open (measured, root cause located, NOT fixed)
+
+### Nested `[[text]]` / `[[bool]]` — blocked upstream of MIR
+
+Traced with an instrumented `lower_index_expr`. For `n: [[text]]` reading
+`n[0][0]`:
+
+```
+[idx] read base_local=1  from_base=true erased=true hir_present=true
+[idx] after-fallback base=1  is_str=false elem_hir_set=true
+[idx] remembered elem hir on local 15
+[idx] read base_local=15 from_base=true erased=true hir_present=true
+[idx] after-fallback base=15 is_str=false elem_hir_set=false
+```
+
+The outer read DOES find `n`'s HIR type and DOES match its `Array(_)` arm. But
+the element type it recovers is **not** `Array(Str)`: on the inner read that
+type fails to match `Array`/`Slice` at all (`elem_hir_set=false`), while its
+enum discriminant is pointer-shaped, i.e. a payload-carrying variant — so it is
+something like `Named`/`Generic`, not the nested array kind. The declared
+`[[text]]` never arrives in MIR as `Array(Array(Str))`.
+
+A candidate MIR-side fix (calling `remember_local_hir_type` on
+`lower_index_expr`'s result local, which it has never done) was written,
+measured to change nothing because of the above, and **reverted** rather than
+landed as inert code. The real fix belongs in whatever records the declared
+container type for a nested array literal, upstream of 50.mir. `[[i64]]` and
+`[[f64]]` pass, so the nesting machinery itself works.
+
+### `if val v = <a text Option>:` — separate, general, NOT array-specific
+
+`if val v = a.first():` on a `[text]` prints a raw handle, while the sibling
+`a.first() ?? d` is now correct. It reproduces with a plain `fn pick() -> text?`
+too, so it is not an array defect and is out of this bug's scope. Root cause
+located: `lower_if_chain` (`mir_lowering_stmts.spl:~2380`) recovers the payload
+type only for `Float`, via `find_local_hir_type(candidate.id)` on the if-val
+BINDING local. Traced: that binding's MIR type is I64 (the gate passes) but
+`hir_present=false` — the binding never inherits the initializer's remembered
+HIR type, so no payload arm of any kind can fire. Adding `Str`/`Optional(Str)`
+arms there was tried and is **unreachable dead code** until the binding inherits
+the metadata; it was reverted rather than landed. The `??` path works because it
+uses `option_inner_hir_type_for_local`, which falls back to the receiver
+EXPRESSION's declared type.
 
 ## Verified non-regressing
 
