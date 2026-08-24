@@ -2815,3 +2815,15 @@ fallback precedence and caps, 1-based lines, stdout, and exit behavior are
 unchanged. Imported-module parsing remains independent. Snapshot projection and
 source-topology contracts were added but not executed under the user's
 no-verification instruction.
+
+### Linear formatter space normalization
+
+The formatter's expression-spacing path previously collapsed repeated ASCII
+spaces with a fixed-point `contains("  ")` plus whole-string `replace` loop.
+For a line of length `n` and a maximum space run `r`, that performs
+`O(n log r)` scans and transient copies. The replacement is now one ordered
+scan which returns the original normalized line unchanged, and otherwise joins
+unchanged span fragments once: `O(n)` work and output-sized storage. It preserves tabs,
+Unicode/non-space spans, operator-rewrite order, context cleanup, and final
+trim behavior. Boundary and idempotence contracts were added but not executed
+under the user's no-verification instruction.
