@@ -90,3 +90,39 @@ interpreter fallback, with the unsafe block tail value observed and `ffi`
 absent from generated global loads. Until that passes, safe-owner migrations
 using this expression form must remain unpushed or be considered blocked by
 the compiler defect; helper extraction is not an acceptable language fix.
+
+## 2026-08-24 codegen gap localized (independent lane)
+
+The rebuilt-seed result above is reproduced verbatim on `origin/main`
+(`045e38290f0`) with the deployed seed, and the surviving gap is localized:
+
+```text
+$ ./bin/simple native-build <any-fixture>.spl -o out.bin ; echo NB_RC=$?
+[CODEGEN BODY] Function 'env_get' body compilation failed: GlobalLoad: unresolved identifier 'ffi' (not a global, function, const-data name, or import)
+[INFO] JIT compilation failed, falling back to interpreter: ... 4 function body/bodies failed to compile: [env_get, env_get_opt, getpid, time_now_unix_micros]
+error[E1002]: function `unsafe` not found
+NB_RC=1
+```
+
+Localization: `grep -rn UnsafeBlock src/compiler_rust/compiler/src/codegen/`
+returns **zero lines**. The parser/HIR fix constructs `Expr::UnsafeBlock` /
+`HirExprKind::UnsafeBlock`, but the seed codegen has no case for that node, so
+it degrades into generic call/global lowering — hence `unresolved identifier
+'ffi'` (the capability list read as an identifier expression) and
+`function 'unsafe' not found`. The fix must add codegen handling, not more
+parser/HIR work.
+
+Blast radius, measured: a control fixture containing **no** `unsafe` at all
+fails identically, because the failure comes entirely from imported
+`src/lib/nogc_sync_mut/io_runtime.spl:280` (`env_get`), which is verbatim this
+defect's shape. So **every** `native-build` on `origin/main` is blocked by this
+defect, not only programs that themselves use `unsafe`.
+
+Not this defect: the Stage 3 self-host vanish point
+(`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:149`) uses the
+**statement/block** form, not the expression form, so the hypothesis that
+Defect A and this defect are the same bug is refuted at the syntactic level.
+Whether the block form also mis-lowers under native codegen is UNMEASURED:
+`SIMPLE_ALLOW_STUB_FALLBACK=1` does not produce a binary here — the worker
+wrapper dies with `failed to spawn process 'bin/simple'` (`RC=255`) for all
+fixtures including the control.
