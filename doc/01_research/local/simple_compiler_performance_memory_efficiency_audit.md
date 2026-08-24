@@ -2688,3 +2688,12 @@ uniqueness checks now use dictionaries rather than repeated linear membership,
 keeping those uniqueness phases linear as the pass inventory expands. Negative
 missing/misbound contracts were added but not executed under the user's
 no-verification instruction.
+
+The same audit previously called `mir_pass_descriptor_registry()` three times,
+reconstructing the full descriptor array and its provider metadata separately
+for status/alias, witness, and fact-preservation phases. It now captures one
+immutable registry snapshot and passes it through the private witness kernel and
+fact loop. The standalone public witness check retains its compatibility API
+and constructs one snapshot only when invoked independently. This removes two
+full registry/provider materializations from the combined integrity path with
+no change to error ordering or content.
