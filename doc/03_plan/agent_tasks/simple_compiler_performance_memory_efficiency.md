@@ -1245,8 +1245,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 
 ## Completed query outline snapshot tranche
 
-- Build one request-local target-file snapshot containing lines, symbols, and
-  imports from one read and one split.
+- Build one request-local target-file snapshot containing lines and symbols
+  from one read and one split.
+- Project imports lazily from snapshot lines only after local lookup misses, so
+  common local hits do not pay a second full scan or allocate import records.
 - Reuse it across definition, hover, completion, type, and signature queries;
   keep imported-module parsing and precedence unchanged.
 - Preserve empty-file behavior, duplicate import ordering, line numbers,
