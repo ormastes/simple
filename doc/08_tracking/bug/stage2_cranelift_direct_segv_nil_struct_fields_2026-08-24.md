@@ -397,3 +397,49 @@ Remaining suspects, in order:
 Refuted so far: most-fields-wins wrong-struct resolution (dv8), typed-binding
 remedy (dv6), empty-literal V loss (dv10), struct-keyed lookup failure (dv11),
 C runtime (direct selfcheck).
+
+## ROOT CAUSE LOCATED (2026-08-24)
+
+The `SIMPLE_TRACE_DICT_ELEM=1` probe run on `dv4.spl` prints:
+
+```
+[dict-elem-probe] method=values recv_local=52
+    recv_mir_type=MirTypeKind::Dict((MirType(kind: MirTypeKind::I64),
+                                     MirType(kind: MirTypeKind::Struct(SymbolId(id: 1000000002)))))
+[dict-elem-probe] stamped elem_type=MirTypeKind::Struct(SymbolId(id: 1000000002)) for method=values
+```
+
+So the **MIR side is entirely correct**: the receiver really is
+`Dict(i64, Struct(Big))`, the `case Dict(k_type, v_type)` match fires, and the
+`.values()` result is stamped `Array(Struct(Big), 0)`. Suspects 1 and 3 from the
+list above are refuted, as is any story about the MIR element type.
+
+The gap is one layer up. Field-access *indices* are resolved from the HIR type
+of the receiver, not from the MIR type — and the Simple HIR/type layers have no
+knowledge of dict method return types at all:
+
+```
+grep -rn '"values"\|"keys"' src/compiler/20.hir/ src/compiler/30.types/ src/compiler/35.semantics/
+  -> no matches
+```
+
+Every `"values"`/`"keys"` occurrence in the compiler is in `10.frontend`
+(interpreter), `15.blocks`, `50.mir` or `70.backend`. Nothing types
+`Dict<K,V>.values()` as `[V]` in HIR. Consequently the for-loop variable's HIR
+type is unresolved, `f.name` gets no field index, and lowering emits byte
+offset 0 with i64 typing — exactly what the disassembly shows.
+
+**Fix direction:** teach the Simple HIR/type layer the dict method return types
+(`values -> [V]`, `keys -> [K]`, and the neighbours `get`/`remove` -> `V`),
+mirroring what the Rust seed already does at
+`compiler/src/hir/lower/expr/mod.rs:1619`, so the for-loop variable carries the
+real struct type and field indices resolve. That is one fix for all 89 sites.
+
+This has NOT been implemented. It is a change in the type layer and needs its
+own design + verification pass; do not assume it is done.
+
+### Reproduce pair for whoever lands the fix
+- `build/lanes_s/dv4.spl` — fails before (C_values corrupt), must pass after.
+- `build/lanes_s/dv11.spl` — struct-keyed neighbour, same requirement.
+Both are interpreted-correct today, so the assertion is simply
+"native output == interpreted output".
