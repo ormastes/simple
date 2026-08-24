@@ -52,6 +52,10 @@ validated Stage 4 path and injects it as `SIMPLE_BINARY` and the established
 `SIMPLE_BIN` compatibility name for every automated
 gate. Ambient or deployed `SIMPLE_BINARY` values cannot redirect that evidence
 to a stale compiler.
+Detector mutation suites are bootstrap evidence, not per-push setup. The
+runtime-API guard's push row therefore invokes `--scan-only` with an explicit
+committed range, while a separate required bootstrap row runs `--selftest`.
+The normal standalone command keeps self-test-first behavior.
 The exhaustive structural-tree fixture campaign is a bootstrap automated row.
 Interactive push retains the same final-tree invariants but evaluates only each
 bounded committed tip and its count-only first-parent reference.

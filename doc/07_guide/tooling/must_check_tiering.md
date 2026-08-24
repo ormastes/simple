@@ -102,6 +102,10 @@ coverage, guard wiring, and executable outline parsing are bootstrap-owned.
 They previously consumed about 59 seconds before the bounded range/ref work;
 moving them does not waive them—the textual ledger keeps every row TODO until
 the bootstrap recorder retains its accepted PASS log.
+The runtime-API deletion detector similarly splits fixture proof from the hot
+path: bootstrap runs `--selftest`, and push supplies an explicit committed range
+to `--scan-only`. Do not use scan-only without an explicit range or treat it as
+self-test evidence.
 
 Do not hand-edit a TODO to `pass`; promotion must come from its bootstrap-owned
 checker or a committed receipt:

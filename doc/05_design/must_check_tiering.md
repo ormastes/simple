@@ -22,6 +22,10 @@ process-wait EINTR coverage, guard wiring, and outline parsing. Their ledger
 rows remain required TODO until a bound bootstrap records real PASS evidence.
 The push tier retains the two measured sub-second structural tree checks plus
 the bounded committed-ref/range guards.
+The runtime-API range guard uses `--scan-only` only from its closed push
+dispatch row; that mode requires an explicit range. Its four mutation fixtures
+remain a separate automated bootstrap row, while default manual execution still
+runs them before scanning.
 The quick rules row extracts `rules.sdl` from the same committed ref before
 parsing its numeric commands. An explicit `--rules` path exists only for
 diagnostic and self-test fixtures.
