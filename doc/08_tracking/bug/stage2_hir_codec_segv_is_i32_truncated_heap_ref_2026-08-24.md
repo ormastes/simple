@@ -435,3 +435,98 @@ slot; `direct=2 merge=2` after.
 * `for e2 in (node.domain_blocks ?? [])` in the real codec. A minimal `?? []`
   fixture fails differently (loud for-in panic) and the discrepancy was not
   chased — see `if_merge_collection_identity_residual_2026-08-24.md`.
+
+---
+
+# CONFIRMED AND FIXED IN THE SEED — the site is HIR `lower_if`, not MIR `lower_if_expr` (2026-08-24)
+
+## Verdict
+
+PASS — mechanism confirmed at a named site, fixed, and measured on a
+same-profile before/after pair of seed binaries. The candidate named in the
+section above (`mir/lower/lowering_expr_control.rs:69` `lower_if_expr`) is NOT
+the site; it is downstream of it and could never have fixed the loop. Following
+the evidence instead:
+
+**`src/compiler_rust/compiler/src/hir/lower/expr/control.rs`, `Lowerer::lower_if`**
+— which carried the defect in its own doc comment: *"Result type is taken from
+the then branch."*
+
+## The chain, each link read in the source
+
+1. `lower_array` (`hir/lower/expr/collections.rs:80-87`) types an EMPTY array
+   literal as `Array { element: type_inference_config.empty_array_default,
+   size: Some(0) }`. That default is **`TypeId::I32`**
+   (`type_inference_config.rs:33`) — this is where the *i32* in this record's
+   title literally comes from.
+2. `.keys()` on a typed dict is stamped correctly:
+   `Array { element: K, size: None }` (`hir/lower/expr/mod.rs:1615-1618`).
+3. `lower_if` set `ty = then_hir.ty` and dropped the else arm entirely, so
+   `val ks3 = if …: [] else: d.keys()` got `Array { I32, Some(0) }`.
+4. The Let stmt gives that TypeId to the local, and
+   `lower_for_stmt` (`mir/lower/lowering_stmt.rs:1710-1745`) reads
+   **`iterable.ty`** — not the MIR merge slot — classifies the element as I32,
+   and emits `UnboxInt` followed by `UnitNarrow { to_bits: 32, signed: true }`.
+5. On a 64-bit tagged heap handle that destroys the high half; LLVM folds
+   `zext(trunc_i32(v)) & ~7` into one `and #0xfffffff8` and the truncated
+   pointer is dereferenced.
+
+Step 4 is why `lower_if_expr`'s merge slot was the wrong suspect: the for-loop
+never consults it. In the seed the HIR TypeId is the ONLY carrier of array
+identity — there is no `runtime_array_locals` side table as in the pure-Simple
+lowering — so the same TypeId also decides `.len()`.
+
+## The fix
+
+`merge_if_arm_types` in `control.rs`, applied in both `lower_if` and
+`lower_if_let_expr`. When exactly one arm has the untyped-empty-literal
+signature (`element == empty_array_default && size == Some(0)` — the same
+predicate the existing `push`/`append` receiver refinement at
+`hir/lower/expr/mod.rs:797` already uses) and the other arm is an array with an
+informative element, the informative arm's TypeId is adopted **wholesale**,
+in both directions. Everything else is unchanged, so a genuinely i32-element
+array is never retyped.
+
+Wholesale rather than the pure-Simple fix's element-only refinement because
+here the type is the only carrier: keeping the empty literal's `size: Some(0)`
+would leave `.len()` on the merged local answering a static 0 while the same
+local iterates N elements — the second half of the same defect. Adopting
+`Array { K, None }` fixes both halves at once, which the reproducer's
+`total=2018` (2 from `.len()` + 1007 + 1009) verifies directly.
+
+`elif` needs no separate arm: the parser desugars it to a nested `If` in the
+else slot, so the merge recurses outward. Measured, not assumed (below).
+
+## Measurements
+
+Two seed binaries, SAME cargo profile and features
+(`cargo build --locked --offline --release -p simple-driver --features llvm`,
+LLVM 18, aarch64-apple-darwin), differing only in `control.rs`; each fixture
+built under its own `SIMPLE_CACHE_SCOPE`.
+
+| binary | md5 | fixture | rc | `ands #0xfffffff8` | output |
+|---|---|---|---|---|---|
+| origin/main | `e541abdf58866f93f1aa570cafea23e4` | `b2.spl` (if-merge) | **139** | **1** | — |
+| fixed | `ae375eeb3bd7fa46fbd5ab949cea624e` | `b2.spl` | **0** | **0** | `total=2018` |
+| origin/main | `e541abdf…` | `b2ok.spl` (no merge, control) | 0 | 0 | `total=2018` |
+| fixed | `ae375eeb…` | `b2ok.spl` | 0 | 0 | `total=2018` |
+| origin/main | `e541abdf…` | `elif.spl` (`[] elif [] else keys()`) | **139** | **1** | — |
+| fixed | `ae375eeb…` | `elif.spl` | **0** | **0** | `total=2018` |
+
+The fixed build is reproducible: rebuilt twice, same md5 both times.
+
+Regression fixture (`reg.spl`: value-position `if` over text / int / array of
+int / array of text / a 3-arm `elif` chain, every arm well-typed) — `objdump
+-d` of the produced binary is **identical** before and after apart from the
+`file format` header line naming the file (2 diff lines, both the header). Same
+program output `t=yes i=1 a0=1 s0=a e=three` on both.
+
+## Explicitly NOT verified here
+
+* Stage 2. See the following section for its status.
+* x86_64-linux. Every measurement above is aarch64-apple-darwin.
+* The two residual defects in
+  `if_merge_collection_identity_residual_2026-08-24.md` (`x ?? []` loses
+  collection-ness; a function-RETURNED if-merge array reads len 0). Neither is
+  addressed: `??` is a different construct, and a returned array's TypeId is
+  the callee's declared return type, which this merge never sees.

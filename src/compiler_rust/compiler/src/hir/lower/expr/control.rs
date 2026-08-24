@@ -37,9 +37,84 @@ impl Lowerer {
         }
     }
 
+    /// True when `ty` is the HIR type an EMPTY array literal gets: the
+    /// configured `empty_array_default` element with a static size of 0.
+    ///
+    /// `[]` has no element to take a type from, so `lower_array`
+    /// (expr/collections.rs) stamps `Array { element: empty_array_default,
+    /// size: Some(0) }` — `TypeId::I32` by default. That signature is already
+    /// treated elsewhere as "untyped empty literal, refine me": the
+    /// `push`/`append` receiver refinement at expr/mod.rs:797 tests exactly
+    /// this pair. Reuse the same predicate rather than inventing a second one.
+    fn is_untyped_empty_array_ty(&self, ty: TypeId) -> bool {
+        match self.module.types.get(ty) {
+            Some(HirType::Array { element, size }) => {
+                *element == self.type_inference_config.empty_array_default && *size == Some(0)
+            }
+            _ => false,
+        }
+    }
+
+    /// True when `ty` is an array whose element type carries real information,
+    /// i.e. it is not the empty-literal placeholder above.
+    fn is_informative_array_ty(&self, ty: TypeId) -> bool {
+        match self.module.types.get(ty) {
+            Some(HirType::Array { element, .. }) => *element != self.type_inference_config.empty_array_default,
+            _ => false,
+        }
+    }
+
+    /// Pick the more specific of the two arm types for a value-position `if`.
+    ///
+    /// Bug (stage2_hir_codec_segv_is_i32_truncated_heap_ref_2026-08-24): this
+    /// lowering typed the whole if-expression from the THEN arm alone and
+    /// discarded the else arm. For the pervasive generated-codec shape
+    ///
+    ///     val ks3 = if node.functions == nil: [] else: node.functions.keys()
+    ///     for dk3 in ks3: ... hc_enc_symbol_id(w, dk3)
+    ///
+    /// the then arm is an empty array literal — `Array { I32, Some(0) }` —
+    /// and the else arm carries the correct `Array { Struct(SymbolId), None }`
+    /// that the `.keys()` typing in expr/mod.rs already stamps. Taking the
+    /// then arm made the Let-bound local `Array { I32, .. }`, so
+    /// `lower_for_stmt` (mir/lower/lowering_stmt.rs) read `iterable.ty`,
+    /// classified the element as I32, and emitted `UnboxInt` + a 32-bit
+    /// `UnitNarrow` on what is in fact a 64-bit tagged heap handle. LLVM folds
+    /// the resulting `zext(trunc_i32(v)) & ~7` into a single 32-bit
+    /// `and #0xfffffff8` and the truncated pointer is dereferenced — the
+    /// arm64 stage-2 `hc_enc_hir_module` SIGSEGV.
+    ///
+    /// The same defect was found and fixed first in the pure-Simple lowering
+    /// (`mir_merge_arm_types` in src/compiler/50.mir/mir_lowering_stmts.spl,
+    /// commit ba3efbee19e); this is the port to the seed, which is the
+    /// compiler that actually builds Stage 2
+    /// (`SIMPLE_NATIVE_BUILD_RUST=1`, bootstrap-from-scratch.sh:3499,3511).
+    ///
+    /// The informative arm's TypeId is adopted WHOLESALE, not just its element
+    /// type, because in the seed the HIR type is the only carrier of array
+    /// identity: keeping the empty literal's `size: Some(0)` would leave
+    /// `.len()` on the merged local answering a static 0 while the same local
+    /// iterates N elements — the second half of the same defect, which the
+    /// pure-Simple fix had to repair through its marking sets. Refinement is
+    /// one-directional (only a placeholder is replaced), so a genuinely
+    /// i32-element array is never retyped and every other merge is unchanged.
+    fn merge_if_arm_types(&self, then_ty: TypeId, else_ty: Option<TypeId>) -> TypeId {
+        let Some(else_ty) = else_ty else {
+            return then_ty;
+        };
+        if self.is_untyped_empty_array_ty(then_ty) && self.is_informative_array_ty(else_ty) {
+            return else_ty;
+        }
+        if self.is_untyped_empty_array_ty(else_ty) && self.is_informative_array_ty(then_ty) {
+            return then_ty;
+        }
+        then_ty
+    }
+
     /// Lower an if expression to HIR
     ///
-    /// Result type is taken from the then branch.
+    /// Result type is the merge of the two arms (see `merge_if_arm_types`); it
+    /// used to be taken from the then branch alone.
     /// Else branch is optional.
     pub(super) fn lower_if(
         &mut self,
@@ -74,7 +149,7 @@ impl Lowerer {
             None
         };
 
-        let ty = then_hir.ty;
+        let ty = self.merge_if_arm_types(then_hir.ty, else_hir.as_ref().map(|e| e.ty));
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -157,6 +232,10 @@ impl Lowerer {
         } else {
             None
         };
+
+        // Same merge as `lower_if` above: the then arm alone must not decide the
+        // type of the whole expression when it is an untyped empty literal.
+        let ty = self.merge_if_arm_types(ty, else_hir.as_ref().map(|e| e.ty));
 
         let if_expr = HirExpr {
             kind: HirExprKind::If {
