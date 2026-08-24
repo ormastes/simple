@@ -35,6 +35,11 @@ fn _log_error(msg: text):
         level == "debug" or level == "trace"):
         rt_eprintln("[ERROR] nvfs_connector: {msg}")
 
+fn _nvfs_absolute_path_is_canonical(path: text) -> bool:
+    path != "" and str_starts_with(path, "/") and
+        not path.contains("//") and not path.contains("/./") and
+        not path.ends_with("/.")
+
 struct NvfsVfsConnection:
     """Mounted NVFS POSIX shim plus VFS-style mount prefix."""
     conn_id:     i64
@@ -89,8 +94,14 @@ fn nvfs_vfs_connect(
     if trimmed == "":
         _log_error("mount rejected: empty mount path")
         return Err(FsError.InvalidArg)
-    if not str_starts_with(trimmed, "/"):
-        _log_error("mount rejected: non-absolute mount path '{trimmed}'")
+    if not _nvfs_absolute_path_is_canonical(trimmed):
+        _log_error("mount rejected: non-canonical absolute path '{trimmed}'")
+        return Err(FsError.InvalidArg)
+    if is_path_traversal(trimmed):
+        _log_error("mount rejected: traversal in mount path '{trimmed}'")
+        return Err(FsError.InvalidArg)
+    if trimmed.len() > 1 and str_slice(trimmed, trimmed.len() - 1, trimmed.len()) == "/":
+        _log_error("mount rejected: non-canonical trailing slash in '{trimmed}'")
         return Err(FsError.InvalidArg)
     # Reject require_caps bits the in-memory driver cannot satisfy.
     if (require_caps & ~NVFS_CONNECTOR_SUPPORTED_CAPS) != 0:
@@ -114,6 +125,9 @@ fn nvfs_vfs_connect(
     ))
 
 fn _nvfs_relpath(conn: NvfsVfsConnection, path: text) -> Result<Path, FsError>:
+    if not _nvfs_absolute_path_is_canonical(path):
+        _log_warn("non-canonical absolute path rejected: '{path}'")
+        return Err(FsError.InvalidArg)
     if is_path_traversal(path):
         _log_warn("traversal rejected: '{path}'")
         return Err(FsError.InvalidArg)
@@ -122,6 +136,11 @@ fn _nvfs_relpath(conn: NvfsVfsConnection, path: text) -> Result<Path, FsError>:
     if not str_starts_with(path, conn.mount_path):
         _log_warn("path outside mount prefix: '{path}' not under '{conn.mount_path}'")
         return Err(FsError.InvalidArg)
+    if path.len() > conn.mount_path.len():
+        val boundary = str_slice(path, conn.mount_path.len(), conn.mount_path.len() + 1)
+        if boundary != "/":
+            _log_warn("path crosses mount prefix boundary: '{path}' not under '{conn.mount_path}'")
+            return Err(FsError.InvalidArg)
     val rel = str_slice(path, conn.mount_path.len(), path.len())
     if rel == "":
         return Ok(Path(raw: "/"))
