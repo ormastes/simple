@@ -90,6 +90,38 @@ stray `/usr/local/bin/link.exe` (3.2 MB PE) also shadows the real MSVC linker on
 `0xc0000135` (STATUS_DLL_NOT_FOUND) failures, a different error from the
 `LNK1181` this record fixes.
 
+## Where the lane stops next — broken host MinGW GCC (NOT a repo defect)
+
+With this fix the seed build gets past every HOST build script and proceeds
+through ~130 crates before failing in `ring v0.17.14`, whose build script
+compiles C for the `x86_64-pc-windows-gnu` TARGET:
+
+```
+warning: ring@0.17.14: Compiler family detection failed due to error:
+  ToolExecError: command did not execute successfully (status code exit code: 1):
+  "gcc" "-E" ".../detect_compiler_family.c"
+error: failed to run custom build command for `ring v0.17.14`
+```
+
+The repo is not at fault. This host's MSYS2 MinGW GCC is broken:
+
+| probe | result |
+|---|---|
+| `gcc --version` | ok, 15.2.0 (Rev8, MSYS2) |
+| `gcc -c hello.c -o hello.o` | **rc=1**, zero stdout, zero stderr |
+| `gcc -E hello.c` | **rc=1**, zero stdout, zero stderr |
+| `cc1.exe --version` (direct) | **rc=127**, zero stderr |
+
+`cc1.exe` exists on disk but cannot load, so the driver fails silently with no
+diagnostic at all — which is why `ring` could only report "Compiler family
+detection failed". Setting `MSYSTEM=MINGW64` does not change it. Repair the
+toolchain on the host (e.g. `pacman -S --needed mingw-w64-x86_64-gcc`) and
+re-run the lane; do not work around it in-repo.
+
+**Measure gcc's status without a pipe.** `gcc -c x.c 2>&1 | head -3; echo $?`
+reports `head`'s status and reads as a PASS — that misread this exact failure
+as success once in this session.
+
 ## Also observed on this host (separate, not fixed here)
 
 The deployed `bin/release/x86_64-pc-windows-msvc/simple.exe` (19,455,488 B,
