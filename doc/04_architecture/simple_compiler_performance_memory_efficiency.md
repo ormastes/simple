@@ -5,9 +5,11 @@
 
 Accepted design for selected Feature Option C / NFR Option 1. The truthful-pass,
 shared CFG/def-use fact, conservative escape, and lint hot-path tranches are
-implemented. Typed HIR collection facts, MemorySSA-lite, interprocedural cost
-summaries, and runtime/profile evidence remain staged; no design-only component
-is represented as active.
+implemented. The first request-local typed HIR collection-fact slice is also
+implemented: resolved-symbol operation metadata, receiver evidence, loop ancestry,
+and a fail-closed explicit-loop COLL002 candidate projection. Its standard-library registry and
+driver diagnostic adapter remain staged, as do MemorySSA-lite, interprocedural cost
+summaries, and runtime/profile evidence. No design-only component is represented as active.
 
 ## Context
 
@@ -43,7 +45,7 @@ This is a virtual capsule at build composition, not an MDSOC feature transform o
 | `00.common/perf_contracts` | Stable cross-layer value contracts | Revision/fact identities, `AnalysisOutcome`, budgets; no AST/HIR/MIR imports |
 | `10.frontend/session` | Parsed source revision | Immutable source/parse artifacts and bounded revision store over existing frontend cache |
 | `20.hir/session` | Typed revision | Typed module, symbols, exact spans, semantic fingerprint |
-| `35.semantics/perf` | Typed diagnostics and CollectionPlan extraction | One HIR visitor, `PerfRuleId`, `PerfDiagnostic`, operation registry, compatibility adapters |
+| `35.semantics/perf` | Typed diagnostics and CollectionPlan extraction | Request-local `HirPerfFacts` traversal and symbol-keyed registry are implemented; full rule registry, driver adapter, and CollectionPlan remain staged |
 | `50.mir/analysis_contracts` | MIR-shaped stable values | `MirRevision`, `MemoryRegion`, access/effect contracts |
 | `55.borrow` | Ownership/escape/COW proofs | Conservative proof production; no optimizer-policy ownership |
 | `60.mir_opt/perf_facts` | Intraprocedural MIR analysis | Cached fact manager, analysis algorithms, invalidation receipts |
@@ -150,7 +152,14 @@ Every changed pass returns `MirChangeReceipt` plus `FactPreservation`. Missing o
 
 ## Collection and memory architecture
 
-The one-pass typed collector emits indexed loop/call/collection/allocation/copy/read/write/suspend events. Standard-library `OperationSummary` metadata is generated/versioned with the library; user summaries are inferred and fingerprinted; unknown operations remain top/unknown.
+The initial one-pass typed collector uses generated immediate-child HIR traversal
+with an explicit worklist, preserves loop ancestry, and emits resolved collection
+operation events. It reads `type_` only when `has_type_` is authoritative and accepts
+cost/effect claims only from version-matched, verified, resolved-symbol metadata.
+Unresolved calls, missing receiver types, absent/unverified metadata, and closure
+execution domains remain explicit incomplete facts. The full allocation/copy/read/
+write/suspend indexes, generated standard-library registry, inferred user summaries,
+and CollectionPlan extraction remain staged.
 
 CollectionPlan preserves source-level ordering, cardinality, callbacks, ownership, and materialization decisions:
 
