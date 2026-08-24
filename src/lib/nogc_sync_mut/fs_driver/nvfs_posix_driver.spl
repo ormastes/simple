@@ -15,6 +15,7 @@ use std.fs_driver.capability.{Capability, FsCapabilitySet}
 use std.fs_driver.extension.{Extension, PosixCompatExt}
 use std.fs_driver.nvfs_arena.{arena_create_nvme_impl, arena_append_impl, nvfs_arena_has_block_device}
 use std.fs_driver.nvfs_device_identity_owner_v1.*
+use std.fs_driver.nvfs_operation_lease_owner_v1.*
 extern fn rt_string_len(value: text) -> i64
 
 struct NvfsPosixFileRecord:
@@ -44,6 +45,13 @@ struct NvfsPosixDriver:
     inner: DbFsDriver
     device_binding: NvfsDeviceIdentityBindingV1?
     device_region: NvfsDeviceRegionIdentityV1?
+
+pub struct NvfsOwnedDeviceClosePlanV1:
+    _binding: NvfsDeviceIdentityBindingV1
+    _identity_ticket: NvfsDeviceCloseTicketV1
+    _operation_fence: NvfsOperationCloseFenceV1
+    _outer_instance_id: i64
+    _inner_instance_id: i64
 
 impl NvfsPosixDriver:
     static fn new(name: text) -> NvfsPosixDriver:
@@ -86,46 +94,139 @@ impl NvfsPosixDriver:
             else:
                 val _ = nvfs_device_identity_quarantine_reservation_v1(reservation)
             return Err(FsError.IoError(code: 0u32))
+        val binding = activation.unwrap()
+        val operation_registration = nvfs_operation_owner_register_v1(
+            binding, reservation.outer_instance_id(), inner.device_instance_id(), region)
+        if operation_registration.is_err():
+            val cleanup = inner.close_device_backing(inner.device_instance_id())
+            if cleanup.is_ok():
+                val terminal = nvfs_device_identity_mark_terminal_v1(binding)
+                if terminal.is_ok(): val _ = nvfs_device_identity_evict_terminal_v1(binding)
+            else:
+                val _ = nvfs_device_identity_mark_indeterminate_v1(binding)
+            return Err(FsError.Busy)
         Ok(NvfsPosixDriver(
             name: name, inst_id: reservation.outer_instance_id(), inner: inner,
-            device_binding: Some(activation.unwrap()), device_region: Some(region)))
+            device_binding: Some(binding), device_region: Some(region)))
 
     fn close_owned_device() -> Result<bool, FsError>:
+        val plan_r = self.begin_owned_device_close()
+        if plan_r.is_err(): return Err(plan_r.unwrap_err())
+        self.finish_owned_device_close(plan_r.unwrap())
+
+    fn begin_owned_device_close() -> Result<NvfsOwnedDeviceClosePlanV1, FsError>:
         if self.device_binding.is_none() or self.device_region.is_none():
             return Err(FsError.Unsupported)
         val binding = self.device_binding.unwrap()
         val region = self.device_region.unwrap()
+        val operation_fence_r = nvfs_operation_begin_close_v1(
+            binding, self.inst_id, self.inner.device_instance_id(), region)
+        if operation_fence_r.is_err():
+            val operation_error = operation_fence_r.unwrap_err()
+            if operation_error == NvfsOperationLeaseErrorV1.Busy:
+                return Err(FsError.Busy)
+            return Err(FsError.StaleHandle)
+        val operation_fence = operation_fence_r.unwrap()
+        val preflight = self.inner.device_backing_close_preflight(
+            self.inner.device_instance_id())
+        if preflight.is_err():
+            val err = preflight.unwrap_err()
+            if err == FsError.Busy:
+                if nvfs_operation_close_busy_v1(operation_fence).is_err():
+                    self._quarantine_close_divergence(binding)
+                    return Err(FsError.IoError(code: 0u32))
+            else:
+                if nvfs_operation_close_retryable_v1(operation_fence).is_err():
+                    self._quarantine_close_divergence(binding)
+                    return Err(FsError.IoError(code: 0u32))
+            return Err(err)
         val ticket_r = nvfs_device_identity_begin_close_v1(
             binding, self.inst_id, self.inner.device_instance_id(), region)
-        if ticket_r.is_err(): return Err(FsError.StaleHandle)
-        val ticket = ticket_r.unwrap()
+        if ticket_r.is_err():
+            if nvfs_operation_close_retryable_v1(operation_fence).is_err():
+                self._quarantine_close_divergence(binding)
+                return Err(FsError.IoError(code: 0u32))
+            return Err(FsError.StaleHandle)
+        Ok(NvfsOwnedDeviceClosePlanV1(
+            _binding: binding, _identity_ticket: ticket_r.unwrap(),
+            _operation_fence: operation_fence,
+            _outer_instance_id: self.inst_id,
+            _inner_instance_id: self.inner.device_instance_id()))
+
+    fn cancel_owned_device_close(plan: NvfsOwnedDeviceClosePlanV1) -> Result<bool, FsError>:
+        if (self.inst_id != plan._outer_instance_id or
+            self.inner.device_instance_id() != plan._inner_instance_id):
+            return Err(FsError.StaleHandle)
+        val identity = nvfs_device_identity_close_busy_v1(plan._identity_ticket)
+        val operation = nvfs_operation_close_busy_v1(plan._operation_fence)
+        if identity.is_err() or operation.is_err():
+            self._quarantine_close_divergence(plan._binding)
+            return Err(FsError.IoError(code: 0u32))
+        Ok(true)
+
+    fn finish_owned_device_close(plan: NvfsOwnedDeviceClosePlanV1) -> Result<bool, FsError>:
+        if (self.inst_id != plan._outer_instance_id or
+            self.inner.device_instance_id() != plan._inner_instance_id or
+            self.device_binding.is_none() or
+            self.device_binding.unwrap().outer_instance_id() != plan._binding.outer_instance_id()):
+            return Err(FsError.StaleHandle)
+        val binding = plan._binding
+        val ticket = plan._identity_ticket
+        val operation_fence = plan._operation_fence
         val closed = self.inner.close_device_backing(self.inner.device_instance_id())
         if closed.is_err():
             val err = closed.unwrap_err()
             if err == FsError.Busy:
-                val _ = nvfs_device_identity_close_busy_v1(ticket)
+                val identity_transition = nvfs_device_identity_close_busy_v1(ticket)
+                val operation_transition = nvfs_operation_close_busy_v1(operation_fence)
+                if identity_transition.is_err() or operation_transition.is_err():
+                    self._quarantine_close_divergence(binding)
+                    return Err(FsError.IoError(code: 0u32))
             elif dbfs_owner_quarantined():
-                val _ = nvfs_device_identity_mark_indeterminate_v1(binding)
+                val identity_transition = nvfs_device_identity_mark_indeterminate_v1(binding)
+                val operation_transition = nvfs_operation_close_quarantine_v1(operation_fence)
+                if identity_transition.is_err() or operation_transition.is_err():
+                    self._quarantine_close_divergence(binding)
             else:
-                val _ = nvfs_device_identity_close_retryable_v1(ticket)
+                val identity_transition = nvfs_device_identity_close_retryable_v1(ticket)
+                val operation_transition = nvfs_operation_close_retryable_v1(operation_fence)
+                if identity_transition.is_err() or operation_transition.is_err():
+                    self._quarantine_close_divergence(binding)
+                    return Err(FsError.IoError(code: 0u32))
             return Err(err)
         val completed = nvfs_device_identity_close_complete_v1(ticket)
         if completed.is_err():
-            val _ = nvfs_device_identity_mark_indeterminate_v1(binding)
+            self._quarantine_close_divergence(binding)
+            return Err(FsError.IoError(code: 0u32))
+        val operation_closed = nvfs_operation_close_complete_v1(operation_fence)
+        if operation_closed.is_err():
+            val _ = nvfs_operation_force_quarantine_v1(
+                binding, self.inst_id, self.inner.device_instance_id(),
+                self.device_region.unwrap())
+            val _ = nvfs_device_identity_quarantine_terminal_v1(binding)
             return Err(FsError.IoError(code: 0u32))
         val evicted = nvfs_device_identity_evict_terminal_v1(binding)
-        if evicted.is_err(): return Err(FsError.IoError(code: 0u32))
+        if evicted.is_err():
+            val quarantined = nvfs_device_identity_quarantine_terminal_v1(binding)
+            if quarantined.is_err(): return Err(FsError.IoError(code: 0u32))
+            return Err(FsError.IoError(code: 0u32))
         Ok(closed.unwrap())
 
+    fn _quarantine_close_divergence(binding: NvfsDeviceIdentityBindingV1):
+        val _ = nvfs_operation_force_quarantine_v1(
+            binding, self.inst_id, self.inner.device_instance_id(),
+            self.device_region.unwrap())
+        val _ = nvfs_device_identity_mark_indeterminate_v1(binding)
+
     fn mount(opts: MountOptions) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        val _ = opts
-        Ok(())
+        self._with_owned_operation(\:
+            val _ = opts
+            Ok(()))
 
     fn remount(opts: MountOptions) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        val _ = opts
-        Ok(())
+        self._with_owned_operation(\:
+            val _ = opts
+            Ok(()))
 
     fn unmount() -> Result<(), FsError>:
         if self.device_binding.is_some():
@@ -134,205 +235,213 @@ impl NvfsPosixDriver:
         Ok(())
 
     fn root() -> Result<Inode, FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        Ok(Inode(id: 1))
+        self._with_owned_operation(\: Ok(Inode(id: 1)))
 
     fn stat_path(path: Path) -> Result<StatInfo, FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        if not _nvfs_posix_path_valid(path.raw):
-            return Err(FsError.InvalidArg)
-        self._ensure_persisted_path(path.raw)?
-        self.inner.stat_path(path)
+        self._with_owned_operation(\:
+            if not _nvfs_posix_path_valid(path.raw):
+                return Err(FsError.InvalidArg)
+            val ensured = self._ensure_persisted_path(path.raw)
+            if ensured.is_err(): return Err(ensured.unwrap_err())
+            self.inner.stat_path(path))
 
     fn stat(path: Path) -> Result<StatInfo, FsError>:
         self.stat_path(path)
 
     fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        if self.inst_id <= 0 or not _nvfs_posix_path_valid(path.raw):
-            return Err(FsError.InvalidArg)
-        if _nvfs_posix_open.len() >= _NVFS_POSIX_MAX_OPEN_HANDLES:
-            return Err(FsError.TooLarge)
-        self._ensure_persisted_path(path.raw)?
-        val had_persisted_record = _nvfs_posix_file_index(path.raw) >= 0
-        if not had_persisted_record and _nvfs_posix_files.len() >= _NVFS_POSIX_MAX_FILES:
-            return Err(FsError.TooLarge)
-        val handle = self.inner.open_path(path, flags)?
-        if not had_persisted_record:
-            _nvfs_posix_store_file(path.raw, [])
-        _nvfs_posix_track_open(self.inst_id, handle.id as u64, path.raw)
-        Ok(handle)
+        self._with_owned_operation(\:
+            if self.inst_id <= 0 or not _nvfs_posix_path_valid(path.raw):
+                return Err(FsError.InvalidArg)
+            if _nvfs_posix_open.len() >= _NVFS_POSIX_MAX_OPEN_HANDLES:
+                return Err(FsError.TooLarge)
+            val ensured = self._ensure_persisted_path(path.raw)
+            if ensured.is_err(): return Err(ensured.unwrap_err())
+            val had_persisted_record = _nvfs_posix_file_index(path.raw) >= 0
+            if not had_persisted_record and _nvfs_posix_files.len() >= _NVFS_POSIX_MAX_FILES:
+                return Err(FsError.TooLarge)
+            val opened = self.inner.open_path(path, flags)
+            if opened.is_err(): return Err(opened.unwrap_err())
+            val handle = opened.unwrap()
+            if not had_persisted_record: _nvfs_posix_store_file(path.raw, [])
+            _nvfs_posix_track_open(self.inst_id, handle.id as u64, path.raw)
+            Ok(handle))
 
     fn open(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
         self.open_path(path, flags)
 
     fn opendir_path(path: Path) -> Result<DirHandle, FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        self.inner.opendir_path(path)
+        self._with_owned_operation(\: self.inner.opendir_path(path))
 
     fn opendir(path: Path) -> Result<DirHandle, FsError>:
         self.opendir_path(path)
 
     fn readdir_handle(handle: DirHandle) -> Result<[DirEntry], FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        val entries = self.inner.readdir_handle(handle)?
-        var out: [DirEntry] = []
-        for entry in entries:
-            out.push(DirEntry(
-                name: _nvfs_posix_entry_name(entry.name),
-                inode: entry.inode,
-                is_dir: entry.is_dir,
-                size: entry.size
-            ))
-        Ok(out)
+        self._with_owned_operation(\:
+            val read = self.inner.readdir_handle(handle)
+            if read.is_err(): return Err(read.unwrap_err())
+            var out: [DirEntry] = []
+            for entry in read.unwrap():
+                out.push(DirEntry(
+                    name: _nvfs_posix_entry_name(entry.name), inode: entry.inode,
+                    is_dir: entry.is_dir, size: entry.size))
+            Ok(out))
 
     fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
         self.readdir_handle(handle)
 
     fn close_dir_handle(handle: DirHandle) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        self.inner.close_dir_handle(handle)
+        self._with_owned_operation(\: self.inner.close_dir_handle(handle))
 
     fn read_handle(handle: FileHandle, length: i64) -> Result<text, FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        self.inner.read_handle(handle, length)
+        self._with_owned_operation(\: self.inner.read_handle(handle, length))
 
     fn read(handle: FileHandle, offset: i64, mut buf: [u8]) -> Result<i64, FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        val length = buf.len() as i64
-        if not _nvfs_posix_range_valid(offset, length):
-            return Err(FsError.InvalidArg)
-        val data_r = self.inner.pread_bytes_handle(handle, offset, length)
-        val data = match data_r:
-            Ok(bytes):
-                bytes
-            Err(err):
-                return Err(err)
-        var i: i64 = 0
-        while i < data.len() as i64 and i < buf.len() as i64:
-            buf[i as i32] = data[i as i32]
-            i = i + 1
-        Ok(i)
+        self._with_owned_operation(\:
+            val length = buf.len() as i64
+            if not _nvfs_posix_range_valid(offset, length): return Err(FsError.InvalidArg)
+            val data_r = self.inner.pread_bytes_handle(handle, offset, length)
+            if data_r.is_err(): return Err(data_r.unwrap_err())
+            val data = data_r.unwrap()
+            var i: i64 = 0
+            while i < data.len() as i64 and i < buf.len() as i64:
+                buf[i as i32] = data[i as i32]
+                i = i + 1
+            Ok(i))
 
     fn pread(handle: FileHandle, offset: i64, mut buf: [u8]) -> Result<i64, FsError>:
         self.read(handle, offset, buf)
 
     fn mkdir_path(path: text, mode: u32) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        if not _nvfs_posix_path_valid(path):
-            return Err(FsError.InvalidArg)
-        self.inner.mkdir_path(path, mode)
+        self._with_owned_operation(\:
+            if not _nvfs_posix_path_valid(path): return Err(FsError.InvalidArg)
+            self.inner.mkdir_path(path, mode))
 
     fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
         self.mkdir_path(path.raw, mode)
 
     fn write_handle(handle: FileHandle, content: text) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        self.inner.write_handle(handle, content)
+        self._with_owned_operation(\: self.inner.write_handle(handle, content))
 
     fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
         self.pwrite(handle, offset, buf)
 
     fn pwrite_handle(handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        self.inner.pwrite_handle(handle, patch, offset)
+        self._with_owned_operation(\: self.inner.pwrite_handle(handle, patch, offset))
 
     fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        val length = buf.len() as i64
-        if not _nvfs_posix_range_valid(offset, length):
-            return Err(FsError.InvalidArg)
-        val written = self.inner.pwrite_bytes_handle(handle, offset, buf)?
-        if written < 0 or written > length:
-            return Err(FsError.IoError(code: 0))
-        val path = _nvfs_posix_path_for_handle(self.inst_id, handle.id as u64)
-        if path != "" and written > 0:
-            val committed = _nvfs_posix_slice_bytes(buf, written)
-            val merged = _nvfs_posix_merge_patch(
-                _nvfs_posix_load_file(path), offset, committed)
-            _nvfs_posix_store_file(path, merged)
-            _nvfs_posix_mirror_to_nvme(merged)
-        Ok(written)
+        self._with_owned_operation(\:
+            val length = buf.len() as i64
+            if not _nvfs_posix_range_valid(offset, length): return Err(FsError.InvalidArg)
+            val write_r = self.inner.pwrite_bytes_handle(handle, offset, buf)
+            if write_r.is_err(): return Err(write_r.unwrap_err())
+            val written = write_r.unwrap()
+            if written < 0 or written > length: return Err(FsError.IoError(code: 0))
+            val path = _nvfs_posix_path_for_handle(self.inst_id, handle.id as u64)
+            if path != "" and written > 0:
+                val committed = _nvfs_posix_slice_bytes(buf, written)
+                val merged = _nvfs_posix_merge_patch(
+                    _nvfs_posix_load_file(path), offset, committed)
+                _nvfs_posix_store_file(path, merged)
+                _nvfs_posix_mirror_to_nvme(merged)
+            Ok(written))
 
     fn pread_handle(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        self.inner.pread_handle(handle, offset, length)
+        self._with_owned_operation(\: self.inner.pread_handle(handle, offset, length))
 
     fn pread_bytes_handle(
         handle: FileHandle, offset: i64, length: i64
     ) -> Result<[u8], FsError>:
         """Return a byte-exact positioned slice with ordinary EOF semantics."""
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        if not _nvfs_posix_range_valid(offset, length):
-            return Err(FsError.InvalidArg)
-        self.inner.pread_bytes_handle(handle, offset, length)
+        self._with_owned_operation(\:
+            if not _nvfs_posix_range_valid(offset, length): return Err(FsError.InvalidArg)
+            self.inner.pread_bytes_handle(handle, offset, length))
 
     fn pread_bounded_bytes_handle(
         handle: FileHandle, offset: i64, length: i64
     ) -> Result<[u8], FsError>:
         """Return an owned positioned chunk bounded to 64 KiB."""
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        if length > _NVFS_POSIX_MAX_BOUNDED_PREAD_BYTES or
-                not _nvfs_posix_range_valid(offset, length):
-            return Err(FsError.InvalidArg)
-        self.inner.pread_bounded_bytes_handle(handle, offset, length)
+        self._with_owned_operation(\:
+            if length > _NVFS_POSIX_MAX_BOUNDED_PREAD_BYTES or
+                    not _nvfs_posix_range_valid(offset, length):
+                return Err(FsError.InvalidArg)
+            self.inner.pread_bounded_bytes_handle(handle, offset, length))
 
     fn close_handle(handle: FileHandle) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        _nvfs_posix_untrack_open(self.inst_id, handle.id as u64)
-        self.inner.close_handle(handle)
+        self._with_owned_operation(\:
+            val closed = self.inner.close_handle(handle)
+            if closed.is_ok(): _nvfs_posix_untrack_open(self.inst_id, handle.id as u64)
+            closed)
 
     fn close(handle: FileHandle) -> Result<(), FsError>:
         self.close_handle(handle)
 
     fn unlink_path(path: text) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        if not _nvfs_posix_path_valid(path):
-            return Err(FsError.InvalidArg)
-        _nvfs_posix_remove_file(path)
-        self.inner.unlink_path(path)
+        self._with_owned_operation(\:
+            if not _nvfs_posix_path_valid(path): return Err(FsError.InvalidArg)
+            val removed = self.inner.unlink_path(path)
+            if removed.is_ok(): _nvfs_posix_remove_file(path)
+            removed)
 
     fn unlink(path: Path) -> Result<(), FsError>:
         self.unlink_path(path.raw)
 
     fn rename_path(old_path: text, new_path: text) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        if not _nvfs_posix_path_valid(old_path) or not _nvfs_posix_path_valid(new_path):
-            return Err(FsError.InvalidArg)
-        val persisted = _nvfs_posix_load_file(old_path)
-        val had_persisted_record = _nvfs_posix_file_index(old_path) >= 0
-        self.inner.rename_path(old_path, new_path)?
-        if had_persisted_record:
-            _nvfs_posix_remove_file(old_path)
-            _nvfs_posix_store_file(new_path, persisted)
-        _nvfs_posix_retarget_open_paths(self.inst_id, old_path, new_path)
-        Ok(())
+        self._with_owned_operation(\:
+            if not _nvfs_posix_path_valid(old_path) or not _nvfs_posix_path_valid(new_path):
+                return Err(FsError.InvalidArg)
+            val persisted = _nvfs_posix_load_file(old_path)
+            val had_persisted_record = _nvfs_posix_file_index(old_path) >= 0
+            val renamed = self.inner.rename_path(old_path, new_path)
+            if renamed.is_err(): return Err(renamed.unwrap_err())
+            if had_persisted_record:
+                _nvfs_posix_remove_file(old_path)
+                _nvfs_posix_store_file(new_path, persisted)
+            _nvfs_posix_retarget_open_paths(self.inst_id, old_path, new_path)
+            Ok(()))
 
     fn rename(old_path: Path, new_path: Path) -> Result<(), FsError>:
         self.rename_path(old_path.raw, new_path.raw)
 
     fn ftruncate_handle(handle: FileHandle, new_size: i64) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        val path = _nvfs_posix_path_for_handle(self.inst_id, handle.id as u64)
-        self.inner.ftruncate_handle(handle, new_size)?
-        if path != "":
-            _nvfs_posix_store_file(path, _nvfs_posix_truncate_bytes(_nvfs_posix_load_file(path), new_size))
-        Ok(())
+        self._with_owned_operation(\:
+            val path = _nvfs_posix_path_for_handle(self.inst_id, handle.id as u64)
+            val truncated = self.inner.ftruncate_handle(handle, new_size)
+            if truncated.is_err(): return Err(truncated.unwrap_err())
+            if path != "":
+                _nvfs_posix_store_file(path, _nvfs_posix_truncate_bytes(_nvfs_posix_load_file(path), new_size))
+            Ok(()))
 
     fn ftruncate(handle: FileHandle, new_size: i64) -> Result<(), FsError>:
         self.ftruncate_handle(handle, new_size)
 
     fn fsync(handle: FileHandle) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        self.inner.fsync(handle)
+        self._with_owned_operation(\: self.inner.fsync(handle))
 
     fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        self.inner.fdatasync(handle)
+        self._with_owned_operation(\: self.inner.fdatasync(handle))
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
-        if not self._lifecycle_ready(): return Err(FsError.StaleHandle)
-        self.inner.fstat(handle)
+        self._with_owned_operation(\: self.inner.fstat(handle))
+
+    fn _with_owned_operation<T>(action: fn() -> Result<T, FsError>) -> Result<T, FsError>:
+        if self.device_binding.is_some() and self.device_region.is_none():
+            return Err(FsError.StaleHandle)
+        val lease_r = if self.device_binding.is_none():
+            nvfs_global_operation_begin_v1()
+        else:
+            nvfs_operation_begin_v1(
+                self.device_binding.unwrap(), self.inst_id,
+                self.inner.device_instance_id(), self.device_region.unwrap())
+        if lease_r.is_err():
+            val err = lease_r.unwrap_err()
+            if err == NvfsOperationLeaseErrorV1.Busy:
+                return Err(FsError.Transient(code: 0u32))
+            return Err(FsError.StaleHandle)
+        val lease = lease_r.unwrap()
+        val result = action()
+        if nvfs_operation_end_v1(lease).is_err():
+            return Err(FsError.IoError(code: 0u32))
+        result
 
     fn _lifecycle_ready() -> bool:
         if self.device_binding.is_none(): return true

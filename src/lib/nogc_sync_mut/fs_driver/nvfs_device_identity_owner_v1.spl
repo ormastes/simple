@@ -50,6 +50,9 @@ impl NvfsDeviceIdentityBindingV1:
     pub fn outer_instance_id() -> i64: self._outer_instance_id
     pub fn inner_instance_id() -> i64: self._inner_instance_id
     pub fn generation() -> u32: self._generation
+    # Indexed owner lookup hint only; the nonce and canonical slot state remain
+    # authoritative, so exposing this scalar cannot forge a binding.
+    pub fn owner_slot_index() -> i32: self._slot
 
 pub struct NvfsDeviceCloseTicketV1:
     _binding: NvfsDeviceIdentityBindingV1
@@ -511,6 +514,32 @@ pub fn nvfs_device_identity_evict_terminal_v1(
     if val err = updated.last_error: return Err(err)
     Ok(true)
 
+pub fn nvfs_device_identity_quarantine_terminal_v1(
+    binding: NvfsDeviceIdentityBindingV1
+) -> Result<bool, NvfsDeviceIdentityErrorV1>:
+    if not _nvfs_device_binding_shape_valid_v1(binding):
+        return Err(NvfsDeviceIdentityErrorV1.InvalidIdentity)
+    val updated = mutex_with_lock(_nvfs_device_identity_owner_v1, \state:
+        var next = state
+        next.last_error = nil
+        if binding._slot >= state.slots.len():
+            next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+        else:
+            val slot = state.slots[binding._slot]
+            if not _nvfs_device_binding_matches_slot_v1(binding, slot):
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+            elif slot.state != NvfsDeviceIdentitySlotStateV1.Terminal:
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.WrongState)
+            else:
+                var quarantined = slot
+                quarantined.state = NvfsDeviceIdentitySlotStateV1.Quarantined
+                next.slots[binding._slot] = quarantined
+                next.terminal_count = state.terminal_count - 1
+                next.quarantined_count = state.quarantined_count + 1
+        next)
+    if val err = updated.last_error: return Err(err)
+    Ok(true)
+
 pub fn nvfs_device_identity_mark_indeterminate_v1(
     binding: NvfsDeviceIdentityBindingV1
 ) -> Result<bool, NvfsDeviceIdentityErrorV1>:
@@ -562,6 +591,7 @@ export nvfs_device_identity_mark_terminal_v1
 export nvfs_device_identity_begin_close_v1, nvfs_device_identity_close_busy_v1
 export nvfs_device_identity_close_retryable_v1, nvfs_device_identity_close_complete_v1
 export nvfs_device_identity_evict_terminal_v1
+export nvfs_device_identity_quarantine_terminal_v1
 export nvfs_device_identity_mark_indeterminate_v1
 export nvfs_device_identity_live_count_v1
 export nvfs_device_identity_terminal_count_v1

@@ -94,15 +94,31 @@ inner cleanup. The NVFS driver validates the binding on operations, provides a
 directory-descriptor release path, and exposes busy/retryable/terminal close
 transitions with terminal eviction.
 
-Connector wiring remains blocked and its unsafe draft was reverted after
-independent static review. The current connector copies drivers out of an
-unserialized global slot, so session validation cannot fence an in-flight
-operation. Correct wiring needs one bounded operation-lease owner which rejects
-new leases, drains active leases, performs a busy preflight, then closes the
-session before unmount. Without that preflight, a Busy result after session
-close would strand the connector permanently.
+The earlier connector wiring remained blocked and its unsafe draft was reverted
+after independent static review. That review established the operation-fence
+and preflight requirements implemented in the progress section below.
 
 This work has only static specifications and remains unverified by explicit
 instruction. The stable block-device identity trust seam also remains: the new
 device connector requires a nonzero owner-issued identity because the generic
 `BlockDevice` trait still cannot derive one itself.
+
+## Operation-fence progress (unverified)
+
+The bounded `nvfs_operation_lease_owner_v1` now aligns its O(1) slot lookup
+with the authenticated device-identity binding. It permits one copied-driver
+operation at a time, consumes exact operation nonces, enters Draining before
+close observes an in-flight operation, rejects new work during drain/close,
+and represents busy, retryable, terminal, and indeterminate-quarantine
+transitions explicitly. `NvfsPosixDriver` registers only after identity
+activation and fences every device-backed operation through that owner.
+
+The narrow preflight and connector ordering are now implemented. DBFS exposes a
+serialized, side-effect-free busy preflight bound to the exact inner instance;
+the connector performs `operation close fence -> DBFS busy preflight ->
+mount-session close -> exact device teardown`. Session validation precedes
+each copied-driver dispatch, connector storage is bounded to 256 entries, and
+failed post-session teardown retains a retryable slot without replaying session
+close. This remains unverified by explicit instruction. The remaining trust
+seam is caller-supplied nonzero device-owner identity because `BlockDevice`
+still cannot derive stable identity itself.

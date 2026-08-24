@@ -10,6 +10,12 @@ use std.fs_driver.error.{FsError}
 use common.string_core.{str_starts_with, str_slice}
 use std.security.sanitize.{is_path_traversal}
 use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
+use std.fs_driver.block_device.{BlockDevice}
+use os.drivers.nvme.nvme_storage_model.{NvmeSharedFilesystemInterface}
+use os.services.vfs.nvfs_mount_session_owner_v1.{
+    NvfsMountSessionV1, nvfs_mount_session_open_v1,
+    nvfs_mount_session_validate_v1, nvfs_mount_session_close_v1
+}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_eprintln(s: text)
@@ -18,6 +24,8 @@ extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_bytes_to_text(data: [u8]) -> text
 
 val NVFS_CONNECTOR_MAX_BYTES: i64 = 16777216   # 16 MiB
+val NVFS_CONNECTOR_MAX_CONNECTIONS: i64 = 256
+val NVFS_CONNECTOR_MAX_CONNECTION_ID: i64 = 0x7fffffffffffffff
 
 # Caps the in-memory POSIX driver can actually satisfy.
 # Any bit set in require_caps that is absent here triggers Permission.
@@ -52,11 +60,16 @@ struct NvfsVfsConnection:
 struct NvfsVfsConnectionSlot:
     conn_id: i64
     driver:  NvfsHostedDriver
+    session: NvfsMountSessionV1?
+    interface: NvmeSharedFilesystemInterface?
 
 var _nvfs_vfs_connections: [NvfsVfsConnectionSlot] = []
 var _nvfs_vfs_next_conn_id: i64 = 1
 
 fn _nvfs_vfs_alloc_conn_id() -> i64:
+    if (_nvfs_vfs_next_conn_id <= 0 or
+        _nvfs_vfs_next_conn_id == NVFS_CONNECTOR_MAX_CONNECTION_ID):
+        return 0
     val conn_id = _nvfs_vfs_next_conn_id
     _nvfs_vfs_next_conn_id = _nvfs_vfs_next_conn_id + 1
     conn_id
@@ -73,13 +86,22 @@ fn _nvfs_vfs_load_driver(conn_id: i64) -> Result<NvfsHostedDriver, FsError>:
     val idx = _nvfs_vfs_find_connection_idx(conn_id)
     if idx < 0:
         return Err(FsError.NotFound)
-    Ok(_nvfs_vfs_connections[idx].driver)
+    val slot = _nvfs_vfs_connections[idx]
+    if slot.session.is_some():
+        if slot.interface.is_none(): return Err(FsError.StaleHandle)
+        if nvfs_mount_session_validate_v1(
+                slot.session.unwrap(), slot.interface.unwrap()).is_err():
+            return Err(FsError.StaleHandle)
+    Ok(slot.driver)
 
 fn _nvfs_vfs_store_driver(conn_id: i64, driver: NvfsHostedDriver) -> Result<(), FsError>:
     val idx = _nvfs_vfs_find_connection_idx(conn_id)
     if idx < 0:
         return Err(FsError.NotFound)
-    _nvfs_vfs_connections[idx] = NvfsVfsConnectionSlot(conn_id: conn_id, driver: driver)
+    val prior = _nvfs_vfs_connections[idx]
+    _nvfs_vfs_connections[idx] = NvfsVfsConnectionSlot(
+        conn_id: conn_id, driver: driver, session: prior.session,
+        interface: prior.interface)
     Ok(())
 
 fn nvfs_vfs_connect(
@@ -107,6 +129,8 @@ fn nvfs_vfs_connect(
     if (require_caps & ~NVFS_CONNECTOR_SUPPORTED_CAPS) != 0:
         _log_error("mount rejected: unsatisfiable require_caps 0x{require_caps}")
         return Err(FsError.Permission)
+    if _nvfs_vfs_connections.len() >= NVFS_CONNECTOR_MAX_CONNECTIONS:
+        return Err(FsError.TooLarge)
     var driver = NvfsHostedDriver.new(name)
     val opts = MountOptions(read_only: read_only, want_caps: want_caps, require_caps: require_caps)
     val mount_r = driver.mount(opts)
@@ -114,7 +138,11 @@ fn nvfs_vfs_connect(
         _log_error("driver.mount failed for '{trimmed}'")
         return Err(mount_r.unwrap_err())
     val conn_id = _nvfs_vfs_alloc_conn_id()
-    _nvfs_vfs_connections.push(NvfsVfsConnectionSlot(conn_id: conn_id, driver: driver))
+    if conn_id <= 0:
+        val _ = driver.unmount()
+        return Err(FsError.TooLarge)
+    _nvfs_vfs_connections.push(NvfsVfsConnectionSlot(
+        conn_id: conn_id, driver: driver, session: nil, interface: nil))
     Ok(NvfsVfsConnection(
         conn_id:     conn_id,
         mount_path:  trimmed,
@@ -123,6 +151,77 @@ fn nvfs_vfs_connect(
         require_caps: require_caps,
         max_bytes:   NVFS_CONNECTOR_MAX_BYTES
     ))
+
+fn nvfs_vfs_connect_owned_device(
+    interface: NvmeSharedFilesystemInterface, dev: BlockDevice,
+    device_owner_id: u64, base_block: i64, block_count: i64,
+    mount_path: text, name: text, read_only: bool,
+    want_caps: u32, require_caps: u32
+) -> Result<NvfsVfsConnection, FsError>:
+    """Mount an identity-bound device driver and open its canonical session."""
+    val trimmed = mount_path.trim()
+    if (trimmed == "" or not _nvfs_absolute_path_is_canonical(trimmed) or
+        is_path_traversal(trimmed) or
+        (trimmed.len() > 1 and trimmed.ends_with("/")) or
+        device_owner_id == 0u64 or base_block < 0 or block_count < 4):
+        return Err(FsError.InvalidArg)
+    if (require_caps & ~NVFS_CONNECTOR_SUPPORTED_CAPS) != 0:
+        return Err(FsError.Permission)
+    if _nvfs_vfs_connections.len() >= NVFS_CONNECTOR_MAX_CONNECTIONS:
+        return Err(FsError.TooLarge)
+    val driver_r = NvfsHostedDriver.new_on_owned_device(
+        name, dev, device_owner_id, base_block, block_count)
+    if driver_r.is_err(): return Err(driver_r.unwrap_err())
+    var driver = driver_r.unwrap()
+    val mounted = driver.mount(MountOptions(
+        read_only: read_only, want_caps: want_caps, require_caps: require_caps))
+    if mounted.is_err():
+        val _ = driver.close_owned_device()
+        return Err(mounted.unwrap_err())
+    val session_r = nvfs_mount_session_open_v1(interface)
+    if session_r.is_err():
+        val _ = driver.close_owned_device()
+        return Err(FsError.Permission)
+    val conn_id = _nvfs_vfs_alloc_conn_id()
+    if conn_id <= 0:
+        val _ = nvfs_mount_session_close_v1(session_r.unwrap())
+        val _ = driver.close_owned_device()
+        return Err(FsError.TooLarge)
+    _nvfs_vfs_connections.push(NvfsVfsConnectionSlot(
+        conn_id: conn_id, driver: driver, session: Some(session_r.unwrap()),
+        interface: Some(interface)))
+    Ok(NvfsVfsConnection(
+        conn_id: conn_id, mount_path: trimmed, read_only: read_only,
+        want_caps: want_caps, require_caps: require_caps,
+        max_bytes: NVFS_CONNECTOR_MAX_BYTES))
+
+fn nvfs_vfs_close(conn: NvfsVfsConnection) -> Result<bool, FsError>:
+    """Close one exact connector without letting copied records resurrect it."""
+    val idx = _nvfs_vfs_find_connection_idx(conn.conn_id)
+    if idx < 0: return Err(FsError.StaleHandle)
+    var slot = _nvfs_vfs_connections[idx]
+    if slot.session.is_none():
+        val unmounted = slot.driver.unmount()
+        if unmounted.is_err(): return Err(unmounted.unwrap_err())
+        _nvfs_vfs_connections.remove(idx)
+        return Ok(true)
+    val plan_r = slot.driver.begin_owned_device_close()
+    if plan_r.is_err(): return Err(plan_r.unwrap_err())
+    val plan = plan_r.unwrap()
+    val session_closed = nvfs_mount_session_close_v1(slot.session.unwrap())
+    if session_closed.is_err():
+        val cancelled = slot.driver.cancel_owned_device_close(plan)
+        if cancelled.is_err(): return Err(cancelled.unwrap_err())
+        return Err(FsError.StaleHandle)
+    # Persist the closed-session state before teardown. A determinate teardown
+    # failure remains retryable without replaying the session close.
+    slot.session = nil
+    slot.interface = nil
+    _nvfs_vfs_connections[idx] = slot
+    val finished = slot.driver.finish_owned_device_close(plan)
+    if finished.is_err(): return Err(finished.unwrap_err())
+    _nvfs_vfs_connections.remove(idx)
+    Ok(true)
 
 fn _nvfs_relpath(conn: NvfsVfsConnection, path: text) -> Result<Path, FsError>:
     if not _nvfs_absolute_path_is_canonical(path):
