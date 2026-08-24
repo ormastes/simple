@@ -19,6 +19,16 @@ x86-32 execution must remain blocked before loader authority consumption.
   teardown that already freed the tree must never report a retryable failure;
   and every quarantine path must return an owner/lease rather than orphaning
   the root. The unsafe draft was reverted.
+  A further three-cycle attempt on 2026-08-24 was also reverted. Its in-flight
+  nonce protocol safely serialized callbacks and rejected copied/re-entrant
+  authorities, but the available blocking-only raw mutex cannot close this
+  race: a waiter may pass an atomic fail-stop precheck immediately before a
+  prior unlock fails while retaining the mutex, then block forever. The draft
+  also initially returned a provisionally registered leaf on that failed
+  unlock, which would permit aliasing/double-free. Resume only after a proven
+  nonblocking try-lock/fail-stop primitive or an owner protocol that cannot
+  strand waiters is available; committed provisional leaves must never be
+  returned to callers.
 - Classic two-level non-PAE i386 has no NX bit. A future mapping receipt must
   not claim writable-vs-executable hardware isolation without a selected
   PAE/NX policy or an explicitly accepted non-NX security row.
