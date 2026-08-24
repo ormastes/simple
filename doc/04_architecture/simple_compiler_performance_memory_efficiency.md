@@ -140,6 +140,9 @@ Likewise, pipeline planning resolves a requested name once and passes the found
 descriptor into backend-policy evaluation. Reports and budget filters reuse
 that descriptor for status, canonical naming, and the decision; they do not
 repeat provider-bearing lookup for the same pass.
+Machine-report renderers accumulate independently rendered records and join
+once. They must not append each record to an ever-growing output string, which
+turns report size into cumulative copying while adding no semantic value.
 
 ### Diagnostic model
 
