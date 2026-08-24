@@ -27,6 +27,21 @@ names a repository capability whose implementation owner is ambiguous.
   `simple`/`spl`/`sdoctest` fences. Use `text` for illustrative snippets.
 - Primary operator guide: `doc/07_guide/infra/testing.md`.
 
+## Compiler performance and memory diagnostics
+
+- **Canonical design:**
+  `doc/04_architecture/simple_compiler_performance_memory_efficiency.md`.
+- **Operator guide:** `doc/07_guide/compiler/performance_diagnostics.md`.
+- **Feature expert:**
+  `doc/00_llm_process/feature_expert/compiler_performance/skill.md`.
+- **MIR layer expert:**
+  `doc/00_llm_process/layer_expert/mir_optimization/skill.md`.
+- **Safety rule:** only `Active` passes may transform; analysis, remark,
+  skeleton, and disabled passes fail closed and stay out of effective pipelines.
+- **Evidence boundary:** current source hardening is integrated, but runtime
+  verification remains blocked until the admitted self-hosted Stage-4 binary is
+  restored. Never substitute the Rust seed.
+
 ## Parent-authoritative actor/process transport
 
 - **Canonical owner rule:** the scheduler owns actor registry/admission/replies;

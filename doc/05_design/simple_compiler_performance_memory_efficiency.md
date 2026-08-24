@@ -3,7 +3,10 @@
 
 ## Scope
 
-This design implements REQ-001..REQ-025 and NFR-001..NFR-015 as one staged program. It does not claim implementation or verification completion.
+This design covers REQ-001..REQ-025 and NFR-001..NFR-015 as one staged program.
+The pass-integrity, shared local MIR facts, conservative escape, and lint/tool
+hot-path slices are implemented; the remaining typed/interprocedural/profile
+slices and runtime verification are explicitly incomplete.
 
 ## Data model
 

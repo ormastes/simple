@@ -3,7 +3,11 @@
 
 ## Status
 
-Accepted design for selected Feature Option C / NFR Option 1. Implementation remains staged and incomplete until executable evidence passes.
+Accepted design for selected Feature Option C / NFR Option 1. The truthful-pass,
+shared CFG/def-use fact, conservative escape, and lint hot-path tranches are
+implemented. Typed HIR collection facts, MemorySSA-lite, interprocedural cost
+summaries, and runtime/profile evidence remain staged; no design-only component
+is represented as active.
 
 ## Context
 
