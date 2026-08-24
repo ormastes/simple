@@ -202,7 +202,20 @@ must_contain "809ce6d4e71 object cache second-build-hits spec" \
 HIRREG="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl"
 must_not_contain "MATCHRET no match-expression with return arms" "$HIRREG" "val kind = match composite.kind:"
 must_contain     "MATCHRET hoisted early-exit"                    "$HIRREG" 'val kind = if composite.kind == "class": SymbolKind.Class else: SymbolKind.Struct'
-must_contain     "IMPLIDX per-surface impl index"                 "$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl" "val impl_positions = self.imported_impl_positions(imported_mod, imported_name)"
+# IMPLIDX was re-spelled by a LATER perf fix and this row must track it, not the
+# old name. 082d57ea99a introduced `imported_impl_positions(...)`; 61dd76f5082
+# ("stop allocating on the empty path -- reexport materialization 60x,
+# 31 min -> 610 ms") replaced that helper with a built-once-per-surface index
+# plus a direct indexed read. Pinning the dead spelling reported a REGRESSION
+# while the mechanism was present and 60x faster -- a false red of the
+# rename/move-drift class. Pin both halves of the current mechanism, which is
+# strictly stronger than the one string it replaces: the index must be built
+# once per surface, AND the per-type read must go through the index rather than
+# sweeping impls.
+IMPLIDXF="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl"
+must_contain     "IMPLIDX per-surface impl index built once"      "$IMPLIDXF" "val surface_key = self.ensure_impl_index(imported_mod)"
+must_contain     "IMPLIDX indexed read, not an impl sweep"        "$IMPLIDXF" "val impl_positions = self.impl_index_positions[wanted_key]"
+must_contain     "IMPLIDX build count pinned by the cost spec"    "$ROOT/test/01_unit/compiler/hir/hir_import_registration_per_symbol_cost_spec.spl" "expect(lowering.impl_index_build_count).to_equal(FIXTURE_PACKAGES)"
 must_contain     "MATCHRET/IMPLIDX cost spec"                     "$ROOT/test/01_unit/compiler/hir/hir_import_registration_per_symbol_cost_spec.spl" "PER_REGISTRATION_BUDGET_US"
 
 # --- NAMEIDX / SCOPEROW / EXCL / seed hot-path (2026-08-22, 7th session of the
