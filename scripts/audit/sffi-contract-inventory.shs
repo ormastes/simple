@@ -14,6 +14,7 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+scan_root=${SFFI_SCAN_ROOT:-$root}
 out=${1:-/dev/stdout}
 symbols_out=${2:-}
 if [ -z "$symbols_out" ] && [ "$out" != "/dev/stdout" ]; then
@@ -103,21 +104,34 @@ if [ -n "${SFFI_ADMISSION_JOBS:-}" ]; then
     sort -u "$work/admitted-symbols.tsv" -o "$work/admitted-symbols.tsv"
 fi
 
-if [ -n "${SFFI_CENSUS_INPUT:-}" ]; then
+if [ "${SFFI_SOURCE_ONLY:-0}" = 1 ]; then
+    printf 'symbol\tclass\tscoped_callsites\tfirst_declaring_file\n' >"$work/backing.tsv"
+elif [ -n "${SFFI_CENSUS_INPUT:-}" ]; then
     cp "$SFFI_CENSUS_INPUT" "$work/backing.tsv"
 else
     SIMPLE_BIN=$simple_bin sh "$root/scripts/check/extern-backing-census.shs" \
         "$work/backing.tsv" >/dev/null
 fi
 
-export SFFI_ROOT=$root
+export SFFI_ROOT=$scan_root
 if [ -n "${SFFI_SOURCE_FILE_LIST:-}" ]; then
     while IFS= read -r source_file; do
         test -n "$source_file" && printf '%s\0' "$source_file"
     done <"$SFFI_SOURCE_FILE_LIST" >"$work/files.bin"
 else
-    find "$root/src" "$root/test" -type f -name '*.spl' ! -path '*/vendor/*' -print0 >"$work/files.bin"
+    set --
+    test ! -d "$scan_root/src" || set -- "$@" "$scan_root/src"
+    test ! -d "$scan_root/test" || set -- "$@" "$scan_root/test"
+    test "$#" -gt 0 || {
+        echo 'SFFI contract inventory: scan root has neither src/ nor test/' >&2
+        exit 2
+    }
+    find "$@" -type f -name '*.spl' ! -path '*/vendor/*' -print0 >"$work/files.bin"
 fi
+test -s "$work/files.bin" || {
+    echo 'SFFI contract inventory: no Simple source files were discovered' >&2
+    exit 2
+}
 xargs -0 -r -n 200 perl -MDigest::SHA=sha256_hex -0ne '
     my $file = $ARGV;
     my @lines = split /\n/, $_, -1;

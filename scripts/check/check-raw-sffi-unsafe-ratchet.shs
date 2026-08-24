@@ -1,0 +1,159 @@
+#!/bin/sh
+# Freeze existing untagged raw SFFI declarations without blessing them.
+#
+# Identity is file + symbol + canonical ABI signature hash. Line numbers are
+# deliberately excluded so unrelated edits do not churn the baseline.
+# New identities fail, and identities that disappear or become tagged fail as
+# stale so reviewed debt reduction must update the baseline explicitly.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+ROOT=$repo_root
+BASELINE="$repo_root/scripts/check/raw_sffi_unsafe_baseline.tsv"
+MODE=scan
+W=$(mktemp -d)
+trap 'rm -rf "$W"' EXIT INT TERM
+
+usage() {
+    echo "usage: $0 [--root DIR] [--baseline FILE] [--generate-baseline|--selftest]"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --root) shift; ROOT=${1:-} ;;
+        --baseline) shift; BASELINE=${1:-} ;;
+        --generate-baseline) MODE=generate ;;
+        --selftest) MODE=selftest ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "ERROR — unknown argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+inventory() {
+    scan_root=$1
+    inventory_out=$2
+    SFFI_SCAN_ROOT=$scan_root SFFI_SOURCE_ONLY=1 \
+        sh "$repo_root/scripts/audit/sffi-contract-inventory.shs" \
+        "$inventory_out" "$W/symbols.tsv" >/dev/null
+}
+
+extract_missing() {
+    inventory_file=$1
+    identities_out=$2
+    awk -F '\t' 'NR > 1 && $7 == "missing" { print $5 "\t" $1 "\t" $4 }' \
+        "$inventory_file" | LC_ALL=C sort -u >"$identities_out"
+}
+
+read_baseline() {
+    baseline_file=$1
+    identities_out=$2
+    test -r "$baseline_file" || return 2
+    awk 'substr($0, 1, 1) != "#" && NF > 0 { print }' "$baseline_file" \
+        | LC_ALL=C sort -u >"$identities_out"
+}
+
+compare_sets() {
+    current=$1
+    frozen=$2
+    comm -23 "$current" "$frozen" >"$W/new.tsv"
+    comm -13 "$current" "$frozen" >"$W/stale.tsv"
+    NEW_COUNT=$(wc -l <"$W/new.tsv" | tr -d ' ')
+    STALE_COUNT=$(wc -l <"$W/stale.tsv" | tr -d ' ')
+    CURRENT_COUNT=$(wc -l <"$current" | tr -d ' ')
+    if test "$NEW_COUNT" -gt 0 || test "$STALE_COUNT" -gt 0; then
+        echo "FAIL — untagged raw SFFI baseline drift: current=$CURRENT_COUNT new=$NEW_COUNT stale=$STALE_COUNT"
+        test "$NEW_COUNT" -eq 0 || { echo "new untagged declarations:"; sed -n '1,40p' "$W/new.tsv"; }
+        test "$STALE_COUNT" -eq 0 || { echo "stale baseline declarations:"; sed -n '1,40p' "$W/stale.tsv"; }
+        return 1
+    fi
+    echo "PASS — $CURRENT_COUNT untagged raw SFFI declaration identities checked, 0 new, 0 stale"
+}
+
+scan_tree() {
+    scan_root=$1
+    baseline_file=$2
+    inventory "$scan_root" "$W/inventory.tsv" || return 2
+    extract_missing "$W/inventory.tsv" "$W/current.tsv"
+    read_baseline "$baseline_file" "$W/baseline.tsv" || {
+        echo "ERROR — missing raw SFFI unsafe baseline: $baseline_file" >&2
+        return 2
+    }
+    compare_sets "$W/current.tsv" "$W/baseline.tsv"
+}
+
+selftest() {
+    fixture="$W/fixture"
+    mkdir -p "$fixture/src"
+    cat >"$fixture/src/boundary.spl" <<'EOF'
+@unsafe(
+    reason: "reviewed fixture boundary",
+    capabilities: [ffi]
+)
+extern fn rt_tagged(value: i64) -> i64
+extern fn rt_legacy(value: i64) -> i64
+EOF
+    inventory "$fixture" "$W/selftest-inventory.tsv"
+    extract_missing "$W/selftest-inventory.tsv" "$W/selftest-current.tsv"
+    test "$(wc -l <"$W/selftest-current.tsv" | tr -d ' ')" = 1 || {
+        echo 'ERROR — selftest did not distinguish multiline unsafe annotation' >&2
+        return 2
+    }
+    cp "$W/selftest-current.tsv" "$W/selftest-baseline.tsv"
+    compare_sets "$W/selftest-current.tsv" "$W/selftest-baseline.tsv" >/dev/null || return 2
+
+    printf 'extern fn rt_new(value: i64) -> i64\n' >>"$fixture/src/boundary.spl"
+    inventory "$fixture" "$W/selftest-new-inventory.tsv"
+    extract_missing "$W/selftest-new-inventory.tsv" "$W/selftest-new.tsv"
+    if compare_sets "$W/selftest-new.tsv" "$W/selftest-baseline.tsv" >/dev/null 2>&1; then
+        echo 'ERROR — selftest accepted a new untagged declaration' >&2
+        return 2
+    fi
+
+    cat >"$fixture/src/boundary.spl" <<'EOF'
+@unsafe(reason: "reviewed fixture boundary", capabilities: [ffi])
+extern fn rt_tagged(value: i64) -> i64
+@unsafe(reason: "legacy boundary reviewed", capabilities: [ffi])
+extern fn rt_legacy(value: i64) -> i64
+EOF
+    inventory "$fixture" "$W/selftest-stale-inventory.tsv"
+    extract_missing "$W/selftest-stale-inventory.tsv" "$W/selftest-stale.tsv"
+    if compare_sets "$W/selftest-stale.tsv" "$W/selftest-baseline.tsv" >/dev/null 2>&1; then
+        echo 'ERROR — selftest accepted a stale baseline identity' >&2
+        return 2
+    fi
+
+    mkdir -p "$W/empty/src"
+    if inventory "$W/empty" "$W/selftest-empty.tsv" >/dev/null 2>&1; then
+        echo 'ERROR — selftest accepted an empty source tree' >&2
+        return 2
+    fi
+    echo 'PASS — raw SFFI unsafe ratchet selftest: clean/new/stale/multiline/empty cases checked'
+}
+
+if test "$MODE" = selftest; then
+    selftest
+    exit 0
+fi
+
+inventory "$ROOT" "$W/inventory.tsv" || {
+    echo 'ERROR — raw SFFI inventory failed; nothing was checked' >&2
+    exit 2
+}
+extract_missing "$W/inventory.tsv" "$W/current.tsv"
+
+if test "$MODE" = generate; then
+    {
+        echo '# simple.raw-sffi-unsafe-baseline.v1'
+        echo '# file<TAB>symbol<TAB>source_signature_sha256'
+        cat "$W/current.tsv"
+    } >"$BASELINE"
+    echo "WROTE — $(wc -l <"$W/current.tsv" | tr -d ' ') untagged raw SFFI identities to $BASELINE"
+    exit 0
+fi
+
+read_baseline "$BASELINE" "$W/baseline.tsv" || {
+    echo "ERROR — missing raw SFFI unsafe baseline: $BASELINE" >&2
+    exit 2
+}
+compare_sets "$W/current.tsv" "$W/baseline.tsv"

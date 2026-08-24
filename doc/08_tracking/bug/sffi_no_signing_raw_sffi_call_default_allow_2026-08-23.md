@@ -1,6 +1,6 @@
 # SFFI bindings are neither signed nor arity-verified, and the lint that would require an `@unsafe` tag is `allow` by default
 
-- **Status:** OPEN
+- **Status:** PARTIALLY FIXED — exact unsafe-declaration ratchet landed; default call lint promotion remains open
 - **Filed:** 2026-08-23
 - **Measured at:** `origin/main` `c1efb59cf09`
 - **Audit:** `doc/09_report/sffi_signing_audit_2026-08-23.md`
@@ -41,6 +41,21 @@ nothing, so that contract is unenforced everywhere it matters.
 `check-unbacked-extern-ratchet.shs`), freeze the current population, ratchet it
 down, and promote to `warn` then `deny` when the baseline reaches 0. A
 reproduce test must fail pre-fix.
+
+### 2026-08-24 ratchet checkpoint
+
+`scripts/check/check-raw-sffi-unsafe-ratchet.shs` now freezes the current
+untagged declaration identities as `(file, symbol, canonical ABI signature
+SHA-256)`. It rejects both new debt and stale rows, recognizes multiline
+`@unsafe(... capabilities: [ffi])`, and fails closed when no Simple source is
+discovered. The source-only scan is bootstrap-owned because its measured
+9.37-second baseline would consume almost the entire interactive push budget.
+It performs no provider loading and no runtime-call work.
+
+The frozen baseline contains 12,799 unique untagged identities from 13,852
+declaration rows. These are explicitly migration debt, not safe, verified, or
+signed declarations. `raw_sffi_call` remains `allow` in the default lint
+profile until the debt can be reduced without flooding normal builds.
 
 ### D2 — `FfiManifest` arity validation has zero callers
 

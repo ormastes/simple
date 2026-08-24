@@ -450,6 +450,16 @@ server and web-framework thread calls now use lexical FFI blocks. Those blocks
 add no helper dispatch, allocation, lookup, or synchronization to the existing
 native call path.
 
+The declaration migration now has an exact bootstrap-owned ratchet rather than
+a count-only threshold. `check-raw-sffi-unsafe-ratchet.shs` keys each missing
+boundary by file, symbol, and normalized ABI signature SHA-256; new entries and
+stale entries both fail. Its 12,799-row baseline is debt, never an unsafe or
+verification claim. The same source parser measured 9.37 seconds and 12,032
+KiB peak RSS before the gate; the completed ratchet measured 8.47 seconds and
+the same 12,032 KiB peak RSS. It therefore remains outside the interactive push
+hot path. The default lint stays `allow` until this baseline is reduced enough
+for useful diagnostics without flooding normal builds.
+
 The lint launcher now accepts both `--profile=robust` and `--profile robust`,
 normalizes the latter before invoking the engine, and does not misclassify the
 tier as an input file. This is command-line setup work only; it does not enter

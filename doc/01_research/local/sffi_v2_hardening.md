@@ -64,6 +64,16 @@ one compiler-owned typed contract and generated lift path. A grep inventory,
 per-lane registry, wrapper convention, or signature field alone cannot prove
 the boundary.
 
+## Untagged-declaration prevention checkpoint (2026-08-24)
+
+The canonical source inventory currently sees 13,852 declaration rows, of
+which 12,859 lack an explicit FFI unsafe tag. Collapsing duplicate rows by
+file, symbol, and normalized ABI signature yields 12,799 exact migration
+identities. A bootstrap-owned ratchet now freezes that set and rejects both new
+untagged identities and stale baseline entries. This prevents new silent debt
+without mass-stamping existing declarations or adding runtime work. It does
+not prove ABI correctness or cryptographic admission.
+
 ## Post-P0 native bridge inventory
 
 The value-returning `spl_wffi_call_i64` family is not one semantic contract.

@@ -10,6 +10,11 @@
 > trust store. The 3,959-symbol counts below were not
 > rerun and must not be presented as current-tree counts.
 
+> **2026-08-24 prevention update:** the bootstrap-owned raw-SFFI unsafe ratchet
+> freezes 12,799 unique untagged declaration identities and rejects new or
+> stale entries. This is migration control only. It does not change the signed
+> count, verify providers, or make the frozen declarations safe.
+
 Question asked: *"is every SFFI binding VERIFIED and SIGNED, or else explicitly
 tagged UNSAFE? Nothing should be silently in between."*
 
