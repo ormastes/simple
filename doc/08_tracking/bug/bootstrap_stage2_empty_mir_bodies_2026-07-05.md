@@ -2249,3 +2249,89 @@ Both must close together. The census of other builtin-receiver methods sharing a
 name with a single user definition is still not done, and is now clearly worth
 doing: the defective rule is name-only lookup, so `is_empty` cannot be the only
 victim.
+
+## 2026-08-25 — HALF THE FIX WORKS; the other half is blocked by a load-bearing rule
+
+Both halves were implemented and measured. **Part 2 works. Part 1 cannot land as
+conceived**, and the reason is the most useful thing in this section.
+
+### Part 2 — the lowering: WORKS (verified, not landed)
+
+`Builtin.is_empty` lowers to `rt_len(recv) == 0`. The correct site is the
+**`MirInst::MethodCallStatic` arm of `codegen/llvm/functions.rs`**, immediately
+before its `substring` special case, gated on the qualifier naming a builtin type
+and placed after the `direct_func` block so a genuine user method always wins.
+
+Two sites were tried first and are **proven dead for this path** — a trace at each
+entry never fired. Do not retry them:
+* `codegen/llvm/functions/calls.rs` — `qualified_rt_redirect`;
+* `codegen/llvm/emitter.rs` — `emit_method_call_static` / `emit_call`.
+
+Measured on the standalone reproducer, no `rt_is_empty` symbol added:
+
+| case | before | after |
+|---|---|---|
+| no user `is_empty` (face 2) | SEGV, `Array.is_empty` unresolved | `true` / `false` — **correct**, 0 unresolved |
+| user `is_empty` present (face 1) | wrong answer | correct **once part 1 is also applied** |
+| genuine `Sp.is_empty()` user method | correct | **still correct** (regression check) |
+
+### Part 1 — the rule fix: BLOCKED
+
+Gating the qualifier-discarding lookup in `resolve_name_variants` fixes the rebind
+(`OUT func_name=Array.is_empty`) and all three fixtures pass. **But Stage 2 then
+fails to link:**
+
+```
+Undefined symbols for architecture arm64:
+  "_Array.ptr",     referenced from: CraneliftCompiledModule.call
+  "_str.ptr",       referenced from: InterpreterBackendImpl.try_call_builtin, llvm_build_nsw_add, ...
+  "_str.to_bytes",  referenced from: smf_serialization__serialize_metadata, ...
+```
+
+**The name-only fallback is load-bearing.** `Array.ptr`, `str.ptr` and
+`str.to_bytes` are builtin-qualified methods that resolve *only* through it, and the
+Stage-2 link depends on them.
+
+A narrowed rule — allow the fallback to bind a free function, forbid only binding
+another type's `_dot_`-qualified method — was also tried. **Same three symbols still
+undefined**, so those three legitimately resolve to `_dot_`-qualified targets today.
+Both attempts were reverted; all seed files are byte-identical to `origin/main`.
+
+### Consequence: the order of work is fixed
+
+The resolution rule **cannot** be tightened until every builtin-receiver method that
+currently depends on the fallback has a real lowering — the same treatment part 2
+gives `is_empty`. At minimum: `ptr`, `to_bytes`. Tighten first and Stage 2 stops
+linking; that is not a judgement call, it is measured twice.
+
+### The census has a mechanical method — found by accident
+
+The corrected census question was *"which qualified builtin-receiver methods have a
+bare name colliding with the use/import map?"*. **The link error answers it
+directly:** block the fallback for builtin qualifiers, build, and read the undefined
+symbols. That enumerates exactly the set, with call sites attached, at the cost of
+one build.
+
+First measured result of that census, from the Stage-2 link above:
+
+| symbol | referenced from |
+|---|---|
+| `Array.ptr` | `CraneliftCompiledModule.call` |
+| `str.ptr` | `InterpreterBackendImpl.try_call_builtin`, `llvm_codegen__*` (many) |
+| `str.to_bytes` | `smf_serialization__serialize_metadata`, `serialize_note_sdn` |
+
+The list is truncated by the linker (`...`), so a full run should capture complete
+output rather than the preview. But the population is now known to be **small and
+enumerable**, not open-ended — which is better news than "likely a longer list than
+anyone expects".
+
+### Status
+
+| face | state |
+|---|---|
+| no user `is_empty` → SEGV | **fixable now** by part 2 alone (verified) |
+| user `is_empty` present → wrong answer | blocked on part 1, which is blocked on lowerings for `ptr`/`to_bytes` |
+
+Nothing was landed as code, per the standing instruction not to land the rule fix
+without the lowering — and here the reverse is also true: part 2 alone does not fix
+Stage 2, because Stage 2 hits face 1.
