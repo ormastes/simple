@@ -24,11 +24,24 @@ fn _http_field_token_byte(byte: u8) -> bool:
         byte == 45u8 or byte == 46u8 or byte == 94u8 or byte == 95u8 or
         byte == 96u8 or byte == 124u8 or byte == 126u8
 
+fn _http_field_name_is_host(line_bytes: [u8], colon: i64) -> bool:
+    # Header names are already restricted to ASCII tchar bytes.  Compare the
+    # four Host bytes directly so the incremental hot path does not allocate a
+    # lowercase copy of every field name or rescan the retained header list.
+    return (colon == 4 and
+        (line_bytes[0u64] == 72u8 or line_bytes[0u64] == 104u8) and
+        (line_bytes[1u64] == 79u8 or line_bytes[1u64] == 111u8) and
+        (line_bytes[2u64] == 83u8 or line_bytes[2u64] == 115u8) and
+        (line_bytes[3u64] == 84u8 or line_bytes[3u64] == 116u8))
+
 class Http1RequestFrameOwner:
     policy: SecureServerPolicy
     retained: [u8]
     line_start: i64
     request_line_seen: bool
+    request_version: text
+    host_seen: bool
+    host_nonempty: bool
     header_count: i32
     headers: [(text, text)]
     pending_cr: bool
@@ -44,6 +57,9 @@ class Http1RequestFrameOwner:
             retained: [],
             line_start: 0,
             request_line_seen: false,
+            request_version: "",
+            host_seen: false,
+            host_nonempty: false,
             header_count: 0,
             headers: [],
             pending_cr: false,
@@ -83,6 +99,7 @@ class Http1RequestFrameOwner:
             if parsed.2 != "HTTP/1.1" and parsed.2 != "HTTP/1.0":
                 self._fail("400 Unsupported HTTP version")
                 return
+            self.request_version = parsed.2
             self.request_line_seen = true
             return
 
@@ -90,6 +107,14 @@ class Http1RequestFrameOwner:
             val decision = headers_decision(self.headers, self.policy.max_body)
             if decision.0 != "":
                 self._fail(decision.0)
+                return
+            if self.request_version == "HTTP/1.1" and
+                (not self.host_seen or not self.host_nonempty):
+                # The filesystem server's deployment policy rejects an empty
+                # Host even though RFC 9112 permits it when target authority
+                # is undefined. Host grammar and configured-authority binding
+                # are separate policy work and are not inferred here.
+                self._fail("400 HTTP/1.1 requires one non-empty Host header")
                 return
             self.headers_complete = true
             self.expected_total = self.retained.len() as i64 + decision.1 as i64
@@ -116,6 +141,9 @@ class Http1RequestFrameOwner:
             name_index = name_index + 1
         val name = line.slice(0, colon)
         val value = line.slice(colon + 1, line.len()).trim()
+        if _http_field_name_is_host(line_bytes, colon):
+            self.host_seen = true
+            self.host_nonempty = value != ""
         self.headers.push((name, value))
 
     me append(fragment: [u8]):
