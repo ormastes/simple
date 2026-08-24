@@ -15,6 +15,65 @@ enum HirNode:
     Type_(node: HirType)
     Pattern(node: HirPattern)
 
+enum HirChildFrame:
+    """One base carrier or transparent wrapper on an iterative HIR work stack."""
+    Expr(node: HirExpr)
+    Stmt(node: HirStmt)
+    Type_(node: HirType)
+    Pattern(node: HirPattern)
+    DimExpr(node: DimExpr)
+    DimExprKind(node: DimExprKind)
+    Effect(node: Effect)
+    EffectKind(node: EffectKind)
+    Asm(node: HirAsm)
+    AsmConstraint(node: HirAsmConstraint)
+    AsmMatchArm(node: HirAsmMatchArm)
+    Block(node: HirBlock)
+    CallArg(node: HirCallArg)
+    CompClause(node: HirCompClause)
+    CompClauseKind(node: HirCompClauseKind)
+    ComprehensionKind(node: HirComprehensionKind)
+    EnumPayload(node: HirEnumPayload)
+    IfArm(node: HirIfArm)
+    Interpolation(node: HirInterpolation)
+    MatchArm(node: HirMatchArm)
+    Param(node: HirParam)
+    PatternPayload(node: HirPatternPayload)
+    WithItem(node: HirWithItem)
+
+trait HirChildFrameSink:
+    me push_hir_child_frame(frame: HirChildFrame)
+
+fn hir_expand_child_frames_reverse(frame: HirChildFrame, sink: HirChildFrameSink):
+    """Push direct child frames in reverse schema order for LIFO traversal."""
+    if frame == nil:
+        return
+    match frame:
+        case Expr(node): hir_expand_expr_child_frames_reverse(node, sink)
+        case Stmt(node): hir_expand_stmt_child_frames_reverse(node, sink)
+        case Type_(node): hir_expand_type_child_frames_reverse(node, sink)
+        case Pattern(node): hir_expand_pattern_child_frames_reverse(node, sink)
+        case DimExpr(node): hir_expand_dim_expr_child_frames_reverse(node, sink)
+        case DimExprKind(node): hir_expand_dim_expr_kind_child_frames_reverse(node, sink)
+        case Effect(node): hir_expand_effect_child_frames_reverse(node, sink)
+        case EffectKind(node): hir_expand_effect_kind_child_frames_reverse(node, sink)
+        case Asm(node): hir_expand_asm_child_frames_reverse(node, sink)
+        case AsmConstraint(node): hir_expand_asm_constraint_child_frames_reverse(node, sink)
+        case AsmMatchArm(node): hir_expand_asm_match_arm_child_frames_reverse(node, sink)
+        case Block(node): hir_expand_block_child_frames_reverse(node, sink)
+        case CallArg(node): hir_expand_call_arg_child_frames_reverse(node, sink)
+        case CompClause(node): hir_expand_comp_clause_child_frames_reverse(node, sink)
+        case CompClauseKind(node): hir_expand_comp_clause_kind_child_frames_reverse(node, sink)
+        case ComprehensionKind(node): hir_expand_comprehension_kind_child_frames_reverse(node, sink)
+        case EnumPayload(node): hir_expand_enum_payload_child_frames_reverse(node, sink)
+        case IfArm(node): hir_expand_if_arm_child_frames_reverse(node, sink)
+        case Interpolation(node): hir_expand_interpolation_child_frames_reverse(node, sink)
+        case MatchArm(node): hir_expand_match_arm_child_frames_reverse(node, sink)
+        case Param(node): hir_expand_param_child_frames_reverse(node, sink)
+        case PatternPayload(node): hir_expand_pattern_payload_child_frames_reverse(node, sink)
+        case WithItem(node): hir_expand_with_item_child_frames_reverse(node, sink)
+        case _: unreachable_hir_variant("HirChildFrame", "hir_expand_child_frames_reverse")
+
 fn _hir_extend(a: [HirNode], b: [HirNode]) -> [HirNode]:
     var out = a
     for it in b:
@@ -552,5 +611,587 @@ fn hir_children_of_with_item(node: HirWithItem) -> [HirNode]:
     out = out.push(HirNode.Expr(node.context_expr))
     out
 
-export HirNode, hir_children_of, _hir_extend
+fn hir_expand_expr_child_frames_reverse(node: HirExpr, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    match node.kind:
+        case IntLit(_, _):
+            hir_visit_nothing()
+        case FloatLit(_, _):
+            hir_visit_nothing()
+        case StringLit(_, b_interpolations):
+            var ri1 = b_interpolations.len()
+            while ri1 > 0:
+                ri1 = ri1 - 1
+                val it1 = b_interpolations[ri1]
+                sink.push_hir_child_frame(HirChildFrame.Interpolation(it1))
+        case BoolLit(_):
+            hir_visit_nothing()
+        case CharLit(_):
+            hir_visit_nothing()
+        case UnitLit:
+            hir_visit_nothing()
+        case NilLit:
+            hir_visit_nothing()
+        case ArrayLit(b_elements, b_type_):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_type_))
+            var ri0 = b_elements.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_elements[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Expr(it0))
+        case ArrayRepeat(b_value, b_count, b_elem_type):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_elem_type))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_count))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_value))
+        case TupleLit(b_elements):
+            var ri0 = b_elements.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_elements[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Expr(it0))
+        case DictLit(b_entries, b_key_type, b_value_type):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_value_type))
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_key_type))
+            var ri0 = b_entries.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val (ka0, kb0) = b_entries[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Expr(kb0))
+                sink.push_hir_child_frame(HirChildFrame.Expr(ka0))
+        case SetLit(b_elements, b_elem_type):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_elem_type))
+            var ri0 = b_elements.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_elements[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Expr(it0))
+        case Var(_):
+            hir_visit_nothing()
+        case NamedVar(_, _):
+            hir_visit_nothing()
+        case Field(b_base, _, _):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_base))
+        case Index(b_base, b_index):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_index))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_base))
+        case TupleIndex(b_base, _):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_base))
+        case OptionalChain(b_base, _):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_base))
+        case NullCoalesce(b_left, b_right):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_right))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_left))
+        case ExistsCheck(b_base):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_base))
+        case Unwrap(b_base):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_base))
+        case Binary(_, b_left, b_right):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_right))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_left))
+        case Unary(_, b_operand):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_operand))
+        case Call(b_callee, b_args, b_type_args):
+            var ri2 = b_type_args.len()
+            while ri2 > 0:
+                ri2 = ri2 - 1
+                val it2 = b_type_args[ri2]
+                sink.push_hir_child_frame(HirChildFrame.Type_(it2))
+            var ri1 = b_args.len()
+            while ri1 > 0:
+                ri1 = ri1 - 1
+                val it1 = b_args[ri1]
+                sink.push_hir_child_frame(HirChildFrame.CallArg(it1))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_callee))
+        case MethodCall(b_receiver, _, b_args, _):
+            var ri2 = b_args.len()
+            while ri2 > 0:
+                ri2 = ri2 - 1
+                val it2 = b_args[ri2]
+                sink.push_hir_child_frame(HirChildFrame.CallArg(it2))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_receiver))
+        case StaticCall(b_type_, _, b_args, _):
+            var ri2 = b_args.len()
+            while ri2 > 0:
+                ri2 = ri2 - 1
+                val it2 = b_args[ri2]
+                sink.push_hir_child_frame(HirChildFrame.CallArg(it2))
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_type_))
+        case If(b_cond, b_then_, b_else_):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_else_))
+            sink.push_hir_child_frame(HirChildFrame.Block(b_then_))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_cond))
+        case IfChain(b_arms, b_else_):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_else_))
+            var ri0 = b_arms.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_arms[ri0]
+                sink.push_hir_child_frame(HirChildFrame.IfArm(it0))
+        case MatchCase(b_scrutinee, b_arms):
+            var ri1 = b_arms.len()
+            while ri1 > 0:
+                ri1 = ri1 - 1
+                val it1 = b_arms[ri1]
+                sink.push_hir_child_frame(HirChildFrame.MatchArm(it1))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_scrutinee))
+        case Loop(b_body, _):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_body))
+        case While(b_cond, b_body, _):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_body))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_cond))
+        case For(_, b_iter, b_body, _):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_body))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_iter))
+        case With(b_items, b_body):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_body))
+            var ri0 = b_items.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_items[ri0]
+                sink.push_hir_child_frame(HirChildFrame.WithItem(it0))
+        case Lambda(b_params, b_body, _):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_body))
+            var ri0 = b_params.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_params[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Param(it0))
+        case Block(b_block):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_block))
+        case HostGpuLane(_, _, b_marker, b_body):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_body))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_marker))
+        case Return(b_value):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_value))
+        case Break(_, b_value):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_value))
+        case Continue(_):
+            hir_visit_nothing()
+        case Throw(b_value):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_value))
+        case Try(b_expr):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_expr))
+        case Await(b_expr):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_expr))
+        case Yield(b_value):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_value))
+        case StructLit(b_type_, b_fields):
+            var ri1 = b_fields.len()
+            while ri1 > 0:
+                ri1 = ri1 - 1
+                val (ka1, kb1) = b_fields[ri1]
+                sink.push_hir_child_frame(HirChildFrame.Expr(kb1))
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_type_))
+        case EnumLit(b_type_, _, b_payload):
+            sink.push_hir_child_frame(HirChildFrame.EnumPayload(b_payload))
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_type_))
+        case Cast(b_expr, b_target):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_target))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_expr))
+        case As(b_expr, b_target):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_target))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_expr))
+        case Range(b_start, b_end, _, b_step):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_step))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_end))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_start))
+        case Comprehension(b_kind, b_expr, b_clauses):
+            var ri2 = b_clauses.len()
+            while ri2 > 0:
+                ri2 = ri2 - 1
+                val it2 = b_clauses[ri2]
+                sink.push_hir_child_frame(HirChildFrame.CompClause(it2))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_expr))
+            sink.push_hir_child_frame(HirChildFrame.ComprehensionKind(b_kind))
+        case CustomBlock(_, _):
+            hir_visit_nothing()
+        case LossBlock(b_body):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_body))
+        case NogradBlock(b_body):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_body))
+        case UnsafeBlock(b_body):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_body))
+        case InlineAsm(b_asm_node):
+            sink.push_hir_child_frame(HirChildFrame.Asm(b_asm_node))
+        case InlineAsmMatch(b_arms):
+            var ri0 = b_arms.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_arms[ri0]
+                sink.push_hir_child_frame(HirChildFrame.AsmMatchArm(it0))
+        case Error:
+            hir_visit_nothing()
+        case TypeTest(b_value, _):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_value))
+        case _: unreachable_hir_variant("HirExprKind", "hir_expand_expr_child_frames_reverse")
+    if node.has_type_:
+        sink.push_hir_child_frame(HirChildFrame.Type_(node.type_))
+
+fn hir_expand_stmt_child_frames_reverse(node: HirStmt, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    match node.kind:
+        case Expr(b_expr):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_expr))
+        case Let(_, b_type_, b_init):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_init))
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_type_))
+        case Assign(b_target, _, b_value):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_value))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_target))
+        case Block(b_block):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_block))
+        case AsmAssert(_):
+            hir_visit_nothing()
+        case _: unreachable_hir_variant("HirStmtKind", "hir_expand_stmt_child_frames_reverse")
+
+fn hir_expand_type_child_frames_reverse(node: HirType, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    match node.kind:
+        case Int(_, _):
+            hir_visit_nothing()
+        case Float(_):
+            hir_visit_nothing()
+        case Bool:
+            hir_visit_nothing()
+        case Char:
+            hir_visit_nothing()
+        case Str:
+            hir_visit_nothing()
+        case Unit:
+            hir_visit_nothing()
+        case Tuple(b_elements):
+            var ri0 = b_elements.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_elements[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Type_(it0))
+        case Array(b_element, _):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_element))
+        case Slice(b_element):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_element))
+        case Dict(b_key, b_value):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_value))
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_key))
+        case Ref(b_inner, _):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_inner))
+        case Ptr(b_inner, _):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_inner))
+        case Optional(b_inner):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_inner))
+        case Result(b_ok, b_err):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_err))
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_ok))
+        case Named(_, b_args):
+            var ri1 = b_args.len()
+            while ri1 > 0:
+                ri1 = ri1 - 1
+                val it1 = b_args[ri1]
+                sink.push_hir_child_frame(HirChildFrame.Type_(it1))
+        case TypeParam(_, b_bounds):
+            var ri1 = b_bounds.len()
+            while ri1 > 0:
+                ri1 = ri1 - 1
+                val it1 = b_bounds[ri1]
+                sink.push_hir_child_frame(HirChildFrame.Type_(it1))
+        case Union(b_members):
+            var ri0 = b_members.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_members[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Type_(it0))
+        case DynTrait(_):
+            hir_visit_nothing()
+        case Function(b_params, b_ret, b_effects):
+            var ri2 = b_effects.len()
+            while ri2 > 0:
+                ri2 = ri2 - 1
+                val it2 = b_effects[ri2]
+                sink.push_hir_child_frame(HirChildFrame.Effect(it2))
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_ret))
+            var ri0 = b_params.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_params[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Type_(it0))
+        case Projection(b_base, _):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_base))
+        case Isolated(b_inner):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_inner))
+        case Infer(_, _):
+            hir_visit_nothing()
+        case Error:
+            hir_visit_nothing()
+        case Never:
+            hir_visit_nothing()
+        case Any:
+            hir_visit_nothing()
+        case Tensor(b_element, b_dims, _):
+            var ri1 = b_dims.len()
+            while ri1 > 0:
+                ri1 = ri1 - 1
+                val it1 = b_dims[ri1]
+                sink.push_hir_child_frame(HirChildFrame.DimExpr(it1))
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_element))
+        case Layer(b_input, b_output):
+            var ri1 = b_output.len()
+            while ri1 > 0:
+                ri1 = ri1 - 1
+                val it1 = b_output[ri1]
+                sink.push_hir_child_frame(HirChildFrame.DimExpr(it1))
+            var ri0 = b_input.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_input[ri0]
+                sink.push_hir_child_frame(HirChildFrame.DimExpr(it0))
+        case _: unreachable_hir_variant("HirTypeKind", "hir_expand_type_child_frames_reverse")
+
+fn hir_expand_pattern_child_frames_reverse(node: HirPattern, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    match node.kind:
+        case Wildcard:
+            hir_visit_nothing()
+        case Literal(b_value):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_value))
+        case Binding(_, _):
+            hir_visit_nothing()
+        case Tuple(b_elements):
+            var ri0 = b_elements.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_elements[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Pattern(it0))
+        case Array(b_elements, _):
+            var ri0 = b_elements.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_elements[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Pattern(it0))
+        case Struct(b_type_, b_fields):
+            var ri1 = b_fields.len()
+            while ri1 > 0:
+                ri1 = ri1 - 1
+                val (ka1, kb1) = b_fields[ri1]
+                sink.push_hir_child_frame(HirChildFrame.Pattern(kb1))
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_type_))
+        case Enum(b_type_, _, b_payload):
+            sink.push_hir_child_frame(HirChildFrame.PatternPayload(b_payload))
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_type_))
+        case Or(b_patterns):
+            var ri0 = b_patterns.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_patterns[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Pattern(it0))
+        case Range(b_start, b_end, _):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_end))
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_start))
+        case Error:
+            hir_visit_nothing()
+        case CompleteRegion(_):
+            hir_visit_nothing()
+        case DynRegion(_):
+            hir_visit_nothing()
+        case TypeTest(_, _):
+            hir_visit_nothing()
+        case _: unreachable_hir_variant("HirPatternKind", "hir_expand_pattern_child_frames_reverse")
+    if node.has_type_:
+        sink.push_hir_child_frame(HirChildFrame.Type_(node.type_))
+
+fn hir_expand_dim_expr_child_frames_reverse(node: DimExpr, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    hir_visit_nothing()
+
+fn hir_expand_dim_expr_kind_child_frames_reverse(node: DimExprKind, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    match node:
+        case Literal(_):
+            hir_visit_nothing()
+        case Named(_, _, _):
+            hir_visit_nothing()
+        case Var(_):
+            hir_visit_nothing()
+        case Dynamic:
+            hir_visit_nothing()
+        case Broadcast:
+            hir_visit_nothing()
+        case ConstParam(_):
+            hir_visit_nothing()
+        case Add(b_left, b_right):
+            sink.push_hir_child_frame(HirChildFrame.DimExpr(b_right))
+            sink.push_hir_child_frame(HirChildFrame.DimExpr(b_left))
+        case Mul(b_left, b_right):
+            sink.push_hir_child_frame(HirChildFrame.DimExpr(b_right))
+            sink.push_hir_child_frame(HirChildFrame.DimExpr(b_left))
+        case Div(b_left, b_right):
+            sink.push_hir_child_frame(HirChildFrame.DimExpr(b_right))
+            sink.push_hir_child_frame(HirChildFrame.DimExpr(b_left))
+        case _: unreachable_hir_variant("DimExprKind", "hir_expand_dim_expr_kind_child_frames_reverse")
+
+fn hir_expand_effect_child_frames_reverse(node: Effect, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    hir_visit_nothing()
+
+fn hir_expand_effect_kind_child_frames_reverse(node: EffectKind, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    match node:
+        case Pure:
+            hir_visit_nothing()
+        case IO:
+            hir_visit_nothing()
+        case Async:
+            hir_visit_nothing()
+        case Throws(b_type_):
+            sink.push_hir_child_frame(HirChildFrame.Type_(b_type_))
+        case Mutates:
+            hir_visit_nothing()
+        case Allocates:
+            hir_visit_nothing()
+        case Custom(_):
+            hir_visit_nothing()
+        case _: unreachable_hir_variant("EffectKind", "hir_expand_effect_kind_child_frames_reverse")
+
+fn hir_expand_asm_child_frames_reverse(node: HirAsm, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    var ri2 = node.constraints.len()
+    while ri2 > 0:
+        ri2 = ri2 - 1
+        val it2 = node.constraints[ri2]
+        sink.push_hir_child_frame(HirChildFrame.AsmConstraint(it2))
+
+fn hir_expand_asm_constraint_child_frames_reverse(node: HirAsmConstraint, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    sink.push_hir_child_frame(HirChildFrame.Expr(node.output_value))
+    sink.push_hir_child_frame(HirChildFrame.Expr(node.value))
+
+fn hir_expand_asm_match_arm_child_frames_reverse(node: HirAsmMatchArm, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    if node.has_asm_body:
+        sink.push_hir_child_frame(HirChildFrame.Asm(node.asm_body))
+
+fn hir_expand_block_child_frames_reverse(node: HirBlock, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    if node.has:
+        sink.push_hir_child_frame(HirChildFrame.Expr(node.value))
+    var ri0 = node.stmts.len()
+    while ri0 > 0:
+        ri0 = ri0 - 1
+        val it0 = node.stmts[ri0]
+        sink.push_hir_child_frame(HirChildFrame.Stmt(it0))
+
+fn hir_expand_call_arg_child_frames_reverse(node: HirCallArg, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    sink.push_hir_child_frame(HirChildFrame.Expr(node.value))
+
+fn hir_expand_comp_clause_child_frames_reverse(node: HirCompClause, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    hir_visit_nothing()
+
+fn hir_expand_comp_clause_kind_child_frames_reverse(node: HirCompClauseKind, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    match node:
+        case For(_, b_iter):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_iter))
+        case If(b_cond):
+            sink.push_hir_child_frame(HirChildFrame.Expr(b_cond))
+        case _: unreachable_hir_variant("HirCompClauseKind", "hir_expand_comp_clause_kind_child_frames_reverse")
+
+fn hir_expand_comprehension_kind_child_frames_reverse(node: HirComprehensionKind, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    match node:
+        case List:
+            hir_visit_nothing()
+        case Dict:
+            hir_visit_nothing()
+        case Set:
+            hir_visit_nothing()
+        case Generator:
+            hir_visit_nothing()
+        case _: unreachable_hir_variant("HirComprehensionKind", "hir_expand_comprehension_kind_child_frames_reverse")
+
+fn hir_expand_enum_payload_child_frames_reverse(node: HirEnumPayload, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    match node:
+        case Tuple(b_values):
+            var ri0 = b_values.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_values[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Expr(it0))
+        case Struct(b_fields):
+            var ri0 = b_fields.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val (ka0, kb0) = b_fields[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Expr(kb0))
+        case _: unreachable_hir_variant("HirEnumPayload", "hir_expand_enum_payload_child_frames_reverse")
+
+fn hir_expand_if_arm_child_frames_reverse(node: HirIfArm, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    sink.push_hir_child_frame(HirChildFrame.Block(node.then_))
+    sink.push_hir_child_frame(HirChildFrame.Expr(node.cond))
+
+fn hir_expand_interpolation_child_frames_reverse(node: HirInterpolation, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    sink.push_hir_child_frame(HirChildFrame.Expr(node.expr))
+
+fn hir_expand_match_arm_child_frames_reverse(node: HirMatchArm, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    sink.push_hir_child_frame(HirChildFrame.Block(node.body))
+    if node.has_guard:
+        sink.push_hir_child_frame(HirChildFrame.Expr(node.guard))
+    sink.push_hir_child_frame(HirChildFrame.Pattern(node.pattern))
+
+fn hir_expand_param_child_frames_reverse(node: HirParam, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    if node.has_default:
+        sink.push_hir_child_frame(HirChildFrame.Expr(node.default))
+    sink.push_hir_child_frame(HirChildFrame.Type_(node.type_))
+
+fn hir_expand_pattern_payload_child_frames_reverse(node: HirPatternPayload, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    match node:
+        case Tuple(b_patterns):
+            var ri0 = b_patterns.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val it0 = b_patterns[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Pattern(it0))
+        case Struct(b_fields):
+            var ri0 = b_fields.len()
+            while ri0 > 0:
+                ri0 = ri0 - 1
+                val (ka0, kb0) = b_fields[ri0]
+                sink.push_hir_child_frame(HirChildFrame.Pattern(kb0))
+        case _: unreachable_hir_variant("HirPatternPayload", "hir_expand_pattern_payload_child_frames_reverse")
+
+fn hir_expand_with_item_child_frames_reverse(node: HirWithItem, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    sink.push_hir_child_frame(HirChildFrame.Expr(node.context_expr))
+
+export HirNode, HirChildFrame, HirChildFrameSink, hir_children_of, _hir_extend
+export hir_expand_child_frames_reverse
 export hir_children_of_expr, hir_children_of_stmt, hir_children_of_type, hir_children_of_pattern, hir_children_of_dim_expr, hir_children_of_dim_expr_kind, hir_children_of_effect, hir_children_of_effect_kind, hir_children_of_asm, hir_children_of_asm_constraint, hir_children_of_asm_match_arm, hir_children_of_block, hir_children_of_call_arg, hir_children_of_comp_clause, hir_children_of_comp_clause_kind, hir_children_of_comprehension_kind, hir_children_of_enum_payload, hir_children_of_if_arm, hir_children_of_interpolation, hir_children_of_match_arm, hir_children_of_param, hir_children_of_pattern_payload, hir_children_of_with_item
+export hir_expand_expr_child_frames_reverse, hir_expand_stmt_child_frames_reverse, hir_expand_type_child_frames_reverse, hir_expand_pattern_child_frames_reverse, hir_expand_dim_expr_child_frames_reverse, hir_expand_dim_expr_kind_child_frames_reverse, hir_expand_effect_child_frames_reverse, hir_expand_effect_kind_child_frames_reverse, hir_expand_asm_child_frames_reverse, hir_expand_asm_constraint_child_frames_reverse, hir_expand_asm_match_arm_child_frames_reverse, hir_expand_block_child_frames_reverse, hir_expand_call_arg_child_frames_reverse, hir_expand_comp_clause_child_frames_reverse, hir_expand_comp_clause_kind_child_frames_reverse, hir_expand_comprehension_kind_child_frames_reverse, hir_expand_enum_payload_child_frames_reverse, hir_expand_if_arm_child_frames_reverse, hir_expand_interpolation_child_frames_reverse, hir_expand_match_arm_child_frames_reverse, hir_expand_param_child_frames_reverse, hir_expand_pattern_payload_child_frames_reverse, hir_expand_with_item_child_frames_reverse
