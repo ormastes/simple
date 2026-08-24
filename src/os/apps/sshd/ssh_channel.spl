@@ -246,13 +246,26 @@ impl ChannelTable:
         val idx = self._find_local_index(local_id)
         if idx < 0:
             return false
-        if self.channels[idx as u64].state != ChannelState.Open or bytes == 0u32:
+        if self.channels[idx as u64].state != ChannelState.Open:
             return false
         val current = self.channels[idx as u64].remote_window
         if bytes > 4294967295u32 - current:
             return false
         self.channels[idx as u64].remote_window = current + bytes
         true
+
+    pub me apply_remote_window_adjust(payload: [u8]) -> bool:
+        """Atomically admit one exact RFC 4254 window-adjust message.
+
+        Framing, channel identity, lifecycle, and overflow
+        are checked before the sole mutable channel owner changes its window.
+        A rejected payload leaves every channel unchanged.
+        """
+        val parsed = ssh_parse_window_adjust(payload)
+        if parsed.is_err():
+            return false
+        val adjustment = parsed.unwrap()
+        self.adjust_remote_window(adjustment.0, adjustment.1)
 
     pub me consume_remote_window(local_id: u32, bytes: u32) -> bool:
         """Consume bytes from the remote send window. Returns false if insufficient."""
@@ -422,8 +435,8 @@ fn ssh_parse_window_adjust(data: [u8]) -> Result<(u32, u32), text>:
 
     Returns: (recipient_channel, bytes_to_add)
     """
-    if data.len() < 9:
-        return Err("WINDOW_ADJUST too short")
+    if data.len() != 9:
+        return Err("WINDOW_ADJUST must be exactly 9 bytes")
     if data[0] != SSH_MSG_CHANNEL_WINDOW_ADJUST:
         return Err("not a WINDOW_ADJUST")
 
