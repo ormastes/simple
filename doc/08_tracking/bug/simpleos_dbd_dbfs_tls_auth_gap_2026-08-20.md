@@ -162,6 +162,20 @@ Required closure evidence:
 
 Performance/durability blocker:
 
+- the canonical Redis engine mutates through `SET`, `DEL`, `INCR`, `EXPIRE`,
+  and `FLUSHALL`, while the current J1 journal defines exact restart semantics
+  only for `SET` and single-key `DEL`. DBD now classifies all five as mutations
+  and rejects `INCR`, `EXPIRE`, and `FLUSHALL` before engine dispatch with a
+  stable durable-command error. It no longer acknowledges memory-only changes
+  that disappear after filesystem restart. Supporting those commands remains
+  open until their time, ordering, and destructive replay semantics are
+  specified and journaled;
+- a proposed credential-provider generation snapshot was rejected in static
+  review because public value-semantic provider copies can be restored or
+  reconstructed. Exact rotation/revocation authority requires an opaque
+  canonical owner or a non-rollback service epoch; snapshot comparison must
+  not be advertised as hardened session authority;
+
 - the post-auth fragmented-command copying blocker is closed structurally:
   `DbdAuthenticatedRespIngressV1` owns a 64 KiB fixed ring and head offset,
   performs one write plus one incremental framing step per accepted byte, and

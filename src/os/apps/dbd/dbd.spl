@@ -42,7 +42,7 @@
 # serve_connection()'s buffering logic (drain all complete commands per read,
 # retain a trailing partial fragment) on top of the freestanding primitives.
 
-use os.apps.dbd.dbd_protocol.{DbdEngine, DbdSessionBudget, DbdPersistenceBudget, DbdCredentialProvider, dbd_command_is_mutating, dbd_encode_journal_line, dbd_parse_next_authenticated_command, dbd_redact_diagnostic, DBD_MAX_JOURNAL_BYTES, DBD_MAX_JOURNAL_LINE_BYTES}
+use os.apps.dbd.dbd_protocol.{DbdEngine, DbdSessionBudget, DbdPersistenceBudget, DbdCredentialProvider, dbd_command_is_mutating, dbd_command_has_durable_journal_semantics, dbd_encode_journal_line, dbd_parse_next_authenticated_command, dbd_redact_diagnostic, DBD_MAX_JOURNAL_BYTES, DBD_MAX_JOURNAL_LINE_BYTES}
 use os.apps.dbd.dbd_auth_ingress.{
     DbdMutableAuthRequestOwnerV1, DbdAuthIngressStatusV1
 }
@@ -425,6 +425,12 @@ impl DbdServer:
         # journal encoding live in dbd_protocol (spec-tested), not here.
         if not dbd_command_is_mutating(args[0]):
             return self.engine.dispatch(args)
+        # The shared Redis engine also mutates through INCR, EXPIRE, and
+        # FLUSHALL. Until the journal defines exact replay semantics for those
+        # commands, reject them before dispatch rather than acknowledge a
+        # memory-only mutation that disappears after filesystem restart.
+        if not dbd_command_has_durable_journal_semantics(args[0]):
+            return "-ERR durable command unsupported\r\n"
         if self.backend_is_dbfs:
             val journal_line = dbd_encode_journal_line(args)
             if journal_line == "" or journal_line.len() > DBD_MAX_LINE_BYTES:
