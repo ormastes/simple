@@ -306,6 +306,12 @@ sh scripts/setup/install-must-check-hooks.shs --check ||
   sh scripts/setup/install-must-check-hooks.shs --install
 ```
 
+The general `scripts/setup/setup.shs` entrypoint delegates this work to
+`scripts/setup/setup-hooks.shs`. That helper runs in primary and linked
+worktrees, leaves all `pre-push` classification and preservation to the
+dedicated installer, and fails setup if installation or wiring verification
+fails. It never overwrites an occupied `pre-push.local` preservation slot.
+
 Windows PowerShell:
 
 ```powershell

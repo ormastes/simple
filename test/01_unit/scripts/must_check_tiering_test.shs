@@ -783,6 +783,28 @@ case "$shared_hooks" in /*) : ;; *) shared_hooks="$hook_repo/$shared_hooks" ;; e
 [ ! -L "$shared_hooks/pre-push" ]
 cmp -s "$hook_repo/scripts/hooks/pre-push-worktree-launcher" "$shared_hooks/pre-push"
 
+# General setup must leave preservation decisions to the dedicated installer.
+# When both payload slots are occupied, fail without overwriting either one.
+printf '%s\n' '#!/bin/sh' 'echo protected-local-hook' > "$shared_hooks/pre-push.local"
+printf '%s\n' '#!/bin/sh' 'echo second-unrelated-hook' > "$shared_hooks/pre-push"
+chmod +x "$shared_hooks/pre-push" "$shared_hooks/pre-push.local"
+cp "$shared_hooks/pre-push" "$hook_repo/pre-push.before"
+cp "$shared_hooks/pre-push.local" "$hook_repo/pre-push.local.before"
+if (cd "$hook_peer" && sh scripts/setup/setup-hooks.shs >/dev/null 2>&1); then
+    echo "FAIL: general setup overwrote an occupied pre-push preservation slot"
+    exit 1
+fi
+cmp -s "$hook_repo/pre-push.before" "$shared_hooks/pre-push" || {
+    echo "FAIL: general setup changed the occupied pre-push payload"
+    exit 1
+}
+cmp -s "$hook_repo/pre-push.local.before" "$shared_hooks/pre-push.local" || {
+    echo "FAIL: general setup changed the occupied pre-push.local payload"
+    exit 1
+}
+rm -f "$shared_hooks/pre-push" "$shared_hooks/pre-push.local"
+(cd "$hook_peer" && sh scripts/setup/setup-hooks.shs >/dev/null)
+
 # A legacy canonical dispatcher is replacement material, not a local hook: if
 # preserved it would call the dispatcher from inside itself forever.
 rm -f "$shared_hooks/pre-push.local"

@@ -1,6 +1,6 @@
 # General setup skips or weakens mandatory must-check hooks
 
-Status: fixed; manually unverified by user instruction
+Status: fixed; focused fixture verified
 
 ## Reproduction
 
@@ -28,3 +28,10 @@ is either a directory or a linked-worktree indirection file.
   fail nonzero.
 - Existing pre-commit deferral behavior remains unchanged.
 - Unix dedicated-install and Windows TODO/evidence contracts remain unchanged.
+
+## Verification
+
+`test/01_unit/scripts/must_check_tiering_test.shs` exercises the general helper
+from a linked worktree, propagates simulated installer and verifier failures,
+and proves that an occupied `pre-push.local` makes setup fail without changing
+either existing hook payload.
