@@ -322,11 +322,22 @@ if [ "${1:-}" = --self-test ]; then
 fi
 
 [ -f "$ROOT/$MANIFEST_REL" ] || die "missing manifest $MANIFEST_REL"
+_pre_push_hook_context=0
+case "${1:-}" in
+    --from-pre-push-hook) _pre_push_hook_context=1; shift ;;
+    '') ;;
+    *) die "unknown argument: $1" ;;
+esac
+[ "$#" -eq 0 ] || die "unexpected trailing arguments"
 _refs=$(mktemp) || exit 2
 _unique_refs=$(mktemp) || exit 2
 trap 'rm -f "$_refs" "$_unique_refs"' EXIT INT TERM
-cat > "$_refs"
-[ -s "$_refs" ] || die "no pushed refs were provided"
+cat > "$_refs" || die "cannot read pushed ref rows"
+if [ ! -s "$_refs" ]; then
+    [ "$_pre_push_hook_context" -eq 1 ] || die "no pushed refs were provided outside the pre-push hook"
+    echo "push-must-check: PASS — 0 refs to push (no-op)"
+    exit 0
+fi
 
 awk 'NF != 4 {bad=1; next} !seen[$2 SUBSEP $4]++ {print} END {exit bad}' "$_refs" > "$_unique_refs" ||
     die "malformed pushed ref row"

@@ -2,7 +2,10 @@
 
 `check-push-must-pass.shs` consumes standard pre-push ref rows, rejects malformed
 input or more than two unique updates, and deduplicates identical tip/base
-pairs. For each remaining outgoing revision it loads the manifest and ledger from that committed revision,
+pairs. The canonical pre-push wrapper marks its invocation explicitly: an empty,
+readable stream in that context is a named `0 refs to push (no-op)` PASS, while
+direct empty input remains a failure so a missing producer cannot pass vacuously.
+For each remaining outgoing revision it loads the manifest and ledger from that committed revision,
 recomputes the source fingerprint, validates ledger cardinality/status/command
 parity and evidence hashes, and runs the registry's `tier=push` range/ref rows.
 Production evidence is a regular blob loaded from the exact pushed revision;

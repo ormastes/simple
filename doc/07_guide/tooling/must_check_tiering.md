@@ -22,6 +22,11 @@ rows are push-blocking.
 The bounded push tier also materializes the exact pushed ref for the Rust
 interpreter module-owner scan. This prevents an undeclared tracked module from
 wasting a full Rust authority/bootstrap attempt while avoiding a compiler run.
+When Git invokes the canonical hook for an already-up-to-date push, its empty
+ref stream is reported as `PASS — 0 refs to push (no-op)`. Directly invoking
+the consumer with empty input still fails; only the wrapper's explicit context
+marker distinguishes a legitimate Git no-op from missing ref input. Malformed
+rows and unreadable input remain failures.
 
 ## Compiler phase admission
 

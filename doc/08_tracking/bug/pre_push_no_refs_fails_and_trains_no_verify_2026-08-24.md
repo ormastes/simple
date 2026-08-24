@@ -1,7 +1,7 @@
 # `push-must-check: FAIL — no pushed refs were provided` is triggered by EMPTY stdin, and it trains every lane onto `--no-verify`
 
 **Date:** 2026-08-24
-**Status:** OPEN
+**Status:** RESOLVED
 **Severity:** systemic — this failure mode is the reason multiple concurrent lanes bypassed ALL pre-push gates today
 
 ## Symptom
@@ -68,9 +68,11 @@ silently. That is exactly the fail-open path
 `fourth_tree_wipe_6f86ff32a7d_guard_not_enforced_2026-08-11.md` documents,
 reached by a different road.
 
-## Suggested fix (not applied here)
+## Resolution
 
-Distinguish the two cases in `check-push-must-pass.shs`:
+The canonical wrapper now identifies its invocation with
+`--from-pre-push-hook`, and `check-push-must-pass.shs` distinguishes the two
+cases:
 - zero ref rows **and** stdin was a valid, readable, empty stream => nothing is
   being pushed => exit 0 with an explicit verdict such as
   `push-must-check: PASS — 0 refs to push (no-op)`, so the run is still
@@ -78,8 +80,10 @@ Distinguish the two cases in `check-push-must-pass.shs`:
 - malformed rows, unreadable stdin, or a ref count that disagrees with what git
   actually offered => keep the current hard failure.
 
-Do NOT simply delete the emptiness check: that would restore a genuine
-fail-open. The point is to name the no-op, not to ignore it.
+The emptiness check remains fail-closed for direct invocation. Unreadable input,
+malformed rows, unexpected arguments, and a ref count beyond the bounded limit
+also remain failures. The focused fixture proves canonical empty input passes
+with the explicit no-op verdict while direct empty and malformed input fail.
 
 ## Evidence trail
 
