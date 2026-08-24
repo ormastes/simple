@@ -1,0 +1,363 @@
+# One-pass typed HIR performance fact collection.
+
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, MethodResolution}
+use compiler.hir.hir_definitions.{HirFunction, HirExpr, HirExprKind}
+use compiler.hir.generated.hir_children.{
+    HirNode, hir_children_of, hir_children_of_block}
+use compiler.semantics.perf_facts.types.*
+
+struct HirPerfWorkItem:
+    node: HirNode
+    loop_depth: i64
+
+class HirPerfWorkStack:
+    items: [HirPerfWorkItem]
+
+impl HirPerfWorkStack:
+    static fn new() -> HirPerfWorkStack:
+        HirPerfWorkStack(items: [])
+
+    me push(item: HirPerfWorkItem):
+        self.items.push(item)
+
+    me push_children(children: [HirNode], loop_depth: i64):
+        var index = children.len()
+        while index > 0:
+            index = index - 1
+            self.items.push(HirPerfWorkItem(
+                node: children[index], loop_depth: loop_depth))
+
+    fn len() -> i64:
+        self.items.len()
+
+    me pop() -> HirPerfWorkItem:
+        self.items.pop()
+
+class HirPerfAccumulator:
+    collection_ops: [ResolvedCollectionOp]
+    functions_scanned: i64
+    nodes_scanned: i64
+    incomplete_ops: i64
+    unclassified_method_calls: i64
+    unavailable_method_bodies: i64
+    unknown_execution_domains: i64
+    coverage_complete: bool
+    registry_valid: bool
+    registry_version: text
+
+impl HirPerfAccumulator:
+    static fn new(
+        registry_version: text, registry_valid: bool
+    ) -> HirPerfAccumulator:
+        HirPerfAccumulator(
+            collection_ops: [], functions_scanned: 0, nodes_scanned: 0,
+            incomplete_ops: 0, unclassified_method_calls: 0,
+            unavailable_method_bodies: 0, coverage_complete: true,
+            unknown_execution_domains: 0,
+            registry_valid: registry_valid,
+            registry_version: registry_version)
+
+    fn snapshot() -> HirPerfFacts:
+        HirPerfFacts(
+            collection_ops: self.collection_ops,
+            functions_scanned: self.functions_scanned,
+            nodes_scanned: self.nodes_scanned,
+            incomplete_ops: self.incomplete_ops,
+            unclassified_method_calls: self.unclassified_method_calls,
+            unavailable_method_bodies: self.unavailable_method_bodies,
+            unknown_execution_domains: self.unknown_execution_domains,
+            coverage_complete: self.coverage_complete,
+            registry_valid: self.registry_valid,
+            registry_version: self.registry_version)
+
+fn hir_perf_receiver_kind(expr: HirExpr) -> HirPerfReceiverKind:
+    if not expr.has_type_:
+        return HirPerfReceiverKind.Unknown("receiver type unavailable")
+    hir_perf_receiver_kind_for_type(expr.type_)
+
+fn hir_perf_receiver_kind_for_type(type_: HirType) -> HirPerfReceiverKind:
+    match type_.kind:
+        case HirTypeKind.Array(_, _): HirPerfReceiverKind.Array
+        case HirTypeKind.Slice(_): HirPerfReceiverKind.Slice
+        case HirTypeKind.Dict(_, _): HirPerfReceiverKind.Dict
+        case HirTypeKind.Str: HirPerfReceiverKind.Text
+        case HirTypeKind.Tuple(_): HirPerfReceiverKind.Tuple
+        case HirTypeKind.Named(symbol, _): HirPerfReceiverKind.Named(symbol.id)
+        case HirTypeKind.Ref(inner, _): hir_perf_receiver_kind_for_type(inner)
+        case HirTypeKind.Isolated(inner): hir_perf_receiver_kind_for_type(inner)
+        case _: HirPerfReceiverKind.Unknown("receiver is not a proven collection type")
+
+fn hir_perf_resolved_method_symbol(resolution: MethodResolution) -> i64?:
+    match resolution:
+        case MethodResolution.InstanceMethod(_, method): Some(method.id)
+        case MethodResolution.TraitMethod(_, method): Some(method.id)
+        case MethodResolution.FreeFunction(function): Some(function.id)
+        case MethodResolution.StaticMethod(_, method): Some(method.id)
+        case MethodResolution.Unresolved: nil
+
+fn hir_perf_receiver_matches(
+    expected: HirPerfReceiverKind, actual: HirPerfReceiverKind
+) -> bool:
+    match expected:
+        case HirPerfReceiverKind.Array:
+            match actual:
+                case HirPerfReceiverKind.Array: true
+                case _: false
+        case HirPerfReceiverKind.Slice:
+            match actual:
+                case HirPerfReceiverKind.Slice: true
+                case _: false
+        case HirPerfReceiverKind.Dict:
+            match actual:
+                case HirPerfReceiverKind.Dict: true
+                case _: false
+        case HirPerfReceiverKind.Text:
+            match actual:
+                case HirPerfReceiverKind.Text: true
+                case _: false
+        case HirPerfReceiverKind.Tuple:
+            match actual:
+                case HirPerfReceiverKind.Tuple: true
+                case _: false
+        case HirPerfReceiverKind.Named(expected_id):
+            match actual:
+                case HirPerfReceiverKind.Named(actual_id): expected_id == actual_id
+                case _: false
+        case HirPerfReceiverKind.Unknown(_): false
+
+fn hir_perf_iteration_is_fixed_small(iter: HirExpr) -> bool:
+    # Tier-0 suppression is deliberately narrow.  Only exact literal/storage
+    # bounds at or below 16 are accepted; every other iterable stays dynamic.
+    match iter.kind:
+        case HirExprKind.ArrayLit(elements, _):
+            return elements.len() <= 16
+        case HirExprKind.ArrayRepeat(_, count, _):
+            match count.kind:
+                case HirExprKind.IntLit(value, _):
+                    return value >= 0 and value <= 16
+                case _: pass_do_nothing
+        case _: pass_do_nothing
+    if iter.has_type_:
+        match iter.type_.kind:
+            case HirTypeKind.Array(_, size):
+                if val exact = size:
+                    return exact >= 0 and exact <= 16
+            case _: pass_do_nothing
+    false
+
+fn hir_perf_unknown_op(
+    function: HirFunction, method_name: text, expr: HirExpr,
+    loop_depth: i64, receiver: HirPerfReceiverKind,
+    resolved_symbol: i64?, reason: text
+) -> ResolvedCollectionOp:
+    ResolvedCollectionOp(
+        function_symbol_id: function.symbol.id,
+        function_name: function.name,
+        method_name: method_name,
+        stable_operation_name: "",
+        span: expr.span,
+        loop_depth: loop_depth,
+        resolved_symbol_id: resolved_symbol,
+        receiver: receiver,
+        operation: HirPerfOperationKind.Unknown(reason),
+        cost: HirPerfCostClass.Unknown(reason),
+        output_cardinality: HirPerfCardinality.Unknown(reason),
+        enumeration: HirPerfEnumerationClass.Unknown,
+        effects: HirPerfEffectFacts(
+            reads: false, writes: false, allocates: false, throws: false,
+            suspends: false, observable: false, unknown: true),
+        allocation: HirPerfAllocationClass.Unknown,
+        materializes: false,
+        preserves_order: false,
+        registry_verified: false,
+        incomplete_reason: reason)
+
+fn hir_perf_method_fact(
+    function: HirFunction, expr: HirExpr, receiver_expr: HirExpr,
+    method_name: text, resolution: MethodResolution, loop_depth: i64,
+    registry: CollectionOperationRegistry
+) -> ResolvedCollectionOp?:
+    if not registry.is_valid():
+        return nil
+    val receiver = hir_perf_receiver_kind(receiver_expr)
+    val resolved = hir_perf_resolved_method_symbol(resolution)
+    if not resolved.?:
+        return nil
+    val symbol_id = resolved.unwrap()
+    val summary = registry.lookup(symbol_id)
+    if not summary.?:
+        return nil
+    val operation = summary.unwrap()
+    if not hir_perf_receiver_matches(operation.expected_receiver, receiver):
+        return Some(hir_perf_unknown_op(
+            function, method_name, expr, loop_depth, receiver, resolved,
+            "receiver type does not match operation metadata"))
+    Some(ResolvedCollectionOp(
+        function_symbol_id: function.symbol.id,
+        function_name: function.name,
+        method_name: method_name,
+        stable_operation_name: operation.stable_name,
+        span: expr.span,
+        loop_depth: loop_depth,
+        resolved_symbol_id: resolved,
+        receiver: receiver,
+        operation: operation.operation,
+        cost: operation.cost,
+        output_cardinality: operation.output_cardinality,
+        enumeration: operation.enumeration,
+        effects: operation.effects,
+        allocation: operation.allocation,
+        materializes: operation.materializes,
+        preserves_order: operation.preserves_order,
+        registry_verified: true,
+        incomplete_reason: ""))
+
+fn hir_perf_scan_function(
+    function: HirFunction, registry: CollectionOperationRegistry,
+    accumulator: HirPerfAccumulator
+):
+    var work = HirPerfWorkStack.new()
+    work.push_children(hir_children_of_block(function.body), 0)
+    while work.len() > 0:
+        val item = work.pop()
+        accumulator.nodes_scanned = accumulator.nodes_scanned + 1
+        var children: [HirNode] = []
+        var child_loop_depth = item.loop_depth
+        match item.node:
+            case HirNode.Expr(expr):
+                match expr.kind:
+                    case HirExprKind.MethodCall(receiver, method, _, resolution):
+                        val fact = hir_perf_method_fact(
+                            function, expr, receiver, method, resolution,
+                            item.loop_depth, registry)
+                        if fact.?:
+                            val resolved_fact = fact.unwrap()
+                            accumulator.collection_ops.push(resolved_fact)
+                            if not resolved_fact.registry_verified:
+                                accumulator.incomplete_ops = accumulator.incomplete_ops + 1
+                        else:
+                            accumulator.unclassified_method_calls =
+                                accumulator.unclassified_method_calls + 1
+                    case HirExprKind.Loop(body, _):
+                        work.push_children(
+                            hir_children_of_block(body), item.loop_depth + 1)
+                        children = []
+                        accumulator.unknown_execution_domains =
+                            accumulator.unknown_execution_domains + 1
+                        accumulator.coverage_complete = false
+                    case HirExprKind.While(_, _, _):
+                        # A while condition proves repetition context but not a
+                        # finite trip count. Mark its condition/body as a loop
+                        # domain while retaining an explicit incomplete fact.
+                        accumulator.unknown_execution_domains =
+                            accumulator.unknown_execution_domains + 1
+                        accumulator.coverage_complete = false
+                        child_loop_depth = item.loop_depth + 1
+                    case HirExprKind.For(_, iter, body, _):
+                        # The iterable expression is evaluated once before the
+                        # loop; only the body inherits the dynamic multiplier.
+                        val body_loop_depth = if hir_perf_iteration_is_fixed_small(iter):
+                            item.loop_depth
+                        else:
+                            item.loop_depth + 1
+                        work.push_children(
+                            hir_children_of_block(body), body_loop_depth)
+                        work.push(HirPerfWorkItem(
+                            node: HirNode.Expr(iter),
+                            loop_depth: item.loop_depth))
+                        children = []
+                    case HirExprKind.Lambda(_, _, _):
+                        # A closure body is a distinct execution domain. Its
+                        # lexical placement inside a loop is not execution
+                        # evidence for the callback itself.
+                        child_loop_depth = 0
+                        accumulator.unknown_execution_domains =
+                            accumulator.unknown_execution_domains + 1
+                        accumulator.coverage_complete = false
+                    case HirExprKind.Comprehension(_, _, _):
+                        # Clause/cardinality metadata is not yet available.
+                        # Do not inherit lexical loop depth as callback proof.
+                        child_loop_depth = 0
+                        accumulator.unknown_execution_domains =
+                            accumulator.unknown_execution_domains + 1
+                        accumulator.coverage_complete = false
+                    case _:
+                        pass_do_nothing
+                if children.len() == 0:
+                    match expr.kind:
+                        case HirExprKind.Loop(_, _): pass_do_nothing
+                        case HirExprKind.For(_, _, _, _): pass_do_nothing
+                        case _: children = hir_children_of(item.node)
+                else:
+                    children = hir_children_of(item.node)
+            case _:
+                children = hir_children_of(item.node)
+        work.push_children(children, child_loop_depth)
+    accumulator.functions_scanned = accumulator.functions_scanned + 1
+
+fn collect_hir_perf_facts(
+    module: HirModule, registry: CollectionOperationRegistry
+) -> HirPerfFacts:
+    var accumulator = HirPerfAccumulator.new(
+        registry.metadata_version, registry.is_valid())
+    for function in module.functions.values():
+        if not function.is_extern:
+            hir_perf_scan_function(function, registry, accumulator)
+    for class_ in module.classes.values():
+        for method_symbol in class_.methods.values():
+            if not module.functions.contains_key(method_symbol):
+                accumulator.unavailable_method_bodies =
+                    accumulator.unavailable_method_bodies + 1
+                accumulator.coverage_complete = false
+    accumulator.snapshot()
+
+fn collect_hir_function_perf_facts(
+    function: HirFunction, registry: CollectionOperationRegistry
+) -> HirPerfFacts:
+    var accumulator = HirPerfAccumulator.new(
+        registry.metadata_version, registry.is_valid())
+    if function.is_extern:
+        return accumulator.snapshot()
+    hir_perf_scan_function(function, registry, accumulator)
+    accumulator.snapshot()
+
+fn typed_coll002_linear_lookup_findings(
+    facts: HirPerfFacts
+) -> [TypedCollectionFinding]:
+    var findings: [TypedCollectionFinding] = []
+    if not facts.registry_valid:
+        return findings
+    for operation in facts.collection_ops:
+        if not operation.registry_verified or operation.loop_depth <= 0:
+            continue
+        var linear_lookup = false
+        match operation.operation:
+            case HirPerfOperationKind.LinearLookup: linear_lookup = true
+            case _: pass_do_nothing
+        if not linear_lookup:
+            continue
+        if operation.stable_operation_name != "Array.contains":
+            continue
+        match operation.cost:
+            case HirPerfCostClass.LinearReceiver: pass_do_nothing
+            case _: continue
+        match operation.receiver:
+            case HirPerfReceiverKind.Array:
+                findings.push(TypedCollectionFinding(
+                    code: "COLL002",
+                    function_name: operation.function_name,
+                    line: operation.span.line,
+                    column: operation.span.col,
+                    message: "Array.contains executes inside a non-small or unknown loop domain",
+                    evidence: [
+                        "receiver=typed sequence",
+                        "lookup_cost=linear(receiver)",
+                        "loop_depth=" + operation.loop_depth.to_text(),
+                        "operation=" + operation.method_name]))
+            case _: pass_do_nothing
+    findings
+
+export hir_perf_receiver_kind, hir_perf_resolved_method_symbol
+export hir_perf_iteration_is_fixed_small
+export collect_hir_perf_facts, collect_hir_function_perf_facts
+export typed_coll002_linear_lookup_findings
