@@ -983,3 +983,258 @@ tail (`unresolved name:` at import spans — `var_reassign_local_id_value`,
 ModuleSurfaceEnum 7, ReturnScan 4, BackendCompileOptions 4, CodegenTarget 3;
 2 `ambiguous explicit callable dependency`). Stage 4 / Stage 5 / MCP remain
 unreached; `--no-mcp` was NOT passed.
+
+---
+
+## RUN 12 (2026-08-24) — the import populations are GONE; stage 3 still rc=1 on a single value-representation defect
+
+Stage 2 green every cycle (`Build complete: 750 compiled, 0 cached, 0 failed`);
+`--stop-after-stage2 --mode=dynload`, receipt minted with
+`planner-admission-v2 --target=//bootstrap:stage3 --reason=seed-missing`, stage 3
+via `SIMPLE_BOOTSTRAP_REASON_RECEIPT=<env> --resume-stage3-from-admitted=build/bootstrap`.
+
+### Measured ladder (every row is a real stage-2 rebuild + stage-3 run)
+
+| tree | runs | HIR modules | SIGSEGV | error modules | total fatal (`[hir-fatal-count]` sum) |
+|---|---|---|---|---|---|
+| RUN 11 final (inherited) | 3 | 692 | 0 | 42-45 | 300 / 300 / 312 |
+| + 26 explicit named imports | 3 | 692 | 0 (a 4th run took the pre-existing phase-2 SEGV) | 21 | **166 / 166 / 166** |
+| + owner-side `ModuleSurfaceEnum` import, `_bootstrap_hir_functions` -> accessor | 1 | 692 | 0 | 14 | 194, and **0** `unresolved type` / `unresolved name` / `ambiguous callable` |
+| + Class/Struct owner-kind discriminator | 1 (+1 phase-2 SEGV) | 692 | 0 | 10 | **102** |
+| + positive-only composite-name memo | 2 | 692 | 0 | 3-4 | **120 / 115** |
+| **final (consolidated)** | 2 | **692 / 692** | 0 | **5 / 3** | **118 / 115** |
+
+`unresolved type`, `unresolved name` and `ambiguous explicit callable dependency`
+are now **zero**. rc=1 is carried entirely by
+`field ... is not visible from this module`, and 113 of the 115 are two modules:
+`loader/jit_instantiator.spl` 61 and `hir/generated/hir_codec.spl` 52.
+
+### Items 1-3 were ONE class, and the RUN 10 recipe cleared all of it
+
+`unresolved name: X at <import span>` is the same defect as `unresolved type: X`:
+a name used in declaration position whose only route into the module is a GLOB.
+26 explicit named imports across 22 files removed 201 `unresolved name` + 42
+`unresolved type` + 4 `ambiguous callable`. Two shapes, both mechanical:
+
+* the module globbed a sibling (`_Items/module_callable_types.spl` reaching
+  `ReturnScan`/`return_scan_empty`/`merge_return_scan` only through
+  `use ..._Items.module_lowering.*`);
+* the module already had a brace list and the name was simply absent from it
+  (`module_surface_export_index.spl` missing `module_surface_name_position`).
+
+Two required the fix in the **owner**, not the importer: `ModuleSurfaceEnum` is
+used in declaration position by `_Items/module_lowering.spl:299`, so importing it
+in the 7 blamed modules cleared only 2 — naming it in `module_lowering.spl`
+cleared the rest. `target_presets.spl` imported `BackendCompileOptions` from
+`compiler.common.driver_core_types`, which does not declare or re-export it at
+all; repointed at `compiler.backend.backend.backend_types`.
+
+### Item 4 — it is NOT "the owner resolves to the wrong symbol"
+
+RUN 11 concluded owner-SymbolId aliasing from a probe that is **not
+trustworthy**: `HIR_MEMBER_VIS_TRACE` is a module-local `val` bool, and it fires
+for only a fraction of the denials it guards — measured 61 errors against **2**
+traces in `jit_instantiator.spl`, 194 errors against 182 traces overall. Counts
+from that probe cannot be used. (Same family as the module-global-init defects
+already recorded for this seed.)
+
+The instrument that does work is the ERROR MESSAGE itself — it is emitted once
+per denial by construction. Embedding the owner's identity in it (temporarily)
+gave, for every residual denial:
+
+```
+field `in_progress` is not visible ... [owner_raw=8 present=1 bare_hit=1 comp_len=-1 name=JitInstantiator comp=-]
+                                        owner_raw=152 ... name=SymbolTable
+                                        owner_raw=104 ... name=HirConst
+```
+
+* `name=JitInstantiator` — **the owner resolves to the CORRECT symbol.** Not
+  aliasing. RUN 11's conclusion is superseded for this residue.
+* `bare_hit=1` — an `rt_dict_contains(self.struct_field_access_by_name,
+  owner_symbol.name)` probe AT THE CALL SITE says the composite IS registered,
+  in the module being lowered. **The same call, on the same `self`, in the same
+  lowering context, is TRUE in one `me` method and effectively false/nil-poisoned
+  inside `composite_name_for_owner_raw` — that discrepancy is the sharpest clue
+  in this record.**
+* `comp_len=-1` — and yet `composite_name_for_owner_raw` answers a value whose
+  `.len()` is **-1**, i.e. **nil, not ""**. A nil makes the `result == ""` guard
+  false, so the bare-name fallback is skipped and every field of that composite
+  is denied at once.
+
+So the blocker is a value-representation defect: a `text` accumulator that comes
+back nil across an `if val ... =` optional binding / class-field `Dict` read, not
+a lookup-order or visibility problem.
+
+Two diagnostic facts worth keeping: a **method call inside string interpolation**
+(`"...{self.f(x)}..."`) lowered to `nil` for the whole string on this path
+(189/193 diagnostics read `[nil]`); hoisting the call to a local fixed it.
+
+### Three rewrites of `composite_name_for_owner_raw` were built and run — all worse
+
+| variant | reach | total fatal |
+|---|---|---|
+| **kept** (`var result` + positive-only memo) | **692** | **115-118** |
+| memo removed (recompute every call) | 389 | 6565 |
+| an interpolation rewrite (see correction below) | 435 | 9391 |
+| early-return restructure, memo kept | 692 | 135 |
+
+The memo is load-bearing (it makes a composite name stick once the owner's
+fields are registered). **Attribution correction (2026-08-24):** the
+interpolation row above was NOT an edit to `composite_name_for_owner_raw` — a
+first-occurrence text replacement put it in the SIBLING
+`composite_name_for_base_raw`, and it was never reverted, so it was still
+present in the later runs that measured 692/692 with **0** fatals. It therefore
+did not cause the 435/9391 collapse, and that collapse is **unexplained**. Both
+functions are now back to origin's `+` form. The other three rows stand.
+
+### What DID move item 4, and what is left
+
+* **Owner-kind discriminator** (`hir_symbol_kind_owns_field_metadata`): only a
+  `Class` or `Struct` symbol can own retained field metadata, so an owner that
+  resolves to a Function/Variable/Parameter/Field/Enum answers **unknown (-1)**
+  instead of denied. 194 -> 102 fatals, reach held at 692. This is deliberately
+  NOT the blanket -1 fenced in RUN 11 (that one let every undescribable owner
+  through and cost ~20x).
+* **Positive-only memo**: never cache a MISS. Imported composites are published
+  lazily, so an early miss was freezing "" for the whole module. Error modules
+  10 -> 3.
+* **Left**: the nil-`text` defect above, worth 113 of the remaining 115 fatals in
+  exactly two modules. Fixing it needs work on the value representation, not on
+  this function — three restructures of it are already excluded by measurement.
+
+Stage 4 / Stage 5 / MCP / deploy remain unreached; `--no-mcp` was NOT passed.
+Exactly two stochastic phase-2 `flat_ast_to_module` SIGSEGVs were seen across
+the 14 stage-3 runs this session (pre-existing class, RUN 8 arm B1).
+
+---
+
+## RUN 13 (2026-08-24) — the HIR phase is CLEAN (0 fatals, 692/692); the blocker moved to phase 4 `substitute_stmt`
+
+### The last two field-visibility populations, and why the landed origin fix is not sufficient alone
+
+Two changes, measured SEPARATELY on this tree (working copy at `cde14a397aa`;
+origin/main is ahead and this tree could not be rebased in-lane):
+
+| tree | runs reaching HIR | HIR modules | `[hir-fatal-count]` sum | error modules |
+|---|---|---|---|---|
+| RUN 12 final | 2 | 692 | 118 / 115 | 5 / 3 |
+| + module-qualified composite key **only** (ported from origin `467f8f66757`) | 1 | 692 | **115** (unchanged) | 3 |
+| + call-site composite recovery **only** | 2 | 692 | **0** | 0 |
+| **+ both** | 1 | 692 | **0** | 0 |
+
+`467f8f66757` ("key the composite field index per declaring module, not by bare
+type name") is a correct and necessary fix — `JitInstantiator` really is declared
+twice, by `99.loader/jit_instantiator.spl` and `99.loader/loader/jit_instantiator.spl`
+— but on this tree it changed the residual count by **zero**. The reason is that
+the defect is not the KEY, it is that `composite_name_for_owner_raw` answers a
+value whose `.len()` is **-1**, i.e. NIL rather than "", so its own
+`result == ""` guard skips the fallback and **no key of any spelling is ever
+tried**. Both are kept: the qualified key is the right registration, and the
+call-site recovery is what makes any key reachable at all.
+
+The call-site recovery re-derives the composite key in `field_access_for_expr`
+(qualified first, bare second) using the `var` + field-copy idiom that a probe
+measured working in a sibling `me` method on the same `self` — the same
+`rt_dict_contains(self.struct_field_access_by_name, <owner name>)` call reported
+TRUE there for every residual denial while the callee answered nil for the same
+owner in the same call. It ends in the same `fields[field_name]` verdict the
+success path uses, so it is not a permissive bypass and a genuinely private
+field still denies.
+
+### New state, and the new blocker
+
+Three separate runs now report `[hir-fatal-count]` sum **0** over **692/692**
+HIR modules, with `phase3:hir_typecheck:done` reached. Stage 3 then enters
+`phase4:monomorphize:start`, prints `specialize`, and SIGSEGVs:
+
+```
+compiler__mono__monomorphize__type_subst__substitute_stmt +1520
+EXC_BAD_ACCESS KERN_INVALID_ADDRESS at 0xf198715900000000
+```
+
+Same symbol and same offset in both runs that got that far — this one looks
+deterministic, unlike the two pre-existing stochastic classes still seen this
+session (`flat_ast_to_module` in phase 2, and one `lower_hir_block`).
+
+`STAGE3_RC` is now 139 from that crash rather than 1 from HIR errors. Stage 4 /
+Stage 5 / MCP / deploy remain unreached; `--no-mcp` was NOT passed.
+
+### Note on the memo (asked for explicitly)
+
+The `composite_name_by_owner_symbol` memo in `expression_support.spl` is
+PRE-EXISTING, not newly added, and is not the RUN 7 completion memo. The only
+change made to it is to STOP caching MISSES — `if result != "":` around the
+store — which strictly narrows what it retains. Its effect was measured on error
+COUNTS, not reach: error modules 10 -> 3 with reach unchanged at 692/692. Its
+removal was also measured, and collapses the build (reach 389, 6565 fatals).
+
+---
+
+## RUN 14 (2026-08-24) — rebased onto origin; the HIR result SURVIVES, and stage 3's outcome is BIMODAL
+
+### Rebase
+
+The working tree was rebased twice by 3-way merge (`git merge-file`, base
+`cde14a397aa`) — first onto `5ad1cea0e61`, then onto `d445acf3e84`, which
+carries `0560611bd6b` (bool in the `Visibility` slot of 25 `define()` calls).
+After dropping every change origin had landed independently, the delta is **26
+`.spl` files, all forward**: 24 are one- or two-line explicit named imports,
+`_Items/module_build.spl` swaps a private-var read for its accessor, and
+`_Expressions/expression_support.spl` carries the three logic changes.
+
+`467f8f66757`'s composite-qualified key is **origin's exact version** — the port
+made in this lane before the rebase was code-identical and its comment was
+replaced by origin's during the merge. The only delta in that file is two import
+lines.
+
+Six of the import fixes turned out to be duplicate work: origin's `4217e91e327`
+made the same change to `primary_expr.spl`, `outline.spl`, `target_presets.spl`,
+`backend_api.spl`, `regalloc.spl` and the `builtin_blocks_*` trio. Those files
+were reverted to origin's spelling rather than re-applied.
+
+### THE OUTCOME IS BIMODAL — this invalidates several earlier single-run verdicts
+
+Same binary, same tree, same command:
+
+| mode | HIR modules | `[hir-fatal-count]` sum | signature |
+|---|---|---|---|
+| GOOD | **692 / 692** | **0** | proceeds to `phase4:monomorphize:start` |
+| BAD | 389-435 | ~6500 | unresolved MirFunction ~450 / MirModule ~375 / MirOperand ~300 / MirBlock ~230 / ExportAttr ~205 / LayoutAttr ~205 / DriverManifestAttr ~165, + ~1600 `ambiguous explicit callable dependency` |
+
+GOOD observed in **5 runs across 3 trees**; BAD in **3**. A third failure mode,
+the pre-existing stochastic phase-2 `flat_ast_to_module` SIGSEGV, accounts for
+the rest.
+
+**Two conclusions recorded in RUN 12/13 are hereby withdrawn.** The
+"interpolation rewrite collapsed it to 435 / 9391" and "memo removed -> 389 /
+6565" rows were each a SINGLE run, and their error profiles are byte-for-byte
+the BAD mode above. Neither edit was ever shown to cause anything. The memo and
+the `+` chain are *not disproven*, but they are not proven load-bearing either;
+the inline comment now says so. Any future verdict on that function needs >= 4
+runs judged on the GOOD/BAD ratio.
+
+**A logging trap that produced two more false results.** The stage-3 resume can
+exit 1 at its git-state preflight (`dirty_fingerprint` before != after) without
+printing a single line, and when it does it leaves the PREVIOUS run's
+`stage3-native-build.log` in place. Three "runs" in this session were the same
+log read three times — the RUN 12 row claiming "166 / 166 / 166 over 3 runs" was
+**one** run. Always md5 the copied log before believing a repetition. The
+fingerprint drifts once after any operation that rewrites the git index, so a
+fresh `--stop-after-stage2` + re-mint settles it.
+
+### Where stage 3 stops now
+
+In GOOD mode: all 692 HIR modules, 0 fatals, `phase3:hir_typecheck:done`, then
+
+```
+phase4:monomorphize:start ... specialize
+compiler__mono__monomorphize__type_subst__substitute_stmt +1520
+EXC_BAD_ACCESS KERN_INVALID_ADDRESS at 0xf198715900000000   (rc=139)
+```
+
+Same symbol and offset in every GOOD-mode run, on three different trees.
+`0560611bd6b` does **not** clear it: that defect aborts in the HIR *codec* on the
+`compile --format=smf` cache-store path, which a `native-build` never reaches,
+and the crash is unchanged with it applied. Stage 4 / Stage 5 / MCP / local
+deploy remain unreached; `--no-mcp` was never passed and no deployed artifact
+was touched.
