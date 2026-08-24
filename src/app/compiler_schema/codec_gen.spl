@@ -544,7 +544,11 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
             for f in fields:
                 parts.push(_emit_enc(u, f.type_text, "b_" + f.binder, "            ", c))
             idx = idx + 1
-        parts.push("        case _: hc_bad_tag(\"" + decl.name + "\", -1)\n")
+        # Encoding sees live compiler state, not an untrusted cache blob. A
+        # malformed/unsupported enum must refuse this cache entry and let the
+        # owning build continue from its in-memory HIR; only decoding a stored
+        # unknown tag is process-fatal.
+        parts.push("        case _: w.reject(\"unencodable " + decl.name + " enum\")\n")
         return parts.join("")
     var body: [text] = []
     for f in decl.fields:
@@ -588,7 +592,8 @@ fn emit_codec_file(u: CodecUniverse) -> text:
     parts.push("#\n# HirModule <-> line blob codec. One encoder and one decoder per\n")
     parts.push("# declaration reachable from HirModule (see codec_gen.spl for the format).\n")
     parts.push("# Enum arms are exhaustive by construction; the trailing `_` arm only\n")
-    parts.push("# satisfies the seed's match checker and routes to hc_bad_tag, which exits.\n\n")
+    parts.push("# satisfies the seed's match checker. Encoders reject the cache entry;\n")
+    parts.push("# decoders route an unknown stored tag to hc_bad_tag, which exits.\n\n")
     parts.push(codec_use_lines() + "\n")
     val order = codec_emit_order(u)
     for name in order:

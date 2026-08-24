@@ -1,7 +1,7 @@
 # Stage 3 self-host SIGSEGV while lowering `values_equal` after full HIR
 
 **Date:** 2026-08-25  
-**Status:** OPEN — blocks Stage 4 deployment and self-hosted GPU verification  
+**Status:** FIX IMPLEMENTED — focused regression evidence pending rebuilt compiler
 **Platform:** `x86_64-unknown-linux-gnu`, LLVM backend, dynload runtime
 
 ## Reproduction
@@ -36,13 +36,20 @@ The wrapper exited 139 (`Segmentation fault (core dumped)`). Evidence is in
 This is not the older `n_modules=0` failure: this run retained the complete
 module set through HIR and entered real MIR function lowering.
 
-## Next investigation
+## Focused reproduction and root cause
 
-Trace the first expression in `BackendInterpreter.values_equal` and remove the
-unresolved method-call-to-zero path rather than masking the crash. Inspect the
-`Value` enum comparison arms and the static owner/type available to each `.get`
-call. A focused MIR-lowering fixture must reproduce the failure before another
-full bootstrap attempt.
+Two ignored, lane-local fixtures reduced the failure below `values_equal`:
+an enum-only match and a single explicit enum match both reach MIR statement 0
+and terminate, while an adjacent `if` lowers. The common path copied
+`HirMatchArm` composites into a fresh `norm_arms` array and then read
+`norm_arms[i].pattern.kind`. The admitted Stage-2 engine erases the pushed
+composite element shape at that boundary.
+
+`lower_match_case` now detects explicit enum/wildcard-only arms on the original
+carrier and calls `lower_enum_match` before constructing `norm_arms`. Binding
+and mixed-pattern cases retain the normalization path. The source contract is
+pinned in `bootstrap_binary_lowering_source_spec.spl`; execution evidence still
+requires rebuilding the affected compiler provider.
 
 The repository's mandatory three-cycle bootstrap cap was reached in the GPU
 dynamic-loading lane. Do not retry this full bootstrap in the same session.

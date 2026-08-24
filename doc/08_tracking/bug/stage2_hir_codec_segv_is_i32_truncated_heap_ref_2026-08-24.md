@@ -696,11 +696,13 @@ Every actionable word of this is wrong for the encoder half:
   reader to the one file that is not at fault. This misdirection is what the
   count above had to be spent to refute.
 
-The producing site is the generated encoder catch-all. A useful message would
-name the SLOT being encoded and dump the offending value's runtime tag /
-discriminant, and would say "a wrongly-typed value reached the encoder", not
-"regenerate". Filed here rather than fixed: it needs a change to the codec
-GENERATOR, not to the generated file, which is out of scope for this lane.
+The producing site is the generated encoder catch-all. The generator now makes
+that arm call `HirCodecWriter.reject`: malformed live state refuses only the
+cache entry, matching the existing `hir_cache_store` contract, while decoder
+unknown tags remain fatal through `hc_bad_tag`. Both generator and generated
+output are pinned by the codec source spec. This deliberately does not claim to
+repair the wrongly typed producer; it prevents an optional cache from killing
+an otherwise progressing build.
 
 ### Next lane's frontier
 

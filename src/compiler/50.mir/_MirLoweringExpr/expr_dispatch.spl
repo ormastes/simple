@@ -4374,6 +4374,30 @@ impl MirLowering:
         scrutinee is evaluated once into a temp to avoid duplicating side
         effects.
         """
+        # An explicit enum-only match needs no Binding -> Enum repair. Route
+        # its original arm carrier directly into lower_enum_match before
+        # constructing `norm_arms`: under the admitted Stage-2 engine, pushing
+        # HirMatchArm values into a fresh array erases their composite element
+        # shape, and the later `norm_arms[i].pattern.kind` read terminates MIR
+        # lowering at statement 0. This is the exact `values_equal` Stage-3
+        # bootstrap failure. Wildcard is allowed as the ordinary default arm;
+        # any Binding or other pattern keeps the normalization path below.
+        var direct_enum_only = true
+        var direct_enum_seen = false
+        var direct_enum_i = 0
+        while direct_enum_i < arms.len():
+            val direct_arm = arms[direct_enum_i]
+            match direct_arm.pattern.kind:
+                case Enum(_, _, _):
+                    direct_enum_seen = true
+                case Wildcard:
+                    ()
+                case _:
+                    direct_enum_only = false
+            direct_enum_i = direct_enum_i + 1
+        if direct_enum_seen and direct_enum_only:
+            return self.lower_enum_match(scrutinee, arms, expected_type)
+
         # Bare payload-less variant patterns (`case Green:`) arrive here as
         # HirPatternKind.Binding(symbol, _): the frontend (convert_nodes.spl)
         # cannot tell an unqualified enum-variant name from a genuine capture
