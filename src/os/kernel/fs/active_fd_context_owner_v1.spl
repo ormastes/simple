@@ -1,0 +1,342 @@
+"""Dispatch-scoped authority for the legacy active descriptor context.
+
+The owner deliberately serializes the complete dispatch scope.  A lease is an
+opaque handle, not a copied descriptor table: fd/open/dup/close and backend
+close adapters must present it before touching the compatibility fd table.
+This module does not call that table, a syscall, or backend I/O.
+"""
+
+use std.thread_sffi.{
+    mutex_raw_create, mutex_raw_lock, mutex_raw_unlock, thread_current_id
+}
+use os.kernel.fs.fd_table_descriptor_owner_support_v1.{
+    FdTaskLifecycleKeyV1, fd_task_lifecycle_key_valid_v1
+}
+
+pub val ACTIVE_FD_CONTEXT_LIMIT_V1: i32 = 256
+val _ACTIVE_FD_CONTEXT_GENERATION_MAX_V1: u64 = 0xffffffffffffffffu64
+
+pub enum ActiveFdOperationV1:
+    Descriptor
+    Open
+    Dup
+    Close
+    BackendClose
+
+enum ActiveFdLeasePurposeV1:
+    Dispatch
+    CleanupRetry
+
+pub(package) struct ActiveFdContextLeaseV1:
+    _slot: i32
+    _slot_generation: u64
+    _nonce: u64
+    _key: FdTaskLifecycleKeyV1
+    _context_generation: u64
+    _owner_thread_id: i64
+    _purpose: ActiveFdLeasePurposeV1
+
+pub struct ActiveFdContextSnapshotV1:
+    key: FdTaskLifecycleKeyV1
+    context_generation: u64
+    cleanup_reserved: bool
+    dispatch_active: bool
+
+struct ActiveFdContextSlotV1:
+    occupied: bool
+    slot_generation: u64
+    key: FdTaskLifecycleKeyV1
+    context_generation: u64
+    cleanup_reserved: bool
+    active_nonce: u64
+
+struct ActiveFdContextOwnerV1:
+    initialized: bool
+    quarantined: bool
+    next_nonce: u64
+    active_slot: i32
+    slots: [ActiveFdContextSlotV1]
+
+fn _active_fd_empty_key_v1() -> FdTaskLifecycleKeyV1:
+    FdTaskLifecycleKeyV1(task_id: 0u64, lifecycle_generation: 0u64)
+
+fn _active_fd_empty_slot_v1(generation: u64) -> ActiveFdContextSlotV1:
+    ActiveFdContextSlotV1(
+        occupied: false, slot_generation: generation,
+        key: _active_fd_empty_key_v1(), context_generation: 1u64,
+        cleanup_reserved: false, active_nonce: 0u64)
+
+fn _active_fd_empty_slots_v1() -> [ActiveFdContextSlotV1]:
+    val slots: [ActiveFdContextSlotV1] = []
+    var i = 0
+    while i < ACTIVE_FD_CONTEXT_LIMIT_V1:
+        slots.push(_active_fd_empty_slot_v1(1u64))
+        i = i + 1
+    slots
+
+val _active_fd_mutex_v1: i64 = mutex_raw_create()
+var _active_fd_owner_v1 = ActiveFdContextOwnerV1(
+    initialized: false, quarantined: false, next_nonce: 1u64,
+    active_slot: -1, slots: [])
+
+fn _active_fd_initialize_v1():
+    if _active_fd_owner_v1.initialized: return
+    _active_fd_owner_v1.slots = _active_fd_empty_slots_v1()
+    _active_fd_owner_v1.initialized = true
+
+fn _active_fd_find_key_v1(key: FdTaskLifecycleKeyV1) -> i32:
+    var i = 0
+    while i < _active_fd_owner_v1.slots.len():
+        val slot = _active_fd_owner_v1.slots[i]
+        if (slot.occupied and slot.key.task_id == key.task_id and
+            slot.key.lifecycle_generation == key.lifecycle_generation):
+            return i
+        i = i + 1
+    -1
+
+fn _active_fd_find_free_v1() -> i32:
+    var i = 0
+    while i < _active_fd_owner_v1.slots.len():
+        if not _active_fd_owner_v1.slots[i].occupied: return i
+        i = i + 1
+    -1
+
+fn _active_fd_lease_matches_v1(lease: ActiveFdContextLeaseV1) -> bool:
+    if lease._owner_thread_id <= 0 or thread_current_id() != lease._owner_thread_id:
+        return false
+    if lease._slot < 0 or lease._slot >= _active_fd_owner_v1.slots.len():
+        return false
+    if _active_fd_owner_v1.active_slot != lease._slot: return false
+    val slot = _active_fd_owner_v1.slots[lease._slot]
+    (slot.occupied and slot.slot_generation == lease._slot_generation and
+     slot.active_nonce != 0u64 and slot.active_nonce == lease._nonce and
+     slot.context_generation == lease._context_generation and
+     slot.key.task_id == lease._key.task_id and
+     slot.key.lifecycle_generation == lease._key.lifecycle_generation)
+
+pub fn active_fd_operation_requires_lease_v1(
+    operation: ActiveFdOperationV1
+) -> bool:
+    match operation:
+        case ActiveFdOperationV1.Descriptor: true
+        case ActiveFdOperationV1.Open: true
+        case ActiveFdOperationV1.Dup: true
+        case ActiveFdOperationV1.Close: true
+        case ActiveFdOperationV1.BackendClose: true
+
+pub(package) fn active_fd_context_begin_v1(
+    key: FdTaskLifecycleKeyV1
+) -> Result<ActiveFdContextLeaseV1, text>:
+    if not fd_task_lifecycle_key_valid_v1(key): return Err("invalid-lifecycle")
+    if _active_fd_mutex_v1 <= 0 or not mutex_raw_lock(_active_fd_mutex_v1):
+        return Err("dispatch-lock-failed")
+    if _active_fd_owner_v1.quarantined:
+        _ = mutex_raw_unlock(_active_fd_mutex_v1)
+        return Err("owner-quarantined")
+    _active_fd_initialize_v1()
+    var index = _active_fd_find_key_v1(key)
+    if index < 0:
+        index = _active_fd_find_free_v1()
+        if index < 0:
+            _ = mutex_raw_unlock(_active_fd_mutex_v1)
+            return Err("context-capacity")
+        var fresh = _active_fd_owner_v1.slots[index]
+        fresh.occupied = true
+        fresh.key = key
+        fresh.context_generation = 1u64
+        fresh.cleanup_reserved = false
+        fresh.active_nonce = 0u64
+        _active_fd_owner_v1.slots[index] = fresh
+    val current = _active_fd_owner_v1.slots[index]
+    if current.cleanup_reserved:
+        _ = mutex_raw_unlock(_active_fd_mutex_v1)
+        return Err("cleanup-reserved")
+    if (_active_fd_owner_v1.next_nonce == 0u64 or
+        _active_fd_owner_v1.next_nonce == _ACTIVE_FD_CONTEXT_GENERATION_MAX_V1):
+        _active_fd_owner_v1.quarantined = true
+        _ = mutex_raw_unlock(_active_fd_mutex_v1)
+        return Err("nonce-exhausted")
+    val nonce = _active_fd_owner_v1.next_nonce
+    val owner_thread_id = thread_current_id()
+    if owner_thread_id <= 0:
+        _ = mutex_raw_unlock(_active_fd_mutex_v1)
+        return Err("thread-identity-unavailable")
+    _active_fd_owner_v1.next_nonce = nonce + 1u64
+    var slot = current
+    slot.active_nonce = nonce
+    _active_fd_owner_v1.slots[index] = slot
+    _active_fd_owner_v1.active_slot = index
+    Ok(ActiveFdContextLeaseV1(
+        _slot: index, _slot_generation: slot.slot_generation, _nonce: nonce,
+        _key: key, _context_generation: slot.context_generation,
+        _owner_thread_id: owner_thread_id,
+        _purpose: ActiveFdLeasePurposeV1.Dispatch))
+
+pub(package) fn active_fd_context_resume_cleanup_v1(
+    key: FdTaskLifecycleKeyV1
+) -> Result<ActiveFdContextLeaseV1, text>:
+    if not fd_task_lifecycle_key_valid_v1(key): return Err("invalid-lifecycle")
+    if _active_fd_mutex_v1 <= 0 or not mutex_raw_lock(_active_fd_mutex_v1):
+        return Err("dispatch-lock-failed")
+    if _active_fd_owner_v1.quarantined:
+        _ = mutex_raw_unlock(_active_fd_mutex_v1)
+        return Err("owner-quarantined")
+    _active_fd_initialize_v1()
+    val index = _active_fd_find_key_v1(key)
+    if index < 0:
+        _ = mutex_raw_unlock(_active_fd_mutex_v1)
+        return Err("cleanup-context-missing")
+    val current = _active_fd_owner_v1.slots[index]
+    if not current.cleanup_reserved:
+        _ = mutex_raw_unlock(_active_fd_mutex_v1)
+        return Err("cleanup-not-reserved")
+    if (_active_fd_owner_v1.next_nonce == 0u64 or
+        _active_fd_owner_v1.next_nonce == _ACTIVE_FD_CONTEXT_GENERATION_MAX_V1):
+        _active_fd_owner_v1.quarantined = true
+        _ = mutex_raw_unlock(_active_fd_mutex_v1)
+        return Err("nonce-exhausted")
+    val nonce = _active_fd_owner_v1.next_nonce
+    val owner_thread_id = thread_current_id()
+    if owner_thread_id <= 0:
+        _ = mutex_raw_unlock(_active_fd_mutex_v1)
+        return Err("thread-identity-unavailable")
+    _active_fd_owner_v1.next_nonce = nonce + 1u64
+    var slot = current
+    slot.active_nonce = nonce
+    _active_fd_owner_v1.slots[index] = slot
+    _active_fd_owner_v1.active_slot = index
+    Ok(ActiveFdContextLeaseV1(
+        _slot: index, _slot_generation: slot.slot_generation, _nonce: nonce,
+        _key: key, _context_generation: slot.context_generation,
+        _owner_thread_id: owner_thread_id,
+        _purpose: ActiveFdLeasePurposeV1.CleanupRetry))
+
+pub(package) fn active_fd_context_accepts_v1(
+    lease: ActiveFdContextLeaseV1, operation: ActiveFdOperationV1
+) -> bool:
+    if not active_fd_operation_requires_lease_v1(operation): return false
+    if not _active_fd_lease_matches_v1(lease): return false
+    if lease._purpose == ActiveFdLeasePurposeV1.CleanupRetry:
+        return operation == ActiveFdOperationV1.BackendClose
+    val slot = _active_fd_owner_v1.slots[lease._slot]
+    if slot.cleanup_reserved:
+        return operation == ActiveFdOperationV1.BackendClose
+    true
+
+pub(package) fn active_fd_context_note_mutation_v1(
+    lease: ActiveFdContextLeaseV1
+) -> Result<ActiveFdContextLeaseV1, text>:
+    if not _active_fd_lease_matches_v1(lease): return Err("stale-lease")
+    if lease._purpose != ActiveFdLeasePurposeV1.Dispatch:
+        return Err("cleanup-retry-cannot-mutate")
+    var slot = _active_fd_owner_v1.slots[lease._slot]
+    if slot.context_generation == _ACTIVE_FD_CONTEXT_GENERATION_MAX_V1:
+        _active_fd_owner_v1.quarantined = true
+        return Err("context-generation-exhausted")
+    slot.context_generation = slot.context_generation + 1u64
+    _active_fd_owner_v1.slots[lease._slot] = slot
+    Ok(ActiveFdContextLeaseV1(
+        _slot: lease._slot, _slot_generation: lease._slot_generation,
+        _nonce: lease._nonce, _key: lease._key,
+        _context_generation: slot.context_generation,
+        _owner_thread_id: lease._owner_thread_id,
+        _purpose: lease._purpose))
+
+pub(package) fn active_fd_context_prepare_fork_v1(
+    parent: ActiveFdContextLeaseV1, child: FdTaskLifecycleKeyV1
+) -> Result<(), text>:
+    if not _active_fd_lease_matches_v1(parent): return Err("stale-parent-lease")
+    if parent._purpose != ActiveFdLeasePurposeV1.Dispatch:
+        return Err("cleanup-retry-cannot-fork")
+    if not fd_task_lifecycle_key_valid_v1(child): return Err("invalid-child-lifecycle")
+    if child.task_id == parent._key.task_id: return Err("child-task-alias")
+    if _active_fd_find_key_v1(child) >= 0: return Err("child-context-exists")
+    val index = _active_fd_find_free_v1()
+    if index < 0: return Err("context-capacity")
+    var slot = _active_fd_owner_v1.slots[index]
+    slot.occupied = true
+    slot.key = child
+    slot.context_generation = 1u64
+    slot.cleanup_reserved = false
+    slot.active_nonce = 0u64
+    _active_fd_owner_v1.slots[index] = slot
+    Ok(())
+
+pub(package) fn active_fd_context_reserve_cleanup_v1(
+    lease: ActiveFdContextLeaseV1
+) -> Result<(), text>:
+    if not _active_fd_lease_matches_v1(lease): return Err("stale-lease")
+    if lease._purpose != ActiveFdLeasePurposeV1.Dispatch:
+        return Err("cleanup-retry-already-reserved")
+    var slot = _active_fd_owner_v1.slots[lease._slot]
+    if slot.cleanup_reserved: return Err("cleanup-already-reserved")
+    slot.cleanup_reserved = true
+    _active_fd_owner_v1.slots[lease._slot] = slot
+    Ok(())
+
+pub(package) fn active_fd_context_finish_cleanup_v1(
+    lease: ActiveFdContextLeaseV1, backend_close_complete: bool
+) -> Result<bool, text>:
+    if not _active_fd_lease_matches_v1(lease): return Err("stale-lease")
+    var slot = _active_fd_owner_v1.slots[lease._slot]
+    if not slot.cleanup_reserved: return Err("cleanup-not-reserved")
+    if not backend_close_complete:
+        # Retain the reservation and context for an explicit retry.  The
+        # dispatch lease still ends below, so no mutex is stranded.
+        slot.active_nonce = 0u64
+        _active_fd_owner_v1.slots[lease._slot] = slot
+        _active_fd_owner_v1.active_slot = -1
+        if not mutex_raw_unlock(_active_fd_mutex_v1):
+            _active_fd_owner_v1.quarantined = true
+            return Err("dispatch-unlock-failed")
+        return Ok(false)
+    if slot.slot_generation == _ACTIVE_FD_CONTEXT_GENERATION_MAX_V1:
+        _active_fd_owner_v1.quarantined = true
+        slot.active_nonce = 0u64
+        _active_fd_owner_v1.slots[lease._slot] = slot
+        _active_fd_owner_v1.active_slot = -1
+        _ = mutex_raw_unlock(_active_fd_mutex_v1)
+        return Err("slot-generation-exhausted")
+    val next_generation = slot.slot_generation + 1u64
+    _active_fd_owner_v1.slots[lease._slot] = _active_fd_empty_slot_v1(next_generation)
+    _active_fd_owner_v1.active_slot = -1
+    if not mutex_raw_unlock(_active_fd_mutex_v1):
+        _active_fd_owner_v1.quarantined = true
+        return Err("dispatch-unlock-failed")
+    Ok(true)
+
+pub(package) fn active_fd_context_end_v1(
+    lease: ActiveFdContextLeaseV1
+) -> Result<(), text>:
+    if not _active_fd_lease_matches_v1(lease): return Err("stale-lease")
+    var slot = _active_fd_owner_v1.slots[lease._slot]
+    if slot.cleanup_reserved:
+        # Fail closed without stranding the mutex.  Reservation remains, so a
+        # later cleanup-only lease can retry the backend close.
+        slot.active_nonce = 0u64
+        _active_fd_owner_v1.slots[lease._slot] = slot
+        _active_fd_owner_v1.active_slot = -1
+        if not mutex_raw_unlock(_active_fd_mutex_v1):
+            _active_fd_owner_v1.quarantined = true
+            return Err("dispatch-unlock-failed")
+        return Err("cleanup-finish-required")
+    slot.active_nonce = 0u64
+    _active_fd_owner_v1.slots[lease._slot] = slot
+    _active_fd_owner_v1.active_slot = -1
+    if not mutex_raw_unlock(_active_fd_mutex_v1):
+        _active_fd_owner_v1.quarantined = true
+        return Err("dispatch-unlock-failed")
+    Ok(())
+
+pub(package) fn active_fd_context_snapshot_v1(
+    lease: ActiveFdContextLeaseV1
+) -> Result<ActiveFdContextSnapshotV1, text>:
+    if not _active_fd_lease_matches_v1(lease): return Err("stale-lease")
+    val slot = _active_fd_owner_v1.slots[lease._slot]
+    Ok(ActiveFdContextSnapshotV1(
+        key: slot.key, context_generation: slot.context_generation,
+        cleanup_reserved: slot.cleanup_reserved,
+        dispatch_active: slot.active_nonce != 0u64))
+
+export ACTIVE_FD_CONTEXT_LIMIT_V1, ActiveFdOperationV1
+export ActiveFdContextSnapshotV1
