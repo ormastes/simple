@@ -126,3 +126,98 @@ Whether the block form also mis-lowers under native codegen is UNMEASURED:
 `SIMPLE_ALLOW_STUB_FALLBACK=1` does not produce a binary here — the worker
 wrapper dies with `failed to spawn process 'bin/simple'` (`RC=255`) for all
 fixtures including the control.
+
+## 2026-08-24 RESOLVED — the codegen localization above is WRONG; defect was a stale binary
+
+**The "codegen gap" section above is retracted.** It is a false localization and
+the next lane should not chase it.
+
+`grep -rn UnsafeBlock src/compiler_rust/compiler/src/codegen/` returning zero
+lines is the **correct and intended** state, not a defect. `unsafe` is a
+capability assertion, and the capability list is compile-time metadata:
+
+- HIR keeps the node so the safety pass can see it —
+  `hir/analysis/unsafe_ffi_checker.rs:156`, whose own header comment (`:4`) says
+  it "runs before MIR erases `UnsafeBlock`".
+- **MIR then erases it** — `mir/lower/lowering_expr.rs:234`:
+  `HirExprKind::UnsafeBlock(stmts) => self.lower_block_expr(stmts)`.
+
+Codegen consumes MIR, so it never sees `UnsafeBlock` **by design**. There was no
+codegen case to add, and none was added.
+
+### What was actually wrong
+
+The measurement that produced the codegen hypothesis used a **stale deployed
+seed binary** built before the parser fix `d2d0bec2e40` ("fix(parser): retain
+value-bound unsafe blocks"). That fix landed 2026-08-24 17:21:44 UTC; the tip it
+was measured against (`045e38290f0`) is 17:55:50 UTC — only 34 minutes later, so
+the deployed binary predated it. The source was already correct end to end
+(parser -> HIR -> MIR -> codegen); only the binary was old.
+
+Both reported signatures are producible **only** from the pre-fix AST shape (a
+call to a function named `unsafe` with `ffi` as an argument), which is why the
+interpreter — which handles `UnsafeBlock` correctly at
+`interpreter/expr/control.rs:310` — also reported `function 'unsafe' not found`:
+it never received an `UnsafeBlock` at all. Both backends failing identically
+implicated the parse, not codegen.
+
+### Evidence — freshly built seed from UNMODIFIED origin/main source
+
+`cargo build --release --bin simple` (BUILD_RC=0), binary size 60513440,
+mtime 2026-08-24 18:12. No source change of any kind:
+
+```text
+unsafe-expression-form: OK (NB_RC=0, RUN_RC=0, output [42])
+unsafe-statement-form:  OK (NB_RC=0, RUN_RC=0, output [42])
+ordinary-call-disambig: OK (NB_RC=0, RUN_RC=0, output [42])
+```
+
+**Both forms work** — answering the open question in "Required resolution": the
+expression form and the statement form both native-build AND execute, with the
+unsafe block's tail value (42) surviving MIR erasure intact. On the
+`io_runtime`-importing control fixture all three old signatures now count
+**zero**: `function 'unsafe' not found` = 0, `unresolved identifier 'ffi'` = 0,
+`env_get ... body compilation failed` = 0.
+
+### Blast-radius claim also retracted
+
+"Every `native-build` on origin/main is blocked by this defect" is false. With a
+current binary, standalone native-builds succeed. The `io_runtime`-importing
+control fixture still fails, but on an **unrelated** defect with no connection to
+`unsafe`:
+
+```text
+error: 37:1: borrow of `local(13)` may still be active at return
+       |||RELATED:6:1:borrow created here
+       |||HELP:ensure borrow ends before returning
+```
+
+plus `[hir-callable-dep-origin-unresolved] owner=std.nogc_sync_mut.io_runtime
+dependency=Option/Result`. That borrow-checker/import defect is now the
+remaining blocker for importing `io_runtime` and needs its own record; it is NOT
+this bug.
+
+### Regression gate
+
+`scripts/check/check-unsafe-block-native-build.shs` — behavioural (native-builds
+and RUNS both forms plus an ordinary-call disambiguation fixture), not a source
+grep, precisely because the erasure above makes a grep meaningless. Selftest
+first and fatal (5 fixtures); verdict last on stdout; PASS/FAIL/ERROR = 0/1/2;
+0 builds executed or a missing seed binary is ERROR, never a pass.
+
+Mutation-tested against the real mechanism — reverting `d2d0bec2e40`'s two
+parser files and rebuilding turns it RED with the exact reported signature:
+
+```text
+MUTGATE_RC=1
+FAIL — 3 case(s) checked, offender(s): unsafe-expression-form(unsafe-not-found)
+       unsafe-statement-form(unsafe-not-found)
+       ordinary-call-disambig(unsafe-not-found)
+```
+
+This doubles as an independent reproduction of the reported failure from the
+pre-fix parser, confirming the stale-binary diagnosis. Source was restored and
+`git status` verified clean before commit.
+
+**Action for other lanes: rebuild your seed. No compiler change is needed for
+`unsafe`.**
