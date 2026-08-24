@@ -1345,3 +1345,9 @@ lifetime scalar caches. Current census: 21,435 calls (2,116 explicit, 19,319
 missing), 12,112 declarations (883 tagged, 382 minimized, 10,963 untouched),
 zero signed/admitted. The rebase regression is now +16; continue with the
 remaining exact owner table rather than increasing either ratchet.
+
+HIR phase profiling now scopes both stderr flushes without changing flush or
+formatting work. Current census: 21,435 calls (2,118 explicit, 19,317 missing),
+12,112 declarations (884 tagged, 382 minimized, 10,962 untouched), zero
+signed/admitted. The rebase regression is +14; continue with the exact owner
+table, preserving debug/profile-disabled zero-work behavior.

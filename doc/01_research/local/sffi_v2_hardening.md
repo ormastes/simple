@@ -2290,3 +2290,19 @@ After a concurrent mainline change added five missing-authority calls, these
 two MIR owners leave the repository at 21,435 raw calls, 2,116 explicit, and
 19,319 missing. Declaration totals are 12,112: 883 tagged, 648 contract-
 documented, 382 minimized, 10,963 untouched, and zero signed/admitted.
+
+## HIR phase-profile flush authority
+
+Both profiler `rt_stderr_flush` calls now retain their exact positions and
+cardinality inside narrow lexical `unsafe(ffi)` scopes. The provider contract
+records that the unit-return ABI cannot distinguish flush failure from success;
+the owner therefore remains unsafe rather than verified. No buffer, string,
+clock, environment, or profiling-state operation changed.
+
+The existing scalar-profile source specification passes 3/3 after repairing
+its stale unescaped interpolation literals. Optimizer findings remain 72 before
+and after; measurement is 10.50 s / 270,228 KiB before and 10.52 s /
+272,372 KiB after. The 0.2% timing and 0.8% RSS deltas are startup noise with no
+source-level allocation or complexity change. Current totals are 21,435 raw,
+2,118 explicit, 19,317 missing; 12,112 declarations, 884 tagged, 382 minimized,
+10,962 untouched, and zero signed/admitted.

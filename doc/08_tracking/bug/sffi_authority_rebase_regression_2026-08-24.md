@@ -16,7 +16,9 @@ cardinality, yielding 21,436 raw, 2,110 explicit, and 19,326 missing: a net
 regression of 23. A later mainline rebase added five missing calls. The MIR
 return-type probe and cached method-trace owners then removed twelve missing
 rows, yielding 21,435 raw, 2,116 explicit, and 19,319 missing: a net regression
-of 16 from the original 19,303 pre-rebase measurement.
+of 16 from the original 19,303 pre-rebase measurement. Scoping the two HIR
+phase-profiler stderr flushes then yields 2,118 explicit and 19,317 missing,
+reducing the net regression to 14.
 
 ## Required resolution
 
