@@ -72,3 +72,32 @@ The owner search is shared, hot, and covered by another lane's record above.
 A blind edit could not be verified from this lane: the compiler under test is a
 prebuilt stage2, so a source change to `20.hir` has no observable effect until a
 bootstrap redeploy. Recorded rather than guessed at.
+
+## Symptom 3 (lead, not yet a diagnosis) — `use M.*` beside `use pkg.M.{...}`
+
+Three slice-B files failed lowering on a name that the file's own **relative
+bare-module wildcard** should already have imported:
+
+| file | unresolved name | imports present |
+|---|---|---|
+| `30.types/type_infer/inference_expr_calls.spl` | `InferMode` | `use type_infer_types.*` **and** `use compiler.types.type_infer_types.{HmInferContext}` |
+| `30.types/type_infer/inference_expr_ops.spl` | `TypeScheme` | same two lines |
+
+In both cases naming the missing symbol in the explicit brace-import fixed it
+(2 errors -> 0, 1 error -> 0), so the wildcard was contributing nothing for that
+name. Whether the brace-import *cancels* the wildcard, or the relative bare
+path `type_infer_types` simply never resolves, is **not established** — three
+sibling files with the identical shape (`core.spl`, `generalization.spl`,
+`inference_control.spl`, `inference_effects.spl`) compile CLEAN, which they
+would not if the wildcard were universally dead. They may simply never reference
+a wildcard-only name.
+
+Census of the shape across slice-B (`30.types`, `35.semantics`, `50.mir`,
+`60.mir_opt`, `70.backend`): **24 files** wildcard-import and brace-import the
+same module — `type_infer_types` (6), `hir_types` (9), `hir`, `mir_types`,
+`llvm` (3), `type_mapper`, `note_sdn`, and others.
+
+Deliberately NOT shipped as a lint rule: the shape is not always wrong (four
+files carry it and compile clean), so a rule that flagged all 24 would be noise
+rather than detection. Recorded here so the next lane starts from the census
+instead of rediscovering it.
