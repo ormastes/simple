@@ -2639,3 +2639,16 @@ critical-mode linting. The source entrypoint and file-scope helper remain
 compatibility adapters. A complete-field/order parity fixture preserves mode,
 group matching, physical lines, messages, and notes; it was not executed under
 the user's no-verification instruction.
+
+### RISC-V RTL canonical source lines
+
+The generated-core debuggability lint needs full source for header substring
+queries and canonical lines for source-map and output-port scans. Previously
+those two scans each split the VHDL independently after the main lint driver
+had already built its line array. A new `source + lines` kernel shares the
+driver's array and preserves the source API as a one-split adapter. This removes
+two proportional VHDL line arrays on the production path while deliberately
+leaving the separate boot-products manifest split untouched—it is different
+input with a different lifetime. Complete warning payload/order parity is
+covered using a generated RV64 bundle, but not executed under the user's
+no-verification instruction.
