@@ -535,7 +535,8 @@ fn verification_contract_obligations_from_canonical_module_v2(
     woven_function_hash: text
 ) -> ExecutionContractObligationSetV2:
     var owners: [MirFunction] = []
-    for symbol in module.functions.keys():
+    val function_symbols = module.functions.keys()
+    for symbol in function_symbols:
         val candidate = module.functions[symbol]
         if candidate.symbol.id.to_string() == owner_symbol_id:
             owners.push(candidate)
@@ -543,31 +544,33 @@ fn verification_contract_obligations_from_canonical_module_v2(
         "FV2-E-CONTRACT-MODULE-OWNER: owner SymbolId must resolve to one MIR function")
     val owner = owners[0]
     var internal_names: [text] = []
-    for symbol in module.functions.keys():
+    var function_symbols_by_name: {text: SymbolId} = {}
+    for symbol in function_symbols:
         val name = module.functions[symbol].name
-        if name == "" or internal_names.contains(name):
+        if name == "" or function_symbols_by_name.has(name):
             return ExecutionContractObligationSetV2([],
                 "FV2-E-CONTRACT-MODULE-NAME: internal function names must be nonempty and unique")
         internal_names.push(name)
+        function_symbols_by_name[name] = symbol
+    var pure_callee_names: {text: bool} = {}
     for block in owner.blocks:
         for instruction in block.instructions:
             val callee_name = verification_direct_call_name_v2(
                 instruction.kind)
             if callee_name != "" and callee_name != owner.name:
-                var callees: [MirFunction] = []
-                for symbol in module.functions.keys():
-                    if module.functions[symbol].name == callee_name:
-                        callees.push(module.functions[symbol])
-                if callees.len() != 1: return ExecutionContractObligationSetV2([],
-                    "FV2-E-CONTRACT-MODULE-CALLEE: direct call must resolve to one internal function")
-                val callee_manifest = verification_region_effect_manifest_v1(
-                    callees[0])
-                if not callee_manifest.closed():
+                if not function_symbols_by_name.has(callee_name):
                     return ExecutionContractObligationSetV2([],
-                        callee_manifest.diagnostic)
-                if not callee_manifest.effects.is_empty():
-                    return ExecutionContractObligationSetV2([],
-                        "FV2-E-CONTRACT-MODULE-CALLEE-EFFECT: initial contract composition admits only pure leaf callees")
+                        "FV2-E-CONTRACT-MODULE-CALLEE: direct call must resolve to one internal function")
+                if not pure_callee_names.has(callee_name):
+                    val callee_manifest = verification_region_effect_manifest_v1(
+                        module.functions[function_symbols_by_name[callee_name]])
+                    if not callee_manifest.closed():
+                        return ExecutionContractObligationSetV2([],
+                            callee_manifest.diagnostic)
+                    if not callee_manifest.effects.is_empty():
+                        return ExecutionContractObligationSetV2([],
+                            "FV2-E-CONTRACT-MODULE-CALLEE-EFFECT: initial contract composition admits only pure leaf callees")
+                    pure_callee_names[callee_name] = true
     val bridge = verification_contract_from_mir_v1(owner,
         woven_function_hash)
     if bridge.diagnostic != "": return ExecutionContractObligationSetV2([],
