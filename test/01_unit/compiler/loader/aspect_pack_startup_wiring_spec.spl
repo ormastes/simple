@@ -1,0 +1,183 @@
+"""
+## Purpose and audience
+Purpose: prove the aspect-pack / dynload path has a REAL product caller — the
+CLI startup hop — and not merely passing library specs.
+Audience: compiler and loader engineers maintaining the aspect/dynload lane.
+## Operator workflow
+Run `bin/simple test test/01_unit/compiler/loader/aspect_pack_startup_wiring_spec.spl
+--no-cover-check --no-self-protect` and read the per-scenario verdicts.
+## Compatibility and limitations
+Fixture packs are built in-process and written under build/test/.
+# @manual: primary
+REQ-APKS-01
+doc/01_research/local/REQ-APKS-01.md
+doc/03_plan/sys_test/REQ-APKS-01.md
+doc/04_architecture/REQ-APKS-01.md
+doc/05_design/REQ-APKS-01.md
+"""
+# @req: REQ-APKS-01
+
+# GAP #1 CLOSURE SPEC for the aspect/dynload lane
+# (doc/03_plan/compiler/aspect_dynload/aspect_dynload_lane_plan_2026-08-19.md,
+# "Order of work" step 4: "Close gap #1 — wire something. Pick ONE real caller
+# ... and prove it with a spec that fails if the wiring is removed.").
+#
+# Before this change std.common.aspect_pack had ZERO product callers: the only
+# non-spec mention was a bench, and compiler.loader.aspect_pack_section — the
+# other candidate bridge — has no importers of its own and no producer for the
+# SMF section it reads. So a custom dynamic library could not be loaded by the
+# product at all.
+#
+# The chain this spec pins, end to end:
+#   pack file on disk
+#   -> compiler.loader.aspect_pack_io.pack_read_range   (positioned read)
+#   -> std.common.aspect_pack.apk_open_pack_v1          (container validation)
+#   -> std.common.aspect_pack.apk_loader_register_pack  (registration)
+#   -> app.cli.startup_aspect_packs.startup_load_aspect_packs
+#   -> app.cli._CliMain.main_and_help.main()            (THE STARTUP CALLER)
+#
+# The last hop is asserted as a SOURCE FACT rather than by invoking main():
+# importing main_and_help pulls the whole CLI graph (office/ide/play/t32) into
+# the interpreter, and `bin/simple` here is the Rust seed, so a subprocess run
+# would not even contain this Simple change. Reading the file is the honest
+# way to assert the call site exists; comment the call out and
+# "REQ-APKS-01 startup call site" goes red immediately.
+
+use std.spec.{describe, it}
+use std.common.aspect_pack.{ApkModuleSourceV1, apk_build_pack_v1,
+    apk_open_pack_v1, apk_load_module_v1}
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.io_runtime.{file_write_bytes, file_read, mkdir_p}
+use compiler.loader.aspect_pack_io.{pack_read_range, pack_file_size}
+use app.cli.startup_aspect_packs.{startup_aspect_pack_paths,
+    startup_load_aspect_packs, STARTUP_ASPECT_PACK_ENV}
+
+val MAIN_PATH: text = "src/app/cli/_CliMain/main_and_help.spl"
+
+fn _pack_dir() -> text:
+    "build/test"
+
+fn _pack_path(tag: text) -> text:
+    "{_pack_dir()}/aspect_pack_startup_{tag}.apk"
+
+fn _payload(tag: text) -> [u8]:
+    var s = ""
+    var i = 0
+    while i < 12:
+        s = s + "startup aspect module {tag} body line {i}; "
+        i = i + 1
+    text_to_bytes(s)
+
+"""Build a one-module pack and land it on disk; returns its path."""
+fn _write_pack(tag: text, module_id: text) -> text:
+    _ = mkdir_p(_pack_dir())
+    val built = apk_build_pack_v1([
+        ApkModuleSourceV1(module_id: module_id, aspect_id: "aspect.{tag}",
+            payload: _payload(tag))
+    ])
+    val path = _pack_path(tag)
+    _ = file_write_bytes(path, built.bytes)
+    path
+
+describe "Startup aspect-pack list parsing":
+
+    it "splits a PATH-style list and drops empty entries":
+        step("Verify: `:`-separated pack list parsing")
+        # @req: REQ-APKS-01
+        expect(startup_aspect_pack_paths("")).to_equal([])
+        expect(startup_aspect_pack_paths("a.apk")).to_equal(["a.apk"])
+        expect(startup_aspect_pack_paths("a.apk::b.apk:")).to_equal(["a.apk", "b.apk"])
+
+    it "an empty spec loads nothing and is not an error":
+        step("Verify: unset environment is a no-op, exit 0")
+        # @req: REQ-APKS-01
+        val r = startup_load_aspect_packs("")
+        expect(r.exit_code).to_equal(0)
+        expect(r.requested).to_equal(0)
+        expect(r.packs_loaded).to_equal(0)
+        expect(r.loader).to_equal(-1)  # oracle: no loader created; 0 is a valid handle
+
+describe "Startup loads a custom dynamic library from disk":
+
+    it "a real pack file on disk is read, validated and registered":
+        step("Verify: startup hop loads one pack file end to end")
+        # @req: REQ-APKS-01
+        val path = _write_pack("one", "custom.lib.one")
+        val r = startup_load_aspect_packs(path)
+        expect(r.error).to_equal("")
+        expect(r.exit_code).to_equal(0)
+        expect(r.requested).to_equal(1)
+        expect(r.packs_loaded).to_equal(1)
+        expect(r.loader >= 0).to_equal(true)  # oracle: a real loader handle was created
+
+    it "two packs in one spec are both registered":
+        step("Verify: PATH-style multi-pack startup")
+        # @req: REQ-APKS-01
+        val p1 = _write_pack("multi_a", "custom.lib.a")
+        val p2 = _write_pack("multi_b", "custom.lib.b")
+        val r = startup_load_aspect_packs("{p1}:{p2}")
+        expect(r.exit_code).to_equal(0)
+        expect(r.packs_loaded).to_equal(2)
+
+    it "the bytes that reach the loader are the pack the module lives in":
+        step("Verify: the registered payload really is a loadable pack")
+        # @req: REQ-APKS-01
+        val path = _write_pack("roundtrip", "custom.lib.rt")
+        val r = startup_load_aspect_packs(path)
+        expect(r.exit_code).to_equal(0)
+        # Re-read via the same positioned-read path the startup hop uses and
+        # confirm the module is actually recoverable from those bytes.
+        val bytes = pack_read_range(path, 0, pack_file_size(path))
+        val handle = apk_open_pack_v1(bytes)
+        expect(handle.ok).to_equal(true)
+        expect(handle.module_count).to_equal(1)
+        val loaded = apk_load_module_v1(bytes, handle, "custom.lib.rt")
+        expect(loaded.found).to_equal(true)
+        expect(bytes_to_text(loaded.payload)).to_equal(bytes_to_text(_payload("roundtrip")))
+
+describe "Startup fails closed on a bad pack":
+
+    it "a missing pack file aborts startup rather than being skipped":
+        step("Verify: nonexistent pack is a hard error, exit 1")
+        # @req: REQ-APKS-01
+        val r = startup_load_aspect_packs("build/test/definitely_not_a_pack.apk")
+        expect(r.exit_code).to_equal(1)
+        expect(r.packs_loaded).to_equal(0)
+        expect(r.error.contains("not found or empty")).to_equal(true)
+
+    it "a file that is not an SMFAPK1 container is rejected before registration":
+        step("Verify: garbage bytes are refused by container validation")
+        # @req: REQ-APKS-01
+        _ = mkdir_p(_pack_dir())
+        val bad = "{_pack_dir()}/aspect_pack_startup_garbage.apk"
+        _ = file_write_bytes(bad, text_to_bytes("this is definitely not a pack container"))
+        val r = startup_load_aspect_packs(bad)
+        expect(r.exit_code).to_equal(1)
+        expect(r.error.contains("not a valid SMFAPK1 container")).to_equal(true)
+
+describe "The startup wiring exists in CLI main()":
+    """
+    These are the removal-proof assertions. They read the CLI entry source and
+    fail if the import or the call site is deleted or commented out.
+    """
+
+    it "startup call site — main_and_help.spl imports the startup hop":
+        step("Verify: CLI main imports app.cli.startup_aspect_packs")
+        # @req: REQ-APKS-01
+        val src = file_read(MAIN_PATH)
+        # NB: no braces in this needle -- `{...}` inside a text literal is
+        # string interpolation in Simple, which silently rewrites the needle.
+        expect(src.contains("use app.cli.startup_aspect_packs.")).to_equal(true)
+        expect(src.contains("apply_startup_aspect_packs")).to_equal(true)
+
+    it "startup call site — main() invokes apply_startup_aspect_packs":
+        step("Verify: CLI main() calls the startup hop and bails on failure")
+        # @req: REQ-APKS-01
+        val src = file_read(MAIN_PATH)
+        expect(src.contains("val aspect_pack_exit = apply_startup_aspect_packs()")).to_equal(true)
+        expect(src.contains("return aspect_pack_exit")).to_equal(true)
+
+    it "the startup hop is driven by a documented environment variable":
+        step("Verify: SIMPLE_ASPECT_PACKS is the operator-facing knob")
+        # @req: REQ-APKS-01
+        expect(STARTUP_ASPECT_PACK_ENV).to_equal("SIMPLE_ASPECT_PACKS")

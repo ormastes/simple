@@ -1,0 +1,132 @@
+# Startup hop that loads custom aspect packs (dynamically loadable libraries)
+# named by the environment, BEFORE any command dispatch runs.
+#
+# WHY THIS EXISTS. The aspect/dynload lane's own plan
+# (doc/03_plan/compiler/aspect_dynload/aspect_dynload_lane_plan_2026-08-19.md,
+# "Order of work" step 4) records gap #1 as the lane's single biggest risk:
+# `std.common.aspect_pack` was a fully spec-proven container with ZERO product
+# callers. `compiler.loader.aspect_pack_section` reads the pack out of an SMF
+# section, but nothing imports IT either, and no producer emits that section
+# (see that module's own TODO(aspect-pack-producer)). So the whole pack path
+# was reachable only from specs and one bench.
+#
+# This module is the product caller. It is deliberately the FILE path, not the
+# SMF-section path: a pack file on disk is a thing that exists today, whereas
+# the SMF section has no writer yet and wiring it would be another uncalled
+# feature.
+#
+# CONTRACT (mirrors apply_mem_infra_flags, the established env-driven startup
+# precedent in _CliMain/main_and_help.spl):
+#   - env unset / empty  -> do nothing, print nothing, exit code 0.
+#   - env set, all packs register -> exit code 0.
+#   - env set, ANY named pack fails -> loud error on stderr, exit code 1.
+# Fail-closed on the error case is deliberate. A dynamic library the operator
+# explicitly asked for and that cannot be loaded must not be silently skipped;
+# a silent downgrade is the exact defect class filed in
+# doc/08_tracking/bug/aspect_dynload_producer_absent_and_mode_silent_downgrade_2026-08-23.md.
+#
+# RELATION TO THE NATIVE PRE-MAIN HOOK. A second, lower startup point is
+# designed but not yet emitted: the weak C symbol
+# `__simple_startup_before_main(argc, argv)`, called after argv publication and
+# before `__libc_init_array`, gated by
+# scripts/check/check-dedicated-host-startup-wiring.shs. Both CRTs already
+# declare it; the emission in 70.backend/backend/llvm_native_link.spl is
+# missing and is owned by another lane. `apply_startup_aspect_packs()` is
+# deliberately shaped to be that hook's body when it lands: it takes no
+# arguments beyond the environment and returns 0 / nonzero, which is exactly
+# the hook's contract (nonzero => the entry returns 125). This module is not a
+# parallel mechanism; it is the Simple-side entry point that the native hook
+# will call, wired today into the one startup path that already exists.
+#
+# No `rt_*` extern is declared here on purpose. The positioned byte read comes
+# from compiler.loader.aspect_pack_io, which owns those externs and is itself
+# spec-proven; this module therefore adds zero direct runtime call sites.
+
+use std.common.aspect_pack.{apk_loader_new, apk_loader_register_pack,
+    apk_loader_last_error, apk_open_pack_v1}
+use compiler.loader.aspect_pack_io.{pack_read_range, pack_file_size}
+use app.io.env_ops.{env_get}
+
+"""Environment variable naming the aspect packs to load at startup.
+Value is a `:`-separated list of pack file paths, PATH-style."""
+val STARTUP_ASPECT_PACK_ENV: text = "SIMPLE_ASPECT_PACKS"
+
+struct StartupAspectPackLoad:
+    """Outcome of the startup aspect-pack hop.
+
+    `loader` is the apk loader handle the packs were registered into, or -1
+    when no packs were requested and no loader was created. -1 rather than 0
+    because apk_loader_new() legitimately hands out 0 as the FIRST handle, so
+    0 cannot mean "absent" (measured: the first assertion of this spec caught
+    exactly that)."""
+    loader: i64
+    requested: i64
+    packs_loaded: i64
+    exit_code: i64
+    error: text
+
+"""Split a PATH-style `:`-separated pack list, dropping empty entries."""
+fn startup_aspect_pack_paths(spec: text) -> [text]:
+    var out: [text] = []
+    for part in spec.split(":"):
+        val p = part.trim()
+        if p != "":
+            out.push(p)
+    out
+
+"""Read one pack file whole and register it with `ld`.
+
+Returns "" on success, or a human-readable reason. The read goes through
+aspect_pack_io's positioned read, which refuses a short read rather than
+handing back a truncated pack."""
+fn startup_register_aspect_pack(ld: i64, path: text) -> text:
+    val size = pack_file_size(path)
+    if size <= 0:
+        return "aspect pack not found or empty: {path}"
+    val bytes = pack_read_range(path, 0, size)
+    if bytes.len() != size:
+        return "aspect pack {path}: short read ({bytes.len()} of {size} bytes)"
+    # Validate the container BEFORE registering it: apk_loader_register_pack
+    # deliberately does not open or validate, so without this a garbage file
+    # would register happily and only fail much later, at facet-load time.
+    val handle = apk_open_pack_v1(bytes)
+    if not handle.ok:
+        return "aspect pack {path} is not a valid SMFAPK1 container: {handle.error_code} {handle.error_message}"
+    if not apk_loader_register_pack(ld, path, bytes):
+        return "aspect pack {path} rejected: {apk_loader_last_error(ld)}"
+    ""
+
+"""Load every pack named in `spec` into a fresh loader.
+
+This is the testable core of the startup hop: it takes the spec text as an
+argument rather than reading the environment, so a spec can drive it without
+mutating process state."""
+fn startup_load_aspect_packs(spec: text) -> StartupAspectPackLoad:
+    val paths = startup_aspect_pack_paths(spec)
+    if paths.len() == 0:
+        return StartupAspectPackLoad(loader: -1, requested: 0, packs_loaded: 0,
+            exit_code: 0, error: "")
+    val ld = apk_loader_new()
+    var loaded = 0
+    for path in paths:
+        val err = startup_register_aspect_pack(ld, path)
+        if err != "":
+            return StartupAspectPackLoad(loader: ld, requested: paths.len(),
+                packs_loaded: loaded, exit_code: 1, error: err)
+        loaded = loaded + 1
+    StartupAspectPackLoad(loader: ld, requested: paths.len(),
+        packs_loaded: loaded, exit_code: 0, error: "")
+
+"""Startup hop called from CLI main(): read the environment and load.
+
+Returns a process exit code; main() bails out on a nonzero result exactly as
+it does for apply_mem_infra_flags."""
+fn apply_startup_aspect_packs() -> i64:
+    val spec = env_get(STARTUP_ASPECT_PACK_ENV)
+    if spec == "":
+        return 0
+    val result = startup_load_aspect_packs(spec)
+    if result.exit_code != 0:
+        print "ERROR: {STARTUP_ASPECT_PACK_ENV}: {result.error}"
+        return result.exit_code
+    0
