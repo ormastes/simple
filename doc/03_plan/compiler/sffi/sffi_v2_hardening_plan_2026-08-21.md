@@ -1500,6 +1500,12 @@ identical corrected scan is 27.18 s / 14,540 KiB versus the same-tree old
 scanner at 40.85 s / 14,132 KiB, retaining all 289 newly visible rows. Continue
 from the corrected 21,556-call baseline.
 
+The LLVM-library unsupported-MIR policy read is now lexically scoped with zero
+normal-path work and the exact `"1"` escape hatch preserved. Optimizer findings
+remain 76; analyzer evidence is 7.64 s / 270,336 KiB before versus 9.96 s /
+270,224 KiB after. Its wildcard SFFI import keeps this ambient call invisible
+to the source census, reinforcing the resolved-HIR inventory requirement.
+
 The LLVM target module now scopes both normalized target-policy reads without
 changing provider cardinality. Optimizer findings remain 22 and paired analyzer
 evidence is 5.94 s / 271,172 KiB before versus 4.93 s / 270,708 KiB after.

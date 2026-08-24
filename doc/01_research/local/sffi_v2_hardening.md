@@ -2351,6 +2351,22 @@ the relative path once. The identical corrected scan now completes in 27.18 s /
 than the same-tree old scanner's 40.85 s, with a 408 KiB RSS increase. The
 performance blocker is resolved; signed/admitted evidence remains zero.
 
+## LLVM-library unsupported-MIR policy boundary
+
+The LLVM C-API translator's unsupported-MIR environment read now executes in a
+minimal lexical `unsafe(ffi)` block and retains the exact `"1"` opt-in. The read
+exists only on the already-unsupported instruction branch, so normal lowering
+adds no call, branch, allocation, lookup, or dispatch. Optimizer findings remain
+76; one analyzer sample changes from 7.64 s / 270,336 KiB to 9.96 s /
+270,224 KiB. The unchanged cold-path algorithm and lower RSS do not establish a
+runtime regression or speedup.
+
+The broad LLVM-lib source spec is 3/5 from unrelated stale expectations and
+does not assert this policy boundary. Because `rt_env_get` arrives through a
+wildcard SFFI import rather than a local declaration or named import, the source
+census still omits the call; totals remain 21,556 / 2,187 / 19,369. This is
+lexically minimized but not inventory-authoritative, signed, or verified.
+
 ## Cranelift backend policy boundary
 
 The Cranelift adapter's unsupported-MIR and no-mangle reads now use minimal
