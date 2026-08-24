@@ -42,19 +42,19 @@ class HirPerfAccumulator:
     unavailable_method_bodies: i64
     unknown_execution_domains: i64
     coverage_complete: bool
-    registry_valid: bool
+    registry_structurally_valid: bool
     registry_version: text
 
 impl HirPerfAccumulator:
     static fn new(
-        registry_version: text, registry_valid: bool
+        registry_version: text, registry_structurally_valid: bool
     ) -> HirPerfAccumulator:
         HirPerfAccumulator(
             collection_ops: [], functions_scanned: 0, nodes_scanned: 0,
             incomplete_ops: 0, unclassified_method_calls: 0,
             unavailable_method_bodies: 0, coverage_complete: true,
             unknown_execution_domains: 0,
-            registry_valid: registry_valid,
+            registry_structurally_valid: registry_structurally_valid,
             registry_version: registry_version)
 
     fn snapshot() -> HirPerfFacts:
@@ -67,7 +67,7 @@ impl HirPerfAccumulator:
             unavailable_method_bodies: self.unavailable_method_bodies,
             unknown_execution_domains: self.unknown_execution_domains,
             coverage_complete: self.coverage_complete,
-            registry_valid: self.registry_valid,
+            registry_structurally_valid: self.registry_structurally_valid,
             registry_version: self.registry_version)
 
 fn hir_perf_receiver_kind(expr: HirExpr) -> HirPerfReceiverKind:
@@ -169,15 +169,16 @@ fn hir_perf_unknown_op(
         allocation: HirPerfAllocationClass.Unknown,
         materializes: false,
         preserves_order: false,
-        registry_verified: false,
+        metadata_admitted: false,
         incomplete_reason: reason)
 
 fn hir_perf_method_fact(
     function: HirFunction, expr: HirExpr, receiver_expr: HirExpr,
-    method_name: text, resolution: MethodResolution, loop_depth: i64,
+    method_name: text, explicit_argument_count: i64,
+    resolution: MethodResolution, loop_depth: i64,
     registry: CollectionOperationRegistry
 ) -> ResolvedCollectionOp?:
-    if not registry.is_valid():
+    if not registry.is_structurally_valid():
         return nil
     val receiver = hir_perf_receiver_kind(receiver_expr)
     val resolved = hir_perf_resolved_method_symbol(resolution)
@@ -188,6 +189,10 @@ fn hir_perf_method_fact(
     if not summary.?:
         return nil
     val operation = summary.unwrap()
+    if operation.explicit_argument_count != explicit_argument_count:
+        return Some(hir_perf_unknown_op(
+            function, method_name, expr, loop_depth, receiver, resolved,
+            "argument count does not match operation metadata"))
     if not hir_perf_receiver_matches(operation.expected_receiver, receiver):
         return Some(hir_perf_unknown_op(
             function, method_name, expr, loop_depth, receiver, resolved,
@@ -209,7 +214,7 @@ fn hir_perf_method_fact(
         allocation: operation.allocation,
         materializes: operation.materializes,
         preserves_order: operation.preserves_order,
-        registry_verified: true,
+        metadata_admitted: true,
         incomplete_reason: ""))
 
 fn hir_perf_scan_function(
@@ -226,14 +231,14 @@ fn hir_perf_scan_function(
         match item.node:
             case HirNode.Expr(expr):
                 match expr.kind:
-                    case HirExprKind.MethodCall(receiver, method, _, resolution):
+                    case HirExprKind.MethodCall(receiver, method, args, resolution):
                         val fact = hir_perf_method_fact(
-                            function, expr, receiver, method, resolution,
+                            function, expr, receiver, method, args.len(), resolution,
                             item.loop_depth, registry)
                         if fact.?:
                             val resolved_fact = fact.unwrap()
                             accumulator.collection_ops.push(resolved_fact)
-                            if not resolved_fact.registry_verified:
+                            if not resolved_fact.metadata_admitted:
                                 accumulator.incomplete_ops = accumulator.incomplete_ops + 1
                         else:
                             accumulator.unclassified_method_calls =
@@ -299,7 +304,7 @@ fn collect_hir_perf_facts(
     module: HirModule, registry: CollectionOperationRegistry
 ) -> HirPerfFacts:
     var accumulator = HirPerfAccumulator.new(
-        registry.metadata_version, registry.is_valid())
+        registry.metadata_version, registry.is_structurally_valid())
     for function in module.functions.values():
         if not function.is_extern:
             hir_perf_scan_function(function, registry, accumulator)
@@ -315,7 +320,7 @@ fn collect_hir_function_perf_facts(
     function: HirFunction, registry: CollectionOperationRegistry
 ) -> HirPerfFacts:
     var accumulator = HirPerfAccumulator.new(
-        registry.metadata_version, registry.is_valid())
+        registry.metadata_version, registry.is_structurally_valid())
     if function.is_extern:
         return accumulator.snapshot()
     hir_perf_scan_function(function, registry, accumulator)
@@ -325,18 +330,16 @@ fn typed_coll002_linear_lookup_findings(
     facts: HirPerfFacts
 ) -> [TypedCollectionFinding]:
     var findings: [TypedCollectionFinding] = []
-    if not facts.registry_valid:
+    if not facts.registry_structurally_valid:
         return findings
     for operation in facts.collection_ops:
-        if not operation.registry_verified or operation.loop_depth <= 0:
+        if not operation.metadata_admitted or operation.loop_depth <= 0:
             continue
-        var linear_lookup = false
+        var contains_lookup = false
         match operation.operation:
-            case HirPerfOperationKind.LinearLookup: linear_lookup = true
+            case HirPerfOperationKind.ContainsLookup: contains_lookup = true
             case _: pass_do_nothing
-        if not linear_lookup:
-            continue
-        if operation.stable_operation_name != "Array.contains":
+        if not contains_lookup:
             continue
         match operation.cost:
             case HirPerfCostClass.LinearReceiver: pass_do_nothing
