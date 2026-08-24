@@ -43,6 +43,33 @@ no lane could reach until now, which is why it has never been seen.
 Fixing it means implementing or explicitly trapping ~68 runtime entry points for
 Windows. That is a porting project, not a patch.
 
+### Measured 2026-08-24 — a false lead worth recording
+
+`runtime_native.c` was found to fail compilation on Windows with 18 errors
+(missing `<direct.h>`, `ATOMIC_VAR_INIT` removed in C23, `timespec_get`
+unexposed, POSIX `dlopen` family). That looked like the whole story: the file
+defines many `rt_*` symbols and is the FIRST entry in the core-C archive input
+list, so "it silently fell out of the archive" was a tidy explanation.
+
+**It was wrong, and the fix did not change the link.** After repairing all 18
+errors (landed separately — it is a real bug regardless) and rebuilding the
+seed, Stage 2 still reports the identical 68 undefined symbols. Direct
+measurement of the linked archive:
+
+```
+nm -g --defined-only libsimple_native_all.a | grep -c ' T rt_'   -> 2154
+ar t libsimple_native_all.a | grep -c runtime_native             -> 1
+nm -g --defined-only ... | grep -c ' T rt_black_box$'            -> 0
+```
+
+`runtime_native.o` IS in the archive and 2154 `rt_*` symbols ARE defined. These
+68 are simply not among them — some exist only inside POSIX-gated branches, and
+at least `rt_black_box` and `rt_host_gpu_active_backend_handle` have no
+definition anywhere in `src/runtime/*.c` or `src/compiler_rust/runtime/src`.
+
+So the coverage-gap reading stands. Do not re-litigate it by chasing a
+compilation failure — check `nm` on the archive first.
+
 ## Blocker B — 22 `multiple definition` errors from the kernel32 import stubs
 
 ```
