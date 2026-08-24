@@ -1,0 +1,128 @@
+#!/bin/sh
+# Gate: the HIR lowering allow-list `is_interp_builtin_fn` must cover every
+# free-function builtin that the HIR interpreter dispatches by name in
+# `lookup_builtin_tag`.
+#
+# Why this gate exists (incident 2026-08-24, lane Q slice-B compile sweep):
+# `assert cond, msg` is desugared by parser_stmts.spl into a call to the
+# builtin `__assert(...)`. `interpreter_calls.spl lookup_builtin_tag` has
+# dispatched `__assert` all along, and `30.types/type_system/builtin_registry.spl`
+# registers it -- but `is_interp_builtin_fn` never listed it, so
+# `lower_unresolved_ident` refused to define the symbol and EVERY module
+# containing an `assert` statement failed HIR lowering with
+# "unresolved name: __assert". Observed in
+# src/compiler/30.types/const_key_validator.spl.
+#
+# This is a two-file consistency invariant: no type check can see it (both
+# sides are string literals in unrelated modules), and a lint rule would have
+# to hard-code the pairing anyway. So it is a structural gate -- the last
+# resort layer, chosen deliberately.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> dispatched builtin(s) checked, 0 missing       exit 0
+#   FAIL  — ... naming every missing name                      exit 1
+#   ERROR — nothing was checked                                exit 2
+# A run that checked 0 names is ERROR, never a pass.
+
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+DISPATCH="$ROOT/src/compiler/70.backend/backend/interpreter_calls.spl"
+ALLOW="$ROOT/src/compiler/20.hir/hir_lowering/_Expressions/expression_support.spl"
+
+# Names dispatched by lookup_builtin_tag are never primitive casts or type
+# names; those are handled by other paths in lower_unresolved_ident.
+EXEMPT="int float bool str text panic eprint"
+
+scan() {
+    d="$1"; a="$2"
+    if [ ! -f "$d" ] || [ ! -f "$a" ]; then
+        echo "ERROR — nothing was checked (missing source: $d or $a)"
+        return 2
+    fi
+    names=$(sed -n '/fn lookup_builtin_tag/,/^fn /p' "$d" \
+        | grep -oE 'name == "[A-Za-z_][A-Za-z0-9_]*"' \
+        | sed 's/.*"\(.*\)"/\1/' | sort -u)
+    allowed=$(sed -n '/fn is_interp_builtin_fn/,/^fn /p' "$a" \
+        | grep -oE 'name == "[A-Za-z_][A-Za-z0-9_]*"' \
+        | sed 's/.*"\(.*\)"/\1/' | sort -u)
+    n=0; missing=""
+    for x in $names; do
+        skip=0
+        for e in $EXEMPT; do [ "$x" = "$e" ] && skip=1; done
+        [ "$skip" -eq 1 ] && continue
+        n=$((n + 1))
+        echo "$allowed" | grep -qx "$x" || missing="$missing $x"
+    done
+    if [ "$n" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 dispatched builtins parsed from $d)"
+        return 2
+    fi
+    if [ -n "$missing" ]; then
+        echo "FAIL — $n dispatched builtin(s) checked, missing from is_interp_builtin_fn:$missing"
+        return 1
+    fi
+    echo "PASS — $n dispatched builtin(s) checked, 0 missing"
+    return 0
+}
+
+selftest() {
+    t=$(mktemp -d) || exit 2
+    mkdir -p "$t/d" "$t/a"
+    cat > "$t/d/dispatch.spl" <<'EOF'
+fn lookup_builtin_tag(name: text) -> i64:
+    if name == "__assert":
+        return 1
+    if name == "print":
+        return 2
+fn other():
+    pass
+EOF
+    cat > "$t/a/good.spl" <<'EOF'
+fn is_interp_builtin_fn(name: text) -> bool:
+    (name == "print" or name == "__assert")
+fn other():
+    pass
+EOF
+    cat > "$t/a/bad.spl" <<'EOF'
+fn is_interp_builtin_fn(name: text) -> bool:
+    (name == "print")
+fn other():
+    pass
+EOF
+    out=$(scan "$t/d/dispatch.spl" "$t/a/good.spl")
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "SELFTEST FAIL: clean fixture did not PASS ($out)"; rm -rf "$t"; exit 2
+    fi
+    out=$(scan "$t/d/dispatch.spl" "$t/a/bad.spl")
+    rc=$?
+    if [ "$rc" -ne 1 ]; then
+        echo "SELFTEST FAIL: missing-name fixture did not FAIL ($out)"; rm -rf "$t"; exit 2
+    fi
+    case "$out" in
+        *__assert*) : ;;
+        *) echo "SELFTEST FAIL: FAIL verdict did not name __assert ($out)"; rm -rf "$t"; exit 2 ;;
+    esac
+    out=$(scan "$t/d/nope.spl" "$t/a/good.spl")
+    rc=$?
+    if [ "$rc" -ne 2 ]; then
+        echo "SELFTEST FAIL: missing source did not ERROR ($out)"; rm -rf "$t"; exit 2
+    fi
+    cat > "$t/d/empty.spl" <<'EOF'
+fn unrelated():
+    pass
+EOF
+    out=$(scan "$t/d/empty.spl" "$t/a/good.spl")
+    rc=$?
+    if [ "$rc" -ne 2 ]; then
+        echo "SELFTEST FAIL: 0-name scan did not ERROR ($out)"; rm -rf "$t"; exit 2
+    fi
+    rm -rf "$t"
+}
+
+selftest
+case "${1:-}" in
+    --selftest) echo "PASS — 4 selftest fixture(s) checked, 0 missing"; exit 0 ;;
+esac
+scan "$DISPATCH" "$ALLOW"
+exit $?
