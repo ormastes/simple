@@ -910,3 +910,58 @@ storage/dbfs/dbfs_no_regression_spec.spl
 Not fixed here and not baselined away: each belongs to a different lane, and
 `--generate-baseline` over a diff nobody read is exactly what this record
 exists to prevent.
+
+## Step-over record — 2026-08-24 (docgen fixes)
+
+`check-test-tree-divergence-delta.shs origin/main <NEW>` →
+**PASS — 24 pre-existing offender(s), 0 introduced by this range**, for the
+landing that corrects the sspec analyzer/generator step-form mismatch.
+
+Base verdict at `origin/main`: `FAIL — 868 diverged vs 854 baselined (19 new,
+5 fixed-but-still-baselined); 1 mirror-only`.
+
+### A mirror sync that had to be reverted
+
+The first attempt at this landing FAILed the delta with `offender list SHRANK
+but guard still FAILs`. Cause: `test/unit/app/tooling/spipe_docgen_scenario_body_spec.spl`
+had been synced from its `test/01_unit/**` twin, removing an offender.
+
+That sync was **wrong and was reverted**. The two copies are not a stale-vs-fresh
+pair of the same file: the `test/unit/` copy (787 lines) is an older generation
+that still expects `<summary>Executable SPipe</summary>` and the retired
+numbered `1. User open app` step form, while the `test/01_unit/` copy (1225
+lines) expects the current `Executable SSpec` and bulleted steps. Overwriting
+one with the other is a decision for the lane that owns those trees, not a
+side effect of an unrelated fix. The landing now edits `test/01_unit/**` only,
+and the pair stays exactly as diverged as it was.
+
+Worth stating plainly, since it is the same failure this file exists to track:
+a mechanical `cp` between mirror trees is indistinguishable from a clobber
+unless someone diffs both directions first.
+
+### The 19 unbaselined offenders making the base red
+
+```
+app/cli/query_diagnostics_spec.spl
+app/cli/query_engine_spec.spl
+app/cli/query_lsp_spec.spl
+app/protocol/jsonrpc_framing_spec.spl
+compiler/hir/hir_codec_optional_node_decode_source_spec.spl
+compiler/lint_allow_attribute_spec.spl
+compiler/lint/critical_file_guard_spec.spl
+compiler/mir_opt/auto_vectorize_spec.spl
+compiler/mir_opt/bounds_check_elim_spec.spl
+compiler/mir_opt/loop_invariant_motion_spec.spl
+compiler/semantics/lint/lint_text_spec.spl
+compiler/verification/cache_correctness_spec.spl
+lib/database_core_spec.spl
+lib/database/database_core_spec.spl
+lib/ffi/dynamic_versioned_spec.spl
+os/kernel/arch/riscv32_boot_spec.spl
+os/kernel/loader/executable_source_vfs_spec.spl
+os/kernel/scheduler/scheduler_spec.spl
+storage/dbfs/dbfs_no_regression_spec.spl
+```
+
+Grown from 11 at the 2026-08-24 smux/caret landing earlier the same day. Each
+belongs to a different lane; none is fixed or baselined away here.
