@@ -7,6 +7,7 @@ BOOTSTRAP="$ROOT/scripts/check/check-bootstrap-must-pass.shs"
 HOOK="$ROOT/scripts/check/pre-push-conflict-tree-guard.shs"
 INSTALL_UNIX="$ROOT/scripts/setup/install-must-check-hooks.shs"
 INSTALL_WINDOWS="$ROOT/scripts/setup/install-must-check-hooks.ps1"
+SETUP_HOOKS="$ROOT/scripts/setup/setup-hooks.shs"
 ZERO=0000000000000000000000000000000000000000
 
 start=$(date +%s)
@@ -22,6 +23,7 @@ grep -q 'pre-push.local' "$ROOT/scripts/hooks/pre-push"
 grep -q 'cmp -s "$LOCAL_HOOK" "$CANONICAL_GUARD"' "$ROOT/scripts/hooks/pre-push"
 grep -q -- '--install' "$INSTALL_UNIX"
 grep -q 'Move-Item' "$INSTALL_WINDOWS"
+grep -q 'scripts/setup/setup-hooks.shs' "$ROOT/scripts/setup/setup.shs"
 
 fixture=$(mktemp -d)
 rules_fixture=$(mktemp -d)
@@ -240,6 +242,7 @@ hook_repo="$fixture-hook-repo"
 hook_peer="$fixture-hook-peer"
 mkdir -p "$hook_repo/scripts/setup" "$hook_repo/scripts/hooks" "$hook_repo/scripts/check"
 cp "$INSTALL_UNIX" "$hook_repo/scripts/setup/install-must-check-hooks.shs"
+cp "$SETUP_HOOKS" "$hook_repo/scripts/setup/setup-hooks.shs"
 cp "$ROOT/scripts/hooks/pre-push" "$hook_repo/scripts/hooks/pre-push"
 cp "$ROOT/scripts/hooks/pre-push-worktree-launcher" "$hook_repo/scripts/hooks/pre-push-worktree-launcher"
 cp "$ROOT/scripts/check/check-hook-installation.shs" "$hook_repo/scripts/check/check-hook-installation.shs"
@@ -266,6 +269,23 @@ git -C "$hook_repo" worktree add -q "$hook_peer" HEAD
 sh "$hook_repo/scripts/setup/install-must-check-hooks.shs" --install >/dev/null
 (cd "$hook_peer" && sh scripts/setup/install-must-check-hooks.shs --check >/dev/null)
 (cd "$hook_peer" && sh scripts/check/check-hook-installation.shs)
+(cd "$hook_peer" && sh scripts/setup/setup-hooks.shs >/dev/null)
+cp "$hook_peer/scripts/setup/install-must-check-hooks.shs" "$hook_peer/scripts/setup/install-must-check-hooks.shs.saved"
+printf '%s\n' '#!/bin/sh' 'exit 9' > "$hook_peer/scripts/setup/install-must-check-hooks.shs"
+chmod +x "$hook_peer/scripts/setup/install-must-check-hooks.shs"
+if (cd "$hook_peer" && sh scripts/setup/setup-hooks.shs >/dev/null 2>&1); then
+    echo "FAIL: general setup hook helper suppressed installer failure"
+    exit 1
+fi
+mv "$hook_peer/scripts/setup/install-must-check-hooks.shs.saved" "$hook_peer/scripts/setup/install-must-check-hooks.shs"
+cp "$hook_peer/scripts/check/check-hook-installation.shs" "$hook_peer/scripts/check/check-hook-installation.shs.saved"
+printf '%s\n' '#!/bin/sh' 'exit 8' > "$hook_peer/scripts/check/check-hook-installation.shs"
+chmod +x "$hook_peer/scripts/check/check-hook-installation.shs"
+if (cd "$hook_peer" && sh scripts/setup/setup-hooks.shs >/dev/null 2>&1); then
+    echo "FAIL: general setup hook helper suppressed verifier failure"
+    exit 1
+fi
+mv "$hook_peer/scripts/check/check-hook-installation.shs.saved" "$hook_peer/scripts/check/check-hook-installation.shs"
 shared_hooks=$(git -C "$hook_repo" rev-parse --git-path hooks)
 case "$shared_hooks" in /*) : ;; *) shared_hooks="$hook_repo/$shared_hooks" ;; esac
 [ ! -L "$shared_hooks/pre-push" ]
