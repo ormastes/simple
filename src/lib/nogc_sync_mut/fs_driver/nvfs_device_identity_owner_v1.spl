@@ -51,6 +51,12 @@ impl NvfsDeviceIdentityBindingV1:
     pub fn inner_instance_id() -> i64: self._inner_instance_id
     pub fn generation() -> u32: self._generation
 
+pub struct NvfsDeviceCloseTicketV1:
+    _binding: NvfsDeviceIdentityBindingV1
+
+impl NvfsDeviceCloseTicketV1:
+    pub fn binding() -> NvfsDeviceIdentityBindingV1: self._binding
+
 pub enum NvfsDeviceIdentityErrorV1:
     InvalidRegion
     InvalidIdentity
@@ -65,6 +71,8 @@ enum NvfsDeviceIdentitySlotStateV1:
     Free
     Reserved
     Active
+    Closing
+    Retryable
     Terminal
     Quarantined
 
@@ -184,7 +192,10 @@ pub fn nvfs_device_identity_reserve_v1(
                 if slot.state == NvfsDeviceIdentitySlotStateV1.Free:
                     if slot_index < 0: slot_index = i
                 elif (slot.state == NvfsDeviceIdentitySlotStateV1.Reserved or
-                      slot.state == NvfsDeviceIdentitySlotStateV1.Active):
+                      slot.state == NvfsDeviceIdentitySlotStateV1.Active or
+                      slot.state == NvfsDeviceIdentitySlotStateV1.Closing or
+                      slot.state == NvfsDeviceIdentitySlotStateV1.Retryable or
+                      slot.state == NvfsDeviceIdentitySlotStateV1.Quarantined):
                     if _nvfs_device_regions_overlap_v1(slot.region, region):
                         next.last_error = Some(NvfsDeviceIdentityErrorV1.BindingMismatch)
                 i = i + 1
@@ -316,6 +327,32 @@ pub fn nvfs_device_identity_abort_reservation_v1(
     if val err = updated.last_error: return Err(err)
     Ok(true)
 
+pub fn nvfs_device_identity_quarantine_reservation_v1(
+    reservation: NvfsDeviceIdentityReservationV1
+) -> Result<bool, NvfsDeviceIdentityErrorV1>:
+    if not _nvfs_device_reservation_shape_valid_v1(reservation):
+        return Err(NvfsDeviceIdentityErrorV1.InvalidIdentity)
+    val updated = mutex_with_lock(_nvfs_device_identity_owner_v1, \state:
+        var next = state
+        next.last_error = nil
+        if reservation._slot >= state.slots.len():
+            next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+        else:
+            val slot = state.slots[reservation._slot]
+            if not _nvfs_device_reservation_matches_slot_v1(reservation, slot):
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+            elif slot.state != NvfsDeviceIdentitySlotStateV1.Reserved:
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.WrongState)
+            else:
+                var quarantined = slot
+                quarantined.state = NvfsDeviceIdentitySlotStateV1.Quarantined
+                next.slots[reservation._slot] = quarantined
+                next.live_count = state.live_count - 1
+                next.quarantined_count = state.quarantined_count + 1
+        next)
+    if val err = updated.last_error: return Err(err)
+    Ok(true)
+
 pub fn nvfs_device_identity_mark_terminal_v1(
     binding: NvfsDeviceIdentityBindingV1
 ) -> Result<bool, NvfsDeviceIdentityErrorV1>:
@@ -331,6 +368,108 @@ pub fn nvfs_device_identity_mark_terminal_v1(
             if not _nvfs_device_binding_matches_slot_v1(binding, slot):
                 next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
             elif slot.state != NvfsDeviceIdentitySlotStateV1.Active:
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.WrongState)
+            else:
+                var terminal = slot
+                terminal.state = NvfsDeviceIdentitySlotStateV1.Terminal
+                next.slots[binding._slot] = terminal
+                next.live_count = state.live_count - 1
+                next.terminal_count = state.terminal_count + 1
+        next)
+    if val err = updated.last_error: return Err(err)
+    Ok(true)
+
+pub fn nvfs_device_identity_begin_close_v1(
+    binding: NvfsDeviceIdentityBindingV1, outer_instance_id: i64,
+    inner_instance_id: i64, region: NvfsDeviceRegionIdentityV1
+) -> Result<NvfsDeviceCloseTicketV1, NvfsDeviceIdentityErrorV1>:
+    if (not _nvfs_device_binding_shape_valid_v1(binding) or
+        not _nvfs_device_region_valid_v1(region)):
+        return Err(NvfsDeviceIdentityErrorV1.InvalidIdentity)
+    val updated = mutex_with_lock(_nvfs_device_identity_owner_v1, \state:
+        var next = state
+        next.last_error = nil
+        if binding._slot >= state.slots.len():
+            next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+        else:
+            val slot = state.slots[binding._slot]
+            if not _nvfs_device_binding_matches_slot_v1(binding, slot):
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+            elif (slot.state != NvfsDeviceIdentitySlotStateV1.Active and
+                  slot.state != NvfsDeviceIdentitySlotStateV1.Retryable):
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.WrongState)
+            elif (outer_instance_id != slot.outer_instance_id or
+                  inner_instance_id != slot.inner_instance_id or
+                  not _nvfs_device_region_equal_v1(region, slot.region)):
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.BindingMismatch)
+            else:
+                var closing = slot
+                closing.state = NvfsDeviceIdentitySlotStateV1.Closing
+                next.slots[binding._slot] = closing
+        next)
+    if val err = updated.last_error: return Err(err)
+    Ok(NvfsDeviceCloseTicketV1(_binding: binding))
+
+pub fn nvfs_device_identity_close_busy_v1(
+    ticket: NvfsDeviceCloseTicketV1
+) -> Result<bool, NvfsDeviceIdentityErrorV1>:
+    val binding = ticket._binding
+    val updated = mutex_with_lock(_nvfs_device_identity_owner_v1, \state:
+        var next = state
+        next.last_error = nil
+        if binding._slot < 0 or binding._slot >= state.slots.len():
+            next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+        else:
+            val slot = state.slots[binding._slot]
+            if not _nvfs_device_binding_matches_slot_v1(binding, slot):
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+            elif slot.state != NvfsDeviceIdentitySlotStateV1.Closing:
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.WrongState)
+            else:
+                var active = slot
+                active.state = NvfsDeviceIdentitySlotStateV1.Active
+                next.slots[binding._slot] = active
+        next)
+    if val err = updated.last_error: return Err(err)
+    Ok(true)
+
+pub fn nvfs_device_identity_close_retryable_v1(
+    ticket: NvfsDeviceCloseTicketV1
+) -> Result<bool, NvfsDeviceIdentityErrorV1>:
+    val binding = ticket._binding
+    val updated = mutex_with_lock(_nvfs_device_identity_owner_v1, \state:
+        var next = state
+        next.last_error = nil
+        if binding._slot < 0 or binding._slot >= state.slots.len():
+            next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+        else:
+            val slot = state.slots[binding._slot]
+            if not _nvfs_device_binding_matches_slot_v1(binding, slot):
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+            elif slot.state != NvfsDeviceIdentitySlotStateV1.Closing:
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.WrongState)
+            else:
+                var retryable = slot
+                retryable.state = NvfsDeviceIdentitySlotStateV1.Retryable
+                next.slots[binding._slot] = retryable
+        next)
+    if val err = updated.last_error: return Err(err)
+    Ok(true)
+
+pub fn nvfs_device_identity_close_complete_v1(
+    ticket: NvfsDeviceCloseTicketV1
+) -> Result<bool, NvfsDeviceIdentityErrorV1>:
+    val binding = ticket._binding
+    val updated = mutex_with_lock(_nvfs_device_identity_owner_v1, \state:
+        var next = state
+        next.last_error = nil
+        if binding._slot < 0 or binding._slot >= state.slots.len():
+            next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+        else:
+            val slot = state.slots[binding._slot]
+            if not _nvfs_device_binding_matches_slot_v1(binding, slot):
+                next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
+            elif slot.state != NvfsDeviceIdentitySlotStateV1.Closing:
                 next.last_error = Some(NvfsDeviceIdentityErrorV1.WrongState)
             else:
                 var terminal = slot
@@ -386,7 +525,9 @@ pub fn nvfs_device_identity_mark_indeterminate_v1(
             val slot = state.slots[binding._slot]
             if not _nvfs_device_binding_matches_slot_v1(binding, slot):
                 next.last_error = Some(NvfsDeviceIdentityErrorV1.StaleIdentity)
-            elif slot.state != NvfsDeviceIdentitySlotStateV1.Active:
+            elif (slot.state != NvfsDeviceIdentitySlotStateV1.Active and
+                  slot.state != NvfsDeviceIdentitySlotStateV1.Closing and
+                  slot.state != NvfsDeviceIdentitySlotStateV1.Retryable):
                 next.last_error = Some(NvfsDeviceIdentityErrorV1.WrongState)
             else:
                 var quarantined = slot
@@ -412,10 +553,14 @@ pub fn nvfs_device_identity_quarantined_count_v1() -> i32:
 
 export NvfsDeviceRegionIdentityV1, NvfsDeviceIdentityReservationV1
 export NvfsDeviceIdentityBindingV1, NvfsDeviceIdentityErrorV1
+export NvfsDeviceCloseTicketV1
 export nvfs_device_identity_reserve_v1, nvfs_device_identity_activate_v1
 export nvfs_device_identity_validate_v1
 export nvfs_device_identity_abort_reservation_v1
+export nvfs_device_identity_quarantine_reservation_v1
 export nvfs_device_identity_mark_terminal_v1
+export nvfs_device_identity_begin_close_v1, nvfs_device_identity_close_busy_v1
+export nvfs_device_identity_close_retryable_v1, nvfs_device_identity_close_complete_v1
 export nvfs_device_identity_evict_terminal_v1
 export nvfs_device_identity_mark_indeterminate_v1
 export nvfs_device_identity_live_count_v1

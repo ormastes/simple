@@ -85,7 +85,24 @@ fail-stop quarantine. Static lifecycle specifications cover outer/inner/device
 substitution, stale copied bindings after reuse, pre-registration rollback,
 terminal replay, and indeterminate cleanup.
 
-This is an unverified and deliberately unwired prerequisite. The blocker
-remains open: `NvfsPosixDriver.new_on_device` does not yet consume the owner,
-and no busy-aware DBFS close/unregister operation exists. Therefore neither
-normal teardown nor registration-count restoration is claimed.
+## Teardown and connector progress (unverified)
+
+An owned constructor and teardown path now consume the identity owner. DBFS
+performs a serialized busy check, exact unregister, cache reclamation, and
+bounded replay retention; copied/mutated outer identities cannot redirect the
+inner cleanup. The NVFS driver validates the binding on operations, provides a
+directory-descriptor release path, and exposes busy/retryable/terminal close
+transitions with terminal eviction.
+
+Connector wiring remains blocked and its unsafe draft was reverted after
+independent static review. The current connector copies drivers out of an
+unserialized global slot, so session validation cannot fence an in-flight
+operation. Correct wiring needs one bounded operation-lease owner which rejects
+new leases, drains active leases, performs a busy preflight, then closes the
+session before unmount. Without that preflight, a Busy result after session
+close would strand the connector permanently.
+
+This work has only static specifications and remains unverified by explicit
+instruction. The stable block-device identity trust seam also remains: the new
+device connector requires a nonzero owner-issued identity because the generic
+`BlockDevice` trait still cannot derive one itself.

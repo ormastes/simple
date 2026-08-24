@@ -103,3 +103,23 @@ describe "NVFS outer to inner device identity owner v1":
         val adjacent_reservation = nvfs_device_identity_reserve_v1(adjacent).unwrap()
         expect(nvfs_device_identity_abort_reservation_v1(first_reservation).is_ok()).to_be(true)
         expect(nvfs_device_identity_abort_reservation_v1(adjacent_reservation).is_ok()).to_be(true)
+
+    it "serializes busy rollback, retryable cleanup, and terminal completion":
+        val region = _nvfs_region_v1(8109u64, 2304)
+        val reservation = nvfs_device_identity_reserve_v1(region).unwrap()
+        val binding = nvfs_device_identity_activate_v1(reservation, 9109).unwrap()
+        val busy = nvfs_device_identity_begin_close_v1(
+            binding, binding.outer_instance_id(), 9109, region).unwrap()
+        expect(nvfs_device_identity_begin_close_v1(
+            binding, binding.outer_instance_id(), 9109, region).unwrap_err()
+        ).to_equal(NvfsDeviceIdentityErrorV1.WrongState)
+        expect(nvfs_device_identity_close_busy_v1(busy).is_ok()).to_be(true)
+        val retry = nvfs_device_identity_begin_close_v1(
+            binding, binding.outer_instance_id(), 9109, region).unwrap()
+        expect(nvfs_device_identity_close_retryable_v1(retry).is_ok()).to_be(true)
+        val final_ticket = nvfs_device_identity_begin_close_v1(
+            binding, binding.outer_instance_id(), 9109, region).unwrap()
+        expect(nvfs_device_identity_close_complete_v1(final_ticket).is_ok()).to_be(true)
+        expect(nvfs_device_identity_close_complete_v1(final_ticket).unwrap_err()
+        ).to_equal(NvfsDeviceIdentityErrorV1.WrongState)
+        expect(nvfs_device_identity_evict_terminal_v1(binding).is_ok()).to_be(true)
