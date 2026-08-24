@@ -3842,6 +3842,26 @@ impl MirLowering:
                     self.runtime_dict_locals[result_local.id] = true
                 if result_struct_name != "":
                     self.struct_value_syms[result_local.id] = result_struct_name
+                # Float payload provenance. `.?` keeps its result slot i64 on
+                # purpose: `if val v = opt:` is parser-desugared to this binding
+                # plus `v != nil`, and the nil sentinel comparison must run on
+                # the raw word (a float-typed slot cannot even hold the integer
+                # sentinel -- llc: "integer constant must have integer type").
+                # The decode therefore belongs in the PRESENT branch, which
+                # lower_if/lower_if_chain already implement
+                # (mir_lowering_stmts.spl, `has_if_val_float_binding`) -- but
+                # that code asks `find_local_hir_type` for the binder's
+                # SEMANTIC type, and nothing ever registered one here, so it
+                # never fired and the binder printed the raw IEEE-754 bits.
+                # Record the payload's own HIR type on the result local: that
+                # is the provenance the present-branch decode needs, carried
+                # forward from the Option's declared inner type rather than
+                # re-sniffed from the desugared shape.
+                if val exists_payload_type = self.option_inner_hir_type_for_local(base, base_local):
+                    match exists_payload_type.kind:
+                        case HirTypeKind.Float(_):
+                            self.remember_local_hir_type(result_local.id, exists_payload_type, 0, 0)
+                        case _: ()
 
                 var b_merge = self.builder
                 b_merge.switch_to_block(merge_block)
