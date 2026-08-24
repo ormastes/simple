@@ -37,6 +37,8 @@ defect a line scan finds instantly.
 use compiler.tools.lint.main.{Linter}
 use std.spec.step
 
+extern fn rt_file_read_text(path: text) -> text?
+
 # ============================================================================
 # TYPE001 — cast to a non-existent type
 # ============================================================================
@@ -86,6 +88,41 @@ describe "TYPE001 — nonexistent type in a cast":
         var linter = Linter.new()
         linter.check_nonexistent_types("/tmp/fake.spl", "# do not write `x as int` here\n")
         expect(linter.results.len()).to_equal(0)
+
+    it "scans rejected prefixes without changing whole-word behavior":
+        step("Verify: rejected cast prefixes retain whole-word behavior")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl",
+            "val x = a as integer_thing + b as integer_thing + " +
+            "c as integer_thing + d as integer_thing + e as int\n")
+        expect(linter.results.len()).to_equal(1)
+        expect(linter.results[0].lint.code).to_equal("TYPE001")
+
+    it "reports one warning per bad name even when an exact cast repeats":
+        step("Verify: repeated exact casts retain one warning per name and line")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl",
+            "val x = a as int + b as int + c as int\n")
+        expect(linter.results.len()).to_equal(1)
+
+    it "retains canonical bad-name order independent of source order":
+        step("Verify: bad-name diagnostics retain canonical order")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl",
+            "val x = a as uint + b as double + c as long + d as int\n")
+        expect(linter.results.len()).to_equal(4)
+        expect(linter.results[0].lint.message).to_contain("`int`")
+        expect(linter.results[1].lint.message).to_contain("`long`")
+        expect(linter.results[2].lint.message).to_contain("`double`")
+        expect(linter.results[3].lint.message).to_contain("`uint`")
+
+    it "keeps TYPE001 rejection scanning cursor-based":
+        step("Verify: TYPE001 rejection scanning uses an absolute cursor")
+        val source = rt_file_read_text(
+            "src/compiler/90.tools/lint/_LintMain/nonexistent_type_lints.spl") ?? ""
+        expect(source).to_contain("line.find(needle, search_from)")
+        expect(source).to_contain("search_from = at + 1")
+        expect(source).not_to_contain("rest = rest[at + 1:]")
 
 # ============================================================================
 # TYPE002 — `for ... in range(...)`

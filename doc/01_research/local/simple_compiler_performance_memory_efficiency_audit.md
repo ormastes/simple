@@ -2653,6 +2653,25 @@ input with a different lifetime. Complete warning payload/order parity is
 covered using a generated RV64 bundle, but not executed under the user's
 no-verification instruction.
 
+### Linear TYPE001 rejected-prefix scanning
+
+The default nonexistent-type lint searched each physical line for four bad cast
+names. When a textual prefix such as `as integer_thing` failed the trailing
+word-boundary test, it sliced away a source prefix and searched the new suffix.
+With m rejected prefixes on an N-byte generated line, cumulative rescanning and
+copied suffix bytes could reach O(N^2) per bad name.
+
+TYPE001 now builds the four ordered `(name, needle)` records once per lint
+request and retains the original line throughout each scan. An absolute cursor
+advances to one byte after a rejected match and the two-argument `find` resumes
+from that position. Each name therefore performs linear scanning with no suffix
+allocation, while needle construction drops from once per name per line to once
+per request. Exact whole-word behavior, one warning per bad name per line,
+canonical `int`/`long`/`double`/`uint` ordering, comment suppression, TYPE002,
+messages, and hints remain unchanged. Prefix-heavy, repeated-exact, reverse-
+source-order, and topology contracts were added but not executed under the
+user's no-verification instruction.
+
 ### Allocation-free critical-file line counting
 
 CFG002 previously read every protected file and materialized

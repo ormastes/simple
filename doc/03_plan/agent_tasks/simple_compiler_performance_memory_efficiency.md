@@ -1355,6 +1355,20 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   legacy exclusion, and source-topology contracts; verification intentionally
   not run under the user's no-verify instruction.
 
+## Completed TYPE001 cursor-scan tranche
+
+- Replace rejected-prefix suffix slicing with a two-argument `find` over the
+  original line and an absolute cursor advanced by one byte.
+- Build the four ordered nonexistent-type search needles once per lint request
+  rather than once per physical line.
+- Reduce adversarial rejected-prefix scanning and copied bytes from O(N^2) to
+  O(N) per bad name without changing whole-word boundaries.
+- Preserve one warning per bad name per line, canonical bad-name diagnostic
+  order, comment suppression, TYPE002 behavior, messages, hints, and API.
+- Add prefix-heavy, repeated-exact, reverse-source-order, and source-topology
+  contracts; verification intentionally not run under the user's no-verify
+  instruction.
+
 ## Completed check-tier accumulator tranche
 
 - Replace input-sized keyword, module-tier, and restricted-file copy-on-append
