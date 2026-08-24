@@ -1,0 +1,482 @@
+#!/bin/sh
+# Produce reviewer-ready (but deliberately unsigned) rust-go benchmark evidence.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+GATE=rust-go-benchmark-parity
+FIXTURE_ID=runtime-fed-lcg-100k
+FIXTURE_DIR=test/05_perf/fixtures/rust_go_benchmark
+SAMPLES=50
+WARMUPS=10
+OUTPUT_DIR=
+RUN_ID=
+SIMPLE_COMPILER=${SIMPLE_COMPILER:-}
+STAGE4_PROVENANCE=${STAGE4_PROVENANCE:-}
+PRODUCER_ID=${PRODUCER_ID:-performance-team}
+REVIEWER_KEY_ID=${REVIEWER_KEY_ID:-independent-reviewer-required}
+SELF_TEST=0
+
+fail() { echo "STATUS: FAIL rust-go-benchmark-producer — $*" >&2; exit 1; }
+usage() {
+    echo "usage: $0 --output-dir <repo-relative-dir> --run-id <id> [--samples 50..1000] [--simple-compiler <stage4-simple>] [--stage4-provenance <file>]"
+    echo "       $0 --self-test"
+}
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+hash_text() { sha256sum | awk '{print $1}'; }
+token_ok() { case "$1" in ''|*[!A-Za-z0-9._:@+/-]*) return 1 ;; *) return 0 ;; esac; }
+copy_regular() { [ -f "$1" ] && [ ! -L "$1" ] || fail "non-regular-$2"; cp "$1" "$3" || fail "copy-$2"; }
+fixed20() { printf '%020d' "$1"; }
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output-dir) OUTPUT_DIR=$2; shift 2 ;;
+        --run-id) RUN_ID=$2; shift 2 ;;
+        --samples) SAMPLES=$2; shift 2 ;;
+        --simple-compiler) SIMPLE_COMPILER=$2; shift 2 ;;
+        --stage4-provenance) STAGE4_PROVENANCE=$2; shift 2 ;;
+        --producer-id) PRODUCER_ID=$2; shift 2 ;;
+        --reviewer-key-id) REVIEWER_KEY_ID=$2; shift 2 ;;
+        --self-test) SELF_TEST=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown-argument-$1" ;;
+    esac
+done
+
+source_fingerprint() {
+    _tree=$1
+    git -C "$ROOT" ls-tree -r HEAD -- src scripts config test rules.sdl doc/07_guide doc/00_llm_process doc/glossary.md >"$_tree" || return 1
+    sed '\|[[:space:]]doc/08_tracking/check/must_check_db.sdn$|d' "$_tree" | sha256sum | awk '{print $1}'
+}
+
+write_fake_elf_tool() {
+    _path=$1; _lane=$2; _log=$3
+    cp /bin/true "$_path"
+    printf '\n%s\n' "$_lane" >>"$_path"
+    chmod +x "$_path"
+    printf '#!/bin/sh\n' >"${_path}.driver"
+    printf 'set -eu\nprintf "%%s\\n" "$*" >>%s\n' "$_log" >>"${_path}.driver"
+    printf 'case "${1:-}" in --version|version) echo "%s fake 1.0"; exit 0;; esac\n' "$_lane" >>"${_path}.driver"
+    printf 'out=\nwhile [ "$#" -gt 0 ]; do case "$1" in --output|-o) out=$2; shift 2;; *) shift;; esac; done\n' >>"${_path}.driver"
+    printf '[ -n "$out" ] || exit 2\ncp %s "$out"\n' "$_path" >>"${_path}.driver"
+    chmod +x "${_path}.driver"
+}
+
+run_self_test() {
+    _tmp=$(mktemp -d) || exit 1
+    trap 'rm -rf "$_tmp"' EXIT INT TERM
+    _log="$_tmp/argv.log"; : >"$_log"
+    write_fake_elf_tool "$_tmp/simple.elf" simple "$_log"
+    write_fake_elf_tool "$_tmp/rust.elf" rust "$_log"
+    write_fake_elf_tool "$_tmp/go.elf" go "$_log"
+    _checker="$_tmp/checker.sh"
+    printf '%s\n' '#!/bin/sh' 'set -eu' \
+      'root= fingerprint= run_id= raw= statistics= equivalence= environment= toolchain= origin= simple_compiler= rust_compiler= go_compiler= simple_exe= rust_exe= go_exe= simple_version= rust_version= go_version= provenance= clock_source= clock_compiler= clock_version= clock_helper=' \
+      'while [ "$#" -gt 0 ]; do case "$1" in --root) root=$2;; --fingerprint) fingerprint=$2;; --run-id) run_id=$2;; --raw-samples) raw=$2;; --statistics) statistics=$2;; --equivalence) equivalence=$2;; --environment) environment=$2;; --toolchain) toolchain=$2;; --build-origin) origin=$2;; --simple-compiler) simple_compiler=$2;; --rust-compiler) rust_compiler=$2;; --go-compiler) go_compiler=$2;; --simple-executable) simple_exe=$2;; --rust-executable) rust_exe=$2;; --go-executable) go_exe=$2;; --simple-version) simple_version=$2;; --rust-version) rust_version=$2;; --go-version) go_version=$2;; --stage4-provenance) provenance=$2;; --clock-source) clock_source=$2;; --clock-compiler) clock_compiler=$2;; --clock-version) clock_version=$2;; --clock-helper) clock_helper=$2;; *) exit 2;; esac; shift 2; done' \
+      'dir=$(dirname "$environment")' \
+      'sh "$root/scripts/check/check-performance-target-identity.shs" --gate rust-go-benchmark-parity --run-id "$run_id" --target "$dir/target-identity.env" --environment "$environment" >/dev/null' \
+      'sh "$root/scripts/check/check-rust-go-benchmark-build-origin.shs" --root "$root" --fingerprint "$fingerprint" --run-id "$run_id" --origin "$origin" --toolchain "$toolchain" --equivalence "$equivalence" --environment "$environment" --simple-compiler "$simple_compiler" --rust-compiler "$rust_compiler" --go-compiler "$go_compiler" --simple-executable "$simple_exe" --rust-executable "$rust_exe" --go-executable "$go_exe" --simple-version "$simple_version" --rust-version "$rust_version" --go-version "$go_version" --clock-source "$clock_source" --clock-compiler "$clock_compiler" --clock-version "$clock_version" --clock-helper "$clock_helper" >/dev/null' \
+      'sh "$root/scripts/check/check-rust-go-benchmark-samples.shs" --root "$root" --fingerprint "$fingerprint" --run-id "$run_id" --raw-samples "$raw" --statistics "$statistics" --equivalence "$equivalence" --environment "$environment" --simple-executable "$simple_exe" --rust-executable "$rust_exe" --go-executable "$go_exe" >/dev/null' \
+      'echo "STATUS: PASS source-decidable-validators; Stage4 isolated"' >"$_checker"
+    chmod +x "$_checker"
+    _stage4="$_tmp/stage4.env"; i=1; while [ "$i" -le 21 ]; do echo "field$i=value$i" >>"$_stage4"; i=$((i+1)); done
+    OUTPUT_DIR="build/rust-go-producer-selftest-$$"; RUN_ID=self-test; SAMPLES=50
+    SIMPLE_COMPILER="$_tmp/simple.elf.driver"; STAGE4_PROVENANCE="$_stage4"
+    SELF_TEST_RUSTC="$_tmp/rust.elf.driver"; SELF_TEST_GO="$_tmp/go.elf.driver"; SELF_TEST_CHECKER="$_checker"
+    produce_bundle >/dev/null
+    _out="$ROOT/build/rust-go-producer-selftest-$$"
+    [ -f "$_out/external-evidence.unsigned.env" ] || fail self-test-summary
+    [ "$(grep -c '^sample|' "$_out/benchmark-raw-samples.env")" -eq 150 ] || fail self-test-sample-count
+    grep -Fxq 'native-build test/05_perf/fixtures/rust_go_benchmark/workload.spl --backend llvm --opt-level=aggressive --strip --output benchmark_simple_executable' "$_log" || fail self-test-simple-argv
+    grep -Fxq -- '-C opt-level=3 -C codegen-units=1 -C strip=symbols -o benchmark_rust_executable test/05_perf/fixtures/rust_go_benchmark/workload.rs' "$_log" || fail self-test-rust-argv
+    grep -Fxq 'build -trimpath -o benchmark_go_executable test/05_perf/fixtures/rust_go_benchmark/workload.go' "$_log" || fail self-test-go-argv
+    grep -Fq 'reviewer_signature' "$_out/external-evidence.unsigned.env" && fail self-test-signed-output
+    _fp=$(sed -n 's/^source_fingerprint=//p' "$_out/benchmark-environment.env")
+    validate_self_bundle() {
+        "$_checker" --root "$ROOT" --fingerprint "$_fp" --run-id self-test \
+          --raw-samples "${1:-$_out/benchmark-raw-samples.env}" --statistics "${2:-$_out/benchmark-statistics.env}" \
+          --equivalence "$_out/semantic-equivalence.env" --environment "${4:-$_out/benchmark-environment.env}" \
+          --toolchain "$_out/toolchain-identity.env" --build-origin "${3:-$_out/benchmark-build-origin.env}" \
+          --simple-version "$_out/benchmark-simple-version.txt" --rust-version "$_out/benchmark-rust-version.txt" --go-version "$_out/benchmark-go-version.txt" \
+          --simple-compiler "$_out/simple-compiler" --rust-compiler "$_out/benchmark-rust-compiler" --go-compiler "$_out/benchmark-go-compiler" \
+          --simple-executable "${5:-$_out/benchmark-simple-executable}" --rust-executable "$_out/benchmark-rust-executable" --go-executable "$_out/benchmark-go-executable" \
+          --stage4-provenance "$_out/stage4-provenance.env" --clock-source "$_out/benchmark-clock-source.c" \
+          --clock-compiler "$_out/benchmark-clock-compiler" --clock-version "$_out/benchmark-clock-compiler-version.txt" --clock-helper "$_out/benchmark-clock-helper" >/dev/null
+    }
+    sed '0,/sample|simple|1|/s//sample|simple|1x|/' "$_out/benchmark-raw-samples.env" >"$_tmp/raw.bad"
+    validate_self_bundle "$_tmp/raw.bad" 2>/dev/null && fail self-test-raw-mutation
+    sed 's/simple_p50_ns=/simple_p50_ns=9/' "$_out/benchmark-statistics.env" >"$_tmp/stat.bad"
+    validate_self_bundle "$_out/benchmark-raw-samples.env" "$_tmp/stat.bad" 2>/dev/null && fail self-test-stat-mutation
+    sed 's#simple_command=simple native-build#simple_command=simple forged-build#' "$_out/benchmark-build-origin.env" >"$_tmp/origin.bad"
+    validate_self_bundle "$_out/benchmark-raw-samples.env" "$_out/benchmark-statistics.env" "$_tmp/origin.bad" 2>/dev/null && fail self-test-origin-mutation
+    sed 's/^cpu_count=.*/cpu_count=0/' "$_out/benchmark-environment.env" >"$_tmp/environment.bad"
+    validate_self_bundle "$_out/benchmark-raw-samples.env" "$_out/benchmark-statistics.env" "$_out/benchmark-build-origin.env" "$_tmp/environment.bad" 2>/dev/null && fail self-test-environment-mutation
+    cp "$_out/benchmark-simple-executable" "$_tmp/simple.bad"; printf x >>"$_tmp/simple.bad"
+    validate_self_bundle "$_out/benchmark-raw-samples.env" "$_out/benchmark-statistics.env" "$_out/benchmark-build-origin.env" "$_out/benchmark-environment.env" "$_tmp/simple.bad" 2>/dev/null && fail self-test-attachment-mutation
+    rm -rf "$_out"
+    rm -rf "$_tmp"
+    echo 'STATUS: PASS rust-go-benchmark-producer self-test'
+}
+
+produce_bundle() {
+token_ok "$RUN_ID" || fail invalid-run-id
+token_ok "$PRODUCER_ID" || fail invalid-producer-id
+token_ok "$REVIEWER_KEY_ID" || fail invalid-reviewer-key-id
+[ "$PRODUCER_ID" != "$REVIEWER_KEY_ID" ] || fail reviewer-must-be-independent
+case "$SAMPLES" in ''|*[!0-9]*) fail invalid-samples ;; esac
+[ "$SAMPLES" -ge 50 ] && [ "$SAMPLES" -le 1000 ] || fail samples-out-of-range
+case "$OUTPUT_DIR" in ''|/*|*' '*|..|../*|*/../*|*/..) fail unsafe-output-dir ;; esac
+prefix=$ROOT
+old_ifs=$IFS; IFS=/
+for component in $OUTPUT_DIR; do
+    prefix=$prefix/$component
+    [ ! -L "$prefix" ] || fail symlinked-output-ancestor
+done
+IFS=$old_ifs
+parent_rel=${OUTPUT_DIR%/*}; [ "$parent_rel" != "$OUTPUT_DIR" ] || parent_rel=.
+mkdir -p "$ROOT/$parent_rel"
+parent_real=$(CDPATH= cd -- "$ROOT/$parent_rel" && pwd -P) || fail invalid-output-parent
+case "$parent_real" in "$ROOT"|"$ROOT"/*) ;; *) fail output-parent-escapes-root ;; esac
+OUT="$parent_real/${OUTPUT_DIR##*/}"
+[ ! -e "$OUT" ] || fail output-dir-exists
+mkdir -p "$OUT"
+work=$(mktemp -d) || exit 1
+trap 'rm -rf "$work"' EXIT INT TERM
+
+if [ -z "$SIMPLE_COMPILER" ]; then
+    for candidate in "$ROOT/bin/release/$(uname -m)-unknown-linux-gnu/simple" "$ROOT/bin/release/simple"; do
+        [ -x "$candidate" ] && { SIMPLE_COMPILER=$candidate; break; }
+    done
+fi
+[ -n "$SIMPLE_COMPILER" ] || fail missing-simple-compiler
+SIMPLE_COMPILER=$(readlink -f "$SIMPLE_COMPILER")
+[ -x "$SIMPLE_COMPILER" ] && [ -f "$SIMPLE_COMPILER" ] || fail unusable-simple-compiler
+[ -n "$STAGE4_PROVENANCE" ] || STAGE4_PROVENANCE="${SIMPLE_COMPILER}.provenance.env"
+STAGE4_PROVENANCE=$(readlink -f "$STAGE4_PROVENANCE")
+[ -f "$STAGE4_PROVENANCE" ] && [ ! -L "$STAGE4_PROVENANCE" ] || fail missing-stage4-provenance
+if [ "$SELF_TEST" -eq 1 ]; then RUSTC=$SELF_TEST_RUSTC; GO=$SELF_TEST_GO; else RUSTC=$(command -v rustc || true); GO=$(command -v go || true); fi
+[ -n "$RUSTC" ] && [ -x "$RUSTC" ] || fail missing-rustc
+[ -n "$GO" ] && [ -x "$GO" ] || fail missing-go
+RUSTC=$(readlink -f "$RUSTC"); GO=$(readlink -f "$GO")
+if [ "$SELF_TEST" -eq 0 ]; then
+    rust_sysroot=$("$RUSTC" --print sysroot) || fail rustc-sysroot
+    [ -x "$rust_sysroot/bin/rustc" ] || fail rustc-real-compiler
+    RUSTC=$(readlink -f "$rust_sysroot/bin/rustc")
+fi
+
+tree="$work/tree"; FINGERPRINT=$(source_fingerprint "$tree") || fail source-fingerprint
+BUILD="$work/build"; mkdir -p "$BUILD/test/05_perf/fixtures/rust_go_benchmark"
+for name in workload.spl workload.rs workload.go input.txt oracle.txt; do cp "$ROOT/$FIXTURE_DIR/$name" "$BUILD/$FIXTURE_DIR/$name"; done
+
+case "$(uname -m)" in x86_64) GOARCH=amd64 ;; aarch64|arm64) GOARCH=arm64 ;; riscv64) GOARCH=riscv64 ;; ppc64le) GOARCH=ppc64le ;; *) fail unsupported-goarch ;; esac
+CLEAN_PATH=/usr/bin:/bin
+mkdir -p "$work/go-cache"
+(cd "$BUILD" && env -i LC_ALL=C PATH="$CLEAN_PATH" SIMPLE_LIB="$ROOT/src" SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_COMPILER" native-build "$FIXTURE_DIR/workload.spl" --backend llvm --opt-level=aggressive --strip --output benchmark_simple_executable) || fail simple-compile
+(cd "$BUILD" && env -i LC_ALL=C PATH="$CLEAN_PATH" "$RUSTC" -C opt-level=3 -C codegen-units=1 -C strip=symbols -o benchmark_rust_executable "$FIXTURE_DIR/workload.rs") || fail rust-compile
+(cd "$BUILD" && env -i LC_ALL=C PATH="$CLEAN_PATH" GOENV=off GOOS=linux GOARCH="$GOARCH" CGO_ENABLED=0 GOCACHE="$work/go-cache" "$GO" build -trimpath -o benchmark_go_executable "$FIXTURE_DIR/workload.go") || fail go-compile
+for lane in simple rust go; do [ -x "$BUILD/benchmark_${lane}_executable" ] || fail "missing-$lane-executable"; done
+
+copy_regular "$SIMPLE_COMPILER" simple-compiler "$OUT/simple-compiler"
+copy_regular "$RUSTC" rust-compiler "$OUT/benchmark-rust-compiler"
+copy_regular "$GO" go-compiler "$OUT/benchmark-go-compiler"
+for lane in simple rust go; do cp "$BUILD/benchmark_${lane}_executable" "$OUT/benchmark-${lane}-executable"; done
+cp "$STAGE4_PROVENANCE" "$OUT/stage4-provenance.env"
+"$SIMPLE_COMPILER" --version >"$OUT/benchmark-simple-version.txt" 2>&1 || fail simple-version
+"$RUSTC" --version >"$OUT/benchmark-rust-version.txt" 2>&1 || fail rust-version
+"$GO" version >"$OUT/benchmark-go-version.txt" 2>&1 || fail go-version
+
+expected_sha=$(hash_file "$ROOT/$FIXTURE_DIR/oracle.txt")
+input_sha=$(hash_file "$ROOT/$FIXTURE_DIR/input.txt")
+empty_sha=$(printf '' | hash_text)
+for lane in simple rust go; do
+    if [ "$SELF_TEST" -eq 1 ]; then
+        cp "$ROOT/$FIXTURE_DIR/oracle.txt" "$work/$lane.out"; : >"$work/$lane.err"
+    else
+        "$OUT/benchmark-${lane}-executable" "$ROOT/$FIXTURE_DIR/input.txt" >"$work/$lane.out" 2>"$work/$lane.err" || fail "$lane-semantic-run"
+    fi
+    [ "$(hash_file "$work/$lane.out")" = "$expected_sha" ] || fail "$lane-semantic-output"
+    [ "$(hash_file "$work/$lane.err")" = "$empty_sha" ] || fail "$lane-semantic-stderr"
+done
+
+cat >"$OUT/semantic-equivalence.env" <<EOF
+equivalence_schema=simple.rust-go-benchmark-equivalence/v1
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+fixture_id=$FIXTURE_ID
+semantic_oracle_path=$FIXTURE_DIR/oracle.txt
+semantic_oracle_sha256=$expected_sha
+input_path=$FIXTURE_DIR/input.txt
+input_sha256=$input_sha
+simple_source_path=$FIXTURE_DIR/workload.spl
+simple_source_sha256=$(hash_file "$ROOT/$FIXTURE_DIR/workload.spl")
+rust_source_path=$FIXTURE_DIR/workload.rs
+rust_source_sha256=$(hash_file "$ROOT/$FIXTURE_DIR/workload.rs")
+go_source_path=$FIXTURE_DIR/workload.go
+go_source_sha256=$(hash_file "$ROOT/$FIXTURE_DIR/workload.go")
+expected_stdout_sha256=$expected_sha
+simple_stdout_sha256=$expected_sha
+rust_stdout_sha256=$expected_sha
+go_stdout_sha256=$expected_sha
+simple_exit=0
+rust_exit=0
+go_exit=0
+operation_count=100000
+final_verdict=PASS
+EOF
+
+simple_compiler_sha=$(hash_file "$OUT/simple-compiler"); rust_compiler_sha=$(hash_file "$OUT/benchmark-rust-compiler"); go_compiler_sha=$(hash_file "$OUT/benchmark-go-compiler")
+simple_version_sha=$(hash_file "$OUT/benchmark-simple-version.txt"); rust_version_sha=$(hash_file "$OUT/benchmark-rust-version.txt"); go_version_sha=$(hash_file "$OUT/benchmark-go-version.txt")
+toolchain_digest=$(printf 'simple=%s\nrust=%s\ngo=%s\nsimple-version=%s\nrust-version=%s\ngo-version=%s\n' "$simple_compiler_sha" "$rust_compiler_sha" "$go_compiler_sha" "$simple_version_sha" "$rust_version_sha" "$go_version_sha" | hash_text)
+cat >"$OUT/toolchain-identity.env" <<EOF
+evidence_schema=simple.must-check-toolchain/v1
+gate_id=$GATE
+run_id=$RUN_ID
+toolchain_id=sha256:$toolchain_digest
+simple_compiler_sha256=$simple_compiler_sha
+rust_compiler_sha256=$rust_compiler_sha
+go_compiler_sha256=$go_compiler_sha
+simple_version_sha256=$simple_version_sha
+rust_version_sha256=$rust_version_sha
+go_version_sha256=$go_version_sha
+final_verdict=PASS
+EOF
+
+host_hash=$({ uname -n; cat /etc/machine-id 2>/dev/null || true; } | hash_text)
+host_id="sha256:$host_hash"; arch=$(uname -m); kernel=$(uname -r)
+cpu_model_sha=$(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo 2>/dev/null | head -n1 | hash_text)
+cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+cpuset_sha=$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' /proc/self/status 2>/dev/null | hash_text)
+governor=$(sed -n '1p' /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)
+case "$governor" in ''|*[!A-Za-z0-9._:@+/-]*) governor=unknown ;; esac
+time_tool=/usr/bin/time; [ -x "$time_tool" ] || fail missing-usr-bin-time
+clock_source="$ROOT/scripts/check/lib/rust-go-benchmark-monotonic-ns.c"
+clock_tool="$work/rust-go-benchmark-monotonic-ns"
+cc_path=$(command -v cc || true); [ -n "$cc_path" ] || fail missing-clock-helper-cc
+cc_path=$(readlink -f "$cc_path")
+env -i LC_ALL=C PATH=/usr/bin:/bin "$cc_path" -O2 -std=c11 "$clock_source" -o "$clock_tool" || fail clock-helper-build
+"$clock_tool" --self-test >/dev/null || fail clock-helper-self-test
+cp "$clock_source" "$OUT/benchmark-clock-source.c"
+copy_regular "$cc_path" clock-compiler "$OUT/benchmark-clock-compiler"
+"$cc_path" --version >"$OUT/benchmark-clock-compiler-version.txt" 2>&1 || fail clock-compiler-version
+cp "$clock_tool" "$OUT/benchmark-clock-helper"
+cat >"$OUT/benchmark-environment.env" <<EOF
+environment_schema=simple.rust-go-benchmark-environment/v1
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+fixture_id=$FIXTURE_ID
+host_id=$host_id
+os=linux
+kernel=$kernel
+arch=$arch
+cpu_model_sha256=$cpu_model_sha
+cpu_count=$cpu_count
+cpu_governor=$governor
+cpuset_sha256=$cpuset_sha
+isolation=controlled-host
+clock_tool_sha256=$(hash_file "$clock_tool")
+simple_compiler_path=$SIMPLE_COMPILER
+simple_compiler_sha256=$simple_compiler_sha
+simple_executable_sha256=$(hash_file "$OUT/benchmark-simple-executable")
+rust_executable_sha256=$(hash_file "$OUT/benchmark-rust-executable")
+go_executable_sha256=$(hash_file "$OUT/benchmark-go-executable")
+warmup_iterations=$WARMUPS
+runtime_order=simple,rust,go
+final_verdict=PASS
+EOF
+
+cat >"$OUT/benchmark-build-origin.env" <<EOF
+build_schema=simple.rust-go-benchmark-build-origin/v2
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+fixture_id=$FIXTURE_ID
+toolchain_identity_sha256=$(hash_file "$OUT/toolchain-identity.env")
+environment_sha256=$(hash_file "$OUT/benchmark-environment.env")
+build_environment_id=clean-build-environment-v1
+lc_all=C
+build_path=$CLEAN_PATH
+simple_lib=src
+simple_no_stub_fallback=1
+rustflags=unset
+cargo_encoded_rustflags=unset
+rustc_wrapper=unset
+rustc_workspace_wrapper=unset
+goflags=unset
+goenv=off
+go_cache=isolated
+cgo_enabled=0
+goos=linux
+goarch=$GOARCH
+clock_source_path=scripts/check/lib/rust-go-benchmark-monotonic-ns.c
+clock_source_sha256=$(hash_file "$OUT/benchmark-clock-source.c")
+clock_compiler_sha256=$(hash_file "$OUT/benchmark-clock-compiler")
+clock_compiler_version_sha256=$(hash_file "$OUT/benchmark-clock-compiler-version.txt")
+clock_helper_sha256=$(hash_file "$OUT/benchmark-clock-helper")
+simple_source_path=$FIXTURE_DIR/workload.spl
+simple_source_sha256=$(hash_file "$ROOT/$FIXTURE_DIR/workload.spl")
+simple_command_id=simple-native-o3-v1
+simple_command=simple native-build $FIXTURE_DIR/workload.spl --backend llvm --opt-level=aggressive --strip --output benchmark_simple_executable
+simple_output_sha256=$(hash_file "$OUT/benchmark-simple-executable")
+simple_compile_exit=0
+rust_source_path=$FIXTURE_DIR/workload.rs
+rust_source_sha256=$(hash_file "$ROOT/$FIXTURE_DIR/workload.rs")
+rust_command_id=rust-opt3-codegen1-v1
+rust_command=rustc -C opt-level=3 -C codegen-units=1 -C strip=symbols -o benchmark_rust_executable $FIXTURE_DIR/workload.rs
+rust_output_sha256=$(hash_file "$OUT/benchmark-rust-executable")
+rust_compile_exit=0
+go_source_path=$FIXTURE_DIR/workload.go
+go_source_sha256=$(hash_file "$ROOT/$FIXTURE_DIR/workload.go")
+go_command_id=go-trimpath-v1
+go_command=go build -trimpath -o benchmark_go_executable $FIXTURE_DIR/workload.go
+go_output_sha256=$(hash_file "$OUT/benchmark-go-executable")
+go_compile_exit=0
+simple_compiler_sha256=$simple_compiler_sha
+rust_compiler_sha256=$rust_compiler_sha
+go_compiler_sha256=$go_compiler_sha
+simple_version_sha256=$simple_version_sha
+rust_version_sha256=$rust_version_sha
+go_version_sha256=$go_version_sha
+final_verdict=PASS
+EOF
+
+cat >"$OUT/benchmark-raw-samples.env" <<EOF
+sample_schema=simple.rust-go-benchmark-samples/v1
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+fixture_id=$FIXTURE_ID
+clock_id=clock_gettime-monotonic
+unit=ns
+sample_count=$SAMPLES
+warmup_iterations=$WARMUPS
+operation_count=100000
+EOF
+for lane in simple rust go; do i=0; while [ "$i" -lt "$WARMUPS" ]; do "$OUT/benchmark-${lane}-executable" "$ROOT/$FIXTURE_DIR/input.txt" >/dev/null 2>/dev/null || fail "$lane-warmup"; i=$((i+1)); done; done
+i=1
+while [ "$i" -le "$SAMPLES" ]; do
+    case $(( (i - 1) % 3 )) in 0) order='simple rust go' ;; 1) order='rust go simple' ;; 2) order='go simple rust' ;; esac
+    for lane in $order; do
+        if [ "$SELF_TEST" -eq 1 ]; then
+            case "$lane" in simple) elapsed=100; rss=1000 ;; rust) elapsed=200; rss=2000 ;; go) elapsed=300; rss=3000 ;; esac
+            cp "$ROOT/$FIXTURE_DIR/oracle.txt" "$work/out"; : >"$work/err"; status=0
+        else
+            start=$("$clock_tool")
+            "$time_tool" -f '%M' -o "$work/rss" "$OUT/benchmark-${lane}-executable" "$ROOT/$FIXTURE_DIR/input.txt" >"$work/out" 2>"$work/err"; status=$?
+            end=$("$clock_tool"); [ "$end" -ge "$start" ] || fail monotonic-clock-regressed
+            elapsed=$((end - start)); rss=$(sed -n '1p' "$work/rss")
+        fi
+        [ "$status" -eq 0 ] || fail "$lane-sample-exit"
+        out_sha=$(hash_file "$work/out"); err_sha=$(hash_file "$work/err")
+        [ "$out_sha" = "$expected_sha" ] && [ "$err_sha" = "$empty_sha" ] || fail "$lane-sample-output"
+        printf 'sample|%s|%s|%s|%s|0|%s|%s|100000|%s|runtime-fed-black-box\n' "$lane" "$i" "$(fixed20 "$elapsed")" "$(fixed20 "$rss")" "$out_sha" "$err_sha" "$input_sha" >>"$OUT/benchmark-raw-samples.env"
+    done
+    i=$((i+1))
+done
+
+for lane in simple rust go; do
+    awk -F'|' -v l="$lane" '$1=="sample" && $2==l {print $4}' "$OUT/benchmark-raw-samples.env" | sort >"$work/$lane.time"
+    awk -F'|' -v l="$lane" '$1=="sample" && $2==l {print $5}' "$OUT/benchmark-raw-samples.env" | sort >"$work/$lane.rss"
+done
+p50_line=$(( (SAMPLES + 1) / 2 )); p95_line=$(( (SAMPLES * 95 + 99) / 100 ))
+cat >"$OUT/benchmark-statistics.env" <<EOF
+statistics_schema=simple.rust-go-benchmark-statistics/v1
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+fixture_id=$FIXTURE_ID
+sample_count=$SAMPLES
+simple_p50_ns=$(sed -n "${p50_line}p" "$work/simple.time")
+simple_p95_ns=$(sed -n "${p95_line}p" "$work/simple.time")
+simple_max_rss_kib=$(tail -n1 "$work/simple.rss")
+rust_p50_ns=$(sed -n "${p50_line}p" "$work/rust.time")
+rust_p95_ns=$(sed -n "${p95_line}p" "$work/rust.time")
+rust_max_rss_kib=$(tail -n1 "$work/rust.rss")
+go_p50_ns=$(sed -n "${p50_line}p" "$work/go.time")
+go_p95_ns=$(sed -n "${p95_line}p" "$work/go.time")
+go_max_rss_kib=$(tail -n1 "$work/go.rss")
+comparison_policy=simple-p50-p95-le-rust-go
+final_verdict=PASS
+EOF
+
+cat >"$OUT/command-receipt.env" <<EOF
+evidence_schema=simple.must-check-command/v1
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+command=sh scripts/check/produce-rust-go-benchmark-evidence.shs --output-dir $OUTPUT_DIR --run-id $RUN_ID --samples $SAMPLES
+exit_status=0
+final_verdict=PASS
+EOF
+cat >"$OUT/target-identity.env" <<EOF
+evidence_schema=simple.must-check-target/v1
+gate_id=$GATE
+run_id=$RUN_ID
+target_kind=native-host
+target_id=$host_id
+final_verdict=PASS
+EOF
+cat >"$OUT/observations.env" <<EOF
+evidence_schema=simple.must-check-observations/v1
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+run_id=$RUN_ID
+acceptance_ids=semantic-equivalence,raw-samples,statistics,rust,go,simple-ge-parity
+acceptance.semantic-equivalence=PASS
+acceptance.raw-samples=PASS
+acceptance.statistics=PASS
+acceptance.rust=PASS
+acceptance.go=PASS
+acceptance.simple-ge-parity=PASS
+final_verdict=PASS
+EOF
+
+if [ "$SELF_TEST" -eq 1 ]; then CHECKER=$SELF_TEST_CHECKER; else CHECKER=$ROOT/scripts/check/check-rust-go-benchmark-parity.shs; fi
+"$CHECKER" --root "$ROOT" --fingerprint "$FINGERPRINT" --run-id "$RUN_ID" \
+ --raw-samples "$OUT/benchmark-raw-samples.env" --statistics "$OUT/benchmark-statistics.env" --equivalence "$OUT/semantic-equivalence.env" \
+ --environment "$OUT/benchmark-environment.env" --toolchain "$OUT/toolchain-identity.env" --build-origin "$OUT/benchmark-build-origin.env" \
+ --simple-version "$OUT/benchmark-simple-version.txt" --rust-version "$OUT/benchmark-rust-version.txt" --go-version "$OUT/benchmark-go-version.txt" \
+ --simple-compiler "$OUT/simple-compiler" --rust-compiler "$OUT/benchmark-rust-compiler" --go-compiler "$OUT/benchmark-go-compiler" \
+ --stage4-provenance "$OUT/stage4-provenance.env" --simple-executable "$OUT/benchmark-simple-executable" \
+ --rust-executable "$OUT/benchmark-rust-executable" --go-executable "$OUT/benchmark-go-executable" \
+ --clock-source "$OUT/benchmark-clock-source.c" --clock-compiler "$OUT/benchmark-clock-compiler" \
+ --clock-version "$OUT/benchmark-clock-compiler-version.txt" --clock-helper "$OUT/benchmark-clock-helper" >/dev/null || fail lane-validation
+
+summary="$OUT/external-evidence.unsigned.env"
+cat >"$summary" <<EOF
+evidence_schema=simple.must-check-external-evidence/v2
+gate_id=$GATE
+source_fingerprint=$FINGERPRINT
+final_verdict=PASS
+producer_id=$PRODUCER_ID
+producer_kind=controlled-host
+run_id=$RUN_ID
+produced_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+reviewer_key_id=$REVIEWER_KEY_ID
+acceptance_contract=$GATE/v1
+acceptance_ids=semantic-equivalence,raw-samples,statistics,rust,go,simple-ge-parity
+EOF
+for entry in \
+ command_receipt:command-receipt.env target_identity:target-identity.env toolchain_identity:toolchain-identity.env observations:observations.env \
+ benchmark_environment:benchmark-environment.env simple_compiler:simple-compiler benchmark_rust_compiler:benchmark-rust-compiler benchmark_go_compiler:benchmark-go-compiler \
+ benchmark_simple_executable:benchmark-simple-executable benchmark_rust_executable:benchmark-rust-executable benchmark_go_executable:benchmark-go-executable \
+ benchmark_raw_samples:benchmark-raw-samples.env benchmark_statistics:benchmark-statistics.env semantic_equivalence:semantic-equivalence.env \
+ benchmark_build_origin:benchmark-build-origin.env benchmark_simple_version:benchmark-simple-version.txt benchmark_rust_version:benchmark-rust-version.txt benchmark_go_version:benchmark-go-version.txt stage4_provenance:stage4-provenance.env \
+ benchmark_clock_source:benchmark-clock-source.c benchmark_clock_compiler:benchmark-clock-compiler benchmark_clock_compiler_version:benchmark-clock-compiler-version.txt benchmark_clock_helper:benchmark-clock-helper; do
+    kind=${entry%%:*}; file=${entry#*:}
+    printf '%s_path=%s/%s\n%s_sha256=%s\n' "$kind" "$OUTPUT_DIR" "$file" "$kind" "$(hash_file "$OUT/$file")" >>"$summary"
+done
+[ "$FINGERPRINT" = "$(source_fingerprint "$work/tree-final")" ] || fail head-drift-during-production
+echo "STATUS: PASS rust-go-benchmark-producer — unsigned reviewer-ready evidence: $OUTPUT_DIR"
+}
+
+if [ "$SELF_TEST" -eq 1 ]; then
+    run_self_test
+else
+    for override in RUST_GO_BENCHMARK_TEST_MODE RUST_GO_BENCHMARK_RUSTC RUST_GO_BENCHMARK_GO RUST_GO_BENCHMARK_CHECKER; do
+        eval '[ -z "${'"$override"'+x}" ]' || fail "forbidden-environment-override-$override"
+    done
+    produce_bundle
+fi

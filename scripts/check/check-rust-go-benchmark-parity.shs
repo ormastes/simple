@@ -3,7 +3,7 @@
 set -eu
 LC_ALL=C
 export LC_ALL
-ROOT=""; FINGERPRINT=""; RUN_ID=""; RAW=""; STATS=""; EQUIV=""; ENVIRONMENT=""; TOOLCHAIN=""; ORIGIN=""; SIMPLE_VERSION=""; RUST_VERSION=""; GO_VERSION=""; COMPILER=""; RUST_COMPILER=""; GO_COMPILER=""; PROVENANCE=""; SIMPLE_EXE=""; RUST_EXE=""; GO_EXE=""
+ROOT=""; FINGERPRINT=""; RUN_ID=""; RAW=""; STATS=""; EQUIV=""; ENVIRONMENT=""; TOOLCHAIN=""; ORIGIN=""; SIMPLE_VERSION=""; RUST_VERSION=""; GO_VERSION=""; COMPILER=""; RUST_COMPILER=""; GO_COMPILER=""; PROVENANCE=""; SIMPLE_EXE=""; RUST_EXE=""; GO_EXE=""; CLOCK_SOURCE=""; CLOCK_COMPILER=""; CLOCK_VERSION=""; CLOCK_HELPER=""
 fail() { echo "STATUS: FAIL rust-go-benchmark-parity — $*" >&2; exit 1; }
 while [ "$#" -gt 0 ]; do
  case "$1" in
@@ -13,17 +13,28 @@ while [ "$#" -gt 0 ]; do
   --simple-version) SIMPLE_VERSION=$2; shift 2 ;; --rust-version) RUST_VERSION=$2; shift 2 ;; --go-version) GO_VERSION=$2; shift 2 ;;
   --simple-compiler) COMPILER=$2; shift 2 ;; --rust-compiler) RUST_COMPILER=$2; shift 2 ;; --go-compiler) GO_COMPILER=$2; shift 2 ;; --stage4-provenance) PROVENANCE=$2; shift 2 ;;
   --simple-executable) SIMPLE_EXE=$2; shift 2 ;; --rust-executable) RUST_EXE=$2; shift 2 ;; --go-executable) GO_EXE=$2; shift 2 ;;
+  --clock-source) CLOCK_SOURCE=$2; shift 2 ;; --clock-compiler) CLOCK_COMPILER=$2; shift 2 ;; --clock-version) CLOCK_VERSION=$2; shift 2 ;; --clock-helper) CLOCK_HELPER=$2; shift 2 ;;
   *) fail "unknown-argument-$1" ;;
  esac
 done
 [ -n "$ROOT" ] && [ -n "$FINGERPRINT" ] && [ -n "$RUN_ID" ] || fail missing-identity
 ROOT=$(CDPATH= cd -- "$ROOT" && pwd -P) || fail invalid-root
 for file in "$RAW" "$STATS" "$EQUIV" "$ENVIRONMENT" "$TOOLCHAIN" "$ORIGIN" "$SIMPLE_VERSION" "$RUST_VERSION" "$GO_VERSION" "$COMPILER" "$RUST_COMPILER" "$GO_COMPILER" "$PROVENANCE" "$SIMPLE_EXE" "$RUST_EXE" "$GO_EXE"; do [ -f "$file" ] && [ ! -L "$file" ] || fail missing-evidence-blob; done
+build_origin_args=
+case "$(sed -n 's/^build_schema=//p' "$ORIGIN")" in
+ simple.rust-go-benchmark-build-origin/v1) ;;
+ simple.rust-go-benchmark-build-origin/v2)
+  for file in "$CLOCK_SOURCE" "$CLOCK_COMPILER" "$CLOCK_VERSION" "$CLOCK_HELPER"; do [ -f "$file" ] && [ ! -L "$file" ] || fail missing-clock-evidence-blob; done
+  build_origin_args="--clock-source $CLOCK_SOURCE --clock-compiler $CLOCK_COMPILER --clock-version $CLOCK_VERSION --clock-helper $CLOCK_HELPER" ;;
+ *) fail unsupported-build-origin-schema ;;
+esac
+# Paths are producer/importer-owned regular files and reject whitespace.
+set -- $build_origin_args
 sh "$ROOT/scripts/check/check-rust-go-benchmark-build-origin.shs" --root "$ROOT" --fingerprint "$FINGERPRINT" --run-id "$RUN_ID" \
  --origin "$ORIGIN" --toolchain "$TOOLCHAIN" --equivalence "$EQUIV" --environment "$ENVIRONMENT" \
  --simple-compiler "$COMPILER" --rust-compiler "$RUST_COMPILER" --go-compiler "$GO_COMPILER" \
  --simple-executable "$SIMPLE_EXE" --rust-executable "$RUST_EXE" --go-executable "$GO_EXE" \
- --simple-version "$SIMPLE_VERSION" --rust-version "$RUST_VERSION" --go-version "$GO_VERSION" >/dev/null || fail build-origin-evidence
+ --simple-version "$SIMPLE_VERSION" --rust-version "$RUST_VERSION" --go-version "$GO_VERSION" "$@" >/dev/null || fail build-origin-evidence
 sh "$ROOT/scripts/check/check-rust-go-benchmark-samples.shs" --root "$ROOT" --fingerprint "$FINGERPRINT" --run-id "$RUN_ID" \
  --raw-samples "$RAW" --statistics "$STATS" --equivalence "$EQUIV" --environment "$ENVIRONMENT" \
  --simple-executable "$SIMPLE_EXE" --rust-executable "$RUST_EXE" --go-executable "$GO_EXE" >/dev/null || fail metric-evidence

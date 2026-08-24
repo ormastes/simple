@@ -211,6 +211,39 @@ The fixed recipe argv are:
 - `simple native-build test/05_perf/fixtures/rust_go_benchmark/workload.spl --backend llvm --opt-level=aggressive --strip --output benchmark_simple_executable`
 - `rustc -C opt-level=3 -C codegen-units=1 -C strip=symbols -o benchmark_rust_executable test/05_perf/fixtures/rust_go_benchmark/workload.rs`
 - `go build -trimpath -o benchmark_go_executable test/05_perf/fixtures/rust_go_benchmark/workload.go`
+
+Produce this bundle with the repository-owned producer, using a new
+repository-relative evidence directory:
+
+```sh
+sh scripts/check/produce-rust-go-benchmark-evidence.shs \
+  --output-dir doc/08_tracking/check/evidence/rust-go-<run-id> \
+  --run-id <run-id> --samples 50 \
+  --simple-compiler /absolute/bin/release/<triple>/simple
+```
+
+The producer requires the compiler's adjacent canonical Stage 4 provenance
+(or `--stage4-provenance`), builds with the literal recipes above, performs ten
+warmups, rotates Simple/Rust/Go order across every trial, and writes the common
+blobs, all fifteen original lane blobs, and four clock-authority attachments.
+Build-origin v2 binds the committed helper source, exact C compiler and version,
+and produced helper; the validator continues to admit closed 32-field v1
+receipts for already-retained bundles. It runs the production lane checker
+before reporting PASS and recomputes the source fingerprint afterward so a
+concurrent `HEAD` change fails closed. Its output summary is deliberately named
+`external-evidence.unsigned.env`: an independent trusted reviewer must inspect
+and sign it and create the separate reviewer receipt. The producer never emits
+a reviewer signature and does not promote the TODO ledger row.
+
+Timing comes from the repository-owned
+`scripts/check/lib/rust-go-benchmark-monotonic-ns.c` helper, compiled for the
+producer host and self-tested before sampling; `clock_id=clock_gettime-monotonic`
+therefore denotes `CLOCK_MONOTONIC`, not wall-clock `date`. Builds run under a
+closed environment with `LC_ALL=C`, `PATH=/usr/bin:/bin`, `SIMPLE_LIB` bound to
+the repository `src` tree, stub fallback disabled, Rust flag/wrapper variables
+absent, and Go fixed to `GOENV=off`, `GOOS=linux`, the matching `GOARCH`,
+`CGO_ENABLED=0`, an isolated cache, and no `GOFLAGS`. These values are recorded
+in and enforced by the build-origin receipt; caller overrides are not inherited.
 Independent signatures cannot substitute for either quantitative oracle.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.

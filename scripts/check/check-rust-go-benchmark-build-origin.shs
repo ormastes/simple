@@ -5,7 +5,7 @@
 set -eu
 LC_ALL=C
 export LC_ALL
-ROOT=""; FINGERPRINT=""; RUN_ID=""; ORIGIN=""; TOOLCHAIN=""; EQUIV=""; ENVIRONMENT=""; SIMPLE_COMPILER=""; RUST_COMPILER=""; GO_COMPILER=""; SIMPLE_EXE=""; RUST_EXE=""; GO_EXE=""; SIMPLE_VERSION=""; RUST_VERSION=""; GO_VERSION=""
+ROOT=""; FINGERPRINT=""; RUN_ID=""; ORIGIN=""; TOOLCHAIN=""; EQUIV=""; ENVIRONMENT=""; SIMPLE_COMPILER=""; RUST_COMPILER=""; GO_COMPILER=""; SIMPLE_EXE=""; RUST_EXE=""; GO_EXE=""; SIMPLE_VERSION=""; RUST_VERSION=""; GO_VERSION=""; CLOCK_SOURCE=""; CLOCK_COMPILER=""; CLOCK_VERSION=""; CLOCK_HELPER=""
 fail() { echo "STATUS: FAIL rust-go-benchmark-build-origin — $*" >&2; exit 1; }
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -14,6 +14,7 @@ while [ "$#" -gt 0 ]; do
         --simple-compiler) SIMPLE_COMPILER=$2; shift 2 ;; --rust-compiler) RUST_COMPILER=$2; shift 2 ;; --go-compiler) GO_COMPILER=$2; shift 2 ;;
         --simple-executable) SIMPLE_EXE=$2; shift 2 ;; --rust-executable) RUST_EXE=$2; shift 2 ;; --go-executable) GO_EXE=$2; shift 2 ;;
         --simple-version) SIMPLE_VERSION=$2; shift 2 ;; --rust-version) RUST_VERSION=$2; shift 2 ;; --go-version) GO_VERSION=$2; shift 2 ;;
+        --clock-source) CLOCK_SOURCE=$2; shift 2 ;; --clock-compiler) CLOCK_COMPILER=$2; shift 2 ;; --clock-version) CLOCK_VERSION=$2; shift 2 ;; --clock-helper) CLOCK_HELPER=$2; shift 2 ;;
         *) fail "unknown-argument-$1" ;;
     esac
 done
@@ -47,14 +48,53 @@ eqf "$TOOLCHAIN" toolchain_id "sha256:$toolchain_digest"
 [ "$rust_version_sha" = "$(hash_file "$RUST_VERSION")" ] || fail rust-version-hash
 [ "$go_version_sha" = "$(hash_file "$GO_VERSION")" ] || fail go-version-hash
 
-[ "$(wc -l <"$ORIGIN" | tr -d ' ')" -eq 32 ] || fail origin-field-count
-eqf "$ORIGIN" build_schema simple.rust-go-benchmark-build-origin/v1
+build_schema=$(field "$ORIGIN" build_schema) || fail missing-build_schema
+case "$build_schema" in
+ simple.rust-go-benchmark-build-origin/v1) [ "$(wc -l <"$ORIGIN" | tr -d ' ')" -eq 32 ] || fail origin-field-count ;;
+ simple.rust-go-benchmark-build-origin/v2)
+  [ "$(wc -l <"$ORIGIN" | tr -d ' ')" -eq 52 ] || fail origin-field-count
+  for file in "$CLOCK_SOURCE" "$CLOCK_COMPILER" "$CLOCK_VERSION" "$CLOCK_HELPER"; do [ -f "$file" ] && [ ! -L "$file" ] || fail missing-clock-evidence-blob; done ;;
+ *) fail unsupported-build-schema ;;
+esac
+eqf "$ORIGIN" build_schema "$build_schema"
 eqf "$ORIGIN" gate_id rust-go-benchmark-parity
 eqf "$ORIGIN" source_fingerprint "$FINGERPRINT"
 eqf "$ORIGIN" run_id "$RUN_ID"
 fixture=$(token "$ORIGIN" fixture_id)
 eqf "$ORIGIN" toolchain_identity_sha256 "$(hash_file "$TOOLCHAIN")"
 eqf "$ORIGIN" environment_sha256 "$(hash_file "$ENVIRONMENT")"
+if [ "$build_schema" = simple.rust-go-benchmark-build-origin/v2 ]; then
+eqf "$ORIGIN" build_environment_id clean-build-environment-v1
+eqf "$ORIGIN" lc_all C
+eqf "$ORIGIN" build_path /usr/bin:/bin
+eqf "$ORIGIN" simple_lib src
+eqf "$ORIGIN" simple_no_stub_fallback 1
+eqf "$ORIGIN" rustflags unset
+eqf "$ORIGIN" cargo_encoded_rustflags unset
+eqf "$ORIGIN" rustc_wrapper unset
+eqf "$ORIGIN" rustc_workspace_wrapper unset
+eqf "$ORIGIN" goflags unset
+eqf "$ORIGIN" goenv off
+eqf "$ORIGIN" go_cache isolated
+eqf "$ORIGIN" cgo_enabled 0
+environment_arch=$(field "$ENVIRONMENT" arch) || fail environment-arch
+case "$environment_arch" in
+    x86_64) expected_goarch=amd64 ;; aarch64|arm64) expected_goarch=arm64 ;;
+    riscv64) expected_goarch=riscv64 ;; ppc64le) expected_goarch=ppc64le ;;
+    *) fail unsupported-build-environment-arch ;;
+esac
+eqf "$ORIGIN" goos linux
+eqf "$ORIGIN" goarch "$expected_goarch"
+clock_source_path=scripts/check/lib/rust-go-benchmark-monotonic-ns.c
+eqf "$ORIGIN" clock_source_path "$clock_source_path"
+eqf "$ORIGIN" clock_source_sha256 "$(git -C "$ROOT" show "HEAD:$clock_source_path" | sha256sum | awk '{print $1}')"
+eqf "$ORIGIN" clock_source_sha256 "$(hash_file "$CLOCK_SOURCE")"
+eqf "$ORIGIN" clock_compiler_sha256 "$(hash_file "$CLOCK_COMPILER")"
+eqf "$ORIGIN" clock_compiler_version_sha256 "$(hash_file "$CLOCK_VERSION")"
+eqf "$ORIGIN" clock_helper_sha256 "$(hash_file "$CLOCK_HELPER")"
+[ -x "$CLOCK_COMPILER" ] && [ -s "$CLOCK_VERSION" ] && [ -x "$CLOCK_HELPER" ] || fail invalid-clock-authority-attachment
+eqf "$ENVIRONMENT" clock_tool_sha256 "$(hash_file "$CLOCK_HELPER")"
+fi
 for language in simple rust go; do
     case "$language" in
         simple) ext=spl; command_id=simple-native-o3-v1; command='simple native-build test/05_perf/fixtures/rust_go_benchmark/workload.spl --backend llvm --opt-level=aggressive --strip --output benchmark_simple_executable'; exe=$SIMPLE_EXE ;;
