@@ -26,10 +26,37 @@ It also runs the REAL mono pass (`run_monomorphization`) over a generic
 """
 
 use std.spec
+use std.io_runtime.{file_exists, file_read}
 use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.mono.monomorphize_integration.{run_monomorphization}
 use compiler.verify.post_mono_verify.*
+
+val POST_MONO_VERIFY_SOURCE = "src/compiler/40.mono/verify/post_mono_verify.spl"
+
+fn post_mono_verify_source() -> text:
+    if not file_exists(POST_MONO_VERIFY_SOURCE):
+        fail("source not found at {POST_MONO_VERIFY_SOURCE}; run from the repo root")
+        return ""
+    file_read(POST_MONO_VERIFY_SOURCE)
+
+fn count_of(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+fn source_section(src: text, start_marker: text, end_marker: text) -> text:
+    val tail = src.split(start_marker)
+    if tail.len() != 2:
+        fail("expected one source marker: {start_marker}")
+        return ""
+    val head = tail[1].split(end_marker)
+    if head.len() < 2:
+        fail("missing source end marker: {end_marker}")
+        return ""
+    head[0]
+
+fn expect_walker_inventory(section: text, owner: text, where_: text, expected: i64):
+    expect(count_of(section, "case {owner}.")).to_equal(expected)
+    expect(count_of(section, "case _: self.hit_unreachable(\"{owner}\", \"{where_}\")")).to_equal(1)
 
 fn mk_span() -> Span:
     Span.empty()
@@ -195,6 +222,31 @@ fn real_mono_modules() -> Dict<text, HirModule>:
 # ---------------------------------------------------------------------------
 
 describe "post-monomorphization invariant verifier (plan section 9.5)":
+    it "uses owner-qualified HIR variants in every semantic match arm":
+        step("Bare variants collide across imported HIR enums in a self-compiled Stage 2")
+        val src = post_mono_verify_source()
+        val type_walker = source_section(src, "me walk_type(ty: HirType):", "me walk_types(")
+        val expr_walker = source_section(src, "me walk_expr(expr: HirExpr):", "me walk_comp_clause(")
+        val comp_walker = source_section(src, "me walk_comp_clause(clause: HirCompClause):", "# Patterns —")
+        val pattern_walker = source_section(src, "me walk_pattern(pattern: HirPattern):", "me walk_stmt(")
+        val stmt_walker = source_section(src, "me walk_stmt(stmt: HirStmt):", "me walk_block(")
+        val pattern_payload_walker = source_section(src, "me walk_pattern_payload(payload: HirPatternPayload?):", "me walk_enum_payload(")
+        val enum_payload_walker = source_section(src, "me walk_enum_payload(payload: HirEnumPayload?):", "me walk_pairs(")
+        expect_walker_inventory(type_walker, "HirTypeKind", "walk_type", 27)
+        expect_walker_inventory(expr_walker, "HirExprKind", "walk_expr", 57)
+        expect_walker_inventory(comp_walker, "HirCompClauseKind", "walk_comp_clause", 2)
+        expect_walker_inventory(pattern_walker, "HirPatternKind", "walk_pattern", 13)
+        expect_walker_inventory(stmt_walker, "HirStmtKind", "walk_stmt", 5)
+        expect_walker_inventory(pattern_payload_walker, "HirPatternPayload", "walk_pattern_payload", 2)
+        expect_walker_inventory(enum_payload_walker, "HirEnumPayload", "walk_enum_payload", 2)
+        expect(expr_walker).to_contain("case HirExprKind.TypeTest(value, _): self.walk_expr(value)")
+        expect(pattern_walker).to_contain("case HirPatternKind.CompleteRegion(_):")
+        expect(pattern_walker).to_contain("case HirPatternKind.DynRegion(_):")
+        expect(pattern_walker).to_contain("case HirPatternKind.TypeTest(_, _):")
+        # Helper-only callee classification is deliberately outside walk_expr.
+        val callee_helper = source_section(src, "me check_template_callee(callee: HirExpr):", "me flag_template(")
+        expect(count_of(callee_helper, "case HirExprKind.")).to_equal(2)
+
     it "reports every counter zero for a monomorphic module":
         step("Verify: reports every counter zero for a monomorphic module")
         # @req: REQ-COMPILER-MONO-001
