@@ -11,6 +11,8 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 use compiler.tools.lint.main.{Linter, LintLevel}
+use compiler.semantics.lint.riscv_rtl_debuggability_lint.{
+    lint_riscv_rtl_debuggability, lint_riscv_rtl_debuggability_lines}
 use lib.hardware.fpga_linux.riscv_fpga_linux.{generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
 
 fn run_shell(command: text) -> i64:
@@ -34,6 +36,26 @@ fn lint_core(path: text) -> any:
     linter.lint_source(path, read_generated_riscv_fpga_rtl_file(path))
 
 describe "RISC-V RTL debuggability lint":
+    it "canonical-line entrypoint preserves complete warning order":
+        step("Verify: source and canonical-line RISC-V lint entrypoints agree")
+        expect(run_shell("rm -rf '/tmp/riscv_rtl_debug_lint_line_parity'")).to_equal(0)
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_line_parity")
+        expect(result.is_ok()).to_equal(true)
+        val path = "/tmp/riscv_rtl_debug_lint_line_parity/rv64/rtl/simple_rv64gc_core.vhd"
+        val source = read_generated_riscv_fpga_rtl_file(path)
+        val legacy = lint_riscv_rtl_debuggability(source, path)
+        val shared = lint_riscv_rtl_debuggability_lines(source, path, source.split("\n"))
+        expect(shared.len()).to_equal(legacy.len())
+        var i = 0
+        while i < legacy.len():
+            expect(shared[i].code).to_equal(legacy[i].code)
+            expect(shared[i].severity).to_equal(legacy[i].severity)
+            expect(shared[i].message).to_equal(legacy[i].message)
+            expect(shared[i].hint).to_equal(legacy[i].hint)
+            expect(shared[i].line_num).to_equal(legacy[i].line_num)
+            expect(shared[i].file_path).to_equal(legacy[i].file_path)
+            i = i + 1
+
     it "accepts clean generated RV64 debug sidecars":
         step("Verify: accepts clean generated RV64 debug sidecars")
         # @req: REQ-COMPILER-LINT-001
