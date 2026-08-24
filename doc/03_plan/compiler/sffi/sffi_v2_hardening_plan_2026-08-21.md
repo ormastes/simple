@@ -1434,3 +1434,15 @@ signed/admitted. The next owner should continue the backend policy family, then
 move to status-bearing provider admission. Tagging is debt containment only:
 completion still requires cryptographically admitted evidence for every safe
 provider or a minimized explicit unsafe boundary for every remaining call.
+
+Both LLVM translator constructors now scope the native no-mangle policy read
+and retain one boolean read per construction. Current census is 21,267 calls
+(2,147 explicit, 19,120 missing), 12,111 declarations (897 tagged, 383
+minimized, 10,948 untouched), zero signed/admitted. Optimizer findings remain
+13; isolated analyzer evidence is 11.13 s / 270,804 KiB before versus 7.08 s /
+271,504 KiB after.
+
+Before claiming the inventory is complete, implement the recorded ambient-call
+gap fix using resolved HIR symbol identity. Do not make the source census appear
+complete by duplicating extern declarations or by treating every `rt_*`-named
+Simple function as foreign.

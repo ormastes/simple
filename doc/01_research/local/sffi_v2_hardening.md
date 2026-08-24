@@ -2478,3 +2478,25 @@ call baseline had not been refreshed after the preceding C-backend policy
 slice, so the ratchet is updated to the measured same-tree totals rather than
 hiding a new call. Signed and admitted evidence remains zero; this module is
 explicitly unsafe, not verified or signed.
+
+## LLVM translator construction policy boundary
+
+Both `MirToLlvm` constructors now evaluate the native no-mangle environment
+policy inside minimal lexical `unsafe(ffi)` blocks and pass the resulting
+boolean into the existing field. The declaration is tagged with the raw text
+provider's unset/failure ambiguity. Each constructor still performs exactly one
+read at the same creation point; reset ordering and object layout are unchanged.
+There is no cache, loop, lookup, copy, allocation, or numeric sentinel added.
+
+Optimizer findings remain 13. The uncontended paired analyzer measurement is
+11.13 s / 270,804 KiB before and 7.08 s / 271,504 KiB after; the roughly
+700 KiB RSS difference is not meaningful evidence of a memory regression.
+Current census: 21,267 calls (2,147 explicit, 19,120 missing), 12,111
+declarations (897 tagged, 383 minimized, 10,948 untouched), zero
+signed/admitted.
+
+The same audit exposed an ambient-call blind spot: the shared
+`common/mir_text_codegen.spl` trait calls `rt_env_get` without a local extern or
+explicit SFFI import, so the source census omits it. This is recorded as
+`sffi_authority_census_ambient_call_gap_2026-08-24.md`; a resolved-HIR inventory
+must replace source-name inference rather than adding duplicate extern owners.
