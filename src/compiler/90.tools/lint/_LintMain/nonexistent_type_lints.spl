@@ -1,0 +1,98 @@
+# Non-existent-type and non-existent-global lints (TYPE001 / TYPE002).
+#
+# Both rules pin defect classes found by the 2026-08-24 slice-C compile sweep
+# (src/app/mcp, src/app/cli, src/compiler/{80.driver,90.tools,99.loader}).
+# Each one is a source construct that LOOKS fine, type-checks nowhere, and is
+# only reported by a full HIR lowering of the whole module closure — minutes of
+# work for a defect a single line scan finds in milliseconds. That is exactly
+# the "if lint can detect the bug, update lint" case.
+#
+# TYPE001 — cast to a type name that does not exist in Simple.
+#   `x as int` is a Python/C reflex. Simple's integer types are i8..i64/u8..u64.
+#   Verified empirically against the compiler on 2026-08-24: a module casting to
+#   each of `int`, `long`, `double`, `uint` produces `unresolved type: <name>`
+#   at HIR lowering, while `float` and `str` resolve fine and are therefore NOT
+#   flagged here. The flagged set is exactly the four names the compiler was
+#   observed to reject, so this rule cannot false-positive on a real type.
+#   Found live in src/app/mcp/debug_eval.spl and src/app/mcp/debug_session.spl.
+#
+# TYPE002 — `for x in range(a, b):`
+#   `range` is not a global in the self-hosted compiler. The only definitions
+#   are `gc_async_mut.pure.collections.range` and unrelated METHODS named
+#   `range` on container types, and no file in the tree imports the former.
+#   A `for` loop over `range(...)` therefore fails with `unresolved name: range`.
+#   The Simple form is `for x in a..b:`. Restricted to the `for ... in range(`
+#   shape on purpose: a bare `range(` also matches legitimate method calls such
+#   as `vec.range(...)`, which must not be flagged.
+#   Found live in src/app/mcp/debug_eval.spl and src/app/mcp/debug_log_tools.spl.
+
+use compiler.tools.lint._LintMain.name_lints.{NameLintWarning}
+
+# Type names that do not exist in Simple, each confirmed to produce
+# `unresolved type: <name>` from the compiler. Keep this list empirical: only
+# add a name after observing the compiler reject it.
+fn nonexistent_type_names() -> [text]:
+    ["int", "long", "double", "uint"]
+
+fn lint_nonexistent_types(path: String, content: String) -> [NameLintWarning]:
+    var warnings: [NameLintWarning] = []
+    if not path.ends_with(".spl"):
+        return warnings
+    val bad_names = nonexistent_type_names()
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            i = i + 1
+            continue
+        for name in bad_names:
+            if _nt_has_cast_to(line, name):
+                warnings.push(NameLintWarning(
+                    code: "TYPE001",
+                    line: i + 1,
+                    message: "cast to `{name}`, which is not a Simple type - HIR lowering reports `unresolved type: {name}`",
+                    hint: "use a real Simple integer type, e.g. `as i64`"))
+        if _nt_has_for_range(trimmed):
+            warnings.push(NameLintWarning(
+                code: "TYPE002",
+                line: i + 1,
+                message: "`for ... in range(a, b)` - `range` is not a resolvable global here, HIR lowering reports `unresolved name: range`",
+                hint: "use the range-expression form: `for x in a..b:`"))
+        i = i + 1
+    warnings
+
+# True when `line` contains a cast `as <name>` with `name` standing alone as a
+# whole word (so `as int` matches but `as integer_thing` / `as i64` do not).
+fn _nt_has_cast_to(line: text, name: text) -> Bool:
+    val needle = " as " + name
+    var rest = line
+    while true:
+        val at = rest.find(needle)
+        if at < 0:
+            return false
+        val after = at + needle.len()
+        if _nt_is_word_boundary(rest, after):
+            return true
+        rest = rest[at + 1:]
+    false
+
+fn _nt_has_for_range(trimmed: text) -> Bool:
+    if not trimmed.starts_with("for "):
+        return false
+    trimmed.find(" in range(") >= 0
+
+# A trailing word boundary: end of line, or a character that cannot continue an
+# identifier. Keeps `as int` distinct from `as into_thing`.
+fn _nt_is_word_boundary(line: text, idx: i64) -> Bool:
+    if idx >= line.len():
+        return true
+    val ch = line[idx]
+    if ch >= "a" and ch <= "z":
+        return false
+    if ch >= "A" and ch <= "Z":
+        return false
+    if ch >= "0" and ch <= "9":
+        return false
+    ch != "_"

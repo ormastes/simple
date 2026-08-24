@@ -5,6 +5,7 @@ use compiler.tools.lint.main.*
 # bare-externs calls whose import chain crosses the facade wildcard re-export.
 # See doc/08_tracking/bug/mangler_bare_extern_sibling_split_part_2026-07-30.md
 use compiler.tools.lint._LintMain.name_lints.{lint_accessor_and_parent_names}
+use compiler.tools.lint._LintMain.nonexistent_type_lints.{lint_nonexistent_types}
 # Simple Language Linter
 # Semantic lints for code quality and safety
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
@@ -269,6 +270,7 @@ impl Linter:
         self.check_param_tag_spl(path, content)
         self.check_stale_md_diagrams(path, content)
         self.check_accessor_and_parent_names(path, content)
+        self.check_nonexistent_types(path, content)
         self.check_llvm_backend_type_safety(path, content)
         self.check_os_freestanding_patterns(path, content)
         self.check_module_init_literal_spl(path, content)
@@ -587,6 +589,21 @@ impl Linter:
         val warnings = lint_accessor_and_parent_names(path, content)
         for warning in warnings:
             val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Warning, warning.message)
+                .with_fix(warning.hint)
+            self.results.push(LintRunResult.new(path, warning.line, 0, lint))
+
+    # Non-existent-type / non-existent-global lints (TYPE001 / TYPE002).
+    # Correctness-category: both codes name a construct the compiler rejects
+    # outright at HIR lowering, so this is a hard defect, not a style opinion.
+    # Warn by default, deliberately NOT deny: the tree already carries ~134
+    # pre-existing `as int`-class sites (148 measured 2026-08-24) outside the slice that found this, and
+    # a new deny would red every lane at once. Promotion to deny is the right
+    # end state and is gated on that population reaching zero — do not weaken
+    # or delete the rule instead.
+    me check_nonexistent_types(path: String, content: String):
+        val warnings = lint_nonexistent_types(path, content)
+        for warning in warnings:
+            val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
                 .with_fix(warning.hint)
             self.results.push(LintRunResult.new(path, warning.line, 0, lint))
 

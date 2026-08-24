@@ -1,0 +1,136 @@
+# @req: REQ-COMP-TYPE001-NONEXISTENT-TYPE-001 — stable requirement identity for this spec.
+"""
+## Purpose and audience
+Purpose: Prove that TYPE001/TYPE002 fire on source the compiler rejects outright.
+Audience: COMP maintainers who read this spec to confirm the behavior still holds.
+"""
+
+"""
+# Non-Existent Type / Global Lint Rules Specification
+
+**Feature IDs:** #TYPE001 #TYPE002
+**Category:** Tooling / Lint
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Pins the two defect classes found live in `src/app/mcp` by the 2026-08-24
+slice-C compile sweep. Both are source constructs the compiler rejects at HIR
+lowering — `unresolved type: int` and `unresolved name: range` — and both were
+previously invisible until a full closure lowering ran, minutes of work for a
+defect a line scan finds instantly.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| TYPE001 | Cast to a name that is not a Simple type (`int`, `long`, `double`, `uint`) |
+| TYPE002 | `for x in range(a, b):` — `range` is not a resolvable global |
+| Empirical set | Only names the compiler was observed to reject are flagged; `float`/`str` resolve and are not flagged |
+"""
+
+use compiler.tools.lint.main.{Linter}
+use std.spec.step
+
+# ============================================================================
+# TYPE001 — cast to a non-existent type
+# ============================================================================
+
+describe "TYPE001 — nonexistent type in a cast":
+    it "fires on `as int`":
+        step("Verify: fires on `as int`")
+        # @req: REQ-COMP-TYPE001-NONEXISTENT-TYPE-001
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl", "val code = ch as int\n")
+        expect(linter.results.len()).to_equal(1)
+
+    it "result carries code TYPE001":
+        step("Verify: result carries code TYPE001")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl", "val code = ch as int\n")
+        expect(linter.results[0].lint.code).to_equal("TYPE001")
+
+    it "fires on `as long`, `as double` and `as uint`":
+        step("Verify: fires on the other three observed-rejected names")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl",
+            "val a = x as long\nval b = x as double\nval c = x as uint\n")
+        expect(linter.results.len()).to_equal(3)
+
+    it "does not fire on `as i64` (a real Simple type)":
+        step("Verify: does not fire on a real type")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl", "val code = ch as i64\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "does not fire on `as float` or `as str`, which the compiler resolves":
+        step("Verify: the flagged set stays empirical")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl",
+            "val a = x as float\nval b = x as str\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "does not fire when the name is only a prefix of a longer identifier":
+        step("Verify: word-boundary guard holds")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl", "val a = x as integer_thing\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "does not fire on a comment line":
+        step("Verify: comments are skipped")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl", "# do not write `x as int` here\n")
+        expect(linter.results.len()).to_equal(0)
+
+# ============================================================================
+# TYPE002 — `for ... in range(...)`
+# ============================================================================
+
+describe "TYPE002 — for-loop over range()":
+    it "fires on `for i in range(0, n):`":
+        step("Verify: fires on the for/range shape")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl", "    for i in range(0, n):\n")
+        expect(linter.results.len()).to_equal(1)
+
+    it "result carries code TYPE002":
+        step("Verify: result carries code TYPE002")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl", "    for i in range(0, n):\n")
+        expect(linter.results[0].lint.code).to_equal("TYPE002")
+
+    it "does not fire on the range-expression form `for i in 0..n:`":
+        step("Verify: the correct form is accepted")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl", "    for i in 0..n:\n")
+        expect(linter.results.len()).to_equal(0)
+
+    it "does not fire on a method named range outside a for loop":
+        step("Verify: `vec.range(...)` is not flagged")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl", "    val sub = vec.range(0, n)\n")
+        expect(linter.results.len()).to_equal(0)
+
+# ============================================================================
+# Regression fixtures — the exact live shapes found in src/app/mcp
+# ============================================================================
+
+describe "regression — the live src/app/mcp shapes":
+    it "flags the debug_eval.spl shape (as int + for/range together)":
+        step("Verify: both codes fire on the real pre-fix source shape")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl",
+            "fn eval_is_alpha(ch) -> Bool:\n    val code = ch as int\n    for _i in range(0, length):\n        pass\n")
+        expect(linter.results.len()).to_equal(2)
+
+    it "reports nothing on the post-fix source shape":
+        step("Verify: the landed fix is clean under this rule")
+        var linter = Linter.new()
+        linter.check_nonexistent_types("/tmp/fake.spl",
+            "fn eval_is_alpha(ch) -> Bool:\n    val code = ch as i64\n    for _i in 0..length:\n        pass\n")
+        expect(linter.results.len()).to_equal(0)
