@@ -1,0 +1,56 @@
+use std.test.*
+use std.fs.{file_read}
+
+val MAPPER = "src/os/kernel/loader/x86_32_authenticated_mapping_owner_v1.spl"
+val RESERVATIONS = "src/os/kernel/scheduler/x86_32_mapping_adoption_reservation_v1.spl"
+
+describe "x86-32 mapper-to-TCB transfer static contract":
+    it "authenticates the complete scheduler-retained admission handle first":
+        val mapper = file_read(MAPPER)
+        val reservations = file_read(RESERVATIONS)
+        val transfer = mapper.split(
+            "pub(package) fn x86_32_authenticated_mapping_transfer_to_tcb_v1")[1]
+        expect(transfer.index_of("scheduler_x86_32_adoption_binding_matches_v1(")).to_be_less_than(
+            transfer.index_of("mutex_raw_lock(_x86_32_mapping_mutex_v1)"))
+        expect(reservations).to_contain("slot.admission_handle")
+        expect(reservations).to_contain("left.open_handle_id != right.open_handle_id")
+        expect(reservations).to_contain("left.verified_load_ranges.len() != right.verified_load_ranges.len()")
+        expect(reservations).to_contain("_x86_32_load_range_equal_v1")
+
+    it "cancels exact abandoned reservations and burns their identities":
+        val body = file_read(RESERVATIONS)
+        expect(body).to_contain("scheduler_next_task_lifecycle_identity_take_v1()")
+        expect(body).to_contain("ticket.generation == slot.generation")
+        expect(body).to_contain("ticket.nonce == slot.nonce")
+        expect(body).to_contain("scheduler_x86_32_adoption_cancel_v1")
+        expect(body).to_contain("SchedulerX8632AdoptionReservationStateV1.Cancelled")
+        expect(body).to_contain("identity above is deliberately burned")
+        expect(body).not.to_contain("g_scheduler_next_task_id")
+
+    it "quarantines indeterminate unlocks without post-unlock slot mutation":
+        val body = file_read(RESERVATIONS)
+        val mapper = file_read(MAPPER)
+        expect(body).to_contain("_x86_32_adoption_poisoned_v1 = true")
+        expect(body).to_contain("whole capsule is now quarantined")
+        expect(body).to_contain("_x86_32_adoption_indeterminate_v1(Some(ticket))")
+        expect(mapper).to_contain("fn _x86_32_mapping_unlock_v1() -> bool")
+        expect(mapper).to_contain("_x86_32_mapping_poisoned_v1 = true")
+        expect(mapper.count("mutex_raw_unlock(_x86_32_mapping_mutex_v1)")).to_equal(1)
+
+    it "returns typed commit reject or indeterminate outcomes only":
+        val mapper = file_read(MAPPER)
+        expect(mapper).to_contain("X8632MappingTcbTransferDispositionV1")
+        expect(mapper).to_contain("TransferCommitted")
+        expect(mapper).to_contain("TransferIndeterminate")
+        expect(mapper).to_contain("identity: committed.identity")
+        expect(mapper).to_contain("quarantine: Some(coordinate)")
+        expect(mapper).not.to_contain("activate_cr3")
+        expect(mapper).not.to_contain("Scheduler.tasks")
+
+    it "never exposes a present handle until both owners commit":
+        val mapper = file_read(MAPPER)
+        val transfer = mapper.split(
+            "pub(package) fn x86_32_authenticated_mapping_transfer_to_tcb_v1")[1]
+        expect(transfer.index_of("scheduler_x86_32_adoption_commit_v1(")).to_be_less_than(
+            transfer.index_of("val handle = SchedulerX8632MappingHandleV1"))
+        expect(mapper).to_contain("handle: scheduler_x86_32_mapping_handle_absent_v1()")

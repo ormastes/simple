@@ -1,0 +1,252 @@
+# Scheduler-owned reservation for one future x86-32 mapping handle.
+#
+# Taking a reservation burns a canonical task lifecycle identity immediately.
+# Cancellation never returns that identity to the allocator.  The retained
+# admission handle is the binding authority; caller-supplied identity strings
+# are never sufficient.
+
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1,
+    executable_image_handle_validate
+}
+use os.kernel.scheduler.scheduler_types.{
+    TaskLifecycleIdentityV1, scheduler_next_task_lifecycle_identity_take_v1
+}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+pub enum SchedulerX8632AdoptionReservationStateV1:
+    Reserved
+    Committed
+    Cancelled
+    Quarantined
+
+pub enum SchedulerX8632AdoptionReservationDispositionV1:
+    Reserved
+    Committed
+    Rejected
+    Indeterminate
+
+pub struct SchedulerX8632AdoptionReservationTicketV1:
+    slot_index: i64
+    generation: u64
+    nonce: u64
+
+pub struct SchedulerX8632AdoptionReservationResultV1:
+    disposition: SchedulerX8632AdoptionReservationDispositionV1
+    ticket: SchedulerX8632AdoptionReservationTicketV1?
+    identity: TaskLifecycleIdentityV1?
+
+struct SchedulerX8632AdoptionReservationSlotV1:
+    generation: u64
+    nonce: u64
+    state: SchedulerX8632AdoptionReservationStateV1
+    identity: TaskLifecycleIdentityV1
+    admission_handle: ExecutableImageHandleV1
+
+val _x86_32_adoption_mutex_v1: i64 = mutex_raw_create()
+var _x86_32_adoption_slots_v1: [SchedulerX8632AdoptionReservationSlotV1] = []
+var _x86_32_adoption_generation_v1: u64 = 1u64
+var _x86_32_adoption_poisoned_v1: bool = false
+
+pub fn scheduler_x86_32_adoption_max_reservations_v1() -> i64: 4
+
+fn _x86_32_adoption_rejected_v1(
+) -> SchedulerX8632AdoptionReservationResultV1:
+    SchedulerX8632AdoptionReservationResultV1(
+        disposition: SchedulerX8632AdoptionReservationDispositionV1.Rejected,
+        ticket: nil, identity: nil)
+
+fn _x86_32_adoption_indeterminate_v1(
+    ticket: SchedulerX8632AdoptionReservationTicketV1?
+) -> SchedulerX8632AdoptionReservationResultV1:
+    SchedulerX8632AdoptionReservationResultV1(
+        disposition: SchedulerX8632AdoptionReservationDispositionV1.Indeterminate,
+        ticket: ticket, identity: nil)
+
+fn _x86_32_load_range_equal_v1(
+    left: ExecutableLoadRangeV1,
+    right: ExecutableLoadRangeV1
+) -> bool:
+    left.file_offset == right.file_offset and
+        left.file_size == right.file_size and
+        left.virtual_address == right.virtual_address and
+        left.memory_size == right.memory_size and
+        left.writable == right.writable and
+        left.executable == right.executable
+
+fn _x86_32_admission_handle_equal_v1(
+    left: ExecutableImageHandleV1,
+    right: ExecutableImageHandleV1
+) -> bool:
+    if (left.schema_version != right.schema_version or
+        left.open_handle_id != right.open_handle_id or
+        left.mount_id != right.mount_id or
+        left.filesystem_name != right.filesystem_name or
+        left.canonical_source_path != right.canonical_source_path or
+        left.mount_generation != right.mount_generation or
+        left.file_id != right.file_id or
+        left.file_generation != right.file_generation or
+        left.size_bytes != right.size_bytes or left.role != right.role or
+        left.target.os != right.target.os or
+        left.target.arch != right.target.arch or
+        left.target.abi != right.target.abi or
+        left.image_hash != right.image_hash or
+        left.admission_id != right.admission_id or
+        left.trust_epoch != right.trust_epoch or
+        left.read_count != right.read_count or
+        left.read_bytes != right.read_bytes or
+        left.consumed != right.consumed or
+        left.verified_load_ranges.len() != right.verified_load_ranges.len()):
+        return false
+    var index = 0
+    while index < left.verified_load_ranges.len():
+        if not _x86_32_load_range_equal_v1(
+            left.verified_load_ranges[index], right.verified_load_ranges[index]):
+            return false
+        index = index + 1
+    true
+
+fn _x86_32_ticket_matches_v1(
+    ticket: SchedulerX8632AdoptionReservationTicketV1,
+    slot: SchedulerX8632AdoptionReservationSlotV1
+) -> bool:
+    ticket.slot_index >= 0 and ticket.generation == slot.generation and
+        ticket.nonce == slot.nonce
+
+fn _x86_32_ticket_for_v1(
+    index: i64,
+    slot: SchedulerX8632AdoptionReservationSlotV1
+) -> SchedulerX8632AdoptionReservationTicketV1:
+    SchedulerX8632AdoptionReservationTicketV1(
+        slot_index: index, generation: slot.generation, nonce: slot.nonce)
+
+pub(package) fn scheduler_x86_32_adoption_reserve_v1(
+    admission_handle: ExecutableImageHandleV1
+) -> SchedulerX8632AdoptionReservationResultV1:
+    if not executable_image_handle_validate(admission_handle).ok:
+        return _x86_32_adoption_rejected_v1()
+    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
+    if maybe_identity == nil: return _x86_32_adoption_rejected_v1()
+    # The identity above is deliberately burned on every subsequent failure.
+    val identity = maybe_identity.unwrap()
+    if (_x86_32_adoption_mutex_v1 <= 0 or _x86_32_adoption_poisoned_v1 or
+        not mutex_raw_lock(_x86_32_adoption_mutex_v1)):
+        return _x86_32_adoption_indeterminate_v1(nil)
+    var reusable = -1
+    var candidate = 0
+    while candidate < _x86_32_adoption_slots_v1.len():
+        val state = _x86_32_adoption_slots_v1[candidate].state
+        if (reusable < 0 and
+            (state == SchedulerX8632AdoptionReservationStateV1.Cancelled or
+             state == SchedulerX8632AdoptionReservationStateV1.Committed)):
+            reusable = candidate
+        candidate = candidate + 1
+    if ((reusable < 0 and _x86_32_adoption_slots_v1.len() >=
+            scheduler_x86_32_adoption_max_reservations_v1()) or
+        _x86_32_adoption_generation_v1 == 0u64 or
+        _x86_32_adoption_generation_v1 == 18446744073709551615u64):
+        if not mutex_raw_unlock(_x86_32_adoption_mutex_v1):
+            _x86_32_adoption_poisoned_v1 = true
+            return _x86_32_adoption_indeterminate_v1(nil)
+        return _x86_32_adoption_rejected_v1()
+    val generation = _x86_32_adoption_generation_v1
+    _x86_32_adoption_generation_v1 = generation + 1u64
+    var nonce = generation ^ identity.task_id ^
+        identity.lifecycle_generation ^ 0x5838333252455356u64
+    if nonce == 0u64: nonce = generation ^ 0x8632u64
+    val slot = SchedulerX8632AdoptionReservationSlotV1(
+        generation: generation, nonce: nonce,
+        state: SchedulerX8632AdoptionReservationStateV1.Reserved,
+        identity: identity, admission_handle: admission_handle)
+    val index = if reusable >= 0: reusable else: _x86_32_adoption_slots_v1.len()
+    if reusable >= 0:
+        _x86_32_adoption_slots_v1[reusable] = slot
+    else:
+        _x86_32_adoption_slots_v1.push(slot)
+    val ticket = _x86_32_ticket_for_v1(index, slot)
+    if not mutex_raw_unlock(_x86_32_adoption_mutex_v1):
+        _x86_32_adoption_poisoned_v1 = true
+        # The whole capsule is now quarantined. Do not touch slot memory after
+        # an unlock whose release semantics are indeterminate.
+        return _x86_32_adoption_indeterminate_v1(Some(ticket))
+    SchedulerX8632AdoptionReservationResultV1(
+        disposition: SchedulerX8632AdoptionReservationDispositionV1.Reserved,
+        ticket: Some(ticket), identity: Some(identity))
+
+fn _x86_32_adoption_transition_v1(
+    ticket: SchedulerX8632AdoptionReservationTicketV1,
+    admission_handle: ExecutableImageHandleV1,
+    commit: bool
+) -> SchedulerX8632AdoptionReservationResultV1:
+    if (_x86_32_adoption_mutex_v1 <= 0 or _x86_32_adoption_poisoned_v1 or
+        not mutex_raw_lock(_x86_32_adoption_mutex_v1)):
+        return _x86_32_adoption_indeterminate_v1(Some(ticket))
+    if ticket.slot_index < 0 or ticket.slot_index >= _x86_32_adoption_slots_v1.len():
+        if not mutex_raw_unlock(_x86_32_adoption_mutex_v1):
+            _x86_32_adoption_poisoned_v1 = true
+            return _x86_32_adoption_indeterminate_v1(nil)
+        return _x86_32_adoption_rejected_v1()
+    var slot = _x86_32_adoption_slots_v1[ticket.slot_index]
+    if (not _x86_32_ticket_matches_v1(ticket, slot) or
+        slot.state != SchedulerX8632AdoptionReservationStateV1.Reserved or
+        not _x86_32_admission_handle_equal_v1(admission_handle, slot.admission_handle)):
+        if not mutex_raw_unlock(_x86_32_adoption_mutex_v1):
+            _x86_32_adoption_poisoned_v1 = true
+            return _x86_32_adoption_indeterminate_v1(nil)
+        return _x86_32_adoption_rejected_v1()
+    slot.state = if commit:
+        SchedulerX8632AdoptionReservationStateV1.Committed
+    else:
+        SchedulerX8632AdoptionReservationStateV1.Cancelled
+    _x86_32_adoption_slots_v1[ticket.slot_index] = slot
+    if not mutex_raw_unlock(_x86_32_adoption_mutex_v1):
+        _x86_32_adoption_poisoned_v1 = true
+        # The whole capsule is now quarantined. Do not touch slot memory after
+        # an unlock whose release semantics are indeterminate.
+        return _x86_32_adoption_indeterminate_v1(Some(ticket))
+    SchedulerX8632AdoptionReservationResultV1(
+        disposition: if commit:
+            SchedulerX8632AdoptionReservationDispositionV1.Committed
+        else:
+            SchedulerX8632AdoptionReservationDispositionV1.Rejected,
+        ticket: Some(ticket), identity: Some(slot.identity))
+
+pub(package) fn scheduler_x86_32_adoption_binding_matches_v1(
+    ticket: SchedulerX8632AdoptionReservationTicketV1,
+    admission_handle: ExecutableImageHandleV1
+) -> bool:
+    if (_x86_32_adoption_mutex_v1 <= 0 or _x86_32_adoption_poisoned_v1 or
+        not mutex_raw_lock(_x86_32_adoption_mutex_v1)):
+        return false
+    var matches = false
+    if ticket.slot_index >= 0 and ticket.slot_index < _x86_32_adoption_slots_v1.len():
+        val slot = _x86_32_adoption_slots_v1[ticket.slot_index]
+        matches = _x86_32_ticket_matches_v1(ticket, slot) and
+            slot.state == SchedulerX8632AdoptionReservationStateV1.Reserved and
+            _x86_32_admission_handle_equal_v1(admission_handle, slot.admission_handle)
+    if not mutex_raw_unlock(_x86_32_adoption_mutex_v1):
+        _x86_32_adoption_poisoned_v1 = true
+        return false
+    matches
+
+pub(package) fn scheduler_x86_32_adoption_commit_v1(
+    ticket: SchedulerX8632AdoptionReservationTicketV1,
+    admission_handle: ExecutableImageHandleV1
+) -> SchedulerX8632AdoptionReservationResultV1:
+    _x86_32_adoption_transition_v1(ticket, admission_handle, true)
+
+pub(package) fn scheduler_x86_32_adoption_cancel_v1(
+    ticket: SchedulerX8632AdoptionReservationTicketV1,
+    admission_handle: ExecutableImageHandleV1
+) -> SchedulerX8632AdoptionReservationResultV1:
+    _x86_32_adoption_transition_v1(ticket, admission_handle, false)
+
+export SchedulerX8632AdoptionReservationStateV1
+export SchedulerX8632AdoptionReservationDispositionV1
+export SchedulerX8632AdoptionReservationTicketV1
+export SchedulerX8632AdoptionReservationResultV1
+export scheduler_x86_32_adoption_max_reservations_v1
+export scheduler_x86_32_adoption_reserve_v1
+export scheduler_x86_32_adoption_binding_matches_v1
+export scheduler_x86_32_adoption_commit_v1
+export scheduler_x86_32_adoption_cancel_v1

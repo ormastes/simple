@@ -21,9 +21,23 @@ use os.kernel.types.memory_types.{PhysAddr, PageFrame, VmFlags, VM_PRESENT, VM_U
 use os.kernel.memory.pmm.{pmm_free_page}
 use os.kernel.boot.mmio.{mmio_write8, mmio_read8}
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.kernel.types.x86_32_mapping_handle_v1.{
+    SchedulerX8632MappingHandleV1,
+    scheduler_x86_32_mapping_handle_absent_v1
+}
+use os.kernel.scheduler.x86_32_mapping_adoption_reservation_v1.{
+    SchedulerX8632AdoptionReservationTicketV1,
+    SchedulerX8632AdoptionReservationDispositionV1,
+    scheduler_x86_32_adoption_binding_matches_v1,
+    scheduler_x86_32_adoption_commit_v1,
+    scheduler_x86_32_adoption_cancel_v1
+}
+use os.kernel.scheduler.scheduler_types.{TaskLifecycleIdentityV1}
 
 pub enum X8632AuthenticatedMappingStateV1:
     MappedBlocked
+    TransferCommitted
+    TransferIndeterminate
     ReleaseRetryable
     Destroyed
     Quarantined
@@ -73,6 +87,21 @@ struct X8632AuthenticatedMappingSlotV1:
     admission_id: text
     image_hash: text
 
+pub enum X8632MappingTcbTransferDispositionV1:
+    Committed
+    Rejected
+    Indeterminate
+
+pub struct X8632MappingTransferQuarantineCoordinateV1:
+    slot_plus_one: u32
+    mapping_generation: u64
+
+pub struct X8632MappingTcbTransferResultV1:
+    disposition: X8632MappingTcbTransferDispositionV1
+    handle: SchedulerX8632MappingHandleV1
+    identity: TaskLifecycleIdentityV1?
+    quarantine: X8632MappingTransferQuarantineCoordinateV1?
+
 val _X86_32_MAPPING_PAGE_BYTES_V1: u64 = 4096u64
 val _X86_32_STACK_PAGE_V1: u64 = 0x00000000BFFFE000u64
 val _X86_32_STACK_TOP_V1: u64 = 0x00000000BFFFF000u64
@@ -80,6 +109,11 @@ val _x86_32_mapping_mutex_v1: i64 = mutex_raw_create()
 var _x86_32_mapping_slots_v1: [X8632AuthenticatedMappingSlotV1] = []
 var _x86_32_mapping_generation_v1: u64 = 1u64
 var _x86_32_mapping_poisoned_v1: bool = false
+
+fn _x86_32_mapping_unlock_v1() -> bool:
+    if mutex_raw_unlock(_x86_32_mapping_mutex_v1): return true
+    _x86_32_mapping_poisoned_v1 = true
+    false
 
 pub fn x86_32_authenticated_mapping_max_live_v1() -> i64: 4
 pub fn x86_32_authenticated_mapping_max_image_pages_v1() -> u64: 255u64
@@ -239,11 +273,15 @@ pub(package) fn x86_32_authenticated_mapping_prepare_v1(
             x86_32_authenticated_mapping_max_live_v1()) or
         _x86_32_mapping_generation_v1 == 0u64 or
         _x86_32_mapping_generation_v1 == 18446744073709551615u64):
-        _ = mutex_raw_unlock(_x86_32_mapping_mutex_v1)
+        if not _x86_32_mapping_unlock_v1():
+            return _x86_32_mapping_reject_v1(
+                X8632AuthenticatedMappingErrorV1.SerializationUnavailable)
         return _x86_32_mapping_reject_v1(X8632AuthenticatedMappingErrorV1.OwnerExhausted)
     val created = x86_32_user_root_create_v1()
     if not created.ok or not created.lease.?:
-        _ = mutex_raw_unlock(_x86_32_mapping_mutex_v1)
+        if not _x86_32_mapping_unlock_v1():
+            return _x86_32_mapping_reject_v1(
+                X8632AuthenticatedMappingErrorV1.SerializationUnavailable)
         return _x86_32_mapping_reject_v1(
             X8632AuthenticatedMappingErrorV1.RootAllocationFailed)
     val root = created.lease.unwrap()
@@ -310,8 +348,7 @@ pub(package) fn x86_32_authenticated_mapping_prepare_v1(
     else:
         _x86_32_mapping_slots_v1.push(slot)
     val answer = _x86_32_mapping_receipt_v1(slot_index, slot, error)
-    if not mutex_raw_unlock(_x86_32_mapping_mutex_v1):
-        _x86_32_mapping_poisoned_v1 = true
+    if not _x86_32_mapping_unlock_v1():
         return _x86_32_mapping_reject_v1(
             X8632AuthenticatedMappingErrorV1.SerializationUnavailable)
     answer
@@ -324,12 +361,16 @@ pub(package) fn x86_32_authenticated_mapping_destroy_v1(
         return _x86_32_mapping_reject_v1(
             X8632AuthenticatedMappingErrorV1.SerializationUnavailable)
     if receipt.slot_index < 0 or receipt.slot_index >= _x86_32_mapping_slots_v1.len():
-        _ = mutex_raw_unlock(_x86_32_mapping_mutex_v1)
+        if not _x86_32_mapping_unlock_v1():
+            return _x86_32_mapping_reject_v1(
+                X8632AuthenticatedMappingErrorV1.SerializationUnavailable)
         return _x86_32_mapping_reject_v1(X8632AuthenticatedMappingErrorV1.InvalidReceipt)
     var slot = _x86_32_mapping_slots_v1[receipt.slot_index]
     if (not _x86_32_mapping_slot_matches_v1(receipt, slot) or
         slot.state == X8632AuthenticatedMappingStateV1.Destroyed):
-        _ = mutex_raw_unlock(_x86_32_mapping_mutex_v1)
+        if not _x86_32_mapping_unlock_v1():
+            return _x86_32_mapping_reject_v1(
+                X8632AuthenticatedMappingErrorV1.SerializationUnavailable)
         return _x86_32_mapping_reject_v1(X8632AuthenticatedMappingErrorV1.InvalidReceipt)
     val (released, updated) = _x86_32_mapping_release_v1(slot)
     slot = updated
@@ -339,11 +380,101 @@ pub(package) fn x86_32_authenticated_mapping_destroy_v1(
     else:
         X8632AuthenticatedMappingErrorV1.RollbackFailed
     val answer = _x86_32_mapping_receipt_v1(receipt.slot_index, slot, error)
-    if not mutex_raw_unlock(_x86_32_mapping_mutex_v1):
-        _x86_32_mapping_poisoned_v1 = true
+    if not _x86_32_mapping_unlock_v1():
         return _x86_32_mapping_reject_v1(
             X8632AuthenticatedMappingErrorV1.SerializationUnavailable)
     answer
+
+fn _x86_32_transfer_rejected_v1() -> X8632MappingTcbTransferResultV1:
+    X8632MappingTcbTransferResultV1(
+        disposition: X8632MappingTcbTransferDispositionV1.Rejected,
+        handle: scheduler_x86_32_mapping_handle_absent_v1(),
+        identity: nil, quarantine: nil)
+
+fn _x86_32_transfer_coordinate_v1(
+    index: i64,
+    generation: u64
+) -> X8632MappingTransferQuarantineCoordinateV1:
+    X8632MappingTransferQuarantineCoordinateV1(
+        slot_plus_one: (index + 1) as u32, mapping_generation: generation)
+
+fn _x86_32_transfer_indeterminate_v1(
+    coordinate: X8632MappingTransferQuarantineCoordinateV1?
+) -> X8632MappingTcbTransferResultV1:
+    X8632MappingTcbTransferResultV1(
+        disposition: X8632MappingTcbTransferDispositionV1.Indeterminate,
+        handle: scheduler_x86_32_mapping_handle_absent_v1(),
+        identity: nil, quarantine: coordinate)
+
+pub(package) fn x86_32_authenticated_mapping_transfer_to_tcb_v1(
+    reservation: SchedulerX8632AdoptionReservationTicketV1,
+    receipt: X8632AuthenticatedMappingReceiptV1,
+    admission_handle: ExecutableImageHandleV1,
+    entry_point: u64,
+    initial_stack_pointer: u64
+) -> X8632MappingTcbTransferResultV1:
+    """Consume one mapping and one retained-handle scheduler reservation."""
+    # This check must precede mapper lookup: only the scheduler-retained full
+    # admission handle authenticates which reserved task identity may receive
+    # this mapping. Admission id/hash strings alone are insufficient.
+    if not scheduler_x86_32_adoption_binding_matches_v1(
+        reservation, admission_handle):
+        return _x86_32_transfer_rejected_v1()
+    if (_x86_32_mapping_mutex_v1 <= 0 or _x86_32_mapping_poisoned_v1 or
+        not mutex_raw_lock(_x86_32_mapping_mutex_v1)):
+        # The retained binding was authenticated, so reclaim the reservation
+        # even though mapper serialization cannot establish mapping state.
+        _ = scheduler_x86_32_adoption_cancel_v1(reservation, admission_handle)
+        return _x86_32_transfer_indeterminate_v1(nil)
+    if receipt.slot_index < 0 or receipt.slot_index >= _x86_32_mapping_slots_v1.len():
+        val cancelled = scheduler_x86_32_adoption_cancel_v1(
+            reservation, admission_handle)
+        if not _x86_32_mapping_unlock_v1():
+            return _x86_32_transfer_indeterminate_v1(nil)
+        if cancelled.disposition ==
+            SchedulerX8632AdoptionReservationDispositionV1.Indeterminate:
+            return _x86_32_transfer_indeterminate_v1(nil)
+        return _x86_32_transfer_rejected_v1()
+    var slot = _x86_32_mapping_slots_v1[receipt.slot_index]
+    if (not _x86_32_mapping_slot_matches_v1(receipt, slot) or
+        slot.state != X8632AuthenticatedMappingStateV1.MappedBlocked or
+        slot.entry_point != entry_point or
+        slot.initial_stack_pointer != initial_stack_pointer or
+        slot.admission_id != admission_handle.admission_id or
+        slot.image_hash != admission_handle.image_hash):
+        val cancelled = scheduler_x86_32_adoption_cancel_v1(
+            reservation, admission_handle)
+        if not _x86_32_mapping_unlock_v1():
+            return _x86_32_transfer_indeterminate_v1(nil)
+        if cancelled.disposition ==
+            SchedulerX8632AdoptionReservationDispositionV1.Indeterminate:
+            return _x86_32_transfer_indeterminate_v1(nil)
+        return _x86_32_transfer_rejected_v1()
+    val committed = scheduler_x86_32_adoption_commit_v1(
+        reservation, admission_handle)
+    val coordinate = _x86_32_transfer_coordinate_v1(
+        receipt.slot_index, slot.generation)
+    if committed.disposition ==
+        SchedulerX8632AdoptionReservationDispositionV1.Indeterminate:
+        slot.state = X8632AuthenticatedMappingStateV1.TransferIndeterminate
+        _x86_32_mapping_slots_v1[receipt.slot_index] = slot
+        _ = _x86_32_mapping_unlock_v1()
+        return _x86_32_transfer_indeterminate_v1(Some(coordinate))
+    if committed.disposition !=
+        SchedulerX8632AdoptionReservationDispositionV1.Committed:
+        if not _x86_32_mapping_unlock_v1():
+            return _x86_32_transfer_indeterminate_v1(Some(coordinate))
+        return _x86_32_transfer_rejected_v1()
+    slot.state = X8632AuthenticatedMappingStateV1.TransferCommitted
+    _x86_32_mapping_slots_v1[receipt.slot_index] = slot
+    val handle = SchedulerX8632MappingHandleV1(
+        slot_plus_one: (receipt.slot_index + 1) as u32,
+        handle_generation: slot.generation)
+    if not _x86_32_mapping_unlock_v1():
+        return _x86_32_transfer_indeterminate_v1(Some(coordinate))
+    X8632MappingTcbTransferResultV1(
+        disposition: X8632MappingTcbTransferDispositionV1.Committed,
+        handle: handle, identity: committed.identity, quarantine: nil)
 
 pub fn x86_32_authenticated_mapping_scheduler_ready_v1() -> bool:
     # A mapping receipt is not CR3/CPL3 lifecycle authority.
@@ -351,7 +482,11 @@ pub fn x86_32_authenticated_mapping_scheduler_ready_v1() -> bool:
 
 export X8632AuthenticatedMappingStateV1, X8632AuthenticatedMappingErrorV1
 export X8632AuthenticatedMappingReceiptV1
+export X8632MappingTcbTransferDispositionV1
+export X8632MappingTransferQuarantineCoordinateV1
+export X8632MappingTcbTransferResultV1
 export x86_32_authenticated_mapping_max_live_v1
 export x86_32_authenticated_mapping_max_image_pages_v1
 export x86_32_authenticated_stack_word_bytes_v1
 export x86_32_authenticated_mapping_scheduler_ready_v1
+export x86_32_authenticated_mapping_transfer_to_tcb_v1
