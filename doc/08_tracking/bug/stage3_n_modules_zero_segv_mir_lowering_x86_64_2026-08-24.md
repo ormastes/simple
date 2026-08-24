@@ -600,3 +600,226 @@ Mutation-tested three ways against the real tree:
 | restore tag test in pure-Simple mirror | `FAIL — 6 case(s) checked, ... simple-mirror:requires-heap-tag` | 1 |
 | delete the probe entirely | `ERROR — nothing was checked (could not extract ...)` | 2 |
 | tree restored | `PASS — 6 case(s) checked, ...` | 0 |
+
+## 2026-08-24 (lane-surfaces-payload): reproduced on Stage 2, plus a SECOND defect — phase 3's failing verdict is lost
+
+### Reproduction (preserved Stage-2 binary, fresh seed, exit code read directly into a variable)
+
+Binary: `/mnt/data/worktrees/lane-retained-surfaces/build/bootstrap/lanefix3/stage2/x86_64-unknown-linux-gnu/simple`
+Input: a two-line `hello.spl` in a fresh output dir, `SIMPLE_COMPILER_PHASE_PROFILE=1`.
+
+```
+NATIVE_BUILD_RC=139
+```
+
+Log tail, verbatim:
+
+```
+[BOOTSTRAP-PHASE] +137ms phase2:parse:done n_modules=1 carrier=modules
+[BOOTSTRAP-PHASE] +137ms phase3:route ready=false config=false n_modules=1 n_sources=1
+[BOOTSTRAP-PHASE] +137ms phase3:legacy:entry n_modules=1 n_sources=1
+[BOOTSTRAP-PHASE] +137ms phase3:hir_typecheck:done
+[mono] generic_fns=0 call_sites=0 specializations=0 unresolved=0
+[BOOTSTRAP-PHASE] +320ms aot:lower_to_mir:module:done idx=0 module=hello functions=0
+[ERROR] MIR error: E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module surface payload malformed at HIR entry (heap-typed payload word is 0 or in the zero page)
+```
+
+### Three facts this pins that were previously mis-stated
+
+1. **The failing route is LEGACY, not streaming.** `phase3:route ready=false config=false`.
+   The earlier "measured `ready=true config=true`" note in this record does not
+   describe this failure and must not be used to reason about it. The two guards
+   emit DIFFERENT codes — `E-DRIVER-HIR-OWNER-MALFORMED` (streaming,
+   `driver_hir_pipeline_lowering.spl:150`) vs
+   `E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED` (legacy, `:585`) — and it is the
+   legacy code that fires. Phase 2 therefore ran `parse_all_impl`'s
+   native-entry-closure branch (`driver_source_pipeline_parsing.spl:737-861`,
+   confirmed by the `[build] surface_freeze` receipts, which exist only there),
+   which commits `self.ctx.module_surfaces = Some(entry_surfaces)` at `:854`
+   and — unlike the streaming path — never calls `module_surfaces_promote`.
+
+2. **It is native-codegen-specific.** The same source, same input, run by the
+   Rust seed's interpreter (`native-build` under a freshly built
+   `cargo build --release --bin simple`) gives `SEED_NATIVE_BUILD_RC=0` with the
+   same `ready=false config=false` legacy route. Only the natively compiled
+   Stage-2 binary reproduces.
+
+3. **The shape alone does not reproduce.** Three standalone native-built
+   fixtures — (a) `Option<class>` field unwrapped into an `Any` extern arg,
+   (b) the same through two levels of class field (`self.ctx.module_surfaces`)
+   inside a `me` method with the guard's exact `if != nil` / `unsafe` / inline
+   `.unwrap()` form, and (c) the whole-context `self.ctx = parsed_ctx`
+   reassignment after a tuple return — all report `wf=true` at every point and
+   exit 0. So this is not a marshalling, unwrap, or context-copy *shape* defect;
+   something in the real run changes the payload.
+
+### LOCALIZED (instrumented Stage 2, probes on both carriers at every transition)
+
+A Stage 2 was rebuilt from `origin/main` with `rt_heap_ref_wellformed` formation
+probes (no dereference, no new extern -- the same disassembly-verified probe the
+guard uses) at each transition between phase 2's commit and HIR entry. Verbatim:
+
+```
+[ZP] A pre-store  ...
+[ZP] P1 parse:entry-closure:committed local=true readback=false isnil=false
+[ZP] P2 orchestration:after-parse wf=false
+[ZP] P3 orchestration:pre-phase3 wf=false
+[ZP] P4 hir:legacy-entry inline=false hoisted=false
+[ERROR] MIR error: E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED
+```
+
+**The payload dies inside a single statement.**
+`driver_source_pipeline_parsing.spl:854`, `self.ctx.module_surfaces = Some(entry_surfaces)`:
+the local `entry_surfaces` is a well-formed heap reference (`local=true`) and the
+value read straight back out of the field on the very next line is a small word
+(`readback=false`) while the Option still compares non-nil (`isnil=false`). This is
+exactly the 2026-08-22 zeroed-payload class, and it is NOT an accumulation across
+the phase boundary -- P2/P3/P4 merely carry forward a value that was already dead
+at the point of commit. Everything downstream (the orchestration window, the
+source-reclaim block, the phase-3 route, the guard's inline-vs-hoisted unwrap) is
+therefore ruled out as the cause; `hoisted=false` at P4 additionally rules out the
+guard's own expression shape.
+
+Not reproducible standalone: four native-built fixtures of increasing fidelity --
+up to a six-field class with `[T]`/`Dict<text,i64>`/`i64`/`bool` fields stored into
+an `Option` field of a class held by another class, written and read back inside a
+`me` method -- all report `local=true optUnwrap=true ctxReadback=true`. The defect
+needs the real function's context, which points at codegen (field displacement,
+spill, or the `Some` construction) rather than at the source shape.
+
+### ROOT CAUSE (proven by disassembly of the failing Stage-2 binary): `.unwrap()` on an Option bound to `Poll.unwrap`
+
+A second instrumented Stage 2 split the store from the read-back:
+
+```
+[ZP] A pre-store  local=true  optUnwrap=false
+[ZP] B post-store readback=false localAfter=true optAfter=false isnil=false
+```
+
+`local=true` / `localAfter=true`: the class reference is intact throughout.
+`optUnwrap=false` BEFORE the field store: **the field store is innocent.** What
+returns a small word is `.unwrap()` itself, on a freshly constructed
+`Some(entry_surfaces)` sitting in a local.
+
+Disassembling the failing Stage-2 binary at the probe's `.rodata` anchor
+(`parse_all_impl`, vaddr 0xe3c070) shows why:
+
+```
+e3e7a0: mov $0x1,%edi ; mov $0xf1987159,%esi ; mov %r14,%rdx
+e3e7b4: call *%r10                 <- rt_enum_new(1, 0xf1987159, entry_surfaces)
+e3e7be: mov %rax,0x78(%r10)        <- STORE module_surfaces, disp 0x78
+e3e7d9: mov 0x78(%r11),%rdi        <- LOAD  module_surfaces, disp 0x78
+e3e7e4: call ...Poll_dot_unwrap    <- lib__nogc_async_mut__async__poll__Poll_dot_unwrap
+```
+
+Store and load use the SAME displacement (0x78), so there is no field-offset
+bug -- the layout hypothesis is disproven. The `Some` is constructed correctly
+with tag `0xf1987159`. The defect is the CALLEE: `.unwrap()` on a
+`ModuleSurfacesByName?` was emitted as a direct call to **`Poll.unwrap`**, the
+unrelated async `Poll<T>` helper from `src/lib/nogc_async_mut/async/poll.spl`:
+
+```
+e85d42: mov $0x91301d4e,%esi ; call rt_enum_check_discriminant   # Poll::Ready
+e85d58: mov $0xabfb25a5,%esi ; call rt_enum_check_discriminant   # Poll::Pending
+e85d72: xor %rax,%rax                                            # neither -> RETURN 0
+```
+
+The stored tag matches neither Poll case, so the callee falls through and
+returns **0**. Zero masked of its low three bits is 0, which is `< 4096`, which
+is exactly the "heap-typed payload word is 0 or in the zero page" the guard
+reports -- while the field itself still holds a real enum object, which is why
+the Option keeps comparing non-nil. Every later probe (P2/P3/P4) reads `false`
+because every one of them goes through the same miscompiled `.unwrap()`.
+
+### Why: an erased receiver binds a bare method name by SUFFIX ALONE
+
+`compiler/src/codegen/instr/closures_structs.rs` resolves a bare (dot-less)
+method name by scanning `ctx.func_ids` for any key ending in `.unwrap` or
+`_dot_unwrap`, with **no receiver-type test in the filter**. When the receiver
+type is erased -- as it is for a class field read -- `Poll.unwrap` is simply the
+`*.unwrap` symbol that happens to be linked in, and it wins.
+
+A guard against exactly this already existed in that file, and
+`pipeline/native_project/mangle.rs` carries two more of the same shape (added
+for an identical `FailSafeResult.unwrap` leak). **The guard was dead**: it was
+gated on `candidates.len() > 1`, so it only fired on multi-candidate ambiguity,
+never on the single-candidate bind. The file's own tail comment says so --
+"EXACTLY the single-candidate erased-receiver bind that produced the known
+thefts, and it is silent today". This is the pre-existing class recorded in
+`doc/08_tracking/bug/codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md`.
+
+### NOT FIXED -- the bind site is still unidentified. Read this before trying again.
+
+The obvious candidate was `compiler/src/codegen/instr/closures_structs.rs`, which
+resolves a bare (dot-less) method name by scanning `ctx.func_ids` for any key
+ending in `.unwrap` / `_dot_unwrap` **with no receiver-type test in the filter**,
+and whose existing refusal for enum-helper names was gated on
+`candidates.len() > 1` -- dead for a single-candidate bind. That file's own tail
+comment already says the single-candidate path is "EXACTLY the single-candidate
+erased-receiver bind that produced the known thefts, and it is silent today".
+
+Two Stage-2 rebuilds were spent on that hypothesis and **it is wrong, or at least
+insufficient**. Both attempts were reverted rather than landed:
+
+| attempt | change | result |
+|---|---|---|
+| 1 | hoist the guard above the `unique_ids` early-return, drop the candidate-count clause, require `matches!(receiver_ty, None \| Some(TypeId::ANY))` | `FIX_NATIVE_BUILD_RC=139`, signature still present |
+| 2 | same, minus the `receiver_ty` clause (exactly `mangle.rs`'s shape) | `FIX2_NATIVE_BUILD_RC=139`, signature still present |
+
+After attempt 2, `Poll_dot_unwrap` still has **269** references binary-wide and
+**4** call sites inside `lower_and_check_impl`. The guard never fires for this
+bind, so the name does **not** reach that `.or_else` fallback -- it is resolved
+somewhere else, most plausibly already qualified as `Poll.unwrap` before mangling
+(which is also why `mangle.rs`'s two sibling refusals, both gated on the name
+having no type qualifier, do not catch it either). **Finding where a `T?`
+receiver's `unwrap` acquires the qualifier `Poll.` is the next lane's target.**
+
+Neither codegen change was landed: an unverified change to method dispatch is a
+worse trade than an open bug with a precise record.
+
+#### A false green worth not repeating
+
+`objdump -d BIN | grep -c "call.*Poll_dot_unwrap"` returns **0** on a binary that
+calls it 269 times. The bind is emitted as `lea <sym>(%rip),%reg` followed by
+`call *%reg`, never as a direct `call <sym>`. That grep briefly "proved" attempt 1
+had removed the miscall. Match `_dot_unwrap>` (the symbol reference in objdump's
+comment column), not `call`.
+
+### THIRD DEFECT, filed not fixed: a non-exhaustive enum match falls through to 0
+
+`Poll.unwrap` is written with a total two-case `match` and no wildcard, yet its
+compiled form ends in `xor %rax,%rax` for an unmatched discriminant. A value
+whose tag matches no case silently yields 0 instead of trapping. Had that path
+trapped, this defect would have been a loud crash inside `Poll.unwrap` on day
+one instead of a day-long hunt for a "zeroed payload". Worth its own record.
+
+### Gate
+
+`scripts/check/check-stage2-option-unwrap-not-stolen.shs` -- **ADVISORY, landed
+honestly RED.** Fail-closed, `--selftest` first and fatal (6 fixtures), verdict
+last, `PASS n>0` exit 0 / `FAIL` exit 1 / `ERROR` exit 2; every subprocess status
+is read directly into a variable on the line after the invocation, never through
+a pipe. Given `--stage2 <path>` it performs two checks: a SYMBOLIC one counting
+`*_dot_unwrap` call sites inside the driver's HIR-entry function (a correct build
+routes an Option unwrap through `rt_enum_payload` / `rt_unwrap_or_trap`, never
+through a Simple method), and a BEHAVIOURAL one asserting a hello-world build
+emits no malformed-surfaces signature and does not crash. Signature-absence plus
+a crash test rather than `rc == 0`, since a Stage-2 build has unrelated failure
+modes this guard must not claim to pin. No `--stage2`, a missing `nm`/`objdump`,
+or a stripped artifact are all ERROR -- absence of evidence is never a pass.
+
+Measured against a Stage 2 built from `origin/main`:
+
+```
+FAIL -- 2 check(s) performed: 4 Simple '*_dot_unwrap' call site(s) inside
+lower_and_check_impl -- an Option unwrap bound to a user method instead of the
+runtime builtin; hello world emitted E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED
+(rc=139);
+```
+
+The guard shipped with a fail-open of its own, found and fixed before landing: a
+relative `--stage2` path did not resolve inside the private temp cwd the
+behavioural check runs in, so the invocation failed 127, emitted no signature,
+and scored CLEAN. The path is now made absolute, and an invocation that produces
+an empty log is ERROR rather than a pass. Promote to MANDATORY once a real fix
+makes it green.
