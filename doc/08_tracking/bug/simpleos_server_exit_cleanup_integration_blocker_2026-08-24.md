@@ -2,6 +2,23 @@
 
 Status: open, unsafe prerequisite draft rejected and removed, unverified.
 
+Update: the generic bounded provider-side transaction prerequisite now exists
+in `src/os/kernel/scheduler/provider_cleanup_attempt_fence_v1.spl`. It provides
+provider-issued opaque attempts, explicit side-effect start, exact idempotent
+completion, cancellation request, same-provider quiescence acknowledgment, and
+generation-rotating retry. A completion racing before the acknowledgment wins;
+after an authenticated acknowledgment and retry, a copied old start identity is stale
+and its late completion is rejected. This closes the generic attempt-fencing
+design gap only. It is intentionally not wired to Scheduler or `Zombie`, and
+the FD, grant, and DBD providers still need identity-bound adapters and terminal
+or authenticated-quarantine receipts before this blocker can close.
+
+The generic start result is deliberately not claimed as unique execution
+authority: Simple values are copyable. Every provider adapter must keep its
+authority inside one attempt-ID dispatch/dedup owner and dispatch work only for
+the single accepted start transition. This provider-local integration remains
+part of the open blocker.
+
 The scheduler currently calls `posix_close_task_fds_with_backends` and
 `server_data_launch_grant_revoke_task_lifecycle_v1`, ignores unsuccessful
 cleanup, then makes `TaskState.Zombie` externally observable. The FD path can
