@@ -1,6 +1,7 @@
 use std.io_runtime.file_read
 use std.spec.step
-use app.cli.check_tier.tier_word_parts
+use app.cli.check_tier.{TierKeywords, build_tier_keyword_index,
+    tier_keyword_required_level, tier_word_parts}
 
 describe "check-tier owner-local accumulation":
     it "does not rebuild growing arrays while scanning project input":
@@ -43,14 +44,18 @@ describe "check-tier owner-local accumulation":
     it "extracts keyword spans without repeated whole-line replacement":
         step("Verify: punctuation normalization is one byte scan")
         val source = file_read("src/app/cli/check_tier.spl")
-        val start = source.index_of("fn check_one_file(")
-        val finish = source.index_of("# String helper", start)
+        val start = source.index_of("fn check_one_file_indexed(")
+        val finish = source.index_of("fn check_one_file(", start)
         val body = source.slice(start, finish)
         expect(source).to_contain("fn tier_word_parts(code: text) -> [text]:")
         expect(source).to_contain("tier_word_delimiter(code.byte_at(i))")
         expect(body).to_contain("val parts = tier_word_parts(code_only)")
         expect(body).not.to_contain("cleaned = cleaned.replace(")
         expect(body).not.to_contain("cleaned.split(\" \")")
+        expect(body).not.to_contain("kw_is_any(")
+        expect(body).not.to_contain("kw_is_allowed(")
+        expect(body).to_contain("val active_tier_level = tier_level(tier)")
+        expect(body).not.to_contain("required_level > tier_level(tier)")
 
     it "preserves the exact legacy delimiter and non-delimiter behavior":
         step("Verify: word spans retain order duplicates tabs and UTF-8")
@@ -60,3 +65,22 @@ describe "check-tier owner-local accumulation":
         expect(tier_word_parts("éclair 東京")).to_equal(["éclair", "東京"])
         expect(tier_word_parts("a'b\\c#d")).to_equal(["a'b\\c#d"])
         expect(tier_word_parts("fn,fn")).to_equal(["fn", "fn"])
+
+    it "indexes the earliest required tier once per request":
+        step("Verify: duplicate keywords preserve seed then core precedence")
+        val index = build_tier_keyword_index(TierKeywords(
+            seed: ["shared", "seed_only"],
+            core: ["shared", "core_only", "core_only"],
+            full: ["shared", "core_only", "full_only"]))
+        expect(tier_keyword_required_level("shared", index)).to_equal(0)
+        expect(tier_keyword_required_level("seed_only", index)).to_equal(0)
+        expect(tier_keyword_required_level("core_only", index)).to_equal(1)
+        expect(tier_keyword_required_level("full_only", index)).to_equal(2)
+        expect(tier_keyword_required_level("unknown", index)).to_equal(-1)
+
+        val source = file_read("src/app/cli/check_tier.spl")
+        expect(source).to_contain("val keyword_index = build_tier_keyword_index(kw)")
+        expect(source).to_contain(
+            "check_one_file_indexed(f, \"seed\", keyword_index)")
+        expect(source).to_contain(
+            "check_one_file_indexed(f, \"core\", keyword_index)")
