@@ -2532,21 +2532,25 @@ instruction.
 
 ### Generated HIR child traversal follow-up
 
-The typed `PerfFacts` collector is iterative only above its generated child
-API. Each popped base node currently constructs a fresh `[HirNode]`, while
-transparent wrapper helpers recursively construct and concatenate additional
-arrays. The correct replacement is a generated `HirChildFrame` work union and
-context-neutral sink in layer 20. It must include base carriers and every
-transparent wrapper, push schema fields/lists/pairs in exact reverse order,
-and let the layer-35 collector attach loop depth. This removes per-node arrays
-and wrapper recursion without coupling HIR to performance semantics.
+The typed `PerfFacts` collector previously was iterative only above its
+generated child API. Each popped base node constructed a fresh `[HirNode]`,
+while transparent wrapper helpers recursively constructed and concatenated
+additional arrays. The generator now emits a `HirChildFrame` work union and
+context-neutral sink in layer 20, covering all four base carriers and all 19
+reachable transparent wrappers. Reverse field/list/pair expansion lets the
+layer-35 collector attach loop depth and retain forward preorder under LIFO
+execution. Wrapper frames are expanded rather than counted. The old allocating
+API remains as a compatibility surface but is no longer used by `PerfFacts`.
 
 Do not hand-specialize the collector or pass its array into generated code:
 Simple value/COW semantics make by-value mutation unsafe, and a base-node-only
 callback leaves recursive wrappers. Keep the allocating API as a compatibility
-adapter during migration. The generated-visitor freshness gate must also cover
-`hir_children.spl`; today it checks other visitor outputs but can miss drift in
-this file.
+adapter during migration. A focused fixture pins parent, receiver, and argument
+fact order. Static comparison found all 23 frame variants and expansion
+functions paired with no ordering omission. Execution evidence is unavailable:
+the deployed nominal release binary identified itself as the Rust bootstrap
+seed, so it was used only once to materialize deterministic generated source
+and was not accepted as verification evidence.
 
 The prerequisite freshness hardening is now implemented. The combined visitor
 gate regenerates both fold visitors and `hir_children.spl` into explicit temp
@@ -2555,6 +2559,12 @@ in its red fixture. The dedicated HIR visitor gate also passes an explicit
 temporary fold-output root. This closes a side-effect hazard where the
 `visitors` command's omitted second output argument could write fold artifacts
 under the scanned source tree during a nominally read-only check.
+
+The schema generator still skips `kind` fields on non-base wrapper structs;
+therefore `HirCompClause.kind` expressions remain absent from both legacy and
+frame traversal. This is a pre-existing completeness defect, tracked separately
+in `doc/08_tracking/bug/hir_comp_clause_children_omitted_2026-08-24.md` rather
+than changing collector semantics inside the allocation migration.
 
 ### TYPE001/TYPE002 canonical line snapshot
 
