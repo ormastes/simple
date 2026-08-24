@@ -1400,6 +1400,21 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add exact sparse/empty/no-match behavior and source-topology contracts;
   verification intentionally not run under the user's no-verify instruction.
 
+## Completed STUB003 candidate-gate tranche
+
+- Add an allocation-free byte scanner for `pass_todo` in the virtual stream
+  produced by deleting exactly ASCII space and tab.
+- Run the historical two-replacement normalization and four exact STUB003 shape
+  checks only on candidate lines.
+- Remove Θ(B) common-case normalized-copy bytes while retaining linear scanning
+  with a fixed nine-byte token.
+- Preserve split spellings, comments/strings, Unicode whitespace behavior,
+  production/test suppression, diagnostic count/message/fix, and STUB003-before-
+  T001/D001 ordering.
+- Add direct gate, production/test, ordering, Unicode-whitespace, and source-
+  dominance contracts; verification intentionally not run under the user's
+  no-verify instruction.
+
 ## Completed check-tier accumulator tranche
 
 - Replace input-sized keyword, module-tier, and restricted-file copy-on-append
