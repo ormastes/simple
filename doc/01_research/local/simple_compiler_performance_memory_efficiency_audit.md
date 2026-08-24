@@ -3578,3 +3578,29 @@ dependency-neutral module rather than making hot query paths import the full
 tier checker. Each source is scanned once in O(N) time with one integer result
 per physical line and no masked text construction for DEPR002. No timing,
 allocation, or RSS measurement was run under the no-verification override.
+
+# 2026-08-24 follow-up: doc-coverage repeated traversal removal
+
+The live self-hosted doc-coverage path ran three recursive grep pipelines for
+the requested aggregate and two more for each of four breakdown rows. The
+default aggregate repeated `src/lib`, and the `std/` plus `lib/` rows rescanned
+that same tree again, yielding 11 process pipelines per terminal/JSON/Markdown
+request. Each pipeline captured matching stdout before reducing it to a count.
+
+Normal reporting now walks each distinct exact requested or breakdown root once
+via the Pure Simple filesystem facade. A root-index cache reuses identical-root counts while the
+requested aggregate intentionally re-adds duplicate roots, preserving historical
+multiplicity. Each `.spl` file is read and counted in one line pass before the
+next file. Grep `-B2` semantics are modeled as distinct triple-quote
+lines in overlapping public-function contexts. Ancestor and descendant roots
+remain separate scan domains, matching their independently requested totals.
+The built-in default remains an ordered multi-root list; a user argument is now
+one literal root rather than an implicit shell-word/glob program, intentionally
+closing the normal-report command-injection surface.
+Normal-report time is O(S + E + Q): S is bytes actually read across all root
+scans, E is visited directory entries, and Q is path construction, stat, and
+hash byte work. With the no-GC command runtime, the conservative peak-allocation
+bound is O(S + E + Q + U), including file/split storage, directory listings,
+path prefixes, and root metadata. It launches zero child processes and retains
+no grep match output. No runtime/RSS measurement was run under the
+no-verification override.

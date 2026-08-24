@@ -872,3 +872,20 @@ Generated output is represented as complete logical fragments with one final
 join. Entry symbols owned by the generated shell are excluded from helper lists
 rather than inserted and repeatedly skipped. File-based adapters perform I/O
 once and delegate to a pure text-to-text core for exact-byte evidence.
+
+# Documentation coverage scan ownership
+
+One request owns ordered requested roots, an exact-root index, and parallel
+coverage counts. Exact root-string identity is used only for scan reuse; requested aggregation
+walks the ordered root list so duplicate multiplicity remains observable. The
+filesystem scanner owns one file at a time and returns scalar counts upward.
+Ancestor and descendant roots are intentionally independent scan domains.
+The entry root is canonicalized so a command-line symlink is followed; children
+whose resolved spelling differs from the canonical-parent child are skipped so
+recursive symlinks cannot duplicate or cycle the traversal.
+Only an omitted path selects the built-in multi-root request. Argument parsing
+preserves that provenance; even explicit text equal to the displayed default is
+one literal root. Normal reporting owns no shell-word, quoting, or glob language.
+Normal renderers consume immutable `CoverageReportFacts` and may not invoke
+process, grep, or independent counting adapters. The bounded `--missing` listing
+remains a separate compatibility capsule.

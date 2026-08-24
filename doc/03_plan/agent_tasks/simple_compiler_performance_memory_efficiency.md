@@ -1734,6 +1734,19 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - No manual execution was run under the user override; static semantic,
   performance, and fixture review is required before sync.
 
+# Completed tranche: doc-coverage single-scan reporting (2026-08-24)
+
+- Replaced normal-report grep pipelines with Pure Simple recursive file facts.
+- Preserved public/documented definitions and overlapping `-B2` docstring-line
+  deduplication.
+- Added a request-local distinct-root cache while preserving duplicate requested
+  root multiplicity and std/lib shared facts.
+- Kept one file content live at a time and removed captured grep output from
+  terminal, JSON, and Markdown reporting.
+- Added mirrored semantic/cache/process-absence evidence and a canonical manual.
+- No manual execution, timing, subprocess, byte-read, or RSS measurement was run
+  under the user override.
+
 # Completed tranche: PatternIdiom safety quarantine (2026-08-24)
 
 - Marked PatternIdiom Disabled and removed its executable witness claim.

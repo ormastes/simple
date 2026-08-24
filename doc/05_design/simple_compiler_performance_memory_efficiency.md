@@ -1181,3 +1181,20 @@ one complete call per function, and the return/footer, then joins once. The
 existing file API performs one read and delegates. This preserves exact output
 while removing linear membership inside discovery and cumulative output-prefix
 copies.
+
+# Doc-coverage single-scan design
+
+`dc_counts_for_source` performs one ordered line scan and tracks the last counted
+docstring-context line to reproduce grep overlap deduplication. `dc_scan_root`
+resolves the entry root, while `dc_scan_resolved` skips children whose real path
+differs from their canonical-parent spelling, reads only `.spl` files, and combines
+three scalar counters. `dc_report_facts` interns ordered distinct exact root strings into a
+text-to-index dictionary, scans each once, then aggregates the original requested
+root sequence so duplicates retain their old weight. `src/lib` owns both std and
+lib breakdown facts. Overlapping ancestor/descendant roots remain independent.
+Each normal renderer obtains one report fact and performs
+only arithmetic plus unchanged output statements.
+`dc_get_path` preserves default-versus-explicit provenance in
+`CoveragePathRequest`: omission owns the built-in root list, while every user
+value passes through `dc_path_roots` as one trimmed literal path, including
+embedded spaces, with no glob expansion.
