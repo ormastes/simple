@@ -38,8 +38,10 @@ use compiler.tools.fix.rules.registry.{check_all_rules_with_lines}
 use lazy nogc_sync_mut.ui.theme_package.{validate_default_theme_package}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
 use compiler.semantics.lint.param_tag.{check_param_tag}
-use compiler.semantics.lint.module_init_literal.{check_module_init_literal}
-use compiler.semantics.lint.cow_alias_hotpath.{check_cow_alias_hotpath}
+use compiler.semantics.lint.lint_text.{
+    CodeLineSnapshot, code_line_snapshot_from_lines}
+use compiler.semantics.lint.module_init_literal.{check_module_init_literal_snapshot}
+use compiler.semantics.lint.cow_alias_hotpath.{check_cow_alias_hotpath_snapshot}
 use compiler.semantics.lint.raw_rt_access.{
     check_raw_rt_access_with_allowlist, raw_rt_lexical_code_lines,
     raw_rt_wrapper_replacement, raw_rt_wrapper_binding_is_unshadowed
@@ -50,10 +52,11 @@ use std.critical.capability_manifest.{load_critical_mode_config}
 use compiler.semantics.lint.leading_operator.{check_leading_operator_lines}
 use compiler.semantics.lint.const_ref_default.{check_const_ref_default_lines}
 use compiler.semantics.lint.bare_primitive_internal.{check_bare_primitive_internal_lines}
-use compiler.semantics.lint.unwrapped_foreign_resource.{check_unwrapped_foreign_resource}
+use compiler.semantics.lint.unwrapped_foreign_resource.{
+    check_unwrapped_foreign_resource_snapshot}
 use compiler.semantics.lint.raw_sffi_call.{
-    RawSffiCodeSnapshot, raw_sffi_code_snapshot, check_raw_sffi_calls_snapshot,
-    check_raw_sffi_declarations_snapshot
+    RawSffiCodeSnapshot, raw_sffi_code_snapshot_from_snapshot,
+    check_raw_sffi_calls_snapshot, check_raw_sffi_declarations_snapshot
 }
 
 # File I/O wrapper
@@ -331,16 +334,25 @@ impl Linter:
         self.check_nonexistent_types(path, lines)
         self.check_llvm_backend_type_safety(path, lines)
         self.check_os_freestanding_patterns(path, lines)
-        self.check_module_init_literal_spl(path, content)
-        self.check_cow_alias_hotpath_spl(path, content)
+        # These adjacent consumers share one short-lived lexical projection.
+        # Release it before raw-RT and critical checks to bound peak retention.
+        val local_code_snapshot = code_line_snapshot_from_lines(lines)
+        self.check_module_init_literal_spl(path, local_code_snapshot)
+        self.check_cow_alias_hotpath_spl(path, local_code_snapshot)
+        local_code_snapshot.release()
         self.check_raw_rt_access_spl(path, content, lines)
         self.check_dynamic_capability_acquire_spl(path, content)
         self.check_silent_default_spl(path, lines)
         self.check_leading_operator_spl(path, lines)
         self.check_const_ref_default_spl(path, lines)
         self.check_bare_primitive_internal_spl(path, lines)
-        self.check_unwrapped_foreign_resource_spl(path, content)
-        self.check_raw_sffi_spl(path, content)
+        # UFR and raw-SFFI have identical lexical needs and are adjacent. A
+        # second phase-local snapshot avoids retaining raw/trimmed text across
+        # unrelated checks while still replacing their two projections.
+        val foreign_code_snapshot = code_line_snapshot_from_lines(lines)
+        self.check_unwrapped_foreign_resource_spl(path, foreign_code_snapshot)
+        self.check_raw_sffi_spl(path, foreign_code_snapshot)
+        foreign_code_snapshot.release()
         self.check_wm_lane_boundary(file_config, path, lines)
 
         # Run shared EasyFix rules and attach as lint results
@@ -433,8 +445,8 @@ impl Linter:
                 .with_fix(warning.hint)
             self.results.push(LintRunResult.new(path, warning.line_num, 0, lint))
 
-    me check_module_init_literal_spl(path: String, content: String):
-        val warnings = check_module_init_literal(content, path)
+    me check_module_init_literal_spl(path: String, snapshot: CodeLineSnapshot):
+        val warnings = check_module_init_literal_snapshot(snapshot, path)
         for warning in warnings:
             val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
                 .with_fix(warning.hint)
@@ -468,8 +480,8 @@ impl Linter:
     # the RAW-RT/LEADOP precedent: the tree already carries offenders, so the
     # rule reports without gating the build. The push-time ratchet
     # scripts/check/check-cow-alias-hotpath.shs freezes that population.
-    me check_cow_alias_hotpath_spl(path: String, content: String):
-        for finding in check_cow_alias_hotpath(content, path):
+    me check_cow_alias_hotpath_spl(path: String, snapshot: CodeLineSnapshot):
+        for finding in check_cow_alias_hotpath_snapshot(snapshot, path):
             val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Warning, finding.message)
                 .with_fix(finding.hint)
             self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
@@ -593,15 +605,17 @@ impl Linter:
     # critical profile. Text-level, intraprocedural, single-assignment
     # heuristic — see unwrapped_foreign_resource.spl for the ponytail note
     # and typed-HIR data-flow upgrade path.
-    me check_unwrapped_foreign_resource_spl(path: String, content: String):
-        val findings = check_unwrapped_foreign_resource(content, path)
+    me check_unwrapped_foreign_resource_spl(
+        path: String, snapshot: CodeLineSnapshot
+    ):
+        val findings = check_unwrapped_foreign_resource_snapshot(snapshot, path)
         for finding in findings:
             val lint = LintDiag.new(finding.code, LintLevel.Allow, LintCategory.Correctness, finding.message)
                 .with_fix(finding.note)
             self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
 
-    me check_raw_sffi_spl(path: String, content: String):
-        val snapshot = raw_sffi_code_snapshot(content, path)
+    me check_raw_sffi_spl(path: String, code_snapshot: CodeLineSnapshot):
+        val snapshot = raw_sffi_code_snapshot_from_snapshot(code_snapshot, path)
         # Preserve the historical category order: all call findings precede
         # all declaration findings regardless of physical source line.
         self.append_raw_sffi_call_findings(path, snapshot)
