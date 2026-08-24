@@ -145,12 +145,28 @@ impl CompilerDriver:
         # word 0 and SIGSEGV'd on the first field load below. This is a
         # formation probe (rt_heap_ref_wellformed), not a liveness proof, so
         # it cannot false-reject a live owner.
+        # The probe stays inside `unsafe` (the extern call needs the ffi
+        # capability), but the FAILING RETURN IS HOISTED OUT of the block.
+        # A tuple-shaped `return (self.ctx, false)` written INSIDE an unsafe
+        # block is lost under native codegen: the caller receives the success
+        # verdict and execution falls through. Measured 2026-08-24 on the
+        # legacy twin of this guard (:586) -- `add_error` ran (its message
+        # resurfaced three phases later as `[ERROR] MIR error: ...`) yet
+        # `phase3:hir_typecheck:done` still printed, i.e. `analyze_ok` was
+        # true. These two guards were the ONLY two tuple returns inside an
+        # unsafe block in the whole owned tree; the other 87 unsafe-block
+        # returns are scalar/enum shaped and demonstrably work. Keep the
+        # verdict at function-body level -- the shape that works everywhere.
+        # See doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
+        # Pinned by scripts/check/check-no-tuple-return-in-unsafe.shs
+        var streaming_owner_wellformed = false
         unsafe(capabilities: [ffi]):
             log_phase("phase3:streaming:r01b-in-unsafe")
-            if not rt_heap_ref_wellformed(surfaces):
-                self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
-                return (self.ctx, false)
+            streaming_owner_wellformed = rt_heap_ref_wellformed(surfaces)
             log_phase("phase3:streaming:r01c-past-wellformed-if")
+        if not streaming_owner_wellformed:
+            self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
+            return (self.ctx, false)
         log_phase("phase3:streaming:r02-wellformed")
         # Fail closed on an empty surface graph, the streaming-mode counterpart
         # of the legacy path's zero-module guard. On this path the SURFACES are
@@ -579,11 +595,19 @@ impl CompilerDriver:
         # Same fail-closed formation probe as the streaming entry: a
         # heap-typed owner payload must be a tagged pointer outside the zero
         # page (2026-08-22 zeroed-payload incident class).
+        # Failing return HOISTED OUT of the unsafe block -- see the streaming
+        # twin above for the measured evidence. This is the site that was
+        # reproduced: the guard fired, `add_error` recorded the message, and
+        # the `return (self.ctx, false)` written here was lost, so phase 3
+        # reported SUCCESS and the malformed payload flowed on to SEGV in MIR
+        # lowering with the error relabelled `[ERROR] MIR error: ...`.
+        var retained_surfaces_wellformed = true
         if self.ctx.module_surfaces != nil:
             unsafe(capabilities: [ffi]):
-                if not rt_heap_ref_wellformed(self.ctx.module_surfaces.unwrap()):
-                    self.ctx.add_error("E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module surface payload malformed at HIR entry (heap-typed payload word is 0 or in the zero page)")
-                    return (self.ctx, false)
+                retained_surfaces_wellformed = rt_heap_ref_wellformed(self.ctx.module_surfaces.unwrap())
+        if not retained_surfaces_wellformed:
+            self.ctx.add_error("E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module surface payload malformed at HIR entry (heap-typed payload word is 0 or in the zero page)")
+            return (self.ctx, false)
         val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.module_surfaces != nil:
             self.ctx.module_surfaces.unwrap()
         elif self.ctx.sources.len() > 0:

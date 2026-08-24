@@ -876,3 +876,115 @@ Stage 2 existed to reproduce the payload defect on.
 
 Fixed by dropping the stale interpolation (an identical fix landed concurrently
 from another lane, so `origin/main` already carries it).
+
+## FIXED 2026-08-24 (lane-errprop) — the lost `return false` is a TUPLE-RETURN-INSIDE-`unsafe` defect
+
+Scope: this section fixes ONLY the propagation loss recorded in "SECOND DEFECT"
+above. The surfaces-payload root cause (why the payload is malformed at all)
+remains open and is untouched here.
+
+### Reproduced first, in a private lane
+
+Private `git worktree --detach` at `d7a667bb37e`; `git status --porcelain` = 0
+before the run. Compiler: the preserved Stage 2 `zpfix2`
+(`/mnt/data/worktrees/lane-surfaces-payload/build/bootstrap/zpfix2/stage2/x86_64-unknown-linux-gnu/simple`),
+input a two-line `hello.spl`, `SIMPLE_COMPILER_PHASE_PROFILE=1`, exit status
+read directly into a variable on the line after the command:
+
+```
+NATIVE_BUILD_RC=139
+[BOOTSTRAP-PHASE] +102ms phase3:route ready=false config=false n_modules=1 n_sources=1
+[BOOTSTRAP-PHASE] +102ms phase3:legacy:entry n_modules=1 n_sources=1
+[BOOTSTRAP-PHASE] +102ms phase3:hir_typecheck:done
+[ERROR] MIR error: E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module surface payload malformed at HIR entry
+```
+
+This is the discriminating pair, and it settles the mechanism:
+
+- `add_error` **did** run — its message survives and resurfaces three phases
+  later, relabelled `[ERROR] MIR error: ...`. So the error LIST propagates, and
+  every COW-alias / lost-context theory for the *errors* is refuted.
+- `phase3:hir_typecheck:done` **still printed**. That line is only reachable
+  past `if not analyze_ok:` in `driver_orchestration.spl`, so `analyze_ok` was
+  **true**. The BOOLEAN alone was lost, and execution fell through the `return`.
+
+Both orchestration call sites (`driver_orchestration.spl:177`, `:285`) do
+destructure and test `analyze_ok`, so "caller ignores the boolean" is refuted at
+source level. `CompileContext.add_error` (`driver_types.spl:987`) mutates
+through the single owner (`self.errors.push`), so the documented COW-alias class
+is refuted there too.
+
+### Root cause
+
+The failing `return (self.ctx, false)` was written **inside an
+`unsafe(capabilities: [ffi])` block**. A tuple-shaped return in that position is
+lost under native codegen: the terminator does not exit the function and control
+falls through past the block.
+
+The census is the load-bearing evidence, and it is 2/2:
+
+| return shape inside an `unsafe` block | sites | status |
+|---|---|---|
+| tuple `return (a, b)` | **2** | both are the implicated phase-3 guards (`:152` streaming, `:586` legacy) |
+| scalar / enum / value | **87** | work fine (`string_core`, `llvm_ir_builder`, `driver_public_shared`, …) |
+
+Those two were the ONLY tuple-returns-inside-`unsafe` in the entire owned tree,
+and they are exactly the two guards whose verdicts were observed to vanish. The
+87 others are in heavily exercised code and are demonstrably fine, so "return
+inside `unsafe` never works" is false — the defect is specific to the tuple
+shape.
+
+### Fix (minimal, semantics-preserving)
+
+At both sites the formation probe STAYS inside the `unsafe` block (the extern
+call genuinely needs the `ffi` capability); only the verdict return is hoisted
+to function-body level, the shape that works everywhere else:
+
+```
+var retained_surfaces_wellformed = true
+if self.ctx.module_surfaces != nil:
+    unsafe(capabilities: [ffi]):
+        retained_surfaces_wellformed = rt_heap_ref_wellformed(self.ctx.module_surfaces.unwrap())
+if not retained_surfaces_wellformed:
+    self.ctx.add_error("E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: ...")
+    return (self.ctx, false)
+```
+
+No guard is weakened: the nil check, the probe, the recorded error and the
+failing verdict are all preserved, and the probe remains side-effect-free (a
+formation probe, never a dereference). Equivalence of the hoisted shape was
+checked directly (`trip=true -> ok=false`, `trip=false -> ok=true`).
+
+### Gate
+
+`scripts/check/check-no-tuple-return-in-unsafe.shs` — `--selftest` runs first
+and is fatal (3 fixtures: an offending tuple return must be detected; the
+hoisted form AND a scalar return inside `unsafe` must stay clean; an empty tree
+must scan 0 blocks so the caller is forced to ERROR). Verdict is the last line
+of stdout: `PASS — <n> unsafe block(s) checked, 0 tuple return(s)` exit 0 /
+`FAIL` naming each site exit 1 / `ERROR — nothing was checked` exit 2. A run
+that scans 0 unsafe blocks is ERROR, never a pass.
+
+Measured: `PASS — 1190 unsafe block(s) checked, 0 tuple return(s)`.
+Mutation-tested BOTH directions — reintroducing the defect shape at the legacy
+site yields `FAIL — 1190 unsafe block(s) checked, 1 tuple return(s)` naming
+`driver_hir_pipeline_lowering.spl:608`; restoring the fix returns to PASS.
+
+### Honest limits — what this does NOT establish
+
+- **Not verified by a native rebuild.** Every Stage-2 binary on this host SEGVs
+  on a two-line hello world (`zp2`, `zp3`, `zpfix`, `zpfix2` all
+  `NATIVE_BUILD_RC=139`; the older `starfive` stage2 fails to build one at all),
+  so no working native compiler existed in which to rebuild the driver and
+  re-run the guard. The fall-through is *reproduced and measured*; the tuple
+  shape is identified by a 2/2-vs-87 census and not yet by disassembly. Whoever
+  next gets a working Stage 2 should re-run the reproduction above and confirm
+  `phase 3 FAILED (1 recorded error(s))` now prints instead of
+  `phase3:hir_typecheck:done`.
+- The underlying malformed-payload defect is unchanged; this fix converts its
+  SEGV into a correctly-attributed phase-3 failure, which is what the "SECOND
+  DEFECT" section asked for.
+- Sibling COW-alias instance noted while here, NOT fixed (out of scope, no
+  measured failure): `CompileContext.mark_module_poisoned`
+  (`driver_types.spl:1025`) does `self.poisoned_modules = self.poisoned_modules.push(name)`,
+  the temporary-alias write shape that `.claude/rules/code-style.md` forbids.
