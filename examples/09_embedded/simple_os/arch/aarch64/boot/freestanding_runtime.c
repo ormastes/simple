@@ -2186,12 +2186,21 @@ spl_u64 rt_limine_kernel_addr_response(void) {
  *     stdio siblings of print_raw    3  real, out the same PL011
  *     sqrt                           1  real (AArch64 FSQRT)
  *
- * DELIBERATELY NOT HERE — these need real subsystems, not shims, and a stub
- * for any of them would be a lie the caller cannot detect: filesystem
- * (rt_file_* / rt_dir_*, 29), process (rt_process_* / rt_shell_exec /
- * rt_getpid / spl_thread_cpu_count, 18), rt_mmap/munmap/madvise/msync (4),
- * time/thread (3), rt_browser_renderer_* (2). They belong to a later
- * milestone; leaving them undefined keeps the link honest about the gap.
+ * THE REMAINING 56 ARE NAMED TRAPS (added 2026-08-24, Route A step 1). They
+ * need real subsystems, not shims, and a VALUE returned by any of them would
+ * be a lie the caller cannot detect: filesystem (rt_file_* / rt_dir_*, 29),
+ * process (rt_process_* / rt_shell_exec / rt_getpid / spl_thread_cpu_count,
+ * 18), rt_mmap/munmap/madvise/msync (4), time/thread (3),
+ * rt_browser_renderer_* (2).
+ *
+ * They are defined here ONLY to reach link closure, which is a different
+ * question from being implemented. A static freestanding link must resolve a
+ * symbol whose CALL SITE is emitted even when that call never executes, and
+ * every one of these is reachable only from MCP `tools/call` handlers —
+ * measured, see the trap block below. Leaving them undefined does not keep
+ * the link "honest about the gap" (the previous wording here): it keeps the
+ * link from happening at all, which blocks the milestone rather than
+ * documenting it. Outcome (3) of the honesty rule below is what documents it.
  *
  * ---------------------------------------------------------------------------
  * THE HONESTY RULE THIS SECTION FOLLOWS
@@ -2875,6 +2884,104 @@ SPL_SIMD_TRAP(rt_simd_hmin_f32x4)
 
 #undef SPL_SIMD_TRAP
 
+/* ---- P10 remainder: the 56 named traps (Route A step 1, 2026-08-24) --------
+ * Link closure, NOT implementation. Each is a distinct named trap so a serial
+ * transcript names the exact entrypoint that was reached — the same shape as
+ * the 41 SIMD kernels above, and the same reason: a returned value would be
+ * the silent-nil class this repo has already been bitten by twice
+ * (doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md, and the
+ * rt_unwrap_or_trap NULL-GOT SEGV in
+ * doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md).
+ *
+ * WHY TRAPPING ALL 56 IS SAFE TODAY, measured rather than assumed: none is on
+ * a path this kernel executes, and none is on the M1 acceptance path either.
+ * `main()`'s startup, serve loop, and `initialize` touch only get_args,
+ * env_get, exit, stderr_write/stderr_flush, stdin_read_char and print_raw —
+ * all six implemented for real above. `tools/list` is answered from a local
+ * static payload. The only file_exists consumer, _mcp_find_simple_binary, is
+ * reachable exclusively from `tools/call` (src/app/mcp/cli_passthrough.spl:21,
+ * dap_bridge.spl:147, main_lazy_diag_tools.spl:137,261,
+ * main_lazy_query_tools.spl:335). So the first thing any of these traps can
+ * possibly interrupt is a tools/call — which is precisely the milestone that
+ * still needs the real subsystem.
+ *
+ * Arity is irrelevant to an AAPCS64 function that never returns, so one macro
+ * shape covers all 56 regardless of each symbol's real signature. */
+#define SPL_P10_TRAP(name)                                    \
+    spl_i64 name(spl_i64 a, spl_i64 b, spl_i64 c) {           \
+        (void)a; (void)b; (void)c;                            \
+        rt_trap_unimplemented(#name);                         \
+        return 0;                                             \
+    }
+
+/* filesystem — rt_file_* / rt_dir_* (29) */
+SPL_P10_TRAP(rt_dir_create)
+SPL_P10_TRAP(rt_dir_create_all)
+SPL_P10_TRAP(rt_dir_exists)
+SPL_P10_TRAP(rt_dir_list)
+SPL_P10_TRAP(rt_dir_remove)
+SPL_P10_TRAP(rt_dir_remove_all)
+SPL_P10_TRAP(rt_dir_walk)
+SPL_P10_TRAP(rt_file_append_text)
+SPL_P10_TRAP(rt_file_atomic_write)
+SPL_P10_TRAP(rt_file_copy)
+SPL_P10_TRAP(rt_file_delete)
+SPL_P10_TRAP(rt_file_exists)
+SPL_P10_TRAP(rt_file_hash_sha256)
+SPL_P10_TRAP(rt_file_is_char_device)
+SPL_P10_TRAP(rt_file_is_regular_no_follow)
+SPL_P10_TRAP(rt_file_lock)
+SPL_P10_TRAP(rt_file_mmap_read_bytes)
+SPL_P10_TRAP(rt_file_mmap_read_text)
+SPL_P10_TRAP(rt_file_move)
+SPL_P10_TRAP(rt_file_read_bytes)
+SPL_P10_TRAP(rt_file_read_text)
+SPL_P10_TRAP(rt_file_read_text_at_checked)
+SPL_P10_TRAP(rt_file_rename)
+SPL_P10_TRAP(rt_file_size)
+SPL_P10_TRAP(rt_file_stat)
+SPL_P10_TRAP(rt_file_unlock)
+SPL_P10_TRAP(rt_file_write_bytes)
+SPL_P10_TRAP(rt_file_write_text)
+SPL_P10_TRAP(rt_file_write_text_at)
+
+/* process (18) */
+SPL_P10_TRAP(rt_getpid)
+SPL_P10_TRAP(rt_process_close_piped)
+SPL_P10_TRAP(rt_process_is_alive)
+SPL_P10_TRAP(rt_process_is_alive_checked)
+SPL_P10_TRAP(rt_process_is_running)
+SPL_P10_TRAP(rt_process_kill)
+SPL_P10_TRAP(rt_process_read_stdout)
+SPL_P10_TRAP(rt_process_read_stdout_checked)
+SPL_P10_TRAP(rt_process_run)
+SPL_P10_TRAP(rt_process_run_bounded)
+SPL_P10_TRAP(rt_process_run_timeout)
+SPL_P10_TRAP(rt_process_spawn_async)
+SPL_P10_TRAP(rt_process_spawn_piped)
+SPL_P10_TRAP(rt_process_wait)
+SPL_P10_TRAP(rt_process_write_stdin)
+SPL_P10_TRAP(rt_process_write_stdin_some)
+SPL_P10_TRAP(rt_shell_exec)
+SPL_P10_TRAP(spl_thread_cpu_count)
+
+/* memory mapping (4) */
+SPL_P10_TRAP(rt_madvise)
+SPL_P10_TRAP(rt_mmap)
+SPL_P10_TRAP(rt_msync)
+SPL_P10_TRAP(rt_munmap)
+
+/* time / thread (3) */
+SPL_P10_TRAP(rt_thread_sleep)
+SPL_P10_TRAP(rt_time_now_monotonic_ms)
+SPL_P10_TRAP(rt_time_now_unix_micros)
+
+/* browser renderer (2) */
+SPL_P10_TRAP(rt_browser_renderer_sandbox_enter)
+SPL_P10_TRAP(rt_browser_renderer_spawn_sandboxed)
+
+#undef SPL_P10_TRAP
+
 /* ---- --gc-sections keepalive ----------------------------------------------
  * WHY THIS EXISTS, and why deleting it silently undoes this whole section:
  * the link runs with --gc-sections and -ffunction-sections, so a symbol that
@@ -2938,6 +3045,45 @@ static void *const g_p10_keepalive[] = {
     (void *)rt_simd_xor_u32x4,
     (void *)rt_simd_hadd_f32x4, (void *)rt_simd_hmax_f32x4,
     (void *)rt_simd_hmin_f32x4,
+    /* --- the 56 P10-remainder traps (2026-08-24). Same reason as every entry
+     * above: nothing live calls them, so without this table --gc-sections
+     * discards all 56 and `nm` on kernel.elf would show the link closure that
+     * was just added as absent. Addresses only — these PARK THE CORE if
+     * called. --- */
+    /* filesystem — rt_file_* / rt_dir_* (29) */
+    (void *)rt_dir_create, (void *)rt_dir_create_all,
+    (void *)rt_dir_exists, (void *)rt_dir_list,
+    (void *)rt_dir_remove, (void *)rt_dir_remove_all,
+    (void *)rt_dir_walk, (void *)rt_file_append_text,
+    (void *)rt_file_atomic_write, (void *)rt_file_copy,
+    (void *)rt_file_delete, (void *)rt_file_exists,
+    (void *)rt_file_hash_sha256, (void *)rt_file_is_char_device,
+    (void *)rt_file_is_regular_no_follow, (void *)rt_file_lock,
+    (void *)rt_file_mmap_read_bytes, (void *)rt_file_mmap_read_text,
+    (void *)rt_file_move, (void *)rt_file_read_bytes,
+    (void *)rt_file_read_text, (void *)rt_file_read_text_at_checked,
+    (void *)rt_file_rename, (void *)rt_file_size,
+    (void *)rt_file_stat, (void *)rt_file_unlock,
+    (void *)rt_file_write_bytes, (void *)rt_file_write_text,
+    (void *)rt_file_write_text_at,
+    /* process (18) */
+    (void *)rt_getpid, (void *)rt_process_close_piped,
+    (void *)rt_process_is_alive, (void *)rt_process_is_alive_checked,
+    (void *)rt_process_is_running, (void *)rt_process_kill,
+    (void *)rt_process_read_stdout, (void *)rt_process_read_stdout_checked,
+    (void *)rt_process_run, (void *)rt_process_run_bounded,
+    (void *)rt_process_run_timeout, (void *)rt_process_spawn_async,
+    (void *)rt_process_spawn_piped, (void *)rt_process_wait,
+    (void *)rt_process_write_stdin, (void *)rt_process_write_stdin_some,
+    (void *)rt_shell_exec, (void *)spl_thread_cpu_count,
+    /* memory mapping (4) */
+    (void *)rt_madvise, (void *)rt_mmap,
+    (void *)rt_msync, (void *)rt_munmap,
+    /* time / thread (3) */
+    (void *)rt_thread_sleep, (void *)rt_time_now_monotonic_ms,
+    (void *)rt_time_now_unix_micros,
+    /* browser renderer (2) */
+    (void *)rt_browser_renderer_sandbox_enter, (void *)rt_browser_renderer_spawn_sandboxed,
 };
 
 spl_i64 rt_aarch64_p10_keepalive(void) {

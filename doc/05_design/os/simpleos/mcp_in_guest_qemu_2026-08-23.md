@@ -13,6 +13,84 @@
 - **Context:** There is no MCP-on-SimpleOS artifact anywhere in this repo or in
   any of the 223 GitHub remote branches. This is net-new work.
 
+## STATUS UPDATE 2026-08-24 (3) — ROUTE A STEP 1 DONE: THE 56 ARE TRAPPED, LINK CLOSURE REACHED
+
+All 56 are now NAMED TRAPS in
+`examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c`, via
+`SPL_P10_TRAP`, the shape the 41 SIMD kernels already used. **Link closure, not
+implementation** — every one prints its own symbol over PL011 and parks the
+core. No value is returned by any of them; that would be the silent-nil class
+(`unregistered_extern_silent_nil_2026-08-01`, and the `rt_unwrap_or_trap`
+NULL-GOT SEGV). Step 2 was deliberately NOT attempted.
+
+**Baseline reproduced first**, so the delta is attributable. The documented
+recipe (`aarch64_limine_kernel_has_no_builder_script_2026-08-23.md`) rebuilt the
+tracked `kernel.elf` **byte-identically** — 123,912 bytes, identical defined-symbol
+set, 0 undefined — before a line was changed.
+
+**Measured after:**
+
+| | before | after |
+|---|---|---|
+| declared externs of the `src/app/mcp/main.spl` closure still missing | 56 | **0** |
+| defined T-symbols in `kernel.elf` | 305 | **361** (+56, exactly) |
+| undefined symbols in `kernel.elf` | 0 | **0** |
+| image | 123,912 B | 133,664 B |
+| boot marker | `symbols=85` | **`symbols=141`** (85 + 56) |
+
+All 56 survive `--gc-sections`: **0 GC'd**, because they were added to the
+`g_p10_keepalive` table in the same change. The marker is computed from
+`sizeof(g_p10_keepalive)` at runtime, so `limine_boot_aarch64.spl` needed no
+edit. **No gate asserts the literal `symbols=85`** — verified by grep; the only
+occurrence in the tree is the emitter at `limine_boot_aarch64.spl:555`, and the
+marker is printed after every marker the boot gate greps. So no assertion was
+updated, and none was silently weakened.
+
+**No runtime regression from trapping.** The full serial transcript diffs
+against the pre-change boot in exactly three places, all explained by a
+9,752-byte-larger image: memory-map regions 6/7 shift by 8,192 B (two 4 KiB
+pages), PMM `free_pages` 120,349 -> 120,347 (the same two pages), and the
+`symbols=` line. **Zero `[TRAP]` lines** in the 95-line capture, all 66 `[BOOT]`
+markers present. Nothing the kernel executes reaches a trap — as predicted, the
+first thing any of them can interrupt is a `tools/call`.
+
+**Verdicts, rc read into a variable on the following line:**
+
+```
+PASS — 4 boot-stage marker(s) checked, EDK2/AAVMF pflash real-firmware aarch64
+boot verified via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit),
+95 serial line(s) captured                                            rc 0
+
+PASS — 10 marker(s) checked in each of 2 boot paths, unified arm64 early-boot
+verified under EDK2/AAVMF pflash real firmware via Limine BOOTAA64.EFI
+`protocol: linux` (no -kernel, no isa-debug-exit, self-relocation exercised)
+and unchanged under legacy -kernel                                    rc 0
+```
+
+### What "0 undefined" does and does NOT prove
+
+It proves the **declared** surface is closed: 150 of 150. It proves nothing
+about the total ABI bill, because **this kernel does not contain the MCP module
+graph** — step 2 is what builds it in. The undeclared axis (codegen-emitted
+runtime calls no `extern` declares, the `rt_unwrap_or_trap` NULL-GOT class) can
+only surface there, and remains entirely unmeasured. A linked static ELF trivially
+has 0 undefined symbols; that number is evidence only alongside the +56 defined
+count and the moved marker.
+
+The compiler's own freestanding precheck reported `3 unexpected symbol(s)` /
+`2 candidate symbol(s) deferred to linker` — **unchanged from baseline**, so this
+change neither added to nor cleared that pre-existing set.
+
+### Not verified by this pass
+
+- Step 2 not attempted, by instruction.
+- Guest stdin RX still not re-proven (`[STDIN-PROBE] no-data`, the documented
+  TX-only `-serial file:` expectation).
+- No trap was ever *executed*; that the trap text reaches the UART is inherited
+  from `rt_trap_unimplemented`, unexercised here.
+- Route B untouched and still P6-blocked. These 56 are Route A's bill only —
+  see the update below.
+
 ## STATUS UPDATE 2026-08-24 (2) — THE 56 ARE ON A DIFFERENT LINK SET THAN M1'S ROUTE
 
 Independent verification pass. The 56 figure below is **confirmed exactly**, by
