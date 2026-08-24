@@ -8,13 +8,25 @@
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{Path, OpenFlags}
+use std.common.contracts.os.server_data_namespace_v1.{
+    SERVER_DATA_DATABASE_ROOT_PATH_V1
+}
 use os.userlib.fs.{
     file_open_direct, file_read_direct, file_write_direct, file_close_direct,
     file_sync_direct, file_rename_direct
 }
 
 pub val DBD_DBFS_MAX_RECOVERY_BYTES: i64 = 1024 * 1024
+pub val DBD_DBFS_STORAGE_ROOT_V1: text = SERVER_DATA_DATABASE_ROOT_PATH_V1
+pub val DBD_DBFS_JOURNAL_PATH_V1: text = DBD_DBFS_STORAGE_ROOT_V1 + "/DBD.LOG"
+pub val DBD_DBFS_QUARANTINE_PATH_V1: text =
+    DBD_DBFS_STORAGE_ROOT_V1 + "/DBD.LOG.QUARANTINE"
 val DBD_DBFS_MAX_GENERATION: i64 = 9223372036854775807
+
+pub fn dbd_dbfs_temp_path_v1(generation: i64) -> text:
+    if generation <= 0 or generation >= DBD_DBFS_MAX_GENERATION:
+        return ""
+    DBD_DBFS_STORAGE_ROOT_V1 + "/DBD.LOG.NEW." + generation.to_text()
 
 pub enum DbdDbfsAdapterState:
     Detached
@@ -71,7 +83,8 @@ pub class DbdDbfsAdapter:
         if self.state != DbdDbfsAdapterState.MountedSyncUnsupported and
             self.state != DbdDbfsAdapterState.MountedDurable:
             return Err(self.blocker())
-        if path != "/DBD.LOG" or max_bytes <= 0 or max_bytes > DBD_DBFS_MAX_RECOVERY_BYTES:
+        if path != DBD_DBFS_JOURNAL_PATH_V1 or max_bytes <= 0 or
+            max_bytes > DBD_DBFS_MAX_RECOVERY_BYTES:
             return Err("dbfs-recovery-read-invalid-boundary")
         if self.filesystem_vfs:
             val opened = file_open_direct(path, 0u32)
@@ -119,20 +132,25 @@ pub class DbdDbfsAdapter:
     pub me commit_and_sync(path: text, bytes: [u8]) -> Result<(), text>:
         if self.state != DbdDbfsAdapterState.MountedDurable:
             return Err(self.blocker())
-        if path != "/DBD.LOG" or bytes.len().to_i64() <= 0 or
+        if path != DBD_DBFS_JOURNAL_PATH_V1 or bytes.len().to_i64() <= 0 or
             bytes.len().to_i64() > DBD_DBFS_MAX_RECOVERY_BYTES:
             return Err("dbfs-commit-invalid-boundary")
         if self.filesystem_vfs:
             if not self.filesystem_vfs_transactional_replace:
                 return Err("dbfs-vfs-transactional-replace-unavailable")
+            if self.generation <= 0 or self.generation >= DBD_DBFS_MAX_GENERATION:
+                self.state = DbdDbfsAdapterState.Quarantined
+                self.last_error = "dbfs-commit-generation-exhausted"
+                return Err(self.last_error)
             # One generation-owned exclusive name prevents two service owners
             # from truncating or substituting a shared staging file.
-            val temp_path = "/DBD.LOG.NEW." + self.generation.to_text()
+            val temp_path = dbd_dbfs_temp_path_v1(self.generation)
             val opened = file_open_direct(temp_path, 0xC1u32)
             if opened.is_err(): return Err("dbfs-commit-open-failed")
             val fd = opened.unwrap()
             val written = file_write_direct(fd, bytes)
-            if written.is_err() or file_sync_direct(fd).is_err():
+            if written.is_err() or written.unwrap() != bytes.len().to_u64() or
+                file_sync_direct(fd).is_err():
                 val _ = file_close_direct(fd)
                 self.state = DbdDbfsAdapterState.Quarantined
                 self.last_error = "dbfs-commit-sync-failed"
@@ -145,7 +163,7 @@ pub class DbdDbfsAdapter:
                 self.state = DbdDbfsAdapterState.Quarantined
                 self.last_error = "dbfs-commit-transactional-replace-failed"
                 return Err(self.last_error)
-            val directory = file_open_direct("/", 0u32)
+            val directory = file_open_direct(DBD_DBFS_STORAGE_ROOT_V1, 0u32)
             if directory.is_err() or file_sync_direct(directory.unwrap()).is_err():
                 if directory.is_ok():
                     val _ = file_close_direct(directory.unwrap())

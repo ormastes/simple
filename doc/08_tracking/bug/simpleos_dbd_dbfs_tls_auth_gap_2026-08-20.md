@@ -122,8 +122,14 @@ the private auth/TLS/DBFS startup facts.
 
 DBFS owner discovery is now typed rather than boolean. `DbdServer` resolves the
 actual root `DriverInstance`; only the `DbFs` variant can construct its adapter.
-The adapter supports an exact, bounded recovery read of an existing `/DBD.LOG`,
-tracks open handles and generations, and quarantines short-read/close failures.
+The adapter supports an exact, bounded recovery read of the canonical
+`/srv/data/db/DBD.LOG`, tracks open handles and generations, and quarantines
+short-read/close failures. The journal, generation-owned temporary file,
+quarantine evidence, and namespace-directory sync are all fixed beneath the
+scheduler-admitted `/srv/data/db` namespace; DBD no longer stores mutable
+database state at filesystem root. Protected managed-path open still fails
+closed while the generic VFS fd transaction described in
+`server_data_vfs_fd_binding_blocked_2026-08-24.md` remains unresolved.
 Restart releases its old driver reference but preserves quarantine state and the
 non-secret failure reason; a restart cannot silently reset durable-recovery
 evidence.
