@@ -397,6 +397,141 @@ fn sha256_u8_hex_zeroizing(data: [u8]) -> text?:
     else:
         nil
 
+# Bounded incremental owner used by retained-handle filesystem snapshots.
+# The state, block, schedule, and constants arrays are allocated once; updates
+# process bytes in place and never retain the complete message.
+class Sha256StreamV1:
+    state: [i64]
+    block: [i64]
+    schedule: [i64]
+    constants: [i64]
+    block_len: i64
+    total_bytes: u64
+    finished: bool
+
+fn sha256_stream_v1_new() -> Sha256StreamV1:
+    Sha256StreamV1(
+        state: [1779033703, 3144134277, 1013904242, 2773480762,
+                1359893119, 2600822924, 528734635, 1541459225],
+        block: [0; 64], schedule: [0; 64], constants: _sha256_k(),
+        block_len: 0, total_bytes: 0u64, finished: false)
+
+fn sha256_stream_v1_reset(stream: Sha256StreamV1):
+    stream.state[0] = 1779033703
+    stream.state[1] = 3144134277
+    stream.state[2] = 1013904242
+    stream.state[3] = 2773480762
+    stream.state[4] = 1359893119
+    stream.state[5] = 2600822924
+    stream.state[6] = 528734635
+    stream.state[7] = 1541459225
+    var i = 0
+    while i < 64:
+        stream.block[i] = 0
+        stream.schedule[i] = 0
+        i = i + 1
+    stream.block_len = 0
+    stream.total_bytes = 0u64
+    stream.finished = false
+
+fn _sha256_stream_v1_process(stream: Sha256StreamV1):
+    val mask32 = 4294967295
+    var i = 0
+    while i < 16:
+        val base = i * 4
+        stream.schedule[i] = (
+            ((stream.block[base] & 255) << 24) |
+            ((stream.block[base + 1] & 255) << 16) |
+            ((stream.block[base + 2] & 255) << 8) |
+            (stream.block[base + 3] & 255)) & mask32
+        i = i + 1
+    while i < 64:
+        val w15 = stream.schedule[i - 15]
+        val w2 = stream.schedule[i - 2]
+        val s0 = (rotr32(w15, 7) ^ rotr32(w15, 18) ^ (w15 >> 3)) & mask32
+        val s1 = (rotr32(w2, 17) ^ rotr32(w2, 19) ^ (w2 >> 10)) & mask32
+        stream.schedule[i] = (stream.schedule[i - 16] + s0 +
+            stream.schedule[i - 7] + s1) & mask32
+        i = i + 1
+
+    var a = stream.state[0]
+    var b = stream.state[1]
+    var c = stream.state[2]
+    var d = stream.state[3]
+    var e = stream.state[4]
+    var f = stream.state[5]
+    var g = stream.state[6]
+    var hh = stream.state[7]
+    i = 0
+    while i < 64:
+        val big_s1 = (rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)) & mask32
+        val ch = ((e & f) ^ ((e ^ mask32) & g)) & mask32
+        val temp1 = (hh + big_s1 + ch + stream.constants[i] + stream.schedule[i]) & mask32
+        val big_s0 = (rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)) & mask32
+        val maj = ((a & b) ^ (a & c) ^ (b & c)) & mask32
+        val temp2 = (big_s0 + maj) & mask32
+        hh = g
+        g = f
+        f = e
+        e = (d + temp1) & mask32
+        d = c
+        c = b
+        b = a
+        a = (temp1 + temp2) & mask32
+        i = i + 1
+    stream.state[0] = (stream.state[0] + a) & mask32
+    stream.state[1] = (stream.state[1] + b) & mask32
+    stream.state[2] = (stream.state[2] + c) & mask32
+    stream.state[3] = (stream.state[3] + d) & mask32
+    stream.state[4] = (stream.state[4] + e) & mask32
+    stream.state[5] = (stream.state[5] + f) & mask32
+    stream.state[6] = (stream.state[6] + g) & mask32
+    stream.state[7] = (stream.state[7] + hh) & mask32
+
+fn _sha256_stream_v1_push(stream: Sha256StreamV1, value: i64):
+    stream.block[stream.block_len] = value & 255
+    stream.block_len = stream.block_len + 1
+    if stream.block_len == 64:
+        _sha256_stream_v1_process(stream)
+        stream.block_len = 0
+
+fn sha256_stream_v1_update(stream: Sha256StreamV1, data: [u8]) -> bool:
+    if stream.finished or data.len() > 0x1fffffffffffffffu64 - stream.total_bytes:
+        return false
+    var i: u64 = 0u64
+    while i < data.len():
+        _sha256_stream_v1_push(stream, data[i] as i64)
+        i = i + 1u64
+    stream.total_bytes = stream.total_bytes + data.len()
+    true
+
+fn sha256_stream_v1_finish_hex(stream: Sha256StreamV1) -> text?:
+    if stream.finished:
+        return nil
+    stream.finished = true
+    val bit_len = stream.total_bytes * 8u64
+    _sha256_stream_v1_push(stream, 128)
+    while stream.block_len != 56:
+        _sha256_stream_v1_push(stream, 0)
+    var shift = 56
+    while shift >= 0:
+        _sha256_stream_v1_push(stream, ((bit_len >> shift) & 255u64) as i64)
+        shift = shift - 8
+
+    val digits = "0123456789abcdef"
+    var result: [text] = [""; 64]
+    var wi = 0
+    var oi = 0
+    while wi < 8:
+        var nibble_shift = 28
+        while nibble_shift >= 0:
+            val nibble = (stream.state[wi] >> nibble_shift) & 15
+            result[oi] = digits[nibble:nibble + 1]
+            oi = oi + 1
+            nibble_shift = nibble_shift - 4
+        wi = wi + 1
+    Some(result.join(""))
+
 # ============================================================================
 # MIR optimizer pattern-recognition hooks
 # Symbol names must match the strings in rules_crypto.spl exactly.
@@ -441,3 +576,4 @@ fn sha256_bytes_scalar(data: [i64]) -> [i64]:
 
 export sha256_u8_hex
 export sha256_u8_hex_zeroizing
+export Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_reset, sha256_stream_v1_update, sha256_stream_v1_finish_hex

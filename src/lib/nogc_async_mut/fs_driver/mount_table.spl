@@ -3,6 +3,8 @@ use std.fs_driver.types.{Path, MountOptions, StatInfo, FileHandle, DirHandle, Di
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.capability.{Capability, FsCapabilitySet, FS_CAPABILITY_V1}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_reset, sha256_stream_v1_update, sha256_stream_v1_finish_hex}
 use std.fs_driver.mount_table_support.{PositionedDriverKind, POSITIONED_DRIVER_MAX_BYTES, mount_handle_encode,
     mount_handle_slot, mount_handle_generation, mount_path_canonical, text_has_mount_prefix,
     driver_positioned_read_bytes, driver_positioned_write_bytes,
@@ -87,6 +89,22 @@ struct StableFileSnapshotInfoV1:
     lease: StableFileSnapshotLeaseV1
     size: u64
 
+struct StableFileSnapshotSealV1:
+    """Copyable metadata issued by MountTable after a snapshot read completes.
+
+    This is immutable evidence, not authority.  The live generational lease
+    remains the authority consumed by close or execute promotion.
+    """
+    lease_id: u64
+    mount_id: MountId
+    backend_name: text
+    backend_kind: text
+    mount_generation: u64
+    namespace_generation: u64
+    content_generation: u64
+    size: u64
+    content_sha256: text
+
 struct StableFileSnapshotBindingV1:
     active: bool
     retired: bool
@@ -99,6 +117,13 @@ struct StableFileSnapshotBindingV1:
     namespace_generation: u64
     content_generation: u64
     size: u64
+    sealed: bool
+    content_sha256: text
+    hash_stream: Sha256StreamV1
+    hash_tracking: bool
+    hash_next_offset: u64
+    hash_complete: bool
+    hash_invalid: bool
 
 struct OpenDirBinding:
     active: bool
@@ -220,12 +245,16 @@ impl MountTable:
             val prior = self.stable_snapshots[slot]
             if not prior.active and not prior.retired:
                 val lease_id = mount_handle_encode(slot, prior.generation)
+                sha256_stream_v1_reset(prior.hash_stream)
                 self.stable_snapshots[slot] = StableFileSnapshotBindingV1(
                     active: true, retired: false, generation: prior.generation,
                     lease_id: lease_id, mount_id: mount_id, file_handle: file_handle,
                     kind: kind, mount_generation: mount_generation,
                     namespace_generation: namespace_generation,
-                    content_generation: content_generation, size: size)
+                    content_generation: content_generation, size: size,
+                    sealed: false, content_sha256: "",
+                    hash_stream: prior.hash_stream, hash_tracking: false,
+                    hash_next_offset: 0u64, hash_complete: false, hash_invalid: false)
                 return Ok(StableFileSnapshotLeaseV1(id: lease_id))
             slot = slot + 1
         if self.stable_snapshots.len() >= STABLE_SNAPSHOT_MAX_LEASES:
@@ -236,7 +265,10 @@ impl MountTable:
             lease_id: lease_id, mount_id: mount_id, file_handle: file_handle,
             kind: kind, mount_generation: mount_generation,
             namespace_generation: namespace_generation,
-            content_generation: content_generation, size: size))
+            content_generation: content_generation, size: size,
+            sealed: false, content_sha256: "",
+            hash_stream: sha256_stream_v1_new(), hash_tracking: false,
+            hash_next_offset: 0u64, hash_complete: false, hash_invalid: false))
         Ok(StableFileSnapshotLeaseV1(id: lease_id))
 
     fn _stable_snapshot_binding(lease: StableFileSnapshotLeaseV1) -> StableFileSnapshotBindingV1?:
@@ -264,7 +296,11 @@ impl MountTable:
             file_handle: binding.file_handle, kind: binding.kind,
             mount_generation: binding.mount_generation,
             namespace_generation: binding.namespace_generation,
-            content_generation: binding.content_generation, size: binding.size)
+            content_generation: binding.content_generation, size: binding.size,
+            sealed: binding.sealed, content_sha256: binding.content_sha256,
+            hash_stream: binding.hash_stream, hash_tracking: binding.hash_tracking,
+            hash_next_offset: binding.hash_next_offset,
+            hash_complete: binding.hash_complete, hash_invalid: binding.hash_invalid)
 
     me fn _file_binding(handle: FileHandle) -> OpenFileBinding?:
         val slot = mount_handle_slot(handle.id)
@@ -482,6 +518,26 @@ impl MountTable:
             i = i + 1
         Err(FsError.NotFound)
 
+    me fn begin_stable_snapshot_promotion_hash_v1(
+        lease: StableFileSnapshotLeaseV1
+    ) -> Result<(), FsError>:
+        """Opt one live lease into owner-side sequential SHA-256 tracking."""
+        val snapshot = match self._stable_snapshot_binding(lease):
+            case nil: return Err(FsError.StaleHandle)
+            case Some(value): value
+        if snapshot.sealed:
+            return Err(FsError.StaleHandle)
+        if snapshot.hash_invalid:
+            return Err(FsError.Corrupt)
+        if snapshot.hash_tracking:
+            return Ok(())
+        val slot = mount_handle_slot(lease.id)
+        sha256_stream_v1_reset(snapshot.hash_stream)
+        self.stable_snapshots[slot].hash_tracking = true
+        self.stable_snapshots[slot].hash_next_offset = 0u64
+        self.stable_snapshots[slot].hash_complete = snapshot.size == 0u64
+        Ok(())
+
     me fn read_stable_snapshot(
         lease: StableFileSnapshotLeaseV1, offset: u64, length: u64
     ) -> Result<[u8], FsError>:
@@ -492,6 +548,10 @@ impl MountTable:
         val snapshot = match self._stable_snapshot_binding(lease):
             case nil: return Err(FsError.StaleHandle)
             case Some(value): value
+        if snapshot.sealed:
+            return Err(FsError.StaleHandle)
+        if snapshot.hash_invalid:
+            return Err(FsError.Corrupt)
         val file = match self._file_binding(snapshot.file_handle):
             case nil: return Err(FsError.StaleHandle)
             case Some(value): value
@@ -507,9 +567,142 @@ impl MountTable:
                     return Ok([])
                 val available = snapshot.size - offset
                 val bounded = if length < available: length else: available
-                return driver_bounded_positioned_read_bytes(
+                val chunk = driver_bounded_positioned_read_bytes(
                     entry.driver, snapshot.kind, file.inner_handle,
-                    offset as i64, bounded as i64)
+                    offset as i64, bounded as i64)?
+                val slot = mount_handle_slot(lease.id)
+                if snapshot.hash_tracking:
+                    if offset != snapshot.hash_next_offset or chunk.len() != bounded:
+                        self.stable_snapshots[slot].hash_invalid = true
+                    else if not sha256_stream_v1_update(snapshot.hash_stream, chunk):
+                        self.stable_snapshots[slot].hash_invalid = true
+                    else:
+                        val next = offset + chunk.len()
+                        self.stable_snapshots[slot].hash_next_offset = next
+                        self.stable_snapshots[slot].hash_complete = next == snapshot.size
+                return Ok(chunk)
+            i = i + 1
+        Err(FsError.StaleHandle)
+
+    me fn finish_stable_snapshot_v1(
+        lease: StableFileSnapshotLeaseV1, content_sha256: text
+    ) -> Result<StableFileSnapshotSealV1, FsError>:
+        """Freeze the read phase and bind a consumer-computed SHA-256 digest.
+
+        Finishing does not close the file or consume the lease.  It prevents
+        further reads and returns copyable metadata that promotion must match.
+        Repeating finish with the same digest is idempotent; digest substitution
+        fails closed.
+        """
+        if not hash256_hex_valid(content_sha256) or hash256_is_zero(content_sha256):
+            return Err(FsError.InvalidArg)
+        val snapshot = match self._stable_snapshot_binding(lease):
+            case nil: return Err(FsError.StaleHandle)
+            case Some(value): value
+        val file = match self._file_binding(snapshot.file_handle):
+            case nil: return Err(FsError.StaleHandle)
+            case Some(value): value
+        if file.mount_id != snapshot.mount_id:
+            return Err(FsError.StaleHandle)
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            val entry = self.mounts[i]
+            if entry.id == snapshot.mount_id:
+                if entry.mount_generation != snapshot.mount_generation or
+                   entry.namespace_generation != snapshot.namespace_generation or
+                   entry.content_generation != snapshot.content_generation:
+                    return Err(FsError.StaleHandle)
+                if snapshot.hash_invalid:
+                    return Err(FsError.Corrupt)
+                if not snapshot.hash_tracking or not snapshot.hash_complete or
+                   snapshot.hash_next_offset != snapshot.size:
+                    return Err(FsError.InvalidArg)
+                if snapshot.sealed:
+                    if snapshot.content_sha256 != content_sha256:
+                        return Err(FsError.Permission)
+                else:
+                    val slot = mount_handle_slot(lease.id)
+                    val computed = match sha256_stream_v1_finish_hex(snapshot.hash_stream):
+                        case nil:
+                            self.stable_snapshots[slot].hash_invalid = true
+                            return Err(FsError.Corrupt)
+                        case Some(value): value
+                    if computed != content_sha256:
+                        self.stable_snapshots[slot].hash_invalid = true
+                        return Err(FsError.Corrupt)
+                    self.stable_snapshots[slot].sealed = true
+                    self.stable_snapshots[slot].content_sha256 = computed
+                return Ok(StableFileSnapshotSealV1(
+                    lease_id: lease.id,
+                    mount_id: snapshot.mount_id,
+                    backend_name: _driver_name(entry.driver),
+                    backend_kind: _driver_kind_name(entry.driver),
+                    mount_generation: snapshot.mount_generation,
+                    namespace_generation: snapshot.namespace_generation,
+                    content_generation: snapshot.content_generation,
+                    size: snapshot.size,
+                    content_sha256: content_sha256))
+            i = i + 1
+        Err(FsError.StaleHandle)
+
+    me fn promote_stable_snapshot_for_execute_v1(
+        lease: StableFileSnapshotLeaseV1,
+        seal: StableFileSnapshotSealV1,
+        trust: ExecuteTrust
+    ) -> Result<ExecuteOpenBinding, FsError>:
+        """Consume a sealed lease and move its already-open handle to execute.
+
+        No path is resolved or reopened.  Policy and all generation-bound seal
+        metadata are checked immediately before the owner retires the lease.
+        A failed promotion leaves the lease live for close or a policy retry.
+        """
+        val snapshot = match self._stable_snapshot_binding(lease):
+            case nil: return Err(FsError.StaleHandle)
+            case Some(value): value
+        if not snapshot.sealed or seal.lease_id != lease.id or
+           seal.mount_id != snapshot.mount_id or
+           seal.mount_generation != snapshot.mount_generation or
+           seal.namespace_generation != snapshot.namespace_generation or
+           seal.content_generation != snapshot.content_generation or
+           seal.size != snapshot.size or
+           seal.content_sha256 != snapshot.content_sha256:
+            return Err(FsError.Permission)
+        if not hash256_hex_valid(seal.content_sha256) or hash256_is_zero(seal.content_sha256):
+            return Err(FsError.InvalidArg)
+        val file = match self._file_binding(snapshot.file_handle):
+            case nil: return Err(FsError.StaleHandle)
+            case Some(value): value
+        if file.mount_id != snapshot.mount_id:
+            return Err(FsError.StaleHandle)
+        var i: i32 = 0
+        while i < self.mounts.len() as i32:
+            val entry = self.mounts[i]
+            if entry.id == snapshot.mount_id:
+                val backend_name = _driver_name(entry.driver)
+                val backend_kind = _driver_kind_name(entry.driver)
+                if entry.mount_generation != snapshot.mount_generation or
+                   entry.namespace_generation != snapshot.namespace_generation or
+                   entry.content_generation != snapshot.content_generation:
+                    return Err(FsError.StaleHandle)
+                if seal.backend_name != backend_name or seal.backend_kind != backend_kind:
+                    return Err(FsError.Permission)
+                val caps = FsCapabilitySet(bits: entry.active_caps)
+                if entry.opts.noexec or not caps.has(Capability.Execute):
+                    return Err(FsError.Permission)
+                if trust == ExecuteTrust.Untrusted and not entry.opts.allow_untrusted_exec:
+                    return Err(FsError.Permission)
+                if snapshot.size < 1u64 or snapshot.size > MOUNT_TABLE_MAX_EXECUTABLE_BYTES:
+                    return Err(FsError.TooLarge)
+                self._retire_stable_snapshot(lease)
+                return Ok(ExecuteOpenBinding(
+                    mount_id: entry.id,
+                    backend_name: backend_name,
+                    backend_kind: backend_kind,
+                    file_handle: snapshot.file_handle,
+                    mount_generation: snapshot.mount_generation,
+                    namespace_generation: snapshot.namespace_generation,
+                    content_generation: snapshot.content_generation,
+                    size: snapshot.size as i64))
             i = i + 1
         Err(FsError.StaleHandle)
 
@@ -1003,4 +1196,4 @@ impl MountTable:
                 val result = _driver_link_path_text(entry.driver, target, link_path)
                 self._advance_generation(entry.id, true)?
                 result
-export PositionedDriverKind, StableFileSnapshotLeaseV1, StableFileSnapshotInfoV1
+export PositionedDriverKind, StableFileSnapshotLeaseV1, StableFileSnapshotInfoV1, StableFileSnapshotSealV1

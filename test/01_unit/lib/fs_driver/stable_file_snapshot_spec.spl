@@ -5,9 +5,12 @@ use std.db.dbfs_driver.{DbFsDriver}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.instance.{DriverInstance}
-use std.fs_driver.mount_table.{MountTable, PositionedDriverKind, StableFileSnapshotLeaseV1}
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind, StableFileSnapshotLeaseV1, StableFileSnapshotSealV1}
 use std.fs_driver.nvfs_driver.{NvfsDriver}
-use std.fs_driver.types.{MountOptions, OpenFlags}
+use std.fs_driver.types.{MountOptions, OpenFlags, ExecuteTrust}
+
+val SNAPSHOT_SHA256_A: text = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+val SNAPSHOT_SHA256_B: text = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 
 fn dbfs_table_with_bytes(path: text, data: [u8]) -> MountTable:
     var table = MountTable.new()
@@ -87,3 +90,92 @@ describe "stable file snapshot leases":
         expect(table.read_stable_snapshot(first.lease, 0u64, 1u64).unwrap_err()).to_equal(FsError.StaleHandle)
         table.close_stable_snapshot(second.lease).unwrap()
         table.unmount("/").unwrap()
+
+    it "finishes into immutable owner metadata without closing the lease":
+        var table = dbfs_table_with_bytes("/sealed.bin", [97u8, 98u8, 99u8])
+        val snapshot = table.open_stable_snapshot("/sealed.bin", 8u64).unwrap()
+        table.begin_stable_snapshot_promotion_hash_v1(snapshot.lease).unwrap()
+        expect(table.read_stable_snapshot(snapshot.lease, 0u64, 3u64).unwrap()).to_equal([97u8, 98u8, 99u8])
+        val seal = table.finish_stable_snapshot_v1(snapshot.lease, SNAPSHOT_SHA256_A).unwrap()
+        expect(seal.lease_id).to_equal(snapshot.lease.id)
+        expect(seal.size).to_equal(3u64)
+        expect(seal.content_sha256).to_equal(SNAPSHOT_SHA256_A)
+        expect(table.read_stable_snapshot(snapshot.lease, 0u64, 1u64).unwrap_err()).to_equal(FsError.StaleHandle)
+        val repeated = table.finish_stable_snapshot_v1(snapshot.lease, SNAPSHOT_SHA256_A).unwrap()
+        expect(repeated.lease_id).to_equal(seal.lease_id)
+        expect(repeated.content_sha256).to_equal(seal.content_sha256)
+        expect(table.finish_stable_snapshot_v1(snapshot.lease, SNAPSHOT_SHA256_B).unwrap_err()).to_equal(FsError.Permission)
+        table.close_stable_snapshot(snapshot.lease).unwrap()
+        expect(table.close_stable_snapshot(snapshot.lease).unwrap_err()).to_equal(FsError.StaleHandle)
+
+    it "promotes the existing handle once without reopening the path":
+        var table = nvfs_table_with_bytes("/program.bin", [97u8, 98u8, 99u8])
+        val snapshot = table.open_stable_snapshot("/program.bin", 8u64).unwrap()
+        expect(table.finish_stable_snapshot_v1(snapshot.lease, SNAPSHOT_SHA256_A).unwrap_err()).to_equal(FsError.InvalidArg)
+        table.begin_stable_snapshot_promotion_hash_v1(snapshot.lease).unwrap()
+        expect(table.read_stable_snapshot(snapshot.lease, 0u64, 3u64).unwrap()).to_equal([97u8, 98u8, 99u8])
+        val seal = table.finish_stable_snapshot_v1(snapshot.lease, SNAPSHOT_SHA256_A).unwrap()
+        val execute = table.promote_stable_snapshot_for_execute_v1(
+            snapshot.lease, seal, ExecuteTrust.Trusted).unwrap()
+        expect(execute.size).to_equal(3)
+        expect(table.execute_binding_is_current(execute)).to_be(true)
+        expect(table.promote_stable_snapshot_for_execute_v1(
+            snapshot.lease, seal, ExecuteTrust.Trusted).unwrap_err()).to_equal(FsError.StaleHandle)
+        expect(table.close_stable_snapshot(snapshot.lease).unwrap_err()).to_equal(FsError.StaleHandle)
+        table.close(execute.file_handle).unwrap()
+
+    it "fails closed on forged seal policy denial and generation change":
+        var table = dbfs_table_with_bytes("/policy.bin", [97u8, 98u8, 99u8])
+        val snapshot = table.open_stable_snapshot("/policy.bin", 8u64).unwrap()
+        table.begin_stable_snapshot_promotion_hash_v1(snapshot.lease).unwrap()
+        expect(table.read_stable_snapshot(snapshot.lease, 0u64, 3u64).unwrap()).to_equal([97u8, 98u8, 99u8])
+        val seal = table.finish_stable_snapshot_v1(snapshot.lease, SNAPSHOT_SHA256_A).unwrap()
+        val forged = StableFileSnapshotSealV1(
+            lease_id: seal.lease_id, mount_id: seal.mount_id,
+            backend_name: "forged", backend_kind: seal.backend_kind,
+            mount_generation: seal.mount_generation,
+            namespace_generation: seal.namespace_generation,
+            content_generation: seal.content_generation, size: seal.size,
+            content_sha256: seal.content_sha256)
+        expect(table.promote_stable_snapshot_for_execute_v1(
+            snapshot.lease, forged, ExecuteTrust.Trusted).unwrap_err()).to_equal(FsError.Permission)
+        expect(table.promote_stable_snapshot_for_execute_v1(
+            snapshot.lease, seal, ExecuteTrust.Untrusted).unwrap_err()).to_equal(FsError.Permission)
+        table.bump_content_generation(seal.mount_id).unwrap()
+        expect(table.promote_stable_snapshot_for_execute_v1(
+            snapshot.lease, seal, ExecuteTrust.Trusted).unwrap_err()).to_equal(FsError.StaleHandle)
+        table.close_stable_snapshot(snapshot.lease).unwrap()
+
+    it "rejects incomplete unordered and digest-mismatched completion":
+        var unordered = dbfs_table_with_bytes("/unordered.bin", [97u8, 98u8, 99u8])
+        val unordered_snapshot = unordered.open_stable_snapshot("/unordered.bin", 8u64).unwrap()
+        unordered.begin_stable_snapshot_promotion_hash_v1(unordered_snapshot.lease).unwrap()
+        expect(unordered.read_stable_snapshot(unordered_snapshot.lease, 1u64, 2u64).unwrap()).to_equal([98u8, 99u8])
+        expect(unordered.finish_stable_snapshot_v1(
+            unordered_snapshot.lease, SNAPSHOT_SHA256_A).unwrap_err()).to_equal(FsError.Corrupt)
+        unordered.close_stable_snapshot(unordered_snapshot.lease).unwrap()
+
+        var mismatch = nvfs_table_with_bytes("/mismatch.bin", [97u8, 98u8, 99u8])
+        val mismatch_snapshot = mismatch.open_stable_snapshot("/mismatch.bin", 8u64).unwrap()
+        mismatch.begin_stable_snapshot_promotion_hash_v1(mismatch_snapshot.lease).unwrap()
+        mismatch.read_stable_snapshot(mismatch_snapshot.lease, 0u64, 3u64).unwrap()
+        expect(mismatch.finish_stable_snapshot_v1(
+            mismatch_snapshot.lease, SNAPSHOT_SHA256_B).unwrap_err()).to_equal(FsError.Corrupt)
+        expect(mismatch.finish_stable_snapshot_v1(
+            mismatch_snapshot.lease, SNAPSHOT_SHA256_A).unwrap_err()).to_equal(FsError.Corrupt)
+        expect(mismatch.read_stable_snapshot(
+            mismatch_snapshot.lease, 0u64, 1u64).unwrap_err()).to_equal(FsError.Corrupt)
+        mismatch.close_stable_snapshot(mismatch_snapshot.lease).unwrap()
+
+    it "hashes incrementally across the SHA-256 block boundary":
+        val sixty_four_as: [u8] = [97u8; 64]
+        var table = nvfs_table_with_bytes("/boundary.bin", sixty_four_as)
+        val snapshot = table.open_stable_snapshot("/boundary.bin", 64u64).unwrap()
+        table.begin_stable_snapshot_promotion_hash_v1(snapshot.lease).unwrap()
+        table.read_stable_snapshot(snapshot.lease, 0u64, 31u64).unwrap()
+        table.read_stable_snapshot(snapshot.lease, 31u64, 33u64).unwrap()
+        val seal = table.finish_stable_snapshot_v1(
+            snapshot.lease,
+            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb").unwrap()
+        expect(seal.size).to_equal(64u64)
+        table.close_stable_snapshot(snapshot.lease).unwrap()

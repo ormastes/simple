@@ -152,11 +152,27 @@ terminal row on failure. Legacy observations explicitly carry no command
 provenance. An empty requested argv is normalized to `[path]`, so evidence must
 never claim `[]` for that launch.
 
-Stable compiler-artifact VFS snapshots remain blocked by
-`doc/08_tracking/bug/simpleos_vfs_stable_snapshot_backend_parity_2026-08-22.md`.
-Do not build the readiness gate on current positioned I/O: FAT32 ignores the
-offset, per-chunk allocations remain in NVFS/DBFS, and positioned writes do not
-advance the MountTable content generation.
+Stable compiler-artifact VFS snapshots now have true FAT32 offsets, bounded
+owned DBFS/NVFS chunks, conservative MountTable mutation generations, and a
+generational lease registry. Caller-buffer reuse and admitted timing/RSS/
+allocation evidence remain open in
+`doc/08_tracking/bug/simpleos_vfs_stable_snapshot_backend_parity_2026-08-22.md`;
+do not claim a zero-allocation or QEMU readiness gate from source coverage.
+
+## Stable snapshot execute promotion (2026-08-24)
+
+`MountTable.begin_stable_snapshot_promotion_hash_v1` opts a lease into hashing
+without charging ordinary snapshot reads. `finish_stable_snapshot_v1` freezes
+a generation-current snapshot only after owner-side incremental SHA-256 covers exact sequential `[0,size)`
+bytes and matches the consumer's canonical nonzero SHA-256. Its returned seal is
+copyable metadata, never authority; the live lease remains the only close or
+promotion authority. `promote_stable_snapshot_for_execute_v1` must compare the
+complete owner-issued seal, recheck generations plus execute/noexec/trust
+policy, retire the lease once, and transfer its existing virtual file handle
+without path resolution or backend reopen. Failure keeps the lease closeable;
+success makes replay and lease close stale while the execute binding owns the
+eventual handle close. Do not re-enable reads after finish or treat a copied
+seal as executable authority.
 
 ## SSH plaintext wire ownership (2026-08-22)
 
