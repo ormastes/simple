@@ -1,6 +1,24 @@
 <!-- codex-design -->
 # Agent Task Plan — Simple Compiler Performance and Memory Efficiency
 
+## Current reconciliation and ownership — 2026-08-24
+
+| Slice | Current state | Evidence owner | Next gate |
+|---|---|---|---|
+| Pass truth and quarantine | Implemented, source-reviewed | MIR optimization layer | Execute focused pass/status/verifier specs |
+| Shared local MIR facts | CFG/dominance/def-use/bounded liveness implemented | PerfFacts owner | Execute fact projection and malformed-CFG specs |
+| Collection/vector safety | Unsafe hoist inert; vector analysis-only and unit-step bounded | MIR optimization layer | Keep disabled until legality/profitability proof |
+| Escape authority | Unknown/return/field/size paths hardened | GC analysis owner | Execute escape regressions before allocation placement |
+| Lint/tool hot paths | Shared views/indexes/policy/assembly tranches integrated | lint/tool owners | Same-fixture timing and peak-RSS comparison |
+| Typed collection analysis | Not implemented | semantics performance owner | Build one typed fact collector and operation registry |
+| Interprocedural/profile tiers | Not implemented | performance summary/profile owners | `.sperf`/`.sprof-v2` designs plus bounded evidence |
+| Runtime acceptance | Blocked: admitted Stage-4 binary absent | bootstrap/release owner | Restore binary, then run each final gate once |
+
+Parallel review lanes `pass_integrity_review`, `lint_perf_review`, and
+`docs_plan_review` completed read-only current-HEAD audits. Merge and final
+review remain owned by `/root`; their findings are reflected above and in the
+current-head research reconciliation.
+
 ## Diagnostic JSON serialization follow-up
 
 - Merge owner: compiler performance/memory lane.
