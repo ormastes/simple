@@ -1926,3 +1926,81 @@ corrupting one value.
   root if it is a seed miscompile; if a local restructure (`.len() == 0`) is used
   instead, record it explicitly as a workaround for a live seed defect, file the
   seed defect separately, and do not let it close this record.
+
+## 2026-08-24 — FIX SITE: bare `is_empty` is suffix-rebound to `Span.is_empty` by the seed's mangler
+
+The mangler lead was right. `self.instructions.is_empty()` — a call on `[MirInst]` —
+is compiled into a direct branch to a completely unrelated user method:
+
+```
+_compiler__mir__mir_data__MirBuilder.finalize_block:
+  ...+0x14:  bl  <_compiler__common__diagnostics__span__Span.is_empty>
+```
+
+That is the FIRST call in `finalize_block`, i.e. the guard
+`if self.instructions.is_empty(): return`.
+
+**Not an artifact of the probes.** Verified in three independently built Stage 2
+binaries, including two built BEFORE the `finalize_block` probe existed
+(`s2wb`, `s2emit`) — all three branch to `Span.is_empty`.
+
+This explains every observation at once: the callee is a real function returning a
+real `bool`, so the answer is a plausible `false` rather than garbage; it is
+deterministic; and the binary contains **no `Array.is_empty` symbol** because the
+call was rebound rather than emitted as a collection op.
+
+### Why it happens
+
+`resolve_method_call_static`
+(`src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs:722`) has a
+bare-name guard at `:756-789` that stops an erased-receiver method call from being
+suffix-rebound to the lone user method of that name. It is the same guard added for
+the 2026-07-13 `starts_with` → `Path.starts_with` fault. Its list is
+**string-builtins only**:
+
+```
+starts_with | ends_with | trim | trim_start | trim_end
+to_upper | upper | to_lower | lower | char_at | char_code_at | replace
+```
+
+**`is_empty` is not in it**, so a bare `is_empty` on an erased receiver falls
+through to suffix binding. Stage 2 defines exactly three user `is_empty` methods
+(`Span`, `HwModule`, `MonomorphizationMetadata`) and the call lands on `Span`'s.
+
+### The fix is in `src/compiler_rust`, and it has TWO parts
+
+Adding `is_empty` to the guard alone is **not sufficient** and would regress into a
+link error. The guard's own comment states the precondition: *"Every method here has
+a `bare_rt_redirect` entry, so leaving it bare never produces an unresolved-call
+error."*
+
+1. **`mangle.rs:756`** — add `is_empty` to the bare-name guard list.
+2. **`calls.rs:2035`** (`bare_rt_redirect`) — add an `is_empty` entry. There is
+   currently none: the table has `"len" => rt_len` but nothing for `is_empty`, and
+   **no `rt_*empty*` function exists in the runtime at all**
+   (`git grep 'rt_[a-z_]*empty' src/runtime/runtime.h` → no matches). So this needs
+   either a new `rt_is_empty` (semantically `rt_len(v) == 0`) added to the C runtime
+   and its header, or codegen lowering `is_empty` as `rt_len(v) == 0` directly.
+
+Direct evidence that part 2 is required: a small `native-build` of a fixture using
+`is_empty()` emits a **qualified** `Array.is_empty`, which is left **unresolved**,
+stubbed by the linker, and SEGVs on call. That is what the bare path would become
+without a redirect entry.
+
+### Blast radius — field receiver vs local: NOT yet established
+
+Still open, and it decides how wide this is. What is known: the confirmed call site
+is a struct-**field** receiver (`self.instructions`), and the guard's rationale is
+about **erased** receivers generally, not fields specifically. A statically-typed
+receiver whose type is recovered does not reach the suffix fallback at all. Anyone
+fixing this should measure a local-variable receiver before assuming it is safe.
+
+### Interim note, explicitly NOT the fix
+
+Until the codegen defect is fixed, `.len() == 0` is a safe substitute at call sites
+and `is_empty()` results in self-compiled code cannot be trusted. **This is a
+mitigation for readers, not a resolution** — it must not be used to close this
+record, and a call-site patch must not be landed in place of the seed fix.
+
+**No fix applied here.** Verifying one requires a C-runtime addition, a seed
+rebuild, and a Stage 2 rebuild.
