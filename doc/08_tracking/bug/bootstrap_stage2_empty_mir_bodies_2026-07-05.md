@@ -2395,3 +2395,49 @@ reachable**, not newly introduced.
 Two known harness requirements, unchanged: macOS needs the `setsid` shim that
 strips options, and `native-build`'s discovery parser rejects the newline-block
 `fn main()` form — write `fn main():`.
+
+## 2026-08-25 — the chain STOPS at Stage 3 on a policy gate, not a defect
+
+With Stage 2 now producing running binaries, Stage 3 was attempted by resuming from
+the admitted Stage 2 rather than rebuilding:
+
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=<out>
+->  bootstrap-policy-error: reason-receipt-required
+```
+
+`--strategy=adhoc --full-bootstrap --stop-after-stage2` is, by the script's own
+help text, **"the sole receipt-free bootstrap lane."** Everything past Stage 2
+requires a typed reason receipt.
+
+### Why this lane cannot supply one
+
+The allowed reasons are enumerated in
+`scripts/check/lib/bootstrap-planner-admission-bound.shs:43-58`:
+
+| target | allowed reasons |
+|---|---|
+| `//bootstrap:stage3` | `seed-missing`, `seed-corrupt`, `seed-target-unsupported`, `seed-cannot-parse-required-language-feature`, `seed-cannot-lower-required-compiler-feature`, `bootstrap-runtime-abi-major-changed`, `bootstrap-artifact-format-major-changed`, `bootstrap-core-interface-major-changed` |
+| `//bootstrap:stage4` | `self-host-convergence-check`, `release-trust-verification`, `diverse-double-compilation` |
+
+Every Stage-3 reason is an assertion that **the seed is broken or the ABI changed**.
+None is true here: the seed builds, Stage 2 is admitted, and the motivation is
+simply to carry the chain forward after a fix. Selecting one of these to unlock the
+gate would be **fabricating the justification the gate exists to demand**, so it was
+not done.
+
+This is a **governance gate working as designed**, not a defect, and not something
+an agent should route around. Proceeding needs a human authorization decision about
+which typed reason is truthful — or a sanctioned lane for "verify a landed fix
+through Stage 3+" if that is judged to be missing from the reason list.
+
+### State left behind
+
+* **Nothing was deployed.** `bin/release/aarch64-apple-darwin-macho/simple` is
+  unchanged at md5 `0d8857b18e9e0cfaa50de2b08ad02512`, and `bin/simple` is still
+  the 431-byte wrapper. A rollback copy of both was taken before any of this and
+  was never needed.
+* The admitted Stage 2 (sha256 `08a11172…`) and its receipts remain available for
+  whoever holds the authorization to continue.
+* Stage 4/5 and the MCP verification were therefore **not attempted**; the goal
+  (`mcp` exists only in the full CLI) is unreached and is not claimed.
