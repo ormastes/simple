@@ -1074,6 +1074,9 @@ and derives `Simple <= Go` itself. Interpreter-startup parity requires ordered
 trial-interleaved raw process-launch samples for Simple/Python/Bun/Go, exact
 Simple interpreter-mode receipts, recomputed p50/p95, strict cold+warm
 comparisons, and the live canonical Stage 4 chain.
+Rust/Go benchmark parity requires a runtime-fed equal-work fixture, rotated
+trial-interleaved raw samples, recomputed p50/p95, equality-or-better Simple
+latency against both references, and the same canonical Stage 4 authority.
 When a push guard's default command also runs mutation fixtures, register its
 scan-only mode in the push tier and retain the self-test as a distinct required
 bootstrap row.

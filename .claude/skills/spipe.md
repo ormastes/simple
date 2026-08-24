@@ -1356,6 +1356,9 @@ artifacts; binary-size parity recomputes committed stripped bytes and derives
 recomputes fixed-width trial-interleaved cold/warm process-launch p50/p95 for
 Simple/Python/Bun/Go, checks every Simple interpreter-mode receipt, and
 requires the live canonical Stage 4 chain.
+Rust/Go benchmark parity requires runtime-fed equal work, rotated
+trial-interleaved samples, recomputed p50/p95, equality-or-better Simple
+latency against both references, and canonical Stage 4 authority.
 When a push guard's default command also runs mutation fixtures, wire its
 scan-only mode into push and retain the self-test as a required bootstrap row.
 

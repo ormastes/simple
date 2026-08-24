@@ -163,6 +163,8 @@ numeric oracle; precomputed PASS or ratio fields are not the verdict.
 Interpreter-startup evidence is trial-interleaved process launch, not warm
 workload throughput; recompute cold/warm p50+p95 and require exact Simple
 interpreter mode plus canonical Stage 4 authority.
+Rust/Go benchmark evidence must use runtime-fed equal work, rotated launch
+order, recomputed p50/p95, and equality-or-better Simple latency against both.
 
 For ordinary feature development, first apply
 `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: name

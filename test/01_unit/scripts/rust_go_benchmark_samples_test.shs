@@ -1,0 +1,171 @@
+#!/bin/sh
+set -eu
+LC_ALL=C
+export LC_ALL
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+CHECKER="$ROOT/scripts/check/check-rust-go-benchmark-samples.shs"
+fixture=$(mktemp -d); trap 'rm -rf "$fixture"' EXIT INT TERM
+mkdir -p "$fixture/test/05_perf/fixtures"
+mkdir -p "$fixture/scripts/check/lib" "$fixture/scripts/bootstrap" "$fixture/src/compiler" "$fixture/src/lib" "$fixture/src/app" "$fixture/src/runtime" "$fixture/examples/10_tooling"
+cp -R "$ROOT/test/05_perf/fixtures/rust_go_benchmark" "$fixture/test/05_perf/fixtures/"
+cp "$ROOT/scripts/check/check-rust-go-benchmark-samples.shs" "$fixture/scripts/check/"
+cp "$ROOT/scripts/check/check-rust-go-benchmark-parity.shs" "$fixture/scripts/check/"
+cp "$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs" "$fixture/scripts/check/lib/"
+cp "$ROOT/scripts/check/lib/stage4-candidate-provenance.shs" "$fixture/scripts/check/lib/"
+cp -R "$ROOT/scripts/check/lib/bootstrap-stage3" "$fixture/scripts/check/lib/"
+cp "$ROOT/scripts/bootstrap/bootstrap-from-scratch.sh" "$fixture/scripts/bootstrap/"
+git -C "$fixture" init -q; git -C "$fixture" config user.name benchmark-test; git -C "$fixture" config user.email benchmark@example.invalid
+git -C "$fixture" add test scripts; git -C "$fixture" commit -qm fixtures
+fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+run_id=benchmark-run-001; fixture_id=runtime-fed-lcg-100k
+empty=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+base=test/05_perf/fixtures/rust_go_benchmark
+hash() { sha256sum "$1" | awk '{print $1}'; }
+stdout_sha=$(printf 'checksum=171811812 operations=100000\n' | sha256sum | awk '{print $1}')
+input_sha=$(hash "$fixture/$base/input.txt")
+cat >"$fixture/equivalence.env" <<EOF
+equivalence_schema=simple.rust-go-benchmark-equivalence/v1
+gate_id=rust-go-benchmark-parity
+source_fingerprint=$fingerprint
+run_id=$run_id
+fixture_id=$fixture_id
+semantic_oracle_path=$base/oracle.txt
+semantic_oracle_sha256=$(hash "$fixture/$base/oracle.txt")
+input_path=$base/input.txt
+input_sha256=$input_sha
+simple_source_path=$base/workload.spl
+simple_source_sha256=$(hash "$fixture/$base/workload.spl")
+rust_source_path=$base/workload.rs
+rust_source_sha256=$(hash "$fixture/$base/workload.rs")
+go_source_path=$base/workload.go
+go_source_sha256=$(hash "$fixture/$base/workload.go")
+expected_stdout_sha256=$stdout_sha
+simple_stdout_sha256=$stdout_sha
+rust_stdout_sha256=$stdout_sha
+go_stdout_sha256=$stdout_sha
+simple_exit=0
+rust_exit=0
+go_exit=0
+operation_count=100000
+final_verdict=PASS
+EOF
+identity=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+cp /bin/true "$fixture/simple-benchmark"; cp /bin/true "$fixture/rust-benchmark"; cp /bin/true "$fixture/go-benchmark"
+simple_exe_sha=$(hash "$fixture/simple-benchmark"); rust_exe_sha=$(hash "$fixture/rust-benchmark"); go_exe_sha=$(hash "$fixture/go-benchmark")
+cat >"$fixture/environment.env" <<EOF
+environment_schema=simple.rust-go-benchmark-environment/v1
+gate_id=rust-go-benchmark-parity
+source_fingerprint=$fingerprint
+run_id=$run_id
+fixture_id=$fixture_id
+host_id=fixture-host
+os=linux
+kernel=fixture-kernel
+arch=x86_64
+cpu_model_sha256=$identity
+cpu_count=4
+cpu_governor=performance
+cpuset_sha256=$identity
+isolation=offline-controlled
+clock_tool_sha256=$identity
+simple_compiler_path=/fixture/bin/release/x86_64/simple
+simple_compiler_sha256=$identity
+simple_executable_sha256=$simple_exe_sha
+rust_executable_sha256=$rust_exe_sha
+go_executable_sha256=$go_exe_sha
+warmup_iterations=10
+runtime_order=simple,rust,go
+final_verdict=PASS
+EOF
+time_for() { case "$1" in simple) echo 00000000000000000100;; rust) echo 00000000000000000200;; go) echo 00000000000000000300;; esac; }
+rss_for() { case "$1" in simple) echo 00000000000000001000;; rust) echo 00000000000000002000;; go) echo 00000000000000003000;; esac; }
+cat >"$fixture/raw.env" <<EOF
+sample_schema=simple.rust-go-benchmark-samples/v1
+gate_id=rust-go-benchmark-parity
+source_fingerprint=$fingerprint
+run_id=$run_id
+fixture_id=$fixture_id
+clock_id=clock_gettime-monotonic
+unit=ns
+sample_count=50
+warmup_iterations=10
+operation_count=100000
+EOF
+i=1
+while [ "$i" -le 50 ]; do
+    case $(( (i - 1) % 3 )) in 0) order='simple rust go';; 1) order='rust go simple';; 2) order='go simple rust';; esac
+    for language in $order; do
+        printf 'sample|%s|%s|%s|%s|0|%s|%s|100000|%s|runtime-fed-black-box\n' \
+            "$language" "$i" "$(time_for "$language")" "$(rss_for "$language")" "$stdout_sha" "$empty" "$input_sha" >>"$fixture/raw.env"
+    done
+    i=$((i + 1))
+done
+cat >"$fixture/statistics.env" <<EOF
+statistics_schema=simple.rust-go-benchmark-statistics/v1
+gate_id=rust-go-benchmark-parity
+source_fingerprint=$fingerprint
+run_id=$run_id
+fixture_id=$fixture_id
+sample_count=50
+simple_p50_ns=00000000000000000100
+simple_p95_ns=00000000000000000100
+simple_max_rss_kib=00000000000000001000
+rust_p50_ns=00000000000000000200
+rust_p95_ns=00000000000000000200
+rust_max_rss_kib=00000000000000002000
+go_p50_ns=00000000000000000300
+go_p95_ns=00000000000000000300
+go_max_rss_kib=00000000000000003000
+comparison_policy=simple-p50-p95-le-rust-go
+final_verdict=PASS
+EOF
+run() { sh "$CHECKER" --root "$fixture" --fingerprint "$fingerprint" --run-id "$run_id" --raw-samples "$1" --statistics "$2" --equivalence "${3:-$fixture/equivalence.env}" --environment "${4:-$fixture/environment.env}" --simple-executable "$fixture/simple-benchmark" --rust-executable "$fixture/rust-benchmark" --go-executable "$fixture/go-benchmark"; }
+run "$fixture/raw.env" "$fixture/statistics.env" | grep -q '^STATUS: PASS '
+sed 's/arch=x86_64/arch=aarch64/' "$fixture/environment.env" >"$fixture/environment.cross-arch"
+run "$fixture/raw.env" "$fixture/statistics.env" "$fixture/equivalence.env" "$fixture/environment.cross-arch" >/dev/null 2>&1 && { echo 'FAIL: environment/executable target mismatch accepted' >&2; exit 1; }
+sed '0,/sample|rust|2|/s//sample|simple|2|/' "$fixture/raw.env" >"$fixture/raw.order"
+run "$fixture/raw.order" "$fixture/statistics.env" >/dev/null 2>&1 && { echo 'FAIL: launch-order bias accepted' >&2; exit 1; }
+sed '0,/00000000000000000100/s//n\/a/' "$fixture/raw.env" >"$fixture/raw.numeric"
+run "$fixture/raw.numeric" "$fixture/statistics.env" >/dev/null 2>&1 && { echo 'FAIL: malformed benchmark timing accepted' >&2; exit 1; }
+sed '0,/|100000|/s//|99999|/' "$fixture/raw.env" >"$fixture/raw.ops"
+run "$fixture/raw.ops" "$fixture/statistics.env" >/dev/null 2>&1 && { echo 'FAIL: wrong operation count accepted' >&2; exit 1; }
+forged=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+sed "s/$stdout_sha/$forged/g" "$fixture/raw.env" >"$fixture/raw.forged"
+sed "s/$stdout_sha/$forged/g" "$fixture/equivalence.env" >"$fixture/equivalence.forged"
+run "$fixture/raw.forged" "$fixture/statistics.env" "$fixture/equivalence.forged" >/dev/null 2>&1 && { echo 'FAIL: output detached from oracle accepted' >&2; exit 1; }
+sed 's/sample|simple|\([0-9][0-9]*\)|00000000000000000100/sample|simple|\1|00000000000000000400/' "$fixture/raw.env" >"$fixture/raw.slow"
+sed 's/simple_p\(50\|95\)_ns=00000000000000000100/simple_p\1_ns=00000000000000000400/' "$fixture/statistics.env" >"$fixture/statistics.slow"
+run "$fixture/raw.slow" "$fixture/statistics.slow" >/dev/null 2>&1 && { echo 'FAIL: slower Simple benchmark accepted' >&2; exit 1; }
+cp /bin/true "$fixture/stage4-simple"; compiler_sha=$(hash "$fixture/stage4-simple")
+sed "s/simple_compiler_sha256=$identity/simple_compiler_sha256=$compiler_sha/" "$fixture/environment.env" >"$fixture/environment.wrapper"
+cat >"$fixture/stage4-provenance.env" <<EOF
+schema=simple-bootstrap-stage4-provenance-v1
+status=pass
+artifact_kind=pure-simple-full-cli
+output_path=/fixture/bin/release/x86_64/simple
+output_sha256=$compiler_sha
+source_revision_kind=content-sha256
+source_revision=$identity
+source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling
+producer_path=/fixture/scripts/bootstrap/bootstrap-from-scratch.sh
+producer_sha256=$identity
+provenance_helper_path=/fixture/scripts/check/lib/stage4-candidate-provenance.shs
+provenance_helper_sha256=$identity
+parent_compiler_path=/fixture/build/stage3/simple
+parent_compiler_sha256=$identity
+stage3_provenance_path=/fixture/build/stage3/provenance.env
+stage3_provenance_sha256=$identity
+build_log_path=/fixture/build/logs/stage4-native-build.log
+build_log_sha256=$identity
+essential_tools_log_path=/fixture/build/logs/stage4-essential-tools-smoke.log
+essential_tools_log_sha256=$identity
+completed_gate=stage4-essential-tools-smoke
+EOF
+sh "$fixture/scripts/check/check-rust-go-benchmark-parity.shs" --root "$fixture" --fingerprint "$fingerprint" --run-id "$run_id" \
+ --raw-samples "$fixture/raw.env" --statistics "$fixture/statistics.env" --equivalence "$fixture/equivalence.env" \
+ --environment "$fixture/environment.wrapper" --simple-compiler "$fixture/stage4-simple" --stage4-provenance "$fixture/stage4-provenance.env" \
+ --simple-executable "$fixture/simple-benchmark" --rust-executable "$fixture/rust-benchmark" --go-executable "$fixture/go-benchmark" \
+ >/dev/null 2>&1 && { echo 'FAIL: fabricated Stage 4 benchmark compiler admitted' >&2; exit 1; }
+grep -Fq 'stage4_verify_candidate_provenance "$live_provenance" "$compiler_path" "$ROOT"' "$fixture/scripts/check/check-rust-go-benchmark-parity.shs"
+grep -Fq 'check-rust-go-benchmark-parity.shs' "$ROOT/scripts/check/check-external-must-check-receipt.shs"
+echo 'PASS: Rust/Go benchmark raw-sample/statistics oracle'

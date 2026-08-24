@@ -189,9 +189,12 @@ requires 50–1000 ordered samples per cold/warm × Simple/Python/Bun/Go cell,
 fixed-width nanoseconds, exact output and interpreter-mode receipts, and
 recomputes p50/p95 before requiring Simple to be strictly faster in all twelve
 comparisons. The outer checker also runs full live Stage 3/4 verification.
-`rust-go-benchmark-parity` remains explicitly rejected until its equivalent
-lane-owned checker exists. Independent signatures cannot substitute for either
-quantitative oracle.
+`rust-go-benchmark-parity` similarly loads raw/statistics/equivalence/
+environment/compiler/provenance blobs. Its runtime-fed 100,000-operation
+Simple/Rust/Go fixture rotates launch order per trial, recomputes p50/p95 and
+max RSS from 50–1000 fixed-width samples, and derives equality-or-better Simple
+latency against both references before full live Stage 4 verification.
+Independent signatures cannot substitute for either quantitative oracle.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.
 It cross-checks registry and ledger structure in one linear parser pass. Only
