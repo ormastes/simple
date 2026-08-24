@@ -1231,6 +1231,27 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   source/line collector plus full warning-payload parity contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed signature/scope-allocation tranche
+
+- Replace cumulative per-character parameter and identifier construction in
+  const-reference lint with boundary tracking and one substring per result.
+- Preserve nested delimiter handling, `mut` exclusions, parameter identities,
+  and source finding order; add nested-type and long-name contracts.
+- Delay MIR function snapshot construction until a function-scoped typed pass
+  arm is selected; module passes allocate no unused function snapshot.
+- Preserve stable pre-pass iteration and fresh pass instances for function
+  adapters; verification intentionally not run under the user's no-verify
+  instruction.
+
+## Planned query outline snapshot tranche
+
+- Build one request-local target-file snapshot containing lines, symbols, and
+  imports from one read and one split.
+- Reuse it across definition, hover, completion, type, and signature queries;
+  keep imported-module parsing and precedence unchanged.
+- Preserve empty-file behavior, duplicate import ordering, line numbers,
+  stdout, limits, and exit codes without introducing persistent cache state.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
