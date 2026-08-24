@@ -34,3 +34,13 @@ declare the symbol in the same LLVM module or correct the load to the intended
 owner symbol. Add a focused `core_codegen.spl` native-build reproducer, rerun
 the failed shard with its isolated cache, then perform a fresh admitted
 bootstrap before running Vulkan device evidence.
+
+## Resolution
+
+Fixed in source; bootstrap admission remains pending. The raw
+`load_symbol_slot` decode had been replaced by
+`MirInst.bootstrap_load_global_symbol_id()`, but the deleted local remained in
+a debug interpolation. HIR therefore emitted an unresolved `GlobalLoad`, which
+LLVM correctly rejected as undeclared. The diagnostic now prints only the
+decoded symbol id, and the source-contract regression follows the indexed
+handler signatures including `module_index` and `ir_handle`.
