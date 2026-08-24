@@ -1,0 +1,39 @@
+# RV32 U-mode sret state contract.
+#
+# This module prepares immutable register state only.  It does not switch SATP,
+# map pages, publish a task, or execute sret.  The scheduler may consume the
+# state only together with a future ownership-bound Sv32 mapping receipt.
+
+val RISCV32_SSTATUS_SIE_V1: u32 = 1u32 << 1
+val RISCV32_SSTATUS_SPIE_V1: u32 = 1u32 << 5
+val RISCV32_SSTATUS_SPP_V1: u32 = 1u32 << 8
+val RISCV32_USER_LIMIT_V1: u64 = 0x0000000080000000u64
+
+pub struct Riscv32UserSretStateV1:
+    sepc: u32
+    sp: u32
+    sstatus: u32
+
+pub fn riscv32_user_sret_state_v1(
+    entry_point: u64,
+    user_sp: u64,
+    inherited_sstatus: u32
+) -> Riscv32UserSretStateV1?:
+    """Prepare an RV32 U-mode return frame without granting execution."""
+    if (entry_point == 0u64 or entry_point >= RISCV32_USER_LIMIT_V1 or
+        entry_point % 2u64 != 0u64 or
+        user_sp == 0u64 or user_sp >= RISCV32_USER_LIMIT_V1 or
+        user_sp % 16u64 != 0u64):
+        return nil
+    # sret selects U-mode only when SPP is clear.  SIE must stay clear while
+    # still in S-mode; SPIE enables interrupts after the privilege transition.
+    val status = (inherited_sstatus &
+        (~(RISCV32_SSTATUS_SPP_V1 | RISCV32_SSTATUS_SIE_V1))) |
+        RISCV32_SSTATUS_SPIE_V1
+    Some(Riscv32UserSretStateV1(
+        sepc: entry_point as u32,
+        sp: user_sp as u32,
+        sstatus: status))
+
+export Riscv32UserSretStateV1
+export riscv32_user_sret_state_v1

@@ -15,3 +15,13 @@ four-byte SysV words, but canonical process-image readiness remains false.
 
 Until all four are resolved together, `executable_target_dispatch_v1` must
 keep `riscv32.process_image_builder_ready = false`.
+
+## 2026-08-24 user-entry prerequisite
+
+The loader registry now has a bounded paired RV32 joint/user-entry lease design
+and the architecture leaf prepares a correct U-mode `sret` state (SPP/SIE clear,
+SPIE set) only after authenticated ELF layout evidence. This evidence is not an
+ownership-bound Sv32 mapping receipt. Generic joint commit cannot
+bypass the entry lease. This is intentionally not wired to scheduler
+publication and does not change readiness: the authoritative Sv32 mapper and
+ownership-bound mapping receipt remain the blocking prerequisites.
