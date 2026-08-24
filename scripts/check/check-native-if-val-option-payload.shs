@@ -1,0 +1,85 @@
+#!/bin/sh
+# check-native-if-val-option-payload.shs
+#
+# Pins the 2026-08-24 native-lane defect where `if val x = opt:` bound the
+# Option HANDLE instead of its payload for the canonical boxed `Some(v)`
+# representation (silent-wrong field reads -> garbage propagated as a `T?` ->
+# SIGSEGV in HirLowering.lower_function on 152+ compiler files).
+#
+# Root cause: hir/lower/stmt_lowering.rs `build_pattern_binding_stmts`' bare
+# identifier arm copies the SUBJECT, which is right for a `match` arm
+# (`case other:` binds the subject) and wrong for `if val` (binds the payload).
+# Fixed by routing the if-let/elif-let/while-let sites through
+# `build_if_let_binding_stmts`, which emits `rt_unwrap_or_self` -- payload for a
+# canonical Option (enum_id 1), value unchanged for anything else -- and by
+# making the presence test `rt_is_some` rather than `subject != nil`, so a
+# boxed `None` no longer reads as present.
+#
+# Native-only: the tree-walking interpreter was always correct, so this must
+# native-build the fixture and RUN it. Verdict is the last line of stdout.
+#   PASS  — exit 0
+#   FAIL  — exit 1
+#   ERROR — nothing was checked, exit 2 (never a pass)
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE=${SIMPLE_BIN:-$ROOT/bin/simple}
+FIXTURE=${1:-$ROOT/test/fixture/native_optional/if_val_option_payload.spl}
+# The work dir must live INSIDE the repo: native-build resolves a module surface
+# for the output path, and an out-of-tree -o fails with "missing importing module
+# surface". build/ is gitignored.
+mkdir -p "$ROOT/build/check-native-if-val"
+WORK=$(mktemp -d "$ROOT/build/check-native-if-val/run.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+EXPECTED='if_val=99
+unwrap=99
+match=99
+field=77
+raw=55
+int=55
+none=ABSENT'
+
+fail() { printf '%s\n' "FAIL — $1"; exit 1; }
+oops() { printf '%s\n' "ERROR — nothing was checked ($1)"; exit 2; }
+
+[ -x "$SIMPLE" ] || oops "no runnable compiler at $SIMPLE"
+[ -f "$FIXTURE" ] || oops "fixture not found: $FIXTURE"
+
+# --- selftest: the expectation text must be non-empty and must discriminate.
+CHECKS=0
+[ -n "$EXPECTED" ] || oops "selftest: empty expectation"
+printf '%s\n' "$EXPECTED" | grep -q 'if_val=99' || oops "selftest: expectation lost its key line"
+printf '%s\n' "$EXPECTED" | grep -q 'if_val=4' && oops "selftest: expectation encodes the buggy value"
+
+# Run from the repo root with REPO-RELATIVE paths: native-build resolves the
+# module surface relative to the workspace and fails with "missing importing
+# module surface" on an absolute out-of-workspace path.
+REL_FIXTURE=${FIXTURE#"$ROOT/"}
+REL_OUT=${WORK#"$ROOT/"}/probe
+cd "$ROOT" || oops "cannot cd to repo root $ROOT"
+SIMPLE_TIMEOUT_SECONDS=0 timeout 900 "$SIMPLE" native-build "$REL_FIXTURE" -o "$REL_OUT" > "$WORK/build.log" 2>&1
+BUILD_RC=$?
+[ "$BUILD_RC" -eq 0 ] || oops "native-build failed rc=$BUILD_RC; see $WORK/build.log"
+[ -x "$WORK/probe" ] || oops "native-build produced no executable"
+
+timeout 120 "$WORK/probe" > "$WORK/out.txt" 2>&1
+RUN_RC=$?
+CHECKS=$((CHECKS + 1))
+
+if [ "$RUN_RC" -ge 124 ]; then
+    fail "$CHECKS invariant set(s) checked, fixture crashed (rc=$RUN_RC, 139=SIGSEGV)"
+fi
+[ "$RUN_RC" -eq 0 ] || fail "$CHECKS invariant set(s) checked, fixture exited rc=$RUN_RC"
+
+ACTUAL=$(grep -E '^(if_val|unwrap|match|field|raw|int|none)=' "$WORK/out.txt")
+LINES=$(printf '%s\n' "$ACTUAL" | grep -c '=')
+[ "$LINES" -eq 7 ] || oops "fixture emitted $LINES of 7 probe lines"
+
+if [ "$ACTUAL" != "$EXPECTED" ]; then
+    DIFF=$(printf '%s\n' "$ACTUAL" | tr '\n' ' ')
+    fail "7 probe(s) checked, got: $DIFF (expected if_val=99 unwrap=99 match=99 field=77 raw=55 int=55 none=ABSENT)"
+fi
+
+printf '%s\n' "PASS — 7 probe(s) checked across 1 native-built fixture, 0 mismatches"
+exit 0

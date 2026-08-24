@@ -1,0 +1,69 @@
+# Fixture for scripts/check/check-native-if-val-option-payload.shs.
+#
+# Pins the 2026-08-24 defect: on the NATIVE lane, `if val x = opt:` bound the
+# Option HANDLE instead of its payload whenever the optional carried the
+# canonical boxed `Some(v)` representation. Every field read on the binder then
+# read the enum header (`p.tag` reported 4 for `Payload(tag: 99)`), and the
+# resulting garbage propagated as a `T?` until a consumer dereferenced it --
+# the HirLowering.lower_function SEGV.
+#
+# `.unwrap()` and `match opt: case Some(x)` were always correct; only the
+# `if val` binder was wrong, which is why the lines below print all four.
+# Interpreter runs were ALWAYS correct, so this must be native-built.
+
+struct Payload:
+    tag: i64
+
+struct Slot:
+    type_: Payload?
+
+fn main():
+    val boxed: Payload? = Some(Payload(tag: 99))
+
+    # 1. `if val` on a boxed Some must bind the PAYLOAD.
+    if val a = boxed:
+        eprint("if_val={a.tag}\n")
+    else:
+        eprint("if_val=ABSENT\n")
+
+    # 2. `.unwrap()` already handled both representations.
+    eprint("unwrap={boxed.unwrap().tag}\n")
+
+    # 3. `match ... case Some(x)` already handled both representations.
+    match boxed:
+        case Some(m): eprint("match={m.tag}\n")
+        case _: eprint("match=ABSENT\n")
+
+    # 4. Same binder over a struct FIELD of optional type -- the exact shape of
+    #    SymbolTable.get_symbol_type_raw's `if val found = sym: found.type_`.
+    val slot = Slot(type_: Some(Payload(tag: 77)))
+    if val b = slot.type_:
+        eprint("field={b.tag}\n")
+    else:
+        eprint("field=ABSENT\n")
+
+    # 5. The raw "migration form" (bare value, nil when absent) must still work:
+    #    rt_unwrap_or_self returns a non-Option value unchanged.
+    val raw: Payload? = Payload(tag: 55)
+    if val c = raw:
+        eprint("raw={c.tag}\n")
+    else:
+        eprint("raw=ABSENT\n")
+
+    # 7. Optional INT field. Recorded separately because a pre-fix probe showed
+    #    `if val r = c:` over `i64?` printing the raw `(false, 0)` nullable-ABI
+    #    tuple rather than a number -- a representation leak in the same seam.
+    val ni: i64? = Some(55)
+    if val e2 = ni:
+        eprint("int={e2}\n")
+    else:
+        eprint("int=ABSENT\n")
+
+    # 6. An ABSENT canonical Option must NOT take the present branch. Before the
+    #    fix the condition was `subject != nil`, and a boxed None is a live enum
+    #    object, so it read as present.
+    val none_opt: Payload? = None
+    if val d = none_opt:
+        eprint("none={d.tag}\n")
+    else:
+        eprint("none=ABSENT\n")
