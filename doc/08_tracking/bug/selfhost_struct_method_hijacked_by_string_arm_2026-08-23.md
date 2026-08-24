@@ -3,6 +3,11 @@
 - Date: 2026-08-23
 - Severity: CRITICAL (blocked bootstrap phase 3; stage2 could not compile a three-line hello world)
 - Status: FIXED (lowering); stage2/stage3 redeploy still required
+  - History note: the lowering fix (`7127df8d794` predicate-shape widening,
+    `ef3df4a785e` cross-module owner evidence) was silently reverted by
+    `0299186137d`, so for a period this line read FIXED while `origin/main`
+    carried the pre-fix narrow form — that disagreement is what identified the
+    clobber. Restored byte-for-byte from `bf00d9197b7` by `8f84d2b19af`.
 - Area: `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
 
 ## Symptom (VERIFIED)

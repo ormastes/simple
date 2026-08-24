@@ -1,7 +1,15 @@
 # `s = s + x` on a scalar silently becomes `rt_array_extend_i64` and yields 0
 
 - **Date:** 2026-08-23
-- **Status:** OPEN — root cause proven down to the emitted instructions
+- **Status:** FIXED in lowering (restored `8f84d2b19af`); stage2/stage3 redeploy still required
+  - The receiver-typed scalar guard in `lower_unresolved_array_merge` was landed,
+    then silently reverted by `0299186137d` (a commit whose message describes only
+    landing a default-off probe, but whose diffstat on
+    `method_calls_literals.spl` is +11/-120). It was restored byte-for-byte from
+    main's own ancestor `bf00d9197b7` by `8f84d2b19af`. This status line said OPEN
+    throughout that window; it is corrected here so the doc and the code agree.
+  - NOT verified after the restore: nothing was built or run on the restoring host
+    (its `bin/simple` is the bootstrap CLI, no `lint`, no self-hosted full CLI).
 - **Severity:** CRITICAL — silent wrong answer in the most ordinary code there is
 - **Area:** `src/compiler/10.frontend/desugar/collection_desugar.spl` (Pattern B) +
   `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
