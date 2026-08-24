@@ -149,3 +149,30 @@ Rebuild Stage 2 from HEAD (which contains `7c453e7b076`, `e52f3e4de26`,
 `63f4b5d1362` and `e0e308c8681`) and re-run Stage 3 against the fresh artifact.
 Do **not** spend further effort interpreting Stage-3 logs produced by the
 2026-08-24 01:34 binary.
+
+## Ruled out: cross-lane cache poisoning
+
+The obvious objection to "the artifact is broken" is that this same binary DID
+parse and HIR-lower 660+/692 modules for 21 minutes in the Stage-3 log, which a
+wholly broken compiler could not. The candidate explanation was a shared HIR
+cache poisoned by a newer binary from another lane (this box runs several), the
+hazard `SIMPLE_CACHE_SCOPE` and `doc/05_design/compiler/incremental_build/per_lane_private_caches.md`
+exist for. **It is not that.** Re-run in an empty scratch directory outside every
+worktree, with a private scope:
+
+```
+SIMPLE_CACHE_SCOPE=lane-e-fresh-$$ stage2 compile --format=smf -o /tmp/hw2.smf hw.spl
+```
+
+`rc=1`, byte-identical error. There is also no `.simple/cache` in the lane
+worktree at all.
+
+The reconciliation is in *where* the failure sits. The binary's LOWERING is
+fine — the hello-world run prints `[bootstrap-error-count] source_idx=0
+point=post-lowering count=0` and `point=post-diagnostics count=0` before it
+dies. The failure is downstream, in the HIR **codec**, on an unset (`-1`)
+`Visibility` tag. The Stage-3 log never reached the codec because it aborted
+earlier on lowering errors. So both observations hold: the binary lowers, and
+the binary cannot emit output for **any** input, hello world included. Either
+way it cannot produce a Stage-3 artifact, and any verification run through it
+is unfalsifiable.
