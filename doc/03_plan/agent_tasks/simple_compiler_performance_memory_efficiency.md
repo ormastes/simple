@@ -1267,6 +1267,18 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   idempotence contracts plus a source guard against restoring the loop.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed check-tier accumulator tranche
+
+- Replace input-sized keyword, module-tier, and restricted-file copy-on-append
+  operations with unique-owner `push`, preserving stable encounter order.
+- Count default full-tier files instead of retaining paths that are never
+  checked, reducing peak path storage to seed/core subsets.
+- Build ordered operator tables once per checked file and share them read-only
+  across line checks; retain the source-taking compatibility adapter.
+- Add guards for owner mutation, full-tier count-only storage, direct operator
+  literals, and per-file pattern reuse.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
