@@ -1,0 +1,86 @@
+"""
+## Purpose and audience
+Purpose: Specify the bounded ARM64 SSH request-context ownership lifecycle.
+Audience: SSH and ARM64 loader maintainers.
+"""
+# @req: REQ-OS-APPS-001
+# @cover src/os/apps/sshd/arm64_ssh_request_context_owner.spl 80%
+use std.spipe.*
+use std.spec.step
+use os.apps.sshd.arm64_ssh_request_context_owner.{
+    ARM64_SSH_CONTEXT_SLOT_LIMIT_V1,
+    Arm64SshRequestContextOwnerV1,
+    Arm64SshContextStateV1
+}
+
+describe "ARM64 SSH request context owner":
+    it "binds one launch lease to the exact session channel principal and request":
+        step("Issue a context and authorize its exact binding")
+        var owner = Arm64SshRequestContextOwnerV1.create(71u64)
+        val handle = owner.issue(9u64, 3u32, "alice", 44u64).unwrap()
+        val lease = owner.authorize_launch(handle, 9u64, 3u32, "alice", 44u64).unwrap()
+        expect(owner.snapshot(handle).unwrap().state).to_equal(Arm64SshContextStateV1.LaunchLeased)
+        expect(owner.complete_launch(lease).unwrap()).to_be(true)
+        expect(owner.snapshot(handle).unwrap().state).to_equal(Arm64SshContextStateV1.Quarantined)
+
+    it "rejects every mismatched binding without changing armed state":
+        step("Attempt launch with mismatched binding dimensions")
+        var owner = Arm64SshRequestContextOwnerV1.create(72u64)
+        val handle = owner.issue(10u64, 4u32, "bob", 45u64).unwrap()
+        expect(owner.authorize_launch(handle, 11u64, 4u32, "bob", 45u64).is_err()).to_be(true)
+        expect(owner.authorize_launch(handle, 10u64, 5u32, "bob", 45u64).is_err()).to_be(true)
+        expect(owner.authorize_launch(handle, 10u64, 4u32, "mallory", 45u64).is_err()).to_be(true)
+        expect(owner.authorize_launch(handle, 10u64, 4u32, "bob", 46u64).is_err()).to_be(true)
+        expect(owner.snapshot(handle).unwrap().state).to_equal(Arm64SshContextStateV1.Armed)
+
+    it "enforces exactly sixteen slots and rejects duplicate live bindings":
+        step("Fill the bounded owner and reject overflow")
+        var owner = Arm64SshRequestContextOwnerV1.create(73u64)
+        expect(owner.slot_count()).to_equal(ARM64_SSH_CONTEXT_SLOT_LIMIT_V1)
+        var i = 0
+        while i < ARM64_SSH_CONTEXT_SLOT_LIMIT_V1:
+            expect(owner.issue(20u64, i.to_u32(), "carol", (i + 1).to_u64()).is_ok()).to_be(true)
+            i = i + 1
+        expect(owner.issue(20u64, 30u32, "carol", 90u64).is_err()).to_be(true)
+
+    it "requires revoke lease commit and rejects replay":
+        step("Revoke an armed context through its opaque lease")
+        var owner = Arm64SshRequestContextOwnerV1.create(74u64)
+        val handle = owner.issue(30u64, 6u32, "dana", 50u64).unwrap()
+        val lease = owner.begin_revoke(handle).unwrap()
+        expect(owner.commit_revoke(lease).unwrap()).to_be(true)
+        expect(owner.commit_revoke(lease).is_err()).to_be(true)
+
+    it "rolls back a cancelled revoke to its exact prior launch lease":
+        step("Abort revoke without losing the prior launch transition")
+        var owner = Arm64SshRequestContextOwnerV1.create(741u64)
+        val handle = owner.issue(31u64, 6u32, "dana", 501u64).unwrap()
+        val launch = owner.authorize_launch(handle, 31u64, 6u32, "dana", 501u64).unwrap()
+        val revoke = owner.begin_revoke(handle).unwrap()
+        expect(owner.abort_revoke(revoke).unwrap()).to_be(true)
+        expect(owner.snapshot(handle).unwrap().state).to_equal(Arm64SshContextStateV1.LaunchLeased)
+        expect(owner.complete_launch(launch).unwrap()).to_be(true)
+        expect(owner.abort_revoke(revoke).is_err()).to_be(true)
+
+    it "quarantines before reuse and invalidates the stale handle":
+        step("Complete, advance quarantine, and reuse the finite slot")
+        var owner = Arm64SshRequestContextOwnerV1.create(75u64)
+        val stale = owner.issue(40u64, 7u32, "erin", 51u64).unwrap()
+        val lease = owner.authorize_launch(stale, 40u64, 7u32, "erin", 51u64).unwrap()
+        expect(owner.complete_launch(lease).unwrap()).to_be(true)
+        expect(owner.advance_quarantine()).to_equal(1)
+        val fresh = owner.issue(41u64, 7u32, "erin", 52u64).unwrap()
+        expect(owner.snapshot(stale).is_err()).to_be(true)
+        expect(owner.snapshot(fresh).unwrap().generation).to_equal(2u64)
+
+    it "daemon drain is terminal idempotent and invalidates all leases":
+        step("Drain active and quarantined contexts before session close")
+        var owner = Arm64SshRequestContextOwnerV1.create(76u64)
+        val active = owner.issue(50u64, 8u32, "frank", 53u64).unwrap()
+        val leased = owner.authorize_launch(active, 50u64, 8u32, "frank", 53u64).unwrap()
+        owner.issue(50u64, 9u32, "frank", 54u64).unwrap()
+        expect(owner.daemon_drain()).to_equal(2)
+        expect(owner.is_drained()).to_be(true)
+        expect(owner.complete_launch(leased).is_err()).to_be(true)
+        expect(owner.issue(51u64, 1u32, "frank", 55u64).is_err()).to_be(true)
+        expect(owner.daemon_drain()).to_equal(0)

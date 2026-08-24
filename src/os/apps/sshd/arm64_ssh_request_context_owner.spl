@@ -1,0 +1,414 @@
+# ARM64 SSH request-context lifecycle owner.
+#
+# One SshSession owns this finite table.  Handles and leases are coordinates
+# into that owner, never copies of mutable context state.  This module does not
+# call the loader: a future adapter may consume LaunchLeaseV1 only while the
+# owning session remains live.
+
+pub val ARM64_SSH_CONTEXT_SLOT_LIMIT_V1: i64 = 16
+
+pub enum Arm64SshContextStateV1:
+    Available
+    Armed
+    LaunchLeased
+    RevokeLeased
+    Quarantined
+    Retired
+
+pub enum Arm64SshContextErrorV1:
+    None
+    Drained
+    Exhausted
+    InvalidBinding
+    InvalidHandle
+    InvalidLaunchLease
+    InvalidRevokeLease
+    InvalidTransition
+    GenerationExhausted
+    NonceExhausted
+
+pub struct Arm64SshContextHandleV1:
+    _slot: i64
+    _generation: u64
+    _nonce: u64
+
+pub struct Arm64SshLaunchLeaseV1:
+    _handle: Arm64SshContextHandleV1
+    _launch_nonce: u64
+
+pub struct Arm64SshRevokeLeaseV1:
+    _handle: Arm64SshContextHandleV1
+    _revoke_nonce: u64
+
+pub struct Arm64SshContextSnapshotV1:
+    state: Arm64SshContextStateV1
+    session_id: u64
+    channel_id: u32
+    principal: text
+    request_id: u64
+    generation: u64
+
+struct Arm64SshContextSlotV1:
+    state: Arm64SshContextStateV1
+    session_id: u64
+    channel_id: u32
+    principal: text
+    request_id: u64
+    generation: u64
+    nonce: u64
+    transition_nonce: u64
+    revoke_previous_state: Arm64SshContextStateV1
+    revoke_previous_transition_nonce: u64
+    quarantine_epoch: u64
+
+pub class Arm64SshRequestContextOwnerV1:
+    slots: [Arm64SshContextSlotV1]
+    nonce_seed: u64
+    next_nonce_counter: u64
+    quarantine_epoch: u64
+    drained: bool
+
+fn _arm64_ssh_mix64(value: u64) -> u64:
+    var mixed = value ^ (value >> 30)
+    mixed = mixed * 0xBF58476D1CE4E5B9u64
+    mixed = mixed ^ (mixed >> 27)
+    mixed = mixed * 0x94D049BB133111EBu64
+    mixed ^ (mixed >> 31)
+
+fn _arm64_ssh_available_slot() -> Arm64SshContextSlotV1:
+    Arm64SshContextSlotV1(
+        state: Arm64SshContextStateV1.Available,
+        session_id: 0u64,
+        channel_id: 0u32,
+        principal: "",
+        request_id: 0u64,
+        generation: 0u64,
+        nonce: 0u64,
+        transition_nonce: 0u64,
+        revoke_previous_state: Arm64SshContextStateV1.Available,
+        revoke_previous_transition_nonce: 0u64,
+        quarantine_epoch: 0u64
+    )
+
+fn _arm64_ssh_binding_valid(
+    session_id: u64, channel_id: u32, principal: text, request_id: u64
+) -> bool:
+    session_id != 0u64 and channel_id != 4294967295u32 and
+        principal != "" and principal.len() <= 256 and request_id != 0u64
+
+fn _arm64_ssh_handle_matches(
+    slot: Arm64SshContextSlotV1, handle: Arm64SshContextHandleV1
+) -> bool:
+    handle._generation != 0u64 and handle._nonce != 0u64 and
+        slot.generation == handle._generation and slot.nonce == handle._nonce
+
+fn _arm64_ssh_binding_matches(
+    slot: Arm64SshContextSlotV1,
+    session_id: u64,
+    channel_id: u32,
+    principal: text,
+    request_id: u64
+) -> bool:
+    slot.session_id == session_id and slot.channel_id == channel_id and
+        slot.principal == principal and slot.request_id == request_id
+
+impl Arm64SshRequestContextOwnerV1:
+    pub static fn create(nonce_seed: u64) -> Arm64SshRequestContextOwnerV1:
+        var slots: [Arm64SshContextSlotV1] = []
+        var i = 0
+        while i < ARM64_SSH_CONTEXT_SLOT_LIMIT_V1:
+            slots.push(_arm64_ssh_available_slot())
+            i = i + 1
+        Arm64SshRequestContextOwnerV1(
+            slots: slots,
+            nonce_seed: if nonce_seed == 0u64: 0x41524D3634535348u64 else: nonce_seed,
+            next_nonce_counter: 1u64,
+            quarantine_epoch: 1u64,
+            drained: false
+        )
+
+    fn _mint_nonce(slot_index: i64, generation: u64, domain: u64) -> u64:
+        var nonce = _arm64_ssh_mix64(
+            self.nonce_seed ^ self.next_nonce_counter ^ generation ^
+                (slot_index as u64) ^ domain
+        )
+        if nonce == 0u64:
+            nonce = _arm64_ssh_mix64(self.nonce_seed ^ domain ^ 0xA5A5A5A5A5A5A5A5u64)
+        nonce
+
+    fn _handle_index(handle: Arm64SshContextHandleV1) -> i64:
+        if handle._slot < 0 or handle._slot >= ARM64_SSH_CONTEXT_SLOT_LIMIT_V1:
+            return -1
+        if handle._slot >= self.slots.len():
+            return -1
+        if not _arm64_ssh_handle_matches(self.slots[handle._slot], handle):
+            return -1
+        handle._slot
+
+    pub me issue(
+        session_id: u64, channel_id: u32, principal: text, request_id: u64
+    ) -> Result<Arm64SshContextHandleV1, Arm64SshContextErrorV1>:
+        if self.drained:
+            return Err(Arm64SshContextErrorV1.Drained)
+        if not _arm64_ssh_binding_valid(session_id, channel_id, principal, request_id):
+            return Err(Arm64SshContextErrorV1.InvalidBinding)
+        if self.next_nonce_counter == 18446744073709551615u64:
+            return Err(Arm64SshContextErrorV1.NonceExhausted)
+
+        var reusable = -1
+        var i = 0
+        while i < self.slots.len():
+            val slot = self.slots[i]
+            if slot.state != Arm64SshContextStateV1.Available and
+                slot.state != Arm64SshContextStateV1.Retired and
+                _arm64_ssh_binding_matches(slot, session_id, channel_id, principal, request_id):
+                return Err(Arm64SshContextErrorV1.InvalidTransition)
+            if reusable < 0 and slot.state == Arm64SshContextStateV1.Available:
+                reusable = i
+            i = i + 1
+        if reusable < 0:
+            return Err(Arm64SshContextErrorV1.Exhausted)
+        val previous = self.slots[reusable]
+        if previous.generation == 18446744073709551615u64:
+            self.slots[reusable].state = Arm64SshContextStateV1.Retired
+            return Err(Arm64SshContextErrorV1.GenerationExhausted)
+        val generation = previous.generation + 1u64
+        val nonce = self._mint_nonce(reusable, generation, 0x48414E444C450001u64)
+        if nonce == 0u64:
+            return Err(Arm64SshContextErrorV1.NonceExhausted)
+        self.next_nonce_counter = self.next_nonce_counter + 1u64
+        self.slots[reusable] = Arm64SshContextSlotV1(
+            state: Arm64SshContextStateV1.Armed,
+            session_id: session_id,
+            channel_id: channel_id,
+            principal: principal,
+            request_id: request_id,
+            generation: generation,
+            nonce: nonce,
+            transition_nonce: 0u64,
+            revoke_previous_state: Arm64SshContextStateV1.Available,
+            revoke_previous_transition_nonce: 0u64,
+            quarantine_epoch: 0u64
+        )
+        Ok(Arm64SshContextHandleV1(
+            _slot: reusable, _generation: generation, _nonce: nonce))
+
+    pub me authorize_launch(
+        handle: Arm64SshContextHandleV1,
+        session_id: u64,
+        channel_id: u32,
+        principal: text,
+        request_id: u64
+    ) -> Result<Arm64SshLaunchLeaseV1, Arm64SshContextErrorV1>:
+        if self.drained:
+            return Err(Arm64SshContextErrorV1.Drained)
+        val index = self._handle_index(handle)
+        if index < 0:
+            return Err(Arm64SshContextErrorV1.InvalidHandle)
+        val slot = self.slots[index]
+        if slot.state != Arm64SshContextStateV1.Armed:
+            return Err(Arm64SshContextErrorV1.InvalidTransition)
+        if not _arm64_ssh_binding_matches(slot, session_id, channel_id, principal, request_id):
+            return Err(Arm64SshContextErrorV1.InvalidBinding)
+        if self.next_nonce_counter == 18446744073709551615u64:
+            return Err(Arm64SshContextErrorV1.NonceExhausted)
+        val lease_nonce = self._mint_nonce(index, slot.generation, 0x4C41554E43480001u64)
+        if lease_nonce == 0u64:
+            return Err(Arm64SshContextErrorV1.NonceExhausted)
+        self.next_nonce_counter = self.next_nonce_counter + 1u64
+        self.slots[index].state = Arm64SshContextStateV1.LaunchLeased
+        self.slots[index].transition_nonce = lease_nonce
+        Ok(Arm64SshLaunchLeaseV1(_handle: handle, _launch_nonce: lease_nonce))
+
+    pub me complete_launch(
+        lease: Arm64SshLaunchLeaseV1
+    ) -> Result<bool, Arm64SshContextErrorV1>:
+        val index = self._handle_index(lease._handle)
+        if index < 0:
+            return Err(Arm64SshContextErrorV1.InvalidLaunchLease)
+        val slot = self.slots[index]
+        if slot.state != Arm64SshContextStateV1.LaunchLeased or
+            slot.transition_nonce != lease._launch_nonce or lease._launch_nonce == 0u64:
+            return Err(Arm64SshContextErrorV1.InvalidLaunchLease)
+        self._quarantine(index)
+        Ok(true)
+
+    pub me begin_revoke(
+        handle: Arm64SshContextHandleV1
+    ) -> Result<Arm64SshRevokeLeaseV1, Arm64SshContextErrorV1>:
+        if self.drained:
+            return Err(Arm64SshContextErrorV1.Drained)
+        val index = self._handle_index(handle)
+        if index < 0:
+            return Err(Arm64SshContextErrorV1.InvalidHandle)
+        val slot = self.slots[index]
+        if slot.state != Arm64SshContextStateV1.Armed and
+            slot.state != Arm64SshContextStateV1.LaunchLeased:
+            return Err(Arm64SshContextErrorV1.InvalidTransition)
+        if self.next_nonce_counter == 18446744073709551615u64:
+            return Err(Arm64SshContextErrorV1.NonceExhausted)
+        val lease_nonce = self._mint_nonce(index, slot.generation, 0x5245564F4B450001u64)
+        if lease_nonce == 0u64:
+            return Err(Arm64SshContextErrorV1.NonceExhausted)
+        self.next_nonce_counter = self.next_nonce_counter + 1u64
+        self.slots[index].state = Arm64SshContextStateV1.RevokeLeased
+        self.slots[index].revoke_previous_state = slot.state
+        self.slots[index].revoke_previous_transition_nonce = slot.transition_nonce
+        self.slots[index].transition_nonce = lease_nonce
+        Ok(Arm64SshRevokeLeaseV1(_handle: handle, _revoke_nonce: lease_nonce))
+
+    pub me commit_revoke(
+        lease: Arm64SshRevokeLeaseV1
+    ) -> Result<bool, Arm64SshContextErrorV1>:
+        val index = self._handle_index(lease._handle)
+        if index < 0:
+            return Err(Arm64SshContextErrorV1.InvalidRevokeLease)
+        val slot = self.slots[index]
+        if slot.state != Arm64SshContextStateV1.RevokeLeased or
+            slot.transition_nonce != lease._revoke_nonce or lease._revoke_nonce == 0u64:
+            return Err(Arm64SshContextErrorV1.InvalidRevokeLease)
+        self._quarantine(index)
+        Ok(true)
+
+    pub me abort_revoke(
+        lease: Arm64SshRevokeLeaseV1
+    ) -> Result<bool, Arm64SshContextErrorV1>:
+        val index = self._handle_index(lease._handle)
+        if index < 0:
+            return Err(Arm64SshContextErrorV1.InvalidRevokeLease)
+        val slot = self.slots[index]
+        if slot.state != Arm64SshContextStateV1.RevokeLeased or
+            slot.transition_nonce != lease._revoke_nonce or lease._revoke_nonce == 0u64:
+            return Err(Arm64SshContextErrorV1.InvalidRevokeLease)
+        if slot.revoke_previous_state != Arm64SshContextStateV1.Armed and
+            slot.revoke_previous_state != Arm64SshContextStateV1.LaunchLeased:
+            return Err(Arm64SshContextErrorV1.InvalidTransition)
+        self.slots[index].state = slot.revoke_previous_state
+        self.slots[index].transition_nonce = slot.revoke_previous_transition_nonce
+        self.slots[index].revoke_previous_state = Arm64SshContextStateV1.Available
+        self.slots[index].revoke_previous_transition_nonce = 0u64
+        Ok(true)
+
+    me _quarantine(index: i64):
+        self.slots[index].state = Arm64SshContextStateV1.Quarantined
+        self.slots[index].transition_nonce = 0u64
+        self.slots[index].revoke_previous_state = Arm64SshContextStateV1.Available
+        self.slots[index].revoke_previous_transition_nonce = 0u64
+        self.slots[index].quarantine_epoch = self.quarantine_epoch
+
+    pub me advance_quarantine() -> i64:
+        if self.drained:
+            return 0
+        if self.quarantine_epoch == 18446744073709551615u64:
+            var retire_i = 0
+            while retire_i < self.slots.len():
+                if self.slots[retire_i].state == Arm64SshContextStateV1.Quarantined:
+                    self.slots[retire_i].state = Arm64SshContextStateV1.Retired
+                retire_i = retire_i + 1
+            return 0
+        val release_before = self.quarantine_epoch
+        self.quarantine_epoch = self.quarantine_epoch + 1u64
+        var released = 0
+        var i = 0
+        while i < self.slots.len():
+            if self.slots[i].state == Arm64SshContextStateV1.Quarantined and
+                self.slots[i].quarantine_epoch < self.quarantine_epoch:
+                self.slots[i].state = Arm64SshContextStateV1.Available
+                self.slots[i].session_id = 0u64
+                self.slots[i].channel_id = 0u32
+                self.slots[i].principal = ""
+                self.slots[i].request_id = 0u64
+                self.slots[i].nonce = 0u64
+                self.slots[i].transition_nonce = 0u64
+                self.slots[i].revoke_previous_state = Arm64SshContextStateV1.Available
+                self.slots[i].revoke_previous_transition_nonce = 0u64
+                self.slots[i].quarantine_epoch = release_before
+                released = released + 1
+            i = i + 1
+        released
+
+    pub me daemon_drain() -> i64:
+        if self.drained:
+            return 0
+        var drained_count = 0
+        var i = 0
+        while i < self.slots.len():
+            if self.slots[i].state != Arm64SshContextStateV1.Available and
+                self.slots[i].state != Arm64SshContextStateV1.Retired:
+                drained_count = drained_count + 1
+            self.slots[i].state = Arm64SshContextStateV1.Retired
+            self.slots[i].session_id = 0u64
+            self.slots[i].channel_id = 0u32
+            self.slots[i].principal = ""
+            self.slots[i].request_id = 0u64
+            self.slots[i].nonce = 0u64
+            self.slots[i].transition_nonce = 0u64
+            self.slots[i].revoke_previous_state = Arm64SshContextStateV1.Available
+            self.slots[i].revoke_previous_transition_nonce = 0u64
+            i = i + 1
+        self.drained = true
+        drained_count
+
+    pub fn snapshot(
+        handle: Arm64SshContextHandleV1
+    ) -> Result<Arm64SshContextSnapshotV1, Arm64SshContextErrorV1>:
+        val index = self._handle_index(handle)
+        if index < 0:
+            return Err(Arm64SshContextErrorV1.InvalidHandle)
+        val slot = self.slots[index]
+        Ok(Arm64SshContextSnapshotV1(
+            state: slot.state,
+            session_id: slot.session_id,
+            channel_id: slot.channel_id,
+            principal: slot.principal,
+            request_id: slot.request_id,
+            generation: slot.generation
+        ))
+
+    pub fn slot_count() -> i64:
+        self.slots.len()
+
+    pub fn is_drained() -> bool:
+        self.drained
+
+@cfg(arm64)
+pub fn ssh_session_arm64_request_context_owner_v1(
+    socket_fd: i64
+) -> Arm64SshRequestContextOwnerV1?:
+    Some(Arm64SshRequestContextOwnerV1.create(
+        (socket_fd as u64) ^ 0x41524D3634535348u64))
+
+@cfg(x86_64)
+pub fn ssh_session_arm64_request_context_owner_v1(
+    _socket_fd: i64
+) -> Arm64SshRequestContextOwnerV1?:
+    nil
+
+@cfg(x86)
+pub fn ssh_session_arm64_request_context_owner_v1(
+    _socket_fd: i64
+) -> Arm64SshRequestContextOwnerV1?:
+    nil
+
+@cfg(arm32)
+pub fn ssh_session_arm64_request_context_owner_v1(
+    _socket_fd: i64
+) -> Arm64SshRequestContextOwnerV1?:
+    nil
+
+@cfg(riscv64)
+pub fn ssh_session_arm64_request_context_owner_v1(
+    _socket_fd: i64
+) -> Arm64SshRequestContextOwnerV1?:
+    nil
+
+@cfg(riscv32)
+pub fn ssh_session_arm64_request_context_owner_v1(
+    _socket_fd: i64
+) -> Arm64SshRequestContextOwnerV1?:
+    nil
+
+export Arm64SshContextStateV1, Arm64SshContextErrorV1
+export Arm64SshContextHandleV1, Arm64SshLaunchLeaseV1, Arm64SshRevokeLeaseV1
+export Arm64SshContextSnapshotV1, Arm64SshRequestContextOwnerV1
+export ssh_session_arm64_request_context_owner_v1
