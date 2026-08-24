@@ -2758,3 +2758,22 @@ dictionary set while warnings remain appended in first-occurrence source
 order. A non-bogus occurrence still does not suppress a later bogus finding.
 Existing liveness and match-diagnostic contracts were not rerun under the
 user's no-verification instruction.
+
+### OPTME001 canonical-line reuse
+
+The normal lint path already split each file into canonical lines, but its
+OPTME001 append then split the same source four more times: once for each of
+three index collectors and once for the warning scan. Three stages also rebuilt
+the same per-line enclosure array. Line-owned collector/check APIs now accept
+the existing view, and a combined index reuses one enclosure map. The lint
+source phase computes compact warnings while canonical lines are live, retains
+only those warnings across parsing, and appends them at the unchanged
+post-parse position. Thus malformed or stale revisions remain suppressed and
+no file-sized duplicate survives into the parser's peak-memory window.
+
+The repo-wide OPTME tool now performs one split and one combined enclosure
+index in its indexing pass, plus one split in its checking pass, rather than
+three splits/enclosure maps in pass one and another split in pass two. Public
+source APIs remain one-split compatibility adapters. Source/line collector and
+full warning payload parity contracts were added but not executed under the
+user's no-verification instruction.

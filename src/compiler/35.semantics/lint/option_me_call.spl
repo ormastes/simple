@@ -293,11 +293,13 @@ fn _om_enclosing_classes(lines: [text]) -> [text]:
 # Index collection (one source file at a time; callers accumulate)
 # ============================================================================
 
-pub fn optme_collect_me_methods(source: text) -> [text]:
-    """Every mutable-receiver method declared in `source`, as "Class::method"."""
+pub struct OptmeSourceIndex:
+    me_methods: [text]
+    opt_fields: [text]
+    ret_optionals: [text]
+
+fn _optme_collect_me_methods_with_enclosing(lines: [text], encl: [text]) -> [text]:
     var out: [text] = []
-    val lines = source.split("\n")
-    val encl = _om_enclosing_classes(lines)
     var i = 0
     while i < lines.len():
         val cls = encl[i]
@@ -311,11 +313,16 @@ pub fn optme_collect_me_methods(source: text) -> [text]:
         i = i + 1
     out
 
-pub fn optme_collect_opt_fields(source: text) -> [text]:
-    """Every option-typed field of a named class, as "Class::field::Type"."""
+pub fn optme_collect_me_methods_lines(lines: [text]) -> [text]:
+    """Line-owned mutable-receiver method index."""
+    _optme_collect_me_methods_with_enclosing(lines, _om_enclosing_classes(lines))
+
+pub fn optme_collect_me_methods(source: text) -> [text]:
+    """Every mutable-receiver method declared in `source`, as "Class::method"."""
+    optme_collect_me_methods_lines(source.split("\n"))
+
+fn _optme_collect_opt_fields_with_enclosing(lines: [text], encl: [text]) -> [text]:
     var out: [text] = []
-    val lines = source.split("\n")
-    val encl = _om_enclosing_classes(lines)
     var fn_ind = -1
     var i = 0
     while i < lines.len():
@@ -339,10 +346,17 @@ pub fn optme_collect_opt_fields(source: text) -> [text]:
         i = i + 1
     out
 
-pub fn optme_collect_ret_optionals(source: text) -> [text]:
-    """Every function declared `-> Class?`, as "fname::Class"."""
+pub fn optme_collect_opt_fields_lines(lines: [text]) -> [text]:
+    """Line-owned option-field index."""
+    _optme_collect_opt_fields_with_enclosing(lines, _om_enclosing_classes(lines))
+
+pub fn optme_collect_opt_fields(source: text) -> [text]:
+    """Every option-typed field of a named class, as "Class::field::Type"."""
+    optme_collect_opt_fields_lines(source.split("\n"))
+
+pub fn optme_collect_ret_optionals_lines(lines: [text]) -> [text]:
+    """Line-owned optional-return index."""
     var out: [text] = []
-    val lines = source.split("\n")
     var i = 0
     while i < lines.len():
         val r = _om_ret_optional(lines[i].trim())
@@ -350,6 +364,18 @@ pub fn optme_collect_ret_optionals(source: text) -> [text]:
             out.push(r)
         i = i + 1
     out
+
+pub fn optme_collect_ret_optionals(source: text) -> [text]:
+    """Every function declared `-> Class?`, as "fname::Class"."""
+    optme_collect_ret_optionals_lines(source.split("\n"))
+
+pub fn optme_collect_source_index_lines(lines: [text]) -> OptmeSourceIndex:
+    """Build every same-file OPTME index from one line and enclosure view."""
+    val encl = _om_enclosing_classes(lines)
+    OptmeSourceIndex(
+        _optme_collect_me_methods_with_enclosing(lines, encl),
+        _optme_collect_opt_fields_with_enclosing(lines, encl),
+        optme_collect_ret_optionals_lines(lines))
 
 # ============================================================================
 # Binding parse
@@ -434,9 +460,10 @@ fn _om_call_name(rhs: text) -> text:
 # Main Entry Points
 # ============================================================================
 
-pub fn check_option_me_call(
+fn _check_option_me_call_with_enclosing(
     file_path: text,
-    source: text,
+    lines: [text],
+    encl: [text],
     me_keys: Dict<text, i64>,
     opt_fields: Dict<text, text>,
     field_owner: Dict<text, text>,
@@ -452,8 +479,6 @@ pub fn check_option_me_call(
     `optme_collect_*` helpers; `check_option_me_call_source` does that for a
     single file."""
     var out: [OptionMeCallWarning] = []
-    val lines = source.split("\n")
-    val encl = _om_enclosing_classes(lines)
     var track_names: [text] = []
     var track_types: [text] = []
     var fn_ind = -1
@@ -549,18 +574,50 @@ pub fn check_option_me_call(
         i = i + 1
     out
 
-pub fn check_option_me_call_source(file_path: text, source: text) -> [OptionMeCallWarning]:
-    """Single-file OPTME001 check: builds the index from `source` alone.
+pub fn check_option_me_call_lines(
+    file_path: text,
+    lines: [text],
+    me_keys: Dict<text, i64>,
+    opt_fields: Dict<text, text>,
+    field_owner: Dict<text, text>,
+    ret_opt: Dict<text, text>
+) -> [OptionMeCallWarning]:
+    """Line-owned OPTME001 check with a caller-supplied same-file index."""
+    _check_option_me_call_with_enclosing(
+        file_path, lines, _om_enclosing_classes(lines),
+        me_keys, opt_fields, field_owner, ret_opt)
+
+pub fn check_option_me_call(
+    file_path: text,
+    source: text,
+    me_keys: Dict<text, i64>,
+    opt_fields: Dict<text, text>,
+    field_owner: Dict<text, text>,
+    ret_opt: Dict<text, text>
+) -> [OptionMeCallWarning]:
+    """Source compatibility adapter for the line-owned OPTME001 check."""
+    check_option_me_call_lines(
+        file_path, source.split("\n"), me_keys, opt_fields, field_owner, ret_opt)
+
+pub fn check_option_me_call_source_lines(
+    file_path: text, lines: [text]
+) -> [OptionMeCallWarning]:
+    """Single-file OPTME001 check over a caller-owned canonical line view.
 
     This is what `bin/simple lint <file>` uses. It only resolves classes
     declared in the SAME file; the repo-wide runner
     (`src/app/optme_lint/optme_scan.spl`) supplies a cross-file index."""
+    val encl = _om_enclosing_classes(lines)
+    val source_index = OptmeSourceIndex(
+        _optme_collect_me_methods_with_enclosing(lines, encl),
+        _optme_collect_opt_fields_with_enclosing(lines, encl),
+        optme_collect_ret_optionals_lines(lines))
     var me_keys: Dict<text, i64> = {}
-    for key in optme_collect_me_methods(source):
+    for key in source_index.me_methods:
         me_keys[key] = 1
     var opt_fields: Dict<text, text> = {}
     var field_owner: Dict<text, text> = {}
-    for entry in optme_collect_opt_fields(source):
+    for entry in source_index.opt_fields:
         val first = entry.find("::")
         if first > 0:
             val cls = entry.substring(0, first)
@@ -576,7 +633,7 @@ pub fn check_option_me_call_source(file_path: text, source: text) -> [OptionMeCa
                 else:
                     field_owner[fld] = ty
     var ret_opt: Dict<text, text> = {}
-    for entry in optme_collect_ret_optionals(source):
+    for entry in source_index.ret_optionals:
         val sep = entry.find("::")
         if sep > 0:
             val fname = entry.substring(0, sep)
@@ -586,4 +643,9 @@ pub fn check_option_me_call_source(file_path: text, source: text) -> [OptionMeCa
                     ret_opt[fname] = ""
             else:
                 ret_opt[fname] = ty
-    check_option_me_call(file_path, source, me_keys, opt_fields, field_owner, ret_opt)
+    _check_option_me_call_with_enclosing(
+        file_path, lines, encl, me_keys, opt_fields, field_owner, ret_opt)
+
+pub fn check_option_me_call_source(file_path: text, source: text) -> [OptionMeCallWarning]:
+    """Source compatibility adapter for the single-file OPTME001 check."""
+    check_option_me_call_source_lines(file_path, source.split("\n"))
