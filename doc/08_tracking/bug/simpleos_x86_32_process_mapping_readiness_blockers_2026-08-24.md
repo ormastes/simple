@@ -11,6 +11,12 @@ x86-32 execution must remain blocked before loader authority consumption.
   instead calls the x86-64 PML4 explicit-root implementation for `@cfg(x86)`.
 - No x86-32 owner currently rolls back partially mapped leaf frames and private
   page tables or destroys a process page-directory tree on every failure.
+  The bounded `arch/x86_32/user_page_root_owner_v1.spl` prerequisite now issues
+  explicit roots, serializes map/unmap/destroy, rejects duplicate physical-leaf
+  provenance across roots, retains private tables, and reports quarantined
+  ownership explicitly on indeterminate publication. It intentionally does not
+  map authenticated ELF ranges or own rollback of caller-owned data frames, so
+  the full process-image mapper remains incomplete.
 - Three static design/review cycles rejected an attempted explicit-root owner.
   The remaining safe design requirements are: an authoritative create-issued
   root and unique-leaf registry; duplicate physical-frame aliases must be
