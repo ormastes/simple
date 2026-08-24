@@ -5,7 +5,7 @@
 #
 # Port of rust/compiler/src/linker/smf_writer.rs
 
-use compiler.backend.linker.smf_header.{SmfHeader}
+use compiler.backend.linker.smf_header.{SmfHeader, SMF_FLAG_ASPECT_PACK}
 use compiler.backend.linker.smf_enums.{Platform, Arch}
 use compiler.common.assurance.policy_names.{normalize_profile_name}
 
@@ -66,6 +66,9 @@ enum SectionType:
     # Startup launch metadata section. Payload is the same SDN text used by
     # native sidecars, embedded for SMF/script launchers. Wire byte = 15.
     LaunchMeta
+    # Aspect-facet dynload design §12.1. Payload is an uncompressed SMFAPK1
+    # container; wire byte 16 matches the authoritative runtime enum.
+    AspectPackDirectory
 
 impl SectionType:
     fn name() -> text:
@@ -81,6 +84,7 @@ impl SectionType:
             case Debug: ".debug"
             case DrvManifest: ".drv_manifest"
             case LaunchMeta: ".launch_meta"
+            case AspectPackDirectory: ".aspect_pack"
 
     """Map to wire byte value (Rust-runtime compatible)."""
     fn to_wire_u8() -> u8:
@@ -96,6 +100,7 @@ impl SectionType:
             case SymTab: 9
             case DrvManifest: 14
             case LaunchMeta: 15
+            case AspectPackDirectory: 16
 
 enum SmfWriterSymbolBinding:
     Local
@@ -277,6 +282,25 @@ impl SmfWriter:
             flags: SECTION_FLAG_READ,
             data: payload,
             alignment: 4
+        )
+        self.sections = self.sections.push(section)
+        self.sections.len() - 1
+
+    me add_aspect_pack_section(data: [u8]) -> i64:
+        """Add an uncompressed, read-only `.aspect_pack` section.
+
+        write() derives SMF_FLAG_ASPECT_PACK from this section, keeping the
+        header and section table consistent by construction.
+        """
+        var payload: [i64] = []
+        for b in data:
+            payload.push(b as i64)
+        val section = SmfSection(
+            name: SectionType.AspectPackDirectory.name(),
+            section_type: SectionType.AspectPackDirectory,
+            flags: SECTION_FLAG_READ,
+            data: payload,
+            alignment: 8
         )
         self.sections = self.sections.push(section)
         self.sections.len() - 1
@@ -468,7 +492,14 @@ impl SmfWriter:
         # compiler.driver.smf_writer and _SmfReaderMemory's dual offset-0/
         # trailer lookup).
         var header: SmfHeader = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
-        header.set_executable(true)
+        var has_aspect_pack = false
+        for written_section in self.sections:
+            if written_section.section_type.to_wire_u8() as i64 == 16:
+                has_aspect_pack = true
+        # An aspect pack is a provider container, never an ordinary executable
+        # module. This also prevents legacy executable paths from accepting it.
+        header.set_executable(not has_aspect_pack)
+        header.set_aspect_pack(has_aspect_pack)
         header.section_count = section_count as u32
         header.section_table_offset = section_table_offset as u64
         header.symbol_table_offset = symbol_table_offset as u64
@@ -512,6 +543,65 @@ impl SmfWriter:
 # ============================================================================
 # Byte serialization helpers (u8 output)
 # ============================================================================
+
+"""Build a standalone SMF image around one SMFAPK1 aspect-pack payload."""
+fn smf_build_aspect_pack_image(pack: [u8]) -> Result<[u8], text>:
+    if pack.len() == 0:
+        return Err("aspect pack payload is empty")
+
+    # The general SmfWriter stores section data as [i64]. Keep pack emission on
+    # the existing direct-byte primitives instead of converting the potentially
+    # large payload [u8] -> [i64] -> [i64] -> [u8].
+    var image: [u8] = []
+    for byte in pack:
+        image.push(byte)
+    while image.len() % 8 != 0:
+        image.push(0)
+
+    val section_table_offset = image.len()
+    val section_type = SectionType.AspectPackDirectory
+    val section_entry = smf_build_section_entry_bytes(
+        section_type.to_wire_u8(), SECTION_FLAG_READ, 0, pack.len(), 8,
+        section_type.name())
+    for byte in section_entry:
+        image.push(byte)
+
+    # A zero-symbol image still carries the implicit one-byte string table used
+    # by SmfReaderMemory's fallback string-table bounds.
+    val symbol_table_offset = image.len()
+    image.push(0)
+
+    val header_bytes = smf_aspect_pack_header_bytes(
+        section_table_offset, symbol_table_offset)
+    for byte in header_bytes:
+        image.push(byte)
+    Ok(image)
+
+fn smf_aspect_pack_header_bytes(
+    section_table_offset: i64,
+    symbol_table_offset: i64
+) -> [u8]:
+    var header: [u8] = [83u8, 77u8, 70u8, 0u8, 1u8, 1u8, 1u8, 0u8]
+    for byte in u32_to_bytes_u8(SMF_FLAG_ASPECT_PACK as i64):
+        header.push(byte)
+    # compression, compression_level, and two reserved compression bytes
+    for byte in u32_to_bytes_u8(0):
+        header.push(byte)
+    for byte in u32_to_bytes_u8(1):
+        header.push(byte)
+    for byte in u64_to_bytes_u8(section_table_offset):
+        header.push(byte)
+    for byte in u64_to_bytes_u8(symbol_table_offset):
+        header.push(byte)
+    for byte in u32_to_bytes_u8(0):
+        header.push(byte)
+    for byte in u32_to_bytes_u8(0):
+        header.push(byte)
+    for byte in u64_to_bytes_u8(0):
+        header.push(byte)
+    while header.len() < 128:
+        header.push(0)
+    header
 
 fn u32_to_bytes_u8(value: i64) -> [u8]:
     [
