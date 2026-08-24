@@ -2627,3 +2627,15 @@ Coverage pins the legacy asymmetric docstring rule (opening line skipped,
 closing line included), raw/trimmed fields, 1-based physical lines, and explicit
 release. It was added but not executed under the user's no-verification
 instruction.
+
+### Dynamic capability canonical-line scan
+
+The always-on lint driver also passed full source to DCA001 after already
+splitting it. DCA001 then split the source once for the first-30-line
+`@init_phase` scope decision and again for its acquisition scan. Its production
+kernel now accepts the driver's canonical lines and feeds the same array to
+both phases, removing two proportional arrays and their text references from
+critical-mode linting. The source entrypoint and file-scope helper remain
+compatibility adapters. A complete-field/order parity fixture preserves mode,
+group matching, physical lines, messages, and notes; it was not executed under
+the user's no-verification instruction.
