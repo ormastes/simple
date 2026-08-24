@@ -121,8 +121,26 @@ fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_leve
     # bind the exact same pre-main slot.  The call deliberately precedes
     # runtime/module initialization: declared argv and file preloads must be
     # admitted before user code can observe process state.
+    # Mach-O has no weak-UNDEFINED symbol for a bare `extern ...
+    # __attribute__((weak))` DECLARATION: on Darwin that still emits a strong
+    # undefined reference, so every hosted native-build on macOS failed to
+    # link with `Undefined symbols for architecture arm64:
+    # "___simple_startup_before_main", referenced from: _main in
+    # simple_entry.o` -- even though the slot is optional by design and the
+    # `if (...)` null test below already assumes it may be absent.
+    # `weak_import` does not help either (measured: ld still errors when the
+    # symbol exists in no input at all). The Mach-O idiom that works is a weak
+    # DEFINITION which a real definition overrides -- exactly what the seed's
+    # own `_main_stub` already does for `spl_main` under `#if
+    # defined(__APPLE__)` (native_project/linker.rs). Mirror it here. ELF
+    # keeps the weak declaration (a null weak-undefined is well-defined
+    # there); MSVC keeps neither.
     c_source = c_source + "#if !defined(_MSC_VER)\n"
+    c_source = c_source + "#if defined(__APPLE__)\n"
+    c_source = c_source + "int __attribute__((weak)) __simple_startup_before_main(int argc, char** argv) { (void)argc; (void)argv; return 0; }\n"
+    c_source = c_source + "#else\n"
     c_source = c_source + "extern int __simple_startup_before_main(int argc, char** argv) __attribute__((weak));\n"
+    c_source = c_source + "#endif\n"
     c_source = c_source + "#endif\n"
     c_source = c_source + "extern void __simple_runtime_init(void);\n"
     c_source = c_source + "extern long long __simple_main(void);\n"

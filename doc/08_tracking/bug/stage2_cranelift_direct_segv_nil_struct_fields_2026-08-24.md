@@ -443,3 +443,107 @@ own design + verification pass; do not assume it is done.
 - `build/lanes_s/dv11.spl` — struct-keyed neighbour, same requirement.
 Both are interpreted-correct today, so the assertion is simply
 "native output == interpreted output".
+
+## NOT REPRODUCIBLE on aarch64-apple-darwin, at HEAD *or* at Lane S's own tree (2026-08-24)
+
+This answers the standing question in Open/UNKNOWN above — "whether a freshly
+built native binary from current `main` reproduces the selective-nil-field
+pattern". On this host, at two different trees, with both backends: **no.**
+
+Measured on macOS 25.5.0 / arm64, worker = a seed built fresh from the tree
+under test (`cargo build --release --bin simple`, 1m53s). The Jul-25 deployed
+seed on this mac is unusable for the question — it cannot parse current stdlib
+(`unsafe(capabilities: [ffi]):` blocks, `signal_stubs.spl`) nor current
+compiler source — so every run below uses the fresh seed.
+
+| fixture | tree | native result |
+|---------|------|---------------|
+| dv4 shape, 6-field `Big` | `6eb889a1b07` (HEAD) | **CORRECT** (A/B/C/D all match interpreted) |
+| dv4 shape, 6-field `Big`, `--backend=cranelift` | HEAD | **CORRECT** |
+| dv4 shape, **16-field** `Big` (nested struct, `text?`, `i64?`, arrays, `Dict` field — the doc's dv2/dv4 shape) | HEAD | **CORRECT** |
+| dv11 shape, `Dict<Sym, Big>` struct-keyed | HEAD | **CORRECT** (both K and L rows) |
+| dvF — dict as a STRUCT FIELD, populated in one function, iterated via a param in another (the actual Stage-2 `module.functions.values()` shape) | HEAD | **CORRECT** |
+| 16-field dv4 shape | `0299186137d` (Lane S's own probe commit) | **CORRECT** |
+| dv4 shape, `--entry-closure` | HEAD | **CORRECT** |
+
+`SIMPLE_MIR_FIELD_TRACE=1` explains why, and is the load-bearing measurement
+here: `field-idx-fallback0` fires **0 times** in every one of those builds.
+`resolve_field_index` never reaches its `0  # Default fallback` on this host,
+so the "offset 0, i64-typed" collapse that the disassembly section above
+documents simply does not occur — the loop variable's HIR type annotation
+resolves and the second tier of the chain answers.
+
+`SIMPLE_TRACE_DICT_ELEM=1` reproduces Lane S's probe output verbatim on this
+host (`recv_mir_type=Dict(I64, Struct(SymbolId(id: 1000000002)))`, `stamped
+elem_type=Struct(...)`), confirming the MIR half is correct here too.
+
+**Conclusion: the miscompile is specific to the x86_64-unknown-linux-gnu lane
+and/or to the binary that produced Lane S's stage2 — it is not a property of
+the Simple source at `main`.** A mac lane cannot serve as the oracle, so no
+fix was landed from here. The reproduce pair remains valid for the Linux lane.
+
+One extra datapoint from the same sweep: `SIMPLE_BOOTSTRAP=1` *plus*
+`--entry-closure` makes the 6-field dv4 fixture SEGV immediately on this host
+(`Fatal: SIGSEGV ... __simple_main + 136`, before any output). `field-idx-fallback0`
+is still 0 for that build, so it is a different defect, not this one. Not chased.
+
+### Refinement of the fix direction — a FOURTH mechanism, not the three suspects
+
+The three suspects were already settled by Lane S's probe (1 and 3 refuted
+outright; 2 refuted in its literal form — `lower_for_iterator` *does* read the
+stamped `Array(...)` type, which is where `element_type = Struct(Big)` comes
+from). The real gap, from reading the chain end to end, is **neither HIR typing
+nor the MIR element type**:
+
+`resolve_field_index` (`50.mir/_MirLowering/function_lowering.spl:1243`) states
+its own rule in its leading comment — *"Numeric SymbolIds are local to each
+module and can collide in an entry-closure build. A lowered local's name-keyed
+provenance is therefore authoritative when available."* Its FIRST tier is
+`struct_value_syms[base_local]`, a NAME, not a type. That entry is written for
+a for-loop variable by exactly one place — `lower_for_array_indexed`
+(`mir_lowering_stmts.spl`, `if for_has_real_struct_name: self.struct_value_syms[loop_var.id] = fesn`)
+— and only when `array_element_struct_syms` holds a real name **for the
+collection local**. Nothing ever writes that map for a `rt_dict_values` /
+`rt_dict_keys` result: the stamp at
+`_MirLoweringExpr/method_calls_literals.spl:1520-1530` sets the MIR type and
+`runtime_array_locals`, and stops there.
+
+That is precisely the gap bug **#189** already closed for the `d[k]` index-read
+path in `expr_dispatch.spl:1143-1195` (two tiers: the result type's own
+`Struct(symbol)` name, then the store-side name recorded by
+`note_container_elem_type`) — which is why dv4's path B is CORRECT and path C
+is not. So the minimal fix is to mirror #189's two tiers onto the
+`.values()`/`.keys()` result local, not to teach the HIR/type layer dict method
+return types; the "teach HIR" paragraph above should be read as superseded by
+this, pending verification.
+
+**Two cautions for whoever implements it**, both measured here:
+- Tier one cannot be `symbols.get_symbol_raw(sym.id).name` alone. The id in
+  `Struct(SymbolId(id: 1000000002))` is a SYNTHETIC canonical id minted from
+  base `1000000000` by `canonical_mir_type_symbol`
+  (`_MirLowering/module_lowering.spl:344-356`); it is not an HIR symbol and
+  `get_symbol_raw` returns nil for it. A reverse map (`canonical id -> bare
+  name`, written at both mint sites — `module_lowering.spl:353` has `info.name`
+  in scope, `switch_operators_calls.spl:639` derives it from `shape`) is needed
+  for that tier to do anything.
+- The store-side tier (`array_element_struct_syms.get(receiver_local.id)`) is
+  per-function state, so it cannot cover the Stage-2 shape at all
+  (`module.functions` populated in one function, iterated in another). It must
+  also be restricted to `values`: that map records the VALUE struct name, and
+  applying it to `.keys()` on a struct-KEYED dict would stamp the wrong struct.
+
+**This analysis is UNVERIFIED.** It is code-reading plus the B-correct /
+C-corrupt asymmetry, not execution: no fixture on this host exercises the
+fallback, so nothing here was proven by running it. Do not land it as a fix
+without a corrupt→correct measurement on the Linux lane.
+
+### Harness gaps that block a macOS lane (both hit here)
+- `setsid` does not exist on macOS and the native-build worker spawns through
+  it — `exec: setsid: not found`, worker exit 127. Shim required.
+- The hosted entry stub declared `__simple_startup_before_main` with
+  `__attribute__((weak))`, which on Mach-O is not a weak-UNDEFINED symbol, so
+  **every** hosted `native-build` on macOS failed to link. Fixed in the same
+  change as this note (`llvm_native_link_hosted_support.spl`, weak DEFINITION
+  under `#if defined(__APPLE__)`, mirroring the seed's own `_main_stub`).
+  `weak_import` was tried first and does NOT work when the symbol exists in no
+  input at all.
