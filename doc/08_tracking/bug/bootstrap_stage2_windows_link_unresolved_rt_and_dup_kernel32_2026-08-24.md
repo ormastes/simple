@@ -249,3 +249,42 @@ at every call site.
 build-config change with an immediate, checkable signal (the undefined count
 should drop 68 -> 37) — then implement the 37 in shape-groups, scalars first,
 SIMD last, re-linking after each group.
+
+### The "just add runtime_native.c to the archive" fix is DISPROVEN (measured)
+
+Two corrections to the analysis above, both from direct measurement.
+
+**1. `runtime_native.o` is not in the archive at all.** An earlier
+`ar t libsimple_native_all.a | grep -c runtime_native` returned 1 and was read as
+"the object is present". It is not — the member that matched is
+`37be46648adf0aaa-runtime_native_gpu_stub.o`, a different file. `runtime_native.c`
+is absent entirely. Match on the exact member name, not a substring.
+
+**2. Adding it would collide 475 ways.** Compiled standalone and compared
+against the archive's existing definitions:
+
+```
+gcc -c -O1 -I src/runtime src/runtime/runtime_native.c -o rn.o     # rc=0
+nm -g --defined-only rn.o        | awk '$2=="T"{print $3}' | sort -u   -> 681
+nm -g --defined-only <archive>   | awk '$2=="T"{print $3}' | sort -u   -> 38203
+comm -12 <those two>                                                   -> 475
+```
+
+475 of the 681 symbols `runtime_native.c` defines are ALREADY defined in
+`libsimple_native_all.a` (`copy_mem`, `panic`, `print_raw`, `rt_actor_join`,
+`rt_actor_recv`, ...). Adding the file to the link or to a build list therefore
+trades 31 undefined symbols for 475 duplicate-definition errors — the same class
+as Blocker B, at 20x the size.
+
+**So the 31/37 split above, while numerically correct, does NOT imply the 31 are
+the easy half.** Both halves are architectural:
+
+- the archive's existing definitions come from the Rust runtime crate, and
+  `runtime_native.c` is a parallel C implementation of largely the same surface
+  (this is the documented "two families / first-definition-wins" arrangement
+  referenced in `runtime_memory_guard.h`'s header);
+- resolving the 31 means deciding WHICH implementation owns those names on
+  Windows, not merely compiling one more file.
+
+Do not attempt the build-config route as a quick win. Measure the overlap first
+with the three commands above; it takes under a minute and it is decisive.
