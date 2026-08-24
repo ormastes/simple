@@ -54,10 +54,12 @@ extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
 @unsafe(reason: "raw file-existence predicate; false sentinel includes missing, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw file-delete status; false sentinel includes absence or provider failure", capabilities: [ffi])
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_append_text(path: text, content: text) -> bool
+@unsafe(reason: "raw file digest; non-64-byte text is the unreadable or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_file_hash_sha256(path: text) -> text
 @unsafe(reason: "raw nullable environment lookup; wrapper normalizes absence", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
@@ -211,12 +213,19 @@ pub fn file_write(path: text, content: text) -> bool:
 pub fn write_file(path: text, content: text) -> bool:
     file_write(path, content)
 
+# Exact one-call runtime status for cache/temp-file owners that already create
+# their parent directory and must not gain file_write's retry policy.
+pub fn file_write_exact(path: text, content: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_write_text(path, content)
+
 pub fn file_exists(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_exists(path)
 
 pub fn file_delete(path: text) -> bool:
-    rt_file_delete(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_delete(path)
 
 pub fn remove_file_if_exists(path: text) -> bool:
     # Idempotent delete: true when the file was removed or did not exist.
@@ -225,7 +234,8 @@ pub fn remove_file_if_exists(path: text) -> bool:
         exists = rt_file_exists(path)
     if not exists:
         return true
-    rt_file_delete(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_delete(path)
 
 pub fn file_copy(src: text, dst: text) -> bool:
     rt_file_copy(src, dst)
@@ -237,10 +247,19 @@ pub fn file_write_bytes(path: text, bytes: [u8]) -> bool:
     rt_file_write_bytes(path, bytes)
 
 pub fn file_hash_sha256(path: text) -> text:
-    val hash = rt_file_hash_sha256(path)
+    val hash = file_hash_sha256_or_empty(path)
     if hash.len() == 64:
         return hash
     shell_output("sha256sum '" + path + "' 2>/dev/null | awk '{print $1}'")
+
+# Exact one-call cache-key contract: invalid/unavailable digest is an empty
+# miss sentinel. Unlike file_hash_sha256, this never shells out.
+pub fn file_hash_sha256_or_empty(path: text) -> text:
+    val hash = unsafe(capabilities: [ffi]):
+        rt_file_hash_sha256(path)
+    if hash.len() == 64:
+        return hash
+    ""
 
 pub fn file_size(path: text) -> i64:
     val size = rt_file_size(path)
@@ -494,8 +513,8 @@ pub fn host_arch() -> text:
 # ============================================================================
 
 export shell, shell_output, shell_bool, shell_output_trimmed, ShellResult, ProcessResult
-export file_read, read_file, read_file_text, file_write, write_file, file_exists
-export file_delete, file_copy, file_size, file_size_raw, file_hash_sha256
+export file_read, read_file, read_file_text, file_write, write_file, file_write_exact, file_exists
+export file_delete, file_copy, file_size, file_size_raw, file_hash_sha256, file_hash_sha256_or_empty
 export file_read_bytes, file_write_bytes, file_append_text, remove_file_if_exists
 export dir_create, dir_create_all, is_dir, is_file, is_char_device, list_dir, mkdir_p
 export dir_list, dir_walk, dir_remove, dir_remove_all, dir_exists
@@ -503,3 +522,4 @@ export env_get, env_set, cwd, home, host_os, host_arch, platform_name, hash_text
 export getpid, process_kill, process_run, process_run_bounded, process_spawn_async, process_is_running
 export time_now_unix_micros, get_args, cli_arg_count, cli_arg_at, exit, thread_sleep
 export time_now_monotonic_ms, shell_exec, file_rename, process_run_timeout
+export file_move_cross_device
