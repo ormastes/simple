@@ -110,7 +110,11 @@ from the complete bootstrap checkout. Its ratchet follows semantic import
 identity, while source lines remain diagnostics only.
 Stage 4 compiler admission and Stage 4 tooling admission are distinct. The
 compiler-stage row cannot substitute for the receipt-backed 49-row CLI/MCP/LSP
-matrix. Likewise, server handler or GPU-admission tests cannot substitute for a
+matrix. Its generic receipt is not trusted by itself: the recorder reads the
+committed `Stage4ToolingMatrixSummaryV1` artifact and independently requires
+full scope, 49 terminal rows, no failed/blocked/remaining/required-not-pass or
+optional-failed rows, `stage4_compiler_files=0`, and `overall=PASS`. Likewise,
+server handler or GPU-admission tests cannot substitute for a
 real configurable listener port, identical CPU/device outputs with device-hit
 proof, or equivalent nginx/PostgreSQL/MySQL measurements. Binary-size and
 startup rows require native Simple artifacts where specified; Rust-seed

@@ -95,6 +95,36 @@ receipt_field() {
     sed -n "s/^${_field}=//p" "$_receipt"
 }
 
+validate_stage4_tooling_summary() {
+    _summary=$1
+    _summary_field() {
+        [ "$(grep -c "^$1=" "$_summary" 2>/dev/null || true)" -eq 1 ] || return 1
+        sed -n "s/^$1=//p" "$_summary"
+    }
+    [ "$(_summary_field schema)" = Stage4ToolingMatrixSummaryV1 ] &&
+        [ "$(_summary_field scope)" = full ] &&
+        [ "$(_summary_field admission_eligible)" = true ] &&
+        [ "$(_summary_field task_total)" = 49 ] &&
+        [ "$(_summary_field terminal_count)" = 49 ] &&
+        [ "$(_summary_field failed)" = 0 ] &&
+        [ "$(_summary_field blocked)" = 0 ] &&
+        [ "$(_summary_field remaining)" = 0 ] &&
+        [ "$(_summary_field required_not_pass)" = 0 ] &&
+        [ "$(_summary_field optional_failed)" = 0 ] &&
+        [ "$(_summary_field stage4_compiler_files)" = 0 ] &&
+        [ "$(_summary_field overall)" = PASS ] || return 1
+    _passed=$(_summary_field passed) || return 1
+    _unsupported=$(_summary_field unsupported) || return 1
+    case "$_passed:$_unsupported" in *[!0-9:]*|:*|*:) return 1 ;; esac
+    [ $((_passed + _unsupported)) -eq 49 ] || return 1
+    _matrix_id=$(_summary_field matrix_id) || return 1
+    _matrix_hash=$(_summary_field matrix_hash) || return 1
+    _config_hash=$(_summary_field config_hash) || return 1
+    [ -n "$_matrix_id" ] || return 1
+    case "$_matrix_hash:$_config_hash" in *[!0-9a-f:]*) return 1 ;; esac
+    [ "${#_matrix_hash}" -eq 64 ] && [ "${#_config_hash}" -eq 64 ]
+}
+
 validate_gate_receipt() {
     _receipt=$1
     _expected_gate=$2
@@ -115,6 +145,12 @@ validate_gate_receipt() {
     _artifact_sha=$(receipt_field "$_receipt_blob" artifact_sha256) || { rm -f "$_receipt_blob"; return 1; }
     rm -f "$_receipt_blob"
     [ "$_artifact" != "$_receipt" ] && head_blob_metadata "$_artifact" && [ "$HEAD_BLOB_SHA" = "$_artifact_sha" ] || return 1
+    if [ "$_expected_gate" = stage4-tooling-matrix ]; then
+        _summary_blob=$(mktemp) || return 1
+        git -C "$ROOT" show "HEAD:$_artifact" >"$_summary_blob" 2>/dev/null || { rm -f "$_summary_blob"; return 1; }
+        validate_stage4_tooling_summary "$_summary_blob" || { rm -f "$_summary_blob"; return 1; }
+        rm -f "$_summary_blob"
+    fi
     HEAD_BLOB_SHA=$_receipt_sha
 }
 
@@ -205,6 +241,48 @@ accepted_gate_verdict() {
 if [ "$MODE" = selftest ]; then
     _tmp=$(mktemp -d) || exit 2
     trap 'rm -rf "$_tmp"' EXIT INT TERM
+    cat > "$_tmp/stage4-summary-good.env" <<'EOF'
+schema=Stage4ToolingMatrixSummaryV1
+matrix_id=fixture
+matrix_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+config_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+scope=full
+admission_eligible=true
+task_total=49
+terminal_count=49
+passed=46
+failed=0
+blocked=0
+unsupported=3
+remaining=0
+required_not_pass=0
+optional_failed=0
+stage4_compiler_files=0
+overall=PASS
+EOF
+    validate_stage4_tooling_summary "$_tmp/stage4-summary-good.env" || {
+        echo "bootstrap-must-check selftest: valid Stage4 tooling summary rejected" >&2
+        exit 1
+    }
+    for _mutation in \
+        's/scope=full/scope=link-only/' \
+        's/task_total=49/task_total=48/' \
+        's/blocked=0/blocked=1/' \
+        's/stage4_compiler_files=0/stage4_compiler_files=unknown/' \
+        's/overall=PASS/overall=SCOPED_PASS/' \
+        's/matrix_hash=aa/matrix_hash=za/'; do
+        sed "$_mutation" "$_tmp/stage4-summary-good.env" > "$_tmp/stage4-summary-bad.env"
+        ! validate_stage4_tooling_summary "$_tmp/stage4-summary-bad.env" || {
+            echo "bootstrap-must-check selftest: invalid Stage4 tooling summary accepted ($_mutation)" >&2
+            exit 1
+        }
+    done
+    cp "$_tmp/stage4-summary-good.env" "$_tmp/stage4-summary-bad.env"
+    echo 'overall=PASS' >> "$_tmp/stage4-summary-bad.env"
+    ! validate_stage4_tooling_summary "$_tmp/stage4-summary-bad.env" || {
+        echo "bootstrap-must-check selftest: duplicate Stage4 summary field accepted" >&2
+        exit 1
+    }
     printf '%s\n' 'setup PASS marker' 'STATUS: FAIL final-verdict' > "$_tmp/incidental-pass.log"
     printf '%s\n' 'setup output' 'STATUS: PASS exact-verdict' > "$_tmp/exact-pass.log"
     ! accepted_gate_verdict "$_tmp/incidental-pass.log" || exit 1
@@ -251,7 +329,7 @@ if [ "$MODE" = selftest ]; then
         echo "bootstrap-must-check selftest: rejected bare run mutated the ledger" >&2
         exit 1
     }
-    echo "bootstrap-must-check: PASS — phase promotion TODO preservation exact Stage4 binding stale reset override rejection and deterministic output checked"
+    echo "bootstrap-must-check: PASS — phase promotion TODO preservation exact Stage4 binding matrix-summary validation stale reset override rejection and deterministic output checked"
     exit 0
 fi
 

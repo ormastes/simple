@@ -30,6 +30,11 @@ Every automated row receives the canonical validated Stage 4 candidate as
 `SIMPLE_BINARY` and `SIMPLE_BIN`; conflicting ambient values are overridden and cannot redirect
 evidence to a stale deployment.
 
+The separate Stage-4 tooling receipt must bind a committed
+`Stage4ToolingMatrixSummaryV1`. The recorder independently rejects scoped,
+partial, failed, blocked, nonterminal, compiler-rebuilding, malformed, or
+duplicate-field summaries; a receipt claiming PASS cannot override them.
+
 ## Validate the must-check ledger
 
 The push tier rejects missing, stale, malformed, duplicate, unknown, failed, or
