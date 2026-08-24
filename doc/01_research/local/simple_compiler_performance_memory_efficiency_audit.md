@@ -2598,3 +2598,13 @@ function/body boundary detection, mutation ordering, and complete finding
 fields; the compatibility source API delegates through one split. Together,
 these changes remove two unconditional per-rule full-file arrays from normal
 linting.
+
+Bare-primitive and silent-default checks now use the same request-owned lines
+as well. Silent-default previously split twice—once for its first-30-line
+mission-critical marker scan and again for findings—so the lines API feeds both
+kernels. Compatibility wrappers retain their vendor fast-return before
+splitting. Complete-field parity fixtures preserve diagnostic order, physical
+lines, mission-critical codes, and the two rules' intentionally different
+vendor predicates. Normal linting now avoids four rule-local splits across
+LEADOP001, const-reference-default, bare-primitive, and silent-default; the
+silent-default migration removes a fifth scope-only split.
