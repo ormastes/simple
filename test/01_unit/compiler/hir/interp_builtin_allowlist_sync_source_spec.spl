@@ -1,0 +1,106 @@
+"""
+## Purpose and audience
+Purpose: Pin that the HIR lowering builtin allow-list `is_interp_builtin_fn`
+covers every free-function builtin the HIR interpreter dispatches by name, and
+that the slice-B import defects found alongside it stay fixed.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Source-fact spec: it reads compiler source, so it binds on every lane without
+needing a redeployed bootstrap binary. It does not execute lowering.
+Troubleshooting: a red scenario here means the pinned contract changed —
+re-read the linked bug record before editing oracles.
+# @manual: primary
+REQ-COMPILER-HIR-001
+doc/01_research/local/REQ-COMPILER-HIR-001.md
+doc/03_plan/sys_test/REQ-COMPILER-HIR-001.md
+doc/04_architecture/REQ-COMPILER-HIR-001.md
+doc/05_design/REQ-COMPILER-HIR-001.md
+"""
+# @req: REQ-COMPILER-HIR-001
+
+# Lane Q slice-B compile sweep, 2026-08-24.
+#
+# `assert cond, msg` is desugared by parser_stmts.spl:853 into a call to the
+# builtin `__assert(...)`. `interpreter_calls.spl:98` lookup_builtin_tag has
+# always dispatched that name and builtin_registry.spl:111 registers it, but
+# `is_interp_builtin_fn` -- whose own docstring names lookup_builtin_tag as its
+# source of truth -- never listed it. So lower_unresolved_ident refused to
+# define the symbol and HIR lowering hard-failed
+#     unresolved name: __assert
+# in EVERY module containing an `assert` statement. Observed on
+# src/compiler/30.types/const_key_validator.spl (assert at lines 208, 217).
+#
+# Three sibling names had drifted out of the same list the same way.
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+use std.spec.step
+
+describe "HIR interpreter builtin allow-list":
+    it "lists __assert so `assert` statements can lower":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: is_interp_builtin_fn accepts the assert desugar target")
+        val s = read_source(
+            "src/compiler/20.hir/hir_lowering/_Expressions/expression_support.spl")
+        expect(s.contains("fn is_interp_builtin_fn(")).to_equal(true)
+        expect(s.contains("name == \"__assert\"")).to_equal(true)
+
+    it "lists the three probe builtins that drifted out of the same list":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: allow-list is in sync with lookup_builtin_tag")
+        val s = read_source(
+            "src/compiler/20.hir/hir_lowering/_Expressions/expression_support.spl")
+        expect(s.contains("name == \"file_is_regular_no_follow\"")).to_equal(true)
+        expect(s.contains("name == \"rt_file_exists_probe_begin\"")).to_equal(true)
+        expect(s.contains("name == \"rt_file_exists_probe_end\"")).to_equal(true)
+
+    it "keeps the dispatcher side of the invariant present":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: lookup_builtin_tag still dispatches __assert")
+        val d = read_source("src/compiler/70.backend/backend/interpreter_calls.spl")
+        expect(d.contains("fn lookup_builtin_tag")).to_equal(true)
+        expect(d.contains("name == \"__assert\"")).to_equal(true)
+
+describe "slice-B unresolved-import defects":
+    it "imports KeyExtractor and declares Symbol in const_key_type":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: 125 post-lowering unresolved errors stay at zero")
+        val s = read_source("src/compiler/30.types/const_key_type.spl")
+        expect(s.contains("use compiler.types.key_extractor.")).to_equal(true)
+        expect(s.contains("type Symbol = text")).to_equal(true)
+
+    it "declares Symbol in const_key_validator":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: the sibling file carries the same local alias")
+        val s = read_source("src/compiler/30.types/const_key_validator.spl")
+        expect(s.contains("type Symbol = text")).to_equal(true)
+
+    it "does not re-export dim names from a module that only imports them":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: dim_* re-export points at its real owner only")
+        val s = read_source("src/compiler/30.types/__init__.spl")
+        # dim_constraints.spl only does `use dim_constraints_types.*`, a
+        # non-re-exporting wildcard, so re-exporting these five through it
+        # bound nothing. dim_constraints_types is the real owner.
+        expect(s.contains(
+            "export use compiler.types.dim_constraints_types.")).to_equal(true)
+        expect(s.contains("DimError, DimErrorKind, DimNote, DimNoteKind,\n")).to_equal(false)
+
+    it "re-exports TypeInferencer from the module that defines it":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: TypeInferencer points at bidirectional_inferencer")
+        val s = read_source("src/compiler/30.types/__init__.spl")
+        # Brace-free substrings: `{` opens interpolation in Simple string
+        # literals, so the module path alone is the discriminating part.
+        expect(s.contains(
+            "export use compiler.types.bidirectional_inferencer.")
+        ).to_equal(true)
+        expect(s.contains(
+            "export use compiler.types.bidirectional_checking.")
+        ).to_equal(false)
