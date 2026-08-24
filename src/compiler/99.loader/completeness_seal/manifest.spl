@@ -216,30 +216,62 @@ fn _parse_extension(v: SdnValue, path: text, mut errors: [ManifestError]) -> Ext
         transition: transition
     )
 
+# Same hoisting rule as `parse_manifest_text`: bind each matched node to a `var`
+# before reading through it. Read straight off the `case Some(...)` binding and
+# the node answers as if every key were absent -- here `item.get("schema_abi")`
+# reported None for an item whose keys demonstrably ARE `enum,schema_abi,
+# constructor`, so a valid manifest failed with
+# `module.extends.schema_abi missing` and the census printed PARSE-FAIL.
+# Bug: doc/08_tracking/bug/match_arm_bound_value_method_call_returns_none_2026-08-24.md
 fn _parse_extends(v: SdnValue, path: text, mut errors: [ManifestError]) -> [ExtendsDecl]:
     var out: [ExtendsDecl] = []
+    var ext_node = v
+    var has_ext = false
     match v.get("extends"):
-        case None:
-            return out
+        case None: has_ext = false
         case Some(ev):
-            match ev.as_array():
-                case None:
-                    errors.push(ManifestError.WrongShape(path, "`extends:` must be a sequence"))
-                case Some(items):
-                    for item in items:
-                        val owner = _required_text(item, "enum", path, "module.extends.", errors)
-                        val ctor = _required_text(item, "constructor", path, "module.extends.", errors)
-                        var abi: i64 = 0
-                        match item.get("schema_abi"):
-                            case Some(av):
-                                match av.as_i64():
-                                    case Some(n):
-                                        abi = n
-                                    case None:
-                                        errors.push(ManifestError.WrongShape(path, "`extends.schema_abi` must be an integer"))
-                            case None:
-                                errors.push(ManifestError.MissingField(path, "module.extends.schema_abi"))
-                        out = out + [ExtendsDecl(owner_enum: owner, constructor: ctor, schema_abi: abi)]
+            ext_node = ev
+            has_ext = true
+    if not has_ext:
+        return out
+
+    var items: [SdnValue] = []
+    var is_array = false
+    match ext_node.as_array():
+        case None: is_array = false
+        case Some(arr):
+            items = arr
+            is_array = true
+    if not is_array:
+        errors.push(ManifestError.WrongShape(path, "`extends:` must be a sequence"))
+        return out
+
+    for item in items:
+        val owner = _required_text(item, "enum", path, "module.extends.", errors)
+        val ctor = _required_text(item, "constructor", path, "module.extends.", errors)
+        var abi: i64 = 0
+        var abi_node = item
+        var has_abi = false
+        match item.get("schema_abi"):
+            case Some(av):
+                abi_node = av
+                has_abi = true
+            case None: has_abi = false
+        if has_abi:
+            var parsed_abi: i64 = 0
+            var ok_abi = false
+            match abi_node.as_i64():
+                case Some(n):
+                    parsed_abi = n
+                    ok_abi = true
+                case None: ok_abi = false
+            if ok_abi:
+                abi = parsed_abi
+            else:
+                errors.push(ManifestError.WrongShape(path, "`extends.schema_abi` must be an integer"))
+        else:
+            errors.push(ManifestError.MissingField(path, "module.extends.schema_abi"))
+        out = out + [ExtendsDecl(owner_enum: owner, constructor: ctor, schema_abi: abi)]
     out
 
 fn _parse_module(v: SdnValue, path: text, mut errors: [ManifestError]) -> ModuleManifest:
@@ -286,16 +318,37 @@ pub fn parse_manifest_text(source: text, path: text) -> Result<ManifestDoc, [Man
         case Ok(root):
             var extensions: [ExtensionManifest] = []
             var modules: [ModuleManifest] = []
+            # Hoist each matched node into a `var` before handing it to a
+            # parser. A value bound by a `case Some(x)` arm is degraded: `.get()`
+            # on it answers as if every key were absent, and it stays degraded
+            # when passed on as a function argument. Passing `ev`/`mv` straight
+            # into `_parse_extension`/`_parse_module` therefore made every field
+            # read empty, so a perfectly valid manifest failed with
+            # missing-field errors and the census reported PARSE-FAIL.
+            # Measured A/B/C: inline-arm MISSING, hoisted-var FOUND,
+            # arm-value-passed-as-parameter MISSING.
+            # Bug: doc/08_tracking/bug/match_arm_bound_value_method_call_returns_none_2026-08-24.md
+            var ext_node = root
+            var has_ext = false
             match root.get("extension"):
                 case Some(ev):
-                    extensions = extensions + [_parse_extension(ev, path, errors)]
+                    ext_node = ev
+                    has_ext = true
                 case None:
-                    extensions = extensions
+                    has_ext = false
+            if has_ext:
+                extensions = extensions + [_parse_extension(ext_node, path, errors)]
+
+            var mod_node = root
+            var has_mod = false
             match root.get("module"):
                 case Some(mv):
-                    modules = modules + [_parse_module(mv, path, errors)]
+                    mod_node = mv
+                    has_mod = true
                 case None:
-                    modules = modules
+                    has_mod = false
+            if has_mod:
+                modules = modules + [_parse_module(mod_node, path, errors)]
             if extensions.len() == 0 and modules.len() == 0:
                 errors.push(ManifestError.EmptyManifest(path))
             if errors.len() > 0:
