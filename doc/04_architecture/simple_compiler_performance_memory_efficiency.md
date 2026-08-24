@@ -364,6 +364,19 @@ semantics and the ten-level lookup bound remain unchanged. These snapshots live 
 daemon reuse requires canonical-path freshness tokens and invalidation rather
 than promoting the cache to process-global state.
 
+### Canonical line ownership for source diagnostics
+
+`Linter.lint_source` owns the one full-file line split for a lint request.
+Source-pattern rules expose line-owned kernels and retain source-taking APIs as
+one-split compatibility adapters. OPTME001 builds its method, option-field,
+optional-return, enclosure, and warning facts from that canonical view; its
+combined index computes the enclosure map once. The lint path does not retain
+the file-sized line array across parsing. Instead it retains only compact
+OPTME001 warnings, publishes them with the same path/revision validity bit as
+the location snapshot, and appends them at their historical post-parse
+position. Parse failure or revision mismatch releases the snapshot and emits no
+OPTME001 result, preserving the fail-closed ordering contract.
+
 ### Raw-SFFI source-view ownership
 
 Raw-SFFI analysis owns one request-local, read-only-by-convention `CodeLine`
