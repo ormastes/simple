@@ -7,10 +7,10 @@
 # Stack layout (low -> high addresses), after the kernel memcpy's the
 # serialized bytes to the TOP of the user stack page range:
 #
-#     initial_sp ->  argc (u64)
+#     initial_sp ->  argc (native ABI word)
 #                    argv[0], argv[1], ..., NULL
 #                    envp[0], envp[1], ..., NULL
-#                    auxv entries (pairs of u64), terminated by AT_NULL,0
+#                    auxv entries (pairs of native ABI words), AT_NULL,0
 #                    optional 16 caller-supplied random bytes (for AT_RANDOM)
 #                    argv/envp string pool (NUL-terminated)
 #                    padding to 16-byte alignment of initial_sp
@@ -114,14 +114,14 @@ fn build_initial_stack_checked(
     `stack_top - 1`. The kernel memcpy's `bytes` to
     `stack_top - bytes.len()`, then sets the userspace sp to that base.
 
-    This builder is ELF64/SysV-only: every scalar and pointer slot is eight
-    bytes. `abi_word_size` must therefore be 8. `random_bytes` must contain
+    Every scalar and pointer slot uses `abi_word_size`, which must be four for
+    ELF32 or eight for ELF64. `random_bytes` must contain
     exactly 16 bytes to emit AT_RANDOM, or be empty to omit AT_RANDOM. It is
     never synthesized. Caller entries precede the AT_NULL terminator.
     """
     if stack_size == 0 or stack_size > MAX_USER_STACK_SIZE or stack_top < stack_size:
         return Err(StackBuildError.InvalidStackBounds)
-    if abi_word_size != 8:
+    if abi_word_size != 4 and abi_word_size != 8:
         return Err(StackBuildError.UnsupportedAbi)
     if random_bytes.len() != 0 and random_bytes.len() != AUX_RANDOM_BYTES as i64:
         return Err(StackBuildError.InvalidEntropy)
@@ -133,7 +133,9 @@ fn build_initial_stack_checked(
     # Even empty strings consume one byte and each vector element consumes at
     # least one pointer slot. Reject impossible counts before doing arithmetic
     # or allocating address tables.
-    if argc > stack_size / 8 or envc > stack_size / 8 or auxc > stack_size / 16:
+    if (argc > stack_size / abi_word_size or
+        envc > stack_size / abi_word_size or
+        auxc > stack_size / (abi_word_size * 2)):
         return Err(StackBuildError.FrameTooLarge)
 
     # Compute the string-pool addresses while materializing each text value
@@ -202,6 +204,21 @@ fn build_initial_stack_checked(
 
     val execfn_addr: u64 = if argv_addrs.len() > 0: argv_addrs[0] else: 0 as u64
 
+    # ELF32 exposes 32-bit pointers and auxv values. Reject truncation rather
+    # than silently serializing the low word of an invalid address/value.
+    if abi_word_size == 4:
+        if random_addr > 0xffffffffu64 or execfn_addr > 0xffffffffu64:
+            return Err(StackBuildError.InvalidFramePointer)
+        for address in argv_addrs:
+            if address > 0xffffffffu64:
+                return Err(StackBuildError.InvalidFramePointer)
+        for address in envp_addrs:
+            if address > 0xffffffffu64:
+                return Err(StackBuildError.InvalidFramePointer)
+        for entry in auxv:
+            if entry.aux_type > 0xffffffffu64 or entry.value > 0xffffffffu64:
+                return Err(StackBuildError.InvalidAuxv)
+
     # --- Build the full auxv: defaults + caller-supplied + AT_NULL terminator.
     var full_aux: [AuxEntry] = []
     full_aux.push(AuxEntry(aux_type: AT_PAGESZ, value: USER_PAGE_SIZE))
@@ -222,7 +239,7 @@ fn build_initial_stack_checked(
     full_aux.push(AuxEntry(aux_type: AT_NULL, value: 0))
 
     # --- Compute total size of the fixed area (argc + argv ptrs + NUL
-    # + envp ptrs + NUL + auxv pairs). Each slot is 8 bytes.
+    # + envp ptrs + NUL + auxv pairs). Each slot is one ABI word.
     val n_argv: u64 = argv.len() as u64
     val n_envp: u64 = envp.len() as u64
     val n_aux:  u64 = full_aux.len() as u64
@@ -237,9 +254,9 @@ fn build_initial_stack_checked(
     if vector_slots > STACK_BUILDER_U64_MAX - aux_slots:
         return Err(StackBuildError.ArithmeticOverflow)
     val fixed_slots: u64 = vector_slots + aux_slots
-    if fixed_slots > STACK_BUILDER_U64_MAX / 8:
+    if fixed_slots > STACK_BUILDER_U64_MAX / abi_word_size:
         return Err(StackBuildError.ArithmeticOverflow)
-    val fixed_size: u64 = fixed_slots * 8
+    val fixed_size: u64 = fixed_slots * abi_word_size
 
     # Base address of the fixed region must be 16-byte aligned (SysV).
     # `sp` points at argc. Align by growing fixed_size downward.
@@ -280,7 +297,7 @@ fn build_initial_stack_checked(
     # argc, argv pointers + NULL, envp pointers + NULL, and auxv words.
     var word: u64 = n_argv
     var word_byte: i64 = 0
-    while word_byte < 8:
+    while word_byte < abi_word_size as i64:
         bytes[cursor] = (word & 0xff) as u8
         word = word >> 8
         cursor = cursor + 1
@@ -290,25 +307,25 @@ fn build_initial_stack_checked(
     while a < argc_i:
         word = argv_addrs[a]
         word_byte = 0
-        while word_byte < 8:
+        while word_byte < abi_word_size as i64:
             bytes[cursor] = (word & 0xff) as u8
             word = word >> 8
             cursor = cursor + 1
             word_byte = word_byte + 1
         a = a + 1
-    cursor = cursor + 8
+    cursor = cursor + abi_word_size as i64
 
     var e: i64 = 0
     while e < envc_i:
         word = envp_addrs[e]
         word_byte = 0
-        while word_byte < 8:
+        while word_byte < abi_word_size as i64:
             bytes[cursor] = (word & 0xff) as u8
             word = word >> 8
             cursor = cursor + 1
             word_byte = word_byte + 1
         e = e + 1
-    cursor = cursor + 8
+    cursor = cursor + abi_word_size as i64
 
     var x: i64 = 0
     val auxn_i = full_aux.len()
@@ -316,14 +333,14 @@ fn build_initial_stack_checked(
         val ent = full_aux[x]
         word = ent.aux_type
         word_byte = 0
-        while word_byte < 8:
+        while word_byte < abi_word_size as i64:
             bytes[cursor] = (word & 0xff) as u8
             word = word >> 8
             cursor = cursor + 1
             word_byte = word_byte + 1
         word = ent.value
         word_byte = 0
-        while word_byte < 8:
+        while word_byte < abi_word_size as i64:
             bytes[cursor] = (word & 0xff) as u8
             word = word >> 8
             cursor = cursor + 1

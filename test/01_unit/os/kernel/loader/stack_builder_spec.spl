@@ -31,6 +31,14 @@ fn _read_u64_le(bytes: [u8], off: i64) -> u64:
         i = i - 1
     v
 
+fn _read_u32_le(bytes: [u8], off: i64) -> u64:
+    var v: u64 = 0
+    var i: i64 = 3
+    while i >= 0:
+        v = (v << 8) | (bytes[off + i] as u64)
+        i = i - 1
+    v
+
 fn _test_entropy(n: i64) -> [u8]:
     var out: [u8] = []
     var i: i64 = 0
@@ -94,9 +102,34 @@ describe "kernel.loader.stack_builder.build_initial_stack_checked":
             case Ok(_): fail("checked builder accepted an excessive stack bound")
             case Err(error): expect(error).to_equal(StackBuildError.InvalidStackBounds)
 
-    it "enforces its ELF64 eight-byte word contract":
+    it "serializes an aligned ELF32 frame with four-byte pointers":
+        val rv32_top = 0x81000000u64
+        match build_initial_stack_checked(rv32_top, 4096, 4, [], ["/x"], [], []):
+            case Err(_): fail("checked builder rejected a bounded ELF32 frame")
+            case Ok(result):
+                expect(result.sp & 0xf).to_equal(0u64)
+                expect(_read_u32_le(result.bytes, 0)).to_equal(1u64)
+                val argv0 = _read_u32_le(result.bytes, 4)
+                expect(argv0 >= result.sp).to_be_true()
+                expect(argv0 < rv32_top).to_be_true()
+                expect(_read_u32_le(result.bytes, 8)).to_equal(0u64)
+
+    it "rejects an ELF32 frame whose pointers exceed 32 bits":
         match build_initial_stack_checked(STACK_TOP, 4096, 4, [], ["/x"], [], []):
-            case Ok(_): fail("ELF64 builder accepted a four-byte ABI")
+            case Ok(_): fail("ELF32 builder truncated an out-of-range pointer")
+            case Err(error): expect(error).to_equal(StackBuildError.InvalidFramePointer)
+
+    it "accepts the exclusive 2^32 stack top when every pointer is 32-bit":
+        val elf32_limit = 0x100000000u64
+        match build_initial_stack_checked(elf32_limit, 4096, 4, [], ["/x"], [], []):
+            case Err(_): fail("ELF32 builder rejected its valid exclusive address limit")
+            case Ok(result):
+                expect(result.sp < elf32_limit).to_be_true()
+                expect(_read_u32_le(result.bytes, 4)).to_equal(0xfffffffdu64)
+
+    it "rejects unsupported ABI word widths":
+        match build_initial_stack_checked(STACK_TOP, 4096, 2, [], ["/x"], [], []):
+            case Ok(_): fail("checked builder accepted a two-byte ABI")
             case Err(error): expect(error).to_equal(StackBuildError.UnsupportedAbi)
 
     it "requires exactly sixteen entropy bytes when AT_RANDOM is requested":
