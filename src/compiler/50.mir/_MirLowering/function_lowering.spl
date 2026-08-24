@@ -61,7 +61,6 @@ fn mir_rettype_probe_on() -> bool:
             mir_rettype_probe_state = 0
     mir_rettype_probe_state == 1
 
-@unsafe(reason: "raw enum-tag probe; -1 denotes a non-enum or unavailable runtime representation", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
 
 # Cached [mir-optional-inner] trace gate (-1 unknown, 0 off, 1 on). Default OFF.
@@ -247,14 +246,10 @@ impl MirLowering:
             print "[mir-lower] lower_function:return-type-start {fn_.name}"
         val return_type = self.lower_type(fn_.return_type)
         if mir_rettype_probe_on():
-            val hir_ret_disc = unsafe(capabilities: [ffi]):
-                rt_enum_discriminant(fn_.return_type.kind)
-            val hir_unit_disc = unsafe(capabilities: [ffi]):
-                rt_enum_discriminant(HirTypeKind.Unit)
-            val mir_ret_disc = unsafe(capabilities: [ffi]):
-                rt_enum_discriminant(return_type.kind)
-            val mir_unit_disc = unsafe(capabilities: [ffi]):
-                rt_enum_discriminant(MirTypeKind.Unit)
+            val hir_ret_disc = rt_enum_discriminant(fn_.return_type.kind)
+            val hir_unit_disc = rt_enum_discriminant(HirTypeKind.Unit)
+            val mir_ret_disc = rt_enum_discriminant(return_type.kind)
+            val mir_unit_disc = rt_enum_discriminant(MirTypeKind.Unit)
             val eq_answer = if return_type.kind == MirTypeKind.Unit: "true" else: "false"
             eprint("[mir-rettype] fn=" + fn_.name + " hir_ret=" + hir_ret_disc.to_text() + " hir_unit=" + hir_unit_disc.to_text() + " mir_ret=" + mir_ret_disc.to_text() + " mir_unit=" + mir_unit_disc.to_text() + " eq_unit=" + eq_answer + " mir_ret_text=" + mir_type_probe_text(return_type) + "\n")
         if trace_enabled:
@@ -618,6 +613,13 @@ impl MirLowering:
             print "[mir-lower] real-lower:end {fn_.name}"
         var fn_result = bldr3.end_function()
         self.builder = bldr3
+        # Other half of the emission-loss probe (see mir_lowering_stmts.spl).
+        # Compare against the builder count printed right after `lower_expr`.
+        if mir_rettype_probe_on():
+            var fn_instr_total = 0
+            for fn_blk in fn_result.blocks:
+                fn_instr_total = fn_instr_total + fn_blk.instructions.len()
+            eprint("[mir-emit] end_function fn=" + fn_.name + " blocks=" + fn_result.blocks.len().to_text() + " instr_total=" + fn_instr_total.to_text() + "\n")
         fn_result.verification_contract = fn_.verification_contract
         if bootstrap_trace:
             print "[mir-lower] real-lower:done {fn_.name}"
@@ -797,6 +799,24 @@ impl MirLowering:
             # function body sees the full set.
 
     me lower_type(type_: HirType) -> MirType:
+
+        # HirTypeKind liveness probe: -1 is rt_enum_discriminant's NOT-AN-ENUM
+
+        # sentinel. `E-MIR-TYPE-Unknown: ... disc=-1` fires on a self-compiled
+
+        # Stage 2 and never interpreted, and the codec blocker `no `HirTypeKind`
+
+        # arm for tag -1` is the same enum reaching a different consumer in the
+
+        # same state. Logging the disc at EVERY lower_type entry shows whether a
+
+        # HirTypeKind arrives dead or dies partway down a nested type, which need
+
+        # different fixes. Default OFF.
+
+        if mir_rettype_probe_on():
+
+            eprint("[mir-lower-type-entry] disc=" + rt_enum_discriminant(type_.kind).to_text() + "\n")
         """Lower HIR type to MIR type."""
         if type_ == nil:
             self.error_fatal("missing HIR type during MIR lowering", nil)
