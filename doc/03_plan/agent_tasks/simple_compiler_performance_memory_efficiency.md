@@ -1106,6 +1106,19 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   acquisition ordering, physical lines, and complete finding payloads.
 - Add complete-field source/lines parity coverage; verification intentionally
   not run under the user's no-verify instruction.
+
+## Completed RISC-V RTL line reuse tranche
+
+- Add a `source + canonical lines` debuggability kernel and retain the source
+  API as a compatibility adapter.
+- Reuse the main lint driver's lines for source-map and output-port scans,
+  removing two generated-VHDL splits without conflating the separately loaded
+  products manifest.
+- Preserve path gating, sidecar/manifest I/O order, warning order, severity,
+  messages, hints, physical location, and file path.
+- Add generated-bundle complete-field parity coverage; verification
+  intentionally not run under the user's no-verify instruction.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
