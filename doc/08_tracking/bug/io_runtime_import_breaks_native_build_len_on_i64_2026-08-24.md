@@ -95,3 +95,64 @@ MCP server.
   breaks the cycle and shows the failure disappearing.
 - Nothing was fixed. This record exists so the next lane starts from a four-line
   reproducer instead of a 61-module MCP build.
+
+## 2026-08-24 (later) — both leads REFUTED by experiment, and the search space is now one file
+
+Both hypotheses recorded above were tested and **both are wrong**. Recorded so
+nobody re-runs them.
+
+### Lead 1 (import cycle): REFUTED
+
+The cycle edge is `io_runtime.spl:13`, `use std.nogc_sync_mut.io.process_ops
+.{process_run_bounded}`, which exists ONLY so line 488 can re-export the name.
+Deleting that line and dropping `process_run_bounded` from the export list makes
+**`io_runtime` a leaf with no `use` lines at all** — the cycle is definitively
+gone, not merely reduced.
+
+The four-line fixture still fails, byte-identically:
+
+```
+error: semantic: method `len` not found on type `i64` (receiver value: 38)
+```
+
+So the cycle is not the cause. It correlated only because every failing fixture
+happened to pull that region of the tree.
+
+**This is the useful part of the refutation:** with `io_runtime` a leaf that
+still reproduces, the culprit is inside `io_runtime.spl`'s own 488 lines. The
+search space went from "the std import graph" to one file.
+
+### Lead 2 (tuple-returning externs): REFUTED, in both forms
+
+`process_ops`/`io_runtime` declare `rt_process_run(...) -> (text, text, i64)`,
+and a tuple ABI mismatch would explain a receiver that is not the value you
+expect. Two separate fixtures, both **build cleanly (rc=0)**:
+
+| probe | shape | result |
+|---|---|---|
+| T1 | imported module DECLARES a tuple-returning extern; fixture imports a non-tuple fn from it | builds |
+| T2 | fixture imports the tuple-returning function itself, across a module boundary | builds |
+
+T2 matters because it is the shape `io/env_ops.spl:7` actually uses
+(`use std.io_runtime.{process_run, env_set as io_env_set}` — `process_run`
+returns `(text, text, i64)`). That exact shape is fine in isolation.
+
+### A bisection note for whoever continues
+
+Truncating `io_runtime.spl` to a prefix does NOT work: the rest of the tree
+depends on its full export surface, and the build fails early with
+`error[E1002]: function 'io_env_set' not found` (from
+`src/lib/nogc_sync_mut/io/env_ops.spl:7,46`) before it ever reaches the
+corrupting code. Any bisect must PRESERVE the exported surface — stub bodies
+rather than delete declarations.
+
+Also note `src/std/nogc_sync_mut/io_runtime.spl` and
+`src/lib/nogc_sync_mut/io_runtime.spl` are the SAME file (a `cp` between them
+reports "identical (not copied)"), so editing one edits both; do not waste a
+run thinking you are testing two variants.
+
+### Status
+
+Three hypotheses eliminated (cycle; tuple extern declared; tuple fn imported),
+one file localized, nothing fixed. No further hypothesis was pursued rather than
+casting around for one.
