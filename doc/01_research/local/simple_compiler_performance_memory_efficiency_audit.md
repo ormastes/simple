@@ -2672,6 +2672,29 @@ messages, and hints remain unchanged. Prefix-heavy, repeated-exact, reverse-
 source-order, and topology contracts were added but not executed under the
 user's no-verification instruction.
 
+### Indexed canonical-module call validation
+
+Canonical MIR contract composition validated internal names with linear array
+membership, then allocated a candidate-function array and rescanned every
+module function for every direct owner call. Repeated calls to one pure leaf
+also rebuilt its region-effect manifest, including canonical MIR serialization
+and hashing. For F functions and C direct calls, validation could therefore
+perform O(F^2 + C*F) lookup work plus repeated callee serialization and transient
+arrays.
+
+The existing name-validation traversal now constructs one compact unique
+name-to-SymbolId dictionary while retaining the ordered name array required by state
+semantics. Each direct call resolves by expected constant-time lookup. A second
+request-local set records only callees whose region manifest was successfully
+closed and pure, so repeated calls skip serialization without caching failures.
+Expected structural work becomes O(F+C+sum(size of uniquely referenced pure
+callees)), plus hashing/comparison of function and callee name bytes, with
+O(F+U) compact index/cache entries. Owner resolution still precedes name validation;
+empty/duplicate names, missing callees, first impure or unclosed callees,
+recursive-call skipping, instruction order, diagnostics, and public APIs remain
+unchanged. Repeated-leaf, exact rejection, precedence, and topology contracts
+were added but not executed under the user's no-verification instruction.
+
 ### Allocation-free critical-file line counting
 
 CFG002 previously read every protected file and materialized
