@@ -1,7 +1,7 @@
 # Stage 3 self-host SIGSEGV while lowering `values_equal` after full HIR
 
 **Date:** 2026-08-25  
-**Status:** SECOND FIX IMPLEMENTED — rebuilt-compiler evidence pending
+**Status:** BLOCKED AFTER THREE CYCLES — final fix not yet admitted
 **Platform:** `x86_64-unknown-linux-gnu`, LLVM backend, dynload runtime
 
 ## Reproduction
@@ -123,3 +123,22 @@ boundary. The final allowed fix cycle removes that redundant composite array
 and obtains each body from the explicitly typed original `HirMatchArm` via the
 already retained primitive source index. This changes O(number-of-arms)
 composite copies to zero while preserving dispatch order and semantics.
+
+### Cycle 3 retained blocker
+
+Commit `7bb6f81954` rebuilt and admitted Stage 2 successfully. Its Stage 3
+planner receipt was accepted and the compiler loaded all 971 inputs. The child
+then received SIGTERM and the wrapper exited 143. The last durable compiler log
+shows surface processing completed through sequence 695
+(`src/compiler/driver/pipeline_fn.spl`); the phase profile ends at fingerprint
+index 640/971 with 119,824,002 bytes peak tracked heap, 301,792 KiB RSS, and
+301,792 KiB HWM. The live sample immediately before termination was about
+623 MiB RSS. No OOM/kernel/service termination record was available.
+
+This interruption did not reach MIR and therefore neither proves nor refutes
+the `enum_bodies` removal. It is distinct from cycle 1/2 SIGSEGVs, but the
+mandatory three-cycle cap is exhausted. Do not launch a fourth Stage 3 build in
+the same logical session. Resume in a fresh scoped session from the admitted
+Stage 2 under `build/bootstrap/mustcheck-stage3-arm-body`, first identifying or
+isolating the external SIGTERM owner; then require `real-lower:done eval_gteq`
+and complete Stage 3 admission before promoting any must-check compiler row.
