@@ -1,0 +1,64 @@
+"""
+## Purpose and audience
+Purpose: Pin architecture ownership and fail-closed WM input constructors.
+Audience: SimpleOS input/compositor maintainers.
+"""
+# @req: REQ-OS-DESKTOP-INPUT-001
+
+use std.spec.*
+use app.io.mod.{file_read_text}
+
+describe "ARM64 and RV64 baremetal WM input ingress constructors":
+    it "keeps platform producers outside DesktopShell":
+        step("Inspect the architecture and shell import boundaries")
+        val shell = file_read_text("src/os/desktop/shell.spl")
+        val arm = file_read_text("src/os/kernel/arch/arm64/wm_input_ingress.spl")
+        val rv = file_read_text("src/os/kernel/arch/riscv64/wm_input_ingress.spl")
+        val shared = file_read_text("src/os/compositor/arm64_virtio_input_backend.spl")
+
+        expect(shell.contains("os.kernel.arch.arm64.wm_input_ingress")).to_equal(false)
+        expect(shell.contains("os.kernel.arch.riscv64.wm_input_ingress")).to_equal(false)
+        expect(arm).to_contain("arm64_virtio_input_init()")
+        expect(arm).to_contain("arm64_virtio_input_ready(ready_mask)")
+        expect(rv).to_contain("riscv64_virtio_input_init()")
+        expect(rv).to_contain("riscv64_virtio_input_ready(ready_mask)")
+        expect(shared.contains("os.kernel.arch.arm64")).to_equal(false)
+        expect(shared.contains("os.kernel.arch.riscv64")).to_equal(false)
+
+    it "publishes only opaque handles after owner installation":
+        step("Require owner-before-registration and zero refusal paths")
+        val arm = file_read_text("src/os/kernel/arch/arm64/wm_input_ingress.spl")
+        val rv = file_read_text("src/os/kernel/arch/riscv64/wm_input_ingress.spl")
+
+        val arm_push = arm.index_of("_arm64_wm_input_owners.push(owner)")
+        val arm_register = arm.index_of("baremetal_input_ingress_register_poller(")
+        val rv_push = rv.index_of("_riscv64_wm_input_owners.push(owner)")
+        val rv_register = rv.index_of("baremetal_input_ingress_register_poller(")
+        expect(arm_push).to_be_greater_than(0)
+        expect(arm_register).to_be_greater_than(arm_push)
+        expect(rv_push).to_be_greater_than(0)
+        expect(rv_register).to_be_greater_than(rv_push)
+        expect(arm).to_contain("_arm64_wm_input_owners.pop()")
+        expect(rv).to_contain("_riscv64_wm_input_owners.pop()")
+        expect(arm).to_contain("return 0")
+        expect(rv).to_contain("return 0")
+        expect(arm).to_contain("screen_width <= 0 or screen_height <= 0")
+        expect(rv).to_contain("screen_width <= 0 or screen_height <= 0")
+        expect(arm).to_contain("_arm64_wm_input_state != ARM64_WM_INPUT_STATE_NEVER")
+        expect(rv).to_contain("_riscv64_wm_input_state != RISCV64_WM_INPUT_STATE_NEVER")
+        expect(arm).to_contain("ARM64_WM_INPUT_STATE_CONSTRUCTING")
+        expect(rv).to_contain("RISCV64_WM_INPUT_STATE_CONSTRUCTING")
+        expect(arm).to_contain("if handle <= 0:")
+        expect(rv).to_contain("if handle <= 0:")
+
+    it "keeps polling bounded to one stable architecture owner":
+        step("Inspect the callback shape and shared bounded decoder")
+        val backend = file_read_text("src/os/compositor/arm64_virtio_input_backend.spl")
+        val arm = file_read_text("src/os/kernel/arch/arm64/wm_input_ingress.spl")
+        val rv = file_read_text("src/os/kernel/arch/riscv64/wm_input_ingress.spl")
+
+        expect(backend).to_contain("var budget = 64")
+        expect(arm).to_contain("ARM64_WM_INPUT_OWNER_CAPACITY: i64 = 1")
+        expect(rv).to_contain("RISCV64_WM_INPUT_OWNER_CAPACITY: i64 = 1")
+        expect(arm).to_contain("_arm64_wm_input_owners[0].poll_event()")
+        expect(rv).to_contain("_riscv64_wm_input_owners[0].poll_event()")

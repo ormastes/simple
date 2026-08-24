@@ -1,0 +1,68 @@
+# RV64-owned constructor for the architecture-neutral baremetal WM ingress.
+#
+# The shared VirtIO decoder is retained behind an RV64 module callback.  No
+# DesktopShell module imports this platform or its PCI producer.
+
+use common.ui.host_input_event.{HostInputEvent}
+use os.compositor.arm64_virtio_input_backend.{Arm64VirtioInputBackend}
+use os.compositor.baremetal_input_ingress.{
+    baremetal_input_ingress_register_poller
+}
+use os.compositor.input_backend.{InputBackend}
+use os.kernel.arch.riscv64.virtio_input.{
+    riscv64_virtio_input_init,
+    riscv64_virtio_input_poll,
+    riscv64_virtio_input_ready
+}
+
+val RISCV64_WM_INPUT_OWNER_CAPACITY: i64 = 1
+val RISCV64_WM_INPUT_STATE_NEVER: i64 = 0
+val RISCV64_WM_INPUT_STATE_CONSTRUCTING: i64 = 1
+val RISCV64_WM_INPUT_STATE_ACTIVE: i64 = 2
+val RISCV64_WM_INPUT_STATE_REFUSED: i64 = 3
+
+var _riscv64_wm_input_owners: [Arm64VirtioInputBackend] = []
+var _riscv64_wm_input_state: i64 = RISCV64_WM_INPUT_STATE_NEVER
+
+fn _riscv64_wm_input_poll_owned() -> HostInputEvent?:
+    # One call returns at most one event.  Decoder state and the bounded raw
+    # pump remain in the owner slot; the registry transports no mutable class.
+    if (
+        _riscv64_wm_input_state != RISCV64_WM_INPUT_STATE_ACTIVE or
+        _riscv64_wm_input_owners.len() != RISCV64_WM_INPUT_OWNER_CAPACITY
+    ):
+        return nil
+    _riscv64_wm_input_owners[0].poll_event()
+
+fn riscv64_wm_input_ingress_boot_create(screen_width: i64, screen_height: i64) -> i64:
+    """Admit real VirtIO devices and return one opaque compositor handle."""
+    if _riscv64_wm_input_state != RISCV64_WM_INPUT_STATE_NEVER:
+        return 0
+    _riscv64_wm_input_state = RISCV64_WM_INPUT_STATE_CONSTRUCTING
+    if screen_width <= 0 or screen_height <= 0:
+        _riscv64_wm_input_state = RISCV64_WM_INPUT_STATE_REFUSED
+        return 0
+
+    val ready_mask = riscv64_virtio_input_init()
+    if not riscv64_virtio_input_ready(ready_mask):
+        _riscv64_wm_input_state = RISCV64_WM_INPUT_STATE_REFUSED
+        return 0
+
+    val owner = Arm64VirtioInputBackend.create_with_poller(
+        screen_width,
+        screen_height,
+        riscv64_virtio_input_poll,
+        true
+    )
+    _riscv64_wm_input_owners.push(owner)
+    val handle = baremetal_input_ingress_register_poller(
+        _riscv64_wm_input_poll_owned
+    )
+    if handle <= 0:
+        _riscv64_wm_input_owners.pop()
+        _riscv64_wm_input_state = RISCV64_WM_INPUT_STATE_REFUSED
+        return 0
+    _riscv64_wm_input_state = RISCV64_WM_INPUT_STATE_ACTIVE
+    handle
+
+export riscv64_wm_input_ingress_boot_create

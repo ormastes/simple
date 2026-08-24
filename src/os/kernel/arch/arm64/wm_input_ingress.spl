@@ -1,0 +1,73 @@
+# ARM64-owned constructor for the architecture-neutral baremetal WM ingress.
+#
+# The decoder remains in this module's single stable array slot.  DesktopShell
+# receives only the opaque registry handle and therefore never imports ARM64
+# platform code or copies the stateful VirtIO decoder.
+
+use common.ui.host_input_event.{HostInputEvent}
+use os.compositor.arm64_virtio_input_backend.{Arm64VirtioInputBackend}
+use os.compositor.baremetal_input_ingress.{
+    baremetal_input_ingress_register_poller
+}
+use os.compositor.input_backend.{InputBackend}
+use os.kernel.arch.arm64.virtio_input.{
+    arm64_virtio_input_init,
+    arm64_virtio_input_poll,
+    arm64_virtio_input_ready
+}
+
+val ARM64_WM_INPUT_OWNER_CAPACITY: i64 = 1
+val ARM64_WM_INPUT_STATE_NEVER: i64 = 0
+val ARM64_WM_INPUT_STATE_CONSTRUCTING: i64 = 1
+val ARM64_WM_INPUT_STATE_ACTIVE: i64 = 2
+val ARM64_WM_INPUT_STATE_REFUSED: i64 = 3
+
+var _arm64_wm_input_owners: [Arm64VirtioInputBackend] = []
+var _arm64_wm_input_state: i64 = ARM64_WM_INPUT_STATE_NEVER
+
+fn _arm64_wm_input_poll_owned() -> HostInputEvent?:
+    # Exactly one translated event may cross the registry per call.  The
+    # backend's raw pump is bounded at 64 records and performs no queue growth.
+    if (
+        _arm64_wm_input_state != ARM64_WM_INPUT_STATE_ACTIVE or
+        _arm64_wm_input_owners.len() != ARM64_WM_INPUT_OWNER_CAPACITY
+    ):
+        return nil
+    _arm64_wm_input_owners[0].poll_event()
+
+fn arm64_wm_input_ingress_boot_create(screen_width: i64, screen_height: i64) -> i64:
+    """Admit real VirtIO devices and return one opaque compositor handle.
+
+    Invalid dimensions, missing keyboard/pointer readiness, duplicate creation,
+    and registry exhaustion all fail closed with handle zero.
+    """
+    if _arm64_wm_input_state != ARM64_WM_INPUT_STATE_NEVER:
+        return 0
+    _arm64_wm_input_state = ARM64_WM_INPUT_STATE_CONSTRUCTING
+    if screen_width <= 0 or screen_height <= 0:
+        _arm64_wm_input_state = ARM64_WM_INPUT_STATE_REFUSED
+        return 0
+
+    val ready_mask = arm64_virtio_input_init()
+    if not arm64_virtio_input_ready(ready_mask):
+        _arm64_wm_input_state = ARM64_WM_INPUT_STATE_REFUSED
+        return 0
+
+    val owner = Arm64VirtioInputBackend.create_with_poller(
+        screen_width,
+        screen_height,
+        arm64_virtio_input_poll,
+        true
+    )
+    _arm64_wm_input_owners.push(owner)
+    val handle = baremetal_input_ingress_register_poller(
+        _arm64_wm_input_poll_owned
+    )
+    if handle <= 0:
+        _arm64_wm_input_owners.pop()
+        _arm64_wm_input_state = ARM64_WM_INPUT_STATE_REFUSED
+        return 0
+    _arm64_wm_input_state = ARM64_WM_INPUT_STATE_ACTIVE
+    handle
+
+export arm64_wm_input_ingress_boot_create

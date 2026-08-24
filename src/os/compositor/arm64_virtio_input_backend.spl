@@ -32,18 +32,18 @@ use os.drivers.virtio.virtio_input_ops.{
     VirtioMouseAccum,
     virtio_input_key_event
 }
-use os.kernel.arch.arm64.virtio_input.{
-    arm64_virtio_input_poll,
-    arm64_virtio_input_ready
-}
+
+val VIRTIO_INPUT_REQUIRED_READY_MASK: u32 = 3u32
+
+fn _virtio_input_unavailable_poll() -> VirtioInputEvent?:
+    nil
 
 class Arm64VirtioInputBackend:
     poll_event: fn() -> VirtioInputEvent?
-    # Site 25 of doc/04_architecture/ui/wm_host_platform_matrix.md:
-    # The freestanding ARM64 runtime owns these externs, while hosted/unit
-    # execution intentionally has no implementation. `create()` therefore
-    # starts unavailable; only the ARM64 MMIO readiness receipt may admit the
-    # producer, so a permanently empty poll never reads as a healthy device.
+    # Site 25 of doc/04_architecture/ui/wm_host_platform_matrix.md: `create()`
+    # intentionally has no platform poller and starts unavailable. An ARM64 or
+    # RV64 composition owner must inject its real poller and admit readiness,
+    # so a permanently empty placeholder never reads as a healthy device.
     _available: bool
     producer_ready_mask: u32
     mouse: VirtioMouseAccum
@@ -106,13 +106,13 @@ class Arm64VirtioInputBackend:
 
 impl Arm64VirtioInputBackend:
     static fn create(screen_width: i64, screen_height: i64) -> Arm64VirtioInputBackend:
-        # The hosted binary deliberately does not link the freestanding MMIO
-        # owner. Keep it unavailable there; gui_entry_desktop admits it only
-        # after the real ARM64 producer reports keyboard + pointer readiness.
+        # Platform-neutral unavailable constructor for hosted/unit callers.
+        # Production composition owners use create_with_poller and their own
+        # readiness receipt; this shared decoder imports no architecture leaf.
         Arm64VirtioInputBackend.create_with_poller(
             screen_width,
             screen_height,
-            arm64_virtio_input_poll,
+            _virtio_input_unavailable_poll,
             false
         )
 
@@ -279,15 +279,16 @@ impl Arm64VirtioInputBackend:
         true
 
     me admit_producer(readiness_mask: u32) -> bool:
-        """Enable polling only after the real ARM64 owner proved both devices.
+        """Enable polling only after a platform owner proved both devices.
 
-        `create()` stays unavailable in hosted/unit executions where the
-        freestanding runtime symbols are absent. The ARM64 desktop calls this
-        before it gives this backend to the compositor, so an idle queue can
-        never be mistaken for a producer.
+        `create()` stays unavailable in hosted/unit executions. Production
+        composition injects a real raw poller before admitting its readiness,
+        so an idle queue can never be mistaken for a producer.
         """
         self.producer_ready_mask = readiness_mask
-        self._available = arm64_virtio_input_ready(readiness_mask)
+        self._available = (
+            readiness_mask & VIRTIO_INPUT_REQUIRED_READY_MASK
+        ) == VIRTIO_INPUT_REQUIRED_READY_MASK
         self._available
 
     me _pump_one() -> bool:
@@ -317,11 +318,10 @@ impl Arm64VirtioInputBackend:
                 return
 
     fn available() -> bool:
-        """True only when arm64_virtio_input_init() reported real keyboard +
-        pointer readiness (create()), or a test explicitly injected an
-        available poller (create_with_poller(..., available: true), the
-        default). False means poll_key()/poll_mouse() will never pump —
-        there is no live backend, not merely an idle one.
+        """True only when a platform owner admitted keyboard + pointer, or a
+        caller explicitly injected an available poller. `create()` itself is
+        always unavailable. False means poll_key()/poll_mouse() never pump —
+        there is no admitted backend, not merely an idle one.
         """
         self._available
 
