@@ -27,6 +27,15 @@ remote-control bridge, OAuth, or full agent orchestration.
 
 | Simple source file | LOC | Claude source match | Role |
 |---|---:|---|---|
+| `src/app/llm_caret/agent_discovery.spl` | 85 | Simple-only agent capability discovery | MCP server / plugin capability enumeration for launched agents |
+| `src/app/llm_caret/agent_files.spl` | 23 | Simple-only agent file adapter | SHA-256 snapshots of agent-touched files and change-set derivation |
+| `src/app/llm_caret/agent_mailbox.spl` | 39 | Simple-only pure mailbox | in-memory team message queue for agent-to-agent handoff |
+| `src/app/llm_caret/agent_plan.spl` | 223 | Simple-only agent planning core | launch requests, launch plans, capability sets, team messages, file fingerprints |
+| `src/app/llm_caret/agent_runtime.spl` | 200 | Simple-only agent process runtime | spawn/poll/kill of planned agent processes and team status aggregation |
+| `src/app/llm_caret/agent_tmux.spl` | 56 | Simple-only tmux-style view model | pane/session model and usage rollup for embedded agent process views |
+| `src/app/llm_caret/agent_tui.spl` | 38 | Simple-only agent handoff renderer | pure text rendering of launch plans, capability sets, and mailbox state |
+| `src/app/llm_caret/agent_vcs.spl` | 43 | Simple-only VCS adapter | git/jj changed-file discovery feeding agent file change sets |
+| `src/app/llm_caret/multi_caret_manager.spl` | 100 | Simple-only multi-agent facade | bounded parent-owned adapter over launch/status/stop/summarize plus tmux embed |
 | `src/app/llm_caret/chat.spl` | 227 | `src/assistant/sessionHistory.ts`, `src/bootstrap/state.ts` | conversation history and message JSON |
 | `src/app/llm_caret/chat_tui.spl` | 798 | `src/screens/REPL.tsx`, `src/commands/*` | transcript, slash commands, session transitions, and lifecycle-safe injected I/O |
 | `src/app/llm_caret/claude_api.spl` | 310 | `src/QueryEngine.ts`, `src/entrypoints/sdk/coreSchemas.ts` | Anthropic Messages request/build/retry/completion ownership |
@@ -53,12 +62,12 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/tui_io.spl` | 101 | Simple-only terminal capability adapter | injected terminal size/raw/screen/byte/line/output operations with production stdlib wiring |
 | `src/app/llm_caret/types.spl` | 225 | `src/entrypoints/sdk/coreSchemas.ts`, `src/types/logs.ts` | request/response/event/config records |
 
-Mapped files at this checkpoint: 25/25 = 100%.
-Mapped LOC at this checkpoint: 7198/7198 = 100%.
-Current direct declaration inventory: 506 symbols; the checker must prove
-506/506 after the symbol TSV is regenerated.
+Mapped files at this checkpoint: 34/34 = 100%.
+Mapped LOC at this checkpoint: 8063/8063 = 100%.
+Current direct declaration inventory: 586 symbols; the checker must prove
+586/586 after the symbol TSV is regenerated.
 
-These counts include the new `tui_io.spl` row and match the regenerated
+These counts include the `tui_io.spl` row and the nine agent-orchestration rows and match the regenerated
 file-qualified inventory. They prove direct-file classification, not executed
 behavior or full Claude parity. Simple-only and conceptual rows are explicit,
 and upstream freshness remains unverifiable while the historical Claude source
@@ -66,7 +75,7 @@ tree is absent.
 
 The nested
 `src/app/llm_caret/claude_full/commands/hidden_stub_registry.spl` parts-bin
-aggregate is intentionally outside the 25 direct-file count. Its focused
+aggregate is intentionally outside the 34 direct-file count. Its focused
 source-completeness spec is listed below; it does not make `claude_full`
 reachable from the shipped Caret facade.
 
