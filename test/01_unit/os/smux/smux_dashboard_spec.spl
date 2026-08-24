@@ -1,3 +1,30 @@
+"""
+## Purpose and audience
+Purpose: Specify the smux dashboard adapter — the session overview rows, pane
+geometry and preview lines, the status bar, attach/detach results, and resize
+hints that the multiplexer presents to an operator.
+Audience: engineers changing `src/os/apps/smux/smux_dashboard.spl` who need to
+know which rendered strings operators depend on.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+Each scenario narrates the row or widget it builds before asserting the exact
+text it renders, so a failing verdict names the widget that changed shape.
+## Compatibility and limitations
+These scenarios pin rendered text and stored values only. Live terminal
+drawing, attach side effects, and real PTY resize are out of scope here.
+# @manual: primary
+REQ-TOOLS-SMUX-DASH-001
+doc/01_research/os/qemu/tmux_simpleos.md
+doc/03_plan/sys_test/smux_caret_sspec_quality.md
+doc/04_architecture/os/tmux_simpleos.md
+doc/05_design/os/desktop/tmux_simpleos_tui.md
+"""
+
+# @req REQ-TOOLS-SMUX-DASH-001
+# @tag: unit, smux, dashboard
+
+use std.spec.{describe, it, expect, step}
+
 # smux_dashboard_spec.spl — Unit tests for the smux dashboard adapter.
 #
 # Tests for session overview, pane layout info, status bar data, attach/detach
@@ -91,96 +118,122 @@ fn dashboard_resize_hint(session_id: text, window_id: text, pane_id: text, cols:
 
 describe "smux dashboard session rows":
     it "renders an attached row with window and pane counts":
+        # @req REQ-TOOLS-SMUX-DASH-001
+        step("Build an attached session row for dev with 3 windows and 5 panes")
         val row = DashSessionRow.make("s0", "dev", 3, 5, true)
         expect(row.to_text()).to_equal("dev (attached) w=3 p=5")
 
     it "renders a detached row with window and pane counts":
+        step("Build a detached session row for ci with 1 window and 2 panes")
         val row = DashSessionRow.make("s1", "ci", 1, 2, false)
         expect(row.to_text()).to_equal("ci (detached) w=1 p=2")
 
     it "preserves the identifiers and counts it was built from":
+        step("Build a row for session sid99 with 4 windows and 8 panes")
         val row = DashSessionRow.make("sid99", "prod", 4, 8, true)
         expect(row.session_id).to_equal("sid99")
-        expect(row.window_count).to_equal(4)
-        expect(row.pane_count).to_equal(8)
+        expect(row.window_count).to_equal(4)  # oracle: the window count passed to make() is stored verbatim
+        expect(row.pane_count).to_equal(8)  # oracle: the pane count passed to make() is stored verbatim
 
     it "reports a zero window count for an empty session":
+        step("Build a row for a session that owns nothing")
         val row = DashSessionRow.make("s2", "empty", 0, 0, false)
-        expect(row.window_count).to_equal(0)
-        expect(row.pane_count).to_equal(0)
+        expect(row.window_count).to_equal(0)  # oracle: a session that owns nothing reports zero, never a placeholder
+        expect(row.pane_count).to_equal(0)  # oracle: a session that owns nothing reports zero panes
 
 describe "smux dashboard pane info":
     it "formats geometry as columns by rows":
+        # @req REQ-TOOLS-SMUX-DASH-001
+        step("Build pane info at the default 80x24 geometry")
         val info = DashPaneInfo.make("p0", "w0", "s0", 80, 24, false, "")
         expect(info.geometry_text()).to_equal("80x24")
 
     it "marks an active pane with a leading star":
+        step("Build an active 120x40 pane previewing $ ls")
         val info = DashPaneInfo.make("p1", "w0", "s0", 120, 40, true, "$ ls")
         expect(info.to_text()).to_equal("*pane[p1] 120x40 > $ ls")
 
     it "marks an inactive pane with a leading space":
+        step("Build an inactive 80x24 pane with no preview")
         val info = DashPaneInfo.make("p2", "w0", "s0", 80, 24, false, "")
         expect(info.to_text()).to_equal(" pane[p2] 80x24 > ")
 
     it "stores the preview line verbatim":
+        step("Build a pane previewing hello world")
         val info = DashPaneInfo.make("p3", "w1", "s1", 80, 24, false, "hello world")
         expect(info.preview_line).to_equal("hello world")
 
     it "preserves width and height":
+        step("Build a 160x50 pane")
         val info = DashPaneInfo.make("p4", "w2", "s2", 160, 50, true, "")
-        expect(info.width).to_equal(160)
-        expect(info.height).to_equal(50)
+        expect(info.width).to_equal(160)  # oracle: the width passed to make() is stored verbatim
+        expect(info.height).to_equal(50)  # oracle: the height passed to make() is stored verbatim
 
 describe "smux dashboard status bar":
     it "starts empty with no sessions":
+        # @req REQ-TOOLS-SMUX-DASH-001
+        step("Read the empty status bar")
         val sb = DashStatusBar.empty()
-        expect(sb.session_count).to_equal(0)
+        expect(sb.session_count).to_equal(0)  # oracle: an empty status bar counts zero sessions
         expect(sb.active_session_name).to_equal("")
 
     it "renders session count, names and geometry":
+        step("Build a status bar over 2 sessions, active dev:main at 80x24")
         val sb = DashStatusBar.build(2, "dev", "main", "80x24", true)
         expect(sb.to_text()).to_equal("[smux 2s] dev:main 80x24")
 
     it "renders placeholders when no session is active":
+        step("Render the empty status bar")
         val sb = DashStatusBar.empty()
         expect(sb.to_text()).to_equal("[smux 0s] : ")
 
     it "reports an attached session":
+        step("Build a status bar whose session is attached")
         val sb = DashStatusBar.build(1, "work", "editor", "100x30", true)
         expect(sb.has_attached).to_equal(true)
 
     it "reports a detached session":
+        step("Build a status bar whose session is detached")
         val sb = DashStatusBar.build(1, "ci", "build", "80x24", false)
         expect(sb.has_attached).to_equal(false)
 
 describe "smux dashboard attach results":
     it "reports success with the attached session id":
+        # @req REQ-TOOLS-SMUX-DASH-001
+        step("Attach successfully to session s42")
         val r = DashAttachResult.success("s42")
         expect(r.ok).to_equal(true)
         expect(r.session_id).to_equal("s42")
 
     it "reports failure with the error message":
+        step("Attempt to attach to a session that does not exist")
         val r = DashAttachResult.failure("session not found: ghost")
         expect(r.ok).to_equal(false)
         expect(r.error_msg).to_equal("session not found: ghost")
 
     it "renders a successful attach":
+        step("Render a successful attach result")
         val r = DashAttachResult.success("sid1")
         expect(r.to_text()).to_equal("attached:sid1")
 
     it "renders a failed attach":
+        step("Render a failed attach result")
         val r = DashAttachResult.failure("not found")
         expect(r.to_text()).to_equal("error:not found")
 
 describe "smux dashboard resize hints":
     it "formats a resize hint from ids and geometry":
+        # @req REQ-TOOLS-SMUX-DASH-001
+        step("Ask for a resize hint targeting 120x40")
         val h = dashboard_resize_hint("s0", "w0", "p0", 120, 40)
         expect(h).to_equal("resize s0/w0/p0 -> 120x40")
 
     it "formats a resize hint at the default terminal size":
+        step("Ask for a resize hint at the default 80x24 terminal size")
         val h = dashboard_resize_hint("sid", "wid", "pid", 80, 24)
         expect(h).to_equal("resize sid/wid/pid -> 80x24")
 
     it "preserves hyphenated identifiers":
+        step("Ask for a resize hint whose ids contain hyphens")
         val h = dashboard_resize_hint("my-session", "win-3", "pane-7", 200, 60)
         expect(h).to_equal("resize my-session/win-3/pane-7 -> 200x60")
