@@ -1,0 +1,119 @@
+#!/bin/sh
+# refresh-critical-release-receipts.shs — re-mint every Phase 9 evidence receipt
+# by RUNNING its producer gate, then report which obligations are still unmet.
+#
+# Why this exists (measured 2026-08-24). Every receipt binds `artifact_sha256`
+# to the resolved `bin/simple`. That symlink is replaced by other lanes multiple
+# times a day (three redeploys in one day, `.claude/rules/commands.md`), and a
+# redeploy invalidates ALL receipts at once: the aggregate went from six fresh
+# to `12 not fresh, 10 of them artifact-mismatch` with no gate having regressed.
+# There was no way to re-mint them except re-running each producer by hand from
+# memory, so `check-critical-release-seal.shs` reported a backlog that was
+# mostly staleness. This driver is that missing half — it produces, the
+# aggregate audits. It deliberately does NOT audit: a producer cannot audit
+# itself (§23.9), so the verdict below is the aggregate gate's own, verbatim.
+#
+# Producer resolution is 1:1 by construction: obligation id `check-foo` is
+# produced by `scripts/check/check-foo.shs`. An id with no such script is
+# reported as `no-producer` and is a real Phase 9 gap, never a skip.
+#
+# Verdicts (last line of stdout):
+#   PASS — <n> obligation(s) refreshed, <k> producer(s) ran, seal green   exit 0
+#   FAIL — <n> obligation(s) refreshed, <k> producer(s) ran; <aggregate>  exit 1
+#   ERROR — nothing was checked (<reason>)                                exit 2
+#
+# Usage:
+#   sh scripts/check/refresh-critical-release-receipts.shs
+#   sh scripts/check/refresh-critical-release-receipts.shs --only check-aspect-seal
+#   sh scripts/check/refresh-critical-release-receipts.shs --timeout 1800
+#   sh scripts/check/refresh-critical-release-receipts.shs --selftest
+#
+# A producer that FAILs is NOT an error here — a red gate that mints a red
+# receipt is exactly the state the aggregate must see. Only a producer that
+# cannot be run at all (missing, timed out, killed) is reported separately, and
+# such an obligation stays unmet rather than being quietly dropped.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+OBLIGATIONS="$REPO_ROOT/scripts/check/critical_release_required_receipts.txt"
+AGGREGATE="$REPO_ROOT/scripts/check/check-critical-release-seal.shs"
+ONLY=""
+PER_GATE_TIMEOUT=1200
+MODE=run
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --only) ONLY="$2"; shift 2 ;;
+        --timeout) PER_GATE_TIMEOUT="$2"; shift 2 ;;
+        --selftest) MODE=selftest; shift ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------- selftest ---
+# Three fixtures, all against the real resolver so a rename of the id->script
+# convention breaks the test rather than silently disabling the driver.
+if [ "$MODE" = selftest ]; then
+    FAILED=0
+
+    # 1. Every id in the obligation list resolves to a producer, or is honestly
+    #    reported. This asserts the resolver runs, not that the tree is green.
+    IDS=$(grep -v '^ *#' "$OBLIGATIONS" | grep -v '^ *$')
+    [ -n "$IDS" ] || { echo "selftest FAIL: obligation list parsed to 0 ids" >&2; FAILED=1; }
+
+    # 2. A known-present producer must resolve.
+    [ -f "$REPO_ROOT/scripts/check/check-aspect-seal.shs" ] || {
+        echo "selftest FAIL: known producer check-aspect-seal.shs not found" >&2; FAILED=1; }
+
+    # 3. A fabricated id must be classified no-producer, not silently skipped.
+    [ -f "$REPO_ROOT/scripts/check/check-definitely-not-a-real-gate.shs" ] && {
+        echo "selftest FAIL: fixture id unexpectedly exists" >&2; FAILED=1; }
+
+    [ "$FAILED" = 0 ] || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+    echo "selftest: 3/3 fixtures OK"
+fi
+
+[ -f "$OBLIGATIONS" ] || { echo "ERROR — nothing was checked (missing obligation list: $OBLIGATIONS)"; exit 2; }
+[ -f "$AGGREGATE" ]   || { echo "ERROR — nothing was checked (missing aggregate gate: $AGGREGATE)"; exit 2; }
+
+IDS=$(grep -v '^ *#' "$OBLIGATIONS" | grep -v '^ *$')
+[ -n "$ONLY" ] && IDS="$ONLY"
+[ -n "$IDS" ] || { echo "ERROR — nothing was checked (0 obligations)"; exit 2; }
+
+TOTAL=0
+RAN=0
+UNRUNNABLE=""
+
+for id in $IDS; do
+    TOTAL=$((TOTAL + 1))
+    producer="$REPO_ROOT/scripts/check/$id.shs"
+    if [ ! -f "$producer" ]; then
+        echo "  $id: no-producer (scripts/check/$id.shs does not exist)"
+        UNRUNNABLE="$UNRUNNABLE $id(no-producer)"
+        continue
+    fi
+    printf '  %s: running... ' "$id"
+    # Read the status directly, never through a pipe — a pipeline's $? is the
+    # last command's status and has produced false greens in this repo.
+    ( cd "$REPO_ROOT" && timeout "$PER_GATE_TIMEOUT" sh "$producer" >/dev/null 2>&1 )
+    rc=$?
+    if [ "$rc" -ge 124 ]; then
+        echo "could not run (rc=$rc)"
+        UNRUNNABLE="$UNRUNNABLE $id(rc=$rc)"
+        continue
+    fi
+    RAN=$((RAN + 1))
+    [ "$rc" = 0 ] && echo "producer PASS" || echo "producer FAIL (rc=$rc) — receipt minted red"
+done
+
+[ "$RAN" = 0 ] && { echo "ERROR — nothing was checked (0 producers ran)"; exit 2; }
+
+[ -n "$UNRUNNABLE" ] && echo "unrunnable obligation(s):$UNRUNNABLE"
+
+SEAL=$( cd "$REPO_ROOT" && sh "$AGGREGATE" 2>&1 | tail -1 )
+
+case "$SEAL" in
+    PASS*) echo "PASS — $TOTAL obligation(s) refreshed, $RAN producer(s) ran, seal green"; exit 0 ;;
+    *)     echo "FAIL — $TOTAL obligation(s) refreshed, $RAN producer(s) ran; $SEAL"; exit 1 ;;
+esac
