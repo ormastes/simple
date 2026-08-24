@@ -2357,3 +2357,18 @@ one paired host sample changes from 6.91 s / 284,052 KiB to 6.02 s /
 281,760 KiB. This supports the no-regression claim but is not treated as a
 general speedup. Current authority totals are 21,435 raw calls, 2,126 explicit,
 and 19,309 missing. Signed and admitted provider evidence remains zero.
+
+## Shared HIR heap-reference wrapper authority
+
+`hir_heap_ref_wellformed` now returns directly from a lexical `unsafe(ffi)`
+block. Its five hot callers retain exactly one wrapper dispatch and one runtime
+probe; the wrapper adds no scalar, branch, allocation, copy, or loop work.
+Optimizer findings remain 70 and RSS is effectively unchanged (288,324 versus
+288,296 KiB). The one-shot optimizer wall time rose from 4.35 s to 6.45 s even
+though its finding set and source algorithm are unchanged, so it is recorded as
+tooling noise rather than runtime-performance evidence. The added authority
+assertion passes; the broader source-contract spec remains 5/9 because four
+pre-existing expectations for other lowering files are stale.
+
+Current authority totals are 21,435 raw calls, 2,127 explicit, and 19,308
+missing. Signed and admitted provider evidence remains zero.

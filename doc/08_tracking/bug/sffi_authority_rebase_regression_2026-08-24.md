@@ -24,7 +24,8 @@ net regression to 11. Scoping the two runtime-cache environment reads and its
 one conditional cached-object existence probe yields 2,124 explicit and 19,311
 missing, reducing the net regression to 8. Scoping both HIR-entry heap-reference
 formation probes yields 2,126 explicit and 19,309 missing, reducing the net
-regression to 6.
+regression to 6. Scoping the shared HIR heap-reference wrapper yields 2,127
+explicit and 19,308 missing, reducing the net regression to 5.
 
 ## Required resolution
 

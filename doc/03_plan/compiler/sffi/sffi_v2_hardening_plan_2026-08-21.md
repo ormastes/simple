@@ -1373,3 +1373,10 @@ a temporary or changing the absent-owner short circuit. Current census: 21,435
 calls (2,126 explicit, 19,309 missing), with zero signed/admitted. The focused
 guard spec passes 8/8, optimizer findings remain 195, and paired measurement is
 6.91 s / 284,052 KiB before versus 6.02 s / 281,760 KiB after.
+
+The shared HIR heap-reference wrapper now returns directly from lexical FFI
+authority, preserving its five-call hot-path shape. Current census: 21,435
+calls (2,127 explicit, 19,308 missing), zero signed/admitted. Optimizer findings
+remain 70 and RSS remains flat; do not infer a runtime regression from the
+single noisy optimizer-process wall-time pair. Four unrelated stale assertions
+keep the broad source-contract spec at 5/9 and require their own owner repair.
