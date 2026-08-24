@@ -1506,6 +1506,12 @@ remain 76; analyzer evidence is 7.64 s / 270,336 KiB before versus 9.96 s /
 270,224 KiB after. Its wildcard SFFI import keeps this ambient call invisible
 to the source census, reinforcing the resolved-HIR inventory requirement.
 
+Wildcard SFFI imports are now included by the fast source census, revealing 155
+additional calls. Current source lower bound: 21,711 calls (2,188 explicit,
+19,523 missing). Full-scan performance improves from 27.18 s / 14,540 KiB to
+24.46 s / 14,488 KiB. Continue to resolved HIR for truly ambient, aliased, and
+generated symbol identity.
+
 The LLVM target module now scopes both normalized target-policy reads without
 changing provider cardinality. Optimizer findings remain 22 and paired analyzer
 evidence is 5.94 s / 271,172 KiB before versus 4.93 s / 270,708 KiB after.

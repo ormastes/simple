@@ -2367,6 +2367,19 @@ wildcard SFFI import rather than a local declaration or named import, the source
 census still omits the call; totals remain 21,556 / 2,187 / 19,369. This is
 lexically minimized but not inventory-authoritative, signed, or verified.
 
+## Wildcard SFFI import census correction
+
+The census now recognizes `use ...sffi...*` and matches direct `rt_*`/`spl_*`
+calls only within those files, using the existing per-file compiled regex. Its
+selftest proves executable wildcard calls are included while call-shaped text
+is excluded. The correction adds 155 real rows: one lexical unsafe and 154
+missing, including the LLVM-library reflection family.
+
+Corrected totals are 21,711 calls, 2,188 explicit, and 19,523 missing. The full
+scan improves from 27.18 s / 14,540 KiB to 24.46 s / 14,488 KiB, so broader
+coverage adds no measured performance or memory regression. Truly ambient calls
+without a declaration or SFFI import still require resolved-HIR inventory.
+
 ## Cranelift backend policy boundary
 
 The Cranelift adapter's unsupported-MIR and no-mangle reads now use minimal

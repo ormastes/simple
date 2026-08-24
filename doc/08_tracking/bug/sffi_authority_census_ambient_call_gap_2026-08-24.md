@@ -25,6 +25,18 @@ foreign symbol from a pure-Simple function that happens to use an `rt_*` name.
 The source scanner may remain a fast migration smoke test, but its report and
 ratchet must label coverage as partial until reconciled against the HIR output.
 
+## Partial source-level improvement
+
+Wildcard imports from an SFFI path are now recognized. Within those files the
+scanner adds direct `rt_*`/`spl_*` candidates to its per-file compiled raw-
+symbol regex. A fixture proves a wildcard-imported raw call is classified while
+the same spelling inside text remains ignored.
+
+This discovers 155 additional rows, including the LLVM-library fallback call.
+The truly ambient `common/mir_text_codegen.spl` call still lacks a declaration
+or SFFI import and remains invisible, so this issue stays open pending resolved
+HIR identity.
+
 ## Acceptance
 
 1. The ambient `mir_text_codegen.spl` call appears exactly once.

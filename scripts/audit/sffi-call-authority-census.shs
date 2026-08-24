@@ -41,6 +41,7 @@ xargs -0 -r -n 200 perl -0ne '
     my @code_lines;
     my %raw;
     my $in_sffi_use = 0;
+    my $sffi_glob = 0;
 
     # Mask comments, ordinary string literals, and multiline docstrings once,
     # preserving indentation and line numbers. The census is a code inventory:
@@ -99,6 +100,9 @@ xargs -0 -r -n 200 perl -0ne '
             $in_sffi_use = 0 if $tail =~ /\}/;
             next;
         }
+        if ($line =~ /^\s*use\s+[^\n]*sffi[^\n]*\.\s*\*/) {
+            $sffi_glob = 1;
+        }
         if ($in_sffi_use) {
             while ($line =~ /\b((?:rt|spl)_[A-Za-z_]\w*)\b/g) { $raw{$1} = 1; }
             $in_sffi_use = 0 if $line =~ /\}/;
@@ -109,8 +113,10 @@ xargs -0 -r -n 200 perl -0ne '
     # declarations/imports and need no function-body scan at all; files that
     # do should match only candidate foreign names rather than parsing every
     # ordinary call and rejecting it through a hash lookup afterward.
-    next unless %raw;
-    my $raw_names = join("|", map { quotemeta($_) } sort keys %raw);
+    next unless %raw || $sffi_glob;
+    my @raw_patterns = map { quotemeta($_) } sort keys %raw;
+    push @raw_patterns, "(?:rt|spl)_[A-Za-z_]\\w*" if $sffi_glob;
+    my $raw_names = join("|", @raw_patterns);
     my $raw_call_re = qr/(?<![A-Za-z0-9_])($raw_names)(?![A-Za-z0-9_])\s*\(/;
     (my $relative = $file) =~ s/^\Q$ENV{SFFI_ROOT}\E\///;
 
