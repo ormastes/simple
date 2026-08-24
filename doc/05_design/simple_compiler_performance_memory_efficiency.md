@@ -46,6 +46,28 @@ value/region/allocation/copy indexes and driver diagnostic projection are staged
 
 `PerfRuleRegistry` owns stable code, group, tier, default kind/policy, fix support, and suppression. `PerfDiagnostic` projects to legacy V1 only for compatibility-owned rules and to deterministic V2 text/JSON/LSP. Exact source origin is mandatory; textual location recovery is removed per migrated rule.
 
+For typed collection rules, future production authority is reserved for a
+sealed post-resolution registry built from the current module's identities and
+available signatures. The current API reports only `metadata_admitted` and
+`registry_structurally_valid`; these names deliberately do not claim
+authenticity. Nonempty caller text is not a verified receipt. Raw symbol
+integers are compilation/module-symbol-table-local and must never be serialized
+as stable operation identity. Fixture registries remain test-only. The first
+COLL002 projection uses the distinct `ContainsLookup` operation kind, exact
+Array receiver, exactly one explicit call argument, linear cost, and loop
+ancestry; argument/return type compatibility remains a sealed-builder gate. A
+generic linear lookup must not inherit the COLL002 code.
+
+The proposed driver hook is after retained resolved HIR passes post-HIR validation and
+before typecheck/MIR/mono dispatch. It scans each admitted module once. The
+adapter converts typed findings through the shared policy port as
+`TypedProven`; Allow suppresses, Warn continues, and Deny fails. Invalid or
+revision-mismatched registries yield one visible analysis-incomplete record,
+not silent global suppression. This hook remains disabled until the built-in
+identity/runtime contract tracked in
+`doc/08_tracking/bug/typed_collection_perf_builtin_identity_2026-08-24.md`
+is satisfied.
+
 Configuration-name membership must not allocate the complete registry for every SDN or
 attribute entry. `all_lint_names` remains the enumeration surface; the hot parser path
 uses allocation-free `lint_name_is_known` dispatch. A parity fixture prevents drift.
