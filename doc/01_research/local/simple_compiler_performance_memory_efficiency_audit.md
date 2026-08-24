@@ -2823,10 +2823,10 @@ spaces with a fixed-point `contains("  ")` plus whole-string `replace` loop.
 For a line of length `n` and a maximum space run `r`, that performs
 `O(n log r)` scans and transient copies. The replacement is now one ordered
 scan which returns the original normalized line unchanged, and otherwise joins
-unchanged span fragments once: `O(n)` work and output-sized storage. It preserves tabs,
-Unicode/non-space spans, operator-rewrite order, context cleanup, and final
-trim behavior. Boundary and idempotence contracts were added but not executed
-under the user's no-verification instruction.
+unchanged span fragments once: `O(n)` work and output-sized storage. It
+preserves tabs, Unicode/non-space spans, operator-rewrite order, context
+cleanup, and final trim behavior. Boundary and idempotence contracts were
+added but not executed under the user's no-verification instruction.
 
 ### Linear `check-tier` accumulation
 
@@ -2848,3 +2848,13 @@ retains unchanged code spans, emits one repeated-space fragment per quoted
 span, and joins once. Quote, escape, unterminated-string, inline-comment,
 Unicode-byte, and column-width behavior remain unchanged; lines requiring no
 masking return their original value.
+
+Keyword extraction then performed roughly thirty sequential full-line
+`replace(punctuation, " ")` operations followed by a split, multiplying scans
+and transient allocations for every checked line. A single byte-indexed span
+collector now recognizes the exact legacy ASCII-space/punctuation delimiter
+set and emits only non-empty word slices in encounter order. Tabs and UTF-8
+bytes remain non-delimiters, matching the prior split behavior. This changes
+the normalization phase from many `O(n)` materializations to one `O(n)` scan.
+Direct delimiter, duplicate-order, tab, backslash, hash, and UTF-8 contracts
+were added but not executed under the user's no-verification instruction.
