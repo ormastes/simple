@@ -3273,10 +3273,16 @@ int64_t rt_value_as_int(int64_t value) {
      * the string registry and kind == RT_VALUE_HEAP_STRING) -- NOT a bare
      * `(value & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP` test. That distinction
      * is load-bearing: TAG_HEAP is 0x1, so every ODD value would test as "heap",
-     * and two pure-Simple call sites pass a RAW, UNTAGGED i64 here and depend on
-     * the bare shift -- `rt_value_as_int(load_symbol_slot >> 32)` and
-     * `rt_value_as_int(packed_return_local & 0xFFFFFFFF)`, both in
-     * src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl (:700, :1011).
+     * and a pure-Simple call site passes a RAW, UNTAGGED i64 here and depends on
+     * the bare shift -- `rt_value_as_int(packed_return_local & 0xFFFFFFFF)` in
+     * src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl.
+     * (The former sibling call site `rt_value_as_int(load_symbol_slot >> 32)` in
+     * the same file was REMOVED 2026-08-24: its "SymbolId decays to a raw i64"
+     * premise was measured FALSE on the seed's tree-walk interpreter, where the
+     * slot is a live SymbolId Object and the shift failed the whole build with
+     * "cannot convert object to int". That site now reads the id through the
+     * typed MirInst accessor bootstrap_load_global_symbol_id. This function's
+     * own contract is unchanged.)
      * Pinned by P4 of src/runtime/test/rt_value_as_int_text_decode_selfcheck.c.
      *
      * Text of exactly one codepoint yields THAT CODE POINT, matching the

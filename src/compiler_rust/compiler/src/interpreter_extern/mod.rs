@@ -2869,10 +2869,28 @@ pub(crate) fn call_extern_function(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     // Evaluate all arguments upfront
-    let evaluated: Vec<Value> = args
-        .iter()
-        .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut evaluated: Vec<Value> = Vec::with_capacity(args.len());
+    for (i, a) in args.iter().enumerate() {
+        match evaluate_expr(&a.value, env, functions, classes, enums, impl_methods) {
+            Ok(v) => evaluated.push(v),
+            Err(e) => {
+                // Level-gated attribution probe: an extern ARGUMENT that fails
+                // to evaluate is otherwise reported with no callee and no
+                // position, which is what made `cannot convert object to int`
+                // unlocalizable during the io_runtime native-build chain.
+                if std::env::var("SIMPLE_DEBUG_EXTERN_ARG").is_ok() {
+                    eprintln!(
+                        "[DEBUG extern-arg] extern={} arg_index={} arg_expr={:?} err={}",
+                        name,
+                        i,
+                        a.value,
+                        e
+                    );
+                }
+                return Err(e);
+            }
+        }
+    }
 
     call_extern_function_with_values(name, &evaluated, env, functions, classes, enums, impl_methods)
 }

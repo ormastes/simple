@@ -1,6 +1,8 @@
 # `E-HIR-BLOCK-VALUE-TYPE-DECAYED` / `cannot convert object to int` blocks native-build of `io_runtime`
 
-**Status:** Open — FOURTH blocker in the `io_runtime` native-build chain
+**Status:** RESOLVED 2026-08-24 — see "Root cause (measured)" below. The
+filed signature was TWO defects, not one, and the headline one was a FALSE
+diagnostic.
 **Observed:** 2026-08-24
 **Area:** 30.hir / 35.semantics (block tail expression type capture)
 
@@ -75,3 +77,144 @@ Two further independent MIR-lowering gaps, measured on the same pass:
 
 - `std.common.text` — `MIR lowering error: unresolved method call: index_of`
 - `std.nogc_sync_mut.fs` — `MIR lowering error: undefined variable Dir`
+
+
+---
+
+## Root cause (measured) — 2026-08-24
+
+Re-measured on a freshly built seed (`cargo build --release --bin simple`,
+`BRC=0`), per the standing warning. The filed report conflated **two
+independent defects**. Exit codes below were read DIRECTLY into a variable on
+the line after each command, never through a pipe.
+
+### Defect 1 — `E-HIR-BLOCK-VALUE-TYPE-DECAYED` is a TAUTOLOGY (false diagnostic)
+
+`src/compiler/20.hir/hir_lowering/_Expressions/block_and_asm_lowering.spl`
+PROBE A **unconditionally** re-forms every value-block tail as
+`HirExpr(kind: …, has_type_: false, type_: nil, span: …)` — the containment
+added for the arm64 stage4 SIGSEGV. PROBE B then tested
+`hir_heap_ref_wellformed(block_value_expr.type_)`. `nil` is not heap-tagged, so
+`rt_heap_ref_wellformed(nil)` is **0 by construction**
+(`src/compiler_rust/runtime/src/value/objects.rs:395`,
+`src/runtime/runtime_native.c:8418`). PROBE B therefore fired on **every**
+value-position block, unconditionally.
+
+It also contradicts `HirExpr`'s own contract, under which `has_type_` is the
+authoritative presence bit and `type_` is meaningless when it is false.
+
+A level-gated capture probe (`SIMPLE_DEBUG_HIR_BLOCK_TAIL=1`) settled it:
+
+```text
+    349 P-HIR-BLOCK-TAIL-CAPTURE: has_type_=false type_ok=false span_ok=true
+```
+
+**349 captures, 349 DECAYED firings, 0 `E-HIR-BLOCK-VALUE-TYPE-MALFORMED`,
+0 `E-HIR-BLOCK-VALUE-SPAN-MALFORMED`.** Nothing ever decayed. The type was
+never present at capture in the first place, and PROBE A destroyed nothing.
+The message text ("became a non-well-formed heap reference between capture and
+HirBlock construction") was flatly wrong — a stale assertion of exactly the
+family the chain has been fixing all day.
+
+The harm was real even though the diagnostic was not: the 349 bogus lines
+pushed **95605 of 107605 bytes** of worker stderr into the middle-drop
+truncator, hiding the genuine diagnostics underneath. After the fix, DECAYED
+count is **0** and worker stderr fell to **28305 bytes**.
+
+Fix: PROBE B now tests the span (the word the function actually carries
+forward) and tests `type_` only when `has_type_` claims one is present.
+
+### Defect 2 — the REAL blocker: raw `LoadGlobal` payload decode
+
+With the noise gone, `cannot convert object to int` was still there — **3
+occurrences, not 349**, i.e. never the same defect. It carried no callee and no
+span, which is why it was unlocalizable.
+
+`SIMPLE_DEBUG_AS_INT_BT=1` (a pre-existing hook in `value_impl.rs`) gave the
+frame:
+
+```text
+simple_compiler::value::Value::as_int
+simple_compiler::interpreter::expr::ops::eval_op_expr
+simple_compiler::interpreter::expr::evaluate_expr
+simple_compiler::interpreter::interpreter_extern::call_extern_function
+```
+
+— an extern *argument* failing to evaluate. A new level-gated attribution probe
+(`SIMPLE_DEBUG_EXTERN_ARG=1`, in `interpreter_extern/mod.rs`) named it exactly:
+
+```text
+[DEBUG extern-arg] extern=rt_value_as_int arg_index=0 \
+  arg_expr=Binary { op: ShiftRight, left: Identifier("load_symbol_slot"), right: Integer(32) } \
+  err=semantic: type mismatch: cannot convert object to int
+```
+
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl` decoded the
+`MirInstKind.LoadGlobal` payload RAW — `rt_enum_payload` + `rt_tuple_get` +
+`slot >> 32` — on the commented premise that
+
+> SymbolId is a one-field struct and can decay to its raw i64 when crossing the
+> staged enum-payload ABI.
+
+**Measured false on the seed's tree-walk interpreter**, which is the engine the
+`native-build` worker runs: tuple slot 1 is a live `SymbolId` **Object**, the
+`: i64` annotation does not coerce it, and `>> 32` reached `Value::as_int` and
+failed the whole build.
+
+Fix (minimal, semantics-preserving): read both slots through typed `MirInst`
+accessors, the shape the `StoreGlobal` sibling in the same file
+(`translate_store_global_at` → `inst.bootstrap_store_global_symbol_id()`) has
+always used and which works on the same lanes. New twins in
+`src/compiler/50.mir/mir_instruction_graph.spl`:
+`bootstrap_load_global_dest_local_id()` / `bootstrap_load_global_symbol_id()`.
+A typed match reads the id under BOTH representations, so the `>> 32` is
+removed (with a typed match it would return garbage).
+
+**Honest caveat carried forward:** the deleted comment also claimed that typed
+re-wrapping "dereferences the scalar as an object in Phase 2 native compilers".
+That claim was falsified only on the interpreter; Phase-2 behaviour rests on
+the `StoreGlobal` precedent (same shape, same file, same lanes), not on a fresh
+measurement — the tracked stage binaries are separately advisory-RED, so it
+could not be measured today. The claim is recorded here rather than silently
+deleted.
+
+Also updated: the now-stale comment at `src/runtime/runtime_native.c` (~:3277)
+which named `rt_value_as_int(load_symbol_slot >> 32)` as a load-bearing
+raw-shift call site. That call site no longer exists; `rt_value_as_int`'s own
+contract is unchanged, and P4 of
+`src/runtime/test/rt_value_as_int_text_decode_selfcheck.c` pins the function's
+behaviour, not the call site.
+
+## Gate
+
+`scripts/check/check-hir-block-tail-and-loadglobal-decode.shs` — `--selftest`
+FIRST and FATAL (6 fixtures), verdict LAST. It does not grep source; it runs a
+real `native-build` of an `io_runtime` importer and classifies the worker
+output, reading the exit status directly into a variable on the line after the
+command. Fixtures cover both must-PASS and must-FAIL directions, and F4 pins
+that a non-zero exit with neither fenced signature is still a **FAIL**, so a
+further blocker underneath can never launder into a green verdict.
+
+Mutation-tested both directions (verbatim):
+
+```text
+MUTANT_ALWAYS_OK_RC=1
+FAIL - selftest failed (6 fixture(s) run); the classifier is untrustworthy, no scan was performed
+MUTANT_ALWAYS_FAIL_RC=1
+FAIL - selftest failed (6 fixture(s) run); the classifier is untrustworthy, no scan was performed
+selftest: 6 fixture(s) passed
+PASS - 6 case(s) checked, selftest only (no native-build performed)
+CLEAN_RC=0
+```
+
+## Retained probes (level-gated, default off)
+
+Per `.claude/rules/code-style.md` (logs are not unused code):
+
+- `SIMPLE_DEBUG_HIR_BLOCK_TAIL=1` — prints `has_type_` / `type_ok` / `span_ok`
+  at block-tail CAPTURE, so any future DECAYED report can be attributed to a
+  real decay rather than to this function's own placeholder substitution.
+- `SIMPLE_DEBUG_EXTERN_ARG=1` — names the callee, argument index and argument
+  expression when an extern argument fails to evaluate. This is the probe that
+  turned an unlocalizable `cannot convert object to int` into a one-line
+  answer; it is generic and will localize the whole class.

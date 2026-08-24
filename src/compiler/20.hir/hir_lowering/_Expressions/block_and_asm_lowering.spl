@@ -130,6 +130,14 @@ impl HirLowering:
                                     # case — 88 of 141 HirExpr constructions in
                                     # src/compiler pass `type_: nil`.
                                     val span_ok = hir_heap_ref_wellformed(expr.span)
+                                    # Level-gated capture probe: prints the
+                                    # ACTUAL presence bit / wellformedness of the
+                                    # tail type_ and span words at CAPTURE, so a
+                                    # DECAYED report can be attributed to a real
+                                    # decay rather than to this function's own
+                                    # placeholder substitution. Default off.
+                                    if (hir_expr_env_get("SIMPLE_DEBUG_HIR_BLOCK_TAIL") ?? "") == "1":
+                                        eprint("P-HIR-BLOCK-TAIL-CAPTURE: has_type_=" + expr.has_type_.to_text() + " type_ok=" + type_ok.to_text() + " span_ok=" + span_ok.to_text())
                                     if not span_ok:
                                         eprint("E-HIR-BLOCK-VALUE-SPAN-MALFORMED: block tail expression span word is not a well-formed heap reference; falling back to the block span")
                                     if span_ok:
@@ -157,8 +165,23 @@ impl HirLowering:
         # A fires-at-A / passes-at-B split says the value was malformed at
         # formation; a passes-at-A / fires-at-B split says it decayed in this
         # function (transient scope end), which is the streaming-HIR-owner class.
-        if block_has_value and not (hir_heap_ref_wellformed(block_value_expr.type_) and hir_heap_ref_wellformed(block_value_expr.span)):
-            eprint("E-HIR-BLOCK-VALUE-TYPE-DECAYED: block tail expression type_ word became a non-well-formed heap reference between capture and HirBlock construction; substituting a placeholder")
+        #
+        # `type_` is deliberately EXCLUDED from this probe. Probe A above always
+        # re-forms the tail expression as `has_type_: false, type_: nil`, and
+        # `rt_heap_ref_wellformed(nil)` is 0 by construction (nil is not
+        # heap-tagged), so testing `type_` here was a TAUTOLOGY that fired on
+        # every value-position block: measured 349 firings against 349 captures
+        # on the `io_runtime` repro, with 0 real malformations at capture
+        # (`has_type_=false type_ok=false span_ok=true` in all 349). It also
+        # contradicts HirExpr's own contract, under which `has_type_` is the
+        # authoritative presence bit and a `type_` word is meaningless when it
+        # is false. The 349 bogus lines cost 95605 of 107605 bytes of worker
+        # stderr to truncation, hiding the genuine diagnostics underneath.
+        # Probe the span (the word this function actually carries forward), and
+        # the type only when `has_type_` claims one is present.
+        val b_type_ok = (not block_value_expr.has_type_) or hir_heap_ref_wellformed(block_value_expr.type_)
+        if block_has_value and not (b_type_ok and hir_heap_ref_wellformed(block_value_expr.span)):
+            eprint("E-HIR-BLOCK-VALUE-TYPE-DECAYED: block tail expression type_/span word became a non-well-formed heap reference between capture and HirBlock construction; substituting a placeholder")
             # `b.span` unconditionally: probe B also covers the span word, so
             # re-reading `block_value_expr.span` here could be the very thing
             # that is malformed.
