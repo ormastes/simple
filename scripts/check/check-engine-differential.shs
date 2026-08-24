@@ -47,6 +47,18 @@
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 . "$ROOT_DIR/scripts/check/lib/emit_receipt.shs"
 
+# die_error <verdict-line> — print an ERROR verdict, REVOKE this gate's
+# evidence receipt, and exit 2. Every ERROR path goes through here for the same
+# reason check-aspect-seal.shs does: a gate that exits 2 has checked nothing,
+# and leaving its previous PASS receipt on disk lets a dead gate keep testifying
+# to check-critical-release-seal.shs. See receipt_error() in
+# lib/emit_receipt.shs.
+die_error() {
+    echo "$1"
+    receipt_error "check-engine-differential" "$1" || true
+    exit 2
+}
+
 FIXTURE_DIR="test/fixtures/engine_differential"
 
 # parse_new_divergences <harness-stdout-file> -> echoes the TRUE count of
@@ -93,7 +105,10 @@ classify() {
     return 0
 }
 
-if [ "${1:-}" = "--selftest" ]; then
+# The selftest runs FIRST and is FATAL on every invocation, not only on an
+# explicit --selftest: house convention, and this one is pure shell (a few
+# milliseconds), so there is no reason to make proving the classifier optional.
+selftest() {
     _sfail=0
     _sfdir=$(mktemp -d) || { echo "selftest FAIL: mktemp" >&2; exit 2; }
     trap 'rm -rf "$_sfdir"' EXIT
@@ -152,6 +167,11 @@ EOF
 
     rm -rf "$_sfdir"; trap - EXIT
     [ "$_sfail" -eq 0 ] || { echo "selftest FAILED"; exit 2; }
+    return 0
+}
+
+selftest
+if [ "${1:-}" = "--selftest" ]; then
     echo "PASS — 9 fixture(s) checked, selftest only (no scan requested)"
     exit 0
 fi
@@ -160,19 +180,16 @@ fi
 # form refused to run in every worktree while reporting it as "not the repo
 # root". See doc/08_tracking/bug/single_module_native_build_dies_in_any_escape_and_mir_for_2026-08-22.md
 if [ ! -e .git ] && [ ! -e .jj ]; then
-    echo "ERROR — must run from the repo root (native-build resolves its source root from cwd); nothing was checked"
-    exit 2
+    die_error "ERROR — must run from the repo root (native-build resolves its source root from cwd); nothing was checked"
 fi
 
 if [ ! -d "$FIXTURE_DIR" ]; then
-    echo "ERROR — nothing was checked (fixture corpus $FIXTURE_DIR is missing)"
-    exit 2
+    die_error "ERROR — nothing was checked (fixture corpus $FIXTURE_DIR is missing)"
 fi
 
 SIMPLE="${SIMPLE_BIN:-bin/simple}"
 if [ ! -x "$SIMPLE" ]; then
-    echo "ERROR — compiler binary '$SIMPLE' not found or not executable; nothing was checked"
-    exit 2
+    die_error "ERROR — compiler binary '$SIMPLE' not found or not executable; nothing was checked"
 fi
 
 N=$(find "$FIXTURE_DIR" -type f -name '*.spl' | wc -l | tr -d ' ')
@@ -180,7 +197,7 @@ N=$(find "$FIXTURE_DIR" -type f -name '*.spl' | wc -l | tr -d ' ')
 # The harness's exit status is read DIRECTLY into a variable on the line after
 # the invocation, never through a pipe: a pipeline's $? is the last command's
 # status and has produced false greens in this repo before.
-HARNESS_OUT=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+HARNESS_OUT=$(mktemp) || die_error "ERROR — nothing was checked (mktemp failed)"
 trap 'rm -f "$HARNESS_OUT"' EXIT
 
 set +e
