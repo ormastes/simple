@@ -624,6 +624,42 @@ fn apk_open_pack_v1(data: [u8]) -> ApkHandleV1:
         schema_version: schema, flags: flags, module_count: module_count,
         dir_size: dir_size, total_size: total_size)
 
+fn apk_validate_pack_directory_v1(data: [u8], handle: ApkHandleV1) -> text:
+    """Validate every directory entry and frame extent without inflation.
+    Empty text means valid; any diagnostic is a fail-closed admission error."""
+    if not handle.ok:
+        return handle.error_message
+    val dir_end = APK_HEADER_SIZE_V1 + handle.dir_size
+    var off = APK_HEADER_SIZE_V1
+    var slot = 0
+    while slot < handle.module_count:
+        val f = _apk_dir_next(data, off, dir_end)
+        if f.len() == 0:
+            return "aspect pack directory entry {slot} is corrupt"
+        val fix_off = f[14]
+        val payload_off = _apk_read_u64(data, fix_off)
+        val comp_size = _apk_read_u64(data, fix_off + 8)
+        val uncomp_size = _apk_read_u64(data, fix_off + 16)
+        val member_off = _apk_read_u64(data, fix_off + 24)
+        val member_len = _apk_read_u64(data, fix_off + 32)
+        val flags = _apk_read_u32(data, fix_off + 52)
+        val alignment = _apk_read_u32(data, fix_off + 56)
+        if payload_off < dir_end or comp_size < 0 or payload_off > data.len() or comp_size > data.len() - payload_off:
+            return "aspect pack frame {slot} escapes the payload area"
+        if alignment <= 0 or (alignment > 1 and (payload_off % alignment) != 0):
+            return "aspect pack frame {slot} is misaligned"
+        if uncomp_size < 0 or uncomp_size > APK_MAX_MODULE_UNCOMPRESSED_SIZE:
+            return "aspect pack frame {slot} has unreasonable uncompressed size"
+        if (flags & APK_CHUNK_FLAG_STORED) != 0 and comp_size != uncomp_size:
+            return "stored aspect pack frame {slot} has inconsistent sizes"
+        if member_off < 0 or member_len < 0 or member_off > uncomp_size or member_len > uncomp_size - member_off:
+            return "aspect pack member {slot} escapes its frame"
+        off = f[15]
+        slot = slot + 1
+    if off != dir_end:
+        return "aspect pack directory size does not match module_count"
+    ""
+
 # ---------------------------------------------------------------- module load
 
 fn _apk_load_error(code: text, message: text, examined: i64) -> ApkModuleLoadV1:
@@ -1327,12 +1363,16 @@ var _fc_generation: [i64] = []
 # freed only when nothing still holds it.
 var _fc_state: [i64] = []
 var _fc_refs: [i64] = []
+# Compact history ledger: preserves the public UNLOADED observation without
+# retaining payloads or full tombstone rows. One row per loader/key.
+var _fc_unloaded: Dict<text, bool> = {}
 
 var _pk_ld: [i64] = []
 var _pk_path: [text] = []
-var _pk_off: [i64] = []
-var _pk_len: [i64] = []
-var _pk_pool: [u8] = []
+# Keep each pack as one value. Arrays are reference-backed values, so this
+# avoids copying every byte into a second flat pool at registration and again
+# out of that pool on every first facet load.
+var _pk_data: [[u8]] = []
 
 # design §14.6 / §21 E-APACK007 activation cycle guard: a flat per-process
 # stack of (loader, facet_key) pairs CURRENTLY being activated. This module
@@ -1459,12 +1499,50 @@ fn apk_loader_register_pack(ld: i64, path: text, data: [u8]) -> bool:
         i = i + 1
     _pk_ld = _pk_ld.push(ld)
     _pk_path = _pk_path.push(path)
-    _pk_off = _pk_off.push(_pk_pool.len())
-    _pk_len = _pk_len.push(data.len())
-    var j = 0
-    while j < data.len():
-        _pk_pool = _pk_pool.push(data[j])
-        j = j + 1
+    _pk_data = _pk_data.push(data)
+    _ld_last_error[ld] = ""
+    true
+
+fn apk_loader_unregister_pack(ld: i64, path: text) -> bool:
+    """Remove one registered pack after releasing its unpinned bindings.
+    Pinned or activating bindings refuse removal, leaving registration intact.
+    """
+    var i = 0
+    while i < _stk_ld.len():
+        if _stk_ld[i] == ld:
+            # Before first publication there is intentionally no facet row
+            # from which to recover the pack path. Refuse any pack removal
+            # for this loader while an activation is in flight.
+            _ld_last_error[ld] = "loader has an activating facet; pack removal refused: {path}"
+            return false
+        i = i + 1
+    i = 0
+    while i < _fc_ld.len():
+        if _fc_ld[i] == ld and _fc_pack[i] == path and _fc_state[i] != APK_FC_UNLOADED:
+            if _fc_refs[i] > 0:
+                _ld_last_error[ld] = "pack has pinned facets: {path}"
+                return false
+        i = i + 1
+    _apk_release_pack_bindings(ld, path)
+    var next_ld: [i64] = []
+    var next_path: [text] = []
+    var next_data: [[u8]] = []
+    var found = false
+    i = 0
+    while i < _pk_ld.len():
+        if _pk_ld[i] == ld and _pk_path[i] == path:
+            found = true
+        else:
+            next_ld.push(_pk_ld[i])
+            next_path.push(_pk_path[i])
+            next_data.push(_pk_data[i])
+        i = i + 1
+    if not found:
+        _ld_last_error[ld] = "pack is not registered: {path}"
+        return false
+    _pk_ld = next_ld
+    _pk_path = next_path
+    _pk_data = next_data
     _ld_last_error[ld] = ""
     true
 
@@ -1665,13 +1743,7 @@ fn _apk_acquire_facet_body(ld: i64, catalog: [u8], facet_key: text, explicit: bo
     if pidx < 0:
         _ld_last_error[ld] = "routed pack is not deployed: {route.pack_path}"
         return _apk_facet_error("APK_PACK_MISSING", "routed pack is not deployed: {route.pack_path}")
-    var pack: [u8] = []
-    var j = 0
-    val base = _pk_off[pidx]
-    val plen = _pk_len[pidx]
-    while j < plen:
-        pack.push(_pk_pool[base + j])
-        j = j + 1
+    val pack = _pk_data[pidx]
 
     _ld_packs_opened[ld] = _ld_packs_opened[ld] + 1
     val handle = apk_open_pack_v1(pack)
@@ -1768,11 +1840,8 @@ fn apk_facet_state_v1(ld: i64, facet_key: text) -> i64:
     val i = _apk_fc_index(ld, facet_key)
     if i >= 0:
         return _fc_state[i]
-    var j = 0
-    while j < _fc_ld.len():
-        if _fc_ld[j] == ld and _fc_key[j] == facet_key:
-            return APK_FC_UNLOADED
-        j = j + 1
+    if _fc_unloaded.has("{ld}\0{facet_key}"):
+        return APK_FC_UNLOADED
     -1
 
 fn apk_facet_refcount_v1(ld: i64, facet_key: text) -> i64:
@@ -1815,12 +1884,75 @@ fn apk_facet_unpin_v1(ld: i64, facet_key: text) -> bool:
     _ld_last_error[ld] = ""
     true
 
-fn _apk_release_binding(ld: i64, i: i64):
+fn _apk_record_unloaded(ld: i64, key: text):
+    _fc_unloaded["{ld}\0{key}"] = true
+
+fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool):
     """design §14.7 step 5: free the binding. Only ever reached with a zero
     refcount, so a resident, still-referenced module can never be freed."""
-    _fc_state[i] = APK_FC_UNLOADED
-    _fc_len[i] = 0
-    _ld_unloads[ld] = _ld_unloads[ld] + 1
+    # Compact the SoA and payload pool in one pass. Leaving tombstone rows or
+    # dead payload bytes here makes reload grow RSS and every future lookup
+    # without bound.
+    var next_ld: [i64] = []
+    var next_key: [text] = []
+    var next_module: [text] = []
+    var next_aspect: [text] = []
+    var next_activation: [i64] = []
+    var next_pack: [text] = []
+    var next_off: [i64] = []
+    var next_len: [i64] = []
+    var next_pool: [u8] = []
+    var next_generation: [i64] = []
+    var next_state: [i64] = []
+    var next_refs: [i64] = []
+    var released = 0
+    var row = 0
+    while row < _fc_ld.len():
+        val drop_row = if by_pack:
+            _fc_ld[row] == ld and _fc_pack[row] == pack_path
+        else:
+            row == index
+        if drop_row:
+            _apk_record_unloaded(_fc_ld[row], _fc_key[row])
+            released = released + 1
+        else:
+            next_ld.push(_fc_ld[row])
+            next_key.push(_fc_key[row])
+            next_module.push(_fc_module[row])
+            next_aspect.push(_fc_aspect[row])
+            next_activation.push(_fc_activation[row])
+            next_pack.push(_fc_pack[row])
+            next_off.push(next_pool.len())
+            next_len.push(_fc_len[row])
+            var byte = 0
+            while byte < _fc_len[row]:
+                next_pool.push(_fc_pool[_fc_off[row] + byte])
+                byte = byte + 1
+            next_generation.push(_fc_generation[row])
+            next_state.push(_fc_state[row])
+            next_refs.push(_fc_refs[row])
+        row = row + 1
+    _fc_ld = next_ld
+    _fc_key = next_key
+    _fc_module = next_module
+    _fc_aspect = next_aspect
+    _fc_activation = next_activation
+    _fc_pack = next_pack
+    _fc_off = next_off
+    _fc_len = next_len
+    _fc_pool = next_pool
+    _fc_generation = next_generation
+    _fc_state = next_state
+    _fc_refs = next_refs
+    _ld_unloads[ld] = _ld_unloads[ld] + released
+
+fn _apk_release_binding(ld: i64, i: i64):
+    """Free one unpinned binding and retain only compact state history."""
+    _apk_compact_bindings(ld, i, "", false)
+
+fn _apk_release_pack_bindings(ld: i64, path: text):
+    """Free all unpinned bindings for a pack with one O(active-bytes) pass."""
+    _apk_compact_bindings(ld, -1, path, true)
 
 fn apk_unload_facet_v1(ld: i64, facet_key: text) -> ApkUnloadResultV1:
     """design §14.7: request unload of one bound facet.

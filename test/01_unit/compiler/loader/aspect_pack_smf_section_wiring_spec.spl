@@ -32,22 +32,25 @@ doc/05_design/REQ-APKW-04.md
 #   -> SmfReaderMemory header flag + section table
 #   -> smf_register_aspect_pack        (loader-side section -> provider bridge)
 #
-# The ModuleLoader.load integration is deliberately NOT implemented by the
-# producer slice. REQ-APKW-03..05 remain explicit pending examples below; they
-# must not be mistaken for producer coverage or silently compiled out.
+# ModuleLoader.load now validates and registers standalone aspect SMFs before
+# publishing them. The remaining catalog-ownership seam stays explicit below.
 
 use std.spec.{describe, it, pending}
 use compiler.loader.aspect_pack_section.{
     smf_find_section_by_wire_type, smf_has_aspect_pack, smf_aspect_pack_bytes,
-    smf_register_aspect_pack, SMF_SECTION_ASPECT_PACK_DIRECTORY
+    smf_register_aspect_pack, smf_validate_optional_aspect_pack,
+    SMF_SECTION_ASPECT_PACK_DIRECTORY
 }
+use compiler.loader.module_loader_compat.{ModuleLoader, LoadResult, moduleloader_aspect_loader_handle}
 use compiler.backend.linker.smf_writer.{SectionType}
 use compiler.driver.smf_writer.{generate_aspect_pack_smf}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.loader.smf_segment_load.{smf_section_extent}
 use std.common.aspect_pack.{
     ApkModuleSourceV2, ApkCatalogEntryV2, apk_build_pack_v2, apk_build_catalog_v2,
     APK_ENTRY_FACET, APK_ACT_LAZY_FACET, apk_loader_new, apk_load_facet,
-    apk_loader_packs_opened
+    apk_loader_packs_opened, apk_facet_pin_v1, apk_facet_unpin_v1,
+    apk_activation_stack_enter_v1, apk_activation_stack_exit_v1
 }
 use std.common.string_core.{text_to_bytes, bytes_to_text}
 use std.io_runtime.{file_write_bytes, file_read_bytes, mkdir_p}
@@ -94,6 +97,61 @@ fn _write_pack_smf() -> bool:
         case Ok(img):
             file_write_bytes(_pack_path(), img)
 
+fn _mutated_path(tag: text) -> text:
+    "build/test/aspect_pack_wiring_{tag}.smf"
+
+fn _with_executable_aspect_flags(bytes: [u8]) -> [u8]:
+    var out = bytes
+    val header = out.len() - 128
+    out[header + 8] = 0x41u8
+    out
+
+fn _without_aspect_flag(bytes: [u8]) -> [u8]:
+    var out = bytes
+    val header = out.len() - 128
+    out[header + 8] = 0u8
+    out
+
+fn _as_markerless_ordinary_smf(bytes: [u8]) -> [u8]:
+    var out = _without_aspect_flag(bytes)
+    val reader = match SmfReaderMemory.from_data(out):
+        case Ok(r): r
+        case Err(e): panic("reader: {e}")
+    # Reclassify the sole section as ordinary code; validation is header-only
+    # and does not execute or publish these fixture bytes.
+    out[reader.sections_offset] = 1u8
+    out
+
+fn _with_duplicate_aspect_section(bytes: [u8]) -> [u8]:
+    val reader = match SmfReaderMemory.from_data(bytes):
+        case Ok(r): r
+        case Err(e): panic("reader: {e}")
+    val header_start = bytes.len() - 128
+    val section_start = reader.sections_offset
+    val section_end = section_start + 64
+    var out = bytes[0:section_end]
+    out = out.concat(bytes[section_start:section_start + 64])
+    out = out.concat(bytes[section_end:header_start])
+    out = out.concat(bytes[header_start:bytes.len()])
+    val new_header = out.len() - 128
+    out[new_header + 16] = 2u8
+    out[new_header + 17] = 0u8
+    out[new_header + 18] = 0u8
+    out[new_header + 19] = 0u8
+    out
+
+fn _with_malformed_aspect_payload(bytes: [u8]) -> [u8]:
+    var out = bytes
+    val reader = match SmfReaderMemory.from_data(out):
+        case Ok(r): r
+        case Err(e): panic("reader: {e}")
+    val section_index = smf_find_section_by_wire_type(reader, SMF_SECTION_ASPECT_PACK_DIRECTORY)
+    val extent = match smf_section_extent(reader, section_index):
+        case Ok(e): e
+        case Err(e): panic("extent: {e}")
+    out[extent.file_offset] = 0u8
+    out
+
 use std.spec.step
 
 describe "aspect pack is a registered SMF section reachable from the load path":
@@ -124,15 +182,97 @@ describe "aspect pack is a registered SMF section reachable from the load path":
 
     it "REQ-APKW-03 ModuleLoader.load registers the pack it found in the section table":
         # @req: REQ-APKW-04
-        pending("ModuleLoader.load registration is outside the focused producer slice")
+        step("Load a standalone aspect SMF through the product loader")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(module):
+                expect(module.path).to_equal(_pack_path())
+            case LoadResult.Error(message):
+                panic("load: {message}")
+            case _:
+                panic("unexpected loader result")
+        val aspect_loader = moduleloader_aspect_loader_handle(loader)
+        val got = apk_load_facet(aspect_loader, _catalog_bytes(), "Widget/Debuggable")
+        expect(got.error_code).to_equal("")
+        expect(got.module_id).to_equal("debug.core")
 
     it "REQ-APKW-04 a facet routes through the catalog into the pack that load() opened":
         # @req: REQ-APKW-04
-        pending("ModuleLoader aspect_facet routing awaits load-time registration")
+        pending("Typed aspect_facet language-surface routing is a later plan slice")
 
     it "REQ-APKW-05 a module with no aspect-pack section registers nothing":
         # @req: REQ-APKW-04
-        pending("ModuleLoader negative registration coverage awaits the load hook")
+        step("Validate a markerless ordinary SMF without allocating provider state")
+        expect(_write_pack_smf()).to_equal(true)
+        val ordinary = _as_markerless_ordinary_smf(_read_smf())
+        val reader = match SmfReaderMemory.from_data(ordinary):
+            case Ok(r): r
+            case Err(e): panic("reader: {e}")
+        match smf_validate_optional_aspect_pack(reader):
+            case Ok(candidate): expect(candidate.present).to_equal(false)
+            case Err(e): panic("ordinary SMF: {e}")
+
+    it "rejects mismatched, duplicate, and executable aspect markers before lazy state exists":
+        step("Mutate the canonical image into three forbidden contracts")
+        expect(_write_pack_smf()).to_equal(true)
+        val canonical = _read_smf()
+        val bad_images = [
+            _without_aspect_flag(canonical),
+            _with_duplicate_aspect_section(canonical),
+            _with_executable_aspect_flags(canonical),
+            _with_malformed_aspect_payload(canonical)
+        ]
+        var loader = ModuleLoader.with_defaults()
+        expect(moduleloader_aspect_loader_handle(loader)).to_equal(-1)
+        var i = 0
+        while i < bad_images.len():
+            val path = _mutated_path(i.to_text())
+            expect(file_write_bytes(path, bad_images[i])).to_equal(true)
+            match loader.load(path):
+                case LoadResult.Error(_): pass
+                case _: panic("forbidden aspect artifact was admitted")
+            expect(loader.is_loaded(path)).to_equal(false)
+            expect(moduleloader_aspect_loader_handle(loader)).to_equal(-1)
+            i = i + 1
+
+    it "unload unregisters the pack and reload admits the same path again":
+        step("Load, resolve, unload, observe removal, then reload")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("initial load failed")
+        val handle = moduleloader_aspect_loader_handle(loader)
+        expect(apk_load_facet(handle, _catalog_bytes(), "Widget/Debuggable").found).to_equal(true)
+        loader.unload(_pack_path())
+        expect(loader.is_loaded(_pack_path())).to_equal(false)
+        expect(apk_load_facet(handle, _catalog_bytes(), "Widget/Debuggable").found).to_equal(false)
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("reload failed")
+        expect(apk_load_facet(handle, _catalog_bytes(), "Widget/Debuggable").found).to_equal(true)
+
+    it "pinned and activating facets block pack removal without partial unload":
+        step("Exercise both lifecycle refusal branches, then release cleanly")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("initial load failed")
+        val handle = moduleloader_aspect_loader_handle(loader)
+        val key = "Widget/Debuggable"
+        expect(apk_load_facet(handle, _catalog_bytes(), key).found).to_equal(true)
+        expect(apk_facet_pin_v1(handle, key)).to_equal(true)
+        loader.unload(_pack_path())
+        expect(loader.is_loaded(_pack_path())).to_equal(true)
+        expect(apk_facet_unpin_v1(handle, key)).to_equal(true)
+        expect(apk_activation_stack_enter_v1(handle, key)).to_equal(true)
+        loader.unload(_pack_path())
+        expect(loader.is_loaded(_pack_path())).to_equal(true)
+        apk_activation_stack_exit_v1(handle, key)
+        loader.unload(_pack_path())
+        expect(loader.is_loaded(_pack_path())).to_equal(false)
 
     it "REQ-APKW-06 the section bridge registers the pack with an aspect-pack loader":
         # @req: REQ-APKW-04

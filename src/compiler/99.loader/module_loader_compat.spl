@@ -12,6 +12,8 @@ use compiler.loader.unload_ownership.{owned_global_symbol_names, global_symbols_
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.obj_taker.{SymbolType}
 use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
+use compiler.loader.aspect_pack_section.{smf_validate_optional_aspect_pack, smf_register_validated_aspect_pack}
+use std.common.aspect_pack.{apk_loader_new, apk_loader_unregister_pack}
 use std.io_runtime.{file_read_bytes}
 
 fn _path_tag(path: text) -> text:
@@ -205,6 +207,10 @@ struct ModuleLoader:
     semantic_dependencies: Dict<text, [text]>
     semantic_fingerprints: Dict<text, text>
     dependency_semantic_fingerprints: Dict<text, Dict<text, text>>
+    # Lazily-created single lifecycle owner for every aspect pack admitted by
+    # this loader. Ordinary source/SMF loads allocate no aspect state.
+    aspect_loader_cell: Dict<i64, i64>
+    aspect_pack_paths: Dict<text, bool>
 
 impl ModuleLoader:
     static fn new(config: ModuleLoaderConfig) -> ModuleLoader:
@@ -276,6 +282,14 @@ impl ModuleLoader:
             case Err(err):
                 return LoadResult.Error(message: "invalid SMF artifact {path}: {err}")
             case Ok(reader):
+                # Validate the complete aspect contract before allocating or
+                # publishing executable symbols. This is the transaction's
+                # read-only admission phase.
+                val aspect_candidate = match smf_validate_optional_aspect_pack(reader):
+                    case Err(message):
+                        return LoadResult.Error(message: "invalid aspect-pack artifact {path}: {message}")
+                    case Ok(candidate):
+                        candidate
                 var symbols: Dict<text, LoadedSymbol> = {}
                 val exported_smf_symbols: [SmfSymbol] = reader.exported_symbols()
                 for smf_sym in exported_smf_symbols:
@@ -355,13 +369,23 @@ impl ModuleLoader:
                             return LoadResult.Error(message: "Failed to restore executable memory for {sym_name}")
                         native_flush_icache(loaded_sym.address, loaded_sym.size)
 
-                val metadata_result = self.jit.load_smf_metadata(path)
-                match metadata_result:
-                    case Err(err):
-                        if symbols.keys().len() == 0:
-                            return LoadResult.Error(message: err)
-                    case Ok(_):
-                        pass
+                if not aspect_candidate.present:
+                    val metadata_result = self.jit.load_smf_metadata(path)
+                    match metadata_result:
+                        case Err(err):
+                            if symbols.keys().len() == 0:
+                                return LoadResult.Error(message: err)
+                        case Ok(_):
+                            pass
+
+                if aspect_candidate.present:
+                    if not self.aspect_loader_cell.has(0):
+                        self.aspect_loader_cell[0] = apk_loader_new()
+                    match smf_register_validated_aspect_pack(self.aspect_loader_cell[0], path, aspect_candidate):
+                        case Err(message):
+                            return LoadResult.Error(message: "aspect-pack commit failed {path}: {message}")
+                        case Ok(_):
+                            self.aspect_pack_paths[path] = true
 
                 val m = LoadedModule(path: path, reader: "", symbols: symbols, load_time: 0, version: 1)
                 self.modules[path] = m
@@ -374,12 +398,17 @@ impl ModuleLoader:
     me reload_with_intent(path: text, intent: ModuleLoadIntent) -> LoadResult:
         self.unload(path)
         if self.modules.has(path):
-            self.modules = self.modules.remove(path)
+            return LoadResult.Error(message: "module unload blocked: " + path)
         self.load_with_intent(path, intent)
 
     me unload(path: text):
         if not self.modules.has(path):
             return
+        if self.aspect_loader_cell.has(0) and self.aspect_pack_paths.has(path):
+            val removed_pack = apk_loader_unregister_pack(self.aspect_loader_cell[0], path)
+            if not removed_pack:
+                return
+            self.aspect_pack_paths = self.aspect_pack_paths.remove(path)
         val remove_jit = _collect_unload_jit_symbols(self, path)
         for sym_name in remove_jit:
             self.jit.drop_cached_symbol(sym_name)
@@ -552,8 +581,15 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
             semantic_exports: {},
             semantic_dependencies: {},
             semantic_fingerprints: {},
-            dependency_semantic_fingerprints: {}
+            dependency_semantic_fingerprints: {},
+            aspect_loader_cell: {},
+            aspect_pack_paths: {}
     )
+
+fn moduleloader_aspect_loader_handle(self: ModuleLoader) -> i64:
+    if self.aspect_loader_cell.has(0):
+        return self.aspect_loader_cell[0]
+    -1
 
 fn moduleloader_with_defaults() -> ModuleLoader:
     moduleloader_new(moduleloaderconfig_default())
