@@ -195,16 +195,29 @@ command. Fixtures cover both must-PASS and must-FAIL directions, and F4 pins
 that a non-zero exit with neither fenced signature is still a **FAIL**, so a
 further blocker underneath can never launder into a green verdict.
 
-Mutation-tested both directions (verbatim):
+The DEFAULT assertion is signature-absence, not exit 0, per the honest-gate
+precedent — blocker #5 (below) means exit 0 is not yet achievable, and a gate
+red at birth would pin nothing. `--require-success` asserts exit 0; flip it on
+as the default once #5 lands.
+
+Mutation-tested both directions, and the real end-to-end scan executed in both
+modes (verbatim):
 
 ```text
 MUTANT_ALWAYS_OK_RC=1
-FAIL - selftest failed (6 fixture(s) run); the classifier is untrustworthy, no scan was performed
+FAIL - selftest failed (8 fixture(s) run); the classifier is untrustworthy, no scan was performed
 MUTANT_ALWAYS_FAIL_RC=1
-FAIL - selftest failed (6 fixture(s) run); the classifier is untrustworthy, no scan was performed
-selftest: 6 fixture(s) passed
-PASS - 6 case(s) checked, selftest only (no native-build performed)
-CLEAN_RC=0
+FAIL - selftest failed (8 fixture(s) run); the classifier is untrustworthy, no scan was performed
+
+$ BUILD_TIMEOUT=300 sh scripts/check/check-hir-block-tail-and-loadglobal-decode.shs
+$ GATE_RC=$?
+GATE_RC=0
+selftest: 8 fixture(s) passed
+PASS - 2 case(s) checked, 0 E-HIR-BLOCK-VALUE-TYPE-DECAYED and 0 object-to-int; native-build exited 124, NOT success -- blocker #5 is open (...); pass --require-success to assert exit 0
+
+$ BUILD_TIMEOUT=300 sh scripts/check/check-hir-block-tail-and-loadglobal-decode.shs --require-success
+FAIL - 2 case(s) checked, both fenced signatures are absent but native-build exited 124 and --require-success was given
+GATE_STRICT_RC=1
 ```
 
 ## Retained probes (level-gated, default off)
@@ -251,3 +264,15 @@ reports that hang as a FAIL rather than being softened to a signature-only
 green.
 
 **Landed:** `be3e6fe4a21`
+
+
+## Defect-class neighbour, checked and CLEARED
+
+The sibling raw-looking decode in the same file —
+`rt_value_as_int(packed_return_local & 0xFFFFFFFF)` in the `Ret` terminator arm
+of `core_codegen.spl` — was inspected for the same premise and is **not** the
+same defect. Its input comes from the typed accessor
+`blocks[block_index].bootstrap_ret_local_id()`, i.e. already the shape this fix
+moved LoadGlobal onto, not from `rt_enum_payload` / `rt_tuple_get`. It is
+additionally guarded by `if packed_return_local > 0xFFFFFFFF`, an i64
+comparison that a live object could not reach silently. No change made.

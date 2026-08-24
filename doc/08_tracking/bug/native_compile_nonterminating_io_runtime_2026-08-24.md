@@ -88,13 +88,39 @@ rather than a profiler.
 
 ## Gate
 
-Already fenced, honestly RED, by
-`scripts/check/check-hir-block-tail-and-loadglobal-decode.shs`: its F4 selftest
-fixture pins that a non-zero exit with neither blocker-#4 signature present is
-still a **FAIL**, so this hang cannot launder into a green verdict. The real
-scan reports
-`FAIL — 2 case(s) checked, both fenced signatures are absent but native-build
-still exited 124; a further blocker is present`.
+Fenced by `scripts/check/check-hir-block-tail-and-loadglobal-decode.shs`.
+Following the honest-gate precedent, the DEFAULT assertion is
+signature-absence, not exit 0 — a gate that is red at birth pins nothing, since
+a real blocker-#4 regression and this hang would both exit 1 and be
+indistinguishable without reading prose. The residual exit status is therefore
+NAMED IN THE VERDICT LINE instead of being asserted away, and `--require-success`
+turns exit 0 into a hard assertion; flip that on as the default once this bug
+lands.
+
+Both modes measured end to end (`BUILD_TIMEOUT=300`), verbatim:
+
+```text
+$ BUILD_TIMEOUT=300 sh scripts/check/check-hir-block-tail-and-loadglobal-decode.shs
+$ GATE_RC=$?
+GATE_RC=0
+selftest: 8 fixture(s) passed
+PASS - 2 case(s) checked, 0 E-HIR-BLOCK-VALUE-TYPE-DECAYED and 0 object-to-int; native-build exited 124, NOT success -- blocker #5 is open (doc/08_tracking/bug/native_compile_nonterminating_io_runtime_2026-08-24.md); pass --require-success to assert exit 0
+
+$ BUILD_TIMEOUT=300 sh scripts/check/check-hir-block-tail-and-loadglobal-decode.shs --require-success
+selftest: 8 fixture(s) passed
+FAIL - 2 case(s) checked, both fenced signatures are absent but native-build exited 124 and --require-success was given
+GATE_STRICT_RC=1
+```
+
+Selftest fixture F4c pins that a DECAYED regression still outranks a non-zero
+exit, so the residual-exit allowance can never mask a real regression.
+
+## Operational note
+
+`timeout` kills the `native-build` parent but the `native_build_worker.spl`
+child SURVIVES as a ~2.1 GB, 100%-CPU orphan. Three were reaped by hand after
+this investigation. Anyone reproducing this should check
+`pgrep -af native_build_worker.spl` afterwards.
 
 ## Also still open (independent, measured on the same pass)
 

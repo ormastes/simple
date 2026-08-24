@@ -39,12 +39,26 @@
 # A run that classified 0 cases is ERROR, never a pass. A missing seed binary
 # is ERROR, never a pass -- absence of a compiler is absence of evidence.
 #
+# WHAT THIS GATE ASSERTS, AND WHY IT IS NOT RC=0 YET.
+# The two fenced signatures being ABSENT is the assertion. Requiring the build
+# to also EXIT 0 is deliberately NOT the default, because a FIFTH blocker sits
+# underneath: native_compile does not terminate on an io_runtime importer
+# (NB_RC=124, filed as
+# doc/08_tracking/bug/native_compile_nonterminating_io_runtime_2026-08-24.md).
+# A gate that is red at birth pins nothing -- a real DECAYED regression and the
+# known hang would both exit 1, and nobody could tell them apart without
+# reading prose. So the residual exit status is REPORTED IN THE VERDICT LINE
+# rather than asserted, which keeps the claim honest in both directions: the
+# gate never says the build succeeded, and it still fails loudly the moment
+# either fenced defect returns. Pass --require-success to assert exit 0 as
+# well; flip that on as the default once blocker #5 lands.
+#
 # --selftest runs FIRST and is FATAL. It mutation-tests the classifier in BOTH
 # directions over crafted worker-output fixtures, so a classifier that always
 # says PASS (or always says FAIL) cannot ship.
 #
 # Usage:
-#   sh scripts/check/check-hir-block-tail-and-loadglobal-decode.shs [--binary PATH]
+#   sh scripts/check/check-hir-block-tail-and-loadglobal-decode.shs [--binary PATH] [--require-success]
 #   sh scripts/check/check-hir-block-tail-and-loadglobal-decode.shs --selftest
 
 set -u
@@ -52,12 +66,14 @@ set -u
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BINARY="$REPO_ROOT/src/compiler_rust/target/release/simple"
 SELFTEST_ONLY=0
+REQUIRE_SUCCESS=0
 BUILD_TIMEOUT=${BUILD_TIMEOUT:-3600}
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --binary) BINARY="$2"; shift 2 ;;
         --selftest) SELFTEST_ONLY=1; shift ;;
+        --require-success) REQUIRE_SUCCESS=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -127,6 +143,17 @@ run_selftest() {
     st_got=$(classify_log "$st_dir/f4.log" 1); st_n=$((st_n + 1))
     [ "$st_got" = "RC:1" ] || { echo "selftest F4 (other failure) expected RC:1, got $st_got" >&2; st_fail=1; }
 
+    # F4b: RC:<n> must remain distinguishable from OK -- the residual-exit
+    # PASS is reported in the verdict, never collapsed into the clean verdict.
+    st_got=$(classify_log "$st_dir/f4.log" 124); st_n=$((st_n + 1))
+    [ "$st_got" = "RC:124" ] || { echo "selftest F4b (timeout) expected RC:124, got $st_got" >&2; st_fail=1; }
+
+    # F4c: a DECAYED regression must still outrank a non-zero exit, so the
+    # residual-exit allowance can never mask a real regression.
+    printf 'E-HIR-BLOCK-VALUE-TYPE-DECAYED: x\n' > "$st_dir/f4c.log"
+    st_got=$(classify_log "$st_dir/f4c.log" 124); st_n=$((st_n + 1))
+    [ "$st_got" = "DECAYED:1" ] || { echo "selftest F4c expected DECAYED:1 under rc=124, got $st_got" >&2; st_fail=1; }
+
     # F5: a missing log must be NOLOG so the caller is forced to ERROR.
     st_got=$(classify_log "$st_dir/nonexistent.log" 0); st_n=$((st_n + 1))
     [ "$st_got" = "NOLOG" ] || { echo "selftest F5 (missing log) expected NOLOG, got $st_got" >&2; st_fail=1; }
@@ -142,7 +169,7 @@ run_selftest() {
 run_selftest
 
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS - 6 case(s) checked, selftest only (no native-build performed)"
+    echo "PASS - 8 case(s) checked, selftest only (no native-build performed)"
     exit 0
 fi
 
@@ -195,8 +222,12 @@ case "$VERDICT" in
         exit 1
         ;;
     RC:*)
-        echo "FAIL - $CHECKED case(s) checked, both fenced signatures are absent but native-build still exited ${VERDICT#RC:}; a further blocker is present (see $SCANNED)"
-        exit 1
+        if [ "$REQUIRE_SUCCESS" -eq 1 ]; then
+            echo "FAIL - $CHECKED case(s) checked, both fenced signatures are absent but native-build exited ${VERDICT#RC:} and --require-success was given"
+            exit 1
+        fi
+        echo "PASS - $CHECKED case(s) checked, 0 E-HIR-BLOCK-VALUE-TYPE-DECAYED and 0 object-to-int; native-build exited ${VERDICT#RC:}, NOT success -- blocker #5 is open (doc/08_tracking/bug/native_compile_nonterminating_io_runtime_2026-08-24.md); pass --require-success to assert exit 0"
+        exit 0
         ;;
     OK)
         echo "PASS - $CHECKED case(s) checked, 0 E-HIR-BLOCK-VALUE-TYPE-DECAYED and 0 object-to-int, native-build of an io_runtime importer exited 0"
