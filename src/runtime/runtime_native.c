@@ -11656,6 +11656,138 @@ int32_t rt_cpu_is_riscv64(void) {
 void __simple_runtime_init(void) {
 }
 
+/* ----------------------------------------------------------------
+ * Startup aspect dynload — definition of the pre-main hook
+ *
+ * `llvm_native_link_hosted_support.spl:116,126` emits a WEAK declaration of
+ * `__simple_startup_before_main(argc, argv)` into the generated C `main` and
+ * calls it before `spl_init_args`'s successors — before `__simple_runtime_init`,
+ * before module initializers, before `__simple_main`. Until now NOTHING in the
+ * tree defined it, so the weak symbol resolved to NULL and the slot was
+ * permanently dead.
+ *
+ * This defines it: at startup, load the shared libraries named by the
+ * environment variable `SIMPLE_STARTUP_ASPECTS` (a `:`-separated list of
+ * paths, `;` on Windows) and call each one's `simple_aspect_pack_init(void)`
+ * entry. That is the runtime primitive underneath the "startup" activation
+ * mode of doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
+ * §9.4 ("startup — before application publication") and Phase 6 ("load startup
+ * packs before application publication").
+ *
+ * Deliberate choices:
+ *   - FAIL CLOSED, loudly (design §1809). A path that cannot be opened, or a
+ *     pack with no `simple_aspect_pack_init`, or an init that returns non-zero,
+ *     prints the offending path and reason to stderr and returns non-zero —
+ *     the generated `main` then exits 125. A startup aspect that silently did
+ *     not load is exactly the silent-nil failure this repo bans.
+ *   - RTLD_GLOBAL, not RTLD_LOCAL (unlike `spl_dlopen`): a startup aspect pack
+ *     exists to be visible to the program it is woven into.
+ *   - Unset or empty variable = no packs = success. Loading nothing is the
+ *     normal case, not an error; only a *named* pack that fails is fatal.
+ *   - This lives in runtime_native.c rather than in its own translation unit,
+ *     and that is load-bearing, not tidiness. A weak UNDEFINED reference does
+ *     NOT pull a member out of a static archive, so a definition sitting alone
+ *     in a new TU would never be linked and the hook would stay NULL — this
+ *     was measured, not assumed: a probe `main` whose only reference to the
+ *     runtime was the weak one linked fine and silently skipped the hook.
+ *     runtime_native.o is pulled in because the SAME generated `main` also
+ *     strongly references `spl_init_args`, `__simple_runtime_init` and
+ *     `__simple_runtime_shutdown`, which this TU owns; once the member is in
+ *     the link, the weak reference resolves to the definition below.
+ *     Moving this function out of this TU therefore silently disables it.
+ * ---------------------------------------------------------------- */
+
+#define SIMPLE_STARTUP_ASPECT_ENV  "SIMPLE_STARTUP_ASPECTS"
+#define SIMPLE_ASPECT_PACK_INIT    "simple_aspect_pack_init"
+
+#if defined(_WIN32)
+#define SIMPLE_STARTUP_ASPECT_SEP ';'
+#else
+#define SIMPLE_STARTUP_ASPECT_SEP ':'
+#endif
+
+static int simple_startup_load_aspect_pack(const char *path) {
+    void *library = NULL;
+    /* Casting a data pointer to a function pointer is undefined in C99 but
+     * required by POSIX dlsym; routed through a union, matching the existing
+     * convention in counterpart_abi_runtime.c:263. */
+    union { void *object; int (*init)(void); } bridge;
+
+#if defined(_WIN32)
+    library = (void *)LoadLibraryA(path);
+#else
+    library = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+#endif
+    if (!library) {
+        fprintf(stderr,
+                "simple runtime: startup aspect pack `%s` failed to load.\n",
+                path);
+#if !defined(_WIN32)
+        {
+            const char *why = dlerror();
+            if (why) fprintf(stderr, "  dlopen: %s\n", why);
+        }
+#endif
+        return 1;
+    }
+
+#if defined(_WIN32)
+    bridge.object = (void *)GetProcAddress((HMODULE)library,
+                                           SIMPLE_ASPECT_PACK_INIT);
+#else
+    bridge.object = dlsym(library, SIMPLE_ASPECT_PACK_INIT);
+#endif
+    if (!bridge.object) {
+        fprintf(stderr,
+                "simple runtime: startup aspect pack `%s` exports no `%s`.\n",
+                path, SIMPLE_ASPECT_PACK_INIT);
+        return 1;
+    }
+
+    if (bridge.init() != 0) {
+        fprintf(stderr,
+                "simple runtime: startup aspect pack `%s`: %s returned non-zero.\n",
+                path, SIMPLE_ASPECT_PACK_INIT);
+        return 1;
+    }
+    return 0;
+}
+
+int __simple_startup_before_main(int argc, char **argv) {
+    const char *spec = getenv(SIMPLE_STARTUP_ASPECT_ENV);
+    size_t start = 0;
+    size_t i = 0;
+    size_t len = 0;
+
+    (void)argc;
+    (void)argv;
+
+    if (!spec || !spec[0]) return 0;
+    len = strlen(spec);
+
+    for (i = 0; i <= len; i++) {
+        if (i != len && spec[i] != SIMPLE_STARTUP_ASPECT_SEP) continue;
+        if (i > start) {
+            size_t n = i - start;
+            char *path = (char *)malloc(n + 1);
+            int rc;
+            if (!path) {
+                fprintf(stderr,
+                        "simple runtime: out of memory reading %s.\n",
+                        SIMPLE_STARTUP_ASPECT_ENV);
+                return 1;
+            }
+            memcpy(path, spec + start, n);
+            path[n] = '\0';
+            rc = simple_startup_load_aspect_pack(path);
+            free(path);
+            if (rc != 0) return rc;
+        }
+        start = i + 1;
+    }
+    return 0;
+}
+
 void __simple_runtime_shutdown(void) {
     fflush(stdout);
     fflush(stderr);
