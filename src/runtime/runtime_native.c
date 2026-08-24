@@ -322,16 +322,44 @@ static int spl_gpu_provider_surface_complete(
         "rt_vulkan_present_buffer_regions_raw", "rt_vulkan_last_present_copy_bytes",
         "rt_vulkan_last_present_copy_rects", "rt_vulkan_destroy_swapchain"
     };
+    static const char *metal_required[] = {
+        "rt_metal_init", "rt_metal_is_available", "rt_metal_device_count",
+        "rt_metal_device_name", "rt_metal_device_memory", "rt_metal_create_device",
+        "rt_metal_destroy_device", "rt_metal_alloc_buffer", "rt_metal_free_buffer",
+        "rt_metal_buffer_upload_raw", "rt_metal_buffer_download_raw",
+        "rt_metal_compile_shader_raw", "rt_metal_load_library_raw",
+        "rt_metal_destroy_shader", "rt_metal_create_compute_pipeline_raw",
+        "rt_metal_destroy_pipeline", "rt_metal_dispatch_compute",
+        "rt_metal_create_compute_encoder", "rt_metal_end_compute_encoder",
+        "rt_metal_destroy_compute_encoder", "rt_metal_set_buffer",
+        "rt_metal_set_bytes_raw", "rt_metal_get_last_error",
+        "rt_metal_create_render_pipeline", "rt_metal_destroy_render_pipeline",
+        "rt_metal_create_texture", "rt_metal_free_texture", "rt_metal_begin_render_pass",
+        "rt_metal_end_render_pass", "rt_metal_draw_indexed", "rt_metal_draw_primitives",
+        "rt_metal_create_command_queue", "rt_metal_destroy_command_queue",
+        "rt_metal_create_command_buffer", "rt_metal_commit_command_buffer",
+        "rt_metal_wait_completed", "rt_metal_destroy_command_buffer",
+        "rt_metal_create_sampler", "rt_metal_destroy_sampler", "rt_metal_set_viewport",
+        "rt_metal_set_scissor", "rt_metal_create_swapchain", "rt_metal_destroy_swapchain",
+        "rt_metal_present", "rt_metal_run_blit_frame", "rt_metal_run_compute_frame"
+    };
     size_t i;
+    const char **required;
+    size_t required_count;
     if (backend_bit == SPL_GPU_PROVIDER_CUDA_BIT) {
-        for (i = 0; i < sizeof(cuda_required) / sizeof(cuda_required[0]); i++) {
-            if (!spl_gpu_provider_resolve(handle, cuda_required[i])) return 0;
-        }
+        required = cuda_required;
+        required_count = sizeof(cuda_required) / sizeof(cuda_required[0]);
+    } else if (backend_bit == SPL_GPU_PROVIDER_VULKAN_BIT) {
+        required = vulkan_required;
+        required_count = sizeof(vulkan_required) / sizeof(vulkan_required[0]);
+    } else if (backend_bit == SPL_GPU_PROVIDER_METAL_BIT) {
+        required = metal_required;
+        required_count = sizeof(metal_required) / sizeof(metal_required[0]);
+    } else {
         return 1;
     }
-    if (backend_bit != SPL_GPU_PROVIDER_VULKAN_BIT) return 1;
-    for (i = 0; i < sizeof(vulkan_required) / sizeof(vulkan_required[0]); i++) {
-        if (!spl_gpu_provider_resolve(handle, vulkan_required[i])) return 0;
+    for (i = 0; i < required_count; i++) {
+        if (!spl_gpu_provider_resolve(handle, required[i])) return 0;
     }
     return 1;
 }
@@ -843,6 +871,199 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_present_buffer_regions(
         swapchain, buffer, width, height, revision,
         (int64_t)(intptr_t)rect_bytes, rects_len);
     free(rect_bytes);
+    return result;
+}
+
+/* Metal provider dispatch. Core owns all RuntimeValue decoding; the admitted
+ * dylib sees only scalar handles, bounded raw bytes, and call-scoped loans. */
+#define SPL_METAL_DISPATCH0(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(void) { \
+        typedef int64_t (*fn_t)(void); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
+        return fn ? fn() : 0; }
+#define SPL_METAL_DISPATCH1(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0) { \
+        typedef int64_t (*fn_t)(int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
+        return fn ? fn(a0) : 0; }
+#define SPL_METAL_DISPATCH2(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1) { \
+        typedef int64_t (*fn_t)(int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
+        return fn ? fn(a0,a1) : 0; }
+#define SPL_METAL_DISPATCH3(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2) { \
+        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
+        return fn ? fn(a0,a1,a2) : 0; }
+#define SPL_METAL_DISPATCH4(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2,int64_t a3) { \
+        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
+        return fn ? fn(a0,a1,a2,a3) : 0; }
+#define SPL_METAL_DISPATCH5(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2,int64_t a3,int64_t a4) { \
+        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
+        return fn ? fn(a0,a1,a2,a3,a4) : 0; }
+#define SPL_METAL_DISPATCH8(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2,int64_t a3,int64_t a4,int64_t a5,int64_t a6,int64_t a7) { \
+        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
+        return fn ? fn(a0,a1,a2,a3,a4,a5,a6,a7) : 0; }
+#define SPL_METAL_DISPATCH12(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2,int64_t a3,int64_t a4,int64_t a5,int64_t a6,int64_t a7,int64_t a8,int64_t a9,int64_t a10,int64_t a11) { \
+        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
+        return fn ? fn(a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11) : 0; }
+#define SPL_METAL_DISPATCH13(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0,int64_t a1,int64_t a2,int64_t a3,int64_t a4,int64_t a5,int64_t a6,int64_t a7,int64_t a8,int64_t a9,int64_t a10,int64_t a11,int64_t a12) { \
+        typedef int64_t (*fn_t)(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t,int64_t); fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, #name); \
+        return fn ? fn(a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12) : 0; }
+
+SPL_METAL_DISPATCH0(rt_metal_init)
+SPL_METAL_DISPATCH0(rt_metal_is_available)
+SPL_METAL_DISPATCH0(rt_metal_device_count)
+SPL_METAL_DISPATCH1(rt_metal_device_memory)
+SPL_METAL_DISPATCH1(rt_metal_create_device)
+SPL_METAL_DISPATCH1(rt_metal_destroy_device)
+SPL_METAL_DISPATCH2(rt_metal_alloc_buffer)
+SPL_METAL_DISPATCH1(rt_metal_free_buffer)
+SPL_METAL_DISPATCH3(rt_metal_buffer_upload_raw)
+SPL_METAL_DISPATCH3(rt_metal_buffer_download_raw)
+SPL_METAL_DISPATCH3(rt_metal_compile_shader_raw)
+SPL_METAL_DISPATCH3(rt_metal_load_library_raw)
+SPL_METAL_DISPATCH1(rt_metal_destroy_shader)
+SPL_METAL_DISPATCH4(rt_metal_create_compute_pipeline_raw)
+SPL_METAL_DISPATCH1(rt_metal_destroy_pipeline)
+SPL_METAL_DISPATCH8(rt_metal_dispatch_compute)
+SPL_METAL_DISPATCH1(rt_metal_create_compute_encoder)
+SPL_METAL_DISPATCH1(rt_metal_end_compute_encoder)
+SPL_METAL_DISPATCH1(rt_metal_destroy_compute_encoder)
+SPL_METAL_DISPATCH4(rt_metal_set_buffer)
+SPL_METAL_DISPATCH4(rt_metal_set_bytes_raw)
+SPL_METAL_DISPATCH4(rt_metal_create_render_pipeline)
+SPL_METAL_DISPATCH1(rt_metal_destroy_render_pipeline)
+SPL_METAL_DISPATCH4(rt_metal_create_texture)
+SPL_METAL_DISPATCH1(rt_metal_free_texture)
+SPL_METAL_DISPATCH1(rt_metal_end_render_pass)
+SPL_METAL_DISPATCH3(rt_metal_draw_indexed)
+SPL_METAL_DISPATCH2(rt_metal_draw_primitives)
+SPL_METAL_DISPATCH1(rt_metal_create_command_queue)
+SPL_METAL_DISPATCH1(rt_metal_destroy_command_queue)
+SPL_METAL_DISPATCH1(rt_metal_create_command_buffer)
+SPL_METAL_DISPATCH1(rt_metal_commit_command_buffer)
+SPL_METAL_DISPATCH1(rt_metal_wait_completed)
+SPL_METAL_DISPATCH1(rt_metal_destroy_command_buffer)
+SPL_METAL_DISPATCH1(rt_metal_create_sampler)
+SPL_METAL_DISPATCH1(rt_metal_destroy_sampler)
+SPL_METAL_DISPATCH5(rt_metal_set_scissor)
+SPL_METAL_DISPATCH4(rt_metal_create_swapchain)
+SPL_METAL_DISPATCH1(rt_metal_destroy_swapchain)
+SPL_METAL_DISPATCH1(rt_metal_present)
+SPL_METAL_DISPATCH13(rt_metal_run_blit_frame)
+SPL_METAL_DISPATCH12(rt_metal_run_compute_frame)
+
+SPL_HOSTED_UNAVAILABLE_WEAK const char *rt_metal_device_name(int64_t device) {
+    typedef const char *(*fn_t)(int64_t);
+    fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, "rt_metal_device_name");
+    return fn ? fn(device) : "";
+}
+SPL_HOSTED_UNAVAILABLE_WEAK const char *rt_metal_get_last_error(void) {
+    typedef const char *(*fn_t)(void);
+    fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, "rt_metal_get_last_error");
+    return fn ? fn() : "";
+}
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_begin_render_pass(
+        int64_t command, int64_t texture, double r, double g, double b, double a) {
+    typedef int64_t (*fn_t)(int64_t,int64_t,double,double,double,double);
+    fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, "rt_metal_begin_render_pass");
+    return fn ? fn(command, texture, r, g, b, a) : 0;
+}
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_set_viewport(
+        int64_t encoder, double x, double y, double width, double height) {
+    typedef int64_t (*fn_t)(int64_t,double,double,double,double);
+    fn_t fn = (fn_t)spl_gpu_provider_symbol(SPL_GPU_PROVIDER_METAL_BIT, "rt_metal_set_viewport");
+    return fn ? fn(encoder, x, y, width, height) : 0;
+}
+
+#undef SPL_METAL_DISPATCH0
+#undef SPL_METAL_DISPATCH1
+#undef SPL_METAL_DISPATCH2
+#undef SPL_METAL_DISPATCH3
+#undef SPL_METAL_DISPATCH4
+#undef SPL_METAL_DISPATCH5
+#undef SPL_METAL_DISPATCH8
+#undef SPL_METAL_DISPATCH12
+#undef SPL_METAL_DISPATCH13
+
+static uint8_t *spl_metal_copy_text(int64_t value, int64_t *length_out) {
+    int64_t length;
+    const uint8_t *data;
+    uint8_t *copy;
+    if (!length_out) return NULL;
+    length = rt_string_len(value);
+    data = rt_string_data(value);
+    if (!data || length <= 0 || length > 268435456) return NULL;
+    copy = (uint8_t*)malloc((size_t)length);
+    if (!copy) return NULL;
+    memcpy(copy, data, (size_t)length);
+    *length_out = length;
+    return copy;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_compile_shader(int64_t device, int64_t source) {
+    int64_t length = 0, result;
+    uint8_t *copy = spl_metal_copy_text(source, &length);
+    if (!copy) return 0;
+    result = rt_metal_compile_shader_raw(device, (int64_t)(intptr_t)copy, length);
+    free(copy);
+    return result;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_create_compute_pipeline(
+        int64_t device, int64_t shader, int64_t entry) {
+    int64_t length = 0, result;
+    uint8_t *copy = spl_metal_copy_text(entry, &length);
+    if (!copy) return 0;
+    result = rt_metal_create_compute_pipeline_raw(
+        device, shader, (int64_t)(intptr_t)copy, length);
+    free(copy);
+    return result;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_load_library_array(int64_t device, int64_t data) {
+    int64_t length = rt_array_len_safe(data), result;
+    uint8_t *copy = spl_vulkan_copy_input_bytes(data, length);
+    if (!copy) return 0;
+    result = rt_metal_load_library_raw(device, (int64_t)(intptr_t)copy, length);
+    free(copy);
+    return result;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_buffer_upload(
+        int64_t buffer, int64_t data, int64_t size) {
+    int64_t result;
+    uint8_t *copy = spl_vulkan_copy_input_bytes(data, size);
+    if (!copy) return 0;
+    result = rt_metal_buffer_upload_raw(buffer, (int64_t)(intptr_t)copy, size);
+    free(copy);
+    return result;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_buffer_download(
+        int64_t data, int64_t buffer, int64_t size) {
+    int64_t result;
+    uint8_t *copy;
+    if (size <= 0 || size > 268435456) return 0;
+    copy = (uint8_t*)malloc((size_t)size);
+    if (!copy) return 0;
+    result = rt_metal_buffer_download_raw((int64_t)(intptr_t)copy, buffer, size);
+    if (result && rt_array_bytes_store_checked(data, copy, size) != size) result = 0;
+    free(copy);
+    return result;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_metal_set_bytes(
+        int64_t encoder, int64_t data, int64_t length, int64_t index) {
+    int64_t result;
+    uint8_t *copy = spl_vulkan_copy_input_bytes(data, length);
+    if (!copy) return 0;
+    result = rt_metal_set_bytes_raw(
+        encoder, (int64_t)(intptr_t)copy, length, index);
+    free(copy);
     return result;
 }
 

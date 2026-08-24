@@ -2253,6 +2253,12 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_font_load_array",
     "rt_file_write_bytes_array",
     "rt_metal_load_library_array",
+    "rt_metal_buffer_upload_raw",
+    "rt_metal_buffer_download_raw",
+    "rt_metal_set_bytes_raw",
+    "rt_metal_compile_shader_raw",
+    "rt_metal_load_library_raw",
+    "rt_metal_create_compute_pipeline_raw",
     // SimpleOS syscall adapters consume owning RuntimeValues.  Byte backing is
     // projected only inside the target runtime provider; these names must not
     // be replaced with a raw array-data pointer escape.
