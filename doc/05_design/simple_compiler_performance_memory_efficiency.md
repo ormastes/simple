@@ -6,7 +6,9 @@
 This design covers REQ-001..REQ-025 and NFR-001..NFR-015 as one staged program.
 The pass-integrity, shared local MIR facts, conservative escape, and lint/tool
 hot-path slices are implemented; the remaining typed/interprocedural/profile
-slices and runtime verification are explicitly incomplete.
+slices and runtime verification are explicitly incomplete. The first typed slice
+now provides a bounded request-local `HirPerfFacts` collector and COLL002 candidate
+projection; it is not yet a compiler-driver diagnostic pass.
 
 ## Data model
 
@@ -33,7 +35,14 @@ child proof surfaces and counts, and remains separate from module-pass execution
 
 ### Typed diagnostics
 
-`PerfFactCollector` visits typed HIR once and indexes events by function, loop, call, receiver, value, region origin, and source span. Rules query indexes and `OperationSummaryRegistry`; they never reparse or recursively traverse the module independently.
+`collect_hir_perf_facts` visits retained HIR once with an indexed worklist over
+generated immediate-child enumeration. The implemented record includes function,
+resolved method symbol, receiver evidence, source span, loop depth, operation/cost/
+effect metadata, ordering/materialization flags, and explicit incompleteness.
+`typed_coll002_linear_lookup_findings` consumes only verified linear-lookup metadata
+for a proven sequence receiver inside a dynamic loop. Missing types, unresolved
+methods, unknown metadata, and version mismatch emit no candidate. The remaining
+value/region/allocation/copy indexes and driver diagnostic projection are staged.
 
 `PerfRuleRegistry` owns stable code, group, tier, default kind/policy, fix support, and suppression. `PerfDiagnostic` projects to legacy V1 only for compatibility-owned rules and to deterministic V2 text/JSON/LSP. Exact source origin is mandatory; textual location recovery is removed per migrated rule.
 
