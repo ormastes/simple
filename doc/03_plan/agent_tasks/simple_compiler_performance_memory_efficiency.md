@@ -1257,6 +1257,16 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   type/signature cursor paths consume snapshot lines rather than rereading.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed formatter space-normalization tranche
+
+- Replace the fixed-point repeated-space `contains`/whole-string `replace`
+  loop with one ASCII-space-run scan and a final fragment join.
+- Return already-normalized lines unchanged and preserve
+  tabs, all non-space spans, operator cleanup order, and final trimming.
+- Add empty, normalized, leading/trailing, long-run, tab-adjacent, and
+  idempotence contracts plus a source guard against restoring the loop.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
