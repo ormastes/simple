@@ -1,25 +1,33 @@
 """
 ## Purpose and audience
-Purpose: Prove that smux system.
-Audience: compiler and tooling engineers who maintain this spec.
+Purpose: Prove the smux native terminal multiplexer's system-level behavior —
+session/window/pane persistence, attach/detach, split and resize, input/output
+routing, capture, the tmux-shaped compatibility surface, deferred features, and
+the observability counters.
+Audience: engineers changing `src/os/apps/smux/**` who need to know which
+operator-visible multiplexer behaviors are pinned before they touch the
+service, api, or contract layers.
 ## Operator workflow
 Run this spec with the test runner and read the per-scenario verdict lines;
 a failing scenario pinpoints the behavior that regressed.
 ## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
+These scenarios drive the smux service surface in interpreter mode with local
+in-memory session tables; the real PTY allocation and on-screen renderer are
+out of scope. Unit-level value-model coverage lives in
+`test/01_unit/os/smux_spec.spl`.
 # @manual: primary
 REQ-TOOLS-SMUX-SYSTEM-001
-doc/01_research/tools/REQ-TOOLS-SMUX-SYSTEM-001.md
-doc/03_plan/tools/REQ-TOOLS-SMUX-SYSTEM-001.md
-doc/04_architecture/tools/REQ-TOOLS-SMUX-SYSTEM-001.md
-doc/05_design/tools/REQ-TOOLS-SMUX-SYSTEM-001.md
+doc/01_research/os/qemu/tmux_simpleos.md
+doc/03_plan/sys_test/smux_caret_sspec_quality.md
+doc/04_architecture/os/tmux_simpleos.md
+doc/05_design/os/desktop/tmux_simpleos_tui.md
 """
 
 
 # smux_system_spec.spl — System feature spec for the smux native terminal multiplexer.
 #
 # Covers REQ-001 through REQ-012 and NFR-007 from
-#   doc/03_plan/sys_test/tmux_simpleos.md
+#   doc/03_plan/sys_test/smux_caret_sspec_quality.md
 #
 # Pattern: Modern SSpec describe/it blocks with expect(...) oracles, so a
 # failing assertion fails the example (and the run) instead of only printing.
@@ -213,77 +221,86 @@ fn _is_deferred(feature: text) -> bool:
 describe "smux native terminal multiplexer system behaviour":
 
     describe "REQ-001 — persistent session/window/pane model":
-        # @req REQ-001
-        it "should create session returns named session":
+        it "create session returns named session":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-001
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise create session returns named session")
             _reset()
             val s = _create_session("main")
             expect(s.name).to_equal("main")
 
-        # @req REQ-001
-        it "should session has non-empty id":
+        it "session has non-empty id":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-001
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise session has non-empty id")
             _reset()
             val s = _create_session("alpha")
             expect(s.id != "").to_be(true)
 
-        # @req REQ-001
-        it "should list sessions includes created session":
+        it "list sessions includes created session":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-001
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise list sessions includes created session")
             _reset()
             val s = _create_session("alpha")
             val list = _list_sessions()
-            expect(list.len()).to_equal(1)
+            expect(list.len()).to_equal(1)  # oracle: exactly one session was created, so the session table holds one row
             expect(list[0].id).to_equal(s.id)
 
-        # @req REQ-001
-        it "should session auto-creates window":
+        it "session auto-creates window":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-001
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise session auto-creates window")
             _reset()
             val s = _create_session("boot")
             val windows = _list_windows(s.id)
-            expect(windows.len()).to_equal(1)
+            expect(windows.len()).to_equal(1)  # oracle: creating a session auto-creates exactly one window
 
-        # @req REQ-001
-        it "should session auto-creates pane":
+        it "session auto-creates pane":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-001
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise session auto-creates pane")
             _reset()
             val s = _create_session("boot")
             val windows = _list_windows(s.id)
             val panes = _list_panes(s.id, windows[0].id)
-            expect(panes.len()).to_equal(1)
+            expect(panes.len()).to_equal(1)  # oracle: the auto-created window owns exactly one pane
 
-        # @req REQ-001
-        it "should multiple sessions all listed":
+        it "multiple sessions all listed":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-001
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise multiple sessions all listed")
             _reset()
             val _s1 = _create_session("s1")
             val _s2 = _create_session("s2")
             val list = _list_sessions()
-            expect(list.len()).to_equal(2)
+            expect(list.len()).to_equal(2)  # oracle: both created sessions remain listed
 
-        # @req REQ-001
-        it "should new_window adds window":
+        it "new_window adds window":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-001
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise new_window adds window")
             _reset()
             val s = _create_session("ws")
             val _w2 = _new_window(s.id, "editor")
             val windows = _list_windows(s.id)
-            expect(windows.len()).to_equal(2)
+            expect(windows.len()).to_equal(2)  # oracle: the auto-created window plus the explicitly added one
 
-        # @req REQ-001
-        it "should new_window auto-creates pane":
+        it "new_window auto-creates pane":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-001
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise new_window auto-creates pane")
             _reset()
             val s = _create_session("wp")
             val w2 = _new_window(s.id, "term")
             val panes = _list_panes(s.id, w2.id)
-            expect(panes.len()).to_equal(1)
+            expect(panes.len()).to_equal(1)  # oracle: a newly added window auto-creates exactly one pane
 
 
     describe "REQ-002 — pane-backed shell execution":
-        # @req REQ-002
-        it "should initial pane state is running":
+        it "initial pane state is running":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-002
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise initial pane state is running")
             _reset()
             val s = _create_session("sh")
@@ -291,8 +308,9 @@ describe "smux native terminal multiplexer system behaviour":
             val panes = _list_panes(s.id, wins[0].id)
             expect(panes[0].state).to_equal("running")
 
-        # @req REQ-002
-        it "should initial pane has non-zero dimensions":
+        it "initial pane has non-zero dimensions":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-002
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise initial pane has non-zero dimensions")
             _reset()
             val s = _create_session("dim")
@@ -304,8 +322,9 @@ describe "smux native terminal multiplexer system behaviour":
 
 
     describe "REQ-003 — attach/detach without session destruction":
-        # @req REQ-003
-        it "should attach registers client against session":
+        it "attach registers client against session":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-003
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise attach registers client against session")
             _reset()
             val s = _create_session("adet")
@@ -313,8 +332,9 @@ describe "smux native terminal multiplexer system behaviour":
             expect(att.attached).to_be(true)
             expect(att.session_id).to_equal(s.id)
 
-        # @req REQ-003
-        it "should detach returns true":
+        it "detach returns true":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-003
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise detach returns true")
             _reset()
             val s = _create_session("det")
@@ -322,26 +342,29 @@ describe "smux native terminal multiplexer system behaviour":
             val ok = _detach("client-2")
             expect(ok).to_be(true)
 
-        # @req REQ-003
-        it "should session persists after detach":
+        it "session persists after detach":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-003
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise session persists after detach")
             _reset()
             val s = _create_session("persist")
             val _att = _attach(s.id, "client-3", 80, 24)
             val _d = _detach("client-3")
             val list = _list_sessions()
-            expect(list.len()).to_equal(1)
+            expect(list.len()).to_equal(1)  # oracle: detach must not destroy the session, so one session remains
             expect(list[0].id).to_equal(s.id)
 
-        # @req REQ-003
-        it "should detach unknown client returns false":
+        it "detach unknown client returns false":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-003
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise detach unknown client returns false")
             _reset()
             val ok = _detach("ghost-client")
             expect(ok).to_equal(false)
 
-        # @req REQ-003
-        it "should reattach after detach succeeds":
+        it "reattach after detach succeeds":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-003
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise reattach after detach succeeds")
             _reset()
             val s = _create_session("reatt")
@@ -352,8 +375,9 @@ describe "smux native terminal multiplexer system behaviour":
 
 
     describe "REQ-004 — split/layout operations":
-        # @req REQ-004
-        it "should split vertical creates pane":
+        it "split vertical creates pane":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-004
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise split vertical creates pane")
             _reset()
             val s = _create_session("split")
@@ -362,8 +386,9 @@ describe "smux native terminal multiplexer system behaviour":
             val ok = _split_pane(s.id, wins[0].id, panes[0].id, "vertical")
             expect(ok).to_be(true)
 
-        # @req REQ-004
-        it "should split horizontal creates pane":
+        it "split horizontal creates pane":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-004
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise split horizontal creates pane")
             _reset()
             val s = _create_session("splith")
@@ -372,8 +397,9 @@ describe "smux native terminal multiplexer system behaviour":
             val ok = _split_pane(s.id, wins[0].id, panes[0].id, "horizontal")
             expect(ok).to_be(true)
 
-        # @req REQ-004
-        it "should split invalid pane returns false":
+        it "split invalid pane returns false":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-004
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise split invalid pane returns false")
             _reset()
             val s = _create_session("spliterr")
@@ -381,8 +407,9 @@ describe "smux native terminal multiplexer system behaviour":
             val ok = _split_pane(s.id, wins[0].id, "bad-pane-id", "vertical")
             expect(ok).to_equal(false)
 
-        # @req REQ-004
-        it "should resize pane returns true":
+        it "resize pane returns true":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-004
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise resize pane returns true")
             _reset()
             val s = _create_session("resize")
@@ -391,8 +418,9 @@ describe "smux native terminal multiplexer system behaviour":
             val ok = _resize_pane(panes[0].id, 120, 40)
             expect(ok).to_be(true)
 
-        # @req REQ-004
-        it "should resize invalid pane returns false":
+        it "resize invalid pane returns false":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-004
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise resize invalid pane returns false")
             _reset()
             val ok = _resize_pane("no-such-pane", 100, 30)
@@ -400,8 +428,9 @@ describe "smux native terminal multiplexer system behaviour":
 
 
     describe "REQ-005 — input/output routing":
-        # @req REQ-005
-        it "should send_command to valid pane succeeds":
+        it "send_command to valid pane succeeds":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-005
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise send_command to valid pane succeeds")
             _reset()
             val s = _create_session("io")
@@ -410,15 +439,17 @@ describe "smux native terminal multiplexer system behaviour":
             val ok = _send_command(panes[0].id, "echo hello")
             expect(ok).to_be(true)
 
-        # @req REQ-005
-        it "should send_command to invalid pane returns false":
+        it "send_command to invalid pane returns false":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-005
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise send_command to invalid pane returns false")
             _reset()
             val ok = _send_command("bad-pane", "echo hi")
             expect(ok).to_equal(false)
 
-        # @req REQ-005
-        it "should capture has correct pane identity after send":
+        it "capture has correct pane identity after send":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-005
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise capture has correct pane identity after send")
             _reset()
             val s = _create_session("iosend")
@@ -431,8 +462,9 @@ describe "smux native terminal multiplexer system behaviour":
 
 
     describe "REQ-006 — state query API":
-        # @req REQ-006
-        it "should list_sessions returns stable metadata":
+        it "list_sessions returns stable metadata":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-006
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise list_sessions returns stable metadata")
             _reset()
             val s = _create_session("stable")
@@ -441,8 +473,9 @@ describe "smux native terminal multiplexer system behaviour":
             expect(l1.len()).to_equal(l2.len())
             expect(l1[0].id).to_equal(l2[0].id)
 
-        # @req REQ-006
-        it "should list_windows returns stable metadata":
+        it "list_windows returns stable metadata":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-006
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise list_windows returns stable metadata")
             _reset()
             val s = _create_session("wstable")
@@ -451,8 +484,9 @@ describe "smux native terminal multiplexer system behaviour":
             expect(w1.len()).to_equal(w2.len())
             expect(w1[0].id).to_equal(w2[0].id)
 
-        # @req REQ-006
-        it "should list_panes returns stable metadata":
+        it "list_panes returns stable metadata":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-006
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise list_panes returns stable metadata")
             _reset()
             val s = _create_session("pstable")
@@ -462,8 +496,9 @@ describe "smux native terminal multiplexer system behaviour":
             expect(p1.len()).to_equal(p2.len())
             expect(p1[0].id).to_equal(p2[0].id)
 
-        # @req REQ-006
-        it "should pane metadata includes session and window ids":
+        it "pane metadata includes session and window ids":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-006
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise pane metadata includes session and window ids")
             _reset()
             val s = _create_session("pmeta")
@@ -475,8 +510,9 @@ describe "smux native terminal multiplexer system behaviour":
 
 
     describe "REQ-007 — capture API":
-        # @req REQ-007
-        it "should capture returns valid pane identity":
+        it "capture returns valid pane identity":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-007
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise capture returns valid pane identity")
             _reset()
             val s = _create_session("cap")
@@ -486,8 +522,9 @@ describe "smux native terminal multiplexer system behaviour":
             val cap = _capture(pid)
             expect(cap.pane_id).to_equal(pid)
 
-        # @req REQ-007
-        it "should capture rows is greater than zero":
+        it "capture rows is greater than zero":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-007
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise capture rows is greater than zero")
             _reset()
             val s = _create_session("caprows")
@@ -496,8 +533,9 @@ describe "smux native terminal multiplexer system behaviour":
             val cap = _capture(panes[0].id)
             expect(cap.rows > 0).to_be(true)
 
-        # @req REQ-007
-        it "should capture increments capture_count":
+        it "capture increments capture_count":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-007
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise capture increments capture_count")
             _reset()
             val s = _create_session("capmet")
@@ -509,8 +547,9 @@ describe "smux native terminal multiplexer system behaviour":
             val after = _get_metrics().capture_count
             expect(after).to_equal(before + 1)
 
-        # @req REQ-007
-        it "should capture on unknown pane returns minimal non-crash result":
+        it "capture on unknown pane returns minimal non-crash result":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-007
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise capture on unknown pane returns minimal non-crash result")
             _reset()
             val cap = _capture("no-pane")
@@ -518,16 +557,18 @@ describe "smux native terminal multiplexer system behaviour":
 
 
     describe "REQ-008 — compatibility-facing tmux-shaped API":
-        # @req REQ-008
-        it "should MuxSession has id and name fields":
+        it "MuxSession has id and name fields":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-008
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise MuxSession has id and name fields")
             _reset()
             val s = _create_session("compat")
             expect(s.id != "").to_be(true)
             expect(s.name).to_equal("compat")
 
-        # @req REQ-008
-        it "should MuxWindow has id and session_id":
+        it "MuxWindow has id and session_id":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-008
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise MuxWindow has id and session_id")
             _reset()
             val s = _create_session("cw")
@@ -535,8 +576,9 @@ describe "smux native terminal multiplexer system behaviour":
             expect(wins[0].id != "").to_be(true)
             expect(wins[0].session_id).to_equal(s.id)
 
-        # @req REQ-008
-        it "should MuxPane has id, window_id, session_id":
+        it "MuxPane has id, window_id, session_id":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-008
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise MuxPane has id, window_id, session_id")
             _reset()
             val s = _create_session("cp")
@@ -547,8 +589,9 @@ describe "smux native terminal multiplexer system behaviour":
             expect(p.window_id).to_equal(wins[0].id)
             expect(p.session_id).to_equal(s.id)
 
-        # @req REQ-008
-        it "should MuxCapture has non-empty pane_id":
+        it "MuxCapture has non-empty pane_id":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-008
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise MuxCapture has non-empty pane_id")
             _reset()
             val s = _create_session("cc")
@@ -557,8 +600,9 @@ describe "smux native terminal multiplexer system behaviour":
             val cap = _capture(panes[0].id)
             expect(cap.pane_id != "").to_be(true)
 
-        # @req REQ-008
-        it "should MuxSession to_text returns non-empty":
+        it "MuxSession to_text returns non-empty":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-008
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise MuxSession to_text returns non-empty")
             _reset()
             val s = _create_session("tt")
@@ -567,31 +611,35 @@ describe "smux native terminal multiplexer system behaviour":
 
 
     describe "REQ-009 — native-first backend, no upstream tmux dependency":
-        # @req REQ-009
-        it "should backend contract name is smux-native":
+        it "backend contract name is smux-native":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-009
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise backend contract name is smux-native")
             val name = _backend_name()
             expect(name).to_equal("smux-native")
 
-        # @req REQ-009
-        it "should service operates without host tmux":
+        it "service operates without host tmux":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-009
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise service operates without host tmux")
             _reset()
             val s = _create_session("natv")
             val wins = _list_windows(s.id)
             val panes = _list_panes(s.id, wins[0].id)
-            expect(panes.len()).to_equal(1)
+            expect(panes.len()).to_equal(1)  # oracle: the native backend auto-creates one pane with no host tmux present
 
 
     describe "REQ-010 — backend swap readiness boundary":
-        # @req REQ-010
-        it "should backend contract name queryable independently of adapter surface":
+        it "backend contract name queryable independently of adapter surface":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-010
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise backend contract name queryable independently of adapter surface")
             val name = _backend_name()
             expect(name != "").to_be(true)
 
-        # @req REQ-010
-        it "should pane has non-empty to_text representation":
+        it "pane has non-empty to_text representation":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-010
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise pane has non-empty to_text representation")
             _reset()
             val s = _create_session("bkswap")
@@ -602,8 +650,9 @@ describe "smux native terminal multiplexer system behaviour":
 
 
     describe "REQ-011 — explicit non-fatal failure handling":
-        # @req REQ-011
-        it "should split invalid pane returns false not crash":
+        it "split invalid pane returns false not crash":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-011
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise split invalid pane returns false not crash")
             _reset()
             val s = _create_session("err1")
@@ -611,29 +660,33 @@ describe "smux native terminal multiplexer system behaviour":
             val ok = _split_pane(s.id, wins[0].id, "ghost", "vertical")
             expect(ok).to_equal(false)
 
-        # @req REQ-011
-        it "should resize invalid pane returns false not crash":
+        it "resize invalid pane returns false not crash":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-011
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise resize invalid pane returns false not crash")
             _reset()
             val ok = _resize_pane("ghost", 80, 24)
             expect(ok).to_equal(false)
 
-        # @req REQ-011
-        it "should send_command invalid pane returns false not crash":
+        it "send_command invalid pane returns false not crash":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-011
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise send_command invalid pane returns false not crash")
             _reset()
             val ok = _send_command("ghost", "ls")
             expect(ok).to_equal(false)
 
-        # @req REQ-011
-        it "should detach unknown client returns false not crash":
+        it "detach unknown client returns false not crash":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-011
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise detach unknown client returns false not crash")
             _reset()
             val ok = _detach("nobody")
             expect(ok).to_equal(false)
 
-        # @req REQ-011
-        it "should capture unknown pane returns minimal result not crash":
+        it "capture unknown pane returns minimal result not crash":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-011
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise capture unknown pane returns minimal result not crash")
             _reset()
             val cap = _capture("nowhere")
@@ -641,50 +694,58 @@ describe "smux native terminal multiplexer system behaviour":
 
 
     describe "REQ-012 — declared deferrals remain deferred and are queryable":
-        # @req REQ-012
-        it "should copy-mode is deferred":
+        it "copy-mode is deferred":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-012
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise copy-mode is deferred")
             expect(_is_deferred("copy-mode")).to_be(true)
 
-        # @req REQ-012
-        it "should mouse is deferred":
+        it "mouse is deferred":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-012
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise mouse is deferred")
             expect(_is_deferred("mouse")).to_be(true)
 
-        # @req REQ-012
-        it "should key-table-compat is deferred":
+        it "key-table-compat is deferred":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-012
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise key-table-compat is deferred")
             expect(_is_deferred("key-table-compat")).to_be(true)
 
-        # @req REQ-012
-        it "should tmux-conf is deferred":
+        it "tmux-conf is deferred":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-012
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise tmux-conf is deferred")
             expect(_is_deferred("tmux-conf")).to_be(true)
 
-        # @req REQ-012
-        it "should control-mode is deferred":
+        it "control-mode is deferred":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-012
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise control-mode is deferred")
             expect(_is_deferred("control-mode")).to_be(true)
 
-        # @req REQ-012
-        it "should non-deferred feature returns false":
+        it "non-deferred feature returns false":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, REQ-012
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise non-deferred feature returns false")
             expect(_is_deferred("session-create")).to_equal(false)
 
 
     describe "NFR-007 — startup/operation observability counters":
-        # @req NFR-007
-        it "should startup_count increments with each session":
+        it "startup_count increments with each session":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, NFR-007
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise startup_count increments with each session")
             _reset()
-            expect(_get_metrics().startup_count).to_equal(0)
+            expect(_get_metrics().startup_count).to_equal(0)  # oracle: a reset service reports a zeroed startup counter
             val _s1 = _create_session("obs1")
-            expect(_get_metrics().startup_count).to_equal(1)
+            expect(_get_metrics().startup_count).to_equal(1)  # oracle: one session has been created since reset
             val _s2 = _create_session("obs2")
-            expect(_get_metrics().startup_count).to_equal(2)
+            expect(_get_metrics().startup_count).to_equal(2)  # oracle: two sessions have been created since reset
 
-        # @req NFR-007
-        it "should capture_count increments with each capture":
+        it "capture_count increments with each capture":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, NFR-007
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise capture_count increments with each capture")
             _reset()
             val s = _create_session("obscap")
@@ -693,28 +754,31 @@ describe "smux native terminal multiplexer system behaviour":
             val pid = panes[0].id
             val _c1 = _capture(pid)
             val _c2 = _capture(pid)
-            expect(_get_metrics().capture_count).to_equal(2)
+            expect(_get_metrics().capture_count).to_equal(2)  # oracle: two capture calls were issued against the pane
 
-        # @req NFR-007
-        it "should resize_count increments with each resize":
+        it "resize_count increments with each resize":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, NFR-007
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise resize_count increments with each resize")
             _reset()
             val s = _create_session("obsrez")
             val wins = _list_windows(s.id)
             val panes = _list_panes(s.id, wins[0].id)
             val _r = _resize_pane(panes[0].id, 100, 30)
-            expect(_get_metrics().resize_count).to_equal(1)
+            expect(_get_metrics().resize_count).to_equal(1)  # oracle: one resize call was issued against the pane
 
-        # @req NFR-007
-        it "should metrics are zero after reset":
+        it "metrics are zero after reset":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, NFR-007
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise metrics are zero after reset")
             _reset()
-            expect(_get_metrics().startup_count).to_equal(0)
-            expect(_get_metrics().capture_count).to_equal(0)
-            expect(_get_metrics().resize_count).to_equal(0)
+            expect(_get_metrics().startup_count).to_equal(0)  # oracle: reset zeroes the startup counter
+            expect(_get_metrics().capture_count).to_equal(0)  # oracle: reset zeroes the capture counter
+            expect(_get_metrics().resize_count).to_equal(0)  # oracle: reset zeroes the resize counter
 
-        # @req NFR-007
-        it "should all metric counters are non-negative":
+        it "all metric counters are non-negative":
+            # @req REQ-TOOLS-SMUX-SYSTEM-001, NFR-007
+            # @capture: the typed MuxSession/MuxWindow/MuxPane/MuxCapture values asserted below are the retained evidence for this outcome
             step("Exercise all metric counters are non-negative")
             _reset()
             val _s = _create_session("mneg")
