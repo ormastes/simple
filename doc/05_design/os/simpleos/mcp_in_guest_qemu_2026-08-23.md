@@ -13,6 +13,160 @@
 - **Context:** There is no MCP-on-SimpleOS artifact anywhere in this repo or in
   any of the 223 GitHub remote branches. This is net-new work.
 
+## STATUS UPDATE 2026-08-24 (4) — ROUTE A STEP 2 DONE: THE MCP SERVER RUNS IN THE GUEST
+
+**The MCP module graph is built into the aarch64 kernel, entered from the boot
+path under real firmware, and runs its startup and serve loop to a clean
+`exit(0)` on EOF — with no trap fired.** It has NOT answered a request; the gate
+lane feeds no input. That is step 3.
+
+`src/os/kernel/boot/limine_boot_aarch64.spl` now imports
+`app.mcp.main.{main as mcp_server_main}` and calls it after the P10 marker —
+the same discipline as the P8/P9/P10 probes, so nothing beneath it can turn the
+boot gate's PASS into a FAIL.
+
+### The undeclared-symbol axis, finally measured: 16, and exactly ONE layer deep
+
+This doc has warned since the P10 inventory that the declared surface "is not
+the total ABI bill". The number was never known. It is now:
+
+| | count |
+|---|---|
+| declared externs in the `src/app/mcp/main.spl` closure | 150 |
+| **undeclared, codegen-emitted symbols** | **16** |
+| of those 16 that appear anywhere in the declared 150 | **0** |
+| **total ABI bill for the MCP graph on Route A** | **166** |
+
+The 16: `rt_array_copy`, `rt_array_sort`, `rt_dict_new`, `rt_file_read_text_rv`,
+`rt_file_remove`, `rt_get_args`, `rt_index_of`, `rt_string_char_at`,
+`rt_string_replace`, `rt_string_rfind`, `rt_string_to_float`,
+`rt_string_to_int_lenient`, `rt_string_to_lower`, `rt_string_to_upper`,
+`rt_text_find`, `rt_value_as_float`.
+
+They are emitted by codegen for built-in method syntax (`.to_upper()`,
+`.find()`, `.sort()`, dict literals), which is why **no extern-based inventory
+could ever have seen them** — including this doc's own. They surfaced only when
+the graph was compiled for the target, exactly as predicted.
+
+**Depth measured, not assumed:** defining the 16 closes the link (rc 0). A
+second iteration produced **zero** new undefined symbols. There is no third
+layer.
+
+**One favourable difference from the `rt_unwrap_or_trap` NULL-GOT class**
+(`stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`): on this
+lane the link is **fail-CLOSED**. `ld.lld` reported
+`undefined symbol: rt_text_find` and friends and exited non-zero. It did not
+silently emit a null GOT slot to fault at first call. The freestanding link
+names the gap instead of deferring it to runtime.
+
+### What was implemented vs trapped
+
+15 of the 16 are NAMED TRAPS, on the same terms as the 56 — link closure, never
+a returned value. They are not equal in difficulty and the buckets say so: 12
+string/array entries are pure computation and are step 3's real work;
+`rt_dict_new` needs a heap kind this runtime does not have (it knows
+`RT_HEAP_STRING`/`ARRAY`/`TUPLE`/`ENUM` only); 2 filesystem entries need the
+same absent subsystem as the 29.
+
+`rt_get_args` was **implemented for real**, not trapped. It is codegen's twin of
+the already-real `sys_get_args`, and a freestanding guest genuinely was never
+handed an argv, so an empty `[text]` is the truth here, not a stub. It was
+promoted only after a live boot proved it is the first symbol `main()` reaches
+(`src/app/mcp/main.spl:345` calls `mcp_get_cli_args()` on its first line).
+
+### The live evidence
+
+First boot, with all 16 trapped — the graph is entered and stops loudly, by
+name, on the easiest symbol in the set:
+
+```
+[BOOT] SIMPLEOS-AARCH64-LIMINE-P10-ABI-PINNED symbols=157
+[BOOT] SIMPLEOS-AARCH64-LIMINE-MCP-GRAPH-ENTERING
+[TRAP] simple runtime: unimplemented entrypoint `rt_get_args` was called.
+[TRAP] This is a NAMED TRAP stub, not an implementation. Core parked.
+```
+
+That transcript is also the **first time a trap has ever been executed** on this
+lane; until now `rt_trap_unimplemented`'s UART path was inherited and
+unexercised. It works: named, loud, not a silent nil and not a SEGV.
+
+Second boot, with `rt_get_args` real — **no trap at all**:
+
+```
+[BOOT] SIMPLEOS-AARCH64-LIMINE-P10-ABI-PINNED symbols=157
+[BOOT] SIMPLEOS-AARCH64-LIMINE-MCP-GRAPH-ENTERING
+[EXIT] rt_exit(0) - no process model in this lane; core parked.
+```
+
+`main()` ran its whole startup, reached the serve loop, called
+`_mcp_read_message()`, got EOF (`-serial file:` is TX-only, so no byte can
+arrive), and took the `msg == ""` branch to `exit(0)`
+(`src/app/mcp/main.spl:408-411`). **This empirically confirms the prediction in
+update (2)**: the startup and serve-loop path touches only `get_args`,
+`env_get`, `exit`, `stderr_write`/`flush`, `stdin_read_char` and `print_raw`,
+all real. The 15 remaining traps are reachable only once a request arrives.
+
+### Measurements
+
+| | step 1 | step 2 |
+|---|---|---|
+| modules compiled | 9 | **68** |
+| image | 133,664 B | **955,712 B** |
+| defined symbols | 361 | **3,387** |
+| undefined in linked `kernel.elf` | 0 | **0** |
+| keepalive marker | `symbols=141` | **`symbols=157`** |
+| `[BOOT]` markers in transcript | 66 | **67** |
+| serial lines | 95 | 98 |
+
+**No regression to the documented build recipe.** The recipe in
+`aarch64_limine_kernel_has_no_builder_script_2026-08-23.md` carries no
+`--source` flags; it still builds, and its output is **byte-identical** to a
+build with `--source src/app --source src/lib --source src/compiler`. The
+default source roots already cover the graph.
+
+**Verdicts, rc read into a variable on the following line:**
+
+```
+PASS — 4 boot-stage marker(s) checked, EDK2/AAVMF pflash real-firmware aarch64
+boot verified via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit),
+98 serial line(s) captured                                            rc 0
+
+PASS — 10 marker(s) checked in each of 2 boot paths, unified arm64 early-boot
+verified under EDK2/AAVMF pflash real firmware via Limine BOOTAA64.EFI
+`protocol: linux` (no -kernel, no isa-debug-exit, self-relocation exercised)
+and unchanged under legacy -kernel                                    rc 0
+```
+
+`scripts/check/check-no-unresolved-runtime-symbols.shs` — the gate that exists
+for exactly this failure class — could **not** run here:
+`ERROR — nothing was checked (selftest failed)`, rc 2. It is Linux-only, deriving
+the platform-library set from `ldd` (`:133`), which macOS does not have. That is
+an environmental ERROR, correctly not a pass. The substance was measured
+directly instead: `llvm-nm -u` on the linked artifact reports **0 undefined**,
+and the link is fail-closed as described above.
+
+### Step 3 is now a bounded, named list
+
+The blocker is no longer structural discovery. It is:
+
+1. Implement the **12 string/array primitives** for real (`rt_text_find` first —
+   it is reached from `app__mcp__main_lazy_json___find_json_value_start`, i.e.
+   JSON parsing, which is on the `initialize` path). Pure computation, the same
+   class as the 19 text/utf8 entries already done.
+2. Feed the request **during** the guest's polling window (`-serial stdio`, not
+   `-serial file:`) — the pacing finding from P8, still unaddressed.
+3. `rt_dict_new` only if the `initialize` path actually reaches it; that one is
+   a new heap kind, not a primitive.
+
+### Not verified by this pass
+
+- **No MCP request was answered and no round trip was attempted.** The server
+  reached EOF because nothing was fed to it. Step 3 was deliberately not started.
+- Whether the `initialize` path reaches `rt_dict_new` is **unknown** — it will
+  be answered by the first real request, not by reading code.
+- Route B untouched and still P6-blocked. All of this is Route A's bill.
+- No board run.
+
 ## STATUS UPDATE 2026-08-24 (3) — ROUTE A STEP 1 DONE: THE 56 ARE TRAPPED, LINK CLOSURE REACHED
 
 All 56 are now NAMED TRAPS in

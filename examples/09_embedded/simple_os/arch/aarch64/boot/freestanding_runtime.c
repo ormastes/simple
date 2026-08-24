@@ -2303,6 +2303,17 @@ spl_i64 sys_get_args(void) {
     return rt_array_new(0);
 }
 
+/* Codegen's twin of sys_get_args: `get_args()` in Simple lowers to rt_get_args,
+ * which no `extern fn` declares (it is one of the 16 second-layer symbols found
+ * in Route A step 2). Same REAL freestanding answer for the same reason — this
+ * guest was never handed an argv, so an empty [text] is the truth here, not a
+ * stub. Promoted out of the step-2 trap block once a live boot showed it was
+ * the first symbol main() reaches: src/app/mcp/main.spl:345 calls
+ * mcp_get_cli_args() on its very first line. */
+spl_i64 rt_get_args(void) {
+    return rt_array_new(0);
+}
+
 void rt_exit(spl_i64 code) {
     char buf[20];
     spl_u64 len = 0;
@@ -2982,6 +2993,74 @@ SPL_P10_TRAP(rt_browser_renderer_spawn_sandboxed)
 
 #undef SPL_P10_TRAP
 
+/* ---- P10 SECOND LAYER: the 16 UNDECLARED symbols (Route A step 2, 2026-08-24)
+ * ---------------------------------------------------------------------------
+ * These are the "not the total ABI bill" caveat, now measured. NO `extern fn`
+ * anywhere in the transitive `use` closure of src/app/mcp/main.spl declares a
+ * single one of them — they are emitted by CODEGEN for built-in method syntax
+ * (`.to_upper()`, `.find()`, `.sort()`, dict literals, ...), so every
+ * extern-based inventory, including this file's own 150-symbol one, was blind
+ * to them by construction. They surfaced only when the MCP module graph was
+ * actually compiled for this target.
+ *
+ * This is the symbol family of
+ * doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md
+ * (rt_unwrap_or_trap / NULL GOT slot). One difference worth recording, because
+ * it is load-bearing and favourable: on THIS lane the link is fail-CLOSED.
+ * ld.lld reported `undefined symbol: rt_text_find` and friends and exited
+ * non-zero; it did not silently emit a null GOT slot to fault later. The
+ * freestanding link names the gap instead of deferring it to runtime.
+ *
+ * MEASURED DEPTH: exactly ONE layer. Defining these 16 closes the link
+ * (rc 0); no third layer appeared. 150 declared + 16 undeclared = 166 is the
+ * complete ABI bill for the MCP graph on this route.
+ *
+ * All 16 are NAMED TRAPS, for link closure, on the same terms as the 56 above
+ * — a returned value would be the silent-nil class. They are NOT equivalent
+ * in difficulty, and grouping them honestly is the point of the buckets below:
+ * the 12 string/array/args entries are pure computation and are the obvious
+ * next increment, whereas rt_dict_new needs a heap kind this runtime does not
+ * have (it knows RT_HEAP_STRING/ARRAY/TUPLE/ENUM only) and the 2 filesystem
+ * entries need the same absent subsystem as the 29 above.
+ *
+ * CONSEQUENCE, stated plainly: a kernel with these as traps LINKS and BOOTS
+ * but CANNOT answer an MCP request. rt_text_find is reached from
+ * app__mcp__main_lazy_json___find_json_value_start, i.e. JSON parsing, which
+ * is on the `initialize` path. Step 2 delivers a built-in, entered MCP graph
+ * and a measured bill — not a round trip. Step 3 stays blocked until the
+ * string/array dozen are real. */
+#define SPL_P10L2_TRAP(name)                                  \
+    spl_i64 name(spl_i64 a, spl_i64 b, spl_i64 c) {           \
+        (void)a; (void)b; (void)c;                            \
+        rt_trap_unimplemented(#name);                         \
+        return 0;                                             \
+    }
+
+/* string / text primitives (10) */
+SPL_P10L2_TRAP(rt_index_of)
+SPL_P10L2_TRAP(rt_string_char_at)
+SPL_P10L2_TRAP(rt_string_replace)
+SPL_P10L2_TRAP(rt_string_rfind)
+SPL_P10L2_TRAP(rt_string_to_float)
+SPL_P10L2_TRAP(rt_string_to_int_lenient)
+SPL_P10L2_TRAP(rt_string_to_lower)
+SPL_P10L2_TRAP(rt_string_to_upper)
+SPL_P10L2_TRAP(rt_text_find)
+SPL_P10L2_TRAP(rt_value_as_float)
+
+/* array primitives (2) */
+SPL_P10L2_TRAP(rt_array_copy)
+SPL_P10L2_TRAP(rt_array_sort)
+
+/* dict — a heap kind this runtime does not have (1) */
+SPL_P10L2_TRAP(rt_dict_new)
+
+/* filesystem, same reason as the 29 above (2) */
+SPL_P10L2_TRAP(rt_file_read_text_rv)
+SPL_P10L2_TRAP(rt_file_remove)
+
+#undef SPL_P10L2_TRAP
+
 /* ---- --gc-sections keepalive ----------------------------------------------
  * WHY THIS EXISTS, and why deleting it silently undoes this whole section:
  * the link runs with --gc-sections and -ffunction-sections, so a symbol that
@@ -3084,6 +3163,21 @@ static void *const g_p10_keepalive[] = {
     (void *)rt_time_now_unix_micros,
     /* browser renderer (2) */
     (void *)rt_browser_renderer_sandbox_enter, (void *)rt_browser_renderer_spawn_sandboxed,
+    /* --- the 16 undeclared second-layer traps (Route A step 2). Same
+     * --gc-sections reason as every entry above. --- */
+    /* string / text primitives (10) */
+    (void *)rt_index_of, (void *)rt_string_char_at,
+    (void *)rt_string_replace, (void *)rt_string_rfind,
+    (void *)rt_string_to_float, (void *)rt_string_to_int_lenient,
+    (void *)rt_string_to_lower, (void *)rt_string_to_upper,
+    (void *)rt_text_find, (void *)rt_value_as_float,
+    /* array primitives (2) */
+    (void *)rt_array_copy, (void *)rt_array_sort,
+    /* dict — a heap kind this runtime does not have (1) */
+    (void *)rt_dict_new,
+    /* filesystem, same reason as the 29 above (2) */
+    (void *)rt_file_read_text_rv, (void *)rt_file_remove,
+    (void *)rt_get_args,
 };
 
 spl_i64 rt_aarch64_p10_keepalive(void) {

@@ -99,6 +99,11 @@ extern fn rt_aarch64_stdout_probe(msg: text) -> u64
 # the number of symbols pinned.
 extern fn rt_aarch64_p10_keepalive() -> u64
 
+# Route A step 2 — the MCP server entry, pulled into the kernel's entry
+# closure. Aliased because a bare `main` in this module would collide with
+# native-build's entry-symbol handling.
+use app.mcp.main.{main as mcp_server_main}
+
 fn halt_loop():
     """Halt forever (aarch64: WFE spin loop, no interrupt controller set up yet)."""
     rt_aarch64_wfe_spin()
@@ -553,6 +558,23 @@ fn memory_init(boot_info: BootOutputPort):
     # into a FAIL.
     val p10_symbols = rt_aarch64_p10_keepalive()
     log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-P10-ABI-PINNED symbols={p10_symbols}")
+
+    # Route A step 2: the MCP module graph is BUILT INTO this kernel and
+    # entered here. Deliberately AFTER every marker the real-firmware boot
+    # gate greps for — same discipline as the P8/P9/P10 probes above — so
+    # neither this call nor a trap reached beneath it can turn that gate's
+    # PASS into a FAIL.
+    #
+    # What this proves and does not prove: it proves the 49-module graph
+    # compiles, links and is entered on this target. It does NOT prove the
+    # server can answer, and today it cannot — the 16 undeclared second-layer
+    # symbols are named traps, and rt_text_find (JSON parsing, reached from
+    # _find_json_value_start) sits on the `initialize` path. Expect the
+    # transcript to end in a [TRAP] line naming the first one reached; that
+    # line IS the deliverable, because it names exactly what step 3 needs.
+    log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-MCP-GRAPH-ENTERING")
+    val mcp_rc = mcp_server_main()
+    log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-MCP-GRAPH-RETURNED rc={mcp_rc}")
 
     halt_loop()
 
