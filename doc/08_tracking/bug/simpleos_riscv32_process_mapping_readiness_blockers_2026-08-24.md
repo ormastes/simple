@@ -25,3 +25,27 @@ ownership-bound Sv32 mapping receipt. Generic joint commit cannot
 bypass the entry lease. This is intentionally not wired to scheduler
 publication and does not change readiness: the authoritative Sv32 mapper and
 ownership-bound mapping receipt remain the blocking prerequisites.
+
+## 2026-08-24 rejected authoritative-registry design
+
+Three independent static-review cycles rejected the attempted RV32 Sv32 owner,
+so its source and specs were removed rather than retaining unsafe authority.
+The final design had fixed caller-constructed PFNs, W+X, arbitrary pages,
+replayable raw install plans, quadratic global scans, and direct-release UAF,
+but two cross-capsule lifecycle defects remained:
+
+1. Generic `executable_authority_abort_joint_reservation_v1` could still clear
+   an active RV32 mapping pin and return the loader slot to `Armed`, reopening
+   abort/reissue races while the mapping slot retained frames.
+2. Mapping-pin release failure had no retained retry coordinate. Create rollback
+   ignored it, while build abort retired an empty slot and reported success,
+   permanently stranding the authority pin without observable recovery.
+
+The next implementation must make the loader registry the single transaction
+owner for mapping pin issue/release (including generic abort, commit, and revoke
+paths), retain a bounded retry record on every indeterminate release, and let
+only an architecture-owned exact root-unreachable receipt free frames. It must
+also bind every page to authenticated ELF ranges or the computed RW+NX stack,
+use PMM-issued provenance only, and expose no replayable physical plan. Until
+that transaction is implemented and independently accepted, canonical RV32
+process-image readiness remains false.
