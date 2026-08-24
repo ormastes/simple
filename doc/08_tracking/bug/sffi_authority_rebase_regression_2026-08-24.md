@@ -10,8 +10,10 @@
 Before rebasing the cache-GC branch, the census reported 21,382 raw calls,
 2,079 explicit-authority calls, and 19,303 missing-authority calls. Rebasing
 onto `origin/main` added 55 missing-authority calls outside the cache-admission
-slice. Cache admission then moved eight calls to lexical `unsafe(ffi)`, yielding
-21,436 raw, 2,086 explicit, and 19,350 missing: a net regression of 47.
+slice. Cache admission moved eight calls to lexical `unsafe(ffi)`. The retained
+dictionary HIR slices then moved another 24 calls without changing call
+cardinality, yielding 21,436 raw, 2,110 explicit, and 19,326 missing: a net
+regression of 23.
 
 ## Required resolution
 

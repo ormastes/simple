@@ -2241,3 +2241,31 @@ slice removes eight, leaving a net repository increase of 47 recorded in
 `sffi_authority_rebase_regression_2026-08-24.md`. Current totals are 21,436 raw,
 2,086 explicit, 19,350 missing; 12,112 declaration rows, 880 tagged, 382
 minimized, 10,966 untouched, and zero signed/admitted.
+
+## Retained-dictionary HIR authority and optimizer evidence
+
+All 24 live `rt_dict_contains` calls in
+`hir_lowering/_Expressions/expression_support.spl` now execute within narrow
+lexical `unsafe(ffi)` scopes under one documented raw declaration contract.
+The change preserves boolean results, lookup order, short-circuit behavior,
+provider-call cardinality, and existing dictionary storage. It introduces no
+new collection, payload copy, retry, or dispatch layer.
+
+The focused module-qualified composite-field specification passes 5/5 under
+the available bootstrap seed at 10.96 s / 372,164 KiB. The authority census is
+now 21,436 raw, 2,110 explicit, and 19,326 missing. This improves the rebase
+regression from +47 to +23 missing calls but does not make the module verified:
+there is still no signed provider-artifact admission evidence.
+The declaration census is 12,112 rows: 881 tagged, 648 contract-documented,
+382 minimized, 10,965 untouched, and zero evidence-verified, signature-
+verified, or admitted.
+
+Optimizer analysis initially appeared to regress from 95 to 107 opportunities.
+The exact 12-count delta was a tooling defect: every
+`unsafe(capabilities: [ffi])` metadata list was misclassified as an indexed
+value access. The classifier now excludes unsafe capability metadata while
+retaining real `values[index]` and `fields[field_name]` accesses; its focused
+spec passes 2/2. Corrected analysis reports 93 opportunities, 4.81 s, and
+272,196 KiB versus the pre-change 95 opportunities, 4.69 s, and 278,984 KiB.
+The two removed findings are pre-existing unsafe metadata false positives, not
+elided runtime checks.

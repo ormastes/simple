@@ -1326,3 +1326,14 @@ separate valid absence/empty results from provider failure. Current census:
 missing calls introduced by the upstream rebase (47 net after this slice), then
 design one status-bearing filesystem metadata/list ABI shared by interpreter,
 C, Rust, native, and Simple wrappers without per-call allocation or lookup.
+
+The retained-dictionary HIR owner is now call-authority complete: all 24 live
+`rt_dict_contains` calls preserve their existing boolean and short-circuit
+semantics inside lexical `unsafe(ffi)` scopes. The authority census is 21,436
+calls (2,110 explicit, 19,326 missing), reducing the upstream rebase regression
+to 23. Declaration totals are 12,112 rows (881 tagged, 382 minimized, 10,965
+untouched, zero signed/admitted). Optimizer capability-list false positives are repaired and covered by a
+focused classifier spec; `[ffi]` metadata is no longer reported as indexed
+runtime access. Next assign the remaining 23 rebase-added calls by canonical
+owner, prioritizing status-bearing wrappers over additional raw call sites and
+retaining zero extra provider calls, allocations, and dynamic dispatch.

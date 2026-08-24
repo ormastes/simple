@@ -241,10 +241,11 @@ impl HirLowering:
     me field_tuple_element_type(base_kind: HirExprKind, index: i64) -> HirType?:
         val base_symbol = _hir_expr_symbol_or_invalid(base_kind)
         if base_symbol.is_valid():
-            if rt_dict_contains(self.local_tuple_types, base_symbol.id):
-                val element_types = self.local_tuple_types[base_symbol.id]
-                if index >= 0 and index < element_types.len():
-                    return element_types[index]
+            unsafe(capabilities: [ffi]):
+                if rt_dict_contains(self.local_tuple_types, base_symbol.id):
+                    val element_types = self.local_tuple_types[base_symbol.id]
+                    if index >= 0 and index < element_types.len():
+                        return element_types[index]
         nil
 
     me field_type_for_owner(owner_symbol_id: SymbolId, field_name: text) -> HirType?:
@@ -254,24 +255,25 @@ impl HirLowering:
             case _: found
 
     me field_type_for_owner_raw(raw_owner_symbol_id: i64, field_name: text) -> HirType:
-        if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
-            if val owner_module = owner_symbol.defining_module:
-                # Interpolation, NOT a 3-operand `text` `+` chain: that form is
-                # a known silent-operand-drop landmine on the staged native /
-                # freestanding path (memory recipe #8 -- `a+":"+b+"\n"` came
-                # back length 1). The canonical composite key is load-bearing:
-                # when it comes out wrong, every field of the composite is
-                # denied at once with `field `X` is not visible from this
-                # module`.
-                val canonical_name = owner_module + "." + owner_symbol.name
-                if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
-                    val canonical_fields = self.struct_field_types_by_name[canonical_name]
-                    if rt_dict_contains(canonical_fields, field_name):
-                        return canonical_fields[field_name]
-            if rt_dict_contains(self.struct_field_types_by_name, owner_symbol.name):
-                val owner_fields = self.struct_field_types_by_name[owner_symbol.name]
-                if rt_dict_contains(owner_fields, field_name):
-                    return owner_fields[field_name]
+        unsafe(capabilities: [ffi]):
+            if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
+                if val owner_module = owner_symbol.defining_module:
+                    # Interpolation, NOT a 3-operand `text` `+` chain: that form is
+                    # a known silent-operand-drop landmine on the staged native /
+                    # freestanding path (memory recipe #8 -- `a+":"+b+"\n"` came
+                    # back length 1). The canonical composite key is load-bearing:
+                    # when it comes out wrong, every field of the composite is
+                    # denied at once with `field `X` is not visible from this
+                    # module`.
+                    val canonical_name = owner_module + "." + owner_symbol.name
+                    if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
+                        val canonical_fields = self.struct_field_types_by_name[canonical_name]
+                        if rt_dict_contains(canonical_fields, field_name):
+                            return canonical_fields[field_name]
+                if rt_dict_contains(self.struct_field_types_by_name, owner_symbol.name):
+                    val owner_fields = self.struct_field_types_by_name[owner_symbol.name]
+                    if rt_dict_contains(owner_fields, field_name):
+                        return owner_fields[field_name]
         _hir_missing_field_type()
 
     me field_type_for_base(base_symbol: SymbolId, field_name: text) -> HirType?:
@@ -281,8 +283,9 @@ impl HirLowering:
             case _: found
 
     me composite_name_for_base_raw(raw_base_symbol_id: i64) -> text:
-        if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
-            return self.local_struct_types[raw_base_symbol_id]
+        unsafe(capabilities: [ffi]):
+            if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
+                return self.local_struct_types[raw_base_symbol_id]
         val raw_owner_symbol_id = self.symbols.get_symbol_named_type_raw(raw_base_symbol_id)
         if raw_owner_symbol_id >= 0:
             return self.composite_name_for_owner_raw(raw_owner_symbol_id)
@@ -320,16 +323,20 @@ impl HirLowering:
         # What IS solid: with the call-site recovery in `field_access_for_expr`
         # below, GOOD-mode runs reach 692/692 with ZERO HIR fatals, which is
         # what this whole subsystem was blocking on.
-        if rt_dict_contains(self.composite_name_by_owner_symbol, raw_owner_symbol_id):
-            return self.composite_name_by_owner_symbol[raw_owner_symbol_id]
+        unsafe(capabilities: [ffi]):
+            if rt_dict_contains(self.composite_name_by_owner_symbol, raw_owner_symbol_id):
+                return self.composite_name_by_owner_symbol[raw_owner_symbol_id]
         var result = ""
         if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
             if val owner_module = owner_symbol.defining_module:
                 val canonical_name = owner_module + "." + owner_symbol.name
-                if rt_dict_contains(self.struct_field_access_by_name, canonical_name):
-                    result = canonical_name
-            if result == "" and rt_dict_contains(self.struct_field_access_by_name, owner_symbol.name):
-                result = owner_symbol.name
+                unsafe(capabilities: [ffi]):
+                    if rt_dict_contains(self.struct_field_access_by_name, canonical_name):
+                        result = canonical_name
+            if result == "":
+                unsafe(capabilities: [ffi]):
+                    if rt_dict_contains(self.struct_field_access_by_name, owner_symbol.name):
+                        result = owner_symbol.name
         # Cache POSITIVE results only. Imported composites are registered into
         # `struct_field_access_by_name` lazily (`register_imported_symbol` /
         # `module_import_registration`), so a lookup that happens before the
@@ -383,31 +390,34 @@ impl HirLowering:
     me field_access_for_base_raw(raw_base_symbol_id: i64, field_name: text) -> i64:
         """Return 1 allowed, 0 denied, -1 when no retained member metadata exists."""
         val composite_name = self.composite_name_for_base_raw(raw_base_symbol_id)
-        if composite_name == "" or not rt_dict_contains(self.struct_field_access_by_name, composite_name):
-            return -1
-        val fields = self.struct_field_access_by_name[composite_name]
-        if not rt_dict_contains(fields, field_name):
-            return -1
-        if fields[field_name]:
-            return 1
+        unsafe(capabilities: [ffi]):
+            if composite_name == "" or not rt_dict_contains(self.struct_field_access_by_name, composite_name):
+                return -1
+            val fields = self.struct_field_access_by_name[composite_name]
+            if not rt_dict_contains(fields, field_name):
+                return -1
+            if fields[field_name]:
+                return 1
         0
 
     me field_access_for_expr(expr: HirExpr, field_name: text) -> i64:
         val direct_symbol = _hir_expr_symbol_or_invalid(expr.kind)
-        if direct_symbol.is_valid() and rt_dict_contains(self.local_struct_types, direct_symbol.id):
-            val local_composite = self.local_struct_types[direct_symbol.id]
-            if not rt_dict_contains(self.struct_field_access_by_name, local_composite):
-                if HIR_MEMBER_VIS_TRACE:
-                    eprint("[member-vis-deny] branch=local-composite-unregistered module={self.module_filename} field={field_name} composite={local_composite}")
-                return 0
-            val local_fields = self.struct_field_access_by_name[local_composite]
-            if not rt_dict_contains(local_fields, field_name):
-                return -1
-            if local_fields[field_name]:
-                return 1
-            if HIR_MEMBER_VIS_TRACE:
-                eprint("[member-vis-deny] branch=local-field-denied module={self.module_filename} field={field_name} composite={local_composite}")
-            return 0
+        if direct_symbol.is_valid():
+            unsafe(capabilities: [ffi]):
+                if rt_dict_contains(self.local_struct_types, direct_symbol.id):
+                    val local_composite = self.local_struct_types[direct_symbol.id]
+                    if not rt_dict_contains(self.struct_field_access_by_name, local_composite):
+                        if HIR_MEMBER_VIS_TRACE:
+                            eprint("[member-vis-deny] branch=local-composite-unregistered module={self.module_filename} field={field_name} composite={local_composite}")
+                        return 0
+                    val local_fields = self.struct_field_access_by_name[local_composite]
+                    if not rt_dict_contains(local_fields, field_name):
+                        return -1
+                    if local_fields[field_name]:
+                        return 1
+                    if HIR_MEMBER_VIS_TRACE:
+                        eprint("[member-vis-deny] branch=local-field-denied module={self.module_filename} field={field_name} composite={local_composite}")
+                    return 0
         val owner = self.named_owner_raw_for_expr(expr)
         if owner < 0:
             return -1
@@ -479,7 +489,9 @@ impl HirLowering:
         # 54). Letting the Field expression continue past this gate on an owner
         # the lowerer cannot describe cascades into the import/materialization
         # path. The permissive verdict costs ~20x what it saves.
-        if composite_name == "" or not rt_dict_contains(self.struct_field_access_by_name, composite_name):
+        val composite_metadata_missing = unsafe(capabilities: [ffi]):
+            composite_name == "" or not rt_dict_contains(self.struct_field_access_by_name, composite_name)
+        if composite_metadata_missing:
             if HIR_MEMBER_VIS_TRACE:
                 var owner_name = "<no-symbol>"
                 var owner_module = "<no-module>"
@@ -552,8 +564,9 @@ impl HirLowering:
                     return -1
             return 0
         val fields = self.struct_field_access_by_name[composite_name]
-        if not rt_dict_contains(fields, field_name):
-            return -1
+        unsafe(capabilities: [ffi]):
+            if not rt_dict_contains(fields, field_name):
+                return -1
         if fields[field_name]:
             return 1
         if HIR_MEMBER_VIS_TRACE:
@@ -562,8 +575,9 @@ impl HirLowering:
 
     me constructor_access_for_name(name: text) -> i64:
         """Return 1 allowed, 0 denied, -1 for a non-composite/unknown callee."""
-        if not rt_dict_contains(self.struct_constructor_access_by_name, name):
-            return -1
+        unsafe(capabilities: [ffi]):
+            if not rt_dict_contains(self.struct_constructor_access_by_name, name):
+                return -1
         if self.struct_constructor_access_by_name[name]:
             return 1
         0
@@ -580,12 +594,13 @@ impl HirLowering:
         self.constructor_access_for_name(name)
 
     me field_type_for_base_raw(raw_base_symbol_id: i64, field_name: text) -> HirType:
-        if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
-            val struct_name = self.local_struct_types[raw_base_symbol_id]
-            if rt_dict_contains(self.struct_field_types_by_name, struct_name):
-                val struct_fields = self.struct_field_types_by_name[struct_name]
-                if rt_dict_contains(struct_fields, field_name):
-                    return struct_fields[field_name]
+        unsafe(capabilities: [ffi]):
+            if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
+                val struct_name = self.local_struct_types[raw_base_symbol_id]
+                if rt_dict_contains(self.struct_field_types_by_name, struct_name):
+                    val struct_fields = self.struct_field_types_by_name[struct_name]
+                    if rt_dict_contains(struct_fields, field_name):
+                        return struct_fields[field_name]
 
         val raw_owner_symbol_id = self.symbols.get_symbol_named_type_raw(raw_base_symbol_id)
         if raw_owner_symbol_id >= 0:
