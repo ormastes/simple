@@ -1,0 +1,534 @@
+# Bounded task-bound authority owner for filesystem-launched SimpleOS servers.
+#
+# This capsule does not dispatch syscalls or database operations.  It redeems
+# the scheduler's sealed /SERVERS.ELF launch grant, revalidates the canonical
+# DBFS-root seal, and publishes only an opaque task/lifecycle-bound lease.
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use common.string_core.{str_char_at}
+use std.fs_driver.mount_table.{DbfsRootMountSealV1, DbfsRootMountSealInfoV1}
+use std.common.contracts.os.server_data_namespace_v1.{
+    SERVER_DATA_RIGHT_READ, SERVER_DATA_RIGHT_WRITE, SERVER_DATA_RIGHT_CREATE,
+    SERVER_DATA_RIGHT_REMOVE, SERVER_DATA_RIGHT_RENAME, SERVER_DATA_RIGHT_SYNC,
+    SERVER_DATA_RIGHT_ATOMIC_REPLACE
+}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.scheduler.server_data_launch_grant_registry.{
+    ServerDataLaunchRedemptionTicketV1,
+    server_data_launch_redemption_commit_v1,
+    server_data_launch_redemption_rollback_v1,
+    server_data_launch_redemption_quarantine_v1,
+    server_data_launch_grant_revoke_task_lifecycle_v1
+}
+use os.services.vfs.vfs_boot_state.{
+    vfs_state_acquire_dbfs_root_mount_seal_v1,
+    vfs_state_revalidate_dbfs_root_mount_seal_v1,
+    vfs_state_close_dbfs_root_mount_seal_v1
+}
+
+pub val SERVER_DATA_NAMESPACE_LEASE_LIMIT_V1: i64 = 64
+pub val SERVER_DATA_WEB_ROOT_V1: text = "/srv/data/web"
+pub val SERVER_DATA_DATABASE_ROOT_V1: text = "/srv/data/db"
+
+val _SERVER_DATA_GENERATION_MAX_V1: u64 = 0xffffffffffffffffu64
+val _SERVER_DATA_NONCE_MAX_V1: u64 = 0xffffffffffffffffu64
+val _SERVER_DATA_WEB_RIGHTS_V1: u32 =
+    SERVER_DATA_RIGHT_READ | SERVER_DATA_RIGHT_WRITE |
+    SERVER_DATA_RIGHT_CREATE | SERVER_DATA_RIGHT_REMOVE |
+    SERVER_DATA_RIGHT_RENAME | SERVER_DATA_RIGHT_SYNC
+val _SERVER_DATA_DATABASE_RIGHTS_V1: u32 =
+    _SERVER_DATA_WEB_RIGHTS_V1 | SERVER_DATA_RIGHT_ATOMIC_REPLACE
+
+pub enum ServerDataNamespaceLeaseStateV1:
+    Free
+    Preparing
+    Active
+    Quarantined
+    Retired
+
+pub enum ServerDataNamespaceOperationV1:
+    Read
+    Write
+    Create
+    Remove
+    Rename
+    Sync
+    AtomicReplace
+
+pub enum ServerDataNamespaceLeaseEventV1:
+    Activate
+    RollbackPreparation
+    Quarantine
+    Revoke
+
+pub fn server_data_namespace_lease_transition_v1(
+    state: ServerDataNamespaceLeaseStateV1,
+    event: ServerDataNamespaceLeaseEventV1
+) -> ServerDataNamespaceLeaseStateV1?:
+    """Pure lifecycle oracle; no returned state is filesystem authority."""
+    match event:
+        ServerDataNamespaceLeaseEventV1.Activate:
+            if state == ServerDataNamespaceLeaseStateV1.Preparing:
+                return Some(ServerDataNamespaceLeaseStateV1.Active)
+        ServerDataNamespaceLeaseEventV1.RollbackPreparation:
+            if state == ServerDataNamespaceLeaseStateV1.Preparing:
+                return Some(ServerDataNamespaceLeaseStateV1.Free)
+        ServerDataNamespaceLeaseEventV1.Quarantine:
+            if (state == ServerDataNamespaceLeaseStateV1.Preparing or
+                state == ServerDataNamespaceLeaseStateV1.Active):
+                return Some(ServerDataNamespaceLeaseStateV1.Quarantined)
+        ServerDataNamespaceLeaseEventV1.Revoke:
+            if (state == ServerDataNamespaceLeaseStateV1.Preparing or
+                state == ServerDataNamespaceLeaseStateV1.Active):
+                return Some(ServerDataNamespaceLeaseStateV1.Free)
+    nil
+
+pub fn server_data_namespace_slot_reusable_v1(
+    state: ServerDataNamespaceLeaseStateV1, generation: u64
+) -> bool:
+    state == ServerDataNamespaceLeaseStateV1.Free and
+        generation != _SERVER_DATA_GENERATION_MAX_V1
+
+pub fn server_data_namespace_binding_allowed_v1(
+    state: ServerDataNamespaceLeaseStateV1,
+    stored_task_id: u64,
+    stored_lifecycle_generation: u64,
+    current_task_id: u64,
+    current_lifecycle_generation: u64,
+    stored_mount_id: u32,
+    current_mount_id: u32,
+    stored_mount_generation: u64,
+    current_mount_generation: u64,
+    stored_dbfs_identity: i64,
+    current_dbfs_identity: i64,
+    stored_dbfs_epoch: u64,
+    current_dbfs_epoch: u64
+) -> bool:
+    """Pure identity oracle used only after opaque lease lookup succeeds."""
+    state == ServerDataNamespaceLeaseStateV1.Active and
+        stored_task_id != 0u64 and
+        stored_task_id == current_task_id and
+        stored_lifecycle_generation != 0u64 and
+        stored_lifecycle_generation == current_lifecycle_generation and
+        stored_mount_id != 0u32 and stored_mount_id == current_mount_id and
+        stored_mount_generation != 0u64 and
+        stored_mount_generation == current_mount_generation and
+        stored_dbfs_identity != 0 and stored_dbfs_identity == current_dbfs_identity and
+        stored_dbfs_epoch == current_dbfs_epoch
+
+pub(package) struct ServerDataNamespaceLeaseV1:
+    slot: i64
+    generation: u64
+    nonce_hi: u64
+    nonce_lo: u64
+
+pub(package) struct ServerDataNamespaceLeaseResultV1:
+    lease: ServerDataNamespaceLeaseV1?
+    reason: text
+
+struct ServerDataNamespaceLeaseSlotV1:
+    state: ServerDataNamespaceLeaseStateV1
+    generation: u64
+    nonce_hi: u64
+    nonce_lo: u64
+    task_id: u64
+    lifecycle_generation: u64
+    mount_id: u32
+    mount_generation: u64
+    namespace_generation: u64
+    content_generation: u64
+    dbfs_instance_identity: i64
+    dbfs_mutation_epoch: u64
+
+struct ServerDataNamespaceOwnerV1:
+    mounted: bool
+    permanently_quarantined: bool
+    nonce_counter: u64
+    seal: DbfsRootMountSealV1?
+    slots: [ServerDataNamespaceLeaseSlotV1]
+
+val _server_data_namespace_mutex_v1: i64 = mutex_raw_create()
+var _server_data_namespace_owner_v1 = ServerDataNamespaceOwnerV1(
+    mounted: false,
+    permanently_quarantined: false,
+    nonce_counter: 0x53444e534f574e52u64,
+    seal: nil,
+    slots: [])
+
+fn _server_data_empty_slot_v1(generation: u64) -> ServerDataNamespaceLeaseSlotV1:
+    ServerDataNamespaceLeaseSlotV1(
+        state: ServerDataNamespaceLeaseStateV1.Free,
+        generation: generation,
+        nonce_hi: 0u64, nonce_lo: 0u64,
+        task_id: 0u64, lifecycle_generation: 0u64,
+        mount_id: 0u32, mount_generation: 0u64,
+        namespace_generation: 0u64, content_generation: 0u64,
+        dbfs_instance_identity: 0, dbfs_mutation_epoch: 0u64)
+
+fn _server_data_namespace_lock_v1() -> bool:
+    if _server_data_namespace_mutex_v1 <= 0 or
+        _server_data_namespace_owner_v1.permanently_quarantined:
+        return false
+    if not mutex_raw_lock(_server_data_namespace_mutex_v1): return false
+    if _server_data_namespace_owner_v1.permanently_quarantined:
+        _ = mutex_raw_unlock(_server_data_namespace_mutex_v1)
+        return false
+    true
+
+fn _server_data_namespace_unlock_v1() -> bool:
+    if mutex_raw_unlock(_server_data_namespace_mutex_v1): return true
+    _server_data_namespace_owner_v1.permanently_quarantined = true
+    false
+
+fn _server_data_seal_snapshot_v1() -> DbfsRootMountSealV1?:
+    if not _server_data_namespace_lock_v1(): return nil
+    val seal = _server_data_namespace_owner_v1.seal
+    if not _server_data_namespace_unlock_v1(): return nil
+    seal
+
+fn _server_data_result_v1(
+    lease: ServerDataNamespaceLeaseV1?, reason: text
+) -> ServerDataNamespaceLeaseResultV1:
+    ServerDataNamespaceLeaseResultV1(lease: lease, reason: reason)
+
+fn _server_data_path_below_v1(path: text, root: text) -> bool:
+    if path == root: return true
+    path.len() > root.len() and path.starts_with(root) and
+        str_char_at(path, root.len()) == "/"
+
+fn _server_data_path_canonical_v1(path: text) -> bool:
+    if path.len() == 0 or path.len() > 4096 or
+        str_char_at(path, 0) != "/":
+        return false
+    if path.contains("//") or path.contains("/./") or
+        path.contains("/../") or path.ends_with("/.") or
+        path.ends_with("/..") or path.contains("\\"):
+        return false
+    true
+
+fn _server_data_operation_right_v1(operation: ServerDataNamespaceOperationV1) -> u32:
+    match operation:
+        ServerDataNamespaceOperationV1.Read: SERVER_DATA_RIGHT_READ
+        ServerDataNamespaceOperationV1.Write: SERVER_DATA_RIGHT_WRITE
+        ServerDataNamespaceOperationV1.Create: SERVER_DATA_RIGHT_CREATE
+        ServerDataNamespaceOperationV1.Remove: SERVER_DATA_RIGHT_REMOVE
+        ServerDataNamespaceOperationV1.Rename: SERVER_DATA_RIGHT_RENAME
+        ServerDataNamespaceOperationV1.Sync: SERVER_DATA_RIGHT_SYNC
+        ServerDataNamespaceOperationV1.AtomicReplace: SERVER_DATA_RIGHT_ATOMIC_REPLACE
+
+pub fn server_data_namespace_path_operation_allowed_v1(
+    path: text, operation: ServerDataNamespaceOperationV1
+) -> bool:
+    """Pure exact-root policy oracle; it does not authenticate a task or lease."""
+    if not _server_data_path_canonical_v1(path): return false
+    val required = _server_data_operation_right_v1(operation)
+    if _server_data_path_below_v1(path, SERVER_DATA_DATABASE_ROOT_V1):
+        return (_SERVER_DATA_DATABASE_RIGHTS_V1 & required) == required
+    if _server_data_path_below_v1(path, SERVER_DATA_WEB_ROOT_V1):
+        return (_SERVER_DATA_WEB_RIGHTS_V1 & required) == required
+    false
+
+pub fn server_data_namespace_rename_allowed_v1(old_path: text, new_path: text) -> bool:
+    if (not _server_data_path_canonical_v1(old_path) or
+        not _server_data_path_canonical_v1(new_path)):
+        return false
+    val both_web = (_server_data_path_below_v1(old_path, SERVER_DATA_WEB_ROOT_V1) and
+        _server_data_path_below_v1(new_path, SERVER_DATA_WEB_ROOT_V1))
+    val both_database = (_server_data_path_below_v1(old_path, SERVER_DATA_DATABASE_ROOT_V1) and
+        _server_data_path_below_v1(new_path, SERVER_DATA_DATABASE_ROOT_V1))
+    both_web or both_database
+
+fn _server_data_mount_facts_match_v1(
+    slot: ServerDataNamespaceLeaseSlotV1,
+    facts: DbfsRootMountSealInfoV1
+) -> bool:
+    slot.mount_id == facts.mount_id.id and
+        slot.mount_generation == facts.mount_generation and
+        slot.namespace_generation == facts.namespace_generation and
+        slot.content_generation == facts.content_generation and
+        slot.dbfs_instance_identity == facts.dbfs_instance_identity and
+        slot.dbfs_mutation_epoch == facts.dbfs_mutation_epoch
+
+fn _server_data_find_task_v1(task_id: u64, lifecycle_generation: u64) -> i64:
+    var i = 0
+    while i < _server_data_namespace_owner_v1.slots.len():
+        val slot = _server_data_namespace_owner_v1.slots[i]
+        if (slot.state == ServerDataNamespaceLeaseStateV1.Preparing or
+            slot.state == ServerDataNamespaceLeaseStateV1.Active or
+            slot.state == ServerDataNamespaceLeaseStateV1.Quarantined) and
+            slot.task_id == task_id and
+            slot.lifecycle_generation == lifecycle_generation:
+            return i
+        i = i + 1
+    -1
+
+fn _server_data_find_lease_v1(
+    lease: ServerDataNamespaceLeaseV1,
+    state: ServerDataNamespaceLeaseStateV1
+) -> i64:
+    if lease.slot < 0 or lease.slot >= _server_data_namespace_owner_v1.slots.len() or
+        lease.generation == 0u64 or lease.nonce_hi == 0u64 or lease.nonce_lo == 0u64:
+        return -1
+    val slot = _server_data_namespace_owner_v1.slots[lease.slot]
+    if slot.state != state or slot.generation != lease.generation or
+        slot.nonce_hi != lease.nonce_hi or slot.nonce_lo != lease.nonce_lo:
+        return -1
+    lease.slot
+
+pub(package) fn server_data_namespace_mount_v1() -> bool:
+    """Acquire the canonical DBFS-root seal exactly once."""
+    val acquired = vfs_state_acquire_dbfs_root_mount_seal_v1()
+    if acquired.is_err(): return false
+    val seal = acquired.unwrap()
+    val facts = vfs_state_revalidate_dbfs_root_mount_seal_v1(seal)
+    if facts.is_err():
+        _ = vfs_state_close_dbfs_root_mount_seal_v1(seal)
+        return false
+    if not _server_data_namespace_lock_v1():
+        _ = vfs_state_close_dbfs_root_mount_seal_v1(seal)
+        return false
+    if _server_data_namespace_owner_v1.mounted or
+        _server_data_namespace_owner_v1.seal != nil:
+        val unlocked = _server_data_namespace_unlock_v1()
+        _ = vfs_state_close_dbfs_root_mount_seal_v1(seal)
+        _ = unlocked
+        return false
+    _server_data_namespace_owner_v1.seal = Some(seal)
+    _server_data_namespace_owner_v1.mounted = true
+    _server_data_namespace_unlock_v1()
+
+fn _server_data_prepare_slot_v1(
+    ticket: ServerDataLaunchRedemptionTicketV1,
+    facts: DbfsRootMountSealInfoV1
+) -> ServerDataNamespaceLeaseV1?:
+    if not _server_data_namespace_lock_v1(): return nil
+    if not _server_data_namespace_owner_v1.mounted or
+        _server_data_find_task_v1(ticket.task_id, ticket.lifecycle_generation) >= 0:
+        _ = _server_data_namespace_unlock_v1()
+        return nil
+    var index = -1
+    var i = 0
+    while i < _server_data_namespace_owner_v1.slots.len():
+        if _server_data_namespace_owner_v1.slots[i].state ==
+            ServerDataNamespaceLeaseStateV1.Free:
+            if _server_data_namespace_owner_v1.slots[i].generation ==
+                _SERVER_DATA_GENERATION_MAX_V1:
+                _server_data_namespace_owner_v1.slots[i].state =
+                    ServerDataNamespaceLeaseStateV1.Retired
+            elif server_data_namespace_slot_reusable_v1(
+                _server_data_namespace_owner_v1.slots[i].state,
+                _server_data_namespace_owner_v1.slots[i].generation):
+                index = i
+                break
+        i = i + 1
+    if index < 0 and _server_data_namespace_owner_v1.slots.len() >=
+        SERVER_DATA_NAMESPACE_LEASE_LIMIT_V1:
+        _ = _server_data_namespace_unlock_v1()
+        return nil
+    val prior_generation = if index >= 0:
+        _server_data_namespace_owner_v1.slots[index].generation
+    else: 0u64
+    if _server_data_namespace_owner_v1.nonce_counter >=
+        _SERVER_DATA_NONCE_MAX_V1 - 2u64:
+        _ = _server_data_namespace_unlock_v1()
+        return nil
+    val generation = prior_generation + 1u64
+    _server_data_namespace_owner_v1.nonce_counter =
+        _server_data_namespace_owner_v1.nonce_counter + 2u64
+    val nonce_hi = _server_data_namespace_owner_v1.nonce_counter - 1u64
+    val nonce_lo = _server_data_namespace_owner_v1.nonce_counter
+    if index < 0: index = _server_data_namespace_owner_v1.slots.len()
+    val slot = ServerDataNamespaceLeaseSlotV1(
+        state: ServerDataNamespaceLeaseStateV1.Preparing,
+        generation: generation, nonce_hi: nonce_hi, nonce_lo: nonce_lo,
+        task_id: ticket.task_id,
+        lifecycle_generation: ticket.lifecycle_generation,
+        mount_id: facts.mount_id.id,
+        mount_generation: facts.mount_generation,
+        namespace_generation: facts.namespace_generation,
+        content_generation: facts.content_generation,
+        dbfs_instance_identity: facts.dbfs_instance_identity,
+        dbfs_mutation_epoch: facts.dbfs_mutation_epoch)
+    if index == _server_data_namespace_owner_v1.slots.len():
+        _server_data_namespace_owner_v1.slots.push(slot)
+    else:
+        _server_data_namespace_owner_v1.slots[index] = slot
+    val lease = ServerDataNamespaceLeaseV1(
+        slot: index, generation: generation,
+        nonce_hi: nonce_hi, nonce_lo: nonce_lo)
+    if not _server_data_namespace_unlock_v1(): return nil
+    Some(lease)
+
+fn _server_data_rollback_preparing_v1(lease: ServerDataNamespaceLeaseV1) -> bool:
+    if not _server_data_namespace_lock_v1(): return false
+    val index = _server_data_find_lease_v1(
+        lease, ServerDataNamespaceLeaseStateV1.Preparing)
+    if index < 0:
+        _ = _server_data_namespace_unlock_v1()
+        return false
+    val generation = _server_data_namespace_owner_v1.slots[index].generation
+    val next = server_data_namespace_lease_transition_v1(
+        _server_data_namespace_owner_v1.slots[index].state,
+        ServerDataNamespaceLeaseEventV1.RollbackPreparation)
+    if next == nil:
+        _ = _server_data_namespace_unlock_v1()
+        return false
+    _server_data_namespace_owner_v1.slots[index] =
+        _server_data_empty_slot_v1(generation)
+    _server_data_namespace_unlock_v1()
+
+fn _server_data_quarantine_lease_v1(lease: ServerDataNamespaceLeaseV1) -> bool:
+    if not _server_data_namespace_lock_v1(): return false
+    var index = _server_data_find_lease_v1(
+        lease, ServerDataNamespaceLeaseStateV1.Preparing)
+    if index < 0:
+        index = _server_data_find_lease_v1(
+            lease, ServerDataNamespaceLeaseStateV1.Active)
+    if index < 0:
+        _ = _server_data_namespace_unlock_v1()
+        return false
+    val next = server_data_namespace_lease_transition_v1(
+        _server_data_namespace_owner_v1.slots[index].state,
+        ServerDataNamespaceLeaseEventV1.Quarantine)
+    if next == nil:
+        _ = _server_data_namespace_unlock_v1()
+        return false
+    _server_data_namespace_owner_v1.slots[index].state = next.unwrap()
+    _server_data_namespace_unlock_v1()
+
+fn _server_data_activate_v1(
+    lease: ServerDataNamespaceLeaseV1,
+    facts: DbfsRootMountSealInfoV1
+) -> bool:
+    if not _server_data_namespace_lock_v1(): return false
+    val index = _server_data_find_lease_v1(
+        lease, ServerDataNamespaceLeaseStateV1.Preparing)
+    if index < 0 or not _server_data_mount_facts_match_v1(
+        _server_data_namespace_owner_v1.slots[index], facts):
+        if index >= 0:
+            _server_data_namespace_owner_v1.slots[index].state =
+                ServerDataNamespaceLeaseStateV1.Quarantined
+        _ = _server_data_namespace_unlock_v1()
+        return false
+    val next = server_data_namespace_lease_transition_v1(
+        _server_data_namespace_owner_v1.slots[index].state,
+        ServerDataNamespaceLeaseEventV1.Activate)
+    if next == nil:
+        _ = _server_data_namespace_unlock_v1()
+        return false
+    _server_data_namespace_owner_v1.slots[index].state = next.unwrap()
+    _server_data_namespace_unlock_v1()
+
+pub(package) fn server_data_namespace_acquire_current_v1(
+    scheduler: Scheduler
+) -> ServerDataNamespaceLeaseResultV1:
+    """Redeem current task grant with Preparing -> Active publication."""
+    val ticket = scheduler.begin_current_server_data_redemption_v1()
+    if ticket == nil: return _server_data_result_v1(nil, "launch-grant-unavailable")
+    val redemption = ticket.unwrap()
+    val seal = _server_data_seal_snapshot_v1()
+    if seal == nil:
+        if not server_data_launch_redemption_rollback_v1(redemption):
+            _ = server_data_launch_redemption_quarantine_v1(redemption)
+        return _server_data_result_v1(nil, "namespace-not-mounted")
+    val initial_facts = vfs_state_revalidate_dbfs_root_mount_seal_v1(seal.unwrap())
+    if initial_facts.is_err():
+        if not server_data_launch_redemption_rollback_v1(redemption):
+            _ = server_data_launch_redemption_quarantine_v1(redemption)
+        return _server_data_result_v1(nil, "dbfs-root-seal-stale")
+    val prepared = _server_data_prepare_slot_v1(redemption, initial_facts.unwrap())
+    if prepared == nil:
+        if not server_data_launch_redemption_rollback_v1(redemption):
+            _ = server_data_launch_redemption_quarantine_v1(redemption)
+        return _server_data_result_v1(nil, "namespace-prepare-failed")
+    val lease = prepared.unwrap()
+    if not server_data_launch_redemption_commit_v1(redemption):
+        if not _server_data_rollback_preparing_v1(lease):
+            _ = _server_data_quarantine_lease_v1(lease)
+        _ = server_data_launch_redemption_quarantine_v1(redemption)
+        return _server_data_result_v1(nil, "launch-grant-commit-failed")
+    val final_facts = vfs_state_revalidate_dbfs_root_mount_seal_v1(seal.unwrap())
+    if final_facts.is_err():
+        _ = _server_data_quarantine_lease_v1(lease)
+        _ = server_data_launch_redemption_quarantine_v1(redemption)
+        return _server_data_result_v1(nil, "namespace-publication-failed")
+    if not _server_data_activate_v1(lease, final_facts.unwrap()):
+        _ = _server_data_quarantine_lease_v1(lease)
+        _ = server_data_launch_redemption_quarantine_v1(redemption)
+        return _server_data_result_v1(nil, "namespace-publication-failed")
+    _server_data_result_v1(Some(lease), "active")
+
+impl Scheduler:
+    fn _server_data_current_task_identity_v1() -> (u64, u64)?:
+        if self.current.id == 0u64: return nil
+        var i = 0
+        while i < self.tasks.len():
+            val maybe_task = self.tasks[i]
+            if maybe_task != nil:
+                val task = maybe_task.unwrap()
+                if task.id.id == self.current.id:
+                    return Some((task.id.id, task.lifecycle_generation))
+            i = i + 1
+        nil
+
+    pub(package) me server_data_namespace_authorize_current_v1(
+        lease: ServerDataNamespaceLeaseV1,
+        operation: ServerDataNamespaceOperationV1,
+        path: text,
+        rename_target: text
+    ) -> bool:
+        """Owner-local authorization only; no syscall or DBFS dispatch occurs."""
+        val identity = self._server_data_current_task_identity_v1()
+        if identity == nil or
+            not server_data_namespace_path_operation_allowed_v1(path, operation):
+            return false
+        if operation == ServerDataNamespaceOperationV1.Rename and
+            not server_data_namespace_rename_allowed_v1(path, rename_target):
+            return false
+        val seal = _server_data_seal_snapshot_v1()
+        if seal == nil: return false
+        val facts = vfs_state_revalidate_dbfs_root_mount_seal_v1(seal.unwrap())
+        if facts.is_err():
+            _ = _server_data_quarantine_lease_v1(lease)
+            return false
+        if not _server_data_namespace_lock_v1(): return false
+        val index = _server_data_find_lease_v1(
+            lease, ServerDataNamespaceLeaseStateV1.Active)
+        var allowed = false
+        if index >= 0:
+            val slot = _server_data_namespace_owner_v1.slots[index]
+            val current = facts.unwrap()
+            allowed = server_data_namespace_binding_allowed_v1(
+                slot.state, slot.task_id, slot.lifecycle_generation,
+                identity.unwrap().0, identity.unwrap().1,
+                slot.mount_id, current.mount_id.id,
+                slot.mount_generation, current.mount_generation,
+                slot.dbfs_instance_identity, current.dbfs_instance_identity,
+                slot.dbfs_mutation_epoch, current.dbfs_mutation_epoch) and
+                _server_data_mount_facts_match_v1(slot, current)
+        if not _server_data_namespace_unlock_v1(): return false
+        allowed
+
+pub(package) fn server_data_namespace_revoke_before_launch_grant_v1(
+    task_id: u64, lifecycle_generation: u64
+) -> bool:
+    """Remove namespace authority before tearing down the scheduler grant."""
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+        not _server_data_namespace_lock_v1():
+        return false
+    val index = _server_data_find_task_v1(task_id, lifecycle_generation)
+    if index >= 0:
+        val slot = _server_data_namespace_owner_v1.slots[index]
+        if slot.state == ServerDataNamespaceLeaseStateV1.Quarantined:
+            _ = _server_data_namespace_unlock_v1()
+            return false
+        val next = server_data_namespace_lease_transition_v1(
+            slot.state, ServerDataNamespaceLeaseEventV1.Revoke)
+        if next == nil:
+            _ = _server_data_namespace_unlock_v1()
+            return false
+        _server_data_namespace_owner_v1.slots[index] =
+            _server_data_empty_slot_v1(slot.generation)
+    if not _server_data_namespace_unlock_v1(): return false
+    server_data_launch_grant_revoke_task_lifecycle_v1(
+        task_id, lifecycle_generation)

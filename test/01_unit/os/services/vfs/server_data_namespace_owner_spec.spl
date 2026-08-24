@@ -1,0 +1,114 @@
+use std.spec
+use os.kernel.scheduler.server_data_namespace_owner.{
+    SERVER_DATA_NAMESPACE_LEASE_LIMIT_V1,
+    SERVER_DATA_WEB_ROOT_V1, SERVER_DATA_DATABASE_ROOT_V1,
+    ServerDataNamespaceOperationV1, ServerDataNamespaceLeaseStateV1,
+    ServerDataNamespaceLeaseEventV1,
+    server_data_namespace_lease_transition_v1,
+    server_data_namespace_slot_reusable_v1,
+    server_data_namespace_binding_allowed_v1,
+    server_data_namespace_path_operation_allowed_v1,
+    server_data_namespace_rename_allowed_v1
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "server-data namespace owner policy":
+    it "keeps the owner table bounded":
+        expect(SERVER_DATA_NAMESPACE_LEASE_LIMIT_V1).to_equal(64)
+
+    it "publishes only through preparing and keeps quarantine terminal":
+        expect(server_data_namespace_lease_transition_v1(
+            ServerDataNamespaceLeaseStateV1.Preparing,
+            ServerDataNamespaceLeaseEventV1.Activate)).to_equal(
+                Some(ServerDataNamespaceLeaseStateV1.Active))
+        expect(server_data_namespace_lease_transition_v1(
+            ServerDataNamespaceLeaseStateV1.Preparing,
+            ServerDataNamespaceLeaseEventV1.RollbackPreparation)).to_equal(
+                Some(ServerDataNamespaceLeaseStateV1.Free))
+        expect(server_data_namespace_lease_transition_v1(
+            ServerDataNamespaceLeaseStateV1.Active,
+            ServerDataNamespaceLeaseEventV1.Quarantine)).to_equal(
+                Some(ServerDataNamespaceLeaseStateV1.Quarantined))
+        expect(server_data_namespace_lease_transition_v1(
+            ServerDataNamespaceLeaseStateV1.Quarantined,
+            ServerDataNamespaceLeaseEventV1.Revoke).is_some()).to_equal(false)
+
+    it "binds active authority to exact task lifecycle and mount seal facts":
+        expect(server_data_namespace_binding_allowed_v1(
+            ServerDataNamespaceLeaseStateV1.Active,
+            41u64, 9u64, 41u64, 9u64,
+            7u32, 7u32, 3u64, 3u64, 17, 17, 23u64, 23u64)).to_equal(true)
+        expect(server_data_namespace_binding_allowed_v1(
+            ServerDataNamespaceLeaseStateV1.Active,
+            41u64, 9u64, 41u64, 10u64,
+            7u32, 7u32, 3u64, 3u64, 17, 17, 23u64, 23u64)).to_equal(false)
+        expect(server_data_namespace_binding_allowed_v1(
+            ServerDataNamespaceLeaseStateV1.Active,
+            41u64, 9u64, 41u64, 9u64,
+            7u32, 7u32, 3u64, 4u64, 17, 17, 23u64, 23u64)).to_equal(false)
+        expect(server_data_namespace_binding_allowed_v1(
+            ServerDataNamespaceLeaseStateV1.Active,
+            41u64, 9u64, 41u64, 9u64,
+            7u32, 7u32, 3u64, 3u64, 17, 17, 23u64, 24u64)).to_equal(false)
+
+    it "skips terminal generation slots without making later capacity unavailable":
+        expect(server_data_namespace_slot_reusable_v1(
+            ServerDataNamespaceLeaseStateV1.Free,
+            0xfffffffffffffffeu64)).to_equal(true)
+        expect(server_data_namespace_slot_reusable_v1(
+            ServerDataNamespaceLeaseStateV1.Free,
+            0xffffffffffffffffu64)).to_equal(false)
+        expect(server_data_namespace_slot_reusable_v1(
+            ServerDataNamespaceLeaseStateV1.Quarantined,
+            4u64)).to_equal(false)
+
+    it "allows only canonical web and database subtree paths":
+        expect(server_data_namespace_path_operation_allowed_v1(
+            SERVER_DATA_WEB_ROOT_V1 + "/index.bin",
+            ServerDataNamespaceOperationV1.Write)).to_equal(true)
+        expect(server_data_namespace_path_operation_allowed_v1(
+            SERVER_DATA_DATABASE_ROOT_V1 + "/main.db",
+            ServerDataNamespaceOperationV1.AtomicReplace)).to_equal(true)
+        expect(server_data_namespace_path_operation_allowed_v1(
+            SERVER_DATA_WEB_ROOT_V1 + "/state.bin",
+            ServerDataNamespaceOperationV1.AtomicReplace)).to_equal(false)
+        expect(server_data_namespace_path_operation_allowed_v1(
+            "/srv/data/database/main.db",
+            ServerDataNamespaceOperationV1.Read)).to_equal(false)
+        expect(server_data_namespace_path_operation_allowed_v1(
+            SERVER_DATA_DATABASE_ROOT_V1 + "/../web/state.bin",
+            ServerDataNamespaceOperationV1.Read)).to_equal(false)
+
+    it "keeps rename inside one exact granted subtree":
+        expect(server_data_namespace_rename_allowed_v1(
+            SERVER_DATA_DATABASE_ROOT_V1 + "/main.tmp",
+            SERVER_DATA_DATABASE_ROOT_V1 + "/main.db")).to_equal(true)
+        expect(server_data_namespace_rename_allowed_v1(
+            SERVER_DATA_DATABASE_ROOT_V1 + "/main.db",
+            SERVER_DATA_WEB_ROOT_V1 + "/main.db")).to_equal(false)
+
+    it "keeps dual revalidation ambiguity handling and revoke ordering in owner code":
+        val source = rt_file_read_text(
+            "src/os/kernel/scheduler/server_data_namespace_owner.spl") ?? ""
+        val first_revalidation = source.index_of(
+            "val initial_facts = vfs_state_revalidate_dbfs_root_mount_seal_v1")
+        val prepare = source.index_of("val prepared = _server_data_prepare_slot_v1")
+        val commit = source.index_of(
+            "server_data_launch_redemption_commit_v1(redemption)")
+        val second_revalidation = source.index_of(
+            "val final_facts = vfs_state_revalidate_dbfs_root_mount_seal_v1")
+        val activate = source.index_of(
+            "_server_data_activate_v1(lease", second_revalidation)
+        expect(first_revalidation).to_be_less_than(prepare)
+        expect(prepare).to_be_less_than(commit)
+        expect(commit).to_be_less_than(second_revalidation)
+        expect(second_revalidation).to_be_less_than(activate)
+        expect(source).to_contain("server_data_launch_redemption_rollback_v1")
+        expect(source).to_contain("server_data_launch_redemption_quarantine_v1")
+        val namespace_revoke = source.index_of(
+            "_server_data_empty_slot_v1(slot.generation)")
+        val grant_revoke = source.index_of(
+            "server_data_launch_grant_revoke_task_lifecycle_v1(\n        task_id",
+            namespace_revoke)
+        expect(namespace_revoke).to_be_less_than(grant_revoke)

@@ -33,7 +33,10 @@ use os.kernel.boot.boot_nvme_production_handoff.{boot_nvme_production_handoff_pr
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_read8, mmio_write8}
 use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_install_block_device}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc}
-use std.fs_driver.mount_table.{MountTable, MountId}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use std.fs_driver.mount_table.{
+    MountTable, MountId, DbfsRootMountSealV1, DbfsRootMountSealInfoV1
+}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{MountOptions}
@@ -70,16 +73,65 @@ var g_vfs_initialized: bool = false
 var g_vfs_boot_storage_provider: text = "not-mounted"
 var g_vfs_boot_storage_pure_simple: bool = false
 var g_mount_table: MountTable = MountTable.new()
+val g_mount_table_mutex_v1: i64 = mutex_raw_create()
+var g_mount_table_quarantined_v1: bool = false
+
+fn vfs_state_mount_table_lock_v1() -> bool:
+    if g_mount_table_mutex_v1 <= 0 or g_mount_table_quarantined_v1:
+        return false
+    if not mutex_raw_lock(g_mount_table_mutex_v1): return false
+    if g_mount_table_quarantined_v1:
+        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
+        return false
+    true
+
+fn vfs_state_mount_table_unlock_v1() -> bool:
+    if mutex_raw_unlock(g_mount_table_mutex_v1): return true
+    g_mount_table_quarantined_v1 = true
+    false
+
+# Narrow owner port for the server-data namespace.  Only opaque seals and
+# immutable revalidation facts cross this seam; the MountTable and DBFS driver
+# remain owned here.
+pub fn vfs_state_acquire_dbfs_root_mount_seal_v1(
+) -> Result<DbfsRootMountSealV1, FsError>:
+    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
+    var table = g_mount_table
+    val result = table.acquire_dbfs_root_mount_seal()
+    g_mount_table = table
+    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    result
+
+pub fn vfs_state_revalidate_dbfs_root_mount_seal_v1(
+    seal: DbfsRootMountSealV1
+) -> Result<DbfsRootMountSealInfoV1, FsError>:
+    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
+    var table = g_mount_table
+    val result = table.revalidate_dbfs_root_mount_seal(seal)
+    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    result
+
+pub fn vfs_state_close_dbfs_root_mount_seal_v1(
+    seal: DbfsRootMountSealV1
+) -> Result<(), FsError>:
+    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
+    var table = g_mount_table
+    val result = table.close_dbfs_root_mount_seal(seal)
+    g_mount_table = table
+    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    result
 
 # Owner APIs for mutable root and MountTable state. Callers may work on a
 # value-semantic driver copy, but only this declaring module commits it.
 fn vfs_state_reset_rootfs():
+    if not vfs_state_mount_table_lock_v1(): return
     g_root_fat32 = nil
     g_root_nvfs_hosted = nil
     g_mount_table = MountTable.new()
     g_vfs_initialized = false
     g_vfs_boot_storage_provider = "not-mounted"
     g_vfs_boot_storage_pure_simple = false
+    _ = vfs_state_mount_table_unlock_v1()
 
 fn vfs_state_mark_rootfs_ready():
     g_vfs_initialized = true
@@ -88,51 +140,67 @@ fn vfs_state_commit_root_nvfs(driver: NvfsPosixDriver):
     g_root_nvfs_hosted = Some(driver)
 
 fn vfs_state_mount(path: text, driver: DriverInstance, options: MountOptions) -> Result<MountId, FsError>:
+    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.mount(path, driver, options)
     g_mount_table = table
+    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_unmount(path: text) -> Result<(), FsError>:
+    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.unmount(path)
     g_mount_table = table
+    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_positioned_open(path: text, flags: OpenFlags) -> Result<FileHandle, FsError>:
+    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.open(path, flags)
     g_mount_table = table
+    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_positioned_close(handle: FileHandle) -> Result<(), FsError>:
+    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.close(handle)
     g_mount_table = table
+    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_fsync(handle: FileHandle) -> Result<(), FsError>:
+    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.fsync(handle)
     g_mount_table = table
+    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_fdatasync(handle: FileHandle) -> Result<(), FsError>:
+    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.fdatasync(handle)
     g_mount_table = table
+    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_positioned_read(file_id: u64, kind: PositionedDriverKind, offset: u64, length: u64) -> Result<[u8], FsError>:
+    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.positioned_read_bytes(file_id, kind, offset, length)
     g_mount_table = table
+    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 fn vfs_state_positioned_write(file_id: u64, kind: PositionedDriverKind, offset: u64, data: [u8]) -> Result<u64, FsError>:
+    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table
     val result = table.positioned_write_bytes(file_id, kind, offset, data)
     g_mount_table = table
+    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
     result
 
 
@@ -186,6 +254,7 @@ fn vfs_boot_nvme_assign_discovered_user_namespace_hardware_driver_instance(
 
 # Boot orchestration mutates canonical state in its declaring module.
 fn _vfs_boot_reset_storage_state():
+    if not vfs_state_mount_table_lock_v1(): return
     g_root_fat32 = nil
     g_root_nvfs_hosted = nil
     g_vfs_initialized = false
@@ -195,6 +264,7 @@ fn _vfs_boot_reset_storage_state():
     g_vfs_boot_storage_pure_simple = false
     nvme_boot_runtime_reset_leases()
     direct_fat32_boot_reader_reset()
+    _ = vfs_state_mount_table_unlock_v1()
 
 pub fn vfs_boot_init() -> bool:
     """Initialize the full storage stack: PCI -> NVMe -> FAT32 -> VFS.
