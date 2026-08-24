@@ -1700,3 +1700,68 @@ Probe: instruction count on `self.builder` immediately after the `lower_expr`
 call in the `Expr` pre-dispatch branch, against the function's total at
 `end_function`. `>0` then `0` proves loss; `0` then `0` proves non-emission.
 That one needs a build, and it discriminates exactly those two.
+
+## 2026-08-24 — PROVEN: the instructions are EMITTED and then LOST
+
+The build was spent on one binary question and it answered cleanly. Measured on an
+**admitted** `--fresh-cache` Stage 2 (`750 compiled, 0 cached`, sha256
+`e1f7be28d207019bcc3d31f5e0d0cd02ef408ccf7b702b186d745b49cd0b6351`), against the
+interpreted lane as control:
+
+| fixture | engine | after `lower_expr` | at `end_function` |
+|---|---|---|---|
+| `fn main(): "abc".len()` | **Stage 2** | pending=**2** | **0** |
+| `fn main(): "abc".len()` | interpreted | pending=**2** | **2** |
+| `fn main(): print("hi")` | **Stage 2** | pending=**3** | **0** |
+| `fn main(): print("hi")` | interpreted | pending=**3** | **3** |
+
+The pending counts are **byte-identical in both engines**. Lowering does the right
+work and emits the right number of instructions on Stage 2; the finished function
+keeps them interpreted and loses **all** of them self-compiled. `>0` then `0` was
+the pre-specified proof of loss.
+
+### What this reframes
+
+This is **not** a silent emission failure. It is a silent instruction **LOSS**,
+between statement lowering and `end_function` — builder state written into a copy
+and never propagated back. Every site on that path is the
+`var b = self.builder; …; self.builder = b` value-semantics round trip that
+`code-style.md` names, and the interpreted engine's different aliasing behaviour is
+exactly why it survives there.
+
+**The lowering logic is exonerated.** The defect is in state propagation, not in
+any HIR/MIR translation rule.
+
+It also retro-explains the rest of the cluster with every link now measured: 0
+instructions trips the guard; with no instructions there is no explicit terminator
+and no tail `result`, so E-SFFI-016 fires downstream — confirming the earlier
+collapse of row 1 into row 2.
+
+### Calibration note (worth keeping)
+
+The first version of the emission probe read only `builder.blocks` and reported
+**0 even on the WORKING interpreted engine**, because `MirBuilder` accumulates into
+a pending `instructions` list that `finalize_block()` only flushes at
+`end_function`. Validating on the seconds-long interpreted lane caught this before
+the 845 s build. An uncalibrated probe would have read "0 then 0" and concluded
+**non-emission — the exact opposite of the truth.** Calibrate a probe on a run that
+is known to work before trusting it on one that does not.
+
+### Where the CoW lint stands on this
+
+`scripts/check/cow_alias_hotpath_baseline.txt` contains **zero** `50.mir` entries,
+so these sites are not flagged. That is not a gap in the lint: `cow_alias_hotpath`
+is a **performance** ratchet (PERF-COW-001/002 flag round trips that deep-copy),
+and the round-trip pattern used here is the *correct*, merely slow form. A **missing**
+write-back is a correctness defect the rule does not model. So "a known-bad pattern
+was left in a load-bearing path" is NOT supported — the pattern is the sanctioned
+one, and the bug is a write-back that does not survive on the self-compiled binary.
+
+### Secondary, and explicitly NOT settled
+
+`lower_type` sees **two** entries on Stage 2 (`disc=-1` and `disc=2375492728`)
+versus **one** live entry interpreted. So a dead `HirTypeKind` exists only on
+Stage 2 and only on a call the interpreter never makes. This does **not** settle
+"born dead vs killed in transit", and it does not confirm the unification
+hypothesis with the codec blocker — the function's own return type is live in both
+engines. Left open.
