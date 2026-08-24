@@ -128,7 +128,10 @@ value, REQ ids bound inside scenario bodies, and lifecycle links pointed at real
 files. Dimensions went narrative 80→100, structure 60→100, oracle 70→100, and
 the `SSDOC-TRC-003` blocker cleared.
 
-**91 is the ceiling, and the ceiling is the generator, not the specs.** Both
+**Update (same day): the generator ceiling was found and fixed — see below.
+Both smux specs now score 95, and the manager spec 84.**
+
+**91 was the ceiling, and the ceiling was the generator, not the specs.** Both
 files are at 100 on every authored dimension; the remaining 9 points are
 `SSDOC-EVD-002` (-15, steps not visible in the manual) and `SSDOC-MNT-008`
 (-20, no traceability section) — both charged against specs for what
@@ -137,6 +140,32 @@ files are at 100 on every authored dimension; the remaining 9 points are
 
 The two system specs sit at 49 and were left alone: raising them means editing
 the very spec that gates this lane, which deserves its own reviewed change.
+
+### The generator ceiling, resolved
+
+The 91 ceiling was a **contract mismatch between two tools**, not a missing
+feature. The analyzer counted a manual step only for lines beginning `step ` or
+`1. `, or containing `data-step=`; the canonical generator emits `- <label>`
+bullets, a form deliberately pinned by an existing test that asserts the ordered
+`1. ` form must NOT appear. So every fully-stepped manual scored zero visible
+steps. The analyzer was corrected to match what the generator emits, and
+`documentize.spl` now emits the `## Traceability` section that never existed.
+
+Confirming that surfaced two real rendering defects, both of which this lane's
+own authoring had made visible: step labels were truncated at an escaped quote
+(`- Create session \`), and the same-line `# oracle:` markers that
+`SSDOC-ORA-003` *requires* were folded into the rendered expected value
+(``equals `0)  # oracle: index 0 is ...` ``). Both fixed, with three regression
+examples that fail before and pass after.
+
+| spec | start | after authoring | after generator fix |
+|---|---|---|---|
+| `smux_spec.spl` | 74 | 91 | **95** |
+| `smux_dashboard_spec.spl` | 74 | 91 | **95** |
+| `multi_caret_manager_spec.spl` | 76 | 76 | **84** |
+
+Detail and the two corrected earlier diagnoses:
+`doc/08_tracking/bug/sspec_docgen_dumps_source_instead_of_scenario_manual_2026-08-24.md`.
 
 ### Authoring trap worth knowing
 
@@ -175,8 +204,10 @@ No repair was attempted here.
 
 1. Land these restores upstream — `origin/main` still carries all three
    clobbered specs.
-2. Fix `documentize.spl` (bug filed) — it caps every spec in the repo at ~91 and
-   defeats the stated purpose of a manual readable without its source.
+2. ~~Fix the generator ceiling~~ — **done**; see "The generator ceiling,
+   resolved" above. Remaining in that area: `spipe_docgen_scenario_body_spec`
+   carries 16 pre-existing failures in the capture/evidence-metadata family,
+   untouched.
 3. Retire the trace-report debt: 85 untraced symbols, 12 stale rows, by hand.
 4. Pick the Ink terminal-UI sub-lane if full parity is to be started.
 5. Add a CI job that runs the lane's system specs, so a state file can never
