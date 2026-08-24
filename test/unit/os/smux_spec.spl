@@ -1,3 +1,31 @@
+"""
+## Purpose and audience
+Purpose: Specify the smux terminal-multiplexer value model — session identity,
+windows, panes, layout splits, PTY configuration, the output ring buffer, the
+pane backend lifecycle, and command classification.
+Audience: engineers changing `src/os/apps/smux/**` who need to know which
+observable behaviors are pinned before they touch the multiplexer.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+Each scenario narrates its arrange/act steps, so a failing verdict names the
+operation that regressed rather than only the value that differed.
+## Compatibility and limitations
+These scenarios exercise the pure value model only. PTY allocation, real
+process attachment, and the on-screen renderer are covered by
+`test/03_system/tools/smux_system_spec.spl`, not here.
+# @manual: primary
+REQ-TOOLS-SMUX-UNIT-001
+doc/01_research/os/qemu/tmux_simpleos.md
+doc/03_plan/sys_test/smux_caret_sspec_quality.md
+doc/04_architecture/os/tmux_simpleos.md
+doc/05_design/os/desktop/tmux_simpleos_tui.md
+"""
+
+# @req REQ-TOOLS-SMUX-UNIT-001
+# @tag: unit, smux, terminal_multiplexer
+
+use std.spec.{describe, it, expect, step}
+
 class SessionId:
     session_name: text
     created_at: int
@@ -218,114 +246,167 @@ class SmuxResponse:
 
 describe "smux session identity":
     it "stores the name it was created with":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Create session \"main\" at index 0")
         val s = SessionId.create("main", 0)
+        # oracle: create() is the only constructor, so it must round-trip both
+        # arguments verbatim; anything else silently renames a user's session.
         expect(s.session_name).to_equal("main")
-        expect(s.session_index).to_equal(0)
+        expect(s.session_index).to_equal(0)  # oracle: index 0 is the first session slot; smux numbers sessions from 0
 
     it "matches its own name":
+        step("Create session \"work\" and ask it to match that same name")
         val s = SessionId.create("work", 1)
         expect(s.matches_name("work")).to_equal(true)
 
     it "rejects a different name":
+        step("Ask session \"work\" to match an unrelated name")
         val s = SessionId.create("work", 1)
         expect(s.matches_name("other")).to_equal(false)
 
 describe "smux windows":
     it "records index and title on creation":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Create window 2 titled \"editor\"")
         val w = WindowId.create(2, "editor")
-        expect(w.window_index).to_equal(2)
+        expect(w.window_index).to_equal(2)  # oracle: the window index passed to create() is stored verbatim
         expect(w.title).to_equal("editor")
+        # oracle: a freshly created window is never the active one; the caller
+        # activates it explicitly, so two new windows cannot both claim focus.
         expect(w.is_active).to_equal(false)
 
     it "becomes active when activated":
+        step("Create window 0 titled \"shell\"")
         val w = WindowId.create(0, "shell")
+        step("Activate it")
         val a = w.activate()
         expect(a.is_active).to_equal(true)
 
     it "becomes inactive when deactivated after activation":
+        step("Create window 0, activate it, then deactivate it")
         val w = WindowId.create(0, "shell")
         val a = w.activate()
         val d = a.deactivate()
+        # oracle: deactivate must undo activate exactly, or focus leaks across
+        # windows and the multiplexer shows two active tabs.
         expect(d.is_active).to_equal(false)
 
 describe "smux panes":
     it "records the width and height it was created with":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Create pane 0 at the default 80x24 terminal geometry")
         val p = PaneId.create(0, 80, 24)
-        expect(p.width).to_equal(80)
-        expect(p.height).to_equal(24)
+        # oracle: 80x24 is the POSIX default terminal geometry inherited from
+        # PtyConfig.default_config(), not an arbitrary fixture size.
+        expect(p.width).to_equal(80)  # oracle: 80 columns is the POSIX default terminal width
+        expect(p.height).to_equal(24)  # oracle: 24 rows is the POSIX default terminal height
 
     it "computes area as width times height":
+        step("Create an 80x24 pane and ask for its cell area")
         val p = PaneId.create(0, 80, 24)
-        expect(p.area()).to_equal(1920)
+        # oracle: 1920 = 80 * 24, the addressable cell count the renderer must
+        # allocate for this pane.
+        expect(p.area()).to_equal(1920)  # oracle: 1920 = 80 * 24 addressable cells
 
     it "adopts new dimensions when resized":
+        step("Create an 80x24 pane, then resize it to 120x40")
         val p = PaneId.create(0, 80, 24)
         val r = p.resize(120, 40)
-        expect(r.width).to_equal(120)
-        expect(r.height).to_equal(40)
+        expect(r.width).to_equal(120)  # oracle: the requested resize width is stored verbatim
+        expect(r.height).to_equal(40)  # oracle: the requested resize height is stored verbatim
 
 describe "smux session state":
     it "starts empty for a fresh session":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Build session state over a newly created session")
         val s = SessionId.create("main", 0)
         val ss = SmuxSessionState.create(s)
+        # oracle: a session with no attached window must report empty, so the
+        # dashboard does not draw a pane that has no backing process.
         expect(ss.is_empty()).to_equal(true)
-        expect(ss.active_count).to_equal(0)
+        expect(ss.active_count).to_equal(0)  # oracle: a fresh session owns no windows yet
 
 describe "smux layout splits":
     it "creates a horizontal split":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Split node 1 horizontally at an even 50 percent ratio")
         val sp = LayoutSplit.horizontal(1, 50)
         expect(sp.direction).to_equal("horizontal")
         expect(sp.is_horizontal()).to_equal(true)
 
     it "creates a vertical split":
+        step("Split node 2 vertically at a 30 percent ratio")
         val sp = LayoutSplit.vertical(2, 30)
         expect(sp.direction).to_equal("vertical")
-        expect(sp.ratio).to_equal(30)
+        # oracle: the requested ratio is stored verbatim; the layout engine
+        # rounds to cells later, so a stored ratio must not be pre-rounded.
+        expect(sp.ratio).to_equal(30)  # oracle: the requested split ratio is stored unrounded
 
     it "inverts horizontal into vertical":
+        step("Invert a horizontal split")
         val sp = LayoutSplit.horizontal(1, 50)
         val inv = sp.invert()
         expect(inv.direction).to_equal("vertical")
 
     it "reports a leaf node as holding a pane":
+        step("Build a leaf node bound to pane 0")
         val n = LayoutNode.leaf(1, 0)
         expect(n.has_pane()).to_equal(true)
 
     it "reports an internal node as holding no pane":
+        step("Build an internal node wrapping a vertical split")
         val sp = LayoutSplit.vertical(1, 50)
         val n = LayoutNode.internal(2, sp)
         expect(n.has_pane()).to_equal(false)
-        expect(n.pane_index).to_equal(-1)
+        # oracle: -1 is the sentinel for \"no pane\"; a real index here would
+        # make the renderer draw an internal node's children twice.
+        expect(n.pane_index).to_equal(-1)  # oracle: -1 is the sentinel meaning "this node holds no pane"
 
 describe "smux pty configuration":
     it "defaults to an 80x24 terminal":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Read the default PTY configuration")
         val cfg = PtyConfig.default_config()
-        expect(cfg.rows).to_equal(24)
-        expect(cfg.cols).to_equal(80)
+        # oracle: 24 rows by 80 columns is the POSIX default terminal geometry
+        # that every consumer of default_config() inherits.
+        expect(cfg.rows).to_equal(24)  # oracle: 24 rows is the POSIX default terminal height
+        expect(cfg.cols).to_equal(80)  # oracle: 80 columns is the POSIX default terminal width
 
     it "adopts a new terminal size":
+        step("Resize the default configuration to 40 rows by 120 columns")
         val cfg = PtyConfig.default_config()
         val r = cfg.with_size(40, 120)
-        expect(r.rows).to_equal(40)
-        expect(r.cols).to_equal(120)
+        expect(r.rows).to_equal(40)  # oracle: the requested row count is stored verbatim
+        expect(r.cols).to_equal(120)  # oracle: the requested column count is stored verbatim
 
 describe "smux output buffer":
     it "returns the first appended line":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Create a 4-line ring buffer and append one line")
         val buf = OutputBuffer.create(4)
         val b1 = buf.append_line("hello")
         expect(b1.get_line(0)).to_equal("hello")
-        expect(b1.line_count).to_equal(1)
+        # oracle: one append yields exactly one line; a ring buffer that
+        # miscounts here drops scrollback once it wraps.
+        expect(b1.line_count).to_equal(1)  # oracle: one append yields exactly one buffered line
 
 describe "smux pane backend":
     it "stops running once stopped":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Create a pane backend over the default PTY configuration")
         val cfg = PtyConfig.default_config()
         val be = PaneBackend.create(1, cfg)
+        step("Stop it with a clean exit status")
         val stopped = be.stop(0)
         expect(stopped.is_running).to_equal(false)
-        expect(stopped.exit_code).to_equal(0)
+        # oracle: 0 is the exit status handed to stop(); the backend records
+        # what it was told rather than inventing a status of its own.
+        expect(stopped.exit_code).to_equal(0)  # oracle: stop() records the status it was handed
 
 describe "smux commands":
     it "classifies new-session as a session command":
+        # @req REQ-TOOLS-SMUX-UNIT-001
+        step("Build a new-session command targeting \"dev\"")
         val cmd = SmuxCommand.new_session("dev")
         expect(cmd.is_session_cmd()).to_equal(true)
         expect(cmd.target_name).to_equal("dev")
