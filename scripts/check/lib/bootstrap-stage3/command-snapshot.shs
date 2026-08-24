@@ -15,18 +15,38 @@ bootstrap_stage3_write_command_transcript() {
         echo "schema=simple-bootstrap-command-transcript-v2"
         printf 'cwd:%s:%s\n' "${#bootstrap_stage3_command_cwd}" \
             "$bootstrap_stage3_command_cwd"
-        for bootstrap_stage3_host_env in \
-            "HOME=$bootstrap_stage3_command_home" \
-            "PATH=$bootstrap_stage3_command_path" \
-            "TMPDIR=$bootstrap_stage3_command_tmpdir" \
-            "LC_ALL=C" "LANG=C"; do
-            case "$bootstrap_stage3_host_env" in
+        # Emitted one call at a time rather than through `for ... in` over
+        # `set --`, because "$@" still carries the explicit-env list that is
+        # parsed immediately below and must not be clobbered.
+        bootstrap_stage3_emit_host_env() {
+            case "$1" in
                 *'
 '*) exit 1 ;;
             esac
-            printf 'host-env:%s:%s\n' "${#bootstrap_stage3_host_env}" \
-                "$bootstrap_stage3_host_env"
-        done
+            printf 'host-env:%s:%s\n' "${#1}" "$1"
+        }
+        bootstrap_stage3_emit_host_env \
+            "HOME=$bootstrap_stage3_command_home"
+        bootstrap_stage3_emit_host_env \
+            "PATH=$bootstrap_stage3_command_path"
+        bootstrap_stage3_emit_host_env \
+            "TMPDIR=$bootstrap_stage3_command_tmpdir"
+        # Windows only: MinGW g++ does not read TMPDIR at all -- it reads TMP
+        # and TEMP. With the hermetic env supplying neither, it falls back to
+        # GetTempPath() and Stage 2 dies with "Cannot create temporary file in
+        # C:\WINDOWS\: Permission denied". Both are pinned to the stage's OWN
+        # tmp directory, so hermeticity and determinism are preserved: no host
+        # temp location leaks in. Unix still records exactly five entries.
+        case "$(uname -s 2>/dev/null || echo unknown)" in
+            MSYS*|MINGW*|CYGWIN*)
+                bootstrap_stage3_emit_host_env \
+                    "TMP=$bootstrap_stage3_command_tmpdir"
+                bootstrap_stage3_emit_host_env \
+                    "TEMP=$bootstrap_stage3_command_tmpdir"
+                ;;
+        esac
+        bootstrap_stage3_emit_host_env "LC_ALL=C"
+        bootstrap_stage3_emit_host_env "LANG=C"
         bootstrap_stage3_seen_env=:
         while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
             case "$1" in
@@ -83,16 +103,29 @@ bootstrap_stage3_verify_command_transcript() {
         rm -f "$bootstrap_stage3_expected" "$bootstrap_stage3_host"
         return 1
     }
-    [ "$(wc -l <"$bootstrap_stage3_host" | tr -d ' ')" = 5 ] || {
+    # Windows pins TMP and TEMP alongside TMPDIR (see the writer above), so the
+    # host-env set is exactly 7 there and exactly 5 everywhere else. The count
+    # stays EXACT on both -- this widens the contract by platform, it does not
+    # relax it into "5 or more".
+    bootstrap_stage3_host_env_expected=5
+    bootstrap_stage3_host_env_windows=0
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*)
+            bootstrap_stage3_host_env_expected=7
+            bootstrap_stage3_host_env_windows=1
+            ;;
+    esac
+    [ "$(wc -l <"$bootstrap_stage3_host" | tr -d ' ')" = \
+        "$bootstrap_stage3_host_env_expected" ] || {
         rm -f "$bootstrap_stage3_expected" "$bootstrap_stage3_host"
         return 1
     }
-    awk -F: '
+    awk -F: -v win="$bootstrap_stage3_host_env_windows" '
         function valid(record, declared, payload) {
             payload = substr(record, index(record, $3))
             return declared == length(payload)
         }
-        /^host-env:[0-9]+:(HOME|PATH|TMPDIR)=/ {
+        /^host-env:[0-9]+:(HOME|PATH|TMPDIR|TMP|TEMP)=/ {
             if (!valid($0, $2)) exit 1
             name = $3
             sub(/=.*/, "", name)
@@ -111,6 +144,10 @@ bootstrap_stage3_verify_command_transcript() {
             if (seen["HOME"] != 1 || seen["PATH"] != 1 ||
                 seen["TMPDIR"] != 1 || seen["LC_ALL"] != 1 ||
                 seen["LANG"] != 1) exit 1
+            # Fail closed BOTH ways: Windows must carry TMP and TEMP, and a
+            # non-Windows transcript must not smuggle them in.
+            if (win == 1 && (seen["TMP"] != 1 || seen["TEMP"] != 1)) exit 1
+            if (win != 1 && (seen["TMP"] > 0 || seen["TEMP"] > 0)) exit 1
         }
     ' "$bootstrap_stage3_host" || {
         rm -f "$bootstrap_stage3_expected" "$bootstrap_stage3_host"
@@ -211,6 +248,30 @@ bootstrap_stage3_run_transcribed() {
     ) || return 1
     (
         cd "$bootstrap_stage3_run_cwd" || exit 1
+        # Must mirror the host-env recorded by
+        # bootstrap_stage3_write_command_transcript exactly, including the
+        # Windows-only TMP/TEMP pinned to this stage's own tmp directory --
+        # the transcript is verified against this set.
+        case "$(uname -s 2>/dev/null || echo unknown)" in
+            MSYS*|MINGW*|CYGWIN*)
+                env -i "HOME=$bootstrap_stage3_run_home" \
+                    "PATH=$bootstrap_stage3_run_path" \
+                    "TMPDIR=$bootstrap_stage3_run_tmpdir" \
+                    "TMP=$bootstrap_stage3_run_tmpdir" \
+                    "TEMP=$bootstrap_stage3_run_tmpdir" \
+                    "LC_ALL=C" "LANG=C" /bin/sh -c '
+                        while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+                            export "$1" || exit 1
+                            shift
+                        done
+                        [ "${1-}" = -- ] || exit 1
+                        shift
+                        [ "$#" -gt 0 ] || exit 1
+                        exec "$@"
+                    ' sh "$@"
+                exit $?
+                ;;
+        esac
         env -i "HOME=$bootstrap_stage3_run_home" \
             "PATH=$bootstrap_stage3_run_path" \
             "TMPDIR=$bootstrap_stage3_run_tmpdir" \
