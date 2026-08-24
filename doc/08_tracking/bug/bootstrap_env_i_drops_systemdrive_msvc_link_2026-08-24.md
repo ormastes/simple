@@ -103,7 +103,8 @@ warning: ring@0.17.14: Compiler family detection failed due to error:
 error: failed to run custom build command for `ring v0.17.14`
 ```
 
-The repo is not at fault. This host's MSYS2 MinGW GCC is broken:
+The repo is not at fault, and **the toolchain is not broken either** — it is
+shadowed. Symptoms first:
 
 | probe | result |
 |---|---|
@@ -112,11 +113,29 @@ The repo is not at fault. This host's MSYS2 MinGW GCC is broken:
 | `gcc -E hello.c` | **rc=1**, zero stdout, zero stderr |
 | `cc1.exe --version` (direct) | **rc=127**, zero stderr |
 
-`cc1.exe` exists on disk but cannot load, so the driver fails silently with no
-diagnostic at all — which is why `ring` could only report "Compiler family
-detection failed". Setting `MSYSTEM=MINGW64` does not change it. Repair the
-toolchain on the host (e.g. `pacman -S --needed mingw-w64-x86_64-gcc`) and
-re-run the lane; do not work around it in-repo.
+Root cause: **PATH order mixes two different mingw64 trees.** `ldd` on
+`cc1.exe` shows it loading DLLs from BOTH:
+
+```
+libgcc_s_seh-1.dll => /mingw64/bin/libgcc_s_seh-1.dll          <- Git Bash's mingw64
+libgmp-10.dll     => /mingw64/bin/libgmp-10.dll                <- Git Bash's mingw64
+libisl-23.dll     => /c/dev/tool/msys2/mingw64/bin/libisl-23.dll  <- the real MSYS2 one
+```
+
+Git for Windows ships its own `/mingw64/bin` and puts it on PATH ahead of the
+MSYS2 installation, so `cc1.exe` binds incompatible support DLLs and dies before
+it can print anything — which is why `ring` could only report "Compiler family
+detection failed". Nothing is missing from disk; `MSYSTEM=MINGW64` does not
+change it, and reinstalling the package would not have either.
+
+Fix is environment-only — put the real MSYS2 mingw64 bin FIRST:
+
+```sh
+export PATH="/c/dev/tool/msys2/mingw64/bin:$PATH"
+```
+
+With that, `cc1.exe --version` is rc=0 and `gcc -c` / `gcc -E` both succeed. Do
+not work around this in-repo.
 
 **Measure gcc's status without a pipe.** `gcc -c x.c 2>&1 | head -3; echo $?`
 reports `head`'s status and reads as a PASS — that misread this exact failure
