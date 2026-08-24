@@ -11,6 +11,7 @@ use os.apps.sshd.ssh_channel.{ChannelState, ChannelTerminalRequestV1, SSH_MSG_CH
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
 use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, _copy_bytes_stable, _push_u32_be_stable, _read_u32_stable, _read_text_field_fast, _bytes_to_hex, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable}
+use os.apps.sshd.ssh_global_request.{SshGlobalRequestDecisionV1, SSH_MSG_GLOBAL_REQUEST, ssh_global_request_classify, ssh_global_request_reply_payload}
 use os.kernel.log.klog_api.{log_info}
 use std.common.string_core.{text_to_bytes}
 
@@ -343,6 +344,14 @@ impl SshSession:
 
             if msg_type == 90:
                 self._handle_channel_open(payload)
+            elif msg_type == SSH_MSG_GLOBAL_REQUEST:
+                val decision = ssh_global_request_classify(payload)
+                if decision == SshGlobalRequestDecisionV1.Malformed:
+                    self.transition_closed()
+                    return
+                val reply = ssh_global_request_reply_payload(decision)
+                if reply.len() > 0u64:
+                    self.send_packet(reply)
             elif msg_type == 94:
                 self._handle_channel_data(payload)
             elif msg_type == 93:
