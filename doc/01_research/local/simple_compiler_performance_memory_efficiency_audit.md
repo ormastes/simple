@@ -2715,3 +2715,11 @@ preserving the exact schema, ordinal order, comma placement, and empty-pipeline
 form while making top-level assembly linear in output size. Existing schema,
 delegation, order, and repeatability contracts were not rerun under the user's
 no-verification instruction.
+
+The SIMD recipe developer report used the same growing-prefix pattern. Its
+table is currently capped at 16 entries, so the absolute exposure is bounded,
+but the implementation still made report cost depend on cumulative prefix
+copies and would regress if the cap grew. It now renders a header plus ordered
+entry fragments with one join. A direct contract pins insertion order, summary
+fields, and trailing newlines; it was not executed under the user's
+no-verification instruction.
