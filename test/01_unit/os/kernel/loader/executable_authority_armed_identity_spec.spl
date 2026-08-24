@@ -1,0 +1,97 @@
+"""Package-private loader authority identity snapshot contract."""
+
+use std.spec.{describe, it, expect, fail}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, ExecutableLoadRangeV1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityErrorV1,
+    executable_authority_loader_owner_initialize,
+    executable_authority_issue_verified,
+    executable_authority_snapshot_armed_identity,
+    executable_authority_commit,
+    executable_authority_slot_count
+}
+
+fn identity_handle() -> ExecutableImageHandleV1:
+    ExecutableImageHandleV1(
+        schema_version: 1,
+        open_handle_id: 17u64,
+        mount_id: 2u64,
+        filesystem_name: "dbfs",
+        canonical_source_path: "/servers/simple-web",
+        mount_generation: 3u64,
+        file_id: 17u64,
+        file_generation: 4u64,
+        size_bytes: 4096u64,
+        role: "web-server",
+        target: ManifestTarget(os: "simpleos", arch: "aarch64", abi: "simpleos"),
+        verified_load_ranges: [ExecutableLoadRangeV1(
+            file_offset: 0u64,
+            file_size: 4096u64,
+            virtual_address: 0x400000u64,
+            memory_size: 4096u64,
+            writable: false,
+            executable: true)],
+        image_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        admission_id: "ssh-web-launch-1",
+        trust_epoch: 5u64,
+        read_count: 0u64,
+        read_bytes: 0u64,
+        consumed: false)
+
+describe "loader-owned Armed authority identity snapshot":
+    it "copies exact bounded identity without consuming or surviving commit":
+        val owner_result = executable_authority_loader_owner_initialize(
+            4, 0x41524D4544494453u64)
+        if owner_result.is_err(): fail("authority owner init failed")
+        val owner = owner_result.unwrap()
+        val issued = executable_authority_issue_verified(
+            owner, identity_handle(), true, 0x400100u64)
+        if issued.is_err(): fail("verified authority issue failed")
+        val token = issued.unwrap()
+        val observed = executable_authority_snapshot_armed_identity(owner, token)
+        if observed.is_err(): fail("Armed identity snapshot failed")
+        var first = observed.unwrap()
+        expect(first.slot_index).to_equal(token.slot_index)
+        expect(first.token_generation).to_equal(token.generation)
+        expect(first.token_nonce).to_equal(token.nonce)
+        expect(first.canonical_source_path).to_equal("/servers/simple-web")
+        expect(first.image_hash).to_equal(identity_handle().image_hash)
+        expect(first.admission_id).to_equal("ssh-web-launch-1")
+        expect(first.role).to_equal("web-server")
+        expect(first.target.arch).to_equal("aarch64")
+        expect(first.has_entry_identity).to_be_true()
+        expect(first.entry_point).to_equal(0x400100u64)
+
+        first.canonical_source_path = "/attacker-rewrite"
+        first.admission_id = "attacker-admission"
+        val repeated = executable_authority_snapshot_armed_identity(owner, token)
+        if repeated.is_err(): fail("repeat Armed identity snapshot failed")
+        expect(repeated.unwrap().canonical_source_path).to_equal("/servers/simple-web")
+        expect(repeated.unwrap().admission_id).to_equal("ssh-web-launch-1")
+        expect(executable_authority_slot_count(owner)).to_equal(1)
+
+        if executable_authority_commit(owner, token).is_err():
+            fail("authority commit failed")
+        match executable_authority_snapshot_armed_identity(owner, token):
+            case Err(error): expect(error).to_equal(ExecutableAuthorityErrorV1.NotArmed)
+            case Ok(_): fail("committed authority exposed as Armed identity")
+
+        val missing_entry = executable_authority_issue_verified(
+            owner, identity_handle(), false, 0u64)
+        if missing_entry.is_err(): fail("legacy no-entry issue failed")
+        val legacy = executable_authority_snapshot_armed_identity(
+            owner, missing_entry.unwrap())
+        if legacy.is_err(): fail("legacy identity snapshot failed")
+        expect(legacy.unwrap().has_entry_identity).to_be_false()
+        expect(legacy.unwrap().entry_point).to_equal(0u64)
+
+        val before_invalid = executable_authority_slot_count(owner)
+        match executable_authority_issue_verified(
+            owner, identity_handle(), true, 0x500000u64
+        ):
+            case Err(error): expect(error).to_equal(ExecutableAuthorityErrorV1.InvalidHandle)
+            case Ok(_): fail("out-of-range entry identity was armed")
+        expect(executable_authority_slot_count(owner)).to_equal(before_invalid)

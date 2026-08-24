@@ -11,7 +11,10 @@
 use std.common.contracts.execution.simpleos_executable_admission_v1.{
     ExecutableImageHandleV1, executable_image_handle_validate
 }
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
 
 pub enum ExecutableAuthorityStateV1:
     Armed
@@ -39,6 +42,7 @@ pub enum ExecutableAuthorityErrorV1:
     Retired
     GenerationExhausted
     NonceExhausted
+    NotArmed
 
 pub struct ExecutableAuthorityTokenV1:
     slot_index: i64
@@ -50,6 +54,21 @@ pub struct ExecutableAuthoritySnapshotV1:
     generation: u64
     nonce: u64
 
+# Owned, non-authorizing identity copied from one live Armed loader slot.
+# The slot coordinate is included so a loader-owned joint transition can bind
+# another lease to the exact token generation without retrieving the image.
+pub(package) struct ExecutableAuthorityArmedIdentityV1:
+    slot_index: i64
+    token_generation: u64
+    token_nonce: u64
+    canonical_source_path: text
+    image_hash: text
+    admission_id: text
+    role: text
+    target: ManifestTarget
+    has_entry_identity: bool
+    entry_point: u64
+
 pub(package) struct ExecutableAuthorityCloseLeaseV1:
     token: ExecutableAuthorityTokenV1
     close_attempt: u64
@@ -60,6 +79,8 @@ struct ExecutableAuthoritySlotV1:
     generation: u64
     nonce: u64
     close_attempt: u64
+    has_entry_identity: bool
+    entry_point: u64
     image_handle: ExecutableImageHandleV1
 
 struct ExecutableAuthorityRegistryStateV1:
@@ -79,6 +100,30 @@ var _authority_registry_state: ExecutableAuthorityRegistryStateV1? = nil
 
 pub fn executable_authority_registry_max_slots() -> i64:
     4096
+
+fn _authority_entry_in_executable_range(
+    image_handle: ExecutableImageHandleV1,
+    entry_point: u64
+) -> bool:
+    if entry_point == 0u64:
+        return false
+    for load_range in image_handle.verified_load_ranges:
+        if load_range.executable and
+            entry_point >= load_range.virtual_address and
+            entry_point < load_range.virtual_address + load_range.memory_size:
+            return true
+    false
+
+fn _authority_copy_text_bounded(value: text, max_bytes: i64) -> text?:
+    val source = value.bytes()
+    if source.len() < 0 or source.len() > max_bytes:
+        return nil
+    var owned: [u8] = []
+    var i = 0
+    while i < source.len():
+        owned.push(source[i])
+        i = i + 1
+    Some(rt_string_from_byte_array(owned))
 
 fn _authority_mix64(value: u64) -> u64:
     var mixed = value ^ (value >> 30)
@@ -183,7 +228,9 @@ pub(package) fn executable_authority_loader_owner(
 
 pub(package) fn executable_authority_issue_verified(
     owner: ExecutableAuthorityRegistryV1,
-    image_handle: ExecutableImageHandleV1
+    image_handle: ExecutableImageHandleV1,
+    has_entry_identity: bool,
+    entry_point: u64
 ) -> Result<ExecutableAuthorityTokenV1, ExecutableAuthorityErrorV1>:
     # Package-private by design: caller-provided structural booleans never
     # reach this verifier-owned seam.
@@ -199,6 +246,10 @@ pub(package) fn executable_authority_issue_verified(
             if not _authority_owner_matches(state, owner):
                 error = ExecutableAuthorityErrorV1.InvalidRegistry
             elif not executable_image_handle_validate(image_handle).ok:
+                error = ExecutableAuthorityErrorV1.InvalidHandle
+            elif (has_entry_identity and
+                not _authority_entry_in_executable_range(image_handle, entry_point)) or
+                (not has_entry_identity and entry_point != 0u64):
                 error = ExecutableAuthorityErrorV1.InvalidHandle
             else:
                 var reusable_index = -1
@@ -239,6 +290,8 @@ pub(package) fn executable_authority_issue_verified(
                             generation: generation,
                             nonce: nonce,
                             close_attempt: 0u64,
+                            has_entry_identity: has_entry_identity,
+                            entry_point: entry_point,
                             image_handle: image_handle
                         )
                         if reusable_index >= 0:
@@ -509,6 +562,74 @@ pub fn executable_authority_snapshot(
     if error != ExecutableAuthorityErrorV1.None:
         return Err(error)
     match snapshot:
+        case Some(value): Ok(value)
+        case nil: Err(ExecutableAuthorityErrorV1.InvalidRegistry)
+
+pub(package) fn executable_authority_snapshot_armed_identity(
+    owner: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1
+) -> Result<ExecutableAuthorityArmedIdentityV1, ExecutableAuthorityErrorV1>:
+    # Copy under the registry mutex so every returned field describes one
+    # exact Armed slot generation. The largest copy is a 16 KiB UTF-8 path;
+    # no file handle, load ranges, or image bytes cross this boundary.
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    var identity: ExecutableAuthorityArmedIdentityV1? = nil
+    match _authority_registry_state:
+        case nil:
+            error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(state):
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_token_index(state, token)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidToken
+                else:
+                    val slot = state.slots[index]
+                    if slot.state != ExecutableAuthorityStateV1.Armed:
+                        error = ExecutableAuthorityErrorV1.NotArmed
+                    else:
+                        val path = _authority_copy_text_bounded(
+                            slot.image_handle.canonical_source_path, 16384)
+                        val image_hash = _authority_copy_text_bounded(
+                            slot.image_handle.image_hash, 64)
+                        val admission_id = _authority_copy_text_bounded(
+                            slot.image_handle.admission_id, 1024)
+                        val role = _authority_copy_text_bounded(
+                            slot.image_handle.role, 1024)
+                        val target_os = _authority_copy_text_bounded(
+                            slot.image_handle.target.os, 1024)
+                        val target_arch = _authority_copy_text_bounded(
+                            slot.image_handle.target.arch, 1024)
+                        val target_abi = _authority_copy_text_bounded(
+                            slot.image_handle.target.abi, 1024)
+                        if not path.? or not image_hash.? or not admission_id.? or
+                            not role.? or not target_os.? or not target_arch.? or
+                            not target_abi.?:
+                            error = ExecutableAuthorityErrorV1.InvalidHandle
+                        else:
+                            identity = Some(ExecutableAuthorityArmedIdentityV1(
+                                slot_index: token.slot_index,
+                                token_generation: slot.generation,
+                                token_nonce: slot.nonce,
+                                canonical_source_path: path.unwrap(),
+                                image_hash: image_hash.unwrap(),
+                                admission_id: admission_id.unwrap(),
+                                role: role.unwrap(),
+                                target: ManifestTarget(
+                                    os: target_os.unwrap(),
+                                    arch: target_arch.unwrap(),
+                                    abi: target_abi.unwrap()),
+                                has_entry_identity: slot.has_entry_identity,
+                                entry_point: slot.entry_point
+                            ))
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error != ExecutableAuthorityErrorV1.None:
+        return Err(error)
+    match identity:
         case Some(value): Ok(value)
         case nil: Err(ExecutableAuthorityErrorV1.InvalidRegistry)
 
