@@ -2165,3 +2165,87 @@ Still open: whether a *local* receiver can also be captured (the local case test
 here resolved correctly, which bounds it), and the census of other bare methods with
 a single user-defined implementation — `is_empty` is special-cased in seven places
 in the seed, which hints the population is larger than one.
+
+## 2026-08-24 — EXACT ROOT CAUSE: `resolve_name_variants` drops the type qualifier
+
+**This corrects the "NEGATIVE" section above.** That section concluded the rebind
+happens *upstream of* `resolve_method_call_static`. **That was wrong.** It happens
+*inside* it — the earlier fix simply targeted the wrong branch of that function.
+
+### The measurement
+
+`SIMPLE_MANGLE_TRACE=1` on the 15-line reproducer (2-second build):
+
+```
+[mangle] resolve_method_call_static IN  func_name=Array.is_empty
+[mangle] resolve_method_call_static OUT func_name=span_mod__Sp_dot_is_empty
+```
+
+Two things this settles:
+
+1. **The receiver type is NOT lost.** The name arrives *correctly qualified* as
+   `Array.is_empty`. Every "erased receiver" hypothesis — mine and the ones
+   suggested to me — is refuted.
+2. **The name is not bare**, which is exactly why adding `is_empty` to the
+   bare-name guard at `mangle.rs:756` changed nothing: that guard is behind
+   `if !lookup_name.contains('.')`.
+
+Neither the unique-candidate nor the suffix fallback trace fired, so the rebind is
+the `resolve_name_variants` success path at `mangle.rs:800`.
+
+### The line
+
+`resolve_name_variants` (`pipeline/native_project/imports.rs`), inside its
+`if let Some(pos) = name.find('.')` branch, ends with:
+
+```rust
+if !method_part.is_empty() {
+    if let Some(resolved) = use_map.get(method_part).or_else(|| import_map.get(method_part)) {
+        return Some(resolved.clone());
+    }
+}
+```
+
+It looks up **the method name alone**, discarding the `Array.` qualifier. With any
+user `is_empty` in the entry closure, `Array.is_empty` resolves to it.
+
+### A rule fix works — and is NOT sufficient on its own
+
+Gating that last-resort lookup on the qualifier not naming a builtin receiver type
+(`Array`/`Dict`/`text`/…), i.e. a **rule** fix rather than an `is_empty` special
+case, was implemented and measured:
+
+```
+[mangle] IN  func_name=Array.is_empty
+[mangle] OUT func_name=Array.is_empty      <-- rebind gone
+```
+
+**But both faces then SEGV**, because `Array.is_empty` has no lowering: it is
+emitted as an external name nothing defines, stubbed, and the stub crashes. That is
+precisely the "trade a wrong answer for a crash and call it progress" outcome, so
+**the fix was reverted, not landed.** All three touched seed files are byte-identical
+to `origin/main` again.
+
+### What part 2 still needs, and the dead end to skip
+
+`[T].is_empty()` needs a real lowering — `rt_len(recv) == 0` reusing the existing
+runtime symbol, adding no ABI surface.
+
+**Dead end, measured so the next lane skips it:** adding `is_empty` to the
+`qualified_rt_redirect` table in `codegen/llvm/functions/calls.rs` does **not**
+work. A trace at that block's entry (`[cg] reached qualified section …`) **never
+fired** for this call, so `Array.is_empty` is emitted somewhere else entirely. The
+emission site for a qualified method call on a builtin receiver must be found first;
+`calls.rs`'s qualified redirect is not on this route.
+
+### Status of the two faces
+
+| face | rule fix alone |
+|---|---|
+| user `is_empty` present → wrong answer | **fixed** (no rebind) |
+| no user `is_empty` → unresolved stub → SEGV | **still open** (and now hit in both cases) |
+
+Both must close together. The census of other builtin-receiver methods sharing a
+name with a single user definition is still not done, and is now clearly worth
+doing: the defective rule is name-only lookup, so `is_empty` cannot be the only
+victim.
