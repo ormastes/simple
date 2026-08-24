@@ -2885,3 +2885,23 @@ remain distinct, and projected read/write effects retain first-occurrence
 order. Canonical state/frame text and hashes therefore receive identical unique
 sets. A focused interleaved read/repeated-write contract was added but not
 executed under the user's no-verification instruction.
+
+### Linear MIR region-type validation and lazy provenance
+
+Manifest construction still compared every admitted global effect against all
+earlier effects to reject one region carrying inconsistent MIR value types.
+Repeated same-typed accesses therefore performed E(E-1)/2 comparisons while
+retaining all E effects. A manifest-local region-to-type dictionary now records
+the first exact type and compares each later access directly. Expected
+validation cost is O(E) with O(R) index storage for R regions; effect order,
+multiplicity, the first conflicting access, and the exact fail-closed diagnostic
+remain unchanged.
+
+The same instruction walk also formatted source provenance text for every
+spanned MIR instruction, although only global loads and stores consume it.
+Provenance construction is now gated by the exact two instruction variants,
+reducing transient formatting from up to I validly-spanned instructions to up
+to G validly-spanned global accesses.
+Global span bytes and missing-span rejection are unchanged. Focused multiplicity
+and exact mismatch contracts were updated but not executed under the user's
+no-verification instruction.
