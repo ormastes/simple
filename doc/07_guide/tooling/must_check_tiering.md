@@ -141,6 +141,10 @@ source fingerprints only while the identical blob/hash remains committed.
 Automated source-sensitive rows still reset when their fingerprint changes.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.
+It cross-checks registry and ledger structure in one linear parser pass. Only
+PASS rows enter the evidence-size and SHA-256 loop; TODO rows do not launch
+per-field or per-row parser processes, so keeping all unfinished work visible
+does not create hundreds of push-time subprocesses.
 Production recording also refuses to run when fingerprinted inputs differ from
 `HEAD`.
 `completed_at_utc` remains `never` while any bootstrap row is unfinished; once

@@ -126,69 +126,106 @@ validate_ledger_text() {
     _manifest=$1
     _ledger=$2
     _want_fp=$3
-    _schema=$(printf '%s\n' "$_ledger" | field_from_text schema)
-    [ "$_schema" = simple.must-check-ledger/v3 ] || return 10
-    _got_fp=$(printf '%s\n' "$_ledger" | field_from_text source_fingerprint)
-    _unpromoted=0
-    if [ "$_got_fp" = unrecorded ] && [ "$ALLOW_UNPROMOTED_LEDGER" -eq 1 ]; then
-        _unpromoted=1
-    else
-        [ "$_got_fp" = "$_want_fp" ] || return 11
-    fi
-    _manifest_ids=$(printf '%s\n' "$_manifest" | awk -F, '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/ {x=$1; gsub(/^[[:space:]]+/,"",x); print x}')
-    _ledger_ids=$(printf '%s\n' "$_ledger" | awk -F, '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*(pass|todo|blocked|fail),/ {x=$1; gsub(/^[[:space:]]+/,"",x); print x}')
-    [ -n "$_manifest_ids" ] && [ -n "$_ledger_ids" ] || return 12
-    [ "$(printf '%s\n' "$_manifest_ids" | sort | uniq -d | wc -l)" -eq 0 ] || return 13
-    [ "$(printf '%s\n' "$_ledger_ids" | sort | uniq -d | wc -l)" -eq 0 ] || return 14
-    [ "$(printf '%s\n' "$_manifest_ids" | sort)" = "$(printf '%s\n' "$_ledger_ids" | sort)" ] || return 15
-    printf '%s\n' "$REQUIRED_BOOTSTRAP_IDS" |
-    while IFS= read -r _required_id; do
-        [ -n "$_required_id" ] || continue
-        printf '%s\n' "$_manifest_ids" | grep -Fqx "$_required_id" || exit 1
-    done || return 16
-    _todo=0
+    _manifest_tmp=$(mktemp) || return 2
+    _ledger_tmp=$(mktemp) || { rm -f "$_manifest_tmp"; return 2; }
+    _validation_tmp=$(mktemp) || { rm -f "$_manifest_tmp" "$_ledger_tmp"; return 2; }
+    printf '%s\n' "$_manifest" > "$_manifest_tmp"
+    printf '%s\n' "$_ledger" > "$_ledger_tmp"
+
+    # Parse and cross-check the complete registry and ledger once. The previous
+    # implementation launched awk/sed/tr once per field per row (roughly 400
+    # processes for the current ledger), dominating the supposedly light hook.
+    awk -F, -v want_fp="$_want_fp" -v allow_unpromoted="$ALLOW_UNPROMOTED_LEDGER" \
+        -v required="$REQUIRED_BOOTSTRAP_IDS" '
+        function trim(v) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); return v }
+        function unquote(v) { v=trim(v); sub(/^"/, "", v); sub(/"$/, "", v); return v }
+        function fail() { bad=1 }
+        FNR == NR {
+            if ($0 ~ /^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/) {
+                id=trim($1)
+                if (id in manifest_seen) fail()
+                manifest_seen[id]=1
+                manifest_order[++manifest_count]=id
+                manifest_blocking[id]=trim($3)
+                manifest_command[id]=unquote($5)
+            }
+            next
+        }
+        $1 ~ /^[[:space:]]*schema:[[:space:]]*/ {
+            v=$0; sub(/^[^:]*:[[:space:]]*/, "", v); schema=unquote(v); next
+        }
+        $1 ~ /^[[:space:]]*source_fingerprint:[[:space:]]*/ {
+            v=$0; sub(/^[^:]*:[[:space:]]*/, "", v); fingerprint=unquote(v); next
+        }
+        $0 ~ /^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*(pass|todo|blocked|fail),/ {
+            id=trim($1)
+            if (id in ledger_seen) fail()
+            ledger_seen[id]=1
+            ledger_count++
+            status[id]=trim($2)
+            passed_at[id]=trim($3)
+            evidence[id]=unquote($5)
+            evidence_sha[id]=unquote($6)
+            ledger_command[id]=unquote($4)
+            owner[id]=unquote($7)
+            unblock[id]=unquote($8)
+        }
+        END {
+            if (schema != "simple.must-check-ledger/v3" || !manifest_count || !ledger_count) fail()
+            unpromoted=(fingerprint == "unrecorded" && allow_unpromoted == 1)
+            if (!unpromoted && fingerprint != want_fp) fail()
+            if (manifest_count != ledger_count) fail()
+            required_count=split(required, required_ids, "\n")
+            for (i=1; i<=required_count; i++)
+                if (required_ids[i] != "" && !(required_ids[i] in manifest_seen)) fail()
+            for (id in ledger_seen) if (!(id in manifest_seen)) fail()
+            for (i=1; i<=manifest_count; i++) {
+                id=manifest_order[i]
+                if (!(id in ledger_seen) || ledger_command[id] != manifest_command[id]) fail()
+                if (owner[id] == "" || owner[id] == "unassigned") fail()
+                if (status[id] == "pass") {
+                    if (unpromoted) fail()
+                    if (passed_at[id] !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/) fail()
+                    if (evidence[id] == "" || evidence[id] == "never" || evidence[id] == "pending required evidence") fail()
+                    if (evidence_sha[id] !~ /^[0-9a-f][0-9a-f]*$/ || length(evidence_sha[id]) != 64) fail()
+                    if (unblock[id] != "none" || evidence[id] ~ /\t/) fail()
+                } else {
+                    if (passed_at[id] != "never") fail()
+                    if (status[id] != "todo" && status[id] != "blocked") fail()
+                    if ((status[id] == "todo" || status[id] == "blocked") && (unblock[id] == "" || unblock[id] == "none")) fail()
+                    if (manifest_blocking[id] == "true" && !unpromoted) fail()
+                }
+            }
+            if (bad) exit 1
+            for (i=1; i<=manifest_count; i++) {
+                id=manifest_order[i]
+                if (status[id] == "pass") printf "P\t%s\t%s\t%s\n", id, evidence[id], evidence_sha[id]
+                else if (status[id] == "todo" || status[id] == "blocked") printf "T\t%s\n", id
+            }
+        }
+    ' "$_manifest_tmp" "$_ledger_tmp" > "$_validation_tmp"
+    _validation_rc=$?
+    rm -f "$_manifest_tmp" "$_ledger_tmp"
+    [ "$_validation_rc" -eq 0 ] || { rm -f "$_validation_tmp"; return 1; }
+
     _evidence_total=0
-    printf '%s\n' "$_manifest" | awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/ {print}' |
-    while IFS=, read -r _id _tier _blocking _mode _command _description; do
-        _id=$(printf '%s' "$_id" | tr -d ' ')
-        _blocking=$(printf '%s' "$_blocking" | tr -d ' ')
-        _row=$(printf '%s\n' "$_ledger" | awk -F, -v id="$_id" '{x=$1; gsub(/^[[:space:]]+/, "", x); if (x==id) {print; exit}}')
-        [ -n "$_row" ] || exit 20
-        _status=$(printf '%s\n' "$_row" | awk -F, '{x=$2; gsub(/[[:space:]]/, "", x); print x}')
-        _passed_at=$(printf '%s\n' "$_row" | awk -F, '{x=$3; gsub(/[[:space:]]/, "", x); print x}')
-        _evidence=$(printf '%s\n' "$_row" | awk -F, '{x=$5; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); gsub(/^"|"$/, "", x); print x}')
-        _evidence_sha=$(printf '%s\n' "$_row" | awk -F, '{x=$6; gsub(/[[:space:]"]/, "", x); print x}')
-        _ledger_command=$(printf '%s\n' "$_row" | awk -F, '{x=$4; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); gsub(/^"|"$/, "", x); print x}')
-        _owner=$(printf '%s\n' "$_row" | awk -F, '{x=$7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); gsub(/^"|"$/, "", x); print x}')
-        _unblock=$(printf '%s\n' "$_row" | awk -F, '{x=$8; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); gsub(/^"|"$/, "", x); print x}')
-        _manifest_command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
-        [ "$_ledger_command" = "$_manifest_command" ] || exit 26
-        [ -n "$_owner" ] && [ "$_owner" != unassigned ] || exit 30
-        if [ "$_status" = pass ]; then
-            [ "$_unpromoted" -eq 0 ] || exit 35
-            printf '%s\n' "$_passed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' || exit 23
-            [ -n "$_evidence" ] && [ "$_evidence" != never ] && [ "$_evidence" != "pending required evidence" ] || exit 25
-            printf '%s\n' "$_evidence_sha" | grep -Eq '^[0-9a-f]{64}$' || exit 27
-            resolve_evidence_path "$_evidence" || exit 28
+    _evidence_rc=0
+    _tab=$(printf '\t')
+    while IFS="$_tab" read -r _kind _id _evidence _evidence_sha; do
+        if [ "$_kind" = P ]; then
+            resolve_evidence_path "$_evidence" || { _evidence_rc=28; break; }
             _evidence_size=$EVIDENCE_SIZE
-            case "$_evidence_size" in ''|*[!0-9]*) exit 33 ;; esac
+            case "$_evidence_size" in ''|*[!0-9]*) _evidence_rc=33; break ;; esac
             _evidence_total=$(( _evidence_total + _evidence_size ))
-            [ "$_evidence_total" -le "$MAX_EVIDENCE_BYTES" ] || exit 34
-            hash_resolved_evidence || exit 28
-            [ "$EVIDENCE_SHA" = "$_evidence_sha" ] || exit 29
-            [ "$_unblock" = none ] || exit 31
-        elif [ "$_passed_at" != never ]; then
-            exit 24
-        fi
-        if [ "$_blocking" = true ] && [ "$_status" != pass ] && [ "$_unpromoted" -eq 0 ]; then exit 21; fi
-        if [ "$_status" = todo ] || [ "$_status" = blocked ]; then
-            [ -n "$_unblock" ] && [ "$_unblock" != none ] || exit 32
+            [ "$_evidence_total" -le "$MAX_EVIDENCE_BYTES" ] || { _evidence_rc=34; break; }
+            hash_resolved_evidence || { _evidence_rc=28; break; }
+            [ "$EVIDENCE_SHA" = "$_evidence_sha" ] || { _evidence_rc=29; break; }
+        elif [ "$_kind" = T ]; then
             echo "push-must-check: TODO $_id" >&2
-        elif [ "$_status" != pass ]; then
-            exit 22
         fi
-    done
-    return $?
+    done < "$_validation_tmp"
+    rm -f "$_validation_tmp"
+    return "$_evidence_rc"
 }
 
 ledger_is_unpromoted_at_rev() {
@@ -294,6 +331,8 @@ if [ "${1:-}" = --self-test ]; then
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/pass")" stale && die "stale fixture accepted"
     sed 's/compiler-stage4, pass/compiler-stage4, fail/' "$_tmp/pass" > "$_tmp/fail"
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/fail")" abc && die "failed blocking row accepted"
+    sed 's/rules-full, todo, never/rules-full, fail, never/' "$_tmp/pass" > "$_tmp/nonblocking-fail"
+    validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/nonblocking-fail")" abc && die "failed nonblocking row accepted"
     sed '/compiler-stage4,/d' "$_tmp/pass" > "$_tmp/missing"
     validate_ledger_text "$(cat "$_tmp/manifest")" "$(cat "$_tmp/missing")" abc && die "missing row accepted"
     cp "$_tmp/pass" "$_tmp/duplicate"
@@ -331,7 +370,7 @@ if [ "${1:-}" = --self-test ]; then
     sed '/^[[:space:]]*rust-go-benchmark-parity,/d' "$_tmp/manifest" > "$_tmp/missing-required-manifest"
     sed '/^[[:space:]]*rust-go-benchmark-parity,/d' "$_tmp/ledger" > "$_tmp/missing-required-ledger"
     validate_ledger_text "$(cat "$_tmp/missing-required-manifest")" "$(cat "$_tmp/missing-required-ledger")" ignored && die "required TODO gate deletion accepted"
-    echo "push-must-check: PASS — 19 ledger fixtures checked"
+    echo "push-must-check: PASS — 20 ledger fixtures checked"
     exit 0
 fi
 
