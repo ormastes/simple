@@ -3,7 +3,7 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
-use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_stage4_streaming}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
 use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
@@ -612,12 +612,35 @@ impl CompilerDriver:
                 if not _driver_parse_shard_owns(source.path):
                     progress_parse_done = progress_parse_done + 1
                     continue
-                val entry_module = parse_full_frontend(
-                    source.content,
-                    source.path,
-                    source.module_name,
-                    self.ctx.logger
-                )
+                # Peak RSS of the whole compile is reached at the END of this
+                # loop, not in HIR: measured 73 MB at parse 0/61 rising to
+                # 1020 MB at parse 60/61 on src/app/mcp/main.spl -- about
+                # 1.2 KB of RSS per source BYTE, which is orders of magnitude
+                # more than the live ASTs and is therefore per-file parse
+                # GARBAGE that the no-GC core runtime never reclaims. See
+                # doc/08_tracking/bug/bootstrap_stage4_ast_hir_overlap_memory_2026-07-27.md
+                # The scoped variant parses inside a transient array scope,
+                # deep-promotes the retained ParserModule out of it, then ends
+                # the scope (freeing the garbage) and resets the lexer/AST
+                # arena owners in the load-bearing order documented in
+                # driver_end_transient_parse_scope(). Opt-in under
+                # --low-memory only: the default path is left byte-identical
+                # so no bootstrap lane changes behaviour until this has been
+                # exercised across a full self-compile.
+                val entry_module = if self.ctx.options.low_memory:
+                    parse_full_frontend_stage4_streaming(
+                        source.content,
+                        source.path,
+                        source.module_name,
+                        self.ctx.logger
+                    )
+                else:
+                    parse_full_frontend(
+                        source.content,
+                        source.path,
+                        source.module_name,
+                        self.ctx.logger
+                    )
                 log_phase("phase2:parse:file:done {source.path}")
                 if par_had_error_get():
                     # Collect-all default (see driver_hir_pipeline_lowering.spl):
