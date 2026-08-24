@@ -1,7 +1,7 @@
 # Seed interpreter parses a `val`-bound `unsafe(...)` block as a call to a function named `unsafe` (2026-08-24)
 
-- **Status:** OPEN in the seed; the three affected compiler call sites are being
-  worked around in pure Simple (2 fixed, 1 left alone — see below)
+- **Status:** Parser/HIR source fix implemented and focused-tested; seed deploy
+  and imported execution remain pending
 - **Severity:** HIGH — it made `native-build` fail with a diagnostic that named
   neither the file, the function, nor the construct
 - **Area:** seed interpreter / parser (`src/compiler_rust`)
@@ -134,3 +134,18 @@ support for a tuple, so `(cwd, _rc) = shell_cmd("pwd")`
 
 All three `= unsafe(` sites in `src/compiler/**` are now converted; a re-scan
 returns none.
+
+## 2026-08-24 direct parser fix
+
+The seed parser now recognizes colon-terminated lexical unsafe blocks from
+primary-expression position. It shares one block parser with statement
+position and retains ordinary `unsafe(...)` calls when no colon follows the
+matching parenthesis. The focused parser test exercises both forms, and the
+focused compiler test proves the value-bound HIR remains an unsafe boundary
+with the block tail's `i64` type.
+
+The fix is compile-time only and linear in the short capability header. It
+does not add a helper call or any target-runtime allocation, copy, closure, or
+dispatch. The earlier pure-Simple helper workarounds are not evidence that the
+rebuilt seed is admitted; deployment and imported-module execution remain
+pending.

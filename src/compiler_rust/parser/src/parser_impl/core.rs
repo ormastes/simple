@@ -927,24 +927,8 @@ impl<'a> Parser<'a> {
             // semantic keywords meaning "no-op / not yet implemented".  Handle them
             // as Pass statements so they don't cause "expected expression, found Indent".
             TokenKind::Identifier { ref name, .. } if name == "danger" || name == "unsafe" => {
-                if self.peek_is(&TokenKind::Colon) {
-                    self.advance();
-                    self.expect(&TokenKind::Colon)?;
-                    let block = self.parse_block()?;
-                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements)))
-                } else if self.peek_is(&TokenKind::LParen) {
-                    // Capability-scoped form:
-                    // `unsafe(capabilities: [ffi, raw_ptr]): ...`
-                    //
-                    // The seed AST records the unsafe block but does not yet
-                    // carry capability names. Parse the complete call-shaped
-                    // header so execution never mistakes `unsafe` for a
-                    // runtime function; the self-hosted HIR owns capability
-                    // preservation and enforcement.
-                    let _capability_header = self.parse_expression()?;
-                    self.expect(&TokenKind::Colon)?;
-                    let block = self.parse_block()?;
-                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements)))
+                if self.is_unsafe_block_start() {
+                    self.parse_unsafe_block_expression().map(Node::Expression)
                 } else {
                     self.parse_expression_or_assignment()
                 }

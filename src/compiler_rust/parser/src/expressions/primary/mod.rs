@@ -12,6 +12,77 @@ mod literals;
 mod math;
 
 impl<'a> Parser<'a> {
+    /// True when the current `unsafe`/`danger` identifier introduces a lexical
+    /// block rather than an ordinary function call. Capability headers are
+    /// syntax-only in the seed AST, but the trailing colon must be observed
+    /// before committing to the block grammar.
+    pub(crate) fn is_unsafe_block_start(&mut self) -> bool {
+        let TokenKind::Identifier { name, .. } = &self.current.kind else {
+            return false;
+        };
+        if name != "unsafe" && name != "danger" {
+            return false;
+        }
+        if self.peek_is(&TokenKind::Colon) {
+            return true;
+        }
+        if !self.peek_is(&TokenKind::LParen) {
+            return false;
+        }
+
+        let mut depth = 0usize;
+        let mut offset = 1usize;
+        loop {
+            match self.peek_nth(offset).kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(self.peek_nth(offset + 1).kind, TokenKind::Colon);
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            offset += 1;
+        }
+    }
+
+    /// Parse a lexical unsafe block in either statement or value-producing
+    /// expression position. Consuming the capability header directly avoids
+    /// constructing and then discarding a fake runtime call expression.
+    pub(crate) fn parse_unsafe_block_expression(&mut self) -> Result<Expr, ParseError> {
+        self.advance(); // `unsafe` or `danger`
+        if self.check(&TokenKind::LParen) {
+            let mut depth = 0usize;
+            loop {
+                match self.current.kind {
+                    TokenKind::LParen => depth += 1,
+                    TokenKind::RParen => {
+                        depth -= 1;
+                        self.advance();
+                        if depth == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    TokenKind::Eof => {
+                        return Err(ParseError::unexpected_token(
+                            "closing ')' in unsafe capability header",
+                            "end of file",
+                            self.current.span,
+                        ));
+                    }
+                    _ => {}
+                }
+                self.advance();
+            }
+        }
+        self.expect(&TokenKind::Colon)?;
+        let block = self.parse_block()?;
+        Ok(Expr::UnsafeBlock(block.statements))
+    }
+
     pub(crate) fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind.clone() {
             // Ellipsis as expression placeholder: `...` is equivalent to pass/unit ()
@@ -62,6 +133,11 @@ impl<'a> Parser<'a> {
                     }
                 }
                 Ok(Expr::Tuple(vec![]))
+            }
+            TokenKind::Identifier { name, .. }
+                if (name == "unsafe" || name == "danger") && self.is_unsafe_block_start() =>
+            {
+                self.parse_unsafe_block_expression()
             }
             TokenKind::Identifier { ref name, .. }
                 if name == "tensor"

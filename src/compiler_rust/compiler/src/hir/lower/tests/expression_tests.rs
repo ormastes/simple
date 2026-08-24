@@ -506,6 +506,24 @@ fn test_lower_danger_block_retains_boundary_and_tail_type() {
 }
 
 #[test]
+fn test_lower_value_bound_unsafe_block_retains_boundary_and_tail_type() {
+    let module = parse_and_lower(
+        "extern fn raw_digest() -> i64\nfn test() -> i64:\n    val result = unsafe(capabilities: [ffi]):\n        raw_digest()\n    result\n",
+    )
+    .unwrap();
+    let func = module
+        .functions
+        .iter()
+        .find(|function| function.name == "test")
+        .unwrap();
+    let HirStmt::Let { value: Some(value), .. } = &func.body[0] else {
+        panic!("Expected value-bound unsafe expression");
+    };
+    assert_eq!(value.ty, TypeId::I64);
+    assert!(matches!(value.kind, HirExprKind::UnsafeBlock(_)));
+}
+
+#[test]
 fn test_lower_resolves_constant_receiver_and_acronym_static_type_semantically() {
     let constant_module = parse_and_lower(
         "val FRAME_HEADER_WORDS: i32 = 4\nfn words() -> u32:\n    return FRAME_HEADER_WORDS.to_u32()\n",

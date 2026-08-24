@@ -91,6 +91,26 @@ fn test_danger_block_is_unsafe_boundary_not_call() {
 }
 
 #[test]
+fn capability_scoped_unsafe_block_is_value_expression() {
+    let module =
+        parse("fn digest() -> i64:\n    val result = unsafe(capabilities: [ffi]):\n        raw_digest()\n    result\n")
+            .unwrap();
+    let Node::Function(function) = &module.items[0] else {
+        panic!("Expected function");
+    };
+    let Node::Let(binding) = &function.body.statements[0] else {
+        panic!("Expected val binding");
+    };
+    assert!(matches!(binding.value.as_ref(), Some(Expr::UnsafeBlock(_))));
+
+    let ordinary_call = parse("val result = unsafe(1)").unwrap();
+    let Node::Let(binding) = &ordinary_call.items[0] else {
+        panic!("Expected val binding");
+    };
+    assert!(matches!(binding.value.as_ref(), Some(Expr::Call { .. })));
+}
+
+#[test]
 fn test_method_call() {
     let module = parse("obj.method(x)").unwrap();
     if let Node::Expression(Expr::MethodCall {
