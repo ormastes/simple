@@ -2672,6 +2672,31 @@ messages, and hints remain unchanged. Prefix-heavy, repeated-exact, reverse-
 source-order, and topology contracts were added but not executed under the
 user's no-verification instruction.
 
+### Sparse native-build diagnostic streaming
+
+The oversized native-build failure path already retained the complete worker
+stderr so it could spill authoritative evidence, but diagnostic preservation
+then called `split("\n")`. That simultaneously materialized an array and every
+line of the same N-byte stream merely to retain a sparse subset, adding O(N)
+payload duplication and O(L) line slots at the failure-path memory high-water
+mark.
+
+Diagnostic collection now walks newline boundaries with an absolute cursor,
+matches directly inside each byte range, materializes only matching lines, and
+appends them to the owned result. Work remains linear in stderr bytes times the fixed matcher
+set, while auxiliary peak storage falls to O(D+M): retained diagnostic bytes D
+plus the longest retained line M, instead of another full-stream line
+projection. Empty, consecutive, and trailing newline fragments remain harmless;
+diagnostic order, multiplicity, broad matching, full-stream spill,
+head/tail excerpts, truncation markers, and APIs are unchanged. Exact sparse,
+CRLF, unterminated, empty/no-match, and source-topology contracts were added but not executed under
+the user's no-verification instruction.
+
+The cursor preserves native/Pure-Simple line bytes exactly, including leading
+indentation and a CR before LF. This also avoids the known interpreter
+`split("\n")` whitespace-loss bug, making interpreted diagnostics agree with the
+intended native byte contract rather than preserving that defect.
+
 ### Indexed canonical-module call validation
 
 Canonical MIR contract composition validated internal names with linear array

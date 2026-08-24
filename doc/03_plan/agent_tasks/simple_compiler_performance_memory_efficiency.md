@@ -1386,6 +1386,20 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   and source-topology contracts; verification intentionally not run under the
   user's no-verify instruction.
 
+## Completed native-build sparse-diagnostic tranche
+
+- Replace full stderr `split("\n")` with an absolute newline cursor, match on
+  source byte ranges, and materialize only retained lines.
+- Append only matching diagnostic lines through the unique result owner;
+  retain no array of noise-line fragments.
+- Reduce auxiliary failure-path peak storage from O(N+L) projected stderr bytes
+  and line slots to O(D+M), retained diagnostics plus the longest line.
+- Preserve native byte text, diagnostic order/count, broad matching,
+  empty/trailing behavior, full-stream spill, head/tail excerpts, banners, and
+  APIs; avoid the interpreter split indentation-loss defect.
+- Add exact sparse/empty/no-match behavior and source-topology contracts;
+  verification intentionally not run under the user's no-verify instruction.
+
 ## Completed check-tier accumulator tranche
 
 - Replace input-sized keyword, module-tier, and restricted-file copy-on-append

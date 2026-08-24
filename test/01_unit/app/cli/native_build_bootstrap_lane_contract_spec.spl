@@ -11,6 +11,7 @@
 
 use std.spec
 use std.io_runtime.{file_read}
+use app.cli.native_build_main.{native_build_collect_diagnostics}
 
 fn seed_wrapper_marker(src: text) -> text:
     ## Markers that would indicate the entry generates a Rust-seed wrapper or a
@@ -53,6 +54,35 @@ describe "native-build / bootstrap CLI entry source contract":
         expect(src).to_contain("fn native_build_collect_diagnostics(output: text) -> [text]:")
         expect(src).to_contain("BEGIN PRESERVED DIAGNOSTICS")
         expect(src).to_contain("NATIVE-BUILD STDERR TRUNCATED")
+
+    it "collects sparse diagnostics in exact stream order":
+        val diagnostics = native_build_collect_diagnostics(
+            "noise\nerror: first\n\nwarning: second\nnoise\npanic tail\n")
+        expect(diagnostics.len()).to_equal(3)
+        expect(diagnostics[0]).to_equal("error: first")
+        expect(diagnostics[1]).to_equal("warning: second")
+        expect(diagnostics[2]).to_equal("panic tail")
+        expect(native_build_collect_diagnostics("noise\n\nmore noise\n").len()).to_equal(0)
+        expect(native_build_collect_diagnostics("").len()).to_equal(0)
+        val crlf = native_build_collect_diagnostics("  warning: crlf\r\n")
+        expect(crlf.len()).to_equal(1)
+        expect(crlf[0]).to_equal("  warning: crlf\r")
+        val eof = native_build_collect_diagnostics("noise\nerror: eof")
+        expect(eof.len()).to_equal(1)
+        expect(eof[0]).to_equal("error: eof")
+
+    it "streams diagnostic lines without retaining a full split array":
+        val src = file_read("src/app/cli/native_build_main.spl")
+        expect(src).to_contain("output.index_of(\"\\n\", line_start)")
+        expect(src).to_contain(
+            "if native_build_range_is_diagnostic(output, line_start, line_end):")
+        expect(src).to_contain("output.substring(line_start, line_end)")
+        val match_pos = src.index_of(
+            "if native_build_range_is_diagnostic(output, line_start, line_end):")
+        val substring_pos = src.index_of(
+            "output.substring(line_start, line_end)", match_pos)
+        expect(substring_pos).to_be_greater_than(match_pos)
+        expect(src).not_to_contain("for line in output.split(\"\\n\")")
 
     it "treats a zero exit with no output binary as a hard failure":
         ## The silent-wrong-result shape for this lane: worker chain dies in a
