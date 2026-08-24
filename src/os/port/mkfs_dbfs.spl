@@ -13,6 +13,7 @@
 # LBA 2-3 DBFS superblock replicas, LBA 4+ DBFS arena.
 
 use os.port.dbfs_image.{DbfsImageConfig, PayloadEntry, build_dbfs_rootfs_image}
+use std.nogc_sync_mut.io_runtime.{get_args}
 use std.process
 
 extern fn rt_text_to_bytes(s: text) -> [u8]
@@ -38,7 +39,22 @@ fn _mkfs_dbfs_seeds() -> [PayloadEntry]:
         ),
     ]
 
-fn main(args: [text]):
+# `fn main(args: [text])` is not honoured by the current toolchain: invoked with
+# arguments it fails semantic analysis, and invoked without them `args.len()`
+# reads uninitialised memory.  Read the argv vector explicitly instead.
+# See doc/08_tracking/bug/main_args_parameter_unsupported_breaks_mkfs_tools_2026-08-24.md
+fn _user_args() -> [text]:
+    val raw = get_args()
+    var out: [text] = []
+    var i = 1
+    while i < raw.len():
+        if raw[i] != "--":
+            out.push(raw[i])
+        i = i + 1
+    return out
+
+fn main():
+    val args = _user_args()
     val output = if args.len() > 0: args[0] else: DEFAULT_OUTPUT
     val size_sectors = if args.len() > 1: args[1].to_i64().to_u64() else: DEFAULT_SIZE_SECTORS
     val cfg = DbfsImageConfig(size_sectors: size_sectors, seeds: _mkfs_dbfs_seeds())

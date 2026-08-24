@@ -129,3 +129,48 @@ describe "positioned binary backend parity":
         val posix_max = _bounded_fixture_bytes()
         driver.pwrite(handle, 0, posix_max).unwrap()
         expect(driver.pread_bounded_bytes_handle(handle, 0, 65536).unwrap().len()).to_equal(65536)
+
+describe "DBFS positioned binary write":
+    # Reproduces the gap fixed on 2026-08-24: `pwrite_bytes_handle` had call
+    # sites in nvfs_driver.spl but no definition anywhere, so building an NVFS
+    # image failed with `method 'pwrite_bytes_handle' not found on type
+    # 'DbFsDriver'`.  The text twin `pwrite_handle` existed; only the byte-exact
+    # form was missing, which is precisely the one NVFS needs.
+
+    it "overwrites in place and returns the byte count":
+        val driver = DbFsDriver.new_hosted()
+        val handle = _seed_dbfs(driver, "/dbfs-pwrite.bin")
+        expect(driver.pwrite_bytes_handle(handle, 1, [1u8, 2u8]).unwrap()).to_equal(2)
+        expect(driver.pread_bytes_handle(handle, 0, 5).unwrap()).to_equal(
+            [0u8, 1u8, 2u8, 0u8, 128u8])
+
+    it "preserves bytes that no text round-trip could carry":
+        # 0x00 and 0xFF are exactly what the text-based pwrite_handle loses.
+        val driver = DbFsDriver.new_hosted()
+        val handle = _seed_dbfs(driver, "/dbfs-pwrite-binary.bin")
+        driver.pwrite_bytes_handle(handle, 0, [0u8, 255u8, 0u8, 255u8, 0u8]).unwrap()
+        expect(driver.pread_bytes_handle(handle, 0, 5).unwrap()).to_equal(
+            [0u8, 255u8, 0u8, 255u8, 0u8])
+
+    it "extends past EOF and zero-fills the hole":
+        val driver = DbFsDriver.new_hosted()
+        val handle = _seed_dbfs(driver, "/dbfs-pwrite-hole.bin")
+        expect(driver.pwrite_bytes_handle(handle, 7, [9u8]).unwrap()).to_equal(1)
+        expect(driver.pread_bytes_handle(handle, 0, 8).unwrap()).to_equal(
+            [0u8, 255u8, 17u8, 0u8, 128u8, 0u8, 0u8, 9u8])
+
+    it "rejects a negative offset and an overflowing range":
+        val driver = DbFsDriver.new_hosted()
+        val handle = _seed_dbfs(driver, "/dbfs-pwrite-invalid.bin")
+        expect(driver.pwrite_bytes_handle(handle, -1, [1u8]).unwrap_err()).to_equal(
+            FsError.InvalidArg)
+        expect(driver.pwrite_bytes_handle(
+            handle, 0x7FFFFFFFFFFFFFFF, [1u8]).unwrap_err()).to_equal(
+                FsError.InvalidArg)
+
+    it "accepts an empty patch as a no-op":
+        val driver = DbFsDriver.new_hosted()
+        val handle = _seed_dbfs(driver, "/dbfs-pwrite-empty.bin")
+        expect(driver.pwrite_bytes_handle(handle, 2, []).unwrap()).to_equal(0)
+        expect(driver.pread_bytes_handle(handle, 0, 5).unwrap()).to_equal(
+            [0u8, 255u8, 17u8, 0u8, 128u8])
