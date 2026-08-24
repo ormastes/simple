@@ -473,7 +473,10 @@ pub(package) fn installed_artifact_catalog_bootstrap_seal_v1(
     _installed_artifact_catalog_v1.lifecycle = InstalledArtifactCatalogLifecycleV1.Sealed
     _installed_artifact_unlock_v1()
 
-pub fn installed_artifact_catalog_lookup_v1(path: text) -> InstalledArtifactRecordV1?:
+fn _installed_artifact_catalog_lookup_bound_v1(
+    path: text,
+    expected_target: ManifestTarget?
+) -> InstalledArtifactRecordV1?:
     """Return a deep-owned metadata snapshot. It never grants execution."""
     if not _installed_artifact_path_valid_v1(path): return nil
     if not _installed_artifact_lock_v1(): return nil
@@ -490,6 +493,22 @@ pub fn installed_artifact_catalog_lookup_v1(path: text) -> InstalledArtifactReco
         _ = _installed_artifact_unlock_v1()
         return nil
     val slot = _installed_artifact_catalog_v1.records[index]
+    match expected_target:
+        case Some(target):
+            # The two retained target copies are an integrity invariant. A
+            # disagreement is catalog corruption, not a caller mismatch.
+            if not _installed_artifact_target_equal_v1(
+                slot.target, slot.manifest.target):
+                _installed_artifact_catalog_v1.lifecycle =
+                    InstalledArtifactCatalogLifecycleV1.Quarantined
+                _ = _installed_artifact_unlock_v1()
+                return nil
+            # Reject mismatched admission context before nested copies and
+            # canonical hashing. This is not catalog corruption.
+            if not _installed_artifact_target_equal_v1(slot.target, target):
+                _ = _installed_artifact_unlock_v1()
+                return nil
+        case nil: ()
     val copied = _installed_artifact_record_copy_v1(slot)
     if not copied.?:
         _installed_artifact_catalog_v1.lifecycle =
@@ -533,6 +552,22 @@ pub fn installed_artifact_catalog_lookup_v1(path: text) -> InstalledArtifactReco
         return nil
     if not _installed_artifact_unlock_v1(): return nil
     Some(candidate.record)
+
+pub fn installed_artifact_catalog_lookup_v1(path: text) -> InstalledArtifactRecordV1?:
+    _installed_artifact_catalog_lookup_bound_v1(path, nil)
+
+pub(package) fn installed_artifact_catalog_lookup_target_v1(
+    path: text,
+    target: ManifestTarget
+) -> InstalledArtifactRecordV1?:
+    """Return metadata only when the installed artifact exactly matches target.
+
+    Target mismatch is a caller/admission failure, not catalog corruption, so
+    it does not quarantine the sealed catalog. The returned value remains a
+    deep-owned diagnostic snapshot and never grants execution authority.
+    """
+    if not _installed_artifact_target_valid_v1(target): return nil
+    _installed_artifact_catalog_lookup_bound_v1(path, Some(target))
 
 pub fn installed_artifact_catalog_status_v1() -> InstalledArtifactCatalogStatusV1?:
     if not _installed_artifact_lock_v1(): return nil

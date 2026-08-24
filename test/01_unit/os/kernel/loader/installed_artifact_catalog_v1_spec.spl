@@ -12,7 +12,8 @@ use os.kernel.loader.installed_artifact_catalog_v1.{
     installed_artifact_catalog_bootstrap_begin_v1,
     installed_artifact_catalog_bootstrap_add_v1,
     installed_artifact_catalog_bootstrap_seal_v1,
-    installed_artifact_catalog_lookup_v1
+    installed_artifact_catalog_lookup_v1,
+    installed_artifact_catalog_lookup_target_v1
 }
 
 fn catalog_digest() -> text:
@@ -155,3 +156,32 @@ describe "installed artifact catalog bounded input":
         expect(second.unwrap().aliases.len()).to_equal(1)
         expect(second.unwrap().manifest.required_services.len()).to_equal(1)
         expect(second.unwrap().manifest.content_hashes.len()).to_equal(1)
+
+        val exact_target = ManifestTarget(
+            os: "simpleos", arch: "x86_64", abi: "simpleos")
+        val exact = installed_artifact_catalog_lookup_target_v1(
+            "/alias/zero", exact_target)
+        expect(exact.?).to_be(true)
+        expect(exact.unwrap().canonical_path).to_equal("/bin/tool0")
+
+        val wrong_arch = installed_artifact_catalog_lookup_target_v1(
+            "/bin/tool0", ManifestTarget(
+                os: "simpleos", arch: "aarch64", abi: "simpleos"))
+        expect(wrong_arch.?).to_be(false)
+        val wrong_os = installed_artifact_catalog_lookup_target_v1(
+            "/bin/tool0", ManifestTarget(
+                os: "linux", arch: "x86_64", abi: "simpleos"))
+        expect(wrong_os.?).to_be(false)
+        val wrong_abi = installed_artifact_catalog_lookup_target_v1(
+            "/bin/tool0", ManifestTarget(
+                os: "simpleos", arch: "x86_64", abi: "sysv"))
+        expect(wrong_abi.?).to_be(false)
+        val invalid_target = installed_artifact_catalog_lookup_target_v1(
+            "/bin/tool0", ManifestTarget(
+                os: "simpleos", arch: "any", abi: "simpleos"))
+        expect(invalid_target.?).to_be(false)
+        # Mismatches do not quarantine a sound sealed catalog.
+        val after_mismatch = installed_artifact_catalog_lookup_target_v1(
+            "/bin/tool0", exact_target)
+        expect(after_mismatch.?).to_be(true)
+        expect(after_mismatch.unwrap().canonical_path).to_equal("/bin/tool0")
