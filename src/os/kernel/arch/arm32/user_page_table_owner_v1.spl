@@ -8,7 +8,23 @@ use std.common.contracts.execution.simpleos_executable_admission_v1.{
     ExecutableImageHandleV1, ExecutableLoadRangeV1
 }
 use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityArmedIdentityV1}
-use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
+use os.kernel.loader.executable_load_plan_v1.{
+    ExecutableLoadConsumerV1, ExecutableLoadConsumerStateV1,
+    ExecutableLoadConsumerErrorV1,
+    executable_load_consumer_plan_v1,
+    executable_load_consumer_begin_mapping_v1,
+    executable_load_consumer_map_page_v1,
+    executable_load_consumer_begin_release_v1,
+    executable_load_consumer_unmap_page_v1,
+    executable_load_consumer_close_v1
+}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    ExecutableLaunchArgumentsV1, executable_launch_arguments_v1_validate
+}
+use os.kernel.loader.stack_builder.{
+    AuxEntry, build_initial_stack_checked, compute_stack_size
+}
+use os.kernel.loader.process_image.{ARM32_USER_STACK_TOP}
 use os.kernel.loader.executable_arm32_mapping_owner_v1.{
     ExecutableArm32MappingReadinessErrorV1,
     executable_arm32_process_image_ready_v1,
@@ -30,6 +46,7 @@ use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 pub enum Arm32UserPageTableStateV1:
     Empty
     MappedBlocked
+    AdoptionReserved
     Destroyed
     Quarantined
 
@@ -45,6 +62,10 @@ pub enum Arm32UserPageTableErrorV1:
     RollbackFailed
     InvalidReceipt
     NotDestroyable
+    InvalidLaunchArguments
+    StackBuildFailed
+    StackMapFailed
+    LoadLifecycleMismatch
 
 pub struct Arm32UserPageTableReceiptV1:
     slot_index: i64
@@ -54,6 +75,8 @@ pub struct Arm32UserPageTableReceiptV1:
     error: Arm32UserPageTableErrorV1
     root_phys: u64
     mapped_pages: u64
+    stack_pages: u64
+    initial_sp: u64
     entry_point: u64
     admission_id: text
     image_hash: text
@@ -62,6 +85,7 @@ pub struct Arm32UserPageTableReceiptV1:
 struct Arm32OwnedLeafV1:
     virt: u64
     phys: u64
+    stack_page: bool
 
 struct Arm32UserPageTableSlotV1:
     generation: u64
@@ -73,6 +97,11 @@ struct Arm32UserPageTableSlotV1:
     entry_point: u64
     admission_id: text
     image_hash: text
+    initial_sp: u64
+    load_pages: u64
+    stack_pages: u64
+    consumer: ExecutableLoadConsumerV1
+    lifecycle_bound: bool
 
 struct Arm32RollbackResultV1:
     ok: bool
@@ -89,14 +118,17 @@ fn _arm32_pt_reject(error: Arm32UserPageTableErrorV1) -> Arm32UserPageTableRecei
     Arm32UserPageTableReceiptV1(
         slot_index: -1, generation: 0u64, nonce: 0u64,
         state: Arm32UserPageTableStateV1.Empty, error: error,
-        root_phys: 0u64, mapped_pages: 0u64, entry_point: 0u64,
+        root_phys: 0u64, mapped_pages: 0u64, stack_pages: 0u64,
+        initial_sp: 0u64, entry_point: 0u64,
         admission_id: "", image_hash: "", execution_authorized: false)
 
 fn _arm32_pt_receipt(index: i64, slot: Arm32UserPageTableSlotV1) -> Arm32UserPageTableReceiptV1:
     Arm32UserPageTableReceiptV1(
         slot_index: index, generation: slot.generation, nonce: slot.nonce,
         state: slot.state, error: Arm32UserPageTableErrorV1.None,
-        root_phys: slot.root_phys, mapped_pages: slot.leaves.len() as u64,
+        root_phys: slot.root_phys,
+        mapped_pages: slot.load_pages,
+        stack_pages: slot.stack_pages, initial_sp: slot.initial_sp,
         entry_point: slot.entry_point, admission_id: slot.admission_id,
         image_hash: slot.image_hash, execution_authorized: false)
 
@@ -204,11 +236,99 @@ fn _arm32_map_authenticated_ranges(
             if not mapped.ok:
                 pmm_free_page(frame.unwrap())
                 return (false, Arm32UserPageTableErrorV1.MapFailed, leaves, l2_tables)
-            leaves.push(Arm32OwnedLeafV1(virt: page, phys: phys))
+            leaves.push(Arm32OwnedLeafV1(
+                virt: page, phys: phys, stack_page: false))
             if not _arm32_copy_segment_page(phys, page, segment, source):
                 return (false, Arm32UserPageTableErrorV1.CopyReadbackFailed, leaves, l2_tables)
             page = page + 4096u64
     (true, Arm32UserPageTableErrorV1.None, leaves, l2_tables)
+
+fn _arm32_map_stack_frame(
+    root: u64,
+    initial_sp: u64,
+    stack_top: u64,
+    bytes: [u8],
+    leaves: [Arm32OwnedLeafV1],
+    l2_tables: [Arm32OwnedL2IdentityV1]
+) -> (bool, [Arm32OwnedLeafV1], [Arm32OwnedL2IdentityV1]):
+    var owned_leaves = leaves
+    var owned_l2 = l2_tables
+    var page = _arm32_page_start(initial_sp)
+    while page < stack_top:
+        val frame = pmm_alloc_page()
+        if not frame.?: return (false, owned_leaves, owned_l2)
+        val phys = frame.unwrap().to_phys_addr().addr
+        val mapped = arm32_user_map_page_in_v1(
+            root, VirtAddr(addr: page), PhysAddr(addr: phys), VmFlags.user_rw())
+        if mapped.created_l2_phys != 0u64:
+            owned_l2.push(Arm32OwnedL2IdentityV1(
+                l1_index: mapped.created_l2_index,
+                phys: mapped.created_l2_phys))
+        if not mapped.ok:
+            pmm_free_page(frame.unwrap())
+            return (false, owned_leaves, owned_l2)
+        owned_leaves.push(Arm32OwnedLeafV1(
+            virt: page, phys: phys, stack_page: true))
+        var offset = 0u64
+        while offset < 4096u64:
+            var value = 0u8
+            val address = page + offset
+            if address >= initial_sp and address < stack_top:
+                val source_index = address - initial_sp
+                if source_index < bytes.len() as u64:
+                    value = bytes[source_index as i64]
+            mmio_write8(phys + offset, value)
+            if mmio_read8(phys + offset) != value:
+                return (false, owned_leaves, owned_l2)
+            offset = offset + 1u64
+        page = page + 4096u64
+    (true, owned_leaves, owned_l2)
+
+fn _arm32_leaf_counts(leaves: [Arm32OwnedLeafV1]) -> (u64, u64):
+    var load_pages = 0u64
+    var stack_pages = 0u64
+    for leaf in leaves:
+        if leaf.stack_page:
+            stack_pages = stack_pages + 1u64
+        else:
+            load_pages = load_pages + 1u64
+    (load_pages, stack_pages)
+
+fn _arm32_publish_rollback_quarantine(
+    reusable: i64,
+    identity: ExecutableAuthorityArmedIdentityV1,
+    handle: ExecutableImageHandleV1,
+    entry_point: u64,
+    root: u64,
+    rollback: Arm32RollbackResultV1,
+    consumer: ExecutableLoadConsumerV1,
+    initial_sp: u64
+) -> Arm32UserPageTableReceiptV1:
+    val (residual_load_pages, residual_stack_pages) = _arm32_leaf_counts(rollback.remaining_leaves)
+    val index = if reusable >= 0: reusable else: _arm32_user_pt_slots_v1.len()
+    val generation = if reusable >= 0:
+        _arm32_user_pt_slots_v1[reusable].generation + 1u64
+    else:
+        1u64
+    var nonce = identity.token_nonce ^ generation ^ ((index + 1) as u64)
+    if nonce == 0u64: nonce = generation ^ 0xA32FA11EDu64
+    val quarantined = Arm32UserPageTableSlotV1(
+        generation: generation, nonce: nonce,
+        state: Arm32UserPageTableStateV1.Quarantined,
+        root_phys: root, leaves: rollback.remaining_leaves,
+        l2_tables: rollback.remaining_l2_tables,
+        entry_point: entry_point, admission_id: handle.admission_id,
+        image_hash: handle.image_hash, initial_sp: initial_sp,
+        load_pages: residual_load_pages, stack_pages: residual_stack_pages,
+        consumer: consumer,
+        lifecycle_bound: false)
+    if reusable >= 0:
+        _arm32_user_pt_slots_v1[reusable] = quarantined
+    else:
+        _arm32_user_pt_slots_v1.push(quarantined)
+    var failed = _arm32_pt_receipt(index, quarantined)
+    failed.error = Arm32UserPageTableErrorV1.RollbackFailed
+    failed
 
 pub(package) fn arm32_user_page_table_prepare_v1(
     identity: ExecutableAuthorityArmedIdentityV1,
@@ -217,13 +337,50 @@ pub(package) fn arm32_user_page_table_prepare_v1(
     authenticated_source: [u8],
     entry_point: u64
 ) -> Arm32UserPageTableReceiptV1:
-    """Map authenticated PT_LOAD pages; deliberately grant no execution."""
+    val launch_result = executable_launch_arguments_v1_validate(
+        handle.canonical_source_path, [handle.canonical_source_path], [])
+    if launch_result.is_err():
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.InvalidLaunchArguments)
+    arm32_user_page_table_prepare_with_launch_v1(
+        identity, handle, consumer, authenticated_source, entry_point,
+        launch_result.unwrap())
+
+pub(package) fn arm32_user_page_table_prepare_with_launch_v1(
+    identity: ExecutableAuthorityArmedIdentityV1,
+    handle: ExecutableImageHandleV1,
+    consumer: ExecutableLoadConsumerV1,
+    authenticated_source: [u8],
+    entry_point: u64,
+    launch: ExecutableLaunchArgumentsV1
+) -> Arm32UserPageTableReceiptV1:
+    """Map authenticated PT_LOAD and ELF32 stack pages without execution."""
+    val checked_launch_result = executable_launch_arguments_v1_validate(
+        launch.path, launch.argv, launch.envp)
+    if checked_launch_result.is_err():
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.InvalidLaunchArguments)
+    val checked_launch = checked_launch_result.unwrap()
     val readiness = executable_arm32_process_image_ready_v1(
         identity, handle, consumer, authenticated_source, entry_point)
     if (not readiness.candidate_ready or readiness.process_image_ready or
         readiness.authority_consumed or readiness.error !=
             ExecutableArm32MappingReadinessErrorV1.MissingArm32ProcessImageOwner):
         return _arm32_pt_reject(Arm32UserPageTableErrorV1.InvalidAuthenticatedPlan)
+    var lifecycle = executable_load_consumer_plan_v1(consumer, handle, entry_point)
+    if lifecycle.state != ExecutableLoadConsumerStateV1.Validated or
+        lifecycle.failure != ExecutableLoadConsumerErrorV1.None or
+        lifecycle.planned_pages != readiness.planned_pages:
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.LoadLifecycleMismatch)
+    lifecycle = executable_load_consumer_begin_mapping_v1(lifecycle)
+    if lifecycle.state != ExecutableLoadConsumerStateV1.Mapping:
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.LoadLifecycleMismatch)
+    val stack_size = compute_stack_size(authenticated_source.len() as u64)
+    val frame_result = build_initial_stack_checked(
+        ARM32_USER_STACK_TOP, stack_size, 4u64, [],
+        checked_launch.argv, checked_launch.envp,
+        [AuxEntry(aux_type: 9u64, value: entry_point)])
+    if frame_result.is_err():
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.StackBuildFailed)
+    val stack_frame = frame_result.unwrap()
     if _arm32_user_pt_mutex_v1 <= 0 or not mutex_raw_lock(_arm32_user_pt_mutex_v1):
         return _arm32_pt_reject(Arm32UserPageTableErrorV1.SerializationIndeterminate)
     var reusable = -1
@@ -245,30 +402,41 @@ pub(package) fn arm32_user_page_table_prepare_v1(
     if not map_ok:
         val rollback = _arm32_rollback_resources(root, mapped_leaves, mapped_l2_tables)
         if not rollback.ok:
-            val failed_index = if reusable >= 0: reusable else: _arm32_user_pt_slots_v1.len()
-            val failed_generation = if reusable >= 0:
-                _arm32_user_pt_slots_v1[reusable].generation + 1u64
-            else:
-                1u64
-            var failed_nonce = identity.token_nonce ^ failed_generation ^ ((failed_index + 1) as u64)
-            if failed_nonce == 0u64: failed_nonce = failed_generation ^ 0xA32FA11EDu64
-            val quarantined = Arm32UserPageTableSlotV1(
-                generation: failed_generation, nonce: failed_nonce,
-                state: Arm32UserPageTableStateV1.Quarantined,
-                root_phys: root, leaves: rollback.remaining_leaves,
-                l2_tables: rollback.remaining_l2_tables,
-                entry_point: entry_point, admission_id: handle.admission_id,
-                image_hash: handle.image_hash)
-            if reusable >= 0:
-                _arm32_user_pt_slots_v1[reusable] = quarantined
-            else:
-                _arm32_user_pt_slots_v1.push(quarantined)
-            var failed = _arm32_pt_receipt(failed_index, quarantined)
-            failed.error = Arm32UserPageTableErrorV1.RollbackFailed
+            val failed = _arm32_publish_rollback_quarantine(
+                reusable, identity, handle, entry_point, root, rollback,
+                lifecycle, 0u64)
             _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
             return failed
         _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
         return _arm32_pt_reject(map_error)
+    var mapped_index = 0u64
+    while mapped_index < mapped_leaves.len() as u64:
+        lifecycle = executable_load_consumer_map_page_v1(lifecycle, true)
+        mapped_index = mapped_index + 1u64
+    if lifecycle.state != ExecutableLoadConsumerStateV1.MappedBlocked or
+        lifecycle.mapped_pages != lifecycle.planned_pages:
+        val rollback = _arm32_rollback_resources(root, mapped_leaves, mapped_l2_tables)
+        if not rollback.ok:
+            val failed = _arm32_publish_rollback_quarantine(
+                reusable, identity, handle, entry_point, root, rollback,
+                lifecycle, 0u64)
+            _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
+            return failed
+        _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.LoadLifecycleMismatch)
+    val (stack_ok, all_leaves, all_l2_tables) = _arm32_map_stack_frame(
+        root, stack_frame.sp, ARM32_USER_STACK_TOP, stack_frame.bytes,
+        mapped_leaves, mapped_l2_tables)
+    if not stack_ok:
+        val rollback = _arm32_rollback_resources(root, all_leaves, all_l2_tables)
+        if not rollback.ok:
+            val failed = _arm32_publish_rollback_quarantine(
+                reusable, identity, handle, entry_point, root, rollback,
+                lifecycle, stack_frame.sp)
+            _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
+            return failed
+        _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.StackMapFailed)
     val index = if reusable >= 0: reusable else: _arm32_user_pt_slots_v1.len()
     val generation = if reusable >= 0:
         _arm32_user_pt_slots_v1[reusable].generation + 1u64
@@ -279,9 +447,12 @@ pub(package) fn arm32_user_page_table_prepare_v1(
     val slot = Arm32UserPageTableSlotV1(
         generation: generation, nonce: nonce,
         state: Arm32UserPageTableStateV1.MappedBlocked,
-        root_phys: root, leaves: mapped_leaves, l2_tables: mapped_l2_tables,
+        root_phys: root, leaves: all_leaves, l2_tables: all_l2_tables,
         entry_point: entry_point, admission_id: handle.admission_id,
-        image_hash: handle.image_hash)
+        image_hash: handle.image_hash, initial_sp: stack_frame.sp,
+        load_pages: lifecycle.mapped_pages,
+        stack_pages: all_leaves.len() as u64 - lifecycle.mapped_pages,
+        consumer: lifecycle, lifecycle_bound: true)
     if reusable >= 0:
         _arm32_user_pt_slots_v1[reusable] = slot
     else:
@@ -304,29 +475,107 @@ pub(package) fn arm32_user_page_table_destroy_v1(
     var slot = _arm32_user_pt_slots_v1[receipt.slot_index]
     if (slot.generation != receipt.generation or slot.nonce != receipt.nonce or
         (slot.state != Arm32UserPageTableStateV1.MappedBlocked and
+            slot.state != Arm32UserPageTableStateV1.AdoptionReserved and
             slot.state != Arm32UserPageTableStateV1.Quarantined) or
         receipt.state != slot.state or
         receipt.execution_authorized):
         _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
         return _arm32_pt_reject(Arm32UserPageTableErrorV1.InvalidReceipt)
+    var lifecycle = slot.consumer
+    if slot.lifecycle_bound:
+        lifecycle = executable_load_consumer_begin_release_v1(slot.consumer)
     val rollback = _arm32_rollback_resources(slot.root_phys, slot.leaves, slot.l2_tables)
     if not rollback.ok:
         slot.state = Arm32UserPageTableStateV1.Quarantined
         slot.leaves = rollback.remaining_leaves
         slot.l2_tables = rollback.remaining_l2_tables
+        val (residual_load_pages, residual_stack_pages) = _arm32_leaf_counts(rollback.remaining_leaves)
+        slot.load_pages = residual_load_pages
+        slot.stack_pages = residual_stack_pages
         _arm32_user_pt_slots_v1[receipt.slot_index] = slot
         _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
         var failed = _arm32_pt_receipt(receipt.slot_index, slot)
         failed.error = Arm32UserPageTableErrorV1.RollbackFailed
         return failed
+    if slot.lifecycle_bound:
+        var released_pages = 0u64
+        while released_pages < slot.consumer.mapped_pages:
+            lifecycle = executable_load_consumer_unmap_page_v1(lifecycle, true)
+            released_pages = released_pages + 1u64
+        lifecycle = executable_load_consumer_close_v1(lifecycle, true)
+        if lifecycle.state != ExecutableLoadConsumerStateV1.Released:
+            # Physical ownership is already gone. Publish an inert terminal
+            # slot, not stale destructor identities that a retry could free.
+            slot.state = Arm32UserPageTableStateV1.Destroyed
+            slot.root_phys = 0u64
+            slot.leaves = []
+            slot.l2_tables = []
+            slot.initial_sp = 0u64
+            slot.load_pages = 0u64
+            slot.stack_pages = 0u64
+            slot.consumer = lifecycle
+            _arm32_user_pt_slots_v1[receipt.slot_index] = slot
+            _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
+            var failed = _arm32_pt_receipt(receipt.slot_index, slot)
+            failed.error = Arm32UserPageTableErrorV1.LoadLifecycleMismatch
+            return failed
     slot.state = Arm32UserPageTableStateV1.Destroyed
     slot.root_phys = 0u64
     slot.leaves = []
     slot.l2_tables = []
+    slot.initial_sp = 0u64
+    slot.load_pages = 0u64
+    slot.stack_pages = 0u64
+    slot.consumer = lifecycle
     _arm32_user_pt_slots_v1[receipt.slot_index] = slot
     val destroyed = _arm32_pt_receipt(receipt.slot_index, slot)
     _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
     destroyed
+
+pub(package) fn arm32_user_page_table_reserve_adoption_v1(
+    receipt: Arm32UserPageTableReceiptV1
+) -> Arm32UserPageTableReceiptV1:
+    """Reserve one mapped image before token consumption; authorize nothing."""
+    if _arm32_user_pt_mutex_v1 <= 0 or not mutex_raw_lock(_arm32_user_pt_mutex_v1):
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.SerializationIndeterminate)
+    if receipt.slot_index < 0 or receipt.slot_index >= _arm32_user_pt_slots_v1.len():
+        _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.InvalidReceipt)
+    var slot = _arm32_user_pt_slots_v1[receipt.slot_index]
+    if (slot.generation != receipt.generation or slot.nonce != receipt.nonce or
+        slot.state != Arm32UserPageTableStateV1.MappedBlocked or
+        receipt.state != Arm32UserPageTableStateV1.MappedBlocked or
+        receipt.execution_authorized or
+        slot.consumer.state != ExecutableLoadConsumerStateV1.MappedBlocked):
+        _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.InvalidReceipt)
+    slot.state = Arm32UserPageTableStateV1.AdoptionReserved
+    _arm32_user_pt_slots_v1[receipt.slot_index] = slot
+    val reserved = _arm32_pt_receipt(receipt.slot_index, slot)
+    _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
+    reserved
+
+pub(package) fn arm32_user_page_table_rollback_adoption_v1(
+    receipt: Arm32UserPageTableReceiptV1
+) -> Arm32UserPageTableReceiptV1:
+    """Return an unused pre-token reservation to its sole mapping owner."""
+    if _arm32_user_pt_mutex_v1 <= 0 or not mutex_raw_lock(_arm32_user_pt_mutex_v1):
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.SerializationIndeterminate)
+    if receipt.slot_index < 0 or receipt.slot_index >= _arm32_user_pt_slots_v1.len():
+        _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.InvalidReceipt)
+    var slot = _arm32_user_pt_slots_v1[receipt.slot_index]
+    if (slot.generation != receipt.generation or slot.nonce != receipt.nonce or
+        slot.state != Arm32UserPageTableStateV1.AdoptionReserved or
+        receipt.state != Arm32UserPageTableStateV1.AdoptionReserved or
+        receipt.execution_authorized):
+        _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
+        return _arm32_pt_reject(Arm32UserPageTableErrorV1.InvalidReceipt)
+    slot.state = Arm32UserPageTableStateV1.MappedBlocked
+    _arm32_user_pt_slots_v1[receipt.slot_index] = slot
+    val rolled_back = _arm32_pt_receipt(receipt.slot_index, slot)
+    _ = mutex_raw_unlock(_arm32_user_pt_mutex_v1)
+    rolled_back
 
 export Arm32UserPageTableStateV1, Arm32UserPageTableErrorV1
 export Arm32UserPageTableReceiptV1

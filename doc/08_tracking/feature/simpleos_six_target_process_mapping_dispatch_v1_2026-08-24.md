@@ -9,6 +9,9 @@ architecture lists. Mapping-ready gates reject the three unfinished 32-bit
 rows before joint reservation or scheduler token commit. The change does not
 bypass the sealed installed-artifact catalog or mint execution authority.
 
-Remaining completion blocker: x86-32, ARM32, and RV32 still require their native
-initial-stack builder, address-space mapper, and user-entry handoff. Their policy
-rows explicitly report that the process-image builder is not ready.
+Remaining completion blocker: x86-32 and RV32 still require completion of their
+native initial-stack/address-space/adoption paths. ARM32 now has a four-byte
+initial stack, explicit address-space mapper, load-lifecycle binding, and
+non-authorizing pre-token adoption reservation/rollback, but still lacks the
+scheduler-owned move and real user-entry/SVC/reap handoff. All three policy rows
+therefore still explicitly report that the process-image builder is not ready.

@@ -1,0 +1,23 @@
+# ARM32 scheduler user-entry adoption remains blocked
+
+Status: prerequisite implemented, unverified by user instruction.
+
+The authenticated ARM32 mapper now uses the shared four-byte SysV stack
+builder, maps the occupied stack pages, binds PT_LOAD mapping and teardown to
+the canonical load-consumer lifecycle, and provides generation-bound
+`MappedBlocked -> AdoptionReserved -> MappedBlocked` rollback before loader
+token consumption. These transitions remain non-authorizing.
+
+ARM32 execution readiness must remain false until one scheduler-owned
+transaction consumes the reserved mapping as an owned move, reserves a TCB and
+lifecycle generation, installs capability/vmspace/observation state with full
+rollback, consumes the matching loader joint reservation exactly once, and
+performs the architecture handoff. The architecture leaf must install TTBR0,
+invalidate and synchronize translation state, enter unprivileged mode at the
+exact ELF entry and initial SP, handle SVC result/exit, and reap the exact PID.
+
+Static source/spec review cannot prove those runtime transitions. Resume with
+the ARM32 scheduler adoption owner and entry leaf; keep
+`executable_target_arch_process_image_ready_v1("arm") == false` until the
+filesystem-backed QEMU transcript proves guest entry, mounted program output,
+exit 37, exact reap, and `TEST PASSED`.
