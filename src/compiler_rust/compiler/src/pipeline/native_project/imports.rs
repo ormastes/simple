@@ -92,6 +92,17 @@ fn method_arity(method: &simple_parser::ast::FunctionDef) -> usize {
 }
 
 /// Try alternate name forms to resolve a call target through use_map/import_map.
+/// True when a method-call qualifier names a BUILTIN receiver type rather than a
+/// user-defined one. Methods on these are builtin operations and must never be
+/// rebound to a same-named user function -- see the call site in
+/// `resolve_name_variants`.
+fn is_builtin_receiver_type(type_part: &str) -> bool {
+    matches!(
+        type_part,
+        "Array" | "Slice" | "Dict" | "Map" | "Set" | "List" | "Tuple" | "Range" | "text" | "String" | "str"
+    )
+}
+
 pub(crate) fn resolve_name_variants(
     name: &str,
     use_map: &std::collections::HashMap<String, String>,
@@ -136,7 +147,20 @@ pub(crate) fn resolve_name_variants(
         if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
             return Some(resolved.clone());
         }
-        if !method_part.is_empty() {
+        // Last-resort bare-method lookup: DISCARDS the type qualifier and matches
+        // on the method name alone. For a BUILTIN receiver that is never right --
+        // the method is a builtin operation on that type, and binding it to a
+        // same-named user method reinterprets the receiver as an unrelated
+        // struct. Measured: `Array.is_empty` bound to `span_mod__Sp_dot_is_empty`,
+        // which answered `false` for every receiver and silently emptied every
+        // MIR body (bootstrap_stage2_empty_mir_bodies_2026-07-05).
+        //
+        // A rule fix, not an `is_empty` special case. The builtin-receiver
+        // methods that previously depended on this fallback (`is_empty`, `ptr`,
+        // `to_bytes`) now have real lowerings in
+        // codegen/llvm/functions.rs's MethodCallStatic arm, so blocking it here
+        // no longer leaves them unresolved.
+        if !method_part.is_empty() && !is_builtin_receiver_type(type_part) {
             if let Some(resolved) = use_map.get(method_part).or_else(|| import_map.get(method_part)) {
                 return Some(resolved.clone());
             }
