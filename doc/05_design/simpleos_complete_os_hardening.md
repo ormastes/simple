@@ -98,6 +98,19 @@ before durable read, write, and ordered flush submission.
 
 Kernel targets and SimpleOS userland triples are separate catalog fields. Canonical userland targets are selected once; every builder, manifest, sysroot path, and receipt derives from the catalog. RISC-V feature/ABI spelling is frozen before implementation and must match actual hardware/toolchain support.
 
+The filesystem-resident toolchain admission vocabulary covers exactly the six
+canonical userland triples: x86_64/i686, AArch64/ARMv7, and RV64GC/RV32IMAC.
+Admission maps those triples to the matching kernel `Architecture` value, but
+does not promote structural candidates to runtime PASS. The 32-bit bootstrap
+guest tuple uses the same `*-unknown-simpleos` identity and catalog-selected
+QEMU binary as its target profile; bare-metal `*-unknown-none*` spellings are
+not interchangeable with userland artifact identity.
+Scheduler terminal evidence retains the loader-authenticated manifest target
+OS, architecture, and ABI from each adopted executable image. The LLVM hello
+authority requires all three compiler/linker/output-image observations to match
+the requested canonical triple, preventing a six-target whitelist from
+relabeling evidence produced by a different architecture.
+
 ### Role construction
 
 Per-target isolated workspaces produce separate compiler, interpreter, loader, and dispatcher artifacts. Aliases may share bytes only through explicit manifest `alias_of`. A pure-Simple admitted compiler receipt is required; Rust seed or unsupported Stage 2/3 commands fail closed.
@@ -109,6 +122,9 @@ Build/install guest-native `clang`, `clang++`, `ld.lld`, selected LLVM tools, he
 ### Tool inventory
 
 Generate one manifest from declared tool descriptors, never a source scan at runtime. A supported tool record includes implementation owner, artifact digest, capabilities, targets, filesystems, representative command, expected output/exit, error command, and evidence IDs. Partial/unavailable/blocked records are visible and cannot launch as supported.
+The full profile requires all six canonical target bindings. Manifest rows may
+remain blocked while payload or execution evidence is absent; expanding target
+identity never fabricates an artifact digest or evidence receipt.
 
 ## Server design
 

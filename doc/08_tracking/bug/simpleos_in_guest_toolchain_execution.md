@@ -263,3 +263,28 @@ guest execution receipt: `clang_static`, the admitted self-hosted Simple test
 runtime, and live QEMU compile/link/run evidence remain absent in this
 worktree.  Runtime timing/RSS and OptimizerPlugin output therefore remain
 blocked; no Rust seed or host compiler result is substituted.
+
+## 2026-08-24 six-target identity and admission repair
+
+The structural filesystem toolchain contracts previously admitted only the
+three 64-bit SimpleOS triples even though the canonical target contract and
+platform catalog already define i686, ARMv7, and RV32IMAC userland. The
+guest-hello contract, multi-role execution gate, filesystem hello projection,
+and truthful primary-tool manifest now share all six canonical target
+identities. The ELF projection maps each triple to its matching kernel
+`Architecture`; it does not infer runtime execution from that mapping.
+Scheduler observations now carry the loader-authenticated target OS,
+architecture, and ABI copied from each executable image handle. The Clang/LLD
+authority binds all three observed executable targets to the requested triple,
+and the diagnostic process-result contract also rejects cross-target evidence.
+
+The 32-bit phase-1/2 guest tuple also no longer compares its userland evidence
+against unrelated bare-metal triples or selects `qemu-system-x86_64` for the
+canonical i686 profile. It now matches the same `*-unknown-simpleos` triple and
+QEMU executable published by `simpleos_32bit_target_profile_v1`.
+
+Focused specifications cover all six structural target candidates and retain
+the fail-closed rule that candidates and blocked inventory rows do not become
+runtime PASS. No target-native payload, bootstrap, QEMU execution, test, build,
+or runtime verification was performed for this structural repair. Real
+compiler payloads and live compile/link/run evidence remain open.

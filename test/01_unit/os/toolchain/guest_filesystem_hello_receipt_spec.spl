@@ -14,10 +14,53 @@ use os.port.guest_filesystem_hello_receipt.{
 
 fn _machine(target: text) -> i64:
     if target == "x86_64-unknown-simpleos": return 62
+    if target == "i686-unknown-simpleos": return 3
     if target == "aarch64-unknown-simpleos": return 183
+    if target == "armv7-unknown-simpleos": return 40
     243
 
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    buf.push((value & 0xff).to_u8())
+    buf.push(((value >> 8) & 0xff).to_u8())
+    buf
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    var out = _push_u16_le(buf, value & 0xffff)
+    _push_u16_le(out, (value >> 16) & 0xffff)
+
+fn _elf32(target: text) -> [u8]:
+    var data: [u8] = [0x7fu8, 0x45u8, 0x4cu8, 0x46u8, 1u8, 1u8, 1u8]
+    while data.len() < 16: data.push(0u8)
+    data = _push_u16_le(data, 2)
+    data = _push_u16_le(data, _machine(target))
+    data = _push_u32_le(data, 1)
+    data = _push_u32_le(data, if target == "i686-unknown-simpleos": 0x8048000 else: 0x80000000)
+    data = _push_u32_le(data, 52)
+    data = _push_u32_le(data, 0)
+    data = _push_u32_le(data, 0)
+    data = _push_u16_le(data, 52)
+    data = _push_u16_le(data, 32)
+    data = _push_u16_le(data, 1)
+    data = _push_u16_le(data, 0)
+    data = _push_u16_le(data, 0)
+    data = _push_u16_le(data, 0)
+    val address = if target == "i686-unknown-simpleos": 0x8048000 else: 0x80000000
+    data = _push_u32_le(data, 1)
+    data = _push_u32_le(data, 0x100)
+    data = _push_u32_le(data, address)
+    data = _push_u32_le(data, address)
+    data = _push_u32_le(data, 4)
+    data = _push_u32_le(data, 4)
+    data = _push_u32_le(data, 5)
+    data = _push_u32_le(data, 0x1000)
+    while data.len() < 0x104: data.push(0u8)
+    data
+
 fn _elf(target: text) -> [u8]:
+    if target == "i686-unknown-simpleos" or
+       target == "armv7-unknown-simpleos" or
+       target == "riscv32imac-unknown-simpleos":
+        return _elf32(target)
     var data: [u8] = []
     while data.len() < 121: data.push(0u8)
     data[0] = 0x7fu8
@@ -97,8 +140,9 @@ describe "Guest filesystem hello-world receipt v1":
     it "projects byte-backed candidates on every target and filesystem":
         # @req: REQ-009 REQ-009/010
         val targets = [
-            "x86_64-unknown-simpleos", "aarch64-unknown-simpleos",
-            "riscv64gc-unknown-simpleos"
+            "x86_64-unknown-simpleos", "i686-unknown-simpleos",
+            "aarch64-unknown-simpleos", "armv7-unknown-simpleos",
+            "riscv64gc-unknown-simpleos", "riscv32imac-unknown-simpleos"
         ]
         val filesystems = [
             GuestToolchainFilesystem.Fat32,
