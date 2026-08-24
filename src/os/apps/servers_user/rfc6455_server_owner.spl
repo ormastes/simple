@@ -1,0 +1,495 @@
+# Bounded server-side RFC 6455 prerequisite for the filesystem server.
+#
+# This owner is intentionally transport-free.  A future HTTP connection owner
+# may validate an upgrade, write the returned response, and transfer both the
+# socket and any bytes read past the HTTP header through append_tail().  Nothing
+# in this module makes WebSocket reachable from /SERVERS.ELF.
+
+use std.nogc_sync_mut.websocket.handshake.{compute_websocket_accept}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+
+pub val RFC6455_MAX_MESSAGE_BYTES: u64 = 65536u64
+pub val RFC6455_MAX_RETAINED_FRAME_BYTES: u64 = 65550u64
+pub val RFC6455_MAX_FRAGMENTS: i32 = 1024
+pub val RFC6455_MAX_HANDSHAKE_BYTES: u64 = 65550u64
+pub val RFC6455_MAX_HANDSHAKE_LINE_BYTES: u64 = 8192u64
+pub val RFC6455_MAX_HANDSHAKE_HEADERS: i32 = 100
+pub val RFC6455_MAX_INPUT_CHUNK_BYTES: u64 = 8192u64
+pub val RFC6455_MAX_EVENTS_PER_APPEND: u64 = 1367u64
+
+pub class Rfc6455HandshakeDecision:
+    accepted: bool
+    response: text
+    error: text
+
+pub enum Rfc6455ServerEventKind:
+    FragmentProgress
+    TextMessage
+    BinaryMessage
+    Ping
+    Pong
+    PeerClose
+    ProtocolClose
+
+pub class Rfc6455ServerEvent:
+    kind: Rfc6455ServerEventKind
+    payload: [u8]
+    outbound: [u8]
+    close_code: i64
+    error: text
+
+fn _handshake_reject(error: text) -> Rfc6455HandshakeDecision:
+    Rfc6455HandshakeDecision(accepted: false, response: "", error: error)
+
+fn _ascii_token_byte(byte: u8) -> bool:
+    (byte >= 48u8 and byte <= 57u8) or
+        (byte >= 65u8 and byte <= 90u8) or
+        (byte >= 97u8 and byte <= 122u8) or
+        byte == 33u8 or byte == 35u8 or byte == 36u8 or byte == 37u8 or
+        byte == 38u8 or byte == 39u8 or byte == 42u8 or byte == 43u8 or
+        byte == 45u8 or byte == 46u8 or byte == 94u8 or byte == 95u8 or
+        byte == 96u8 or byte == 124u8 or byte == 126u8
+
+fn _field_name_valid(name: text) -> bool:
+    val bytes = name.bytes()
+    if bytes.len() == 0:
+        return false
+    for byte in bytes:
+        if not _ascii_token_byte(byte.to_u8()):
+            return false
+    true
+
+fn _strict_crlf(request: text) -> bool:
+    val bytes = request.bytes()
+    var index: u64 = 0u64
+    while index < bytes.len():
+        if bytes[index] == 13:
+            if index + 1u64 >= bytes.len() or bytes[index + 1u64] != 10:
+                return false
+            index = index + 2u64
+        elif bytes[index] == 10:
+            return false
+        else:
+            index = index + 1u64
+    true
+
+fn _token_list_has(value: text, expected: text) -> bool:
+    for part in value.split(","):
+        if part.trim().lower() == expected:
+            return true
+    false
+
+fn _token_list_valid(value: text, allow_protocol_version: bool) -> bool:
+    for raw_part in value.split(","):
+        val part = raw_part.trim()
+        if part == "":
+            return false
+        val slash = part.find("/")
+        if slash >= 0:
+            if not allow_protocol_version or slash == 0 or slash + 1 == part.len() or
+                part.slice(slash + 1, part.len()).contains("/"):
+                return false
+        for byte in part.bytes():
+            if byte == 47:
+                if not allow_protocol_version:
+                    return false
+            elif not _ascii_token_byte(byte.to_u8()):
+                return false
+    true
+
+fn _request_target_valid(target: text) -> bool:
+    val bytes = target.bytes()
+    if bytes.len() == 0:
+        return false
+    var index: u64 = 0u64
+    while index < bytes.len():
+        val byte = bytes[index]
+        if byte <= 32 or byte >= 127:
+            return false
+        if byte == 35:
+            return false
+        if byte == 37:
+            if index + 2u64 >= bytes.len():
+                return false
+            val first = bytes[index + 1u64]
+            val second = bytes[index + 2u64]
+            val first_hex = (first >= 48 and first <= 57) or
+                (first >= 65 and first <= 70) or (first >= 97 and first <= 102)
+            val second_hex = (second >= 48 and second <= 57) or
+                (second >= 65 and second <= 70) or (second >= 97 and second <= 102)
+            if not first_hex or not second_hex:
+                return false
+            index = index + 3u64
+        else:
+            index = index + 1u64
+    true
+
+fn _field_value_valid(value: text) -> bool:
+    # RFC 9110 field-content permits HTAB, SP, visible ASCII and obs-text.
+    # Reject every other C0 control plus DEL before trimming or tokenization.
+    for byte in value.bytes():
+        if (byte < 32 and byte != 9) or byte == 127:
+            return false
+    true
+
+fn _base64_symbol(byte: u8) -> bool:
+    (byte >= 65u8 and byte <= 90u8) or
+        (byte >= 97u8 and byte <= 122u8) or
+        (byte >= 48u8 and byte <= 57u8) or byte == 43u8 or byte == 47u8
+
+fn _websocket_key_is_canonical_16_bytes(key: text) -> bool:
+    # Sixteen octets have one canonical RFC 4648 shape: 22 data symbols and
+    # two padding bytes.  The low four bits of data symbol 22 must be zero.
+    val bytes = key.bytes()
+    if bytes.len() != 24:
+        return false
+    var index: u64 = 0u64
+    while index < 22u64:
+        if not _base64_symbol(bytes[index].to_u8()):
+            return false
+        index = index + 1u64
+    if bytes[22u64] != 61 or bytes[23u64] != 61:
+        return false
+    val last = bytes[21u64]
+    last == 65 or last == 81 or last == 103 or last == 119
+
+pub fn validate_rfc6455_server_handshake(request: text) -> Rfc6455HandshakeDecision:
+    if request.len().to_u64() > RFC6455_MAX_HANDSHAKE_BYTES:
+        return _handshake_reject("handshake exceeds 65550 bytes")
+    if not _strict_crlf(request) or not request.ends_with("\r\n\r\n"):
+        return _handshake_reject("handshake requires strict CRLF framing")
+    val lines = request.split("\r\n")
+    if lines.len() < 3:
+        return _handshake_reject("handshake is incomplete")
+    val request_parts = lines[0].split(" ")
+    if lines[0].len().to_u64() > RFC6455_MAX_HANDSHAKE_LINE_BYTES:
+        return _handshake_reject("handshake request line exceeds 8192 bytes")
+    if request_parts.len() != 3 or request_parts[0] != "GET" or
+        request_parts[2] != "HTTP/1.1":
+        return _handshake_reject("WebSocket upgrade requires GET HTTP/1.1")
+    if not _request_target_valid(request_parts[1]) or
+        not request_parts[1].starts_with("/") or request_parts[1].contains("#"):
+        return _handshake_reject("invalid WebSocket request target")
+
+    var host = ""
+    var version = ""
+    var key = ""
+    var upgrade_has_websocket = false
+    var connection_has_upgrade = false
+    var host_count = 0
+    var upgrade_count = 0
+    var connection_count = 0
+    var version_count = 0
+    var key_count = 0
+    var index: u64 = 1u64
+    while index < lines.len() and lines[index] != "":
+        val line = lines[index]
+        if line.len().to_u64() > RFC6455_MAX_HANDSHAKE_LINE_BYTES:
+            return _handshake_reject("handshake header line exceeds 8192 bytes")
+        if index > RFC6455_MAX_HANDSHAKE_HEADERS.to_u64():
+            return _handshake_reject("handshake exceeds 100 headers")
+        if line.starts_with(" ") or line.starts_with("\t"):
+            return _handshake_reject("obsolete folded headers are forbidden")
+        val colon = line.find(":")
+        if colon <= 0:
+            return _handshake_reject("malformed handshake header")
+        val name = line.slice(0, colon)
+        if not _field_name_valid(name):
+            return _handshake_reject("invalid handshake field name")
+        val raw_value = line.slice(colon + 1, line.len())
+        if not _field_value_valid(raw_value):
+            return _handshake_reject("invalid control byte in handshake field value")
+        val value = raw_value.trim()
+        val lower = name.lower()
+        if lower == "host":
+            host_count = host_count + 1
+            host = value
+        elif lower == "upgrade":
+            if not _token_list_valid(value, true):
+                return _handshake_reject("invalid Upgrade protocol list")
+            upgrade_count = upgrade_count + 1
+            if _token_list_has(value, "websocket"):
+                upgrade_has_websocket = true
+        elif lower == "connection":
+            if not _token_list_valid(value, false):
+                return _handshake_reject("invalid Connection token list")
+            connection_count = connection_count + 1
+            if _token_list_has(value, "upgrade"):
+                connection_has_upgrade = true
+        elif lower == "sec-websocket-version":
+            version_count = version_count + 1
+            version = value
+        elif lower == "sec-websocket-key":
+            key_count = key_count + 1
+            key = value
+        index = index + 1u64
+
+    # split("\r\n") leaves two terminal empty elements for the required
+    # header terminator.  Anything after the first empty line is smuggling,
+    # not another handshake header block.
+    if index + 2u64 != lines.len():
+        return _handshake_reject("bytes follow the WebSocket handshake")
+
+    if host_count != 1 or host == "":
+        return _handshake_reject("handshake requires exactly one non-empty Host")
+    if upgrade_count < 1 or not upgrade_has_websocket:
+        return _handshake_reject("handshake requires a WebSocket Upgrade field")
+    if connection_count < 1 or not connection_has_upgrade:
+        return _handshake_reject("handshake requires a Connection upgrade token")
+    if version_count != 1 or version != "13":
+        return _handshake_reject("handshake requires Sec-WebSocket-Version 13")
+    if key_count != 1 or not _websocket_key_is_canonical_16_bytes(key):
+        return _handshake_reject("handshake requires one canonical 16-byte Sec-WebSocket-Key")
+
+    val accept = compute_websocket_accept(key)
+    val response = "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Upgrade: websocket\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Sec-WebSocket-Accept: {accept}\r\n\r\n"
+    Rfc6455HandshakeDecision(accepted: true, response: response, error: "")
+
+fn _server_frame(opcode: u8, payload: [u8]) -> [u8]:
+    var result: [u8] = [0x80u8 | opcode]
+    if payload.len() < 126u64:
+        result.push(payload.len().to_u8())
+    else:
+        result.push(126u8)
+        result.push(((payload.len() >> 8u64) & 255u64).to_u8())
+        result.push((payload.len() & 255u64).to_u8())
+    result.extend(payload)
+    result
+
+fn _close_payload(code: i64) -> [u8]:
+    [((code >> 8) & 255).to_u8(), (code & 255).to_u8()]
+
+fn _valid_close_code(code: i64) -> bool:
+    if code >= 3000 and code <= 4999:
+        return true
+    if code < 1000 or code > 1014:
+        return false
+    code != 1004 and code != 1005 and code != 1006
+
+fn _event(kind: Rfc6455ServerEventKind, payload: [u8], outbound: [u8],
+    close_code: i64, error: text) -> Rfc6455ServerEvent:
+    Rfc6455ServerEvent(kind: kind, payload: payload, outbound: outbound,
+        close_code: close_code, error: error)
+
+pub class Rfc6455ServerConnectionOwner:
+    wire: [u8]
+    wire_start: u64
+    fragmented: [u8]
+    fragmented_opcode: u8
+    fragment_count: i32
+    terminal: bool
+    failed: bool
+
+    static fn create() -> Rfc6455ServerConnectionOwner:
+        Rfc6455ServerConnectionOwner(wire: [], fragmented: [],
+            wire_start: 0u64, fragmented_opcode: 0u8,
+            fragment_count: 0,
+            terminal: false, failed: false)
+
+    me _fail(code: i64, message: text) -> Rfc6455ServerEvent:
+        self.failed = true
+        self.terminal = true
+        self.wire = []
+        self.wire_start = 0u64
+        self.fragmented = []
+        self.fragmented_opcode = 0u8
+        self.fragment_count = 0
+        _event(Rfc6455ServerEventKind.ProtocolClose, [],
+            _server_frame(8u8, _close_payload(code)), code, message)
+
+    me _message(opcode: u8, payload: [u8]) -> Rfc6455ServerEvent:
+        if opcode == 1u8:
+            if validated_utf8_bytes_to_text_linear(payload).is_err():
+                return self._fail(1007, "text message is not valid UTF-8")
+            return _event(Rfc6455ServerEventKind.TextMessage, payload, [], 0, "")
+        _event(Rfc6455ServerEventKind.BinaryMessage, payload, [], 0, "")
+
+    me _process(fin: bool, opcode: u8, payload: [u8]) -> Rfc6455ServerEvent:
+        if opcode == 8u8:
+            if payload.len() == 1u64:
+                return self._fail(1002, "close payload cannot contain one byte")
+            var code: i64 = 0
+            var reason: [u8] = []
+            if payload.len() >= 2u64:
+                code = (payload[0u64].to_i64() << 8) | payload[1u64].to_i64()
+                if not _valid_close_code(code):
+                    return self._fail(1002, "invalid close status code")
+                reason = payload.slice(2u64, payload.len())
+                if validated_utf8_bytes_to_text_linear(reason).is_err():
+                    return self._fail(1007, "close reason is not valid UTF-8")
+            self.terminal = true
+            self.wire = []
+            self.wire_start = 0u64
+            self.fragmented = []
+            self.fragmented_opcode = 0u8
+            self.fragment_count = 0
+            return _event(Rfc6455ServerEventKind.PeerClose, payload,
+                _server_frame(8u8, payload), code, "")
+        if opcode == 9u8:
+            return _event(Rfc6455ServerEventKind.Ping, payload,
+                _server_frame(10u8, payload), 0, "")
+        if opcode == 10u8:
+            return _event(Rfc6455ServerEventKind.Pong, payload, [], 0, "")
+
+        if opcode == 0u8:
+            if self.fragmented_opcode == 0u8:
+                return self._fail(1002, "continuation without fragmented message")
+            if self.fragment_count >= RFC6455_MAX_FRAGMENTS:
+                return self._fail(1009, "fragment count exceeds 1024")
+            if (self.fragmented.len() > RFC6455_MAX_MESSAGE_BYTES or
+                payload.len() > RFC6455_MAX_MESSAGE_BYTES - self.fragmented.len()):
+                return self._fail(1009, "fragmented message exceeds 65536 bytes")
+            self.fragmented.extend(payload)
+            self.fragment_count = self.fragment_count + 1
+            if fin:
+                val complete = self.fragmented
+                val message_opcode = self.fragmented_opcode
+                self.fragmented = []
+                self.fragmented_opcode = 0u8
+                self.fragment_count = 0
+                return self._message(message_opcode, complete)
+            return _event(Rfc6455ServerEventKind.FragmentProgress, [], [], 0, "")
+
+        if self.fragmented_opcode != 0u8:
+            return self._fail(1002, "new data frame during fragmented message")
+        if fin:
+            return self._message(opcode, payload)
+        self.fragmented_opcode = opcode
+        self.fragmented = payload
+        self.fragment_count = 1
+        _event(Rfc6455ServerEventKind.FragmentProgress, [], [], 0, "")
+
+    me _drain_wire() -> [Rfc6455ServerEvent]:
+        var events: [Rfc6455ServerEvent] = []
+        while (not self.terminal and self.wire.len() >= self.wire_start and
+            self.wire.len() - self.wire_start >= 2u64):
+            val frame_start = self.wire_start
+            val first = self.wire[frame_start]
+            val second = self.wire[frame_start + 1u64]
+            val fin = (first & 0x80u8) != 0u8
+            val rsv = first & 0x70u8
+            val opcode = first & 0x0Fu8
+            val masked = (second & 0x80u8) != 0u8
+            val length_tag = second & 0x7Fu8
+            if rsv != 0u8:
+                events.push(self._fail(1002, "RSV bits require a negotiated extension"))
+                break
+            if not (opcode == 0u8 or opcode == 1u8 or opcode == 2u8 or
+                opcode == 8u8 or opcode == 9u8 or opcode == 10u8):
+                events.push(self._fail(1002, "reserved or unknown opcode"))
+                break
+            if not masked:
+                events.push(self._fail(1002, "client frame must be masked"))
+                break
+
+            var header_without_mask: u64 = 2u64
+            var payload_length: u64 = length_tag.to_u64()
+            if length_tag == 126u8:
+                if self.wire.len() - frame_start < 4u64:
+                    break
+                payload_length = (self.wire[frame_start + 2u64].to_u64() << 8u64) |
+                    self.wire[frame_start + 3u64].to_u64()
+                header_without_mask = 4u64
+                if payload_length < 126u64:
+                    events.push(self._fail(1002, "non-canonical 16-bit payload length"))
+                    break
+            elif length_tag == 127u8:
+                if self.wire.len() - frame_start < 10u64:
+                    break
+                if (self.wire[frame_start + 2u64] & 0x80u8) != 0u8:
+                    events.push(self._fail(1002, "63-bit payload length MSB must be zero"))
+                    break
+                payload_length = 0u64
+                var length_index: u64 = 2u64
+                while length_index < 10u64:
+                    payload_length = (payload_length << 8u64) |
+                        self.wire[frame_start + length_index].to_u64()
+                    length_index = length_index + 1u64
+                header_without_mask = 10u64
+                if payload_length < 65536u64:
+                    events.push(self._fail(1002, "non-canonical 64-bit payload length"))
+                    break
+
+            val control = opcode >= 8u8
+            if control and (not fin or payload_length > 125u64):
+                events.push(self._fail(1002, "control frame must be final and at most 125 bytes"))
+                break
+            if payload_length > RFC6455_MAX_MESSAGE_BYTES:
+                events.push(self._fail(1009, "frame payload exceeds 65536 bytes"))
+                break
+            val header_size = header_without_mask + 4u64
+            if header_size > RFC6455_MAX_RETAINED_FRAME_BYTES or
+                payload_length > RFC6455_MAX_RETAINED_FRAME_BYTES - header_size:
+                events.push(self._fail(1009, "frame exceeds retained-byte bound"))
+                break
+            val total = header_size + payload_length
+            if self.wire.len() - frame_start < total:
+                break
+
+            val mask_offset = frame_start + header_without_mask
+            var payload: [u8] = [0u8; payload_length]
+            var payload_index: u64 = 0u64
+            while payload_index < payload_length:
+                payload[payload_index] = self.wire[frame_start + header_size + payload_index] ^
+                    self.wire[mask_offset + (payload_index % 4u64)]
+                payload_index = payload_index + 1u64
+            self.wire_start = frame_start + total
+            events.push(self._process(fin, opcode, payload))
+        if not self.terminal:
+            if self.wire_start == self.wire.len():
+                self.wire = []
+                self.wire_start = 0u64
+            elif self.wire_start > 0u64:
+                # Compact at most once per drain, never once per frame.
+                self.wire = self.wire.slice(self.wire_start, self.wire.len())
+                self.wire_start = 0u64
+        events
+
+    me append_tail(input: [u8]) -> [Rfc6455ServerEvent]:
+        # Explicit tail-input seam: the future HTTP owner must transfer bytes
+        # already read beyond the upgrade header through this same bounded API.
+        # Transport reads are capped so both retained bytes and returned event
+        # objects remain bounded. Incomplete frames may span calls.
+        var events: [Rfc6455ServerEvent] = []
+        if self.terminal:
+            return events
+        if input.len() > RFC6455_MAX_INPUT_CHUNK_BYTES:
+            events.push(self._fail(1009, "tail input exceeds 8192-byte call bound"))
+            return events
+        var input_index: u64 = 0u64
+        while input_index < input.len() and not self.terminal:
+            if self.wire.len() < self.wire_start:
+                events.push(self._fail(1002, "invalid retained-frame cursor"))
+                break
+            val retained = self.wire.len() - self.wire_start
+            if retained > RFC6455_MAX_RETAINED_FRAME_BYTES:
+                events.push(self._fail(1009, "retained frame bytes exceed 65550"))
+                break
+            val capacity = RFC6455_MAX_RETAINED_FRAME_BYTES - retained
+            if capacity == 0u64:
+                events.push(self._fail(1009, "incomplete frame fills retained-byte bound"))
+                break
+            val remaining = input.len() - input_index
+            val take = if remaining < capacity: remaining else: capacity
+            self.wire.extend(input.slice(input_index, input_index + take))
+            input_index = input_index + take
+            events.extend(self._drain_wire())
+            if events.len() > RFC6455_MAX_EVENTS_PER_APPEND:
+                events = [self._fail(1009, "event count exceeds per-call bound")]
+                return events
+        if input.len() == 0u64 and not self.terminal:
+            events.extend(self._drain_wire())
+        events
+
+    fn is_terminal() -> bool: self.terminal
+    fn protocol_failed() -> bool: self.failed
+    fn retained_wire_bytes() -> u64:
+        if self.wire.len() < self.wire_start: 0u64 else: self.wire.len() - self.wire_start
+    fn retained_message_bytes() -> u64: self.fragmented.len()
+
+export Rfc6455HandshakeDecision, Rfc6455ServerEventKind, Rfc6455ServerEvent
+export Rfc6455ServerConnectionOwner
+export validate_rfc6455_server_handshake
