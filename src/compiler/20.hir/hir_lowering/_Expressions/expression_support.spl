@@ -197,6 +197,19 @@ fn _hir_missing_field_type() -> HirType:
 # ============================================================================
 
 impl HirLowering:
+    # The `rt_dict_contains` probe lives in a STATEMENT-position `unsafe` block
+    # inside its own method, not `val x = unsafe(...):` at the use site. The
+    # seed interpreter parses the expression form as a call to a function
+    # literally named `unsafe` and dies with error[E1002]
+    # "function 'unsafe' not found" -- a diagnostic that names neither this
+    # file nor the construct. Kept as a METHOD (not a free function) so `self`
+    # stays in scope and the composite index's aliased type never has to be
+    # spelled as a parameter. See
+    # doc/08_tracking/bug/seed_val_bound_unsafe_block_parsed_as_call_2026-08-24.md
+    me _composite_metadata_missing(composite_name: text) -> bool:
+        unsafe(capabilities: [ffi]):
+            composite_name == "" or not rt_dict_contains(self.struct_field_access_by_name, composite_name)
+
     me field_module_callable(module_name: text, field_name: text) -> SymbolId?:
         # NOTE: deliberately does NOT filter candidates by `candidate.kind ==
         # SymbolKind.Function`. A same-process cross-module symbol-kind
@@ -489,8 +502,7 @@ impl HirLowering:
         # 54). Letting the Field expression continue past this gate on an owner
         # the lowerer cannot describe cascades into the import/materialization
         # path. The permissive verdict costs ~20x what it saves.
-        val composite_metadata_missing = unsafe(capabilities: [ffi]):
-            composite_name == "" or not rt_dict_contains(self.struct_field_access_by_name, composite_name)
+        val composite_metadata_missing = self._composite_metadata_missing(composite_name)
         if composite_metadata_missing:
             if HIR_MEMBER_VIS_TRACE:
                 var owner_name = "<no-symbol>"

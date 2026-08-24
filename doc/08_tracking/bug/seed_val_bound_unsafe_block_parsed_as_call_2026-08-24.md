@@ -101,3 +101,36 @@ this lane, so converting it would be an unverified change to a hot HIR path.
   worked around.
 - Whether the same mis-parse affects `unsafe` blocks bound in other expression
   positions (an argument, a field initializer, a match scrutinee) was not tested.
+
+## 2026-08-24 (later) — the third site WAS reached, and is now fixed too
+
+The judgement above ("not reached by any build in this lane, so converting it
+would be an unverified change") was correct at the time and wrong an hour later.
+`native-build src/app/mcp/main.spl` reaches it: with the two MIR gates fixed the
+MCP build got past parse for all 61 modules and then died at HIR 8/61 with the
+same `function 'unsafe' not found`. The interpreted call stack under
+`SIMPLE_INTERP_OOB_DEBUG=1 SIMPLE_DEBUG_FIELD_ACCESS=1` named it directly:
+
+```
+... -> lower_and_check_impl -> lower_parser_module_unstub -> lower_module
+    -> lower_function -> lower_hir_block -> lower_hir_stmt_multi
+    -> lower_hir_stmt -> lower_hir_expr -> lower_hir_expr -> field_access_for_expr
+```
+
+The type problem that made it look risky is avoided by making the helper a
+METHOD on `impl HirLowering` rather than a free function: `self` stays in scope,
+so `self.struct_field_access_by_name` is passed to `rt_dict_contains` exactly as
+before and its aliased type (`HirFieldAccessByName`) never has to be spelled as
+a parameter. The body is byte-identical to the old block body; only its position
+changed.
+
+Measured effect: the MCP build advances from **HIR 8/61** to **MIR 61/61** —
+every one of the 61 modules now parses, lowers to HIR, and lowers to MIR. It
+then stops on a FOURTH, unrelated defect: MIR lowering has no assignment-target
+support for a tuple, so `(cwd, _rc) = shell_cmd("pwd")`
+(`src/app/mcp/main_lazy_protocol.spl:63`) fails with
+`unsupported MIR assignment target: HirExprKind::TupleLit(...)`
+(`50.mir/mir_lowering_stmts.spl:1740`). That is recorded separately.
+
+All three `= unsafe(` sites in `src/compiler/**` are now converted; a re-scan
+returns none.
