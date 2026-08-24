@@ -641,16 +641,20 @@ impl MirLowering:
             else:
                 gpu_selection.backend_order
 
-        # Propagate @export("C") from HIR export_attr
-        match fn_.export_attr:
-            case Some(ea):
-                if ea.is_export_c:
-                    fn_result.is_export_c = true
-                    # Fresh copy, same MIR-owns-its-names rule as mir_fn_name
-                    # above (hazard 4).
-                    fn_result.export_name = ea.export_name + ""
-            case None:
-                ()
+        # Propagate @export("C") from HIR export_attr. Do not bind the
+        # struct payload through `case Some(ea)` here: the self-hosted native
+        # lowering can preserve the Option wrapper instead of the ExportAttr
+        # payload, then dereference an invalid field offset after HIR (bug
+        # stage3_backend_segfault_after_hir_gpu_dynload_2026_08_25). Presence
+        # plus typed coalesce is the established compiled-safe struct-optional
+        # form used by the return path above.
+        if fn_.export_attr.?:
+            val ea = fn_.export_attr ?? ExportAttr(is_export_c: false, export_name: "")
+            if ea.is_export_c:
+                fn_result.is_export_c = true
+                # Fresh copy, same MIR-owns-its-names rule as mir_fn_name
+                # above (hazard 4).
+                fn_result.export_name = ea.export_name + ""
 
         # Propagate @driver/@native_lib manifest metadata for backend registry
         # synthesis and manifest emission.
