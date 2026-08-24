@@ -1,7 +1,7 @@
 # Stage 3 self-host SIGSEGV while lowering `values_equal` after full HIR
 
 **Date:** 2026-08-25  
-**Status:** FIX IMPLEMENTED — focused regression evidence pending rebuilt compiler
+**Status:** SECOND FIX IMPLEMENTED — rebuilt-compiler evidence pending
 **Platform:** `x86_64-unknown-linux-gnu`, LLVM backend, dynload runtime
 
 ## Reproduction
@@ -75,3 +75,35 @@ No evidence executable was produced, so Vulkan availability, device identity,
 present, readback, and pixel parity remain **not executed**, not failed. The
 generated source and raw wrapper evidence are under
 `build/vulkan-engine2d-readback-gpu-r3/` (ignored build artifacts).
+
+## Current-head follow-up: `eval_gt` (2026-08-24 UTC)
+
+Fresh source `227049b0c4518e2173851692562eaf5e03a89a75` produced and admitted
+Stage 2, then resumed Stage 3 from a planner-admission-v2 receipt. The compiler
+crossed HIR 695/695, HIR finalization 950/950, post-HIR validation 695/695,
+HIR reclamation, monomorphization, and post-monomorphization verification.
+It entered MIR lowering and exited 139 at statement 0 of `eval_gt` in
+`src/compiler/70.backend/backend/interpreter.spl`. The prior `values_equal`
+frontier was therefore cleared, but the general carrier bug was not.
+
+Retained evidence:
+
+- `build/bootstrap/mustcheck-stage3-current/bootstrap-build-progress.events`
+- `build/bootstrap/mustcheck-stage3-current/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`
+- `build/bootstrap/mustcheck-stage3-current/stage3/x86_64-unknown-linux-gnu/memory-snapshot-v1.4004404.events`
+
+The final retained snapshot reports 1,117,411,788 bytes peak tracked heap,
+2,722,956 KiB RSS, and 2,742,140 KiB HWM. This is a MIR-lowering SIGSEGV, not
+the older HIR memory termination.
+
+The earlier direct-enum route still extracted elements of `[HirMatchArm]` into
+untyped locals before accessing composite fields. Stage 2 stores such array
+elements through ANY; the interpreter owner already documents the necessary
+typed-local rebound for `[HirStmt]`. The owner fix now explicitly rebinds every
+arm extraction on the direct, normalization, enum, and deep-enum routes as
+`HirMatchArm`. This preserves the algorithm and removes no behavior or API.
+
+The installed repository executable identified itself as a Rust bootstrap seed
+when asked to run the focused source spec and lint, so those invocations are
+rejected as acceptance evidence. Rebuilt Stage 2/3 evidence is required; the
+same failed Stage 3 command must not be rerun against unchanged source.
