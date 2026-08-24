@@ -28,6 +28,7 @@ use compiler.mir.intrinsics.{MIR_STORAGE_ALLOC_OWNED_RAW_V1}
 # (50.mir/_MirLowering/bootstrap_globals.spl:25). (2026-08-08 stage3)
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
+@unsafe(reason: "raw debug-environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 
 pub fn mir_trace_enabled() -> bool:
@@ -38,13 +39,14 @@ pub fn mir_trace_enabled() -> bool:
     so one switch turns every MIR-lowering receipt back on. Callers on hot
     paths must read this ONCE and cache it (see emit_call_value below), never
     per receipt."""
-    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
-        return true
-    if (rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1":
-        return true
-    if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-        return true
-    (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+    unsafe(capabilities: [ffi]):
+        if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+            return true
+        if (rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1":
+            return true
+        if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+            return true
+        (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
 
 # ============================================================================
 # MIR Builder
@@ -146,7 +148,10 @@ impl MirBuilder:
         # prologue instructions) still carries a real, in-function location
         # instead of nil.
         self.current_span = Some(span)
-        if (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1":
+        var mirb_trace = false
+        unsafe(capabilities: [ffi]):
+            mirb_trace = (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+        if mirb_trace:
             print "MIRB begin {name} post-reset blocks={self.blocks.len()} locals={self.locals.len()}"
 
         # Create entry block
@@ -157,7 +162,10 @@ impl MirBuilder:
             terminator: MirTerminator.Unreachable  # Placeholder
         ))
 
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        var bootstrap_mode = false
+        unsafe(capabilities: [ffi]):
+            bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        if not bootstrap_mode:
             # Create return local
             if signature.return_type.kind != MirTypeKind.Unit:
                 self.new_local(Some("_return"), signature.return_type, LocalKind.Return)
@@ -220,7 +228,10 @@ impl MirBuilder:
         fn_.locals = self.locals
         fn_.blocks = self.blocks
         self.current_function = nil
-        if (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1":
+        var mirb_trace = false
+        unsafe(capabilities: [ffi]):
+            mirb_trace = (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+        if mirb_trace:
             var first_insts = -1
             if fn_.blocks.len() > 0:
                 first_insts = fn_.blocks[0].instructions.len()
@@ -345,7 +356,9 @@ impl MirBuilder:
         # SIMPLE_MIRB_TRACE gate; default OFF.
         val fb_pending_len = self.instructions.len()
         val fb_is_empty = self.instructions.is_empty()
-        val fb_trace = (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+        var fb_trace = false
+        unsafe(capabilities: [ffi]):
+            fb_trace = (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
         if fb_trace:
             print "MIRB finalize pending_len={fb_pending_len} is_empty={fb_is_empty} block={self.current_block.id}"
         if self.instructions.is_empty():
@@ -555,7 +568,9 @@ impl MirBuilder:
         # lines 113/186). These probes were unconditional, which on a hot path
         # (every non-unit call emit) floods stderr for the whole build; they are
         # retained, not deleted, per the log-retention policy. (2026-08-08)
-        val mirb_trace = (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+        var mirb_trace = false
+        unsafe(capabilities: [ffi]):
+            mirb_trace = (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
         if mirb_trace:
             eprint("[mir-call-value] new-temp-before next={self.next_local_id}\n")
         val dest = self.new_temp(return_type)

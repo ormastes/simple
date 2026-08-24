@@ -1512,6 +1512,16 @@ additional calls. Current source lower bound: 21,711 calls (2,188 explicit,
 24.46 s / 14,488 KiB. Continue to resolved HIR for truly ambient, aliased, and
 generated symbol identity.
 
+Current-main reconciliation tightened the authority ratchet after upstream
+added raw runtime/compiler calls. The pure-Simple simple-core memory provider
+now scopes all 27 raw calls lexically and tags its raw allocation/load/store
+declarations; three MIR diagnostic reads are again lexical. Current lower bound:
+21,723 calls, 2,220 explicit, 19,503 missing. The identical scan is 17.27 s /
+14,484 KiB before and 16.09 s / 14,520 KiB after. Declaration state is 12,118
+rows, 907 tagged, 385 minimized, 10,945 untouched, and zero signed/admitted.
+Compiled optimizer/spec verification remains blocked because the deployed
+release path is still the Rust seed; do not substitute its results.
+
 The LLVM target module now scopes both normalized target-policy reads without
 changing provider cardinality. Optimizer findings remain 22 and paired analyzer
 evidence is 5.94 s / 271,172 KiB before versus 4.93 s / 270,708 KiB after.

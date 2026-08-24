@@ -4,13 +4,21 @@
 # Simple runtime archive owns the required `rt_*` symbols and delegates raw
 # allocation/memory operations to the platform C ABI.
 
+@unsafe(reason: "raw libc allocation; zero is the allocation-failure sentinel", capabilities: [ffi, raw_ptr])
 extern fn malloc(size: i64) -> i64
+@unsafe(reason: "raw libc release; pointer ownership is caller-established", capabilities: [ffi, raw_ptr])
 extern fn free(ptr: i64)
+@unsafe(reason: "raw libc reallocation; zero is failure and the input allocation remains owned", capabilities: [ffi, raw_ptr])
 extern fn realloc(ptr: i64, size: i64) -> i64
+@unsafe(reason: "raw memory copy; source and destination extents are caller-established", capabilities: [ffi, raw_ptr])
 extern fn memcpy(dst: i64, src: i64, n: i64) -> i64
+@unsafe(reason: "raw memory fill; destination extent is caller-established", capabilities: [ffi, raw_ptr])
 extern fn memset(dst: i64, value: i64, n: i64) -> i64
+@unsafe(reason: "raw pointer read; allocation extent and alignment are validated by the wrapper", capabilities: [ffi, raw_ptr])
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer write; allocation extent and alignment are validated by the wrapper", capabilities: [ffi, raw_ptr])
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw byte write; allocation extent is validated by the wrapper", capabilities: [ffi, raw_ptr])
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
 
 # The pure-Simple bootstrap runtime is single-threaded.  Keep allocation
@@ -21,68 +29,76 @@ var struct_alloc_len: i64 = 0
 var struct_alloc_cap: i64 = 0
 
 fn register_struct_alloc(ptr: i64, size: i64) -> bool:
-    if struct_alloc_len >= struct_alloc_cap:
-        val next_cap = if struct_alloc_cap < 1: 64 else: struct_alloc_cap * 2
-        val next_items = realloc(struct_alloc_items, next_cap * 16)
-        if next_items < 1:
-            return false
-        struct_alloc_items = next_items
-        struct_alloc_cap = next_cap
-    spl_store_i64(struct_alloc_items, struct_alloc_len * 16, ptr)
-    spl_store_i64(struct_alloc_items, struct_alloc_len * 16 + 8, size)
-    struct_alloc_len = struct_alloc_len + 1
-    true
+    unsafe(capabilities: [ffi, raw_ptr]):
+        if struct_alloc_len >= struct_alloc_cap:
+            val next_cap = if struct_alloc_cap < 1: 64 else: struct_alloc_cap * 2
+            val next_items = realloc(struct_alloc_items, next_cap * 16)
+            if next_items < 1:
+                return false
+            struct_alloc_items = next_items
+            struct_alloc_cap = next_cap
+        spl_store_i64(struct_alloc_items, struct_alloc_len * 16, ptr)
+        spl_store_i64(struct_alloc_items, struct_alloc_len * 16 + 8, size)
+        struct_alloc_len = struct_alloc_len + 1
+        true
 
 fn unregister_struct_alloc(ptr: i64):
-    var i = 0
-    while i < struct_alloc_len:
-        if spl_load_i64(struct_alloc_items, i * 16) == ptr:
-            val last = struct_alloc_len - 1
-            if i < last:
-                spl_store_i64(struct_alloc_items, i * 16, spl_load_i64(struct_alloc_items, last * 16))
-                spl_store_i64(struct_alloc_items, i * 16 + 8, spl_load_i64(struct_alloc_items, last * 16 + 8))
-            struct_alloc_len = last
-            return
-        i = i + 1
+    unsafe(capabilities: [ffi, raw_ptr]):
+        var i = 0
+        while i < struct_alloc_len:
+            if spl_load_i64(struct_alloc_items, i * 16) == ptr:
+                val last = struct_alloc_len - 1
+                if i < last:
+                    spl_store_i64(struct_alloc_items, i * 16, spl_load_i64(struct_alloc_items, last * 16))
+                    spl_store_i64(struct_alloc_items, i * 16 + 8, spl_load_i64(struct_alloc_items, last * 16 + 8))
+                struct_alloc_len = last
+                return
+            i = i + 1
 
 pub fn rt_alloc(size: i64) -> i64:
-    return malloc(size)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        return malloc(size)
 
 pub fn rt_struct_alloc(size: i64) -> i64:
     if size < 1:
         return 0
-    val ptr = malloc(size)
-    if ptr < 1:
-        return 0
-    if not register_struct_alloc(ptr, size):
-        free(ptr)
-        return 0
-    ptr
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val ptr = malloc(size)
+        if ptr < 1:
+            return 0
+        if not register_struct_alloc(ptr, size):
+            free(ptr)
+            return 0
+        ptr
 
 pub fn rt_struct_receiver_valid(receiver: i64, byte_offset: i64, access_width: i64) -> i8:
     if receiver == 0 or byte_offset < 0 or access_width < 1:
         return 0
-    val ptr = receiver & -8
-    var i = 0
-    while i < struct_alloc_len:
-        if spl_load_i64(struct_alloc_items, i * 16) == ptr:
-            val size = spl_load_i64(struct_alloc_items, i * 16 + 8)
-            if byte_offset <= size and access_width <= size - byte_offset:
-                return 1
-            return 0
-        i = i + 1
-    0
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val ptr = receiver & -8
+        var i = 0
+        while i < struct_alloc_len:
+            if spl_load_i64(struct_alloc_items, i * 16) == ptr:
+                val size = spl_load_i64(struct_alloc_items, i * 16 + 8)
+                if byte_offset <= size and access_width <= size - byte_offset:
+                    return 1
+                return 0
+            i = i + 1
+        0
 
 pub fn rt_realloc(ptr: i64, size: i64) -> i64:
-    return realloc(ptr, size)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        return realloc(ptr, size)
 
 pub fn rt_free(ptr: i64) -> i64:
     unregister_struct_alloc(ptr)
-    free(ptr)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
     return 0
 
 pub fn rt_memcpy(dst: i64, src: i64, n: i64) -> i64:
-    return memcpy(dst, src, n)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        return memcpy(dst, src, n)
 
 # Core-library primitive. Callers pass a byte count; generic collections must
 # scale their element count before crossing this ABI boundary.
@@ -90,24 +106,29 @@ pub fn copy_mem(dst: i64, src: i64, n: i64) -> i64:
     return rt_memcpy(dst, src, n)
 
 pub fn rt_memset(dst: i64, value: i64, n: i64) -> i64:
-    return memset(dst, value, n)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        return memset(dst, value, n)
 
 pub fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64:
-    spl_load_i64(addr, offset)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_i64(addr, offset)
 
 pub fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64) -> i64:
-    spl_store_i64(addr, offset, value)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_i64(addr, offset, value)
     return 0
 
 pub fn rt_ptr_write_i32(addr: i64, offset: i64, value: i64) -> i64:
-    spl_store_u8(addr, offset, value & 255)
-    spl_store_u8(addr, offset + 1, (value >> 8) & 255)
-    spl_store_u8(addr, offset + 2, (value >> 16) & 255)
-    spl_store_u8(addr, offset + 3, (value >> 24) & 255)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_u8(addr, offset, value & 255)
+        spl_store_u8(addr, offset + 1, (value >> 8) & 255)
+        spl_store_u8(addr, offset + 2, (value >> 16) & 255)
+        spl_store_u8(addr, offset + 3, (value >> 24) & 255)
     return 0
 
 pub fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) -> i64:
-    spl_store_u8(addr, offset, value)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_u8(addr, offset, value)
     return 0
 
 pub fn rt_function_not_found(name: i64, len: i64) -> i64:

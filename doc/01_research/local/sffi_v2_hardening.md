@@ -2380,6 +2380,31 @@ scan improves from 27.18 s / 14,540 KiB to 24.46 s / 14,488 KiB, so broader
 coverage adds no measured performance or memory regression. Truly ambient calls
 without a declaration or SFFI import still require resolved-HIR inventory.
 
+## Post-sync authority ratchet and simple-core memory boundary
+
+After rebasing onto current `main`, the authority ratchet correctly rejected 15
+net new missing call sites rather than absorbing them into its baseline. The
+new debt was concentrated in the newly expanded pure-Simple `simple-core`
+memory provider and displaced MIR diagnostic environment scopes.
+
+Every raw allocation, release, load, and store in `core_memory.spl` now has a
+contract-tagged declaration and executes inside a lexical
+`unsafe(ffi, raw_ptr)` block. The MIR trace reads restored their narrow lexical
+`unsafe(ffi)` scopes. No function signature, sentinel, branch, allocation,
+copy, table layout, loop, provider-call count, or dispatch path changed.
+
+The current source lower bound is 21,723 calls: 2,220 explicit and 19,503
+missing. The identical census improves from 17.27 s / 14,484 KiB to 16.09 s /
+14,520 KiB. The declaration census reports 12,118 rows, 907 tagged, 651
+contract-documented, 385 minimized, 10,945 untouched, and zero cryptographically
+verified, signed, or admitted. Implementation definitions are C++ 219, C 2,349,
+Rust 2,166, and Simple 574; these are definitions, not proof of caller safety.
+
+The repository still has no deployed pure-Simple optimizer/test runtime: the
+release wrapper resolves to the 60,650,360-byte Rust bootstrap seed and prints
+the bootstrap-only warning. Seed optimizer output is diagnostic only and is not
+accepted as self-hosted verification.
+
 ## Cranelift backend policy boundary
 
 The Cranelift adapter's unsupported-MIR and no-mangle reads now use minimal
