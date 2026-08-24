@@ -39,6 +39,16 @@ fn debug_line(message: text):
 fn close_fd(fd: i32):
     val _ = syscall(33, fd as u64, 0, 0, 0, 0)
 
+fn http_listener_requires_partial_startup_close(
+    http_listener_ready: bool, db_listener_fd: i64
+) -> bool:
+    http_listener_ready and db_listener_fd < 0
+
+fn listener_requires_setup_failure_close(
+    socket_created: bool, bind_ready: bool, listen_ready: bool
+) -> bool:
+    socket_created and (not bind_ready or not listen_ready)
+
 fn send_all(sock: Socket, bytes: [u8]) -> bool:
     var sent: u64 = 0
     var attempts: i32 = 0
@@ -56,10 +66,21 @@ fn send_all(sock: Socket, bytes: [u8]) -> bool:
 
 fn bind_listener(port: u16) -> Result<Socket, text>:
     val ip = IpAddr.from_text("0.0.0.0")?
-    val listener = socket(2u32, 1u32)?
-    val _bound = bind(listener, SockAddr(ip: ip, port: port))?
-    val _listening = listen(listener, 8)?
-    Ok(listener)
+    match socket(2u32, 1u32):
+        case Err(message): Err(message)
+        case Ok(listener):
+            match bind(listener, SockAddr(ip: ip, port: port)):
+                case Err(message):
+                    if listener_requires_setup_failure_close(true, false, false):
+                        close_fd(listener.fd)
+                    Err(message)
+                case Ok(_):
+                    match listen(listener, 8):
+                        case Err(message):
+                            if listener_requires_setup_failure_close(true, true, false):
+                                close_fd(listener.fd)
+                            Err(message)
+                        case Ok(_): Ok(listener)
 
 fn http_response(request: text) -> text:
     val route = http_classify_request(request)
@@ -210,6 +231,9 @@ fn main() -> i64:
     val db_listener = db_server.bind_listener(DB_PORT.to_i64())
     if http_result.is_err() or db_listener < 0:
         debug_line("[simpleos-servers-user] listener bind=fail")
+        if http_listener_requires_partial_startup_close(
+            http_result.is_ok(), db_listener):
+            close_fd(http_result.unwrap().fd)
         val _ = db_server.close_service()
         return 3
     val http_listener = http_result.unwrap()
@@ -240,3 +264,6 @@ fn main() -> i64:
     val _ = db_server.close_service()
     debug_line("[simpleos-servers-user] bounded idle stop")
     0
+
+export http_listener_requires_partial_startup_close
+export listener_requires_setup_failure_close
