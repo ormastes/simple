@@ -17,6 +17,12 @@ x86-32 execution must remain blocked before loader authority consumption.
   ownership explicitly on indeterminate publication. It intentionally does not
   map authenticated ELF ranges or own rollback of caller-owned data frames, so
   the full process-image mapper remains incomplete.
+  The loader-owned `x86_32_authenticated_mapping_owner_v1.spl` now closes the
+  mapping-side prerequisite: it revalidates the digest and exact PT_LOAD layout,
+  owns exact allocated leaves, performs copy/BSS-zero readback, creates a
+  four-byte initial stack, and retains retryable/quarantined teardown state.
+  It reports the non-PAE absence of hardware NX/W^X and deliberately publishes
+  no scheduler or execution authority.
 - Three static design/review cycles rejected an attempted explicit-root owner.
   The remaining safe design requirements are: an authoritative create-issued
   root and unique-leaf registry; duplicate physical-frame aliases must be
@@ -46,9 +52,9 @@ x86-32 execution must remain blocked before loader authority consumption.
   rollback/quarantine owner (including the case where unlock released but
   reported failure) before a receipt may escape. The rejected wrapper and its
   hosted-only specs were reverted; no target exclusion claim is retained.
-- Classic two-level non-PAE i386 has no NX bit. A future mapping receipt must
-  not claim writable-vs-executable hardware isolation without a selected
-  PAE/NX policy or an explicitly accepted non-NX security row.
+- Classic two-level non-PAE i386 has no NX bit. The mapping receipt now reports
+  `hardware_execute_disable=false` and `hardware_wx_enforced=false`; selecting
+  PAE/NX remains necessary for any future hardware W^X claim.
 - A consume-once scheduler adoption must transfer the future mapping owner into
   a task, install its CR3 for CPL3 entry, and invoke terminal destruction.
 
