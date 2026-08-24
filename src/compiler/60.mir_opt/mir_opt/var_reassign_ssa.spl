@@ -639,26 +639,42 @@ fn ssa_terminator_successors(term: MirTerminator) -> [i64]:
 # loop backedge (bug #131 generalization must never treat a loop-carried
 # reassignment as a phi merge).
 fn ssa_block_can_reach(blocks: [MirBlock], start_id: i64, target_id: i64, visited: [i64]) -> bool:
+    # Iterative worklist, NOT recursion with a per-branch `visited` copy. The
+    # recursive form threaded `seen = visited.push(start_id)` DOWN each branch,
+    # so sibling successors never saw each other's marks and every distinct
+    # path through the CFG was re-explored: O(2^branches). It still terminated
+    # in principle, which is why it read as a hang rather than a crash --
+    # `process_run_timeout_live` (94 blocks) did not finish in 3600s, while
+    # small functions were unaffected (callers gate on `blocks.len() < 4`).
+    # See doc/08_tracking/bug/native_compile_nonterminating_io_runtime_2026-08-24.md
+    #
+    # Sharing one `seen` set across the WHOLE search is exactly equivalent for a
+    # reachability predicate: a block already expanded without reaching
+    # `target_id` cannot reach it via a different path either.
     if start_id == target_id:
         return true
     if local_list_contains(visited, start_id):
         return false
-    val seen = visited.push(start_id)
-    val start_opt = ssa_block_by_id(blocks, start_id)
-    # NOTE: deliberately `if start_opt.?: ... else: false` rather than
-    # `if not start_opt.?: return false` -- negating `.?` on a MirBlock?
-    # (struct-boxed) optional mis-evaluates in the bootstrap interpreter;
-    # every existing MirBlock? check in this file already uses the
-    # positive form only.
-    if start_opt.?:
-        val start_block = start_opt.unwrap()
-        var reached = false
-        for succ_id in ssa_terminator_successors(start_block.terminator):
-            if ssa_block_can_reach(blocks, succ_id, target_id, seen):
-                reached = true
-        reached
-    else:
-        false
+    var seen = visited.push(start_id)
+    var frontier: [i64] = [start_id]
+    var i = 0
+    while i < frontier.len():
+        val cur_id = frontier[i]
+        i = i + 1
+        val cur_opt = ssa_block_by_id(blocks, cur_id)
+        # NOTE: deliberately `if cur_opt.?:` rather than `if not cur_opt.?:` --
+        # negating `.?` on a MirBlock? (struct-boxed) optional mis-evaluates in
+        # the bootstrap interpreter; every existing MirBlock? check in this
+        # file already uses the positive form only.
+        if cur_opt.?:
+            val cur_block = cur_opt.unwrap()
+            for succ_id in ssa_terminator_successors(cur_block.terminator):
+                if succ_id == target_id:
+                    return true
+                if not local_list_contains(seen, succ_id):
+                    seen = seen.push(succ_id)
+                    frontier = frontier.push(succ_id)
+    false
 
 # Every block whose terminator can transfer control directly to `join_id`,
 # regardless of terminator kind (Goto/If/Switch/CallTerminator). This is the
