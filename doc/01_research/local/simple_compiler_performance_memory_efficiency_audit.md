@@ -2653,6 +2653,26 @@ input with a different lifetime. Complete warning payload/order parity is
 covered using a generated RV64 bundle, but not executed under the user's
 no-verification instruction.
 
+### Indexed MIR-builder local type queries
+
+`MirBuilder.new_local` assigns the current `next_local_id` and immediately
+appends the local, establishing `LocalId == locals position` for canonical
+builder state. MIR lowering nevertheless scanned every local for each type
+query, including repeated array, dictionary, string, float, boolean, tuple,
+indexing, and result-type probes. With Q queries and L locals this contributed
+O(Q*L) comparisons and could become quadratic as a function grew.
+
+`MirBuilder.local_type` now checks the dense index and stored identity in O(1).
+A scan fallback retains first-match behavior for directly constructed unique-ID
+sparse or reordered builder state; duplicate LocalIds violate the builder
+invariant. The shared lowering lookup and all remaining explicit
+type-predicate scans delegate to this method; hot canonical lowering becomes
+O(Q), with no dictionary, cache, or invalidation lifetime. Local creation,
+retyping, naming, type objects, diagnostics, and public MIR output are unchanged.
+The fallback remains O(L) only for malformed/noncanonical layout. No manual
+verification or timing measurement was run under the user's explicit
+no-verification instruction.
+
 ### Linear canonical MIR DAG validation
 
 Canonical termination closure previously resolved every branch target by

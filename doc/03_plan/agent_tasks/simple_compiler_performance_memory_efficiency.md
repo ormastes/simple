@@ -164,6 +164,20 @@ current-head research reconciliation.
 - Manual verification intentionally omitted under the user's explicit
   no-verification instruction.
 
+## Completed MIR-builder local-type index tranche
+
+- Formalize the canonical append-only `LocalId == locals position` builder
+  invariant in one bounds-checked lookup method.
+- Retain a first-match scan fallback for unique-ID sparse or reordered direct
+  fixtures; duplicate LocalIds remain invalid builder state.
+- Route shared type lookup and explicit array/dict/string/float/bool/tuple/base
+  predicates through the canonical method.
+- Reduce Q canonical type queries over L locals from O(Q*L) comparisons to
+  O(Q), without a side dictionary, cache lifetime, or MIR/API change.
+- Leave local retype/name mutation unchanged for a separately reviewed tranche.
+- Manual verification intentionally omitted under the user's explicit
+  no-verification instruction.
+
 ## Completed no-allocation closure-index tranche
 
 - Replace processed/queued array membership scans with one insertion-time

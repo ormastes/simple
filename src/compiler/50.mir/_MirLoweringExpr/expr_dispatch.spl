@@ -343,20 +343,18 @@ impl MirLowering:
 
     fn local_is_runtime_array(local: LocalId) -> bool:
         if self.runtime_array_locals.contains(local.id): return true
-        for item in self.builder.locals:
-            if item.id.id == local.id:
-                match item.type_.kind:
-                    case MirTypeKind.Array(_, _): return true
-                    case MirTypeKind.Slice(_): return true
-                    case _: return false
+        if val type_ = self.builder.local_type(local):
+            match type_.kind:
+                case MirTypeKind.Array(_, _): return true
+                case MirTypeKind.Slice(_): return true
+                case _: return false
         false
 
     fn local_is_runtime_dict(local: LocalId) -> bool:
         if self.runtime_dict_locals.contains(local.id):
             return true
-        for item in self.builder.locals:
-            if item.id.id == local.id:
-                return rt_enum_discriminant(item.type_.kind) == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64()))
+        if val type_ = self.builder.local_type(local):
+            return rt_enum_discriminant(type_.kind) == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64()))
         false
     fn noted_runtime_elem_type(container_local: LocalId) -> MirType?:
         """Nil-discriminating read of the store-observed element/value note.
@@ -529,9 +527,8 @@ impl MirLowering:
         HIR `.type_` is frequently nil on this path (flat HIR)."""
         if self.is_tagged_text_local(local.id):
             return true
-        for item in self.builder.locals:
-            if item.id.id == local.id:
-                return self.mir_type_is_str(item.type_)
+        if val type_ = self.builder.local_type(local):
+            return self.mir_type_is_str(type_)
         false
 
     fn local_enum_type_id(local: LocalId) -> i64:
@@ -555,11 +552,10 @@ impl MirLowering:
         lowering must key off the MIR local type. Without this, arithmetic on
         floats gets an i64 dest from infer_binop_type and the backend emits
         integer add/mul on double BIT PATTERNS (garbage results)."""
-        for item in self.builder.locals:
-            if item.id.id == local.id:
-                match item.type_.kind:
-                    case MirTypeKind.F32 | MirTypeKind.F64: return true
-                    case _: return false
+        if val type_ = self.builder.local_type(local):
+            match type_.kind:
+                case MirTypeKind.F32 | MirTypeKind.F64: return true
+                case _: return false
         false
 
     fn local_is_f32(local: LocalId) -> bool:
@@ -1148,12 +1144,12 @@ impl MirLowering:
         """
         var dict_result_type = MirType.i64()
         var resolved_from_local = false
-        var has_dict_mir_type = false
         var resolved_dict_mir_type = MirType.i64()
-        for item in self.builder.locals:
-            if item.id.id == base_local.id:
-                has_dict_mir_type = true
-                resolved_dict_mir_type = item.type_
+        val has_dict_mir_type = if val type_ = self.builder.local_type(base_local):
+            resolved_dict_mir_type = type_
+            true
+        else:
+            false
         if has_dict_mir_type:
             if rt_enum_discriminant(resolved_dict_mir_type.kind) == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
                 match resolved_dict_mir_type.kind:
@@ -1793,18 +1789,18 @@ impl MirLowering:
             return base_local
         var result_type = MirType.i64()
         var result_type_from_base = false
-        var has_base_mir_type = false
         var raw_pointer_base = false
         var base_mir_type = MirType.i64()
-        for item in self.builder.locals:
-            if item.id.id == base_local.id:
-                has_base_mir_type = true
-                base_mir_type = item.type_
-                match item.type_.kind:
-                    case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _):
-                        raw_pointer_base = true
-                    case _:
-                        ()
+        val has_base_mir_type = if val type_ = self.builder.local_type(base_local):
+            base_mir_type = type_
+            match type_.kind:
+                case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _):
+                    raw_pointer_base = true
+                case _:
+                    ()
+            true
+        else:
+            false
         val gpu_raw_pointer = raw_pointer_base and (self.current_gpu_kernel_target == "vulkan" or self.current_gpu_kernel_target == "cuda")
         if not gpu_raw_pointer:
             self.emit_bounds_check_for_index(base.type_, base_local, index_local)

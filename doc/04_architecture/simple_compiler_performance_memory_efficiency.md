@@ -636,3 +636,13 @@ Invalidation snapshots and detaches its initiating bucket before cross-cleanup,
 so iteration never aliases a bucket being rewritten. This keeps public ordered
 array representation intact, bounds retained reverse-index memory by live
 edges, and avoids bucket allocation on identical refreshes.
+
+### Dense builder-local indexing contract
+
+Canonical MIR construction owns an append-only local table whose newly assigned
+`LocalId` equals its array position. Type queries must use a bounds check plus
+stored-ID guard at that position. A linear first-match fallback is retained for
+directly constructed unique-ID sparse or reordered builder fixtures; duplicate
+IDs are invalid builder state. The lookup owns
+no side index, allocation, or invalidation state; all lowering type predicates
+consume the same method so complexity and identity checks cannot diverge.
