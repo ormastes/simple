@@ -1216,7 +1216,7 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Existing liveness and match-exhaustiveness contracts cover behavior;
   verification intentionally not run under the user's no-verify instruction.
 
-## Planned OPTME001 canonical-line tranche
+## Completed OPTME001 canonical-line tranche
 
 - Add line-owned OPTME001 collection/check kernels and retain source-taking
   compatibility adapters.
@@ -1225,6 +1225,11 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   enclosure arrays per file.
 - Preserve parser revision checks, same-file ambiguity behavior, diagnostic
   line numbers/order, and request-local snapshot lifetime.
+- Retain only compact warnings across parsing, never the file-sized line view;
+  parse failure and stale revision paths continue to suppress OPTME001.
+- Route the repo-wide scanner through one combined index per file and add
+  source/line collector plus full warning-payload parity contracts.
+- Verification intentionally not run under the user's no-verify instruction.
 
 ## Reviewed workspace JSON process tranche
 
