@@ -530,3 +530,67 @@ program output `t=yes i=1 a0=1 s0=a e=three` on both.
   collection-ness; a function-RETURNED if-merge array reads len 0). Neither is
   addressed: `??` is a different construct, and a returned array's TypeId is
   the callee's declared return type, which this merge never sees.
+
+## Stage 2 — MEASURED after the seed fix: the SIGSEGV is GONE, hello world still does not compile
+
+Verdict: **PARTIAL.** `rc=139` -> `rc=1` with a clean diagnostic, and all 7
+32-bit masks are gone from `hc_enc_hir_module`. This is NOT "Stage 2 is fixed":
+a second, previously-invisible codec defect is now the blocker.
+
+Stage 2 built from a tree carrying only the seed fix
+(`sh scripts/bootstrap/bootstrap-from-scratch.sh --strategy=adhoc
+--full-bootstrap --stop-after-stage2 --output=<dir>`, aarch64-apple-darwin,
+750 modules compiled / 0 failed, sha256
+`aaac7c6270b501a3200eab644971cda0d825ae53a5ad73b238c37ccc14f8b7b5`).
+Both gates on that binary report `status=pass`: `stage2-sanity.env`
+(5 checks) and `stage2-receiver.env`
+(`bootstrap_stage2_struct_receiver=PASS`).
+
+Same fixture, same env, both binaries:
+
+```
+printf 'fn main()\n    print("hi")\n' > h.spl
+SIMPLE_BOOTSTRAP=1 SIMPLE_PROJECT_ROOT=<repo> <stage2> compile h.spl --format=smf
+```
+
+| stage2 | sha256 | rc | `ands #0xfffffff8` total | ... inside `hc_enc_hir_module` |
+|---|---|---|---|---|
+| pre-fix (sibling lane's admitted build) | `e6761bfe…` | **139** (SIGSEGV, no message) | 524 | **7** |
+| post-fix | `aaac7c62…` | **1** (clean error) | 517 | **0** |
+
+524 - 517 = 7 — exactly the seven this record's first section counted, and they
+are exactly the ones inside `hc_enc_hir_module`. The remaining 517 are
+elsewhere in the binary and are legitimate 32-bit arithmetic.
+
+The new, now-reachable failure is a different defect:
+
+```
+[bootstrap-error-count] source_idx=0 point=post-diagnostics count=0
+error: hir codec: no `HirTypeKind` arm for tag -1; regenerate
+       src/compiler/20.hir/generated/hir_codec.spl
+```
+
+That text comes from the **encoder's** catch-all,
+`hc_enc_hir_type_kind`'s `case _: hc_bad_tag("HirTypeKind", -1)`
+(`src/compiler/20.hir/generated/hir_codec.spl:5378`) — a `HirTypeKind` variant
+that no `case` in the generated encoder matches. It is a codec-completeness /
+match-dispatch problem, unrelated to pointer truncation, and it was
+unreachable before because the process died first. It is now the Stage-2
+blocker and needs its own lane.
+
+### Admission caveat, stated rather than hidden
+
+This run did NOT get an admission receipt: it ended
+`error: refused incomplete Stage 2 admission provenance` (exit 4). The cause is
+recorded and is a concurrency artifact, not a property of the fix — the guard
+compares a source snapshot taken before and after the stage, and exactly **3**
+files changed under the shared worktree mid-run:
+`src/compiler/50.mir/mir_types.spl`,
+`src/compiler/50.mir/mir_lowering_stmts.spl`, and
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` — a parallel
+session editing the pure-Simple lowering. `tool-authority` and `runtime-origin`
+snapshots are byte-identical before and after, and both stage-2 evidence files
+say `status=pass`. None of those three files is on the Stage-2 build path
+(`SIMPLE_NATIVE_BUILD_RUST=1` never executes `src/compiler/50.mir/**`), so the
+binary itself is sound evidence; it is simply not an *admitted* Stage 2. A
+re-run on a quiescent tree would produce the receipt.
