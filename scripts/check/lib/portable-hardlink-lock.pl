@@ -18,7 +18,17 @@ sub path_identity {
 sub ps_value {
     my ($field, $pid) = @_;
     local $ENV{LC_ALL} = 'C';
-    open(my $fh, '-|', 'ps', '-o', "$field=", '-p', $pid) or return;
+    # Fork explicitly so the child's stderr can be silenced: a `ps` without
+    # -o support (MSYS / Git Bash `ps` accepts only -aeflsupW) writes a usage
+    # error here on every call. The caller treats undef as "unsupported" and
+    # falls back to proc_stat_snapshot; the noise would be pure confusion.
+    my $child = open(my $fh, '-|');
+    return unless defined($child);
+    if (!$child) {
+        open(STDERR, '>', '/dev/null');
+        exec('ps', '-o', "$field=", '-p', $pid);
+        exit 127;
+    }
     my @lines = <$fh>;
     close($fh) or return;
     return unless @lines == 1;
@@ -27,16 +37,50 @@ sub ps_value {
     return length($lines[0]) ? $lines[0] : undef;
 }
 
+# Fallback identity source for hosts whose `ps` has no -o (MSYS / Git Bash).
+# /proc/<pid>/stat field 22 is starttime and field 5 is pgrp; MSYS provides
+# both. starttime is a strictly stronger PID-reuse discriminator than lstart
+# (clock ticks since boot, not whole seconds). comm (field 2) may contain
+# spaces and parens, so split after the LAST ')'.
+sub proc_stat_snapshot {
+    my ($pid) = @_;
+    open(my $fh, '<', "/proc/$pid/stat") or return;
+    my $line = <$fh>;
+    close($fh) or return;
+    return unless defined($line);
+    my $close_paren = rindex($line, ')');
+    return if $close_paren < 0;
+    my $rest = substr($line, $close_paren + 1);
+    $rest =~ s/\A\s+//;
+    my @fields = split(/\s+/, $rest);
+    # @fields[0] is field 3 (state), so field N is index N - 3.
+    return unless @fields >= 20;
+    my $pgid = $fields[2];
+    my $start = $fields[19];
+    return unless defined($start) && $start =~ /\A[0-9]+\z/;
+    return unless defined($pgid) && $pgid =~ /\A[0-9]+\z/;
+    return ($start, $pgid);
+}
+
 sub process_snapshot {
     my ($pid) = @_;
     return unless defined($pid) && $pid =~ /\A[1-9][0-9]*\z/;
     my $start_one = ps_value('lstart', $pid);
-    return unless defined($start_one);
-    my $pgid = ps_value('pgid', $pid);
-    return unless defined($pgid) && $pgid =~ /\A[1-9][0-9]*\z/;
-    my $start_two = ps_value('lstart', $pid);
-    return unless defined($start_two) && $start_one eq $start_two;
-    return (unpack('H*', $start_one), $pgid);
+    if (defined($start_one)) {
+        my $pgid = ps_value('pgid', $pid);
+        return unless defined($pgid) && $pgid =~ /\A[1-9][0-9]*\z/;
+        my $start_two = ps_value('lstart', $pid);
+        return unless defined($start_two) && $start_one eq $start_two;
+        return (unpack('H*', $start_one), $pgid);
+    }
+    my ($proc_start_one, $proc_pgid) = proc_stat_snapshot($pid);
+    return unless defined($proc_start_one);
+    return unless defined($proc_pgid) && $proc_pgid =~ /\A[1-9][0-9]*\z/;
+    # Read twice and compare, exactly as the ps path does, so a PID recycled
+    # between the two reads cannot be mistaken for the original process.
+    my ($proc_start_two) = proc_stat_snapshot($pid);
+    return unless defined($proc_start_two) && $proc_start_one eq $proc_start_two;
+    return (unpack('H*', $proc_start_one), $proc_pgid);
 }
 
 sub pid_absent {

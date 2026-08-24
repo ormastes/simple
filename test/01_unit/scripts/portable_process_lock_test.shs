@@ -2,6 +2,8 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+# The alias lane below needs a REAL symlink; Windows shells copy by default.
+. "$root/scripts/check/lib/portable-symlink-mode.shs"
 PORTABLE_LOCK_ATOMIC_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
 PORTABLE_LOCK_SESSION_EXEC_PATH="$root/scripts/check/lib/portable-session-exec.pl"
 export PORTABLE_LOCK_ATOMIC_HELPER_PATH
@@ -157,22 +159,34 @@ portable_lock_release_all || fail "aggregate multi-lock release failed"
   fail "aggregate release retained successful handles"
 
 # Canonical aliases must address one lock lane, and traversal is rejected.
-ln -s "$tmp/real" "$tmp/alias"
-portable_lock_acquire "$tmp/real" alias 2
-alias_handle=$PORTABLE_LOCK_HANDLE
-if ROOT_PATH=$root LOCK_ROOT="$tmp/alias" \
-  PORTABLE_LOCK_ATOMIC_HELPER_PATH=$PORTABLE_LOCK_ATOMIC_HELPER_PATH \
-  sh -c '
-    . "$ROOT_PATH/scripts/check/lib/portable-process-lock.shs"
-    portable_lock_acquire "$LOCK_ROOT" alias 1
-  '; then
-  fail "alias contender acquired an already-owned lane"
+# The alias case needs a REAL symlink. MSYS / Git Bash `ln -s` silently copies
+# the directory instead unless MSYS=winsymlinks:nativestrict is set (and that
+# needs Developer Mode or admin), which would make `$tmp/alias` a genuinely
+# distinct lane — the contender would then rightly acquire it and the case
+# would report a lock defect that does not exist. Assert the precondition and,
+# when the host cannot express it, say so loudly rather than passing quietly.
+ln -s "$tmp/real" "$tmp/alias" 2>/dev/null || :
+if [ -L "$tmp/alias" ]; then
+  portable_lock_acquire "$tmp/real" alias 2
+  alias_handle=$PORTABLE_LOCK_HANDLE
+  if ROOT_PATH=$root LOCK_ROOT="$tmp/alias" \
+    PORTABLE_LOCK_ATOMIC_HELPER_PATH=$PORTABLE_LOCK_ATOMIC_HELPER_PATH \
+    sh -c '
+      . "$ROOT_PATH/scripts/check/lib/portable-process-lock.shs"
+      portable_lock_acquire "$LOCK_ROOT" alias 1
+    '; then
+    fail "alias contender acquired an already-owned lane"
+  else
+    alias_status=$?
+    [ "$alias_status" -eq 75 ] || fail "alias contender returned $alias_status"
+  fi
+  portable_lock_handle_is_owned "$alias_handle" || fail "alias owner lost lock"
+  portable_lock_release "$alias_handle" || fail "alias owner could not release"
 else
-  alias_status=$?
-  [ "$alias_status" -eq 75 ] || fail "alias contender returned $alias_status"
+  rm -rf "$tmp/alias"
+  printf 'portable process lock test UNSUPPORTED: %s\n' \
+    "symlink-alias lane not checked: this host cannot create symlinks (ln -s produced a non-symlink)" >&2
 fi
-portable_lock_handle_is_owned "$alias_handle" || fail "alias owner lost lock"
-portable_lock_release "$alias_handle" || fail "alias owner could not release"
 if portable_lock_acquire "$tmp/real/../real" traversal 1; then
   fail "dot-dot output was accepted"
 else

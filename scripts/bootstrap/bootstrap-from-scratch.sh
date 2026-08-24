@@ -4462,6 +4462,9 @@ export BOOTSTRAP_STAGE3_FACADE_PATH
 PORTABLE_LOCK_ATOMIC_HELPER_PATH=\
 "${repo_root}/scripts/check/lib/portable-hardlink-lock.pl"
 export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+# The immutable authority publication below republishes the seed by SYMLINK,
+# which Windows shells will silently turn into a copy unless told otherwise.
+. "${repo_root}/scripts/check/lib/portable-symlink-mode.shs"
 . "${repo_root}/scripts/check/lib/portable-process-lock.shs"
 bootstrap_runtime_authority_path=\
 "${repo_root}/src/compiler_rust/target/bootstrap"
@@ -4495,11 +4498,26 @@ portable_lock_canonical_output "${output_dir}" || {
 output_dir=${PORTABLE_LOCK_CANONICAL_OUTPUT}
 bootstrap_lock_root="$(dirname -- "${output_dir}")/.simple-bootstrap-locks"
 bootstrap_lock_name="output-$(bootstrap_stage3_args_sha256 "${output_dir}")"
+bootstrap_lock_rc=0
 portable_lock_acquire "${bootstrap_lock_root}" "${bootstrap_lock_name}" \
-  "${SIMPLE_BOOTSTRAP_LOCK_WAIT_SECONDS:-30}" || {
-  echo "error: timed out waiting for bootstrap output ownership: ${output_dir}" >&2
+  "${SIMPLE_BOOTSTRAP_LOCK_WAIT_SECONDS:-30}" || bootstrap_lock_rc=$?
+if [ "${bootstrap_lock_rc}" -ne 0 ]; then
+  # Name the ACTUAL cause. Collapsing every rc into "timed out" sent a 2026-08-24
+  # Windows/Git Bash session hunting a nonexistent concurrent bootstrap when the
+  # real fault was rc=70: the lock helper could not read this host's process
+  # identity. Only rc=75 is a genuine timeout.
+  case "${bootstrap_lock_rc}" in
+    64) bootstrap_lock_reason="invalid lock root or lock name" ;;
+    69) bootstrap_lock_reason="lock helper missing: ${PORTABLE_LOCK_ATOMIC_HELPER_PATH:-unset}" ;;
+    70) bootstrap_lock_reason="could not determine this process identity (ps/proc unavailable)" ;;
+    73) bootstrap_lock_reason="could not create the lock claim file" ;;
+    75) bootstrap_lock_reason="timed out waiting for another bootstrap to release it" ;;
+    *) bootstrap_lock_reason="unexpected lock error" ;;
+  esac
+  echo "error: could not acquire bootstrap output ownership: ${output_dir}" >&2
+  echo "  reason: ${bootstrap_lock_reason} (rc=${bootstrap_lock_rc})" >&2
   exit 1
-}
+fi
 bootstrap_lock_handle=${PORTABLE_LOCK_HANDLE}
 bootstrap_progress_pid=
 deploy_lock_handle=
