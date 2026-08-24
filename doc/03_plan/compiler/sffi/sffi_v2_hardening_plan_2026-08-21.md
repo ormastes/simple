@@ -1480,7 +1480,8 @@ zero signed/admitted.
 The LLVM target module now scopes both normalized target-policy reads without
 changing provider cardinality. Optimizer findings remain 22 and paired analyzer
 evidence is 5.94 s / 271,172 KiB before versus 4.93 s / 270,708 KiB after.
-The target-flow spec is 6/7 due to a recorded pre-existing stale source string;
-all six behavioral cases pass. Current census is 21,267 calls (2,163 explicit,
-19,104 missing), 12,111 declarations (905 tagged, 385 minimized, 10,940
-untouched), zero signed/admitted.
+The target-flow spec exposed and repaired two pre-existing stale source strings;
+it now passes 7/7 while retaining the behavioral cases and exact ordering
+checks. Current census is 21,267 calls (2,163 explicit, 19,104 missing), 12,111
+declarations (905 tagged, 385 minimized, 10,940 untouched), zero
+signed/admitted.

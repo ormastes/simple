@@ -2560,10 +2560,11 @@ decision points. No caching, call, allocation path, loop, or dispatch was
 added. Optimizer findings remain 22; isolated analyzer evidence is 5.94 s /
 271,172 KiB before versus 4.93 s / 270,708 KiB after.
 
-The target-flow spec is 6/7. All behavioral target cases pass; its source-order
-case is stale because it searches for `if target == CodegenTarget.SimpleOS_X86_64:`
-although the committed pre-change source already uses `if is_simpleos:`. The
-unrelated test defect is recorded separately and is not laundered into a pass.
+The target-flow spec initially exposed two stale source strings: it searched for
+`if target == CodegenTarget.SimpleOS_X86_64:` and `return simpleos_triple`
+although the committed pre-change source uses `if is_simpleos:` and returns the
+constructed triple directly. The assertion now pins those exact current forms,
+retains guard/return/host-probe ordering, and the complete spec passes 7/7.
 Current census is 21,267 calls (2,163 explicit, 19,104 missing), 12,111
 declarations (905 tagged, 385 minimized, 10,940 untouched), zero
 signed/admitted.
