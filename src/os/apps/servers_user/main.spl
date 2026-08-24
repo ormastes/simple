@@ -5,17 +5,19 @@
 # transaction semantics, bounded responses, commit identity, and durability
 # are all delegated to their canonical Pure-Simple owners.
 
-use os.userlib.net.{IpAddr, SockAddr, Socket, socket, bind, listen, accept, socket_send}
+use os.userlib.net.{IpAddr, SockAddr, Socket, socket, bind, listen, accept, socket_send_range}
 use os.userlib.fs.{read_file_bytes_direct, read_file_bytes_direct_owned}
 use os.userlib.syscall_raw.{syscall}
 use os.kernel.net.http_route.{http_classify_request, HttpRouteKind}
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
-use std.nogc_sync_mut.http_server.response.{serialize_response, with_default_security_headers}
+use std.nogc_sync_mut.http_server.response.{
+    serialize_response, serialize_response_head_for_body_length,
+    response_wire_parts_fit, with_default_security_headers
+}
 use std.nogc_sync_mut.http_server.mime.{mime_from_path}
 use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, plaintext_development_capability}
 use os.apps.dbd.dbd.{DbdServer}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
-use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_u8_slots}
 use os.apps.servers_user.database_persistence_adapter.{
     simpleos_database_dbfs_vfs_caps
@@ -52,17 +54,40 @@ fn listener_requires_setup_failure_close(
 fn send_all(sock: Socket, bytes: [u8]) -> bool:
     var sent: u64 = 0
     var attempts: i32 = 0
+    var send_window: u64 = 4096u64
     while sent < bytes.len() as u64 and attempts < 64:
-        val remaining = bytes.slice(sent, bytes.len() as u64)
-        match socket_send(sock, remaining):
-            Ok(count):
+        match socket_send_range(sock, bytes, sent, send_window):
+            Ok(progress):
+                val count = progress.0
+                val staged = progress.1
                 if count == 0:
                     attempts = attempts + 1
                 else:
                     sent = sent + count
+                    if count < staged:
+                        send_window = count
+                    elif send_window < 4096u64:
+                        val doubled = send_window * 2u64
+                        send_window = if doubled < 4096u64: doubled else: 4096u64
             Err(_):
                 attempts = attempts + 1
     sent == bytes.len() as u64
+
+class HttpWireParts:
+    head: [u8]
+    body: [u8]
+
+fn http_wire_parts_fit(parts: HttpWireParts, max_wire_bytes: u64) -> bool:
+    val head_len = parts.head.len().to_u64()
+    val body_len = parts.body.len().to_u64()
+    response_wire_parts_fit(head_len, body_len, max_wire_bytes)
+
+fn _text_response_parts(response: HttpResponse) -> HttpWireParts:
+    HttpWireParts(head: text_to_bytes_pure(serialize_response(response)), body: [])
+
+fn _byte_response_parts(response: HttpResponse, body: [u8]) -> HttpWireParts:
+    val head = serialize_response_head_for_body_length(response, body.len().to_i64())
+    HttpWireParts(head: text_to_bytes_pure(head), body: body)
 
 fn bind_listener(port: u16) -> Result<Socket, text>:
     val ip = IpAddr.from_text("0.0.0.0")?
@@ -82,7 +107,7 @@ fn bind_listener(port: u16) -> Result<Socket, text>:
                             Err(message)
                         case Ok(_): Ok(listener)
 
-fn http_response(request: text) -> text:
+fn http_response(request: text) -> HttpWireParts:
     val route = http_classify_request(request)
     var response = HttpResponse(
         status: HttpStatus.NotFound,
@@ -114,12 +139,13 @@ fn http_response(request: text) -> text:
                 Err(_):
                     response = HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR file not found\n")
                 Ok(bytes):
-                    response = HttpResponse(
+                    val file_response = with_default_security_headers(HttpResponse(
                         status: HttpStatus.Ok,
                         headers: [("Content-Type", mime_from_path(mounted_path))],
-                        body: bytes_to_string(bytes)
-                    )
-    serialize_response(with_default_security_headers(response, false))
+                        body: ""
+                    ), false)
+                    return _byte_response_parts(file_response, bytes)
+    _text_response_parts(with_default_security_headers(response, false))
 
 fn handle_http(listener: Socket, policy: SecureServerPolicy) -> bool:
     match accept(listener):
@@ -127,9 +153,11 @@ fn handle_http(listener: Socket, policy: SecureServerPolicy) -> bool:
         Ok(client):
             val frame = recv_http1_request_owned(client, policy)
             if frame.complete:
-                val response = text_to_bytes_pure(http_response(frame.request))
-                if response.len() <= MAX_WIRE_RESPONSE:
-                    val _sent = send_all(client, response)
+                val response = http_response(frame.request)
+                if http_wire_parts_fit(response, MAX_WIRE_RESPONSE):
+                    val head_sent = send_all(client, response.head)
+                    if head_sent and response.body.len() > 0:
+                        val _body_sent = send_all(client, response.body)
             else:
                 val rejected = HttpResponse(
                     status: HttpStatus.BadRequest,

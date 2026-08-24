@@ -1,0 +1,59 @@
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.http_server.response.{
+    serialize_response_head_for_body_length, response_wire_parts_fit,
+    with_default_security_headers
+}
+use os.userlib.net.{socket_send_range_chunk}
+
+describe "SimpleOS filesystem HTTP response copy contract":
+    it "serializes an external byte body's exact length without touching its bytes":
+        step("Build the canonical secured header for a binary body")
+        val response = with_default_security_headers(HttpResponse(
+            status: HttpStatus.Ok,
+            headers: [("Content-Type", "application/octet-stream")],
+            body: ""
+        ), false)
+        val head = serialize_response_head_for_body_length(response, 4)
+
+        step("Check canonical framing uses the external byte length")
+        expect(head).to_start_with("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n")
+        expect(head).to_contain("Content-Type: application/octet-stream\r\n")
+        expect(head).to_end_with("\r\n\r\n")
+
+    it "rejects a negative external body length before producing a head":
+        val response = HttpResponse(status: HttpStatus.Ok, headers: [], body: "")
+        expect(serialize_response_head_for_body_length(response, 0i64 - 1i64)).to_equal("")
+
+    it "admits exactly the complete wire cap and rejects every overflow shape":
+        expect(response_wire_parts_fit(536u64, 65000u64, 65536u64)).to_be(true)
+        expect(response_wire_parts_fit(536u64, 65001u64, 65536u64)).to_be(false)
+        expect(response_wire_parts_fit(65537u64, 0u64, 65536u64)).to_be(false)
+        expect(response_wire_parts_fit(0u64, 65536u64, 65536u64)).to_be(true)
+
+    it "copies the exact bounded suffix and rejects offsets past the buffer":
+        expect(socket_send_range_chunk([10u8, 20u8, 30u8, 40u8], 1u64, 2u64)).to_equal(Ok([20u8, 30u8]))
+        expect(socket_send_range_chunk([10u8, 20u8], 2u64, 4u64)).to_equal(Ok([]))
+        expect(socket_send_range_chunk([10u8, 20u8], 3u64, 4u64)).to_equal(
+            Err("send offset 3 exceeds buffer length 2"))
+        match socket_send_range_chunk([7u8; 4097], 0u64, 5000u64):
+            Ok(chunk): expect(chunk.len()).to_equal(4096)
+            Err(message): expect(message).to_equal("")
+
+    it "keeps partial sends and static file bodies allocation-linear":
+        step("Inspect the production owners without executing the server")
+        val server = file_read("src/os/apps/servers_user/main.spl")
+        val net = file_read("src/os/userlib/net.spl")
+
+        step("Check retries borrow by offset and files remain byte-owned")
+        expect(server).to_contain("socket_send_range(sock, bytes, sent, send_window)")
+        expect(server).to_contain("if count < staged")
+        expect(server).to_contain("return _byte_response_parts(file_response, bytes)")
+        expect(server).to_contain("if head_sent and response.body.len() > 0")
+        expect(server.contains("bytes.slice(sent")).to_be(false)
+        expect(server.contains("bytes_to_string(bytes)")).to_be(false)
+        expect(net).to_contain("_NET_SEND_RANGE_CHUNK_BYTES: u64 = 4096u64")
+        expect(net).to_contain("socket_send(sock, chunk)")
+        expect(net.contains("rt_array_data_ptr")).to_be(false)
+        expect(net.contains("unsafe_addr_of(data) +")).to_be(false)

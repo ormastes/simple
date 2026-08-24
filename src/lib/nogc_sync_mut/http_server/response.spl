@@ -91,10 +91,9 @@ fn _application_header_is_safe(name: text, value: text) -> bool:
     val normalized = name.to_lower()
     normalized != "content-length" and normalized != "transfer-encoding" and normalized != "connection"
 
-fn _serialize_response_head(resp: HttpResponse) -> text:
+fn _serialize_response_head_with_body_length(resp: HttpResponse, body_len: i64) -> text:
     val status_code = http_status_code(resp.status)
     val reason = http_status_reason(resp.status)
-    val body_len = resp.body.len()
 
     var wire = "HTTP/1.1 {status_code} {reason}\r\n"
     wire = "{wire}Content-Length: {body_len}\r\n"
@@ -113,6 +112,19 @@ fn _serialize_response_head(resp: HttpResponse) -> text:
     wire = "{wire}\r\n"
     return wire
 
+fn serialize_response_head_for_body_length(resp: HttpResponse, body_len: i64) -> text:
+    """Serialize canonical HTTP/1.1 headers for an externally-owned byte body.
+
+    A negative length is never a valid wire representation.  Returning an
+    empty head lets bounded callers fail closed before writing any bytes.
+    """
+    if body_len < 0:
+        return ""
+    _serialize_response_head_with_body_length(resp, body_len)
+
+fn _serialize_response_head(resp: HttpResponse) -> text:
+    _serialize_response_head_with_body_length(resp, resp.body.len())
+
 fn serialize_response(resp: HttpResponse) -> text:
     "{_serialize_response_head(resp)}{resp.body}"
 
@@ -121,6 +133,12 @@ fn response_wire_size(resp: HttpResponse) -> i64:
 
 fn response_wire_fits(resp: HttpResponse, max_response_bytes: i64) -> bool:
     max_response_bytes > 0 and response_wire_size(resp) <= max_response_bytes
+
+fn response_wire_parts_fit(head_len: u64, body_len: u64, max_response_bytes: u64) -> bool:
+    """Check a split head/body wire size without overflow-prone addition."""
+    if head_len > max_response_bytes:
+        return false
+    body_len <= max_response_bytes - head_len
 
 # Returns one complete response or an empty string.  The empty result means
 # even the fixed, security-hardened 500 response does not fit; callers close
@@ -185,6 +203,7 @@ fn html_error_page(status: HttpStatus, message: text) -> HttpResponse:
 
 export write_response, write_response_limited, write_error, write_error_limited
 export serialize_response, response_wire_size, response_wire_fits, bounded_response_wire
+export serialize_response_head_for_body_length, response_wire_parts_fit
 export with_default_security_headers
 export response_header_name_is_token, response_header_value_is_safe
 export generate_error_page, html_not_found_page, html_error_page
