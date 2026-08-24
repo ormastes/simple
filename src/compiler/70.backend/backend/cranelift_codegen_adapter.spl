@@ -24,6 +24,7 @@ use compiler.mir.mir_instruction_support.{mir_operand_const_int}
 use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
+@unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
 extern fn rt_enum_payload(value: Any) -> i64
@@ -767,7 +768,10 @@ fn cl_translate_instruction(
             # `SIMPLE_ALLOW_UNLOWERED_MIR=1` escape hatch.
             val cl_unlowered_name = mir_instkind_variant_name(inst_kind)
             eprint("[cranelift] E-BACKEND-CRANELIFT-INST-{cl_unlowered_name}: Cranelift backend does not lower {cl_unlowered_name}")
-            if (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") != "1":
+            var allow_unlowered = false
+            unsafe(capabilities: [ffi]):
+                allow_unlowered = (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") == "1"
+            if not allow_unlowered:
                 panic("compile error: E-BACKEND-CRANELIFT-INST-{cl_unlowered_name}: Cranelift backend does not lower {cl_unlowered_name}")
 
 # ============================================================================
@@ -1369,7 +1373,10 @@ fn cl_is_lowering_owned_runtime(name: text) -> bool:
 fn cl_function_emit_name(name: text) -> text:
     if name == "main":
         return "__simple_main"
-    if (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1":
+    var no_mangle = false
+    unsafe(capabilities: [ffi]):
+        no_mangle = (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
+    if no_mangle:
         return name
     # cl_is_lowering_owned_runtime names are unconditionally runtime-routed
     # in cl_translate_call above -- a same-named local body is unreachable

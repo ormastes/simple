@@ -1477,6 +1477,13 @@ the paired analyzer sample is 4.70 s / 277,740 KiB before versus 6.80 s /
 missing), 12,111 declarations (904 tagged, 385 minimized, 10,941 untouched),
 zero signed/admitted.
 
+Cranelift now scopes its two environment-policy reads without changing the
+normal lowered-path call shape. Optimizer findings remain 210 and paired
+analyzer evidence is 5.74 s / 270,976 KiB before versus 5.83 s / 270,652 KiB
+after. The existing source census sees only the one-line-function call because
+it incorrectly stops at multiline signature closures; fix the recorded scanner
+gap before treating the measured 21,267-call total as complete.
+
 The LLVM target module now scopes both normalized target-policy reads without
 changing provider cardinality. Optimizer findings remain 22 and paired analyzer
 evidence is 5.94 s / 271,172 KiB before versus 4.93 s / 270,708 KiB after.

@@ -2327,6 +2327,24 @@ requirement. Current totals are 21,435 raw, 2,121 explicit, 19,314 missing;
 12,112 declarations, 885 tagged, 382 minimized, 10,961 untouched, and zero
 signed/admitted.
 
+## Cranelift backend policy boundary
+
+The Cranelift adapter's unsupported-MIR and no-mangle reads now use minimal
+lexical `unsafe(ffi)` blocks on one tagged declaration. Both keep one exact
+`"1"` comparison and one provider read at the original point; the normal
+lowered path still performs no unsupported-MIR read. Optimizer findings remain
+210 and paired analyzer evidence is 5.74 s / 270,976 KiB before versus 5.83 s /
+270,652 KiB after.
+
+The broad aggregate source-contract suite is 6/13; none of its assertions
+targets these policy blocks, so it is recorded rather than presented as focused
+verification. The row-level census also exposed that multiline function
+headers terminate its scan before the body, omitting the unsupported-MIR call.
+That new tool gap is recorded separately. Measured current totals under the
+existing scanner are 21,267 calls (2,164 explicit, 19,103 missing), 12,111
+declarations (906 tagged, 385 minimized, 10,939 untouched), zero
+signed/admitted.
+
 ## HIR-cache environment authority
 
 All seven HIR-cache environment reads now use one tagged declaration and narrow
