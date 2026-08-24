@@ -10,7 +10,7 @@
 
 1. seed-interpreter expression-position `if val` binding gap — FIXED `9e3eb1adccd`
 2. Return borrow-check false positive on `Ref`-containing functions — FIXED `9e3eb1adccd`
-3. `E-BACKEND-LLVM-INST-ResultMatchSemantic` — FIXED (see
+3. `E-BACKEND-LLVM-INST-ResultMatchSemantic` — FIXED in `02176b8a7e6` (see
    `llvm_backend_no_result_match_semantic_2026-08-24.md`); that signature is
    now measured at **0 occurrences**, down from 7.
 

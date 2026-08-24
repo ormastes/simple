@@ -1,6 +1,6 @@
 # LLVM backend does not lower `ResultMatchSemantic`
 
-**Status:** FIXED 2026-08-24 — see the "FIXED" section at the end of this record.
+**Status:** FIXED 2026-08-24 in `02176b8a7e6` — see the "FIXED" section at the end of this record.
 **Was:** Open — top remaining blocker for native-building `Result`-using stdlib modules
 **Observed:** 2026-08-24
 **Area:** 70.backend / LLVM lowering
@@ -181,3 +181,25 @@ substituting a placeholder
 Filed separately as
 `doc/08_tracking/bug/hir_block_value_type_decayed_object_to_int_2026-08-24.md`.
 This record is closed on its own signature, which is measured at zero.
+
+## Side measurement: the `Some(40)` binds as `320` (`<<3`) report does NOT reproduce
+
+Checked on the same freshly-built seed, because two lanes today found filed
+signatures counting zero on a fresh seed. Five shapes of i64 Option payload
+binding, on BOTH the interpreter (`run`) and native (`native-build` + execute
+the produced binary, `NB_RC=0` / `RUN_RC=0`):
+
+| shape | expected | measured |
+|---|---|---|
+| `if val v = pick(true)` (statement form, fn returning `i64?`) | 40 | **40** |
+| `val w = if val u = pick(true): u else: -1` (expression form) | 40 | **40** |
+| `if val a = o` where `val o: i64? = Some(40)` | 40 | **40** |
+| `if val b = arr.first()` | 40 | **40** |
+| `match o: case Some(c)` | 40 | **40** |
+
+No `<<3` tag-width leak observed in any of them. The report predates
+`4cc714ece3e` / `51a7b28e220` / `9e3eb1adccd`; it is most likely already fixed
+by one of those. **No bug record filed** — filing one for a signature measured
+at zero would be exactly the stale-record failure this repo keeps hitting. If
+the `320` behaviour is seen again, it needs a fresh reproduction against a
+freshly-built seed before it is treated as live.
