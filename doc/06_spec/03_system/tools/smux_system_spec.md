@@ -1340,6 +1340,26 @@ expect(_get_metrics().resize_count >= 0).to_be(true)
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-TOOLS-SMUX-SYSTEM-001`
+- `REQ-001`
+- `REQ-012`
+- `REQ-002`
+- `REQ-003`
+- `REQ-004`
+- `REQ-005`
+- `REQ-006`
+- `REQ-007`
+- `REQ-008`
+- `REQ-009`
+- `REQ-010`
+- `REQ-011`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
@@ -1353,27 +1373,24 @@ Source SHA-256: `5ca70ad5f7af16d3b844e9100d00fbca77bd48eacac929ea45fb9f582fc5fcc
 
 Source SHA-256: `5ca70ad5f7af16d3b844e9100d00fbca77bd48eacac929ea45fb9f582fc5fcc1`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **71/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **73/100**; effective score: **49/100**; blockers: **1**.
 
 SSpec documentization score: 49/100
 source: test/03_system/tools/smux_system_spec.spl
 mirror: doc/06_spec/03_system/tools/smux_system_spec.md (current)
-findings: 15 blockers: 1
+findings: 14 blockers: 1
   narrative=100 structure=70 oracle=70
-  traceability=60 evidence=40 coverage=100 maintainability=70
+  traceability=60 evidence=55 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=71; blocker cap makes effective=49
-doc/06_spec/03_system/tools/smux_system_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
+  raw=73; blocker cap makes effective=49
 doc/06_spec/03_system/tools/smux_system_spec.md:1:1: warning SSDOC-EVD-003 [evidence] (-15): source captures are not rendered as manual evidence
   why: Retained evidence must be visible or linked from the professional manual.
   improve: Select a supported evidence display and regenerate.
 doc/06_spec/03_system/tools/smux_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/tools/smux_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability, recovery/troubleshooting
+doc/06_spec/03_system/tools/smux_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
 test/03_system/tools/smux_system_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 16 unexplained numeric expected value(s)

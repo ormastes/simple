@@ -92,8 +92,8 @@ expect(row.to_text()).to_equal("ci (detached) w=1 p=2")
 
 - Build a row for session sid99 with 4 windows and 8 panes
    - Expected: row.session_id equals `sid99`
-   - Expected: row.window_count equals `4)  # oracle: the window count passed to make() is stored verbatim`
-   - Expected: row.pane_count equals `8)  # oracle: the pane count passed to make() is stored verbatim`
+   - Expected: row.window_count equals `4`
+   - Expected: row.pane_count equals `8`
 
 
 <details>
@@ -115,8 +115,8 @@ expect(row.pane_count).to_equal(8)  # oracle: the pane count passed to make() is
 #### reports a zero window count for an empty session
 
 - Build a row for a session that owns nothing
-   - Expected: row.window_count equals `0)  # oracle: a session that owns nothing reports zero, never a placeholder`
-   - Expected: row.pane_count equals `0)  # oracle: a session that owns nothing reports zero panes`
+   - Expected: row.window_count equals `0`
+   - Expected: row.pane_count equals `0`
 
 
 <details>
@@ -220,8 +220,8 @@ expect(info.preview_line).to_equal("hello world")
 #### preserves width and height
 
 - Build a 160x50 pane
-   - Expected: info.width equals `160)  # oracle: the width passed to make() is stored verbatim`
-   - Expected: info.height equals `50)  # oracle: the height passed to make() is stored verbatim`
+   - Expected: info.width equals `160`
+   - Expected: info.height equals `50`
 
 
 <details>
@@ -244,7 +244,7 @@ expect(info.height).to_equal(50)  # oracle: the height passed to make() is store
 #### starts empty with no sessions
 
 - Read the empty status bar
-   - Expected: sb.session_count equals `0)  # oracle: an empty status bar counts zero sessions`
+   - Expected: sb.session_count equals `0`
    - Expected: sb.active_session_name equals ``
 
 
@@ -507,6 +507,14 @@ expect(h).to_equal("resize my-session/win-3/pane-7 -> 200x60")
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-TOOLS-SMUX-DASH-001`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
@@ -520,23 +528,20 @@ Source SHA-256: `b932f11301b8963414c83f647b7d5ed6b58f2f3491cbd21c59811e868b9adf1
 
 Source SHA-256: `b932f11301b8963414c83f647b7d5ed6b58f2f3491cbd21c59811e868b9adf16`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 90/100
+SSpec documentization score: 92/100
 source: test/01_unit/os/smux/smux_dashboard_spec.spl
 mirror: doc/06_spec/01_unit/os/smux/smux_dashboard_spec.md (current)
-findings: 6 blockers: 0
+findings: 5 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=55 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/smux/smux_dashboard_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
-  why: Source tokens alone do not prove reader-visible workflow structure.
-  improve: Use supported literal step calls and regenerate the manual.
 doc/06_spec/01_unit/os/smux/smux_dashboard_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/smux/smux_dashboard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, evidence, recovery/troubleshooting
+doc/06_spec/01_unit/os/smux/smux_dashboard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, evidence, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
 test/01_unit/os/smux/smux_dashboard_spec.spl:120:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders an attached row with window and pane counts' has no retained capture or evidence
