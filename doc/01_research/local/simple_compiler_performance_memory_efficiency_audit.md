@@ -2608,3 +2608,22 @@ lines, mission-critical codes, and the two rules' intentionally different
 vendor predicates. Normal linting now avoids four rule-local splits across
 LEADOP001, const-reference-default, bare-primitive, and silent-default; the
 silent-default migration removes a fifth scope-only split.
+
+### Phase-local lexical code snapshots
+
+Four later always-on rules independently rebuilt the same docstring-aware
+`CodeLine` projection: module-init literals, COW alias hot paths, unwrapped
+foreign resources, and raw SFFI. Their lexical state machine is identical, but
+retaining one projection across the intervening raw-RT, capability, and source
+shape checks would unnecessarily extend the lifetime of both raw and trimmed
+line text. The lint driver now creates two short-lived snapshots around the two
+adjacent consumer pairs and explicitly releases each after use. This reduces
+four projections to two without changing diagnostic ordering, physical line
+numbers, rule-specific exclusions, or the public source-taking APIs. The
+design optimizes allocation/copy behavior while bounding peak live storage;
+whole-request snapshot retention remains intentionally rejected.
+
+Coverage pins the legacy asymmetric docstring rule (opening line skipped,
+closing line included), raw/trimmed fields, 1-based physical lines, and explicit
+release. It was added but not executed under the user's no-verification
+instruction.
