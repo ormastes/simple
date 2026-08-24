@@ -64,3 +64,231 @@ pub struct SimpleArtifactManifest:
     content_hashes: [text]
     signature: text
     debug_identity: text
+
+# Installed-artifact consumers accept only this fixed, dependency-free bounded
+# projection.  These limits are policy-independent safety ceilings: a loader or
+# catalog may impose smaller limits, but must never enlarge them from caller
+# input.
+pub const SIMPLE_ARTIFACT_MANIFEST_MAX_COLLECTION_ITEMS_V1: i64 = 64
+pub const SIMPLE_ARTIFACT_MANIFEST_MAX_TOTAL_ITEMS_V1: i64 = 256
+pub const SIMPLE_ARTIFACT_MANIFEST_MAX_ELEMENT_BYTES_V1: i64 = 4096
+pub const SIMPLE_ARTIFACT_MANIFEST_MAX_TOTAL_VALUE_BYTES_V1: i64 = 65536
+pub const SIMPLE_ARTIFACT_MANIFEST_MAX_SIGNING_BODY_BYTES_V1: i64 = 131072
+
+fn _manifest_text_byte_len_bounded_v1(value: text) -> i64:
+    # `bytes()` allocates, so reject an oversized logical value first.  UTF-8
+    # can expand this preflight by at most four times; the resulting bounded
+    # byte copy is then checked against the authoritative byte ceiling.
+    if value.len() > SIMPLE_ARTIFACT_MANIFEST_MAX_ELEMENT_BYTES_V1:
+        return -1
+    val raw = value.bytes()
+    if raw.len() > SIMPLE_ARTIFACT_MANIFEST_MAX_ELEMENT_BYTES_V1:
+        return -1
+    raw.len() as i64
+
+fn _manifest_accumulate_text_v1(total: i64, value: text) -> i64:
+    if total < 0:
+        return -1
+    val size = _manifest_text_byte_len_bounded_v1(value)
+    if size < 0 or total > SIMPLE_ARTIFACT_MANIFEST_MAX_TOTAL_VALUE_BYTES_V1 - size:
+        return -1
+    total + size
+
+fn _manifest_collection_count_valid_v1(count: i64) -> bool:
+    count >= 0 and count <= SIMPLE_ARTIFACT_MANIFEST_MAX_COLLECTION_ITEMS_V1
+
+fn _manifest_signing_body_upper_bound_v1(manifest: SimpleArtifactManifest) -> i64:
+    # Exact element bytes are already capped by the validator.  Each text
+    # field needs at most four decimal length bytes plus ':'.  Numeric fields
+    # need at most 20 value bytes plus their own length prefix and ':'.  This
+    # conservative bound is computed before the canonical output is allocated.
+    val arguments = manifest.argument_schema.len() as i64
+    val preloads = manifest.startup_preloads.len() as i64
+    val text_items = manifest.required_abi_features.len() as i64 +
+        manifest.required_services.len() as i64 +
+        manifest.native_libraries.len() as i64 +
+        manifest.smf_libraries.len() as i64 +
+        manifest.content_hashes.len() as i64
+    val text_fields = 8 + text_items + arguments * 3 + preloads * 5
+    val numeric_fields = 13 + arguments + preloads * 3
+    39 + SIMPLE_ARTIFACT_MANIFEST_MAX_TOTAL_VALUE_BYTES_V1 +
+        text_fields * 5 + numeric_fields * 23
+
+fn _manifest_total_item_count_v1(manifest: SimpleArtifactManifest) -> i64:
+    manifest.required_abi_features.len() as i64 +
+        manifest.required_services.len() as i64 +
+        manifest.native_libraries.len() as i64 +
+        manifest.smf_libraries.len() as i64 +
+        manifest.argument_schema.len() as i64 +
+        manifest.startup_preloads.len() as i64 +
+        manifest.content_hashes.len() as i64
+
+pub fn simple_artifact_manifest_bounds_validate_v1(
+    manifest: SimpleArtifactManifest
+) -> ManifestCheck:
+    """Validate all collection, element, and aggregate retained-byte ceilings."""
+    if not _manifest_collection_count_valid_v1(manifest.required_abi_features.len() as i64) or
+        not _manifest_collection_count_valid_v1(manifest.required_services.len() as i64) or
+        not _manifest_collection_count_valid_v1(manifest.native_libraries.len() as i64) or
+        not _manifest_collection_count_valid_v1(manifest.smf_libraries.len() as i64) or
+        not _manifest_collection_count_valid_v1(manifest.argument_schema.len() as i64) or
+        not _manifest_collection_count_valid_v1(manifest.startup_preloads.len() as i64) or
+        not _manifest_collection_count_valid_v1(manifest.content_hashes.len() as i64):
+        return ManifestCheck(ok: false, reason: "manifest collection limit exceeded")
+    if _manifest_total_item_count_v1(manifest) > SIMPLE_ARTIFACT_MANIFEST_MAX_TOTAL_ITEMS_V1:
+        return ManifestCheck(ok: false, reason: "manifest total item limit exceeded")
+    if _manifest_signing_body_upper_bound_v1(manifest) >
+        SIMPLE_ARTIFACT_MANIFEST_MAX_SIGNING_BODY_BYTES_V1:
+        return ManifestCheck(ok: false, reason: "manifest signing body limit exceeded")
+
+    var total = 0
+    total = _manifest_accumulate_text_v1(total, manifest.artifact_kind)
+    total = _manifest_accumulate_text_v1(total, manifest.target.os)
+    total = _manifest_accumulate_text_v1(total, manifest.target.arch)
+    total = _manifest_accumulate_text_v1(total, manifest.target.abi)
+    total = _manifest_accumulate_text_v1(total, manifest.entrypoint)
+    total = _manifest_accumulate_text_v1(total, manifest.namespace_template)
+    total = _manifest_accumulate_text_v1(total, manifest.interpreter)
+    total = _manifest_accumulate_text_v1(total, manifest.signature)
+    total = _manifest_accumulate_text_v1(total, manifest.debug_identity)
+    for item in manifest.required_abi_features:
+        total = _manifest_accumulate_text_v1(total, item)
+    for item in manifest.required_services:
+        total = _manifest_accumulate_text_v1(total, item)
+    for item in manifest.native_libraries:
+        total = _manifest_accumulate_text_v1(total, item)
+    for item in manifest.smf_libraries:
+        total = _manifest_accumulate_text_v1(total, item)
+    for item in manifest.content_hashes:
+        total = _manifest_accumulate_text_v1(total, item)
+    for item in manifest.argument_schema:
+        total = _manifest_accumulate_text_v1(total, item.name)
+        total = _manifest_accumulate_text_v1(total, item.value_kind)
+        total = _manifest_accumulate_text_v1(total, item.default_value)
+    for item in manifest.startup_preloads:
+        total = _manifest_accumulate_text_v1(total, item.source_arg)
+        total = _manifest_accumulate_text_v1(total, item.fixed_path)
+        total = _manifest_accumulate_text_v1(total, item.mode)
+        total = _manifest_accumulate_text_v1(total, item.access)
+        total = _manifest_accumulate_text_v1(total, item.hash_policy)
+    if total < 0:
+        return ManifestCheck(ok: false, reason: "manifest element or total byte limit exceeded")
+    ManifestCheck(ok: true, reason: "")
+
+fn _copy_text_array_v1(source: [text]) -> [text]:
+    var copied: [text] = []
+    for item in source:
+        copied.push(item)
+    copied
+
+pub fn simple_artifact_manifest_deep_copy_bounded_v1(
+    manifest: SimpleArtifactManifest
+) -> SimpleArtifactManifest?:
+    """Return a separately owned nested projection, but only after full bounds validation."""
+    if not simple_artifact_manifest_bounds_validate_v1(manifest).ok:
+        return nil
+    var arguments: [ManifestArgument] = []
+    for item in manifest.argument_schema:
+        arguments.push(ManifestArgument(
+            name: item.name, value_kind: item.value_kind,
+            required: item.required, default_value: item.default_value))
+    var preloads: [ManifestPreload] = []
+    for item in manifest.startup_preloads:
+        preloads.push(ManifestPreload(
+            source_arg: item.source_arg, fixed_path: item.fixed_path,
+            mode: item.mode, required: item.required,
+            maximum_bytes: item.maximum_bytes, access: item.access,
+            prefault: item.prefault, hash_policy: item.hash_policy))
+    Some(SimpleArtifactManifest(
+        format_version: manifest.format_version,
+        artifact_kind: manifest.artifact_kind,
+        target: ManifestTarget(
+            os: manifest.target.os, arch: manifest.target.arch, abi: manifest.target.abi),
+        entrypoint: manifest.entrypoint,
+        required_abi_features: _copy_text_array_v1(manifest.required_abi_features),
+        required_services: _copy_text_array_v1(manifest.required_services),
+        required_capabilities: manifest.required_capabilities,
+        resource_limits: ManifestResourceLimits(
+            max_memory_bytes: manifest.resource_limits.max_memory_bytes,
+            max_open_handles: manifest.resource_limits.max_open_handles,
+            max_threads: manifest.resource_limits.max_threads,
+            cpu_budget_us: manifest.resource_limits.cpu_budget_us),
+        namespace_template: manifest.namespace_template,
+        native_libraries: _copy_text_array_v1(manifest.native_libraries),
+        smf_libraries: _copy_text_array_v1(manifest.smf_libraries),
+        interpreter: manifest.interpreter,
+        argument_schema: arguments,
+        startup_preloads: preloads,
+        content_hashes: _copy_text_array_v1(manifest.content_hashes),
+        signature: manifest.signature,
+        debug_identity: manifest.debug_identity))
+
+class _ManifestCanonicalWriterV1:
+    bytes: [u8]
+
+    me append_raw(value: text):
+        for byte in value.bytes():
+            self.bytes.push(byte)
+
+    me append_field(value: text):
+        val raw = value.bytes()
+        self.append_raw(raw.len().to_text())
+        self.bytes.push(58u8)
+        for byte in raw:
+            self.bytes.push(byte)
+
+fn _manifest_signing_body_build_v1(manifest: SimpleArtifactManifest) -> [u8]:
+    var writer = _ManifestCanonicalWriterV1(bytes: [])
+    writer.append_raw("simpleos-installed-artifact-manifest-v1")
+    writer.append_field(manifest.format_version.to_text())
+    writer.append_field(manifest.artifact_kind)
+    writer.append_field(manifest.target.os)
+    writer.append_field(manifest.target.arch)
+    writer.append_field(manifest.target.abi)
+    writer.append_field(manifest.entrypoint)
+    writer.append_field(manifest.required_abi_features.len().to_text())
+    for item in manifest.required_abi_features: writer.append_field(item)
+    writer.append_field(manifest.required_services.len().to_text())
+    for item in manifest.required_services: writer.append_field(item)
+    writer.append_field(manifest.required_capabilities.to_text())
+    writer.append_field(manifest.resource_limits.max_memory_bytes.to_text())
+    writer.append_field(manifest.resource_limits.max_open_handles.to_text())
+    writer.append_field(manifest.resource_limits.max_threads.to_text())
+    writer.append_field(manifest.resource_limits.cpu_budget_us.to_text())
+    writer.append_field(manifest.namespace_template)
+    writer.append_field(manifest.native_libraries.len().to_text())
+    for item in manifest.native_libraries: writer.append_field(item)
+    writer.append_field(manifest.smf_libraries.len().to_text())
+    for item in manifest.smf_libraries: writer.append_field(item)
+    writer.append_field(manifest.interpreter)
+    writer.append_field(manifest.argument_schema.len().to_text())
+    for item in manifest.argument_schema:
+        writer.append_field(item.name)
+        writer.append_field(item.value_kind)
+        writer.append_field(item.required.to_text())
+        writer.append_field(item.default_value)
+    writer.append_field(manifest.startup_preloads.len().to_text())
+    for item in manifest.startup_preloads:
+        writer.append_field(item.source_arg)
+        writer.append_field(item.fixed_path)
+        writer.append_field(item.mode)
+        writer.append_field(item.required.to_text())
+        writer.append_field(item.maximum_bytes.to_text())
+        writer.append_field(item.access)
+        writer.append_field(item.prefault.to_text())
+        writer.append_field(item.hash_policy)
+    writer.append_field(manifest.debug_identity)
+    writer.append_field(manifest.content_hashes.len().to_text())
+    for item in manifest.content_hashes: writer.append_field(item)
+    writer.bytes
+
+pub fn simple_artifact_manifest_canonical_hash_input_v1(
+    manifest: SimpleArtifactManifest
+) -> [u8]?:
+    """Build the signature-free canonical bytes that an installed catalog may hash."""
+    if not simple_artifact_manifest_bounds_validate_v1(manifest).ok:
+        return nil
+    val body = _manifest_signing_body_build_v1(manifest)
+    if body.len() > SIMPLE_ARTIFACT_MANIFEST_MAX_SIGNING_BODY_BYTES_V1:
+        return nil
+    Some(body)

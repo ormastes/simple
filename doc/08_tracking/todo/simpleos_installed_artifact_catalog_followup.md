@@ -3,6 +3,15 @@
 Status: blocked design audit; unsafe phase-1 draft reverted after the required
 independent static re-review failed. No catalog or launch integration landed.
 
+## Implemented prerequisite primitive (pending commit)
+
+The common `SimpleArtifactManifest` owner now defines fixed collection,
+element, aggregate-value, and canonical-body ceilings; bounded nested-array
+deep copy; and a signature-free, domain-separated canonical byte projection.
+This resolves only the input-shape and allocation prerequisite. The catalog
+lifecycle and launch transaction below remain unimplemented and blocked on
+their own owner/security review.
+
 ## Phase-1 blockers
 
 The catalog must resolve these issues together before implementation is safe:

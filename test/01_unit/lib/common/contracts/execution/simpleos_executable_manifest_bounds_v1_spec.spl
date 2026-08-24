@@ -1,0 +1,126 @@
+use std.spec.{describe, it, expect}
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestArgument, ManifestPreload, ManifestResourceLimits, ManifestTarget,
+    SimpleArtifactManifest,
+    SIMPLE_ARTIFACT_MANIFEST_MAX_COLLECTION_ITEMS_V1,
+    SIMPLE_ARTIFACT_MANIFEST_MAX_ELEMENT_BYTES_V1,
+    simple_artifact_manifest_bounds_validate_v1,
+    simple_artifact_manifest_deep_copy_bounded_v1,
+    simple_artifact_manifest_canonical_hash_input_v1
+}
+
+fn bounded_manifest(signature: text = "sig") -> SimpleArtifactManifest:
+    SimpleArtifactManifest(
+        format_version: 1,
+        artifact_kind: "elf",
+        target: ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simple"),
+        entrypoint: "main",
+        required_abi_features: ["base"],
+        required_services: ["filesystem"],
+        required_capabilities: 1u32,
+        resource_limits: ManifestResourceLimits(
+            max_memory_bytes: 1048576, max_open_handles: 8,
+            max_threads: 2, cpu_budget_us: 100000),
+        namespace_template: "default",
+        native_libraries: ["libsimple"],
+        smf_libraries: [],
+        interpreter: "",
+        argument_schema: [ManifestArgument(
+            name: "mode", value_kind: "text", required: false,
+            default_value: "safe")],
+        startup_preloads: [ManifestPreload(
+            source_arg: "", fixed_path: "/etc/app.sdn", mode: "read",
+            required: true, maximum_bytes: 4096, access: "private",
+            prefault: false, hash_policy: "sha256")],
+        content_hashes: ["0123456789abcdef"],
+        signature: signature,
+        debug_identity: "fixture")
+
+fn repeated_text(count: i64) -> text:
+    var value = ""
+    var i = 0
+    while i < count:
+        value = value + "x"
+        i = i + 1
+    value
+
+describe "bounded SimpleOS artifact manifest value contract":
+    it "accepts a bounded manifest and produces deterministic signature-free bytes":
+        val manifest = bounded_manifest()
+        expect(simple_artifact_manifest_bounds_validate_v1(manifest).ok).to_be(true)
+        val first = simple_artifact_manifest_canonical_hash_input_v1(manifest)
+        val second = simple_artifact_manifest_canonical_hash_input_v1(bounded_manifest("other"))
+        expect(first.?).to_be(true)
+        expect(second.?).to_be(true)
+        expect(first.unwrap()).to_equal(second.unwrap())
+
+    it "changes canonical bytes when a signed field changes":
+        val first = simple_artifact_manifest_canonical_hash_input_v1(bounded_manifest())
+        var changed = bounded_manifest()
+        changed.entrypoint = "other-main"
+        val second = simple_artifact_manifest_canonical_hash_input_v1(changed)
+        expect(first.?).to_be(true)
+        expect(second.?).to_be(true)
+        expect(first.unwrap() == second.unwrap()).to_be(false)
+
+    it "rejects a collection before copying or canonicalizing it":
+        var manifest = bounded_manifest()
+        var items: [text] = []
+        var i = 0
+        while i <= SIMPLE_ARTIFACT_MANIFEST_MAX_COLLECTION_ITEMS_V1:
+            items.push("x")
+            i = i + 1
+        manifest.required_services = items
+        expect(simple_artifact_manifest_bounds_validate_v1(manifest).ok).to_be(false)
+        expect(simple_artifact_manifest_deep_copy_bounded_v1(manifest).?).to_be(false)
+        expect(simple_artifact_manifest_canonical_hash_input_v1(manifest).?).to_be(false)
+
+    it "rejects an oversized contained value":
+        var manifest = bounded_manifest()
+        manifest.entrypoint = repeated_text(
+            SIMPLE_ARTIFACT_MANIFEST_MAX_ELEMENT_BYTES_V1 + 1)
+        expect(simple_artifact_manifest_bounds_validate_v1(manifest).ok).to_be(false)
+
+    it "rejects aggregate text beyond the retained byte budget":
+        var manifest = bounded_manifest()
+        val large = repeated_text(SIMPLE_ARTIFACT_MANIFEST_MAX_ELEMENT_BYTES_V1)
+        var items: [text] = []
+        var i = 0
+        while i < 17:
+            items.push(large)
+            i = i + 1
+        manifest.required_services = items
+        expect(simple_artifact_manifest_bounds_validate_v1(manifest).ok).to_be(false)
+        expect(simple_artifact_manifest_canonical_hash_input_v1(manifest).?).to_be(false)
+
+    it "rejects aggregate item count even when every collection is individually bounded":
+        var manifest = bounded_manifest()
+        var items: [text] = []
+        var i = 0
+        while i < 52:
+            items.push("x")
+            i = i + 1
+        manifest.required_abi_features = items
+        manifest.required_services = items
+        manifest.native_libraries = items
+        manifest.smf_libraries = items
+        manifest.content_hashes = items
+        expect(simple_artifact_manifest_bounds_validate_v1(manifest).ok).to_be(false)
+
+    it "deep owns nested arrays":
+        var manifest = bounded_manifest()
+        val copied = simple_artifact_manifest_deep_copy_bounded_v1(manifest)
+        expect(copied.?).to_be(true)
+        manifest.required_services.push("network")
+        manifest.content_hashes.push("other")
+        manifest.argument_schema.push(ManifestArgument(
+            name: "extra", value_kind: "text", required: false,
+            default_value: ""))
+        manifest.startup_preloads.push(ManifestPreload(
+            source_arg: "", fixed_path: "/etc/other.sdn", mode: "read",
+            required: false, maximum_bytes: 64, access: "private",
+            prefault: false, hash_policy: "sha256"))
+        expect(copied.unwrap().required_services.len()).to_equal(1)
+        expect(copied.unwrap().content_hashes.len()).to_equal(1)
+        expect(copied.unwrap().argument_schema.len()).to_equal(1)
+        expect(copied.unwrap().startup_preloads.len()).to_equal(1)
