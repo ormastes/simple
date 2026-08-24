@@ -6,6 +6,7 @@
 use app.cli.query_helpers.{_count_indent}
 use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name}
 use app.cli.query_lint_scan.{lint_scan_line}
+use app.cli.query_source_mask.{code_pattern_line_facts}
 
 # ============================================================================
 # MEXH001-005: Match exhaustiveness (text-based heuristic)
@@ -592,33 +593,61 @@ fn _check_multiline_bool_text(lines: [text], file: text, format: text) -> i64:
 
 fn _check_safety_text(lines: [text], file: text, format: text) -> i64:
     """Text-based heuristic for safety checking."""
+    val safety_patterns = [
+        "unsafe:", "unsafe {",
+        "asm ", "asm(", "asm",
+        "ptr_read(", "ptr_write(", "ptr_cast(", "ptr_offset(",
+        "mem_copy(", "mem_set("]
+    val facts = code_pattern_line_facts(lines, safety_patterns)
     var count = 0
-    var in_unsafe = false
-    var unsafe_indent = -1
+    var unsafe_indents: [i64] = []
     var safe_i = 0
     while safe_i < lines.len():
         val scan = lint_scan_line(lines, safe_i)
         val trimmed = scan.trimmed
         val line_num = scan.line_num
         val indent = scan.indent
-        if trimmed.starts_with("unsafe:") or trimmed.starts_with("unsafe {"):
-            in_unsafe = true
-            unsafe_indent = indent
-        if in_unsafe and indent <= unsafe_indent and trimmed != "" and not trimmed.starts_with("unsafe"):
-            in_unsafe = false
-            unsafe_indent = -1
-        if not in_unsafe and indent > 0:
-            if trimmed.starts_with("asm ") or trimmed.starts_with("asm(") or trimmed == "asm":
+        val line_facts = facts[safe_i]
+        val first_code = line_facts.first_code_column
+        val columns = line_facts.pattern_columns
+        val starts_unsafe_block = (
+            (columns[0] > 0 and columns[0] == first_code) or
+            (columns[1] > 0 and columns[1] == first_code))
+        if first_code > 0:
+            while unsafe_indents.len() > 0 and indent <= unsafe_indents[unsafe_indents.len() - 1]:
+                unsafe_indents.pop()
+        if starts_unsafe_block:
+            unsafe_indents.push(indent)
+        if unsafe_indents.len() == 0 and indent > 0:
+            var asm_col = 0
+            var asm_len = 0
+            if columns[2] > 0 and columns[2] == first_code:
+                asm_col = columns[2]
+                asm_len = 4
+            elif columns[3] > 0 and columns[3] == first_code:
+                asm_col = columns[3]
+                asm_len = 4
+            elif columns[4] > 0 and columns[4] == first_code and trimmed == "asm":
+                asm_col = columns[4]
+                asm_len = 3
+            if asm_col > 0:
                 if format == "json":
-                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE001\",\"message\":\"inline assembly outside unsafe block\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE001\",\"message\":\"inline assembly outside unsafe block\",\"line\":{line_num},\"col\":{asm_col},\"end_line\":{line_num},\"end_col\":{asm_col + asm_len},\"tags\":[],\"source\":\"simple-lint\"}")
                 else:
                     print "{file}:{line_num}: error[SAFE001]: inline assembly outside unsafe block"
                 count = count + 1
-            if (trimmed.contains("ptr_read(") or trimmed.contains("ptr_write(") or
-                trimmed.contains("ptr_cast(") or trimmed.contains("ptr_offset(") or
-                trimmed.contains("mem_copy(") or trimmed.contains("mem_set(")):
+            var pointer_col = 0
+            var pointer_len = 0
+            var pointer_i = 5
+            while pointer_i < safety_patterns.len():
+                val candidate_col = columns[pointer_i]
+                if candidate_col > 0 and (pointer_col == 0 or candidate_col < pointer_col):
+                    pointer_col = candidate_col
+                    pointer_len = safety_patterns[pointer_i].len()
+                pointer_i = pointer_i + 1
+            if pointer_col > 0:
                 if format == "json":
-                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE003\",\"message\":\"raw pointer operation outside unsafe block\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE003\",\"message\":\"raw pointer operation outside unsafe block\",\"line\":{line_num},\"col\":{pointer_col},\"end_line\":{line_num},\"end_col\":{pointer_col + pointer_len},\"tags\":[],\"source\":\"simple-lint\"}")
                 else:
                     print "{file}:{line_num}: error[SAFE003]: raw pointer operation outside unsafe block"
                 count = count + 1

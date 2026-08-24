@@ -1770,6 +1770,22 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - No manual execution or performance/RSS measurement was run under the user
   override.
 
+# Completed tranche: SAFE001/SAFE003 lexical hardening (2026-08-24)
+
+- Added a bounded multi-pattern, stateful code-only projection with original
+  source columns.
+- Routed unsafe-scope state, SAFE001 assembly detection, and SAFE003 pointer
+  detection through one request-local fact array.
+- Replaced the single unsafe-indent slot with a nested indentation stack and
+  rejected unsafe-prefixed ordinary identifiers as scope markers.
+- Rejected comment/string/docstring false positives and fake unsafe-state
+  transitions while preserving real unsafe suppression.
+- Replaced line-wide JSON locations with exact first-token spans.
+- Added canonical severity, lexical-boundary, scope, precedence, and span
+  evidence plus a manual.
+- No manual execution or runtime/RSS measurement was run under the user
+  override.
+
 # Completed tranche: linear app feature index (2026-08-24)
 
 - Replaced growing app-index Markdown prefixes with fragments and one join.

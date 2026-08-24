@@ -3524,6 +3524,25 @@ This avoids silent miscompilation and candidate traversal in normal builds. No
 runtime, allocation, or RSS measurement was run under the no-verification
 override.
 
+# 2026-08-24 follow-up: SAFE001/SAFE003 lexical soundness
+
+The fast safety lint scanned trimmed raw lines. Consequently pointer-operation
+spellings inside comments, strings, and multiline docstrings emitted severity-1
+SAFE003 errors. Fake `unsafe:` text in docstring payload could also enter the
+heuristic unsafe state and suppress a later real error. SAFE001 had the same raw
+lexical weakness, and both diagnostics reported line-wide, indentation-shifted
+spans rather than the offending token.
+
+Safety analysis now obtains first-code and bounded-pattern columns from one
+stateful lexical projection per request. `unsafe` state, assembly detection, and
+all six pointer operations consume only executable-code facts, while raw lines
+remain available for unchanged text output. JSON spans identify the first real
+offending token. A stack of unsafe-header indents preserves nested scopes and
+only syntactic `unsafe:`/`unsafe {` headers can enter one. With P fixed safety
+patterns, work is O(N*P)=O(N), storage is O(L*P)=O(L), and no masked source copy
+or parser invocation is added. No timing, allocation, or RSS measurement was
+run under the no-verification override.
+
 # 2026-08-24 follow-up: LLVM-direct minimal C construction
 
 The LLVM-direct fallback discovered each function with `functions.contains`

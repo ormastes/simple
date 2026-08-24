@@ -855,6 +855,15 @@ also remains there for check-tier. Neither module may depend on the parser,
 tier-check driver, or LSP command surface. This keeps local lint work linear and
 prevents diagnostic and fix eligibility from diverging.
 
+# Severity-one lexical safety boundary
+
+Text fallback rules that can emit errors must never derive state or candidates
+from raw lexical payload. The dependency-neutral source scanner returns one
+request-owned `CodePatternLineFacts` record per line: first executable column and
+first columns for a bounded pattern set. Safety policy owns pattern meaning,
+unsafe indentation state, precedence, and diagnostic rendering. This separates
+lexical truth from warning/error policy while sharing one source traversal.
+
 # Generated-text assembly boundary
 
 Fallback generators separate ordered semantic discovery from uniqueness lookup:

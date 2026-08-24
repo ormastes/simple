@@ -1158,6 +1158,19 @@ lines. Complexity is O(source bytes) time and O(line count) result storage; the
 scanner creates no masked source copy. The single-line helper is fixture-only
 convenience over the same projection.
 
+# SAFE001/SAFE003 lexical design
+
+`code_pattern_line_facts(lines, safety_patterns)` scans the request once while
+tracking triple strings, ordinary strings/escapes, and comments. Each line stores
+`first_code_column` plus one first-match column per fixed pattern. `_check_safety_text`
+uses only those facts to maintain an indentation stack for syntactic unsafe
+headers, select assembly candidates, and choose the lowest-column pointer
+candidate. Before each executable line it pops every scope whose header indent
+is greater than or equal to the current indent, then pushes a real `unsafe:` or
+`unsafe {` header. It preserves one SAFE003 per line and pattern-order
+tie-breaking. JSON end columns are token start plus matched pattern length; text
+diagnostics and severity remain unchanged.
+
 # LLVM-direct minimal C design
 
 `llvm_direct_minimal_c_source(source)` scans split lines once. `seen: {text:
