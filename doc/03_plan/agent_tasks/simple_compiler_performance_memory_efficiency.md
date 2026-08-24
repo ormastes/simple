@@ -149,6 +149,20 @@ current-head research reconciliation.
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Planned generated HIR child-frame tranche
+
+- Generator owner: add `HirChildFrame`, its context-neutral sink, reverse
+  expansion, and allocating compatibility adapters.
+- Collector owner: migrate `PerfFacts` traversal while preserving preorder,
+  node counts, fact order, and loop-depth scheduling.
+- Gate owner: extend generated visitor freshness to `hir_children.spl` and add
+  wrapper/list/pair/order coverage.
+- Merge owner: current compiler-performance lane.
+- Final reviewer: normal-capability compiler reviewer after generated output
+  regeneration; no sidecar result alone may approve ordering or COW semantics.
+- Current status: designed, not implemented; stage-4 generator execution and
+  manual verification were excluded by the user's no-verify instruction.
+
 ## Completed VHDL deterministic-sort tranche
 
 - Replaced quadratic catalog text and SymbolId selection scans with stable
