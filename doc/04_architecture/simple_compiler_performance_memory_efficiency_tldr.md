@@ -3,6 +3,10 @@
 
 Purpose: make optimizer claims truthful, share frontend/MIR facts, add precise performance diagnostics, and remove measured compiler/tool hot-path waste without unsafe speculative rewrites.
 
+Current frontier: request-local `HirPerfFacts` now records resolved collection
+operations and loop ancestry with fail-closed metadata. The standard-library
+registry/driver adapter and CollectionPlan are still planned, not active.
+
 Core structure:
 
 ```text
