@@ -476,3 +476,14 @@ mismatch fails at the first conflicting effect with the stable diagnostic.
 Instruction provenance is demand-built only for instruction kinds whose region
 effect contract consumes it; unrelated MIR operations must not allocate a
 formatted span merely because debug source metadata exists.
+
+### Lint tracking-row parser ownership
+
+The TRK001 feature database gate owns one row-local CSV decoder. It scans ASCII
+quote and comma bytes but carries every other byte in maximal source spans, so
+UTF-8 is never reconstructed character by character. A field owns a short
+fragment array only until one `join("")`; the published trimmed field is then
+appended to the ordered result. The decoder remains deliberately permissive
+and must preserve empty fields, mid-field quotes, quoted commas, conditional
+doubled-quote decoding, unmatched-quote tolerance, and post-decode trimming.
+No parser-global cache or retained source view is permitted.
