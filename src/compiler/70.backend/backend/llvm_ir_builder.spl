@@ -12,12 +12,17 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.common.mir_target_context.{mir_target_context_os_from}
 use compiler.common.attributes.FunctionAttr
 
+@unsafe(reason: "raw target-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 # Amortized-O(1) string accumulation (same runtime builder as
 # src/lib/common/string_builder.spl; bug rt_string_concat_quadratic_2026-06-12).
+@unsafe(reason: "raw opaque builder acquisition; zero/sentinel and allocation failure are not represented by a typed contract", capabilities: [ffi])
 extern fn rt_string_builder_new() -> i64
+@unsafe(reason: "raw opaque builder mutation; invalid-handle and allocation failure are not represented by a typed contract", capabilities: [ffi])
 extern fn rt_string_builder_push(handle: i64, s: text) -> i64
+@unsafe(reason: "raw opaque builder ownership transfer; invalid-handle and finish failure are not represented by a typed contract", capabilities: [ffi])
 extern fn rt_string_builder_finish(handle: i64) -> text
+@unsafe(reason: "raw opaque builder query; invalid-handle failure is indistinguishable from a valid zero length", capabilities: [ffi])
 extern fn rt_string_builder_len(handle: i64) -> i64
 
 var _llvm_simpleos_header: bool = false
@@ -26,7 +31,9 @@ pub fn llvm_ir_builder_set_simpleos_header(enabled: bool):
     _llvm_simpleos_header = enabled
 
 fn llvm_builder_target() -> CodegenTarget:
-    val requested = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    var requested = ""
+    unsafe(capabilities: [ffi]):
+        requested = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if requested.contains("simpleos"):
         CodegenTarget.SimpleOS_X86_64
     elif requested.starts_with("aarch64-") or requested.starts_with("arm64-"):
@@ -87,9 +94,12 @@ class LlvmIRBuilder:
 
     static fn create(name: text, target: LlvmTargetTriple) -> LlvmIRBuilder:
         val st = if target.is_32bit(): "i32" else: "i64"
+        var builder_handle = 0
+        unsafe(capabilities: [ffi]):
+            builder_handle = rt_string_builder_new()
         LlvmIRBuilder(
             module_name: name,
-            sb: rt_string_builder_new(),
+            sb: builder_handle,
             current_function: nil,
             local_counter: 0,
             debug_counter: 10,
@@ -101,9 +111,10 @@ class LlvmIRBuilder:
 
     me emit(line: text):
         """Emit an IR line."""
-        if rt_string_builder_len(self.sb) > 0:
-            rt_string_builder_push(self.sb, "\n")
-        rt_string_builder_push(self.sb, line)
+        unsafe(capabilities: [ffi]):
+            if rt_string_builder_len(self.sb) > 0:
+                rt_string_builder_push(self.sb, "\n")
+            rt_string_builder_push(self.sb, line)
 
     me emit_module_header():
         """Emit module header."""
@@ -650,7 +661,8 @@ class LlvmIRBuilder:
 
     me build() -> text:
         """Build final IR string."""
-        rt_string_builder_finish(self.sb)
+        unsafe(capabilities: [ffi]):
+            return rt_string_builder_finish(self.sb)
 
 # ============================================================================
 # Helper Functions
@@ -658,9 +670,10 @@ class LlvmIRBuilder:
 
 pub fn llvm_ir_builder_push_line(line: text, handle: i64):
     """Append one LLVM IR line through the scalar builder handle."""
-    if rt_string_builder_len(handle) > 0:
-        rt_string_builder_push(handle, "\n")
-    rt_string_builder_push(handle, line)
+    unsafe(capabilities: [ffi]):
+        if rt_string_builder_len(handle) > 0:
+            rt_string_builder_push(handle, "\n")
+        rt_string_builder_push(handle, line)
 
 pub fn llvm_ir_builder_handle(builder: LlvmIRBuilder) -> i64:
     """Project the scalar accumulator handle in the builder owner module."""
@@ -668,7 +681,8 @@ pub fn llvm_ir_builder_handle(builder: LlvmIRBuilder) -> i64:
 
 pub fn llvm_ir_builder_build(builder: LlvmIRBuilder) -> text:
     """Build final IR without relying on receiver-method dispatch."""
-    return rt_string_builder_finish(builder.sb)
+    unsafe(capabilities: [ffi]):
+        return rt_string_builder_finish(builder.sb)
 
 fn natural_alignment(ty: text) -> i64:
     """Return natural alignment in bytes for an LLVM type."""

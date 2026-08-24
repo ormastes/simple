@@ -1446,3 +1446,17 @@ Before claiming the inventory is complete, implement the recorded ambient-call
 gap fix using resolved HIR symbol identity. Do not make the source census appear
 complete by duplicating extern declarations or by treating every `rt_*`-named
 Simple function as foreign.
+
+The LLVM IR string-builder hot path now scopes all ten raw operations without
+adding calls, allocation, lookup, copying, or wrapper dispatch. Preserve the
+amortized-O(1) runtime builder and exact length/newline/line-push sequence.
+Builder coverage passes 3/3; optimizer findings remain 27 and the isolated
+analyzer pair is 15.37 s / 272,368 KiB before versus 8.45 s / 271,188 KiB
+after. Current census is 21,267 calls (2,157 explicit, 19,110 missing), 12,111
+declarations (902 tagged, 651 contract-documented, 385 minimized, 10,943
+untouched), zero signed/admitted.
+
+Next, design a status-bearing builder acquisition/mutation/finalization ABI so
+zero handles and empty finished text cannot conceal provider failure. Keep the
+checked typed thunk direct and cached; do not add per-line hashing, symbol
+lookup, allocation, or generic dispatch.

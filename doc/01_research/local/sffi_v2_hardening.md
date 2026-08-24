@@ -2500,3 +2500,22 @@ The same audit exposed an ambient-call blind spot: the shared
 explicit SFFI import, so the source census omits it. This is recorded as
 `sffi_authority_census_ambient_call_gap_2026-08-24.md`; a resolved-HIR inventory
 must replace source-name inference rather than adding duplicate extern owners.
+
+## LLVM IR string-builder hot boundary
+
+The LLVM IR builder's environment and opaque string-builder declarations now
+state their raw-provider limitations, and all ten executable calls use minimal
+lexical `unsafe(ffi)` blocks. The hot `emit` and `push_line` paths retain one
+length query, one conditional newline push, and one line push. Creation retains
+one acquisition and finalization retains one finish/ownership-transfer call.
+No wrapper dispatch, additional provider call, cache, scan, string copy, or
+allocation was introduced; the existing runtime builder remains amortized
+O(1).
+
+The builder spec passes 3/3. Optimizer findings remain 27; isolated analyzer
+evidence is 15.37 s / 272,368 KiB before versus 8.45 s / 271,188 KiB after.
+Current census is 21,267 calls (2,157 explicit, 19,110 missing), 12,111
+declarations (902 tagged, 651 contract-documented, 385 minimized, 10,943
+untouched), zero signed/admitted. The raw handle can still conflate a zero or
+invalid sentinel with allocation/provider failure, so this owner is minimized
+unsafe—not verified safe.
