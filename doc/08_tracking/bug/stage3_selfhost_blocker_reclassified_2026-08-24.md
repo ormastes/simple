@@ -92,3 +92,60 @@ trees. The "duplicate module trees" lead is therefore false as stated; the
 `logical=832 physical=614` gap in the loader log is the symlink aliasing, and
 the canonical import spelling used everywhere in-tree is the unnumbered one
 (`compiler.hir....`).
+
+## RESOLVED QUESTION (measured after the first write-up): the Stage-2 artifact is itself broken
+
+The line-buffered + `ulimit -s unlimited` rerun reproduces the SIGSEGV exactly:
+`[build] hir 0/692 step 2/6 +269693ms dt=145ms app.cli.bootstrap_main` then
+`Segmentation fault`, `rc=139`, with `HIR lowering error` = 0 and
+`not visible from this module` = 0. Unlimited stack did **not** help, so it is
+not stack overflow from deep recursion.
+
+The decisive test is much smaller than the compiler. A **two-line hello world**
+fails on **both** commands the bootstrap CLI supports:
+
+```
+printf 'fn main():\n    print("hi")\n' > /tmp/hw.spl
+stage2 compile --format=smf -o /tmp/hw.smf /tmp/hw.spl   # rc=1
+stage2 native-build /tmp/hw.spl -o /tmp/hw_bin           # rc=1
+```
+
+Both print:
+
+```
+error: hir codec: no `Visibility` arm for tag -1; regenerate src/compiler/20.hir/generated/hir_codec.spl
+```
+
+**The admitted Stage-2 compiler cannot compile anything at all.** So:
+
+- The 405-error narrative is doubly stale: the source class it names is fixed at
+  HEAD, and the binary the lane was told to verify with cannot compile a
+  hello world, let alone the compiler.
+- The SIGSEGV above is that binary's defect, on its broken codec path — it is
+  **not** evidence about HEAD sources. Nothing measured with this artifact can
+  clear or condemn `src/compiler` at HEAD.
+- `-1` is an UNSET `Visibility` tag reaching the HIR codec. This is the same
+  malformed-tagged-value family as `7c453e7b076` ("contain malformed tagged
+  values at the HirBlock clone — stage 3 SIGSEGV eliminated, 6/6 runs") and
+  `e52f3e4de26` ("bare-lift `HirSymbol.type_` — heap `Some` box segfaulted
+  HIR-cache encode"), both of which post-date the binary
+  (`build/bootstrap/goal-stage2/stage2/x86_64-unknown-linux-gnu/simple`,
+  132,944,880 B, mtime 2026-08-24 01:34).
+
+### The gate defect this exposes
+
+Stage 2 was **admitted with a provenance receipt** and Stage 3 was then run
+against it. Nothing between those two steps ever asked the artifact to compile
+a hello world — which is the exact failure shape
+`scripts/check/check-stage-binaries-runnable.shs` was written for (a stage
+binary whose `--version` answers cleanly while both of its real commands fail),
+and that guard is currently ADVISORY, not MANDATORY, and honestly RED. The
+Stage-2 admission path needs the same smoke test before the receipt is issued;
+otherwise every Stage-3 failure report is unfalsifiable.
+
+### Correct next action for this lane
+
+Rebuild Stage 2 from HEAD (which contains `7c453e7b076`, `e52f3e4de26`,
+`63f4b5d1362` and `e0e308c8681`) and re-run Stage 3 against the fresh artifact.
+Do **not** spend further effort interpreting Stage-3 logs produced by the
+2026-08-24 01:34 binary.
