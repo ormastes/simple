@@ -2514,3 +2514,15 @@ remains one `CodeLine` view. The remaining dominant kernel is body-lines times r
 names with up to seven textual probes and temporary needle construction; a
 tokenized call-name set is the next bounded design. No timing, allocation, or
 RSS measurement is claimed under the no-verify instruction.
+
+### HWIR shape-validation membership indexes
+
+`HwModuleDef.shape_diagnostic()` used growing text arrays as sets for clock
+domains, case-folded declaration names, source-origin IDs, and driven results.
+The repeated `contains` scans made these validation kernels quadratic in their
+respective node counts and retained four growable arrays. They now use
+`{text: bool}` membership indexes while keeping traversal order, insertion
+points, case folding, and the first returned diagnostic unchanged. Other HWIR
+lookups, including repeated width/name resolution, remain separate audit work.
+No timing, allocation, or RSS measurement is claimed under the no-verify
+instruction.
