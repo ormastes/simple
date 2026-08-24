@@ -2939,8 +2939,9 @@ Trim and comma parsing now use byte boundaries and bounded span slices per
 retained name. Direct local-owner `push` preserves file, export, and root
 encounter order without keeping the old accumulator binding live. The
 redundant root array is gone; module count remains exactly the number of
-requested roots, including duplicates or empty roots. Serialization records ordered fragments and joins
-once, changing assembly from worst-case O(P^2) copied bytes to O(P) output work
+requested roots, including duplicates or empty roots. Serialization records
+ordered fragments and joins once, changing assembly from worst-case O(P^2)
+copied bytes to O(P) output work
 with O(F) fragment references. Directory read order and the final lexical
 module/symbol sort remain unchanged. Duplicate exports intentionally remain
 because the previous implementation never deduplicated despite a stale
@@ -2948,3 +2949,23 @@ docstring, which is now corrected.
 
 Exact empty and multi-module SDN byte contracts plus an ordered export fixture
 were added but not executed under the user's no-verification instruction.
+
+### Adaptive MIR local-type lookup
+
+Each local-backed global load/store resolved its type by scanning every MIR
+local and recursively serializing the match. With G accesses and L locals this
+was O(G*L) identity comparisons plus repeated serialization for reused locals.
+The manifest now keeps the first lookup on the direct path and avoids the O(L)
+position-index build for G below two. On the second lookup it builds one first-declaration-wins
+LocalId-to-position index; resolved serialized identities are cached only for
+locals actually used. Repeated workloads become O(L+G) expected lookup work
+without adding a second eager serialization of unused recursive types.
+
+Constant operands still serialize their embedded type directly and never build
+the index. Missing locals still yield the exact load/store type diagnostics.
+Duplicate LocalIds retain the old first-declaration behavior even for directly
+constructed malformed MIR, while all admitted effects remain ordered and
+duplicated exactly as before. The existing repeated-access contract exercises
+the adaptive path; duplicate-id, constant-store, exact indexed-missing, and
+source-topology contracts were added but not executed under the user's
+no-verification instruction.
