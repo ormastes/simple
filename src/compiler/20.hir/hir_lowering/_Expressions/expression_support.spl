@@ -416,6 +416,15 @@ impl HirLowering:
     me field_access_for_expr(expr: HirExpr, field_name: text) -> i64:
         val direct_symbol = _hir_expr_symbol_or_invalid(expr.kind)
         if direct_symbol.is_valid():
+            # Use the base-symbol owner path first. Besides locals with an
+            # explicitly retained composite, it owns the staged-safe
+            # `self`/`me` recovery through current_method_self_symbol_id.
+            # Bypassing it and resolving the receiver's aliased type ID below
+            # made an impl capsule reject its defining struct's private fields
+            # (BitfieldMirLower.builder produced seven Stage-3 HIR fatals).
+            val direct_access = self.field_access_for_base_raw(direct_symbol.id, field_name)
+            if direct_access >= 0:
+                return direct_access
             unsafe(capabilities: [ffi]):
                 if rt_dict_contains(self.local_struct_types, direct_symbol.id):
                     val local_composite = self.local_struct_types[direct_symbol.id]
