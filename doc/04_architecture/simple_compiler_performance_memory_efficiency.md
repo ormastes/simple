@@ -420,6 +420,10 @@ collections. Full-tier paths are counted rather than retained because they are
 never inspected after classification. Immutable operator metadata is built
 once per checked file and shared read-only across its line scan, preserving
 core-before-full violation order without per-line table reconstruction.
+String/comment masking is also span-owned: scan bytes once, retain unchanged
+code spans, represent each quoted span with one repeated-space fragment, and
+stop at the first unquoted comment marker. This preserves byte-column masking
+and escape handling without cumulative per-character string construction.
 
 ### Raw-SFFI source-view ownership
 
