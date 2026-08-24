@@ -20,7 +20,14 @@ requires a positive real symbol count. A changed surface retains the complete
 base/tip definition, re-export, removal, and unbuildable-tree analysis. Git
 comparison failure remains ERROR.
 
-The same committed-range scan now takes 3.89 seconds and 10,240 KiB peak RSS
-(47.6% lower latency). All four mutation fixtures pass, including incident
-replay, forward progress, intentional single removal, and the unchanged-range
-non-vacuity case.
+The first tree-equality change reduced the same committed-range scan from 7.43
+seconds/10,496 KiB to 3.89 seconds/10,240 KiB. Profiling then showed each
+remaining extraction still spawned one `git show` per runtime file. Two
+committed-tree `git grep` operations now extract the complete Rust and C sets.
+Their outputs were compared before replacement: Rust 1,804 versus 1,804 and C
+1,504 versus 1,504, byte-for-byte identical in both cases.
+
+The final scan takes 0.84 seconds and 35,328 KiB peak RSS: 88.7% lower latency
+than the 7.43-second baseline. All four mutation fixtures pass, including
+incident replay, forward progress, intentional single removal, and the
+unchanged-range non-vacuity case.

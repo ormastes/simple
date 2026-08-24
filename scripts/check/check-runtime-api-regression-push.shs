@@ -120,29 +120,6 @@ die() {
 }
 
 # ---------------------------------------------------------------------------
-# list_rust_runtime_files / list_c_runtime_files <repo> <rev>
-#   Prints candidate runtime source paths that exist at <rev>, split by
-#   implementation. Rust (src/compiler_rust/runtime/src/**) and C
-#   (src/runtime/*.c|*.h, incl. baremetal stubs) are DISTINCT, PARALLEL
-#   implementations of the same rt_* symbol names (see
-#   src/runtime/runtime_native.c's own comments about tracking the Rust
-#   runtime's coverage) -- a symbol still defined in one does not mean the
-#   OTHER'S removal is safe, so they are evaluated as separate sets, never
-#   unioned. Unioning them was tried and tried wrong during development: it
-#   silently masked the real incident (44 Rust definitions gone) because
-#   src/runtime/runtime_native.c happens to carry same-named C fallbacks for
-#   some of them.
-# ---------------------------------------------------------------------------
-list_rust_runtime_files() {
-    git -C "$1" ls-tree -r --name-only "$2" -- src/compiler_rust/runtime/src 2>/dev/null \
-        | $GREP -E '\.rs$'
-}
-list_c_runtime_files() {
-    git -C "$1" ls-tree -r --name-only "$2" -- src/runtime 2>/dev/null \
-        | $GREP -E '\.(c|h)$'
-}
-
-# ---------------------------------------------------------------------------
 # defined_symbols_rust / defined_symbols_c <repo> <rev>
 #   Prints one rt_* symbol name per line: the DEFINED set at <rev> for that
 #   implementation, from committed content only.
@@ -150,26 +127,21 @@ list_c_runtime_files() {
 defined_symbols_rust() {
     ds_repo=$1
     ds_rev=$2
-    list_rust_runtime_files "$ds_repo" "$ds_rev" | while IFS= read -r ds_path; do
-        [ -n "$ds_path" ] || continue
-        git -C "$ds_repo" show "$ds_rev:$ds_path" 2>/dev/null \
-          | $GREP -oE '(pub[[:space:]]+extern[[:space:]]+"C"[[:space:]]+fn[[:space:]]+rt_[A-Za-z0-9_]+|pub[[:space:]]+fn[[:space:]]+rt_[A-Za-z0-9_]+)'
-    done | $GREP -oE 'rt_[A-Za-z0-9_]+' | sort -u
+    git -C "$ds_repo" grep -h -o -E \
+      '(pub[[:space:]]+extern[[:space:]]+"C"[[:space:]]+fn[[:space:]]+rt_[A-Za-z0-9_]+|pub[[:space:]]+fn[[:space:]]+rt_[A-Za-z0-9_]+)' \
+      "$ds_rev" -- ':(glob)src/compiler_rust/runtime/src/**/*.rs' 2>/dev/null \
+      | $GREP -oE 'rt_[A-Za-z0-9_]+' | sort -u
 }
 defined_symbols_c() {
     ds_repo=$1
     ds_rev=$2
-    list_c_runtime_files "$ds_repo" "$ds_rev" | while IFS= read -r ds_path; do
-        [ -n "$ds_path" ] || continue
-        # C definition: return-type prefix then rt_NAME( at start of line,
-        # ending the SAME statement in '{' (not a call site / prototype
-        # ending in ';'). Restricted to .c/.h only -- this pattern is too
-        # loose to run over .rs call sites (matched call sites during
-        # development, e.g. "return rt_array_map(arr, ...)" inside another
-        # function looked like a definition).
-        git -C "$ds_repo" show "$ds_rev:$ds_path" 2>/dev/null \
-          | $GREP -oE '^[A-Za-z_][A-Za-z0-9_ \*]*[[:space:]]rt_[A-Za-z0-9_]+[[:space:]]*\([^;]*\)[[:space:]]*\{'
-    done | $GREP -oE 'rt_[A-Za-z0-9_]+' | sort -u
+    # C definition: return-type prefix then rt_NAME( at start of line,
+    # ending the SAME statement in '{' (not a call site / prototype ending
+    # in ';'). One committed-tree grep replaces one `git show` per file.
+    git -C "$ds_repo" grep -h -o -E \
+      '^[A-Za-z_][A-Za-z0-9_ \*]*[[:space:]]rt_[A-Za-z0-9_]+[[:space:]]*\([^;]*\)[[:space:]]*\{' \
+      "$ds_rev" -- ':(glob)src/runtime/**/*.[ch]' 2>/dev/null \
+      | $GREP -oE 'rt_[A-Za-z0-9_]+' | sort -u
 }
 
 # ---------------------------------------------------------------------------
@@ -234,8 +206,7 @@ evaluate() {
     EV_CHECKED=$ev_union
 
     # Removed = removed from the RUST set OR removed from the C set --
-    # implementations are evaluated SEPARATELY (see comment on
-    # list_rust_runtime_files), then the removal lists are combined for the
+    # implementations are evaluated SEPARATELY, then removal lists combine for the
     # threshold/report so a mixed Rust+C mass deletion still totals up.
     ev_removed_rs="$TMPROOT/removed_rs.out"
     ev_removed_c="$TMPROOT/removed_c.out"

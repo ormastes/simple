@@ -35,6 +35,10 @@ algorithmic fast path: an unchanged range extracts and counts the tip once;
 any changed runtime root performs the full base/tip removal analysis. The
 unchanged-range scan measured 7.43 seconds before and 3.89 seconds afterward,
 with non-vacuity and mutation fixtures retained.
+Committed symbol extraction is batched by implementation through one Git tree
+grep for Rust and one for C rather than one `git show` per file. Exact-set
+comparison proved 1,804/1,804 Rust and 1,504/1,504 C symbols identical; combined
+with tree equality, the unchanged-range scan reaches 0.84 seconds.
 The quick rules row extracts `rules.sdl` from the same committed ref before
 parsing its numeric commands. An explicit `--rules` path exists only for
 diagnostic and self-test fixtures.
