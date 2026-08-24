@@ -286,3 +286,61 @@ decisions; result not yet in at time of writing.
 Fixtures, all in `build/lanes_s/`: `dv2` (first repro), `dv4` (access-path
 matrix), `dv6` (typed binding, disproves the remedy), `dv7` (alternative
 iteration forms), `dv8` (unique field names, refutes the resolver story).
+
+## A PROVEN WORKING REWRITE EXISTS (i64-keyed dicts)
+
+`dv9.spl`, native build, same `Dict<i64, Big>`:
+
+| form | native result |
+|------|---------------|
+| `for f in d.values()` (dv4 C) | CORRUPT |
+| `for k in d.keys(): val g: Big = d[k]` (dv9 F) | **CORRECT** |
+| copy into `[Big]` via `d[k]`, then iterate the array (dv9 H) | **CORRECT** |
+
+So `for x in dict.values()` is the ONLY broken iteration form measured. Unlike
+the typed-binding idiom, this rewrite is proven by execution, not by analogy.
+
+`d.entries()` is not an option: it fails to build at all —
+`MIR lowering error: unresolved method call: entries`.
+
+**Caveat before applying it to the compiler:** the loops that crash Stage 2
+iterate `Dict<SymbolId, MirFunction>` — a STRUCT-keyed dict — and
+`backend/interpreter.spl:145-175` separately claims struct-keyed
+`.has()`/`[]` lookups fail to find present entries. dv9 used i64 keys, so it
+does not license the rewrite for the compiler's dicts. `dv11.spl` tests exactly
+that (`Dict<Sym, Big>`, keys-reindex and values side by side); it is
+interpreted-correct and its native result decides whether the rewrite is
+usable where it is actually needed. Do not apply the rewrite to the adapter
+until that result is in.
+
+## Where the fix belongs: SIMPLE source, not the Rust seed
+
+Settled by the diagnostic text itself. `native-build` fails dv7 with
+`for-in over non-array iterables is not supported by native codegen yet
+(#143)`, and that string lives in **`src/compiler/50.mir/mir_lowering_stmts.spl:2597`**
+— Simple source, run as the native-build worker — not in `src/compiler_rust`.
+The seed contributes Cranelift/LLVM codegen from the MIR the Simple lowering
+produced.
+
+The relevant Simple-side chain:
+- `mir_lowering_stmts.spl:2540-2570` derives the loop `element_type` from the
+  collection local's HIR type (`Array`/`Slice`) and then its MIR type
+  (`Array`/`Slice`), defaulting to i64 otherwise. An i64 default is exactly the
+  observed "offset 0, i64-typed" field read.
+- `_MirLoweringExpr/method_calls_literals.spl:1446-1500` is the code that is
+  supposed to stamp `Array(elem_type, 0)` onto the `rt_dict_values` result by
+  recovering `Dict(k_type, v_type)` from `local_mir_type_of(receiver_local)`.
+  It already carries two prior bug comments about this exact class
+  (`native_dict_keys_iter_index`, `native_dict_call_result_keys_elem_type`).
+  If that match does not yield `Dict(...)`, the element type stays i64.
+
+Leading hypothesis for why the stamp misses, NOT yet confirmed: `var d:
+Dict<i64, Big> = {}` takes its MIR type from the EMPTY dict literal (no values
+to infer V from) rather than from the annotation, so `local_mir_type_of` has no
+usable `V`. `dv10.spl` (identical but `= {1: make()}`) tests this; result
+pending.
+
+For reference the Rust seed side already looks correct and is probably not the
+fix site: `type_resolver.rs` threads `HirType::Dict{key,value}`,
+`hir/lower/expr/mod.rs:1619` types `.values()` as `Array{element: V}`, and
+`type_registry.rs:188 get_iterable_element` unwraps `Array`.
