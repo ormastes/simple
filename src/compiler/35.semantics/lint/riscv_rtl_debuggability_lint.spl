@@ -10,7 +10,9 @@ pub struct RiscvRtlDebugLintWarning:
     line_num: i64
     file_path: text
 
-pub fn lint_riscv_rtl_debuggability(source: text, path: text) -> [RiscvRtlDebugLintWarning]:
+pub fn lint_riscv_rtl_debuggability_lines(
+    source: text, path: text, lines: [text]
+) -> [RiscvRtlDebugLintWarning]:
     var warnings: [RiscvRtlDebugLintWarning] = []
     if not _is_generated_riscv_core_vhdl(path):
         return warnings
@@ -33,7 +35,7 @@ pub fn lint_riscv_rtl_debuggability(source: text, path: text) -> [RiscvRtlDebugL
     val sidecar_proof_lane = _extract_json_string(sidecar, "proofLane")
     if sidecar_proof_lane != proof_lane:
         warnings.push(_warn("RTLDBG002", "ERROR", path, "sidecar proofLane does not match the VHDL proof-lane header", "regenerate the sidecar and VHDL header from the same shared debug metadata"))
-    val header_entries = _extract_source_map_entries(source)
+    val header_entries = _extract_source_map_entries_lines(lines)
     val sidecar_entry_count = _count_substring(sidecar, "\"signal\":\"")
     if header_entries.len() == 0 or sidecar_entry_count != header_entries.len():
         warnings.push(_warn("RTLDBG002", "ERROR", path, "sidecar/source-map entry counts do not match the VHDL header", "keep sourceMap entries in the JSON sidecar aligned with every -- source-map header line"))
@@ -64,7 +66,7 @@ pub fn lint_riscv_rtl_debuggability(source: text, path: text) -> [RiscvRtlDebugL
         if not manifest.contains("debug_output = \"{debug_output}\""):
             warnings.push(_warn("RTLDBG003", "ERROR", path, "manifest is missing debug output {debug_output}", "emit one debug_output entry per declared debug signal"))
             break
-        if not _has_output_port(source, debug_output):
+        if not _has_output_port_lines(lines, debug_output):
             warnings.push(_warn("RTLDBG003", "ERROR", path, "generated VHDL does not expose declared debug output {debug_output}", "align GeneratedCoreShellContract.debug_outputs with the emitted core ports"))
             break
 
@@ -118,6 +120,12 @@ pub fn lint_riscv_rtl_debuggability(source: text, path: text) -> [RiscvRtlDebugL
         warnings.push(_warn("RTLDBG102", "WARNING", path, "proof/testbench report markers do not expose enough post-failure context", "emit at least three stable failure-context report markers and keep them in the sidecar"))
 
     warnings
+
+pub fn lint_riscv_rtl_debuggability(
+    source: text, path: text
+) -> [RiscvRtlDebugLintWarning]:
+    """Compatibility adapter for callers that own only source text."""
+    lint_riscv_rtl_debuggability_lines(source, path, source.split("\n"))
 
 fn _warn(code: text, severity: text, path: text, message: text, hint: text) -> RiscvRtlDebugLintWarning:
     RiscvRtlDebugLintWarning(code: code, severity: severity, message: message, hint: hint, line_num: 1, file_path: path)
@@ -175,9 +183,8 @@ fn _extract_vhdl_header_value(source: text, prefix: text, suffix: text) -> text:
         return ""
     tail.slice(0, end)
 
-fn _extract_source_map_entries(source: text) -> [text]:
+fn _extract_source_map_entries_lines(lines: [text]) -> [text]:
     var entries: [text] = []
-    val lines = source.split("\n")
     for line in lines:
         val trimmed = line.trim()
         if trimmed.starts_with("-- source-map: "):
@@ -384,8 +391,7 @@ fn _source_map_contains(sidecar: text, signal: text, slice_text: text) -> bool:
     val object_text = tail.slice(0, object_end)
     object_text.contains("\"slice\":\"{slice_text}\"")
 
-fn _has_output_port(source: text, debug_output: text) -> bool:
-    val lines = source.split("\n")
+fn _has_output_port_lines(lines: [text], debug_output: text) -> bool:
     for line in lines:
         val trimmed = line.trim()
         if trimmed.starts_with("{debug_output}") and trimmed.contains(": out "):
