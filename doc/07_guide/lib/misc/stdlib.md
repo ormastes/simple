@@ -43,11 +43,14 @@ given backend (calling a spec-less pointer-returning `rt_*` can even crash — s
 `doc/08_tracking/bug/interp_missing_pointer_extern_nil_deref_sigsegv_2026-06-18.md`).
 The std aliases are stable, documented, and backed by registered intrinsics.
 
-**Enforcement:** the compiler's `raw_rt_access` lint (RAW-RT-001, default *warn*)
-flags any `extern fn rt_*` declared outside the privileged tiers (`src/lib`,
-`src/runtime`, `src/compiler`). Genuinely low-level modules (emulators, baremetal
-MMIO, crypto/protocol implementations) may opt out with a file-level
-`@runtime_intrinsics` / `#[runtime_intrinsics]` marker. See `doc/07_guide/app/lint.md`.
+**Enforcement:** the compiler's `raw_rt_access` lint (default *warn*) diagnoses
+raw declarations (`RAW-RT-001`), direct imports/calls (`RAW-RT-002`), and
+product-side aliases (`RAW-RT-003`). Provider privilege is narrow and comes
+from `scripts/check/no_direct_rt_allowlist.txt`; whole `src/lib` or
+`src/compiler` trees are not exempt. Genuinely low-level modules (emulators,
+baremetal MMIO, crypto/protocol implementations) may opt out with a file-level
+`@runtime_intrinsics` / `#[runtime_intrinsics]` marker. See
+`doc/07_guide/app/lint.md`.
 
 ---
 
