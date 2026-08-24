@@ -2924,6 +2924,27 @@ unchanged. Imported-module parsing remains independent. Snapshot projection and
 source-topology contracts were added but not executed under the user's
 no-verification instruction.
 
+### Bounded lint-cache reverse dependencies
+
+`lint_cache_store` replaced the live entry but appended its key to every new
+symbol bucket without removing old links or suppressing repeated dependencies.
+After U refreshes with D dependencies, one live scope could therefore retain
+O(U*D) reverse-index slots; symbol invalidation scanned those duplicates, and
+removing through one symbol left stale links in other buckets.
+
+The cache now treats reverse dependencies as live unique edges while retaining
+the public `Dict<text, [text]>` representation and caller-provided dependency
+list. Store computes unique old/new dependency sets, unlinks only old-minus-new
+buckets, and appends only new-minus-old buckets. Identical refreshes perform set
+work but allocate no replacement bucket arrays. Entry removal filters all of
+its named buckets and removes empty buckets; symbol invalidation detaches its
+bucket before walking a unique snapshot and cleans each removed entry's other
+links. Retained reverse-index memory is O(E) for E live unique scope-symbol
+edges rather than cumulative store history. Bucket filtering remains linear in
+the touched fanout and preserves key order. The cache is ephemeral, so arbitrary
+corruption from a pre-patch process is not migrated. No manual verification was
+run under the user's explicit no-verification instruction.
+
 ### Indexed no-allocation import closure
 
 The no-allocation dependency gate previously kept discovered paths in arrays.

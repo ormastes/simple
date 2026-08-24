@@ -624,3 +624,15 @@ membership expected O(V+E) with O(V) auxiliary ownership. Here path identity is
 the resolver-produced string; filesystem canonicalization, source scanning, and
 candidate probes are separate concerns. The index is ephemeral and has no cache
 invalidation or cross-request lifetime.
+
+### Exact reverse-index ownership
+
+Incremental caches with a forward entry map and array-valued reverse index own
+one unique reverse edge for every live `(entry, dependency)` pair. Replacing an
+entry applies an old/new dependency delta: remove old-only edges, retain the
+intersection without copying its buckets, and append new-only edges. Removal
+must unlink the entry from all dependency buckets and delete empty buckets.
+Invalidation snapshots and detaches its initiating bucket before cross-cleanup,
+so iteration never aliases a bucket being rewritten. This keeps public ordered
+array representation intact, bounds retained reverse-index memory by live
+edges, and avoids bucket allocation on identical refreshes.
