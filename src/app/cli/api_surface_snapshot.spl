@@ -80,38 +80,33 @@ export SNAPSHOT_ROOTS
 # ---------------------------------------------------------------------------
 
 fn _trim_space(s: text) -> text:
-    var result: text = s
-    val ws: [text] = [" ", "\t", "\r", "\n"]
-    var changed: bool = true
-    while changed:
-        changed = false
-        for w in ws:
-            if result.starts_with(w):
-                result = result.slice(w.len(), result.len())
-                changed = true
-            if result.ends_with(w):
-                result = result.slice(0, result.len() - w.len())
-                changed = true
-    return result
+    var start: i64 = 0
+    var end: i64 = s.len()
+    while start < end and _is_trim_space_byte(s.byte_at(start)):
+        start = start + 1
+    while end > start and _is_trim_space_byte(s.byte_at(end - 1)):
+        end = end - 1
+    if start == 0 and end == s.len(): return s
+    s.slice(start, end)
+
+fn _is_trim_space_byte(byte: i64) -> bool:
+    byte == 32 or byte == 9 or byte == 13 or byte == 10
 
 fn _split_comma(line: text) -> [text]:
     """Split a comma-separated list of export names."""
     var parts: [text] = []
-    var current: text = ""
+    var start: i64 = 0
     var i: i64 = 0
     while i < line.len():
-        val ch: text = line.slice(i, i + 1)
-        if ch == ",":
-            val t: text = _trim_space(current)
+        if line.byte_at(i) == 44:
+            val t: text = _trim_space(line.slice(start, i))
             if t.len() > 0:
-                parts = parts.push(t)
-            current = ""
-        else:
-            current = current + ch
+                parts.push(t)
+            start = i + 1
         i = i + 1
-    val t: text = _trim_space(current)
+    val t: text = _trim_space(line.slice(start, line.len()))
     if t.len() > 0:
-        parts = parts.push(t)
+        parts.push(t)
     return parts
 
 fn _parse_export_line(raw: text) -> [text]:
@@ -141,15 +136,6 @@ fn _module_key_for(file_path: text, repo_root: text) -> text:
         return file_path.slice(prefix.len(), file_path.len())
     return file_path
 
-fn _parent_dir(path: text) -> text:
-    """Return the directory part of a file path."""
-    var i: i64 = path.len() - 1
-    while i >= 0:
-        if path.slice(i, i + 1) == "/":
-            return path.slice(0, i)
-        i = i - 1
-    return ""
-
 # ---------------------------------------------------------------------------
 # Core snapshot logic
 # ---------------------------------------------------------------------------
@@ -165,7 +151,7 @@ fn collect_exports_from_file(file_path: text, module_key: text) -> [SnapshotEntr
             val names: [text] = _parse_export_line(trimmed)
             for name in names:
                 if name.len() > 0:
-                    entries = entries.push(SnapshotEntry {
+                    entries.push(SnapshotEntry {
                         module_key: module_key,
                         symbol_name: name,
                     })
@@ -187,7 +173,7 @@ fn collect_exports_from_dir(dir_path: text, repo_root: text) -> [SnapshotEntry]:
             val key: text = _module_key_for(full_path, repo_root)
             val file_entries: [SnapshotEntry] = collect_exports_from_file(full_path, key)
             for e in file_entries:
-                entries = entries.push(e)
+                entries.push(e)
     return entries
 
 export collect_exports_from_dir
@@ -195,17 +181,15 @@ export collect_exports_from_dir
 fn snapshot_modules(roots: [text], repo_root: text) -> SnapshotResult:
     """
     Enumerate exported public symbols for all roots.
-    Returns a SnapshotResult with a sorted, deduplicated entry list.
+    Returns a SnapshotResult with a sorted entry list.
     """
     var all_entries: [SnapshotEntry] = []
-    var seen_modules: [text] = []
 
     for root in roots:
         val dir_path: text = repo_root + "/" + root
         val new_entries: [SnapshotEntry] = collect_exports_from_dir(dir_path, repo_root)
         for e in new_entries:
-            all_entries = all_entries.push(e)
-        seen_modules = seen_modules.push(root)
+            all_entries.push(e)
 
     # Sort by (module_key, symbol_name) for determinism
     val sorted: [SnapshotEntry] = all_entries.sort_by(fn(a: SnapshotEntry, b: SnapshotEntry) -> i64:
@@ -222,7 +206,7 @@ fn snapshot_modules(roots: [text], repo_root: text) -> SnapshotResult:
 
     return SnapshotResult {
         entries: sorted,
-        module_count: seen_modules.len(),
+        module_count: roots.len(),
         symbol_count: sorted.len(),
     }
 
@@ -247,20 +231,22 @@ fn emit_sdn(result: SnapshotResult) -> text:
 
       ...
     """
-    var out: text = "[api_surface]\n"
-    out = out + "generated_by = api_surface_snapshot.spl\n"
-    out = out + "module_count = " + result.module_count.to_string() + "\n"
-    out = out + "symbol_count = " + result.symbol_count.to_string() + "\n"
+    var parts: [text] = [
+        "[api_surface]\n",
+        "generated_by = api_surface_snapshot.spl\n",
+        "module_count = " + result.module_count.to_string() + "\n",
+        "symbol_count = " + result.symbol_count.to_string() + "\n",
+    ]
 
     var last_module: text = ""
     for e in result.entries:
         if e.module_key != last_module:
-            out = out + "\n[module]\n"
-            out = out + "path = " + e.module_key + "\n"
+            parts.push("\n[module]\n")
+            parts.push("path = " + e.module_key + "\n")
             last_module = e.module_key
-        out = out + "symbol = " + e.symbol_name + "\n"
+        parts.push("symbol = " + e.symbol_name + "\n")
 
-    return out
+    return parts.join("")
 
 export emit_sdn
 
