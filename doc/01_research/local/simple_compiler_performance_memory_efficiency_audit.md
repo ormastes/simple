@@ -2805,9 +2805,10 @@ Definition, hover, completion, type-at, and signature-help queries separately
 parsed the target outline and then reread/resplit the same file for imports or
 cursor-line text. A local miss caused two reads and two splits; type-at and
 signature help also had their own explicit cursor read. The query engine now
-builds one request-local `OutlineSnapshot` containing lines, symbols, and
-imports. All target-file phases consume that snapshot, reducing the target to
-one read and one split without introducing persistent cache invalidation.
+builds one request-local `OutlineSnapshot` containing lines and symbols. A
+local hit returns without scanning or allocating imports; only an imported
+lookup lazily projects imports from the retained lines. This preserves one read
+and one split while avoiding an eager second scan on the common local-hit path.
 
 Local symbol order, duplicate import traversal, imported symbol order, grep
 fallback precedence and caps, 1-based lines, stdout, and exit behavior are
