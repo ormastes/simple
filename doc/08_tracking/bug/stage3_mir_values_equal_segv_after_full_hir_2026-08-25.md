@@ -107,3 +107,19 @@ The installed repository executable identified itself as a Rust bootstrap seed
 when asked to run the focused source spec and lint, so those invocations are
 rejected as acceptance evidence. Rebuilt Stage 2/3 evidence is required; the
 same failed Stage 3 command must not be rerun against unchanged source.
+
+### Cycle 2 result and final allowed fix cycle
+
+The rebuilt compiler at `a02d01a1d9` passed the old `eval_gt` frontier and
+continued through later functions, proving that typed arm rebinding corrected
+one real carrier failure. It then exited 139 at statement 0 of the adjacent
+`eval_gteq` nested enum match. HIR peak evidence improved slightly versus the
+control: tracked heap 1,111,057,002 versus 1,117,411,788 bytes; RSS 2,715,972
+versus 2,722,956 KiB; HWM 2,734,700 versus 2,742,140 KiB.
+
+The remaining enum path copied every `HirBlock` body into
+`enum_bodies: [HirBlock]`, then reread it after the same ANY-backed pushed-array
+boundary. The final allowed fix cycle removes that redundant composite array
+and obtains each body from the explicitly typed original `HirMatchArm` via the
+already retained primitive source index. This changes O(number-of-arms)
+composite copies to zero while preserving dispatch order and semantics.

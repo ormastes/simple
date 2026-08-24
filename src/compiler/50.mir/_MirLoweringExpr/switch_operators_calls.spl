@@ -2124,7 +2124,6 @@ impl MirLowering:
         var enum_binds: [[SymbolId]] = []
         var enum_bind_pos: [[i64]] = []
         var enum_arities: [i64] = []
-        var enum_bodies: [HirBlock] = []
         # Parallel to enum_discs: whether the arm's payload contains a nested
         # Enum/Literal sub-pattern (1/0), and the arm's index in `arms`, so
         # the deep payload walk (emit_enum_payload_deep) can re-read the
@@ -2257,7 +2256,6 @@ impl MirLowering:
                     enum_binds = enum_binds.push(enum_pat_binding_syms(epayload))
                     enum_bind_pos = enum_bind_pos.push(enum_pat_binding_positions(epayload))
                     enum_arities = enum_arities.push(enum_pat_arity(epayload))
-                    enum_bodies = enum_bodies.push(arm.body)
                     enum_variants = enum_variants.push(variant)
                     # Classify HERE, on the proven-good `epayload` binding —
                     # see the enum_deep_flags declaration comment. The scan is
@@ -2672,7 +2670,12 @@ impl MirLowering:
                             self.local_map[bind_syms[fi].id] = gl
                             self.bind_local(bind_syms[fi].id, gl)
                     fi = fi + 1
-            val arm_result = self.lower_block_expected(enum_bodies[ci], expected_type)
+            # Do not copy HirBlock composites through another pushed array:
+            # Stage-2 stores those elements through ANY and repeated enum
+            # matches eventually read a corrupted body carrier. Reuse the
+            # primitive source index and restore the original typed arm.
+            val body_arm: HirMatchArm = arms[enum_arm_srcidx[ci]]
+            val arm_result = self.lower_block_expected(body_arm.body, expected_type)
             var b_arm2 = self.builder
             # Guard: if the arm body already terminated (e.g. `return r`), emit
             # NOTHING more into this block. set_terminator would clobber the
