@@ -625,6 +625,7 @@ int8_t   rt_contains(int64_t collection, int64_t value);
 int64_t  rt_unwrap_or_self(int64_t value);
 int64_t  rt_unwrap_or_value(int64_t value, int64_t default_val);
 int64_t  rt_unwrap_or_trap(int64_t value);
+int64_t  rt_expect_or_trap(int64_t value, int64_t msg);
 
 /* Codegen-emitted entry points recovered 2026-08-21 -- see
  * doc/08_tracking/bug/c_runtime_missing_83_codegen_runtime_symbols_2026-08-21.md

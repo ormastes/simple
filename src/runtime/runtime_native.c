@@ -11690,6 +11690,44 @@ int64_t rt_unwrap_or_trap(int64_t value) {
     return value;
 }
 
+/* `.expect(msg)` on Option/Result: same Ok/Some-payload-or-trap semantics as
+ * rt_unwrap_or_trap above, but the trap prints the CALLER'S message instead of
+ * the fixed ".unwrap() called on None/Err" text. Cranelift emits a call to this
+ * exact name from codegen/instr/closures_structs.rs (the `"expect"` arm, which
+ * declare_function()s it as Import on demand) and runtime_sffi.rs lists it as
+ * RuntimeFuncSpec("rt_expect_or_trap", [I64, I64] -> [I64]) -- but the C
+ * runtime, the one the bootstrap/native lane actually links, defined it
+ * nowhere. That is the rt_unwrap_or_trap incident class exactly: an undefined
+ * symbol the native link tolerates, leaving a NULL GOT slot that SEGVs at the
+ * first `.expect(...)` call. Semantics transcribed from the Rust runtime's
+ * rt_expect_or_trap (value/objects.rs), including its non-enum passthrough and
+ * its arbitrary-user-enum "return self" fallback. */
+int64_t rt_expect_or_trap(int64_t value, int64_t msg) {
+    int64_t enum_id = rt_enum_id(value);
+    int64_t discriminant;
+    const uint8_t* text;
+    int64_t len;
+    if (enum_id < 0) return value;
+    discriminant = rt_enum_discriminant(value);
+    if (enum_id == SPL_OPTION_ENUM_ID) {
+        if (discriminant == 0 || discriminant == (int64_t)SPL_HASH_SOME) return rt_enum_payload(value);
+        if (discriminant != 1 && discriminant != (int64_t)SPL_HASH_NONE) return value;
+    } else if (discriminant == (int64_t)SPL_HASH_OK) {
+        return rt_enum_payload(value);
+    } else if (discriminant != (int64_t)SPL_HASH_ERR) {
+        return value;
+    }
+    text = rt_string_data(msg);
+    len = rt_string_len(msg);
+    if (text == NULL || len < 0) {
+        fprintf(stderr, "expect() called on Err/None\n");
+    } else {
+        fprintf(stderr, "%.*s\n", (int)len, (const char*)text);
+    }
+    fflush(stderr);
+    abort();
+}
+
 int64_t rt_option_some(int64_t payload) {
     return rt_enum_new(SPL_OPTION_ENUM_ID, (int32_t)SPL_HASH_SOME, payload);
 }
