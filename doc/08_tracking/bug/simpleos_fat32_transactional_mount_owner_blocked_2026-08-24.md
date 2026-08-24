@@ -31,17 +31,13 @@ Test-only filesystem constructors must never mint a live production seal.
    strand the mount while the caller drops its only close session.
 5. Atomic-replace capability is separately mutable global state and direct
    mutation adapters do not consume a mount-bound operation lease.
-6. `block_device_identity_owner_v1` now authenticates an exact device region,
-   but its seal is explicitly observational. Validation and FAT32 publication
-   are separate owner transactions. The registration holder can replace or
-   unmount the device after validation and before (or after) mount commit, so a
-   mount owner built only from the existing seal has a TOCTOU stale-device
-   race. The block-device owner needs a bounded, generation-bound mount pin:
-   `block_device_identity_pin_v1(seal)` must increment canonical pin state and
-   return an opaque consume-once pin lease; replace/unmount must return `Busy`
-   while pins exist; `block_device_identity_unpin_v1(lease)` must invalidate
-   copied leases and release exactly once. Pin capacity and nonce exhaustion
-   must fail closed and quarantine rather than wrap.
+6. The block-device identity owner now implements a bounded,
+   generation-and-region-bound pin lease issued only from current registration
+   authority. Live and indeterminate-release pins
+   make replace/unmount return `Busy`; successful release consumes the private
+   owner record and invalidates copied leases. The remaining blocker is moving
+   that opaque lease through the production `BlockDevice` adapter into the
+   canonical FAT32 mount owner; no existing FAT32 publication path owns it yet.
 
 ## Rejected draft
 
@@ -63,9 +59,9 @@ publication from an unpinned observational seal.
 
 1. Extend the storage handoff with an owner-issued opaque namespace identity and
    bind every production `BlockDevice` adapter to it.
-2. Add the bounded device pin/lease transition described above and require the
-   mount transaction to acquire the pin before probing. Rollback releases it;
-   committed mount state owns it until quiescent close.
+2. Move the implemented bounded device pin lease into the mount transaction
+   before probing. Rollback releases it; committed mount state owns it until
+   quiescent close. Do not reconstruct a lease from observational identity.
 3. Add a private successful-mount receipt that cannot be constructed by fixture
    constructors or field mutation.
 4. Route every mounted FAT32 operation through one bounded generational lease
