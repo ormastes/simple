@@ -105,3 +105,71 @@ fn parse_alloc_allowances(raw: text) -> McAllocDiagnosticConfig:
             continue
         out.push(McAllocAllowance(scope: scope, justification: why))
     McAllocDiagnosticConfig(allowances: out)
+
+# ============================================================================
+# Critical-mode toolchain allowances (2026-08-24)
+# ============================================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# Critical mode closes the startup seal automatically
+# (`noalloc_checker.steady_state_gate_active`), and the steady-state gate then
+# rejects every symbol that is not `is_steady_state_safe()`. The Simple
+# COMPILER, LOADER and INTERPRETER all allocate by construction -- they build
+# ASTs, HIR, symbol tables and module graphs whose size is a function of the
+# input program, which is exactly `AllocClass.Unbounded`. Under the
+# unconfigured gate none of the three can run under critical mode at all, so
+# critical mode could never be applied to a build that hosts its own
+# toolchain.
+#
+# This is the config change that permits it: critical mode now SHIPS with a
+# justified allowance covering the toolchain namespace, instead of requiring
+# every operator to hand-write `SIMPLE_MC_ALLOC_ALLOW` for it.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+# --------------------------------
+#  - It does NOT change `McAllocDiagnosticConfig.default()`, which stays empty:
+#    the unconfigured gate and `check_steady_state_gate` remain byte-identical,
+#    as `mission_critical_alloc_config_spec.spl` pins.
+#  - It does NOT add a profile, mode, severity dimension or env knob.
+#  - It does NOT widen the accepted `AllocClass` set.
+#  - Above all it grants NOTHING outside the `compiler.` namespace. The
+#    baremetal no-alloc consumer (`src/lib/nogc_async_mut_noalloc`, the tier
+#    whose whole purpose is the no-alloc guarantee) is untouched and stays
+#    hard-rejected -- that guarantee is real and has real dependents, so it is
+#    not widened to make the toolchain green.
+#
+# The three components the allowance names share one module namespace in this
+# tree -- `compiler.*` covers the compiler pipeline (layers 00-90), the loader
+# (`compiler.loader`, `src/compiler/99.loader`) and the interpreter
+# (`compiler.interp` / `compiler.frontend.core.interpreter`) -- so one
+# dot-boundary scope expresses exactly those three and nothing else. Listing
+# the same subtree three times would not narrow it.
+#
+# A symbol admitted here is still REPORTED, tagged `allowed[steady-state]`
+# with this justification, so an audit can enumerate every allocation a
+# critical-mode build tolerates.
+
+val MC_TOOLCHAIN_SCOPE = "compiler"
+
+# The critical-mode toolchain allowance set: allocation is permitted for the
+# self-hosted compiler, loader and interpreter, and for nothing else.
+fn mc_alloc_toolchain_allowances() -> McAllocDiagnosticConfig:
+    McAllocDiagnosticConfig(allowances: [
+        McAllocAllowance(
+            scope: MC_TOOLCHAIN_SCOPE,
+            justification: "self-hosted compiler/loader/interpreter: AST, HIR, symbol-table and module-graph growth is a function of the input program and cannot be bounded at build time; hosting the toolchain under critical mode requires it"
+        )
+    ])
+
+# Merge operator-supplied allowances on top of a base set. Both sides are
+# preserved: an operator entry never removes a base entry, and `mc_alloc_*`
+# already returns the FIRST matching justification, so a base allowance and a
+# narrower operator allowance cannot silently cancel each other.
+fn mc_alloc_merge(base: McAllocDiagnosticConfig, extra: McAllocDiagnosticConfig) -> McAllocDiagnosticConfig:
+    var out: [McAllocAllowance] = []
+    for a in extra.allowances:
+        out.push(a)
+    for a in base.allowances:
+        out.push(a)
+    McAllocDiagnosticConfig(allowances: out)

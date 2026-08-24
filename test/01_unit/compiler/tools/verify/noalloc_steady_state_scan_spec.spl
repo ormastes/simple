@@ -22,6 +22,13 @@ Audience: compiler and tooling engineers who maintain this spec.
 # passes the raw allowance STRING directly — no environment injection.
 
 use std.spec.*
+use compiler.semantics.noalloc_checker.{
+    NoallocCapabilityManifest, check_steady_state_gate_with_config
+}
+use compiler.common.mission_critical.alloc_diagnostic_config.{
+    mc_alloc_toolchain_allowances, mc_alloc_merge, mc_alloc_is_allowed,
+    parse_alloc_allowances, McAllocDiagnosticConfig
+}
 use compiler.tools.verify.noalloc_manifest_scan.{
     steady_state_scan_findings, format_steady_state_scan,
     steady_state_scan_rejected, steady_state_scan_enabled
@@ -81,3 +88,49 @@ describe "mission-critical steady-state scan wiring":
         val target = base[0].fn_name
         expect(steady_state_scan_rejected(steady_state_scan_findings(target + "="))).to_equal(
             steady_state_scan_rejected(base))
+
+describe "critical-mode toolchain allowance set":
+
+    it "permits allocation for the compiler, loader and interpreter":
+        step("Verify: critical mode ships an allowance covering compiler.*")
+        # @req: REQ-QUALITY-NoalManiScan-001
+        val cfg = mc_alloc_toolchain_allowances()
+        expect(mc_alloc_is_allowed(cfg, "compiler.driver.compile_module")).to_equal(true)
+        expect(mc_alloc_is_allowed(cfg, "compiler.loader.load_module")).to_equal(true)
+        expect(mc_alloc_is_allowed(cfg, "compiler.interp.eval_stmts")).to_equal(true)
+        expect(mc_alloc_is_allowed(cfg, "compiler.frontend.core.interpreter.eval")).to_equal(true)
+
+    it "grants nothing to the baremetal no-alloc tier":
+        step("Verify: nogc_async_mut_noalloc stays hard-rejected")
+        # @req: REQ-QUALITY-NoalManiScan-001
+        val cfg = mc_alloc_toolchain_allowances()
+        expect(mc_alloc_is_allowed(cfg, "nogc_async_mut_noalloc.mimalloc.alloc")).to_equal(false)
+        expect(mc_alloc_is_allowed(cfg, "bm_int_to_str")).to_equal(false)
+        # dot-boundary, never a bare textual prefix
+        expect(mc_alloc_is_allowed(cfg, "compiler_rust_seed_helper")).to_equal(false)
+
+    it "clears the real gate for a toolchain symbol while rejecting a baremetal one":
+        step("Verify: the allowance changes the gate outcome, not just a predicate")
+        # @req: REQ-QUALITY-NoalManiScan-001
+        val m = NoallocCapabilityManifest.new()
+        m.register("compiler.interp.eval_stmts", false, true, "")
+        m.register("nogc_async_mut_noalloc.mimalloc.alloc", false, true, "")
+        val bare = check_steady_state_gate_with_config(
+            m, ["compiler.interp.eval_stmts", "nogc_async_mut_noalloc.mimalloc.alloc"],
+            McAllocDiagnosticConfig.default())
+        expect(bare.len()).to_equal(2)
+        val tool = check_steady_state_gate_with_config(
+            m, ["compiler.interp.eval_stmts", "nogc_async_mut_noalloc.mimalloc.alloc"],
+            mc_alloc_toolchain_allowances())
+        expect(tool.len()).to_equal(1)
+        expect(tool[0].fn_name).to_equal("nogc_async_mut_noalloc.mimalloc.alloc")
+
+    it "merges operator allowances on top without dropping the base":
+        step("Verify: SIMPLE_MC_ALLOC_ALLOW adds to, never replaces, the shipped set")
+        # @req: REQ-QUALITY-NoalManiScan-001
+        val merged = mc_alloc_merge(
+            mc_alloc_toolchain_allowances(),
+            parse_alloc_allowances("bm_int_to_str=audited baremetal formatter"))
+        expect(mc_alloc_is_allowed(merged, "compiler.interp.eval_stmts")).to_equal(true)
+        expect(mc_alloc_is_allowed(merged, "bm_int_to_str")).to_equal(true)
+        expect(mc_alloc_is_allowed(merged, "nogc_async_mut_noalloc.mimalloc.alloc")).to_equal(false)

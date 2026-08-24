@@ -39,7 +39,9 @@ use compiler.semantics.noalloc_checker.{
 # ("Unexpected token: expected expression, found Dedent" on its multi-line
 # `export use` blocks) — a pre-existing defect, filed separately, that
 # `35.semantics/noalloc_checker.spl:47` already routes around the same way.
-use compiler.common.mission_critical.alloc_diagnostic_config.{parse_alloc_allowances}
+use compiler.common.mission_critical.alloc_diagnostic_config.{
+    parse_alloc_allowances, mc_alloc_toolchain_allowances, mc_alloc_merge
+}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk}
 use std.nogc_sync_mut.io.file_ops.{file_read}
 
@@ -235,13 +237,22 @@ fn steady_state_scan_findings(raw_allowances: text) -> [SteadyStateFinding]:
     Takes the RAW STRING, not the environment: the env read stays in the
     caller, preserving `alloc_diagnostic_config.spl`'s stated discipline (no
     module-level state, no env access below the entry point) and letting a
-    spec drive this without injecting environment."""
+    spec drive this without injecting environment.
+
+    The BASE config is critical mode's shipped toolchain allowance set
+    (`mc_alloc_toolchain_allowances`), which permits allocation in the
+    `compiler.*` namespace -- the self-hosted compiler, loader and interpreter
+    -- and nothing else; `raw_allowances` merges on top. Symbols under
+    `src/lib/nogc_async_mut_noalloc` are outside that namespace and stay
+    hard-rejected."""
     val scanned = scan_noalloc_functions()
     val manifest = _manifest_from_scan(scanned)
     var names: [text] = []
     for entry in scanned:
         names.push(entry.name)
-    steady_state_findings(manifest, names, parse_alloc_allowances(raw_allowances))
+    val config = mc_alloc_merge(
+        mc_alloc_toolchain_allowances(), parse_alloc_allowances(raw_allowances))
+    steady_state_findings(manifest, names, config)
 
 fn format_steady_state_scan(findings: [SteadyStateFinding]) -> [text]:
     """Format every finding — allowed ones included. An allowance suppresses
