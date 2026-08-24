@@ -1602,3 +1602,6 @@ mutex, hash, or string lookup to each call.
   whose open object identity is bound to the admitted artifact digest.
 - [ ] Make the verifier-minted receipt/token unforgeable to ordinary Simple
   source and then narrow the generated wrapper's unsafe region.
+- [x] Make legacy integer calls fail closed instead of fabricating zero for an
+  invalid handle, missing symbol, or unsupported arity; retain cached slots as
+  the no-lookup hot path.

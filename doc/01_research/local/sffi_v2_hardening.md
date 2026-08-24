@@ -2776,3 +2776,11 @@ pathname rather than consuming a platform-minted immutable handle bound to the
 artifact digest. Identity checks and symbol resolution are one-time O(n)
 admission work; cached calls retain their existing O(argument-count) path with
 no hashing, signature verification, pathname lookup, or symbol lookup added.
+
+Legacy `DynLib.call0` through `call4` and `call_n` no longer turn an invalid
+handle, unresolved symbol, or unsupported arity into integer zero. They retain
+their return type for compatibility and panic with a typed SFFI diagnostic on
+bridge failure, while a legitimate foreign zero remains a legitimate result.
+The valid legacy path adds one predictable handle check but already pays
+per-call `dlsym` and string lookup; performance-sensitive code must use the
+cached slot family, whose call path is unchanged.
