@@ -916,8 +916,45 @@ impl MirLowering:
                                             vulkan_u32_initializer = true
                                         case _:
                                             ()
+                        # An explicit CONTAINER annotation (`Dict<K, V>`,
+                        # `[T]`) outranks the initializer's inferred type for
+                        # EVERY initializer kind, not just a matching one. The same preference
+                        # already existed in the `local_is_runtime_dict` arm
+                        # below with the same justification (Bug #189), but it
+                        # was unreachable whenever the initializer inferred to
+                        # something else -- and an OPTIONAL-returning
+                        # initializer infers to `Tuple`, which is how Option is
+                        # represented in MIR. So `val map: Dict<text, any> =
+                        # f(x)` where `f` returns `any?` fell into the
+                        # `local_is_tuple` arm and took `Tuple` as the
+                        # binding's type, discarding the annotation entirely.
+                        #
+                        # Measured, both sides of a one-character pair (`-> any`
+                        # vs `-> any?`), printed from the running compiler:
+                        #   -> any   init=I64    is_tuple=false  eff=Dict(...)   builds, runs
+                        #   -> any?  init=Tuple  is_tuple=true   eff=Tuple       #143, no binary
+                        #
+                        # Downstream that is fatal rather than merely imprecise:
+                        # `local_is_runtime_dict` tests the MIR local's type, so
+                        # a Tuple-typed binding is not a dict, `receiver_is_dict`
+                        # stays false, `.keys()` never reaches `rt_dict_keys`,
+                        # and the for-in sees a non-array iterable -- reported as
+                        # "#143 not supported yet", a feature-gap message for
+                        # what is actually a lost type.
+                        # doc/08_tracking/bug/for_in_optional_initialized_local_loses_collection_type_2026-08-24.md
+                        val annotated_is_dict_pre = match mir_type.kind:
+                            case MirTypeKind.Dict(_, _): true
+                            case _: false
+                        val annotated_is_array_pre = match mir_type.kind:
+                            case MirTypeKind.Array(_, _): true
+                            case MirTypeKind.Slice(_): true
+                            case _: false
                         val effective_type = if vulkan_u32_initializer:
                             init_mir_type_value
+                        else if let_type != nil and annotated_is_dict_pre and not self.local_is_runtime_dict(init_local):
+                            mir_type
+                        else if let_type != nil and annotated_is_array_pre and not self.local_is_runtime_array(init_local):
+                            mir_type
                         else if self.local_is_runtime_array(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_runtime_dict(init_local):

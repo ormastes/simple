@@ -124,3 +124,119 @@ to learn something the error should have printed.
   runs after `lower_to_mir`, so the NLL false positive in
   `nll_mut_borrow_of_local_false_positive_at_return_2026-08-24.md` is queued
   behind it and has never yet executed on this closure.
+
+## 2026-08-24 (later) — FIXED in part, and my attribution above was WRONG
+
+**Correction first, because it is the important part.** The section above says
+"the declared annotation is discarded when the initializer's type is optional"
+and then attributes **30 of 32** MCP blockers to it. The first half is true and
+is now proven at the instruction level. **The attribution is false.** The 30
+sites do not carry an annotation at all:
+
+```
+src/lib/common/json/object_ops.spl:83   val map = json_to_object(obj)      # no annotation
+src/lib/common/json/array_ops.spl:32    val list = json_to_array(arr)      # no annotation
+```
+
+Only **3** bindings in `object_ops.spl` (lines 26, 66, 310) were annotated
+`Dict<text, any>`, and those three are not the ones the failing `for-in` loops
+read. So the annotation-discard defect, fixed on its own, clears **0 of 32**. I
+read "the file has annotated bindings of this shape" off the wrong lines and did
+not check the ones the loops actually use.
+
+### What the mechanism actually is (measured, both sides of a one-character pair)
+
+The `[let]` probe printed from the running compiler, for
+`val map: Dict<text, any> = f(obj)`:
+
+| `f`'s return | init MIR type | `is_tuple` | effective type |
+|---|---|---|---|
+| `-> any` | `I64` | false | `Dict(Tuple,I64)` — annotation kept |
+| `-> any?` | **`Tuple`** | **true** | **`Tuple`** — annotation discarded |
+
+**An OPTIONAL is represented as `Tuple` in MIR.** In
+`50.mir/mir_lowering_stmts.spl`, the early-`Let` `effective_type` chain prefers
+the initializer's inferred type for array/str/float/bool/**tuple** initializers,
+so an optional-returning initializer's `Tuple` beat the explicit `Dict`
+annotation. The chain already contained exactly the right guard — "when an
+explicit `Dict<K,V>` annotation is present, prefer it" (Bug #189) — but it lived
+INSIDE the `local_is_runtime_dict` arm, so it could only fire when the
+initializer was already a dict, i.e. never in the case that needed it.
+
+Downstream that is fatal rather than imprecise: `local_is_runtime_dict` tests the
+MIR local's type, so a `Tuple`-typed binding is not a dict, `receiver_is_dict`
+stays false, `.keys()` never reaches `rt_dict_keys`, and the `for-in` sees a
+non-array iterable — reported as "#143 not supported yet", a feature-gap message
+for what is actually a lost type. That is why `MethodResolution::Unresolved`
+appeared in the earlier probe.
+
+### The fix
+
+Hoist the annotation preference to the FRONT of the chain so it applies for every
+initializer kind, and generalise it from `Dict` to containers:
+
+```
+else if let_type != nil and annotated_is_dict_pre  and not self.local_is_runtime_dict(init_local):  mir_type
+else if let_type != nil and annotated_is_array_pre and not self.local_is_runtime_array(init_local): mir_type
+```
+
+Deliberately NOT keyed on `keys`/`values`, on `Dict` alone, or on the initializer
+being optional — the rule is "an explicit container annotation outranks the
+initializer's inferred type", which is the same principle Bug #189 already
+recorded, applied where it was unreachable.
+
+### The other half: the library was missing real type information
+
+With the compiler fixed, the 30 unannotated sites still fail, because there is no
+annotation to prefer and the payload type is `any`. Those bindings were annotated
+to match what **three sibling functions in the same file already do**:
+
+```
+val map: Dict<text, any> = json_to_object(obj)     # 9 sites + 2 map1/map2
+val list: [any] = json_to_array(arr)               # 18 sites
+```
+
+This is not routing around the compiler: the annotation is genuine type
+information the callers omitted, the file's own prevailing style already carries
+it, and **without the compiler fix adding it would have changed nothing** — it
+would have been discarded exactly as the three existing ones were.
+
+### Measured result
+
+`native-build src/app/mcp/main.spl`, `[i143]` probe count at
+`mir_lowering_stmts.spl`:
+
+| state | sites |
+|---|---|
+| before | **32** |
+| compiler fix alone | 32 (fires on 3 bindings; none feed a failing loop) |
+| + `Dict` annotations | 24 (all 8 `MethodCall` `.keys()` sites cleared) |
+| + array rule + `[any]` annotations | **15** |
+
+Remaining 15: 12 `NamedVar`/`I64`, 2 `Field`/`I64`
+(`src/app/mcp/main_lazy_assistant.spl:20` — the field-receiver hole
+`fb7e76c489a` left open), 1 `NamedVar`/`Tuple`. The 12 are unannotated locals
+(`name`, `lines`, `nested`, ...) in other modules; their spans are empty so they
+were not localized.
+
+### Verified
+
+Seven fixtures build, link and RUN with correct output on a clean worktree with a
+fresh `SIMPLE_CACHE_SCOPE`: the one-character pair (`pass=2` / `fail=2`, the
+latter previously failing); an annotated dict literal plus an EMPTY
+`Dict<text, S>` literal (Bug #189's shape — `n=5 m=0 elen=0`); a dict plus a
+plain `[i64]` array loop (`n=1 s=6`); and the three fixtures from earlier in this
+chain (`v=10`, `s=hello n=7 len=5`, `x=a z=c k=3 zlen=1`), so nothing regressed.
+
+### NOT verified
+
+- **No test-suite run.** Verification is these seven fixtures plus the MCP site
+  count. The `effective_type` chain is a hot path and a broad behaviour change to
+  it deserves the suite; that was not run.
+- The general hole is NOT closed: `val x = f()` with no annotation, where `f`
+  returns `T?`, still loses `T`. Unwrapping the Option here yields `any`, which
+  is not a container either, so those 12 need real inference or source
+  annotations.
+- MCP still does not produce a binary, and clearing #143 entirely would not be
+  enough on its own: `borrow_check()` runs after `lower_to_mir`, so the NLL false
+  positive is still queued behind it and has never executed on this closure.
