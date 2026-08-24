@@ -1494,6 +1494,12 @@ before versus corrected samples of 43.81 s / 14,632 KiB and 57.09 s /
 14,504 KiB. Profile and bring the identical idle-host run within 5% wall time
 and 1 MiB RSS before marking the tool improvement performance-safe.
 
+The scanner performance blocker is resolved by matching only the per-file raw
+symbol set and skipping files/lines that cannot contain a raw call. The
+identical corrected scan is 27.18 s / 14,540 KiB versus the same-tree old
+scanner at 40.85 s / 14,132 KiB, retaining all 289 newly visible rows. Continue
+from the corrected 21,556-call baseline.
+
 The LLVM target module now scopes both normalized target-policy reads without
 changing provider cardinality. Optimizer findings remain 22 and paired analyzer
 evidence is 5.94 s / 271,172 KiB before versus 4.93 s / 270,708 KiB after.

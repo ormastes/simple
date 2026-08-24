@@ -2344,6 +2344,13 @@ Performance is not accepted: the same-tree old scanner measured 40.85 s /
 14,504 KiB. The open performance bug requires profiling and an identical idle-
 host comparison. Signed/admitted evidence remains zero.
 
+The performance follow-up compiles a per-file raw-symbol regex, skips files
+without raw declarations/imports, skips body lines without `(`, and computes
+the relative path once. The identical corrected scan now completes in 27.18 s /
+14,540 KiB with exactly the same corrected totals. This is about 33% faster
+than the same-tree old scanner's 40.85 s, with a 408 KiB RSS increase. The
+performance blocker is resolved; signed/admitted evidence remains zero.
+
 ## Cranelift backend policy boundary
 
 The Cranelift adapter's unsupported-MIR and no-mangle reads now use minimal

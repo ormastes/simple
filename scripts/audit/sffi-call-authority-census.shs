@@ -105,6 +105,15 @@ xargs -0 -r -n 200 perl -0ne '
         }
     }
 
+    # Compile the file-local raw symbol set once. Most files have no raw
+    # declarations/imports and need no function-body scan at all; files that
+    # do should match only candidate foreign names rather than parsing every
+    # ordinary call and rejecting it through a hash lookup afterward.
+    next unless %raw;
+    my $raw_names = join("|", map { quotemeta($_) } sort keys %raw);
+    my $raw_call_re = qr/(?<![A-Za-z0-9_])($raw_names)(?![A-Za-z0-9_])\s*\(/;
+    (my $relative = $file) =~ s/^\Q$ENV{SFFI_ROOT}\E\///;
+
     for (my $i = 0; $i <= $#lines; $i++) {
         my $header = $code_lines[$i];
         next unless $header =~ /^(\s*)(?:(?:pub|static)\s+)*(?:fn|me)\s+[A-Za-z_]\w*/;
@@ -147,13 +156,12 @@ xargs -0 -r -n 200 perl -0ne '
                 $lexical_indent = $indent;
                 next;
             }
+            next if index($body, "(") < 0;
             my $code = $body;
-            while ($code =~ /(?<![A-Za-z0-9_])([A-Za-z_]\w*)\s*\(/g) {
+            while ($code =~ /$raw_call_re/g) {
                 my $name = $1;
-                next unless $raw{$name};
                 my $state = $fn_unsafe ? "function_unsafe" :
                     ($lexical_indent >= 0 ? "lexical_unsafe" : "missing");
-                (my $relative = $file) =~ s/^\Q$ENV{SFFI_ROOT}\E\///;
                 print join("\t", $relative, $j + 1, $name, $state), "\n";
             }
         }
