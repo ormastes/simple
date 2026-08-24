@@ -2777,3 +2777,24 @@ three splits/enclosure maps in pass one and another split in pass two. Public
 source APIs remain one-split compatibility adapters. Source/line collector and
 full warning payload parity contracts were added but not executed under the
 user's no-verification instruction.
+
+### Linear signature parsing and scope-gated MIR snapshots
+
+The const-reference lint parsed a function header by appending every character
+to a growing parameter fragment and then to a growing identifier. Under
+immutable/value-semantics strings, a long single-line signature could therefore
+copy a cumulative O(H^2) bytes. The parser now tracks comma boundaries and
+identifier end offsets, materializing each substring once. Nested `()`, `[]`,
+and `<>` comma behavior, `mut` exclusions, parameter identities, and finding
+order are unchanged; nested-type and long-name contracts were added but not
+executed under the user's no-verification instruction.
+
+`run_typed_pass_on_module` also constructed a full function snapshot before it
+knew the selected pass scope. Whole-module passes such as inlining, outlining,
+vectorization, pattern idioms, and target narrowing never consumed that array,
+so every invocation paid O(function_count) setup and retained the function
+payload slots unnecessarily. Snapshot construction now occurs only in
+function-pass match arms. Those arms retain the original one-snapshot,
+fresh-pass-per-function behavior; module arms receive the module exactly once.
+Existing typed module-dispatch contracts were not rerun under the user's
+no-verification instruction.
