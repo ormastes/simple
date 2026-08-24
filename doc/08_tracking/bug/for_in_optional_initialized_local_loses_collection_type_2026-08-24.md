@@ -346,3 +346,108 @@ class closed, the inference hole untouched".
   `borrow_check()` runs after `lower_to_mir`, so the NLL false positive in
   `nll_mut_borrow_of_local_false_positive_at_return_2026-08-24.md` is still queued
   behind it and has never executed on this closure.
+
+## 2026-08-25 — the hole's ROOT is in the PARSER, and closing it does NOT clear the 12
+
+The general hole named above — `val x = f()` unannotated, `f -> T?`, loses `T` —
+is real, is now fixed for every DECLARED payload, and **does not account for the
+remaining MCP blockers**. Both halves matter; the second is the one that stops a
+wrong conclusion.
+
+### It is not an unwrap problem. `T?` never carried `T` in the first place.
+
+The working hypothesis was that unwrapping an optional yields `any` instead of
+the payload. That is not what happens. Probing the HIR signature pass on
+`fn optarr(x: i64) -> [i64]?` printed:
+
+```
+[reg] fn=optarr parser_kind=TypeKind::Named((Option, []))     <- ZERO type arguments
+      ret_lowered=HirTypeKind::Optional(HirTypeKind::Any)
+```
+
+The payload is gone at the **parser**, before HIR runs at all.
+`parser_absorb_optional_suffix` (`10.frontend/core/parser.spl:522`) absorbed the
+`?` tokens and then returned the bare, argless `TYPE_OPTION` **unconditionally,
+discarding its `base` argument** — for every `T`, not just containers. The four
+`Option<i64|f64|text|bool>` spellings survived only because the explicit
+`Option<T>` branch hands in a dedicated tag; the `T?` suffix form lost
+everything.
+
+### Fix, in three parts
+
+1. **Parser (the root).** `parser_absorb_optional_suffix` now preserves the
+   payload: dedicated tags for `i64`/`f64`/`text`/`bool`, the existing
+   `TYPE_OPTION_GENERIC` registry (dedup'd by inner tag, already used for a
+   *named* inner) for everything else, and the old bare `TYPE_OPTION` as the
+   fallback when the registry is full or the base is already an option tag. It
+   can only ever preserve MORE than before, never less. `-> [i64]?` now parses to
+   `Named("Option", [Array(i64)])` and lowers to `Optional(Array(Int(64,true)))`.
+
+2. **`Infer` is not an annotation.** `val x = f()` does **not** arrive with a nil
+   annotation — it arrives as `Some(Type(kind: TypeKind.Infer))`. A bare
+   `type_.?` test therefore reads "annotated" for every inferred binding, which
+   is why the first two attempts at the consumer never fired. Added
+   `parser_type_kind_is_infer` beside its `parser_type_kind_*` siblings and both
+   `val` arms now treat `Infer` as unannotated — the principle MIR already
+   records as Bug #138 ("a non-nil-but-Infer-defaulted `type_` is as unreliable
+   as a nil one"), made available to HIR.
+
+3. **Payload adoption.** A by-NAME registry `fn_optional_container_returns`,
+   populated in the same signature pass and for the same reason as
+   `fn_tuple_returns`, is consumed by both `val` arms: no annotation + an
+   initializer calling a container-behind-optional function => the binding adopts
+   the payload type.
+
+**Part 1 is fully general; part 3 is deliberately container-only.** Adopting the
+payload as the binding's type for EVERY optional return would change what `.?`
+and `unwrap()` see on hundreds of bindings, and there is no test lane that
+native-builds, so no suite would catch a regression. Containers are where the
+loss is fatal rather than merely imprecise. Recorded rather than silently scoped.
+
+### Verified
+
+| fixture | before | after |
+|---|---|---|
+| `fn optarr() -> [i64]?`, `val xs = optarr(1)`, `for v in xs` | build FAILS (#143) | builds, runs, `s=12` |
+| `fn optdict() -> Dict<text,i64>?`, `val m = ...`, `for k in m.keys()` | build FAILS | builds, runs, `n=6` |
+| `fn optany() -> any?` | build FAILS | build FAILS — **correct** |
+
+The third is not a residual defect: `any?`'s payload genuinely IS `any`, which is
+not a container, so there is nothing to recover. A compiler that "fixed" it would
+be inventing a type.
+
+### It does NOT clear the remaining 12, and that answers the open question
+
+The natural hypothesis was that the 12 uncharacterized `NamedVar` residuals were
+this defect all along. **They are not.** With the fix in place, on
+`native-build src/app/mcp/main.spl`:
+
+```
+infer-hit count = 0        # the payload-adoption path never fires in the MCP closure
+#143 sites     = unchanged
+```
+
+Zero, because `json_to_object` and `json_to_array` are declared `-> any?`
+(`src/lib/common/json/types.spl:251,267`). Their payload is `any`. There is no
+container type in the signature to preserve, so preserving it perfectly changes
+nothing. That is also why the hand-written `Dict<text, any>` / `[any]`
+annotations recorded earlier remain the right compensation: they supply
+information the signature genuinely does not carry.
+
+**The cause of the 12 therefore remains uncharacterized**, exactly as it was.
+They are not this defect, and they are not the `split()`/text-iteration shapes
+either (those reduce to fixtures that build and run). Whoever picks them up
+starts from an open question, not from this fix.
+
+### NOT verified
+
+- Still no test lane that native-builds, so the evidence is a 16-program
+  differential plus 9 fixtures — nothing broader.
+- Part 1 changes the type TAG for every `T?` in the tree from a single shared
+  `TYPE_OPTION` to distinct per-payload tags. Anything comparing option type tags
+  for equality would see a behaviour change. Nothing in the corpus did, but the
+  corpus is 16 programs.
+- MCP still produces no binary. Clearing #143 entirely would still not be enough:
+  `borrow_check()` runs after `lower_to_mir`, so the NLL false positive in
+  `nll_mut_borrow_of_local_false_positive_at_return_2026-08-24.md` remains queued
+  behind it and has never executed on this closure.

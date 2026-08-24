@@ -529,6 +529,34 @@ fn parser_absorb_optional_suffix(base: i64) -> i64:
             kind = par_kind_get()
         else:
             break
+    # `T?` used to return the bare, argless TYPE_OPTION here for EVERY T,
+    # discarding the payload the programmer wrote. That is the root of the
+    # "#143 for-in over non-array iterables" class: `fn f() -> [i64]?` parsed
+    # to `Named("Option", [])`, so `val xs = f()` had no container fact to
+    # inherit, the binding took the Option's MIR representation (a Tuple), and
+    # a later `for x in xs` was rejected as an unsupported iterable -- a
+    # feature-gap message for a type the signature fully declared.
+    #
+    # Preserve the payload the same way the explicit `Option<T>` branch below
+    # already does for a named inner: register the inner tag in the
+    # TYPE_OPTION_GENERIC registry (dedup'd by inner tag, mirroring
+    # Dict<K,V>/Result<T,E>/tuple/array-element). Falls back to the
+    # old bare TYPE_OPTION when the registry is full or the base is already an
+    # option tag, so this can only ever preserve MORE than before, never less.
+    # doc/08_tracking/bug/for_in_optional_initialized_local_loses_collection_type_2026-08-24.md
+    # Already an optional tag (`Option<T>?`): absorbing another `?` is
+    # idempotent, and re-registering would churn the dedup registry.
+    if base == TYPE_OPTION:
+        return TYPE_OPTION
+    if base == TYPE_OPTION_I64 or base == TYPE_OPTION_F64:
+        return base
+    if base == TYPE_OPTION_TEXT or base == TYPE_OPTION_BOOL:
+        return base
+    if is_option_generic_tag(base):
+        return base
+    val absorbed_opt_tag = option_generic_type_register(base)
+    if absorbed_opt_tag >= 0:
+        return absorbed_opt_tag
     TYPE_OPTION
 
 fn parser_parse_type() -> i64:

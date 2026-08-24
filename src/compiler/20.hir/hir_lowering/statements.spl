@@ -463,15 +463,41 @@ impl HirLowering:
             # dereferenced it behind only a tag==HEAP && !=0 shape test -- SIGSEGV at
             # 0xf198715900000000 in `substitute_stmt` under `canonicalize_template`.
             # Keep the bare value for the HIR node and the Option for the symbol table.
-            val v_hir_type_bare: HirType = if v_type.?:
-                self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span))
-            else:
-                nil
-            val v_hir_type: HirType? = if v_type.?:
-                Some(v_hir_type_bare)
-            else:
-                nil
             val v_hir_init = self.lower_hir_expr(v_init)
+            # No annotation + an initializer that CALLS a function declared to
+            # return a container behind an optional (`-> [T]?`, `-> Dict<K,V>?`)
+            # => adopt the payload type. Without this the binding inherits the
+            # Option's MIR representation, which is a Tuple, so every container
+            # fact the signature declared is lost and a later `for x in xs` is
+            # rejected as "#143 for-in over non-array iterables" -- a
+            # feature-gap message for a fully-declared type. Measured: a
+            # 6-line fixture whose function returns `[i64]?` failed to build
+            # with no annotation and built+ran with one.
+            # doc/08_tracking/bug/for_in_optional_initialized_local_loses_collection_type_2026-08-24.md
+            # `val x = f()` arrives as Some(Type(Infer)), NOT nil, so a bare
+            # `v_type.?` reads "annotated" for every inferred binding and the
+            # payload inference below would never run.
+            val v_has_annot = v_type.? and not parser_type_kind_is_infer((v_type ?? Type(kind: TypeKind.Infer, span: s.span)).kind)
+            val v_inferred_payload: HirType? = if v_has_annot:
+                nil
+            else:
+                val v_callee = self.td_init_callee_name(v_hir_init)
+                if v_callee != "" and self.fn_optional_container_returns.has(v_callee):
+                    Some(self.fn_optional_container_returns[v_callee])
+                else:
+                    nil
+            val v_hir_type_bare: HirType = if v_has_annot:
+                self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span))
+            elif v_inferred_payload.?:
+                v_inferred_payload ?? nil
+            else:
+                nil
+            val v_hir_type: HirType? = if v_has_annot:
+                Some(v_hir_type_bare)
+            elif v_inferred_payload.?:
+                v_inferred_payload
+            else:
+                nil
             val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_hir_type, s.span, Visibility.Private, false, nil)
             self.try_register_local_struct_type(v_symbol, v_init)
             self.try_register_local_tuple_type(v_symbol, v_init)
@@ -612,15 +638,32 @@ impl HirLowering:
                 # dereferenced it behind only a tag==HEAP && !=0 shape test -- SIGSEGV at
                 # 0xf198715900000000 in `substitute_stmt` under `canonicalize_template`.
                 # Keep the bare value for the HIR node and the Option for the symbol table.
-                val hir_type_bare: HirType = if type_.?:
-                    self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
-                else:
-                    nil
-                val hir_type: HirType? = if type_.?:
-                    Some(hir_type_bare)
-                else:
-                    nil
                 val hir_init = self.lower_hir_expr(init)
+                # See the sibling fast-path arm: no annotation + an initializer
+                # that CALLS a container-behind-optional function adopts the
+                # payload type. Both arms carry it because which one a `val`
+                # takes is lane-dependent -- that is why the fast path exists.
+                val has_annot = type_.? and not parser_type_kind_is_infer((type_ ?? Type(kind: TypeKind.Infer, span: s.span)).kind)
+                val inferred_payload: HirType? = if has_annot:
+                    nil
+                else:
+                    val vm_callee = self.td_init_callee_name(hir_init)
+                    if vm_callee != "" and self.fn_optional_container_returns.has(vm_callee):
+                        Some(self.fn_optional_container_returns[vm_callee])
+                    else:
+                        nil
+                val hir_type_bare: HirType = if has_annot:
+                    self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
+                elif inferred_payload.?:
+                    inferred_payload ?? nil
+                else:
+                    nil
+                val hir_type: HirType? = if has_annot:
+                    Some(hir_type_bare)
+                elif inferred_payload.?:
+                    inferred_payload
+                else:
+                    nil
                 val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, Visibility.Private, false, nil)
                 HirStmtKind.Let(symbol, hir_type_bare, hir_init)
 

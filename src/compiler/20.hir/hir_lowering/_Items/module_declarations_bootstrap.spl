@@ -136,6 +136,18 @@ impl HirLowering:
                     for parser_tuple_elem in parser_tuple_elems:
                         fn_ret_tuple_elems.push(self.lower_type(parser_tuple_elem))
                     self.fn_tuple_returns[name] = fn_ret_tuple_elems
+                # Same capture, same pass, for a CONTAINER payload behind an
+                # optional return (`-> [T]?`, `-> Dict<K,V>?`). Without this a
+                # caller writing `val xs = f()` with no annotation loses every
+                # container fact: the binding inherits the Option's MIR
+                # representation, which is a Tuple, and a later `for x in xs`
+                # is reported as "#143 for-in over non-array iterables" -- a
+                # feature-gap message for a type the signature fully declared.
+                # doc/08_tracking/bug/for_in_optional_initialized_local_loses_collection_type_2026-08-24.md
+                val fn_ret_lowered = self.lower_type(fn_return_type)
+                val fn_ret_payload = _hir_optional_container_payload(fn_ret_lowered)
+                if fn_ret_payload.?:
+                    self.fn_optional_container_returns[name] = fn_ret_payload ?? fn_ret_lowered
             self.symbols.define(name, SymbolKind.Function, fn_type, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 

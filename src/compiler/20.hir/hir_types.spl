@@ -705,5 +705,52 @@ export ScopeId, Scope, ScopeKind, SymbolTable
 export HirType, HirTypeKind
 export DimExpr, DimExprKind
 export DeviceType, MemorySpace, LayerType, ParamShape
+
+# ============================================================================
+# Optional payload accessor
+# ============================================================================
+
+@unsafe(reason: "raw enum discriminant probe; -1 is the not-an-enum sentinel", capabilities: [ffi])
+extern fn rt_enum_discriminant(value: HirTypeKind) -> i64
+
+# Payload of an `Optional` whose inner type is a CONTAINER (Dict/Array/Slice),
+# else nil.
+#
+# Discriminant-guarded before the `match`, the same idiom every
+# `parser_type_kind_*` accessor uses: a qualified-arm match against an enum
+# value built through a different import spelling of the same module silently
+# falls to the wildcard on some lanes, and both callers of this helper also
+# import `TypeKind`, which has colliding variant names.
+#
+# CONTAINER-only on purpose. Typing an unannotated `val x = f()` as the bare
+# payload when `f` returns `T?` is what a human writes by hand (see the
+# `val map: Dict<text, any> = json_to_object(obj)` bindings in
+# src/lib/common/json/object_ops.spl), but doing it for EVERY optional return
+# would change what `.?` and `unwrap()` see on hundreds of bindings, and there
+# is no test lane that native-builds, so no suite would catch a regression.
+# Containers are the case where the loss is fatal rather than merely
+# imprecise: it surfaces as "#143 for-in over non-array iterables".
+# doc/08_tracking/bug/for_in_optional_initialized_local_loses_collection_type_2026-08-24.md
+fn _hir_optional_container_payload(t: HirType) -> HirType?:
+    val tk: HirTypeKind = t.kind
+    if rt_enum_discriminant(tk) != rt_enum_discriminant(HirTypeKind.Optional(t)):
+        return nil
+    val inner: HirType? = match tk:
+        case HirTypeKind.Optional(payload): payload
+        case _: nil
+    if not inner.?:
+        return nil
+    val inner_t: HirType = inner ?? t
+    val ik: HirTypeKind = inner_t.kind
+    val ik_disc = rt_enum_discriminant(ik)
+    if ik_disc == rt_enum_discriminant(HirTypeKind.Dict(inner_t, inner_t)):
+        return inner_t
+    if ik_disc == rt_enum_discriminant(HirTypeKind.Array(inner_t, nil)):
+        return inner_t
+    if ik_disc == rt_enum_discriminant(HirTypeKind.Slice(inner_t)):
+        return inner_t
+    nil
+
 export Effect, EffectKind
+export _hir_optional_container_payload
 # ============================================================================
