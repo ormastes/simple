@@ -12,8 +12,37 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #if defined(__linux__)
+/* F_ADD_SEALS and the F_SEAL_* flags used by the artifact-sealing path below
+ * are Linux-specific fcntl commands. glibc's <fcntl.h> exposes them only under
+ * _GNU_SOURCE and only on new enough releases, so include the UAPI header
+ * directly -- the same thing this block already does for memfd. Without it
+ * `clang -fsyntax-only` and every native-build fail with "use of undeclared
+ * identifier 'F_ADD_SEALS'".
+ *
+ * <linux/fcntl.h> canNOT be included here to get them: it pulls in
+ * asm-generic/fcntl.h, which redefines `struct flock` against glibc's
+ * <fcntl.h> above ("error: redefinition of 'flock'"). Define the constants
+ * directly instead -- they are stable UAPI values that the kernel cannot
+ * change without breaking every existing binary. */
 #include <linux/memfd.h>
 #include <sys/syscall.h>
+/* Defensive fallbacks: these are stable UAPI constants, so defining them when
+ * an older header omits them is safe and keeps the sealing path compiling. */
+#ifndef F_ADD_SEALS
+#define F_ADD_SEALS 1033
+#endif
+#ifndef F_SEAL_SEAL
+#define F_SEAL_SEAL 0x0001
+#endif
+#ifndef F_SEAL_SHRINK
+#define F_SEAL_SHRINK 0x0002
+#endif
+#ifndef F_SEAL_GROW
+#define F_SEAL_GROW 0x0004
+#endif
+#ifndef F_SEAL_WRITE
+#define F_SEAL_WRITE 0x0008
+#endif
 #endif
 #endif
 

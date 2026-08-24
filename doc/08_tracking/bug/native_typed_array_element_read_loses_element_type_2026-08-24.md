@@ -154,3 +154,55 @@ Landed **ADVISORY because it is honestly RED**: `FAIL — 4 case(s) checked,
   `stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md`), and the two
   have not been shown to be the same defect.
 - Which of the two lowering gaps above is sufficient on its own.
+
+## Mechanism pinned exactly (probe, 2026-08-24) — and a partial fix that is NOT enough
+
+A temporary `SIMPLE_INDEX_TRACE` probe in `lower_index_expr` printed, for
+`var a: [text] = []` / `a.push("BOOM")` / `a[0]`:
+
+```
+IDXPROBE from_base=true has_idx_hir=false tuple=false bootstrap=false
+         base_hir_nil=false result_disc=258540933
+         str_disc=2429702914 i64_disc=258540933
+```
+
+Read that carefully — `result_disc == i64_disc`, and `base_hir_nil=false`:
+
+1. The base local's **MIR** type comes back as `Array(i64, _)`. The element type
+   is already erased by the time the array local's MIR type is formed, even
+   though the declaration says `[text]`.
+2. Because the MIR-type match succeeds it sets `result_type_from_base = true`,
+   which **skips** the HIR fallback at `expr_dispatch.spl:1849-1855` — the
+   fallback that was sitting right there with the correct `Str` element type
+   available (`base_hir_nil=false` proves it was available).
+
+So the precise HIR type is present and discarded. That is gap 1.
+
+### Partial fix tried, measured, and REVERTED
+
+Refining `result_type` from the HIR element type **only** when the MIR element
+type is the erased plain `i64` and the HIR type disagrees (a strictly
+information-adding condition, and a no-op for a genuine `[i64]`) moved the
+`text` row but did not fix it:
+
+```
+before:  text: DIVERGE interp=[V=BOOM] native=[V=104913387449185]   <- raw word
+after:   text: DIVERGE interp=[V=BOOM] native=[V=RTS]               <- bad handle
+         i64:  MATCH V=42                                          <- no regression
+```
+
+The value stopped being rendered as a raw integer — `coerce_concat_operand` now
+takes the string path — but the element is still WRONG, because the raw word is
+handed to the string path without the correct untag/decode. **Gap 2 (the decode
+in `decode_runtime_value` / the `rt_array_get` result handling) is therefore
+independently necessary, and gap 1 alone is not sufficient.**
+
+The change was reverted rather than landed: a half-fix here converts a visibly
+absurd value (a 15-digit integer where a string belongs) into a plausible-looking
+short string, which is strictly worse for anyone debugging downstream. Recorded
+here so the next attempt starts from gap 2 and does both together.
+
+Worth noting for whoever picks this up: `i64: MATCH` held throughout, so the
+conditional refinement did **not** reproduce the int-array corruption that
+sank the earlier unconditional attempt documented in `expr_dispatch.spl`. The
+condition is sound; it is just incomplete on its own.

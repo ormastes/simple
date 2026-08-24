@@ -35,6 +35,27 @@
 #if defined(__linux__)
 #include <linux/memfd.h>
 #include <sys/syscall.h>
+/* F_ADD_SEALS and the F_SEAL_* flags used by the artifact-sealing fcntl below
+ * are Linux-specific fcntl commands that glibc's <fcntl.h> exposes only under
+ * _GNU_SOURCE and only on new enough releases. <linux/fcntl.h> cannot be used
+ * to get them: it pulls in asm-generic/fcntl.h, which redefines `struct flock`
+ * against the glibc <fcntl.h> included above. Define them directly -- stable
+ * UAPI values, each behind #ifndef so a toolchain that declares them wins. */
+#ifndef F_ADD_SEALS
+#define F_ADD_SEALS 1033
+#endif
+#ifndef F_SEAL_SEAL
+#define F_SEAL_SEAL 0x0001
+#endif
+#ifndef F_SEAL_SHRINK
+#define F_SEAL_SHRINK 0x0002
+#endif
+#ifndef F_SEAL_GROW
+#define F_SEAL_GROW 0x0004
+#endif
+#ifndef F_SEAL_WRITE
+#define F_SEAL_WRITE 0x0008
+#endif
 #endif
 #if defined(_WIN32)
 #include <io.h>
