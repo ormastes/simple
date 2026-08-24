@@ -407,7 +407,8 @@ shift counts at and past the word width.
 
 The "Still owed" item above ("the native (LLVM AOT) lane was not measured") is
 now discharged. Measured at `origin/main` `dcc1e682940` from a clean worktree,
-seed sha256 `a1387e23c4f015aa`. Both remaining unbaselined divergences —
+seed sha256 `a1387e23c4f015aa`; fixed by `5fc2a871e35`. Both remaining
+unbaselined divergences —
 `i64_boundary_values` and `f64_roundtrip` — are fixed, but **neither one was the
 61-bit tag truncation this file is named after.** That half is genuinely fixed:
 every `boxed_p60`/`boxed_p62`/`boxed_imax` row measured CORRECT on native before
@@ -495,5 +496,7 @@ baselined — both genuinely agree across interpret, jit and native.
 
 The 2 lane errors are pre-existing and unrelated (`closure_runtime_facing`:
 `unresolved method call: find`; `list_index_and_get`: `unresolved method call:
-get`) — both are MIR-lowering gaps, and `list_index_and_get` was verified to fail
-identically at base `dcc1e682940` with these changes stashed.
+get`) — both are MIR-lowering gaps, and BOTH were verified to fail identically
+at base `dcc1e682940` with these changes stashed (`list_index_and_get` ->
+`unresolved method call: get`, `closure_runtime_facing` -> `unresolved method
+call: find`, each rc=1).
