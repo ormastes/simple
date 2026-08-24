@@ -46,7 +46,7 @@ pub struct RawRtAccessFinding:
 # ============================================================================
 
 pub fn raw_rt_provider_allowlist_allows(file_path: text, allowlist: text) -> bool:
-    """Apply the canonical shell gate's prefix/suffix allowlist semantics."""
+    """Apply exact-file, directory-prefix, and suffix allowlist semantics."""
     var relative = file_path
     val src_at = file_path.find("src/")
     if src_at >= 0:
@@ -59,7 +59,9 @@ pub fn raw_rt_provider_allowlist_allows(file_path: text, allowlist: text) -> boo
             val suffix = entry.substring(7, entry.len())
             if relative.ends_with(suffix):
                 return true
-        elif relative.starts_with(entry):
+        elif entry.ends_with("/") and relative.starts_with(entry):
+            return true
+        elif relative == entry:
             return true
     false
 
@@ -115,6 +117,9 @@ fn _rra_is_ident_char(ch: text) -> bool:
     val is_upper = ch >= "A" and ch <= "Z"
     val is_digit = ch >= "0" and ch <= "9"
     is_lower or is_upper or is_digit
+
+fn _rra_is_inline_space(ch: text) -> bool:
+    ch == " " or ch == "\t"
 
 fn _rra_leading_indent(line: text) -> i64:
     """Count leading indentation without allocating a trimmed copy."""
@@ -292,10 +297,45 @@ fn _rra_first_call_in_position(line: text) -> (text, i64):
             while j < line.len() and _rra_is_ident_char(line.substring(j, j + 1)):
                 j = j + 1
             var k = j
-            while k < line.len() and line.substring(k, k + 1) == " ":
+            while k < line.len() and _rra_is_inline_space(line.substring(k, k + 1)):
                 k = k + 1
             if j > i + 3 and k < line.len() and line.substring(k, k + 1) == "(":
                 return (line.substring(i, j), i + 1)
+            # A direct callee may be grouped: `(rt_remove)(path)`. Require the
+            # matching lexical shape immediately around the name so a value
+            # mention such as `consume(rt_remove)` is not classified as a call.
+            if j > i + 3 and k < line.len() and line.substring(k, k + 1) == ")":
+                var before = i - 1
+                while before >= 0 and _rra_is_inline_space(line.substring(before, before + 1)):
+                    before = before - 1
+                var after = k + 1
+                while after < line.len() and _rra_is_inline_space(line.substring(after, after + 1)):
+                    after = after + 1
+                if before >= 0 and line.substring(before, before + 1) == "(" and
+                   after < line.len() and line.substring(after, after + 1) == "(":
+                    var prefix = before - 1
+                    while prefix >= 0 and _rra_is_inline_space(line.substring(prefix, prefix + 1)):
+                        prefix = prefix - 1
+                    # `consume(rt_remove)(path)` invokes consume's result, not
+                    # the raw symbol. A grouped raw callee must begin the
+                    # expression or follow punctuation; language keywords that
+                    # introduce an expression are admitted explicitly below.
+                    var group_is_callee = prefix < 0 or not _rra_is_ident_char(line.substring(prefix, prefix + 1))
+                    if not group_is_callee:
+                        var word_start = prefix
+                        while word_start >= 0 and _rra_is_ident_char(line.substring(word_start, word_start + 1)):
+                            word_start = word_start - 1
+                        val prefix_word = line.substring(word_start + 1, prefix + 1)
+                        group_is_callee = (prefix_word == "return" or prefix_word == "yield" or
+                            prefix_word == "if" or prefix_word == "elif" or
+                            prefix_word == "while" or prefix_word == "case" or
+                            prefix_word == "not" or prefix_word == "and" or
+                            prefix_word == "or" or prefix_word == "xor" or
+                            prefix_word == "await" or prefix_word == "spawn" or
+                            prefix_word == "match" or prefix_word == "in" or
+                            prefix_word == "try" or prefix_word == "throw")
+                    if group_is_callee:
+                        return (line.substring(i, j), i + 1)
         search_from = i + 3
     ("", 0)
 
@@ -320,28 +360,29 @@ fn _rra_first_direct_import_name(line: text, import_context: bool) -> text:
                 val alias = line.find(" as ")
                 if alias >= 0:
                     candidate_end = alias
-                var candidate_start = 0
+                # Start after the import keyword so no-dot imports such as
+                # `use rt_remove` inspect the imported binding, not `use`.
+                var candidate_start = line.find("use ") + 4
                 var i = 0
                 while i < candidate_end:
                     if line.substring(i, i + 1) == ".":
                         candidate_start = i + 1
                     i = i + 1
                 candidate = line.substring(candidate_start, candidate_end)
-    var search_from = 0
-    while search_from + 3 < candidate.len():
-        val tail = candidate.substring(search_from, candidate.len())
-        val relative = tail.find("rt_")
-        if relative < 0:
-            return ""
-        val i = search_from + relative
-        val boundary_ok = i == 0 or not _rra_is_ident_char(candidate.substring(i - 1, i))
-        if boundary_ok:
-            var j = i + 3
-            while j < candidate.len() and _rra_is_ident_char(candidate.substring(j, j + 1)):
-                j = j + 1
-            if j > i + 3:
-                return candidate.substring(i, j)
-        search_from = i + 3
+    # Inspect only each imported source binding (the identifier before `as`).
+    # Looking for rt_ anywhere in the item misclassifies `safe_api as rt_api`.
+    for raw_item in candidate.split(","):
+        val item = raw_item.trim()
+        var i = 0
+        while i < item.len() and not _rra_is_ident_char(item.substring(i, i + 1)):
+            i = i + 1
+        val start = i
+        while i < item.len() and _rra_is_ident_char(item.substring(i, i + 1)):
+            i = i + 1
+        if i > start:
+            val imported_name = item.substring(start, i)
+            if imported_name.starts_with("rt_") and imported_name.len() > 3:
+                return imported_name
     ""
 
 # ============================================================================

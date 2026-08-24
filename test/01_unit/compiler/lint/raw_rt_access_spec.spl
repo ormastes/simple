@@ -181,6 +181,13 @@ describe "RAW-RT-002: direct raw runtime use":
         expect(aliased_findings.len()).to_equal(1)
         expect(aliased_findings[0].name).to_equal("rt_remove")
 
+    it "warns on no-dot direct imports":
+        step("Verify: the imported binding follows use/export even without a module path")
+        val imported = "u" + "se r" + "t_remove\n"
+        val exported = "export u" + "se r" + "t_remove\n"
+        expect(check_raw_rt_access(imported, "src/app/imported.spl").len()).to_equal(1)
+        expect(check_raw_rt_access(exported, "src/app/exported_bare.spl").len()).to_equal(1)
+
     it "warns on single-line and multiline parenthesized direct imports":
         step("Verify: parenthesized import grammar cannot bypass the boundary")
         val single = "u" + "se runtime.primitive (r" + "t_remove as delete_path)\n"
@@ -198,6 +205,32 @@ describe "RAW-RT-002: direct raw runtime use":
         val source = "u" + "se runtime.r" + "t_provider.SafeFacade\n"
         val findings = check_raw_rt_access(source, "src/app/product.spl")
         expect(findings.len()).to_equal(0)
+
+    it "does not confuse an rt-looking alias with a raw imported binding":
+        step("Verify: braced and parenthesized alias targets are not source bindings")
+        val braced = "u" + "se product.api.{safe_remove as r" + "t_remove}\n"
+        val parenthesized = "u" + "se product.api (safe_remove as r" + "t_remove)\n"
+        expect(check_raw_rt_access(braced, "src/app/braced_alias.spl").len()).to_equal(0)
+        expect(check_raw_rt_access(parenthesized, "src/app/paren_alias.spl").len()).to_equal(0)
+
+    it "warns on spaced, tabbed, and parenthesized direct callees":
+        step("Verify: harmless call formatting cannot bypass direct-call detection")
+        val spaced = "fn f(): r" + "t_remove   (path)\n"
+        val tabbed = "fn f(): r" + "t_remove\t(path)\n"
+        val grouped = "fn f(): (r" + "t_remove) (path)\n"
+        expect(check_raw_rt_access(spaced, "src/app/spaced.spl").len()).to_equal(1)
+        expect(check_raw_rt_access(tabbed, "src/app/tabbed.spl").len()).to_equal(1)
+        expect(check_raw_rt_access(grouped, "src/app/grouped.spl").len()).to_equal(1)
+
+    it "does not treat a grouped call argument as the direct callee":
+        step("Verify: invocation of a consumer result is not attributed to its argument")
+        val source = "fn f(): consume(r" + "t_remove) (path)\n"
+        expect(check_raw_rt_access(source, "src/app/consumer.spl").len()).to_equal(0)
+
+    it "recognizes grouped callees after expression-introducing keywords":
+        step("Verify: control-flow and operator syntax do not hide a grouped direct call")
+        val source = "fn f():\n    if (r" + "t_remove)(path): pass\n    while (r" + "t_remove)(path): pass\n    val a = not (r" + "t_remove)(path)\n    val b = ready and (r" + "t_remove)(path)\n    val c = await (r" + "t_remove)(path)\n"
+        expect(check_raw_rt_access(source, "src/app/control.spl").len()).to_equal(5)
 
     it "allows that alias only when the canonical policy sanctions its provider path":
         step("Verify: allows that alias only when the canonical policy sanctions its provider path")
@@ -247,12 +280,28 @@ describe "raw rt wrapper fix lookup":
         expect(raw_rt_wrapper_replacement("rt_mkdir")).to_equal("")
         expect(raw_rt_wrapper_replacement("rt_unknown_device_op")).to_equal("")
 
-    it "uses exact canonical prefix and suffix allowlist semantics":
-        step("Verify: uses exact canonical prefix and suffix allowlist semantics")
-        val policy = "src/lib/provider/\nsuffix:_sffi.spl\n"
+    it "uses exact-file, directory-prefix, and suffix allowlist semantics":
+        step("Verify: file entries cannot privilege a lookalike path prefix")
+        val policy = "src/lib/provider/\nsrc/lib/exact.spl\nsuffix:_sffi.spl\n"
         expect(raw_rt_provider_allowlist_allows("/repo/src/lib/provider/x.spl", policy)).to_equal(true)
         expect(raw_rt_provider_allowlist_allows("/repo/src/app/io/file_sffi.spl", policy)).to_equal(true)
         expect(raw_rt_provider_allowlist_allows("/repo/src/lib/providerish/x.spl", policy)).to_equal(false)
+        expect(raw_rt_provider_allowlist_allows("/repo/src/lib/exact.spl", policy)).to_equal(true)
+        expect(raw_rt_provider_allowlist_allows("/repo/src/lib/exact.spl.backup", policy)).to_equal(false)
+
+    it "loads the canonical policy for only the directory provider file":
+        step("Verify: canonical file exemption does not expand to lookalike product paths")
+        val source = "extern fn r" + "t_remove(path: text) -> i64\nfn remove(path: text): r" + "t_remove(path)\n"
+        var provider_raw_findings = 0
+        var lookalike_raw_findings = 0
+        for result in lint_cli_source(Linter.new(), "src/lib/nogc_sync_mut/io/dir_entry_ops.spl", source):
+            if result.lint.code.starts_with("RAW-RT-"):
+                provider_raw_findings = provider_raw_findings + 1
+        for result in lint_cli_source(Linter.new(), "src/lib/nogc_sync_mut/io/dir_entry_ops.spl_extra.spl", source):
+            if result.lint.code.starts_with("RAW-RT-"):
+                lookalike_raw_findings = lookalike_raw_findings + 1
+        expect(provider_raw_findings).to_equal(0)
+        expect(lookalike_raw_findings).to_be_greater_than(0)
 
 describe "RAW-RT-002 auto-fix":
     it "withholds an rt_mkdir rename across incompatible contracts":
@@ -303,6 +352,26 @@ describe "RAW-RT-002 auto-fix":
         expect(replacements).to_equal(1)
         expect(applied).to_contain("    directory_remove(path)")
         expect(applied).to_not_contain("    rt_remove(path)")
+
+    it "offers all signature-identical rt_readdir wrapper renames":
+        step("Verify: every directory-stream ABI call has a machine-applicable mapping")
+        val source = "u" + "se std.nogc_sync_mut.io.dir_entry_ops.{directory_stream_open, directory_stream_count, directory_stream_entry, directory_stream_close}\nfn scan(path: text, handle: i64):\n    r" + "t_readdir(path)\n    r" + "t_readdir_count(handle)\n    r" + "t_readdir_entry(handle, 0)\n    r" + "t_readdir_free(handle)\n"
+        var replacements = 0
+        var replacement_names: [text] = []
+        for result in lint_cli_source(Linter.new(), "/tmp/raw_rt_readdir_fix.spl", source):
+            if result.lint.code == "RAW-RT-002":
+                match result.lint.easy_fix:
+                    case Some(fix):
+                        for rep in easyfix_replacements(fix):
+                            replacements = replacements + 1
+                            replacement_names.push(rep.new_text)
+                    case nil:
+                        val _ = 0
+        expect(replacements).to_equal(4)
+        expect(replacement_names).to_contain("directory_stream_open")
+        expect(replacement_names).to_contain("directory_stream_count")
+        expect(replacement_names).to_contain("directory_stream_entry")
+        expect(replacement_names).to_contain("directory_stream_close")
 
     it "offers a safe rename only when the canonical wrapper facade is in scope":
         step("Verify: offers a safe rename only when the canonical wrapper facade is in scope")
