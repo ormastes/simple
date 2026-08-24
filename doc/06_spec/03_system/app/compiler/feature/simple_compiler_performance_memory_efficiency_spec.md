@@ -1,6 +1,7 @@
 # Simple Compiler Performance and Memory Efficiency
 
-Status: **fail-fast design scaffold; not implementation or PASS evidence**.
+Status: **executable source contract present; runtime execution blocked by the
+missing admitted Stage-4 binary**.
 
 ## Purpose and audience
 
@@ -40,7 +41,11 @@ Validate provenance and compare frontend reuse, Tier-0/Tier-1 time, RSS, analysi
 
 ## Current limitation
 
-Every executable helper intentionally calls `assert(false)`. This prevents the design scaffold from masquerading as coverage. Replace each helper with a production invocation and typed oracle, then run SPipe docgen and `sspec-maintain`; this authored mirror is not a generated PASS manual.
+The executable helper flow now invokes production pass-status, effective
+pipeline, `PerfFacts`, diagnostic-evidence, and quarantined-transform APIs with
+typed oracles. It is not PASS evidence until the admitted self-hosted binary is
+restored and this exact spec plus docgen/maintenance gates execute. Runtime time
+and RSS budgets remain separate performance evidence, not source assertions.
 
 ## Evidence policy
 
