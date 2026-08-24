@@ -975,3 +975,14 @@ receive that class reference, not the array value. The production linter runs
 the call kernel, appends its findings, then runs the declaration kernel so
 diagnostic arrays do not coexist at peak. Compatibility APIs build a snapshot
 and run only their requested kernel, avoiding accidental extra analysis.
+
+### HIR child-frame migration contract
+
+Generate one frame variant per base carrier and transparent wrapper. Expansion
+pushes kind payload fields before carrier-extra fields in reverse, reverses
+lists by index, and pushes pair value before key; LIFO popping then exactly
+matches the current forward flattened order. Guards and nil behavior remain
+unchanged and wildcard arms still fail closed. `For` scheduling remains
+iterable-at-parent-depth before body-at-derived-depth; Loop, While, Lambda, and
+Comprehension retain their current depth rules. Generator freshness comparison
+must include `hir_children.spl` before the collector switches APIs.
