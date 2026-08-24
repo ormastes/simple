@@ -1,0 +1,224 @@
+# Mission-critical ALLOCATION ADMISSION for the Simple compiler, loader and
+# interpreter.
+#
+# WHAT THIS IS -- and, just as importantly, what it is NOT.
+#
+# Under mission-critical mode the startup seal closes (`noalloc_checker.
+# steady_state_gate_active`: sealed when `SIMPLE_NO_STUB_FALLBACK=1` OR the
+# resolved `SIMPLE_SAFETY_PROFILE` is at least `AssuranceStrictness.Critical`)
+# and the steady-state gate rejects every symbol whose `AllocClass` is
+# `Unbounded` or `Unknown`. The Simple compiler, its object/JIT loader
+# (`compiler.loader.*`) and its tree-walking interpreter
+# (`compiler.frontend.core.interpreter.*`) all allocate on the GC heap by
+# construction -- dynamic ASTs, symbol tables, relocation tables -- so under
+# that gate all three are rejected outright and cannot run in the lane at all.
+#
+# This module is the "alloc allow" side of that: a DECLARED, SEALED,
+# FAIL-CLOSED ADMISSION POLICY that names exactly which subsystems may keep
+# allocating once the seal has closed, under which quota contract, and in
+# which execution contexts. It reuses the already-tested mission-critical
+# relaxed-allocation profile (`std.nogc_sync_mut.mission_critical.
+# domain_arena_v1.RelaxedAllocationProfileV1`, whose own header calls it a
+# "sealed quota transaction for relaxed, non-critical allocation") rather
+# than inventing a second policy shape.
+#
+# HONESTY LIMIT -- read before citing this module as a bound:
+#   * This is ADMISSION, not ENFORCEMENT. The compiler/loader/interpreter
+#     allocate through the ordinary GC heap; they are NOT routed through a
+#     `domain_arena_v1` arena, so the `quota_bytes` here bounds nothing at
+#     runtime. An admitted domain is therefore classified
+#     `admitted-unbounded under a sealed quota contract`, and is deliberately
+#     NOT reclassified as `AllocClass.BoundedPool` -- calling it bounded
+#     without arena routing would be a false claim.
+#   * Like `noalloc_checker.spl` itself (which has no production call sites),
+#     this is an AUDIT-LANE policy. The ordinary production compile path does
+#     not consult it. Wiring it into a live compile gate is separate work.
+#
+# Fail-closed by construction: a module path that matches no declared domain
+# is NOT admitted; an unsealed profile is NOT admitted; a zero quota is NOT
+# admitted; and a request carrying any critical execution context
+# (kernel/ISR/storage-commit/ownership-publication/isolation-transition, i.e.
+# `ARENA_CONTEXT_CRITICAL_MASK`) is NOT admitted, because a compiler has no
+# business allocating on those paths.
+
+use std.nogc_sync_mut.mission_critical.domain_arena_v1.*
+
+# ============================================================================
+# Admission outcome
+# ============================================================================
+
+enum MciAllocAdmissionCodeV1:
+    Admitted
+    UnknownDomain
+    UnsealedProfile
+    ZeroQuota
+    ForbiddenContext
+    InvalidRequest
+
+impl MciAllocAdmissionCodeV1:
+    fn name() -> text:
+        """Canonical lowercase code name, for diagnostics and gate receipts."""
+        match self:
+            MciAllocAdmissionCodeV1.Admitted: "admitted"
+            MciAllocAdmissionCodeV1.UnknownDomain: "unknown_domain"
+            MciAllocAdmissionCodeV1.UnsealedProfile: "unsealed_profile"
+            MciAllocAdmissionCodeV1.ZeroQuota: "zero_quota"
+            MciAllocAdmissionCodeV1.ForbiddenContext: "forbidden_context"
+            MciAllocAdmissionCodeV1.InvalidRequest: "invalid_request"
+
+struct MciAllocAdmissionV1:
+    """One admission decision. `admitted` is true only for
+    `MciAllocAdmissionCodeV1.Admitted`; every other code is a refusal and
+    carries the reason."""
+    admitted: bool
+    domain_name: text
+    code: MciAllocAdmissionCodeV1
+
+# ============================================================================
+# Declared domains
+# ============================================================================
+
+struct MciAllocDomainV1:
+    """A subsystem whose steady-state allocation is admitted under
+    mission-critical mode, together with the sealed quota contract it is
+    admitted under.
+
+    `module_prefix` is matched with dot-boundary discipline (exact match, or
+    the prefix followed by `.`) -- never a bare `starts_with`, which would
+    silently swallow an unrelated sibling package such as
+    `compiler.loader_stub`."""
+    domain_name: text
+    module_prefix: text
+    profile: RelaxedAllocationProfileV1
+
+val MCI_ALLOC_ADMISSION_SCHEMA: u16 = 1u16
+
+# Quotas are the declared contract for the lane, not a measured high-water
+# mark: 512 MiB for the compiler proper, 64 MiB for the loader's object and
+# relocation tables, 256 MiB for interpreted evaluation state. Any change
+# here is a policy change and must move the doc and the gate together.
+val MCI_COMPILER_QUOTA_BYTES: u64 = 536870912u64
+val MCI_LOADER_QUOTA_BYTES: u64 = 67108864u64
+val MCI_INTERPRETER_QUOTA_BYTES: u64 = 268435456u64
+
+fn mci_alloc_profile(profile_id: text, domain_id: u32, quota_bytes: u64, max_allocations: u32) -> RelaxedAllocationProfileV1:
+    """Build the sealed relaxed-allocation profile for one admitted domain.
+
+    Every domain is sealed (`sealed: true`), non-strict-by-default
+    (`strict_default: false` -- that is precisely the "allow alloc" posture),
+    allowed only in `ARENA_CONTEXT_NORMAL`, and forbidden in every context in
+    `ARENA_CONTEXT_CRITICAL_MASK`."""
+    RelaxedAllocationProfileV1(
+        schema_version: MCI_ALLOC_ADMISSION_SCHEMA,
+        profile_id: profile_id,
+        strict_default: false,
+        domain_id: domain_id,
+        quota_bytes: quota_bytes,
+        alignment: 16u32,
+        max_allocations_per_generation: max_allocations,
+        allowed_context_mask: ARENA_CONTEXT_NORMAL,
+        forbidden_context_mask: ARENA_CONTEXT_CRITICAL_MASK,
+        sealed: true
+    )
+
+fn mci_alloc_domains() -> [MciAllocDomainV1]:
+    """The three subsystems this port admits, most specific prefix first is
+    NOT required -- `mci_alloc_domain_for_module` performs a longest-prefix
+    match so `compiler.loader.x` resolves to the loader domain and not to the
+    enclosing `compiler` domain."""
+    [
+        MciAllocDomainV1(
+            domain_name: "compiler",
+            module_prefix: "compiler",
+            profile: mci_alloc_profile("mci-alloc-compiler-v1", 1u32, MCI_COMPILER_QUOTA_BYTES, 1048576u32)
+        ),
+        MciAllocDomainV1(
+            domain_name: "loader",
+            module_prefix: "compiler.loader",
+            profile: mci_alloc_profile("mci-alloc-loader-v1", 2u32, MCI_LOADER_QUOTA_BYTES, 131072u32)
+        ),
+        MciAllocDomainV1(
+            domain_name: "interpreter",
+            module_prefix: "compiler.frontend.core.interpreter",
+            profile: mci_alloc_profile("mci-alloc-interpreter-v1", 3u32, MCI_INTERPRETER_QUOTA_BYTES, 524288u32)
+        ),
+    ]
+
+fn mci_normalized_module_path(module_path: text) -> text:
+    """Strip a leading `std.`/`lib.` import prefix, mirroring
+    `noalloc_checker.is_bounded_pool_family`'s own normalization so both
+    spellings of a registered family module resolve identically."""
+    var path = module_path
+    if path.starts_with("std."):
+        return path[4:path.len()]
+    if path.starts_with("lib."):
+        return path[4:path.len()]
+    path
+
+fn mci_module_matches_prefix(module_path: text, module_prefix: text) -> bool:
+    """Exact-or-dot-boundary match. `compiler.loader` matches
+    `compiler.loader` and `compiler.loader.object_provider`, but never
+    `compiler.loader_stub`."""
+    module_path == module_prefix or module_path.starts_with(module_prefix + ".")
+
+fn mci_alloc_domain_for_module(module_path: text) -> MciAllocDomainV1:
+    """Longest-prefix domain lookup. Returns a sentinel domain with an empty
+    `domain_name` and an UNSEALED, zero-quota profile when nothing matches --
+    so a caller that forgets to check `domain_name` still gets refused by the
+    seal and quota checks rather than silently admitted."""
+    var best = MciAllocDomainV1(
+        domain_name: "",
+        module_prefix: "",
+        profile: RelaxedAllocationProfileV1(
+            schema_version: MCI_ALLOC_ADMISSION_SCHEMA,
+            profile_id: "",
+            strict_default: true,
+            domain_id: 0u32,
+            quota_bytes: 0u64,
+            alignment: 16u32,
+            max_allocations_per_generation: 0u32,
+            allowed_context_mask: 0u64,
+            forbidden_context_mask: ARENA_CONTEXT_CRITICAL_MASK,
+            sealed: false
+        )
+    )
+    if module_path == "":
+        return best
+    val path = mci_normalized_module_path(module_path)
+    var best_len = -1
+    val domains = mci_alloc_domains()
+    for domain in domains:
+        if mci_module_matches_prefix(path, domain.module_prefix):
+            val plen = domain.module_prefix.len()
+            if plen > best_len:
+                best_len = plen
+                best = domain
+    best
+
+fn mci_alloc_admit(module_path: text, context_mask: u64) -> MciAllocAdmissionV1:
+    """The admission decision itself, fail-closed at every step.
+
+    `context_mask` is the execution context the allocation would happen in,
+    using `domain_arena_v1`'s `ARENA_CONTEXT_*` bits. A caller that does not
+    know its context must pass `ARENA_CONTEXT_NORMAL` explicitly; there is no
+    permissive default."""
+    if context_mask == 0u64:
+        return MciAllocAdmissionV1(admitted: false, domain_name: "", code: MciAllocAdmissionCodeV1.InvalidRequest)
+    val domain = mci_alloc_domain_for_module(module_path)
+    if domain.domain_name == "":
+        return MciAllocAdmissionV1(admitted: false, domain_name: "", code: MciAllocAdmissionCodeV1.UnknownDomain)
+    if not domain.profile.sealed:
+        return MciAllocAdmissionV1(admitted: false, domain_name: domain.domain_name, code: MciAllocAdmissionCodeV1.UnsealedProfile)
+    if domain.profile.quota_bytes == 0u64:
+        return MciAllocAdmissionV1(admitted: false, domain_name: domain.domain_name, code: MciAllocAdmissionCodeV1.ZeroQuota)
+    if (context_mask & domain.profile.forbidden_context_mask) != 0u64:
+        return MciAllocAdmissionV1(admitted: false, domain_name: domain.domain_name, code: MciAllocAdmissionCodeV1.ForbiddenContext)
+    if (context_mask & domain.profile.allowed_context_mask) != context_mask:
+        return MciAllocAdmissionV1(admitted: false, domain_name: domain.domain_name, code: MciAllocAdmissionCodeV1.ForbiddenContext)
+    MciAllocAdmissionV1(admitted: true, domain_name: domain.domain_name, code: MciAllocAdmissionCodeV1.Admitted)
+
+fn mci_alloc_admission_line(module_path: text, admission: MciAllocAdmissionV1) -> text:
+    """One receipt line, stable field order, for the gate to compare against."""
+    ("mci_alloc_admission module={module_path} domain={admission.domain_name}"
+        + " admitted=" + (if admission.admitted: "true" else: "false")
+        + " code=" + admission.code.name())
