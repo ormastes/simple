@@ -1,0 +1,245 @@
+#!/bin/sh
+# check-phase3-empty-module-abort.shs
+#
+# Fail-closed ratchet for the Stage-3 self-host blocker fixed 2026-08-24:
+#   doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
+#
+# WHAT WENT WRONG
+#
+#   Phase 2's streaming-surface path sets `streaming_surface_owner_ready = true`
+#   and DELIBERATELY empties `ctx.modules` -- on that path the module surfaces
+#   ARE the module set. Phase 3's dispatch in `lower_and_check_impl` routed on
+#   that mutable readiness boolean ALONE. Under native value semantics the
+#   boolean was lost across the phase boundary, so the dispatch read false, fell
+#   into the LEGACY path, type-checked the (deliberately empty) `ctx.modules` in
+#   1 ms, and returned SUCCESS with zero HIR modules. The empty program then
+#   flowed through monomorphize (0/0) into MIR lowering, where the bootstrap
+#   entry HIR module was nil and the process SIGSEGV'd with
+#   `[mir-lower-free] start` as its last output.
+#
+#   350 seconds of real parse work over 692 modules was discarded silently, and
+#   the crash site (MIR) was three phases downstream of the defect site.
+#
+# WHAT THIS GUARD PINS
+#
+#   Four source-level invariants, all fail-closed. This is a static ratchet by
+#   design: reproducing the defect dynamically costs a full bootstrap (~40 min),
+#   which is far too slow to run on every push, and a guard that is routed
+#   around protects nothing.
+#
+#     1. phase-3 dispatch routes on stable CONFIGURATION as well as the mutable
+#        readiness scalar (never the boolean alone)
+#     2. the legacy phase-3 path ABORTS on zero modules from non-zero sources
+#     3. the streaming phase-3 path ABORTS on zero surfaces from non-zero sources
+#     4. MIR bootstrap-entry lowering explicitly nil-checks the entry HIR module
+#        rather than trusting `.?` (which has been measured entering the Some
+#        arm while binding a nil payload in Stage-2-compiled code)
+#
+# VERDICT CONVENTION (repo standard; verdict is ALWAYS the last line of stdout)
+#     PASS  — <n> invariant(s) checked, ...      exit 0   (n is always > 0)
+#     FAIL  — ...                                exit 1
+#     ERROR — nothing was checked                exit 2
+#
+# A run that checked 0 invariants is ERROR, never a pass. --selftest runs FIRST
+# and is FATAL.
+
+set -u
+
+HIR_REL="src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+MIR_REL="src/compiler/50.mir/_MirLowering/bootstrap_globals.spl"
+
+# ---------------------------------------------------------------- scan core --
+# Scans one tree root. Echoes offender names on stdout (one per line, prefixed
+# "OFFENDER "), and a final "CHECKED <n>" line. Never exits; the caller decides.
+scan_tree() {
+    st_root="$1"
+    st_hir="${st_root}/${HIR_REL}"
+    st_mir="${st_root}/${MIR_REL}"
+    st_checked=0
+
+    if [ ! -f "$st_hir" ]; then
+        echo "MISSING ${HIR_REL}"
+        echo "CHECKED ${st_checked}"
+        return 0
+    fi
+    if [ ! -f "$st_mir" ]; then
+        echo "MISSING ${MIR_REL}"
+        echo "CHECKED ${st_checked}"
+        return 0
+    fi
+
+    # -- invariant 1: dispatch is not routed on the readiness boolean alone.
+    # The fixed form tests the config gate too, on the same `if`.
+    # Two-sided: the config gate must participate in the routing decision AND
+    # the bare incident form (`if self.streaming_surface_owner_ready:` guarding
+    # the streaming return) must be gone. Either half alone is fail-open.
+    st_checked=$((st_checked + 1))
+    st_has_config=$(grep -c 'streaming_config_gate = driver_streaming_surface_enabled' "$st_hir" 2>/dev/null)
+    st_routes_both=$(grep -c 'if streaming_ready_flag or streaming_config_gate:' "$st_hir" 2>/dev/null)
+    st_bare_form=$(grep -c '^ *if self\.streaming_surface_owner_ready: *$' "$st_hir" 2>/dev/null)
+    if [ "${st_has_config:-0}" -eq 0 ] || [ "${st_routes_both:-0}" -eq 0 ] || [ "${st_bare_form:-0}" -ne 0 ]; then
+        echo "OFFENDER phase3-dispatch-routes-on-mutable-flag-alone"
+    fi
+
+    # -- invariant 2: legacy path aborts on an empty module set.
+    st_checked=$((st_checked + 1))
+    if ! grep -q 'E-DRV-PHASE3-EMPTY\]' "$st_hir" 2>/dev/null; then
+        echo "OFFENDER legacy-phase3-missing-zero-module-abort"
+    fi
+
+    # -- invariant 3: streaming path aborts on an empty surface graph.
+    st_checked=$((st_checked + 1))
+    if ! grep -q 'E-DRV-PHASE3-EMPTY-SURFACES\]' "$st_hir" 2>/dev/null; then
+        echo "OFFENDER streaming-phase3-missing-zero-surface-abort"
+    fi
+
+    # -- invariant 4: MIR bootstrap entry nil-checks the payload.
+    st_checked=$((st_checked + 1))
+    if ! grep -q 'E-MIR-BOOTSTRAP-ENTRY-NIL\]' "$st_mir" 2>/dev/null; then
+        echo "OFFENDER mir-bootstrap-entry-missing-nil-check"
+    fi
+
+    echo "CHECKED ${st_checked}"
+}
+
+# ------------------------------------------------------------------ selftest --
+# Builds real fixture trees and drives them through the REAL scanner above.
+selftest_fail() {
+    echo "selftest FAILED: $1" >&2
+    rm -rf "$ST_TMP" 2>/dev/null
+    echo "ERROR — nothing was checked (selftest failed: $1)"
+    exit 2
+}
+
+fixture_offenders() {
+    scan_tree "$1" | grep '^OFFENDER ' | sed 's/^OFFENDER //' | tr '\n' ' '
+}
+fixture_checked() {
+    scan_tree "$1" | grep '^CHECKED ' | sed 's/^CHECKED //'
+}
+
+run_selftest() {
+    ST_TMP=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+
+    # ---- fixture A: fully fixed tree, must be clean.
+    mkdir -p "${ST_TMP}/a/$(dirname "$HIR_REL")" "${ST_TMP}/a/$(dirname "$MIR_REL")"
+    cat > "${ST_TMP}/a/${HIR_REL}" <<'EOF'
+    me lower_and_check_impl() -> (CompileContext, bool):
+        val streaming_config_gate = driver_streaming_surface_enabled(self.ctx)
+        if streaming_ready_flag or streaming_config_gate:
+            return self.lower_and_check_streaming_surfaces_impl()
+        if phase3_module_count == 0 and phase3_source_count > 0:
+            self.ctx.add_error("error[E-DRV-PHASE3-EMPTY]: zero modules")
+            return (self.ctx, false)
+        if surfaces.surfaces.len() == 0:
+            self.ctx.add_error("error[E-DRV-PHASE3-EMPTY-SURFACES]: zero surfaces")
+EOF
+    cat > "${ST_TMP}/a/${MIR_REL}" <<'EOF'
+        if hir_module == nil:
+            print "error[E-MIR-BOOTSTRAP-ENTRY-NIL]: nil entry"
+            rt_exit(1)
+EOF
+    a_off=$(fixture_offenders "${ST_TMP}/a")
+    a_chk=$(fixture_checked "${ST_TMP}/a")
+    [ -z "$a_off" ] || selftest_fail "clean fixture reported offenders: $a_off"
+    [ "$a_chk" = "4" ] || selftest_fail "clean fixture checked '$a_chk', expected 4"
+
+    # ---- fixture B: THE INCIDENT. Dispatch on the mutable flag alone, and no
+    # aborts anywhere. Must flag all four.
+    mkdir -p "${ST_TMP}/b/$(dirname "$HIR_REL")" "${ST_TMP}/b/$(dirname "$MIR_REL")"
+    cat > "${ST_TMP}/b/${HIR_REL}" <<'EOF'
+    me lower_and_check_impl() -> (CompileContext, bool):
+        if self.streaming_surface_owner_ready:
+            return self.lower_and_check_streaming_surfaces_impl()
+        val log = self.ctx.logger
+EOF
+    cat > "${ST_TMP}/b/${MIR_REL}" <<'EOF'
+    if _bootstrap_entry_hir_module.?:
+        val hir_module: HirModule = _bootstrap_entry_hir_module.unwrap()
+EOF
+    b_off=$(fixture_offenders "${ST_TMP}/b")
+    case "$b_off" in
+        *phase3-dispatch-routes-on-mutable-flag-alone*) ;;
+        *) selftest_fail "incident fixture did not flag the dispatch defect (got: $b_off)" ;;
+    esac
+    case "$b_off" in
+        *legacy-phase3-missing-zero-module-abort*) ;;
+        *) selftest_fail "incident fixture did not flag the missing legacy abort (got: $b_off)" ;;
+    esac
+    case "$b_off" in
+        *streaming-phase3-missing-zero-surface-abort*) ;;
+        *) selftest_fail "incident fixture did not flag the missing streaming abort (got: $b_off)" ;;
+    esac
+    case "$b_off" in
+        *mir-bootstrap-entry-missing-nil-check*) ;;
+        *) selftest_fail "incident fixture did not flag the missing MIR nil check (got: $b_off)" ;;
+    esac
+
+    # ---- fixture C: partial regression -- only the dispatch is reverted.
+    # A guard that only ever fires all-or-nothing would miss this.
+    mkdir -p "${ST_TMP}/c/$(dirname "$HIR_REL")" "${ST_TMP}/c/$(dirname "$MIR_REL")"
+    sed -e 's/^        val streaming_config_gate = .*$//' \
+        -e 's/^        if streaming_ready_flag or streaming_config_gate:$/        if self.streaming_surface_owner_ready:/' \
+        "${ST_TMP}/a/${HIR_REL}" > "${ST_TMP}/c/${HIR_REL}"
+    cp "${ST_TMP}/a/${MIR_REL}" "${ST_TMP}/c/${MIR_REL}"
+    c_off=$(fixture_offenders "${ST_TMP}/c")
+    case "$c_off" in
+        *phase3-dispatch-routes-on-mutable-flag-alone*) ;;
+        *) selftest_fail "partial-regression fixture did not flag the dispatch defect (got: $c_off)" ;;
+    esac
+    case "$c_off" in
+        *missing-zero-module-abort*|*missing-zero-surface-abort*|*missing-nil-check*)
+            selftest_fail "partial-regression fixture over-reported (got: $c_off)" ;;
+        *) ;;
+    esac
+
+    # ---- fixture D: empty tree must check 0 invariants, forcing the caller to
+    # ERROR rather than silently passing on an absent file.
+    mkdir -p "${ST_TMP}/d"
+    d_chk=$(fixture_checked "${ST_TMP}/d")
+    [ "$d_chk" = "0" ] || selftest_fail "empty fixture checked '$d_chk', expected 0"
+
+    rm -rf "$ST_TMP" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------- main --
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+RC=$?
+if [ "$RC" -ne 0 ] || [ -z "$ROOT" ]; then
+    ROOT="."
+fi
+SELFTEST_ONLY=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --root) shift; ROOT="${1:-.}" ;;
+        *) echo "usage: $0 [--selftest] [--root DIR]" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# Selftest runs FIRST and is FATAL, on every invocation.
+run_selftest
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — selftest only: 4 fixtures passed (clean, incident, partial-regression, empty)"
+    exit 0
+fi
+
+SCAN_OUT=$(scan_tree "$ROOT")
+CHECKED=$(echo "$SCAN_OUT" | grep '^CHECKED ' | sed 's/^CHECKED //')
+OFFENDERS=$(echo "$SCAN_OUT" | grep '^OFFENDER ' | sed 's/^OFFENDER //' | tr '\n' ' ')
+MISSING=$(echo "$SCAN_OUT" | grep '^MISSING ' | sed 's/^MISSING //' | tr '\n' ' ')
+
+if [ -z "$CHECKED" ] || [ "$CHECKED" -eq 0 ] 2>/dev/null; then
+    echo "ERROR — nothing was checked (source file(s) not found under ${ROOT}: ${MISSING:-unknown})"
+    exit 2
+fi
+
+if [ -n "$OFFENDERS" ]; then
+    echo "FAIL — ${CHECKED} invariant(s) checked in ${ROOT}, violated: ${OFFENDERS}"
+    exit 1
+fi
+
+echo "PASS — ${CHECKED} invariant(s) checked, phase-3 zero-module abort intact (dispatch routes on config+flag; legacy, streaming and MIR-entry paths all fail closed)"
+exit 0

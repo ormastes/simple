@@ -138,8 +138,25 @@ impl CompilerDriver:
         if self.ctx.options.backend == "vhdl":
             self.capture_vhdl_metadata()
         log_debug("phase 2 done")
-        val parsed_module_count = self.ctx.modules.keys().len()
-        log_phase("phase2:parse:done n_modules={parsed_module_count}")
+        # On the streaming path the SURFACES are the module set -- phase 2
+        # empties ctx.modules by design -- so reporting ctx.modules there
+        # prints a bare `n_modules=0` on a fully successful 692-module parse.
+        # That line cost a whole investigation (it reads as catastrophic loss).
+        # Name the carrier that is actually authoritative for the mode.
+        val parse_streaming_carrier = driver_streaming_surface_enabled(self.ctx)
+        var parsed_module_count = self.ctx.modules.keys().len()
+        var parsed_module_carrier = "modules"
+        if parse_streaming_carrier:
+            parsed_module_carrier = "surfaces"
+            # Explicit nil check before unwrap: never dereference a value
+            # merely because the adjacent readiness scalar says it is there
+            # (established pattern in the phase-3 streaming path).
+            if self.streaming_module_surfaces_owner != nil:
+                parsed_module_count =
+                    self.streaming_module_surfaces_owner.unwrap().surfaces.len()
+            else:
+                parsed_module_count = -1
+        log_phase("phase2:parse:done n_modules={parsed_module_count} carrier={parsed_module_carrier}")
         log_build_progress("parse", "modules", parsed_module_count,
             parsed_module_count, "complete", 2, 6, 0, 0, "running")
 

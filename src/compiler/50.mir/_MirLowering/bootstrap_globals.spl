@@ -583,6 +583,16 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
     # Check the option explicitly before extracting the module used below.
     if _bootstrap_entry_hir_module.?:
         val hir_module: HirModule = _bootstrap_entry_hir_module.unwrap()
+        # `.?` above is not a liveness proof: it has been measured entering the
+        # Some arm while binding a nil payload in Stage-2-compiled code (the
+        # same predicate-misread class as `is_empty()` returning false on an
+        # empty list, c018ee15926). Dereferencing `hir_module` on the next line
+        # then SIGSEGVs with `[mir-lower-free] start` as the last output --
+        # which is exactly how a lost module set was reported as a MIR bug.
+        # Check the payload explicitly and fail closed, loudly.
+        if hir_module == nil:
+            print "error[E-MIR-BOOTSTRAP-ENTRY-NIL]: the bootstrap entry HIR module is nil at MIR lowering -- the HIR phase produced no entry module (upstream: the phase-2 module set was lost before phase 3). Refusing to lower an empty program."
+            rt_exit(1)
         var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
         lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
         val entry_functions = hir_module.functions

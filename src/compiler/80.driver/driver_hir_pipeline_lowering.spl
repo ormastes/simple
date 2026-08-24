@@ -143,6 +143,15 @@ impl CompilerDriver:
             if not rt_heap_ref_wellformed(surfaces):
                 self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
                 return (self.ctx, false)
+        # Fail closed on an empty surface graph, the streaming-mode counterpart
+        # of the legacy path's zero-module guard. On this path the SURFACES are
+        # the module set (phase 2 empties ctx.modules by design), so an empty
+        # surface set with sources present means the parse result was lost and
+        # must never flow into HIR/MIR.
+        if surfaces.surfaces.len() == 0 and self.ctx.source_paths_owner.len() > 0:
+            self.ctx.add_error(
+                "error[E-DRV-PHASE3-EMPTY-SURFACES]: phase 3 (HIR typecheck, streaming) received 0 module surfaces from {self.ctx.source_paths_owner.len()} source(s) -- the phase-2 surface graph was lost across the phase boundary; refusing to type-check an empty program")
+            return (self.ctx, false)
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         var lowered_by_surface: Dict<i64, HirModule> = {}
         var poisoned_by_surface: Dict<i64, bool> = {}
@@ -484,8 +493,34 @@ impl CompilerDriver:
 
     me lower_and_check_impl() -> (CompileContext, bool):
         dtrace("[DRV] lac-canary=entry")
-        if self.streaming_surface_owner_ready:
+        # Route on STABLE CONFIGURATION as well as the mutable readiness
+        # scalar. driver_orchestration already derives its phase-3 routing this
+        # way ("not the adjacent mutable readiness boolean that native value
+        # semantics can lose between phase methods"); this dispatch was the one
+        # place still trusting the boolean alone, and it is where Stage 3 died.
+        # Phase 2's streaming path sets `streaming_surface_owner_ready = true`
+        # and deliberately empties `ctx.modules` (the surfaces ARE the module
+        # set). When the boolean was lost across the phase boundary, this test
+        # read false, fell into the legacy path, type-checked the empty
+        # `ctx.modules` in 1 ms, reported success with zero HIR modules, and the
+        # empty program flowed on to SEGV at `[mir-lower-free]`.
+        # Both terms are kept: configuration rescues a lost flag, and the flag
+        # serves compat callers that stage surfaces without the env gates.
+        # See doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
+        val streaming_ready_flag = self.streaming_surface_owner_ready
+        val streaming_config_gate = driver_streaming_surface_enabled(self.ctx)
+        val phase3_module_count = self.ctx.modules.keys().len()
+        val phase3_source_count = self.ctx.sources.len()
+        log_phase("phase3:route ready={streaming_ready_flag} config={streaming_config_gate} n_modules={phase3_module_count} n_sources={phase3_source_count}")
+        if streaming_ready_flag or streaming_config_gate:
             return self.lower_and_check_streaming_surfaces_impl()
+        # Fail closed on the legacy path: type-checking zero modules out of a
+        # non-empty source set is never legitimate. Silently succeeding here is
+        # exactly how an emptied module set reached MIR lowering and crashed.
+        if phase3_module_count == 0 and phase3_source_count > 0:
+            self.ctx.add_error(
+                "error[E-DRV-PHASE3-EMPTY]: phase 3 (HIR typecheck) reached the legacy path with 0 parsed modules from {phase3_source_count} source(s) -- the phase-2 module set was lost across the phase boundary (streaming ready={streaming_ready_flag}, config gate={streaming_config_gate}); refusing to type-check an empty program")
+            return (self.ctx, false)
         val log = self.ctx.logger
 
         # Build module_name -> source_path map so each module gets the right
