@@ -203,9 +203,35 @@ impl HirLowering:
                     # (a value-position `if` typed from the then arm alone drops
                     # the array element type), and reintroducing it here would
                     # undo the fix at the moment of using it.
+                    # MEASURED 2026-08-24: the `has_type_` route alone is DEAD here.
+                    # Instrumenting this exact gate and native-building two
+                    # fixtures through the interpreted pure-Simple compiler
+                    # showed `has_type_=false` for BOTH a local-variable
+                    # receiver (`d.keys()`) and a field receiver
+                    # (`n.functions.keys()`), so the arm added by c9da626ec1c
+                    # never opened and its binaries were byte-identical to the
+                    # unpatched ones. `lower_hir_expr` simply does not populate
+                    # expression types for receivers at this stage.
+                    #
+                    # The declared type IS available, one lookup away: the same
+                    # `_hir_expr_symbol_or_invalid` + `get_symbol_raw` route the
+                    # module-callable check above already uses. For
+                    # `var d: Dict<SymbolId, i64>` it yields
+                    # `HirTypeKind::Dict(Named(...), Int(64, true))` — measured,
+                    # printed from the running compiler, not inferred. So the
+                    # expression type is preferred when present and the symbol's
+                    # declared type is the fallback.
                     if method_name_t == "keys" or method_name_t == "values":
-                        if hir_args.len() == 0 and mc_lowered_receiver.has_type_ and mc_lowered_receiver.type_ != nil:
-                            val mc_recv_type = mc_lowered_receiver.type_ ?? HirType(kind: HirTypeKind.Error, span: e.span)
+                        if hir_args.len() == 0:
+                            var mc_recv_type_opt: HirType? = nil
+                            if mc_lowered_receiver.has_type_ and mc_lowered_receiver.type_ != nil:
+                                mc_recv_type_opt = mc_lowered_receiver.type_
+                            else:
+                                val mc_recv_sym = _hir_expr_symbol_or_invalid(mc_lowered_receiver.kind)
+                                if mc_recv_sym.is_valid():
+                                    if val mc_recv_symbol = self.symbols.get_symbol_raw(mc_recv_sym.id):
+                                        mc_recv_type_opt = mc_recv_symbol.type_
+                            val mc_recv_type = mc_recv_type_opt ?? HirType(kind: HirTypeKind.Error, span: e.span)
                             match mc_recv_type.kind:
                                 case HirTypeKind.Dict(mc_dict_key, mc_dict_value):
                                     if method_name_t == "keys":
@@ -611,9 +637,20 @@ impl HirLowering:
                 # doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md
                 # localises for statements on Stage 2, and typing that depends
                 # on which of two duplicated arms happens to run is not typing.
+                # Same expression-type-then-symbol-table lookup as arm A above;
+                # see the measurement recorded there for why `has_type_` alone
+                # is not sufficient.
                 if method_name_t == "keys" or method_name_t == "values":
-                    if hir_args.len() == 0 and lowered_method_receiver.has_type_ and lowered_method_receiver.type_ != nil:
-                        val fb_recv_type = lowered_method_receiver.type_ ?? HirType(kind: HirTypeKind.Error, span: e.span)
+                    if hir_args.len() == 0:
+                        var fb_recv_type_opt: HirType? = nil
+                        if lowered_method_receiver.has_type_ and lowered_method_receiver.type_ != nil:
+                            fb_recv_type_opt = lowered_method_receiver.type_
+                        else:
+                            val fb_recv_sym = _hir_expr_symbol_or_invalid(lowered_method_receiver.kind)
+                            if fb_recv_sym.is_valid():
+                                if val fb_recv_symbol = self.symbols.get_symbol_raw(fb_recv_sym.id):
+                                    fb_recv_type_opt = fb_recv_symbol.type_
+                        val fb_recv_type = fb_recv_type_opt ?? HirType(kind: HirTypeKind.Error, span: e.span)
                         match fb_recv_type.kind:
                             case HirTypeKind.Dict(fb_dict_key, fb_dict_value):
                                 if method_name_t == "keys":
