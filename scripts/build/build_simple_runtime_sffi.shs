@@ -1,9 +1,10 @@
 #!/bin/sh
-# Build the hosted runtime dylib with the complete runtime symbol table.
+# Build backend-specific hosted GPU dynamic providers.
 #
-# Native hosted executables intentionally resolve runtime-owned externs from
-# this dynamic provider. The runtime-symbol-table feature retains canonical C
-# providers that Cargo would otherwise dead-strip from the cdylib.
+# Native hosted executables load these artifacts as data through the core GPU
+# registry. They are never linker inputs. Core-C is built by its owning native
+# runtime path; whole-linking that archive here would incorrectly pull process
+# preinit state into a provider DSO.
 set -eu
 
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -16,37 +17,28 @@ case "$(uname -s)" in
   *) EXT="dll" ;;
 esac
 
-(cd "$CRATE_ROOT" && cargo build -p simple-runtime --release --features runtime-symbol-table,vulkan,runtime-tls)
-
 mkdir -p "$OUT_DIR"
 SRC="$CRATE_ROOT/target/release/libsimple_runtime.$EXT"
-DST="$OUT_DIR/libsimple_runtime_wm.$EXT"
-cp "$SRC" "$DST.new"
-if [ "$(uname -s)" = Darwin ]; then
-  install_name_tool -id "@rpath/libsimple_runtime_wm.dylib" "$DST.new"
-fi
-mv "$DST.new" "$DST"
-echo "[build_simple_runtime_sffi] staged: $DST"
 
-C_ARCHIVE="$(find "$CRATE_ROOT/target/release/build" -path '*/simple-runtime-*/out/libruntime_sffi_c.a' -type f -print0 | xargs -0 ls -t | head -1)"
-if [ ! -s "$C_ARCHIVE" ]; then
-  echo "[build_simple_runtime_sffi] missing Cargo C-runtime archive" >&2
-  exit 1
-fi
-C_DST="$OUT_DIR/libsimple_runtime_c_wm.$EXT"
-case "$(uname -s)" in
-  Darwin)
-    cc -dynamiclib -Wl,-undefined,dynamic_lookup \
-      -Wl,-install_name,@rpath/libsimple_runtime_c_wm.dylib \
-      -Wl,-force_load,"$C_ARCHIVE" -o "$C_DST.new" -lm
-    ;;
-  Linux|FreeBSD)
-    cc -shared -Wl,--whole-archive "$C_ARCHIVE" -Wl,--no-whole-archive -o "$C_DST.new" -lm
-    ;;
-  *)
-    echo "[build_simple_runtime_sffi] unsupported host for C provider" >&2
+build_rust_dylib() {
+  _name=$1
+  _features=$2
+  _dst="$OUT_DIR/$_name.$EXT"
+  (cd "$CRATE_ROOT" && cargo build -p simple-runtime --release \
+    --no-default-features --features "$_features")
+  cp "$SRC" "$_dst.new"
+  if [ "$(uname -s)" = Darwin ]; then
+    install_name_tool -id "@rpath/$_name.dylib" "$_dst.new"
+  fi
+  nm -g "$_dst.new" | grep -q 'rt_simple_gpu_provider_abi_version' || {
+    echo "[build_simple_runtime_sffi] $_name missing GPU provider ABI export" >&2
     exit 1
-    ;;
-esac
-mv "$C_DST.new" "$C_DST"
-echo "[build_simple_runtime_sffi] staged: $C_DST"
+  }
+  mv "$_dst.new" "$_dst"
+  echo "[build_simple_runtime_sffi] staged: $_dst"
+}
+
+# Each backend is data loaded by core, never a native linker input. Building
+# with no defaults prevents CUDA and Vulkan from leaking into one another.
+build_rust_dylib libsimple_gpu_cuda runtime-symbol-table,cuda
+build_rust_dylib libsimple_gpu_vulkan runtime-symbol-table,vulkan

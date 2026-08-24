@@ -1,0 +1,87 @@
+#!/bin/sh
+# Prove that core-C opens a GPU provider explicitly, validates its ABI/backend,
+# resolves probe symbols against that handle, and has no provider link edge.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+TMP_BASE="${TMPDIR:-/tmp}"
+TMP="$(mktemp -d "$TMP_BASE/simple-gpu-provider-registry.XXXXXX")"
+cleanup() {
+    case "$TMP" in
+        "$TMP_BASE"/simple-gpu-provider-registry.*) rm -rf "$TMP" ;;
+        *) exit 2 ;;
+    esac
+}
+trap cleanup EXIT HUP INT TERM
+
+cat >"$TMP/provider.c" <<'EOF'
+#include <stdint.h>
+#ifndef PROVIDER_ABI
+#define PROVIDER_ABI 1
+#endif
+int64_t rt_simple_gpu_provider_abi_version(void) { return PROVIDER_ABI; }
+int64_t rt_simple_gpu_provider_backend_bits(void) { return 2; }
+int64_t rt_vulkan_provider_is_available(void) { return 1; }
+int64_t rt_vulkan_provider_device_count(void) { return 7; }
+int32_t rt_vk_provider_available(void) { return 1; }
+int64_t rt_vulkan_init(void) { return 1; }
+int64_t rt_vulkan_alloc_buffer(int64_t size, int64_t usage) {
+    return size == 4096 && usage == 3 ? 73 : 0;
+}
+EOF
+
+cat >"$TMP/harness.c" <<'EOF'
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+int64_t rt_gpu_provider_loaded(int64_t backend_bit);
+int64_t rt_gpu_provider_abi_version(int64_t backend_bit);
+int64_t rt_vulkan_is_available(void);
+int64_t rt_vulkan_device_count(void);
+int32_t rt_vk_available(void);
+int64_t rt_vulkan_init(void);
+int64_t rt_vulkan_alloc_buffer(int64_t size, int64_t usage);
+int main(int argc, char **argv) {
+    if (argc != 2) return 2;
+    if (setenv("SIMPLE_VULKAN_PROVIDER_PATH", argv[1], 1) != 0) return 3;
+    printf("loaded=%lld abi=%lld available=%lld count=%lld vk=%d init=%lld buffer=%lld\n",
+        (long long)rt_gpu_provider_loaded(2),
+        (long long)rt_gpu_provider_abi_version(2),
+        (long long)rt_vulkan_is_available(),
+        (long long)rt_vulkan_device_count(), (int)rt_vk_available(),
+        (long long)rt_vulkan_init(),
+        (long long)rt_vulkan_alloc_buffer(4096, 3));
+    return 0;
+}
+EOF
+
+cc -shared -fPIC "$TMP/provider.c" -o "$TMP/provider.so"
+cc -shared -fPIC -DPROVIDER_ABI=99 "$TMP/provider.c" -o "$TMP/wrong.so"
+cc -std=gnu11 -O0 -ffunction-sections -fdata-sections \
+    -I"$ROOT/src/runtime" -I"$ROOT/src/runtime/platform" \
+    -c "$ROOT/src/runtime/runtime_native.c" -o "$TMP/runtime_native.o"
+cc -Wl,--gc-sections "$TMP/harness.c" "$TMP/runtime_native.o" \
+    -ldl -lm -o "$TMP/harness"
+
+good="$($TMP/harness "$TMP/provider.so")"
+bad="$($TMP/harness "$TMP/wrong.so")"
+missing="$($TMP/harness "$TMP/missing.so")"
+[ "$good" = "loaded=1 abi=1 available=1 count=7 vk=1 init=1 buffer=73" ]
+[ "$bad" = "loaded=0 abi=0 available=0 count=0 vk=0 init=0 buffer=0" ]
+[ "$missing" = "loaded=0 abi=0 available=0 count=0 vk=0 init=0 buffer=0" ]
+
+if command -v readelf >/dev/null 2>&1; then
+    if readelf -d "$TMP/harness" | grep -Fq 'provider.so'; then
+        echo "gpu provider registry: provider is statically linked" >&2
+        exit 1
+    fi
+fi
+
+printf '%s\n' \
+    "gpu_provider_dynamic_load=true" \
+    "gpu_provider_handle_local_resolution=true" \
+    "gpu_provider_scalar_operation_dispatch=true" \
+    "gpu_provider_abi_v1_admitted=true" \
+    "gpu_provider_wrong_abi_rejected=true" \
+    "gpu_provider_missing_rejected=true" \
+    "gpu_provider_static_dependency=false"

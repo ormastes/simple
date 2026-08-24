@@ -4,7 +4,7 @@ use std.spec.{describe, it, expect}
 extern fn rt_file_read_text(path: text) -> text
 
 describe "Stage4 runtime-native wiring":
-    it "keeps CUDA and Vulkan-compute fallbacks weak so dynamic providers win":
+    it "routes CUDA and Vulkan probes through an admitted provider handle":
         val source = rt_file_read_text("src/runtime/runtime_native.c") ?? ""
         expect(source).to_contain(
             "SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_available(void)")
@@ -13,11 +13,16 @@ describe "Stage4 runtime-native wiring":
         expect(source).to_contain(
             "SPL_HOSTED_UNAVAILABLE_WEAK int32_t rt_vk_available(void)")
         expect(source).to_contain(
-            "spl_hosted_provider_i64_probe(\"rt_cuda_provider_available\")")
+            "SPL_GPU_PROVIDER_CUDA_BIT, \"rt_cuda_provider_available\"")
         expect(source).to_contain(
-            "spl_hosted_provider_i64_probe(\"rt_cuda_provider_device_count\")")
+            "SPL_GPU_PROVIDER_CUDA_BIT, \"rt_cuda_provider_device_count\"")
         expect(source).to_contain(
-            "spl_hosted_provider_i32_probe(\"rt_vk_provider_available\")")
+            "SPL_GPU_PROVIDER_VULKAN_BIT, \"rt_vk_provider_available\"")
+        expect(source).to_contain("rt_simple_gpu_provider_abi_version")
+        expect(source).to_contain("rt_simple_gpu_provider_backend_bits")
+        expect(source).to_contain("spl_gpu_provider_resolve(slot->handle, symbol)")
+        expect(source).to_contain("SPL_VULKAN_DISPATCH0(rt_vulkan_init)")
+        expect(source).to_contain("SPL_VULKAN_DISPATCH2(rt_vulkan_alloc_buffer)")
 
     it "keeps Vulkan availability fallbacks weak so real providers win":
         val source = rt_file_read_text("src/runtime/runtime_native.c") ?? ""
@@ -25,11 +30,13 @@ describe "Stage4 runtime-native wiring":
             "SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_is_available(void)")
         expect(source).to_contain(
             "SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void)")
-        expect(source).to_contain("dlsym(RTLD_DEFAULT, symbol)")
+        expect(source.contains("dlsym(RTLD_DEFAULT, symbol)")).to_equal(false)
+        expect(source).to_contain("RTLD_NOW | RTLD_LOCAL")
+        expect(source).to_contain("LoadLibraryA(path)")
         expect(source).to_contain(
-            "return spl_hosted_provider_i64_probe(\"rt_vulkan_provider_is_available\")")
+            "SPL_GPU_PROVIDER_VULKAN_BIT, \"rt_vulkan_provider_is_available\"")
         expect(source).to_contain(
-            "return spl_hosted_provider_i64_probe(\"rt_vulkan_provider_device_count\")")
+            "SPL_GPU_PROVIDER_VULKAN_BIT, \"rt_vulkan_provider_device_count\"")
 
     it "localizes legacy dynload owners before archive inventory":
         val source = compiler_native_link_source()

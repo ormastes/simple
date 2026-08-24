@@ -232,54 +232,239 @@ void rt_host_gpu_queue_reset(void);
 typedef int64_t (*spl_hosted_i64_probe_fn)(void);
 typedef int32_t (*spl_hosted_i32_probe_fn)(void);
 
-static int64_t spl_hosted_provider_i64_probe(const char* symbol) {
-#if !defined(_WIN32)
-    /*
-     * Use a provider-only symbol name.  Looking up the public compatibility
-     * name can return this executable's own weak definition under Mach-O's
-     * two-level namespace instead of the strong dependent-dylib definition.
-     */
-    void* resolved = dlsym(RTLD_DEFAULT, symbol);
+typedef struct {
+    atomic_flag lock;
+    void *handle;
+    atomic_int attempted;
+    atomic_int valid;
+    int64_t backend_bit;
+    const char *path_env;
+} spl_gpu_provider_slot;
+
+#define SPL_GPU_PROVIDER_ABI_V1 1
+#define SPL_GPU_PROVIDER_CUDA_BIT 1
+#define SPL_GPU_PROVIDER_VULKAN_BIT 2
+#define SPL_GPU_PROVIDER_METAL_BIT 4
+
+static spl_gpu_provider_slot spl_cuda_provider = {
+    ATOMIC_FLAG_INIT, NULL, ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0), SPL_GPU_PROVIDER_CUDA_BIT,
+    "SIMPLE_CUDA_PROVIDER_PATH"
+};
+static spl_gpu_provider_slot spl_vulkan_provider = {
+    ATOMIC_FLAG_INIT, NULL, ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0), SPL_GPU_PROVIDER_VULKAN_BIT,
+    "SIMPLE_VULKAN_PROVIDER_PATH"
+};
+static spl_gpu_provider_slot spl_metal_provider = {
+    ATOMIC_FLAG_INIT, NULL, ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0), SPL_GPU_PROVIDER_METAL_BIT,
+    "SIMPLE_METAL_PROVIDER_PATH"
+};
+
+typedef int64_t (*spl_gpu_provider_metadata_fn)(void);
+
+static spl_gpu_provider_slot *spl_gpu_provider_for_bit(int64_t backend_bit) {
+    if (backend_bit == SPL_GPU_PROVIDER_CUDA_BIT) return &spl_cuda_provider;
+    if (backend_bit == SPL_GPU_PROVIDER_VULKAN_BIT) return &spl_vulkan_provider;
+    if (backend_bit == SPL_GPU_PROVIDER_METAL_BIT) return &spl_metal_provider;
+    return NULL;
+}
+
+static void *spl_gpu_provider_open_local(const char *path) {
+#if defined(_WIN32)
+    return (void*)(intptr_t)LoadLibraryA(path);
+#else
+    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+#endif
+}
+
+static void *spl_gpu_provider_resolve(void *handle, const char *symbol) {
+    if (!handle) return NULL;
+#if defined(_WIN32)
+    return (void*)(intptr_t)GetProcAddress((HMODULE)handle, symbol);
+#else
+    return dlsym(handle, symbol);
+#endif
+}
+
+static void spl_gpu_provider_close_invalid(void *handle) {
+    if (!handle) return;
+#if defined(_WIN32)
+    FreeLibrary((HMODULE)handle);
+#else
+    dlclose(handle);
+#endif
+}
+
+static int spl_gpu_provider_admit_locked(
+        spl_gpu_provider_slot *slot, const char *path) {
+    void *handle;
+    spl_gpu_provider_metadata_fn abi_version;
+    spl_gpu_provider_metadata_fn backend_bits;
+    if (!slot || !path || !*path ||
+            atomic_load_explicit(&slot->attempted, memory_order_relaxed)) {
+        return slot && atomic_load_explicit(&slot->valid, memory_order_acquire);
+    }
+    atomic_store_explicit(&slot->attempted, 1, memory_order_relaxed);
+    handle = spl_gpu_provider_open_local(path);
+    if (!handle) return 0;
+    abi_version = (spl_gpu_provider_metadata_fn)spl_gpu_provider_resolve(
+        handle, "rt_simple_gpu_provider_abi_version");
+    backend_bits = (spl_gpu_provider_metadata_fn)spl_gpu_provider_resolve(
+        handle, "rt_simple_gpu_provider_backend_bits");
+    if (!abi_version || !backend_bits ||
+            abi_version() != SPL_GPU_PROVIDER_ABI_V1 ||
+            (backend_bits() & slot->backend_bit) == 0) {
+        spl_gpu_provider_close_invalid(handle);
+        return 0;
+    }
+    /* A valid provider is process-pinned. Backend-owned opaque handles may
+     * outlive any one Simple session, so unloading here would invalidate
+     * function pointers and device resources behind the core trampolines. */
+    slot->handle = handle;
+    atomic_store_explicit(&slot->valid, 1, memory_order_release);
+    return 1;
+}
+
+static int spl_gpu_provider_ensure(spl_gpu_provider_slot *slot) {
+    const char *path;
+    int ready;
+    if (!slot) return 0;
+    if (atomic_load_explicit(&slot->valid, memory_order_acquire)) return 1;
+    while (atomic_flag_test_and_set_explicit(&slot->lock, memory_order_acquire)) { }
+    path = getenv(slot->path_env);
+    ready = spl_gpu_provider_admit_locked(slot, path);
+    atomic_flag_clear_explicit(&slot->lock, memory_order_release);
+    return ready;
+}
+
+static void *spl_gpu_provider_symbol(int64_t backend_bit, const char *symbol) {
+    spl_gpu_provider_slot *slot = spl_gpu_provider_for_bit(backend_bit);
+    if (!spl_gpu_provider_ensure(slot)) return NULL;
+    return spl_gpu_provider_resolve(slot->handle, symbol);
+}
+
+int64_t rt_gpu_provider_loaded(int64_t backend_bit) {
+    spl_gpu_provider_slot *slot = spl_gpu_provider_for_bit(backend_bit);
+    return spl_gpu_provider_ensure(slot) ? 1 : 0;
+}
+
+int64_t rt_gpu_provider_abi_version(int64_t backend_bit) {
+    spl_gpu_provider_slot *slot = spl_gpu_provider_for_bit(backend_bit);
+    if (!spl_gpu_provider_ensure(slot)) return 0;
+    return SPL_GPU_PROVIDER_ABI_V1;
+}
+
+static int64_t spl_hosted_provider_i64_probe(int64_t backend_bit, const char* symbol) {
+    void* resolved = spl_gpu_provider_symbol(backend_bit, symbol);
     if (resolved != NULL) {
         return ((spl_hosted_i64_probe_fn)resolved)();
     }
-#else
-    (void)symbol;
-#endif
     return 0;
 }
 
-static int32_t spl_hosted_provider_i32_probe(const char* symbol) {
-#if !defined(_WIN32)
-    void* resolved = dlsym(RTLD_DEFAULT, symbol);
+static int32_t spl_hosted_provider_i32_probe(int64_t backend_bit, const char* symbol) {
+    void* resolved = spl_gpu_provider_symbol(backend_bit, symbol);
     if (resolved != NULL) {
         return ((spl_hosted_i32_probe_fn)resolved)();
     }
-#else
-    (void)symbol;
-#endif
     return 0;
 }
 
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_available(void) {
-    return spl_hosted_provider_i64_probe("rt_cuda_provider_available");
+    return spl_hosted_provider_i64_probe(
+        SPL_GPU_PROVIDER_CUDA_BIT, "rt_cuda_provider_available");
 }
 
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_device_count(void) {
-    return spl_hosted_provider_i64_probe("rt_cuda_provider_device_count");
+    return spl_hosted_provider_i64_probe(
+        SPL_GPU_PROVIDER_CUDA_BIT, "rt_cuda_provider_device_count");
 }
 
 SPL_HOSTED_UNAVAILABLE_WEAK int32_t rt_vk_available(void) {
-    return spl_hosted_provider_i32_probe("rt_vk_provider_available");
+    return spl_hosted_provider_i32_probe(
+        SPL_GPU_PROVIDER_VULKAN_BIT, "rt_vk_provider_available");
 }
 
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_is_available(void) {
-    return spl_hosted_provider_i64_probe("rt_vulkan_provider_is_available");
+    return spl_hosted_provider_i64_probe(
+        SPL_GPU_PROVIDER_VULKAN_BIT, "rt_vulkan_provider_is_available");
 }
 
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void) {
-    return spl_hosted_provider_i64_probe("rt_vulkan_provider_device_count");
+    return spl_hosted_provider_i64_probe(
+        SPL_GPU_PROVIDER_VULKAN_BIT, "rt_vulkan_provider_device_count");
 }
+
+/* Scalar Engine2D operations keep their public ABI in core and dispatch only
+ * through the admitted provider handle. Pointer/length operations are added
+ * separately so RuntimeValue is never allowed to cross this boundary. */
+#define SPL_VULKAN_DISPATCH0(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(void) { \
+        typedef int64_t (*fn_t)(void); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
+            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
+        return fn ? fn() : 0; \
+    }
+#define SPL_VULKAN_DISPATCH1(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0) { \
+        typedef int64_t (*fn_t)(int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
+            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
+        return fn ? fn(a0) : 0; \
+    }
+#define SPL_VULKAN_DISPATCH2(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name(int64_t a0, int64_t a1) { \
+        typedef int64_t (*fn_t)(int64_t, int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
+            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
+        return fn ? fn(a0, a1) : 0; \
+    }
+#define SPL_VULKAN_DISPATCH3(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name( \
+            int64_t a0, int64_t a1, int64_t a2) { \
+        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
+            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
+        return fn ? fn(a0, a1, a2) : 0; \
+    }
+#define SPL_VULKAN_DISPATCH4(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name( \
+            int64_t a0, int64_t a1, int64_t a2, int64_t a3) { \
+        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
+            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
+        return fn ? fn(a0, a1, a2, a3) : 0; \
+    }
+
+SPL_VULKAN_DISPATCH0(rt_vulkan_init)
+SPL_VULKAN_DISPATCH0(rt_vulkan_shutdown)
+SPL_VULKAN_DISPATCH1(rt_vulkan_select_device)
+SPL_VULKAN_DISPATCH2(rt_vulkan_alloc_buffer)
+SPL_VULKAN_DISPATCH1(rt_vulkan_free_buffer)
+SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_shader)
+SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_pipeline)
+SPL_VULKAN_DISPATCH1(rt_vulkan_create_descriptor_set)
+SPL_VULKAN_DISPATCH3(rt_vulkan_bind_buffer)
+SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_descriptor_set)
+SPL_VULKAN_DISPATCH0(rt_vulkan_begin_compute)
+SPL_VULKAN_DISPATCH2(rt_vulkan_bind_pipeline)
+SPL_VULKAN_DISPATCH2(rt_vulkan_bind_descriptors)
+SPL_VULKAN_DISPATCH4(rt_vulkan_dispatch)
+SPL_VULKAN_DISPATCH1(rt_vulkan_end_compute)
+SPL_VULKAN_DISPATCH1(rt_vulkan_discard_command)
+SPL_VULKAN_DISPATCH1(rt_vulkan_submit_and_wait)
+SPL_VULKAN_DISPATCH0(rt_vulkan_fence_submission_supported)
+SPL_VULKAN_DISPATCH0(rt_vulkan_accepted_compute_submit_count)
+SPL_VULKAN_DISPATCH1(rt_vulkan_submit_and_wait_fence)
+SPL_VULKAN_DISPATCH1(rt_vulkan_submit_no_wait)
+SPL_VULKAN_DISPATCH2(rt_vulkan_wait_fence)
+SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_fence)
+SPL_VULKAN_DISPATCH0(rt_vulkan_wait_idle)
+
+#undef SPL_VULKAN_DISPATCH0
+#undef SPL_VULKAN_DISPATCH1
+#undef SPL_VULKAN_DISPATCH2
+#undef SPL_VULKAN_DISPATCH3
+#undef SPL_VULKAN_DISPATCH4
 
 /*
  * Core-C parity for the runtime-owned Vulkan dependency-quarantine gate.

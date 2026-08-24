@@ -56,6 +56,29 @@ pub mod vulkan;
 pub mod vulkan_graphics_runtime;
 pub mod metal_graphics_runtime;
 
+/// Stable metadata queried by the core runtime before it admits this artifact
+/// as a dynamically loaded GPU provider. Operation tables are backend-specific
+/// and append-only; version 1 never passes RuntimeValue across the boundary.
+#[no_mangle]
+pub extern "C" fn rt_simple_gpu_provider_abi_version() -> i64 {
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simple_gpu_provider_backend_bits() -> i64 {
+    let mut bits = 0;
+    if cfg!(feature = "cuda") {
+        bits |= 1;
+    }
+    if cfg!(feature = "vulkan") {
+        bits |= 2;
+    }
+    if cfg!(target_os = "macos") {
+        bits |= 4;
+    }
+    bits
+}
+
 // Initialize runtime thread on first use
 #[cfg(feature = "monoio-net")]
 #[ctor::ctor]
