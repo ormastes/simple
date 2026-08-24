@@ -1868,3 +1868,61 @@ Field inference now reads the registered self-field type first, so
 `builtin_is_empty_source_spec.spl`; the executable admission guard is
 `stage2_mir_retention.spl`. Status remains OPEN pending one fresh Stage 2 that
 passes the native guard; no source-only claim substitutes for that evidence.
+
+## 2026-08-24 — ROOT CAUSE: `is_empty()` returns FALSE on an empty list in Stage-2-compiled code
+
+Confirmed on an admitted `--fresh-cache` Stage 2 (`750 compiled, 0 cached`, sha256
+`572d7a5aa3e29893f7675d29c5dd5f0c4098a86a9c898a8363b70f8201f2e00e`), interpreted
+lane as matched control, same fixture and same probe:
+
+| | **Stage 2** | interpreted |
+|---|---|---|
+| `MIRB finalize` | `pending_len=0 is_empty=`**`false`** | `pending_len=0 is_empty=`**`true`** |
+| branch taken | **FELL-THROUGH** | early-return-taken |
+| `MIRB end` | `b0_insts=`**`0`** | `b0_insts=`**`3`** |
+| returned function | `instr_total=`**`0`** | `instr_total=`**`3`** |
+
+`pending_len=0` and `is_empty=false` are printed **from the same value on the same
+line**. `.len()` says 0 while `.is_empty()` says false — an internally inconsistent
+pair. This is a **predicate misread**, not a disagreement about the data.
+
+### The complete mechanism, every link measured
+
+1. `lower_expr` emits 3 instructions into the builder's pending list — identical
+   count to the working engine.
+2. The first `finalize_block()` sees `pending_len=3, is_empty=false`, falls through
+   correctly, and writes the 3 into block 0.
+3. `self.builder` therefore holds `finalized=3` right up to the `end_function` call
+   — which is why every earlier bracket point agreed and the write-back chain was
+   exonerated.
+4. `end_function()`'s first statement is `finalize_block()`. Pending is now empty
+   (`pending_len=0`), so the guard `if self.instructions.is_empty(): return` should
+   fire. **On Stage 2 it does not.**
+5. Control reaches `block.instructions = self.instructions` and **overwrites block
+   0's three instructions with the empty pending list**.
+6. `end_function` returns a function with 0 instructions → the loud guard fires →
+   and, with no instructions there is no terminator and no tail `result`, so
+   E-SFFI-016 fires downstream.
+
+### Scope warning — this is NOT the wrong-value-in-a-slot cluster
+
+Every `is_empty()` guard in the self-compiled compiler is now **suspect**, and any
+negative result that depended on one is unsafe to trust. Prefer `.len() == 0` at
+call sites until the codegen defect is fixed. This is a broader hazard than any of
+the six slot defects, because it silently inverts control flow rather than
+corrupting one value.
+
+### Explicitly NOT established
+
+* **Which codegen path** miscompiles the call, and whether it is specific to a
+  struct-**field** receiver (`self.instructions`) or affects locals too.
+* A **standalone fixture does not reproduce it.** A small `native-build` leaves
+  `Array.is_empty` unresolved and the linker stub SEGVs — a *different* defect (the
+  `b5afb5579b8` emitted-but-undefined class), which reproduced in 3 lines and is
+  worth filing on its own. Stage 2 carries **no** `Array.is_empty` symbol at all, so
+  it lowers the call differently and the fixture cannot stand in for it. This was
+  nearly reported as the root cause; it is not.
+* **No fix or workaround is applied here.** Per the standing instruction: fix the
+  root if it is a seed miscompile; if a local restructure (`.len() == 0`) is used
+  instead, record it explicitly as a workaround for a live seed defect, file the
+  seed defect separately, and do not let it close this record.
