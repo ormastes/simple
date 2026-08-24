@@ -3,6 +3,16 @@
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
+**2026-08-24 — read alongside `io_runtime_import_breaks_native_build_len_on_i64_2026-08-24.md`.** A sibling
+manifestation of this message shape was reproduced by EXECUTION (not source
+inspection) from a FOUR-LINE file whose only content is
+`use std.io_runtime.{env_get}` — no MCP, no `_mcp_extract_id`, and the callee
+is never invoked. It fires at BUILD time and produces no binary, so it blocks
+strictly earlier than Symptom 2 below, and its receiver values are small and
+UNSTABLE (38, 254) rather than pointer-shaped. Same family; do not assume one
+fix closes both, and do not conflate them — that conflation is what cost this
+repo a day on the stage-2 codec defect.
+
 **Date:** 2026-07-17
 **Scope:** `src/app/mcp/main.spl` (`.spl` fix, DONE) + `src/compiler_rust` interpreter
 (NOT fixed here — out of scope per task rules; seed-side).
