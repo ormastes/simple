@@ -1,10 +1,10 @@
 # Scheduler-owned sealed server-data launch grant registry.
 #
 # Canonical mutable state is one checked-mutex capsule. Boundary values are
-# opaque generational handles or claims; neither carries DBFS/namespace
-# authority. A future namespace owner may consume a claim inside the kernel,
-# but scalar task identifiers and copied image metadata never authorize data
-# access.
+# opaque generational handles or redemption tickets; neither carries
+# DBFS/namespace authority.  A future namespace owner may use the two-phase
+# protocol while installing its own authority, but no transition in this file
+# authorizes data access.
 
 use std.common.contracts.execution.simpleos_executable_admission_v1.{
     ExecutableImageHandleV1, executable_image_handle_validate
@@ -27,7 +27,7 @@ pub(package) struct ServerDataLaunchGrantLifecycleHandleV1:
     task_id: u64
     lifecycle_generation: u64
 
-pub(package) struct ServerDataLaunchGrantClaimV1:
+pub(package) struct ServerDataLaunchRedemptionTicketV1:
     slot: i64
     generation: u64
     nonce: u64
@@ -38,15 +38,52 @@ pub(package) struct ServerDataLaunchGrantInstallResultV1:
     status: ServerDataLaunchGrantInstallStatusV1
     handle: ServerDataLaunchGrantLifecycleHandleV1?
 
-enum ServerDataLaunchGrantSlotStateV1:
+pub enum ServerDataLaunchGrantProtocolStateV1:
     Empty
     Installed
-    Claimed
+    Redeeming
+    Redeemed
     Quarantined
     Retired
 
+pub enum ServerDataLaunchGrantProtocolEventV1:
+    BeginRedemption
+    CommitRedemption
+    RollbackRedemption
+    QuarantineRedemption
+    QuarantineCommittedRedemption
+    RevokeLifecycle
+
+pub fn server_data_launch_grant_protocol_transition_v1(
+    state: ServerDataLaunchGrantProtocolStateV1,
+    event: ServerDataLaunchGrantProtocolEventV1
+) -> ServerDataLaunchGrantProtocolStateV1?:
+    """Pure protocol oracle; it observes no registry row and grants no authority."""
+    match event:
+        case ServerDataLaunchGrantProtocolEventV1.BeginRedemption:
+            if state == ServerDataLaunchGrantProtocolStateV1.Installed:
+                return Some(ServerDataLaunchGrantProtocolStateV1.Redeeming)
+        case ServerDataLaunchGrantProtocolEventV1.CommitRedemption:
+            if state == ServerDataLaunchGrantProtocolStateV1.Redeeming:
+                return Some(ServerDataLaunchGrantProtocolStateV1.Redeemed)
+        case ServerDataLaunchGrantProtocolEventV1.RollbackRedemption:
+            if state == ServerDataLaunchGrantProtocolStateV1.Redeeming:
+                return Some(ServerDataLaunchGrantProtocolStateV1.Installed)
+        case ServerDataLaunchGrantProtocolEventV1.QuarantineRedemption:
+            if state == ServerDataLaunchGrantProtocolStateV1.Redeeming:
+                return Some(ServerDataLaunchGrantProtocolStateV1.Quarantined)
+        case ServerDataLaunchGrantProtocolEventV1.QuarantineCommittedRedemption:
+            if state == ServerDataLaunchGrantProtocolStateV1.Redeemed:
+                return Some(ServerDataLaunchGrantProtocolStateV1.Quarantined)
+        case ServerDataLaunchGrantProtocolEventV1.RevokeLifecycle:
+            if (state == ServerDataLaunchGrantProtocolStateV1.Installed or
+                state == ServerDataLaunchGrantProtocolStateV1.Redeeming or
+                state == ServerDataLaunchGrantProtocolStateV1.Redeemed):
+                return Some(ServerDataLaunchGrantProtocolStateV1.Empty)
+    nil
+
 struct ServerDataLaunchGrantSlotV1:
-    state: ServerDataLaunchGrantSlotStateV1
+    state: ServerDataLaunchGrantProtocolStateV1
     generation: u64
     nonce: u64
     task_id: u64
@@ -74,7 +111,7 @@ var _server_data_launch_grant_registry_v1 = ServerDataLaunchGrantRegistryStateV1
 
 fn _server_data_launch_grant_empty_slot_v1(generation: u64) -> ServerDataLaunchGrantSlotV1:
     ServerDataLaunchGrantSlotV1(
-        state: ServerDataLaunchGrantSlotStateV1.Empty,
+        state: ServerDataLaunchGrantProtocolStateV1.Empty,
         generation: generation,
         nonce: 0u64,
         task_id: 0u64,
@@ -106,14 +143,16 @@ fn _server_data_launch_grant_install_result_v1(
 ) -> ServerDataLaunchGrantInstallResultV1:
     ServerDataLaunchGrantInstallResultV1(status: status, handle: handle)
 
-fn _server_data_launch_grant_live_task_index_v1(
+fn _server_data_launch_grant_task_index_v1(
     task_id: u64, lifecycle_generation: u64
 ) -> i64:
     var i = 0
     while i < _server_data_launch_grant_registry_v1.slots.len():
         val slot = _server_data_launch_grant_registry_v1.slots[i]
-        if (slot.state == ServerDataLaunchGrantSlotStateV1.Installed or
-            slot.state == ServerDataLaunchGrantSlotStateV1.Claimed) and
+        if (slot.state == ServerDataLaunchGrantProtocolStateV1.Installed or
+            slot.state == ServerDataLaunchGrantProtocolStateV1.Redeeming or
+            slot.state == ServerDataLaunchGrantProtocolStateV1.Redeemed or
+            slot.state == ServerDataLaunchGrantProtocolStateV1.Quarantined) and
             slot.task_id == task_id and
             slot.lifecycle_generation == lifecycle_generation:
             return i
@@ -129,7 +168,7 @@ fn _server_data_launch_grant_handle_index_v1(
         handle.task_id == 0u64 or handle.lifecycle_generation == 0u64:
         return -1
     val slot = _server_data_launch_grant_registry_v1.slots[handle.slot]
-    if slot.state != ServerDataLaunchGrantSlotStateV1.Installed or
+    if slot.state != ServerDataLaunchGrantProtocolStateV1.Installed or
         slot.generation != handle.generation or slot.nonce != handle.nonce or
         slot.task_id != handle.task_id or
         slot.lifecycle_generation != handle.lifecycle_generation:
@@ -161,7 +200,7 @@ pub(package) fn server_data_launch_grant_install_before_publication_v1(
     if not _server_data_launch_grant_lock_v1():
         return _server_data_launch_grant_install_result_v1(
             ServerDataLaunchGrantInstallStatusV1.SerializationUnavailable, nil)
-    if _server_data_launch_grant_live_task_index_v1(task_id, lifecycle_generation) >= 0:
+    if _server_data_launch_grant_task_index_v1(task_id, lifecycle_generation) >= 0:
         val unlocked = _server_data_launch_grant_unlock_v1()
         return _server_data_launch_grant_install_result_v1(
             if unlocked: ServerDataLaunchGrantInstallStatusV1.Rejected
@@ -172,7 +211,7 @@ pub(package) fn server_data_launch_grant_install_before_publication_v1(
     var i = 0
     while i < _server_data_launch_grant_registry_v1.slots.len():
         if _server_data_launch_grant_registry_v1.slots[i].state ==
-            ServerDataLaunchGrantSlotStateV1.Empty:
+            ServerDataLaunchGrantProtocolStateV1.Empty:
             reusable = i
             break
         i = i + 1
@@ -193,7 +232,7 @@ pub(package) fn server_data_launch_grant_install_before_publication_v1(
         _server_data_launch_grant_registry_v1.nonce_counter == 0xFFFFFFFFFFFFFFFFu64:
         if reusable >= 0:
             var retired = _server_data_launch_grant_registry_v1.slots[reusable]
-            retired.state = ServerDataLaunchGrantSlotStateV1.Retired
+            retired.state = ServerDataLaunchGrantProtocolStateV1.Retired
             _server_data_launch_grant_registry_v1.slots[reusable] = retired
         val unlocked = _server_data_launch_grant_unlock_v1()
         return _server_data_launch_grant_install_result_v1(
@@ -210,7 +249,7 @@ pub(package) fn server_data_launch_grant_install_before_publication_v1(
     else:
         _server_data_launch_grant_registry_v1.slots.len()
     val installed = ServerDataLaunchGrantSlotV1(
-        state: ServerDataLaunchGrantSlotStateV1.Installed,
+        state: ServerDataLaunchGrantProtocolStateV1.Installed,
         generation: generation,
         nonce: nonce,
         task_id: task_id,
@@ -261,33 +300,116 @@ pub(package) fn server_data_launch_grant_quarantine_before_publication_v1(
         _ = _server_data_launch_grant_unlock_v1()
         return false
     var slot = _server_data_launch_grant_registry_v1.slots[index]
-    slot.state = ServerDataLaunchGrantSlotStateV1.Quarantined
+    slot.state = ServerDataLaunchGrantProtocolStateV1.Quarantined
     _server_data_launch_grant_registry_v1.slots[index] = slot
     _server_data_launch_grant_unlock_v1()
 
-pub(package) fn server_data_launch_grant_claim_once_for_task_v1(
+fn _server_data_launch_redemption_ticket_index_v1(
+    ticket: ServerDataLaunchRedemptionTicketV1,
+    expected_state: ServerDataLaunchGrantProtocolStateV1
+) -> i64:
+    if ticket.slot < 0 or
+        ticket.slot >= _server_data_launch_grant_registry_v1.slots.len() or
+        ticket.generation == 0u64 or ticket.nonce == 0u64 or
+        ticket.task_id == 0u64 or ticket.lifecycle_generation == 0u64:
+        return -1
+    val slot = _server_data_launch_grant_registry_v1.slots[ticket.slot]
+    if slot.state != expected_state or
+        slot.generation != ticket.generation or slot.nonce != ticket.nonce or
+        slot.task_id != ticket.task_id or
+        slot.lifecycle_generation != ticket.lifecycle_generation:
+        return -1
+    ticket.slot
+
+fn _server_data_launch_grant_begin_for_task_v1(
     task_id: u64, lifecycle_generation: u64
-) -> ServerDataLaunchGrantClaimV1?:
+) -> ServerDataLaunchRedemptionTicketV1?:
     if task_id == 0u64 or lifecycle_generation == 0u64 or
         not _server_data_launch_grant_lock_v1():
         return nil
-    val index = _server_data_launch_grant_live_task_index_v1(
+    val index = _server_data_launch_grant_task_index_v1(
         task_id, lifecycle_generation)
     if index < 0 or _server_data_launch_grant_registry_v1.slots[index].state !=
-        ServerDataLaunchGrantSlotStateV1.Installed:
+        ServerDataLaunchGrantProtocolStateV1.Installed:
         _ = _server_data_launch_grant_unlock_v1()
         return nil
     var slot = _server_data_launch_grant_registry_v1.slots[index]
-    slot.state = ServerDataLaunchGrantSlotStateV1.Claimed
+    val next = server_data_launch_grant_protocol_transition_v1(
+        slot.state, ServerDataLaunchGrantProtocolEventV1.BeginRedemption)
+    if next == nil:
+        _ = _server_data_launch_grant_unlock_v1()
+        return nil
+    slot.state = next.unwrap()
     _server_data_launch_grant_registry_v1.slots[index] = slot
-    val claim = ServerDataLaunchGrantClaimV1(
+    val ticket = ServerDataLaunchRedemptionTicketV1(
         slot: index,
         generation: slot.generation,
         nonce: slot.nonce,
         task_id: slot.task_id,
         lifecycle_generation: slot.lifecycle_generation)
     if not _server_data_launch_grant_unlock_v1(): return nil
-    Some(claim)
+    Some(ticket)
+
+pub(package) fn server_data_launch_redemption_commit_v1(
+    ticket: ServerDataLaunchRedemptionTicketV1
+) -> bool:
+    if not _server_data_launch_grant_lock_v1(): return false
+    val index = _server_data_launch_redemption_ticket_index_v1(
+        ticket, ServerDataLaunchGrantProtocolStateV1.Redeeming)
+    if index < 0:
+        _ = _server_data_launch_grant_unlock_v1()
+        return false
+    var slot = _server_data_launch_grant_registry_v1.slots[index]
+    val next = server_data_launch_grant_protocol_transition_v1(
+        slot.state, ServerDataLaunchGrantProtocolEventV1.CommitRedemption)
+    if next == nil:
+        _ = _server_data_launch_grant_unlock_v1()
+        return false
+    slot.state = next.unwrap()
+    _server_data_launch_grant_registry_v1.slots[index] = slot
+    _server_data_launch_grant_unlock_v1()
+
+pub(package) fn server_data_launch_redemption_rollback_v1(
+    ticket: ServerDataLaunchRedemptionTicketV1
+) -> bool:
+    if not _server_data_launch_grant_lock_v1(): return false
+    val index = _server_data_launch_redemption_ticket_index_v1(
+        ticket, ServerDataLaunchGrantProtocolStateV1.Redeeming)
+    if index < 0:
+        _ = _server_data_launch_grant_unlock_v1()
+        return false
+    var slot = _server_data_launch_grant_registry_v1.slots[index]
+    val next = server_data_launch_grant_protocol_transition_v1(
+        slot.state, ServerDataLaunchGrantProtocolEventV1.RollbackRedemption)
+    if next == nil:
+        _ = _server_data_launch_grant_unlock_v1()
+        return false
+    slot.state = next.unwrap()
+    _server_data_launch_grant_registry_v1.slots[index] = slot
+    _server_data_launch_grant_unlock_v1()
+
+pub(package) fn server_data_launch_redemption_quarantine_v1(
+    ticket: ServerDataLaunchRedemptionTicketV1
+) -> bool:
+    if not _server_data_launch_grant_lock_v1(): return false
+    var event = ServerDataLaunchGrantProtocolEventV1.QuarantineRedemption
+    var index = _server_data_launch_redemption_ticket_index_v1(
+        ticket, ServerDataLaunchGrantProtocolStateV1.Redeeming)
+    if index < 0:
+        index = _server_data_launch_redemption_ticket_index_v1(
+            ticket, ServerDataLaunchGrantProtocolStateV1.Redeemed)
+        event = ServerDataLaunchGrantProtocolEventV1.QuarantineCommittedRedemption
+        if index < 0:
+            _ = _server_data_launch_grant_unlock_v1()
+            return false
+    var slot = _server_data_launch_grant_registry_v1.slots[index]
+    val next = server_data_launch_grant_protocol_transition_v1(slot.state, event)
+    if next == nil:
+        _ = _server_data_launch_grant_unlock_v1()
+        return false
+    slot.state = next.unwrap()
+    _server_data_launch_grant_registry_v1.slots[index] = slot
+    _server_data_launch_grant_unlock_v1()
 
 pub(package) fn server_data_launch_grant_revoke_task_lifecycle_v1(
     task_id: u64, lifecycle_generation: u64
@@ -295,19 +417,26 @@ pub(package) fn server_data_launch_grant_revoke_task_lifecycle_v1(
     if task_id == 0u64 or lifecycle_generation == 0u64 or
         not _server_data_launch_grant_lock_v1():
         return false
-    val index = _server_data_launch_grant_live_task_index_v1(
+    val index = _server_data_launch_grant_task_index_v1(
         task_id, lifecycle_generation)
     if index < 0:
         # Already revoked or not applicable is an idempotent terminal absence.
         return _server_data_launch_grant_unlock_v1()
-    val generation = _server_data_launch_grant_registry_v1.slots[index].generation
+    val slot = _server_data_launch_grant_registry_v1.slots[index]
+    val next = server_data_launch_grant_protocol_transition_v1(
+        slot.state, ServerDataLaunchGrantProtocolEventV1.RevokeLifecycle)
+    if next == nil:
+        # Quarantined rows remain tombstones and block identity reuse.
+        _ = _server_data_launch_grant_unlock_v1()
+        return false
+    val generation = slot.generation
     _server_data_launch_grant_registry_v1.slots[index] =
         _server_data_launch_grant_empty_slot_v1(generation)
     _server_data_launch_grant_unlock_v1()
 
 impl Scheduler:
-    pub(package) me claim_current_server_data_launch_grant_once_v1(
-    ) -> ServerDataLaunchGrantClaimV1?:
+    pub(package) me begin_current_server_data_redemption_v1(
+    ) -> ServerDataLaunchRedemptionTicketV1?:
         # The caller supplies no PID, lifecycle generation, path, image hash,
         # or slot token. Both identity components come from the scheduler's
         # canonical current TCB under the scheduler owner boundary.
@@ -318,7 +447,7 @@ impl Scheduler:
             if maybe_task != nil:
                 val task = maybe_task.unwrap()
                 if task.id.id == self.current.id:
-                    return server_data_launch_grant_claim_once_for_task_v1(
+                    return _server_data_launch_grant_begin_for_task_v1(
                         task.id.id, task.lifecycle_generation)
             i = i + 1
         nil

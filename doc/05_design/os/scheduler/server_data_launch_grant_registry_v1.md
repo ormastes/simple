@@ -30,18 +30,27 @@ scheduler instances or CPUs from publishing duplicate identities.
 ## Ownership and lifecycle
 
 One checked mutex owns at most 64 reusable generational slots. A slot has one
-of `Empty`, `Installed`, `Claimed`, `Quarantined`, or `Retired` state. Reuse
-increments its generation; nonce or generation exhaustion fails closed.
-Unlock indeterminacy permanently quarantines the registry.
+of `Empty`, `Installed`, `Redeeming`, `Redeemed`, `Quarantined`, or `Retired`
+state. Reuse increments its generation; nonce or generation exhaustion fails
+closed. Unlock indeterminacy permanently quarantines the registry.
 
-The scheduler's claim API takes no identity arguments. It derives PID and
-lifecycle generation from the current TCB and atomically transitions exactly
-one installed row to claimed. The returned package-private claim is opaque and
-copyable but non-authorizing; only a future namespace owner may validate and
-consume it while installing its own authority. Exit, reap preparation, or exec
-replacement revokes unclaimed/claimed lifecycle state. A failure after grant
-installation but before TCB publication rolls the exact handle back; an
-indeterminate rollback quarantines rather than publishes authority.
+The scheduler's begin-redemption API takes no identity arguments. It derives
+PID and lifecycle generation from the current TCB and atomically transitions
+exactly one installed row to redeeming. The returned package-private ticket is
+opaque, exact-generation, and non-authorizing. Exact commit moves only that
+ticket's `Redeeming` row to `Redeemed`; exact rollback restores it to
+`Installed`, so a namespace-owner preparation failure does not silently spend
+the launch grant. Replay, stale, cross-task, or wrong-state tickets fail.
+
+`Quarantined` is a non-reusable tombstone. A redemption whose outcome cannot be
+made unambiguous can quarantine its exact ticket from either `Redeeming` or
+`Redeemed`; this covers namespace preparation failure as well as ambiguity
+after launch-ticket commit but before namespace publication. A duplicate
+install for the same task lifecycle remains blocked. Exit, reap preparation, or exec
+replacement revokes `Installed`, `Redeeming`, and `Redeemed` lifecycle state.
+It deliberately cannot erase a quarantined tombstone. A failure after grant
+installation but before TCB publication rolls the exact lifecycle handle back;
+an indeterminate rollback quarantines rather than publishes authority.
 
 The current-TCB lookup remains inside the mutable `Scheduler.me` owner domain;
 the registry mutex is acquired only after that scheduler-owned identity is
@@ -49,14 +58,15 @@ copied, preserving the fixed scheduler-then-registry lock order.
 
 ## Complexity and storage
 
-Install, claim, revoke, and rollback scan at most 64 fixed rows: O(64), which is
-constant under the protocol bound. Each row retains one bounded canonical path
+Install, begin, commit, revoke, and rollback scan at most 64 fixed rows: O(64),
+which is constant under the protocol bound. Each row retains one bounded canonical path
 and two bounded digest/identity strings plus scalar identities. No image bytes,
 argv/env, DBFS handles, namespaces, or filesystem objects are copied into the
 registry.
 
 ## Deferred boundary
 
-The DBFS/namespace owner must atomically consume the opaque claim and install a
-least-authority server-data capability. Until that owner exists, the claim is
-not a usable filesystem or database permission.
+The DBFS/namespace owner must coordinate the opaque two-phase ticket with its
+own unpublished preparation and publish authority only after exact commit.
+Until that owner exists, `Redeemed` is only scheduler protocol state and is not
+a usable filesystem or database permission.
