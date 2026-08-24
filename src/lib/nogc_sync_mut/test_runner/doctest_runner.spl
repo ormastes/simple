@@ -6,7 +6,7 @@
 use std.io.{file_read, file_exists}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_remove}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
-use std.io_runtime.{dir_walk}
+use std.io_runtime.{dir_walk, dir_create_all}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.test_runner.test_runner_types.{TestFileResult, TEST_OUTPUT_CAPTURE_BYTES}
 # PERF (2026-08-17): import find_simple_binary from its DEFINING module
@@ -399,6 +399,44 @@ fn _dt_strip_doc_marker(trimmed: text, marker_len: i64) -> text:
         r = r[1:]
     r
 
+# Where the same-file doctest composite is written.
+#
+# It MUST live INSIDE the repository under test. The seed resolves `use std.*`
+# by walking UP from the source file's directory looking for a stdlib root, and
+# only if that walk finds nothing does it fall back to a repo root baked in at
+# BUILD time (`env!("CARGO_MANIFEST_DIR")` in
+# `src/compiler_rust/compiler/src/pipeline/module_loader.rs`, tried BEFORE the
+# process cwd). Writing the composite to `$TMPDIR` (`/tmp`, `/mnt/data/tmp`)
+# gives the walk-up nothing to find, so every doctest block silently compiled
+# the stdlib of whatever worktree the seed binary happened to be BUILT in --
+# a different tree than the one under test. Measured 2026-08-24 by strace: a
+# composite under /mnt/data/tmp opened
+# `/mnt/data/worktrees/seed-deploy-1/src/lib/nogc_sync_mut/spec/decorators.spl`
+# while the repo under test was a different worktree entirely, so stdlib fixes
+# made in the tree under test were invisible and stale defects in the unrelated
+# build tree were reported as failures of this tree's examples.
+#
+# `.simple/` is already gitignored, so the composite is inside the repo (the
+# walk-up finds this tree's `src/lib`) without polluting `src/` -- a stray
+# composite left under `src/` by a killed run would be picked up as a source
+# file by the next doctest discovery sweep.
+fn _dt_composite_dir() -> text:
+    val dir = ".simple/doctest"
+    dir_create_all(dir)
+    dir
+
+# Composite basenames must be unique per SOURCE FILE, not just per line number.
+# Two different sources with a doctest on the same line ran concurrently would
+# otherwise write and delete the same path underneath each other.
+fn _dt_composite_slug(file_path: text) -> text:
+    var slug = ""
+    for ch in file_path:
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
+            slug = slug + ch
+        else:
+            slug = slug + "_"
+    slug
+
 fn build_spl_doctest_code(source_content: text, dt: Doctest) -> text:
     source_content + "\n\n# --- doctest from line {dt.line_number} ---\nuse std.spec.*\n" + dt.code
 
@@ -436,7 +474,7 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64) -> SdoctestFileR
     for dt in doctests:
         # Build composite file: source + doctest code
         val composite_code = build_spl_doctest_code(source_content, dt)
-        val temp_path = "{_dt_get_temp_dir()}/spl_doctest_{dt.line_number}.spl"
+        val temp_path = "{_dt_composite_dir()}/spl_doctest_{_dt_composite_slug(file_path)}_{dt.line_number}.spl"
         file_atomic_write(temp_path, composite_code)
 
         val start = time_now_unix_micros()
