@@ -225,11 +225,8 @@ void rt_host_gpu_queue_reset(void);
 #define SPL_HOSTED_UNAVAILABLE_WEAK
 #endif
 
-int64_t rt_cuda_available(void) { return 0; }
-int64_t rt_cuda_device_count(void) { return 0; }
-int32_t rt_vk_available(void) { return 0; }
-
 typedef int64_t (*spl_hosted_i64_probe_fn)(void);
+typedef int32_t (*spl_hosted_i32_probe_fn)(void);
 
 static int64_t spl_hosted_provider_i64_probe(const char* symbol) {
 #if !defined(_WIN32)
@@ -246,6 +243,30 @@ static int64_t spl_hosted_provider_i64_probe(const char* symbol) {
     (void)symbol;
 #endif
     return 0;
+}
+
+static int32_t spl_hosted_provider_i32_probe(const char* symbol) {
+#if !defined(_WIN32)
+    void* resolved = dlsym(RTLD_DEFAULT, symbol);
+    if (resolved != NULL) {
+        return ((spl_hosted_i32_probe_fn)resolved)();
+    }
+#else
+    (void)symbol;
+#endif
+    return 0;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_available(void) {
+    return spl_hosted_provider_i64_probe("rt_cuda_provider_available");
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_cuda_device_count(void) {
+    return spl_hosted_provider_i64_probe("rt_cuda_provider_device_count");
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int32_t rt_vk_available(void) {
+    return spl_hosted_provider_i32_probe("rt_vk_provider_available");
 }
 
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_is_available(void) {

@@ -3509,13 +3509,20 @@ stage2_compile_stack_mib=$(bootstrap_stage3_transcript_argv_value_after \
   "$stage2_transcript" --compile-stack-mib 2>/dev/null || true)
 stage2_progress=$(bootstrap_stage3_transcript_explicit_env_value \
   "$stage2_transcript" SIMPLE_BUILD_PROGRESS_EVENTS) || exit 1
+stage2_rust_log=$(bootstrap_stage3_transcript_explicit_env_value \
+  "$stage2_transcript" RUST_LOG) || exit 1
+stage2_library_path=$(bootstrap_stage3_transcript_explicit_env_value \
+  "$stage2_transcript" LIBRARY_PATH) || exit 1
+stage2_link_compat=$(bootstrap_stage3_transcript_explicit_env_value \
+  "$stage2_transcript" SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256) || exit 1
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
 case "$stage2_timeout" in ''|*[!0-9]*) exit 1 ;; esac
 case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
 if [ -n "$stage2_compile_stack_mib" ]; then
   stage2_args=$(bootstrap_stage3_args_sha256 \
-  "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
+  "RUST_LOG=$stage2_rust_log" "LIBRARY_PATH=$stage2_library_path" \
+  "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
   "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
@@ -3528,7 +3535,8 @@ if [ -n "$stage2_compile_stack_mib" ]; then
   --runtime-path "$runtime" -o "$stage2")
 else
   stage2_args=$(bootstrap_stage3_args_sha256 \
-  "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
+  "RUST_LOG=$stage2_rust_log" "LIBRARY_PATH=$stage2_library_path" \
+  "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
   "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
@@ -6139,9 +6147,10 @@ else
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
       --source src/compiler --source src/app --source src/lib \
-      --entry-closure --threads "${jobs}" --cache-dir "${stage2_cache_absolute}" \
+      --entry-closure --threads "${jobs}" \
       --timeout "${native_build_timeout}" \
       ${native_verbose_arg} \
+      --cache-dir "${stage2_cache_absolute}" \
       --mode "${bootstrap_mode}" --entry src/app/cli/bootstrap_main.spl \
       --runtime-path "${stage_runtime_absolute}" \
       -o "${stage2_bin}"

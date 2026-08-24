@@ -1399,6 +1399,12 @@ pub extern "C" fn rt_cuda_device_count() -> i64 {
     get_device_count().unwrap_or(0) as i64
 }
 
+/// Distinct provider entry used by the core C runtime fallback.
+#[no_mangle]
+pub extern "C" fn rt_cuda_provider_device_count() -> i64 {
+    rt_cuda_device_count()
+}
+
 /// Check if CUDA is available (SFFI)
 #[no_mangle]
 pub extern "C" fn rt_cuda_available() -> i64 {
@@ -1406,6 +1412,12 @@ pub extern "C" fn rt_cuda_available() -> i64 {
         Ok(count) if count > 0 => 1,
         _ => 0,
     }
+}
+
+/// Distinct provider entry used by the core C runtime fallback.
+#[no_mangle]
+pub extern "C" fn rt_cuda_provider_available() -> i64 {
+    rt_cuda_available()
 }
 
 // =============================================================================
@@ -2717,6 +2729,12 @@ pub extern "C" fn rt_cuda_get_error_string(error_code: i64) -> *const c_char {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_probe_aliases_match_public_cuda_probes() {
+        assert_eq!(super::rt_cuda_provider_available(), super::rt_cuda_available());
+        assert_eq!(super::rt_cuda_provider_device_count(), super::rt_cuda_device_count());
+    }
+
     use super::*;
     use std::ffi::CString;
 
