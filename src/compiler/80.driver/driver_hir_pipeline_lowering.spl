@@ -121,6 +121,11 @@ impl CompilerDriver:
             total_promoted_bytes: total_promoted_bytes))
 
     me lower_and_check_streaming_surfaces_impl() -> (CompileContext, bool):
+        # UNCONDITIONAL entry receipt. A predicate cannot be trusted to report
+        # which path ran: Stage-2-compiled code has been measured misreading
+        # boolean guards (c018ee15926), so a marker that is itself behind an
+        # `if` proves nothing. This line executes or it does not.
+        log_phase("phase3:streaming:entry")
         if (not self.streaming_surface_owner_ready or
             self.streaming_module_surfaces_owner == nil):
             self.ctx.add_error("Streaming module surfaces missing after phase 2")
@@ -180,6 +185,19 @@ impl CompilerDriver:
             hir_levels = hir_shard_levels(surfaces)
             hir_level_count = hir_shard_level_count(hir_levels)
         val hir_visit_order: [i64] = hir_shard_visit_order(self.ctx.source_module_names_owner, surfaces, hir_levels)
+        # The loop below is driven ENTIRELY by hir_visit_order, which is built
+        # from ctx.source_module_names_owner. If that owner array is empty the
+        # loop iterates zero times, phase 3 "succeeds" over zero modules in
+        # ~0 ms, and the empty program flows on to SEGV in MIR lowering.
+        log_phase("phase3:streaming:visit order={hir_visit_order.len()} surfaces={surfaces.surfaces.len()} names={self.ctx.source_module_names_owner.len()} paths={self.ctx.source_paths_owner.len()} contents={self.ctx.source_contents_owner.len()}")
+        # Fail closed against the SURFACES, the carrier proven present -- never
+        # against the owner arrays, which are the very thing suspected of being
+        # lost (a guard conditioned on the lost carrier is vacuous exactly when
+        # the bug fires).
+        if hir_visit_order.len() == 0 and surfaces.surfaces.len() > 0:
+            self.ctx.add_error(
+                "error[E-DRV-PHASE3-EMPTY-VISIT]: phase 3 (HIR typecheck, streaming) computed an EMPTY visit order from {surfaces.surfaces.len()} module surface(s) -- ctx.source_module_names_owner is empty ({self.ctx.source_module_names_owner.len()} names, {self.ctx.source_paths_owner.len()} paths), so every module would be skipped and an empty program would flow into MIR lowering. Refusing to continue.")
+            return (self.ctx, false)
         var hir_loop_pos: i64 = 0
         val hir_bootstrap_mode_gate = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
@@ -514,6 +532,7 @@ impl CompilerDriver:
         log_phase("phase3:route ready={streaming_ready_flag} config={streaming_config_gate} n_modules={phase3_module_count} n_sources={phase3_source_count}")
         if streaming_ready_flag or streaming_config_gate:
             return self.lower_and_check_streaming_surfaces_impl()
+        log_phase("phase3:legacy:entry n_modules={phase3_module_count} n_sources={phase3_source_count}")
         # Fail closed on the legacy path: type-checking zero modules out of a
         # non-empty source set is never legitimate. Silently succeeding here is
         # exactly how an emptied module set reached MIR lowering and crashed.
