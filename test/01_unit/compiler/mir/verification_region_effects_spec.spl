@@ -126,6 +126,29 @@ describe "FV2 typed MIR region effects":
         expect(missing_replay.accepted()).to_be(false)
         expect(missing_replay.diagnostic).to_contain("REPLAY")
 
+    it "deduplicates repeated writes while preserving canonical atom order":
+        step("Verify: deduplicates repeated writes while preserving canonical atom order")
+        val i64_type = MirType.i64()
+        val repeated = region_function("repeated_writer", [region_local(0, i64_type)], [
+            MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 42), region_copy(0)), span: Some(region_span())),
+            MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 41)), span: Some(region_span())),
+            MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 41), region_copy(0)), span: Some(region_span())),
+            MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 42), region_copy(0)), span: Some(region_span())),
+            MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 41), region_copy(0)), span: Some(region_span()))
+        ], MirTerminator.Ret(nil))
+        val frame = verification_region_frame_obligation_v1(repeated)
+        val manifest = verification_region_effect_manifest_v1(repeated)
+        expect(frame.closed()).to_be(true)
+        expect(frame.written_region_atoms).to_equal([
+            "global:41@" + manifest.effects[0].value_type_identity,
+            "global:42@" + manifest.effects[0].value_type_identity
+        ])
+        expect(manifest.verification_effects()).to_equal([
+            VerificationEffectV1.Write("global:42"),
+            VerificationEffectV1.Read("global:41"),
+            VerificationEffectV1.Write("global:41")
+        ])
+
     it "prevents caller-supplied effects from contradicting canonical VIR":
         step("Verify: prevents caller-supplied effects from contradicting canonical VIR")
         val i64_type = MirType.i64()
