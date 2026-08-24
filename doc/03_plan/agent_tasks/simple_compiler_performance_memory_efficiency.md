@@ -32,6 +32,9 @@ current-head research reconciliation.
   derives them from the resolved owner/signature; no driver warning is wired.
 - Remaining integration: generate the standard-library metadata registry and
   adapt typed findings into driver-owned diagnostics without a second parse.
+- Blocking dependency: repair the built-in collection method identity/runtime
+  contract in `doc/08_tracking/bug/typed_collection_perf_builtin_identity_2026-08-24.md`;
+  fixture symbols must not be promoted into production metadata.
 - Runtime status: source-reviewed only while the admitted Stage-4 binary is absent.
 
 ## Diagnostic JSON serialization follow-up
