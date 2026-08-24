@@ -4,6 +4,27 @@
 
 Repository scope: static audit of ormastes/simple main at commit 37bd406e219cc35cae049b4130f5167c21801864, dated August 22, 2026 KST.
 
+## Current-HEAD reconciliation — 2026-08-24
+
+The original snapshot remains the historical baseline. The owned hardening
+lineage has now been replayed onto current HEAD. Source review confirms these
+material changes: pass descriptors expose structural status/expectation;
+inactive transforms are excluded from effective pipelines; collection loop
+header “hoisting” is inert; vectorization is analysis-only and its candidate
+recognizer requires an exact integer unit step in the candidate loop region;
+escape `Unknown` remains conservative; shared requested `PerfFacts` provide
+CFG, dominance, def-use, and bounded liveness projections; and lint policy,
+source views, fixes, and diagnostic serialization avoid multiple documented
+quadratic/repeated-allocation paths.
+
+This reconciliation is source evidence, not runtime certification. The deployed
+`bin/release/simple` wrapper currently fails because its admitted self-hosted
+target is absent. Therefore test, optimizer, timing, and RSS claims remain
+blocked by `simple_compiler_perf_audit_missing_stage4_binary.md`. The correct
+next implementation layers remain typed HIR collection facts, MemorySSA-lite,
+bounded cost summaries, and profile correlation; dormant transforms must not be
+bulk-activated.
+
 I inspected the lint path, collection analysis, MIR optimization registry and dispatch, loop analyses, vectorization, bounds-check elimination, and escape analysis. This was a source-level audit; I did not execute the compiler, test suite, or benchmarks. Findings below therefore distinguish observed code, derived risk, and runtime impact requiring measurement.
 
 Executive conclusions
