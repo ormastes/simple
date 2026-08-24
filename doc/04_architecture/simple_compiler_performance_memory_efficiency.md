@@ -779,6 +779,17 @@ operation has verified interpreter and backend lowering, both pass descriptors
 remain `AnalysisOnly`, expose no activation witness, and preserve the input
 function exactly. Reactivation requires semantic ordering/effect proofs plus a
 lowering receipt for every supported backend.
+
+# Duplicate-analysis bucket ownership
+
+Semantic signature membership is an indexed storage capsule: one dictionary
+maps each token to a stable bucket ID, and one nested integer array owns bucket
+members. The dictionary must not own growing array values or encoded index text;
+both forms introduce repeated COW/copy or serialization work. Oversized-bucket
+policy is represented by a 401-member saturated bucket: the first oversized
+value is retained as a sentinel and later members are discarded because that
+bucket can never enter pair comparison. Processed-bucket membership order is
+unchanged.
 # Watch dependency fact ownership
 
 The watch request owns one ordered snapshot of changed files and one parallel

@@ -3442,3 +3442,22 @@ functions remain the sole candidate-analysis surface. This also removes the
 transform adapters' per-block dictionaries, instruction-array rebuilding, and
 temporary hint operands from normal or direct-call paths. No runtime result is
 claimed because manual execution was explicitly skipped.
+
+# 2026-08-24 follow-up: semantic duplicate bucket storage
+
+The local semantic duplicate analyzer encoded every signature-token bucket as
+comma-separated decimal text. Appending member `i` rebuilt the complete prior
+bucket string, and consumption then allocated substrings and parsed every index
+back to `i64`. For a hot bucket of size `k`, construction copied
+worst-case `O(k^2 log N)` character payload (and at least quadratic delimiter
+copies) before the existing 400-member comparison cap could reject it.
+
+The analyzer now stores `{token: bucket_index}` plus `[[i64]]` membership
+buckets. Direct nested-array pushes preserve document/signature insertion order
+without dictionary-value copy/writeback, decimal formatting, delimiter growth,
+split substrings, or integer parsing. Membership construction becomes amortized
+linear in total token memberships; pair comparison, the 400-member cap,
+pair-key deduplication, cosine threshold, and final ordering are unchanged.
+Buckets saturate at 401 members, the first value that is unconditionally
+skipped, so common tokens no longer retain the remaining `N-401` indices.
+Runtime timing and RSS were not measured under the no-verification override.

@@ -1097,3 +1097,16 @@ counts remain available through `count_write_coalesce` and
 `count_syscall_batch`; these analyzers must not imply executable transformation
 support. Re-enabling either adapter requires a first-class MIR representation,
 complete backend/interpreter lowering, and ordering/effect legality tests.
+
+# Semantic duplicate bucket design
+
+`token_to_bucket: {text: i64}` assigns each signature token a stable index into
+`buckets: [[i64]]`. First membership appends `[document_index]`; subsequent
+members mutate `buckets[bucket_index]` directly. Comparison reads the completed
+integer bucket without conversion. This deliberately avoids both immutable text
+prefix growth and dictionary-held array copy/writeback while retaining token
+key traversal, per-bucket document order, the `> 400` guard, and downstream
+pair semantics.
+An existing bucket accepts a member only while its length is at most 400. The
+push that reaches 401 records the oversized state; subsequent members are not
+retained, bounding storage without changing the unconditional skip.

@@ -312,16 +312,27 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
     # Bucket by shared signature token (inverted index), NOT by directory —
     # semantic clones usually live in different directories. Comparing only
     # inside token buckets keeps this near-linear instead of global O(n²).
-    var token_to_indices: {text: text} = {}
+    # Store bucket membership as integers. Encoding a growing bucket as comma-
+    # separated text recopied its entire prefix on every insertion, then split
+    # and parsed it again before comparison (quadratic copying for hot tokens).
+    var token_to_bucket: {text: i64} = {}
+    var buckets: [[i64]] = []
     var gi = 0
     while gi < documented.len():
         if fvecs[gi].magnitude != 0.0:
             for tok in sigs[gi].split(","):
                 if tok.len() > 0:
-                    if token_to_indices.has(tok):
-                        token_to_indices[tok] = token_to_indices[tok] + "," + "{gi}"
+                    if token_to_bucket.has(tok):
+                        val bucket_index = token_to_bucket[tok]
+                        # 401 is an oversized sentinel. Once reached this
+                        # bucket is always skipped, so retaining later members
+                        # cannot affect matching and only wastes memory.
+                        if semantic_bucket_accepts_member(buckets[bucket_index].len()):
+                            buckets[bucket_index].push(gi)
                     else:
-                        token_to_indices[tok] = "{gi}"
+                        val bucket_index = buckets.len()
+                        token_to_bucket[tok] = bucket_index
+                        buckets.push([gi])
         gi = gi + 1
 
     var matches: [SemanticMatch] = []
@@ -329,11 +340,8 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
     # Dedup: a pair sharing multiple signature tokens lands in multiple buckets.
     var seen_pairs: {text: bool} = {}
 
-    for tok in token_to_indices.keys():
-        val idx_strs = token_to_indices[tok].split(",")
-        var indices: [i64] = []
-        for s in idx_strs:
-            indices.push(int(s))
+    for tok in token_to_bucket.keys():
+        val indices = buckets[token_to_bucket[tok]]
 
         # ponytail: cap giant buckets (a common token like "value"); raise if it
         # ever drops a real clone — a genuine pair shares 5 tokens, so it also
@@ -372,6 +380,14 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
         cache_misses: 0,
         used_fallback: false
     )
+
+fn semantic_bucket_accepts_member(current_len: i64) -> bool:
+    """Return whether a signature bucket still needs one more member.
+
+    Length 401 is the retained oversized sentinel; later members are irrelevant
+    because comparison unconditionally skips this bucket.
+    """
+    current_len <= 400
 
 fn empty_report() -> SemanticReport:
     SemanticReport(

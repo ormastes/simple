@@ -1692,3 +1692,20 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   arrays to constant-time adapter return; candidate analysis remains opt-in.
 - No manual verification was run under the user override; static parallel review
   is required before the unverified sync.
+
+# Completed tranche: linear semantic duplicate buckets (2026-08-24)
+
+- Replaced comma-separated index strings with stable bucket IDs and nested
+  integer arrays in the local semantic analyzer.
+- Removed repeated decimal formatting, growing-prefix copies, split substring
+  allocation, and integer reparsing.
+- Saturated unconditionally skipped common-token buckets at the 401-member
+  sentinel rather than retaining every later document index.
+- Preserved membership order, oversized-bucket policy, pair deduplication,
+  similarity thresholds, match construction, and final sorting.
+- Existing cross-directory and exact-one same-file semantic fixtures remain the
+  behavioral oracles; no alternate implementation or foreign-language path was
+  introduced.
+- Source-level bound changes from quadratic copied character payload per hot
+  token to amortized linear membership insertion. No timing/RSS claim is made
+  because manual verification remains disabled by user instruction.
