@@ -2828,6 +2828,79 @@ impl MirLowering:
                     cmsg = cmsg + "' (no default/wildcard arm). Missing: " + missing_names.join(", ") + "."
                     self.error_fatal(cmsg, Some(scrutinee.span))
 
+            # Runtime fall-through TRAP for a TOTAL match (2026-08-24).
+            #
+            # Deliberately the COMPLEMENT of the warn-only case above:
+            # `missing_v` EMPTY means the arms name every variant of
+            # `enum_name`, so no legitimate value of that enum can reach this
+            # block. A fall-through here is therefore never "the programmer
+            # forgot a variant" -- it is the scrutinee not being a value of
+            # this enum at all (mis-bound receiver, corrupt tag, colliding
+            # bare enum name). Until now that produced the `const 0`
+            # placeholder emitted at merge_block below, and the zero flowed
+            # onward as a valid-looking pointer: the `Poll<T>.unwrap` mis-bind
+            # of 2026-08-24 cost a full lane-day in exactly this shape. See
+            # doc/08_tracking/bug/total_enum_match_fallthrough_zeroes_2026-08-24.md
+            #
+            # rt_panic(msg) + MirTerminator.Abort, the same two-halves shape
+            # `lower_bootstrap_panic_call` documents: the call makes the
+            # message survive, the Abort makes the block DIVERGE so control
+            # cannot run on even if rt_panic is stubbed or returns. No new MIR
+            # opcode is introduced -- every backend already lowers Abort.
+            #
+            # Four gates, all required, each removing a way a VALID value
+            # could reach here:
+            #   * variant set actually known (`enum_variant_index.has`) --
+            #     otherwise `missing_v` is empty vacuously.
+            #   * bare enum name NOT contested -- with a collision the index
+            #     may be a different enum's (possibly shorter) variant list,
+            #     which is the soundness gap the warn-only TODO above cites.
+            #   * every arm discriminant RESOLVED (>= 0) -- an arm left at the
+            #     -1 sentinel never matches a real value, so a name-exhaustive
+            #     match containing one can fall through on a valid scrutinee.
+            #   * NO arm carries a guard -- `case V(x) if cond:` covers V
+            #     textually but does not fire when the guard is false, so its
+            #     fall-through is reachable and correct.
+            # Non-exhaustive matches keep the placeholder-0 behaviour: the 286
+            # in-tree sites the warn-only choice above was measured against are
+            # untouched by this, which is why this is a runtime trap on
+            # provably-unreachable code and not the compile-time promotion the
+            # TODO defers.
+            var all_discs_resolved = true
+            for dchk in enum_discs:
+                if dchk < 0:
+                    all_discs_resolved = false
+            var any_guarded = false
+            for arm_g in arms:
+                if arm_g.has_guard:
+                    any_guarded = true
+            var total_match_trap_ok = missing_v.len() == 0 and enum_discs.len() > 0
+            if not self.enum_variant_index.has(enum_name):
+                total_match_trap_ok = false
+            if self.enum_bare_name_collisions.has(enum_name):
+                total_match_trap_ok = false
+            if not all_discs_resolved:
+                total_match_trap_ok = false
+            if any_guarded:
+                total_match_trap_ok = false
+            if total_match_trap_ok:
+                var b_ft = self.builder
+                if not b_ft.current_block_has_explicit_terminator():
+                    var tmsg = "total enum match fell through on '" + enum_name
+                    tmsg = tmsg + "': the value's discriminant matched NONE of the arms ("
+                    tmsg = tmsg + covered_txt + "), which cover every variant of that enum."
+                    tmsg = tmsg + " The scrutinee is not a valid '" + enum_name
+                    tmsg = tmsg + "' value (mis-bound receiver, corrupt tag, or bare-name enum collision)."
+                    val tmsg_local = b_ft.new_temp(self.bootstrap_text_type())
+                    b_ft.emit_const(tmsg_local, MirConstValue.Str(tmsg), self.bootstrap_text_type())
+                    val tpanic_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_panic"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
+                    ))
+                    b_ft.emit_call(tpanic_op, [mir_operand_copy(tmsg_local)], MirType.unit())
+                    b_ft.terminate_abort(tmsg)
+                self.builder = b_ft
+
         if has_default:
             val dres = self.lower_block_expected(default_body, expected_type)
             var b_d2 = self.builder
