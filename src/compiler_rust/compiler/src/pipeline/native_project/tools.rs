@@ -452,6 +452,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .arg("-fno-stack-protector")
             .arg("-fPIC")
             .arg("-std=gnu11")
+            .arg("-D_GNU_SOURCE")
             .arg("-DSIMPLE_CORE_C_STANDALONE=1")
             .args(core_c_target_flags(target, source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))

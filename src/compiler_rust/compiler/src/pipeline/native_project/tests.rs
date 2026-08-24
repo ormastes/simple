@@ -9,7 +9,6 @@ use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
 use super::linker::{add_extra_link_objects, split_extra_link_objects, validate_extra_link_objects};
-use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
@@ -474,20 +473,6 @@ fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str
         .unwrap()
         .success());
     archive
-}
-
-#[cfg(target_os = "linux")]
-fn build_host_gpu_runtime_authority(root: &Path) -> (PathBuf, PathBuf) {
-    std::fs::create_dir_all(root).unwrap();
-    let definitions = simple_common::RUNTIME_SYMBOL_NAMES
-        .iter()
-        .filter(|symbol| symbol.starts_with("rt_host_gpu_queue_"))
-        .map(|symbol| format!("void {symbol}(void) {{}}\n"))
-        .collect::<String>();
-    let archive = build_compiler_backfill_test_archive(root, "simple_runtime", &[definitions.as_str()]);
-    let hosted = root.join("libspl_hosted_runtime-contract.rlib");
-    std::fs::write(&hosted, b"hosted-runtime-contract").unwrap();
-    (archive, hosted)
 }
 
 /// LIM-010: every stripping failure must explain itself, tagged, in Display.
@@ -3836,110 +3821,19 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
+fn test_runtime_bundle_host_gpu_selects_only_core_c_provider_loader() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
-    build_compiler_backfill_test_archive(
-        temp.path(),
-        "simple_runtime",
-        &["void rt_host_gpu_queue_reset(void) {}\n"],
-    );
-
-    let mut config = NativeBuildConfig {
-        runtime_path: Some(temp.path().to_path_buf()),
-        ..Default::default()
-    };
+    let mut config = NativeBuildConfig::default();
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
 
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("missing Engine2D queue symbols"));
-    assert!(error.contains("rt_host_gpu_queue_emit_payload"));
-    assert!(error.contains("rt_host_gpu_queue_emit_payload_text"));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn test_runtime_bundle_host_gpu_discovers_cargo_deps_runtime_archive() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let temp = tempfile::tempdir().unwrap();
-    let deps = temp.path().join("deps");
-    std::fs::create_dir_all(&deps).unwrap();
-    build_compiler_backfill_test_archive(&deps, "simple_runtime", &["void rt_host_gpu_queue_reset(void) {}\n"]);
-
-    let mut config = NativeBuildConfig {
-        runtime_path: Some(temp.path().to_path_buf()),
-        ..Default::default()
-    };
-    config.runtime_bundle = "host-gpu".to_string();
-    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
-
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("missing Engine2D queue symbols"));
-    assert!(!error.contains("feature-built libsimple_runtime.a is missing"));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn test_runtime_bundle_host_gpu_discovers_target_root_bootstrap_authority() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let temp = tempfile::tempdir().unwrap();
-    let target_root = temp.path().join("target");
-    let authority = target_root.join("bootstrap/deps");
-    let (runtime, hosted) = build_host_gpu_runtime_authority(&authority);
-
-    let mut config = NativeBuildConfig {
-        runtime_path: Some(target_root.clone()),
-        ..Default::default()
-    };
-    config.runtime_bundle = "host-gpu".to_string();
-    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
-
-    assert_eq!(
-        builder.selected_runtime_library(temp.path()).unwrap(),
-        Some((runtime, false))
-    );
-    assert_eq!(find_hosted_runtime_rlib(&target_root), Some(hosted));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn test_runtime_bundle_host_gpu_accepts_adjacent_bootstrap_root() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let temp = tempfile::tempdir().unwrap();
-    let bootstrap_root = temp.path().join("target/bootstrap");
-    let authority = bootstrap_root.join("deps");
-    let (runtime, hosted) = build_host_gpu_runtime_authority(&authority);
-
-    let mut config = NativeBuildConfig {
-        runtime_path: Some(bootstrap_root.clone()),
-        ..Default::default()
-    };
-    config.runtime_bundle = "host-gpu".to_string();
-    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
-
-    assert_eq!(
-        builder.selected_runtime_library(temp.path()).unwrap(),
-        Some((runtime, false))
-    );
-    assert_eq!(find_hosted_runtime_rlib(&bootstrap_root), Some(hosted));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn test_runtime_bundle_host_gpu_missing_authority_fails_closed() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let temp = tempfile::tempdir().unwrap();
-    let mut config = NativeBuildConfig {
-        runtime_path: Some(temp.path().to_path_buf()),
-        ..Default::default()
-    };
-    config.runtime_bundle = "host-gpu".to_string();
-    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
-
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("feature-built libsimple_runtime.a is missing"));
-    assert_eq!(find_hosted_runtime_rlib(temp.path()), None);
+    let (runtime, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(!is_native_all);
+    assert!(runtime.starts_with(temp.path().join("host_gpu_core_c_runtime")));
+    let symbols = archive_defined_symbols(&runtime).unwrap();
+    assert!(symbols.contains("rt_gpu_provider_loaded"));
+    assert!(symbols.contains("rt_vulkan_init"));
 }
 
 #[test]

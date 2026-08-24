@@ -363,38 +363,14 @@ impl NativeProjectBuilder {
         }
 
         if runtime_bundle_requests_host_gpu(&self.config.runtime_bundle) {
-            let provider = self
-                .config
-                .runtime_path
-                .as_ref()
-                .and_then(|path| {
-                    runtime_authority_search_dirs(path)
-                        .into_iter()
-                        .map(|dir| dir.join(runtime_name))
-                        .find(|candidate| candidate.is_file())
-                })
-                .ok_or_else(|| {
-                    "native-build requested host-gpu but a feature-built libsimple_runtime.a is missing".to_string()
-                })?;
-            let symbols = archive_defined_symbols(&provider).ok_or_else(|| {
-                format!(
-                    "native-build could not inspect host-gpu runtime archive `{}`",
-                    provider.display()
-                )
-            })?;
-            let missing = simple_common::RUNTIME_SYMBOL_NAMES
-                .iter()
-                .copied()
-                .filter(|symbol| symbol.starts_with("rt_host_gpu_queue_") && !symbols.contains(*symbol))
-                .collect::<Vec<_>>();
-            if !missing.is_empty() {
-                return Err(format!(
-                    "native-build host-gpu runtime archive `{}` is missing Engine2D queue symbols: {}",
-                    provider.display(),
-                    missing.join(", ")
-                ));
-            }
-            return Ok(Some((provider, false)));
+            // `host-gpu` now selects the core-C loader only. CUDA, Vulkan, and
+            // Metal implementations are provider DSOs admitted at runtime;
+            // selecting a feature-built Rust archive here would install strong
+            // symbols that bypass the loader's weak trampolines.
+            let core_dir = temp_dir.join("host_gpu_core_c_runtime");
+            let core = build_core_c_runtime_library(&core_dir)
+                .ok_or_else(|| "failed to build the host-gpu core-C provider loader".to_string())?;
+            return Ok(Some((core, false)));
         }
 
         // A source checkout is authoritative for the explicit core-C lane.

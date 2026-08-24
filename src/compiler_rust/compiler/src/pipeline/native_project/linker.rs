@@ -12,7 +12,7 @@ use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
     build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
-    find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib, find_objcopy_tool,
+    find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_objcopy_tool,
     is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
     validate_stage4_cli_c_provider_archive_disjointness,
 };
@@ -61,12 +61,11 @@ fn add_macos_runtime_host_support(cmd: &mut std::process::Command) {
     }
 }
 
-fn macos_runtime_host_support_required(selected_runtime: bool, host_gpu_lane: bool, exact_stage4: bool) -> bool {
-    // `libsimple_runtime.a` contains the macOS Metal runtime even on the
-    // core-c-bootstrap lane. Static archives do not preserve rustc's
-    // framework-link directives for their final consumer, so every selected
-    // Rust runtime archive needs the same host framework admission.
-    selected_runtime || host_gpu_lane || exact_stage4
+fn macos_runtime_host_support_required(has_native_all: bool, exact_stage4: bool) -> bool {
+    // Core-C and host-gpu binaries load Metal as a provider DSO and therefore
+    // must not acquire a static Metal framework edge. Only the legacy hosted
+    // bundle and exact Stage4 compiler retain Rust host support.
+    has_native_all || exact_stage4
 }
 
 pub(super) fn split_extra_link_objects(value: &OsStr) -> Vec<PathBuf> {
@@ -1117,30 +1116,6 @@ int main(int argc, char** argv) {
         } else {
             None
         };
-        let host_gpu_lane = self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpu;
-        let host_gpu_core_runtime = if host_gpu_lane {
-            Some(
-                build_core_c_runtime_library(&temp_dir.join("host_gpu_core_c_runtime"))
-                    .ok_or_else(|| "failed to build the host-gpu core-C runtime supplement".to_string())?,
-            )
-        } else {
-            None
-        };
-        let host_gpu_hosted_runtime = if host_gpu_lane {
-            let runtime_path = self
-                .config
-                .runtime_path
-                .as_deref()
-                .ok_or_else(|| "host-gpu requires an explicit runtime path".to_string())?;
-            Some(find_hosted_runtime_rlib(runtime_path).ok_or_else(|| {
-                format!(
-                    "host-gpu canonical hosted runtime rlib is missing under `{}`",
-                    runtime_path.display()
-                )
-            })?)
-        } else {
-            None
-        };
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let selected_runtime = match selected_runtime {
             // Constructor removal exists only for the diagnostic legacy mode
@@ -1292,7 +1267,7 @@ int main(int argc, char** argv) {
             .as_ref()
             .is_some_and(|(_, is_native_all)| *is_native_all);
 
-        let cc = if has_native_all || host_gpu_lane {
+        let cc = if has_native_all {
             target_cxx_compiler(cross_target)
         } else {
             target_c_compiler(cross_target)
@@ -1540,12 +1515,6 @@ int main(int argc, char** argv) {
                     cmd.arg(runtime_lib);
                 }
             }
-            if let Some(hosted_runtime) = host_gpu_hosted_runtime.as_ref() {
-                cmd.arg(hosted_runtime);
-            }
-            if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
-                cmd.arg(core_runtime);
-            }
             if let Some(mutex_runtime) = bootstrap_mutex_runtime.as_ref() {
                 cmd.arg(mutex_runtime);
             }
@@ -1617,7 +1586,7 @@ int main(int argc, char** argv) {
             }
         }
         #[cfg(target_os = "macos")]
-        if macos_runtime_host_support_required(selected_runtime.is_some(), host_gpu_lane, exact_stage4) {
+        if macos_runtime_host_support_required(has_native_all, exact_stage4) {
             add_macos_runtime_host_support(&mut cmd);
         }
 
@@ -1630,12 +1599,6 @@ int main(int argc, char** argv) {
                 }
                 if let Some((runtime, _)) = selected_runtime.as_ref() {
                     provider_paths.push(runtime.as_path());
-                }
-                if let Some(hosted_runtime) = host_gpu_hosted_runtime.as_ref() {
-                    provider_paths.push(hosted_runtime.as_path());
-                }
-                if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
-                    provider_paths.push(core_runtime.as_path());
                 }
                 provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
                 let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
@@ -2573,11 +2536,10 @@ mod linker_tests {
     }
 
     #[test]
-    fn macos_core_runtime_archive_requires_host_framework_support() {
-        assert!(macos_runtime_host_support_required(true, false, false));
-        assert!(macos_runtime_host_support_required(false, true, false));
-        assert!(macos_runtime_host_support_required(false, false, true));
-        assert!(!macos_runtime_host_support_required(false, false, false));
+    fn macos_dynamic_gpu_lane_avoids_host_framework_support() {
+        assert!(macos_runtime_host_support_required(true, false));
+        assert!(macos_runtime_host_support_required(false, true));
+        assert!(!macos_runtime_host_support_required(false, false));
     }
 
     #[test]
