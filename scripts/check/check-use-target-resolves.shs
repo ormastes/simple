@@ -101,9 +101,12 @@
 #
 # RATCHET, not a hard zero-bar: the tree already carries this drift, so the
 # current population is frozen in `use_target_resolves_baseline.txt` and the
-# gate FAILs on any NEWLY unresolvable use. Per the repo's ratchet convention a
-# baselined entry that now RESOLVES also FAILs (stale baseline) -- a baseline
-# that no longer describes the tree is how a ratchet silently stops ratcheting.
+# gate FAILs on any NEWLY unresolvable use. Ratchet identity is semantic:
+# class + source file + target module + member. Source line remains diagnostic
+# evidence but is excluded from identity, so inserting unrelated lines cannot
+# manufacture one NEW plus one STALE row. Identical repeated debt in one file
+# is one obligation. A semantic baseline entry that now RESOLVES still fails as
+# stale -- a baseline that no longer describes the tree silently stops ratcheting.
 #
 # Verdict is the LAST line of stdout, per .claude/rules/vcs.md:
 #   PASS  — <n> use(s) checked, 0 new, 0 stale                exit 0
@@ -171,6 +174,11 @@ scan_tree() {
     ) > "$TMP/files.txt" 2>/dev/null
 
     [ -s "$TMP/files.txt" ] || { echo "#COUNT 0"; return 0; }
+    st_missing=0
+    while IFS= read -r st_path; do
+        [ -f "$st_root/$st_path" ] || { echo "#ERROR tracked source is not materialized: $st_path"; st_missing=1; break; }
+    done < "$TMP/files.txt"
+    [ "$st_missing" -eq 0 ] || { echo "#COUNT 0"; return 0; }
 
     ( cd "$st_root" || exit 0
       awk '
@@ -479,8 +487,22 @@ run_scan() {
     rs_root=$1; rs_out=$2
     scan_tree "$rs_root" > "$TMP/raw.txt" 2>/dev/null
     RS_COUNT=$(sed -n 's/^#COUNT //p' "$TMP/raw.txt" | tail -1)
+    RS_ERROR=$(sed -n 's/^#ERROR //p' "$TMP/raw.txt" | head -1)
     [ -n "${RS_COUNT:-}" ] || RS_COUNT=0
-    grep -v '^#COUNT ' "$TMP/raw.txt" | LC_ALL=C sort -u > "$rs_out"
+    grep -v '^#COUNT ' "$TMP/raw.txt" | grep -v '^#ERROR ' | LC_ALL=C sort -u > "$rs_out"
+}
+
+# Normalize diagnostic records into stable ratchet identities. Input field 2
+# is `path:line`; strip only the final numeric suffix so paths containing other
+# colons remain intact. The scanner continues to retain exact lines separately.
+normalize_enforced() {
+    awk -F'\t' '
+      $1 == "MODULE_MISSING" || $1 == "MEMBER_MISSING" {
+        source=$2
+        sub(/:[0-9]+$/, "", source)
+        print $1 "\t" source "\t" $3 "\t" $4
+      }
+    ' "$1" | LC_ALL=C sort -u > "$2"
 }
 
 TMP=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (no temp dir)"; exit 2; }
@@ -569,11 +591,37 @@ EOF
     grep -q 'totally_absent_module' "$TMP/st7.txt" && {
         echo "selftest FAIL: vendored file was scanned" >&2; st_fail=1; }
 
+    # 8. line movement changes diagnostics, not semantic ratchet identity.
+    printf 'MODULE_MISSING\ttest/a.spl:1\tapp.missing\t-\n' > "$TMP/line-a.txt"
+    printf 'MODULE_MISSING\ttest/a.spl:99\tapp.missing\t-\n' > "$TMP/line-b.txt"
+    normalize_enforced "$TMP/line-a.txt" "$TMP/line-a.key"
+    normalize_enforced "$TMP/line-b.txt" "$TMP/line-b.key"
+    cmp -s "$TMP/line-a.key" "$TMP/line-b.key" || {
+        echo "selftest FAIL: line-only movement changed ratchet identity" >&2; st_fail=1; }
+
+    # 9. a changed target remains a distinct semantic obligation.
+    printf 'MODULE_MISSING\ttest/a.spl:99\tapp.other_missing\t-\n' > "$TMP/target-b.txt"
+    normalize_enforced "$TMP/target-b.txt" "$TMP/target-b.key"
+    cmp -s "$TMP/line-a.key" "$TMP/target-b.key" && {
+        echo "selftest FAIL: changed target kept the old ratchet identity" >&2; st_fail=1; }
+
+    # 10. A Git index entry without materialized bytes is ERROR, not an empty
+    # module. This is the sparse-checkout/partial-worktree regression shape.
+    mk missingbytes
+    git -C "$F/missingbytes" init -q
+    git -C "$F/missingbytes" add src test
+    rm -f "$F/missingbytes/src/app/slang_pack/core.spl"
+    run_scan "$F/missingbytes" "$TMP/st10.txt"
+    case "$RS_ERROR" in
+        'tracked source is not materialized:'*) ;;
+        *) echo "selftest FAIL: missing tracked bytes did not produce scanner ERROR" >&2; st_fail=1 ;;
+    esac
+
     if [ "$st_fail" -ne 0 ]; then
         echo "ERROR — nothing was checked (selftest failed)"
         exit 2
     fi
-    echo "selftest: 7 fixture(s) OK"
+    echo "selftest: 10 fixture(s) OK"
 }
 
 selftest
@@ -586,6 +634,10 @@ selftest
 run_scan "$SCAN_ROOT" "$TMP/current.txt"
 CHECKED=$RS_COUNT
 
+if [ -n "${RS_ERROR:-}" ]; then
+    echo "ERROR — nothing was checked ($RS_ERROR)"
+    exit 2
+fi
 if [ "$CHECKED" -eq 0 ]; then
     echo "ERROR — nothing was checked (0 use targets found under $SCAN_ROOT)"
     exit 2
@@ -612,10 +664,8 @@ LC_ALL=C sort -u "$BASELINE" > "$TMP/base.txt"
 # demand a FAIL), which is the whole reason that test is mandatory here. The
 # selection is done by awk on the actual field, and the non-vacuity check below
 # makes this failure mode self-reporting instead of silent.
-awk -F'\t' '$1 == "MODULE_MISSING" || $1 == "MEMBER_MISSING"' \
-    "$TMP/current.txt" > "$TMP/cur_e.txt" 2>/dev/null || : > "$TMP/cur_e.txt"
-awk -F'\t' '$1 == "MODULE_MISSING" || $1 == "MEMBER_MISSING"' \
-    "$TMP/base.txt"    > "$TMP/base_e.txt" 2>/dev/null || : > "$TMP/base_e.txt"
+normalize_enforced "$TMP/current.txt" "$TMP/cur_e.txt"
+normalize_enforced "$TMP/base.txt" "$TMP/base_e.txt"
 
 # Non-vacuity on the ENFORCED subset specifically. A scan that examined
 # hundreds of thousands of use targets and yet selected zero enforced-class

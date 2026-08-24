@@ -102,6 +102,10 @@ coverage, guard wiring, and executable outline parsing are bootstrap-owned.
 They previously consumed about 59 seconds before the bounded range/ref work;
 moving them does not waive them—the textual ledger keeps every row TODO until
 the bootstrap recorder retains its accepted PASS log.
+Whole-tree means materialized: `check-use-target-resolves.shs` rejects sparse
+tracked inputs rather than inferring missing members from absent bytes. Run it
+from the complete bootstrap checkout. Its ratchet follows semantic import
+identity, while source lines remain diagnostics only.
 The runtime-API deletion detector similarly splits fixture proof from the hot
 path: bootstrap runs `--selftest`, and push supplies an explicit committed range
 to `--scan-only`. Do not use scan-only without an explicit range or treat it as

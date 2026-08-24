@@ -20,6 +20,11 @@ to automated bootstrap rows: use-target resolution, C runtime compilation,
 direct-runtime scanning, signature provenance, performance-mechanism coverage,
 process-wait EINTR coverage, guard wiring, and outline parsing. Their ledger
 rows remain required TODO until a bound bootstrap records real PASS evidence.
+The use-target resolver requires every Git-indexed `src/` and `test/` input to
+be physically materialized; sparse/partial inputs are ERROR, not empty modules.
+Its baseline identity excludes diagnostic line numbers and binds class, source
+file, module, and member, preventing line-only edits from creating NEW/STALE
+pairs.
 The push tier retains the two measured sub-second structural tree checks plus
 the bounded committed-ref/range guards.
 The runtime-API range guard uses `--scan-only` only from its closed push
