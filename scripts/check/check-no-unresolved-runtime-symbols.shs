@@ -98,6 +98,42 @@ fi
 TMPROOT=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
 trap 'rm -rf "$TMPROOT"' EXIT INT TERM
 
+# ---------------------------------------------------------------- platform ---
+# This guard was written against GNU binutils on Linux and was silently
+# unrunnable on macOS: `--selftest` returned 2 before printing a single fixture
+# line, so the host had NO automated oracle for the NULL-GOT class at all. The
+# `_` prefix is only the FIRST of five Mach-O/BSD divergences; all five are
+# handled here rather than one at a time.
+#
+#   1. Mach-O prefixes every C symbol with `_`, so `rt_x` reads as `_rt_x` and
+#      every prefix match and every set comparison misses.
+#   2. `nm -D` is GNU-only. Darwin's nm answers "File format has no dynamic
+#      symbol table" and exits non-zero; `nm -u` alone is the right query there.
+#   3. `ldd` does not exist on macOS (`otool -L` is the equivalent), AND the
+#      dylibs it names normally have NO on-disk file at all -- they live in the
+#      dyld shared cache (`ls /usr/lib/libSystem.B.dylib` -> No such file).
+#      See provided_by_libs for why that does not weaken the verdict.
+#   4. `-Wl,--unresolved-symbols=ignore-all` is rejected by Apple ld; the
+#      equivalent is `-Wl,-undefined,dynamic_lookup`.
+#   5. `cc -static` fails (no crt0.o ships) and Mach-O cannot be stripped down
+#      to an empty symbol table at all -- `strip -N` still leaves the globals.
+UNAME_S=$(uname -s 2>/dev/null || echo unknown)
+case "$UNAME_S" in
+    Darwin) SYM_UNDERSCORE=1 ;;
+    *)      SYM_UNDERSCORE=0 ;;
+esac
+
+# Normalise a stream of symbol names on stdin to the source-level spelling.
+# Strips exactly ONE leading underscore on Mach-O and nothing anywhere else, so
+# a genuine source-level `_foo` on Linux is never rewritten.
+normalise_syms() {
+    if [ "$SYM_UNDERSCORE" -eq 1 ]; then
+        sed 's/^_//'
+    else
+        cat
+    fi
+}
+
 # ---------------------------------------------------------------- prefixes ---
 # Derive runtime symbol prefixes from runtime.h's own declarations.
 derive_prefixes() {
@@ -126,16 +162,39 @@ BIN_COUNT=0
 
 # Symbols provided by the binary's own resolved shared libraries (libc, libm,
 # libpthread, ld-linux, ...). Derived at runtime from `ldd`, never hand-listed.
+# On macOS the dylibs `otool -L` names usually have no on-disk file (dyld shared
+# cache), so this set comes back empty or partial there. That does NOT weaken the
+# verdict, and the direction matters: an empty provided set can only turn a
+# resolved symbol into a reported OFFENDER, never an unresolved one into a pass.
+# It is fail-CLOSED, which is the side this guard must err on. It is also inert
+# in practice, because only symbols already filtered to the runtime prefixes
+# (rt_/spl_/simple_) are ever looked up here, and no system library defines
+# those. LIBS_UNREADABLE records the shortfall so the verdict can state it
+# rather than imply a completeness the host cannot deliver.
+LIBS_UNREADABLE=0
+LIBS_READ=0
 provided_by_libs() {
     pl_bin=$1
     pl_out="$TMPROOT/provided.$$"
     : > "$pl_out"
-    pl_libs=$(ldd "$pl_bin" 2>/dev/null | "$GREP" -oE '/[^ ]+\.so[^ ]*' | sort -u)
+    if [ "$SYM_UNDERSCORE" -eq 1 ]; then
+        pl_libs=$(otool -L "$pl_bin" 2>/dev/null | awk 'NR>1 {print $1}' | "$GREP" -E '^/' | sort -u)
+    else
+        pl_libs=$(ldd "$pl_bin" 2>/dev/null | "$GREP" -oE '/[^ ]+\.so[^ ]*' | sort -u)
+    fi
     for l in $pl_libs; do
-        [ -r "$l" ] || continue
-        "$NM" -D --defined-only "$l" 2>/dev/null | awk '{print $NF}' >> "$pl_out"
+        if [ ! -r "$l" ]; then
+            LIBS_UNREADABLE=$((LIBS_UNREADABLE + 1))
+            continue
+        fi
+        LIBS_READ=$((LIBS_READ + 1))
+        if [ "$SYM_UNDERSCORE" -eq 1 ]; then
+            "$NM" --defined-only "$l" 2>/dev/null | awk '{print $NF}' >> "$pl_out"
+        else
+            "$NM" -D --defined-only "$l" 2>/dev/null | awk '{print $NF}' >> "$pl_out"
+        fi
     done
-    sort -u "$pl_out"
+    sort -u "$pl_out" | normalise_syms | sort -u
 }
 
 check_binary() {
@@ -148,13 +207,20 @@ check_binary() {
     cb_u="$TMPROOT/undef"
     cb_all="$TMPROOT/allsyms"
     "$NM" -a "$cb_path" >"$cb_all" 2>/dev/null
-    { "$NM" -u "$cb_path" 2>/dev/null; "$NM" -D --undefined-only "$cb_path" 2>/dev/null; } \
-        | awk '{print $NF}' | sort -u > "$cb_u"
+    # `nm -D` is asked for only where it exists. On Darwin it is not merely
+    # empty, it FAILS ("File format has no dynamic symbol table") -- harmless
+    # through 2>/dev/null, but `nm -u` is the complete answer there anyway.
+    if [ "$SYM_UNDERSCORE" -eq 1 ]; then
+        "$NM" -u "$cb_path" 2>/dev/null | awk '{print $NF}' | normalise_syms | sort -u > "$cb_u"
+    else
+        { "$NM" -u "$cb_path" 2>/dev/null; "$NM" -D --undefined-only "$cb_path" 2>/dev/null; } \
+            | awk '{print $NF}' | sort -u > "$cb_u"
+    fi
     # A fully STRIPPED artifact yields no symbol table at all. That is absence of
     # EVIDENCE, not evidence of absence -- reporting PASS on it would be exactly
     # the fail-open this guard exists to close. ERROR, never a pass.
     if [ ! -s "$cb_u" ] && [ ! -s "$cb_all" ]; then
-        echo "ERROR — nothing was checked (no symbol table, stripped: $cb_label)"
+        echo "ERROR — nothing was checked (no readable symbol table: $cb_label)"
         exit 2
     fi
     cb_rt=$("$GREP" -E "^($PREFIX_RE)" "$cb_u" 2>/dev/null | sort -u)
@@ -219,7 +285,8 @@ check_archive() {
     "$GREP" -rhoE '(call_runtime|get_rt[a-z_]*|get_function|add_function|emit[a-z_]*call[a-z_]*)\(\s*"rt_[a-z0-9_]+"|=> *"rt_[a-z0-9_]+"' "$ca_cg" 2>/dev/null \
         | "$GREP" -oE 'rt_[a-z0-9_]+' | sort -u > "$ca_names"
     ca_defined="$TMPROOT/ar_defined"
-    "$NM" "$ca_archive" 2>/dev/null | awk '$2 ~ /^[TWtiIRD]$/ {print $3}' | sort -u > "$ca_defined"
+    "$NM" "$ca_archive" 2>/dev/null | awk '$2 ~ /^[TWtiIRD]$/ {print $3}' \
+        | normalise_syms | sort -u > "$ca_defined"
     if [ ! -s "$ca_defined" ]; then
         echo "ERROR — nothing was checked (no defined symbols read from $ARCHIVE)"
         exit 2
@@ -233,7 +300,25 @@ check_archive() {
             ARCHIVE_MISSING="$ARCHIVE_MISSING $ARCHIVE:$n"
         fi
     done < "$ca_names"
-    ARCHIVE_STATUS="checked($ARCHIVE_CHECKED codegen-emitted names)"
+    # Record WHICH archive was judged, not just that one was. The default path
+    # build/simple-core/libsimple_runtime.a is written by TWO different lanes --
+    # the core-C capsule (scripts/check/build-core-c-bootstrap-runtime-capsule.shs,
+    # members runtime_*.o) and the pure-Simple `native-build --emit-archive` lane
+    # (members mod_N.o) -- and they define very different symbol sets. Observed
+    # 2026-08-24: the same path held a 362,632-byte C archive with 1,165 defined
+    # symbols one hour and a 143,352-byte 19-member mod_0.o archive with 414 the
+    # next, flipping this guard's verdict from PASS to FAIL with 124 names, with
+    # nothing in the output to say the artifact had been swapped underneath it.
+    # A verdict that cannot be traced to the artifact it judged is not evidence.
+    ca_members=$(ar t "$ca_archive" 2>/dev/null | "$GREP" -cv '^__\.SYMDEF')
+    [ -n "$ca_members" ] || ca_members=0
+    ca_kind="unknown"
+    if ar t "$ca_archive" 2>/dev/null | "$GREP" -q 'runtime_native'; then
+        ca_kind="core-c-capsule"
+    elif ar t "$ca_archive" 2>/dev/null | "$GREP" -q '^mod_[0-9]'; then
+        ca_kind="pure-simple-emit-archive"
+    fi
+    ARCHIVE_STATUS="checked($ARCHIVE_CHECKED codegen-emitted names; artifact=$ARCHIVE kind=$ca_kind members=$ca_members defined=$(wc -l < "$ca_defined" | tr -d ' '))"
 }
 
 # ---------------------------------------------------------------- selftest ---
@@ -268,7 +353,17 @@ EOF
 long rt_fixture_missing(long x);
 long fixture_entry(void) { return rt_fixture_missing(1); }
 EOF
-    "$st_cc" -shared -fPIC -o "$st_dir/b.bin" "$st_dir/b.c" -Wl,--unresolved-symbols=ignore-all >/dev/null 2>&1 || return 2
+    # The flag that lets the link tolerate the undefined reference is
+    # platform-specific: Apple ld rejects `--unresolved-symbols=ignore-all`
+    # outright ("ld: unknown options"), which is what made this selftest
+    # `return 2` on macOS before printing a single fixture line -- the guard
+    # reported "selftest failed" and the host was left with no oracle at all.
+    if [ "$SYM_UNDERSCORE" -eq 1 ]; then
+        st_bflag="-Wl,-undefined,dynamic_lookup"
+    else
+        st_bflag="-Wl,--unresolved-symbols=ignore-all"
+    fi
+    "$st_cc" -shared -fPIC -o "$st_dir/b.bin" "$st_dir/b.c" $st_bflag >/dev/null 2>&1 || return 2
 
     # (c) only libc undefined -> PASS
     cat > "$st_dir/c.c" <<'EOF'
@@ -298,14 +393,29 @@ EOF
 
     # (e) a fully stripped artifact with NO symbol table -- the exact shape of
     # the tracked stage blobs. Must be ERROR (no evidence), never PASS.
-    "$st_cc" -static -o "$st_dir/e.bin" "$st_dir/a.c" >/dev/null 2>&1 && strip -s "$st_dir/e.bin" >/dev/null 2>&1
+    # Two of the five macOS divergences land here at once: `cc -static` fails
+    # (no crt0.o ships) and Mach-O cannot be stripped to an empty symbol table
+    # at all -- `strip -N` still leaves `_main` and the globals, and `strip -s`
+    # means something else entirely on BSD strip ("no files specified"). The
+    # BRANCH under test is "the artifact yields no readable symbol table", so on
+    # Darwin it is exercised with an unrecognisable blob, which reaches that
+    # branch by the same route (`nm` writes nothing to either file). The fixture
+    # is renamed accordingly instead of pretending a stripped ELF was built.
+    st_elabel="stripped-binary"
+    if [ "$SYM_UNDERSCORE" -eq 1 ]; then
+        st_elabel="unreadable-symbol-table"
+        head -c 4096 /dev/urandom > "$st_dir/e.bin" 2>/dev/null
+        chmod +x "$st_dir/e.bin" 2>/dev/null
+    else
+        "$st_cc" -static -o "$st_dir/e.bin" "$st_dir/a.c" >/dev/null 2>&1 && strip -s "$st_dir/e.bin" >/dev/null 2>&1
+    fi
     if [ ! -x "$st_dir/e.bin" ]; then
-        echo "selftest fixture (e) stripped-binary: FAILED (could not build)"; st_fail=1
+        echo "selftest fixture (e) $st_elabel: FAILED (could not build)"; st_fail=1
     else
         st_out=$(sh "$st_self" --bin "$st_dir/e.bin" 2>&1); st_rc=$?
         if [ "$st_rc" -ne 2 ] || ! echo "$st_out" | "$GREP" -q '^ERROR'; then
-            echo "selftest fixture (e) stripped-binary: FAILED (rc=$st_rc)"; st_fail=1
-        else echo "selftest fixture (e) stripped-binary: ok (ERROR, no symbol table)"; fi
+            echo "selftest fixture (e) $st_elabel: FAILED (rc=$st_rc)"; st_fail=1
+        else echo "selftest fixture (e) $st_elabel: ok (ERROR, no readable symbol table)"; fi
     fi
 
     st_empty="$TMPROOT/emptyrepo"
@@ -418,7 +528,13 @@ if [ "$BIN_COUNT" -eq 0 ] && [ "$ARCHIVE_CHECKED" -eq 0 ]; then
     exit 2
 fi
 
-[ "$BIN_STATUS" = "pending" ] && BIN_STATUS="checked($BIN_COUNT binary(ies))"
+# State the library-resolution shortfall instead of implying completeness. On a
+# host where the linked libraries have no on-disk file (macOS dyld shared cache)
+# the provided set is partial; that can only over-report, never under-report,
+# but a reader must be able to see it in the verdict.
+LIBS_NOTE=""
+[ "$LIBS_UNREADABLE" -gt 0 ] && LIBS_NOTE=", libs read=$LIBS_READ unreadable=$LIBS_UNREADABLE (provided-set partial; over-reports, never under-reports)"
+[ "$BIN_STATUS" = "pending" ] && BIN_STATUS="checked($BIN_COUNT binary(ies))$LIBS_NOTE"
 echo "binaries=$BIN_STATUS"
 echo "archive=$ARCHIVE_STATUS"
 if [ "$TOTAL_OFFENDERS" -gt 0 ]; then
