@@ -1351,3 +1351,10 @@ formatting work. Current census: 21,435 calls (2,118 explicit, 19,317 missing),
 12,112 declarations (884 tagged, 382 minimized, 10,962 untouched), zero
 signed/admitted. The rebase regression is +14; continue with the exact owner
 table, preserving debug/profile-disabled zero-work behavior.
+
+Safety-severity subprocess reads are now lexically scoped without caching or
+changing mutation-visible behavior. Current census: 21,435 calls (2,121
+explicit, 19,314 missing), 12,112 declarations (885 tagged, 382 minimized,
+10,961 untouched), zero signed/admitted. The rebase regression is +11. Repair
+the recorded unsafe-expression lowering defect before relying on expression-
+scoped capability syntax; until then, use executed block-form coverage.

@@ -2306,3 +2306,23 @@ and after; measurement is 10.50 s / 270,228 KiB before and 10.52 s /
 source-level allocation or complexity change. Current totals are 21,435 raw,
 2,118 explicit, 19,317 missing; 12,112 declarations, 884 tagged, 382 minimized,
 10,962 untouched, and zero signed/admitted.
+
+## Safety-severity subprocess-policy authority
+
+All three `driver_safety_severity.spl` environment reads now execute inside
+lexical `unsafe(ffi)` blocks under an explicit empty/unset/provider-failure
+contract. Reads remain uncached because the existing functional specification
+mutates the subprocess serialization variables between calls; caching would
+change public behavior. Call cardinality, normalization, downgrade ordering,
+and severity values are unchanged.
+
+The profile-severity specification passes 12/12. Optimizer findings remain 5;
+measurement changes from 9.70 s / 267,656 KiB to 9.71 s / 268,816 KiB. The
+0.1% timing and 0.43% RSS differences have no source-level allocation or
+complexity mechanism. Expression-form `val x = unsafe(...):` failed executed
+import lowering as `function unsafe not found`; the supported block form is
+used and the language defect is recorded in
+`unsafe_expression_import_lowering_2026-08-24.md` with a no-overhead fix
+requirement. Current totals are 21,435 raw, 2,121 explicit, 19,314 missing;
+12,112 declarations, 885 tagged, 382 minimized, 10,961 untouched, and zero
+signed/admitted.
