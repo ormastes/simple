@@ -564,3 +564,21 @@ and effectful callees fail immediately and are never cached. Recursive self
 calls retain their existing exclusion. Neither structure enters canonical
 serialization, obligation hashes, module state, or cross-request caches, so no
 invalidation surface is introduced.
+
+### Sparse failure-stream retention
+
+Failure handlers that already own a complete bounded process stream must not
+create a second full line projection to extract sparse evidence. They own an
+absolute newline cursor and an ordered array containing only retained evidence.
+Matching operates on the original byte range before one newly retained line is
+materialized. Empty and trailing fragments are naturally discarded.
+
+The native-build stderr path is the reference contract. Full output remains
+authoritative for spill/recovery; the sparse collector is only the preserved
+diagnostic view. It may not alter matcher breadth, diagnostic order or
+multiplicity, head/tail selection, truncation banners, spill behavior, or
+caller-visible output.
+
+The byte contract is the native/Pure-Simple split contract: leading whitespace
+and CRLF's CR byte are retained. Cursor implementations intentionally avoid the
+interpreter's known newline-split indentation-loss defect.
