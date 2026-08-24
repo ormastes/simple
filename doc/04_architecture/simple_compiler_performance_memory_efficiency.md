@@ -391,11 +391,13 @@ turns an otherwise linear scan into cumulative O(header_bytes^2) copying.
 
 Each definition, hover, completion, type-at, and signature-help invocation owns
 one `OutlineSnapshot` for its target file. The snapshot is produced by one read
-and one split and carries ordered physical lines, outline symbols, and imports.
-Local lookup consumes `symbols`; imported lookup consumes `imports`; cursor
-display and active-parameter calculation consume `lines`. Imported modules keep
-their existing independent parsing and resolver precedence. The snapshot is
-never process-global or path-cached, so freshness, empty/unreadable behavior,
+and one split and carries ordered physical lines plus outline symbols. Local
+lookup consumes `symbols`; only a query that reaches imported lookup projects
+imports from the retained `lines`. This keeps local-hit queries at one outline
+scan and avoids a second read or split on misses. Cursor display and
+active-parameter calculation also consume `lines`. Imported modules keep their
+existing independent parsing and resolver precedence. The snapshot is never
+process-global or path-cached, so freshness, empty/unreadable behavior,
 duplicate imports, output limits, and local-before-import-before-grep ordering
 remain unchanged.
 
