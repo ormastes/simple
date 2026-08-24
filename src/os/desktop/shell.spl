@@ -76,7 +76,13 @@ use os.compositor.rv64_process_owned_scene.{Rv64ProcessOwnedScene, rv64_process_
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
 use os.desktop.wm_runtime_bridge.{simpleos_wm_pointer_runtime_command, simpleos_wm_apply_pointer}
 use os.desktop.wm_pointer_decode.{wm_pointer_button_from_code, wm_pointer_kind_from_code}
-use os.kernel.boot.cpu.{port_inb}
+use common.ui.host_input_event.{HostInputEvent}
+use os.compositor.baremetal_input_ingress.{
+    baremetal_input_ingress_register_poller,
+    baremetal_input_ingress_register_legacy_ready,
+    baremetal_input_ingress_poll,
+    baremetal_input_ingress_legacy_ready,
+}
 use os.services.vfs.vfs_init.{g_vfs_read_file_text}
 use os.services.vfs.vfs_write_ops.{g_vfs_write_file_text}
 use os.desktop.shell_types.{
@@ -322,6 +328,9 @@ class DesktopShell:
     baremetal_web_caches: [WebRenderPixelArtifactCache]
     last_rendered_scene_revision: i64
     last_rendered_taskbar_revision: i64
+    # Opaque scalar into the bounded architecture-owned ingress registry.
+    # Common shell stores neither trait/class state nor hardware callbacks.
+    baremetal_input_handle: i64
 
 impl DesktopShell:
 
@@ -378,8 +387,29 @@ impl DesktopShell:
             baremetal_web_cache_ids: [],
             baremetal_web_caches: [],
             last_rendered_scene_revision: 0,
-            last_rendered_taskbar_revision: 0
+            last_rendered_taskbar_revision: 0,
+            baremetal_input_handle: 0
         )
+
+    me install_baremetal_event_poller(poll_event: fn() -> HostInputEvent?):
+        """Install an architecture-owned producer callback.
+
+        The callback's module retains concrete decoder state; the shell stores
+        no trait/class alias and therefore cannot copy that state on unwrap.
+        """
+        if self.baremetal_input_handle != 0:
+            return
+        self.baremetal_input_handle = baremetal_input_ingress_register_poller(poll_event)
+
+    me install_legacy_baremetal_readiness(ready: fn() -> bool):
+        """Install an architecture-owned legacy readiness capability.
+
+        Only the x86 composition root imports the i8042 provider. Common and
+        ARM/RV entry closures contain no call edge to port I/O.
+        """
+        if self.baremetal_input_handle != 0:
+            return
+        self.baremetal_input_handle = baremetal_input_ingress_register_legacy_ready(ready)
 
     me set_task_reaper_enabled(enabled: bool):
         """Toggle kernel-backed task polling inside `reconcile_dead_process_windows`.

@@ -93,6 +93,9 @@ impl DesktopShell:
         var remote_event_polls_left: i64 = 0
         var remote_event_window_id: i64 = 0
         var remote_event_input_seq: i64 = 0
+        # Stable scalar capability captured once. The bounded registry owns the
+        # callback pair; concrete architecture modules retain decoder state.
+        val input_handle = self.baremetal_input_handle
         # Keep the idle hot-loop gate scalar. Projecting pending fields from
         # the nested compositor materializes aggregate temporaries on the
         # freestanding target and exhausted the bump heap while idle.
@@ -105,9 +108,13 @@ impl DesktopShell:
             # evidence wrapper's 10s input-correlation windows (proven live).
             # Only a PS/2 poll runs when no input is pending.
             #
-            # Hardware pre-check (proven live 2026-07-12): reading the i8042
-            # status register directly is a plain scalar extern call with NO
-            # heap allocation. Without this gate, the copy-commit idiom below
+            # Backend pre-check: poll the architecture-selected ingress owner
+            # before staging the compositor copy. A nil poll is the
+            # allocation-free idle path on ARM64/RV64/USB/hosted producers.
+            # The legacy x86 entry has not installed Ps2InputBackend yet, so
+            # its composition root injects the temporary i8042 readiness
+            # capability. DesktopShell itself never imports architecture I/O.
+            # Without this gate, the copy-commit idiom below
             # ran on EVERY idle iteration (not just when a byte is actually
             # waiting), deep-copying the whole Compositor (surfaces array +
             # window content strings) on a tight busy-poll. That blew past
@@ -118,9 +125,19 @@ impl DesktopShell:
             # [wm-input-irq]/[wm-state]/[wm-frame] markers ever fired).
             # Skip the expensive copy when the controller has no byte and the
             # prior hardware iteration left no logical receipt to drain.
-            val ps2_status = port_inb(0x64)
-            val ps2_byte_ready = ((ps2_status as i32) & 1) != 0
-            if not ps2_byte_ready and not queued_input_active:
+            # Never admit a second event while the shell still owns an
+            # uncommitted logical receipt in its scalar pending slots.
+            val backend_event = if not queued_input_active:
+                baremetal_input_ingress_poll(input_handle)
+            else:
+                nil
+            val backend_event_ready = backend_event != nil
+            val legacy_ps2_ready = if backend_event_ready or queued_input_active:
+                false
+            else:
+                baremetal_input_ingress_legacy_ready(input_handle)
+            val hardware_event_ready = backend_event_ready or legacy_ps2_ready
+            if not hardware_event_ready and not queued_input_active:
                 if remote_bootstrap_polls_left > 0 or remote_event_polls_left > 0:
                     remote_bootstrap_poll_ticks = remote_bootstrap_poll_ticks + 1
                     if remote_bootstrap_poll_ticks >= 65536:
@@ -155,7 +172,9 @@ impl DesktopShell:
             # sequence write was lost and F11 never correlated (proven live).
             # Mutate a local handle and commit it back on any input.
             var input_compositor = self.compositor
-            if ps2_byte_ready:
+            if val event = backend_event:
+                input_compositor.apply_polled_input_backend_event(event)
+            elif legacy_ps2_ready:
                 input_compositor.handle_input_baremetal_ps2()
             val fullscreen_sequence = input_compositor.pending_fullscreen_sequence
             val fullscreen_release_sequence = input_compositor.pending_fullscreen_release_sequence
