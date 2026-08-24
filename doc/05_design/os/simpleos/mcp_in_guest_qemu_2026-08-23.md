@@ -133,6 +133,13 @@ traps**, 143 KB, still MCP-free.
 
 ### A standing caution earned the hard way
 
+**`rt_array_new()` takes a CAPACITY and returns an array with `len` 0** (and a
+floor of 4). Copying elements into it without assigning `len` yields a fully
+populated buffer that every caller reads as EMPTY. This bit `rt_array_copy`, and
+it is precisely the silent-wrong-answer shape this lane keeps getting caught by:
+no crash, no diagnostic, just a collection that is the wrong size several layers
+from the cause. Any new array-producing primitive must set `len` explicitly.
+
 **A probe that exercises a symbol from a different caller than production proves
 less than it appears to.** The P9 STDOUT-PROBE was green for a full milestone
 while every Simple-level print was landing in a no-op, because the probe calls
