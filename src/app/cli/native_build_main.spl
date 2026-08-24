@@ -197,20 +197,56 @@ fn native_build_line_is_diagnostic(line: text) -> bool:
 
     Deliberately broad: a missed diagnostic is silently dropped evidence, while
     an extra kept line only costs a few bytes in the preserved block."""
-    line.contains("error:") or line.contains("error :") or line.contains("[ERROR]")
-        or line.contains("warning:") or line.contains("[WARN]")
-        or line.contains("undefined field") or line.contains("type 'nil'")
-        or line.contains("MIR error") or line.contains("MIR lowering error")
-        or line.contains("panic") or line.contains("Traceback")
-        or line.contains("unresolved") or line.contains("unsupported")
-        or line.contains("Assertion") or line.contains("Segmentation fault")
+    native_build_range_is_diagnostic(line, 0, line.len())
+
+fn native_build_range_contains(
+    output: text, needle: text, line_start: i64, line_end: i64
+) -> bool:
+    val needle_len = needle.len()
+    if needle_len == 0: return true
+    var at = line_start
+    val last_start = line_end - needle_len
+    while at <= last_start:
+        var offset = 0
+        while (offset < needle_len and
+            output.byte_at(at + offset) == needle.byte_at(offset)):
+            offset = offset + 1
+        if offset == needle_len: return true
+        at = at + 1
+    false
+
+fn native_build_range_is_diagnostic(
+    output: text, line_start: i64, line_end: i64
+) -> bool:
+    native_build_range_contains(output, "error:", line_start, line_end)
+        or native_build_range_contains(output, "error :", line_start, line_end)
+        or native_build_range_contains(output, "[ERROR]", line_start, line_end)
+        or native_build_range_contains(output, "warning:", line_start, line_end)
+        or native_build_range_contains(output, "[WARN]", line_start, line_end)
+        or native_build_range_contains(output, "undefined field", line_start, line_end)
+        or native_build_range_contains(output, "type 'nil'", line_start, line_end)
+        or native_build_range_contains(output, "MIR error", line_start, line_end)
+        or native_build_range_contains(output, "MIR lowering error", line_start, line_end)
+        or native_build_range_contains(output, "panic", line_start, line_end)
+        or native_build_range_contains(output, "Traceback", line_start, line_end)
+        or native_build_range_contains(output, "unresolved", line_start, line_end)
+        or native_build_range_contains(output, "unsupported", line_start, line_end)
+        or native_build_range_contains(output, "Assertion", line_start, line_end)
+        or native_build_range_contains(output, "Segmentation fault", line_start, line_end)
 
 fn native_build_collect_diagnostics(output: text) -> [text]:
     """Every diagnostic line in the WHOLE stream, including the part head+tail drops."""
     var kept: [text] = []
-    for line in output.split("\n"):
-        if native_build_line_is_diagnostic(line):
-            kept = kept.push(line)
+    var line_start = 0
+    while line_start <= output.len():
+        val newline = output.index_of("\n", line_start)
+        var line_end = output.len()
+        if newline >= 0: line_end = newline
+        if native_build_range_is_diagnostic(output, line_start, line_end):
+            val line = output.substring(line_start, line_end)
+            kept.push(line)
+        if newline < 0: break
+        line_start = newline + 1
     kept
 
 fn eprint_bounded(output: text):
