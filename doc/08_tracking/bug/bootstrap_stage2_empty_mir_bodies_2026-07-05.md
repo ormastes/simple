@@ -1853,3 +1853,18 @@ shape: `print("abc".len())`. Admission requires the native executable to print
 This closes the admission false-positive, not the compiler defect. The bug
 remains OPEN until the self-compiled predicate/finalization root is fixed and a
 fresh Stage 2 passes this new executable probe.
+
+## 2026-08-24 — source root fixed, executable confirmation pending
+
+The bootstrap C code generator's `cg_infer_expr_type(EXPR_FIELD_ACCESS)` did
+not consume the `self_<field>` type entries that impl emission already records.
+When reconstructed named-type metadata did not recover `MirBuilder.instructions`
+as an array, `is_empty` fell back to `spl_str_len` and tested the array through
+the text ABI. That precisely explains the measured false predicate and empty
+overwrite in `finalize_block`.
+
+Field inference now reads the registered self-field type first, so
+`self.instructions.is_empty()` selects `spl_array_len`. The source contract is
+`builtin_is_empty_source_spec.spl`; the executable admission guard is
+`stage2_mir_retention.spl`. Status remains OPEN pending one fresh Stage 2 that
+passes the native guard; no source-only claim substitutes for that evidence.
