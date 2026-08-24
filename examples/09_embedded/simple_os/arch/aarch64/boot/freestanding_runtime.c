@@ -461,40 +461,104 @@ spl_i64 rt_hash_text(spl_i64 value) {
     return (spl_i64)hash;
 }
 
+/* Forward declarations: the PL011 writers are defined further down this file,
+ * below the print family that now uses them. */
+static void uart_write_bytes(const char *data, spl_u64 len);
+static void uart_put_byte(spl_u8 byte);
+
+/* REAL, as of Route A step 3 (2026-08-24). These four were `(void)value;`
+ * no-ops, which this design doc already flagged as an erratum and then left
+ * alone. Leaving them alone is what made the first in-guest MCP round trip
+ * fail in a genuinely confusing way: the server READ the request correctly,
+ * dispatched it, built the response, called mcp_write_message() -> print ->
+ * rt_println_str... and the bytes went into a no-op. The serve loop then read
+ * again, got EOF, and exited 0 — a transcript indistinguishable from "the
+ * request never arrived". Three separate hypotheses (pacing, heap, framing)
+ * were tested and eliminated before this one.
+ *
+ * ABI note, taken from the host rather than guessed: rt_print_str takes a RAW
+ * (ptr, len) pair — `void rt_print_str(const uint8_t*, uint64_t)`
+ * (src/runtime/runtime_native.c) — NOT a tagged value like print_raw's
+ * argument. Reading it as a tagged value would decode a pointer as an integer
+ * and print nothing or garbage.
+ *
+ * `\n` only, matching the host's rt_println_str exactly, because this stream
+ * is a JSONL protocol channel and not just a console: the marker helpers in
+ * this file use `\r\n`, and adding a stray CR here would put a carriage
+ * return inside a JSON-RPC frame. stdout and stderr are the same PL011 in this
+ * lane, which is a real property of the guest, not a shortcut. */
 void rt_print_str(spl_i64 value, spl_i64 len) {
-    (void)value;
-    (void)len;
+    const char *p = (const char *)(spl_u64)value;
+    if (!p || len <= 0) {
+        return;
+    }
+    uart_write_bytes(p, (spl_u64)len);
 }
 
 void rt_println_str(spl_i64 value, spl_i64 len) {
-    (void)value;
-    (void)len;
+    rt_print_str(value, len);
+    uart_put_byte((spl_u8)'\n');
 }
 
 void rt_eprint_str(spl_i64 value, spl_i64 len) {
-    (void)value;
-    (void)len;
+    rt_print_str(value, len);
 }
 
 void rt_eprintln_str(spl_i64 value, spl_i64 len) {
-    (void)value;
-    (void)len;
+    rt_println_str(value, len);
+}
+
+/* REAL as of Route A step 3 (2026-08-24), and THIS is the pair that actually
+ * carries the MCP response.
+ *
+ * How this was found, because the symptom pointed everywhere else: a Simple
+ * `print_raw(x)` call does NOT lower to the C symbol `print_raw`. Codegen
+ * lowers it to rt_string_new_literal(ptr,len) followed by **rt_print_value**.
+ * Disassembly of app__mcp__main__mcp_serve_entry shows exactly that — a blr to
+ * 0x...80100ed0 (rt_print_value), while print_raw sits unused at 0x...801030a0.
+ * So every Simple-level print in the MCP server was landing in a `(void)value;`
+ * no-op, including mcp_write_message()'s response write
+ * (src/app/mcp/main_transport.spl:15).
+ *
+ * The symptom was badly misleading: the server read the request correctly,
+ * dispatched it, built the response, wrote it into the void, looped, hit EOF
+ * and exit(0) — a transcript identical to "the request never arrived". Pacing,
+ * heap exhaustion and JSON framing were each tested and eliminated first; the
+ * P9 STDOUT-PROBE's green result actively misled, because that probe calls
+ * print_raw from C, which is the one path that never goes through here.
+ *
+ * Body mirrors print_raw's: take the tagged value, render non-strings via
+ * rt_to_string, write the bytes to PL011. stdout and stderr are the same UART
+ * in this lane. `\n` only for the println forms — this is a JSONL protocol
+ * channel, so a stray CR would sit inside a JSON-RPC frame. */
+static void rt_write_value_to_uart(spl_i64 value) {
+    RtString *text = rt_as_string(value);
+    spl_i64 rendered;
+    if (!text) {
+        rendered = rt_to_string(value);
+        text = rt_as_string(rendered);
+    }
+    if (text) {
+        uart_write_bytes(text->data, text->len);
+    }
 }
 
 void rt_print_value(spl_i64 value) {
-    (void)value;
+    rt_write_value_to_uart(value);
 }
 
 void rt_println_value(spl_i64 value) {
-    (void)value;
+    rt_write_value_to_uart(value);
+    uart_put_byte((spl_u8)'\n');
 }
 
 void rt_eprint_value(spl_i64 value) {
-    (void)value;
+    rt_write_value_to_uart(value);
 }
 
 void rt_eprintln_value(spl_i64 value) {
-    (void)value;
+    rt_write_value_to_uart(value);
+    uart_put_byte((spl_u8)'\n');
 }
 
 spl_i64 rt_interp_call(spl_i64 a, spl_i64 b, spl_i64 c, spl_i64 d, spl_i64 e, spl_i64 f, spl_i64 g, spl_i64 h) {
@@ -1416,8 +1480,8 @@ void rt_aarch64_uart_put(spl_u64 byte) {
 #define SIMPLEOS_STDIN_RX_SPIN 100000U
 #endif
 
-static spl_i64 uart_try_get_byte(void) {
-    for (spl_u32 spin = 0; spin < SIMPLEOS_STDIN_RX_SPIN; spin = spin + 1) {
+static spl_i64 uart_try_get_byte_bounded(spl_u64 spins) {
+    for (spl_u64 spin = 0; spin < spins; spin = spin + 1) {
         spl_u32 fr = *(volatile spl_u32 *)(PL011_UART0_BASE + PL011_FR_OFFSET);
         if ((fr & PL011_FR_RXFE) == 0U) {
             spl_u32 dr = *(volatile spl_u32 *)(PL011_UART0_BASE + PL011_DR_OFFSET);
@@ -1427,14 +1491,72 @@ static spl_i64 uart_try_get_byte(void) {
     return -1;
 }
 
+static spl_i64 uart_try_get_byte(void) {
+    return uart_try_get_byte_bounded(SIMPLEOS_STDIN_RX_SPIN);
+}
+
+/* INTER-BYTE bound for stdin_read_char, deliberately much larger than the
+ * probe's. Measured 2026-08-24 bringing up the round trip: with both on the
+ * same 100k bound, an `initialize` request (~180 bytes) never arrived intact.
+ * The PL011 FIFO is 16 bytes deep, so a multi-hundred-byte request is
+ * delivered in refill bursts, and QEMU only refills on a main-loop turn.
+ * _mcp_read_line() (src/app/mcp/main.spl:292) treats a single empty read as
+ * EOF, so one refill gap wider than the bound truncates the message and the
+ * server exits(0) on a FALSE EOF — which is exactly what the first two
+ * round-trip attempts showed.
+ *
+ * Why this does not weaken anything: `uart_try_get_byte` keeps the original
+ * 100k bound, so rt_aarch64_stdin_probe and every existing TX-only aarch64
+ * gate are bit-for-bit unaffected — they never call stdin_read_char. Only the
+ * MCP transport pays the longer wait, and it is still BOUNDED: a genuine EOF
+ * is still reported as an empty string, just after a longer look. */
+#ifndef SIMPLEOS_STDIN_READ_SPIN
+#define SIMPLEOS_STDIN_READ_SPIN 40000000ULL
+#endif
+
 /* Raw byte reader for Simple callers that want the no-data case as a value
  * rather than as an empty string: byte 0..255, or -1 when the window expired. */
 spl_i64 rt_aarch64_uart_try_get(void) {
     return uart_try_get_byte();
 }
 
-static spl_i64 stdin_read_char_impl(void) {
-    spl_i64 byte = uart_try_get_byte();
+/* NON-CONSUMING readiness wait, for the MCP transport shim (Route A step 3).
+ *
+ * This exists because of the pacing hazard P8 recorded and this doc's §4.3
+ * flagged as a DESIGN INPUT: bytes written before the guest reaches its
+ * polling window are swallowed by EDK2/Limine's own console, but the serve
+ * loop's first read is bounded at SIMPLEOS_STDIN_RX_SPIN (~100k spins), which
+ * is far shorter than a host round trip. So a host that waits to see the
+ * guest's "entering" marker before writing will ALWAYS miss the window, and
+ * the server exits on a false EOF before a byte can land.
+ *
+ * The fix belongs here and not in uart_try_get_byte(): the design doc is
+ * explicit that "MCP's blocking-read semantics belong in the P10 transport
+ * shim, not in the UART primitive". uart_try_get_byte() stays bounded and
+ * non-blocking, so every existing TX-only gate is unaffected — none of them
+ * calls this function at all.
+ *
+ * Polls FR/RXFE only; it never touches DR, so it CONSUMES NOTHING and the
+ * byte it saw is still there for stdin_read_char(). Returns 1 if data became
+ * available, 0 if `rounds` windows expired first. Bounded, never infinite:
+ * an unbounded wait would wedge a guest whose host never writes. */
+spl_i64 rt_aarch64_stdin_wait_ready(spl_i64 rounds) {
+    if (rounds <= 0) {
+        return 0;
+    }
+    for (spl_i64 r = 0; r < rounds; r = r + 1) {
+        for (spl_u32 spin = 0; spin < SIMPLEOS_STDIN_RX_SPIN; spin = spin + 1) {
+            spl_u32 fr = *(volatile spl_u32 *)(PL011_UART0_BASE + PL011_FR_OFFSET);
+            if ((fr & PL011_FR_RXFE) == 0U) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static spl_i64 stdin_read_char_impl(spl_u64 spins) {
+    spl_i64 byte = uart_try_get_byte_bounded(spins);
     if (byte < 0) {
         return rt_string_new(0, 0);
     }
@@ -1448,11 +1570,22 @@ static spl_i64 stdin_read_char_impl(void) {
  * either. `rt_stdin_read_char` is provided alongside it for the rt_* naming
  * convention used by the other freestanding arch stubs. */
 spl_i64 stdin_read_char(void) {
-    return stdin_read_char_impl();
+    return stdin_read_char_impl(SIMPLEOS_STDIN_READ_SPIN);
 }
 
 spl_i64 rt_stdin_read_char(void) {
-    return stdin_read_char_impl();
+    return stdin_read_char_impl(SIMPLEOS_STDIN_READ_SPIN);
+}
+
+/* The P8 probe's reader, pinned to the SHORT bound. rt_aarch64_stdin_probe
+ * does `rounds` reads in a row, so it must NOT inherit the long inter-byte
+ * bound stdin_read_char now uses: measured 2026-08-24, 300 rounds x 40M spins
+ * wedged the boot past the gate's 90s timeout and the transcript stopped dead
+ * at "[STDIN-PROBE] armed rounds=300". Keeping the probe on 100k restores its
+ * previous timing exactly, which is what every existing TX-only aarch64 gate
+ * depends on. */
+static spl_i64 stdin_read_char_probe(void) {
+    return stdin_read_char_impl(SIMPLEOS_STDIN_RX_SPIN);
 }
 
 static void uart_write_bytes(const char *data, spl_u64 len) {
@@ -1503,7 +1636,7 @@ spl_i64 rt_aarch64_stdin_probe(spl_i64 rounds) {
     uart_put_byte('\n');
 
     for (spl_i64 round = 0; round < max_rounds && len < SIMPLEOS_STDIN_PROBE_CAP; round = round + 1) {
-        spl_i64 value = stdin_read_char();
+        spl_i64 value = stdin_read_char_probe();
         RtString *s = rt_as_string(value);
         if (!s || s->len == 0) {
             continue;
@@ -3036,16 +3169,10 @@ SPL_P10_TRAP(rt_browser_renderer_spawn_sandboxed)
         return 0;                                             \
     }
 
-/* string / text primitives (10) */
-SPL_P10L2_TRAP(rt_index_of)
-SPL_P10L2_TRAP(rt_string_char_at)
-SPL_P10L2_TRAP(rt_string_replace)
-SPL_P10L2_TRAP(rt_string_rfind)
+/* string / text primitives — 7 promoted to real implementations above,
+ * these 3 remain traps (numeric parsing needs care, not just bytes) */
 SPL_P10L2_TRAP(rt_string_to_float)
 SPL_P10L2_TRAP(rt_string_to_int_lenient)
-SPL_P10L2_TRAP(rt_string_to_lower)
-SPL_P10L2_TRAP(rt_string_to_upper)
-SPL_P10L2_TRAP(rt_text_find)
 SPL_P10L2_TRAP(rt_value_as_float)
 
 /* array primitives (2) */
@@ -3060,6 +3187,201 @@ SPL_P10L2_TRAP(rt_file_read_text_rv)
 SPL_P10L2_TRAP(rt_file_remove)
 
 #undef SPL_P10L2_TRAP
+
+/* ---- Route A step 3: string/array primitives, REAL implementations --------
+ * These are seven of the 16 undeclared codegen symbols found in step 2. They
+ * are promoted out of the trap block because they are pure computation over
+ * memory this runtime already owns — no subsystem is missing for them, so a
+ * trap would be understating what this lane can do.
+ *
+ * Every one is a FAITHFUL PORT of the host semantics in
+ * src/runtime/runtime_native.c (rt_text_find :3860, rt_string_rfind :3875,
+ * rt_string_char_at :2918, rt_string_replace, rt_index_of, and the
+ * rt_string_ascii_case pair), including the edge cases that are easy to get
+ * subtly wrong and that a caller cannot detect: empty-needle returns `start`
+ * (clamped to len) rather than -1 or 0; a negative `start` clamps to 0; an
+ * out-of-range index yields nil, not an empty string; replace returns the
+ * ORIGINAL value unchanged when the needle is empty or absent, rather than a
+ * fresh copy. Divergence here would be the silent-wrong-value class, which is
+ * strictly worse than the traps these replace. */
+
+static spl_i64 rt_bytes_eq(const char *a, const char *b, spl_u64 n) {
+    for (spl_u64 i = 0; i < n; i = i + 1) {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Uninitialised string of exactly `len` bytes, header filled, NUL-terminated.
+ * Mirrors rt_string_new's header setup; exists so replace() can write its
+ * result once instead of building it in a scratch buffer and copying. */
+static RtString *rt_string_alloc(spl_u64 len) {
+    RtString *out = (RtString *)rt_alloc((spl_i64)(sizeof(RtString) + len + 1));
+    if (!out) {
+        return 0;
+    }
+    out->header.object_type = RT_HEAP_STRING;
+    out->header.gc_flags = 0;
+    out->header.reserved = 0;
+    out->header.size = (spl_u32)(sizeof(RtString) + len);
+    out->len = len;
+    out->hash = 0;
+    out->data[len] = 0;
+    return out;
+}
+
+spl_i64 rt_text_find(spl_i64 value, spl_i64 needle, spl_i64 start) {
+    RtString *s = rt_as_string(value);
+    RtString *n = rt_as_string(needle);
+    if (!s || !n) {
+        return -1;
+    }
+    if (start < 0) {
+        start = 0;
+    }
+    if (n->len == 0) {
+        return start <= (spl_i64)s->len ? start : (spl_i64)s->len;
+    }
+    if (start >= (spl_i64)s->len || n->len > s->len) {
+        return -1;
+    }
+    for (spl_u64 i = (spl_u64)start; i + n->len <= s->len; i = i + 1) {
+        if (rt_bytes_eq(s->data + i, n->data, n->len)) {
+            return (spl_i64)i;
+        }
+    }
+    return -1;
+}
+
+spl_i64 rt_string_rfind(spl_i64 value, spl_i64 needle) {
+    RtString *s = rt_as_string(value);
+    RtString *n = rt_as_string(needle);
+    if (!s || !n) {
+        return -1;
+    }
+    if (n->len == 0) {
+        return (spl_i64)s->len;
+    }
+    if (n->len > s->len) {
+        return -1;
+    }
+    for (spl_u64 i = s->len - n->len + 1; i-- > 0;) {
+        if (rt_bytes_eq(s->data + i, n->data, n->len)) {
+            return (spl_i64)i;
+        }
+    }
+    return -1;
+}
+
+spl_i64 rt_string_char_at(spl_i64 string, spl_i64 index) {
+    RtString *s = rt_as_string(string);
+    if (!s || index < 0 || (spl_u64)index >= s->len) {
+        return rt_nil();
+    }
+    return rt_string_new((spl_i64)(spl_u64)(const spl_u8 *)(s->data + index), 1);
+}
+
+static spl_i64 rt_string_ascii_case(spl_i64 value, int to_lower) {
+    RtString *s = rt_as_string(value);
+    if (!s) {
+        return value;
+    }
+    RtString *out = rt_string_alloc(s->len);
+    if (!out) {
+        return rt_nil();
+    }
+    for (spl_u64 i = 0; i < s->len; i = i + 1) {
+        char c = s->data[i];
+        if (to_lower) {
+            out->data[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+        } else {
+            out->data[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+        }
+    }
+    return rt_heap(out);
+}
+
+spl_i64 rt_string_to_lower(spl_i64 value) {
+    return rt_string_ascii_case(value, 1);
+}
+
+spl_i64 rt_string_to_upper(spl_i64 value) {
+    return rt_string_ascii_case(value, 0);
+}
+
+/* Host contract (runtime_native.c): try the ARRAY interpretation first, fall
+ * back to a string find from 0. Kept in that order deliberately — reversing it
+ * would make an array of strings search its own bytes. */
+spl_i64 rt_index_of(spl_i64 haystack, spl_i64 needle) {
+    RtArray *a = rt_as_array(haystack);
+    if (a) {
+        for (spl_u64 i = 0; i < a->len; i = i + 1) {
+            if (a->data[i] == needle) {
+                return (spl_i64)i;
+            }
+            RtString *ea = rt_as_string(a->data[i]);
+            RtString *en = rt_as_string(needle);
+            if (ea && en && ea->len == en->len
+                && rt_bytes_eq(ea->data, en->data, ea->len)) {
+                return (spl_i64)i;
+            }
+        }
+        return -1;
+    }
+    return rt_text_find(haystack, needle, 0);
+}
+
+spl_i64 rt_string_replace(spl_i64 value, spl_i64 old_value, spl_i64 new_value) {
+    RtString *s = rt_as_string(value);
+    RtString *o = rt_as_string(old_value);
+    RtString *w = rt_as_string(new_value);
+    if (!s || !o || !w) {
+        return value;
+    }
+    if (o->len == 0 || o->len > s->len) {
+        return value;
+    }
+    spl_u64 count = 0;
+    for (spl_u64 i = 0; i + o->len <= s->len;) {
+        if (rt_bytes_eq(s->data + i, o->data, o->len)) {
+            count = count + 1;
+            i = i + o->len;
+        } else {
+            i = i + 1;
+        }
+    }
+    if (count == 0) {
+        return value;
+    }
+    spl_u64 out_len;
+    if (w->len >= o->len) {
+        out_len = s->len + count * (w->len - o->len);
+    } else {
+        out_len = s->len - count * (o->len - w->len);
+    }
+    RtString *out = rt_string_alloc(out_len);
+    if (!out) {
+        return rt_nil();
+    }
+    spl_u64 in_i = 0;
+    spl_u64 out_i = 0;
+    while (in_i < s->len) {
+        if (o->len <= s->len - in_i && rt_bytes_eq(s->data + in_i, o->data, o->len)) {
+            for (spl_u64 k = 0; k < w->len; k = k + 1) {
+                out->data[out_i + k] = w->data[k];
+            }
+            out_i = out_i + w->len;
+            in_i = in_i + o->len;
+        } else {
+            out->data[out_i] = s->data[in_i];
+            out_i = out_i + 1;
+            in_i = in_i + 1;
+        }
+    }
+    return rt_heap(out);
+}
 
 /* ---- --gc-sections keepalive ----------------------------------------------
  * WHY THIS EXISTS, and why deleting it silently undoes this whole section:
@@ -3165,7 +3487,8 @@ static void *const g_p10_keepalive[] = {
     (void *)rt_browser_renderer_sandbox_enter, (void *)rt_browser_renderer_spawn_sandboxed,
     /* --- the 16 undeclared second-layer traps (Route A step 2). Same
      * --gc-sections reason as every entry above. --- */
-    /* string / text primitives (10) */
+    /* string / text primitives — 7 promoted to real implementations above,
+ * these 3 remain traps (numeric parsing needs care, not just bytes) */
     (void *)rt_index_of, (void *)rt_string_char_at,
     (void *)rt_string_replace, (void *)rt_string_rfind,
     (void *)rt_string_to_float, (void *)rt_string_to_int_lenient,
@@ -3178,6 +3501,7 @@ static void *const g_p10_keepalive[] = {
     /* filesystem, same reason as the 29 above (2) */
     (void *)rt_file_read_text_rv, (void *)rt_file_remove,
     (void *)rt_get_args,
+    (void *)rt_aarch64_stdin_wait_ready,
 };
 
 spl_i64 rt_aarch64_p10_keepalive(void) {

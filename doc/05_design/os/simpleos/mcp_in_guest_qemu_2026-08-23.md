@@ -13,6 +13,156 @@
 - **Context:** There is no MCP-on-SimpleOS artifact anywhere in this repo or in
   any of the 223 GitHub remote branches. This is net-new work.
 
+## STATUS UPDATE 2026-08-24 (5) — M1 ACHIEVED: THE IN-GUEST MCP SERVER ANSWERS
+
+**An MCP server running inside a SimpleOS aarch64 guest, booted by real EDK2/AAVMF
+firmware through Limine `BOOTAA64.EFI` on a FAT ESP, answered a JSON-RPC
+`initialize` request with a well-formed response bound to a host-generated
+nonce.** This is §4.1's M1, on Route A. No host `simple mcp` was involved; every
+byte below came off the guest's serial line.
+
+Gated by the new `scripts/check/check-simpleos-mcp-roundtrip-qemu.shs`:
+
+```
+PASS — 7 assertion(s) checked, in-guest MCP answered initialize under EDK2/AAVMF
+real firmware via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit);
+nonce 759b753cbefa echoed as the JSON-RPC id; 100 serial line(s), 1 request
+write(s)
+```
+rc 0. **Negative control**, the same gate pointed at the plain kernel (which has
+no MCP graph): `ERROR — nothing was checked: guest never printed
+MCP-GRAPH-ENTERING, so no request was ever written`, rc 2 — it refuses to pass
+rather than passing vacuously.
+
+### The transcript (host wrote the first line; the guest wrote the second)
+
+```
+-> {"jsonrpc":"2.0","id":"5f3a9c7e21b8","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}
+
+<- {"jsonrpc":"2.0","id":"5f3a9c7e21b8","result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{},"resources":{"listChanged":false},"prompts":{"listChanged":false},"logging":{},"roots":{"listChanged":false}},"serverInfo":{"name":"0","version":"0"}}}
+```
+
+The nonce is the JSON-RPC `id`, generated fresh per run, so a canned or replayed
+transcript cannot satisfy the gate.
+
+### The root cause that hid the round trip for four attempts
+
+The server was reading the request correctly and answering it **from the very
+first attempt**. The response went into a no-op.
+
+A Simple-level `print_raw(x)` does **not** lower to the C symbol `print_raw`.
+Codegen lowers it to `rt_string_new_literal(ptr,len)` then **`rt_print_value`**.
+Disassembly of `app__mcp__main__mcp_serve_entry` shows the `blr` going to
+`rt_print_value` at `0x…80100ed0`, while `print_raw` sits unused at
+`0x…801030a0`. `rt_print_value` was one of the four `(void)value;` no-op print
+families this doc had already flagged as an erratum **and then left alone**. So
+`mcp_write_message()` (`main_transport.spl:15`) wrote every response into
+nothing.
+
+The symptom was maximally misleading: read OK, dispatch OK, response built,
+discarded, loop, EOF, `exit(0)` — a transcript **identical** to "the request
+never arrived". Pacing, heap exhaustion and JSON framing were each tested and
+eliminated first. **The P9 STDOUT-PROBE's green result actively misled**: it
+calls `print_raw` from C, the one path that never goes through `rt_print_value`.
+The lesson worth keeping: a probe that exercises a symbol from a different
+caller than production proves less than it appears to.
+
+### What was implemented, and what stayed a trap
+
+REAL implementations added to `freestanding_runtime.c`:
+
+| symbols | note |
+|---|---|
+| `rt_print_value` / `rt_println_value` / `rt_eprint_value` / `rt_eprintln_value` | the response path; `\n` only, since this is a JSONL protocol channel and a stray CR would sit inside a frame |
+| `rt_print_str` / `rt_println_str` / `rt_eprint_str` / `rt_eprintln_str` | raw `(ptr,len)` ABI taken from the host, **not** a tagged value — reading it as tagged would print garbage |
+| `rt_text_find`, `rt_string_rfind`, `rt_string_char_at`, `rt_string_to_lower`, `rt_string_to_upper`, `rt_index_of`, `rt_string_replace` | faithful ports of `runtime_native.c`, edge cases included: empty needle returns `start` clamped to len, negative `start` clamps to 0, out-of-range index is nil, `replace` returns the ORIGINAL value when the needle is empty or absent |
+| `rt_aarch64_stdin_wait_ready` | non-consuming RX arming wait, the P8 pacing fix |
+
+Still NAMED TRAPS, honestly: `rt_string_to_float`, `rt_string_to_int_lenient`,
+`rt_value_as_float` (numeric parsing deserves care, not a byte loop),
+`rt_array_copy`, `rt_array_sort`, `rt_dict_new` (a heap kind this runtime does
+not have), and the 2 filesystem entries. **None of them is reached by the
+`initialize` round trip** — the gate asserts zero `[TRAP]` lines and passes.
+
+### Pacing, solved — and a regression caught in the act
+
+Two bounds now exist where there was one. `uart_try_get_byte` keeps the original
+100k spin bound; `stdin_read_char` gets a much larger INTER-BYTE bound, because
+the PL011 FIFO is 16 bytes deep and a ~160-byte request arrives in refill
+bursts, while `_mcp_read_line()` (`main.spl:292`) treats a single empty read as
+EOF — one refill gap wider than the bound truncated the message and produced a
+false EOF.
+
+Raising the shared bound first **broke the existing P8 probe**:
+`rt_aarch64_stdin_probe` calls `stdin_read_char` in a 300-round loop, so it
+inherited the long bound, and the boot wedged past the gate's timeout with the
+transcript stopping dead at `[STDIN-PROBE] armed rounds=300`. Fixed by pinning
+the probe to its own short-bound reader; every existing TX-only aarch64 gate is
+unaffected because none of them calls `stdin_read_char`.
+
+### The MCP kernel is now a SEPARATE artifact — cross-lane hazard removed
+
+Step 2 put the MCP call inside `limine_boot_aarch64.spl`, which meant **every**
+build of the plain kernel carried the graph (133 KB -> 933 KB) and every lane
+consuming `build/os/aarch64_limine/kernel.elf` silently got it. Fixed
+structurally: `limine_aarch64_boot_sequence()` now RETURNS, `limine_entry.spl`
+halts after it (plain kernel, **136 KB, 9 modules, MCP-free**), and a new
+`examples/09_embedded/simple_os/arch/aarch64/mcp_entry.spl` runs the server
+after it, building to `build/os/aarch64_limine_mcp/`. A runtime flag could not
+have done this: the call site alone keeps the graph alive through
+`--gc-sections`.
+
+Plain-kernel gates re-run after all of the above, rc read into a variable on the
+following line:
+
+```
+PASS — 4 boot-stage marker(s) checked, EDK2/AAVMF pflash real-firmware aarch64
+boot verified via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit),
+95 serial line(s) captured                                            rc 0
+
+PASS — 10 marker(s) checked in each of 2 boot paths, unified arm64 early-boot
+verified under EDK2/AAVMF pflash real firmware via Limine BOOTAA64.EFI
+`protocol: linux` (no -kernel, no isa-debug-exit, self-relocation exercised)
+and unchanged under legacy -kernel                                    rc 0
+```
+66 `[BOOT]` markers, 0 traps.
+
+### `tools/list` does NOT work, and the reason is a real defect
+
+The natural follow-on failed, and the failure is informative rather than
+cosmetic. `tools/list` returns a **well-formed envelope with a wrong result**:
+
+```
+{"jsonrpc":"2.0","id":"7c1e4b9d33a0-tools","result":0}
+```
+
+`result` is `0`, not the 151-tool payload. The same defect shows inside the
+working `initialize` response: `"serverInfo":{"name":"0","version":"0"}`.
+
+Both read **module-level constants/statics**, and freestanding native builds
+**skip module-level initializers** — a gap this very kernel already works around
+by hand for the MMIO layer (`limine_boot_aarch64.spl`, "Freestanding native
+builds skip module-level initializers", Step 0). `initialize` works precisely
+because its result is assembled from inline literals. So the boundary is exactly
+"does this handler read a module global", and `tools/list` is on the wrong side
+of it. This is the next blocker, and it is a compiler/runtime defect, not more
+externs.
+
+### Not verified by this pass
+
+- **`tools/list` is NOT working** — see above. Only `initialize` round-trips.
+- The response's `serverInfo` values are wrong (`"0"`), same root cause. The
+  gate deliberately does not assert them, and says so rather than lowering the
+  bar quietly.
+- No `tools/call` was attempted; it needs the filesystem and process traps.
+- Route B untouched, still P6-blocked. `check-simpleos-mcp-in-guest-qemu.shs`
+  remains a scaffold at ERROR — that is the Route B gate and this result does
+  not change its verdict.
+- No board run. The nonce arrives over `-serial stdio`, a QEMU host pipe; on
+  hardware that becomes a physical cable, which is untested.
+- `scripts/check/check-no-unresolved-runtime-symbols.shs` still cannot run on
+  this host (Linux-only, needs `ldd`).
+
 ## STATUS UPDATE 2026-08-24 (4) — ROUTE A STEP 2 DONE: THE MCP SERVER RUNS IN THE GUEST
 
 **The MCP module graph is built into the aarch64 kernel, entered from the boot

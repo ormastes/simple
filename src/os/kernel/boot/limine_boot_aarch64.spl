@@ -99,10 +99,6 @@ extern fn rt_aarch64_stdout_probe(msg: text) -> u64
 # the number of symbols pinned.
 extern fn rt_aarch64_p10_keepalive() -> u64
 
-# Route A step 2 — the MCP server entry, pulled into the kernel's entry
-# closure. Aliased because a bare `main` in this module would collide with
-# native-build's entry-symbol handling.
-use app.mcp.main.{main as mcp_server_main}
 
 fn halt_loop():
     """Halt forever (aarch64: WFE spin loop, no interrupt controller set up yet)."""
@@ -559,24 +555,12 @@ fn memory_init(boot_info: BootOutputPort):
     val p10_symbols = rt_aarch64_p10_keepalive()
     log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-P10-ABI-PINNED symbols={p10_symbols}")
 
-    # Route A step 2: the MCP module graph is BUILT INTO this kernel and
-    # entered here. Deliberately AFTER every marker the real-firmware boot
-    # gate greps for — same discipline as the P8/P9/P10 probes above — so
-    # neither this call nor a trap reached beneath it can turn that gate's
-    # PASS into a FAIL.
-    #
-    # What this proves and does not prove: it proves the 49-module graph
-    # compiles, links and is entered on this target. It does NOT prove the
-    # server can answer, and today it cannot — the 16 undeclared second-layer
-    # symbols are named traps, and rt_text_find (JSON parsing, reached from
-    # _find_json_value_start) sits on the `initialize` path. Expect the
-    # transcript to end in a [TRAP] line naming the first one reached; that
-    # line IS the deliverable, because it names exactly what step 3 needs.
-    log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-MCP-GRAPH-ENTERING")
-    val mcp_rc = mcp_server_main()
-    log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-MCP-GRAPH-RETURNED rc={mcp_rc}")
-
-    halt_loop()
+    # memory_init RETURNS here rather than halting, so that an entry file can
+    # run something after the boot sequence. limine_entry.spl halts
+    # immediately (the default kernel); mcp_entry.spl runs the MCP server
+    # first. Everything above this point has already printed every marker the
+    # real-firmware boot gate greps for, so nothing an entry file does
+    # afterwards can turn that gate's PASS into a FAIL.
 
 # Named `limine_aarch64_boot_main` (not `kernel_main`) because native-build
 # mangles non-entry-file module symbols with their full module path
@@ -591,9 +575,20 @@ fn memory_init(boot_info: BootOutputPort):
 # examples/09_embedded/simple_os/arch/aarch64/limine_entry.spl defines the
 # actual bare `fn kernel_main()` symbol the linker script needs and calls
 # this one.
-@noreturn
-fn limine_aarch64_boot_main():
-    """Limine boot entry point (aarch64).
+fn limine_aarch64_boot_sequence():
+    """Limine boot sequence (aarch64) — RETURNS to its caller.
+
+    Split out of limine_aarch64_boot_main so a second entry file can run code
+    after the boot sequence without duplicating any of it. The default kernel
+    (limine_entry.spl) halts immediately after this returns; mcp_entry.spl
+    runs the in-guest MCP server first. Keeping the MCP call out of THIS
+    module is what keeps the default kernel free of the MCP module graph —
+    `--entry-closure` starts at the entry file, so a `use` of app.mcp.main
+    here would drag ~800 KB into every build of the plain kernel.
+
+    Called by Limine bootloader (BOOTAA64.EFI) after loading the kernel into
+    higher-half. Initializes serial, parses boot info, hands off to the
+    memory layer.
 
     Called by Limine bootloader (BOOTAA64.EFI) after loading the kernel into
     higher-half. Initializes serial, parses boot info, hands off to the
@@ -629,6 +624,12 @@ fn limine_aarch64_boot_main():
     log_raw_println("[BOOT] Handing off to memory layer...")
     memory_init(boot_info)
 
-    # Step 5: If control returns, halt
-    log_raw_println("[BOOT] FATAL: memory_init returned, halting")
+    # Step 5: memory_init returns by design (see its tail); this function
+    # returns too, and the entry file decides what happens next.
+
+@noreturn
+fn limine_aarch64_boot_main():
+    """Default aarch64 Limine entry: boot, then halt. Used by
+    limine_entry.spl, which is the plain kernel with no MCP graph in it."""
+    limine_aarch64_boot_sequence()
     halt_loop()

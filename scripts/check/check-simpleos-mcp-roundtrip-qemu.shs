@@ -1,0 +1,150 @@
+#!/bin/sh
+# Gate: an MCP server running INSIDE a SimpleOS aarch64 guest, under REAL
+# FIRMWARE, answers a JSON-RPC `initialize` request with a response bound to a
+# host-generated nonce.
+#
+# This is the Route A realisation of milestone M1 in
+# doc/05_design/os/simpleos/mcp_in_guest_qemu_2026-08-23.md §4.1. It is a
+# SEPARATE gate from scripts/check/check-simpleos-mcp-in-guest-qemu.shs, which
+# fences the Route B (/usr/bin/simple mcp guest-process) design and is still a
+# scaffold blocked on P6 — do not conflate the two verdicts.
+#
+# BOOT CHAIN — no QEMU boot-protocol cheats:
+#   AAVMF_CODE.fd (pflash0, ro) + VARS (pflash1, rw)
+#     -> BOOTAA64.EFI on a FAT ESP (a real EFI application)
+#     -> build/os/aarch64_limine_mcp/kernel.elf
+# NEVER `-kernel`. NEVER `isa-debug-exit`. Asserted against this gate's OWN
+# argv below, so a future edit that reintroduces a cheat fails the gate rather
+# than silently weakening it.
+#
+# HONESTY RULES:
+#   1. Never invoke a host `simple mcp`. Every byte asserted on comes off the
+#      guest's serial line. No guest evidence is FAIL or ERROR, never a host
+#      measurement.
+#   2. A response missing the nonce is FAIL, not a warning. The nonce is the
+#      JSON-RPC `id`, generated fresh per run, so a canned or replayed
+#      transcript cannot satisfy it.
+#   3. Exit status is read into a variable on the line AFTER the invocation,
+#      never through a pipe.
+#
+# VERDICT CONTRACT — last line of stdout:
+#   PASS  — <n> assertion(s) ...            exit 0   n is always > 0
+#   FAIL  — ...                             exit 1
+#   ERROR — nothing was checked: <reason>   exit 2
+# A run that asserted zero things is ERROR, never a pass.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$ROOT_DIR"
+
+ART=${ART_DIR:-build/os/aarch64_limine_mcp}
+QEMU_BIN=${QEMU_SYSTEM_AARCH64:-qemu-system-aarch64}
+BOOT_TIMEOUT=${BOOT_TIMEOUT:-120}
+
+pass() { printf 'PASS — %s\n' "$1"; exit 0; }
+fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
+oops() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+
+command -v "$QEMU_BIN" >/dev/null 2>&1 || oops "missing $QEMU_BIN"
+[ -s "$ART/kernel.elf" ] || oops "missing $ART/kernel.elf — build it with: bin/simple native-build --backend cranelift --entry-closure --entry examples/09_embedded/simple_os/arch/aarch64/mcp_entry.spl --target aarch64-unknown-none-elf --linker-script examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld -o $ART/kernel.elf"
+[ -s "$ART/esp.img" ] || oops "missing $ART/esp.img — build it with: OUT_DIR=\$PWD/$ART KERNEL_ELF=\$PWD/$ART/kernel.elf sh scripts/os/build-simpleos-aarch64-efi-esp.shs"
+[ -s "$ART/AAVMF_CODE.fd" ] || oops "missing $ART/AAVMF_CODE.fd (real EDK2/AAVMF firmware); faking this with -kernel is forbidden by .claude/rules/board-runnable.md"
+
+W=$(mktemp -d)
+trap 'rm -rf "$W"' EXIT
+cp "$ART/AAVMF_VARS.fd" "$W/VARS.fd"
+
+NONCE=${MCP_NONCE:-$(od -An -tx1 -N6 /dev/urandom | tr -d ' \n')}
+[ -n "$NONCE" ] || oops "could not generate a nonce"
+
+REQ='{"jsonrpc":"2.0","id":"'$NONCE'","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"roundtrip-gate","version":"1"}}}'
+
+QEMU_ARGS="-M virt -cpu cortex-a72 -m 512M"
+QEMU_ARGS="$QEMU_ARGS -drive if=pflash,format=raw,file=$ART/AAVMF_CODE.fd,readonly=on"
+QEMU_ARGS="$QEMU_ARGS -drive if=pflash,format=raw,file=$W/VARS.fd"
+QEMU_ARGS="$QEMU_ARGS -drive if=none,file=$ART/esp.img,format=raw,id=esp"
+QEMU_ARGS="$QEMU_ARGS -device virtio-blk-device,drive=esp"
+QEMU_ARGS="$QEMU_ARGS -device ramfb -display none -serial stdio"
+
+# Self-audit: the forbidden flags must not appear in our OWN argv. Needles are
+# spliced so these lines cannot match themselves.
+_k="-ker""nel"
+_d="isa-de""bug-exit"
+case " $QEMU_ARGS " in *" $_k"*) oops "gate argv contains the forbidden QEMU kernel-pass flag" ;; esac
+case " $QEMU_ARGS " in *"$_d"*) oops "gate argv contains the forbidden ISA debug-exit device" ;; esac
+
+IN=$W/in; OUT=$W/out
+mkfifo "$IN"
+: > "$OUT"
+
+# Hold the write end open so QEMU's stdin never sees EOF between writes.
+sleep "$BOOT_TIMEOUT" > "$IN" &
+HOLD=$!
+
+timeout "$BOOT_TIMEOUT" "$QEMU_BIN" $QEMU_ARGS < "$IN" > "$OUT" 2>/dev/null &
+QPID=$!
+
+# PACING IS THE WHOLE PROBLEM (design doc, P8 status update): bytes written
+# before the guest reaches its polling window are swallowed by EDK2/Limine's
+# own console. So wait for the guest's own "entering" marker, THEN write, and
+# keep re-writing — the guest arms a long non-consuming RX wait around exactly
+# this point (rt_aarch64_stdin_wait_ready).
+WROTE=0
+i=0
+while [ "$i" -lt 1200 ]; do
+    if grep -q 'SIMPLEOS-AARCH64-LIMINE-MCP-GRAPH-ENTERING' "$OUT" 2>/dev/null; then
+        k=0
+        while [ "$k" -lt 4 ]; do
+            printf '%s\n' "$REQ" > "$IN"
+            WROTE=$((WROTE + 1))
+            sleep 2
+            if grep -q "\"id\":\"$NONCE\"" "$OUT" 2>/dev/null; then break; fi
+            k=$((k + 1))
+        done
+        break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+done
+
+wait "$QPID" 2>/dev/null || true
+kill "$HOLD" 2>/dev/null || true
+
+LINES=$(grep -c . "$OUT" 2>/dev/null || echo 0)
+[ "$LINES" -gt 0 ] || oops "empty serial transcript; the guest produced no evidence at all"
+[ "$WROTE" -gt 0 ] || oops "guest never printed MCP-GRAPH-ENTERING, so no request was ever written"
+
+ASSERTED=0
+
+grep -q 'SIMPLEOS-AARCH64-LIMINE-KERNEL-OK' "$OUT" || fail "guest never reached KERNEL-OK; nothing about MCP can be concluded ($LINES serial line(s))"
+ASSERTED=$((ASSERTED + 1))
+
+grep -q 'SIMPLEOS-AARCH64-LIMINE-MCP-GRAPH-ENTERING' "$OUT" || fail "guest never entered the MCP graph"
+ASSERTED=$((ASSERTED + 1))
+
+RESP=$(grep -m1 "\"id\":\"$NONCE\"" "$OUT" 2>/dev/null || true)
+[ -n "$RESP" ] || fail "no response carrying the host nonce $NONCE appeared in $LINES serial line(s) after $WROTE request write(s)"
+ASSERTED=$((ASSERTED + 1))
+
+case "$RESP" in
+    '{"jsonrpc":"2.0"'*) ;;
+    *) fail "response is not a JSON-RPC 2.0 envelope: $RESP" ;;
+esac
+ASSERTED=$((ASSERTED + 1))
+
+case "$RESP" in
+    *'"result"'*) ;;
+    *) fail "response carries no result member: $RESP" ;;
+esac
+ASSERTED=$((ASSERTED + 1))
+
+case "$RESP" in
+    *'"protocolVersion"'*) ;;
+    *) fail "initialize result carries no protocolVersion: $RESP" ;;
+esac
+ASSERTED=$((ASSERTED + 1))
+
+grep -q '\[TRAP\]' "$OUT" && fail "a named runtime trap fired during the round trip: $(grep -m1 '\[TRAP\]' "$OUT")"
+ASSERTED=$((ASSERTED + 1))
+
+pass "$ASSERTED assertion(s) checked, in-guest MCP answered initialize under EDK2/AAVMF real firmware via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit); nonce $NONCE echoed as the JSON-RPC id; $LINES serial line(s), $WROTE request write(s)"
