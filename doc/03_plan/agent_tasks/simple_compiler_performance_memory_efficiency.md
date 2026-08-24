@@ -1140,6 +1140,16 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add context and SPipe boundary coverage; verification intentionally not run
   under the user's no-verify instruction.
 
+## Completed optimizer stable-name integrity tranche
+
+- Require every registered descriptor's stable name to resolve to the same
+  `PassKind`, in addition to existing alias/status/expectation checks.
+- Fail closed with distinct unresolved-name and wrong-kind reasons.
+- Replace quadratic array membership in registry and witness uniqueness checks
+  with dictionary sets.
+- Add positive, missing-name, and misbound-name contracts; verification
+  intentionally not run under the user's no-verify instruction.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
