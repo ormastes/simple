@@ -299,3 +299,55 @@ which LOOKS like the same bug but is not: assigning a bare value to an
 optional-typed variable does not box (`hc_dec_hir_stmt_kind` contains exactly 5
 `rt_enum_new`, one per HirStmtKind variant). Only an explicit `Some(v)` boxes.
 Do not "fix" the generated codec on the strength of its spelling.
+
+## VERIFIED on the real Stage 3 (2026-08-24, after `d4b1dee0d63`)
+
+The fix above was verified on the **full sanctioned Stage-3 build**, not only on
+the minimal reproducer. Stage 2 was rebuilt from a tree carrying the fix
+(sha256 `7e45db55…`), re-admitted via `planner-admission-v2`, and Stage 3 was
+resumed with `--resume-stage3-from-admitted`. Both cache-scope ownership gates
+PASSed.
+
+```
+[BOOTSTRAP-PHASE] +898664ms phase4:monomorphize:start
+[BOOTSTRAP-PHASE] +907601ms phase4:monomorphize:done     <-- CLEARED (8.9 s)
+[BOOTSTRAP-PHASE] +907601ms phase5:mode_dispatch:start
+[BOOTSTRAP-PHASE] +907601ms aot:lower_to_mir:start
+command-snapshot.shs: line 182: 19229 Segmentation fault: 11
+```
+
+`HIR lowering error` count 0, `post_hir_validate 692/692`.
+**`phase4:monomorphize` is cleared.** The blocker this record was opened for is
+fixed and verified end to end.
+
+**Still no Stage-3 artifact**: no `stage3/aarch64-apple-darwin/simple`, no
+`provenance.env`, no `full/`. Stage 4, Stage 5 and deployment remain
+unreachable, now for a different reason.
+
+### New frontier: `aot:lower_to_mir`, same family again
+
+The minimal reproducer (`fn id<T>(v: T) -> T: val x: T = v; x`) reaches the same
+point and gives the frame the Stage-3 sandbox cannot:
+
+```
+EXC_BAD_ACCESS (code=1, address=0xf198715900000000)   <-- identical address
+ #0 MirLowering.lower_type + 200            (ldr x10, [x9])
+ #1 MirLowering.lower_call + 14968          (`ret_type = self.lower_type(callee.type_)`)
+ #2 MirLowering.lower_expr + 1580
+ #3 MirLowering.lower_bootstrap_print_call + 96
+ #5 MirLowering.lower_stmt_impl + 2256
+ #8 MirLowering.lower_function_with_gpu_metadata + 10952
+ #9 bootstrap_lower_flat_hir_module_to_mir + 2312
+ #12 CompilerDriver.aot_compile + 568
+```
+
+Same defect family, one phase later: an Option handle sitting in a non-Option
+slot, dereferenced through the same `tag == HEAP && (v & ~7) != 0` shape test.
+`switch_operators_calls.spl:4781` is *correct* — it guards on `callee.has_type_`
+and `HirExpr` uses the desugared `has_type_: bool` + `type_: HirType` shape — so
+the handle was **stored into** `type_` upstream. `type_: Some(` and
+`.type_ = Some(` both find nothing, so the producer is an Option-typed
+*variable* flowing into the field rather than a literal `Some(...)`.
+**Producer NOT located** — that is the next piece of work, and it is plausibly
+the same root as `9854efed570` (`if val` binds the Option handle), whose
+lowering fix is still in flight in a sibling lane.
