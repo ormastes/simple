@@ -202,6 +202,28 @@ if printf '%s' "$MIRROR_BODY" | grep -q '& 7) != 1'; then
     OFFENDERS="$OFFENDERS simple-mirror:requires-heap-tag"
 fi
 
+# --- Lane 3: the RUST mirror. THIS IS THE ONE THE NATIVE LANE ACTUALLY LINKS.
+# Measured 2026-08-24 by disassembling build/bootstrap/*/stage2/*/simple: the
+# Stage-2 compiler resolves rt_heap_ref_wellformed to objects.rs, NOT to
+# runtime_native.c. Fixing only the C probe left the shipped binary unchanged,
+# which is exactly the false-green this row exists to prevent.
+EV_CHECKED=$((EV_CHECKED + 1))
+RUST_OBJECTS="$ROOT/src/compiler_rust/runtime/src/value/objects.rs"
+if [ ! -f "$RUST_OBJECTS" ]; then
+    echo "ERROR -- nothing was checked (missing $RUST_OBJECTS)"
+    exit 2
+fi
+RUST_BODY=$(awk '/pub extern "C" fn rt_heap_ref_wellformed/{f=1} f{print} f&&/^\}/{exit}' "$RUST_OBJECTS")
+if [ -z "$RUST_BODY" ]; then
+    echo "ERROR -- nothing was checked (could not isolate the Rust mirror body)"
+    exit 2
+fi
+# Strip comment lines first: the body's own prose explains that it is
+# deliberately NOT gated on is_heap(), and matching that would false-fail.
+if printf '%s' "$RUST_BODY" | grep -v '^[[:space:]]*//' | grep -q 'is_heap()'; then
+    OFFENDERS="$OFFENDERS rust-mirror:gated-on-is_heap"
+fi
+
 if [ "$EV_CHECKED" -eq 0 ]; then
     echo "ERROR -- nothing was checked (0 cases evaluated)"
     exit 2

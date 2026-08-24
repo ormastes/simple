@@ -396,10 +396,13 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
 /// nothing and the check below is already contract-correct as written.
 #[no_mangle]
 pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
-    if !value.is_heap() {
-        return 0;
-    }
-    let addr = value.as_heap_ptr() as usize;
+    // Masked address only -- deliberately NOT gated on `is_heap()`. See the
+    // contract note above: a class reference on the native codegen lane is a
+    // raw UNTAGGED pointer, and this is the body the NATIVE lane links (the
+    // Stage-2/3 compiler binary resolves rt_heap_ref_wellformed here, not to
+    // runtime_native.c). Gating on the tag made it answer 0 for every live
+    // class instance and fired the driver HIR-entry guards unconditionally.
+    let addr = (value.0 & !super::tags::TAG_MASK) as usize;
     if addr < 4096 {
         0
     } else {

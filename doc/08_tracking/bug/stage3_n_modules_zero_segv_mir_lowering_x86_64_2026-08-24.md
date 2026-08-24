@@ -427,7 +427,70 @@ which is the re-invocation defect already recorded above in this file.
 
 ---
 
-## ROOT CAUSE FOUND AND FIXED (2026-08-24, lane `lane-retained-surfaces`)
+## CORRECTION (2026-08-24, later the same day) — READ THIS FIRST
+
+**The section below overstated its conclusion and is CORRECTED here. Do not
+cite it standalone.** A real defect in the probe was found and fixed, but it is
+**NOT** the root cause of this bug, and Stage 2 still SEGVs.
+
+**What is proven:** `rt_heap_ref_wellformed` required the heap tag, and on the
+native codegen lane a class reference is a raw UNTAGGED pointer, so the probe
+answered 0 for every live class instance. Measured red→green on a native
+fixture: `class-instance wellformed = false` → `true`. That was a genuine
+latent defect — the guard could never have passed even on GOOD data — and the
+fix is correct and necessary. **A second half was missed on the first pass and
+is now also fixed:** the Stage-2 binary resolves this symbol to the **Rust**
+runtime (`src/compiler_rust/runtime/src/value/objects.rs`), *not* to
+`runtime_native.c`. Verified by disassembling the shipped binary.
+
+**What is DISPROVEN:** that fixing the probe repairs Stage 2. With the tag test
+confirmed **gone from the shipped Stage-2 binary** —
+
+```
+000000000112bd8e <rt_heap_ref_wellformed>:
+ 112bd8e:  48 81 ff 00 10 00 00   cmp    $0x1000,%rdi
+ 112bd95:  0f 93 c0               setae  %al
+ 112bd98:  c3                     ret
+```
+
+— the guard **still fires**:
+
+```
+NATIVE_BUILD_RC=139
+[ERROR] MIR error: E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module
+surface payload malformed at HIR entry
+```
+
+Since the probe now answers 0 **only** when `(value & ~7) < 4096`, the retained
+surfaces owner payload is **genuinely a small word (0 or near-0), not a
+pointer**. The guard is therefore **doing its job and correctly reporting a real
+upstream defect**.
+
+**So the answer to deliverable 1 is: BOTH, in sequence.** The check WAS wrong
+(now fixed), AND the surfaces owner IS genuinely malformed (still open, and it
+is the actual self-hosting blocker).
+
+**Ruled out as the cause of the malformed value** — the driver's exact shape
+reproduces CLEAN in a small native program, so this is not an `Any`-marshalling
+or Option-unwrap artifact:
+
+```
+A fresh-local = true
+B option-field-unwrap = true n=42     <-- Option<class> FIELD stored, read back, unwrapped
+```
+
+**Where to look next:** whatever populates `self.ctx.module_surfaces` between
+phase 2 and HIR entry loses it — the payload word is zeroed while the Option
+stays `Some`. That is the 2026-08-22 zeroed-payload class, now confirmed to be
+occurring for real on this path rather than hypothetically. The narrowed
+receipts (`r01-unwrapped` prints, `r02-wellformed` does not) are consistent with
+this and remain the best entry point.
+
+---
+
+## Original section (SUPERSEDED IN PART by the correction above)
+
+## Probe defect found and fixed (2026-08-24, lane `lane-retained-surfaces`)
 
 `E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED` fired on a **valid** hello world
 because the formation probe backing it, `rt_heap_ref_wellformed`, **required the
