@@ -468,3 +468,11 @@ use separate read and write region indexes while retaining first-occurrence
 array order, avoiding a composite-key allocation per effect. Reads never enter
 the frame-write set, and dictionary iteration order never reaches canonical
 text or hashes.
+
+Manifest admission owns a separate region-to-type index. The first effect for
+a region establishes its exact serialized MIR type; later effects compare
+against it in expected constant time and are still appended unchanged. A
+mismatch fails at the first conflicting effect with the stable diagnostic.
+Instruction provenance is demand-built only for instruction kinds whose region
+effect contract consumes it; unrelated MIR operations must not allocate a
+formatted span merely because debug source metadata exists.
