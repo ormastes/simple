@@ -21,3 +21,18 @@ the ARM32 scheduler adoption owner and entry leaf; keep
 `executable_target_arch_process_image_ready_v1("arm") == false` until the
 filesystem-backed QEMU transcript proves guest entry, mounted program output,
 exit 37, exact reap, and `TEST PASSED`.
+
+## 2026-08-24 scheduler-move prerequisite
+
+The page-table capsule now supports an exact
+`AdoptionReserved -> SchedulerOwnedUnpublished -> SchedulerOwnedPublished ->
+SchedulerTerminal -> Destroyed` move bound to task ID and lifecycle generation.
+A stale receipt cannot roll back, publish, terminate, or reap a later state.
+Only the unpublished state can roll back; only terminal state can reap.
+The immutable entry state binds the 16 KiB-aligned TTBR0 root, word-aligned
+entry, eight-byte-aligned SP, and one-shot execution token. Its hardware
+installer uses `DSB -> TTBR0 -> TLBIALL -> DSB -> ISB` and reads back the root.
+
+Global readiness remains false. Scheduler must still publish the receipt with
+its TCB, invoke entry, bind SVC/exit to the same lifecycle, restore the kernel
+root, and reap during wait collection. No runtime verification ran.
