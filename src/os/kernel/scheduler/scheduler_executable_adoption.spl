@@ -44,6 +44,9 @@ use os.kernel.loader.executable_load_plan_v1.{
     ExecutableLoadConsumerV1, ExecutableLoadReceiptV1,
     executable_load_consumer_receipt_v1
 }
+use os.kernel.loader.executable_target_dispatch_v1.{
+    executable_target_dispatch_consumer_matches_v1
+}
 use os.kernel.memory.user_address_space.{
     create_user_address_space, destroy_user_address_space
 }
@@ -137,15 +140,9 @@ impl Scheduler:
     fn _authenticated_consumer_arch_matches_v1(
         consumer: ExecutableLoadConsumerV1, arch: Architecture
     ) -> bool:
-        if arch == Architecture.X86_64:
-            return consumer.expected_arch == "x86_64"
-        if arch == Architecture.Riscv64:
-            return consumer.expected_arch == "riscv64"
-        if arch == Architecture.Arm64:
-            # Manifest/load-plan architecture vocabulary is canonicalized as
-            # aarch64; Architecture.Arm64 is the in-kernel enum spelling.
-            return consumer.expected_arch == "aarch64"
-        false
+        executable_target_dispatch_consumer_matches_v1(
+            consumer.expected_os, consumer.expected_arch,
+            consumer.expected_abi, arch)
 
     me _record_authenticated_executable_adoption_v1(
         state: SchedulerExecutableAdoptionOwnerStateV1,
@@ -185,6 +182,14 @@ impl Scheduler:
             return _scheduler_adoption_reject(
                 consumer, ExecutableLoadConsumerErrorV1.InvalidConsumer)
         val owned_launch = checked_launch.unwrap()
+        # Target readiness and the active architecture are non-authorizing
+        # routing facts. Reject them before committing the one-shot loader
+        # token, so an unsupported 32-bit builder or wrong-kernel dispatch can
+        # never burn otherwise valid authenticated source authority.
+        val active_arch = get_arch()
+        if not self._authenticated_consumer_arch_matches_v1(consumer, active_arch):
+            return _scheduler_adoption_reject(
+                consumer, ExecutableLoadConsumerErrorV1.UnsupportedArchitecture)
         val prepared_owner = scheduler_executable_adoption_transition_v1(
             self.executable_adoption_state,
             SchedulerExecutableAdoptionOwnerEventV1.Prepare)
@@ -213,14 +218,6 @@ impl Scheduler:
         self._record_authenticated_executable_adoption_v1(
             prepared_owner.state, 0u64, token)
         val handle = retrieved.unwrap().image_handle
-        val active_arch = get_arch()
-        if not self._authenticated_consumer_arch_matches_v1(consumer, active_arch):
-            self._record_authenticated_executable_adoption_v1(
-                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
-            return _scheduler_adoption_fail_and_close(
-                table, authorities, token, consumer,
-                ExecutableLoadConsumerErrorV1.RollbackUnavailable)
-
         val prepared = executable_prepare_image_with_launch_v1(
             table, handle, consumer, entry_point, active_arch, owned_launch)
         if prepared.is_err():
