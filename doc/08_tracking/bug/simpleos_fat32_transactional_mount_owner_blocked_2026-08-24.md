@@ -72,6 +72,27 @@ That draft and its inadequate tautological spec were removed. The bounded
 operation-slot and close-ordering design was locally sound, but cannot be
 published until both identity binding and side-effect-free probing exist.
 
+A fourth draft retained a generic `BlockDevice` behind a package-private
+pin-bound I/O handle and attempted to compare identity methods exposed by the
+trait. Two independent static-review cycles rejected it and it was reverted:
+
+1. Identity methods implemented by the same caller-supplied trait object are
+   self-attestation, not controller/namespace-owner authentication. A backend B
+   can report A's metadata, so comparison cannot authorize the object.
+2. Calling identity or I/O trait methods under the global identity mutex permits
+   reentrant deadlock and serializes unrelated devices.
+3. Moving dispatch outside that mutex through a module-global dynamic backend
+   array makes different-slot access race with array mutation/reallocation.
+   An `io_busy` bit protects lifecycle metadata, not the shared vector storage.
+
+The safe next boundary is a bounded, fixed-location backend capsule created by
+the concrete controller/namespace owner. It must carry an opaque owner-issued
+seal that ordinary `BlockDevice` implementations cannot construct. The identity
+owner may then validate that seal, reserve one slot, invoke the per-slot capsule
+without the global identity lock, and consume the capsule handle with the pin.
+Until that provider-owned capsule exists, a package-private facade alone does
+not make caller-supplied block I/O authenticated.
+
 ## Safe implementation order
 
 1. Extend the storage handoff with an owner-issued opaque namespace identity and
