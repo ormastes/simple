@@ -2519,3 +2519,18 @@ declarations (902 tagged, 651 contract-documented, 385 minimized, 10,943
 untouched), zero signed/admitted. The raw handle can still conflate a zero or
 invalid sentinel with allocation/provider failure, so this owner is minimized
 unsafe—not verified safe.
+
+## Backend target-context policy boundary
+
+The target-context provider's two native-target reads now share one tagged raw
+declaration and each executes in a minimal lexical `unsafe(ffi)` block. Both
+retain one provider read and the same trim/lower normalization at the original
+call point. Mutable environment policy remains observable; no cache, additional
+lookup, copy, allocation, loop, or dispatch was added.
+
+The wiring spec passes 5/5. Optimizer findings remain 7; isolated analyzer
+evidence is 11.55 s / 270,528 KiB before versus 7.00 s / 270,276 KiB after.
+Current census is 21,267 calls (2,159 explicit, 19,108 missing), 12,111
+declarations (903 tagged, 385 minimized, 10,942 untouched), zero
+signed/admitted. Empty text still conflates unset configuration with provider
+failure, so this is minimized authority, not a safe verified result contract.

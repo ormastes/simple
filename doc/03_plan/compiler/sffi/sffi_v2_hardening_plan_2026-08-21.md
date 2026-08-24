@@ -1460,3 +1460,10 @@ Next, design a status-bearing builder acquisition/mutation/finalization ABI so
 zero handles and empty finished text cannot conceal provider failure. Keep the
 checked typed thunk direct and cached; do not add per-line hashing, symbol
 lookup, allocation, or generic dispatch.
+
+The backend target-context provider now scopes both normalized target reads
+without caching mutable policy or changing read cardinality. The wiring spec
+passes 5/5, optimizer findings remain 7, and isolated analyzer evidence is
+11.55 s / 270,528 KiB before versus 7.00 s / 270,276 KiB after. Current census
+is 21,267 calls (2,159 explicit, 19,108 missing), 12,111 declarations (903
+tagged, 385 minimized, 10,942 untouched), zero signed/admitted.
