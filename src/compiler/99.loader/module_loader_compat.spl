@@ -180,6 +180,10 @@ struct LoaderStats:
     jit_stats: Dict<text, i64>
     cache_stats: Dict<text, i64>
 
+enum ModuleLoadIntent:
+    SmfArtifact
+    SourceMetadata
+
 enum LoadResult:
     Success(module: LoadedModule)
     AlreadyLoaded(module: LoadedModule)
@@ -194,6 +198,7 @@ enum SymbolResult:
 struct ModuleLoader:
     config: ModuleLoaderConfig
     modules: Dict<text, LoadedModule>
+    module_intents: Dict<text, text>
     global_symbols: Dict<text, (text, LoadedSymbol)>
     jit: JitInstantiator
     semantic_exports: Dict<text, [text]>
@@ -234,10 +239,33 @@ impl ModuleLoader:
     # direct-mutation guarantee; `self.jit` is a class (reference type) so its
     # own methods are safe to keep factored out.
     me load(path: text) -> LoadResult:
+        self.load_with_intent(path, ModuleLoadIntent.SmfArtifact)
+
+    me load_with_intent(path: text, intent: ModuleLoadIntent) -> LoadResult:
         if self.modules.has(path):
+            val requested_intent = match intent:
+                case SmfArtifact: "smf_artifact"
+                case SourceMetadata: "source_metadata"
+            if not self.module_intents.has(path) or self.module_intents[path] != requested_intent:
+                return LoadResult.Error(message: "module already loaded with a different intent: " + path)
             return LoadResult.AlreadyLoaded(module: self.modules[path])
         if not rt_file_exists(path):
             return LoadResult.Error(message: "module not found: " + path)
+
+        match intent:
+            case SourceMetadata:
+                # Source-only registration is an explicit caller decision. It
+                # does not probe the SMF parser, so malformed artifacts cannot
+                # silently downgrade to metadata modules. Metadata registration
+                # also avoids copying the full source into a temporary byte
+                # buffer; the JIT sidecar loader owns any data it actually needs.
+                val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
+                self.modules[path] = m
+                self.module_intents[path] = "source_metadata"
+                val _ = self.jit.load_smf_metadata(path)
+                return LoadResult.Success(module: m)
+            case SmfArtifact:
+                pass
 
         val smf_bytes = file_read_bytes(path)
         if smf_bytes.len() == 0:
@@ -245,15 +273,8 @@ impl ModuleLoader:
 
         val reader_result = SmfReaderMemory.from_data(smf_bytes)
         match reader_result:
-            case Err(_):
-                # Non-SMF source path (e.g. a plain `.spl` file). Per the
-                # compat loader contract, register it as a source-only
-                # module: no native symbols, but tracked as loaded so JIT
-                # metadata can still rehydrate from its sidecar.
-                val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
-                self.modules[path] = m
-                val _ = self.jit.load_smf_metadata(path)
-                return LoadResult.Success(module: m)
+            case Err(err):
+                return LoadResult.Error(message: "invalid SMF artifact {path}: {err}")
             case Ok(reader):
                 var symbols: Dict<text, LoadedSymbol> = {}
                 val exported_smf_symbols: [SmfSymbol] = reader.exported_symbols()
@@ -344,13 +365,17 @@ impl ModuleLoader:
 
                 val m = LoadedModule(path: path, reader: "", symbols: symbols, load_time: 0, version: 1)
                 self.modules[path] = m
+                self.module_intents[path] = "smf_artifact"
                 return LoadResult.Success(module: m)
 
     me reload(path: text) -> LoadResult:
+        self.reload_with_intent(path, ModuleLoadIntent.SmfArtifact)
+
+    me reload_with_intent(path: text, intent: ModuleLoadIntent) -> LoadResult:
         self.unload(path)
         if self.modules.has(path):
             self.modules = self.modules.remove(path)
-        self.load(path)
+        self.load_with_intent(path, intent)
 
     me unload(path: text):
         if not self.modules.has(path):
@@ -377,6 +402,8 @@ impl ModuleLoader:
 
         if self.modules.has(path):
             self.modules = self.modules.remove(path)
+        if self.module_intents.has(path):
+            self.module_intents = self.module_intents.remove(path)
 
     me record_semantic_export(path: text, key: text):
         if not self.semantic_exports.has(path):
@@ -514,6 +541,7 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
         ModuleLoader(
             config: config,
             modules: {},
+            module_intents: {},
             global_symbols: {},
             jit: JitInstantiator.new(JitInstantiatorConfig(
                 update_smf: config.enable_cache,
@@ -533,8 +561,14 @@ fn moduleloader_with_defaults() -> ModuleLoader:
 me moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
     self.load(path)
 
+me moduleloader_load_with_intent(self: ModuleLoader, path: text, intent: ModuleLoadIntent) -> LoadResult:
+    self.load_with_intent(path, intent)
+
 me moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
     self.reload(path)
+
+me moduleloader_reload_with_intent(self: ModuleLoader, path: text, intent: ModuleLoadIntent) -> LoadResult:
+    self.reload_with_intent(path, intent)
 
 me moduleloader_unload(self: ModuleLoader, path: text):
     self.unload(path)
