@@ -99,3 +99,55 @@ runtime-only, semantics-preserving cost bug of the same class:
 zero live entries). Fixed by the same-capacity rehash guard the immortal
 registry already had. Record:
 `c_runtime_dict_tombstone_churn_unbounded_growth_2026-08-23.md`.
+
+## 2026-08-24 re-verification on `origin/main` a9b936ed0cd (still OPEN)
+
+Independently re-measured by a second lane, against `runtime_native.c`
+compiled FRESH from `origin/main` (`clang -O2`), not the shared tree's
+prebuilt archive. The metric is **total bytes passed to `malloc`**, counted by
+interposition — a mechanism number, immune to machine speed (the box was at
+load ~63 during this run, so wall clock would have been meaningless):
+
+| N single-char appends | malloc'd bytes | mallocs | ratio vs previous |
+|---|---|---|---|
+| 10,000 | 50,175,000 | 10,000 | — |
+| 40,000 | 800,700,000 | 40,000 | **15.95x** |
+| 160,000 | 12,802,800,000 | 160,000 | **16.00x** |
+
+4x N -> 16x bytes is exactly N^2. One `malloc` per append and no capacity, as
+the original analysis said. 12.8 GB copied to build a 160 kB string.
+Probe: `concat_probe.c` (scratch, not committed — the harness is 30 lines and
+is reproduced by the table's method line above).
+
+**The design stop above is confirmed, and one proposed fix is now stale.**
+
+- Option 1's "track capacity in the currently-unused `reserved` slot" is no
+  longer available as written: `reserved` is **no longer unused**. It is now
+  the string flags word — `RT_CORE_STRING_FLAG_SHARED` (1) and
+  `RT_CORE_STRING_FLAG_TRANSIENT` (2), `runtime_native.c:864-874`. Any capacity
+  encoding must coexist with those bits (e.g. a log2-capacity class in the
+  upper bits), which is a wider audit than the record implies.
+- The ABI concern is now concrete, not theoretical: codegen inlines the string
+  layout rather than going through `rt_*` accessors — see the "LLVM len fast
+  path" reading `RtCoreString`'s `kind`/`len` at
+  `src/compiler_rust/compiler/src/codegen/instr/helpers.rs:64` and the
+  `kind == 0x53545231` ("STR1") magic compare at
+  `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs:355`. Moving
+  `data` out of line (a `char*` + capacity header) would break those inline
+  reads in every already-compiled artifact.
+- Option 2 / the compiler-side sole-owner signal has a **recorded failed
+  attempt**, which future work should not repeat blind.
+  `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:1040-1047`
+  handles the `x = x + y` -> `x.merge(y)` Pattern-B rewrite and carries an
+  explicit `DELIBERATELY NOT HANDLED HERE: a text receiver` comment: an
+  `emit_raw_strcat` + copy-back arm was tried there and **measured producing
+  "a" instead of "abc"**, so text was left on its existing path rather than
+  swapped for a different wrong answer. So the compiler does NOT currently
+  carry a sole-ownership proof for strings that a runtime append could lean on
+  — `t = s` is a raw tagged-pointer copy the runtime never observes.
+
+Status unchanged: **OPEN**, and correctly so. No runtime-only patch was made.
+An in-place append inside `rt_string_concat` without a compiler-provided
+ownership proof is an aliasing bug, which is strictly worse than quadratic.
+No regression gate was added, because no fix landed — a gate here would pin
+nothing.
