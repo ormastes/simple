@@ -2,6 +2,29 @@
 
 Status: open, unsafe prerequisite draft rejected and removed, unverified.
 
+## 2026-08-24 FD reservation attempt rejected
+
+A lifecycle/context-generation reservation plus provider-fence adapter draft
+was independently rejected and removed. Loading a reserved context for backend
+cleanup also made it reachable through every ordinary legacy `fd_*` operation;
+the table had neither a dispatch-scoped authority parameter nor an enforced
+single execution domain, so copied cleanup attempts and concurrent syscalls
+could mutate the same supposedly non-operational context. A provider Start
+could also become stranded if reserved activation failed afterward, and the
+task fork compatibility path created lifecycle-zero child contexts that could
+never enter lifecycle-authenticated cleanup.
+
+The next attempt must first make FD access authority explicit. Either every
+operation accepts a validated active-context lease (including backend-close
+helpers), or one synchronized FD owner serializes ordinary access and cleanup
+dispatch without exposing a process-global active table. Reserve/start must be
+one recoverable transition: every post-Start error retains an opaque recovery
+handle capable of provider-authenticated cancellation/quiescence acknowledgment.
+Fork must receive the child's real nonzero lifecycle generation. Static
+coverage must include failed backend close with retry, copied-run rejection,
+post-Start activation failure, cancellation finalization failure, fork
+lifecycle, ordinary access denial while reserved, and PID/context reuse.
+
 ## 2026-08-24 provider-wiring audit
 
 A direct wiring pass was stopped before source edits because every current
@@ -86,6 +109,18 @@ cleanup reservations in both namespace and grant owners, a non-operational
 `CleanupBound` state, and one two-phase adapter transaction that either commits
 both reservations into a bounded row or rolls both back. Partial namespace-
 then-grant cleanup must retain the exact reservation identities for retry.
+
+Update: that namespace/grant prerequisite now exists as an unwired, bounded
+two-owner reservation in
+`src/os/kernel/scheduler/server_data_cleanup_reservation_owner_v1.spl`.
+Both canonical owners have a generation-bound `CleanupBound` state; namespace
+authorization accepts only `Active`, so a reserved lease is non-operational.
+The adapter pre-admits capacity, binds the exact provider-attempt identity,
+rolls both reservations back on ordinary preparation failure, and retains exact
+namespace/grant handles plus a partial receipt when cleanup must retry. It is
+not connected to scheduler exit or `Zombie`, and has not received runtime/QEMU
+verification. FD, capability, DBD, and the single pre-Zombie transaction remain
+open prerequisites.
 
 The attempted FD adapter was rejected and removed. The legacy FD table exposes
 only task-ID contexts and no atomic, lifecycle-authenticated cleanup

@@ -44,6 +44,7 @@ pub enum ServerDataNamespaceLeaseStateV1:
     Free
     Preparing
     Active
+    CleanupBound
     Quarantined
     Retired
 
@@ -61,6 +62,9 @@ pub enum ServerDataNamespaceLeaseEventV1:
     RollbackPreparation
     Quarantine
     Revoke
+    BindCleanup
+    RollbackCleanup
+    RevokeCleanup
 
 pub fn server_data_namespace_lease_transition_v1(
     state: ServerDataNamespaceLeaseStateV1,
@@ -81,6 +85,15 @@ pub fn server_data_namespace_lease_transition_v1(
         ServerDataNamespaceLeaseEventV1.Revoke:
             if (state == ServerDataNamespaceLeaseStateV1.Preparing or
                 state == ServerDataNamespaceLeaseStateV1.Active):
+                return Some(ServerDataNamespaceLeaseStateV1.Free)
+        ServerDataNamespaceLeaseEventV1.BindCleanup:
+            if state == ServerDataNamespaceLeaseStateV1.Active:
+                return Some(ServerDataNamespaceLeaseStateV1.CleanupBound)
+        ServerDataNamespaceLeaseEventV1.RollbackCleanup:
+            if state == ServerDataNamespaceLeaseStateV1.CleanupBound:
+                return Some(ServerDataNamespaceLeaseStateV1.Active)
+        ServerDataNamespaceLeaseEventV1.RevokeCleanup:
+            if state == ServerDataNamespaceLeaseStateV1.CleanupBound:
                 return Some(ServerDataNamespaceLeaseStateV1.Free)
     nil
 
@@ -127,6 +140,23 @@ pub(package) struct ServerDataNamespaceLeaseResultV1:
     lease: ServerDataNamespaceLeaseV1?
     reason: text
 
+pub(package) struct ServerDataNamespaceCleanupReservationV1:
+    _lease: ServerDataNamespaceLeaseV1
+    _task_id: u64
+    _lifecycle_generation: u64
+    _transaction_id: u64
+    _transaction_generation: u64
+    _attempt_ordinal: u64
+
+pub(package) enum ServerDataNamespaceCleanupMutationStatusV1:
+    Rejected
+    Applied
+    Indeterminate
+
+pub(package) struct ServerDataNamespaceCleanupReserveResultV1:
+    status: ServerDataNamespaceCleanupMutationStatusV1
+    reservation: ServerDataNamespaceCleanupReservationV1?
+
 struct ServerDataNamespaceLeaseSlotV1:
     state: ServerDataNamespaceLeaseStateV1
     generation: u64
@@ -140,6 +170,9 @@ struct ServerDataNamespaceLeaseSlotV1:
     content_generation: u64
     dbfs_instance_identity: i64
     dbfs_mutation_epoch: u64
+    cleanup_transaction_id: u64
+    cleanup_transaction_generation: u64
+    cleanup_attempt_ordinal: u64
 
 struct ServerDataNamespaceOwnerV1:
     mounted: bool
@@ -164,7 +197,10 @@ fn _server_data_empty_slot_v1(generation: u64) -> ServerDataNamespaceLeaseSlotV1
         task_id: 0u64, lifecycle_generation: 0u64,
         mount_id: 0u32, mount_generation: 0u64,
         namespace_generation: 0u64, content_generation: 0u64,
-        dbfs_instance_identity: 0, dbfs_mutation_epoch: 0u64)
+        dbfs_instance_identity: 0, dbfs_mutation_epoch: 0u64,
+        cleanup_transaction_id: 0u64,
+        cleanup_transaction_generation: 0u64,
+        cleanup_attempt_ordinal: 0u64)
 
 fn _server_data_namespace_lock_v1() -> bool:
     if _server_data_namespace_mutex_v1 <= 0 or
@@ -261,12 +297,32 @@ fn _server_data_find_task_v1(task_id: u64, lifecycle_generation: u64) -> i64:
         val slot = _server_data_namespace_owner_v1.slots[i]
         if (slot.state == ServerDataNamespaceLeaseStateV1.Preparing or
             slot.state == ServerDataNamespaceLeaseStateV1.Active or
+            slot.state == ServerDataNamespaceLeaseStateV1.CleanupBound or
             slot.state == ServerDataNamespaceLeaseStateV1.Quarantined) and
             slot.task_id == task_id and
             slot.lifecycle_generation == lifecycle_generation:
             return i
         i = i + 1
     -1
+
+fn _server_data_cleanup_reservation_index_v1(
+    reservation: ServerDataNamespaceCleanupReservationV1,
+    expected: ServerDataNamespaceLeaseStateV1
+) -> i64:
+    val index = _server_data_find_lease_v1(reservation._lease, expected)
+    if index < 0: return -1
+    val slot = _server_data_namespace_owner_v1.slots[index]
+    if slot.task_id != reservation._task_id or
+        slot.lifecycle_generation != reservation._lifecycle_generation or
+        reservation._transaction_id == 0u64 or
+        reservation._transaction_generation == 0u64 or
+        reservation._attempt_ordinal == 0u64 or
+        slot.cleanup_transaction_id != reservation._transaction_id or
+        slot.cleanup_transaction_generation !=
+            reservation._transaction_generation or
+        slot.cleanup_attempt_ordinal != reservation._attempt_ordinal:
+        return -1
+    index
 
 fn _server_data_find_lease_v1(
     lease: ServerDataNamespaceLeaseV1,
@@ -354,7 +410,10 @@ fn _server_data_prepare_slot_v1(
         namespace_generation: facts.namespace_generation,
         content_generation: facts.content_generation,
         dbfs_instance_identity: facts.dbfs_instance_identity,
-        dbfs_mutation_epoch: facts.dbfs_mutation_epoch)
+        dbfs_mutation_epoch: facts.dbfs_mutation_epoch,
+        cleanup_transaction_id: 0u64,
+        cleanup_transaction_generation: 0u64,
+        cleanup_attempt_ordinal: 0u64)
     if index == _server_data_namespace_owner_v1.slots.len():
         _server_data_namespace_owner_v1.slots.push(slot)
     else:
@@ -573,3 +632,91 @@ pub(package) fn server_data_namespace_revoke_before_launch_grant_v1(
     if not _server_data_namespace_unlock_v1(): return false
     server_data_launch_grant_revoke_task_lifecycle_v1(
         task_id, lifecycle_generation)
+
+pub(package) fn server_data_namespace_reserve_cleanup_v1(
+    task_id: u64,
+    lifecycle_generation: u64,
+    transaction_id: u64,
+    transaction_generation: u64,
+    attempt_ordinal: u64
+) -> ServerDataNamespaceCleanupReserveResultV1:
+    """Bind an Active lease to one cleanup attempt and suppress all I/O."""
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+        transaction_id == 0u64 or transaction_generation == 0u64 or
+        attempt_ordinal == 0u64 or not _server_data_namespace_lock_v1():
+        return ServerDataNamespaceCleanupReserveResultV1(
+            status: ServerDataNamespaceCleanupMutationStatusV1.Rejected,
+            reservation: nil)
+    val index = _server_data_find_task_v1(task_id, lifecycle_generation)
+    if index < 0 or _server_data_namespace_owner_v1.slots[index].state !=
+        ServerDataNamespaceLeaseStateV1.Active:
+        _ = _server_data_namespace_unlock_v1()
+        return ServerDataNamespaceCleanupReserveResultV1(
+            status: ServerDataNamespaceCleanupMutationStatusV1.Rejected,
+            reservation: nil)
+    var slot = _server_data_namespace_owner_v1.slots[index]
+    val next = server_data_namespace_lease_transition_v1(
+        slot.state, ServerDataNamespaceLeaseEventV1.BindCleanup)
+    if next == nil:
+        _ = _server_data_namespace_unlock_v1()
+        return ServerDataNamespaceCleanupReserveResultV1(
+            status: ServerDataNamespaceCleanupMutationStatusV1.Rejected,
+            reservation: nil)
+    slot.state = next.unwrap()
+    slot.cleanup_transaction_id = transaction_id
+    slot.cleanup_transaction_generation = transaction_generation
+    slot.cleanup_attempt_ordinal = attempt_ordinal
+    _server_data_namespace_owner_v1.slots[index] = slot
+    val reservation = ServerDataNamespaceCleanupReservationV1(
+        _lease: ServerDataNamespaceLeaseV1(
+            slot: index, generation: slot.generation,
+            nonce_hi: slot.nonce_hi, nonce_lo: slot.nonce_lo),
+        _task_id: task_id,
+        _lifecycle_generation: lifecycle_generation,
+        _transaction_id: transaction_id,
+        _transaction_generation: transaction_generation,
+        _attempt_ordinal: attempt_ordinal)
+    if not _server_data_namespace_unlock_v1():
+        return ServerDataNamespaceCleanupReserveResultV1(
+            status: ServerDataNamespaceCleanupMutationStatusV1.Indeterminate,
+            reservation: Some(reservation))
+    ServerDataNamespaceCleanupReserveResultV1(
+        status: ServerDataNamespaceCleanupMutationStatusV1.Applied,
+        reservation: Some(reservation))
+
+pub(package) fn server_data_namespace_rollback_cleanup_v1(
+    reservation: ServerDataNamespaceCleanupReservationV1
+) -> ServerDataNamespaceCleanupMutationStatusV1:
+    if not _server_data_namespace_lock_v1():
+        return ServerDataNamespaceCleanupMutationStatusV1.Rejected
+    val index = _server_data_cleanup_reservation_index_v1(
+        reservation, ServerDataNamespaceLeaseStateV1.CleanupBound)
+    if index < 0:
+        _ = _server_data_namespace_unlock_v1()
+        return ServerDataNamespaceCleanupMutationStatusV1.Rejected
+    _server_data_namespace_owner_v1.slots[index].state =
+        ServerDataNamespaceLeaseStateV1.Active
+    _server_data_namespace_owner_v1.slots[index].cleanup_transaction_id = 0u64
+    _server_data_namespace_owner_v1.slots[index].cleanup_transaction_generation = 0u64
+    _server_data_namespace_owner_v1.slots[index].cleanup_attempt_ordinal = 0u64
+    if not _server_data_namespace_unlock_v1():
+        return ServerDataNamespaceCleanupMutationStatusV1.Indeterminate
+    ServerDataNamespaceCleanupMutationStatusV1.Applied
+
+pub(package) fn server_data_namespace_commit_cleanup_v1(
+    reservation: ServerDataNamespaceCleanupReservationV1
+) -> ServerDataNamespaceCleanupMutationStatusV1:
+    """Consume the exact reservation; absence is never treated as success."""
+    if not _server_data_namespace_lock_v1():
+        return ServerDataNamespaceCleanupMutationStatusV1.Rejected
+    val index = _server_data_cleanup_reservation_index_v1(
+        reservation, ServerDataNamespaceLeaseStateV1.CleanupBound)
+    if index < 0:
+        _ = _server_data_namespace_unlock_v1()
+        return ServerDataNamespaceCleanupMutationStatusV1.Rejected
+    val generation = _server_data_namespace_owner_v1.slots[index].generation
+    _server_data_namespace_owner_v1.slots[index] =
+        _server_data_empty_slot_v1(generation)
+    if not _server_data_namespace_unlock_v1():
+        return ServerDataNamespaceCleanupMutationStatusV1.Indeterminate
+    ServerDataNamespaceCleanupMutationStatusV1.Applied
