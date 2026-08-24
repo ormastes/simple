@@ -207,3 +207,39 @@ the scheduler wrapper prevents the overflowing retry, but other future callers
 must not bypass it until the provider owns the same guard. Fault-injection and
 QEMU evidence are intentionally absent, so this update is an unverified
 pre-Zombie prerequisite rather than completed exit wiring.
+
+## 2026-08-24 production-wiring rejection: runnable-task race
+
+A two-cycle production-wiring draft was independently rejected and removed.
+The first version classified server tasks only by retained namespace/grant
+rows. Once those rows were committed but before the preparation receipt was
+consumed, ordinary exit could misclassify the task and publish `Zombie`. A
+second version retained the preparation row as a barrier through receipt
+consumption, but exposed the deeper scheduler/syscall race: the TCB remains
+runnable while receipts are consumed, authority absence is checked, FDs are
+closed, and `Zombie` is stored. Another CPU can admit a syscall and create an
+FD/capability or restore authority after cleanup, leaking live resources into
+the Zombie. Replayed completion could also repeat close/observation/wakeup
+unless publication is explicitly one-shot.
+
+The committed `cpu_interrupt_quiescence_lease_v1` is not sufficient. It is a
+scoped loan of one logical CPU's interrupt-enable state; it neither deschedules
+an exact task from every CPU nor fences syscall, FD, capability, namespace, or
+grant admission. Safe production wiring therefore additionally requires:
+
+1. a scheduler-owned `PreparingExit` state or equivalent bounded pending row
+   installed before provider dispatch and retained through publication;
+2. removal from every ready/run queue plus an exact cross-CPU task-quiescence
+   receipt before terminal cleanup begins;
+3. syscall, FD, capability, namespace, and grant admission gates bound to that
+   exact task/lifecycle generation;
+4. one serialized publication permit that consumes the exact DBD and
+   namespace/grant terminal receipts, closes remaining resources, stores
+   `Zombie`, and rejects replay; and
+5. mapping release only in the existing reap owner after its independent
+   address-space quiescence proof.
+
+Do not treat registry absence, local IRQ disablement, a copied TCB, or a
+source-order assertion as quiescence evidence. Until these owners converge,
+the legacy direct exit remains a known blocker and the pre-exit preparation
+capsule must not be presented as production Zombie wiring.
