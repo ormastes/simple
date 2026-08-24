@@ -62,11 +62,11 @@ fn load_tier_kw(sdn_path: text) -> TierKeywords:
                 value_part = value_part.replace("\"", "")
 
                 if value_part == "seed":
-                    seed = seed + [key]
+                    seed.push(key)
                 elif value_part == "core":
-                    core = core + [key]
+                    core.push(key)
                 elif value_part == "full":
-                    full = full + [key]
+                    full.push(key)
     TierKeywords(seed: seed, core: core, full: full)
 
 fn kw_is_allowed(keyword: text, tier: text, kw: TierKeywords) -> bool:
@@ -105,47 +105,53 @@ struct OpPattern:
 
 fn get_core_op_patterns() -> [OpPattern]:
     """Return operator patterns that are core-tier (not available in seed)."""
-    var ops: [OpPattern] = []
-    ops = ops + [OpPattern(pattern: "??", tier: "core", name: "null_coalesce")]
-    ops = ops + [OpPattern(pattern: ".?", tier: "core", name: "optional_chain")]
-    ops = ops + [OpPattern(pattern: "?.", tier: "core", name: "optional_chain")]
-    ops = ops + [OpPattern(pattern: "|>", tier: "core", name: "pipe_forward")]
-    ops = ops + [OpPattern(pattern: "**", tier: "core", name: "power")]
-    ops = ops + [OpPattern(pattern: "..=", tier: "core", name: "inclusive_range")]
-    ops = ops + [OpPattern(pattern: ":=", tier: "core", name: "walrus")]
-    ops
+    [
+        OpPattern(pattern: "??", tier: "core", name: "null_coalesce"),
+        OpPattern(pattern: ".?", tier: "core", name: "optional_chain"),
+        OpPattern(pattern: "?.", tier: "core", name: "optional_chain"),
+        OpPattern(pattern: "|>", tier: "core", name: "pipe_forward"),
+        OpPattern(pattern: "**", tier: "core", name: "power"),
+        OpPattern(pattern: "..=", tier: "core", name: "inclusive_range"),
+        OpPattern(pattern: ":=", tier: "core", name: "walrus")
+    ]
 
 fn get_full_op_patterns() -> [OpPattern]:
     """Return operator patterns that are full-tier (not available in core)."""
-    var ops: [OpPattern] = []
-    ops = ops + [OpPattern(pattern: ".+", tier: "full", name: "broadcast_add")]
-    ops = ops + [OpPattern(pattern: ".-", tier: "full", name: "broadcast_sub")]
-    ops = ops + [OpPattern(pattern: ".*", tier: "full", name: "broadcast_mul")]
-    ops = ops + [OpPattern(pattern: "./", tier: "full", name: "broadcast_div")]
-    ops = ops + [OpPattern(pattern: ".^", tier: "full", name: "broadcast_pow")]
-    ops = ops + [OpPattern(pattern: "~>", tier: "full", name: "layer_connect")]
-    ops = ops + [OpPattern(pattern: "<<<", tier: "full", name: "gpu_launch_start")]
-    ops = ops + [OpPattern(pattern: ">>>", tier: "full", name: "gpu_launch_end")]
-    ops
+    [
+        OpPattern(pattern: ".+", tier: "full", name: "broadcast_add"),
+        OpPattern(pattern: ".-", tier: "full", name: "broadcast_sub"),
+        OpPattern(pattern: ".*", tier: "full", name: "broadcast_mul"),
+        OpPattern(pattern: "./", tier: "full", name: "broadcast_div"),
+        OpPattern(pattern: ".^", tier: "full", name: "broadcast_pow"),
+        OpPattern(pattern: "~>", tier: "full", name: "layer_connect"),
+        OpPattern(pattern: "<<<", tier: "full", name: "gpu_launch_start"),
+        OpPattern(pattern: ">>>", tier: "full", name: "gpu_launch_end")
+    ]
 
-fn check_line_operators(code_line: text, tier: text) -> [OpPattern]:
+fn check_line_operators_with_patterns(
+    code_line: text, tier: text,
+    core_ops: [OpPattern], full_ops: [OpPattern]
+) -> [OpPattern]:
     """Check a code line for operator patterns not allowed in the given tier.
     Returns list of violated patterns."""
     var violations: [OpPattern] = []
 
     if tier == "seed":
-        val core_ops = get_core_op_patterns()
         for op in core_ops:
             if code_line.contains(op.pattern):
-                violations = violations + [op]
+                violations.push(op)
 
     if tier == "seed" or tier == "core":
-        val full_ops = get_full_op_patterns()
         for op in full_ops:
             if code_line.contains(op.pattern):
-                violations = violations + [op]
+                violations.push(op)
 
     violations
+
+fn check_line_operators(code_line: text, tier: text) -> [OpPattern]:
+    """Compatibility adapter for callers without request-owned tables."""
+    check_line_operators_with_patterns(
+        code_line, tier, get_core_op_patterns(), get_full_op_patterns())
 
 fn check_line_lambda(code_line: text, tier: text) -> bool:
     """Check if a code line contains lambda syntax (backslash + identifier).
@@ -218,6 +224,8 @@ fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
     var line_num = 1
     var in_docstring = false
     val lines = source.split("\n")
+    val core_ops = get_core_op_patterns()
+    val full_ops = get_full_op_patterns()
 
     for line in lines:
         val trimmed = line.trim()
@@ -307,7 +315,8 @@ fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
                     violations = violations + 1
 
         # --- Operator/construct checks (on stripped code, before punctuation replacement) ---
-        val op_violations = check_line_operators(code_only, tier)
+        val op_violations = check_line_operators_with_patterns(
+            code_only, tier, core_ops, full_ops)
         for op in op_violations:
             val op_col = find_word_col(line, op.pattern)
             print "{file_path}:{line_num}:{op_col}: error: '{op.pattern}' ({op.name}) not available in {tier} tier"
@@ -499,7 +508,7 @@ fn scan_module_tiers(root: text) -> [ModuleTier]:
             var dir_path = trimmed
             if dir_path.ends_with(init_suffix):
                 dir_path = dir_path[0 : dir_path.len() - init_suffix.len()]
-            result = result + [ModuleTier(dir_path: dir_path, tier: tier)]
+            result.push(ModuleTier(dir_path: dir_path, tier: tier))
 
     result
 
@@ -630,7 +639,7 @@ fn run_check_tier(args: [text]) -> i64:
     # Group files by effective tier for efficient checking
     var seed_files: [text] = []
     var core_files: [text] = []
-    var full_files: [text] = []
+    var full_file_count = 0
     var file_count = 0
 
     for file_path in files:
@@ -649,17 +658,17 @@ fn run_check_tier(args: [text]) -> i64:
                 print "  {rel} -> {effective}"
 
         if effective == "seed":
-            seed_files = seed_files + [trimmed]
+            seed_files.push(trimmed)
         elif effective == "core":
-            core_files = core_files + [trimmed]
+            core_files.push(trimmed)
         else:
-            full_files = full_files + [trimmed]
+            full_file_count = full_file_count + 1
         file_count = file_count + 1
 
     if verbose:
         print ""
 
-    print "Tier check: {file_count} files ({seed_files.len()} seed, {core_files.len()} core, {full_files.len()} full)"
+    print "Tier check: {file_count} files ({seed_files.len()} seed, {core_files.len()} core, {full_file_count} full)"
 
     # Check each tier group
     var total_violations = 0
