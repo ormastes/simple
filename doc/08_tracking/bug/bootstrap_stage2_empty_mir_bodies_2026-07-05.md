@@ -1548,3 +1548,68 @@ Stage 2 is ~845 s of compile, and paying that twice to ask two questions would
 have been waste. Instrument 1 runs only where the process is already about to
 `rt_exit(1)`; instrument 2 is behind an env gate that is off by default. Neither
 changes behaviour on any passing path.
+
+## 2026-08-24 — E-SFFI-016 SETTLED: the classification is wrong for EVERY function, and it is not the Stage 2 blocker
+
+Settled with the probe landed in `db2651ca785`, measured on the **interpreted**
+lane in seconds. **No second Stage 2 build was needed** — validating the probe
+before spending 845 s is what made the build unnecessary.
+
+### The measurement
+
+`SIMPLE_MIR_RETTYPE_DEBUG=1` on a fixture with three deliberately different
+signatures:
+
+```
+[mir-rettype] fn=h_i64  hir_ret=2375492728 hir_unit=406810393 mir_ret=258540933 mir_unit=406810393 eq_unit=false mir_ret_text=I64
+[mir-rettype] fn=h_unit hir_ret=2375492728 hir_unit=406810393 mir_ret=258540933 mir_unit=406810393 eq_unit=false mir_ret_text=I64
+[mir-rettype] fn=main   hir_ret=2375492728 hir_unit=406810393 mir_ret=258540933 mir_unit=406810393 eq_unit=false mir_ret_text=I64
+```
+
+`h_i64() -> i64`, `h_unit()` — **declared unit** — and `main()` all report the
+same `hir_ret`/`mir_ret` discriminants and all lower to **`I64`**. Per-function
+return types are not preserved on the bootstrap flat path; every function becomes
+`I64`.
+
+### Which of the three candidates it was
+
+| candidate | verdict |
+|---|---|
+| (a) HIR classification is wrong | **YES** — but far wider than the entry point |
+| (b) `lower_type` drops Unit | subsumed by (a): the HIR side is already wrong (`hir_ret != hir_unit`) |
+| (c) the `==` comparison is broken | **NO** — `mir_unit` is a distinct, stable value and the comparison answers correctly for the values it is given |
+
+### And the guard is right
+
+The error branch is reachable only when `return_type.kind != MirTypeKind.Unit`.
+`main` really is non-unit **in this compiler's own view**, so the check applies
+legitimately and the message is accurate. The alternative reading — "the guard
+shouldn't apply to a unit entry point" — is **refuted**: the entry point is not
+unit here, and it is not special either; `h_unit()` is misclassified identically.
+
+### E-SFFI-016 is a SYMPTOM on Stage 2, not the cause
+
+The misclassification is **identical in both engines** — the numbers above come
+from the run that SUCCEEDS. So it is neither the interpreted/self-compiled
+divergence nor the Stage 2 blocker. What differs is downstream:
+
+* **Interpreted:** the body emits instructions, so a tail `result` exists, the
+  `elif result.?` branch is taken, and the misclassification stays masked.
+* **Stage 2:** the body emits nothing (0 instructions, with dispatch verified
+  succeeding), so there is no explicit terminator and no `result` — and the
+  `else` branch fires E-SFFI-016.
+
+So row 1 of the three-defect table collapses into the same underlying failure as
+row 2: **statement/expression lowering emits no MIR on a self-compiled Stage 2
+despite correct dispatch.** E-SFFI-016 was the loudest thing near it, not a
+separate defect.
+
+### What is now genuinely open
+
+1. The silent emission failure itself (rows 1 and 2, now one defect).
+2. Row 3 — `helper()` + `main()` gives rc=139 with no output, appearing only once
+   a second function exists. Untouched, deliberately: three defects behind one
+   guard is how this got confusing in the first place.
+3. Return types collapsing to `I64` on the bootstrap flat path. Real,
+   pre-existing, currently masked in the interpreter, and its own lane — it will
+   produce wrong ABI/return handling the moment a body does emit.
