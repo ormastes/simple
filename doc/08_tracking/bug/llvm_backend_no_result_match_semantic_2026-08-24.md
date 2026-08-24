@@ -1,6 +1,6 @@
 # LLVM backend does not lower `ResultMatchSemantic`
 
-**Status:** FIXED 2026-08-24 in `02176b8a7e6` — see the "FIXED" section at the end of this record.
+**Status:** FIXED 2026-08-24 in `838f5e2e08c` — see the "FIXED" section at the end of this record.
 **Was:** Open — top remaining blocker for native-building `Result`-using stdlib modules
 **Observed:** 2026-08-24
 **Area:** 70.backend / LLVM lowering
