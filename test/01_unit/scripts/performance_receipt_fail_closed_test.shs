@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+VALIDATOR="$ROOT/scripts/check/check-external-must-check-receipt.shs"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+: >"$work/receipt.env"
+: >"$work/artifact.env"
+
+assert_rejected_for_missing_semantic_validator() {
+    gate=$1
+    reason=$2
+    set +e
+    output=$(MUST_CHECK_ROOT="$ROOT" \
+        MUST_CHECK_RECEIPT_FILE="$work/receipt.env" \
+        MUST_CHECK_ARTIFACT_FILE="$work/artifact.env" \
+        MUST_CHECK_EXPECTED_GATE="$gate" \
+        MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        sh "$VALIDATOR" 2>&1)
+    status=$?
+    set -e
+    [ "$status" -eq 1 ] || {
+        echo "FAIL: $gate generic receipt was not rejected" >&2
+        exit 1
+    }
+    printf '%s\n' "$output" | grep -Fxq \
+        "STATUS: FAIL external-must-check-receipt — $reason" || {
+        echo "FAIL: $gate did not fail at its semantic-validator boundary" >&2
+        exit 1
+    }
+}
+
+assert_rejected_for_missing_semantic_validator \
+    interpreter-startup-parity \
+    interpreter-startup-semantic-validator-not-implemented
+assert_rejected_for_missing_semantic_validator \
+    rust-go-benchmark-parity \
+    rust-go-benchmark-semantic-validator-not-implemented
+
+echo 'PASS: quantitative performance receipts fail closed without lane validators'

@@ -183,6 +183,10 @@ the committed compiler/provenance copies to match the producer host's live
 canonical files, and runs the full canonical Stage-3/Stage-4 verifier there.
 Detached or custom `admitted=true` summaries are not provenance. Rust-seed,
 Cargo, or rustc process evidence fails.
+`interpreter-startup-parity` and `rust-go-benchmark-parity` are explicitly
+rejected by the generic external validator until their lane-owned checkers can
+recompute raw samples, statistics, semantic work, and threshold verdicts.
+Independent signatures cannot substitute for those quantitative oracles.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.
 It cross-checks registry and ledger structure in one linear parser pass. Only
