@@ -10,6 +10,7 @@ use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc}
 
 extern fn rt_enum_payload(value: StmtKind) -> Expr
 extern fn rt_enum_discriminant(value: StmtKind) -> i64
@@ -20,6 +21,24 @@ fn hir_stmt_kind_disc(k: StmtKind) -> i64:
 
 # Statement Lowering
 # ============================================================================
+
+# Returns the element list of an AST tuple-literal expression, or [] for
+# anything else. Uses the discriminant helper rather than a bare `match` on
+# `ExprKind`: a qualified-arm match against an enum value built through a
+# different import spelling of the same module silently falls to the wildcard
+# on some lanes, which is why the statement dispatcher below is written as
+# `hir_stmt_kind_disc` comparisons instead of a match. The `match` is still
+# used to pull the payload out, but only once the discriminant has confirmed
+# the variant.
+fn _ast_tuple_lit_elements(e: Expr) -> [Expr]:
+    val ek: ExprKind = e.kind
+    if hir_expr_kind_disc(ek) == hir_expr_kind_disc(ExprKind.TupleLit([])):
+        match ek:
+            case ExprKind.TupleLit(els):
+                return els
+            case _:
+                return []
+    []
 
 impl HirLowering:
     # Nested-field-access support (native --entry path bug -- see
@@ -296,6 +315,64 @@ impl HirLowering:
             case _:
                 return ""
 
+    # Desugar `(a, b, ...) = <expr>` -- tuple destructuring as an ASSIGNMENT to
+    # variables that are ALREADY declared, as opposed to the `val (a, b) = ...`
+    # / `var (a, b) = ...` declaration forms handled by
+    # lower_hir_tuple_destructure_val / _var above.
+    #
+    # Without this the statement survived into MIR as
+    # `Assign(target: TupleLit([...]), ...)` and hit the catch-all at
+    # 50.mir/mir_lowering_stmts.spl:1740, `unsupported MIR assignment target:
+    # HirExprKind::TupleLit(...)`. That blocked native-build of anything using
+    # the form -- `src/app/mcp/` alone has ten call sites.
+    # doc/08_tracking/bug/mir_no_tuple_assignment_target_2026-08-24.md
+    #
+    # Structure mirrors lower_tuple_destructure below: bind the RHS to a temp
+    # ONCE (so a call initializer is evaluated exactly once, left to right),
+    # then read element i out of it. The only difference is that each element
+    # goes to an existing place via `Assign` instead of defining a new symbol
+    # via `Let`. Element TYPES are recovered from the same by-NAME
+    # `fn_tuple_returns` registry for the same reason spelled out there: with a
+    # nil element type the locals default to i64, which renders a `text`
+    # element's handle as a decimal integer and breaks every text method on it.
+    me lower_hir_tuple_destructure_assign(targets: [Expr], value: Expr, span: Span) -> HirStmt:
+        val hir_value = self.lower_hir_expr(value)
+        var stmts: [HirStmt] = []
+        val tmp_sym = self.symbols.define("__tuple_assign", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
+        stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, nil, hir_value), span: span))
+        var ta_elem_types: [HirType] = []
+        val ta_base_sym: SymbolId? = match hir_value.kind:
+            case HirExprKind.Var(ta_sym): ta_sym
+            case HirExprKind.NamedVar(ta_sym2, _): ta_sym2
+            case _: nil
+        if val ta_bs = ta_base_sym:
+            if self.local_tuple_types.has(ta_bs.id):
+                for ta_elem_type in self.local_tuple_types[ta_bs.id]:
+                    ta_elem_types = ta_elem_types.push(ta_elem_type)
+        if ta_elem_types.len() == 0:
+            val ta_callee_name: text = self.td_init_callee_name(hir_value)
+            if ta_callee_name != "" and self.fn_tuple_returns.has(ta_callee_name):
+                for ta_return_type in self.fn_tuple_returns[ta_callee_name]:
+                    ta_elem_types = ta_elem_types.push(ta_return_type)
+        var i = 0
+        while i < targets.len():
+            # A bare `_` target discards its element, matching the `pname != "_"`
+            # skip in lower_tuple_destructure. `_rc` and friends are ordinary
+            # names and are assigned normally.
+            val ta_is_hole: bool = match targets[i].kind:
+                case ExprKind.Ident(ta_nm): ta_nm == "_"
+                case _: false
+            if not ta_is_hole:
+                val ta_idx_type: HirType? = if i < ta_elem_types.len(): ta_elem_types[i] else: nil
+                val ta_idx_expr = HirExpr(kind: HirExprKind.Index(
+                    HirExpr(kind: HirExprKind.Var(tmp_sym), type_: nil, span: span),
+                    HirExpr(kind: HirExprKind.IntLit(i, nil), type_: nil, span: span)
+                ), type_: ta_idx_type, span: span)
+                stmts = stmts.push(HirStmt(kind: HirStmtKind.Assign(
+                    self.lower_hir_expr(targets[i]), nil, ta_idx_expr), span: span))
+            i = i + 1
+        HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: span), span: span)), span: span)
+
     me lower_tuple_destructure(name: text, hir_init: HirExpr, is_mut: bool, span: Span) -> HirStmt:
         val inner = name.slice(1, name.len() - 1)
         val parts = inner.split(",")
@@ -507,6 +584,15 @@ impl HirLowering:
             match expr_t.kind:
                 case ExprKind.Assign(assign_target, assign_op, assign_value):
                     val hir_assign_op = self.lower_hir_assign_op_opt(assign_op)
+                    # `(a, b) = <expr>` -- destructuring assignment to
+                    # already-declared variables. This is THE path it arrives
+                    # on (the flat parser emits every `target = value` as an
+                    # expression statement), so the desugar has to happen here;
+                    # left alone it survives into MIR as
+                    # `Assign(target: TupleLit([...]))` and is rejected outright.
+                    val ea_tuple_elems: [Expr] = _ast_tuple_lit_elements(assign_target)
+                    if ea_tuple_elems.len() > 0 and not assign_op.?:
+                        return self.lower_hir_tuple_destructure_assign(ea_tuple_elems, assign_value, s.span)
                     return HirStmt(kind: HirStmtKind.Assign(
                         self.lower_hir_expr(assign_target),
                         hir_assign_op,
