@@ -30,8 +30,16 @@
 # site in its body is a genuine, non-fabricated violation.
 
 use compiler.semantics.noalloc_checker.{
-    NoallocCapabilityManifest, check_all_noalloc_fns, format_noalloc_violations
+    NoallocCapabilityManifest, check_all_noalloc_fns, format_noalloc_violations,
+    SteadyStateFinding, steady_state_findings, format_steady_state_finding,
+    steady_state_gate_active
 }
+# Direct module path, NOT the `compiler.common.mission_critical` package
+# `__init__.spl`: that file is currently unparseable on the deployed seed
+# ("Unexpected token: expected expression, found Dedent" on its multi-line
+# `export use` blocks) — a pre-existing defect, filed separately, that
+# `35.semantics/noalloc_checker.spl:47` already routes around the same way.
+use compiler.common.mission_critical.alloc_diagnostic_config.{parse_alloc_allowances}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk}
 use std.nogc_sync_mut.io.file_ops.{file_read}
 
@@ -187,6 +195,77 @@ fn scan_noalloc_functions() -> [ScannedFn]:
             i = i + 1
     results
 
+fn _manifest_from_scan(scanned: [ScannedFn]) -> NoallocCapabilityManifest:
+    """Register every scanned function (not only @noalloc ones) so a callee
+    defined elsewhere under NOALLOC_ROOT resolves to its real family_module
+    and its own direct-alloc status."""
+    val manifest = NoallocCapabilityManifest.new()
+    for entry in scanned:
+        val allocates = entry.expr_tags.len() > 0
+        manifest.register(entry.name, entry.is_noalloc, allocates, entry.module_path)
+    manifest
+
+# ============================================================================
+# Mission-critical steady-state gate driver (WP-12 wiring)
+# ============================================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# `35.semantics/noalloc_checker.spl`'s steady-state gate and
+# `00.common/mission_critical/alloc_diagnostic_config.spl`'s scoped allowance
+# config both landed with ZERO production call sites: the independent review
+# `doc/09_report/mission_critical_warning_phase_review_2026-08-23.md` recorded
+# `SIMPLE_MC_ALLOC_ALLOW` as "read nowhere in src/", i.e. the opt-out changed
+# no compiler behaviour as landed. This module is the first genuinely reachable
+# driver of `check_all_noalloc_fns`, so it is also the honest place to make the
+# gate and its allowance config reachable.
+#
+# HONEST SCOPE — do not overclaim: the symbol universe here is exactly what
+# `scan_noalloc_functions` finds under NOALLOC_ROOT by text scan, with the
+# fidelity limits this file's header already states. It is NOT a whole-program
+# sealed-closure symbol set. Porting the compiler/loader/interpreter symbol
+# universe under this gate is the follow-on work, not something this driver
+# claims to have done.
+
+fn steady_state_scan_findings(raw_allowances: text) -> [SteadyStateFinding]:
+    """Every scanned symbol whose `AllocClass` is not steady-state safe, each
+    tagged allowed/rejected by the allowance config parsed from
+    `raw_allowances` (the `SIMPLE_MC_ALLOC_ALLOW` grammar).
+
+    Takes the RAW STRING, not the environment: the env read stays in the
+    caller, preserving `alloc_diagnostic_config.spl`'s stated discipline (no
+    module-level state, no env access below the entry point) and letting a
+    spec drive this without injecting environment."""
+    val scanned = scan_noalloc_functions()
+    val manifest = _manifest_from_scan(scanned)
+    var names: [text] = []
+    for entry in scanned:
+        names.push(entry.name)
+    steady_state_findings(manifest, names, parse_alloc_allowances(raw_allowances))
+
+fn format_steady_state_scan(findings: [SteadyStateFinding]) -> [text]:
+    """Format every finding — allowed ones included. An allowance suppresses
+    the REJECTION, never the report: `allowed[steady-state]: ...` lines keep
+    each tolerated allocation enumerable by an audit."""
+    var out: [text] = []
+    for f in findings:
+        out.push(format_steady_state_finding(f))
+    out
+
+fn steady_state_scan_rejected(findings: [SteadyStateFinding]) -> i64:
+    """How many findings are still rejections after allowances are applied."""
+    var n = 0
+    for f in findings:
+        if not f.allowed:
+            n = n + 1
+    n
+
+fn steady_state_scan_enabled(safety_profile: text, no_stub_fallback: bool) -> bool:
+    """Is the mission-critical steady-state gate live for this build? Reuses
+    `noalloc_checker.steady_state_gate_active` verbatim — no second severity
+    or profile table is introduced here."""
+    steady_state_gate_active(safety_profile, no_stub_fallback)
+
 fn run_noalloc_manifest_scan() -> [text]:
     """Build a real NoallocCapabilityManifest from scanned source and check it.
 
@@ -200,10 +279,7 @@ fn run_noalloc_manifest_scan() -> [text]:
     found at all — both are reported distinctly by print_noalloc_manifest_scan).
     """
     val scanned = scan_noalloc_functions()
-    val manifest = NoallocCapabilityManifest.new()
-    for entry in scanned:
-        val allocates = entry.expr_tags.len() > 0
-        manifest.register(entry.name, entry.is_noalloc, allocates, entry.module_path)
+    val manifest = _manifest_from_scan(scanned)
 
     var fn_bodies: [{text: [text]}] = []
     var fn_callees: [{text: [text]}] = []

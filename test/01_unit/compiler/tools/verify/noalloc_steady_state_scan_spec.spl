@@ -1,0 +1,83 @@
+"""
+## Purpose and audience
+Purpose: Prove the mission-critical steady-state gate and its
+`SIMPLE_MC_ALLOC_ALLOW` allowance config are actually WIRED into a reachable
+driver — not merely exported.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-QUALITY-NoalManiScan-001 — reuses the scan driver's requirement id.
+
+# Feature: the steady-state-gate entry points in
+# src/compiler/90.tools/verify/noalloc_manifest_scan.spl.
+#
+# WHY THIS SPEC EXISTS
+# --------------------
+# `doc/09_report/mission_critical_warning_phase_review_2026-08-23.md` recorded
+# `SIMPLE_MC_ALLOC_ALLOW` as "read nowhere in src/" — the opt-out was
+# decorative, and the WP-12 gate itself had zero production call sites. This
+# spec drives the REAL scan module over the REAL tree, so a regression that
+# unwires either one fails here rather than passing silently.
+#
+# The env read deliberately lives in the entry-point script, so this spec
+# passes the raw allowance STRING directly — no environment injection.
+
+use std.spec.*
+use compiler.tools.verify.noalloc_manifest_scan.{
+    steady_state_scan_findings, format_steady_state_scan,
+    steady_state_scan_rejected, steady_state_scan_enabled
+}
+
+fn rejected_names(raw: text) -> [text]:
+    var out: [text] = []
+    for f in steady_state_scan_findings(raw):
+        if not f.allowed:
+            out.push(f.fn_name)
+    out
+
+describe "mission-critical steady-state scan wiring":
+
+    it "is inactive by default and active in mission-critical mode":
+        step("Verify: the gate follows the resolved safety profile / seal")
+        # @req: REQ-QUALITY-NoalManiScan-001
+        expect(steady_state_scan_enabled("", false)).to_equal(false)
+        expect(steady_state_scan_enabled("critical", false)).to_equal(true)
+        expect(steady_state_scan_enabled("", true)).to_equal(true)
+
+    it "produces real rejections from the real tree with no allowances":
+        step("Verify: the unconfigured gate rejects genuinely-unsafe symbols")
+        # @req: REQ-QUALITY-NoalManiScan-001
+        val findings = steady_state_scan_findings("")
+        expect(findings.len() > 0).to_equal(true)
+        expect(steady_state_scan_rejected(findings)).to_equal(findings.len())
+
+    it "a justified allowance converts a rejection into a visible allowed finding":
+        step("Verify: SIMPLE_MC_ALLOC_ALLOW narrows the gate at exactly one symbol")
+        # @req: REQ-QUALITY-NoalManiScan-001
+        val base = steady_state_scan_findings("")
+        val target = base[0].fn_name
+        val cfg = steady_state_scan_findings(target + "=spec-owned justification")
+        # Same finding population; one fewer rejection.
+        expect(cfg.len()).to_equal(base.len())
+        expect(steady_state_scan_rejected(cfg) < steady_state_scan_rejected(base)).to_equal(true)
+        expect(rejected_names(target + "=spec-owned justification").contains(target)).to_equal(false)
+
+    it "reports an allowed finding rather than deleting it":
+        step("Verify: an allowance suppresses the rejection, never the report")
+        # @req: REQ-QUALITY-NoalManiScan-001
+        val base = steady_state_scan_findings("")
+        val target = base[0].fn_name
+        val lines = format_steady_state_scan(
+            steady_state_scan_findings(target + "=spec-owned justification"))
+        var saw_allowed = false
+        for line in lines:
+            if line.starts_with("allowed[steady-state]") and line.contains(target):
+                saw_allowed = true
+        expect(saw_allowed).to_equal(true)
+
+    it "drops an unjustified allowance fail-closed":
+        step("Verify: `sym=` with an empty justification grants nothing")
+        # @req: REQ-QUALITY-NoalManiScan-001
+        val base = steady_state_scan_findings("")
+        val target = base[0].fn_name
+        expect(steady_state_scan_rejected(steady_state_scan_findings(target + "="))).to_equal(
+            steady_state_scan_rejected(base))

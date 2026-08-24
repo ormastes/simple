@@ -3,8 +3,30 @@
 # Populates a real NoallocCapabilityManifest from source under
 # src/lib/nogc_async_mut_noalloc and runs it through
 # noalloc_checker.check_all_noalloc_fns.
+#
+# MISSION-CRITICAL STEADY-STATE GATE (added 2026-08-24)
+# -----------------------------------------------------
+# When the startup seal is closed for this build -- SIMPLE_NO_STUB_FALLBACK=1,
+# or SIMPLE_SAFETY_PROFILE resolving to at least `critical` -- this script also
+# runs the WP-12 steady-state gate over the scanned symbols and fails on any
+# symbol that is not steady-state safe. `SIMPLE_MC_ALLOC_ALLOW` is read HERE
+# (the entry point) and its raw string handed to the scan module, keeping
+# alloc_diagnostic_config.spl's no-env-below-the-entry-point discipline.
+#
+#   SIMPLE_SAFETY_PROFILE=critical \
+#   SIMPLE_MC_ALLOC_ALLOW="heap_init=audited bounded pool, boot=init-time only" \
+#     bin/simple run scripts/audit/noalloc_manifest_scan.spl
+#
+# An allowance suppresses the REJECTION only; the finding is still printed as
+# `allowed[steady-state]: ...` with its justification. With the gate inactive
+# (the default), behaviour is byte-identical to before this gate existed.
 
-use compiler.tools.verify.noalloc_manifest_scan.{scan_noalloc_functions, run_noalloc_manifest_scan}
+use compiler.tools.verify.noalloc_manifest_scan.{
+    scan_noalloc_functions, run_noalloc_manifest_scan,
+    steady_state_scan_findings, format_steady_state_scan,
+    steady_state_scan_rejected, steady_state_scan_enabled
+}
+use std.nogc_sync_mut.io_runtime.{env_get_or}
 
 extern fn rt_exit(code: i64)
 
@@ -22,3 +44,18 @@ else:
     for message in messages:
         print message
     rt_exit(1)
+
+val gate_on = steady_state_scan_enabled(
+    env_get_or("SIMPLE_SAFETY_PROFILE", ""),
+    env_get_or("SIMPLE_NO_STUB_FALLBACK", "") == "1"
+)
+if gate_on:
+    val findings = steady_state_scan_findings(env_get_or("SIMPLE_MC_ALLOC_ALLOW", ""))
+    for line in format_steady_state_scan(findings):
+        print line
+    val rejected = steady_state_scan_rejected(findings)
+    if rejected == 0:
+        print "steady-state gate: {scanned.len()} symbol(s) checked, 0 rejections"
+    else:
+        print "steady-state gate: {scanned.len()} symbol(s) checked, {rejected} rejection(s)"
+        rt_exit(1)
