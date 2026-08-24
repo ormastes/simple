@@ -1,7 +1,7 @@
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind, HirExpr, HirExprKind}
-use compiler.hir.hir_types.{SymbolId, SymbolTable}
+use compiler.hir.hir_types.{SymbolId, SymbolTable, HirSymbol, SymbolKind, ScopeId}
 use compiler.mir.mir_data.{MirSignature, MirType}
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.core.interpreter.eval_tables.{enum_table_register, enum_table_lookup, enum_table_reset}
@@ -58,6 +58,44 @@ fn make_enum(name: text, runtime_name: text, variant_names: [text]) -> HirEnum:
         type_bindings: {})
 
 describe "enum bare-name collision produces a loud miss":
+    it "derives a qualified key through the scalar symbol readers":
+        var symbols = SymbolTable.new()
+        symbols.register_preserved_symbol(HirSymbol(
+            id: SymbolId(id: 77),
+            name: "Colour",
+            kind: SymbolKind.Enum,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            visibility: Visibility.Public,
+            is_public: true,
+            is_mutable: false,
+            defining_module: Some("src/ui/palette.spl")))
+        var lowering = MirLowering.new(symbols)
+
+        expect(lowering.enum_qualified_key(SymbolId(id: 77))).to_equal("ui.palette.Colour")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "fails loudly instead of unwrapping a missing enum symbol":
+        var lowering = MirLowering.new(SymbolTable.new())
+
+        val key = lowering.enum_qualified_key(SymbolId(id: 424242))
+
+        expect(key).to_equal("")
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(lowering.errors[0].message).to_contain("missing or invalid symbol id 424242")
+
+    it "fails loudly for an invalid negative enum symbol id":
+        var lowering = MirLowering.new(SymbolTable.new())
+
+        val key = lowering.enum_qualified_key(SymbolId(id: -1))
+
+        expect(key).to_equal("")
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(lowering.errors[0].message).to_contain("missing or invalid symbol id -1")
+
     it "records a divergent same-bare-name registration and names both sides":
         var lowering = MirLowering.new(SymbolTable.new())
         lowering.register_enum_variants(make_enum(

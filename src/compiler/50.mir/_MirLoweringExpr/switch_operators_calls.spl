@@ -79,11 +79,21 @@ impl MirLowering:
 
         This is how a call site that only ever had a bare name obtains a key
         that distinguishes two same-bare-named enums."""
-        val info = self.symbols.get_symbol_raw(symbol.id)
-        if not info.?:
+        # Do not carry `HirSymbol?` across this boundary. Stage-native has a
+        # proven struct-Option transport defect where `.?` reports Some but
+        # `unwrap()` returns a null payload (the Stage 3 SIGSEGV was the field
+        # load below at address 0x48). Scalar readers keep the struct-valued
+        # Dict access inside SymbolTable.
+        val symbol_name = self.symbols.symbol_name_scalar_raw(symbol.id)
+        if symbol_name == "":
+            # Returning "" is still necessary so diagnostic collection can
+            # continue, but it is not a silent bare-key fallback: this error is
+            # explicitly fatal and therefore blocks code generation.
+            self.error_fatal(
+                "enum symbol resolution: missing or invalid symbol id {symbol.id}",
+                nil)
             return ""
-        val sym = info.unwrap()
-        val defining_module = sym.defining_module ?? ""
+        val defining_module = self.symbols.symbol_defining_module_scalar_raw(symbol.id)
         if defining_module == "":
             return ""
         # `defining_module` is a SOURCE PATH; HIR built `runtime_name` from the
@@ -99,7 +109,7 @@ impl MirLowering:
         val owner_module = bootstrap_mir_logical_module_name(defining_module)
         if owner_module == "":
             return ""
-        "{owner_module}.{sym.name}"
+        "{owner_module}.{symbol_name}"
 
     me enum_bare_of(enum_key: text) -> text:
         """The BARE name behind a key that may be a runtime_name.
@@ -1873,8 +1883,9 @@ impl MirLowering:
         var equalified = ""
         match etype.kind:
             case Named(esym, _):
-                val s = self.symbols.get_symbol_raw(esym.id)
-                ename = if s.?: s.name else: ""
+                # Keep the sibling name lookup on the same scalar-only path as
+                # enum_qualified_key; do not reintroduce HirSymbol? transport.
+                ename = self.symbols.symbol_name_scalar_raw(esym.id)
                 equalified = self.enum_qualified_key(esym)
             case _:
                 ()
@@ -2165,8 +2176,7 @@ impl MirLowering:
                     if enum_name == "":
                         enum_name = match etype.kind:
                             case Named(esym, _):
-                                val s = self.symbols.get_symbol_raw(esym.id)
-                                if s.?: s.name else: ""
+                                self.symbols.symbol_name_scalar_raw(esym.id)
                             case _: ""
                         enum_key = match etype.kind:
                             case Named(esym2, _):
@@ -3234,8 +3244,7 @@ impl MirLowering:
         handled here — Option/Result use a separate path and fall through."""
         val enum_name = match type_.kind:
             case Named(symbol, _):
-                val s = self.symbols.get_symbol_raw(symbol.id)
-                if s.?: s.name else: ""
+                self.symbols.symbol_name_scalar_raw(symbol.id)
             case _: ""
         # Step (c): resolve against THIS declaration's runtime_name when the
         # symbol carries a defining module, so `Shape.Circle(7)` constructs the
@@ -3436,14 +3445,16 @@ impl MirLowering:
             if enum_name == "Option":
                 self.option_value_locals[tagged.id] = true
             elif enum_name != "Result":
-                val enum_symbol = self.symbols.lookup(enum_name)
-                if val enum_symbol_id = enum_symbol:
-                    val enum_definition = self.symbols.get_symbol_raw(enum_symbol_id.id)
-                    if val found_enum_definition = enum_definition:
-                        self.remember_local_hir_type(tagged.id, HirType(
-                            kind: HirTypeKind.Named(enum_symbol_id, []),
-                            span: found_enum_definition.span
-                        ), 2, 0)
+                # Avoid both Option<SymbolId> and Option<HirSymbol> transport on
+                # this custom-enum route. The raw-id lookup and proven Dict
+                # bracket hit keep the struct values in their owning frames.
+                val enum_symbol_id = self.symbols.lookup_or_invalid(enum_name)
+                if enum_symbol_id.id >= 0 and self.symbols.symbols.has(enum_symbol_id.id):
+                    val enum_span = self.symbols.symbols[enum_symbol_id.id].span
+                    self.remember_local_hir_type(tagged.id, HirType(
+                        kind: HirTypeKind.Named(enum_symbol_id, []),
+                        span: enum_span
+                    ), 2, 0)
             return tagged
         payload_local
 
