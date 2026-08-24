@@ -191,3 +191,78 @@ admitting — **my own diagnostic**, which printed a bare function name and
 manufactured a false contradiction from it. Shared state and diagnostics keyed by
 bare name are a systemic habit in this compiler, and tooling built to investigate
 it inherits the same flaw unless it prints a qualifier.
+
+## 2026-08-25 (later) — annotations LANDED, with the differential
+
+The eight annotations measured above are now landed in
+`src/lib/common/text_advanced.spl`. Each matches the function's own docstring
+example; none is a guess:
+
+| function | added | docstring evidence |
+|---|---|---|
+| `extract_words` | `-> [text]` | `extract_words("Hello, world! 123")  # ["Hello", "world", "123"]` |
+| `trim_lines` | `lines: [text]) -> [text]` | `trim_lines(["  hello  ", "  world  "])  # ["hello", "world"]` |
+| `remove_empty_lines` | `lines: [text]) -> [text]` | `# ["hello", "world"]` |
+| `prefix_lines` | `lines: [text]) -> [text]` | `# ["> hello", "> world"]` |
+| `suffix_lines` | `lines: [text]) -> [text]` | `# ["hello!", "world!"]` |
+| `detect_indent` | `lines: [text]` | `detect_indent(["hello", "  world", "    foo"])  # 2` |
+| `dedent_lines` | `lines: [text]` | `# ["hello", "  world"]` |
+| `normalize_indent` | `lines: [text]` | `# ["    hello", "        world"]` |
+
+`multi_replace` (untyped `pairs`) and `most_common_char` remain untouched — the
+element type is not derivable from the signature and `most_common_char` was never
+traced. Not guessed, for the third time.
+
+### Behavioural verification: identical, and correct against every docstring
+
+Native execution of these functions is **impossible on either tree**, so that
+route was closed (see the limitation below). The interpreter path is not, and it
+exercises the real functions:
+
+```
+        BASE (origin/main)          ANNOTATED
+trim    |hello|world                |hello|world
+rmempty |hello|world                |hello|world
+prefix  |> hello|> world            |> hello|> world
+suffix  |hello!|world!              |hello!|world!
+detect  2                           2
+dedent  |hello|  world              |hello|  world
+norm    |    hello|        world    |    hello|        world
+words   |Hello|world|123            |Hello|world|123
+```
+
+Byte-identical between trees, and every line matches the documented example. All
+eight annotated functions are covered — this is behaviour, not a site count.
+
+### Site counts, same method on both trees
+
+| build | base | annotated |
+|---|---|---|
+| 4-line reproducer | **11** | **2** |
+| `native-build src/app/mcp/main.spl` | **16** | **7** |
+
+No new error kinds appear in either; the remaining rows are the same `#143`
+message.
+
+### Entry check first, before quoting any differential
+
+The 16-program native-build corpus used for `9ca094b44ee` and `3dc5b8dd8a2` was
+checked for whether it compiles `text_advanced` **before** being run for this
+change. It does not — zero occurrences in its build logs. Quoting a
+byte-identical result from it would have been the third false green in this
+lane's favour, so it is not quoted. The MCP build is the corpus that actually
+exercises this module, and it is reported above.
+
+### Limitation, stated rather than worked around
+
+**No native binary is obtainable from `text_advanced` on EITHER tree.** Importing
+it pulls slice-using functions and MIR lowering stops at
+`unsupported array/string slice index a[start:end] (no native array-slice
+lowering)`. On the base tree the same import stops earlier, at
+`unsupported MIR type kind [infer-arm]: HirTypeKind::Infer` — the untyped
+parameters. So the annotations demonstrably move the failure from the untyped-
+parameter gap to an unrelated, pre-existing feature gap, but they cannot be
+verified by native execution. The interpreter comparison above is what stands in
+its place.
+
+That slice gap is now the next thing behind `#143` for this module.
