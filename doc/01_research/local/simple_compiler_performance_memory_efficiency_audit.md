@@ -2663,3 +2663,15 @@ at one, exactly matching split semantics for empty content, internal blank
 lines, and trailing newlines. Complexity remains O(bytes), while auxiliary
 storage drops from O(lines) to O(1). Direct boundary coverage was added but not
 executed under the user's no-verification instruction.
+
+### Constant-space tool line counts
+
+The same count-only allocation pattern existed in three Pure Simple tools:
+context pack metadata, LLM Caret message statistics, and SPipe documentation
+validation. Each now scans newline characters directly rather than allocating
+a line array. Context and message statistics preserve their explicit empty-text
+result of zero; SPipe preserves `split` semantics, where an empty documentation
+block contributes one line and a trailing newline contributes a final empty
+segment. This keeps O(bytes) time and reduces auxiliary storage from O(lines)
+to O(1) at every call site. Context and SPipe boundary fixtures were added but
+not executed under the user's no-verification instruction.
