@@ -111,3 +111,29 @@ The next design must therefore combine canonical filesystem/device publication,
 generation state, replace-capability publication, and close authority under one
 owner-side commit. A candidate may return only frozen state to that owner; it
 must not mutate process globals or carry a caller-usable close operation.
+
+## 2026-08-24 capsule-backed mount-owner prerequisite
+
+`os.kernel.fs.fat32_capsule_mount_owner_v1` now supplies the missing coherent
+transactional shape without changing production boot:
+
+- one `BlockBackendIoLeaseV1` is the sole sector-I/O authority;
+- BPB, root-cluster bytes, and replace capability are built off-root with
+  bounded reads and no process-global mutation;
+- filesystem state, mount generation, capability, and lease publish together;
+- bounded generation/nonce operation receipts fence close and copied receipts
+  become stale after owner-side release;
+- close withdraws publication before consuming the capsule lease and
+  quarantines an indeterminate release for exact retry.
+
+This does not close the live-launch blocker yet. Legacy boot/syscall paths still
+publish and retrieve copied `Fat32Filesystem` and `BlockDevice` values. The
+side-effect-free candidate also truthfully publishes atomic replace as
+unsupported until an owner-held journal replay transaction exists. Those
+callers and recovery must migrate behind this mount owner's operation receipts
+before executable identity can be bound to live reads.
+
+The backend identity/capsule provider also needs a deterministic unpin-failure
+injection seam before candidate-cleanup quarantine and exact retry can receive
+executable failure-path coverage; the owner retains that authority today, but
+this turn intentionally does not claim runtime evidence.
