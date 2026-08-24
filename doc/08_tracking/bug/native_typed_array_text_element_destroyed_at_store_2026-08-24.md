@@ -208,6 +208,49 @@ the metadata; it was reverted rather than landed. The `??` path works because it
 uses `option_inner_hir_type_for_local`, which falls back to the receiver
 EXPRESSION's declared type.
 
+## Stage-1 diagnostic evidence (2026-08-24) — diagnostics ARE readable now
+
+The point of this bug was never formatting: `CompileContext.error_message_at`
+returns `self.errors[index]` from a `[text]`, and the diagnostic reporter
+iterates that list with `for`. A Stage-2-compiled compiler was SEGVing WHILE
+reporting an error it had correctly detected, printing nothing usable.
+
+A full bootstrap was run on the post-fix tree. **Stage 1 built clean** —
+`Build complete: 449 compiled, 290 cached, 0 failed` / `Stage 1: OK (27387280
+bytes, hash=5ce49cd6...)`. Stage 1 is compiled from the Simple sources, so it
+carries both rounds of this fix. Fed a two-line fixture with a deliberate error
+(`val x: = 1`), it prints, verbatim:
+
+```
+[parser_error] line 2:12: expected type annotation
+[parser_error_ctx] path /tmp/lai/s1/bad.spl kind 100 text '='
+  line 2:12: expected type annotation
+```
+
+That is a **readable diagnostic**, naming the right line, column and message —
+the exact `expected type annotation` string the round-1 fixture proxy turned
+from `E=RTS\001` into real text. The compiler can now say what is wrong with
+your program.
+
+**Two honest limits on this evidence, stated rather than glossed:**
+
+1. **The SEGV is NOT gone.** The run still exits 139 after printing. It is now a
+   crash that reports first instead of a silent one, which is what unblocks the
+   investigation, but it is still a crash. And it is a SEPARATE defect: the same
+   Stage 1 binary also SEGVs on a *valid* hello-world, with
+   `[ERROR] MIR error: E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module
+   surface payload malformed at HIR entry (heap-typed payload word is 0 or in
+   the zero page)` — nothing to do with text elements. That is the next thread
+   to pull, and it is not this bug.
+2. **Attribution between round 1 and round 2 is not separated.** `errors[index]`
+   is the round-1 `a[i]` fix; `for e in errors` is round 2's. Only a second
+   ~35-minute bootstrap of the pre-round-2 tree would split them, and it was not
+   run. The claim here is "diagnostics are readable on the post-fix tree", not
+   "round 2 alone made them readable".
+
+Stage 3 (the actual self-hosted stage) was not reached: Stage 1 alone took ~35
+minutes and the run hit its time cap during the Stage 2 determinism re-check.
+
 ## Verified non-regressing
 
 wide `i64` (2^60), negative `i64`, `f64` 0.1, `Dict<text, text>`, plain `text`
