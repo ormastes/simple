@@ -1161,6 +1161,17 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Existing positive registry/witness integrity contracts cover behavior;
   verification intentionally not run under the user's no-verify instruction.
 
+## Completed optimizer descriptor-reuse tranche
+
+- Split backend policy evaluation into a resolved-descriptor kernel and the
+  public name-resolving compatibility adapter.
+- Reuse one descriptor per pass in budget-filtered pipelines and deterministic
+  optimization reports instead of reconstructing provider metadata twice.
+- Preserve unknown/missing-pass rejection, canonical stable names, status,
+  backend delegation, cost budget, report schema, and ordering.
+- Existing backend-decision and deterministic report contracts cover behavior;
+  verification intentionally not run under the user's no-verify instruction.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
