@@ -1,6 +1,13 @@
 # SimpleOS scheduler address-space quiescence blocker
 
-**Status: BLOCKED — unsafe prerequisite draft reverted.**
+**Status: BLOCKED — two unsafe prerequisite drafts reverted after review.**
+
+The second draft added bounded epoch/nonce rows, a mutex, one-shot snapshots,
+and canonical scheduler admission, but it still cleared the outgoing CPU lease
+before the architecture switch path had restored and confirmed another root.
+A concurrent fence could therefore observe an empty scheduler set while the
+CPU still executed the old task or retained its CR3/TTBR/SATP root. The draft
+was reverted; no false quiescence authority remains.
 
 Safe ARM32 mapping destruction cannot be admitted from caller-supplied CPU
 masks, CPU identifiers, or TTBR0 values. Those scalars are forgeable, and even
@@ -10,16 +17,19 @@ than expose a false destruction authority.
 
 The required production owner must atomically:
 
-1. fence dispatch and migration for the exact `(task_id, lifecycle_generation,
-   mapping slot, mapping generation)`;
-2. snapshot a scheduler-issued residency epoch and active CPU set;
-3. send an owner-tracked IPI request to every captured CPU;
-4. accept only completion receipts created by the architecture IPI handler
+1. reserve an incoming dispatch while retaining the outgoing task's active CPU
+   lease and bind the fence to exact task/mapping generations;
+2. perform the architecture root switch and required barriers, then accept a
+   non-forgeable interrupt/context-switch completion before releasing the
+   outgoing lease;
+3. snapshot a scheduler-issued residency epoch and private active CPU set;
+4. send an owner-tracked IPI request to every captured CPU;
+5. accept only completion receipts created by the architecture IPI handler
    after kernel-root restore, architecture-required barriers, TLB invalidation,
    and hardware root readback;
-5. keep the dispatch fence held until a one-shot mapping destruction completes
+6. keep the dispatch fence held until a one-shot mapping destruction completes
    or its outcome is quarantined; and
-6. recycle only positively destroyed receipt slots with a non-wrapping
+7. recycle only positively destroyed receipt slots with a non-wrapping
    generation, while retaining failed/unknown mappings under a bounded
    operator-owned quarantine policy.
 
@@ -27,3 +37,7 @@ ARM32 needs an interrupt-side TTBR0 receipt provider tied to the scheduler
 residency epoch. RV32/x86 need equivalent SATP/CR3 providers. None exists at the
 current scheduler boundary, so integrating address-space destruction would be
 unsafe. No production support or quiescence proof is claimed.
+
+The owner also needs an explicit policy for mutex-unlock failure after a
+committed mutation (terminal poison/quarantine or a proven infallible unlock),
+and task liveness/removal must share the same serialized owner transaction.

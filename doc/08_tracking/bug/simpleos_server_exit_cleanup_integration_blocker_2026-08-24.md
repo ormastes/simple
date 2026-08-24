@@ -16,6 +16,20 @@ diverge, a caller-provided quarantine Boolean could falsely authorize Zombie,
 and a lost outstanding attempt had no safe recovery transition. Live
 integration remains blocked on four coupled owner changes:
 
+A second three-cycle registry draft was also rejected and removed. It fixed
+session/provider authority separation, receipt replay, sealed provider
+registration, and exact task/lifecycle routing, but exposed a deeper
+cancellation race: the scheduler could mark an Outstanding attempt Retryable
+after the provider had started side effects, then dispatch a new attempt while
+the old close/revoke/persistence operation was still executing. Rejecting the
+late receipt does not undo or serialize those effects. The next design must
+either receive a provider-authenticated cancellation/lease-revocation
+acknowledgment before retry, or require each provider to fence and deduplicate
+work by an immutable transaction+attempt identity carried in the non-authorizing
+target view. Static scenarios must model old work completing after cancellation
+while a retry is requested; no retry may dispatch until the old execution
+domain is proven quiescent or the provider's idempotency fence owns both.
+
 1. scheduler-issued, non-wrapping cleanup transaction generations retained
    with the exiting TCB until reap;
 2. FD and grant adapters that return exact completed/retryable/quarantined
