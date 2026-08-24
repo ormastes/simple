@@ -49,3 +49,27 @@ identity or sector count. As in the existing NVMe filesystem mount factory, a
 caller-provided device can only be trusted to represent the lease window; the
 connector cannot prove that association until the block-device owner exports a
 falsifiable lease-binding identity.
+
+## Rejected teardown design review (2026-08-24)
+
+A three-cycle independent static review rejected and caused reversion of an
+unverified teardown draft. The remaining prerequisite is more specific:
+
+- the bounded owner must canonically bind the outer `NvfsPosixDriver` identity
+  to the inner DBFS instance, close nonce, and admitted device region; trusting
+  the mutable outer `inst_id` lets one copied driver delete another instance's
+  cache/tracking state while closing its own inner device;
+- terminal replay may be bounded, but receipt eviction must make old copies
+  stale without permitting another unregister or state resurrection;
+- active validation cannot linearly scan up to 65,536 mounts on every file I/O;
+  use a bounded O(1) slot+generation owner (or equivalent indexed owner) and
+  keep validation under the same serialization domain as teardown;
+- constructor nonce/identity admission must precede device registration, and
+  indeterminate unlock remains explicit bounded fail-stop quarantine rather
+  than being described as successful rollback;
+- lifecycle evidence must include outer-id mutation, post-close copied-driver
+  operations, cache isolation/reclamation, directory handles, busy retry,
+  cleanup failure, terminal eviction, and registration count restoration.
+
+No implementation from the rejected draft remains and no verification was
+run.
