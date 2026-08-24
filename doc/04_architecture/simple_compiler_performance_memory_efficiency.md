@@ -401,6 +401,16 @@ process-global or path-cached, so freshness, empty/unreadable behavior,
 duplicate imports, output limits, and local-before-import-before-grep ordering
 remain unchanged.
 
+### Formatter normalization kernels
+
+Input-sized formatter normalization must use bounded ordered scans rather than
+fixed-point whole-string replacement. Repeated ASCII-space cleanup records
+maximal unchanged spans and returns the original value when no duplicate space
+exists. Tabs and every non-space character remain byte-for-byte owned by their
+original spans. Later
+context cleanup and final trimming keep their historical order, so this kernel
+changes copying cost without widening formatter semantics.
+
 ### Raw-SFFI source-view ownership
 
 Raw-SFFI analysis owns one request-local, read-only-by-convention `CodeLine`
