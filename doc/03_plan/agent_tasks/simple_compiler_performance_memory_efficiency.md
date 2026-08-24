@@ -1758,6 +1758,18 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   no full tier-check dependency, and no repeated prefix construction.
 - No manual execution or measurement was run under the user override.
 
+# Completed tranche: LLVM-direct minimal C construction (2026-08-24)
+
+- Added a pure text-to-text core beneath the existing file adapter.
+- Replaced repeated array membership with a dictionary-backed seen set while
+  preserving first-seen function order.
+- Excluded generated-shell `main` from helper storage without changing bytes.
+- Replaced growing immutable C prefixes with complete fragments and one join.
+- Added canonical exact ordered, main-presence, empty-input, adapter, and
+  structural regression oracles plus a manual.
+- No manual execution or performance/RSS measurement was run under the user
+  override.
+
 # Completed tranche: linear app feature index (2026-08-24)
 
 - Replaced growing app-index Markdown prefixes with fragments and one join.

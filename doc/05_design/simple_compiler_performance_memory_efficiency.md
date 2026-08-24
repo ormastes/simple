@@ -1157,3 +1157,14 @@ index the same projection rather than rescanning source prefixes or trimmed
 lines. Complexity is O(source bytes) time and O(line count) result storage; the
 scanner creates no masked source copy. The single-line helper is fixture-only
 convenience over the same projection.
+
+# LLVM-direct minimal C design
+
+`llvm_direct_minimal_c_source(source)` scans split lines once. `seen: {text:
+bool}` provides uniqueness while `functions: [text]` preserves first encounter
+order; `main` is excluded because it is always generated separately. Rendering
+pushes one include fragment, one complete stub per function, the main header,
+one complete call per function, and the return/footer, then joins once. The
+existing file API performs one read and delegates. This preserves exact output
+while removing linear membership inside discovery and cumulative output-prefix
+copies.

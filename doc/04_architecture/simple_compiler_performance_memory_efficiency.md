@@ -854,3 +854,12 @@ rule-specific lookup and one-based span conversion. The legacy single-line mask
 also remains there for check-tier. Neither module may depend on the parser,
 tier-check driver, or LSP command surface. This keeps local lint work linear and
 prevents diagnostic and fix eligibility from diverging.
+
+# Generated-text assembly boundary
+
+Fallback generators separate ordered semantic discovery from uniqueness lookup:
+an encounter-order array owns emission order and a dictionary owns membership.
+Generated output is represented as complete logical fragments with one final
+join. Entry symbols owned by the generated shell are excluded from helper lists
+rather than inserted and repeatedly skipped. File-based adapters perform I/O
+once and delegate to a pure text-to-text core for exact-byte evidence.
