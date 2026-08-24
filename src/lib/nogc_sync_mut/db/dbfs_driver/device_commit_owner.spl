@@ -65,6 +65,7 @@ var _owner_pending_generations: [i64] = []
 var _owner_pending_slots: [i32] = []
 var _owner_pending_dirty: [bool] = []
 var _owner_device_dirty: [bool] = []
+var _owner_mutation_epochs: [u64] = []
 var _owner_quarantined: bool = false
 
 var _owner_blob_inst_ids: [i64] = []
@@ -168,6 +169,14 @@ fn _blob_idx(inst_id: i64, inode_id: u64) -> i32:
         i = i + 1
     -1
 
+fn _advance_mutation_epoch_locked(inst_id: i64):
+    val idx = _owner_idx(inst_id)
+    if idx < 0: return
+    if _owner_mutation_epochs[idx] == 0xFFFFFFFFFFFFFFFFu64:
+        _owner_quarantined = true
+        return
+    _owner_mutation_epochs[idx] = _owner_mutation_epochs[idx] + 1u64
+
 fn _device_register_locked(inst_id: i64, dev: BlockDevice) -> Result<bool, FsError>:
     val existing = _owner_idx(inst_id)
     if existing >= 0:
@@ -181,6 +190,7 @@ fn _device_register_locked(inst_id: i64, dev: BlockDevice) -> Result<bool, FsErr
     _owner_pending_slots.push(-1)
     _owner_pending_dirty.push(false)
     _owner_device_dirty.push(false)
+    _owner_mutation_epochs.push(1u64)
     Ok(true)
 
 fn _device_unregister_locked(inst_id: i64) -> Result<bool, FsError>:
@@ -196,6 +206,7 @@ fn _device_unregister_locked(inst_id: i64) -> Result<bool, FsError>:
     _owner_pending_slots.remove(idx)
     _owner_pending_dirty.remove(idx)
     _owner_device_dirty.remove(idx)
+    _owner_mutation_epochs.remove(idx)
     var blob_idx = _owner_blob_inst_ids.len() as i32 - 1
     while blob_idx >= 0:
         if _owner_blob_inst_ids[blob_idx] == inst_id:
@@ -239,6 +250,7 @@ fn _device_blob_binding_locked(inst_id: i64, inode_id: u64) -> DbfsBlobBinding:
     )
 
 fn _device_restore_blob_locked(inst_id: i64, inode_id: u64, binding: DbfsBlobBinding):
+    _advance_mutation_epoch_locked(inst_id)
     val idx = _blob_idx(inst_id, inode_id)
     if not binding.exists:
         if idx >= 0:
@@ -338,6 +350,7 @@ fn _device_read_bytes_locked(inst_id: i64, base_block: i64, block_count: i64, of
 
 fn _device_append_locked(inst_id: i64, base_block: i64, block_count: i64,
         data: [u8]) -> Result<i64, FsError>:
+    _advance_mutation_epoch_locked(inst_id)
     val idx = _owner_idx(inst_id)
     if idx < 0:
         return Err(FsError.Unsupported)
@@ -482,6 +495,7 @@ fn _decode_snapshot(inst_id: i64, base_block: i64, block_count: i64, bytes: [u8]
     Some(DbfsNamespaceSnapshot(generation: generation, next_inode: next_inode, next_offset: next_offset, entries: entries))
 
 fn _device_recover_locked(inst_id: i64, base_block: i64, block_count: i64) -> Result<DbfsNamespaceSnapshot, FsError>:
+    _advance_mutation_epoch_locked(inst_id)
     val idx = _owner_idx(inst_id)
     if idx < 0 or block_count < 4:
         return Err(FsError.InvalidArg)
@@ -523,6 +537,7 @@ fn _device_recover_locked(inst_id: i64, base_block: i64, block_count: i64) -> Re
     Ok(chosen)
 
 fn _device_persist_namespace_locked(inst_id: i64, base_block: i64, block_count: i64, entries: [DbfsNamespaceEntry]) -> Result<i64, FsError>:
+    _advance_mutation_epoch_locked(inst_id)
     val idx = _owner_idx(inst_id)
     if idx < 0:
         return Err(FsError.Unsupported)
@@ -572,6 +587,20 @@ fn _device_flush_locked(inst_id: i64) -> Result<bool, FsError>:
 fn dbfs_device_serialization_ready() -> bool:
     if not _owner_lock(): return false
     _finish_bool(true)
+
+fn dbfs_device_instance_registered(inst_id: i64) -> bool:
+    """Observe exact device ownership under the canonical transaction lock."""
+    if inst_id <= 0 or not _owner_lock(): return false
+    _finish_bool(_owner_idx(inst_id) >= 0)
+
+fn dbfs_device_mount_seal_epoch_locked(inst_id: i64, block_count: i64) -> Result<u64, FsError>:
+    """Return exact registered-instance mutation epoch inside an owner transaction."""
+    val idx = _owner_idx(inst_id)
+    if idx < 0 or _owner_quarantined:
+        return Err(FsError.Unsupported)
+    if _device_data_capacity_locked(inst_id, block_count) <= 0:
+        return Err(FsError.Unsupported)
+    Ok(_owner_mutation_epochs[idx])
 
 fn dbfs_device_register(inst_id: i64, dev: BlockDevice) -> Result<bool, FsError>:
     if not _owner_lock(): return Err(FsError.Unsupported)
@@ -687,6 +716,7 @@ export DBFS_DEVICE_SERIALIZATION_MISSING
 export dbfs_device_mutex_provider_blocker, dbfs_device_serialization_blocker
 export dbfs_text_to_bytes, dbfs_bytes_to_text, dbfs_slice_bytes
 export dbfs_device_serialization_ready, dbfs_device_register, dbfs_device_unregister
+export dbfs_device_instance_registered
 export dbfs_device_data_capacity
 export dbfs_device_registration_count
 export dbfs_device_blob_binding, dbfs_device_restore_blob
@@ -696,6 +726,7 @@ export dbfs_owner_transaction_begin, dbfs_owner_transaction_end
 export dbfs_owner_quarantined
 export dbfs_device_register_locked, dbfs_device_unregister_locked
 export dbfs_device_data_capacity_locked, dbfs_device_blob_binding_locked
+export dbfs_device_mount_seal_epoch_locked
 export dbfs_device_restore_blob_locked, dbfs_device_commit_blob_locked
 export dbfs_device_append_unbound_locked, dbfs_device_read_bytes_locked
 export dbfs_device_recover_locked, dbfs_device_persist_namespace_locked

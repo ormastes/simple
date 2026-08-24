@@ -10,6 +10,7 @@ use std.fs_driver.mount_table_support.{PositionedDriverKind, POSITIONED_DRIVER_M
     driver_positioned_read_bytes, driver_positioned_write_bytes,
     driver_bounded_positioned_read_bytes, driver_positioned_kind}
 use std.fs_driver.mount_driver_dispatch.{_driver_name, _driver_kind_name, _driver_capabilities, _driver_stat_path,
+    _driver_dbfs_server_data_identity, _driver_dbfs_current_server_data_identity,
     _driver_fstat, _driver_open_path, _driver_opendir_path, _driver_readdir_handle,
     _driver_read_handle, _driver_mkdir_path, _driver_write_text_handle,
     _driver_pwrite_text_handle, _driver_pread_text_handle, _driver_close_handle,
@@ -27,6 +28,7 @@ val MOUNT_HANDLE_GENERATION_MAX: u32 = 0xFFFFFFFFu32
 val STABLE_SNAPSHOT_MAX_LEASES: i64 = 1024
 val STABLE_SNAPSHOT_MAX_READ_BYTES: u64 = 65536u64
 val STABLE_SNAPSHOT_MAX_FILE_BYTES: u64 = 1073741824u64
+val DBFS_ROOT_MOUNT_SEAL_MAX_LEASES: i64 = 64
 
 struct MountId:
     """Opaque mount table index. Assigned sequentially; not reused after unmount."""
@@ -130,6 +132,34 @@ struct StableFileSnapshotBindingV1:
     hash_complete: bool
     hash_invalid: bool
 
+struct DbfsRootMountSealV1:
+    """Opaque lease for one canonical, durable DBFS root mount."""
+    id: u64
+    owner_nonce: u64
+
+struct DbfsRootMountSealInfoV1:
+    """Immutable facts reissued only while the MountTable binding is current."""
+    mount_id: MountId
+    mount_generation: u64
+    namespace_generation: u64
+    content_generation: u64
+    dbfs_instance_identity: i64
+    owner_nonce: u64
+    dbfs_mutation_epoch: u64
+
+struct DbfsRootMountSealBindingV1:
+    active: bool
+    retired: bool
+    generation: u32
+    lease_id: u64
+    mount_id: MountId
+    mount_generation: u64
+    namespace_generation: u64
+    content_generation: u64
+    dbfs_instance_identity: i64
+    owner_nonce: u64
+    dbfs_mutation_epoch: u64
+
 struct OpenDirBinding:
     active: bool
     retired: bool
@@ -168,13 +198,119 @@ struct MountTable:
     open_files:       [OpenFileBinding]
     open_dirs:        [OpenDirBinding]
     stable_snapshots: [StableFileSnapshotBindingV1]
+    dbfs_root_mount_seals: [DbfsRootMountSealBindingV1]
     dir_capacity_limit: i64
 
 impl MountTable:
     static fn new() -> MountTable:
         MountTable(mounts: [], mount_slots: [], mount_slot_by_active_index: [],
             next_id: 1, open_files: [], open_dirs: [], stable_snapshots: [],
+            dbfs_root_mount_seals: [],
             dir_capacity_limit: MOUNT_TABLE_MAX_OPEN_DIRS)
+
+    me fn acquire_dbfs_root_mount_seal() -> Result<DbfsRootMountSealV1, FsError>:
+        """Seal the uniquely resolved canonical root after backend-owner admission.
+
+        The MountTable is the sole issuer.  Caller booleans, backend labels,
+        and paths other than the exact canonical root cannot manufacture this
+        authority.
+        """
+        val root = match self.lookup_text("/"):
+            case nil: return Err(FsError.NotFound)
+            case Some(entry): entry
+        if root.mount_point != "/" or _driver_kind_name(root.driver) != "dbfs":
+            return Err(FsError.Unsupported)
+        val owner_identity = _driver_dbfs_server_data_identity(root.driver)?
+        val instance_identity = owner_identity.0
+        val owner_nonce = owner_identity.1
+        val mutation_epoch = owner_identity.2
+        var slot: i32 = 0
+        while slot < self.dbfs_root_mount_seals.len() as i32:
+            val prior = self.dbfs_root_mount_seals[slot]
+            if not prior.active and not prior.retired:
+                val lease_id = mount_handle_encode(slot, prior.generation)
+                self.dbfs_root_mount_seals[slot] = DbfsRootMountSealBindingV1(
+                    active: true, retired: false, generation: prior.generation,
+                    lease_id: lease_id, mount_id: root.id,
+                    mount_generation: root.mount_generation,
+                    namespace_generation: root.namespace_generation,
+                    content_generation: root.content_generation,
+                    dbfs_instance_identity: instance_identity,
+                    owner_nonce: owner_nonce,
+                    dbfs_mutation_epoch: mutation_epoch)
+                return Ok(DbfsRootMountSealV1(id: lease_id, owner_nonce: owner_nonce))
+            slot = slot + 1
+        if self.dbfs_root_mount_seals.len() >= DBFS_ROOT_MOUNT_SEAL_MAX_LEASES:
+            return Err(FsError.TooLarge)
+        val lease_id = mount_handle_encode(self.dbfs_root_mount_seals.len() as i32, 1u32)
+        self.dbfs_root_mount_seals.push(DbfsRootMountSealBindingV1(
+            active: true, retired: false, generation: 1u32,
+            lease_id: lease_id, mount_id: root.id,
+            mount_generation: root.mount_generation,
+            namespace_generation: root.namespace_generation,
+            content_generation: root.content_generation,
+            dbfs_instance_identity: instance_identity,
+            owner_nonce: owner_nonce,
+            dbfs_mutation_epoch: mutation_epoch))
+        Ok(DbfsRootMountSealV1(id: lease_id, owner_nonce: owner_nonce))
+
+    me fn revalidate_dbfs_root_mount_seal(
+        seal: DbfsRootMountSealV1
+    ) -> Result<DbfsRootMountSealInfoV1, FsError>:
+        val slot = mount_handle_slot(seal.id)
+        if slot < 0 or slot >= self.dbfs_root_mount_seals.len() as i32:
+            return Err(FsError.StaleHandle)
+        val binding = self.dbfs_root_mount_seals[slot]
+        if not binding.active or binding.lease_id != seal.id or
+           binding.generation != mount_handle_generation(seal.id) or
+           binding.owner_nonce != seal.owner_nonce:
+            return Err(FsError.StaleHandle)
+        val entry = match self.lookup_text("/"):
+            case nil: return Err(FsError.StaleHandle)
+            case Some(value): value
+        if entry.mount_point != "/" or entry.id != binding.mount_id or
+           entry.mount_generation != binding.mount_generation or
+           entry.namespace_generation != binding.namespace_generation or
+           entry.content_generation != binding.content_generation:
+            return Err(FsError.StaleHandle)
+        val current_identity = match _driver_dbfs_current_server_data_identity(entry.driver):
+            case Err(_): return Err(FsError.StaleHandle)
+            case Ok(value): value
+        if current_identity.0 != binding.dbfs_instance_identity or
+           current_identity.1 != binding.dbfs_mutation_epoch:
+            return Err(FsError.StaleHandle)
+        Ok(DbfsRootMountSealInfoV1(
+            mount_id: binding.mount_id,
+            mount_generation: binding.mount_generation,
+            namespace_generation: binding.namespace_generation,
+            content_generation: binding.content_generation,
+            dbfs_instance_identity: binding.dbfs_instance_identity,
+            owner_nonce: binding.owner_nonce,
+            dbfs_mutation_epoch: binding.dbfs_mutation_epoch))
+
+    me fn close_dbfs_root_mount_seal(seal: DbfsRootMountSealV1) -> Result<(), FsError>:
+        val slot = mount_handle_slot(seal.id)
+        if slot < 0 or slot >= self.dbfs_root_mount_seals.len() as i32:
+            return Err(FsError.StaleHandle)
+        val binding = self.dbfs_root_mount_seals[slot]
+        if not binding.active or binding.lease_id != seal.id or
+           binding.generation != mount_handle_generation(seal.id) or
+           binding.owner_nonce != seal.owner_nonce:
+            return Err(FsError.StaleHandle)
+        val current = self.revalidate_dbfs_root_mount_seal(seal).is_ok()
+        val terminal = binding.generation == MOUNT_HANDLE_GENERATION_MAX
+        self.dbfs_root_mount_seals[slot] = DbfsRootMountSealBindingV1(
+            active: false, retired: terminal,
+            generation: if terminal: binding.generation else: binding.generation + 1u32,
+            lease_id: 0u64, mount_id: binding.mount_id,
+            mount_generation: binding.mount_generation,
+            namespace_generation: binding.namespace_generation,
+            content_generation: binding.content_generation,
+            dbfs_instance_identity: binding.dbfs_instance_identity,
+            owner_nonce: binding.owner_nonce,
+            dbfs_mutation_epoch: binding.dbfs_mutation_epoch)
+        if not current: return Err(FsError.StaleHandle)
+        Ok(())
 
     fn has_live_handles() -> bool:
         """Report whether this table still owns any live virtual binding.

@@ -130,3 +130,13 @@ Use the admitted pure-Simple runtime only:
 - `find doc/06_spec -name '*_spec.spl' | wc -l` (must be `0`)
 
 QEMU evidence is run once as one matrix gate, not as repeatedly green per-architecture commands. If the runtime/bootstrap is unavailable, record the exact missing artifact and do not substitute the Rust seed or invent timing/RSS results.
+# DBFS root mount-seal prerequisite (2026-08-24)
+
+- Implemented a bounded, generational `MountTable` lease for the uniquely
+  resolved durable DBFS root.
+- The DBFS owner, rather than a caller, supplies instance identity, durability
+  admission, transactional namespace-replace provenance, and a reset-safe nonce.
+- Namespace authority creation, launch-grant redemption, and syscall wiring
+  remain intentionally out of scope for this prerequisite.
+- Static independent review is required before handoff; runtime verification is
+  deferred under the active no-verify instruction.

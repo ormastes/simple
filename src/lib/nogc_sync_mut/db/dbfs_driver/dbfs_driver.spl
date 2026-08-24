@@ -27,10 +27,12 @@ use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{
     DbfsNamespaceEntry,
     dbfs_text_to_bytes, dbfs_bytes_to_text, dbfs_slice_bytes,
     dbfs_device_serialization_blocker, dbfs_device_serialization_ready,
+    dbfs_device_instance_registered,
     dbfs_device_append_unbound,
     dbfs_owner_transaction_begin, dbfs_owner_transaction_end,
     dbfs_device_register_locked, dbfs_device_unregister_locked,
     dbfs_device_data_capacity_locked, dbfs_device_blob_binding_locked,
+    dbfs_device_mount_seal_epoch_locked,
     dbfs_device_restore_blob_locked, dbfs_device_commit_blob_locked,
     dbfs_device_append_unbound_locked, dbfs_device_read_bytes_locked,
     dbfs_device_recover_locked, dbfs_device_persist_namespace_locked,
@@ -76,6 +78,7 @@ struct DbFsFd:
 var _dbfs_inodes: [DbFsInode] = []
 var _dbfs_fds:    [DbFsFd] = []
 var _dbfs_next_inst: i64 = 1
+var _dbfs_next_mount_seal_nonce: u64 = 1u64
 # --- DbFsDriver struct ---
 
 struct DbFsDriver:
@@ -403,11 +406,47 @@ impl DbFsDriver:
         self.write_zeroes_supported
 
     fn durability_serialization_ready() -> bool:
-        self.arena_base >= 0 and dbfs_device_serialization_ready()
+        self.arena_base >= 0 and dbfs_device_serialization_ready() and
+            dbfs_device_instance_registered(self.inst_id)
 
     fn durability_serialization_blocker() -> text:
         if self.arena_base < 0: return "not-device-backed"
         dbfs_device_serialization_blocker()
+
+    fn transactional_replace_ready() -> bool:
+        """DBFS rename commits one replacement checkpoint under this owner."""
+        self.arena_base >= 0 and self.arena_block_count >= 4 and
+            dbfs_device_instance_registered(self.inst_id)
+
+    fn issue_server_data_root_mount_identity() -> Result<(i64, u64, u64), FsError>:
+        """Issue DBFS identity plus a process-lifetime unique mount-seal nonce.
+
+        DBFS namespace rename is serialized by the same transaction owner that
+        persists namespace checkpoints.  A hosted instance, quarantined
+        instance, or unavailable device owner therefore cannot be represented
+        as a durable transactional-replace root by a mount-table caller.
+        """
+        if self.inst_id <= 0 or self.arena_base < 0 or self.arena_block_count < 4:
+            return Err(FsError.Unsupported)
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        val mutation_epoch = dbfs_device_mount_seal_epoch_locked(
+            self.inst_id, self.arena_block_count)
+        if mutation_epoch.is_err():
+            return _dbfs_finish_result(Err(mutation_epoch.unwrap_err()))
+        if _dbfs_next_mount_seal_nonce == 0xFFFFFFFFFFFFFFFFu64:
+            return _dbfs_finish_result(Err(FsError.TooLarge))
+        val nonce = _dbfs_next_mount_seal_nonce
+        _dbfs_next_mount_seal_nonce = _dbfs_next_mount_seal_nonce + 1u64
+        _dbfs_finish_result(Ok((self.inst_id, nonce, mutation_epoch.unwrap())))
+
+    fn server_data_root_instance_identity() -> Result<(i64, u64), FsError>:
+        """Observe the admitted identity without minting another seal nonce."""
+        if self.inst_id <= 0 or self.arena_base < 0 or self.arena_block_count < 4:
+            return Err(FsError.Unsupported)
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        val epoch = dbfs_device_mount_seal_epoch_locked(self.inst_id, self.arena_block_count)
+        if epoch.is_err(): return _dbfs_finish_result(Err(epoch.unwrap_err()))
+        _dbfs_finish_result(Ok((self.inst_id, epoch.unwrap())))
 
     fn _direct_io_extent_for_consumer_locked(handle: FileHandle, file_offset: i64, byte_len: u64, consumer: text) -> Result<DirectIoExtent, FsError>:
         """Map a file-relative direct-I/O range onto the DBFS data region."""
