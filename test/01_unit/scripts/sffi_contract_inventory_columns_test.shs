@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+cat >"$work/provider.spl" <<'EOF'
+@unsafe(reason: "raw checked C provider", capabilities: [ffi])
+extern fn rt_c_checked() -> i64
+
+@unsafe(
+    reason: "raw checked multiline provider",
+    capabilities: [ffi, raw_ptr],
+)
+extern fn rt_c_multiline() -> i64
+
+extern fn rt_untouched() -> i64
+
+@sffi(abi: "C", contract: "status_out")
+extern fn rt_rust_claimed() -> i64
+EOF
+cat >"$work/backing.tsv" <<'EOF'
+symbol	class	scoped_callsites	first_declaring_file
+rt_c_checked	c_runtime_source_only	1	fixture/provider.spl
+rt_c_multiline	c_runtime_source_only	1	fixture/provider.spl
+rt_rust_claimed	rust_source_feature_gated	1	fixture/provider.spl
+rt_untouched	GENUINELY_MISSING	1	fixture/provider.spl
+EOF
+printf '%s\n' "$work/provider.spl" >"$work/files.txt"
+
+if ! SFFI_CENSUS_INPUT="$work/backing.tsv" \
+    SFFI_SOURCE_FILE_LIST="$work/files.txt" \
+    sh "$root/scripts/audit/sffi-contract-inventory.shs" \
+        "$work/declarations.tsv" "$work/symbols.tsv" >"$work/stdout" 2>"$work/stderr"; then
+    cat "$work/stderr" >&2
+    exit 1
+fi
+
+head -n 1 "$work/declarations.tsv" | grep -Fq 'provider_language'
+head -n 1 "$work/declarations.tsv" | grep -Fq 'cryptographic_admission'
+awk -F '\t' '$1 == "rt_c_checked" && $3 == "c_or_cpp" && $7 == "tagged" && $9 == "not_admitted" { found=1 } END { exit !found }' "$work/declarations.tsv"
+awk -F '\t' '$1 == "rt_c_multiline" && $3 == "c_or_cpp" && $7 == "tagged" && $9 == "not_admitted" { found=1 } END { exit !found }' "$work/declarations.tsv"
+awk -F '\t' '$1 == "rt_rust_claimed" && $3 == "rust" && $8 == "sffi_metadata" && $9 == "not_admitted" { found=1 } END { exit !found }' "$work/declarations.tsv"
+awk -F '\t' '$1 == "rt_untouched" && $10 == "untouched" && $8 == 0 { found=1 } END { exit !found }' "$work/symbols.tsv"
+grep -Fq 'signed_admitted=0' "$work/stderr"
+grep -Fq 'untouched=1' "$work/stderr"
+grep -Fq 'SFFI rt_symbol stats: total=4 unsafe_tagged=2 signed_admitted=0 untouched=1' "$work/stderr"
+
+if SFFI_CENSUS_INPUT="$work/backing.tsv" \
+    SFFI_SOURCE_FILE_LIST="$work/files.txt" \
+    SFFI_MAX_MIGRATION_REQUIRED=0 \
+    sh "$root/scripts/audit/sffi-contract-inventory.shs" \
+        "$work/ratchet-declarations.tsv" "$work/ratchet-symbols.tsv" \
+        >"$work/ratchet-stdout" 2>"$work/ratchet-stderr"; then
+    echo 'FAIL: untouched debt bypassed the migration ratchet' >&2
+    exit 1
+fi
+grep -Fq 'migration=3/0' "$work/ratchet-stderr" || {
+    cat "$work/ratchet-stderr" >&2
+    exit 1
+}
+
+echo 'PASS: SFFI inventory reports provider language, unsafe, signed/admitted, and untouched state'

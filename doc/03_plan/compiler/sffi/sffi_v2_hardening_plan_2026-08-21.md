@@ -1600,8 +1600,11 @@ mutex, hash, or string lookup to each call.
   publication, while retaining lexical `unsafe(ffi, raw_ptr)`.
 - [x] Replace Linux pathname `dlopen` with a sealed memfd snapshot whose exact
   bytes are hashed and loaded through one descriptor.
-- [ ] Make the verifier-minted receipt/token unforgeable to ordinary Simple
-  source and then narrow the generated wrapper's unsafe region.
+- [ ] Make the verifier-minted receipt/token unforgeable and then narrow the
+  generated wrapper's unsafe region. Receipt and exact-artifact carrier fields
+  are now file-private, which closes aggregate forgery outside their canonical
+  owner modules; the public parser/digest loader still accepts caller-supplied
+  evidence without loader cryptographic authority.
 - [x] Make legacy integer calls fail closed instead of fabricating zero for an
   invalid handle, missing symbol, or unsupported arity; retain cached slots as
   the no-lookup hot path.
@@ -1611,3 +1614,12 @@ mutex, hash, or string lookup to each call.
   hashing and loading, preventing concurrent in-place mutation.
 - [ ] Implement equivalent immutable-snapshot admission for Windows/macOS/
   FreeBSD, or keep those dynamic providers rejected in critical mode.
+- [x] Extend the canonical contract inventory with provider-language,
+  unsafe-tag, signed/admitted, and untouched statistics. Source-only evidence
+  remains conservatively `not_admitted`; signed counts require fresh replay of
+  canonical evidence-admission jobs against configured trust stores. A fixture
+  mode verifies the classifier without rerunning the full-tree census, and the
+  evidence sabotage suite verifies positive signed replay.
+- [x] Pin the `rt-safety-census` consumer to the canonical inventory schema and
+  repair its language/unsafe/contract/evidence/scope column mapping. The
+  corrected census now reports current `rt_*` counts instead of false zeros.

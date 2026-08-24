@@ -19,6 +19,13 @@ trap 'rm -rf "$work"' EXIT INT TERM
 sh "$root/scripts/audit/sffi-contract-inventory.shs" \
     "$work/contracts.tsv" "$work/symbols.tsv" >/dev/null 2>&1
 
+expected_contract_header='symbol	backing	provider_language	source_signature_sha256	file	line	unsafe_tag	contract	cryptographic_admission	evidence	state'
+actual_contract_header=$(head -n 1 "$work/contracts.tsv")
+test "$actual_contract_header" = "$(printf '%b' "$expected_contract_header")" || {
+    echo 'rt safety census: unsupported SFFI contract-inventory schema' >&2
+    exit 2
+}
+
 if [ -n "${RT_VERIFIED_ADMISSION_TSV:-}" ] ||
    [ -n "${RT_VERIFIED_ADMISSION_TRUSTED:-}" ]; then
     echo 'legacy RT_VERIFIED_ADMISSION_* trust assertions are forbidden; use signed SFFI evidence inputs' >&2
@@ -65,9 +72,9 @@ awk -F '\t' 'BEGIN { OFS="\t" }
     }
     $1 !~ /^rt_/ { next }
     {
-        verified = admitted[$1 SUBSEP $3] ? "true" : "false"
+        verified = admitted[$1 SUBSEP $4] ? "true" : "false"
         signed = verified
-        safe = admitted[$1 SUBSEP $3] && $6 == "tagged" && $7 != "missing"
+        safe = admitted[$1 SUBSEP $4] && $7 == "tagged" && $8 != "missing"
         print $0, verified, signed, (safe ? "verified_and_signed" : "unsafe")
     }
 ' "$work/admitted.tsv" "$work/contracts.tsv" >"$declarations_out"
@@ -133,19 +140,19 @@ awk -F '\t' 'BEGIN { OFS="\t" }
     {
         rows++
         symbol[$1]=1
-        if ($6 == "tagged") tagged++
-        if ($7 != "missing") contracted++
-        if ($8 == "claim_present_unverified") claims++
-        if ($10 == "true") verified++
-        if ($11 == "true") signed++
-        if ($12 == "verified_and_signed") admitted++
+        if ($7 == "tagged") tagged++
+        if ($8 != "missing") contracted++
+        if ($10 == "claim_present_unverified") claims++
+        if ($12 == "true") verified++
+        if ($13 == "true") signed++
+        if ($14 == "verified_and_signed") admitted++
         else {
             unsafe++
-            if ($6 == "tagged" && $7 != "missing") minimized++
+            if ($7 == "tagged" && $8 != "missing") minimized++
             else unminimized++
         }
-        if ($6 == "missing" && $7 == "missing" && $8 == "missing") untouched++
-        signature[$1 SUBSEP $3]=1
+        if ($7 == "missing" && $8 == "missing" && $10 == "missing") untouched++
+        signature[$1 SUBSEP $4]=1
     }
     END {
         for (s in symbol) symbols++
@@ -179,16 +186,16 @@ awk -F '\t' 'BEGIN { OFS="\t" }
         rows[family]++
         symbol_key = family SUBSEP $1
         if (!(symbol_key in symbols)) { symbols[symbol_key]=1; symbol_count[family]++ }
-        if ($6 == "tagged") tagged[family]++
-        if ($7 != "missing") contracted[family]++
-        if ($10 == "true") verified[family]++
-        if ($11 == "true") signed[family]++
-        if ($12 == "verified_and_signed") admitted[family]++
+        if ($7 == "tagged") tagged[family]++
+        if ($8 != "missing") contracted[family]++
+        if ($12 == "true") verified[family]++
+        if ($13 == "true") signed[family]++
+        if ($14 == "verified_and_signed") admitted[family]++
         else {
             unsafe[family]++
-            if ($6 == "tagged" && $7 != "missing") minimized[family]++
+            if ($7 == "tagged" && $8 != "missing") minimized[family]++
         }
-        if ($6 == "missing" && $7 == "missing" && $8 == "missing") untouched[family]++
+        if ($7 == "missing" && $8 == "missing" && $10 == "missing") untouched[family]++
     }
     END {
         print "family", "declaration_rows", "distinct_symbols", "unsafe_tagged_rows", \
@@ -210,23 +217,23 @@ awk -F '\t' 'BEGIN { OFS="\t" }
 awk -F '\t' 'BEGIN { OFS="\t" }
     NR == 1 { next }
     {
-        if ($4 ~ /^test\//) scope="test"
-        else if ($4 ~ /^src\/compiler_rust\/lib\/std\//) scope="bootstrap_library"
-        else if ($4 ~ /^src\//) scope="production"
+        if ($5 ~ /^test\//) scope="test"
+        else if ($5 ~ /^src\/compiler_rust\/lib\/std\//) scope="bootstrap_library"
+        else if ($5 ~ /^src\//) scope="production"
         else scope="unknown"
         rows[scope]++
         symbol_key=scope SUBSEP $1
         if (!(symbol_key in symbols)) { symbols[symbol_key]=1; symbol_count[scope]++ }
-        if ($6 == "tagged") tagged[scope]++
-        if ($7 != "missing") contracted[scope]++
-        if ($10 == "true") verified[scope]++
-        if ($11 == "true") signed[scope]++
-        if ($12 == "verified_and_signed") admitted[scope]++
+        if ($7 == "tagged") tagged[scope]++
+        if ($8 != "missing") contracted[scope]++
+        if ($12 == "true") verified[scope]++
+        if ($13 == "true") signed[scope]++
+        if ($14 == "verified_and_signed") admitted[scope]++
         else {
             unsafe[scope]++
-            if ($6 == "tagged" && $7 != "missing") minimized[scope]++
+            if ($7 == "tagged" && $8 != "missing") minimized[scope]++
         }
-        if ($6 == "missing" && $7 == "missing" && $8 == "missing") untouched[scope]++
+        if ($7 == "missing" && $8 == "missing" && $10 == "missing") untouched[scope]++
     }
     END {
         print "scope", "declaration_rows", "distinct_symbols", "unsafe_tagged_rows", \

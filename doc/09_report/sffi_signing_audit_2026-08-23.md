@@ -1,5 +1,15 @@
 # SFFI Signing / Verification Audit — 2026-08-23
 
+> **2026-08-24 update:** this is a historical snapshot. A cryptographic
+> evidence-admission tool and sealed Linux artifact loader have since landed,
+> but no source declaration is thereby automatically signed or safe. The
+> canonical contract inventory now reports provider language, unsafe coverage,
+> signed/admitted state, and untouched debt while refusing to treat source
+> claims or saved receipts as cryptographic admission. Signed counts require
+> fresh replay from original evidence inputs against an explicitly configured
+> trust store. The 3,959-symbol counts below were not
+> rerun and must not be presented as current-tree counts.
+
 Question asked: *"is every SFFI binding VERIFIED and SIGNED, or else explicitly
 tagged UNSAFE? Nothing should be silently in between."*
 

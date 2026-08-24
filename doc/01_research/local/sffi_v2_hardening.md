@@ -2795,7 +2795,66 @@ bytes plus all four seals. Snapshot copying uses a fixed 64 KiB buffer, rejects
 non-regular/symlink inputs, and caps provider bytes at 1 GiB. This is one-time
 admission work and changes no cached-call instructions.
 
-The result remains `unsafe(ffi)`: the Simple wrapper/receipt types are still
-constructible by ordinary source, and non-Linux platforms currently reject the
-sealed-loader API. Critical-safe publication still requires a loader-private,
-unforgeable token bound to provider generation.
+The receipt and exact-artifact carrier now keep their authority-bearing fields
+file-private and expose read-only identity accessors. HIR aggregate visibility
+enforcement rejects construction outside the canonical owner modules. This adds
+no admission or call-path work. The result remains `unsafe(ffi)`: the public
+parser and exact loader still accept caller-supplied evidence without
+cryptographic loader authority, and non-Linux platforms reject the sealed-loader
+API. Critical-safe publication still requires a loader-minted, unforgeable token
+bound to provider generation.
+
+The available bootstrap-seed compatibility run passes the focused admission
+spec 7/7 (6.03 s, 175,472 KiB peak RSS), but is not current-source Stage-4
+verification. The real HIR visibility spec is still blocked by the recorded
+missing `rt_heap_ref_wellformed` seed extern (17/17 failures; 20.14 s,
+410,292 KiB). O3 optimizer analysis completed on `admission.spl`, `dynamic.spl`,
+and `sffi_signature.spl` in 4.48--4.96 s with 288,308--290,928 KiB peak RSS.
+This slice changes only admission construction/access and performs the existing
+O(n) bounded identity pass once; cached foreign calls gain no branch, lookup,
+allocation, hash, or signature work.
+
+## 2026-08-24 contract-inventory statistics upgrade
+
+The canonical `scripts/audit/sffi-contract-inventory.shs` now reports, for each
+declaration and distinct symbol, runtime-backing class, coarse provider-language
+provenance, unsafe tagging, contract metadata, cryptographic admission, and an
+explicit `untouched` state. Source text can report only `not_admitted`: an
+evidence-looking annotation is never promoted to a signed/verified result. The
+tool also prints total, unsafe-tagged, signed/admitted, untouched, and per-language
+symbol counts, with separate `rt_` declaration and distinct-symbol rows. Its
+fixture mode accepts a pinned backing TSV and source-file list,
+so the classifier can be tested in constant time without repeating the expensive
+full-tree/nm census. The focused fixture passes and proves C/C++, Rust, unsafe,
+multiline-unsafe, zero-admission, and untouched classifications. `untouched` is
+still counted against the existing migration-debt ratchet, so the richer state
+cannot weaken its threshold. The previous full census was not
+rerun because its session hard cap was already reached; the dated 3,959-symbol
+report remains historical evidence, not a current-tree count.
+
+Signed statistics are no longer permanently zero. An optional canonical
+admission-jobs ledger names the original manifest, raw Ed25519 signature,
+configured trust store, provider artifact, source/build/compiler inputs, ABI
+registry, and verification report. The inventory reruns
+`sffi-evidence-admission.shs` into a private temporary receipt for every job and
+counts only symbols from those fresh receipts as `reverified`; it never accepts
+a saved receipt or source boolean. Malformed, stale, tampered, or rejected jobs
+abort the inventory, including when an admitted symbol lacks an owned Simple
+declaration. The canonical evidence-admission sabotage suite passes, including
+positive inventory replay: 21 discriminating cases in 5.30 s
+with 56,064 KiB peak RSS. The supplied trust store remains the explicit policy
+authority; this audit mechanism does not invent a repository trust root.
+
+The first current-tree `rt-safety-census` run exposed stale numeric column
+indexes after the inventory schema expansion: it falsely reported zero unsafe
+rows and classified all scope as unknown. The consumer now pins the exact
+inventory header and uses the corrected columns throughout summaries, families,
+scopes, signature variants, and its contract. The corrected current-tree run
+passes in 25.27 s / 75,308 KiB and reports 12,123 owned `rt_*` declaration rows,
+3,166 distinct declared `rt_*` symbols, 911 unsafe-tagged rows, 652
+contract-documented rows, 10,946 untouched rows, and zero generally
+verified-and-signed rows. Implementation-definition inventory reports C 1,845
+distinct symbols / 91 files, C++ 219 / 1, Rust 2,106 / 173, and Simple 535 / 46;
+languages overlap when one symbol has more than one implementation. The
+fixture-only clock provider separately admits three signed symbols and is not
+counted as general production admission.

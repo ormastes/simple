@@ -108,6 +108,46 @@ grep -qx "abi_registry_sha256	$abi_hash" "$work/admission.tsv"
 grep -qx "symbol	$test_symbol	$signature_hash	true	true" "$work/admission.tsv"
 echo 'PASS: exact signed evidence admitted'
 
+# The source inventory may count a symbol as signed/admitted only when it
+# freshly replays the canonical verifier from original evidence inputs. A saved
+# admission receipt is deliberately not accepted as authority.
+cat >"$work/inventory-source.spl" <<EOF
+@unsafe(reason: "fixture C provider", capabilities: [ffi])
+extern fn $test_symbol() -> i64
+EOF
+printf 'symbol\tclass\tscoped_callsites\tfirst_declaring_file\n%s\tc_runtime_source_only\t1\tfixture/provider.spl\n' \
+    "$test_symbol" >"$work/inventory-backing.tsv"
+printf '%s\n' "$work/inventory-source.spl" >"$work/inventory-files.txt"
+printf 'schema\tsimple.sffi-admission-jobs.v1\njob\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$work/manifest.tsv" "$work/signature.bin" "$work/trust.tsv" \
+    "$work/artifact" "$work/source" "$work/build" "$work/compiler" \
+    "$work/abi" "$work/report.tsv" >"$work/admission-jobs.tsv"
+SFFI_CENSUS_INPUT="$work/inventory-backing.tsv" \
+SFFI_SOURCE_FILE_LIST="$work/inventory-files.txt" \
+SFFI_ADMISSION_JOBS="$work/admission-jobs.tsv" \
+sh "$root/scripts/audit/sffi-contract-inventory.shs" \
+    "$work/inventory.tsv" "$work/inventory-symbols.tsv" \
+    >"$work/inventory.stdout" 2>"$work/inventory.stderr"
+test "$(awk -F '\t' 'NR > 1 && $9 == "reverified" { n++ } END { print n + 0 }' "$work/inventory.tsv")" -eq 1
+grep -Fq 'SFFI rt_symbol stats: total=1 unsafe_tagged=1 signed_admitted=1 untouched=0 language_c_or_cpp=1' "$work/inventory.stderr"
+echo 'PASS: inventory reverified signed admission from original evidence inputs'
+
+printf '@unsafe(reason: "different symbol", capabilities: [ffi])\nextern fn rt_other() -> i64\n' \
+    >"$work/inventory-source.spl"
+printf 'symbol\tclass\tscoped_callsites\tfirst_declaring_file\nrt_other\tc_runtime_source_only\t1\tfixture/provider.spl\n' \
+    >"$work/inventory-backing.tsv"
+if SFFI_CENSUS_INPUT="$work/inventory-backing.tsv" \
+    SFFI_SOURCE_FILE_LIST="$work/inventory-files.txt" \
+    SFFI_ADMISSION_JOBS="$work/admission-jobs.tsv" \
+    sh "$root/scripts/audit/sffi-contract-inventory.shs" \
+        "$work/inventory-mismatch.tsv" "$work/inventory-mismatch-symbols.tsv" \
+        >"$work/inventory-mismatch.stdout" 2>"$work/inventory-mismatch.stderr"; then
+    echo 'FAIL: admitted symbol without an owned declaration was accepted' >&2
+    exit 1
+fi
+grep -Fq 'admitted provider symbols have no owned declaration' "$work/inventory-mismatch.stderr"
+echo 'PASS: admitted symbol without owned declaration rejected'
+
 manifest_before_alias=$(hash "$work/manifest.tsv")
 if sh "$root/scripts/audit/sffi-evidence-admission.shs" \
     "$work/manifest.tsv" "$work/signature.bin" "$work/trust.tsv" \

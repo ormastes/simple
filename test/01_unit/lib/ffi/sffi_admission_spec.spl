@@ -1,7 +1,7 @@
 use std.sffi.admission.{SFFI_ADMISSION_MAX_SYMBOLS, parse_sffi_admission_v1}
-use std.sffi.dynamic.{DynLib, ExactArtifactDynLib}
+use std.io_runtime.{file_read}
 use std.sffi.sffi_signature.{
-    EvidenceBoundI64ManifestV1, resolve_evidence_bound_i64_manifest,
+    EvidenceBoundI64ManifestV1, validate_evidence_bound_i64_identity,
 }
 use std.spec.{describe, it, expect}
 
@@ -24,8 +24,8 @@ describe "SFFI admission receipt v1":
     it "parses an exact canonical signed-evidence receipt":
         match parse_sffi_admission_v1(admission_fixture()):
             case Ok(receipt):
-                expect(receipt.provider_id).to_equal("test.provider")
-                expect(receipt.source_signatures["rt_test"]).to_equal(DIGEST_A)
+                expect(receipt.provider_identity()).to_equal("test.provider")
+                expect(receipt.source_signature("rt_test")).to_equal(Some(DIGEST_A))
             case Err(error):
                 expect("unexpected parse error: {error}").to_equal("")
 
@@ -63,19 +63,22 @@ describe "SFFI admission receipt v1":
             case Ok(_):
                 expect("uppercase digest was accepted").to_equal("")
 
-    it "rejects provider identity before touching the foreign handle":
+    it "keeps receipt and exact-artifact authority fields file-private":
+        val admission_source = file_read("src/lib/nogc_sync_mut/sffi/admission.spl")
+        val dynamic_source = file_read("src/lib/nogc_sync_mut/sffi/dynamic.spl")
+        expect(admission_source).to_contain("    artifact_sha256: text")
+        expect(admission_source).to_contain("    source_signatures: {text: text}")
+        expect(dynamic_source).to_contain("    lib: DynLib")
+        expect(dynamic_source).to_contain("    artifact_sha256: text")
+
+    it "rejects provider identity without touching a foreign handle":
         match parse_sffi_admission_v1(admission_fixture()):
             case Ok(receipt):
                 val manifest = EvidenceBoundI64ManifestV1.create(
                     "wrong.provider", "x86_64-linux", DIGEST_A, DIGEST_B,
                 )
-                val lib = ExactArtifactDynLib(
-                    lib: DynLib(handle: 0, path: "must-not-be-touched"),
-                    artifact_sha256: DIGEST_A,
-                )
-                val result = unsafe(capabilities: [ffi, raw_ptr]):
-                    resolve_evidence_bound_i64_manifest(lib, manifest, receipt)
-                match result:
+                match validate_evidence_bound_i64_identity(
+                    manifest, receipt, DIGEST_A):
                     case Err(error):
                         expect(error).to_contain("E-SFFI-005")
                     case Ok(_):

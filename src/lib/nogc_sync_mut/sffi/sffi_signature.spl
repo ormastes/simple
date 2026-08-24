@@ -170,6 +170,38 @@ impl EvidenceBoundI64ManifestV1:
     fn count() -> i64:
         self.entries.len()
 
+# Pure admission-identity validation. This does not grant authority or touch a
+# foreign handle; it only proves that the parsed receipt, expected manifest,
+# and already-observed artifact digest agree exactly.
+fn validate_evidence_bound_i64_identity(
+    manifest: EvidenceBoundI64ManifestV1,
+    receipt: SffiAdmissionReceiptV1,
+    open_artifact_sha256: text,
+) -> Result<bool, text>:
+    if receipt.provider_identity() != manifest.provider_id or
+       receipt.target_identity() != manifest.target:
+        return Err("E-SFFI-005: provider admission identity mismatch")
+    if receipt.artifact_digest() != manifest.artifact_sha256:
+        return Err("E-SFFI-004: provider artifact admission mismatch")
+    if open_artifact_sha256 != receipt.artifact_digest():
+        return Err("E-SFFI-004: open provider object does not match admitted artifact")
+    if receipt.abi_registry_digest() != manifest.abi_registry_sha256:
+        return Err("E-SFFI-003: provider ABI registry admission mismatch")
+    if receipt.source_signature_count() != manifest.count():
+        return Err("E-SFFI-006: admitted symbol closure size mismatch")
+
+    for name in manifest.entries:
+        val signature = manifest.entries[name]
+        match receipt.source_signature(name):
+            case Some(admitted_signature):
+                if admitted_signature != signature.source_signature_sha256:
+                    return Err("E-SFFI-006: stale admitted signature for {name}")
+            case nil:
+                return Err("E-SFFI-006: missing admitted signature for {name}")
+        if signature.arg_count < 0 or signature.arg_count > 8:
+            return Err("E-SFFI-003: {name} arity {signature.arg_count} is outside 0..8")
+    Ok(true)
+
 @unsafe(
     reason: "Linux binds a sealed snapshot across hash/load, but receipt/token values remain source-forgeable",
     capabilities: [ffi, raw_ptr],
@@ -179,26 +211,15 @@ fn resolve_evidence_bound_i64_manifest(
     manifest: EvidenceBoundI64ManifestV1,
     receipt: SffiAdmissionReceiptV1,
 ) -> Result<ResolvedI64Manifest, text>:
-    if receipt.provider_id != manifest.provider_id or receipt.target != manifest.target:
-        return Err("E-SFFI-005: provider admission identity mismatch")
-    if receipt.artifact_sha256 != manifest.artifact_sha256:
-        return Err("E-SFFI-004: provider artifact admission mismatch")
-    if lib.artifact_sha256 != receipt.artifact_sha256:
-        return Err("E-SFFI-004: open provider object does not match admitted artifact")
-    if receipt.abi_registry_sha256 != manifest.abi_registry_sha256:
-        return Err("E-SFFI-003: provider ABI registry admission mismatch")
-    if receipt.source_signatures.len() != manifest.count():
-        return Err("E-SFFI-006: admitted symbol closure size mismatch")
+    match validate_evidence_bound_i64_identity(
+        manifest, receipt, lib.artifact_digest()):
+        case Err(error): return Err(error)
+        case Ok(_): pass
 
     var slots: {text: DynI64FnSlot} = {}
     for name in manifest.entries:
         val signature = manifest.entries[name]
-        if not receipt.source_signatures.contains(name) or
-           receipt.source_signatures[name] != signature.source_signature_sha256:
-            return Err("E-SFFI-006: stale or missing admitted signature for {name}")
-        if signature.arg_count < 0 or signature.arg_count > 8:
-            return Err("E-SFFI-003: {name} arity {signature.arg_count} is outside 0..8")
-        match lib.lib.resolve_i64_checked(name, signature.arg_count):
+        match lib.resolve_i64_checked(name, signature.arg_count):
             case Ok(slot):
                 slots[name] = slot
             case Err(error):
