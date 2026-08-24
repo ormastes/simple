@@ -149,7 +149,7 @@ current-head research reconciliation.
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
-## Planned generated HIR child-frame tranche
+## Implemented generated HIR child-frame tranche
 
 - Generator owner: add `HirChildFrame`, its context-neutral sink, reverse
   expansion, and allocating compatibility adapters.
@@ -160,8 +160,9 @@ current-head research reconciliation.
 - Merge owner: current compiler-performance lane.
 - Final reviewer: normal-capability compiler reviewer after generated output
   regeneration; no sidecar result alone may approve ordering or COW semantics.
-- Current status: designed, not implemented; stage-4 generator execution and
-  manual verification were excluded by the user's no-verify instruction.
+- Current status: generator, generated output, collector migration, and focused
+  preorder fixture implemented. Manual verification remains excluded by the
+  user's no-verify instruction and no self-hosted binary is deployed here.
 - Freshness prerequisite completed: both visitor gates now isolate every
   generator output in temporary roots, and the combined gate includes a
   hand-edit-sensitive `hir_children.spl` comparison.
