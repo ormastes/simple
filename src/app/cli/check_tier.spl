@@ -28,6 +28,9 @@ struct TierKeywords:
     core: [text]
     full: [text]
 
+struct TierKeywordIndex:
+    required_level: {text: i64}
+
 fn load_tier_kw(sdn_path: text) -> TierKeywords:
     """Load tier_keywords.sdn and return keyword sets."""
     var seed: [text] = []
@@ -90,6 +93,25 @@ fn kw_is_any(word: text, kw: TierKeywords) -> bool:
     for k in kw.full:
         if k == word: return true
     false
+
+fn build_tier_keyword_index(kw: TierKeywords) -> TierKeywordIndex:
+    """Index each keyword at its earliest tier; earlier tiers take priority."""
+    var required_level: {text: i64} = {}
+    for word in kw.seed:
+        if not required_level.contains_key(word):
+            required_level[word] = 0
+    for word in kw.core:
+        if not required_level.contains_key(word):
+            required_level[word] = 1
+    for word in kw.full:
+        if not required_level.contains_key(word):
+            required_level[word] = 2
+    TierKeywordIndex(required_level: required_level)
+
+fn tier_keyword_required_level(word: text, index: TierKeywordIndex) -> i64:
+    if index.required_level.contains_key(word):
+        return index.required_level[word]
+    -1
 
 fn find_word_col(line: text, word: text) -> i64:
     """Find the column position of a word in a line."""
@@ -243,7 +265,9 @@ fn tier_word_parts(code: text) -> [text]:
         parts.push(code.substring(word_start, code.len()))
     parts
 
-fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
+fn check_one_file_indexed(
+    file_path: text, tier: text, keyword_index: TierKeywordIndex
+) -> i64:
     """Check if a file stays within the given tier's grammar.
     Returns number of violations found."""
     val source = read_file_text(file_path)
@@ -257,6 +281,7 @@ fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
     val lines = source.split("\n")
     val core_ops = get_core_op_patterns()
     val full_ops = get_full_op_patterns()
+    val active_tier_level = tier_level(tier)
 
     for line in lines:
         val trimmed = line.trim()
@@ -309,11 +334,12 @@ fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
         val parts = tier_word_parts(code_only)
 
         for word in parts:
-            if kw_is_any(word, kw):
-                if not kw_is_allowed(word, tier, kw):
-                    val word_col = find_word_col(line, word)
-                    print "{file_path}:{line_num}:{word_col}: error: '{word}' not available in {tier} tier"
-                    violations = violations + 1
+            val required_level = tier_keyword_required_level(
+                word, keyword_index)
+            if required_level > active_tier_level:
+                val word_col = find_word_col(line, word)
+                print "{file_path}:{line_num}:{word_col}: error: '{word}' not available in {tier} tier"
+                violations = violations + 1
 
         # --- Operator/construct checks (on stripped code, before punctuation replacement) ---
         val op_violations = check_line_operators_with_patterns(
@@ -330,6 +356,10 @@ fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
 
         line_num = line_num + 1
     violations
+
+fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
+    """Compatibility adapter for callers without a request-owned index."""
+    check_one_file_indexed(file_path, tier, build_tier_keyword_index(kw))
 
 # ============================================================================
 # String helper (local, avoids import issues)
@@ -598,6 +628,7 @@ fn run_check_tier(args: [text]) -> i64:
     if kw.seed.len() == 0 and kw.core.len() == 0 and kw.full.len() == 0:
         print "Error: could not load {sdn_path}"
         return 1
+    val keyword_index = build_tier_keyword_index(kw)
 
     # Read project-level tier
     val project_tier = read_project_tier(root)
@@ -675,12 +706,12 @@ fn run_check_tier(args: [text]) -> i64:
     var total_violations = 0
 
     for f in seed_files:
-        val v = check_one_file(f, "seed", kw)
+        val v = check_one_file_indexed(f, "seed", keyword_index)
         if v > 0:
             total_violations = total_violations + v
 
     for f in core_files:
-        val v = check_one_file(f, "core", kw)
+        val v = check_one_file_indexed(f, "core", keyword_index)
         if v > 0:
             total_violations = total_violations + v
 

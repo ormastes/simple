@@ -2858,3 +2858,13 @@ bytes remain non-delimiters, matching the prior split behavior. This changes
 the normalization phase from many `O(n)` materializations to one `O(n)` scan.
 Direct delimiter, duplicate-order, tab, backslash, hash, and UTF-8 contracts
 were added but not executed under the user's no-verification instruction.
+
+Each extracted word then scanned all keyword arrays to decide whether it was
+known and scanned them again to decide whether the active tier allowed it. A
+request-owned dictionary now stores the minimum required tier for every
+spelling and is reused across all checked files, reducing lookup from
+`O(keyword_count)` per probe to expected constant time. Ordered seed, core, and
+full insertion with no overwrite preserves cross-section duplicate precedence;
+unknown words remain ignored. The active tier level is resolved once per file,
+not once per token. Direct precedence contracts were added but not executed
+under the user's no-verification instruction.
