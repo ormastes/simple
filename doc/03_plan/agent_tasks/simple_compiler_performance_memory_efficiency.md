@@ -149,6 +149,21 @@ current-head research reconciliation.
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed canonical MIR DAG-validation tranche
+
+- Build the unique block-id index once, retaining duplicate-ID diagnostic
+  precedence ahead of terminator and target validation.
+- Resolve and store ordered successor indices once while computing indegrees.
+- Replace repeated full-block progress scans with an append-only Kahn queue and
+  monotonic cursor.
+- Deduplicate switch successors with a local indexed set while preserving
+  default-first encounter order.
+- Reduce adversarial validation from O(B^2+B*E+sum(k^2)) to expected O(B+T),
+  where T counts raw successor entries; retain O(B+E) live graph storage plus
+  O(max(k)) transient switch membership and no hash or API change.
+- Manual verification intentionally omitted under the user's explicit
+  no-verification instruction.
+
 ## Completed MIR verification atom-set tranche
 
 - Replace growing state-atom, projected-effect, and written-region arrays'
