@@ -23,8 +23,8 @@ Verifies the nvme cosmos openssd boot behaviour end to end so maintainers of thi
 | Plan | doc/03_plan/sys_test/cosmos_openssd_production_hal.md |
 | Design | doc/05_design/cosmos_openssd_production_hal.md |
 | Source | `test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl` |
-| Updated | 2026-08-22 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-08-24 |
+| Generator | Manual source-parity update; docgen not rerun |
 
 ## Purpose and audience
 Verifies the nvme cosmos openssd boot behaviour end to end so maintainers of this
@@ -45,13 +45,13 @@ unrelated sibling features are out of scope.
 - Verify: should execute the host FSBL, NFC, and PCIe MMIO state machines
 - Compile and run the fail-closed host mock-MMIO integration driver
    - Expected: code equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
-- Verify all six bounded MMIO scenarios complete
+- Verify all seven bounded MMIO scenarios complete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -62,11 +62,12 @@ step("Compile and run the fail-closed host mock-MMIO integration driver")
 val (out, err, code) = _run("sh " + HOST_MMIO)
 expect(code).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 
-step("Verify all six bounded MMIO scenarios complete")
+step("Verify all seven bounded MMIO scenarios complete")
 expect(out).to_contain("PASS FSBL handoff and PCFG_DONE")
 expect(out).to_contain("PASS unconfigured PL fail-closed")
 expect(out).to_contain("PASS NFC bounded initialization")
 expect(out).to_contain("PASS NFC read/program/erase/ECC")
+expect(out).to_contain("PASS NFC raw marker read")
 expect(out).to_contain("PASS NFC timeout quarantine")
 expect(out).to_contain("PASS PCIe link/function/MSI/admin")
 expect(out).to_contain("STATUS: PASS cosmos host mock-MMIO integration")

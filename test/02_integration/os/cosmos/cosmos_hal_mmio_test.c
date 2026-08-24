@@ -6,8 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include "cosmos_hal.h"
@@ -77,7 +75,7 @@ static struct mock_mmio mock;
 
 static void mock_fail(const char *message, unsigned int address) {
     fprintf(stderr, "mock MMIO failure: %s at 0x%08x\n", message, address);
-    _exit(90);
+    exit(90);
 }
 
 static int mock_is_nfc(unsigned int address) {
@@ -661,21 +659,10 @@ struct test_case {
 
 static int run_case(const struct test_case *test) {
     int status;
-    pid_t child = fork();
 
-    if (child < 0) {
-        perror("fork");
-        return 1;
-    }
-    if (child == 0) {
-        mock_reset();
-        _exit(test->run() == 0 ? 0 : 1);
-    }
-    if (waitpid(child, &status, 0) != child) {
-        perror("waitpid");
-        return 1;
-    }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    mock_reset();
+    status = test->run();
+    if (status != 0) {
         fprintf(stderr, "FAIL %s (status=%d)\n", test->name, status);
         return 1;
     }
@@ -683,7 +670,7 @@ static int run_case(const struct test_case *test) {
     return 0;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     static const struct test_case tests[] = {
         {"FSBL handoff and PCFG_DONE", test_fsbl_handoff},
         {"unconfigured PL fail-closed", test_unconfigured_pl_is_not_touched},
@@ -695,7 +682,25 @@ int main(void) {
     };
     void *buffers;
     void *control;
+    char *index_end;
+    unsigned long requested_index;
     size_t index;
+
+    if (argc == 2 && strcmp(argv[1], "--count") == 0) {
+        printf("%zu\n", sizeof(tests) / sizeof(tests[0]));
+        return 0;
+    }
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <case-index>|--count\n", argv[0]);
+        return 2;
+    }
+    requested_index = strtoul(argv[1], &index_end, 10);
+    if (argv[1][0] == '\0' || index_end[0] != '\0' ||
+        requested_index >= sizeof(tests) / sizeof(tests[0])) {
+        fprintf(stderr, "invalid case index: %s\n", argv[1]);
+        return 2;
+    }
+    index = (size_t)requested_index;
 
     buffers = mmap((void *)(uintptr_t)TEST_BUFFER_MAP_BASE,
                    TEST_BUFFER_MAP_BYTES, PROT_READ | PROT_WRITE,
@@ -712,12 +717,10 @@ int main(void) {
         (void)munmap(buffers, TEST_BUFFER_MAP_BYTES);
         return 1;
     }
-    for (index = 0U; index < sizeof(tests) / sizeof(tests[0]); index++) {
-        if (run_case(&tests[index]) != 0) {
-            (void)munmap(control, TEST_CONTROL_MAP_BYTES);
-            (void)munmap(buffers, TEST_BUFFER_MAP_BYTES);
-            return 1;
-        }
+    if (run_case(&tests[index]) != 0) {
+        (void)munmap(control, TEST_CONTROL_MAP_BYTES);
+        (void)munmap(buffers, TEST_BUFFER_MAP_BYTES);
+        return 1;
     }
     if (munmap(control, TEST_CONTROL_MAP_BYTES) != 0 ||
         munmap(buffers, TEST_BUFFER_MAP_BYTES) != 0) {
