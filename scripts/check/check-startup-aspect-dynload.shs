@@ -1,0 +1,400 @@
+#!/bin/sh
+# check-startup-aspect-dynload.shs — the startup aspect dynload hook must
+# actually load a real shared library and call into it.
+#
+# What this pins
+# --------------
+# `src/compiler/70.backend/backend/llvm_native_link_hosted_support.spl` emits a
+# WEAK declaration of `__simple_startup_before_main(argc, argv)` into the
+# generated C `main` and calls it before runtime/module init, exiting 125 on a
+# non-zero return. Until 2026-08-24 nothing in the tree DEFINED that symbol, so
+# the weak reference resolved to NULL and the slot was permanently dead — the
+# exact silent-nil shape this repo bans. `src/runtime/runtime_native.c` now
+# defines it: it dlopen()s each path in `SIMPLE_STARTUP_ASPECTS` and calls that
+# library's `simple_aspect_pack_init()`, failing closed and loudly.
+#
+# Why a compiler is run rather than a text scan: "the symbol is defined" is NOT
+# the property that matters. A weak undefined reference does not pull a member
+# out of a static archive, so a correct-looking definition in the wrong
+# translation unit links cleanly and is never called. Only building and RUNNING
+# a binary distinguishes those two worlds, so this gate does that.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> case(s) checked, ...      exit 0
+#   FAIL — ...                           exit 1
+#   ERROR — nothing was checked (...)    exit 2
+# A run that checked 0 cases is ERROR, never a pass.
+#
+# `--selftest` runs FIRST, unconditionally, and is FATAL.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RUNTIME_C="$REPO_ROOT/src/runtime/runtime_native.c"
+HOSTED_SPL="$REPO_ROOT/src/compiler/70.backend/backend/llvm_native_link_hosted_support.spl"
+ARCHIVE="$REPO_ROOT/build/simple-core/libsimple_runtime.a"
+
+CHECKED=0
+FAILED=""
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/startup-aspect-dynload.XXXXXX") || {
+    printf 'ERROR — nothing was checked (could not create a temp dir)\n'
+    exit 2
+}
+cleanup() { [ "${KEEP_WORK:-0}" = "1" ] || rm -rf "$WORK"; }
+trap cleanup EXIT INT TERM
+
+# ---------------------------------------------------------------- helpers
+
+fail() { FAILED="$FAILED $1"; }
+
+pick_cc() {
+    for candidate in "${CC:-}" clang cc gcc; do
+        [ -n "$candidate" ] || continue
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Emit the pre-main entry closure that the compiler really generates.
+# Mirrors hosted_support.spl:108-134 — including the strong references to
+# spl_init_args/__simple_runtime_init/__simple_runtime_shutdown, which are what
+# pull runtime_native.o out of the archive so the weak hook can bind.
+write_entry_main() {
+    cat > "$1" <<'ENTRY_EOF'
+#include <stdio.h>
+extern void spl_init_args(int argc, char** argv);
+extern int __simple_startup_before_main(int argc, char** argv) __attribute__((weak));
+extern void __simple_runtime_init(void);
+extern void __simple_runtime_shutdown(void);
+int main(int argc, char** argv) {
+    spl_init_args(argc, argv);
+    if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) return 125;
+    __simple_runtime_init();
+    printf("MAIN_RAN\n");
+    fflush(stdout);
+    __simple_runtime_shutdown();
+    return 0;
+}
+ENTRY_EOF
+}
+
+# write_pack <out.c> <sentinel> <init_return>   (init_return "-" == omit symbol)
+write_pack() {
+    _out=$1; _sentinel=$2; _ret=$3
+    if [ "$_ret" = "-" ]; then
+        cat > "$_out" <<PACK_EOF
+#include <stdio.h>
+int some_other_symbol(void) { printf("$_sentinel\n"); return 0; }
+PACK_EOF
+    else
+        cat > "$_out" <<PACK_EOF
+#include <stdio.h>
+int simple_aspect_pack_init(void) { printf("$_sentinel\n"); fflush(stdout); return $_ret; }
+PACK_EOF
+    fi
+}
+
+# ---------------------------------------------------------------- selftest
+# Proves the gate's own machinery discriminates: that it can build a program
+# and a shared library, that it detects a sentinel that IS printed, and that it
+# does NOT report one that is absent. A gate that cannot fail cannot pass.
+selftest() {
+    st_dir="$WORK/selftest"
+    mkdir -p "$st_dir" || return 1
+
+    cat > "$st_dir/probe.c" <<'EOF'
+#include <stdio.h>
+int main(void) { printf("SELFTEST_SENTINEL\n"); return 0; }
+EOF
+    "$SELECTED_CC" "$st_dir/probe.c" -o "$st_dir/probe" >/dev/null 2>&1
+    st_rc=$?
+    [ "$st_rc" -eq 0 ] || { echo "selftest: cannot compile a trivial program (rc=$st_rc)" >&2; return 1; }
+
+    st_out=$("$st_dir/probe" 2>&1)
+    st_rc=$?
+    [ "$st_rc" -eq 0 ] || { echo "selftest: trivial program did not run (rc=$st_rc)" >&2; return 1; }
+
+    case "$st_out" in
+        *SELFTEST_SENTINEL*) : ;;
+        *) echo "selftest: present sentinel was not detected" >&2; return 1 ;;
+    esac
+    case "$st_out" in
+        *ABSENT_SENTINEL*) echo "selftest: absent sentinel was falsely detected" >&2; return 1 ;;
+        *) : ;;
+    esac
+
+    # A shared library must be buildable and dlopen-able, else every real case
+    # below would be vacuous.
+    write_pack "$st_dir/pack.c" "SELFTEST_PACK" 0
+    "$SELECTED_CC" -shared -fPIC "$st_dir/pack.c" -o "$st_dir/libselftest.so" >/dev/null 2>&1
+    st_rc=$?
+    [ "$st_rc" -eq 0 ] || { echo "selftest: cannot build a shared library (rc=$st_rc)" >&2; return 1; }
+
+    cat > "$st_dir/loader.c" <<'EOF'
+#include <dlfcn.h>
+#include <stdio.h>
+int main(int argc, char** argv) {
+    void* h = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
+    if (!h) { printf("SELFTEST_DLOPEN_FAILED\n"); return 1; }
+    printf("SELFTEST_DLOPEN_OK\n");
+    (void)argc; return 0;
+}
+EOF
+    "$SELECTED_CC" "$st_dir/loader.c" -o "$st_dir/loader" -ldl >/dev/null 2>&1
+    st_rc=$?
+    [ "$st_rc" -eq 0 ] || { echo "selftest: cannot build a dlopen probe (rc=$st_rc)" >&2; return 1; }
+
+    st_out=$("$st_dir/loader" "$st_dir/libselftest.so" 2>&1)
+    st_rc=$?
+    [ "$st_rc" -eq 0 ] || { echo "selftest: dlopen probe failed (rc=$st_rc): $st_out" >&2; return 1; }
+    case "$st_out" in
+        *SELFTEST_DLOPEN_OK*) : ;;
+        *) echo "selftest: dlopen of a freshly built .so did not succeed" >&2; return 1 ;;
+    esac
+
+    # A non-zero exit must be observable as a non-zero status, read on the line
+    # AFTER the command (never through a pipe).
+    cat > "$st_dir/rc125.c" <<'EOF'
+int main(void) { return 125; }
+EOF
+    "$SELECTED_CC" "$st_dir/rc125.c" -o "$st_dir/rc125" >/dev/null 2>&1 || return 1
+    "$st_dir/rc125" >/dev/null 2>&1
+    st_rc=$?
+    [ "$st_rc" -eq 125 ] || { echo "selftest: exit status not observed (got $st_rc, want 125)" >&2; return 1; }
+
+    return 0
+}
+
+# ---------------------------------------------------------------- preflight
+
+SELECTED_CC=$(pick_cc)
+if [ -z "${SELECTED_CC:-}" ]; then
+    printf 'ERROR — nothing was checked (no C compiler: tried $CC, clang, cc, gcc)\n'
+    exit 2
+fi
+
+if [ ! -f "$RUNTIME_C" ]; then
+    printf 'ERROR — nothing was checked (missing %s)\n' "$RUNTIME_C"
+    exit 2
+fi
+if [ ! -f "$HOSTED_SPL" ]; then
+    printf 'ERROR — nothing was checked (missing %s)\n' "$HOSTED_SPL"
+    exit 2
+fi
+if [ ! -f "$ARCHIVE" ]; then
+    printf 'ERROR — nothing was checked (missing runtime archive %s; build it first)\n' "$ARCHIVE"
+    exit 2
+fi
+
+selftest
+SELFTEST_RC=$?
+if [ "$SELFTEST_RC" -ne 0 ]; then
+    printf 'ERROR — nothing was checked (selftest failed, rc=%s)\n' "$SELFTEST_RC"
+    exit 2
+fi
+
+# ---------------------------------------------------------------- build
+
+# Recompile the edited translation unit and REPLACE it inside a private copy of
+# the real runtime archive, so the binary under test is the real runtime plus
+# this source, not a bespoke mini-runtime.
+cp "$ARCHIVE" "$WORK/libsimple_runtime.a"
+CP_RC=$?
+if [ "$CP_RC" -ne 0 ]; then
+    printf 'ERROR — nothing was checked (could not copy the runtime archive)\n'
+    exit 2
+fi
+
+"$SELECTED_CC" -c -O0 -I "$REPO_ROOT/src/runtime" "$RUNTIME_C" -o "$WORK/runtime_native.o" \
+    > "$WORK/compile.log" 2>&1
+COMPILE_RC=$?
+if [ "$COMPILE_RC" -ne 0 ]; then
+    printf 'FAIL — 0 case(s) checked, %s failed to compile (rc=%s); see %s\n' \
+        "runtime_native.c" "$COMPILE_RC" "$WORK/compile.log"
+    KEEP_WORK=1
+    exit 1
+fi
+
+( cd "$WORK" && ar r libsimple_runtime.a runtime_native.o ) > "$WORK/ar.log" 2>&1
+AR_RC=$?
+if [ "$AR_RC" -ne 0 ]; then
+    printf 'ERROR — nothing was checked (ar failed, rc=%s)\n' "$AR_RC"
+    exit 2
+fi
+
+write_entry_main "$WORK/entry.c"
+"$SELECTED_CC" "$WORK/entry.c" "$WORK/libsimple_runtime.a" -o "$WORK/prog" \
+    -ldl -lm -lpthread > "$WORK/link.log" 2>&1
+LINK_RC=$?
+if [ "$LINK_RC" -ne 0 ]; then
+    printf 'FAIL — 0 case(s) checked, the generated entry closure failed to link (rc=%s); see %s\n' \
+        "$LINK_RC" "$WORK/link.log"
+    KEEP_WORK=1
+    exit 1
+fi
+
+write_pack "$WORK/packA.c" "PACK_A_INIT" 0
+"$SELECTED_CC" -shared -fPIC "$WORK/packA.c" -o "$WORK/libpackA.so" >/dev/null 2>&1 || {
+    printf 'ERROR — nothing was checked (could not build fixture pack A)\n'; exit 2; }
+write_pack "$WORK/packB.c" "PACK_B_INIT" 0
+"$SELECTED_CC" -shared -fPIC "$WORK/packB.c" -o "$WORK/libpackB.so" >/dev/null 2>&1 || {
+    printf 'ERROR — nothing was checked (could not build fixture pack B)\n'; exit 2; }
+write_pack "$WORK/packNoSym.c" "PACK_NOSYM" -
+"$SELECTED_CC" -shared -fPIC "$WORK/packNoSym.c" -o "$WORK/libpackNoSym.so" >/dev/null 2>&1 || {
+    printf 'ERROR — nothing was checked (could not build fixture pack without init)\n'; exit 2; }
+write_pack "$WORK/packFail.c" "PACK_FAIL_INIT" 7
+"$SELECTED_CC" -shared -fPIC "$WORK/packFail.c" -o "$WORK/libpackFail.so" >/dev/null 2>&1 || {
+    printf 'ERROR — nothing was checked (could not build fixture pack with failing init)\n'; exit 2; }
+
+# ---------------------------------------------------------------- cases
+
+# case 1 — no env var: the program runs normally and loads nothing.
+CHECKED=$((CHECKED + 1))
+unset SIMPLE_STARTUP_ASPECTS
+OUT=$("$WORK/prog" 2>&1)
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    fail "no-env(rc=$RC)"
+else
+    case "$OUT" in
+        *MAIN_RAN*) : ;;
+        *) fail "no-env(main-did-not-run)" ;;
+    esac
+fi
+
+# case 2 — one pack: its init runs, and runs BEFORE main.
+CHECKED=$((CHECKED + 1))
+OUT=$(SIMPLE_STARTUP_ASPECTS="$WORK/libpackA.so" "$WORK/prog" 2>&1)
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    fail "one-pack(rc=$RC)"
+else
+    case "$OUT" in
+        *PACK_A_INIT*MAIN_RAN*) : ;;
+        *MAIN_RAN*PACK_A_INIT*) fail "one-pack(init-ran-after-main)" ;;
+        *PACK_A_INIT*) fail "one-pack(main-did-not-run)" ;;
+        *) fail "one-pack(init-never-called)" ;;
+    esac
+fi
+
+# case 3 — two packs, separator-delimited: both load, in the listed order.
+CHECKED=$((CHECKED + 1))
+OUT=$(SIMPLE_STARTUP_ASPECTS="$WORK/libpackA.so:$WORK/libpackB.so" "$WORK/prog" 2>&1)
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    fail "two-packs(rc=$RC)"
+else
+    case "$OUT" in
+        *PACK_A_INIT*PACK_B_INIT*MAIN_RAN*) : ;;
+        *) fail "two-packs(wrong-order-or-missing)" ;;
+    esac
+fi
+
+# case 4 — a named pack that does not exist must fail closed (exit 125) and
+# name the offending path. This is the anti-silent-nil case.
+CHECKED=$((CHECKED + 1))
+OUT=$(SIMPLE_STARTUP_ASPECTS="$WORK/does-not-exist.so" "$WORK/prog" 2>&1)
+RC=$?
+if [ "$RC" -ne 125 ]; then
+    fail "missing-pack(rc=$RC,want-125)"
+else
+    case "$OUT" in
+        *does-not-exist.so*) : ;;
+        *) fail "missing-pack(path-not-named)" ;;
+    esac
+    case "$OUT" in
+        *MAIN_RAN*) fail "missing-pack(main-ran-anyway)" ;;
+        *) : ;;
+    esac
+fi
+
+# case 5 — a real library lacking `simple_aspect_pack_init` must fail closed
+# and name the missing symbol, not load silently.
+CHECKED=$((CHECKED + 1))
+OUT=$(SIMPLE_STARTUP_ASPECTS="$WORK/libpackNoSym.so" "$WORK/prog" 2>&1)
+RC=$?
+if [ "$RC" -ne 125 ]; then
+    fail "pack-without-init(rc=$RC,want-125)"
+else
+    case "$OUT" in
+        *simple_aspect_pack_init*) : ;;
+        *) fail "pack-without-init(symbol-not-named)" ;;
+    esac
+    case "$OUT" in
+        *MAIN_RAN*) fail "pack-without-init(main-ran-anyway)" ;;
+        *) : ;;
+    esac
+fi
+
+# case 6 — an init that returns non-zero must fail closed; main must not run.
+CHECKED=$((CHECKED + 1))
+OUT=$(SIMPLE_STARTUP_ASPECTS="$WORK/libpackFail.so" "$WORK/prog" 2>&1)
+RC=$?
+if [ "$RC" -ne 125 ]; then
+    fail "init-returns-nonzero(rc=$RC,want-125)"
+else
+    case "$OUT" in
+        *PACK_FAIL_INIT*) : ;;
+        *) fail "init-returns-nonzero(init-never-called)" ;;
+    esac
+    case "$OUT" in
+        *MAIN_RAN*) fail "init-returns-nonzero(main-ran-anyway)" ;;
+        *) : ;;
+    esac
+fi
+
+# case 7 — a failing pack must abort the whole startup: a later, healthy pack
+# in the same list must NOT be loaded.
+CHECKED=$((CHECKED + 1))
+OUT=$(SIMPLE_STARTUP_ASPECTS="$WORK/does-not-exist.so:$WORK/libpackA.so" "$WORK/prog" 2>&1)
+RC=$?
+if [ "$RC" -ne 125 ]; then
+    fail "abort-on-first-failure(rc=$RC,want-125)"
+else
+    case "$OUT" in
+        *PACK_A_INIT*) fail "abort-on-first-failure(later-pack-still-loaded)" ;;
+        *) : ;;
+    esac
+fi
+
+# case 8 — drift pin. The generated entry closure this gate mirrors must still
+# declare the weak hook and still call it. If codegen stops emitting the call,
+# every case above would keep passing while the feature was dead in real
+# binaries, so this is checked against the real source.
+CHECKED=$((CHECKED + 1))
+if ! /usr/bin/grep -q '__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0' "$HOSTED_SPL"; then
+    fail "codegen-drift(hosted_support.spl no longer emits the pre-main call)"
+elif ! /usr/bin/grep -q 'extern int __simple_startup_before_main' "$HOSTED_SPL"; then
+    fail "codegen-drift(hosted_support.spl no longer declares the hook)"
+fi
+
+# case 9 — placement pin. The definition must live in the same translation unit
+# that owns __simple_runtime_init. A weak undefined reference does not pull an
+# archive member, so moving it to its own TU silently disables the hook.
+CHECKED=$((CHECKED + 1))
+if ! /usr/bin/grep -q '^int __simple_startup_before_main(int argc, char \*\*argv)' "$RUNTIME_C"; then
+    fail "placement(runtime_native.c does not define __simple_startup_before_main)"
+elif ! /usr/bin/grep -q '^void __simple_runtime_init(void)' "$RUNTIME_C"; then
+    fail "placement(runtime_native.c no longer owns __simple_runtime_init)"
+fi
+
+# ---------------------------------------------------------------- verdict
+
+if [ "$CHECKED" -eq 0 ]; then
+    printf 'ERROR — nothing was checked (no cases ran)\n'
+    exit 2
+fi
+
+if [ -n "$FAILED" ]; then
+    KEEP_WORK=1
+    printf 'FAIL — %s case(s) checked, offender(s):%s\n' "$CHECKED" "$FAILED"
+    exit 1
+fi
+
+printf 'PASS — %s case(s) checked, startup aspect dynload loads real shared libraries via %s and fails closed (cc=%s)\n' \
+    "$CHECKED" "SIMPLE_STARTUP_ASPECTS" "$SELECTED_CC"
+exit 0
