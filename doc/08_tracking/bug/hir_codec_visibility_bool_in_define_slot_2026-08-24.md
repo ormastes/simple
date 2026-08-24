@@ -90,3 +90,37 @@ the pre-existing `cranelift-direct` SEGV is now reachable. That crash was measur
 **unmodified** Stage-2 binary with `SIMPLE_HIR_CACHE=0` before this fix existed
 (`rc=139`, last lines `[cranelift-direct] start / target / module`), so it is a separate
 defect this change exposes rather than introduces.
+
+## Causal proof (harness, not inference)
+
+A 25-line entry built with the Stage-2 bootstrap CLI
+(`/mnt/data/worktrees/goal-main-1/build/bootstrap/goal-r3/stage2/x86_64-unknown-linux-gnu/simple`,
+132,945,096 bytes, built 2026-08-24 02:50 — executed from a copy, never edited in place)
+constructs two `HirSymbol`s that differ in exactly one field and hands both to the same
+`hc_enc_hir_symbol`. Verbatim, one run of one binary:
+
+```
+GOOD visibility=Visibility.Private -> encoded, bytes=39
+BAD  visibility=false -> encoding now (expect the codec abort)
+error: hir codec: no `Visibility` arm for tag -1; regenerate src/compiler/20.hir/generated/hir_codec.spl
+HARNESS_RUN_RC=1
+```
+
+A bool in that field reproduces the production error byte-for-byte; a `Visibility` encodes.
+The harness is scratch evidence, not a tracked artifact: it needed
+`SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1 SIMPLE_ALLOW_INTERNAL_STUBS=1` because its import closure
+drags in 9 mmap/file runtime entries and `bytes_to_u16_le`/`bytes_to_u32_le` that the C
+bootstrap runtime does not define. None of those are on the code path it exercises.
+
+## Stage-3 build from the fixed tree
+
+`stage2 native-build ... src/app/cli/bootstrap_main.spl` over the fixed tree reached all 692
+surfaces and ran the whole HIR phase, then failed (rc=1) with **68 `hir-fatal`s, zero of them
+a codec/Visibility error** (`grep -c 'hir codec' = 0`). Every fatal is the documented
+Stage-3 class other lanes own: `unresolved name`/`unresolved type`, `ambiguous explicit
+callable dependency DiContainer/AopWeaver`, and `field 'kind' is not visible from this module`.
+The 7 that name files this change touched are all `unresolved name`/`unresolved type`
+(`bootstrap_hir_functions_add`, `hir_expr_env_get`, `ModuleSurfaceEnum`, …) — none mentions
+`Visibility` or an ambiguous import, so this change introduced no new lowering error. No
+Stage-3 binary was produced, so `compile --format=smf` could not be re-run on a compiler
+built from this fix; the harness above is the direct evidence in its place.
