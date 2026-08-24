@@ -2,7 +2,32 @@
 
 **Date:** 2026-08-24
 **Severity:** HIGH (a hardening exit gate reports ERROR, and its last recorded PASS is unreproducible)
-**Status:** OPEN
+**Status:** SUPERSEDED / already FIXED upstream — 2026-08-24
+
+> **Superseded by** `doc/08_tracking/bug/seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md`
+> and the fix in commit `1ca19a1e31a` ("fix(stdlib): file_read aborted the
+> process -- two forwarders closed into infinite mutual recursion").
+>
+> The diagnosis below — that the aspect-seal *census* or its aspect-parsing path
+> was at fault — is **wrong**. The census and the parser are both fine. The real
+> cause is a cross-module name collision: `file_read` has a second co-compiled
+> definition at `src/lib/nogc_sync_mut/io/file_ops.spl:76` whose body is
+> `read_file_text(path)`, so when resolution fell back to last-definition-wins,
+> `io_runtime.read_file_text -> file_ops.file_read -> read_file_text -> …`
+> recursed with no base case and aborted the process on the FIRST read of ANY
+> file. Every script under `src/app/**` pulls `file_ops` in via
+> `app/io/mod_stub.spl`, which is why it presented as "reading a file crashes,
+> but only from `src/app`". The observation recorded below — that the census
+> completes when no `--aspect` is passed — is still correct, and was the clue:
+> without `--aspect`, nothing reads a file.
+>
+> The fix points `read_file`/`read_file_text` at `file_read_result`, whose name
+> has exactly one definition in the tree. Verified on this tree at
+> `origin/main` `ffc46d283524`: `sh scripts/check/check-aspect-seal.shs` →
+> `PASS — 1 aspect(s) checked, unbound-required=0 late-activation=0
+> post-weave-recheck=ran`. The Phase 6 gate is live again.
+>
+> Kept for the trail; do not act on the resume steps below.
 **Plan section:** hardening plan Phase 6 (`doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md`)
 
 ## Symptom
