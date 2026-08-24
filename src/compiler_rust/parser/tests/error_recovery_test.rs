@@ -281,8 +281,7 @@ fn test_explicit_self_field_access_is_valid_simple() {
 
     assert_eq!(detect_common_mistake(&self_token, &prev, Some(&dot_token)), None);
 
-    let mut parser =
-        Parser::new("class Point:\n    x: i64\n    me set_x(value: i64):\n        self.x = value\n");
+    let mut parser = Parser::new("class Point:\n    x: i64\n    me set_x(value: i64):\n        self.x = value\n");
     assert!(parser.parse().is_ok());
     assert!(parser.error_hints().is_empty());
 }

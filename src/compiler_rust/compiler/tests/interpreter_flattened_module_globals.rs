@@ -819,11 +819,7 @@ fn lambda_parameter_shadowing_global_stays_local() {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("state.spl");
     let main_path = dir.path().join("main.spl");
-    fs::write(
-        state_path,
-        "var value = 0\n\nfn read() -> i32:\n    return value\n",
-    )
-    .unwrap();
+    fs::write(state_path, "var value = 0\n\nfn read() -> i32:\n    return value\n").unwrap();
     fs::write(
         &main_path,
         "use state.{read, value}\n\nfn main() -> i32:\n    val f = \\value: value + 1\n    val r = f(41)\n    return r * 10 + read()\n",

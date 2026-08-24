@@ -397,14 +397,7 @@ fn box_for_closure_boundary<M: Module>(
             };
             call_runtime_1(ctx, builder, "rt_value_bool", widened)
         }
-        TypeId::I8
-        | TypeId::I16
-        | TypeId::I32
-        | TypeId::I64
-        | TypeId::U8
-        | TypeId::U16
-        | TypeId::U32
-        | TypeId::U64 => {
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64 => {
             let widened = match vt {
                 types::I8 | types::I16 | types::I32 => builder.ins().sextend(types::I64, val),
                 types::F64 => builder.ins().bitcast(types::I64, MemFlags::new(), val),
@@ -1538,8 +1531,8 @@ fn builtin_method_result_type(method: &str, receiver_ty: Option<TypeId>) -> Opti
         // (`"  42  ".trim().to_i64()`) still returning the intermediate text's
         // HEAP POINTER as a "successful" integer.
         // doc/08_tracking/bug/seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md
-        "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower" | "to_lowercase"
-        | "char_at" | "replace" => Some(TypeId::STRING),
+        "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower" | "to_lowercase" | "char_at"
+        | "replace" => Some(TypeId::STRING),
         // `slice`/`substring`/`concat` are shared with array receivers, where
         // the result is an array, not text — so they stay receiver-gated. A
         // wrong entry here could make a previously-correct call worse.
@@ -2601,7 +2594,11 @@ fn try_emit_vtable_type_switch<M: Module>(
         let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
         let sig_ref = builder.func.dfg.ext_funcs[func_ref].signature;
         let sig_params = builder.func.dfg.signatures[sig_ref].params.len();
-        let mut call_args = if sig_params == arg_vals.len() { vec![] } else { vec![recv] };
+        let mut call_args = if sig_params == arg_vals.len() {
+            vec![]
+        } else {
+            vec![recv]
+        };
         call_args.extend(arg_vals.iter().copied());
         let call_args = super::calls::adapt_args_to_signature(builder, func_ref, call_args);
         let call = adapted_call(builder, func_ref, &call_args);

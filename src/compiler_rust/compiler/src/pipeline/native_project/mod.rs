@@ -435,7 +435,10 @@ mod shared_metadata_tests {
             ),
         ]);
 
-        assert_eq!(build_ambiguous_field_names(&forward), build_ambiguous_field_names(&reverse));
+        assert_eq!(
+            build_ambiguous_field_names(&forward),
+            build_ambiguous_field_names(&reverse)
+        );
     }
 }
 

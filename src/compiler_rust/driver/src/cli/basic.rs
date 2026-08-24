@@ -150,10 +150,7 @@ impl SpecOutcome {
     /// `false` for the UNVERIFIED classes, whose partial tallies must not be
     /// counted as failures or drops.
     fn is_verified(self) -> bool {
-        matches!(
-            self,
-            SpecOutcome::Ok | SpecOutcome::Error | SpecOutcome::Crashed
-        )
+        matches!(self, SpecOutcome::Ok | SpecOutcome::Error | SpecOutcome::Crashed)
     }
 
     /// Whether `executed < declared` is meaningful as a *silent drop* for this
@@ -838,11 +835,7 @@ mod tests {
 
     /// Write `source` to a uniquely-named temp `.spl` file and return its path.
     fn spec_fixture(tag: &str, source: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "simple_dropcheck_{}_{}.spl",
-            tag,
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_dropcheck_{}_{}.spl", tag, std::process::id()));
         std::fs::write(&path, source).expect("write fixture");
         path
     }

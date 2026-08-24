@@ -168,7 +168,8 @@ static SIMPLE_KEEP_RT_POOL_SAFEPOINT: unsafe extern "C" fn() -> i64 = rt_pool_sa
 static SIMPLE_KEEP_RT_POOL_STATE_CREATE: unsafe extern "C" fn(i64) -> i64 = rt_pool_state_create_v1;
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
-static SIMPLE_KEEP_RT_POOL_STATE_TRY_SUBMIT_I64: unsafe extern "C" fn(i64, i64, i64) -> i64 = rt_pool_state_try_submit_i64_v1;
+static SIMPLE_KEEP_RT_POOL_STATE_TRY_SUBMIT_I64: unsafe extern "C" fn(i64, i64, i64) -> i64 =
+    rt_pool_state_try_submit_i64_v1;
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_POOL_TASK_STATUS_I64: unsafe extern "C" fn(i64) -> i64 = rt_pool_task_status_i64_v1;
@@ -452,8 +453,7 @@ fn runtime_symbol_table_atomic_contracts_dispatch() {
     }
 
     let int_new: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(entry("rt_atomic_int_new")) };
-    let int_add: extern "C" fn(i64, i64) -> i64 =
-        unsafe { std::mem::transmute(entry("rt_atomic_int_fetch_add")) };
+    let int_add: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(entry("rt_atomic_int_fetch_add")) };
     let int_load: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(entry("rt_atomic_int_load")) };
     let int_free: extern "C" fn(i64) = unsafe { std::mem::transmute(entry("rt_atomic_int_free")) };
     let int_handle = int_new(7);
@@ -463,8 +463,7 @@ fn runtime_symbol_table_atomic_contracts_dispatch() {
     int_free(int_handle);
 
     let bool_new: extern "C" fn(bool) -> i64 = unsafe { std::mem::transmute(entry("rt_atomic_bool_new")) };
-    let bool_swap: extern "C" fn(i64, bool) -> bool =
-        unsafe { std::mem::transmute(entry("rt_atomic_bool_swap")) };
+    let bool_swap: extern "C" fn(i64, bool) -> bool = unsafe { std::mem::transmute(entry("rt_atomic_bool_swap")) };
     let bool_free: extern "C" fn(i64) = unsafe { std::mem::transmute(entry("rt_atomic_bool_free")) };
     let bool_handle = bool_new(false);
     assert_ne!(bool_handle, 0);
@@ -503,14 +502,8 @@ fn runtime_symbol_table_signature_contracts_resolve_exact_providers() {
 #[test]
 fn runtime_symbol_table_file_lock_contracts_resolve_exact_providers() {
     for (name, expected) in [
-        (
-            "rt_file_lock",
-            value::sffi::file_io::rt_file_lock as *const u8,
-        ),
-        (
-            "rt_file_unlock",
-            value::sffi::file_io::rt_file_unlock as *const u8,
-        ),
+        ("rt_file_lock", value::sffi::file_io::rt_file_lock as *const u8),
+        ("rt_file_unlock", value::sffi::file_io::rt_file_unlock as *const u8),
     ] {
         let actual = RUNTIME_SYMBOL_ENTRIES
             .iter()
@@ -529,10 +522,7 @@ fn runtime_symbol_table_checked_offset_read_resolves_exact_provider() {
         .find(|entry| entry.name == "rt_file_read_text_at_checked")
         .expect("checked offset-read provider must be registered")
         .ptr;
-    assert_eq!(
-        actual,
-        value::sffi::file_io::rt_file_read_text_at_checked as *const u8
-    );
+    assert_eq!(actual, value::sffi::file_io::rt_file_read_text_at_checked as *const u8);
 }
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
@@ -880,7 +870,8 @@ pub use value::{
     rt_object_field_get,
     rt_object_field_set,
     rt_object_new,
-    rt_ptr_read_i64, rt_ptr_read_u8,
+    rt_ptr_read_i64,
+    rt_ptr_read_u8,
     rt_ptr_to_value,
     rt_ptr_write_bytes_raw_shim,
     rt_ptr_write_i32,
@@ -973,13 +964,13 @@ pub use value::{
     rt_tls_client_config_set_verify_mode, rt_tls_client_connect, rt_tls_client_connect_with_sni,
     rt_tls_client_connect_address_with_sni_timeout, rt_tls_client_read, rt_tls_client_read_timeout,
     rt_tls_client_write, rt_tls_client_write_timeout, rt_tls_free_cert, rt_tls_generate_self_signed_cert,
-    rt_tls_get_cert_expiry,
-    rt_tls_get_cert_issuer, rt_tls_get_cert_subject, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
-    rt_tls_get_peer_cert, rt_tls_get_protocol_version, rt_tls_hash_cert, rt_tls_is_handshake_complete,
-    rt_tls_load_cert, rt_tls_load_key, rt_tls_server_accept, rt_tls_server_close_connection, rt_tls_server_config_free,
-    rt_tls_server_config_new, rt_tls_server_config_require_client_cert, rt_tls_server_config_set_alpn,
-    rt_tls_server_create, rt_tls_server_create_from_der, rt_tls_server_read, rt_tls_server_shutdown,
-    rt_tls_server_write, rt_tls_server_write_bytes, rt_tls_verify_cert,
+    rt_tls_get_cert_expiry, rt_tls_get_cert_issuer, rt_tls_get_cert_subject, rt_tls_get_cipher_suite,
+    rt_tls_get_negotiated_alpn, rt_tls_get_peer_cert, rt_tls_get_protocol_version, rt_tls_hash_cert,
+    rt_tls_is_handshake_complete, rt_tls_load_cert, rt_tls_load_key, rt_tls_server_accept,
+    rt_tls_server_close_connection, rt_tls_server_config_free, rt_tls_server_config_new,
+    rt_tls_server_config_require_client_cert, rt_tls_server_config_set_alpn, rt_tls_server_create,
+    rt_tls_server_create_from_der, rt_tls_server_read, rt_tls_server_shutdown, rt_tls_server_write,
+    rt_tls_server_write_bytes, rt_tls_verify_cert,
 };
 
 // Re-export contract violation types and SFFI functions (CTR-050-054)
@@ -1146,8 +1137,9 @@ pub use parallel::{
 
 // Re-export coverage instrumentation types and SFFI functions
 pub use coverage::{
-    rt_coverage_clear, rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_dump_sdn, rt_coverage_dump_sdn_cstr,
-    rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize, rt_coverage_path_probe, CoverageData,
+    rt_coverage_clear, rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_dump_sdn,
+    rt_coverage_dump_sdn_cstr, rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize,
+    rt_coverage_path_probe, CoverageData,
 };
 
 // Re-export debug SFFI functions

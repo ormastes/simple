@@ -2752,8 +2752,25 @@ mod tests {
     #[cfg(not(feature = "cuda"))]
     fn test_cuda_sffi_stubs_report_not_initialized() {
         let ptx = CString::new(".version 7.0\n.target sm_50\n.address_size 64\n").unwrap();
-        assert_eq!(rt_cuda_module_load_data(ptx.as_ptr() as *const u8, ptx.as_bytes().len() as u64), -3);
-        assert_eq!(rt_cuda_launch_kernel(0, ptx.as_ptr() as *const u8, ptx.as_bytes().len() as u64, 1, 1, 1, 1, 1, 1, 0), -3);
+        assert_eq!(
+            rt_cuda_module_load_data(ptx.as_ptr() as *const u8, ptx.as_bytes().len() as u64),
+            -3
+        );
+        assert_eq!(
+            rt_cuda_launch_kernel(
+                0,
+                ptx.as_ptr() as *const u8,
+                ptx.as_bytes().len() as u64,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                0
+            ),
+            -3
+        );
         assert_eq!(rt_cuda_f64_binary_op(0, 0, 0, 1, 0), -3);
         assert_eq!(rt_cuda_f64_sum(0, 0, 1), -3);
         assert_eq!(rt_cuda_f64_minmax(0, 0, 1, 0), -3);
@@ -2845,7 +2862,18 @@ mod tests {
         let module = rt_cuda_module_load_data(ptx.as_ptr() as *const u8, ptx.as_bytes().len() as u64);
         assert!(module > 0, "expected PTX module to load, got {module}");
 
-        let launch = rt_cuda_launch_kernel(module, kernel_name.as_ptr() as *const u8, kernel_name.as_bytes().len() as u64, 1, 1, 1, 1, 1, 1, 0);
+        let launch = rt_cuda_launch_kernel(
+            module,
+            kernel_name.as_ptr() as *const u8,
+            kernel_name.as_bytes().len() as u64,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+        );
         assert_eq!(launch, 0, "expected noop kernel launch to succeed, got {launch}");
 
         let sync = rt_cuda_sync();

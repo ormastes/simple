@@ -166,23 +166,25 @@ impl LlvmBackend {
         let alloc_call = builder
             .build_call(alloc_fn, &[size_val.into()], "aggcopy_alloc")
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
-        let alloc_value = alloc_call.try_as_basic_value().left().ok_or_else(|| {
-            crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value")
-        })?;
-        let new_ptr = match alloc_value {
-            inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
-                .build_pointer_cast(ptr, i8_ptr_type, "aggcopy_ptr")
-                .map_err(|e| crate::error::factory::llvm_cast_failed("cast alloc ptr", &e))?,
-            inkwell::values::BasicValueEnum::IntValue(iv) => builder
-                .build_int_to_ptr(iv, i8_ptr_type, "aggcopy_ptr")
-                .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?,
-            _ => {
-                return Err(crate::error::factory::llvm_build_failed(
-                    "rt_alloc result",
-                    &"unsupported return value kind",
-                ))
-            }
-        };
+        let alloc_value = alloc_call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?;
+        let new_ptr =
+            match alloc_value {
+                inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
+                    .build_pointer_cast(ptr, i8_ptr_type, "aggcopy_ptr")
+                    .map_err(|e| crate::error::factory::llvm_cast_failed("cast alloc ptr", &e))?,
+                inkwell::values::BasicValueEnum::IntValue(iv) => builder
+                    .build_int_to_ptr(iv, i8_ptr_type, "aggcopy_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?,
+                _ => {
+                    return Err(crate::error::factory::llvm_build_failed(
+                        "rt_alloc result",
+                        &"unsupported return value kind",
+                    ))
+                }
+            };
         let new_i64 = builder
             .build_ptr_to_int(new_ptr, i64_type, "aggcopy_new_i64")
             .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;

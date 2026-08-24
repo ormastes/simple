@@ -314,9 +314,9 @@ impl JitCompiler {
                     {
                         let _ = callee;
                         if !(crate::codegen::jit_closure_abi_supports(*return_type)
-                                && param_types
-                                    .iter()
-                                    .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
+                            && param_types
+                                .iter()
+                                .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
                         {
                             return Some((
                                 func.name.clone(),

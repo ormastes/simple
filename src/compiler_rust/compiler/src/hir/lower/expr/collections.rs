@@ -310,9 +310,7 @@ impl Lowerer {
         let mut declared = declared;
         let bare_name = name.rsplit('.').next().unwrap_or(name);
         let provided_names: Vec<&str> = provided.iter().filter_map(|(n, _)| *n).collect();
-        let registry_covers = provided_names
-            .iter()
-            .all(|pn| declared.iter().any(|d| d == pn));
+        let registry_covers = provided_names.iter().all(|pn| declared.iter().any(|d| d == pn));
         if !registry_covers && !provided_names.is_empty() {
             if let Some(variants) = self
                 .duplicate_global_struct_defs

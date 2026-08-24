@@ -370,7 +370,6 @@ impl ModuleResolver {
         self.profiles.get(name)
     }
 
-
     /// Get mutable access to project symbols.
     pub fn project_symbols_mut(&mut self) -> &mut ProjectSymbols {
         &mut self.project_symbols

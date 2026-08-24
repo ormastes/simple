@@ -423,11 +423,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn extract_asm_block_strings(
-        block: &Block,
-        instructions: &mut Vec<String>,
-        span: Span,
-    ) -> Result<(), ParseError> {
+    fn extract_asm_block_strings(block: &Block, instructions: &mut Vec<String>, span: Span) -> Result<(), ParseError> {
         for stmt in &block.statements {
             match stmt {
                 Node::Expression(Expr::String(s)) => instructions.push(s.clone()),
@@ -614,7 +610,10 @@ mod tests {
         assert_eq!(asm.instructions.len(), 1);
         let instr = &asm.instructions[0];
         assert!(instr.contains("=stack_top"), "expected bare identifier, got {instr:?}");
-        assert!(!instr.contains("Identifier("), "Debug-formatted AST leaked into asm: {instr:?}");
+        assert!(
+            !instr.contains("Identifier("),
+            "Debug-formatted AST leaked into asm: {instr:?}"
+        );
     }
 
     #[test]
@@ -628,7 +627,10 @@ mod tests {
     #[test]
     fn test_asm_template_placeholder_rejects_unsupported_operand() {
         let mut parser = crate::Parser::new("fn test():\n    asm volatile:\n        \"mov r0, {a + b}\"\n");
-        let err = parser.parse().err().expect("expected parse error for unsupported asm placeholder");
+        let err = parser
+            .parse()
+            .err()
+            .expect("expected parse error for unsupported asm placeholder");
         let msg = format!("{err:?}");
         assert!(
             msg.contains("unsupported operand in inline asm template placeholder"),

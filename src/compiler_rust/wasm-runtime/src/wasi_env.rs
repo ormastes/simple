@@ -655,7 +655,10 @@ sandbox_manifest:
 
         let table = WasiCapabilityTable::from_sandbox_lowering_sdn("PluginSandbox", lowering).unwrap();
 
-        assert!(table.read_dirs.contains("/reports"), "grants must survive the enforcement block");
+        assert!(
+            table.read_dirs.contains("/reports"),
+            "grants must survive the enforcement block"
+        );
         assert!(table.env_keys.contains("SIMPLE_ENV"));
         // Grants belonging to a different sandbox must not leak in.
         assert!(!table.read_dirs.contains("/secrets"));
@@ -714,7 +717,10 @@ sandbox_manifest:
             .with_sandbox_policy("TypoSandbox", manifest)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("is not declared in the module's security manifest"), "unexpected: {err}");
+        assert!(
+            err.contains("is not declared in the module's security manifest"),
+            "unexpected: {err}"
+        );
     }
 
     /// End-to-end through the production bridge: policy grants `/reports`, the
@@ -729,7 +735,10 @@ sandbox_manifest:
             .with_preopen_dir("/etc", "/etc");
 
         let err = config.validate_capabilities().unwrap_err().to_string();
-        assert!(err.contains("denied preopen host '/etc' as '/etc'"), "unexpected: {err}");
+        assert!(
+            err.contains("denied preopen host '/etc' as '/etc'"),
+            "unexpected: {err}"
+        );
 
         // ...and the honest direction: a granted preopen still runs.
         let ok = WasiConfig::new()

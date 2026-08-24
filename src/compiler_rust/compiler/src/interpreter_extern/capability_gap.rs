@@ -70,13 +70,11 @@ pub fn dispatch(name: &str) -> Result<Value, CompileError> {
         "{family}: no native implementation (capability gap, tracked in \
          native_library_binding_survey.md \u{a7}1): {name}"
     );
-    let ctx = ErrorContext::new()
-        .with_code(codes::UNDEFINED_FUNCTION)
-        .with_help(
-            "this family has no native implementation on any target yet; see \
+    let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FUNCTION).with_help(
+        "this family has no native implementation on any target yet; see \
              doc/04_architecture/runtime/native_library_binding_survey.md \u{a7}1 \
              and doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md lane R3",
-        );
+    );
     Err(CompileError::semantic_with_context(msg, ctx))
 }
 

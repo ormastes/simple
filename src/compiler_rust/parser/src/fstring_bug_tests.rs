@@ -235,9 +235,7 @@ main()
 
     #[test]
     fn test_nested_interpolation_literal_does_not_change_outer_brace_depth() {
-        let tokens = get_fstring_tokens(
-            r#"val ty = "struct_{member_ids.map("{_}").join("_")}""#,
-        );
+        let tokens = get_fstring_tokens(r#"val ty = "struct_{member_ids.map("{_}").join("_")}""#);
         assert_eq!(
             tokens,
             vec![TokenKind::FString(vec![
@@ -444,7 +442,9 @@ main()
         assert_eq!(tokens.len(), 1);
         match &tokens[0] {
             TokenKind::FString(parts) => {
-                assert!(parts.iter().any(|p| *p == FStringToken::Expr(r#"m.get("key")"#.to_string())));
+                assert!(parts
+                    .iter()
+                    .any(|p| *p == FStringToken::Expr(r#"m.get("key")"#.to_string())));
             }
             other => panic!("Expected FString with nested quote, got: {:?}", other),
         }

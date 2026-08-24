@@ -1143,10 +1143,7 @@ mod tests {
             &impl_methods,
         )
         .expect("bounded split should dispatch");
-        assert_eq!(
-            bounded,
-            Value::array(vec![Value::text("a"), Value::text("b:c")])
-        );
+        assert_eq!(bounded, Value::array(vec![Value::text("a"), Value::text("b:c")]));
 
         let unicode = call_method_on_value(
             Value::text("한글끝"),
@@ -1159,10 +1156,7 @@ mod tests {
             &impl_methods,
         )
         .expect("unicode character split should dispatch");
-        assert_eq!(
-            unicode,
-            Value::array(vec![Value::text("한"), Value::text("글끝")])
-        );
+        assert_eq!(unicode, Value::array(vec![Value::text("한"), Value::text("글끝")]));
     }
 }
 

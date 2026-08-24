@@ -305,7 +305,9 @@ pub fn rt_heap_live_bytes_by_kind(args: &[Value]) -> Result<Value, CompileError>
         Some(Value::Int(k)) => *k,
         _ => return Ok(Value::Int(0)),
     };
-    Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes_by_kind(kind)))
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes_by_kind(
+        kind,
+    )))
 }
 
 /// Live object count for one `HeapObjectType` tag (0 for out-of-range kinds).
@@ -316,7 +318,9 @@ pub fn rt_heap_live_count_by_kind(args: &[Value]) -> Result<Value, CompileError>
         Some(Value::Int(k)) => *k,
         _ => return Ok(Value::Int(0)),
     };
-    Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_count_by_kind(kind)))
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_count_by_kind(
+        kind,
+    )))
 }
 
 /// Dispatch a hosted-runtime transient parser-array scope operation.
@@ -852,11 +856,7 @@ mod ptr_read_u8_tests {
         let bytes = [0x00_u8, 0x7f, 0x80, 0xff, 0x5a];
         let addr = bytes.as_ptr() as usize as i64;
         for (offset, expected) in bytes.iter().enumerate() {
-            let value = rt_ptr_read_u8(&[
-                Value::Int(addr),
-                Value::Int(offset as i64),
-            ])
-            .expect("byte read");
+            let value = rt_ptr_read_u8(&[Value::Int(addr), Value::Int(offset as i64)]).expect("byte read");
             assert_eq!(value.as_int().expect("integer byte"), i64::from(*expected));
         }
     }
@@ -882,14 +882,10 @@ mod ptr_read_u8_tests {
         .unwrap();
         assert_ne!(mapped, -1);
         assert_eq!(
-            rt_mprotect(&[
-                Value::Int(mapped),
-                Value::Int(4096),
-                Value::Int(libc::PROT_READ as i64),
-            ])
-            .unwrap()
-            .as_int()
-            .unwrap(),
+            rt_mprotect(&[Value::Int(mapped), Value::Int(4096), Value::Int(libc::PROT_READ as i64),])
+                .unwrap()
+                .as_int()
+                .unwrap(),
             0
         );
         assert_eq!(
@@ -1047,7 +1043,6 @@ pub fn rt_mmio_write_u8(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
-
 /// Volatile read/write family mirroring the native runtime's
 /// `rt_volatile_read_u{8,16,32,64}` / `rt_volatile_write_u{8,16,32,64}`
 /// (src/compiler_rust/runtime/src/lib.rs:379-417, all `(addr: i64 [, value:
@@ -1167,7 +1162,9 @@ pub fn rt_volatile_write_u64(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_copy_user_byte(ptr_addr: u64) -> u8`
 pub fn rt_copy_user_byte(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Err(CompileError::runtime("rt_copy_user_byte requires 1 argument (ptr_addr)"));
+        return Err(CompileError::runtime(
+            "rt_copy_user_byte requires 1 argument (ptr_addr)",
+        ));
     }
     let addr = args[0].as_int()? as usize;
     unsafe { Ok(Value::Int((addr as *const u8).read_volatile() as i64)) }
@@ -1310,7 +1307,9 @@ pub fn rt_call_ptr_0(args: &[Value]) -> Result<Value, CompileError> {
     }
     let addr = args[0].as_int()?;
     if addr <= 0 {
-        return Err(CompileError::runtime("rt_call_ptr_0 received a null or invalid function address"));
+        return Err(CompileError::runtime(
+            "rt_call_ptr_0 received a null or invalid function address",
+        ));
     }
     let f: extern "C" fn() -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
     Ok(Value::Int(f()))
@@ -1332,7 +1331,9 @@ fn call_ptr_args<const N: usize>(name: &str, args: &[Value]) -> Result<(i64, [i6
 pub fn rt_call_ptr_1(args: &[Value]) -> Result<Value, CompileError> {
     let (addr, a) = call_ptr_args::<1>("rt_call_ptr_1", args)?;
     if addr <= 0 {
-        return Err(CompileError::runtime("rt_call_ptr_1 received a null or invalid function address"));
+        return Err(CompileError::runtime(
+            "rt_call_ptr_1 received a null or invalid function address",
+        ));
     }
     let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
     Ok(Value::Int(f(a[0])))
@@ -1342,10 +1343,11 @@ pub fn rt_call_ptr_1(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_call_ptr_2(args: &[Value]) -> Result<Value, CompileError> {
     let (addr, a) = call_ptr_args::<2>("rt_call_ptr_2", args)?;
     if addr <= 0 {
-        return Err(CompileError::runtime("rt_call_ptr_2 received a null or invalid function address"));
+        return Err(CompileError::runtime(
+            "rt_call_ptr_2 received a null or invalid function address",
+        ));
     }
-    let f: extern "C" fn(i64, i64) -> i64 =
-        unsafe { std::mem::transmute(addr as usize as *const ()) };
+    let f: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
     Ok(Value::Int(f(a[0], a[1])))
 }
 
@@ -1353,10 +1355,11 @@ pub fn rt_call_ptr_2(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_call_ptr_3(args: &[Value]) -> Result<Value, CompileError> {
     let (addr, a) = call_ptr_args::<3>("rt_call_ptr_3", args)?;
     if addr <= 0 {
-        return Err(CompileError::runtime("rt_call_ptr_3 received a null or invalid function address"));
+        return Err(CompileError::runtime(
+            "rt_call_ptr_3 received a null or invalid function address",
+        ));
     }
-    let f: extern "C" fn(i64, i64, i64) -> i64 =
-        unsafe { std::mem::transmute(addr as usize as *const ()) };
+    let f: extern "C" fn(i64, i64, i64) -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
     Ok(Value::Int(f(a[0], a[1], a[2])))
 }
 
@@ -1565,19 +1568,32 @@ mod tests {
         // contract as the non-harden path) but the block itself is NOT
         // really deallocated yet — it sits in the quarantine ring.
         assert!(!map_contains(ptr), "freed pointer must leave the live metadata map");
-        assert!(quarantine_contains(ptr as usize), "freed block must enter the quarantine ring");
+        assert!(
+            quarantine_contains(ptr as usize),
+            "freed block must enter the quarantine ring"
+        );
 
         // Read-after-free: the block is poisoned (0xDE), not garbage/reused.
         let byte = unsafe { std::ptr::read(ptr as *const u8) };
-        assert_eq!(byte, HARDEN_POISON_BYTE, "quarantined block must read as poison before tampering");
-        assert_eq!(rt_mem_harden_check(&[]).unwrap().as_int().unwrap(), 0, "untouched quarantine must report clean");
+        assert_eq!(
+            byte, HARDEN_POISON_BYTE,
+            "quarantined block must read as poison before tampering"
+        );
+        assert_eq!(
+            rt_mem_harden_check(&[]).unwrap().as_int().unwrap(),
+            0,
+            "untouched quarantine must report clean"
+        );
 
         // Write-after-free: tamper one byte through the stale pointer.
         unsafe {
             std::ptr::write(ptr as *mut u8, 0x41);
         }
         let tampered = rt_mem_harden_check(&[]).unwrap().as_int().unwrap();
-        assert!(tampered >= 1, "rt_mem_harden_check must report >=1 tampered block, got {tampered}");
+        assert!(
+            tampered >= 1,
+            "rt_mem_harden_check must report >=1 tampered block, got {tampered}"
+        );
 
         // Double free of a quarantined (not really-freed) block must still
         // be refused, not touch the allocator.
@@ -1595,7 +1611,10 @@ mod tests {
         let ptr2 = alloc(32);
         assert_ne!(ptr, 0);
         assert_ne!(ptr2, 0);
-        assert_ne!(ptr, ptr2, "quarantined block's address must not be reused before ring eviction");
+        assert_ne!(
+            ptr, ptr2,
+            "quarantined block's address must not be reused before ring eviction"
+        );
         rt_free(&[Value::Int(ptr2)]).unwrap();
     }
 
@@ -1618,13 +1637,7 @@ mod tests {
         assert!(rt_call_ptr_0(&[Value::Int(0)]).is_err());
         assert!(rt_call_ptr_1(&[Value::Int(0), Value::Int(1)]).is_err());
         assert!(rt_call_ptr_2(&[Value::Int(0), Value::Int(1), Value::Int(2)]).is_err());
-        assert!(rt_call_ptr_3(&[
-            Value::Int(0),
-            Value::Int(1),
-            Value::Int(2),
-            Value::Int(3),
-        ])
-        .is_err());
+        assert!(rt_call_ptr_3(&[Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3),]).is_err());
     }
 
     #[test]
@@ -1663,14 +1676,10 @@ mod tests {
             9
         );
         assert_eq!(
-            rt_call_ptr_2(&[
-                Value::Int(add_two as usize as i64),
-                Value::Int(8),
-                Value::Int(13),
-            ])
-            .unwrap()
-            .as_int()
-            .unwrap(),
+            rt_call_ptr_2(&[Value::Int(add_two as usize as i64), Value::Int(8), Value::Int(13),])
+                .unwrap()
+                .as_int()
+                .unwrap(),
             21
         );
         assert_eq!(
@@ -1689,12 +1698,7 @@ mod tests {
 
     #[test]
     fn raw_pointer_writes_reject_invalid_descriptors_and_write_exact_widths() {
-        for write in [
-            rt_ptr_write_u8,
-            rt_ptr_write_i16,
-            rt_ptr_write_i32,
-            rt_ptr_write_i64,
-        ] {
+        for write in [rt_ptr_write_u8, rt_ptr_write_i16, rt_ptr_write_i32, rt_ptr_write_i64] {
             assert!(write(&[Value::Int(0), Value::Int(0), Value::Int(1)]).is_err());
             assert!(write(&[Value::Int(1), Value::Int(-1), Value::Int(1)]).is_err());
         }
@@ -1702,24 +1706,9 @@ mod tests {
         let mut bytes = [0u8; 16];
         let address = bytes.as_mut_ptr() as usize as i64;
         rt_ptr_write_u8(&[Value::Int(address), Value::Int(0), Value::Int(0xab)]).unwrap();
-        rt_ptr_write_i16(&[
-            Value::Int(address),
-            Value::Int(2),
-            Value::Int(0x1234),
-        ])
-        .unwrap();
-        rt_ptr_write_i32(&[
-            Value::Int(address),
-            Value::Int(4),
-            Value::Int(0x1234_5678),
-        ])
-        .unwrap();
-        rt_ptr_write_i64(&[
-            Value::Int(address),
-            Value::Int(8),
-            Value::Int(0x0102_0304_0506_0708),
-        ])
-        .unwrap();
+        rt_ptr_write_i16(&[Value::Int(address), Value::Int(2), Value::Int(0x1234)]).unwrap();
+        rt_ptr_write_i32(&[Value::Int(address), Value::Int(4), Value::Int(0x1234_5678)]).unwrap();
+        rt_ptr_write_i64(&[Value::Int(address), Value::Int(8), Value::Int(0x0102_0304_0506_0708)]).unwrap();
         assert_eq!(bytes[0], 0xab);
         assert_eq!(i16::from_ne_bytes(bytes[2..4].try_into().unwrap()), 0x1234);
         assert_eq!(i32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 0x1234_5678);
@@ -1737,8 +1726,7 @@ mod tests {
         }
 
         let bytes: [u8; 13] = [
-            0xff, 0x78, 0x56, 0x34, 0x12, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02,
-            0x01,
+            0xff, 0x78, 0x56, 0x34, 0x12, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
         ];
         let address = bytes.as_ptr() as usize as i64;
         assert_eq!(
@@ -1767,24 +1755,13 @@ mod tests {
     #[test]
     fn raw_pointer_bulk_copy_distinguishes_empty_success_from_invalid_descriptors() {
         assert_eq!(
-            rt_ptr_write_bytes_raw(&[
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(0),
-            ])
-            .unwrap()
-            .as_int()
-            .unwrap(),
+            rt_ptr_write_bytes_raw(&[Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(0),])
+                .unwrap()
+                .as_int()
+                .unwrap(),
             0
         );
-        assert!(rt_ptr_write_bytes_raw(&[
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(1),
-            Value::Int(1),
-        ])
-        .is_err());
+        assert!(rt_ptr_write_bytes_raw(&[Value::Int(0), Value::Int(0), Value::Int(1), Value::Int(1),]).is_err());
 
         let source = [1u8, 2, 3, 4];
         let mut destination = [0u8; 4];

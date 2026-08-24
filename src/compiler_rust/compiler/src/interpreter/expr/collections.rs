@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use simple_parser::ast::Expr;
 
-use super::evaluate_expr;
+use super::{evaluate_expr, try_unwrap_option_or_result};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
@@ -396,6 +396,11 @@ pub(super) fn eval_collection_expr(
         }
         Expr::Index { receiver, index } => {
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
+            // Flow-sensitive nil checks narrow `T?` at compile time, but the
+            // interpreter still carries the runtime Option wrapper.  Keep
+            // indexing aligned with field/method access by consuming a present
+            // Option/Result payload before dispatching on the collection kind.
+            let recv_val = try_unwrap_option_or_result(&recv_val).unwrap_or(recv_val);
             let idx_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
 
             // Check if idx_val is a range object for slicing
@@ -546,10 +551,17 @@ pub(super) fn eval_collection_expr(
                 Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => {
                     let raw_idx = require_integer_index_value(&idx_val, "byte array")?;
                     let len = bytes.len() as i64;
-                    let idx = if raw_idx < 0 { (len + raw_idx) as usize } else { raw_idx as usize };
+                    let idx = if raw_idx < 0 {
+                        (len + raw_idx) as usize
+                    } else {
+                        raw_idx as usize
+                    };
                     bytes
                         .get(idx)
-                        .map(|byte| Value::UInt { value: u64::from(*byte), width: 8 })
+                        .map(|byte| Value::UInt {
+                            value: u64::from(*byte),
+                            width: 8,
+                        })
                         .ok_or_else(|| {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
@@ -742,6 +754,10 @@ pub(super) fn eval_collection_expr(
         }
         Expr::TupleIndex { receiver, index } => {
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
+            // Keep positional tuple access in parity with ordinary Index: an
+            // Option<Tuple>/Result<Tuple> which has been flow-narrowed still
+            // carries its Some/Ok wrapper in the interpreter value.
+            let recv_val = try_unwrap_option_or_result(&recv_val).unwrap_or(recv_val);
             let result = match recv_val {
                 Value::Tuple(tup) => tup.get(*index).cloned().ok_or_else(|| {
                     // E1044 - Tuple Index OOB
@@ -965,20 +981,19 @@ pub(super) fn eval_collection_expr(
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("use .reversed() to reverse a string, array, or tuple; negative step is not supported");
                 return Err(CompileError::semantic_with_context(
-                    "invalid operation: negative slice step is not supported -- use .reversed() to reverse"
-                        .to_string(),
+                    "invalid operation: negative slice step is not supported -- use .reversed() to reverse".to_string(),
                     ctx,
                 ));
             }
 
             let result = match recv_val {
                 Value::Array(arr) => Ok(Value::array(slice_collection(&arr, start_idx, end_idx, step_val))),
-                Value::ByteArray(bytes) => {
-                    Ok(Value::byte_array(slice_collection(&bytes, start_idx, end_idx, step_val)))
-                }
-                Value::FrozenByteArray(bytes) => {
-                    Ok(Value::frozen_byte_array(slice_collection(&bytes, start_idx, end_idx, step_val)))
-                }
+                Value::ByteArray(bytes) => Ok(Value::byte_array(slice_collection(
+                    &bytes, start_idx, end_idx, step_val,
+                ))),
+                Value::FrozenByteArray(bytes) => Ok(Value::frozen_byte_array(slice_collection(
+                    &bytes, start_idx, end_idx, step_val,
+                ))),
                 Value::Str(s) => {
                     // BYTE-indexed slicing. The `len` these indices were
                     // normalized against (above) is already the BYTE length
@@ -1138,6 +1153,28 @@ else:
     result_ = 1
 main = result_
 "#;
-        assert_eq!(run(src), 0, "explicitly provided fields must not be clobbered by the default pre-fill pass");
+        assert_eq!(
+            run(src),
+            0,
+            "explicitly provided fields must not be clobbered by the default pre-fill pass"
+        );
+    }
+
+    #[test]
+    fn tuple_index_consumes_present_option_payload() {
+        let src = r#"
+val pair = Some((7, 11))
+main = pair.0
+"#;
+        assert_eq!(run(src), 7);
+    }
+
+    #[test]
+    fn tuple_index_consumes_ok_result_payload() {
+        let src = r#"
+val pair = Ok((13, 17))
+main = pair.0
+"#;
+        assert_eq!(run(src), 13);
     }
 }

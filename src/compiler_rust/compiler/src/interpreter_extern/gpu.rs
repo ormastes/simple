@@ -606,9 +606,9 @@ pub(super) fn arg_bytes_ptr(
 }
 
 fn strict_owned_bytes(args: &[Value], index: usize, name: &str, expected: usize) -> Result<Box<[u8]>, CompileError> {
-    let value = args.get(index).ok_or_else(|| {
-        CompileError::semantic(format!("{name} expects {expected} arguments"))
-    })?;
+    let value = args
+        .get(index)
+        .ok_or_else(|| CompileError::semantic(format!("{name} expects {expected} arguments")))?;
     if let Some(bytes) = value.byte_array_view() {
         return Ok(bytes.to_vec().into_boxed_slice());
     }
@@ -625,9 +625,10 @@ fn strict_owned_bytes(args: &[Value], index: usize, name: &str, expected: usize)
     let mut bytes = Vec::with_capacity(items.len());
     for item in items {
         let raw = item.as_int()?;
-        bytes.push(u8::try_from(raw).map_err(|_| {
-            CompileError::semantic(format!("{name} byte value {raw} is out of bounds"))
-        })?);
+        bytes.push(
+            u8::try_from(raw)
+                .map_err(|_| CompileError::semantic(format!("{name} byte value {raw} is out of bounds")))?,
+        );
     }
     Ok(bytes.into_boxed_slice())
 }
@@ -651,11 +652,18 @@ fn release_runtime_owner(owner: simple_runtime::value::RuntimeValue) {
 }
 
 fn strict_i64_values(args: &[Value], index: usize, name: &str, expected: usize) -> Result<Vec<i64>, CompileError> {
-    let value = args.get(index).ok_or_else(|| CompileError::semantic(format!("{name} expects {expected} arguments")))?;
+    let value = args
+        .get(index)
+        .ok_or_else(|| CompileError::semantic(format!("{name} expects {expected} arguments")))?;
     let items = match value {
         Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
         Value::FixedSizeArray { data, .. } => data.as_ref(),
-        other => return Err(CompileError::semantic(format!("{name} argument {index} must be [i64], got {}", other.type_name()))),
+        other => {
+            return Err(CompileError::semantic(format!(
+                "{name} argument {index} must be [i64], got {}",
+                other.type_name()
+            )))
+        }
     };
     items.iter().map(Value::as_int).collect()
 }
@@ -926,12 +934,9 @@ pub fn rt_metal_compile_shader_fn(args: &[Value]) -> Result<Value, CompileError>
 }
 
 pub fn rt_metal_destroy_shader_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(rt_metal_destroy_shader(arg_i64(
-        args,
-        0,
-        "rt_metal_destroy_shader",
-        1,
-    )?) != 0))
+    Ok(Value::Bool(
+        rt_metal_destroy_shader(arg_i64(args, 0, "rt_metal_destroy_shader", 1)?) != 0,
+    ))
 }
 
 pub fn rt_metal_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -947,12 +952,9 @@ pub fn rt_metal_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, Comp
 }
 
 pub fn rt_metal_destroy_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(rt_metal_destroy_pipeline(arg_i64(
-        args,
-        0,
-        "rt_metal_destroy_pipeline",
-        1,
-    )?) != 0))
+    Ok(Value::Bool(
+        rt_metal_destroy_pipeline(arg_i64(args, 0, "rt_metal_destroy_pipeline", 1)?) != 0,
+    ))
 }
 
 pub fn rt_metal_create_command_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -1444,12 +1446,7 @@ pub fn rt_cuda_event_record_fn(args: &[Value]) -> Result<Value, CompileError> {
         if event > 0 {
             if let Some(fns) = get_cuda_dl() {
                 if let Some(f) = fns.event_record {
-                    let rc = unsafe {
-                        f(
-                            event as *mut std::ffi::c_void,
-                            stream as *mut std::ffi::c_void,
-                        )
-                    };
+                    let rc = unsafe { f(event as *mut std::ffi::c_void, stream as *mut std::ffi::c_void) };
                     return Ok(Value::Int(if rc == 0 { 0 } else { -1 }));
                 }
             }

@@ -378,11 +378,7 @@ impl Lowerer {
     /// "this name is a declared field of a class we fully resolved". The
     /// concrete-class requirement above is what keeps the check sound; leniency
     /// is not.
-    pub(super) fn check_implicit_self_field_assignment(
-        &self,
-        name: &str,
-        ctx: &FunctionContext,
-    ) -> LowerResult<()> {
+    pub(super) fn check_implicit_self_field_assignment(&self, name: &str, ctx: &FunctionContext) -> LowerResult<()> {
         if !ctx.has_self {
             return Ok(());
         }
@@ -397,7 +393,12 @@ impl Lowerer {
         if class_ty == TypeId::ANY {
             return Ok(());
         }
-        let Some(HirType::Struct { name: class_name, fields, .. }) = self.module.types.get(class_ty) else {
+        let Some(HirType::Struct {
+            name: class_name,
+            fields,
+            ..
+        }) = self.module.types.get(class_ty)
+        else {
             return Ok(());
         };
         if fields.iter().any(|(field_name, _)| field_name == name) {

@@ -94,7 +94,14 @@ pub(crate) fn apply_lambda_to_vec(
                 if let Some(param) = params.first() {
                     local_env.insert(param.clone(), item.clone());
                 }
-                let result = super::lambda_body::eval_lambda_body(body, &mut local_env, functions, classes, enums, impl_methods)?;
+                let result = super::lambda_body::eval_lambda_body(
+                    body,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
                 results.push(result);
             }
             Ok(results)

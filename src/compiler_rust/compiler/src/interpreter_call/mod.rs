@@ -12,13 +12,13 @@ pub use core::clear_class_instantiation_state;
 pub(crate) use bdd::{
     exec_block_value, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED,
     BDD_EXPECT_PROVISIONAL, BDD_EXPECT_SEQ, BDD_FAILURE_MSG, BDD_INDENT, BDD_LAZY_VALUES, BDD_MATCHER_COUNT,
-    BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ,
-    BDD_SHARED_EXAMPLES,
+    BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ, BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{
-    bind_args, bind_args_with_injected, bind_args_with_values, reorder_named_arg_values, captured_env_with_live_globals, exec_function, exec_function_with_bound_args,
-    exec_function_with_captured_env, exec_function_with_values, exec_function_with_values_and_self, exec_lambda,
-    execute_function_body, instantiate_class, publish_and_repoint, publish_live_bound_globals, refresh_live_bound_globals,
+    bind_args, bind_args_with_injected, bind_args_with_values, reorder_named_arg_values,
+    captured_env_with_live_globals, exec_function, exec_function_with_bound_args, exec_function_with_captured_env,
+    exec_function_with_values, exec_function_with_values_and_self, exec_lambda, execute_function_body,
+    instantiate_class, publish_and_repoint, publish_live_bound_globals, refresh_live_bound_globals,
     sync_live_bound_globals, sync_owned_captured_globals, ProceedContext, IN_NEW_METHOD,
 };
 pub(crate) use core::bitfield_support::instantiate_bitfield_from_args;
@@ -163,7 +163,9 @@ fn function_module_owner(func: &Arc<FunctionDef>) -> Option<Arc<str>> {
 /// Every registered definition of `name`: the overload set plus the flat-map
 /// entry (which is not always in the overload set).
 fn all_candidates(name: &str, functions: &HashMap<String, Arc<FunctionDef>>) -> Vec<Arc<FunctionDef>> {
-    let mut out = FUNCTION_OVERLOADS.with(|cell| cell.borrow().get(name).cloned()).unwrap_or_default();
+    let mut out = FUNCTION_OVERLOADS
+        .with(|cell| cell.borrow().get(name).cloned())
+        .unwrap_or_default();
     if let Some(flat) = functions.get(name) {
         if !out.iter().any(|c| Arc::ptr_eq(c, flat)) {
             out.push(Arc::clone(flat));
@@ -539,16 +541,11 @@ pub(crate) fn evaluate_call(
         let user_defined = functions.contains_key(name.as_str())
             || FUNCTION_OVERLOADS.with(|cell| cell.borrow().contains_key(name.as_str()));
         let builtin_wins = builtin_wins_over_user_fn(name.as_str(), user_defined);
-        if user_defined
-            && !builtin_wins
-            && super::interpreter_eval::is_user_facing_prelude(name.as_str())
-        {
+        if user_defined && !builtin_wins && super::interpreter_eval::is_user_facing_prelude(name.as_str()) {
             warn_prelude_shadow_once(name.as_str(), functions, false);
         }
         if builtin_wins {
-            if let Some(result) =
-                builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)?
-            {
+            if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
                 return Ok(result);
             }
         }
@@ -665,18 +662,27 @@ pub(crate) fn evaluate_call(
         // choice unambiguous; when no candidate matches we fall through to
         // E1002 rather than guess, because guessing is the defect above.
         if let Some(current) = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone()) {
-            if let Some((source_owner, source_name)) = crate::interpreter::owner_bindings(&current)
-                .and_then(|bindings| bindings.get(name).cloned())
+            if let Some((source_owner, source_name)) =
+                crate::interpreter::owner_bindings(&current).and_then(|bindings| bindings.get(name).cloned())
             {
                 if std::env::var("SIMPLE_DEBUG_ALIAS").is_ok() {
-                    eprintln!("[alias] name={name} current={current} source_owner={source_owner} source_name={source_name}");
+                    eprintln!(
+                        "[alias] name={name} current={current} source_owner={source_owner} source_name={source_name}"
+                    );
                     for c in all_candidates(&source_name, functions) {
                         eprintln!("[alias]   cand {} owner={:?}", c.name, function_module_owner(&c));
                     }
-                    eprintln!("[alias]   mangled={} present={}",
+                    eprintln!(
+                        "[alias]   mangled={} present={}",
                         crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name),
-                        functions.contains_key(&crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name)));
-                    if let Some(b) = crate::interpreter::owner_bindings(&source_owner).and_then(|x| x.get(&source_name).cloned()) {
+                        functions.contains_key(&crate::interpreter::flatten_owner_mangled_name(
+                            &source_owner,
+                            &source_name
+                        ))
+                    );
+                    if let Some(b) =
+                        crate::interpreter::owner_bindings(&source_owner).and_then(|x| x.get(&source_name).cloned())
+                    {
                         eprintln!("[alias]   next-hop={:?}", b);
                     } else {
                         eprintln!("[alias]   next-hop=NONE");
@@ -703,7 +709,10 @@ pub(crate) fn evaluate_call(
                 // wrapper and recurses until the stack overflows. The chain is
                 // therefore NOT trustworthy here and is deliberately not walked.
                 let mut target: Option<Arc<FunctionDef>> = functions
-                    .get(&crate::interpreter::flatten_owner_mangled_name(&source_owner, &source_name))
+                    .get(&crate::interpreter::flatten_owner_mangled_name(
+                        &source_owner,
+                        &source_name,
+                    ))
                     .cloned()
                     .or_else(|| candidate_declared_by(&source_owner, &source_name, functions));
 
@@ -724,10 +733,7 @@ pub(crate) fn evaluate_call(
                     let facade_stem = std::path::Path::new(&*source_owner).file_stem().map(|s| s.to_owned());
                     let mut outside: Vec<Arc<FunctionDef>> = all_candidates(&source_name, functions)
                         .into_iter()
-                        .filter(|candidate| {
-                            function_module_owner(candidate)
-                                .is_some_and(|owner| *owner != *current)
-                        })
+                        .filter(|candidate| function_module_owner(candidate).is_some_and(|owner| *owner != *current))
                         .collect();
                     if let Some(stem) = facade_stem {
                         let matching: Vec<Arc<FunctionDef>> = outside
@@ -745,8 +751,7 @@ pub(crate) fn evaluate_call(
                     }
                     // All survivors owned by ONE module means the choice is
                     // unambiguous even when that module registered several.
-                    let owners: Vec<Arc<str>> =
-                        outside.iter().filter_map(function_module_owner).collect();
+                    let owners: Vec<Arc<str>> = outside.iter().filter_map(function_module_owner).collect();
                     if !owners.is_empty() && owners.iter().all(|o| *o == owners[0]) {
                         target = outside.into_iter().next();
                     }
@@ -944,7 +949,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(module_name.clone()), &(field.clone()), &payload,
+                        "variant-construction",
+                        &(module_name.clone()),
+                        &(field.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: module_name.clone(),
@@ -981,7 +989,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(module_name.clone()), &(field.clone()), &payload,
+                        "variant-construction",
+                        &(module_name.clone()),
+                        &(field.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: module_name.clone(),
@@ -1138,7 +1149,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(type_name.clone()), &(method_name.clone()), &payload,
+                        "variant-construction",
+                        &(type_name.clone()),
+                        &(method_name.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: type_name.clone(),
@@ -1279,7 +1293,10 @@ pub(crate) fn evaluate_call(
                 // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                 // `EnumName.Variant(args)` construction path.
                 crate::interpreter::note_enum_payload_function_opt(
-                    "variant-construction", &("Option".to_string()), &(method_name.clone()), &payload,
+                    "variant-construction",
+                    &("Option".to_string()),
+                    &(method_name.clone()),
+                    &payload,
                 );
                 return Ok(Value::Enum {
                     enum_name: "Option".to_string(),
@@ -1307,7 +1324,10 @@ pub(crate) fn evaluate_call(
                 // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                 // `EnumName.Variant(args)` construction path.
                 crate::interpreter::note_enum_payload_function_opt(
-                    "variant-construction", &("Result".to_string()), &(method_name.clone()), &payload,
+                    "variant-construction",
+                    &("Result".to_string()),
+                    &(method_name.clone()),
+                    &payload,
                 );
                 return Ok(Value::Enum {
                     enum_name: "Result".to_string(),
@@ -1447,7 +1467,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(type_name.clone()), &(method_name.clone()), &payload,
+                        "variant-construction",
+                        &(type_name.clone()),
+                        &(method_name.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: type_name.clone(),

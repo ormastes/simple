@@ -231,4 +231,46 @@ mod tests {
         assert!(module.types.lookup("bool").is_some());
         assert!(module.types.lookup("str").is_some());
     }
+
+    #[test]
+    fn builtin_text_names_survive_colliding_nominal_registration() {
+        let mut types = TypeRegistry::new();
+        let nominal = types.register_named(
+            "text".to_string(),
+            HirType::Struct {
+                name: "text".to_string(),
+                fields: vec![("data".to_string(), TypeId::I64)],
+                has_snapshot: false,
+                generic_params: vec![],
+                is_generic_template: false,
+                type_bindings: HashMap::new(),
+            },
+        );
+
+        assert_ne!(nominal, TypeId::STRING);
+        assert_eq!(types.lookup("text"), Some(TypeId::STRING));
+        assert!(matches!(types.get(TypeId::STRING), Some(HirType::String)));
+        assert!(matches!(types.get(nominal), Some(HirType::Struct { name, .. }) if name == "text"));
+    }
+
+    #[test]
+    fn builtin_string_name_survives_colliding_nominal_update() {
+        let mut types = TypeRegistry::new();
+        let nominal = types.update_named(
+            "String".to_string(),
+            HirType::Struct {
+                name: "String".to_string(),
+                fields: vec![("data".to_string(), TypeId::I64)],
+                has_snapshot: false,
+                generic_params: vec![],
+                is_generic_template: false,
+                type_bindings: HashMap::new(),
+            },
+        );
+
+        assert_ne!(nominal, TypeId::STRING);
+        assert_eq!(types.lookup("String"), Some(TypeId::STRING));
+        assert!(matches!(types.get(TypeId::STRING), Some(HirType::String)));
+        assert!(matches!(types.get(nominal), Some(HirType::Struct { name, .. }) if name == "String"));
+    }
 }

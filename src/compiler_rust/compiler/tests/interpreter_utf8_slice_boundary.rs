@@ -61,7 +61,11 @@ fn bracket_slice_and_method_slice_agree_on_a_split_range() {
          if s[0:2].len() == s.slice(0, 2).len() and s.slice(0, 2).len() == s.substring(0, 2).len():\n        \
          return 0\n    1\n\nmain = main()"
     );
-    assert_eq!(run(&code), 0, "s[0:2], s.slice(0,2) and s.substring(0,2) must have the same length");
+    assert_eq!(
+        run(&code),
+        0,
+        "s[0:2], s.slice(0,2) and s.substring(0,2) must have the same length"
+    );
 }
 
 /// Reassembly is the invariant that U+FFFD destroyed: the original byte was
@@ -98,5 +102,9 @@ fn empty_and_overrun_ranges_are_clamped() {
          if s.slice(3, 3).len() == 0 and s.slice(6, 99).len() == 5 and s.slice(99, 99).len() == 0 \
          and s.slice(2, 1).len() == 0:\n        return 0\n    1\n\nmain = main()"
     );
-    assert_eq!(run(&code), 0, "empty/overrun ranges must clamp without changing length semantics");
+    assert_eq!(
+        run(&code),
+        0,
+        "empty/overrun ranges must clamp without changing length semantics"
+    );
 }

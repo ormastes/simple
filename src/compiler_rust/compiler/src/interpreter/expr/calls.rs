@@ -9,7 +9,8 @@ use crate::value::Value;
 
 use super::super::{
     evaluate_call, evaluate_call_args, evaluate_method_call, exec_method_function, find_and_exec_method_with_self,
-    find_and_exec_method_with_self_owned_values, object_method_exists, ClassDef, Enums, Env, FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MODULE_GLOBALS,
+    find_and_exec_method_with_self_owned_values, object_method_exists, ClassDef, Enums, Env, FunctionDef, ImplMethods,
+    BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MODULE_GLOBALS,
 };
 
 /// Call a method whose receiver is a *place* — a variable followed by an
@@ -172,17 +173,19 @@ pub(super) fn eval_call_expr(
                     // The generic path below copies the field into a temp binding,
                     // which aliases the array Arc and makes every mutator clone the
                     // whole backing Vec — O(N^2) accumulation into any object field.
-                    if let Some(result) = crate::interpreter::interpreter_helpers::patterns::try_field_array_mutation_in_place(
-                        var_name,
-                        field,
-                        method,
-                        args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )? {
+                    if let Some(result) =
+                        crate::interpreter::interpreter_helpers::patterns::try_field_array_mutation_in_place(
+                            var_name,
+                            field,
+                            method,
+                            args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?
+                    {
                         return Ok(Some(result));
                     }
                     // MECALL-OWNED (2026-08-22): `self.symbols.define(..)` in expression
@@ -191,7 +194,9 @@ pub(super) fn eval_call_expr(
                     // below copies the field into a temp binding, so every dict write
                     // inside the callee deep-copied that dict (linear in the table).
                     let owned_field_call = match env.get(var_name) {
-                        Some(Value::Object { fields: parent_fields, .. }) => match parent_fields.get(field) {
+                        Some(Value::Object {
+                            fields: parent_fields, ..
+                        }) => match parent_fields.get(field) {
                             Some(Value::Object { class: field_class, .. }) => {
                                 object_method_exists(classes, impl_methods, field_class, method)
                             }
@@ -202,7 +207,9 @@ pub(super) fn eval_call_expr(
                     if owned_field_call {
                         let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
                         let taken = match env.get_mut(var_name) {
-                            Some(Value::Object { fields: parent_fields, .. }) => Arc::make_mut(parent_fields).remove(field),
+                            Some(Value::Object {
+                                fields: parent_fields, ..
+                            }) => Arc::make_mut(parent_fields).remove(field),
                             _ => None,
                         };
                         if let Some(Value::Object {
@@ -225,7 +232,10 @@ pub(super) fn eval_call_expr(
                                 Some(pair) => pair,
                                 None => unreachable!("object_method_exists checked before the field was taken"),
                             };
-                            if let Some(Value::Object { fields: parent_fields, .. }) = env.get_mut(var_name) {
+                            if let Some(Value::Object {
+                                fields: parent_fields, ..
+                            }) = env.get_mut(var_name)
+                            {
                                 Arc::make_mut(parent_fields).insert(field.clone(), updated_field);
                             }
                             return Ok(Some(result));
@@ -341,7 +351,10 @@ pub(super) fn eval_call_expr(
                                     new_arr[real_idx as usize] = updated_elem;
                                     let new_arr_val = Value::Array(std::sync::Arc::new(new_arr));
                                     env.insert(arr_name.clone(), new_arr_val.clone());
-                                    if !env.is_local(arr_name) && super::super::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(arr_name)) {
+                                    if !env.is_local(arr_name)
+                                        && super::super::MODULE_GLOBALS
+                                            .with(|cell| cell.borrow().contains_key(arr_name))
+                                    {
                                         super::super::MODULE_GLOBALS.with(|cell| {
                                             cell.borrow_mut().insert(arr_name.clone(), new_arr_val);
                                         });
@@ -495,9 +508,9 @@ pub(super) fn eval_call_expr(
                             )?));
                         }
                     }
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::UNDEFINED_FIELD)
-                        .with_help(format!("check that field or method '{field}' exists on class {class_name}"));
+                    let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FIELD).with_help(format!(
+                        "check that field or method '{field}' exists on class {class_name}"
+                    ));
                     Err(CompileError::semantic_with_context(
                         format!("undefined field '{field}': class {class_name} has no such field or getter"),
                         ctx,

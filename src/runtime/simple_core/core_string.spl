@@ -30,7 +30,7 @@ extern fn rt_dict_len(dict: i64) -> i64
 extern fn rt_dict_contains(dict: i64, key: i64) -> i8
 extern fn rt_value_int(value: i64) -> i64
 extern fn rt_value_as_int(value: i64) -> i64
-extern fn rt_value_float(raw_bits: i64) -> i64
+extern fn rt_value_float(value: f64) -> i64
 extern fn rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> i64
 extern fn rt_enum_discriminant(value: i64) -> i64
 extern fn rt_enum_id(value: i64) -> i64
@@ -41,7 +41,6 @@ extern fn rt_enum_payload(value: i64) -> i64
 # copy of. When that object is not in the link set the symbol resolves to a
 # stub returning 0, so the audit is simply inactive -- fail-closed OFF, never
 # a link failure and never a behaviour change.
-extern fn rt_text_slice_audit_note_range(src: i64, src_len: i64, begin: i64, finish: i64) -> i64
 
 # ponytail: bootstrap-sized string sets only need a compact linear registry;
 # replace it only if equality profiles show pointer validation is hot.
@@ -97,6 +96,14 @@ fn write_string_to_fd(fd: i64, value: i64) -> i64:
     if len < 1:
         return 0
     return write(fd, string_data_ptr_value(ptr), len)
+
+pub fn rt_string_new_literal(bytes: i64, len: i64) -> i64:
+    rt_string_new(bytes, len)
+
+pub fn rt_text_slice_audit_note_range(src: i64, src_len: i64, begin: i64, finish: i64) -> i64:
+    # The optional UTF-8 audit is disabled in simple-core; the canonical
+    # symbol must still be owned by this runtime archive.
+    0
 
 fn is_space_byte(ch: i64) -> i64:
     if ch > 31 and ch < 33:
@@ -618,6 +625,35 @@ pub fn rt_native_neq(left: i64, right: i64) -> i64:
     if eq < 1:
         return 1
     return 0
+
+pub fn rt_native_cmp(left: i64, right: i64) -> i64:
+    val left_ptr = string_ptr(left)
+    val right_ptr = string_ptr(right)
+    if left_ptr > 0 and right_ptr > 0:
+        val left_len = string_len_ptr(left_ptr)
+        val right_len = string_len_ptr(right_ptr)
+        val common_len = if left_len < right_len: left_len else: right_len
+        val ordered = memcmp(string_data_ptr_value(left_ptr), string_data_ptr_value(right_ptr), common_len)
+        if ordered < 0: return -1
+        if ordered > 0: return 1
+        if left_len < right_len: return -1
+        if left_len > right_len: return 1
+        return 0
+    if (left & 7) == 2 and (right & 7) == 2:
+        val left_bits = left & -8
+        val right_bits = right & -8
+        if left_bits == right_bits: return 0
+        # IEEE-754 encodings are ascending for non-negative values and
+        # descending for negative values.  Tagged floats preserve all order-
+        # significant bits, so no host conversion helper is required.
+        if left_bits < 0 and right_bits < 0:
+            return if left_bits > right_bits: -1 else: 1
+        if left_bits < 0: return -1
+        if right_bits < 0: return 1
+        return if left_bits < right_bits: -1 else: 1
+    if left < right: return -1
+    if left > right: return 1
+    0
 
 pub fn rt_contains(collection: i64, value: i64) -> i8:
     val text_ptr = string_ptr(collection)
@@ -1461,7 +1497,7 @@ pub fn rt_string_to_float(value: i64) -> i64:
         if is_space_byte(spl_load_u8(cursor, 0)) < 1:
             return 3
         cursor = cursor + 1
-    return rt_value_float(spl_f64_to_bits(parsed))
+    return rt_value_float(parsed)
 
 # -- Lexer source cache (mirrors src/runtime/runtime_native.c
 # rt_lexer_source_set / rt_lexer_source_slice). The parser/lexer set the

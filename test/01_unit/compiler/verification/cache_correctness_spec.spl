@@ -11,20 +11,28 @@ use verification.fingerprint.{Fingerprint, simple_hash}
 use verification.state.{VerificationState}
 use verification.proof_unit.{ProofUnit}
 
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+val VERIFICATION_CACHE_SCRATCH = "/tmp/simple_vcache_unit_" + rt_getpid().to_text() + "_" + rt_time_now_unix_micros().to_text()
+
+fn verification_cache_scratch(name: text) -> text:
+    VERIFICATION_CACHE_SCRATCH + "_" + name
+
 # @cover src/compiler_rust/lib/std/src/verification/cache.spl 80%
 
 describe "Verification Cache":
     it "returns nil for unknown entries":
         step("Verify: returns nil for unknown entries")
         # @req: REQ-COMPILER-VERIFICATION-001
-        val cache = VerificationCache.new("/tmp/test-vcache-empty")
+        val cache = VerificationCache.new(verification_cache_scratch("empty"))
         val fp = Fingerprint.from_hashes("h1", "h2", [], "v4.x")
         val result = cache.lookup("unknown.spl", fp)
         expect(result).to_be_nil()
 
     it "stores and retrieves an entry with matching fingerprint":
         step("Verify: stores and retrieves an entry with matching fingerprint")
-        var cache = VerificationCache.new("/tmp/test-vcache-store")
+        var cache = VerificationCache.new(verification_cache_scratch("store"))
         val fp = Fingerprint.from_hashes("src1", "lean1", [], "v4.x")
         cache.store("my_module.spl", fp, VerificationState.Verified, {}, "v4.x")
         val result = cache.lookup("my_module.spl", fp)
@@ -38,7 +46,7 @@ describe "Verification Cache":
 
     it "returns nil when fingerprint has changed (stale detection)":
         step("Verify: returns nil when fingerprint has changed (stale detection)")
-        var cache = VerificationCache.new("/tmp/test-vcache-stale")
+        var cache = VerificationCache.new(verification_cache_scratch("stale"))
         val fp_old = Fingerprint.from_hashes("src1", "lean1", [], "v4.x")
         cache.store("stale_module.spl", fp_old, VerificationState.Verified, {}, "v4.x")
         # Now compute a different fingerprint (source changed)
@@ -48,7 +56,7 @@ describe "Verification Cache":
 
     it "never returns a Verified result when fingerprint mismatches":
         step("Verify: never returns a Verified result when fingerprint mismatches")
-        var cache = VerificationCache.new("/tmp/test-vcache-safety")
+        var cache = VerificationCache.new(verification_cache_scratch("safety"))
         val fp_original = Fingerprint.from_hashes("original", "lean_ok", [], "v4.x")
         cache.store("safety.spl", fp_original, VerificationState.Verified, {}, "v4.x")
         # Simulate a semantic change by altering the source hash
@@ -59,7 +67,7 @@ describe "Verification Cache":
 
     it "tracks cache statistics for hits and misses":
         step("Verify: tracks cache statistics for hits and misses")
-        var cache = VerificationCache.new("/tmp/test-vcache-stats")
+        var cache = VerificationCache.new(verification_cache_scratch("stats"))
         val fp = Fingerprint.from_hashes("s1", "l1", [], "v4.x")
         cache.store("hit.spl", fp, VerificationState.Verified, {}, "v4.x")
 
@@ -89,7 +97,7 @@ describe "Verification Cache":
     context "invalidate_dependents":
         it "removes cached entries for units depending on changed module":
             step("Verify: removes cached entries for units depending on changed module")
-            var cache = VerificationCache.new("/tmp/test-vcache-invalidate")
+            var cache = VerificationCache.new(verification_cache_scratch("invalidate"))
             val fp_a = Fingerprint.from_hashes("a", "la", [], "v4.x")
             val fp_b = Fingerprint.from_hashes("b", "lb", [], "v4.x")
             cache.store("a.spl", fp_a, VerificationState.Verified, {}, "v4.x")
@@ -115,7 +123,7 @@ describe "Verification Cache":
     context "clear":
         it "empties the cache completely":
             step("Verify: empties the cache completely")
-            var cache = VerificationCache.new("/tmp/test-vcache-clear")
+            var cache = VerificationCache.new(verification_cache_scratch("clear"))
             val fp = Fingerprint.from_hashes("x", "y", [], "v4.x")
             cache.store("one.spl", fp, VerificationState.Verified, {}, "v4.x")
             cache.store("two.spl", fp, VerificationState.Failed, {}, "v4.x")

@@ -103,7 +103,10 @@ fn me_method_field_push_is_linear_at_every_hop_depth() {
     // n^2/2 (8,000 vs 8,000,000 at n = 4,000).
     let budget = (4 * n) as u64;
     let direct = elems_cloned(n, 0);
-    assert!(direct <= budget, "direct receiver: {direct} elements cloned (budget {budget})");
+    assert!(
+        direct <= budget,
+        "direct receiver: {direct} elements cloned (budget {budget})"
+    );
     for depth in 1..=3usize {
         let cloned = elems_cloned(n, depth);
         eprintln!("[hop] depth {depth}: {cloned} elements cloned");
@@ -129,7 +132,11 @@ fn a_genuine_alias_still_forces_the_copy() {
         n + 1
     );
     let before = perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED.load(Ordering::Relaxed);
-    assert_eq!(run_program(&src), Ok(0), "an alias taken before the pushes must not observe them");
+    assert_eq!(
+        run_program(&src),
+        Ok(0),
+        "an alias taken before the pushes must not observe them"
+    );
     let cloned = perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED.load(Ordering::Relaxed) - before;
     eprintln!("[hop-alias] {cloned} elements cloned");
     assert!(

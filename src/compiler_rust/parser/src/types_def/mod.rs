@@ -732,8 +732,7 @@ impl<'a> Parser<'a> {
                         start_span,
                     ));
                 }
-            } else if (self.check(&TokenKind::Val) || self.check(&TokenKind::Var))
-                && !self.val_var_prefix_is_a_field()
+            } else if (self.check(&TokenKind::Val) || self.check(&TokenKind::Var)) && !self.val_var_prefix_is_a_field()
             {
                 // Skip val/var bindings inside struct bodies.
                 // These are desugared type variables: `val _tv_0 = [[text], [text]]`

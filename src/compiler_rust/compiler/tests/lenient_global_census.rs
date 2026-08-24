@@ -53,11 +53,7 @@ fn scan_roots() -> Vec<PathBuf> {
     let root = repo_root();
     match std::env::var("SIMPLE_CENSUS_ROOTS") {
         Ok(value) if !value.is_empty() => value.split(':').map(|r| root.join(r)).collect(),
-        _ => vec![
-            root.join("src/compiler"),
-            root.join("src/lib"),
-            root.join("src/app"),
-        ],
+        _ => vec![root.join("src/compiler"), root.join("src/lib"), root.join("src/app")],
     }
 }
 
@@ -186,8 +182,7 @@ fn census_of_lenient_unresolved_globals() {
         parsed_ok += 1;
         definitions_in(&module, &mut defined);
 
-        let mut lowerer =
-            Lowerer::with_module_resolver(ModuleResolver::single_file(path), path.to_path_buf());
+        let mut lowerer = Lowerer::with_module_resolver(ModuleResolver::single_file(path), path.to_path_buf());
         lowerer.set_strict_mode(false);
         lowerer.set_lenient_types(true);
         let Ok(output) = lowerer.lower_module_with_warnings(&module) else {
@@ -221,10 +216,7 @@ fn census_of_lenient_unresolved_globals() {
         bare.rsplit('.').next().is_some_and(|last| defined.contains(last))
     };
 
-    let undefined: BTreeMap<&String, &Vec<String>> = attributed
-        .iter()
-        .filter(|(name, _)| !is_defined(name))
-        .collect();
+    let undefined: BTreeMap<&String, &Vec<String>> = attributed.iter().filter(|(name, _)| !is_defined(name)).collect();
 
     println!("\n=== lenient unresolved-global census ===");
     println!("roots:                    {roots:?}");

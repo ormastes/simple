@@ -1,20 +1,19 @@
 use crate::{
-    rt_pool_state_close_v1, rt_pool_state_completed_v1, rt_pool_state_create_v1,
-    rt_pool_state_destroy_v1, rt_pool_state_join_idle_v1, rt_pool_state_outstanding_v1,
-    rt_pool_state_try_submit_i64_v1, rt_pool_task_join_i64_v1,
-    rt_pool_task_release_i64_v1, rt_pool_task_status_i64_v1,
+    rt_pool_state_close_v1, rt_pool_state_completed_v1, rt_pool_state_create_v1, rt_pool_state_destroy_v1,
+    rt_pool_state_join_idle_v1, rt_pool_state_outstanding_v1, rt_pool_state_try_submit_i64_v1,
+    rt_pool_task_join_i64_v1, rt_pool_task_release_i64_v1, rt_pool_task_status_i64_v1,
 };
 
 const DIRECT_FUNCTION_MARKER: i64 = 0x5344_4952_4543_5446;
 
-extern "C" fn plus_one(input: i64) -> i64 { input + 1 }
-extern "C" fn identity(input: i64) -> i64 { input }
+extern "C" fn plus_one(input: i64) -> i64 {
+    input + 1
+}
+extern "C" fn identity(input: i64) -> i64 {
+    input
+}
 
-unsafe fn submit(
-    state: i64,
-    entry: extern "C" fn(i64) -> i64,
-    input: i64,
-) -> i64 {
+unsafe fn submit(state: i64, entry: extern "C" fn(i64) -> i64, input: i64) -> i64 {
     // Native Simple function values are two-word direct-function descriptors.
     // The runtime validates and copies this descriptor before submit returns.
     let descriptor = [entry as usize as i64, DIRECT_FUNCTION_MARKER];
@@ -94,7 +93,9 @@ fn bounded_state_reuses_task_storage_for_100k_results() {
             assert_eq!(rt_pool_task_join_i64_v1(task), input + 1);
             assert_eq!(rt_pool_task_release_i64_v1(task), 1);
             assert_eq!(rt_pool_task_status_i64_v1(task), -1);
-            if input % 1000 == 0 { sampled_stale.push(task); }
+            if input % 1000 == 0 {
+                sampled_stale.push(task);
+            }
         }
         for stale in sampled_stale {
             assert_eq!(rt_pool_task_status_i64_v1(stale), -1);

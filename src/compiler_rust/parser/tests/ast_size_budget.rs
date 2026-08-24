@@ -33,8 +33,14 @@ fn node_stays_within_memory_budget() {
     eprintln!("size_of::<FunctionDef>() = {func}  (budget {FUNCTION_DEF_BUDGET})");
     eprintln!("size_of::<Expr>()        = {expr}  (budget {EXPR_BUDGET})");
     assert!(node <= NODE_BUDGET, "size_of::<Node>() = {node} B exceeds the {NODE_BUDGET} B budget; every AST node in the retained 807-module closure pays this");
-    assert!(func <= FUNCTION_DEF_BUDGET, "size_of::<FunctionDef>() = {func} B exceeds the {FUNCTION_DEF_BUDGET} B budget; it sets size_of::<Node>()");
-    assert!(expr <= EXPR_BUDGET, "size_of::<Expr>() = {expr} B exceeds the {EXPR_BUDGET} B budget");
+    assert!(
+        func <= FUNCTION_DEF_BUDGET,
+        "size_of::<FunctionDef>() = {func} B exceeds the {FUNCTION_DEF_BUDGET} B budget; it sets size_of::<Node>()"
+    );
+    assert!(
+        expr <= EXPR_BUDGET,
+        "size_of::<Expr>() = {expr} B exceeds the {EXPR_BUDGET} B budget"
+    );
 }
 
 /// Neighbour test, same defect class: the two boxed fields must stay boxed.
@@ -44,7 +50,12 @@ fn node_stays_within_memory_budget() {
 fn rarely_populated_function_fields_are_indirect() {
     // If either field is ever un-boxed these regain 336 B / 112 B inline.
     let f = FunctionDef {
-        span: simple_parser::token::Span { start: 0, end: 0, line: 1, column: 1 },
+        span: simple_parser::token::Span {
+            start: 0,
+            end: 0,
+            line: 1,
+            column: 1,
+        },
         name: String::new(),
         generic_params: Vec::new(),
         params: Vec::new(),
@@ -69,6 +80,14 @@ fn rarely_populated_function_fields_are_indirect() {
         type_bindings: Default::default(),
     };
     // `Option<Box<_>>` is niche-optimised to one pointer.
-    assert_eq!(std::mem::size_of_val(&f.contract), 8, "contract must be Option<Box<ContractBlock>> (8 B), not an inline 336 B ContractBlock");
-    assert_eq!(std::mem::size_of_val(&f.return_constraint), 8, "return_constraint must be Option<Box<Expr>> (8 B), not an inline 112 B Expr");
+    assert_eq!(
+        std::mem::size_of_val(&f.contract),
+        8,
+        "contract must be Option<Box<ContractBlock>> (8 B), not an inline 336 B ContractBlock"
+    );
+    assert_eq!(
+        std::mem::size_of_val(&f.return_constraint),
+        8,
+        "return_constraint must be Option<Box<Expr>> (8 B), not an inline 112 B Expr"
+    );
 }

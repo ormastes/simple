@@ -3,8 +3,8 @@
 use std::sync::Arc;
 use super::super::{
     eval_arg, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter, eval_array_find, eval_array_map,
-    eval_array_reduce, eval_dict_filter, eval_dict_for_each, eval_dict_map_values, evaluate_expr, exec_function, instantiate_class, Enums,
-    ImplMethods,
+    eval_array_reduce, eval_dict_filter, eval_dict_for_each, eval_dict_map_values, evaluate_expr, exec_function,
+    instantiate_class, Enums, ImplMethods,
 };
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
@@ -114,9 +114,9 @@ pub(crate) fn array_write_span(
     let dst_len = dst.len() as i64;
     let src_len = src_arr.len() as i64;
     if dst_off < 0 || src_off < 0 || dst_off + count > dst_len || src_off + count > src_len {
-        let ctx = ErrorContext::new()
-            .with_code(codes::INDEX_OUT_OF_BOUNDS)
-            .with_help("write_span never grows the destination; ensure dst_off+count <= dst.len() and src_off+count <= src.len()");
+        let ctx = ErrorContext::new().with_code(codes::INDEX_OUT_OF_BOUNDS).with_help(
+            "write_span never grows the destination; ensure dst_off+count <= dst.len() and src_off+count <= src.len()",
+        );
         return Err(CompileError::semantic_with_context(
             format!(
                 "write_span out of range: dst_off={dst_off} src_off={src_off} count={count} dst_len={dst_len} src_len={src_len}"
@@ -1572,7 +1572,10 @@ mod keys_materialization_tests {
             span: span(),
             pattern: Pattern::Identifier("x".to_string()),
             iterable,
-            body: Block { span: span(), statements: body },
+            body: Block {
+                span: span(),
+                statements: body,
+            },
             simd_requested: false,
             is_suspend: false,
             auto_enumerate: false,
@@ -1598,7 +1601,10 @@ mod keys_materialization_tests {
     fn keys_in_loop_body_materializes_once_per_iteration() {
         // The shape the ratchet forbids: an invariant receiver, called inside
         // the body. One full key array per iteration.
-        let n = run_loop(Expr::Identifier("ticks".to_string()), vec![Node::Expression(keys_call())]);
+        let n = run_loop(
+            Expr::Identifier("ticks".to_string()),
+            vec![Node::Expression(keys_call())],
+        );
         assert_eq!(
             n, ITERATIONS,
             "a .keys() inside the body must materialize once per iteration -- \
@@ -1630,7 +1636,10 @@ mod keys_materialization_tests {
                 span: span(),
                 pattern: Pattern::Identifier("x".to_string()),
                 iterable: keys_call(),
-                body: Block { span: span(), statements: vec![] },
+                body: Block {
+                    span: span(),
+                    statements: vec![],
+                },
                 simd_requested: false,
                 is_suspend: false,
                 auto_enumerate: false,
@@ -1648,7 +1657,10 @@ mod keys_materialization_tests {
                 )
             });
             result.expect("exec_for");
-            assert_eq!(n, 1, "hoisted .keys() must stay at 1 materialization for a {size}-entry dict");
+            assert_eq!(
+                n, 1,
+                "hoisted .keys() must stay at 1 materialization for a {size}-entry dict"
+            );
         }
     }
 }

@@ -1669,12 +1669,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        generate_spipe_docs_for_results_with_binary, handle_run_management_with_db,
-        platform_tag_matches_mode, targeted_discovery_is_empty,
+        generate_spipe_docs_for_results_with_binary, handle_run_management_with_db, platform_tag_matches_mode,
+        targeted_discovery_is_empty,
     };
-    use crate::cli::test_runner::types::{
-        OutputFormat, TestExecutionMode, TestFileResult, TestOptions, TestRunResult,
-    };
+    use crate::cli::test_runner::types::{OutputFormat, TestExecutionMode, TestFileResult, TestOptions, TestRunResult};
     use crate::test_db::{TestRunRecord, TestRunStatus, list_runs};
     use crate::unified_db::Database;
 

@@ -54,9 +54,8 @@ fn as_int(name: &str, args: &[Value], i: usize) -> Result<i64, CompileError> {
 
 fn as_text(name: &str, args: &[Value], i: usize) -> Result<CString, CompileError> {
     match &args[i] {
-        Value::Str(s) => CString::new(s.as_ref().clone()).map_err(|_| {
-            CompileError::runtime(format!("{name}: argument {i} contains an embedded NUL"))
-        }),
+        Value::Str(s) => CString::new(s.as_ref().clone())
+            .map_err(|_| CompileError::runtime(format!("{name}: argument {i} contains an embedded NUL"))),
         other => Err(CompileError::runtime(format!(
             "{name}: argument {i} must be a string, got {other:?}"
         ))),

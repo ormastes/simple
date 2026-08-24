@@ -506,7 +506,9 @@ fn warn_unprovided_use_names(
         if provided.contains(&name) {
             continue;
         }
-        let importer = current_file.map(|p| p.display().to_string()).unwrap_or_else(|| "<unknown>".to_string());
+        let importer = current_file
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
         if use_warning_seen(format!("{}\u{1}{}\u{1}{}", module_path.display(), name, importer)) {
             continue;
         }

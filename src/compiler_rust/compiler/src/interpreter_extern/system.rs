@@ -1237,10 +1237,7 @@ pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
             }
             if let Some(previous) = piped_find_slot(pid) {
                 if !std::ptr::eq(previous, slot) {
-                    let mut previous_child = previous
-                        .child
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut previous_child = previous.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     if previous.pid.load(Ordering::Acquire) == pid {
                         // PID reuse is possible only after the previous child
                         // was reaped. Retire its cached object without sending
@@ -1250,10 +1247,7 @@ pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
                     }
                 }
             }
-            let mut owned = slot
-                .child
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut owned = slot.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             *owned = Some(child);
             slot.pid.store(pid, Ordering::Release);
             Ok(Value::Int(pid))
@@ -1493,10 +1487,7 @@ pub fn rt_process_close_piped(args: &[Value]) -> Result<Value, CompileError> {
     let Some(slot) = piped_find_slot(pid) else {
         return Ok(Value::Bool(false));
     };
-    let mut owned = slot
-        .child
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut owned = slot.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if slot.pid.load(Ordering::Acquire) != pid {
         return Ok(Value::Bool(false));
     }
@@ -1819,8 +1810,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shell_exec_captures_stdout_and_exit_code_via_shell() {
-        let out = rt_shell_exec(&[Value::text("echo hello".to_string())])
-            .expect("rt_shell_exec should succeed");
+        let out = rt_shell_exec(&[Value::text("echo hello".to_string())]).expect("rt_shell_exec should succeed");
         let Value::Str(stdout) = out else {
             panic!("expected text result, got {out:?}");
         };
@@ -1845,10 +1835,8 @@ mod tests {
     fn shell_exec_honors_shell_metacharacters() {
         // Real callers (e.g. container_adapter.spl) rely on pipes/redirection
         // being interpreted, not passed literally to argv[1].
-        let out = rt_shell_exec(&[Value::text(
-            "echo one; echo two 1>&2 2>/dev/null".to_string(),
-        )])
-        .expect("rt_shell_exec should succeed");
+        let out = rt_shell_exec(&[Value::text("echo one; echo two 1>&2 2>/dev/null".to_string())])
+            .expect("rt_shell_exec should succeed");
         let Value::Str(stdout) = out else {
             panic!("expected text result, got {out:?}");
         };
@@ -1858,10 +1846,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shell_exec_tuple_returns_stdout_stderr_and_exit_code_separately() {
-        let result = rt_shell_exec_tuple(&[Value::text(
-            "printf out; printf err 1>&2; exit 3".to_string(),
-        )])
-        .expect("rt_shell_exec_tuple should succeed");
+        let result = rt_shell_exec_tuple(&[Value::text("printf out; printf err 1>&2; exit 3".to_string())])
+            .expect("rt_shell_exec_tuple should succeed");
         let Value::Tuple(parts) = result else {
             panic!("expected tuple result, got {result:?}");
         };

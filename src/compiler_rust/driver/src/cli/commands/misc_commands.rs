@@ -366,7 +366,9 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     // Deploying the verified stage over a shared path while another lane is
     // using it is unsafe; --no-deploy (or SIMPLE_BOOTSTRAP_NO_DEPLOY=1) makes
     // the run verification-only.
-    let mut no_deploy = std::env::var("SIMPLE_BOOTSTRAP_NO_DEPLOY").map(|v| v != "0").unwrap_or(false);
+    let mut no_deploy = std::env::var("SIMPLE_BOOTSTRAP_NO_DEPLOY")
+        .map(|v| v != "0")
+        .unwrap_or(false);
     for arg in args {
         if *arg == "--no-deploy" {
             no_deploy = true;
@@ -492,14 +494,15 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     println!();
     let inputs_after = bootstrap_closure_fingerprint(&workdir.join("src"));
     if inputs_before.is_empty() {
-        println!("ERROR — nothing was checked (no source files found under {}/src)", workdir.display());
+        println!(
+            "ERROR — nothing was checked (no source files found under {}/src)",
+            workdir.display()
+        );
         return 2;
     }
     if bootstrap_closure_digest(&inputs_after) != inputs_digest {
-        let before: std::collections::BTreeMap<&String, &String> =
-            inputs_before.iter().map(|(p, h)| (p, h)).collect();
-        let after: std::collections::BTreeMap<&String, &String> =
-            inputs_after.iter().map(|(p, h)| (p, h)).collect();
+        let before: std::collections::BTreeMap<&String, &String> = inputs_before.iter().map(|(p, h)| (p, h)).collect();
+        let after: std::collections::BTreeMap<&String, &String> = inputs_after.iter().map(|(p, h)| (p, h)).collect();
         let mut changed: Vec<String> = Vec::new();
         for (p, h) in &after {
             match before.get(p) {
@@ -523,7 +526,11 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     }
 
     // Verify
-    println!("Inputs stable: {} source file(s), tree={}", inputs_before.len(), inputs_digest);
+    println!(
+        "Inputs stable: {} source file(s), tree={}",
+        inputs_before.len(),
+        inputs_digest
+    );
     println!();
     match classify_bootstrap_verdict(&stage1.hash, &stage2.hash, &stage3.hash) {
         BootstrapVerdict::Verified => {
@@ -640,11 +647,7 @@ fn bootstrap_closure_fingerprint(root: &Path) -> Vec<(String, String)> {
                 .unwrap_or(false)
             {
                 if let Ok(h) = sha256_file(&path.to_string_lossy()) {
-                    let rel = path
-                        .strip_prefix(root)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .to_string();
+                    let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
                     out.push((rel, h));
                 }
             }
@@ -879,7 +882,9 @@ fn compile_stage(compiler: &str, output: &str, backend: &str, workdir: &Path) ->
                 if seed_supports_llvm(compiler) {
                     "llvm-lib"
                 } else {
-                    println!("  Backend auto: seed cannot use llvm (built without the 'llvm' feature) — using cranelift");
+                    println!(
+                        "  Backend auto: seed cannot use llvm (built without the 'llvm' feature) — using cranelift"
+                    );
                     "cranelift"
                 }
             }
@@ -1122,8 +1127,7 @@ fn seed_supports_llvm(compiler: &str) -> bool {
                     String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr)
                 );
-                !text.contains("'llvm' feature not enabled")
-                    && !text.contains("without the 'llvm' cargo feature")
+                !text.contains("'llvm' feature not enabled") && !text.contains("without the 'llvm' cargo feature")
             }
             // Could not run the probe: don't silently downgrade the backend.
             Err(_) => true,
@@ -1330,10 +1334,7 @@ mod bootstrap_determinism_tests {
         // empty closure. A fingerprint that quietly returned a stable digest
         // for an empty tree would make that branch unreachable and let a
         // bootstrap over zero source files report VERIFIED.
-        let dir = std::env::temp_dir().join(format!(
-            "bootstrap-determinism-empty-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("bootstrap-determinism-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(

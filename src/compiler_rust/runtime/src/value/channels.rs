@@ -92,11 +92,7 @@ pub extern "C" fn rt_channel_send(channel: RuntimeValue, value: RuntimeValue) ->
     };
     // The legacy channel API has no endpoint-role metadata. Until typed channel
     // endpoints land, its admitted compatibility route is parent -> thread.
-    let Some(packet) = RuntimeTransferPacket::inline_copy(
-        value,
-        TransferDomain::Parent,
-        TransferDomain::Thread,
-    ) else {
+    let Some(packet) = RuntimeTransferPacket::inline_copy(value, TransferDomain::Parent, TransferDomain::Thread) else {
         return 0;
     };
 
@@ -107,7 +103,7 @@ pub extern "C" fn rt_channel_send(channel: RuntimeValue, value: RuntimeValue) ->
         Ok(guard) => match guard.as_ref() {
             Some(sender) if sender.try_send(packet).is_ok() => 1,
             _ => 0,
-        }
+        },
         Err(_) => 0,
     };
     result
@@ -125,12 +121,12 @@ pub extern "C" fn rt_channel_recv(channel: RuntimeValue) -> RuntimeValue {
         return RuntimeValue::NIL;
     }
     let result = match state.receiver.lock() {
-        Ok(guard) => {
-            match guard.recv_timeout(Duration::from_secs(30)) {
-                Ok(packet) => packet.runtime_value_for_target(TransferDomain::Thread).unwrap_or(RuntimeValue::NIL),
-                Err(_) => RuntimeValue::NIL,
-            }
-        }
+        Ok(guard) => match guard.recv_timeout(Duration::from_secs(30)) {
+            Ok(packet) => packet
+                .runtime_value_for_target(TransferDomain::Thread)
+                .unwrap_or(RuntimeValue::NIL),
+            Err(_) => RuntimeValue::NIL,
+        },
         Err(_) => RuntimeValue::NIL,
     };
     result
@@ -149,7 +145,9 @@ pub extern "C" fn rt_channel_try_recv(channel: RuntimeValue) -> RuntimeValue {
     }
     let result = match state.receiver.lock() {
         Ok(guard) => match guard.try_recv() {
-            Ok(packet) => packet.runtime_value_for_target(TransferDomain::Thread).unwrap_or(RuntimeValue::NIL),
+            Ok(packet) => packet
+                .runtime_value_for_target(TransferDomain::Thread)
+                .unwrap_or(RuntimeValue::NIL),
             Err(TryRecvError::Empty) => RuntimeValue::NIL,
             Err(TryRecvError::Disconnected) => RuntimeValue::NIL,
         },
@@ -177,7 +175,9 @@ pub extern "C" fn rt_channel_recv_timeout(channel: RuntimeValue, timeout_ms: i64
     }
     let result = match state.receiver.lock() {
         Ok(guard) => match guard.recv_timeout(timeout) {
-            Ok(packet) => packet.runtime_value_for_target(TransferDomain::Thread).unwrap_or(RuntimeValue::NIL),
+            Ok(packet) => packet
+                .runtime_value_for_target(TransferDomain::Thread)
+                .unwrap_or(RuntimeValue::NIL),
             Err(_) => RuntimeValue::NIL,
         },
         Err(_) => RuntimeValue::NIL,
@@ -385,7 +385,13 @@ mod tests {
         .unwrap();
         state.sender.lock().unwrap().as_ref().unwrap().try_send(packet).unwrap();
         let received = state.receiver.lock().unwrap().try_recv().unwrap();
-        assert_eq!(received.runtime_value_for_target(TransferDomain::Thread).unwrap().as_int(), 42);
+        assert_eq!(
+            received
+                .runtime_value_for_target(TransferDomain::Thread)
+                .unwrap()
+                .as_int(),
+            42
+        );
     }
 
     #[test]

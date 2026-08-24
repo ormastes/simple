@@ -189,7 +189,23 @@ impl Lowerer {
             }
         }
 
-        let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
+        let lowered_receiver = self.lower_expr(receiver, ctx)?;
+        // Flow analysis may permit `.0` on Option<Tuple>/Result<Tuple>, but
+        // the lowered receiver is still the enum container.  Project the
+        // Some/Ok payload before deriving the positional element type and
+        // emitting Index, matching force-unwrap and interpreter semantics.
+        let payload_ty = self.result_like_payload_type(lowered_receiver.ty);
+        let recv_hir = Box::new(if let Some(payload_ty) = payload_ty {
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_enum_payload".to_string(),
+                    args: vec![lowered_receiver],
+                },
+                ty: payload_ty,
+            }
+        } else {
+            lowered_receiver
+        });
         if self.should_treat_unresolved_field_as_static_variant(receiver, &recv_hir, field) {
             if let Expr::Identifier(recv_name) = receiver {
                 return Ok(HirExpr {
@@ -307,8 +323,7 @@ impl Lowerer {
                                     return Err(LowerError::CannotInferFieldType {
                                         struct_name: candidate_struct_name.clone(),
                                         field: field.to_string(),
-                                        available_fields: self
-                                            .registry_field_names_for_struct(candidate_struct_name),
+                                        available_fields: self.registry_field_names_for_struct(candidate_struct_name),
                                     });
                                 }
                             }
@@ -891,9 +906,7 @@ impl Lowerer {
         let tuple_elem_ty = |tid: TypeId| -> Option<TypeId> {
             match self.module.types.get(tid) {
                 Some(HirType::Tuple(elems)) => Some(elems.get(index).copied().unwrap_or(TypeId::ANY)),
-                Some(HirType::LabeledTuple(fields)) => {
-                    Some(fields.get(index).map(|(_, t)| *t).unwrap_or(TypeId::ANY))
-                }
+                Some(HirType::LabeledTuple(fields)) => Some(fields.get(index).map(|(_, t)| *t).unwrap_or(TypeId::ANY)),
                 _ => None,
             }
         };

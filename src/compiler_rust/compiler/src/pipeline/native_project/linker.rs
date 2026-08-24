@@ -240,7 +240,9 @@ impl NativeProjectBuilder {
         None
     }
 
-    pub(super) fn simpleos_user_runtime_paths(cross_target: simple_common::target::Target) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    pub(super) fn simpleos_user_runtime_paths(
+        cross_target: simple_common::target::Target,
+    ) -> Option<(PathBuf, PathBuf, PathBuf)> {
         if cross_target.os != simple_common::target::TargetOS::SimpleOS
             || !matches!(
                 cross_target.arch,
@@ -2111,17 +2113,16 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
             ordered
         };
 
-        let freestanding_stub_obj =
-            generate_stub_object_freestanding(
-                temp_dir,
-                object_paths,
-                &boot_objects,
-                triple,
-                march,
-                mabi,
-                &self.project_root,
-                &self.output,
-            )?;
+        let freestanding_stub_obj = generate_stub_object_freestanding(
+            temp_dir,
+            object_paths,
+            &boot_objects,
+            triple,
+            march,
+            mabi,
+            &self.project_root,
+            &self.output,
+        )?;
         let weak_boot_defsyms = Self::freestanding_weak_boot_defsyms(object_paths, &boot_objects, imports)?;
         if !weak_boot_defsyms.is_empty() {
             eprintln!(

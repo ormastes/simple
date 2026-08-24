@@ -204,9 +204,7 @@ impl ExecutionManager for LocalExecutionManager {
         // `simple_common::engine_receipt`.
         match &self.backend {
             JitBackendImpl::Cranelift(jit) => {
-                simple_common::engine_receipt::stamp(
-                    simple_common::engine_receipt::Engine::CraneliftJit,
-                );
+                simple_common::engine_receipt::stamp(simple_common::engine_receipt::Engine::CraneliftJit);
                 // Dispatch based on argument count
                 unsafe {
                     match args.len() {
@@ -224,9 +222,7 @@ impl ExecutionManager for LocalExecutionManager {
             }
             #[cfg(feature = "llvm")]
             JitBackendImpl::Llvm(jit) => {
-                simple_common::engine_receipt::stamp(
-                    simple_common::engine_receipt::Engine::LlvmJit,
-                );
+                simple_common::engine_receipt::stamp(simple_common::engine_receipt::Engine::LlvmJit);
                 jit.execute(name, args).map_err(|e| format!("{}", e))
             }
         }

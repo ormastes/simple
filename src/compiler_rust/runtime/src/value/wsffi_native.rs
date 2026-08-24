@@ -470,11 +470,7 @@ pub extern "C" fn spl_wffi_call_f64(fptr: i64, args_rv: RuntimeValue, nargs: i64
 /// Interpreter/native-equivalent checked float transport. The second element
 /// is the exact IEEE-754 bit pattern and is meaningful only for status zero.
 #[no_mangle]
-pub extern "C" fn spl_wffi_call_f64_checked(
-    fptr: i64,
-    args_rv: RuntimeValue,
-    nargs: i64,
-) -> RuntimeValue {
+pub extern "C" fn spl_wffi_call_f64_checked(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> RuntimeValue {
     match try_call_f64_value(fptr, args_rv, nargs) {
         Ok(value) => checked_i64_result(WFFI_OK, value.to_bits() as i64),
         Err(status) => checked_i64_result(status, 0),

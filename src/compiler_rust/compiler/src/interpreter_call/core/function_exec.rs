@@ -6,8 +6,8 @@ use super::macros::*;
 use crate::error::CompileError;
 use crate::interpreter::{
     exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS, CURRENT_EXEC_MODULE,
-    FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, owned_global, owned_globals_snapshot,
-    owner_bindings, owner_has_globals, seed_owner_globals, set_owned_global, visit_pattern_binding_names,
+    FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, owned_global, owned_globals_snapshot, owner_bindings,
+    owner_has_globals, seed_owner_globals, set_owned_global, visit_pattern_binding_names,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
@@ -55,9 +55,7 @@ fn sffi_return_contract(return_type: Option<&Type>) -> SffiReturnContract {
         // `return` in a `-> unit` fn yield Value::Nil under a NonOptional
         // contract, faulting with "nil is forbidden by the non-optional
         // return contract".
-        Some(Type::Simple(name)) if name == "()" || name == "unit" || name == "void" => {
-            SffiReturnContract::Unit
-        }
+        Some(Type::Simple(name)) if name == "()" || name == "unit" || name == "void" => SffiReturnContract::Unit,
         Some(Type::Optional(_)) => SffiReturnContract::Optional,
         // Explicit generic spelling `Option<T>` / `Optional<T>` is equivalent
         // to the `T?` sugar (which parses to `Type::Optional`) and must be
@@ -72,6 +70,11 @@ fn sffi_return_contract(return_type: Option<&Type>) -> SffiReturnContract {
 
 fn is_language_unit_return_type(return_type: Option<&Type>) -> bool {
     matches!(sffi_return_contract(return_type), SffiReturnContract::Unit)
+}
+
+fn tail_exists_check_is_bool_predicate(func: &FunctionDef, body: &Block) -> bool {
+    matches!(func.return_type.as_ref(), Some(Type::Simple(name)) if name == "bool" || name == "Bool")
+        && matches!(body.statements.last(), Some(Node::Expression(Expr::ExistsCheck(_))))
 }
 
 pub(crate) fn validate_sffi_return_contract(
@@ -761,6 +764,17 @@ pub(crate) fn execute_function_body(
         None => validate_sffi_return_contract(&func.name, func.return_type.as_ref(), return_origin, None)?,
     };
 
+    // In a Bool return position `value.?` is a presence predicate, matching
+    // condition lowering and the HIR path. The tree interpreter evaluates
+    // `.?` in ordinary value position first (payload or Nil), so normalize the
+    // direct implicit-return form before enforcing the non-optional contract.
+    // Without this, an absent Dict.get() reaches E-SFFI-016 as a Nil return.
+    let result = if return_origin == SffiReturnOrigin::TailValue && tail_exists_check_is_bool_predicate(func, body) {
+        Value::Bool(!matches!(result, Value::Nil))
+    } else {
+        result
+    };
+
     // Auto-wrap return value in Some() when the declared return type is T? (Optional)
     // and the actual return value is not already an Option enum.
     // This handles `fn f() -> i32?: return 42` without explicit `return Some(42)`.
@@ -777,9 +791,7 @@ pub(crate) fn execute_function_body(
                 // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the implicit
                 // `T -> Option<T>` wrap on a function return, the exact shape
                 // behind `emit_call() -> LocalId?`.
-                crate::interpreter::note_enum_payload_function(
-                    "fn-return-some-wrap", "Option", "Some", 0, &result,
-                );
+                crate::interpreter::note_enum_payload_function("fn-return-some-wrap", "Option", "Some", 0, &result);
                 Value::Enum {
                     enum_name: "Option".to_string(),
                     variant: "Some".to_string(),
@@ -818,12 +830,7 @@ pub(crate) fn execute_function_body(
     };
 
     // Validate the full return contract (total, not unit-only).
-    let result = validate_sffi_return_contract(
-        &func.name,
-        func.return_type.as_ref(),
-        return_origin,
-        Some(result),
-    )?;
+    let result = validate_sffi_return_contract(&func.name, func.return_type.as_ref(), return_origin, Some(result))?;
 
     // Wrap in Promise if async and requested
     let result = if wrap_async && is_async_function(func) {
@@ -975,7 +982,7 @@ pub(crate) fn exec_function_with_values_and_self(
         )?;
 
         outer_env.release_scope();
-    let result = execute_function_body(
+        let result = execute_function_body(
             func,
             bound,
             &mut local_env,
@@ -1022,7 +1029,7 @@ pub(crate) fn exec_function_with_captured_env(
 
         let parked = park_written_back_arguments(func, args, outer_env, classes, self_mode);
         outer_env.release_scope();
-    let result = execute_function_body(
+        let result = execute_function_body(
             func,
             bound_args,
             &mut local_env,
@@ -1104,8 +1111,14 @@ fn is_value_type_struct(v: &Value, classes: &HashMap<String, Arc<ClassDef>>) -> 
 /// callee's new container; writing back a value-equal one is observably a
 /// no-op, so identity is the right — and O(1) — test.
 fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) -> bool {
-    let (Value::Object { fields: caller_fields, .. }, Value::Object { fields: callee_fields, .. }) =
-        (&mut *caller_val, callee_val)
+    let (
+        Value::Object {
+            fields: caller_fields, ..
+        },
+        Value::Object {
+            fields: callee_fields, ..
+        },
+    ) = (&mut *caller_val, callee_val)
     else {
         return false;
     };
@@ -1464,9 +1477,7 @@ fn write_back_mutable_arguments(
                         // no-change path restores it exactly.
                         let taken = outer_env.take_frame_owned(&caller_name);
                         let took = taken.is_some();
-                        if let Some(mut caller_val) =
-                            taken.or_else(|| outer_env.get(&caller_name).cloned())
-                        {
+                        if let Some(mut caller_val) = taken.or_else(|| outer_env.get(&caller_name).cloned()) {
                             if merge_shared_collection_fields(&mut caller_val, callee_val) {
                                 outer_env.insert(caller_name, caller_val);
                             } else if took {
@@ -1504,10 +1515,7 @@ fn write_back_mutable_arguments(
                             match obj_val {
                                 Value::Object { class, mut fields } => {
                                     if crate::perf_counters::enabled() {
-                                        crate::perf_counters::bump(
-                                            &crate::perf_counters::FIELD_WRITEBACK_CALLS,
-                                            1,
-                                        );
+                                        crate::perf_counters::bump(&crate::perf_counters::FIELD_WRITEBACK_CALLS, 1);
                                         if Arc::strong_count(&fields) > 1 {
                                             crate::perf_counters::bump(
                                                 &crate::perf_counters::FIELD_WRITEBACK_MAP_CLONES,

@@ -40,10 +40,7 @@ fn as_f64(v: &Value) -> Result<f64, CompileError> {
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
                 .with_help("expected a numeric argument");
-            Err(CompileError::semantic_with_context(
-                "expected numeric".to_string(),
-                ctx,
-            ))
+            Err(CompileError::semantic_with_context("expected numeric".to_string(), ctx))
         }
     }
 }

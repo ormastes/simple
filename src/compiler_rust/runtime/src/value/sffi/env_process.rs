@@ -1016,9 +1016,7 @@ pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
         // Wait indefinitely. A poisoned mutex is recovered rather than turned
         // into a permanent -1: the child map is plain data, and refusing to
         // ever wait again is strictly worse than reading a possibly-stale map.
-        let mut map = SPAWNED_CHILDREN
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut map = SPAWNED_CHILDREN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(mut child) = map.remove(&pid) {
             loop {
                 match child.wait() {
@@ -1036,9 +1034,7 @@ pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
         loop {
             {
-                let mut map = SPAWNED_CHILDREN
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut map = SPAWNED_CHILDREN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 if let Some(child) = map.get_mut(&pid) {
                     match child.try_wait() {
                         Ok(Some(status)) => {
@@ -1880,12 +1876,7 @@ mod tests {
             let value = b"ok";
             for name in ["", "TEST=INVALID", "TEST\0INVALID"] {
                 let (name_ptr, name_len) = str_to_ptr(name);
-                assert!(!rt_env_set(
-                    name_ptr,
-                    name_len,
-                    value.as_ptr(),
-                    value.len() as u64
-                ));
+                assert!(!rt_env_set(name_ptr, name_len, value.as_ptr(), value.len() as u64));
             }
 
             let (name_ptr, name_len) = str_to_ptr("TEST_ENV_NUL_SIMPLE");

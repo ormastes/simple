@@ -6,9 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use simple_parser::ast::{
-    BinOp, Block, Expr, FunctionDef, MatchArm, Node, Pattern, Type, UnaryOp,
-};
+use simple_parser::ast::{BinOp, Block, Expr, FunctionDef, MatchArm, Node, Pattern, Type, UnaryOp};
 
 use crate::value::{ACTOR_BUILTINS, BLOCKING_BUILTINS, GENERATOR_BUILTINS};
 
@@ -316,9 +314,7 @@ fn is_native_payload_free_enum_match(arms: &[MatchArm]) -> bool {
 fn is_native_safe_binding_pattern(pattern: &Pattern) -> bool {
     match pattern {
         Pattern::Identifier(_) | Pattern::MutIdentifier(_) | Pattern::Wildcard => true,
-        Pattern::Tuple(elements) | Pattern::Array(elements) => {
-            elements.iter().all(is_native_safe_binding_pattern)
-        }
+        Pattern::Tuple(elements) | Pattern::Array(elements) => elements.iter().all(is_native_safe_binding_pattern),
         Pattern::Struct { fields, .. } => fields.iter().all(|(_, p)| is_native_safe_binding_pattern(p)),
         _ => false,
     }
@@ -388,9 +384,7 @@ fn analyze_node(node: &Node, reasons: &mut Vec<FallbackReason>, mode: Compilabil
                 }
                 analyze_block(&arm.body, reasons, mode);
             }
-            if !(mode == CompilabilityMode::AotNative
-                && is_native_payload_free_enum_match(&match_stmt.arms))
-            {
+            if !(mode == CompilabilityMode::AotNative && is_native_payload_free_enum_match(&match_stmt.arms)) {
                 add_reason(reasons, FallbackReason::PatternMatch);
             }
         }
@@ -626,9 +620,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
                 }
                 analyze_block(&arm.body, reasons, mode);
             }
-            if !(mode == CompilabilityMode::AotNative
-                && is_native_payload_free_enum_match(arms))
-            {
+            if !(mode == CompilabilityMode::AotNative && is_native_payload_free_enum_match(arms)) {
                 add_reason(reasons, FallbackReason::PatternMatch);
             }
         }

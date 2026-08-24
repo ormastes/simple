@@ -692,14 +692,20 @@ pub unsafe extern "C" fn rt_cranelift_begin_function(module: i64, name_ptr: i64,
             }
         };
         let jit_name = JIT_MODULES.lock().unwrap().get(&module).and_then(|ctx| {
-            ctx.func_ids.iter().find_map(|(name, &id)| if id == func_id { Some(name.clone()) } else { None })
+            ctx.func_ids
+                .iter()
+                .find_map(|(name, &id)| if id == func_id { Some(name.clone()) } else { None })
         });
         match jit_name {
             Some(name) => name,
             None => {
                 let aot = AOT_MODULES.lock().unwrap();
                 let Some(ctx) = aot.get(&module) else { return 0 };
-                match ctx.func_ids.iter().find_map(|(name, &id)| if id == func_id { Some(name.clone()) } else { None }) {
+                match ctx
+                    .func_ids
+                    .iter()
+                    .find_map(|(name, &id)| if id == func_id { Some(name.clone()) } else { None })
+                {
                     Some(name) => name,
                     None => return 0,
                 }
@@ -1604,7 +1610,12 @@ fn rt_cranelift_emit_object_impl(module: i64, path: &str) -> bool {
 
 /// Define a function in an AOT module.
 #[no_mangle]
-pub unsafe extern "C" fn rt_cranelift_aot_define_function(module: i64, _name_ptr: i64, _name_len: i64, ctx: i64) -> bool {
+pub unsafe extern "C" fn rt_cranelift_aot_define_function(
+    module: i64,
+    _name_ptr: i64,
+    _name_len: i64,
+    ctx: i64,
+) -> bool {
     let finished = FINISHED_FUNCS.lock().unwrap().remove(&ctx);
     let Some(finished) = finished else { return false };
     let name = finished.name;
@@ -1926,7 +1937,12 @@ mod tests {
                 let result = rt_cranelift_iconst(ctx, CL_TYPE_I64, value);
                 rt_cranelift_return(ctx, result);
                 assert!(rt_cranelift_end_function(ctx) > 0);
-                assert!(rt_cranelift_aot_define_function(module, name.as_ptr() as i64, name.len() as i64, ctx));
+                assert!(rt_cranelift_aot_define_function(
+                    module,
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    ctx
+                ));
             }
 
             let temp_dir = tempfile::tempdir().unwrap();

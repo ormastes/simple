@@ -337,7 +337,14 @@ pub(crate) fn build_import_map(
                         if !c.fields.is_empty() {
                             let fields: Vec<(String, simple_parser::Type)> =
                                 c.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-                            record_struct_fields(&mut struct_defs, &mut unique_struct_owners, &mut duplicate_struct_defs, &prefix, &c.name, fields);
+                            record_struct_fields(
+                                &mut struct_defs,
+                                &mut unique_struct_owners,
+                                &mut duplicate_struct_defs,
+                                &prefix,
+                                &c.name,
+                                fields,
+                            );
                         }
                         for m in &c.methods {
                             if !m.body.statements.is_empty() {
@@ -396,7 +403,14 @@ pub(crate) fn build_import_map(
                         if !s.fields.is_empty() {
                             let fields: Vec<(String, simple_parser::Type)> =
                                 s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-                            record_struct_fields(&mut struct_defs, &mut unique_struct_owners, &mut duplicate_struct_defs, &prefix, &s.name, fields);
+                            record_struct_fields(
+                                &mut struct_defs,
+                                &mut unique_struct_owners,
+                                &mut duplicate_struct_defs,
+                                &prefix,
+                                &s.name,
+                                fields,
+                            );
                         }
                         for m in &s.methods {
                             if !m.body.statements.is_empty() {
@@ -500,7 +514,14 @@ pub(crate) fn build_import_map(
                                     .filter_map(|f| f.name.as_ref().map(|n| (n.clone(), f.ty.clone())))
                                     .collect();
                                 if !named.is_empty() {
-                                    record_struct_fields(&mut struct_defs, &mut unique_struct_owners, &mut duplicate_struct_defs, &prefix, &v.name, named);
+                                    record_struct_fields(
+                                        &mut struct_defs,
+                                        &mut unique_struct_owners,
+                                        &mut duplicate_struct_defs,
+                                        &prefix,
+                                        &v.name,
+                                        named,
+                                    );
                                 }
                             }
                         }

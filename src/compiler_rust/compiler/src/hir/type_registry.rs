@@ -134,7 +134,17 @@ impl TypeRegistry {
 
     pub fn register_named(&mut self, name: String, ty: HirType) -> TypeId {
         let id = self.register(ty);
-        self.name_to_id.insert(name, id);
+        // Text-primitive spellings are canonical language type names.  A nominal
+        // declaration with the same spelling still gets its own TypeId (and
+        // remains available to the declaration/impl registries), but must not
+        // replace the primitive mapping or mutate the primitive HirType.
+        //
+        // In particular, `struct text` used as an extension declaration must
+        // not turn later `text` annotations into that struct and thereby drop
+        // text methods into dynamic/ANY dispatch.
+        if !Self::is_canonical_builtin_name(&name) {
+            self.name_to_id.insert(name, id);
+        }
         id
     }
 
@@ -143,6 +153,9 @@ impl TypeRegistry {
     /// This is useful for forward declarations (e.g., enum placeholders).
     pub fn update_named(&mut self, name: String, ty: HirType) -> TypeId {
         if let Some(&existing_id) = self.name_to_id.get(&name) {
+            if Self::is_canonical_builtin_name(&name) {
+                return self.register(ty);
+            }
             // Update in place - keep the same TypeId
             self.types.insert(existing_id, ty);
             existing_id
@@ -150,6 +163,13 @@ impl TypeRegistry {
             // No existing type, register as new
             self.register_named(name, ty)
         }
+    }
+
+    fn is_canonical_builtin_name(name: &str) -> bool {
+        // This is intentionally limited to the four spellings of the text
+        // primitive.  Whether declarations may shadow numeric, sentinel, and
+        // dynamic built-ins is a separate language decision.
+        matches!(name, "str" | "Str" | "text" | "String")
     }
 
     pub fn get(&self, id: TypeId) -> Option<&HirType> {

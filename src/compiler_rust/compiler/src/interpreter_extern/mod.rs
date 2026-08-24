@@ -226,14 +226,19 @@ fn rt_browser_http_job_bool_stub(_args: &[Value]) -> Result<Value, CompileError>
 }
 
 fn rt_cli_command_v1_call_interpreter(args: &[Value]) -> Result<Value, CompileError> {
-    let [Value::Int(fn_ptr), Value::Int(interface_handle), Value::Int(provider_context),
-        Value::Int(request_ptr), Value::Int(request_len), Value::Int(result_ptr),
-        Value::Int(result_capacity)] = args else {
+    let [Value::Int(fn_ptr), Value::Int(interface_handle), Value::Int(provider_context), Value::Int(request_ptr), Value::Int(request_len), Value::Int(result_ptr), Value::Int(result_capacity)] =
+        args
+    else {
         return Ok(Value::Int(-1));
     };
     Ok(Value::Int(simple_runtime::value::sffi::rt_cli_command_v1_call(
-        *fn_ptr, *interface_handle, *provider_context, *request_ptr, *request_len,
-        *result_ptr, *result_capacity,
+        *fn_ptr,
+        *interface_handle,
+        *provider_context,
+        *request_ptr,
+        *request_len,
+        *result_ptr,
+        *result_capacity,
     ) as i64))
 }
 
@@ -278,16 +283,37 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_screenshot_is_enabled", screenshot_sffi::rt_screenshot_is_enabled);
     insert_simple!("rt_screenshot_set_refresh", screenshot_sffi::rt_screenshot_set_refresh);
     insert_simple!("rt_screenshot_is_refresh", screenshot_sffi::rt_screenshot_is_refresh);
-    insert_simple!("rt_screenshot_set_output_dir", screenshot_sffi::rt_screenshot_set_output_dir);
-    insert_simple!("rt_screenshot_get_output_dir", screenshot_sffi::rt_screenshot_get_output_dir);
+    insert_simple!(
+        "rt_screenshot_set_output_dir",
+        screenshot_sffi::rt_screenshot_set_output_dir
+    );
+    insert_simple!(
+        "rt_screenshot_get_output_dir",
+        screenshot_sffi::rt_screenshot_get_output_dir
+    );
     insert_simple!("rt_screenshot_set_context", screenshot_sffi::rt_screenshot_set_context);
-    insert_simple!("rt_screenshot_clear_context", screenshot_sffi::rt_screenshot_clear_context);
-    insert_simple!("rt_screenshot_clear_captures", screenshot_sffi::rt_screenshot_clear_captures);
-    insert_simple!("rt_screenshot_capture_before_terminal", screenshot_sffi::rt_screenshot_capture_before_terminal);
-    insert_simple!("rt_screenshot_capture_after_terminal", screenshot_sffi::rt_screenshot_capture_after_terminal);
+    insert_simple!(
+        "rt_screenshot_clear_context",
+        screenshot_sffi::rt_screenshot_clear_context
+    );
+    insert_simple!(
+        "rt_screenshot_clear_captures",
+        screenshot_sffi::rt_screenshot_clear_captures
+    );
+    insert_simple!(
+        "rt_screenshot_capture_before_terminal",
+        screenshot_sffi::rt_screenshot_capture_before_terminal
+    );
+    insert_simple!(
+        "rt_screenshot_capture_after_terminal",
+        screenshot_sffi::rt_screenshot_capture_after_terminal
+    );
     insert_simple!("rt_screenshot_exists", screenshot_sffi::rt_screenshot_exists);
     insert_simple!("rt_screenshot_get_path", screenshot_sffi::rt_screenshot_get_path);
-    insert_simple!("rt_screenshot_capture_count", screenshot_sffi::rt_screenshot_capture_count);
+    insert_simple!(
+        "rt_screenshot_capture_count",
+        screenshot_sffi::rt_screenshot_capture_count
+    );
     insert_simple!("rt_screenshot_free_string", screenshot_sffi::rt_screenshot_free_string);
     insert_simple!("bytes_to_u16_be", conversion::bytes_to_u16_be_fn);
     insert_simple!("bytes_to_u16_le", conversion::bytes_to_u16_le_fn);
@@ -373,22 +399,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // Resolves doc/08_tracking/bug/mem_infra_harden_check_symbol_divergence_2026-08-02.md.
     insert_simple!("rt_mem_harden_check_native", memory::rt_mem_harden_check);
     insert_simple!("rt_mem_guard_stats", memory::rt_mem_guard_stats);
-    insert_simple!(
-        "rt_transient_array_scope_begin",
-        memory::rt_transient_array_scope_begin
-    );
-    insert_simple!(
-        "rt_transient_array_scope_pause",
-        memory::rt_transient_array_scope_pause
-    );
-    insert_simple!(
-        "rt_transient_array_scope_end",
-        memory::rt_transient_array_scope_end
-    );
-    insert_simple!(
-        "rt_transient_heap_promote",
-        memory::rt_transient_heap_promote
-    );
+    insert_simple!("rt_transient_array_scope_begin", memory::rt_transient_array_scope_begin);
+    insert_simple!("rt_transient_array_scope_pause", memory::rt_transient_array_scope_pause);
+    insert_simple!("rt_transient_array_scope_end", memory::rt_transient_array_scope_end);
+    insert_simple!("rt_transient_heap_promote", memory::rt_transient_heap_promote);
     insert_simple!(
         "rt_transient_last_promoted_nodes",
         memory::rt_transient_last_promoted_nodes
@@ -397,9 +411,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_transient_last_promoted_bytes",
         memory::rt_transient_last_promoted_bytes
     );
-    insert_simple!("rt_transient_promotion_stats_reset", memory::rt_transient_promotion_stats_reset);
-    insert_simple!("rt_transient_scope_promoted_nodes", memory::rt_transient_scope_promoted_nodes);
-    insert_simple!("rt_transient_scope_promoted_bytes", memory::rt_transient_scope_promoted_bytes);
+    insert_simple!(
+        "rt_transient_promotion_stats_reset",
+        memory::rt_transient_promotion_stats_reset
+    );
+    insert_simple!(
+        "rt_transient_scope_promoted_nodes",
+        memory::rt_transient_scope_promoted_nodes
+    );
+    insert_simple!(
+        "rt_transient_scope_promoted_bytes",
+        memory::rt_transient_scope_promoted_bytes
+    );
     insert_simple!("min", math::min);
     insert_simple!("__mock_policy_check", mock_policy::mock_policy_check);
     insert_simple!("__mock_policy_disable", mock_policy::mock_policy_disable);
@@ -762,13 +785,19 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_pool_uses_work_stealing", concurrency::rt_pool_uses_work_stealing);
     insert_simple!("rt_pool_safepoint", concurrency::rt_pool_safepoint);
     insert_simple!("rt_pool_state_create_v1", concurrency::rt_pool_state_v1_unavailable);
-    insert_simple!("rt_pool_state_try_submit_i64_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!(
+        "rt_pool_state_try_submit_i64_v1",
+        concurrency::rt_pool_state_v1_unavailable
+    );
     insert_simple!("rt_pool_task_status_i64_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_task_join_i64_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_task_release_i64_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_state_close_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_state_join_idle_v1", concurrency::rt_pool_state_v1_unavailable);
-    insert_simple!("rt_pool_state_outstanding_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!(
+        "rt_pool_state_outstanding_v1",
+        concurrency::rt_pool_state_v1_unavailable
+    );
     insert_simple!("rt_pool_state_pending_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_state_running_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_state_completed_v1", concurrency::rt_pool_state_v1_unavailable);
@@ -967,7 +996,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_event_elapsed_ns", gpu::rt_cuda_event_elapsed_ns_fn);
     insert_simple!("rt_cuda_event_destroy", gpu::rt_cuda_event_destroy_fn);
     insert_simple!("rt_vulkan_timestamp_supported", gpu::rt_vulkan_timestamp_supported_fn);
-    insert_simple!("rt_vulkan_timestamp_period_fnum", gpu::rt_vulkan_timestamp_period_fnum_fn);
+    insert_simple!(
+        "rt_vulkan_timestamp_period_fnum",
+        gpu::rt_vulkan_timestamp_period_fnum_fn
+    );
     insert_simple!("rt_vulkan_query_elapsed_ns", gpu::rt_vulkan_query_elapsed_ns_fn);
     insert_simple!(
         "rt_cuda_device_compute_capability",
@@ -999,7 +1031,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_module_load_data", gpu::rt_cuda_module_load_data_fn);
     insert_simple!("rt_cuda_module_load_data_array", gpu::rt_cuda_module_load_data_array_fn);
     insert_simple!("rt_cuda_module_load_data_bytes", gpu::rt_cuda_module_load_data_bytes_fn);
-    insert_simple!("rt_cuda_launch_kernel_name_array", gpu::rt_cuda_launch_kernel_name_array_fn);
+    insert_simple!(
+        "rt_cuda_launch_kernel_name_array",
+        gpu::rt_cuda_launch_kernel_name_array_fn
+    );
     insert_simple!("rt_cuda_module_load", gpu::rt_cuda_module_load_fn);
     insert_simple!("rt_cuda_module_unload", gpu::rt_cuda_module_unload_fn);
     insert_simple!("rt_cuda_sync", gpu::rt_cuda_sync_fn);
@@ -1627,15 +1662,42 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_package_mkdir_all", package::mkdir_all);
     insert_simple!("rt_package_remove_dir_all", package::remove_dir_all);
     insert_simple!("rt_package_sha256", package::sha256);
-    insert_simple!("rt_packed_span_v1_resolve_base", packed_span::rt_packed_span_v1_resolve_base_fn);
-    insert_simple!("rt_packed_span_v1_probe_verdict", packed_span::rt_packed_span_v1_probe_verdict_fn);
-    insert_simple!("rt_packed_span_v1_flags_bits", packed_span::rt_packed_span_v1_flags_bits_fn);
-    insert_simple!("rt_packed_span_v1_last_verdict", packed_span::rt_packed_span_v1_last_verdict_fn);
-    insert_simple!("rt_packed_span_v1_last_rejection", packed_span::rt_packed_span_v1_last_rejection_fn);
-    insert_simple!("rt_packed_span_v1_rejected_count", packed_span::rt_packed_span_v1_rejected_count_fn);
-    insert_simple!("rt_packed_span_v1_resolve_count", packed_span::rt_packed_span_v1_resolve_count_fn);
-    insert_simple!("rt_packed_span_v1_admitted_element_count", packed_span::rt_packed_span_v1_admitted_element_count_fn);
-    insert_simple!("rt_packed_span_v1_struct_size", packed_span::rt_packed_span_v1_struct_size_fn);
+    insert_simple!(
+        "rt_packed_span_v1_resolve_base",
+        packed_span::rt_packed_span_v1_resolve_base_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_probe_verdict",
+        packed_span::rt_packed_span_v1_probe_verdict_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_flags_bits",
+        packed_span::rt_packed_span_v1_flags_bits_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_last_verdict",
+        packed_span::rt_packed_span_v1_last_verdict_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_last_rejection",
+        packed_span::rt_packed_span_v1_last_rejection_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_rejected_count",
+        packed_span::rt_packed_span_v1_rejected_count_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_resolve_count",
+        packed_span::rt_packed_span_v1_resolve_count_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_admitted_element_count",
+        packed_span::rt_packed_span_v1_admitted_element_count_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_struct_size",
+        packed_span::rt_packed_span_v1_struct_size_fn
+    );
     insert_simple!("rt_path_absolute", file_io::rt_path_absolute);
     insert_simple!("rt_path_basename", file_io::rt_path_basename);
     insert_simple!("rt_path_dirname", file_io::rt_path_dirname);
@@ -1733,11 +1795,20 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_readdir_free", file_io::rt_readdir_free);
     insert_simple!("rt_remove", file_io::rt_remove);
     insert_simple!("rt_rsa_pss_sha256_verify", signatures::rt_rsa_pss_sha256_verify);
-    insert_simple!("rt_rsa_pss_sha256_verify_checked", signatures::rt_rsa_pss_sha256_verify_checked);
+    insert_simple!(
+        "rt_rsa_pss_sha256_verify_checked",
+        signatures::rt_rsa_pss_sha256_verify_checked
+    );
     insert_simple!("rt_rsa_pss_sha384_verify", signatures::rt_rsa_pss_sha384_verify);
-    insert_simple!("rt_rsa_pss_sha384_verify_checked", signatures::rt_rsa_pss_sha384_verify_checked);
+    insert_simple!(
+        "rt_rsa_pss_sha384_verify_checked",
+        signatures::rt_rsa_pss_sha384_verify_checked
+    );
     insert_simple!("rt_rsa_pss_sha512_verify", signatures::rt_rsa_pss_sha512_verify);
-    insert_simple!("rt_rsa_pss_sha512_verify_checked", signatures::rt_rsa_pss_sha512_verify_checked);
+    insert_simple!(
+        "rt_rsa_pss_sha512_verify_checked",
+        signatures::rt_rsa_pss_sha512_verify_checked
+    );
     insert_simple!("rt_rsa_sha256_sign", signatures::rt_rsa_sha256_sign);
     insert_simple!("rt_rsa_sha256_sign_checked", signatures::rt_rsa_sha256_sign_checked);
     insert_simple!("rt_rsa_sha256_verify", signatures::rt_rsa_sha256_verify);
@@ -1845,7 +1916,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_engine2d_simd_fill_span_u32", simd::rt_engine2d_simd_fill_span_u32);
     insert_simple!("rt_engine2d_simd_copy_span_u32", simd::rt_engine2d_simd_copy_span_u32);
     insert_simple!("rt_engine2d_simd_blend_span_u32", simd::rt_engine2d_simd_blend_span_u32);
-    insert_simple!("rt_engine2d_simd_blend_const_span_u32", simd::rt_engine2d_simd_blend_const_span_u32);
+    insert_simple!(
+        "rt_engine2d_simd_blend_const_span_u32",
+        simd::rt_engine2d_simd_blend_const_span_u32
+    );
     insert_simple!("rt_engine2d_simd_copy_row_u32", simd::rt_engine2d_simd_copy_row_u32);
     insert_simple!("rt_engine2d_simd_blend_row_u32", simd::rt_engine2d_simd_blend_row_u32);
     insert_simple!("rt_simd_aes_round_last_u8x16", simd::rt_simd_aes_round_last_u8x16);
@@ -2071,14 +2145,38 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_torch_torchtensor_shape", torch::rt_torch_torchtensor_shape);
     insert_simple!("rt_torch_torchtensor_sub", torch::rt_torch_torchtensor_sub);
     insert_simple!("rt_torch_torchtensor_sum", torch::rt_torch_torchtensor_sum);
-    insert_simple!("rt_torch_torchtensor_sum_checked", torch::rt_torch_torchtensor_sum_checked);
-    insert_simple!("rt_torch_torchtensor_mean_checked", torch::rt_torch_torchtensor_mean_checked);
-    insert_simple!("rt_torch_torchtensor_min_checked", torch::rt_torch_torchtensor_min_checked);
-    insert_simple!("rt_torch_torchtensor_max_checked", torch::rt_torch_torchtensor_max_checked);
-    insert_simple!("rt_torch_torchtensor_norm_checked", torch::rt_torch_torchtensor_norm_checked);
-    insert_simple!("rt_torch_torchtensor_det_checked", torch::rt_torch_torchtensor_det_checked);
-    insert_simple!("rt_torch_torchtensor_std_checked", torch::rt_torch_torchtensor_std_checked);
-    insert_simple!("rt_torch_torchtensor_var_checked", torch::rt_torch_torchtensor_var_checked);
+    insert_simple!(
+        "rt_torch_torchtensor_sum_checked",
+        torch::rt_torch_torchtensor_sum_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_mean_checked",
+        torch::rt_torch_torchtensor_mean_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_min_checked",
+        torch::rt_torch_torchtensor_min_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_max_checked",
+        torch::rt_torch_torchtensor_max_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_norm_checked",
+        torch::rt_torch_torchtensor_norm_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_det_checked",
+        torch::rt_torch_torchtensor_det_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_std_checked",
+        torch::rt_torch_torchtensor_std_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_var_checked",
+        torch::rt_torch_torchtensor_var_checked
+    );
     insert_simple!("rt_torch_to_cpu", torch::rt_torch_to_cpu);
     insert_simple!("rt_torch_to_cuda", torch::rt_torch_to_cuda);
     insert_simple!("rt_typed_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
@@ -2294,7 +2392,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_vulkan_push_constants", gpu::rt_vulkan_push_constants_fn);
     insert_simple!("rt_vulkan_push_constants_array", gpu::rt_vulkan_push_constants_array_fn);
-    insert_simple!("rt_vulkan_present_buffer_regions", gpu::rt_vulkan_present_buffer_regions_fn);
+    insert_simple!(
+        "rt_vulkan_present_buffer_regions",
+        gpu::rt_vulkan_present_buffer_regions_fn
+    );
     insert_simple!("rt_vulkan_select_device", gpu::rt_vulkan_select_device_fn);
     insert_simple!("rt_vulkan_shutdown", gpu::rt_vulkan_shutdown_fn);
     insert_simple!("rt_vulkan_submit_and_wait", gpu::rt_vulkan_submit_and_wait_fn);
@@ -2415,14 +2516,20 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_wffi_call_f64_checked", wsffi::spl_wffi_call_f64_checked);
     insert_simple!("spl_wffi_call_i64", wsffi::spl_wffi_call_i64);
     insert_simple!("spl_wffi_call_i64_checked", wsffi::spl_wffi_call_i64_checked);
-    insert_simple!("spl_wffi_call_i64_with_bytes", dynamic_sffi::spl_wffi_call_i64_with_bytes_fn);
+    insert_simple!(
+        "spl_wffi_call_i64_with_bytes",
+        dynamic_sffi::spl_wffi_call_i64_with_bytes_fn
+    );
     insert_simple!(
         "spl_wffi_call_i64_with_bytes_checked",
         dynamic_sffi::spl_wffi_call_i64_with_bytes_checked_fn
     );
     insert_simple!("spl_fonts_call_init_blob", dynamic_sffi::spl_fonts_call_init_blob_fn);
     insert_simple!("spl_fonts_call_init_path", dynamic_sffi::spl_fonts_call_init_path_fn);
-    insert_simple!("spl_fonts_call_layout_text", dynamic_sffi::spl_fonts_call_layout_text_fn);
+    insert_simple!(
+        "spl_fonts_call_layout_text",
+        dynamic_sffi::spl_fonts_call_layout_text_fn
+    );
     insert_simple!("rt_provider_query_v1_call", dynamic_sffi::rt_provider_query_v1_call_fn);
     insert_simple!("rt_cli_command_v1_call", rt_cli_command_v1_call_interpreter);
     insert_simple!("sqrt", math::sqrt);
@@ -2543,10 +2650,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         net_tls_client::rt_tls_client_write_timeout
     );
     insert_simple!("rt_tls_client_read", net_tls_client::rt_tls_client_read);
-    insert_simple!(
-        "rt_tls_client_read_timeout",
-        net_tls_client::rt_tls_client_read_timeout
-    );
+    insert_simple!("rt_tls_client_read_timeout", net_tls_client::rt_tls_client_read_timeout);
     insert_simple!("rt_tls_client_close", net_tls_client::rt_tls_client_close);
     insert_simple!(
         "rt_tls_get_protocol_version",
@@ -2562,10 +2666,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_browser_http_job_take_response",
         rt_browser_http_job_take_response_stub
     );
-    insert_simple!(
-        "rt_browser_http_job_take_error",
-        rt_browser_http_job_take_error_stub
-    );
+    insert_simple!("rt_browser_http_job_take_error", rt_browser_http_job_take_error_stub);
     insert_simple!("rt_browser_http_job_cancel", rt_browser_http_job_bool_stub);
     insert_simple!("rt_browser_http_job_free", rt_browser_http_job_bool_stub);
     // PTY (pseudo-terminal) operations
@@ -2856,8 +2957,6 @@ pub(crate) fn call_extern_function_with_values(
         return sdl3::dispatch(name, &evaluated);
     }
 
-
-
     // The rt_audio_* family (31 names) is implemented once, in C, at
     // src/runtime/runtime_audio.c (a real miniaudio-backed engine). It was
     // absent from every interpreter path -- not a registration gap alone,
@@ -3051,13 +3150,22 @@ mod tests {
         // arity is enforced, and NOT as a generic "unknown extern function".
         let err = rt_heap_ref_wellformed_fn(&[]).unwrap_err();
         let text = format!("{err}");
-        assert!(text.contains("rt_heap_ref_wellformed expects 1 argument"), "got: {text}");
+        assert!(
+            text.contains("rt_heap_ref_wellformed expects 1 argument"),
+            "got: {text}"
+        );
         assert!(!text.contains("unknown extern function"), "got: {text}");
     }
 
     #[test]
     fn actor_hosted_symbols_keep_dynamic_fallback() {
-        for name in ["rt_actor_spawn", "rt_actor_send", "rt_actor_stop", "rt_actor_try_send", "rt_actor_recv"] {
+        for name in [
+            "rt_actor_spawn",
+            "rt_actor_send",
+            "rt_actor_stop",
+            "rt_actor_try_send",
+            "rt_actor_recv",
+        ] {
             assert!(simple_common::RUNTIME_SYMBOL_NAMES.contains(&name));
             assert!(!EXTERN_DISPATCH.contains_key(name));
         }
@@ -3305,9 +3413,7 @@ mod tests {
             EXTERN_DISPATCH.contains_key("rt_string_ends_with"),
             "missing rt_string_ends_with"
         );
-        let handler = EXTERN_DISPATCH
-            .get("rt_string_ends_with")
-            .expect("registered handler");
+        let handler = EXTERN_DISPATCH.get("rt_string_ends_with").expect("registered handler");
 
         let cases: &[(&str, &str, bool)] = &[
             ("notes.md", ".md", true),
@@ -3319,7 +3425,8 @@ mod tests {
             // multi-byte suffix: byte-wise tail compare must not split a
             // codepoint or report a false hit
             ("héllo…", "…", true),
-            ("héllo…", "o…", false),
+            ("héllo…", "o…", true),
+            ("héllo…", "lo…x", false),
         ];
 
         for &(subject, suffix, expected) in cases {
@@ -3354,9 +3461,7 @@ mod tests {
             EXTERN_DISPATCH.contains_key("rt_string_rfind"),
             "missing rt_string_rfind"
         );
-        let handler = EXTERN_DISPATCH
-            .get("rt_string_rfind")
-            .expect("registered handler");
+        let handler = EXTERN_DISPATCH.get("rt_string_rfind").expect("registered handler");
 
         let cases: &[(&str, &str, i64)] = &[
             ("a/b/c", "/", 3),
@@ -3384,11 +3489,7 @@ mod tests {
                 &impl_methods,
             )
             .expect("rt_string_rfind should not error on two text arguments");
-            assert_eq!(
-                result,
-                Value::Int(expected),
-                "rt_string_rfind({subject:?}, {needle:?})"
-            );
+            assert_eq!(result, Value::Int(expected), "rt_string_rfind({subject:?}, {needle:?})");
         }
     }
 
@@ -3396,9 +3497,7 @@ mod tests {
     /// must be an error, not `false`.
     #[test]
     fn rt_string_ends_with_rejects_missing_second_argument() {
-        let handler = EXTERN_DISPATCH
-            .get("rt_string_ends_with")
-            .expect("registered handler");
+        let handler = EXTERN_DISPATCH.get("rt_string_ends_with").expect("registered handler");
         let mut env = Env::new();
         let mut functions = HashMap::new();
         let mut classes = HashMap::new();

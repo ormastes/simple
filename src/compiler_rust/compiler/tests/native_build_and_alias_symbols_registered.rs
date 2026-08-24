@@ -55,9 +55,7 @@ fn compiler_owned_table_is_live() {
         );
     }
     assert!(
-        !simple_compiler::codegen::jit::compiler_owned_symbol_resolves(
-            "rt_definitely_not_a_compiler_owned_symbol"
-        ),
+        !simple_compiler::codegen::jit::compiler_owned_symbol_resolves("rt_definitely_not_a_compiler_owned_symbol"),
         "compiler-owned table answers yes for a nonexistent symbol; it cannot discriminate"
     );
 }
@@ -166,8 +164,7 @@ const UNRESOLVED_BASELINE: &[&str] = &[
 fn listed_runtime_symbols_do_not_regress() {
     let provider = registered();
     let resolves = |name: &str| {
-        provider.get_symbol(name).is_some()
-            || simple_compiler::codegen::jit::compiler_owned_symbol_resolves(name)
+        provider.get_symbol(name).is_some() || simple_compiler::codegen::jit::compiler_owned_symbol_resolves(name)
     };
 
     // Non-vacuity: the resolution mechanism must be live and must discriminate,
@@ -176,7 +173,10 @@ fn listed_runtime_symbols_do_not_regress() {
         !RUNTIME_SYMBOL_NAMES.is_empty(),
         "RUNTIME_SYMBOL_NAMES is empty; this sweep checks nothing"
     );
-    assert!(resolves("rt_array_new"), "symbol registry is inert; this sweep proves nothing");
+    assert!(
+        resolves("rt_array_new"),
+        "symbol registry is inert; this sweep proves nothing"
+    );
     assert!(
         !resolves("rt_definitely_not_a_runtime_symbol"),
         "registry answers Some for a nonexistent symbol; it cannot discriminate"

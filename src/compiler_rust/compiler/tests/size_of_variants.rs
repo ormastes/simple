@@ -1,5 +1,11 @@
 use std::mem::size_of;
-#[test] fn variant_sizes() { macro_rules! p { ($t:ty) => { println!("SZ {:>6}  {}", size_of::<$t>(), stringify!($t)); }; }
+#[test]
+fn variant_sizes() {
+    macro_rules! p {
+        ($t:ty) => {
+            println!("SZ {:>6}  {}", size_of::<$t>(), stringify!($t));
+        };
+    }
     p!(simple_parser::ast::ActorDef);
     p!(simple_parser::ast::AdmitStmt);
     p!(simple_parser::ast::AopAdvice);

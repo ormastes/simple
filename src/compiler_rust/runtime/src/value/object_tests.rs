@@ -250,15 +250,25 @@ fn test_enum_invalid_value() {
 
 #[test]
 fn test_unwrap_or_self_only_unwraps_canonical_option() {
-    let option_some = rt_enum_new(
-        super::OPTION_ENUM_ID,
-        0,
-        RuntimeValue::from_int(42),
-    );
+    let option_some = rt_enum_new(super::OPTION_ENUM_ID, 0, RuntimeValue::from_int(42));
     assert_eq!(super::rt_unwrap_or_self(option_some).as_int(), 42);
 
     let user_enum = rt_enum_new(77, 0, RuntimeValue::from_int(42));
     assert_eq!(super::rt_unwrap_or_self(user_enum), user_enum);
+}
+
+#[test]
+fn test_option_probes_reject_forged_heap_handles_without_dereference() {
+    // Flat optional payloads are not necessarily tagged RuntimeValues. Values
+    // congruent to one modulo eight therefore look heap-shaped even though
+    // their masked addresses are invalid. Presence checks and migration-form
+    // unwrapping must treat them as raw payloads, never dereference them.
+    for raw in [9_u64, 17, (-7_i64) as u64, u64::MAX] {
+        let payload = RuntimeValue::from_raw(raw);
+        assert!(super::rt_is_some(payload));
+        assert!(!super::rt_is_none(payload));
+        assert_eq!(super::rt_unwrap_or_self(payload), payload);
+    }
 }
 
 #[test]

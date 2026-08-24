@@ -567,12 +567,27 @@ fn replace_bare_placeholder_fixed(expr: Expr, slot: usize) -> Expr {
             then_branch: Box::new(replace_bare_placeholder_fixed(*then_branch, slot)),
             else_branch: else_branch.map(|e| Box::new(replace_bare_placeholder_fixed(*e, slot))),
         },
-        Expr::Tuple(items) => Expr::Tuple(items.into_iter().map(|e| replace_bare_placeholder_fixed(e, slot)).collect()),
-        Expr::Array(items) => Expr::Array(items.into_iter().map(|e| replace_bare_placeholder_fixed(e, slot)).collect()),
+        Expr::Tuple(items) => Expr::Tuple(
+            items
+                .into_iter()
+                .map(|e| replace_bare_placeholder_fixed(e, slot))
+                .collect(),
+        ),
+        Expr::Array(items) => Expr::Array(
+            items
+                .into_iter()
+                .map(|e| replace_bare_placeholder_fixed(e, slot))
+                .collect(),
+        ),
         Expr::Dict(entries) => Expr::Dict(
             entries
                 .into_iter()
-                .map(|(k, v)| (replace_bare_placeholder_fixed(k, slot), replace_bare_placeholder_fixed(v, slot)))
+                .map(|(k, v)| {
+                    (
+                        replace_bare_placeholder_fixed(k, slot),
+                        replace_bare_placeholder_fixed(v, slot),
+                    )
+                })
                 .collect(),
         ),
         Expr::FString { parts, .. } => {

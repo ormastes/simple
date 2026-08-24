@@ -1629,6 +1629,23 @@ impl MirLowering:
                 self.builder = b_dict_typed
                 self.runtime_array_locals[dict_keys_typed.id] = true
                 self.mark_runtime_value_local(dict_keys_typed.id)
+                # Preserve the named aggregate carried by a typed Dict view.
+                # The for-loop lowering consumes array_element_struct_syms and
+                # transfers it to struct_value_syms on the loop variable. If
+                # this edge is missing, `for value in d.values()` retains the
+                # right MirType but field resolution still defaults every
+                # access to byte offset zero/i64.
+                var dict_view_struct_name = ""
+                if method == "values":
+                    dict_view_struct_name = self.array_element_struct_syms.get(receiver_local.id) ?? ""
+                if dict_view_struct_name == "":
+                    match dict_keys_elem_type.kind:
+                        case MirTypeKind.Struct(struct_symbol):
+                            if val struct_definition = self.symbols.get_symbol_raw(struct_symbol.id):
+                                dict_view_struct_name = struct_definition.name
+                        case _: ()
+                if dict_view_struct_name != "" and dict_view_struct_name != "__runtime_array__":
+                    self.array_element_struct_syms[dict_keys_typed.id] = dict_view_struct_name
                 return dict_keys_typed
             return receiver_local
 

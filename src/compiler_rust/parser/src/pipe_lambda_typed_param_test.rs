@@ -6,9 +6,9 @@ mod pipe_lambda_typed_param {
     use crate::ast::{Expr, LambdaParam, Node};
 
     fn parse_expr(src: &str) -> Expr {
-        let module = crate::Parser::new(src).parse().unwrap_or_else(|e| {
-            panic!("expected `{src}` to parse, got error: {e:?}")
-        });
+        let module = crate::Parser::new(src)
+            .parse()
+            .unwrap_or_else(|e| panic!("expected `{src}` to parse, got error: {e:?}"));
         let stmt = module
             .items
             .into_iter()

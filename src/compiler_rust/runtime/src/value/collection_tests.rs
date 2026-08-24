@@ -480,8 +480,7 @@ fn test_rt_string_split_reuses_host_and_provider_resolution_without_override() {
         let value_bytes = b"one,two";
         let delimiter_bytes = b",";
         let value = collections::rt_string_new(value_bytes.as_ptr(), value_bytes.len() as u64);
-        let delimiter =
-            collections::rt_string_new(delimiter_bytes.as_ptr(), delimiter_bytes.len() as u64);
+        let delimiter = collections::rt_string_new(delimiter_bytes.as_ptr(), delimiter_bytes.len() as u64);
 
         let host_epoch_start = simple_simd::host_cpu_config_resolution_count_for_tests();
         let provider_epoch_start = collections::collection_provider_resolution_count_for_tests();
@@ -535,8 +534,7 @@ fn test_rt_string_split_reuses_host_and_provider_resolution_without_override() {
             1
         );
         assert_eq!(
-            collections::collection_provider_resolution_count_for_tests()
-                - refreshed_provider_epoch_start,
+            collections::collection_provider_resolution_count_for_tests() - refreshed_provider_epoch_start,
             1
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), equivalent_source);
@@ -1326,17 +1324,33 @@ fn test_array_any_all_apply_the_predicate() {
 
     // Row 2: elements all falsy, predicate true everywhere. This is the
     // direction that catches a constant-0 implementation.
-    assert_eq!(rt_array_any(a000, closure(is_zero)), 1, "any([0,0,0], x==0) must be true");
-    assert_eq!(rt_array_all(a000, closure(is_zero)), 1, "all([0,0,0], x==0) must be true");
+    assert_eq!(
+        rt_array_any(a000, closure(is_zero)),
+        1,
+        "any([0,0,0], x==0) must be true"
+    );
+    assert_eq!(
+        rt_array_all(a000, closure(is_zero)),
+        1,
+        "all([0,0,0], x==0) must be true"
+    );
 
     // Short-circuit: stop at the first decisive element, as the interpreter does.
     CALLS.store(0, Ordering::SeqCst);
     assert_eq!(rt_array_any(a123, closure(ge2)), 1);
-    assert_eq!(CALLS.load(Ordering::SeqCst), 2, "any must stop at the first truthy element");
+    assert_eq!(
+        CALLS.load(Ordering::SeqCst),
+        2,
+        "any must stop at the first truthy element"
+    );
 
     CALLS.store(0, Ordering::SeqCst);
     assert_eq!(rt_array_all(a123, closure(lt2)), 0);
-    assert_eq!(CALLS.load(Ordering::SeqCst), 2, "all must stop at the first falsy element");
+    assert_eq!(
+        CALLS.load(Ordering::SeqCst),
+        2,
+        "all must stop at the first falsy element"
+    );
 
     // Empty receiver is vacuously true for `all`, false for `any`.
     let empty = array(&[]);
@@ -2544,7 +2558,6 @@ fn rt_reverse_mut_reverses_in_place_and_returns_the_receiver() {
     let e = rt_array_new(0);
     assert_eq!(rt_array_len(rt_reverse_mut(e)), 0);
 }
-
 
 /// Build a text `RuntimeValue` from a `&str`, for the mutator tests below.
 #[cfg(test)]

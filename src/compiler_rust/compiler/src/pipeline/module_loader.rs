@@ -15,9 +15,8 @@ use simple_parser::Parser;
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    flatten_owner_mangled_name, normalize_path_key, tag_function_module_owner,
-    FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
-    FLATTEN_MODULE_OWNER_ATTR_PREFIX,
+    flatten_owner_mangled_name, normalize_path_key, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
 };
 use crate::stdlib_variant::stdlib_root_candidates;
 use crate::CompileError as _;
@@ -658,12 +657,7 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         is_type_only: false,
                         is_lazy: false,
                     };
-                    append_flattened_import_binding_markers(
-                        &mut items,
-                        &reexport_as_use,
-                        module_path,
-                        &owner_name,
-                    );
+                    append_flattened_import_binding_markers(&mut items, &reexport_as_use, module_path, &owner_name);
                 }
                 next_global_already_tagged = false;
             }
@@ -1318,19 +1312,23 @@ pub fn load_module_with_imports(path: &Path, visited: &mut HashSet<PathBuf>) -> 
 /// populated. Only names with two or more DISTINCT layouts are kept, matching
 /// native_project's `record_struct_fields` semantics (identical re-imports of
 /// the same layout are not collisions).
-pub fn collect_duplicate_struct_defs(
-    module: &Module,
-) -> HashMap<String, Vec<Vec<(String, Type)>>> {
+pub fn collect_duplicate_struct_defs(module: &Module) -> HashMap<String, Vec<Vec<(String, Type)>>> {
     let mut by_name: HashMap<String, Vec<Vec<(String, Type)>>> = HashMap::new();
     for item in &module.items {
         let (name, fields) = match item {
             Node::Struct(s) if !s.fields.is_empty() => (
                 &s.name,
-                s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect::<Vec<_>>(),
+                s.fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .collect::<Vec<_>>(),
             ),
             Node::Class(c) if !c.fields.is_empty() => (
                 &c.name,
-                c.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect::<Vec<_>>(),
+                c.fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .collect::<Vec<_>>(),
             ),
             _ => continue,
         };
@@ -1341,7 +1339,6 @@ pub fn collect_duplicate_struct_defs(
     }
     by_name.into_iter().filter(|(_, v)| v.len() > 1).collect()
 }
-
 
 pub fn load_module_with_imports_for_target(
     path: &Path,
@@ -1580,11 +1577,7 @@ fn warn_duplicate_private_signatures(module: &Module) {
                 // pass stamps every method via `tag_node_function_owners`), so the
                 // first method's owner attributes the class. A method-less class
                 // falls back to "<entry file>".
-                let owner = c
-                    .methods
-                    .first()
-                    .map(function_owner_module)
-                    .unwrap_or("<entry file>");
+                let owner = c.methods.first().map(function_owner_module).unwrap_or("<entry file>");
                 classes_by_name.entry(c.name.as_str()).or_default().push(owner);
             }
             _ => {}

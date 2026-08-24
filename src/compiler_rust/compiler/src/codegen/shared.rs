@@ -25,7 +25,11 @@ pub(crate) fn enum_runtime_type_id(runtime_name: &str) -> u32 {
         _ => {}
     }
 
-    let mut hash = if runtime_name.is_empty() { 0 } else { 0xcbf29ce484222325_u64 };
+    let mut hash = if runtime_name.is_empty() {
+        0
+    } else {
+        0xcbf29ce484222325_u64
+    };
     for byte in runtime_name.bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
@@ -460,15 +464,11 @@ pub fn get_body_kind(
 )> {
     let any = crate::hir::TypeId::ANY;
     match inst {
-        MirInst::ActorSpawn { body_block, .. } => {
-            Some((*body_block, BodyKind::Actor, Vec::new(), Vec::new(), any))
-        }
+        MirInst::ActorSpawn { body_block, .. } => Some((*body_block, BodyKind::Actor, Vec::new(), Vec::new(), any)),
         MirInst::GeneratorCreate { body_block, .. } => {
             Some((*body_block, BodyKind::Generator, Vec::new(), Vec::new(), any))
         }
-        MirInst::FutureCreate { body_block, .. } => {
-            Some((*body_block, BodyKind::Future, Vec::new(), Vec::new(), any))
-        }
+        MirInst::FutureCreate { body_block, .. } => Some((*body_block, BodyKind::Future, Vec::new(), Vec::new(), any)),
         MirInst::ClosureCreate {
             body_block: Some(bb),
             lambda_params,
@@ -498,8 +498,7 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
         let live_ins_map = func.compute_live_ins();
         for block in &func.blocks {
             for (inst_index, inst) in block.instructions.iter().enumerate() {
-                if let Some((body_block, kind, lambda_params, capture_regs, lambda_return_type)) = get_body_kind(inst)
-                {
+                if let Some((body_block, kind, lambda_params, capture_regs, lambda_return_type)) = get_body_kind(inst) {
                     let name = format!("{}_outlined_{}", func.name, body_block.0);
                     if seen.contains(&name) {
                         continue;

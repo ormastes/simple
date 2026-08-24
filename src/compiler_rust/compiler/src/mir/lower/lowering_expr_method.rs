@@ -646,7 +646,11 @@ impl<'a> MirLowerer<'a> {
                 })
                 .unwrap_or(TypeId::ANY);
             let receiver_reg = self.lower_expr(receiver)?;
-            let runtime_fn = if method == "max" { "rt_array_max" } else { "rt_array_min" };
+            let runtime_fn = if method == "max" {
+                "rt_array_max"
+            } else {
+                "rt_array_min"
+            };
             let raw_result = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -682,7 +686,11 @@ impl<'a> MirLowerer<'a> {
         {
             let receiver_reg = self.lower_expr(receiver)?;
             let n_reg = self.lower_expr(&args[0])?;
-            let runtime_fn = if method == "take" { "rt_array_take" } else { "rt_array_drop" };
+            let runtime_fn = if method == "take" {
+                "rt_array_take"
+            } else {
+                "rt_array_drop"
+            };
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -1041,9 +1049,7 @@ impl<'a> MirLowerer<'a> {
         // pointer of the SAME element type as the receiver — no unboxing
         // needed, matching the `"slice" | "filter" | "map" =>
         // Some(receiver.ty)` table entry in hir/lower/expr/mod.rs.
-        if matches!(method, "copy" | "clone")
-            && args.is_empty()
-            && self.receiver_is_array(receiver, receiver_local_ty)
+        if matches!(method, "copy" | "clone") && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty)
         {
             let receiver_reg = self.lower_expr(receiver)?;
             return self.with_func(|func, current_block| {
@@ -1466,8 +1472,8 @@ impl<'a> MirLowerer<'a> {
         // HIR type is what SELECTS this unbox, and without the unbox the tagged
         // word flows into an int-typed VReg.
         // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
-        let is_slot_yielding_accessor = (args.is_empty() && matches!(method, "first" | "last" | "pop"))
-            || (args.len() == 1 && method == "remove");
+        let is_slot_yielding_accessor =
+            (args.is_empty() && matches!(method, "first" | "last" | "pop")) || (args.len() == 1 && method == "remove");
         if is_slot_yielding_accessor {
             let element_ty = self
                 .type_registry
@@ -1640,8 +1646,8 @@ impl<'a> MirLowerer<'a> {
             // `p.push(0.1); p[0] == 0.1` was false on the JIT path. Same fix the
             // array-literal lowering already has (lowering_expr_collection.rs).
             // See doc/08_tracking/bug/seed_f64_array_element_precision_mask_2026-07-19.md.
-            let needs_push_float_boxing = matches!(push_arg_ty, TypeId::F32 | TypeId::F64)
-                && !receiver_element_is_function;
+            let needs_push_float_boxing =
+                matches!(push_arg_ty, TypeId::F32 | TypeId::F64) && !receiver_element_is_function;
             if push_arg_ty == TypeId::U64 {
                 arg_regs[0] = self.box_u64_runtime_value(arg_regs[0])?;
             } else if needs_push_boxing || needs_push_float_boxing {
@@ -1732,10 +1738,7 @@ impl<'a> MirLowerer<'a> {
         // so `[T].index_of(v)` above is untouched; the receiver and needle
         // are tagged string handles like the one-arg `rt_index_of` route, and
         // `start` stays a raw i64 as `rt_text_find` expects.
-        if method == "index_of"
-            && args.len() == 2
-            && !self.receiver_is_array(receiver, receiver_local_ty)
-        {
+        if method == "index_of" && args.len() == 2 && !self.receiver_is_array(receiver, receiver_local_ty) {
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();

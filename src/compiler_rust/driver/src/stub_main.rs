@@ -33,7 +33,5 @@ pub extern "C" fn spl_get_arg(index: i64) -> *const std::os::raw::c_char {
     if index < 0 {
         return std::ptr::null();
     }
-    args()
-        .get(index as usize)
-        .map_or(std::ptr::null(), |arg| arg.as_ptr())
+    args().get(index as usize).map_or(std::ptr::null(), |arg| arg.as_ptr())
 }

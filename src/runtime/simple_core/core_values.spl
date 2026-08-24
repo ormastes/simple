@@ -10,12 +10,66 @@ extern fn calloc(count: i64, size: i64) -> i64
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
 extern fn abort()
+extern fn spl_f64_to_bits(value: f64) -> i64
+
+var transient_scope_active: bool = false
+var transient_scope_paused: bool = false
+var transient_last_nodes: i64 = 0
+var transient_last_bytes: i64 = 0
+var transient_scope_nodes: i64 = 0
+var transient_scope_bytes: i64 = 0
 
 pub fn __simple_runtime_init() -> i64:
     return 0
 
 pub fn __simple_runtime_shutdown() -> i64:
     return 0
+
+pub fn rt_is_jit_runtime() -> bool:
+    false
+
+pub fn rt_transient_array_scope_begin() -> bool:
+    if transient_scope_active:
+        return false
+    transient_scope_active = true
+    transient_scope_paused = false
+    rt_transient_promotion_stats_reset()
+    transient_scope_nodes = 0
+    transient_scope_bytes = 0
+    true
+
+pub fn rt_transient_array_scope_pause() -> bool:
+    if not transient_scope_active:
+        return false
+    transient_scope_paused = true
+    true
+
+pub fn rt_transient_heap_promote(value: i64) -> bool:
+    # simple-core allocations are process-owned; promotion is therefore a
+    # validated ownership transition with no graph relocation.
+    if not transient_scope_active or not transient_scope_paused:
+        return false
+    transient_last_nodes = if value == 0: 0 else: 1
+    transient_last_bytes = 0
+    transient_scope_nodes = transient_scope_nodes + transient_last_nodes
+    true
+
+pub fn rt_transient_last_promoted_nodes() -> i64: transient_last_nodes
+pub fn rt_transient_last_promoted_bytes() -> i64: transient_last_bytes
+
+pub fn rt_transient_promotion_stats_reset():
+    transient_last_nodes = 0
+    transient_last_bytes = 0
+
+pub fn rt_transient_scope_promoted_nodes() -> i64: transient_scope_nodes
+pub fn rt_transient_scope_promoted_bytes() -> i64: transient_scope_bytes
+
+pub fn rt_transient_array_scope_end() -> bool:
+    if not transient_scope_active:
+        return false
+    transient_scope_active = false
+    transient_scope_paused = false
+    true
 
 pub fn rt_value_int(value: i64) -> i64:
     return value << 3
@@ -46,7 +100,8 @@ pub fn rt_pool_safepoint() -> i64:
     # simple-core bootstrap execution is single-threaded.
     return 0
 
-pub fn rt_value_float(raw_bits: i64) -> i64:
+pub fn rt_value_float(value: f64) -> i64:
+    val raw_bits = spl_f64_to_bits(value)
     return (raw_bits & -8) | 2
 
 pub fn rt_value_bool(value: i64) -> i64:

@@ -23,7 +23,11 @@ fn matcher_of(node: &Node) -> Option<(String, usize)> {
     else {
         return None;
     };
-    let Expr::Call { callee, args: recv_args } = receiver.as_ref() else {
+    let Expr::Call {
+        callee,
+        args: recv_args,
+    } = receiver.as_ref()
+    else {
         return None;
     };
     if !matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect") || recv_args.len() != 1 {
@@ -48,7 +52,8 @@ fn matcher_word_form_folds_into_a_single_matcher_call() {
     ] {
         let items = parse(src);
         assert_eq!(items.len(), 1, "{src:?} must be ONE statement, not a split pair");
-        let (found, argc) = matcher_of(&items[0]).unwrap_or_else(|| panic!("{src:?} did not fold into expect(..).matcher(..)"));
+        let (found, argc) =
+            matcher_of(&items[0]).unwrap_or_else(|| panic!("{src:?} did not fold into expect(..).matcher(..)"));
         assert_eq!(found, matcher, "{src:?}");
         assert_eq!(argc, 1, "{src:?} matcher must carry its expected value");
     }

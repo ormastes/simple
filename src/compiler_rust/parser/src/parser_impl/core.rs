@@ -549,9 +549,9 @@ impl<'a> Parser<'a> {
                 self.parse_pub_item_with_doc(doc_comment)
             }
             TokenKind::Mut if is_prefixed_let_decl => self.parse_mut_let(), // Legacy: mut let
-            TokenKind::Let => self.parse_let(),     // Legacy: let
-            TokenKind::Val => self.parse_val(),     // New: val (immutable)
-            TokenKind::Var => self.parse_var(),     // New: var (mutable)
+            TokenKind::Let => self.parse_let(),                             // Legacy: let
+            TokenKind::Val => self.parse_val(),                             // New: val (immutable)
+            TokenKind::Var => self.parse_var(),                             // New: var (mutable)
             TokenKind::Const => self.parse_const(),
             TokenKind::Static => self.parse_static(),
             TokenKind::Shared if is_prefixed_let_decl => self.parse_shared_let(),
@@ -787,9 +787,7 @@ impl<'a> Parser<'a> {
             TokenKind::Defer => self.parse_defer(),
             TokenKind::Errdefer => self.parse_errdefer(),
             TokenKind::Assert => self.parse_assert(),
-            TokenKind::Assume | TokenKind::Admit if soft_kw_stmt_as_ident => {
-                self.parse_expression_or_assignment()
-            }
+            TokenKind::Assume | TokenKind::Admit if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::Assume => self.parse_assume(),
             TokenKind::Admit => self.parse_admit(),
             // "calc" is parsed contextually - not a reserved keyword
@@ -1028,10 +1026,7 @@ impl<'a> Parser<'a> {
         self.parse_condition_block_allowing_empty(false)
     }
 
-    pub(crate) fn parse_condition_block_allowing_empty(
-        &mut self,
-        allow_empty_body: bool,
-    ) -> Result<Block, ParseError> {
+    pub(crate) fn parse_condition_block_allowing_empty(&mut self, allow_empty_body: bool) -> Result<Block, ParseError> {
         self.expect(&TokenKind::Newline)?;
 
         // Deep shape: the compensating DEDENT(s) appear right here, before
@@ -1055,8 +1050,7 @@ impl<'a> Parser<'a> {
 
         // Shallow shape: the compensating DEDENT(s) don't appear until after
         // the whole block body, alongside the block's own terminating DEDENT.
-        let deferred =
-            self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
+        let deferred = self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
         self.consume_dedents_for_method_chain(deferred);
 
         Ok(block)
@@ -1078,10 +1072,7 @@ impl<'a> Parser<'a> {
     /// `false` and get a parse error; Simple has `pass` for a deliberate no-op.
     /// See doc/08_tracking/bug/
     /// seed_accepts_bodyless_if_native_build_rejects_2026-08-22.md
-    fn parse_block_after_newline_allowing_empty(
-        &mut self,
-        allow_empty_body: bool,
-    ) -> Result<Block, ParseError> {
+    fn parse_block_after_newline_allowing_empty(&mut self, allow_empty_body: bool) -> Result<Block, ParseError> {
         // Simple supports "flat body" pattern where block body appears on the
         // next line at the SAME indentation level (no indent token):
         //   if cond:

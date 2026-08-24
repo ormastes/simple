@@ -375,7 +375,9 @@ fn bind_pattern_vars(pattern: &Pattern, bound: &mut Vec<String>, vars: &mut Hash
                 bind_pattern_vars(p, bound, vars);
             }
         }
-        Pattern::Enum { payload: Some(pats), .. } => {
+        Pattern::Enum {
+            payload: Some(pats), ..
+        } => {
             for p in pats {
                 bind_pattern_vars(p, bound, vars);
             }
@@ -750,7 +752,16 @@ fn collect_free_vars_recursive(expr: &Expr, bound: &mut Vec<String>, vars: &mut 
         Expr::Spawn(inner) => {
             collect_free_vars_recursive(inner, bound, vars);
         }
-        Expr::Forall { pattern, range, predicate } | Expr::Exists { pattern, range, predicate } => {
+        Expr::Forall {
+            pattern,
+            range,
+            predicate,
+        }
+        | Expr::Exists {
+            pattern,
+            range,
+            predicate,
+        } => {
             collect_free_vars_recursive(range, bound, vars);
             let mark = bound.len();
             bind_pattern_vars(pattern, bound, vars);

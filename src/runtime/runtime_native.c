@@ -3845,6 +3845,13 @@ int64_t text_dot_from_char_code(int64_t code) {
     return rt_char_from_code(code);
 }
 
+/* Older admitted Stage-2 compilers lowered integer `.chr()` in generic
+ * library modules to this bare helper name.  Keep the compatibility spelling
+ * as an ABI alias; current compilers emit the canonical rt_char_from_code. */
+int64_t char_from_code(int64_t code) {
+    return rt_char_from_code(code);
+}
+
 int64_t rt_string_find(int64_t value, int64_t needle) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* n = rt_core_as_string(needle);
@@ -4954,6 +4961,14 @@ int64_t rt_sort(int64_t receiver) {
     for (int64_t i = 0; i < n; i++) rt_array_set(arr, i, buf[i]);
     free(buf);
     return receiver;
+}
+
+/* Builtin Array.sort uses the historical boolean-returning runtime ABI while
+ * method lowering uses rt_sort's receiver-returning ABI.  They share exactly
+ * the same stable in-place implementation. */
+int8_t rt_array_sort(int64_t array) {
+    (void)rt_sort(array);
+    return 1;
 }
 
 /* take / taken: first n CHARACTERS of text, or first n ELEMENTS of an array.

@@ -80,17 +80,19 @@ pub(crate) fn runtime_inputs_fingerprint(runtime_root: &Path, inputs: &[&str]) -
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        let bytes = std::fs::read(runtime_root.join(input)).map_err(|e| {
-            // A silent None here surfaces far away as "could not build the
-            // core-C runtime archive" with no compile ever attempted (seen
-            // 2026-08-18: a stale staged compiler listed the since-deleted
-            // runtime_mcp_core.c). Name the offending input.
-            eprintln!(
-                "native-build: core-C runtime input `{}` unreadable in {}: {e}",
-                input,
-                runtime_root.display()
-            );
-        }).ok()?;
+        let bytes = std::fs::read(runtime_root.join(input))
+            .map_err(|e| {
+                // A silent None here surfaces far away as "could not build the
+                // core-C runtime archive" with no compile ever attempted (seen
+                // 2026-08-18: a stale staged compiler listed the since-deleted
+                // runtime_mcp_core.c). Name the offending input.
+                eprintln!(
+                    "native-build: core-C runtime input `{}` unreadable in {}: {e}",
+                    input,
+                    runtime_root.display()
+                );
+            })
+            .ok()?;
         for byte in bytes {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
@@ -1239,7 +1241,11 @@ fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<Stri
         // project_stage4_archive_closure), whose output is re-checked. Rejecting
         // them here made every capsule build fail on a core that the projection
         // was designed to sanitize (test_stage4_runtime_capsule_keeps_only_requested_globals).
-        let forbidden_sections = if *label == "core" { Vec::new() } else { forbidden_archive_sections(archive)? };
+        let forbidden_sections = if *label == "core" {
+            Vec::new()
+        } else {
+            forbidden_archive_sections(archive)?
+        };
         if !forbidden_sections.is_empty() {
             return Err(format!(
                 "Stage4 archive {label} retained constructor/destructor sections: {}",

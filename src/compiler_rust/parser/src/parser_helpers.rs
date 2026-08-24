@@ -241,10 +241,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn soft_keyword_prefixes_operand(&mut self) -> bool {
         matches!(
             self.peek_next().kind,
-            TokenKind::Backslash
-                | TokenKind::Pipe
-                | TokenKind::Identifier { .. }
-                | TokenKind::Me
+            TokenKind::Backslash | TokenKind::Pipe | TokenKind::Identifier { .. } | TokenKind::Me
         )
     }
 

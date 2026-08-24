@@ -287,10 +287,7 @@ pub(crate) fn pattern_matches(
             // before any promotion. Do NOT make this quieter --- the silence is
             // the bug.
             if matches!(variant.as_str(), "Some" | "None" | "Ok" | "Err")
-                && !matches!(
-                    value,
-                    Value::Enum { .. } | Value::Nil | Value::Object { .. }
-                )
+                && !matches!(value, Value::Enum { .. } | Value::Nil | Value::Object { .. })
                 && std::env::var("SIMPLE_DIAG_OPTION_PATTERN_SHAPE").as_deref() == Ok("1")
             {
                 eprintln!(
@@ -335,9 +332,7 @@ pub(crate) fn pattern_matches(
                     if let (Some(patterns), Some(vp)) = (payload, value_payload) {
                         // READ side of the enum-payload provenance diagnostic
                         // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1).
-                        crate::interpreter::note_enum_payload_function(
-                            "match-arm", ve, vv, 0, vp.as_ref(),
-                        );
+                        crate::interpreter::note_enum_payload_function("match-arm", ve, vv, 0, vp.as_ref());
                         if patterns.len() == 1 {
                             // Single payload - match directly
                             if pattern_matches(&patterns[0], vp.as_ref(), bindings, enums, classes)? {
@@ -460,10 +455,7 @@ pub(crate) fn pattern_matches(
             // `Value::Enum` and `Value::Nil` are excluded so real `Option::Some`
             // destructuring (handled above) and `None`/nil (handled at the top of
             // this arm) keep their existing, already-correct behaviour.
-            if enum_name == "Option"
-                && variant == "Some"
-                && !matches!(value, Value::Enum { .. } | Value::Nil)
-            {
+            if enum_name == "Option" && variant == "Some" && !matches!(value, Value::Enum { .. } | Value::Nil) {
                 if let Some(patterns) = payload {
                     if patterns.len() == 1 {
                         return pattern_matches(&patterns[0], value, bindings, enums, classes);
@@ -698,7 +690,11 @@ fn probe() -> i64:
 
 main = probe() - 7
 "#;
-        assert_eq!(run(src), 0, "`case Some(x)` over a bare local `T?` must fire and bind 7");
+        assert_eq!(
+            run(src),
+            0,
+            "`case Some(x)` over a bare local `T?` must fire and bind 7"
+        );
     }
 
     #[test]
@@ -759,7 +755,11 @@ fn probe(v: i64?) -> i64:
 
 main = probe(5)
 "#;
-        assert_eq!(run(src), 0, "`case Ok(x)` over a bare value must NOT match, matching the JIT");
+        assert_eq!(
+            run(src),
+            0,
+            "`case Ok(x)` over a bare value must NOT match, matching the JIT"
+        );
     }
 
     // --- Positional class pattern (the bug) ---
@@ -983,7 +983,10 @@ if disc == -1:
 main = exit_code
 "#;
         let code = run(src);
-        assert_eq!(code, 0, "StmtKind.Expr(x) at module level must construct a real enum value");
+        assert_eq!(
+            code, 0,
+            "StmtKind.Expr(x) at module level must construct a real enum value"
+        );
     }
 
     #[test]
@@ -1161,7 +1164,10 @@ result_ = extract(s)
 main = result_
 "#;
         let code = run(src);
-        assert_eq!(code, 42, "single-arm match must extract the real payload (42), not fall to wildcard (-1)");
+        assert_eq!(
+            code, 42,
+            "single-arm match must extract the real payload (42), not fall to wildcard (-1)"
+        );
     }
 
     #[test]

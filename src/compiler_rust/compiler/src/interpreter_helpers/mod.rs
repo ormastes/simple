@@ -21,7 +21,9 @@ pub(crate) use method_dispatch::{
     build_method_missing_args, call_method_on_value, find_and_exec_method, try_method_missing,
 };
 
-pub(crate) use objects::{create_range_object, create_range_object_opt, create_range_object_step, expand_range_fields, spawn_actor_with_expr};
+pub(crate) use objects::{
+    create_range_object, create_range_object_opt, create_range_object_step, expand_range_fields, spawn_actor_with_expr,
+};
 
 pub(crate) use lambda_body::eval_lambda_body;
 
@@ -29,9 +31,9 @@ pub(crate) use args::{eval_arg, eval_arg_int, eval_arg_usize};
 
 pub(crate) use collections::{
     eval_array_all, eval_array_any, eval_array_filter, eval_array_find, eval_array_map, eval_array_reduce,
-    eval_dict_filter, eval_dict_for_each, eval_dict_map_values, eval_option_and_then, eval_option_filter, eval_option_map,
-    eval_option_or_else, eval_result_and_then, eval_result_map, eval_result_map_err, eval_result_or_else, iter_to_vec,
-    message_to_value, OptionResultEvalContext,
+    eval_dict_filter, eval_dict_for_each, eval_dict_map_values, eval_option_and_then, eval_option_filter,
+    eval_option_map, eval_option_or_else, eval_result_and_then, eval_result_map, eval_result_map_err,
+    eval_result_or_else, iter_to_vec, message_to_value, OptionResultEvalContext,
 };
 
 pub(crate) use patterns::{

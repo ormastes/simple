@@ -448,30 +448,64 @@ pub fn rt_mem_snapshot_open(args: &[Value]) -> Result<Value, CompileError> {
     return Ok(Value::Int(-1));
     #[cfg(unix)]
     let file = {
-        let parent = match target.parent() { Some(value) => value, None => Path::new(".") };
+        let parent = match target.parent() {
+            Some(value) => value,
+            None => Path::new("."),
+        };
         let root = CString::new(if target.is_absolute() { "/" } else { "." }).expect("fixed path");
         let mut parent_fd = unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
-        if parent_fd < 0 { return Ok(Value::Int(-1)); }
+        if parent_fd < 0 {
+            return Ok(Value::Int(-1));
+        }
         for component in parent.components() {
             use std::path::Component;
             let name = match component {
                 Component::RootDir | Component::CurDir => continue,
                 Component::Normal(value) => value,
-                Component::ParentDir | Component::Prefix(_) => { unsafe { libc::close(parent_fd) }; return Ok(Value::Int(-1)); }
+                Component::ParentDir | Component::Prefix(_) => {
+                    unsafe { libc::close(parent_fd) };
+                    return Ok(Value::Int(-1));
+                }
             };
-            let name = match CString::new(name.as_bytes()) { Ok(value) => value, Err(_) => { unsafe { libc::close(parent_fd) }; return Ok(Value::Int(-1)); } };
-            let next = unsafe { libc::openat(parent_fd, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            let name = match CString::new(name.as_bytes()) {
+                Ok(value) => value,
+                Err(_) => {
+                    unsafe { libc::close(parent_fd) };
+                    return Ok(Value::Int(-1));
+                }
+            };
+            let next = unsafe {
+                libc::openat(
+                    parent_fd,
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
             unsafe { libc::close(parent_fd) };
-            if next < 0 { return Ok(Value::Int(-1)); }
+            if next < 0 {
+                return Ok(Value::Int(-1));
+            }
             parent_fd = next;
         }
         let leaf = match target.file_name().and_then(|name| CString::new(name.as_bytes()).ok()) {
             Some(value) => value,
-            None => { unsafe { libc::close(parent_fd) }; return Ok(Value::Int(-1)); }
+            None => {
+                unsafe { libc::close(parent_fd) };
+                return Ok(Value::Int(-1));
+            }
         };
-        let fd = unsafe { libc::openat(parent_fd, leaf.as_ptr(), libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+        let fd = unsafe {
+            libc::openat(
+                parent_fd,
+                leaf.as_ptr(),
+                libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
         unsafe { libc::close(parent_fd) };
-        if fd < 0 { return Ok(Value::Int(-1)); }
+        if fd < 0 {
+            return Ok(Value::Int(-1));
+        }
         unsafe { std::fs::File::from_raw_fd(fd) }
     };
     if !file.metadata().map(|m| m.is_file()).unwrap_or(false) {
@@ -485,7 +519,10 @@ pub fn rt_mem_snapshot_open(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 fn snapshot_int(args: &[Value], index: usize) -> Option<i64> {
-    match args.get(index) { Some(Value::Int(value)) => Some(*value), _ => None }
+    match args.get(index) {
+        Some(Value::Int(value)) => Some(*value),
+        _ => None,
+    }
 }
 
 fn snapshot_token(value: &str) -> String {
@@ -500,11 +537,16 @@ fn snapshot_token(value: &str) -> String {
 }
 
 fn process_status_kib(key: &str) -> i64 {
-    fs::read_to_string("/proc/self/status").ok().and_then(|status| {
-        status.lines().find(|line| line.starts_with(key))
-            .and_then(|line| line[key.len()..].split_whitespace().next())
-            .and_then(|value| value.parse::<i64>().ok())
-    }).unwrap_or(-1)
+    fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find(|line| line.starts_with(key))
+                .and_then(|line| line[key.len()..].split_whitespace().next())
+                .and_then(|value| value.parse::<i64>().ok())
+        })
+        .unwrap_or(-1)
 }
 
 fn snapshot_monotonic_ms() -> i64 {
@@ -512,41 +554,60 @@ fn snapshot_monotonic_ms() -> i64 {
     unsafe {
         let mut value: libc::timespec = std::mem::zeroed();
         if libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) == 0 {
-            return value.tv_sec.saturating_mul(1000)
-                + value.tv_nsec.saturating_div(1_000_000);
+            return value.tv_sec.saturating_mul(1000) + value.tv_nsec.saturating_div(1_000_000);
         }
     }
     -1
 }
 
 pub fn rt_mem_snapshot_record(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 17 { return Ok(Value::Bool(false)); }
-    let handle = match snapshot_int(args, 0) { Some(v) => v, None => return Ok(Value::Bool(false)) };
-    let seq = match snapshot_int(args, 1) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+    if args.len() != 17 {
+        return Ok(Value::Bool(false));
+    }
+    let handle = match snapshot_int(args, 0) {
+        Some(v) => v,
+        None => return Ok(Value::Bool(false)),
+    };
+    let seq = match snapshot_int(args, 1) {
+        Some(v) => v,
+        None => return Ok(Value::Bool(false)),
+    };
     let event = snapshot_token(&extract_content(args, 2)?);
     let phase = snapshot_token(&extract_content(args, 3)?);
-    let source_index = match snapshot_int(args, 4) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+    let source_index = match snapshot_int(args, 4) {
+        Some(v) => v,
+        None => return Ok(Value::Bool(false)),
+    };
     let path = snapshot_token(&extract_content(args, 5)?);
     let mut counts = [0i64; 11];
     for (slot, arg_index) in (6usize..17).enumerate() {
-        counts[slot] = match snapshot_int(args, arg_index) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+        counts[slot] = match snapshot_int(args, arg_index) {
+            Some(v) => v,
+            None => return Ok(Value::Bool(false)),
+        };
     }
     let heap_live = simple_runtime::value::heap::rt_heap_live_bytes();
     let heap_peak = simple_runtime::value::heap::rt_heap_peak_bytes();
-    let run_id = snapshot_token(&std::env::var("SIMPLE_EVIDENCE_RUN_ID")
-        .unwrap_or_else(|_| "none".to_string()));
+    let run_id = snapshot_token(&std::env::var("SIMPLE_EVIDENCE_RUN_ID").unwrap_or_else(|_| "none".to_string()));
     let line = format!("schema=simple.compiler.mem_snapshot.v1 run_id={run_id} seq={seq} pid={} monotonic_ms={} event={event} phase={phase} source_index={source_index} source_path_kind={} source_path={} retained_modules={} validation_keys={} validation_values={} shared_traits={} hir_names={} hir_symbols={} hir_functions={} hir_constants={} hir_enums={} hir_structs={} hir_classes={} heap_live_bytes={heap_live} heap_peak_bytes={heap_peak} rss_kib={} hwm_kib={}\n",
         std::process::id(), snapshot_monotonic_ms(),
         if path.is_empty() { "none" } else { "recorded" }, if path.is_empty() { "-" } else { &path },
         counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8], counts[9], counts[10],
         process_status_kib("VmRSS:"), process_status_kib("VmHWM:"));
     let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
-    let ok = files.1.get_mut(&handle).map(|file| file.write_all(line.as_bytes()).is_ok() && file.sync_all().is_ok()).unwrap_or(false);
+    let ok = files
+        .1
+        .get_mut(&handle)
+        .map(|file| file.write_all(line.as_bytes()).is_ok() && file.sync_all().is_ok())
+        .unwrap_or(false);
     Ok(Value::Bool(ok))
 }
 
 pub fn rt_mem_snapshot_close(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = match snapshot_int(args, 0) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+    let handle = match snapshot_int(args, 0) {
+        Some(v) => v,
+        None => return Ok(Value::Bool(false)),
+    };
     let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
     Ok(Value::Bool(files.1.remove(&handle).is_some()))
 }
@@ -1003,7 +1064,6 @@ pub fn rt_smf_parse_relocs(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 fn parse_smf_relocs_from_bytes(args: &[Value], data: &[u8]) -> Result<Value, CompileError> {
-
     let sections_off = match args.get(1) {
         Some(Value::Int(n)) => *n as usize,
         _ => return Ok(Value::byte_array(vec![])),
@@ -1274,10 +1334,18 @@ pub fn rt_write_u32s_strided_to_raw(args: &[Value]) -> Result<Value, CompileErro
         _ => None,
     };
     let (ptr, capacity, destination_row_bytes, source_stride, source_x, source_y, width, height) = match (
-        int_at(0), int_at(1), int_at(2), int_at(4), int_at(5), int_at(6), int_at(7), int_at(8),
+        int_at(0),
+        int_at(1),
+        int_at(2),
+        int_at(4),
+        int_at(5),
+        int_at(6),
+        int_at(7),
+        int_at(8),
     ) {
-        (Some(ptr), Some(capacity), Some(row_bytes), Some(stride), Some(x), Some(y), Some(width), Some(height)) =>
-            (ptr, capacity, row_bytes, stride, x, y, width, height),
+        (Some(ptr), Some(capacity), Some(row_bytes), Some(stride), Some(x), Some(y), Some(width), Some(height)) => {
+            (ptr, capacity, row_bytes, stride, x, y, width, height)
+        }
         _ => return Ok(Value::Int(0)),
     };
     let items: &[Value] = match args.get(3) {
@@ -1286,19 +1354,45 @@ pub fn rt_write_u32s_strided_to_raw(args: &[Value]) -> Result<Value, CompileErro
         Some(Value::FixedSizeArray { data, .. }) => data,
         _ => return Ok(Value::Int(0)),
     };
-    if ptr <= 0 || capacity < 0 || destination_row_bytes <= 0 || source_stride <= 0 || source_x < 0 || source_y < 0 || width <= 0 || height <= 0 || width > destination_row_bytes / 4 || width > source_stride || source_x > source_stride - width {
+    if ptr <= 0
+        || capacity < 0
+        || destination_row_bytes <= 0
+        || source_stride <= 0
+        || source_x < 0
+        || source_y < 0
+        || width <= 0
+        || height <= 0
+        || width > destination_row_bytes / 4
+        || width > source_stride
+        || source_x > source_stride - width
+    {
         return Ok(Value::Int(0));
     }
-    let row_bytes = match width.checked_mul(4) { Some(value) => value, None => return Ok(Value::Int(0)) };
+    let row_bytes = match width.checked_mul(4) {
+        Some(value) => value,
+        None => return Ok(Value::Int(0)),
+    };
     if row_bytes > capacity {
         return Ok(Value::Int(0));
     }
-    let source_end_row = match source_y.checked_add(height) { Some(value) => value, None => return Ok(Value::Int(0)) };
+    let source_end_row = match source_y.checked_add(height) {
+        Some(value) => value,
+        None => return Ok(Value::Int(0)),
+    };
     if source_end_row > items.len() as i64 / source_stride {
         return Ok(Value::Int(0));
     }
-    let copied = match width.checked_mul(height) { Some(value) => value, None => return Ok(Value::Int(0)) };
-    let last_row_bytes = match height.checked_sub(1).and_then(|rows| rows.checked_mul(destination_row_bytes)) { Some(value) => value, None => return Ok(Value::Int(0)) };
+    let copied = match width.checked_mul(height) {
+        Some(value) => value,
+        None => return Ok(Value::Int(0)),
+    };
+    let last_row_bytes = match height
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(destination_row_bytes))
+    {
+        Some(value) => value,
+        None => return Ok(Value::Int(0)),
+    };
     if last_row_bytes > capacity - row_bytes {
         return Ok(Value::Int(0));
     }
@@ -1312,7 +1406,13 @@ pub fn rt_write_u32s_strided_to_raw(args: &[Value]) -> Result<Value, CompileErro
                 Value::UInt { value, .. } => *value as u32,
                 _ => 0,
             };
-            unsafe { std::ptr::copy_nonoverlapping(word.to_le_bytes().as_ptr(), destination.add((destination_base + col * 4) as usize), 4) };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    word.to_le_bytes().as_ptr(),
+                    destination.add((destination_base + col * 4) as usize),
+                    4,
+                )
+            };
         }
     }
     Ok(Value::Int(copied))
@@ -1489,10 +1589,7 @@ mod tests {
 
     #[test]
     fn file_read_text_distinguishes_empty_success_from_failure() {
-        let path = std::env::temp_dir().join(format!(
-            "simple_file_read_text_empty_{}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_file_read_text_empty_{}", std::process::id()));
         std::fs::write(&path, "").unwrap();
         let path_value = Value::text(path.to_string_lossy().to_string());
 
@@ -1506,10 +1603,7 @@ mod tests {
 
     #[test]
     fn file_size_matches_native_missing_file_sentinel() {
-        let path = std::env::temp_dir().join(format!(
-            "simple_file_size_missing_{}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_file_size_missing_{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         assert_eq!(
             rt_file_size(&[Value::text(path.to_string_lossy().to_string())]).unwrap(),
@@ -1519,18 +1613,12 @@ mod tests {
 
     #[test]
     fn file_hash_distinguishes_empty_file_digest_from_failure() {
-        let path = std::env::temp_dir().join(format!(
-            "simple_file_hash_empty_{}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_file_hash_empty_{}", std::process::id()));
         std::fs::write(&path, "").unwrap();
         let path_value = Value::text(path.to_string_lossy().to_string());
         assert_eq!(
             rt_file_hash_sha256(std::slice::from_ref(&path_value)).unwrap(),
-            Value::text(
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                    .to_string()
-            )
+            Value::text("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string())
         );
         std::fs::remove_file(&path).unwrap();
         assert_eq!(rt_file_hash_sha256(&[path_value]).unwrap(), Value::Nil);
@@ -1538,10 +1626,7 @@ mod tests {
 
     #[test]
     fn checked_offset_read_distinguishes_empty_success_from_failure() {
-        let path = std::env::temp_dir().join(format!(
-            "simple_checked_offset_read_{}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_checked_offset_read_{}", std::process::id()));
         std::fs::write(&path, "abc").unwrap();
         let path_value = Value::text(path.to_string_lossy().to_string());
 
@@ -1580,10 +1665,7 @@ mod tests {
         };
         assert_eq!(packed >> 32, 2);
         assert_eq!(packed & 0xffff_ffff, 2);
-        assert_eq!(
-            rt_file_exists_probe_end(&[Value::Int(token)]).unwrap(),
-            Value::Int(-2)
-        );
+        assert_eq!(rt_file_exists_probe_end(&[Value::Int(token)]).unwrap(), Value::Int(-2));
     }
 
     #[test]
@@ -1592,7 +1674,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(file_exists_probe_test_seed_generation(0x7fff_ffff_ffff_fffe), 0);
-        assert_eq!(rt_file_exists_probe_begin(&[]).unwrap(), Value::Int(0x7fff_ffff_ffff_ffff));
+        assert_eq!(
+            rt_file_exists_probe_begin(&[]).unwrap(),
+            Value::Int(0x7fff_ffff_ffff_ffff)
+        );
         assert_eq!(
             rt_file_exists_probe_end(&[Value::Int(0x7fff_ffff_ffff_ffff)]).unwrap(),
             Value::Int(0)
@@ -1634,13 +1719,21 @@ mod tests {
                 panic!("rt_bytes_alloc must produce packed byte storage");
             };
             assert_eq!(bytes.as_slice(), &[0, 0, 0, 0]);
-            assert!(bytes.capacity() <= 8, "small packed allocation must not box one Value per byte");
+            assert!(
+                bytes.capacity() <= 8,
+                "small packed allocation must not box one Value per byte"
+            );
         }
     }
 
     #[test]
     fn bytes_alloc_invalid_lengths_fail_closed() {
-        for args in [vec![], vec![Value::Int(0)], vec![Value::Int(-1)], vec![Value::Bool(true)]] {
+        for args in [
+            vec![],
+            vec![Value::Int(0)],
+            vec![Value::Int(-1)],
+            vec![Value::Bool(true)],
+        ] {
             let allocated = rt_bytes_alloc(&args).unwrap();
             assert_eq!(allocated.byte_array_view(), Some([].as_slice()));
         }
@@ -1662,7 +1755,11 @@ mod tests {
 
         const LEN: usize = 8 * 1024 * 1024;
         let before = rss_bytes();
-        let allocated = rt_bytes_alloc(&[Value::UInt { value: LEN as u64, width: 64 }]).unwrap();
+        let allocated = rt_bytes_alloc(&[Value::UInt {
+            value: LEN as u64,
+            width: 64,
+        }])
+        .unwrap();
         let after = rss_bytes();
         assert_eq!(allocated.byte_array_view().map(<[u8]>::len), Some(LEN));
         let delta = after.saturating_sub(before);
@@ -1670,7 +1767,10 @@ mod tests {
             delta <= (LEN as u64 * 4) + (4 * 1024 * 1024),
             "packed allocation RSS delta {delta} exceeds 4x payload plus measurement slack"
         );
-        assert!(std::mem::size_of::<Value>() > 4, "boxed Value storage would not demonstrate the regression");
+        assert!(
+            std::mem::size_of::<Value>() > 4,
+            "boxed Value storage would not demonstrate the regression"
+        );
     }
 
     // Regression coverage for the P2 interpreter-over-count bug

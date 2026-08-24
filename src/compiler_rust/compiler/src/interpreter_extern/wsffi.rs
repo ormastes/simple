@@ -438,7 +438,9 @@ pub fn spl_wffi_call_f64_checked(args: &[Value]) -> Result<Value, CompileError> 
     }
     let supplied = match &args[1] {
         Value::Array(values)
-            if values.iter().all(|value| matches!(value, Value::Float(_) | Value::Int(_))) =>
+            if values
+                .iter()
+                .all(|value| matches!(value, Value::Float(_) | Value::Int(_))) =>
         {
             values.len()
         }
@@ -458,10 +460,7 @@ pub fn spl_wffi_call_f64_checked(args: &[Value]) -> Result<Value, CompileError> 
         return Ok(Value::array(vec![Value::Int(1), Value::Int(0)]));
     }
     match spl_wffi_call_f64(args)? {
-        Value::Float(value) => Ok(Value::array(vec![
-            Value::Int(0),
-            Value::Int(value.to_bits() as i64),
-        ])),
+        Value::Float(value) => Ok(Value::array(vec![Value::Int(0), Value::Int(value.to_bits() as i64)])),
         _ => Ok(Value::array(vec![Value::Int(1), Value::Int(0)])),
     }
 }

@@ -76,16 +76,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let src_stride_pixels = as_u64(name, args, 3)?;
             let copy_w = as_u64(name, args, 4)?;
             let copy_h = as_u64(name, args, 5)?;
-            unsafe {
-                rt_fb_blit32(
-                    dst_addr,
-                    dst_stride_pixels,
-                    src_addr,
-                    src_stride_pixels,
-                    copy_w,
-                    copy_h,
-                )
-            };
+            unsafe { rt_fb_blit32(dst_addr, dst_stride_pixels, src_addr, src_stride_pixels, copy_w, copy_h) };
             Ok(Value::Nil)
         }
         _ => Err(CompileError::runtime(format!(
@@ -110,11 +101,7 @@ mod tests {
     fn fill32_accepts_three_args_and_returns_nil() {
         // dst_addr=0 is a deliberate no-op guard inside rt_fb_fill32 itself
         // (see runtime_framebuffer.c), so this is safe to call unconditionally.
-        let result = dispatch(
-            "rt_fb_fill32",
-            &[Value::Int(0), Value::Int(0), Value::Int(0)],
-        )
-        .unwrap();
+        let result = dispatch("rt_fb_fill32", &[Value::Int(0), Value::Int(0), Value::Int(0)]).unwrap();
         assert!(matches!(result, Value::Nil));
     }
 

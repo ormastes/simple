@@ -11,7 +11,6 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use crate::CompileError;
 
-
 thread_local! {
     /// Per-process memo of PARSED imported modules, keyed by resolved path.
     ///
@@ -36,9 +35,7 @@ thread_local! {
 }
 
 /// Read + parse an imported module, memoized per process. See `IMPORTED_MODULE_AST`.
-pub(crate) fn parsed_imported_module(
-    path: &std::path::Path,
-) -> Option<std::sync::Arc<simple_parser::ast::Module>> {
+pub(crate) fn parsed_imported_module(path: &std::path::Path) -> Option<std::sync::Arc<simple_parser::ast::Module>> {
     if let Some(hit) = IMPORTED_MODULE_AST.with(|c| c.borrow().get(path).cloned()) {
         crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_HITS, 1);
         return hit;
@@ -49,7 +46,10 @@ pub(crate) fn parsed_imported_module(
             if source.contains('\r') {
                 source = source.replace('\r', "");
             }
-            simple_parser::Parser::new(&source).parse().ok().map(std::sync::Arc::new)
+            simple_parser::Parser::new(&source)
+                .parse()
+                .ok()
+                .map(std::sync::Arc::new)
         }
         Err(_) => None,
     };
@@ -896,10 +896,7 @@ impl Lowerer {
         // Read and parse the module file (memoized per process, same rationale
         // as the pre-register site above).
         let imported_module = parsed_imported_module(&resolved.path).ok_or_else(|| {
-            LowerError::ModuleResolution(format!(
-                "Failed to read or parse module file {:?}",
-                resolved.path
-            ))
+            LowerError::ModuleResolution(format!("Failed to read or parse module file {:?}", resolved.path))
         })?;
 
         let previous_file = self.current_file.clone();

@@ -1576,8 +1576,7 @@ impl Lowerer {
                             .resolve_type(&simple_parser::ast::Type::Simple(s.name.clone()))
                             .unwrap_or(TypeId::ANY);
                         let mut methods_map = HashMap::new();
-                        let own: std::collections::HashSet<&str> =
-                            s.methods.iter().map(|m| m.name.as_str()).collect();
+                        let own: std::collections::HashSet<&str> = s.methods.iter().map(|m| m.name.as_str()).collect();
                         for method in &s.methods {
                             methods_map.insert(method.name.clone(), format!("{}.{}", s.name, method.name));
                         }
