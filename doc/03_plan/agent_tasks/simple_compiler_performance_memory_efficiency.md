@@ -1275,8 +1275,10 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   checked, reducing peak path storage to seed/core subsets.
 - Build ordered operator tables once per checked file and share them read-only
   across line checks; retain the source-taking compatibility adapter.
+- Replace per-byte stripped-source concatenation with one byte scan, unchanged
+  code spans, one mask fragment per string, and a final join.
 - Add guards for owner mutation, full-tier count-only storage, direct operator
-  literals, and per-file pattern reuse.
+  literals, per-file pattern reuse, and span-owned string/comment masking.
 - Verification intentionally not run under the user's no-verify instruction.
 
 ## Reviewed workspace JSON process tranche
