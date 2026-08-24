@@ -52,6 +52,30 @@ This is a virtual capsule at build composition, not an MDSOC feature transform o
 | `60.mir_opt/perf_summary` | Bounded interprocedural analysis | `PerfSummary`, SCC propagation, `.sperf` semantic owners |
 | `60.mir_opt` pass registry | Optimization planning/execution | Truthful status, expectation, delegation, effective pipeline, run records |
 | `80.driver` | Compiler session/CLI orchestration | Reuse artifacts, route diagnostic/remark/deep modes, no semantic duplication |
+
+### Built-in collection identity boundary
+
+Typed collection metadata must share the exact identity universe used by HIR
+method resolution. Array and Slice currently have no type `SymbolId`; their
+built-in methods therefore remain `MethodResolution.Unresolved`, and a
+symbol-keyed registry cannot honestly classify them. The collector must not
+repair this by trusting method text.
+
+The prerequisite owner is the HIR symbol/resolution layer: re-intern a
+deterministic, collision-checked set of compiler-owned built-in callable keys in
+each compilation's identity universe, or introduce an explicit typed built-in
+call identity. Exact receiver kind and arity are mandatory; signature
+compatibility is required where typed evidence is available and otherwise the
+call remains incomplete. The performance registry is then built from that same
+module's identities and bound to its revision. Unsupported runtime operations
+are not admitted. The proposed driver collection point is once after post-HIR
+validation and before MIR/monomorphization; it is not wired today, and partial
+or poisoned HIR must never be analyzed.
+
+Severity remains outside `80.driver`. The proposed reusable lint-policy contract must be
+owned below both driver and `90.tools`; the driver receives an already-resolved
+policy decision or lower-layer policy port. It must not import `90.tools`, read
+`simple.sdn`, duplicate COLL severity rules, or parse source.
 | `90.tools/perf` | Tool projections | `.sperf`/curve/report commands over compiler owners, not a separate analyzer |
 
 The first shared-analysis implementation uses declared-local bucket indexes for def/use
