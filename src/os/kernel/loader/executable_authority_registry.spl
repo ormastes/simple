@@ -21,6 +21,10 @@ use os.kernel.loader.executable_riscv32_mapping_owner_v1.{
 use os.kernel.arch.riscv32.user_entry_v1.{
     Riscv32UserSretStateV1, riscv32_user_sret_state_v1
 }
+use os.kernel.arch.riscv32.sv32_user_root_owner_v1.{
+    Riscv32Sv32RootUnreachableReceiptV1,
+    riscv32_sv32_root_unreachable_claim_v1
+}
 use os.kernel.loader.executable_load_plan_v1.{
     ExecutableLoadConsumerStateV1, ExecutableLoadConsumerErrorV1,
     ExecutableLoadConsumerV1, executable_load_consumer_schema_version_v1
@@ -1093,6 +1097,60 @@ pub(package) fn executable_authority_mapping_release_indeterminate_v1(
                     else:
                         slot.rv32_mapping_pin_state =
                             ExecutableRiscv32MappingPinStateV1.ReleaseRetryable
+                        state.slots[index] = slot
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error == ExecutableAuthorityErrorV1.None: Ok(()) else: Err(error)
+
+pub(package) fn executable_authority_complete_riscv32_mapping_release_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    coordinate: ExecutableRiscv32MappingReleaseCoordinateV1,
+    unreachable: Riscv32Sv32RootUnreachableReceiptV1
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    """Clear a mapping pin only for the architecture owner's exact detached root."""
+    if not riscv32_sv32_root_unreachable_claim_v1(
+        unreachable, coordinate._root_id, coordinate._root_generation):
+        return Err(ExecutableAuthorityErrorV1.InvalidMappingReleaseCoordinate)
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    match _authority_registry_state:
+        case nil: error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_rv32_mapping_pin_index(
+                    state, coordinate._pin)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                else:
+                    var slot = state.slots[index]
+                    if (slot.rv32_mapping_pin_state !=
+                            ExecutableRiscv32MappingPinStateV1.ReleaseInProgress or
+                        slot.rv32_mapping_release_attempt !=
+                            coordinate._release_attempt or
+                        slot.rv32_mapping_root_id != coordinate._root_id or
+                        slot.rv32_mapping_root_generation !=
+                            coordinate._root_generation):
+                        error = ExecutableAuthorityErrorV1.InvalidMappingReleaseCoordinate
+                    else:
+                        # The root is already architecture-proven unreachable.
+                        # Reopen the armed image only before its frames are freed.
+                        slot.state = ExecutableAuthorityStateV1.Armed
+                        slot.joint_nonce = 0u64
+                        slot.rv32_entry_nonce = 0u64
+                        slot.rv32_entry_point = 0u32
+                        slot.rv32_user_sp = 0u32
+                        slot.rv32_sstatus = 0u32
+                        slot.rv32_mapping_pin_state =
+                            ExecutableRiscv32MappingPinStateV1.None
+                        slot.rv32_mapping_pin_nonce = 0u64
+                        slot.rv32_mapping_release_attempt = 0u64
+                        slot.rv32_mapping_root_id = 0u64
+                        slot.rv32_mapping_root_generation = 0u64
                         state.slots[index] = slot
             _authority_registry_state = Some(state)
     if not _authority_unlock():

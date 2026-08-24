@@ -63,3 +63,20 @@ This fail-closes the two cross-capsule lifecycle defects in the rejected design.
 It does not close the overall blocker: the authoritative PMM/Sv32 mapper, its
 root-unreachable producer, and a registry-backed scheduler adoption consumer do
 not yet exist, and readiness remains false.
+
+## 2026-08-24 Sv32 mapper prerequisite
+
+The bounded PMM-provenanced Sv32 mapping owner and architecture-produced
+root-unreachable lifecycle now exist in
+`src/os/kernel/loader/riscv32_sv32_mapping_owner_v1.spl` and
+`src/os/kernel/arch/riscv32/sv32_user_root_owner_v1.spl`. The mapper binds its
+create-issued root before installing exact authenticated pages, enforces W^X,
+and retains rollback/quarantine state so a failed unmap or indeterminate
+registry completion cannot free a reachable frame.
+
+This source is static and unverified under the explicit no-verification
+instruction. Readiness remains false. The remaining production boundary is a
+registry-backed scheduler adoption move that takes sole mapping teardown
+ownership, constructs and maps the RV32 four-byte initial stack, publishes the
+TCB, switches SATP, and performs U-mode entry/reap. Filesystem-backed RV32 QEMU
+evidence is also still required.
