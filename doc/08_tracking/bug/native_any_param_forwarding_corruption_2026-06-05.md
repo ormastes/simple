@@ -108,7 +108,7 @@ dispatch, consult the already-recorded declared HIR type via
 `str(x)` builtin already uses for any-typed values — and mark the result a
 tagged text local. Pure-Simple compiler side; no Rust-seed change.
 
-Status: RESOLVED.
+Status: RESOLVED — commit `eaac3400b86`.
 
 ### Gate state after the fix (clean worktree at `6119ba3878f`, seed sha256 `a1387e23…`)
 
