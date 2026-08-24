@@ -2840,3 +2840,11 @@ peak path storage from all files to the seed/core subsets. Operator tables are
 constructed once per checked file and shared across its lines instead of being
 rebuilt for every line. Source contracts were added but not executed under the
 user's no-verification instruction.
+
+The same hot line path previously rebuilt the stripped-source prefix for every
+byte while masking string literals and removing comments. That makes a line of
+length `n` susceptible to `O(n^2)` copied bytes. It now scans raw bytes once,
+retains unchanged code spans, emits one repeated-space fragment per quoted
+span, and joins once. Quote, escape, unterminated-string, inline-comment,
+Unicode-byte, and column-width behavior remain unchanged; lines requiring no
+masking return their original value.
