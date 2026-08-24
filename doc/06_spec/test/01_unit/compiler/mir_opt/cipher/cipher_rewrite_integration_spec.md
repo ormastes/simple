@@ -48,7 +48,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_aes_caps_on()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(func.blocks[0].instructions.len()).to_equal(2)
 ```
@@ -65,7 +65,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_aes_caps_on()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 0, 0)).to_equal("Intrinsic")
 ```
@@ -82,7 +82,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_aes_caps_on()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 0, 1)).to_equal("Intrinsic")
 ```
@@ -99,7 +99,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_aes_caps_on()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(intg_count_intrinsic(func, 0)).to_equal(2)
 ```
@@ -116,7 +116,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_aes_caps_on()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(intg_inst_intrinsic_name(func, 0, 0)).to_equal("crypto_aes_round")
 ```
@@ -133,7 +133,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_aes_caps_on()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(intg_inst_intrinsic_name(func, 0, 1)).to_equal("crypto_aes_round")
 ```
@@ -152,7 +152,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_aes_caps_off()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_all_off(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_all_off(), false)
 val func = intg_first_func(res)
 expect(func.blocks[0].instructions.len()).to_equal(2)
 ```
@@ -169,7 +169,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_aes_caps_off()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_all_off(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_all_off(), false)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 0, 0)).to_equal("Call")
 ```
@@ -186,7 +186,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_aes_caps_off()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_all_off(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_all_off(), false)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 0, 1)).to_equal("Call")
 ```
@@ -203,7 +203,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_aes_caps_off()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_all_off(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_all_off(), false)
 val func = intg_first_func(res)
 expect(intg_count_intrinsic(func, 0)).to_equal(0)
 ```
@@ -220,7 +220,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_aes_caps_off()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_all_off(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_all_off(), false)
 val func = intg_first_func(res)
 expect(intg_count_call(func, 0)).to_equal(2)
 ```
@@ -239,7 +239,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_blocks_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(func.blocks.len()).to_equal(2)
 ```
@@ -256,7 +256,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_blocks_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 0, 0)).to_equal("Intrinsic")
 ```
@@ -273,7 +273,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_blocks_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 1, 0)).to_equal("Intrinsic")
 ```
@@ -290,7 +290,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_blocks_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(func.blocks[0].instructions.len()).to_equal(1)
 ```
@@ -307,7 +307,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_blocks_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(func.blocks[1].instructions.len()).to_equal(1)
 ```
@@ -324,7 +324,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_blocks_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_all_off(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_all_off(), false)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 0, 0)).to_equal("Call")
 ```
@@ -341,7 +341,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_blocks_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_all_off(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_all_off(), false)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 1, 0)).to_equal("Call")
 ```
@@ -360,7 +360,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_mixed_block_sizes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(func.blocks[0].instructions.len()).to_equal(1)
 ```
@@ -377,7 +377,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_mixed_block_sizes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(func.blocks[1].instructions.len()).to_equal(2)
 ```
@@ -394,7 +394,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_mixed_block_sizes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 0, 0)).to_equal("Intrinsic")
 ```
@@ -411,7 +411,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_mixed_block_sizes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(intg_count_intrinsic(func, 1)).to_equal(2)
 ```
@@ -430,7 +430,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_single_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), true)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), true)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 0, 0)).to_equal("Intrinsic")
 ```
@@ -447,7 +447,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_single_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), false)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 0, 0)).to_equal("Intrinsic")
 ```
@@ -464,7 +464,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_single_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_all_off(), true)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_all_off(), true)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 0, 0)).to_equal("Call")
 ```
@@ -481,7 +481,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_single_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_all_off(), false)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_all_off(), false)
 val func = intg_first_func(res)
 expect(intg_inst_kind_tag(func, 0, 0)).to_equal("Call")
 ```
@@ -498,7 +498,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val m    = intg_module_two_blocks_aes()
-val res  = run_pattern_idiom_pass_x86(m, intg_caps_aes_on(), true)
+val res  = run_pattern_idiom_candidate_pass_x86(m, intg_caps_aes_on(), true)
 val func = intg_first_func(res)
 expect(intg_inst_intrinsic_name(func, 0, 0)).to_equal("crypto_aes_round")
 ```

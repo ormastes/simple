@@ -3506,3 +3506,20 @@ and joins once under the native join contract. It preserves input order, nested
 behavior counts, status fallback, exact table framing, output path, and final
 newline. A final-slash search plus one basename slice replaces whole-path
 splitting. No runtime measurement was run under the no-verification override.
+
+# 2026-08-24 follow-up: PatternIdiom backend-safety quarantine
+
+The capability-aware PatternIdiom candidate rewrote software AES/SHA/CRC calls
+to MIR intrinsics, but x86-64 instruction selection only implemented rotate,
+popcount, byte-swap, and storage-address projection. Its previous catch-all
+lowered every other intrinsic to a NOP, which could erase a computation and
+leave its destination undefined. This is a correctness blocker, not a missed
+performance opportunity.
+
+PatternIdiom is now explicitly Disabled and absent from effective pipelines.
+All production adapters preserve MIR; the transforming engine has an explicit
+candidate-only name for parity fixtures. x86-64 lowering now accepts a closed
+allowlist and fails loudly for unsupported intrinsics or missing destinations.
+This avoids silent miscompilation and candidate traversal in normal builds. No
+runtime, allocation, or RSS measurement was run under the no-verification
+override.

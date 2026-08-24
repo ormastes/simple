@@ -1,5 +1,11 @@
 # Pattern Dispatch Specification
 
+> Safety amendment (2026-08-24): production PatternIdiom adapters are exact
+> identities while the pass is Disabled. Rewrite scenarios below exercise the
+> explicitly named candidate engine only; they are not evidence of production
+> activation. The paired executable spec also preserves an AES call through the
+> public x86 adapter.
+
 > <details>
 
 <!-- sdn-diagram:id=pattern_dispatch_spec.arch -->
@@ -274,7 +280,7 @@ expect(result.?).to_equal(false)
 
 </details>
 
-### run_pattern_idiom_pass_x86 — rewrites AES call when has_aes=true
+### run_pattern_idiom_candidate_pass_x86 — rewrites AES call when has_aes=true
 
 #### module function count is preserved after rewrite
 
@@ -287,7 +293,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.aes.cipher.aes_round_software")
 val caps = make_x86_caps_aes_only()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
 ```
 
@@ -304,7 +310,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.aes.cipher.aes_round_software")
 val caps = make_x86_caps_aes_only()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 expect(func.blocks[0].instructions.len()).to_equal(1)
@@ -323,7 +329,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.aes.cipher.aes_round_software")
 val caps = make_x86_caps_aes_only()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val inst = func.blocks[0].instructions[0]
@@ -346,7 +352,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.aes.cipher.aes_round_software")
 val caps = make_x86_caps_aes_only()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val inst = func.blocks[0].instructions[0]
@@ -358,7 +364,7 @@ expect(intrinsic_name).to_equal("crypto_aes_round")
 
 </details>
 
-### run_pattern_idiom_pass_x86 — no rewrite when has_aes=false
+### run_pattern_idiom_candidate_pass_x86 — no rewrite when has_aes=false
 
 #### instruction remains Call when has_aes=false
 
@@ -371,7 +377,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.aes.cipher.aes_round_software")
 val caps = make_x86_caps_none()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val inst = func.blocks[0].instructions[0]
@@ -394,7 +400,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.aes.cipher.aes_round_software")
 val caps = make_x86_caps_none()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 expect(func.blocks[0].instructions.len()).to_equal(1)
@@ -402,7 +408,7 @@ expect(func.blocks[0].instructions.len()).to_equal(1)
 
 </details>
 
-### run_pattern_idiom_pass_x86 — no rewrite for non-cipher callee
+### run_pattern_idiom_candidate_pass_x86 — no rewrite for non-cipher callee
 
 #### instruction remains Call for std.io.print callee
 
@@ -415,7 +421,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.io.print")
 val caps = make_x86_caps_aes_only()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val inst = func.blocks[0].instructions[0]
@@ -438,7 +444,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.io.print")
 val caps = make_x86_caps_aes_only()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 expect(func.blocks[0].instructions.len()).to_equal(1)
@@ -462,9 +468,9 @@ Tests covering:
 - PatternIdiomStats — zero builder
 - pattern idiom capability guards
 - idiom_for_intrinsic — known cipher intrinsics
-- run_pattern_idiom_pass_x86 — rewrites AES call when has_aes=true
-- run_pattern_idiom_pass_x86 — no rewrite when has_aes=false
-- run_pattern_idiom_pass_x86 — no rewrite for non-cipher callee
+- run_pattern_idiom_candidate_pass_x86 — rewrites AES call when has_aes=true
+- run_pattern_idiom_candidate_pass_x86 — no rewrite when has_aes=false
+- run_pattern_idiom_candidate_pass_x86 — no rewrite for non-cipher callee
 
 ## Scenario Summary
 

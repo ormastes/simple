@@ -1135,3 +1135,14 @@ six fixed heading/table fragments, one complete row per `FeatureFileInfo`, and
 one final newline fragment. Behavior totals still traverse describes and
 contexts exactly once per row. `extract_app_index_filename` slices after the
 last `/` before applying unchanged `_spec.spl` and `.spl` precedence.
+
+# PatternIdiom safety design
+
+`pass_status(PatternIdiom)` is Disabled with a concrete backend/parity reason,
+so canonical and explicitly requested pipelines skip it. Public x86 and generic
+adapters return their input module unchanged. Candidate rewrite functions remain
+separately named for proof fixtures and must have no production caller. x86
+intrinsic selection checks a closed implemented-name set before destination
+handling and panics on unsupported, missing-destination, or unreachable lowering
+paths. Reactivation must add backend lowering and semantic differential evidence
+before restoring an Active status and witness.

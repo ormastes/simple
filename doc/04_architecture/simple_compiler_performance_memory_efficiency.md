@@ -834,3 +834,13 @@ App aggregate indexes use the same append-only rendering boundary: fixed header
 fragments, one complete fragment per input row, one final blank-line fragment,
 and one native join. App inputs are not regrouped, so their source order is the
 authoritative row order.
+
+# Pattern transform quarantine boundary
+
+An AnalysisOnly or Disabled pattern engine may expose candidate simulation to
+dedicated compiler fixtures, but production pass adapters must be exact
+identities and the pass must be absent from effective pipelines. Backend
+intrinsic selection owns a closed support allowlist; an unknown intrinsic or a
+required result without a destination is a compile-time failure, never a NOP.
+Activation requires end-to-end semantic parity and lowering coverage for every
+emitted intrinsic.

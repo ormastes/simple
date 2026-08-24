@@ -49,7 +49,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module(SYM_AES_ROUND)
 val caps = make_x86_caps_none()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
 ```
 
@@ -66,7 +66,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module(SYM_AES_ROUND)
 val caps = make_x86_caps_full()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
 ```
 
@@ -83,7 +83,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module(SYM_SHA256_COMPRESS)
 val caps = make_x86_caps_none()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
 ```
 
@@ -100,7 +100,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module(SYM_SHA256_COMPRESS)
 val caps = make_x86_caps_full()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
 ```
 
@@ -119,7 +119,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module(SYM_AES_ROUND)
 val caps = make_x86_caps_full()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 expect(func.blocks[0].instructions.len()).to_equal(1)
@@ -138,7 +138,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module(SYM_SHA256_COMPRESS)
 val caps = make_x86_caps_full()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 expect(func.blocks[0].instructions.len()).to_equal(1)
@@ -157,7 +157,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module(SYM_CRC32_UPDATE_BYTE)
 val caps = make_x86_caps_full()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 expect(func.blocks[0].instructions.len()).to_equal(1)
@@ -179,7 +179,7 @@ Reproduction: this block contains the complete executable scenario source.
 val callees = [SYM_AES_ROUND, SYM_AES_ROUND_LAST, SYM_AES_INV_ROUND, SYM_AES_INV_ROUND_LAST]
 val m    = make_multi_call_module(callees)
 val caps = make_x86_caps_full()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val block = func.blocks[0]
@@ -207,7 +207,7 @@ Reproduction: this block contains the complete executable scenario source.
 val callees = [SYM_AES_ROUND, SYM_AES_ROUND_LAST, SYM_AES_INV_ROUND, SYM_AES_INV_ROUND_LAST]
 val m    = make_multi_call_module(callees)
 val caps = make_x86_caps_none()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val block = func.blocks[0]
@@ -235,7 +235,7 @@ Reproduction: this block contains the complete executable scenario source.
 val callees = [SYM_AES_ROUND, SYM_SHA256_COMPRESS, SYM_CRC32_UPDATE_BYTE, SYM_CLMUL_LO]
 val m    = make_multi_call_module(callees)
 val caps = make_x86_caps_full()
-val out  = run_pattern_idiom_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val block = func.blocks[0]
@@ -267,7 +267,7 @@ val caps = make_x86_caps_full()
 var all_intrinsic = true
 for sym in all_syms:
     val m   = make_call_module(sym)
-    val out = run_pattern_idiom_pass_x86(m, caps, false)
+    val out = run_pattern_idiom_candidate_pass_x86(m, caps, false)
     val fsym = out.functions.keys()[0]
     val func = out.functions[fsym]
     val inst = func.blocks[0].instructions[0]
@@ -302,7 +302,7 @@ val caps = make_x86_caps_none()
 var all_call = true
 for sym in all_syms:
     val m   = make_call_module(sym)
-    val out = run_pattern_idiom_pass_x86(m, caps, false)
+    val out = run_pattern_idiom_candidate_pass_x86(m, caps, false)
     val fsym = out.functions.keys()[0]
     val func = out.functions[fsym]
     val inst = func.blocks[0].instructions[0]

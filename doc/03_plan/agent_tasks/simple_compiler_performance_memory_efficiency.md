@@ -1734,6 +1734,18 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - No manual execution was run under the user override; static semantic,
   performance, and fixture review is required before sync.
 
+# Completed tranche: PatternIdiom safety quarantine (2026-08-24)
+
+- Marked PatternIdiom Disabled and removed its executable witness claim.
+- Made every production PatternIdiom adapter an exact identity.
+- Retained rewriting under explicit candidate-only names for parity fixtures.
+- Replaced x86-64's unsupported-intrinsic NOP fallback with closed-allowlist,
+  fail-loud handling.
+- Updated paired fixtures and canonical manuals to separate production
+  quarantine evidence from candidate simulation.
+- Performance review: normal builds avoid candidate traversal; no runtime/RSS
+  measurements were run under the user override.
+
 # Completed tranche: linear app feature index (2026-08-24)
 
 - Replaced growing app-index Markdown prefixes with fragments and one join.
