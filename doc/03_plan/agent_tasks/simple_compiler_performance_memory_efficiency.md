@@ -1183,6 +1183,17 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Existing deterministic report contracts cover behavior; verification
   intentionally not run under the user's no-verify instruction.
 
+## Completed SIMD recipe report tranche
+
+- Replace growing-prefix recipe report concatenation with ordered fragments
+  and one final join.
+- Preserve header count, insertion order, entry summary fields, indentation,
+  and one trailing newline per entry.
+- Keep the current 16-entry bound while ensuring future bound growth does not
+  make report assembly cumulatively copy prior output.
+- Add a direct deterministic report contract; verification intentionally not
+  run under the user's no-verify instruction.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
