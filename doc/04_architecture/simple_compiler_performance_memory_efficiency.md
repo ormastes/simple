@@ -160,6 +160,12 @@ turns report size into cumulative copying while adding no semantic value.
 This applies equally to bounded developer inventories such as SIMD recipe
 tables: bounds protect memory, but renderers still use ordered fragments and a
 single join so increasing a bound does not silently reintroduce quadratic work.
+Typed module dispatch classifies scope before materializing function payloads.
+Function/FsDriver adapters take one stable pre-pass function snapshot so
+dictionary mutation cannot affect iteration and newly created functions are
+not revisited. Module-scoped passes receive the module directly and allocate no
+function snapshot; whole-module routes must not pay O(function_count) setup
+that they never consume.
 
 ### Diagnostic model
 
@@ -376,6 +382,10 @@ OPTME001 warnings, publishes them with the same path/revision validity bit as
 the location snapshot, and appends them at their historical post-parse
 position. Parse failure or revision mismatch releases the snapshot and emits no
 OPTME001 result, preserving the fail-closed ordering contract.
+Within a line-owned rule, variable-width lexical fields remain start/end
+offsets until the completed token or parameter slice is needed.
+Character-by-character string append is forbidden on input-sized headers: it
+turns an otherwise linear scan into cumulative O(header_bytes^2) copying.
 
 ### Raw-SFFI source-view ownership
 
