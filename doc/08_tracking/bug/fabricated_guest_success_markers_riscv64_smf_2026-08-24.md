@@ -143,3 +143,24 @@ clang --target=riscv64-unknown-none-elf -march=rv64gc -mabi=lp64d
   there is no self-hosted `bin/simple` (Stage 3 SEGVs), so it stays blocked for
   the reason already filed in
   `arm64_efi_real_firmware_lane_unreproducible_and_unified_lane_uses_kernel_2026-08-11.md`.
+
+## Retraction filed against this record (2026-08-24, filesystem lane)
+
+The §27 row of 2026-08-24 titled "SimpleOS's own filesystems: FAT32 / dbfs /
+nvfs across the QEMU lanes" (commit `038f1278541`) claimed, as its FAT32
+verdict, **"mounts and reads, real transcript"** on the strength of a riscv64
+boot showing `FS_MOUNT_OK` -> `SMF_DISCOVERY_OK` -> `ELF_LOAD_OK` ->
+`SMF_CLI_LAUNCH_OK`.
+
+**That verdict is withdrawn.** Every one of those four markers is on the
+fabricated list above: `FS_MOUNT_OK` and `SMF_DISCOVERY_OK` came from
+`rt_riscv_smf_cli_probe`, `ELF_LOAD_OK` and `SMF_CLI_LAUNCH_OK` from
+`rt_riscv_smf_cli_load`, both of which were `return 1;`. The boot was real and
+rc=0, but it demonstrated nothing about FAT32: no mount was proven and no ELF
+was proven loaded. The `FS_LS_*` directory listing in the same transcript is not
+covered by the five fabricated probes and may be real, but it was not
+independently verified and is not being claimed here.
+
+FAT32's honest status is therefore **unproven in QEMU**, alongside dbfs and
+nvfs — not "working". Nothing in that commit's code changes depended on the
+claim; the retraction is to the evidence row only.

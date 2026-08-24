@@ -1,0 +1,101 @@
+# Run: bin/simple test test/02_integration/storage/fs_image_mount_roundtrip_spec.spl
+#
+# SimpleOS's own filesystems: mount an image FROM DISK and read seeded content.
+#
+# Until 2026-08-24 nothing in the tree could do this. `MemBlockDevice` had
+# `write_to_file` and no inverse, so every existing image spec rebuilt the
+# device in memory and asserted against it -- which proves the builder is
+# self-consistent and proves nothing about the bytes that reached the disk.
+# `nvfs_image_builder_spec.spl:105` is exactly that shape: it reopens
+# `_nvfs_image_mem_device(...)`, never a file.
+#
+# These scenarios go through the file. Each writes an image with mkfs, drops
+# the in-memory device, loads the image back with `MemBlockDevice.from_file`,
+# mounts it through the production driver, and compares the file content byte
+# for byte against what was seeded. A boolean probe cannot satisfy this: the
+# expected text has to come back out of the image.
+#
+# Scope: HOST-SIDE. This is not a QEMU guest mount -- see the §27 row.
+
+use std.spipe.*
+use std.common.string_core.{text_to_bytes}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.fs_driver.types.{Path, OpenFlags}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.db.dbfs_engine.superblock.{dbfs_superblock_set_device}
+use os.port.dbfs_image.{DbfsImageConfig, PayloadEntry, build_dbfs_rootfs_image}
+use os.port.nvfs_image.{
+    NvfsImageConfig, NvfsImageSeed, build_nvfs_rootfs_image, NVFS_IMAGE_PROVIDER
+}
+
+
+
+val SECTORS: u64 = 2048u64
+val SECTOR_SIZE: u32 = 512u32
+val FIRST_ARENA_LBA: i64 = 4
+val DBFS_MOTD: text = "SimpleOS DBFS root\n"
+val NVFS_MOTD: text = "SimpleOS NVFS root\n"
+
+fn _arena_blocks() -> i64:
+    (SECTORS as i64) - FIRST_ARENA_LBA
+
+describe "DBFS image mounts from disk and returns seeded content":
+
+    it "round-trips /etc/motd through a written image file":
+        val img = "/tmp/spl-dbfs-roundtrip.img"
+        val cfg = DbfsImageConfig(
+            size_sectors: SECTORS,
+            seeds: [PayloadEntry(name: "/etc/motd", data: text_to_bytes(DBFS_MOTD))]
+        )
+        expect(build_dbfs_rootfs_image(cfg, img).is_ok()).to_equal(true)
+
+        val dev = MemBlockDevice.from_file(img, SECTOR_SIZE).unwrap()
+        expect(dev.sector_count()).to_equal(SECTORS)
+        dbfs_superblock_set_device(dev)
+        val driver = DbFsDriver.open_on_device(dev, FIRST_ARENA_LBA, _arena_blocks()).unwrap()
+        val handle = driver.open_path(Path(raw: "/etc/motd"), OpenFlags.read_only()).unwrap()
+        # Independent literal on purpose: asserting against DBFS_MOTD (the same
+        # symbol used to seed) is a tautology that survives mutating either side.
+        expect(driver.read_handle(handle, 64).unwrap()).to_equal("SimpleOS DBFS root\n")
+        expect(driver.close_handle(handle).is_ok()).to_equal(true)
+
+describe "NVFS image mounts from disk and returns seeded content":
+
+    it "round-trips /etc/motd through a written image file":
+        val img = "/tmp/spl-nvfs-roundtrip.img"
+        val cfg = NvfsImageConfig(
+            size_sectors: SECTORS,
+            seeds: [NvfsImageSeed(name: "/etc/motd", data: text_to_bytes(NVFS_MOTD))]
+        )
+        expect(build_nvfs_rootfs_image(cfg, img).is_ok()).to_equal(true)
+
+        val dev = MemBlockDevice.from_file(img, SECTOR_SIZE).unwrap()
+        expect(dev.sector_count()).to_equal(SECTORS)
+        dbfs_superblock_set_device(dev)
+        val driver = NvfsPosixDriver.new_on_device(
+            NVFS_IMAGE_PROVIDER, dev, FIRST_ARENA_LBA, _arena_blocks()
+        ).unwrap()
+        val handle = driver.open_path(Path(raw: "/etc/motd"), OpenFlags.read_only()).unwrap()
+        # Independent literal, same reasoning as the DBFS scenario above.
+        expect(driver.read_handle(handle, 64).unwrap()).to_equal("SimpleOS NVFS root\n")
+        expect(driver.close_handle(handle).is_ok()).to_equal(true)
+
+describe "MemBlockDevice.from_file rejects what it cannot mount":
+    # Without these the round-trips above could pass on a loader that happily
+    # invents a device for any input.
+
+    it "rejects a missing image":
+        expect(MemBlockDevice.from_file(
+            "/tmp/spl-does-not-exist.img", SECTOR_SIZE).is_err()).to_equal(true)
+
+    it "rejects a zero sector size":
+        val img = "/tmp/spl-dbfs-roundtrip.img"
+        expect(MemBlockDevice.from_file(img, 0u32).is_err()).to_equal(true)
+
+    it "rejects an image that is not a whole number of sectors":
+        # 700 bytes is not a multiple of 512.
+        val ragged = "/tmp/spl-ragged.img"
+        val dev = MemBlockDevice.new(700u64, 1u32)
+        expect(dev.write_to_file(ragged).is_ok()).to_equal(true)
+        expect(MemBlockDevice.from_file(ragged, SECTOR_SIZE).is_err()).to_equal(true)
