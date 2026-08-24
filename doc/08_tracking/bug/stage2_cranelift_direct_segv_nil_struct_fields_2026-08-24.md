@@ -344,3 +344,56 @@ For reference the Rust seed side already looks correct and is probably not the
 fix site: `type_resolver.rs` threads `HirType::Dict{key,value}`,
 `hir/lower/expr/mod.rs:1619` types `.values()` as `Array{element: V}`, and
 `type_registry.rs:188 get_iterable_element` unwraps `Array`.
+
+## dv10 / dv11 results, and why the per-site rewrite was NOT landed
+
+`dv10` (`var d: Dict<i64, Big> = {1: make()}`, a NON-empty literal so V is
+inferable): still CORRUPT, byte-identical to dv4. **The "empty dict literal
+drops V" hypothesis is refuted.**
+
+`dv11` (`Dict<Sym, Big>`, a STRUCT-keyed dict):
+```
+K_len 1
+K_structkey_reindex  name=[main]  ret=9 nloc=0 nblk=1 entry=3 sym=1   CORRECT
+L_structkey_values   name=[<ptr>] ret=1 nloc=1 nblk=1 entry=<ptr> sym=1  CORRUPT
+```
+So the keys-reindex rewrite works for struct-keyed dicts too — and this is a
+**third disproven in-tree claim**: `backend/interpreter.spl:145-175` says
+struct-keyed `.has()`/`[]` lookups fail to find a present entry. Measured here,
+`d.len()` is 1 and `d[k]` returns the correct struct. Do not route around
+`d[k]` on that basis.
+
+### Census: the per-site rewrite is not a path to a working Stage 2
+```
+for x in <...>.values():   89 sites under src/compiler/,  91 src-wide
+```
+Every one of them is miscompiled when the seed builds Stage 2. Rewriting the
+adapter's five would only move the SEGV to the next site — plausibly Lane Q's
+`HirLowering.lower_function`. The rewrite was implemented, measured to be
+correct at fixture level, and then **deliberately reverted**: it is a bridge,
+not a fix, and landing it would have created a false impression that Stage 2
+was unblocked. It is documented here so it can be reapplied deliberately if
+someone needs to get past the adapter to expose the next crash site.
+
+Not covered by that rewrite in any case: `driver_aot_smf_output.spl:169`
+(`for fn_ in module.functions.values(): if fn_.has_driver_manifest_attr`) is in
+the same Stage-2 path and equally miscompiled.
+
+### Current state of the root-cause hunt
+The element-type chain is Simple-side and runs INTERPRETED inside the
+native-build worker, so it has a minutes-long iteration loop with no bootstrap
+rebuild. A level-gated probe (`SIMPLE_TRACE_DICT_ELEM=1`, default off) was added
+to `_MirLoweringExpr/method_calls_literals.spl` to read out whether the
+`case Dict(k_type, v_type)` match actually fires for the `.values()` receiver
+and what element type gets stamped. Result not yet in.
+
+Remaining suspects, in order:
+1. the `local_is_runtime_dict(dict_recv_local)` gate (:1440) never sets
+   `receiver_is_dict`, so the whole typed-stamp block is skipped;
+2. the stamp fires but `lower_for_iterator` reads the raw call result rather
+   than the stamped temp;
+3. `local_mir_type_of(receiver_local)` returns something other than `Dict(k,v)`.
+
+Refuted so far: most-fields-wins wrong-struct resolution (dv8), typed-binding
+remedy (dv6), empty-literal V loss (dv10), struct-keyed lookup failure (dv11),
+C runtime (direct selfcheck).
