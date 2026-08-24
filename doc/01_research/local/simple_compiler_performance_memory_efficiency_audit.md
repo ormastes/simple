@@ -2798,3 +2798,19 @@ function-pass match arms. Those arms retain the original one-snapshot,
 fresh-pass-per-function behavior; module arms receive the module exactly once.
 Existing typed module-dispatch contracts were not rerun under the user's
 no-verification instruction.
+
+### Request-local query outline snapshot
+
+Definition, hover, completion, type-at, and signature-help queries separately
+parsed the target outline and then reread/resplit the same file for imports or
+cursor-line text. A local miss caused two reads and two splits; type-at and
+signature help also had their own explicit cursor read. The query engine now
+builds one request-local `OutlineSnapshot` containing lines, symbols, and
+imports. All target-file phases consume that snapshot, reducing the target to
+one read and one split without introducing persistent cache invalidation.
+
+Local symbol order, duplicate import traversal, imported symbol order, grep
+fallback precedence and caps, 1-based lines, stdout, and exit behavior are
+unchanged. Imported-module parsing remains independent. Snapshot projection and
+source-topology contracts were added but not executed under the user's
+no-verification instruction.

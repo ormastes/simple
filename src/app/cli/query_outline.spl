@@ -19,6 +19,11 @@ struct OutlineImport:
     module_path: text
     items: [text]
 
+struct OutlineSnapshot:
+    lines: [text]
+    symbols: [OutlineSymbol]
+    imports: [OutlineImport]
+
 struct OutlineOptions:
     parent_for_types: bool
     include_import_symbols: bool
@@ -26,13 +31,29 @@ struct OutlineOptions:
     extract_binding_types: bool
 
 fn parse_outline_file(file: text, options: OutlineOptions) -> [OutlineSymbol]:
+    parse_outline_snapshot(file, options).symbols
+
+fn parse_outline_snapshot(file: text, options: OutlineOptions) -> OutlineSnapshot:
+    """One request-local read/split shared by symbols, imports, and cursor lines."""
     val content = query_file_read_rich(file) ?? ""
+    parse_outline_snapshot_source(content, options)
+
+fn parse_outline_snapshot_source(
+    content: text, options: OutlineOptions
+) -> OutlineSnapshot:
+    """Source adapter for the same one-split snapshot contract."""
     if content == "":
-        return []
-    parse_outline_source(content, options)
+        return OutlineSnapshot(lines: [], symbols: [], imports: [])
+    val lines = content.split("\n")
+    OutlineSnapshot(
+        lines: lines,
+        symbols: parse_outline_lines(lines, options),
+        imports: parse_outline_import_lines(lines))
 
 fn parse_outline_source(content: text, options: OutlineOptions) -> [OutlineSymbol]:
-    val lines = content.split("\n")
+    parse_outline_lines(content.split("\n"), options)
+
+fn parse_outline_lines(lines: [text], options: OutlineOptions) -> [OutlineSymbol]:
     var symbols: [OutlineSymbol] = []
     var doc_lines: [text] = []
     var current_parent = ""
@@ -63,7 +84,9 @@ fn parse_outline_imports(file: text) -> [OutlineImport]:
     val content = query_file_read_rich(file) ?? ""
     if content == "":
         return []
-    val lines = content.split("\n")
+    parse_outline_import_lines(content.split("\n"))
+
+fn parse_outline_import_lines(lines: [text]) -> [OutlineImport]:
     var imports: [OutlineImport] = []
     for line in lines:
         val trimmed = line.trim()
