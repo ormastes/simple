@@ -84,6 +84,14 @@ dense outer array so recording a use does not repeatedly copy a dictionary-held 
 Coverage is explicit: an unknown instruction or undeclared local reference makes
 `def_use_complete=false`. No consumer may interpret partial coverage as absence of uses.
 
+Dense liveness storage is admitted only after the existing cell budget and completeness
+checks, then allocated at its exact final size. It must not be assembled with repeated
+`push` operations: without a proven uniqueness fast path, growth may repeatedly copy the
+entire prefix. The initial predecessor worklist follows the same rule: allocate the
+`block_count` live prefix once, fill it by index, and use a top cursor for later reuse.
+This keeps initialization O(block_count * local_count) time and storage, including at the
+four-million-cell admission boundary, without changing the fail-closed budget contract.
+
 Pass preservation is fail-closed. Until proved otherwise, a changed active pass
 invalidates CFG, dominators, and def/use. Analysis-only, remark-only, skeleton, and
 disabled routes preserve all facts because they cannot replace MIR.
