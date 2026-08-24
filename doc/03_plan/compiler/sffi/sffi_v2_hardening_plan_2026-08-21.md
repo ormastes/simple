@@ -1316,3 +1316,13 @@ missing) and 12,077 declarations (875 tagged, 380 minimized, 10,937 untouched,
 zero signed/admitted). Next harden `cache/gc/admission.spl`: keep its single
 tree traversal and size probes, and do not interpret absent/inaccessible/provider
 failure as proof that capacity is available.
+
+Cache admission now rejects unknown file-size/root accounting and has unique
+private helper names, while preserving one traversal and size probe per file.
+It remains unsafe until checked filesystem existence/read/walk contracts can
+separate valid absence/empty results from provider failure. Current census:
+21,436 calls (2,086 explicit, 19,350 missing), 12,112 declarations (880 tagged,
+382 minimized, 10,966 untouched), zero signed/admitted. First reconcile the 55
+missing calls introduced by the upstream rebase (47 net after this slice), then
+design one status-bearing filesystem metadata/list ABI shared by interpreter,
+C, Rust, native, and Simple wrappers without per-call allocation or lookup.

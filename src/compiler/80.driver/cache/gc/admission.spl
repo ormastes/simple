@@ -8,10 +8,15 @@
 # storage-accounting decision only; it never touches identity/trust classes
 # (see cache_protocol.sdn header note on CAS/TRUST/GC_METADATA separation).
 
+@unsafe(reason: "raw file probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw pin read; empty text is valid data and also the unreadable or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw file size; nil includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> usize?
+@unsafe(reason: "raw directory probe; false includes non-directory, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_dir_exists(path: text) -> bool
+@unsafe(reason: "raw directory walk; empty data includes an empty tree or provider failure", capabilities: [ffi])
 extern fn rt_dir_walk(root: text) -> [text]
 
 use compiler.driver.cache.metadata.cache_limits.{
@@ -29,30 +34,50 @@ struct PinnedOverflowReport:
     largest_roots: [text]
     suggested_action: text
 
-fn dir_total_bytes(root: text) -> i64:
-    if not rt_file_exists(root):
-        return 0
+fn admission_dir_total_bytes(root: text) -> i64?:
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(root)
+    if not exists:
+        return nil
     var total: i64 = 0
-    for path in rt_dir_walk(root):
-        if not rt_dir_exists(path):
-            match rt_file_size(path):
-                case Some(sz):
-                    total = total + sz.to_i64()
-                case nil:
-                    pass_do_nothing
+    var accounting_valid = true
+    unsafe(capabilities: [ffi]):
+        for path in rt_dir_walk(root):
+            if not rt_dir_exists(path):
+                match rt_file_size(path):
+                    case Some(sz):
+                        total = total + sz.to_i64()
+                    case nil:
+                        accounting_valid = false
+    if not accounting_valid:
+        return nil
     total
 
-fn cache_total_bytes(root: text) -> i64:
-    dir_total_bytes("{root}/cas") + dir_total_bytes("{root}/actions")
+fn admission_cache_total_bytes(root: text) -> i64?:
+    match admission_dir_total_bytes("{root}/cas"):
+        case Some(cas_bytes):
+            match admission_dir_total_bytes("{root}/actions"):
+                case Some(action_bytes):
+                    cas_bytes + action_bytes
+                case nil:
+                    nil
+        case nil:
+            nil
 
 # Reads pins the same way mark_sweep.spl does (root/pins, one digest/line) —
 # duplicated here rather than imported to keep admission a leaf module gc/
 # fast_gc and gc/mark_sweep can both run without depending on each other.
 fn read_pins(root: text) -> [text]:
     val path = "{root}/pins"
-    if not rt_file_exists(path):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(path)
+    if not exists:
         return []
-    val content = rt_file_read_text(path) ?? ""
+    var content = ""
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_text(path) ?? ""
     var out: [text] = []
     for line in content.split("\n"):
         if line.trim() != "":
@@ -60,18 +85,19 @@ fn read_pins(root: text) -> [text]:
     out
 
 # Bytes protected by explicit pins (approximate: sums matching blob sizes).
-fn pinned_bytes(root: text) -> i64:
+fn pinned_bytes(root: text) -> i64?:
     val pins = read_pins(root)
     if pins.len() == 0:
         return 0
     var total: i64 = 0
     for digest in pins:
         val path = cas_blob_path(root, digest)
-        match rt_file_size(path):
-            case Some(sz):
-                total = total + sz.to_i64()
-            case nil:
-                pass_do_nothing
+        unsafe(capabilities: [ffi]):
+            match rt_file_size(path):
+                case Some(sz):
+                    total = total + sz.to_i64()
+                case nil:
+                    return nil
     total
 
 # Pre-write admission check. write_bytes is the size of the write about to
@@ -84,7 +110,10 @@ fn pinned_bytes(root: text) -> i64:
 # GC gets a chance to run.
 fn admission_check(root: text, limits: CacheLimits, write_bytes: i64) -> AdmissionResult:
     val hard_limit = cache_limits_hard_limit_bytes(limits)
-    val current = cache_total_bytes(root)
+    val current = match admission_cache_total_bytes(root):
+        case Some(bytes): bytes
+        case nil:
+            return AdmissionResult(admitted: false, reason: "accounting_unavailable")
     val projected = current + write_bytes
 
     if projected > hard_limit:
@@ -101,7 +130,9 @@ fn admission_check(root: text, limits: CacheLimits, write_bytes: i64) -> Admissi
 # schema rule, this NEVER triggers deletion of a protected root — it is a
 # report only, surfaced so an operator/CI can raise the quota or unpin.
 fn pinned_overflow_check(root: text, limits: CacheLimits) -> PinnedOverflowReport?:
-    val protected = pinned_bytes(root)
+    val protected = match pinned_bytes(root):
+        case Some(bytes): bytes
+        case nil: return nil
     if protected <= limits.max_bytes:
         return nil
     PinnedOverflowReport(

@@ -2216,3 +2216,28 @@ The authoritative totals are now 21,382 raw calls, 2,079 explicit, and 19,303
 missing. Of 12,077 declaration rows, 875 are tagged, 645 contract-documented,
 380 minimized, 10,937 untouched, and zero evidence-verified, signature-
 verified, or admitted.
+
+## Cache admission authority
+
+`cache/gc/admission.spl` now documents its five legacy filesystem contracts and
+scopes all eight live calls. Directory and cache totals are optional internally;
+an unavailable root or file-size result returns `accounting_unavailable` and
+rejects the write rather than fabricating zero usage. Owner-qualified helper
+names remove a real cross-module dispatch collision with fast GC.
+
+The algorithm keeps one traversal and one size observation per discovered file,
+plus the existing pin array. It adds one scalar validity flag and no retry,
+lookup, copy, collection, or provider call. Optimizer general findings remain
+one existing pin-collection preallocation suggestion. Focused seed-only
+coverage passes 12/12. The owner-rename comparison is 3.17 s / 192,228 KiB to
+3.24 s / 192,300 KiB; the 72 KiB RSS delta and startup-dominated 2.2% timing
+delta show no meaningful memory/performance regression.
+
+Legacy `rt_file_exists`, `rt_file_read_text`, and `rt_dir_walk` still collapse
+provider failure with valid absence/empty data, so this owner remains explicitly
+unsafe rather than verified. A status-bearing filesystem ABI is required before
+promotion. After rebasing, upstream had added 55 missing-authority calls; this
+slice removes eight, leaving a net repository increase of 47 recorded in
+`sffi_authority_rebase_regression_2026-08-24.md`. Current totals are 21,436 raw,
+2,086 explicit, 19,350 missing; 12,112 declaration rows, 880 tagged, 382
+minimized, 10,966 untouched, and zero signed/admitted.
