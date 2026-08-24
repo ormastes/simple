@@ -2925,3 +2925,26 @@ An exact deny-level diagnostic fixture uses a quoted identifier to prove comma
 and doubled-quote decoding directly, while quoted title and description fields
 exercise column alignment. It was not executed under the user's no-verification
 instruction.
+
+### Linear API-surface snapshot assembly
+
+The repository API snapshot tool carried four related COW/text-growth costs.
+Its ASCII trim repeatedly sliced one edge byte, comma parsing appended one
+character at a time, three entry accumulators rebound the result of `push`, and
+SDN serialization repeatedly appended to the complete output prefix. Long
+export lines and large snapshots could therefore accumulate quadratic copied
+bytes, while a roots-sized array was retained solely to compute `roots.len()`.
+
+Trim and comma parsing now use byte boundaries and bounded span slices per
+retained name. Direct local-owner `push` preserves file, export, and root
+encounter order without keeping the old accumulator binding live. The
+redundant root array is gone; module count remains exactly the number of
+requested roots, including duplicates or empty roots. Serialization records ordered fragments and joins
+once, changing assembly from worst-case O(P^2) copied bytes to O(P) output work
+with O(F) fragment references. Directory read order and the final lexical
+module/symbol sort remain unchanged. Duplicate exports intentionally remain
+because the previous implementation never deduplicated despite a stale
+docstring, which is now corrected.
+
+Exact empty and multi-module SDN byte contracts plus an ordered export fixture
+were added but not executed under the user's no-verification instruction.
