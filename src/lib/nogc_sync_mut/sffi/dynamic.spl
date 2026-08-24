@@ -40,6 +40,29 @@ extern fn spl_wffi_call_i64_checked(fptr: i64, args: [i64], nargs: i64) -> [i64]
 fn _sffi_call_i64_raw_checked(fptr: i64, args: [i64]) -> [i64]:
     spl_wffi_call_i64_checked(fptr, args, args.len())
 
+# Resolved, immutable integer-only call slot. Resolution happens once; calls do
+# not perform dlsym, path lookup, hashing, or signature verification. This is a
+# migration type, not a generally safe FFI type: it can represent only the
+# explicit C family `i64(i64...)`, with 0..8 arguments.
+class DynI64FnSlot:
+    fptr: i64
+    symbol: text
+    provider_path: text
+    arity: i64
+
+impl DynI64FnSlot:
+    @unsafe(reason: "resolved integer slot cannot prove the provider artifact or declared C ABI", capabilities: [ffi, raw_ptr])
+    fn call_checked(args: [i64]) -> Result<i64, text>:
+        if args.len() != self.arity:
+            return Err("E-SFFI-003: {self.symbol} expects {self.arity} i64 arguments, got {args.len()}")
+        val result = _sffi_call_i64_raw_checked(self.fptr, args)
+        if result.len() != 2:
+            return Err("E-SFFI-017: corrupt checked transport result: {self.symbol}")
+        val status = result[0]
+        if status == 0:
+            return Ok(result[1])
+        Err("E-SFFI-014: foreign bridge rejected {self.symbol} with status {status}")
+
 use std.io_runtime.{env_get}
 
 # ============================================================================
@@ -162,6 +185,24 @@ impl DynLib:
         if status == 0:
             return Ok(result[1])
         Err("E-SFFI-014: foreign bridge rejected {name} with status {status}")
+
+    # Resolve one exact integer-only ABI slot. Callers cache the returned slot
+    # and avoid dlsym/string lookup on every invocation.
+    @unsafe(reason: "resolves an unverified integer-only foreign ABI slot", capabilities: [ffi, raw_ptr])
+    fn resolve_i64_checked(name: text, arity: i64) -> Result<DynI64FnSlot, text>:
+        if self.handle <= 0:
+            return Err("E-SFFI-001: provider is not loaded: {self.path}")
+        if arity < 0 or arity > 8:
+            return Err("E-SFFI-003: unsupported i64 ABI arity {arity} for {name}; expected 0..8")
+        val fptr = spl_dlsym(self.handle, name)
+        if fptr <= 0:
+            return Err("E-SFFI-001: unresolved foreign symbol: {name}")
+        Ok(DynI64FnSlot(
+            fptr: fptr,
+            symbol: name,
+            provider_path: self.path,
+            arity: arity
+        ))
 
     # Close the library and zero the handle.
     @unsafe(reason: "releases an unverified dynamic provider", capabilities: [ffi])
@@ -358,4 +399,4 @@ fn sffi_call_checked(func_name: text, args: [i64]) -> Result<i64, text>:
     loader.call_checked(lib_path, func_name, args)
 
 export spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64, spl_wffi_call_i64_checked
-export DynLib, DynLoader
+export DynI64FnSlot, DynLib, DynLoader

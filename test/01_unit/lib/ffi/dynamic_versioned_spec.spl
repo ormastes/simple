@@ -4,7 +4,7 @@ use std.sffi.dynamic_versioned.{
     LibVersion, lib_version, lib_version_any, lib_version_string,
     build_candidate_paths, library_search_paths
 }
-use std.sffi.dynamic.{platform_lib_extension, sffi_call_checked}
+use std.sffi.dynamic.{DynI64FnSlot, DynLib, platform_lib_extension, sffi_call_checked}
 use std.spec.{describe, it, expect}
 
 describe "LibVersion":
@@ -84,6 +84,33 @@ describe "checked convention dispatch":
                 expect(error).to_contain("malformed convention symbol")
             case Ok(value):
                 expect("unexpected checked value: {value}").to_equal("")
+
+    it "rejects a cached integer slot arity mismatch before dispatch":
+        val slot = DynI64FnSlot(
+            fptr: 1,
+            symbol: "probe_two",
+            provider_path: "fixture",
+            arity: 2
+        )
+        val result = unsafe(capabilities: [ffi, raw_ptr]):
+            slot.call_checked([7])
+        match result:
+            case Err(error):
+                expect(error).to_contain("E-SFFI-003")
+                expect(error).to_contain("expects 2 i64 arguments, got 1")
+            case Ok(value):
+                expect("unexpected cached value: {value}").to_equal("")
+
+    it "rejects unsupported slot arity before symbol lookup":
+        val lib = DynLib(handle: 1, path: "fixture")
+        val result = unsafe(capabilities: [ffi, raw_ptr]):
+            lib.resolve_i64_checked("probe_nine", 9)
+        match result:
+            case Err(error):
+                expect(error).to_contain("E-SFFI-003")
+                expect(error).to_contain("expected 0..8")
+            case Ok(_):
+                expect("unexpected resolved slot").to_equal("")
 
     it "rejects an empty provider prefix before foreign loading":
         val result = unsafe(capabilities: [ffi, raw_ptr]):

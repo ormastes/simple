@@ -7155,6 +7155,50 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs) {
     }
 }
 
+/* Checked integer-only WFFI transport, matching the Rust runtime and
+ * interpreter contract exactly: [status, value], with value meaningful only
+ * for status 0. Keep this beside the legacy dispatcher so pure-Simple native
+ * binaries do not depend on a Rust runtime owner for the checked symbol. */
+#define SPL_WFFI_OK 0
+#define SPL_WFFI_INVALID_ARGUMENT 1
+#define SPL_WFFI_NULL_FUNCTION 2
+#define SPL_WFFI_UNSUPPORTED_SIGNATURE 3
+
+static int64_t spl_wffi_i64_checked_result(int64_t status, int64_t value) {
+    SplArray* result = rt_array_new(2);
+    if (!result) return rt_core_nil();
+    if (!rt_array_push(result, rt_value_int(status)) ||
+        !rt_array_push(result, rt_value_int(value))) {
+        rt_array_free(result);
+        return rt_core_nil();
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
+int64_t spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value, int64_t nargs) {
+    if (fptr == 0) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_NULL_FUNCTION, 0);
+    }
+    if (nargs < 0) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    if (nargs > 8) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_UNSUPPORTED_SIGNATURE, 0);
+    }
+    RtCoreArray* args = rt_core_as_array(args_value);
+    if (!args || (args->flags & RT_CORE_ARRAY_FLAG_BYTES) || !args->data ||
+        nargs > args->len) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    for (int64_t i = 0; i < nargs; i++) {
+        if (!rt_core_is_int(((int64_t*)args->data)[i])) {
+            return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+        }
+    }
+    return spl_wffi_i64_checked_result(
+        SPL_WFFI_OK, spl_wffi_call_i64(fptr, args_value, nargs));
+}
+
 int64_t rt_array_header_ptr(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? (int64_t)(uintptr_t)array : 0;
@@ -11831,7 +11875,8 @@ void __simple_runtime_shutdown(void) {
  * plausible-looking value for the third case:
  *
  *   (1) Real semantics, taken from the Rust runtime (`src/compiler_rust/
- *       runtime/src/value/objects.rs`) or `src/runtime/simple_core/*.spl`.
+ *       runtime/src/value/objects.rs`) or the `.spl` files under
+ *       `src/runtime/simple_core/`.
  *   (2) A NAMED LOUD TRAP -- `rt_trap_unimplemented("rt_x")` prints the symbol
  *       to stderr and aborts. This is a STUB, not an implementation. It is
  *       strictly better than address 0 (you learn WHICH call died) and strictly

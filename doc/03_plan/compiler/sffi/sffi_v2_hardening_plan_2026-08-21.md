@@ -1574,3 +1574,16 @@ When an admitted current-source Stage-4 runtime exists, run the focused checked
 loader correctness spec, the Simple optimizer on `dynamic.spl`, and one paired
 legacy-versus-checked dispatcher timing/RSS sample. Until those exact gates run,
 retain `UNVERIFIED`, zero signed/admitted, and the current census debt.
+
+The integer-only cached-slot precursor is implemented: C/Rust checked transport
+status parity, one-time `dlsym`, exact `0..8` arity validation, atomic manifest
+resolution, and compatibility facades over one canonical signature owner. Keep
+the entire family `unsafe(ffi, raw_ptr)`; it is not evidence for floats,
+aggregates, pointers, ownership, unwind, or a signed provider.
+
+Next, generate one direct slot type per canonical ABI registry signature and
+bind its publication to `sffi-evidence-admission.shs` output for the exact
+artifact. Replace the checked result array with status/out or direct typed
+return contracts where appropriate so hot calls allocate nothing. Admission
+must remain one-time and atomic; revocation/generation state must not add a
+mutex, hash, or string lookup to each call.

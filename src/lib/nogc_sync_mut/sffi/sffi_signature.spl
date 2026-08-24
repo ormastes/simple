@@ -3,6 +3,7 @@
 # Manifest-based validation for dynamically loaded libraries.
 # Verifies expected functions exist and match declared arg counts.
 
+use std.sffi.dynamic.{DynI64FnSlot}
 use std.sffi.dynamic_versioned.{VersionedDynLib}
 
 # ============================================================================
@@ -110,3 +111,46 @@ fn classify_api_groups(lib: VersionedDynLib, groups: {text: [text]}) -> [text]:
         if all_present:
             supported.push(group_name)
     supported
+
+# Atomically resolved integer-only manifest. Construction resolves every
+# symbol once; callers may retain a slot and invoke it without per-call dlsym.
+class ResolvedI64Manifest:
+    slots: {text: DynI64FnSlot}
+
+impl ResolvedI64Manifest:
+    fn count() -> i64:
+        self.slots.len()
+
+    fn get(name: text) -> DynI64FnSlot?:
+        if self.slots.contains(name):
+            return self.slots[name]
+        nil
+
+    @unsafe(reason: "cached integer slots remain unverified foreign ABI calls", capabilities: [ffi, raw_ptr])
+    fn call_checked(name: text, args: [i64]) -> Result<i64, text>:
+        if not self.slots.contains(name):
+            return Err("E-SFFI-001: symbol was not admitted into the resolved manifest: {name}")
+        self.slots[name].call_checked(args)
+
+@unsafe(reason: "resolves unverified provider symbols into integer-only ABI slots", capabilities: [ffi, raw_ptr])
+fn resolve_i64_manifest(lib: VersionedDynLib, manifest: FfiManifest) -> Result<ResolvedI64Manifest, text>:
+    var slots: {text: DynI64FnSlot} = {}
+    val names = manifest.names()
+    var i = 0
+    while i < names.len():
+        val name = names[i]
+        match manifest.get(name):
+            case Some(signature):
+                if signature.return_type != "i64":
+                    return Err("E-SFFI-003: {name} return type is {signature.return_type}; resolved i64 manifest requires i64")
+                if signature.arg_count < 0 or signature.arg_count > 8:
+                    return Err("E-SFFI-003: {name} arity {signature.arg_count} is outside 0..8")
+                match lib.lib.resolve_i64_checked(name, signature.arg_count):
+                    case Ok(slot):
+                        slots[name] = slot
+                    case Err(error):
+                        return Err(error)
+            case nil:
+                return Err("E-SFFI-003: manifest lost signature for {name}")
+        i = i + 1
+    Ok(ResolvedI64Manifest(slots: slots))

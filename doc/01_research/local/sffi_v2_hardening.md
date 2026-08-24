@@ -2734,3 +2734,28 @@ This slice is source-reviewed but not executed: the deployed `bin/simple`
 remains the Rust seed rather than an admitted current-source pure-Simple Stage
 4. Therefore it provides neither compiled correctness evidence nor timing/RSS
 evidence and must not be described as verified, signed, or safe.
+
+## Checked C parity and cached integer slots
+
+The checked array transport previously existed in the Rust runtime and
+interpreter but had no `runtime_native.c` definition. The C owner now implements
+the same four observable statuses: success `0`, invalid argument `1`, null
+function `2`, and unsupported signature `3`. It rejects non-integer array
+elements and preserves a legitimate foreign zero as `[0, 0]`. A real C harness
+passes six discriminating cases in 4.16 seconds build-plus-run with 141,112 KiB
+peak RSS; this measurement is harness/toolchain cost, not per-call latency.
+
+`DynI64FnSlot` is the first resolved cached slot family. Resolution validates
+arity `0..8` and performs `dlsym` once. Subsequent calls do one arity comparison
+and the existing checked bridge; they do not repeat path lookup, symbol lookup,
+hashing, signing, or manifest traversal. `ResolvedI64Manifest` constructs all
+requested integer slots in a local dictionary and publishes only after every
+entry resolves, preventing partial admission. Duplicate signature modules now
+export the canonical no-GC synchronous owner instead of maintaining three
+copies.
+
+This is still an unsafe migration family, not general typed SFFI: only the
+exact C ABI `i64(i64...)` is representable, provider signatures remain
+declarative rather than cryptographically bound, and checked result arrays
+allocate per call. Safe/critical hot paths still require compiler-generated
+direct signature-specific slots plus signed artifact/ABI admission.

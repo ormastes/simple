@@ -1,0 +1,43 @@
+#!/bin/sh
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+HARNESS="$ROOT/test/harness/wffi_i64_checked_c_harness.c"
+STUBS="$ROOT/test/harness/rt_clear_harness_stubs.c"
+WORK=${TMPDIR:-/tmp}/wffi-i64-checked-c.$$
+
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT INT TERM
+
+CC=
+for candidate in clang cc gcc; do
+    if command -v "$candidate" >/dev/null 2>&1; then CC=$candidate; break; fi
+done
+if [ -z "$CC" ]; then
+    printf 'ERROR — nothing was checked (no C compiler)\n'
+    exit 2
+fi
+
+mkdir -p "$WORK"
+"$CC" -O2 -std=gnu11 -D_GNU_SOURCE -w -o "$WORK/harness" \
+    "$HARNESS" "$STUBS" -lm -lpthread -ldl >"$WORK/build.log" 2>&1
+if [ $? -ne 0 ]; then
+    printf 'ERROR — nothing was checked (C harness build failed)\n'
+    cat "$WORK/build.log"
+    exit 2
+fi
+
+"$WORK/harness" >"$WORK/output" 2>&1
+rc=$?
+cat "$WORK/output"
+cases=$(grep -c -E '^\[( ok |FAIL)\]' "$WORK/output" 2>/dev/null || true)
+[ -n "$cases" ] || cases=0
+if [ "$cases" -eq 0 ]; then
+    printf 'ERROR — nothing was checked (harness reported zero cases)\n'
+    exit 2
+fi
+if [ "$rc" -ne 0 ]; then
+    printf 'FAIL — %s checked C WFFI case(s), harness rc=%s\n' "$cases" "$rc"
+    exit 1
+fi
+printf 'PASS — %s checked C WFFI case(s)\n' "$cases"
