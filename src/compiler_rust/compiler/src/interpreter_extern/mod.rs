@@ -1382,6 +1382,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_exists_probe_begin", file_io::rt_file_exists_probe_begin);
     insert_simple!("rt_file_exists_probe_end", file_io::rt_file_exists_probe_end);
     insert_simple!("rt_file_is_regular_no_follow", file_io::rt_file_is_regular_no_follow);
+    insert_simple!("rt_hosted_safe_artifact_read_v1", file_io::rt_hosted_safe_artifact_read_v1);
+    insert_simple!("rt_hosted_safe_artifact_publish_v1", file_io::rt_hosted_safe_artifact_publish_v1);
+    insert_simple!("rt_hosted_safe_artifact_root_open_v1", file_io::rt_hosted_safe_artifact_root_open_v1);
+    insert_simple!("rt_hosted_safe_artifact_root_close_v1", file_io::rt_hosted_safe_artifact_root_close_v1);
     insert_simple!("rt_file_is_char_device", file_io::rt_file_is_char_device);
     insert_simple!("rt_file_exists_str", file_io::rt_file_exists);
     insert_simple!("rt_file_find", file_io::rt_file_find);

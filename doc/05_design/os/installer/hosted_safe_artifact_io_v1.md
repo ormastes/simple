@@ -1,6 +1,6 @@
 # Hosted safe artifact I/O v1
 
-Status: BLOCKED AT HOST CAPABILITY BOUNDARY
+Status: PROVIDER PRIMITIVES IMPLEMENTED; UNVERIFIED
 
 ## Purpose
 
@@ -88,9 +88,47 @@ retain a typed descriptor and its native provider does not request no-follow.
 rename-no-replace mode.  Consequently these operations cannot be safely
 composed in pure Simple.
 
-No executable owner is added until the canonical host facade exposes the
-missing atomic primitives consistently in interpreter and native providers.
-This is fail-closed: the signer must continue to report safe I/O unavailable.
+`src/os/installer/hosted_safe_artifact_io_v1.spl` now owns the only Pure Simple
+facade.  A package-private trusted-startup entrypoint opens an absolute root
+once, returns an opaque sealed root authority, and retains that descriptor in
+the canonical owner until its one-shot close.  Read and publication calls take
+the sealed authority, never a root path.  Their package-private grants are backed by one
+module-global mutex, positive nonwrapping generations, domain-separated seals,
+and one outstanding generation per operation.  Copying a grant does not copy
+redemption authority: the canonical generation is cleared by the first valid
+redemption.  Generation exhaustion or an indeterminate unlock quarantines the
+owner.
+
+The interpreter provider and native C provider expose the same consuming
+operations.  Root acquisition and all data operations are Linux-only in v1;
+other hosts fail closed rather than inheriting platform-dependent `close(EINTR)`
+or weaker lookup semantics.  On Linux, reads resolve relative to the retained root descriptor
+with `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|
+RESOLVE_NO_XDEV)`, reject dot/empty/absolute components before dispatch,
+snapshot regular-file identity and size with
+`fstat`, perform an interruption-bounded exact read, re-stat, and close every
+descriptor.  A returned array is therefore tied to the checked descriptor;
+growth is ignored and premature EOF or metadata change fails closed.
+
+On Linux, publication resolves the destination parent with the same `openat2`
+policy and uses an owner-only unnamed `O_TMPFILE`, bounded
+short-write/EINTR loops, `fdatasync`, `fsync`, regular-file identity checking,
+and `linkat(AT_EMPTY_PATH)`.  The latter is the fd-bound atomic no-replace
+operation: an existing destination reports `already-exists` and is never
+replaced.  A final directory `fsync` supplies namespace durability.  Hosts
+without `openat2` or this exact unnamed-inode publication path report
+`unsupported`; no
+named file in an attacker-writable directory is substituted.  Cleanup failure
+and post-publication durability failure remain distinct provider outcomes.
+
+The read provider intentionally collapses all host errors to one rejected
+class so interpreter and native callers cannot branch on platform errno.  The
+publication provider shares the status classes `already-exists`, `unsupported`,
+`cleanup-failed`, `published-not-durable`, and generic rejection.  Neither
+provider exports an fd or accepts one from Simple code.
+
+This implementation has not been built or executed.  The signer must not claim
+safe publication until its separate secret-zeroization prerequisite is closed.
 
 ## Static acceptance contract
 
@@ -106,5 +144,18 @@ This is fail-closed: the signer must continue to report safe I/O unavailable.
 - Interpreter and native implementations must have identical failure classes
   before this capability is exported to the signer.
 
+## Static implementation map
+
+- Pure Simple owner: `src/os/installer/hosted_safe_artifact_io_v1.spl`
+- Native provider: `src/runtime/runtime_native.c`
+- Interpreter provider and registry:
+  `src/compiler_rust/compiler/src/interpreter_extern/file_io.rs` and `mod.rs`
+- Native ABI declarations/text expansion:
+  `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs`,
+  `src/compiler_rust/compiler/src/codegen/instr/calls.rs`, and
+  `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs`
+- Facade rejection spec:
+  `test/01_unit/os/installer/hosted_safe_artifact_io_v1_spec.spl`
+
 No tests, builds, SPipe, benchmarks, optimizer, or runtime verification were
-run for this static contract.
+run for this implementation.

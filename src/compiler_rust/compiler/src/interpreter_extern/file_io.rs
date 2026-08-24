@@ -2768,6 +2768,226 @@ pub fn rt_file_is_regular_no_follow(args: &[Value]) -> Result<Value, CompileErro
     Ok(Value::Bool(regular))
 }
 
+#[cfg(unix)]
+fn safe_artifact_open_root(root: &str) -> Option<i32> {
+    if !root.starts_with('/') || root.len() > 4095 || root.contains("//") || (root != "/" && root.ends_with('/')) {
+        return None;
+    }
+    let components: Vec<&str> = root.split('/').skip(1).filter(|part| !part.is_empty()).collect();
+    if components.iter().any(|part| *part == "." || *part == ".." || part.len() > 255 || part.as_bytes().contains(&0)) {
+        return None;
+    }
+    let slash = CString::new("/").ok()?;
+    let mut current = unsafe { libc::open(slash.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if current < 0 { return None }
+    for component in components {
+        let component = match CString::new(component.as_bytes()) {
+            Ok(value) => value,
+            Err(_) => { unsafe { libc::close(current) }; return None; }
+        };
+        let mut retries = 0;
+        let next = loop {
+            let fd = unsafe { libc::openat(current, component.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            if fd >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) || retries >= 31 { break fd }
+            retries += 1;
+        };
+        if next < 0 || unsafe { libc::close(current) } != 0 {
+            if next >= 0 { unsafe { libc::close(next) }; }
+            return None;
+        }
+        current = next;
+    }
+    Some(current)
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct SafeArtifactOpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn safe_artifact_open_beneath(root_fd: i32, relative: &str, flags: i32, mode: u32) -> i32 {
+    let Ok(relative) = CString::new(relative.as_bytes()) else { return -1 };
+    let how = SafeArtifactOpenHow {
+        flags: flags as u64,
+        mode: mode as u64,
+        resolve: 0x01 | 0x02 | 0x04 | 0x08,
+    };
+    let mut retries = 0;
+    loop {
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_openat2, root_fd, relative.as_ptr(), &how,
+                std::mem::size_of::<SafeArtifactOpenHow>(),
+            ) as i32
+        };
+        if fd >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) || retries >= 31 {
+            return fd;
+        }
+        retries += 1;
+    }
+}
+
+pub fn rt_hosted_safe_artifact_root_open_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let root = extract_path(args, 0)?;
+    #[cfg(target_os = "linux")]
+    let handle = safe_artifact_open_root(&root).map(i64::from).unwrap_or(-1);
+    #[cfg(not(target_os = "linux"))]
+    let handle = { let _ = root; -1 };
+    Ok(Value::Int(handle))
+}
+
+pub fn rt_hosted_safe_artifact_root_close_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args.first().map(Value::as_int).transpose()?.unwrap_or(-1);
+    #[cfg(target_os = "linux")]
+    let closed = handle >= 0 && handle <= i32::MAX as i64 && unsafe { libc::close(handle as i32) } == 0;
+    #[cfg(not(target_os = "linux"))]
+    let closed = false;
+    Ok(Value::Bool(closed))
+}
+
+/// Descriptor-bound bounded read for the Pure Simple hosted-artifact owner.
+/// Nil is the sole fail-closed provider result; an empty array is valid.
+pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let root_handle = args.first().map(Value::as_int).transpose()?.unwrap_or(-1);
+    let relative = extract_path(args, 1)?;
+    let max_bytes = match args.get(2) {
+        Some(value) => value.as_int()?,
+        None => -1,
+    };
+    if max_bytes < 0 || max_bytes > 16_777_216 {
+        return Ok(Value::Nil);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root_handle, relative);
+        return Ok(Value::Nil);
+    }
+    #[cfg(unix)]
+    {
+        if root_handle < 0 || root_handle > i32::MAX as i64 { return Ok(Value::Nil) }
+        let root_fd = root_handle as i32;
+        let mut retries = 0;
+        let mut root_identity: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 { return Ok(Value::Nil) }
+        #[cfg(target_os = "linux")]
+        let fd = safe_artifact_open_beneath(root_fd, &relative, libc::O_RDONLY | libc::O_CLOEXEC, 0);
+        #[cfg(not(target_os = "linux"))]
+        let fd = -1;
+        let mut ok = fd >= 0;
+        let mut before: libc::stat = unsafe { std::mem::zeroed() };
+        if ok { ok = unsafe { libc::fstat(fd, &mut before) } == 0 }
+        if ok { ok = before.st_dev == root_identity.st_dev && (before.st_mode & libc::S_IFMT) == libc::S_IFREG && before.st_size >= 0 && before.st_size <= max_bytes }
+        let wanted = if ok { before.st_size as usize } else { 0 };
+        let mut bytes = vec![0u8; wanted];
+        let mut used = 0usize;
+        retries = 0;
+        while ok && used < wanted {
+            let count = unsafe { libc::read(fd, bytes[used..].as_mut_ptr().cast(), wanted - used) };
+            if count > 0 { used += count as usize; retries = 0; continue; }
+            if count < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) && retries < 31 {
+                retries += 1;
+                continue;
+            }
+            ok = false;
+        }
+        let mut after: libc::stat = unsafe { std::mem::zeroed() };
+        if ok { ok = unsafe { libc::fstat(fd, &mut after) } == 0 }
+        if ok {
+            ok = before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+                before.st_mode == after.st_mode && before.st_size == after.st_size &&
+                before.st_mtime == after.st_mtime && before.st_ctime == after.st_ctime;
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            { ok = ok && before.st_mtime_nsec == after.st_mtime_nsec && before.st_ctime_nsec == after.st_ctime_nsec; }
+            #[cfg(target_os = "macos")]
+            { ok = ok && before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec && before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec; }
+        }
+        if fd >= 0 && unsafe { libc::close(fd) } != 0 { ok = false }
+        if ok {
+            Ok(Value::byte_array(bytes))
+        } else {
+            bytes.fill(0);
+            Ok(Value::Nil)
+        }
+    }
+}
+
+/// Unnamed private staging plus absent-destination publication.  Status:
+/// 0 durable success, -2 already exists, -3 unsupported, -4 published but the
+/// directory/close durability fence failed, -1 all other fail-closed errors.
+pub fn rt_hosted_safe_artifact_publish_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let root_handle = args.first().map(Value::as_int).transpose()?.unwrap_or(-1);
+    let relative = extract_path(args, 1)?;
+    let Some(payload) = args.get(2).and_then(Value::byte_array_view) else { return Ok(Value::Int(-1)) };
+    let max_bytes = match args.get(3) {
+        Some(value) => value.as_int()?,
+        None => -1,
+    };
+    if max_bytes < 0 || max_bytes > 16_777_216 || payload.len() > max_bytes as usize {
+        return Ok(Value::Int(-1));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (root_handle, relative, payload);
+        return Ok(Value::Int(-3));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if root_handle < 0 || root_handle > i32::MAX as i64 { return Ok(Value::Int(-1)) }
+        let root_fd = root_handle as i32;
+        let (parent_path, leaf_text) = match relative.rsplit_once('/') {
+            Some((parent, leaf)) if !parent.is_empty() && !leaf.is_empty() => (parent, leaf),
+            None => (".", relative.as_str()),
+            _ => return Ok(Value::Int(-1)),
+        };
+        let Ok(leaf) = CString::new(leaf_text.as_bytes()) else { return Ok(Value::Int(-1)) };
+        let parent_fd = safe_artifact_open_beneath(
+            root_fd, parent_path, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC, 0);
+        if parent_fd < 0 { return Ok(Value::Int(-1)) }
+        let mut root_identity: libc::stat = unsafe { std::mem::zeroed() };
+        let mut parent_identity: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 ||
+            unsafe { libc::fstat(parent_fd, &mut parent_identity) } != 0 ||
+            root_identity.st_dev != parent_identity.st_dev {
+            unsafe { libc::close(parent_fd); }
+            return Ok(Value::Int(-1));
+        }
+        let dot = CString::new(".").expect("literal has no NUL");
+        let fd = unsafe { libc::openat(parent_fd, dot.as_ptr(), libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC, 0o600) };
+        let mut status = if fd < 0 { -3 } else { -1 };
+        let mut published = false;
+        let mut used = 0usize;
+        let mut retries = 0;
+        while fd >= 0 && used < payload.len() {
+            let written = unsafe { libc::write(fd, payload[used..].as_ptr().cast(), payload.len() - used) };
+            if written > 0 { used += written as usize; retries = 0; continue; }
+            if written < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) && retries < 31 {
+                retries += 1;
+                continue;
+            }
+            break;
+        }
+        let mut identity: libc::stat = unsafe { std::mem::zeroed() };
+        if fd >= 0 && used == payload.len() && unsafe { libc::fdatasync(fd) } == 0 &&
+            unsafe { libc::fsync(fd) } == 0 && unsafe { libc::fstat(fd, &mut identity) } == 0 &&
+            identity.st_dev == root_identity.st_dev && (identity.st_mode & libc::S_IFMT) == libc::S_IFREG && identity.st_size == payload.len() as i64 {
+            let empty = CString::new("").expect("literal has no NUL");
+            if unsafe { libc::linkat(fd, empty.as_ptr(), parent_fd, leaf.as_ptr(), libc::AT_EMPTY_PATH) } == 0 {
+                status = if unsafe { libc::fsync(parent_fd) } == 0 { 0 } else { -4 };
+                published = true;
+            } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST) {
+                status = -2;
+            }
+        }
+        if fd >= 0 && unsafe { libc::close(fd) } != 0 { status = if published { -4 } else { -5 } }
+        if unsafe { libc::close(parent_fd) } != 0 { status = if published { -4 } else { -5 } }
+        Ok(Value::Int(status))
+    }
+}
+
 /// No-shell stat(2)-backed char-device probe. Mirrors the C runtime's
 /// `rt_file_is_char_device` (src/runtime/runtime.c) for the interpreter path.
 /// Symlinks are followed (fs::metadata, not symlink_metadata) so a path that

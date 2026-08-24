@@ -87,6 +87,15 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include <pthread.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
+#if defined(__linux__) && !defined(O_TMPFILE)
+#define O_TMPFILE (020000000 | O_DIRECTORY)
+#endif
+#if defined(__linux__) && !defined(AT_EMPTY_PATH)
+#define AT_EMPTY_PATH 0x1000
+#endif
 #endif
 
 /* C-string worker; the public (ptr, len) entry point is below. Named to match
@@ -9662,6 +9671,252 @@ int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
 #else
     struct stat st;
     return path && lstat(path, &st) == 0 && S_ISREG(st.st_mode);
+#endif
+}
+
+/* Hosted safe-artifact provider v1.
+ *
+ * These are deliberately high-level consuming operations.  No descriptor is
+ * exposed through the value-semantic Simple ABI: one C frame owns the trusted
+ * root, walked directory descriptors, leaf descriptor, and close outcome.
+ * Windows and POSIX hosts without O_TMPFILE + AT_EMPTY_PATH fail with the
+ * documented unsupported status rather than approximating atomicity.
+ */
+#if !defined(_WIN32)
+#define RT_SAFE_ARTIFACT_EINTR_LIMIT 32
+#if defined(__linux__)
+struct rt_safe_artifact_open_how {
+    uint64_t flags;
+    uint64_t mode;
+    uint64_t resolve;
+};
+#define RT_SAFE_RESOLVE_NO_XDEV 0x01u
+#define RT_SAFE_RESOLVE_NO_MAGICLINKS 0x02u
+#define RT_SAFE_RESOLVE_NO_SYMLINKS 0x04u
+#define RT_SAFE_RESOLVE_BENEATH 0x08u
+
+static int rt_safe_artifact_open_beneath(int root_fd, const char* relative,
+                                         int flags, int mode) {
+#if defined(SYS_openat2)
+    struct rt_safe_artifact_open_how how;
+    int retries = 0;
+    long result;
+    memset(&how, 0, sizeof(how));
+    how.flags = (uint64_t)flags;
+    how.mode = (uint64_t)mode;
+    how.resolve = RT_SAFE_RESOLVE_BENEATH | RT_SAFE_RESOLVE_NO_SYMLINKS |
+        RT_SAFE_RESOLVE_NO_MAGICLINKS | RT_SAFE_RESOLVE_NO_XDEV;
+    do { result = syscall(SYS_openat2, root_fd, relative, &how, sizeof(how)); }
+    while (result < 0 && errno == EINTR && ++retries < RT_SAFE_ARTIFACT_EINTR_LIMIT);
+    return result >= 0 && result <= INT_MAX ? (int)result : -1;
+#else
+    (void)root_fd; (void)relative; (void)flags; (void)mode;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+#endif
+
+static int rt_safe_artifact_path_copy(const uint8_t* value, uint64_t len,
+                                      char* out, size_t capacity) {
+    if (!value || len == 0 || len >= capacity || memchr(value, '\0', (size_t)len)) return 0;
+    memcpy(out, value, (size_t)len);
+    out[len] = '\0';
+    return 1;
+}
+
+static int rt_safe_artifact_open_root(const char* root) {
+    char path[4096];
+    char* cursor;
+    int current;
+    if (!root || root[0] != '/' || strlen(root) >= sizeof(path)) return -1;
+    current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (current < 0) return -1;
+    if (root[1] == '\0') return current;
+    memcpy(path, root + 1, strlen(root));
+    cursor = path;
+    for (;;) {
+        char* slash = strchr(cursor, '/');
+        size_t len = slash ? (size_t)(slash - cursor) : strlen(cursor);
+        int next, retries = 0;
+        if (len == 0 || len >= 256 || (len == 1 && cursor[0] == '.') ||
+            (len == 2 && cursor[0] == '.' && cursor[1] == '.')) {
+            close(current);
+            return -1;
+        }
+        if (slash) *slash = '\0';
+        do { next = openat(current, cursor, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); }
+        while (next < 0 && errno == EINTR && ++retries < RT_SAFE_ARTIFACT_EINTR_LIMIT);
+        if (next < 0 || close(current) != 0) {
+            if (next >= 0) close(next);
+            return -1;
+        }
+        current = next;
+        if (!slash) return current;
+        cursor = slash + 1;
+    }
+}
+
+static int rt_safe_artifact_stat_equal(const struct stat* a, const struct stat* b) {
+    int time_equal;
+#if defined(__APPLE__)
+    time_equal = a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec &&
+        a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
+        a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec &&
+        a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
+#else
+    time_equal = a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
+        a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
+        a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
+        a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+#endif
+    return time_equal && a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+        a->st_mode == b->st_mode && a->st_size == b->st_size &&
+        a->st_mtime == b->st_mtime && a->st_ctime == b->st_ctime;
+}
+#endif
+
+int64_t rt_hosted_safe_artifact_root_open_v1(
+    const uint8_t* root_ptr, uint64_t root_len) {
+#if !defined(__linux__)
+    (void)root_ptr; (void)root_len;
+    return -1;
+#else
+    char root[4096];
+    if (!rt_safe_artifact_path_copy(root_ptr, root_len, root, sizeof(root))) return -1;
+    return (int64_t)rt_safe_artifact_open_root(root);
+#endif
+}
+
+int rt_hosted_safe_artifact_root_close_v1(int64_t root_handle) {
+#if !defined(__linux__)
+    (void)root_handle;
+    return 0;
+#else
+    if (root_handle < 0 || root_handle > INT_MAX) return 0;
+    return close((int)root_handle) == 0;
+#endif
+}
+
+int64_t rt_hosted_safe_artifact_read_v1(
+    int64_t root_handle, const uint8_t* relative_ptr,
+    uint64_t relative_len, int64_t max_bytes) {
+#if !defined(__linux__)
+    (void)root_handle; (void)relative_ptr; (void)relative_len; (void)max_bytes;
+    return 0;
+#else
+    char relative[4096];
+    int root_fd, fd = -1, retries = 0, ok = 0;
+    struct stat root_identity, before, after;
+    uint8_t* bytes = NULL;
+    size_t used = 0, wanted = 0;
+    SplArray* result = NULL;
+    if (root_handle < 0 || root_handle > INT_MAX || max_bytes < 0 || max_bytes > 16777216 ||
+        !rt_safe_artifact_path_copy(relative_ptr, relative_len, relative, sizeof(relative))) return 0;
+    root_fd = (int)root_handle;
+    if (fstat(root_fd, &root_identity) != 0) goto done;
+    fd = rt_safe_artifact_open_beneath(root_fd, relative, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0 || fstat(fd, &before) != 0 || before.st_dev != root_identity.st_dev || !S_ISREG(before.st_mode) ||
+        before.st_size < 0 || before.st_size > max_bytes ||
+        (uintmax_t)before.st_size > SIZE_MAX) goto done;
+    wanted = (size_t)before.st_size;
+    bytes = (uint8_t*)malloc(wanted > 0 ? wanted : 1);
+    if (!bytes) goto done;
+    while (used < wanted) {
+        ssize_t count = read(fd, bytes + used, wanted - used);
+        if (count > 0) { used += (size_t)count; retries = 0; continue; }
+        if (count < 0 && errno == EINTR && ++retries < RT_SAFE_ARTIFACT_EINTR_LIMIT) continue;
+        goto done;
+    }
+    if (fstat(fd, &after) != 0 || !rt_safe_artifact_stat_equal(&before, &after)) goto done;
+    ok = 1;
+done:
+    if (fd >= 0 && close(fd) != 0) ok = 0;
+    if (ok) {
+        result = rt_byte_array_new_len((uint64_t)wanted);
+        {
+            RtCoreArray* array = rt_core_array_ptr(result);
+            if (!array || (wanted > 0 && !array->data)) { result = NULL; ok = 0; }
+            else if (wanted > 0) memcpy(array->data, bytes, wanted);
+        }
+    }
+    if (bytes) { memset(bytes, 0, wanted); free(bytes); }
+    return ok ? (int64_t)(uintptr_t)result : 0;
+#endif
+}
+
+int64_t rt_hosted_safe_artifact_publish_v1(
+    int64_t root_handle, const uint8_t* relative_ptr, uint64_t relative_len,
+    int64_t payload_value, int64_t max_bytes) {
+#if !defined(__linux__) || !defined(O_TMPFILE) || !defined(AT_EMPTY_PATH)
+    (void)root_handle; (void)relative_ptr; (void)relative_len;
+    (void)payload_value; (void)max_bytes;
+    return -3;
+#else
+    char relative[4096], parent_path[4096], leaf[256];
+    char* slash;
+    int root_fd, parent_fd = -1, fd = -1, retries = 0, published = 0;
+    int64_t status = -1;
+    SplArray* payload = (SplArray*)(intptr_t)payload_value;
+    int64_t count, index;
+    struct stat root_identity, parent_identity, identity;
+    if (root_handle < 0 || root_handle > INT_MAX || !payload || max_bytes < 0 || max_bytes > 16777216 ||
+        !rt_safe_artifact_path_copy(relative_ptr, relative_len, relative, sizeof(relative))) return -1;
+    count = rt_array_len(payload);
+    if (count < 0 || count > max_bytes) return -1;
+    root_fd = (int)root_handle;
+    slash = strrchr(relative, '/');
+    if (slash) {
+        size_t parent_len = (size_t)(slash - relative);
+        size_t leaf_len = strlen(slash + 1);
+        if (parent_len == 0 || parent_len >= sizeof(parent_path) || leaf_len == 0 || leaf_len >= sizeof(leaf)) goto done;
+        memcpy(parent_path, relative, parent_len); parent_path[parent_len] = '\0';
+        memcpy(leaf, slash + 1, leaf_len + 1);
+    } else {
+        strcpy(parent_path, ".");
+        if (strlen(relative) >= sizeof(leaf)) goto done;
+        strcpy(leaf, relative);
+    }
+    if (fstat(root_fd, &root_identity) != 0) goto done;
+    parent_fd = rt_safe_artifact_open_beneath(
+        root_fd, parent_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    if (parent_fd < 0 || fstat(parent_fd, &parent_identity) != 0 ||
+        parent_identity.st_dev != root_identity.st_dev) goto done;
+    retries = 0;
+    do { fd = openat(parent_fd, ".", O_TMPFILE | O_WRONLY | O_CLOEXEC, 0600); }
+    while (fd < 0 && errno == EINTR && ++retries < RT_SAFE_ARTIFACT_EINTR_LIMIT);
+    if (fd < 0) { status = -3; goto done; }
+    index = 0;
+    while (index < count) {
+        uint8_t block[4096];
+        size_t block_len = (size_t)((count - index) < 4096 ? (count - index) : 4096);
+        size_t block_used = 0;
+        size_t i;
+        for (i = 0; i < block_len; i++) block[i] = (uint8_t)(rt_array_get(payload, index + (int64_t)i) & 0xff);
+        retries = 0;
+        while (block_used < block_len) {
+            ssize_t written = write(fd, block + block_used, block_len - block_used);
+            if (written > 0) { block_used += (size_t)written; retries = 0; continue; }
+            if (written < 0 && errno == EINTR && ++retries < RT_SAFE_ARTIFACT_EINTR_LIMIT) continue;
+            memset(block, 0, sizeof(block));
+            goto done;
+        }
+        memset(block, 0, sizeof(block));
+        index += (int64_t)block_len;
+    }
+    if (fdatasync(fd) != 0 || fsync(fd) != 0 || fstat(fd, &identity) != 0 ||
+        identity.st_dev != root_identity.st_dev || !S_ISREG(identity.st_mode) || identity.st_size != count) goto done;
+    if (linkat(fd, "", parent_fd, leaf, AT_EMPTY_PATH) != 0) {
+        status = errno == EEXIST ? -2 : -1;
+        goto done;
+    }
+    status = 0;
+    published = 1;
+    if (fsync(parent_fd) != 0) status = -4;
+done:
+    if (fd >= 0 && close(fd) != 0) status = published ? -4 : -5;
+    if (parent_fd >= 0 && close(parent_fd) != 0) status = published ? -4 : -5;
+    return status;
 #endif
 }
 

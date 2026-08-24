@@ -80,6 +80,22 @@ Required prerequisites are therefore:
   reports wipe failure and clears every explicitly registered owner-reachable
   secret workspace under the audited contract above.
 
+## Safe-I/O provider update (2026-08-24, unverified)
+
+The first two safe-I/O prerequisites now have a Linux provider draft in
+`src/os/installer/hosted_safe_artifact_io_v1.spl`.  It retains a package-bound
+trusted-root descriptor, uses kernel-enforced `openat2` beneath/no-symlink/
+no-magic-link/no-mount-crossing resolution for reads and destination parents,
+uses unnamed private `O_TMPFILE` staging, publishes the exact fd with atomic
+absent-destination `linkat(AT_EMPTY_PATH)`, and orders data/file/directory
+durability.  Interpreter and native C entrypoints share the failure classes.
+The Pure Simple owner consumes positive-generation sealed grants so copying a
+grant cannot redeem it twice.  This draft has received only static review; no
+test, build, SPipe, benchmark, optimizer, or runtime verification was run.
+
+The signing secret-workspace zeroization prerequisite remains open, so the
+signer remains blocked even after this I/O boundary is accepted.
+
 Static facade audit (2026-08-24):
 
 - `std.io.FileHandle` retains an fd for read/metadata/flush/close, but

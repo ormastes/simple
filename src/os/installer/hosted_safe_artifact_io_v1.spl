@@ -1,0 +1,280 @@
+"""Consumed Pure Simple facade for the hosted safe-artifact provider.
+
+The host provider owns every descriptor from open through close.  This module
+adds the value-copy-safe redemption boundary: returned grants carry no public
+fields and only the module-global owner may consume the one outstanding
+generation.  It intentionally serializes operations; artifact installation is
+not a request hot path and a second in-flight grant would need a bounded slot
+table rather than copied class state.
+"""
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+pub val HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1: i64 = 16777216
+
+@unsafe(reason: "atomic hosted provider owns no-follow descriptors through close", capabilities: [ffi])
+extern fn rt_hosted_safe_artifact_read_v1(
+    root_handle: i64, relative_path: text, max_bytes: i64,
+) -> [u8]?
+
+@unsafe(reason: "atomic hosted provider consumes staged file and directory authorities", capabilities: [ffi])
+extern fn rt_hosted_safe_artifact_publish_v1(
+    root_handle: i64, relative_path: text, payload: [u8], max_bytes: i64,
+) -> i64
+
+@unsafe(reason: "opens the trusted hosted root as a retained no-follow descriptor", capabilities: [ffi])
+extern fn rt_hosted_safe_artifact_root_open_v1(root: text) -> i64
+
+@unsafe(reason: "consumes the retained hosted root descriptor", capabilities: [ffi])
+extern fn rt_hosted_safe_artifact_root_close_v1(root_handle: i64) -> bool
+
+pub(package) struct HostedSafeArtifactRootAuthorityV1:
+    _generation: u64
+    _seal: u64
+
+pub(package) struct HostedSafeArtifactReadGrantV1:
+    _generation: u64
+    _seal: u64
+    _bytes: [u8]
+
+pub(package) struct HostedSafeArtifactPublishGrantV1:
+    _generation: u64
+    _seal: u64
+    _byte_count: i64
+
+pub struct HostedSafeArtifactPublishReceiptV1:
+    byte_count: i64
+    durable: bool
+
+struct HostedSafeArtifactOwnerStateV1:
+    next_generation: u64
+    read_generation: u64
+    publish_generation: u64
+    root_generation: u64
+    root_handle: i64
+    quarantined: bool
+
+val _hosted_safe_artifact_mutex_v1 = mutex_raw_create()
+var _hosted_safe_artifact_owner_v1 = HostedSafeArtifactOwnerStateV1(
+    next_generation: 0u64, read_generation: 0u64,
+    publish_generation: 0u64, root_generation: 0u64,
+    root_handle: -1, quarantined: false)
+
+pub fn hosted_safe_artifact_relative_path_valid_v1(relative_path: text) -> bool:
+    if relative_path == "" or relative_path.len() > 4095 or
+        relative_path.contains("\0") or relative_path.starts_with("/") or
+        relative_path.starts_with("\\") or relative_path.ends_with("/"):
+        return false
+    for component in relative_path.split("/"):
+        if component == "" or component == "." or component == ".." or
+            component.len() > 255:
+            return false
+    true
+
+fn _hosted_safe_artifact_root_matches_locked_v1(
+    authority: HostedSafeArtifactRootAuthorityV1,
+) -> bool:
+    authority._generation != 0u64 and
+        authority._generation == _hosted_safe_artifact_owner_v1.root_generation and
+        authority._seal == _hosted_safe_artifact_seal_v1(
+            authority._generation, 0x524f4f54u64) and
+        _hosted_safe_artifact_owner_v1.root_handle >= 0
+
+pub(package) fn hosted_safe_artifact_root_acquire_v1(
+    trusted_absolute_root: text,
+) -> Result<HostedSafeArtifactRootAuthorityV1, text>:
+    if not trusted_absolute_root.starts_with("/") or
+        trusted_absolute_root.contains("\0") or
+        trusted_absolute_root.len() > 4095:
+        return Err("hosted-safe-io-invalid-root")
+    if not _hosted_safe_artifact_lock_v1():
+        return Err("hosted-safe-io-owner-unavailable")
+    if _hosted_safe_artifact_owner_v1.root_generation != 0u64:
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-root-outstanding")
+    val generation = _hosted_safe_artifact_next_generation_locked_v1()
+    if generation == 0u64:
+        _hosted_safe_artifact_owner_v1.quarantined = true
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-generation-exhausted")
+    var handle = -1i64
+    unsafe(capabilities: [ffi]):
+        handle = rt_hosted_safe_artifact_root_open_v1(trusted_absolute_root)
+    if handle < 0:
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-root-rejected")
+    _hosted_safe_artifact_owner_v1.root_generation = generation
+    _hosted_safe_artifact_owner_v1.root_handle = handle
+    val authority = HostedSafeArtifactRootAuthorityV1(
+        _generation: generation,
+        _seal: _hosted_safe_artifact_seal_v1(generation, 0x524f4f54u64))
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err("hosted-safe-io-owner-quarantined")
+    Ok(authority)
+
+pub(package) fn hosted_safe_artifact_root_close_v1(
+    authority: HostedSafeArtifactRootAuthorityV1,
+) -> Result<(), text>:
+    if not _hosted_safe_artifact_lock_v1():
+        return Err("hosted-safe-io-owner-unavailable")
+    if not _hosted_safe_artifact_root_matches_locked_v1(authority) or
+        _hosted_safe_artifact_owner_v1.read_generation != 0u64 or
+        _hosted_safe_artifact_owner_v1.publish_generation != 0u64:
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-root-invalid-busy-or-consumed")
+    val handle = _hosted_safe_artifact_owner_v1.root_handle
+    var closed = false
+    unsafe(capabilities: [ffi]):
+        closed = rt_hosted_safe_artifact_root_close_v1(handle)
+    _hosted_safe_artifact_owner_v1.root_generation = 0u64
+    _hosted_safe_artifact_owner_v1.root_handle = -1
+    if not closed:
+        _hosted_safe_artifact_owner_v1.quarantined = true
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-root-close-failed")
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err("hosted-safe-io-owner-quarantined")
+    Ok(())
+
+fn _hosted_safe_artifact_lock_v1() -> bool:
+    if _hosted_safe_artifact_mutex_v1 <= 0:
+        return false
+    if not mutex_raw_lock(_hosted_safe_artifact_mutex_v1):
+        return false
+    if _hosted_safe_artifact_owner_v1.quarantined:
+        _ = mutex_raw_unlock(_hosted_safe_artifact_mutex_v1)
+        return false
+    true
+
+fn _hosted_safe_artifact_unlock_v1() -> bool:
+    if mutex_raw_unlock(_hosted_safe_artifact_mutex_v1):
+        return true
+    _hosted_safe_artifact_owner_v1.quarantined = true
+    false
+
+fn _hosted_safe_artifact_next_generation_locked_v1() -> u64:
+    if _hosted_safe_artifact_owner_v1.next_generation == 0xffffffffffffffffu64:
+        return 0u64
+    _hosted_safe_artifact_owner_v1.next_generation =
+        _hosted_safe_artifact_owner_v1.next_generation + 1u64
+    _hosted_safe_artifact_owner_v1.next_generation
+
+fn _hosted_safe_artifact_seal_v1(generation: u64, domain: u64) -> u64:
+    (generation * 0x9e3779b185ebca87u64) ^ domain ^ 0x53414645494f5631u64
+
+pub(package) fn hosted_safe_artifact_read_prepare_v1(
+    authority: HostedSafeArtifactRootAuthorityV1,
+    relative_path: text, max_bytes: i64,
+) -> Result<HostedSafeArtifactReadGrantV1, text>:
+    if not hosted_safe_artifact_relative_path_valid_v1(relative_path):
+        return Err("hosted-safe-io-invalid-path")
+    if max_bytes < 0 or max_bytes > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1:
+        return Err("hosted-safe-io-invalid-bound")
+    if not _hosted_safe_artifact_lock_v1():
+        return Err("hosted-safe-io-owner-unavailable")
+    if _hosted_safe_artifact_owner_v1.read_generation != 0u64:
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-read-grant-outstanding")
+    if not _hosted_safe_artifact_root_matches_locked_v1(authority):
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-root-authority-invalid")
+
+    var bytes: [u8]? = nil
+    unsafe(capabilities: [ffi]):
+        bytes = rt_hosted_safe_artifact_read_v1(
+            _hosted_safe_artifact_owner_v1.root_handle, relative_path, max_bytes)
+    if bytes == nil:
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-read-rejected")
+    val generation = _hosted_safe_artifact_next_generation_locked_v1()
+    if generation == 0u64:
+        _hosted_safe_artifact_owner_v1.quarantined = true
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-generation-exhausted")
+    _hosted_safe_artifact_owner_v1.read_generation = generation
+    val grant = HostedSafeArtifactReadGrantV1(
+        _generation: generation,
+        _seal: _hosted_safe_artifact_seal_v1(generation, 0x52454144u64),
+        _bytes: bytes ?? [])
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err("hosted-safe-io-owner-quarantined")
+    Ok(grant)
+
+pub(package) fn hosted_safe_artifact_read_redeem_v1(
+    grant: HostedSafeArtifactReadGrantV1,
+) -> Result<[u8], text>:
+    if not _hosted_safe_artifact_lock_v1():
+        return Err("hosted-safe-io-owner-unavailable")
+    val matches = grant._generation != 0u64 and
+        grant._generation == _hosted_safe_artifact_owner_v1.read_generation and
+        grant._seal == _hosted_safe_artifact_seal_v1(grant._generation, 0x52454144u64)
+    if not matches:
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-read-grant-invalid-or-consumed")
+    _hosted_safe_artifact_owner_v1.read_generation = 0u64
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err("hosted-safe-io-owner-quarantined")
+    Ok(grant._bytes)
+
+pub(package) fn hosted_safe_artifact_publish_prepare_v1(
+    authority: HostedSafeArtifactRootAuthorityV1,
+    relative_path: text, payload: [u8], max_bytes: i64,
+) -> Result<HostedSafeArtifactPublishGrantV1, text>:
+    if not hosted_safe_artifact_relative_path_valid_v1(relative_path):
+        return Err("hosted-safe-io-invalid-path")
+    if max_bytes < 0 or max_bytes > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        payload.len() > max_bytes:
+        return Err("hosted-safe-io-invalid-bound")
+    if not _hosted_safe_artifact_lock_v1():
+        return Err("hosted-safe-io-owner-unavailable")
+    if _hosted_safe_artifact_owner_v1.publish_generation != 0u64:
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-publish-grant-outstanding")
+    if not _hosted_safe_artifact_root_matches_locked_v1(authority):
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-root-authority-invalid")
+    val generation = _hosted_safe_artifact_next_generation_locked_v1()
+    if generation == 0u64:
+        _hosted_safe_artifact_owner_v1.quarantined = true
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-generation-exhausted")
+    var status = -1i64
+    unsafe(capabilities: [ffi]):
+        status = rt_hosted_safe_artifact_publish_v1(
+            _hosted_safe_artifact_owner_v1.root_handle,
+            relative_path, payload, max_bytes)
+    if status != 0:
+        _ = _hosted_safe_artifact_unlock_v1()
+        if status == -2: return Err("hosted-safe-io-already-exists")
+        if status == -3: return Err("hosted-safe-io-unsupported")
+        if status == -4: return Err("hosted-safe-io-published-not-durable")
+        if status == -5: return Err("hosted-safe-io-cleanup-failed")
+        return Err("hosted-safe-io-publish-rejected")
+    _hosted_safe_artifact_owner_v1.publish_generation = generation
+    val grant = HostedSafeArtifactPublishGrantV1(
+        _generation: generation,
+        _seal: _hosted_safe_artifact_seal_v1(generation, 0x5055424cu64),
+        _byte_count: payload.len())
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err("hosted-safe-io-owner-quarantined")
+    Ok(grant)
+
+pub(package) fn hosted_safe_artifact_publish_redeem_v1(
+    grant: HostedSafeArtifactPublishGrantV1,
+) -> Result<HostedSafeArtifactPublishReceiptV1, text>:
+    if not _hosted_safe_artifact_lock_v1():
+        return Err("hosted-safe-io-owner-unavailable")
+    val matches = grant._generation != 0u64 and
+        grant._generation == _hosted_safe_artifact_owner_v1.publish_generation and
+        grant._seal == _hosted_safe_artifact_seal_v1(grant._generation, 0x5055424cu64)
+    if not matches:
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-publish-grant-invalid-or-consumed")
+    _hosted_safe_artifact_owner_v1.publish_generation = 0u64
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err("hosted-safe-io-owner-quarantined")
+    Ok(HostedSafeArtifactPublishReceiptV1(
+        byte_count: grant._byte_count, durable: true))
+
+export HostedSafeArtifactPublishReceiptV1
+export hosted_safe_artifact_relative_path_valid_v1
