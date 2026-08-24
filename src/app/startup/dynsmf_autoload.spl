@@ -312,11 +312,9 @@ pub fn dynsmf_startup_session_with_dynload_config(args: [text], session_id: text
 # out of app-root when the operator knob is absent.
 val PRODUCT_DYNLOAD_CONFIG_ENV: text = "SIMPLE_DYNLOAD_CONFIG"
 
-# Platform-neutral startup extension selection. Applications only provide
-# argv/env values; host-specific discovery remains behind the dynSMF loader.
-# Precedence is CLI > env > the default path. Repeated --dynload entries retain
-# argv order, and the existing settings merger makes the last value for an id
-# win deterministically.
+# Platform-neutral startup extension selection. CLI overrides environment,
+# which overrides the default checked-config path. Repeated settings retain
+# argv order; the settings merger applies the last value for an id.
 class DynSmfStartupOptions:
     ok: bool
     reason: text
@@ -369,12 +367,13 @@ pub fn dynsmf_startup_options_from_values(args: [text], env_config: text,
     DynSmfStartupOptions(ok: true, reason: "loaded", config_path: config_path,
         settings_text: settings_text, explicit_config: explicit_config)
 
-struct ProductDynloadStartupMetrics:
+pub struct ProductDynloadStartupMetrics:
     elapsed_us: i64
     config_file_reads: i64
     raw_pack_file_reads: i64
     full_tree_scans: i64
     child_processes: i64
+    trace_lines_emitted: i64
     latency_target_us: i64
     latency_target_configured: bool
     latency_target_source: text
@@ -385,13 +384,14 @@ struct ProductDynloadStartupMetrics:
     raw_apk_counter_state: text
     raw_apk_compat_path: text
 
-class ProductDynloadStartup:
+pub class ProductDynloadStartup:
     session: DynSmfSession
     metrics: ProductDynloadStartupMetrics
     config_ok: bool
     exit_code: i64
     error: text
     closed: bool
+    trace_line: text
 
     # One O(libraries) reverse close. Raw APK compatibility has its own CLI
     # owner and never shares this lifecycle.
@@ -419,13 +419,15 @@ fn product_dynload_failure_reason(session: DynSmfSession) -> text:
             return row.action + ":" + row.reason
     ""
 
-fn product_dynload_metrics(elapsed_us: i64, config_reads: i64) -> ProductDynloadStartupMetrics:
+fn product_dynload_metrics(elapsed_us: i64, config_reads: i64,
+        trace_lines_emitted: i64) -> ProductDynloadStartupMetrics:
     ProductDynloadStartupMetrics(
         elapsed_us: if elapsed_us >= 0: elapsed_us else: 0,
         config_file_reads: config_reads,
         raw_pack_file_reads: -1,
         full_tree_scans: 0,
         child_processes: 0,
+        trace_lines_emitted: trace_lines_emitted,
         latency_target_us: 0,
         latency_target_configured: false,
         latency_target_source: "outer-harness-required",
@@ -436,7 +438,7 @@ fn product_dynload_metrics(elapsed_us: i64, config_reads: i64) -> ProductDynload
         raw_apk_counter_state: "not-owned-deferred",
         raw_apk_compat_path: "app.cli.startup_aspect_packs")
 
-fn product_dynload_startup_from_values(args: [text], env_dynsmf: text,
+pub fn product_dynload_startup_from_values(args: [text], env_dynsmf: text,
         env_disable: text, session_id: text, manifest: [DynSmfManifestEntry],
         sdn_text: text, env_dynload: text,
         elapsed_us: i64, config_file_reads: i64) -> ProductDynloadStartup:
@@ -447,53 +449,95 @@ fn product_dynload_startup_from_values(args: [text], env_dynsmf: text,
     val failure = product_dynload_failure_reason(session)
     ProductDynloadStartup(
         session: session,
-        metrics: product_dynload_metrics(elapsed_us, config_file_reads),
+        metrics: product_dynload_metrics(elapsed_us, config_file_reads, 0),
         config_ok: not config_failed,
         exit_code: if failure == "": 0 else: 1,
         error: if failure == "": "" elif config_failed:
             "dynload config rejected: " + failure
         else:
             "dynload startup rejected: " + failure,
-        closed: false)
+        closed: false,
+        trace_line: "")
 
-fn product_dynload_startup(args: [text], session_id: text) -> ProductDynloadStartup:
-    val started_us = time_now_micros()
-    if (env_get("SIMPLE_DYNSMF_TRACE") ?? "") == "1":
-        print "dynsmf-trace: startup_session_init session=" + session_id
+fn product_dynload_config_path() -> (text, bool):
+    val configured = env_get(PRODUCT_DYNLOAD_CONFIG_ENV) ?? ""
+    if configured != "":
+        return (configured, true)
+    (dynsmf_dynload_config_default_path(), false)
+
+# Deterministic filesystem/trace boundary shared by the product path and its
+# focused spec. The caller performs the one existence/read operation; this
+# owner maps that observation to checked-config admission and exact counters.
+pub fn product_dynload_startup_with_io(args: [text], session_id: text,
+        manifest: [DynSmfManifestEntry], config_path: text,
+        explicit_config: bool, config_exists_fn: fn(text) -> bool,
+        config_read_fn: fn(text) -> (bool, text),
+        env_dynsmf: text, env_disable: text,
+        env_dynload: text, trace_enabled: bool,
+        elapsed_us: i64) -> ProductDynloadStartup:
     val options = dynsmf_startup_options_from_values(
-        args,
-        env_get(PRODUCT_DYNLOAD_CONFIG_ENV) ?? "",
-        env_get("SIMPLE_DYNLOAD") ?? "")
-    val config_path = options.config_path
-    val explicit_config = options.explicit_config
+        args, if explicit_config: config_path else: "", env_dynload)
+    val resolved_path = if options.explicit_config: options.config_path elif config_path != "": config_path else: options.config_path
+    val resolved_explicit = explicit_config or options.explicit_config
     var sdn_text = ""
     var config_reads = 0
     if not options.ok:
-        sdn_text = "invalid_dynload_cli:" + options.reason
-    elif config_path != "" and file_exists(config_path):
+        # A bare top-level token is guaranteed to fail checked SDN parsing;
+        # `key:value` would be accepted as an unknown top-level setting.
+        sdn_text = "invalid_dynload_cli_" + options.reason
+    elif resolved_path != "" and config_exists_fn(resolved_path):
         config_reads = 1
-        match read_file_text_result(config_path):
-            Ok(content): sdn_text = content
-            Err(_): sdn_text = "unreadable_explicit_dynload_config"
-    elif explicit_config:
+        val (read_ok, content) = config_read_fn(resolved_path)
+        if read_ok:
+            sdn_text = content
+        else:
+            sdn_text = "unreadable_explicit_dynload_config"
+    elif resolved_explicit:
         sdn_text = "missing_explicit_dynload_config"
     val owner = product_dynload_startup_from_values(
+        args, env_dynsmf, env_disable, session_id, manifest, sdn_text,
+        options.settings_text, elapsed_us, config_reads)
+    if trace_enabled:
+        owner.trace_line =
+            "dynsmf-trace: startup_session_init session=" + session_id
+    owner.metrics.trace_lines_emitted = if owner.trace_line == "": 0 else: 1
+    owner
+
+fn product_dynload_config_exists(config_path: text) -> bool:
+    file_exists(config_path)
+
+fn product_dynload_config_read(config_path: text) -> (bool, text):
+    match read_file_text_result(config_path):
+        Ok(content): (true, content)
+        Err(_): (false, "")
+
+pub fn product_dynload_startup(args: [text], session_id: text) -> ProductDynloadStartup:
+    val started_us = time_now_micros()
+    val trace_enabled = (env_get("SIMPLE_DYNSMF_TRACE") ?? "") == "1"
+    val (config_path, explicit_config) = product_dynload_config_path()
+    val owner = product_dynload_startup_with_io(
         args,
-        env_get("SIMPLE_DYNSMF") ?? "",
-        env_get("SIMPLE_DYNSMF_DISABLE") ?? "",
         session_id,
         dynsmf_default_manifest(),
-        sdn_text,
-        options.settings_text,
-        0,
-        config_reads)
+        config_path,
+        explicit_config,
+        product_dynload_config_exists,
+        product_dynload_config_read,
+        env_get("SIMPLE_DYNSMF") ?? "",
+        env_get("SIMPLE_DYNSMF_DISABLE") ?? "",
+        env_get("SIMPLE_DYNLOAD") ?? "",
+        trace_enabled,
+        0)
+    if owner.trace_line != "":
+        print owner.trace_line
     val finished_us = time_now_micros()
     owner.metrics = product_dynload_metrics(
         if finished_us >= started_us: finished_us - started_us else: 0,
-        owner.metrics.config_file_reads)
+        owner.metrics.config_file_reads,
+        owner.metrics.trace_lines_emitted)
     owner
 
-fn product_dynload_startup_metrics_line(metrics: ProductDynloadStartupMetrics) -> text:
+pub fn product_dynload_startup_metrics_line(metrics: ProductDynloadStartupMetrics) -> text:
     "dynload_startup elapsed_us=" + metrics.elapsed_us.to_text() +
         " latency_target_us=" + metrics.latency_target_us.to_text() +
         " latency_target_configured=" + metrics.latency_target_configured.to_text() +
@@ -502,6 +546,7 @@ fn product_dynload_startup_metrics_line(metrics: ProductDynloadStartupMetrics) -
         " raw_pack_file_reads=" + metrics.raw_pack_file_reads.to_text() +
         " full_tree_scans=" + metrics.full_tree_scans.to_text() +
         " child_processes=" + metrics.child_processes.to_text() +
+        " trace_lines_emitted=" + metrics.trace_lines_emitted.to_text() +
         " measured_max_rss_kib=" + metrics.measured_max_rss_kib.to_text() +
         " rss_target_kib=" + metrics.rss_target_kib.to_text() +
         " rss_target_configured=" + metrics.rss_target_configured.to_text() +
