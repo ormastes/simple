@@ -487,3 +487,19 @@ appended to the ordered result. The decoder remains deliberately permissive
 and must preserve empty fields, mid-field quotes, quoted commas, conditional
 doubled-quote decoding, unmatched-quote tolerance, and post-decode trimming.
 No parser-global cache or retained source view is permitted.
+
+### Repository API snapshot ownership
+
+The API-surface command owns mutable entry accumulators at file, directory, and
+request scope; these locals use statement-form `push` and never retain a live
+old alias across mutation. Export parsing scans exact ASCII trim/comma bytes and
+emits maximal source spans. The final serializer owns an ordered fragment array
+and performs one join, preserving the byte contract while avoiding cumulative
+prefix copies.
+
+Compatibility is explicit: direct directory filenames remain sorted before
+reads, all entries are finally sorted by `(module_key, symbol_name)`, duplicate
+exports remain present, and `module_count` means requested root count rather
+than distinct emitted file modules. Empty output contains only four terminated
+header lines; each contiguous module transition owns one blank line, module
+header, and path row.
