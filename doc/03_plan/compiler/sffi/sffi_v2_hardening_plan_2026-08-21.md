@@ -1412,3 +1412,10 @@ missing); 12,111 declarations (894 tagged, 383 minimized, 10,951 untouched),
 zero signed/admitted. Round-trip coverage passes 4/4, optimizer findings remain
 77, and paired measurement is 3.36 s / 283,912 KiB before versus 3.21 s /
 283,848 KiB after.
+
+MIR statement tracing now scopes both one-read process-lifetime trace gates and
+tags their declaration. Current census: 21,266 calls (2,145 explicit, 19,121
+missing); 12,111 declarations (895 tagged, 383 minimized, 10,950 untouched),
+zero signed/admitted. Optimizer findings remain 153 and no hot-path environment
+read was added. The focused updated assertion passes; six unrelated stale
+source expectations keep the enclosing legacy spec at 5/11.

@@ -2342,6 +2342,21 @@ The HIR-cache round-trip specification passes 4/4. Optimizer findings remain
 missing; 12,111 declarations, 894 tagged, 383 minimized, 10,951 untouched, and
 zero signed/admitted.
 
+## MIR statement trace environment authority
+
+The dictionary-element and statement-caller trace gates now share one tagged
+environment declaration and two lexical `unsafe(ffi)` scopes. Both families
+retain their existing process-lifetime scalar memo, so default-off builds still
+perform one environment read per family and zero repeated reads in statement or
+loop hot paths.
+
+Optimizer findings remain 153; paired measurement is 3.31 s / 281,920 KiB
+before versus 3.56 s / 281,880 KiB after. The updated stmt-caller assertion
+passes, while its broad source-contract file remains 5/11 because six unrelated
+expectations for other backend/lowering owners are stale. Current totals are
+21,266 raw calls, 2,145 explicit, 19,121 missing; 12,111 declarations, 895
+tagged, 383 minimized, 10,950 untouched, and zero signed/admitted.
+
 ## Runtime-object-cache authority and performance evidence
 
 The two newly added runtime-object-cache environment reads and its cached-object
