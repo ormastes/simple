@@ -1194,6 +1194,17 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add a direct deterministic report contract; verification intentionally not
   run under the user's no-verify instruction.
 
+## Completed PerfFacts fixed-allocation tranche
+
+- Allocate admitted liveness in/out, definition, and use bit matrices at their
+  exact capped sizes instead of growing them one cell at a time.
+- Preallocate the initial block worklist and queued bitmap, fill the worklist by
+  index, and retain the existing top-cursor reuse discipline.
+- Preserve the four-million-cell cap, incomplete-input rejection, visit budget,
+  fact ordering, and public API while removing cumulative array-growth copies.
+- Existing liveness propagation and fail-closed contracts cover behavior;
+  verification intentionally not run under the user's no-verify instruction.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
