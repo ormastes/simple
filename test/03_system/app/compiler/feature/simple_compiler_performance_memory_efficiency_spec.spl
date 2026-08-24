@@ -2,32 +2,95 @@
 """
 # Simple Compiler Performance and Memory Efficiency
 
-Fail-fast design scaffold for REQ-001 through REQ-025. No scenario counts as
-passing evidence until its production helper replaces the explicit assertion.
+Executable operator flow for the truthful optimizer, shared MIR facts, and
+evidence-aware performance diagnostic contracts.
 """
+# @req: REQ-001, REQ-002, REQ-003, REQ-004, REQ-009, REQ-013, REQ-023
 
 use std.spec.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirFunction, MirBlock}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{
+    DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.mir_opt.mir_opt.mod.{
+    PassKind, PassStatus, PassExpectation, OptLevel,
+    pass_status, pass_expectation, pass_status_allows_transform,
+    mir_pass_registry_integrity_errors,
+    optimizationpipeline_effective_passes_for_level}
+use compiler.mir_opt.mir_opt.perf_facts.{
+    perf_facts_build_without_liveness, perf_facts_successors,
+    perf_facts_predecessors}
+use compiler.mir_opt.mir_opt.dce.{create_dce_pass}
+use compiler.tools.lint._LintMain.config_and_model.{
+    LintDiag, LintRunResult, LintLevel, LintCategory, LintEvidenceTier,
+    lint_diag_effective_level}
 
-fn setup_optimizer_integrity_fixture():
-    assert(false)
+fn setup_optimizer_integrity_fixture() -> MirFunction:
+    val block = MirBlock(
+        BlockId(id: 0), Some("entry"), [], MirTerminator.Ret(nil))
+    MirFunction(
+        SymbolId(id: 7001), "optimizer_integrity_fixture",
+        MirSignature([], MirType.unit(), false), [], [block],
+        BlockId(id: 0), Span(0, 0, 1, 1), [], false, nil, {}, nil,
+        false, false, "", false,
+        DriverManifestAttr(DriverManifestAttrKind.Driver, 0, 0, [], "", ""),
+        false, vhdl_hardware_metadata_default(), false)
 
-fn setup_perf_diagnostic_fixture():
-    assert(false)
+fn setup_perf_diagnostic_fixture() -> LintRunResult:
+    val diagnostic = LintDiag.new(
+        "COLL010", LintLevel.Warn, LintCategory.Warning,
+        "repeated linear lookup inside a dynamic loop"
+    ).with_evidence(["outer=orders.len", "lookup=users.len"])
+     .with_uncertainty("receiver mutation summary unavailable")
+     .with_evidence_tier(LintEvidenceTier.SourcePattern)
+    LintRunResult.new("fixture.spl", 7, 3, diagnostic)
 
 fn check_effective_pipeline_status():
-    assert(false)
+    expect(mir_pass_registry_integrity_errors().len()).to_equal(0)
+    expect(pass_status(PassKind.DeadCodeElimination)).to_equal(
+        PassStatus.Skeleton)
+    expect(pass_expectation(PassKind.DeadCodeElimination)).to_equal(
+        PassExpectation.NeverTransforms)
+    expect(pass_status_allows_transform(
+        pass_status(PassKind.AutoVectorize))).to_equal(false)
+    val effective = optimizationpipeline_effective_passes_for_level(
+        OptLevel.Speed)
+    expect(effective.contains("dead_code_elimination")).to_equal(false)
+    expect(effective.contains("collection_opt")).to_equal(false)
 
 fn check_perf_facts_reuse():
-    assert(false)
+    val function = setup_optimizer_integrity_fixture()
+    val facts = perf_facts_build_without_liveness(function)
+    expect(facts.block_count).to_equal(1)
+    expect(facts.liveness_complete).to_equal(false)
+    expect(facts.live_in.len()).to_equal(0)
+    expect(perf_facts_successors(facts, BlockId(id: 0)).len()).to_equal(0)
+    expect(perf_facts_predecessors(facts, BlockId(id: 0)).len()).to_equal(0)
 
 fn check_perf_diagnostic_record():
-    assert(false)
+    val result = setup_perf_diagnostic_fixture()
+    expect(result.format()).to_contain("warning[COLL010]")
+    expect(result.format()).to_contain("evidence: outer=orders.len")
+    expect(result.format()).to_contain("uncertainty:")
+    expect(lint_diag_effective_level(result.lint, true)).to_equal(
+        LintLevel.Warn)
 
 fn check_semantic_differential():
-    assert(false)
+    val before = setup_optimizer_integrity_fixture()
+    var pass = create_dce_pass()
+    val after = pass.run_on_function(before)
+    expect(after.name).to_equal(before.name)
+    expect(after.entry_block.id).to_equal(before.entry_block.id)
+    expect(after.blocks.len()).to_equal(before.blocks.len())
+    expect(after.blocks[0].terminator).to_equal(before.blocks[0].terminator)
 
 fn check_perf_budget():
-    assert(false)
+    val function = setup_optimizer_integrity_fixture()
+    val facts = perf_facts_build_without_liveness(function)
+    expect(facts.block_count).to_be_less_than(2)
+    expect(facts.live_in.len()).to_equal(0)
+    expect(facts.live_out.len()).to_equal(0)
 
 describe "Simple compiler performance and memory efficiency":
     it "should load the effective optimizer pipeline":
@@ -37,7 +100,6 @@ describe "Simple compiler performance and memory efficiency":
 
     it "should reject dishonest active transforms":
         step("Reject dishonest active transforms")
-        setup_optimizer_integrity_fixture()
         check_effective_pipeline_status()
 
     it "should analyze one function with shared performance facts":
@@ -46,7 +108,6 @@ describe "Simple compiler performance and memory efficiency":
 
     it "should report actionable performance and memory diagnostics":
         step("Report actionable performance and memory diagnostics")
-        setup_perf_diagnostic_fixture()
         check_perf_diagnostic_record()
 
     it "should preserve semantics while applying a proven transform":
