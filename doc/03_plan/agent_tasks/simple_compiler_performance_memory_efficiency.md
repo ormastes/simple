@@ -1119,6 +1119,16 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add generated-bundle complete-field parity coverage; verification
   intentionally not run under the user's no-verify instruction.
 
+## Completed critical-file line-count tranche
+
+- Replace CFG002's per-file `split("\n").len()` with one-pass newline counting.
+- Preserve exact split-count behavior for empty files, blank lines, and trailing
+  newlines while reducing auxiliary storage from O(lines) to O(1).
+- Keep configuration parsing unchanged because that path consumes actual line
+  contents rather than only their count.
+- Add direct boundary coverage; verification intentionally not run under the
+  user's no-verify instruction.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
