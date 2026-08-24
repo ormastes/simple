@@ -154,6 +154,47 @@ validate_gate_receipt() {
     HEAD_BLOB_SHA=$_receipt_sha
 }
 
+validate_external_gate_receipt() {
+    _receipt=$1
+    _expected_gate=$2
+    _expected_fingerprint=$3
+    _validator=$4
+    [ -n "$_validator" ] || return 1
+    validate_gate_receipt "$_receipt" "$_expected_gate" "$_expected_fingerprint" || return 1
+    _receipt_sha=$HEAD_BLOB_SHA
+    _receipt_blob=$(mktemp) || return 1
+    _artifact_blob=$(mktemp) || { rm -f "$_receipt_blob"; return 1; }
+    _validator_log=$(mktemp) || { rm -f "$_receipt_blob" "$_artifact_blob"; return 1; }
+    git -C "$ROOT" show "HEAD:$_receipt" >"$_receipt_blob" 2>/dev/null || {
+        rm -f "$_receipt_blob" "$_artifact_blob" "$_validator_log"
+        return 1
+    }
+    _artifact=$(receipt_field "$_receipt_blob" artifact_path) || {
+        rm -f "$_receipt_blob" "$_artifact_blob" "$_validator_log"
+        return 1
+    }
+    git -C "$ROOT" show "HEAD:$_artifact" >"$_artifact_blob" 2>/dev/null || {
+        rm -f "$_receipt_blob" "$_artifact_blob" "$_validator_log"
+        return 1
+    }
+    (
+        cd "$ROOT" || exit 2
+        MUST_CHECK_RECEIPT_FILE="$_receipt_blob" \
+        MUST_CHECK_ARTIFACT_FILE="$_artifact_blob" \
+        MUST_CHECK_EXPECTED_GATE="$_expected_gate" \
+        MUST_CHECK_EXPECTED_FINGERPRINT="$_expected_fingerprint" \
+            sh -c "$_validator"
+    ) >"$_validator_log" 2>&1
+    _validator_rc=$?
+    if [ "$_validator_rc" -ne 0 ] || ! accepted_gate_verdict "$_validator_log"; then
+        tail -n 8 "$_validator_log" >&2
+        rm -f "$_receipt_blob" "$_artifact_blob" "$_validator_log"
+        return 1
+    fi
+    rm -f "$_receipt_blob" "$_artifact_blob" "$_validator_log"
+    HEAD_BLOB_SHA=$_receipt_sha
+}
+
 gate_owner() {
     case "$1" in
         compiler-stage*) echo compiler-team ;;
@@ -241,6 +282,8 @@ accepted_gate_verdict() {
 if [ "$MODE" = selftest ]; then
     _tmp=$(mktemp -d) || exit 2
     trap 'rm -rf "$_tmp"' EXIT INT TERM
+    mkdir -p "$_tmp/config/check" || exit 2
+    cp "$MANIFEST" "$_tmp/config/check/must_check_gates.sdn" || exit 2
     cat > "$_tmp/stage4-summary-good.env" <<'EOF'
 schema=Stage4ToolingMatrixSummaryV1
 matrix_id=fixture
@@ -294,7 +337,7 @@ EOF
     printf '%s\n' '#!/bin/sh' 'exit 0' > "$_tmp/stage4"
     chmod +x "$_tmp/phase-validator" "$_tmp/stage4"
     chmod +x "$_tmp/gate-runner"
-    SIMPLE_BINARY="$_tmp/wrong-ambient-simple" SIMPLE_BIN="$_tmp/wrong-ambient-simple-bin" MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
+    SIMPLE_BINARY="$_tmp/wrong-ambient-simple" SIMPLE_BIN="$_tmp/wrong-ambient-simple-bin" MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
     grep -q 'compiler-stage1, pass' "$_tmp/ledger.sdn" || exit 1
     grep -q 'compiler-stage2, pass' "$_tmp/ledger.sdn" || exit 1
     grep -q 'compiler-stage3, pass' "$_tmp/ledger.sdn" || exit 1
@@ -310,18 +353,29 @@ EOF
     grep -q 'web-server-request-port, todo' "$_tmp/ledger.sdn" || exit 1
     grep -q 'db-server-request-port, todo' "$_tmp/ledger.sdn" || exit 1
     _first=$(sha256sum "$_tmp/ledger.sdn" | awk '{print $1}')
-    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
-    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/ledger2.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
+    MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
+    MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/ledger2.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
     cmp "$_tmp/ledger.sdn" "$_tmp/ledger2.sdn" >/dev/null || exit 1
     [ -n "$_first" ] || exit 1
+    mkdir -p "$_tmp/other-root/config/check" || exit 1
+    cp "$MANIFEST" "$_tmp/other-root/config/check/must_check_gates.sdn" || exit 1
+    _before_split=$(sha256sum "$_tmp/ledger.sdn" | awk '{print $1}')
+    if MUST_CHECK_ROOT="$_tmp/other-root" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/other-root/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null 2>&1; then
+        echo "bootstrap-must-check selftest: split-root ledger override was accepted" >&2
+        exit 1
+    fi
+    [ "$(sha256sum "$_tmp/ledger.sdn" | awk '{print $1}')" = "$_before_split" ] || {
+        echo "bootstrap-must-check selftest: rejected split-root override mutated ledger" >&2
+        exit 1
+    }
     sed 's/source_fingerprint: "[^"]*"/source_fingerprint: "old"/; s/caret-smux-multi-launch, todo, never/caret-smux-multi-launch, pass, 1999-01-01T00:00:00Z/' "$_tmp/ledger.sdn" > "$_tmp/stale-ledger.sdn"
-    MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/stale-ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence-stale" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=new MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
+    MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/stale-ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence-stale" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=new MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
     grep -q 'caret-smux-multi-launch, todo, never' "$_tmp/stale-ledger.sdn" || exit 1
-    if MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/rejected.sdn" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" sh "$0" --record-bootstrap-success >/dev/null 2>&1; then
+    if MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/rejected.sdn" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" sh "$0" --record-bootstrap-success >/dev/null 2>&1; then
         echo "bootstrap-must-check selftest: production validator override was accepted" >&2
         exit 1
     fi
-    if MUST_CHECK_ROOT="$ROOT" MUST_CHECK_LEDGER="$_tmp/bare-run.sdn" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 sh "$0" >/dev/null 2>&1; then
+    if MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/bare-run.sdn" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 sh "$0" >/dev/null 2>&1; then
         echo "bootstrap-must-check selftest: bare run recorded unbound automated PASS" >&2
         exit 1
     fi
@@ -332,6 +386,27 @@ EOF
     echo "bootstrap-must-check: PASS — phase promotion TODO preservation exact Stage4 binding matrix-summary validation stale reset override rejection and deterministic output checked"
     exit 0
 fi
+
+ROOT=$(cd "$ROOT" && pwd -P) || exit 2
+bind_path_under_root() {
+    _candidate=$1
+    case "$_candidate" in /*) ;; *) _candidate="$ROOT/$_candidate" ;; esac
+    _parent=$(CDPATH= cd -- "$(dirname -- "$_candidate")" 2>/dev/null && pwd -P) || return 1
+    case "$_parent" in "$ROOT"|"$ROOT"/*) ;; *) return 1 ;; esac
+    printf '%s/%s\n' "$_parent" "$(basename -- "$_candidate")"
+}
+MANIFEST=$(bind_path_under_root "$MANIFEST") || {
+    echo "bootstrap-must-check: ERROR — manifest must remain inside MUST_CHECK_ROOT" >&2
+    exit 2
+}
+LEDGER=$(bind_path_under_root "$LEDGER") || {
+    echo "bootstrap-must-check: ERROR — ledger must remain inside MUST_CHECK_ROOT" >&2
+    exit 2
+}
+[ ! -L "$MANIFEST" ] && { [ ! -e "$LEDGER" ] || [ ! -L "$LEDGER" ]; } || {
+    echo "bootstrap-must-check: ERROR — manifest and ledger must not be symlinks" >&2
+    exit 2
+}
 
 [ -f "$MANIFEST" ] || { echo "bootstrap-must-check: ERROR — missing manifest" >&2; exit 2; }
 if [ "$MODE" = run ]; then
@@ -375,7 +450,8 @@ if [ "$MODE" = record-gate ]; then
         exit 2
     }
     _record_mode=$(awk -F, -v id="$RECORD_GATE_ID" '{x=$1; gsub(/^[[:space:]]+/, "", x); if (x==id) {v=$4; gsub(/[[:space:]]/, "", v); print v; exit}}' "$MANIFEST")
-    [ "$_record_mode" = todo ] || {
+    _record_validator=$(awk -F, -v id="$RECORD_GATE_ID" '{x=$1; gsub(/^[[:space:]]+/, "", x); if (x==id) {v=$5; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); if (substr(v,1,1)=="\"") v=substr(v,2); if (substr(v,length(v),1)=="\"") v=substr(v,1,length(v)-1); print v; exit}}' "$MANIFEST")
+    { [ "$_record_mode" = external-receipt ] || { [ "$RECORD_GATE_ID" = stage4-tooling-matrix ] && [ "$_record_mode" = todo ]; }; } || {
         echo "bootstrap-must-check: ERROR — $RECORD_GATE_ID is not a TODO receipt gate" >&2
         exit 2
     }
@@ -383,6 +459,12 @@ if [ "$MODE" = record-gate ]; then
         echo "bootstrap-must-check: ERROR — evidence must be a committed simple.must-check-gate-receipt/v1 bound to this gate, source fingerprint, final PASS, and committed artifact hash" >&2
         exit 2
     }
+    if [ "$_record_mode" = external-receipt ]; then
+        validate_external_gate_receipt "$RECORD_GATE_EVIDENCE" "$RECORD_GATE_ID" "$_fp" "$_record_validator" || {
+            echo "bootstrap-must-check: ERROR — external evidence failed its registry-owned semantic validator" >&2
+            exit 2
+        }
+    fi
 fi
 if [ "$MODE" = record-bootstrap ]; then
     _phase_results=$(validate_compiler_phases) || {
@@ -423,7 +505,11 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _description; do
     _unblock=$_description
     _unblock=$(printf '%s' "$_unblock" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
     if [ "$MODE" = record-gate ] && [ "$_id" = "$RECORD_GATE_ID" ]; then
-        validate_gate_receipt "$RECORD_GATE_EVIDENCE" "$RECORD_GATE_ID" "$_fp" || exit 1
+        if [ "$_gate_mode" = external-receipt ]; then
+            validate_external_gate_receipt "$RECORD_GATE_EVIDENCE" "$RECORD_GATE_ID" "$_fp" "$_command" || exit 1
+        else
+            validate_gate_receipt "$RECORD_GATE_EVIDENCE" "$RECORD_GATE_ID" "$_fp" || exit 1
+        fi
         _old=$(row_value "$_id" 2)
         _old_evidence=$(row_value "$_id" 5)
         _old_sha=$(row_value "$_id" 6)

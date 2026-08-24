@@ -7,7 +7,7 @@ never counts as PASS.
 
 | Requirement | State | Authoritative evidence or exact unblock condition |
 |---|---|---|
-| Textual SDN ledger with TODO-to-first-PASS promotion | PASS | `doc/08_tracking/check/must_check_db.sdn`; `simple.must-check-gate-receipt/v1`; focused tiering contract PASS |
+| Textual SDN ledger with TODO-to-first-PASS promotion | FAIL | Generic and signed external promotion paths now fail closed and reject self-attestation, but no production reviewer trust root is provisioned; external TODO-to-PASS promotion remains unavailable until `config/check/must_check_external_reviewers.sdn` receives a reviewed public key |
 | Lightweight push / expensive bootstrap split | PASS | `config/check/must_check_gates.sdn`; push retains bounded range/ref checks and two sub-second tree checks; measured whole-tree/compiler/executable rows plus detector mutation fixtures are bootstrap-owned |
 | Push completes within ten seconds | PASS | Latest exact committed-tree path on 2026-08-24: 4.84s, 224,840 KiB peak RSS, down from the same-session 6.10s / 224,968 KiB baseline after replacing per-row subprocess parsing with one linear ledger pass; see `../bug/push_must_check_remaining_overhead_2026-08-24.md` |
 | Push evidence is exact-ref, bounded, and monotonic | PASS | Exact pushed blobs, 64 MiB pre-hash aggregate cap, two-ref cap, required-ID ratchet, initial unpromoted state, and post-PASS downgrade rejection are covered by `must_check_tiering_test.shs` |

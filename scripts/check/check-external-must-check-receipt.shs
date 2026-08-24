@@ -1,0 +1,174 @@
+#!/bin/sh
+# Admit external must-check evidence only from exact committed blobs reviewed by
+# a repository-trusted signing key. This is bootstrap-owned, never a push gate.
+set -u
+
+SCRIPT_ROOT=$(cd "$(dirname "$0")/../.." && pwd -P)
+ROOT=${MUST_CHECK_ROOT:-$SCRIPT_ROOT}
+ROOT=$(cd "$ROOT" && pwd -P) || exit 2
+POLICY=$ROOT/config/check/must_check_external_reviewers.sdn
+receipt=${MUST_CHECK_RECEIPT_FILE:-}
+artifact=${MUST_CHECK_ARTIFACT_FILE:-}
+expected_gate=${MUST_CHECK_EXPECTED_GATE:-}
+expected_fingerprint=${MUST_CHECK_EXPECTED_FINGERPRINT:-}
+work=$(mktemp -d) || exit 2
+trap 'rm -rf "$work"' EXIT INT TERM
+
+fail() {
+    echo "STATUS: FAIL external-must-check-receipt — $*" >&2
+    exit 1
+}
+
+field() {
+    _file=$1
+    _name=$2
+    [ "$(grep -c "^${_name}=" "$_file" 2>/dev/null || true)" -eq 1 ] || return 1
+    sed -n "s/^${_name}=//p" "$_file"
+}
+
+require_eq_in() {
+    _value=$(field "$1" "$2") || fail "missing-or-duplicate-$2"
+    [ "$_value" = "$3" ] || fail "$2-mismatch"
+}
+
+require_token_in() {
+    _value=$(field "$1" "$2") || fail "missing-or-duplicate-$2"
+    case "$_value" in ''|*[!A-Za-z0-9._:@+/-]*) fail "invalid-$2" ;; esac
+    printf '%s' "$_value"
+}
+
+require_text_in() {
+    _value=$(field "$1" "$2") || fail "missing-or-duplicate-$2"
+    [ -n "$_value" ] || fail "empty-$2"
+    case "$_value" in *"	"*) fail "invalid-$2" ;; esac
+    printf '%s' "$_value"
+}
+
+require_sha_value() {
+    _value=$1
+    _label=$2
+    case "$_value" in *[!0-9a-f]*|'') fail "invalid-$_label" ;; esac
+    [ "${#_value}" -eq 64 ] || fail "invalid-$_label-length"
+    [ "$_value" != 0000000000000000000000000000000000000000000000000000000000000000 ] || fail "zero-$_label"
+}
+
+load_head_blob() {
+    _path=$1
+    _expected_sha=$2
+    _output=$3
+    case "$_path" in ''|/*|..|../*|*/../*|*/..) fail unsafe-evidence-path ;; esac
+    require_sha_value "$_expected_sha" evidence-sha256
+    _entry=$(git -C "$ROOT" ls-tree HEAD -- "$_path" 2>/dev/null) || fail evidence-ls-tree
+    [ "$(printf '%s\n' "$_entry" | wc -l | tr -d ' ')" -eq 1 ] || fail evidence-not-unique
+    case "$(printf '%s\n' "$_entry" | awk '{print $1}')" in 100644|100755) ;; *) fail evidence-not-regular ;; esac
+    _size=$(git -C "$ROOT" cat-file -s "HEAD:$_path" 2>/dev/null) || fail evidence-size
+    case "$_size" in ''|*[!0-9]*) fail evidence-size-invalid ;; esac
+    [ "$_size" -le 16777216 ] || fail evidence-blob-too-large
+    git -C "$ROOT" show "HEAD:$_path" >"$_output" 2>/dev/null || fail evidence-read
+    [ "$(sha256sum "$_output" | awk '{print $1}')" = "$_expected_sha" ] || fail evidence-hash-mismatch
+}
+
+load_named_artifact_blob() {
+    _kind=$1
+    _path=$(field "$artifact" "${_kind}_path") || fail "missing-or-duplicate-${_kind}_path"
+    _sha=$(field "$artifact" "${_kind}_sha256") || fail "missing-or-duplicate-${_kind}_sha256"
+    load_head_blob "$_path" "$_sha" "$work/$_kind"
+}
+
+expected_acceptance_ids() {
+    case "$1" in
+        windows-hook-installation) echo 'native-windows,linked-worktree-a,linked-worktree-b,install,check,launcher-hash' ;;
+        caret-local-llm-launch) echo 'slang-provider,readiness,generation,response,timeout,stop,no-leak' ;;
+        caret-installed-provider-launches) echo 'claude,codex,gemini,kimi,caret-routing,bounded-stop,no-leak' ;;
+        caret-agent-runtime-primitives) echo 'launch,status,cancel,stop,no-leak' ;;
+        caret-production-multi-manager-launch) echo 'multi-launch,parent-supervision,poll,stop,exit,no-leak' ;;
+        caret-smux-multi-launch) echo 'smux-pty,multi-launch,capture,resize,cancel,stop,no-leak' ;;
+        web-server-request-port) echo 'configurable-port,listen,request,response,ownership,stop,no-leak' ;;
+        web-server-gpu-nginx) echo 'request-port,cpu-result,gpu-device-hit,gpu-result-parity,nginx-throughput,nginx-latency' ;;
+        db-server-request-port) echo 'configurable-port,listen,query,result,ownership,stop,no-leak' ;;
+        db-server-gpu-sql) echo 'request-port,cpu-result,gpu-device-hit,gpu-result-parity,postgresql-parity,mysql-parity' ;;
+        simpleos-sbc-qemu-ls) echo 'image-identity,sbc-boot,sbc-ls,qemu-boot,qemu-ls,paired-parity' ;;
+        simpleos-clang-hello) echo 'image-identity,guest-clang,filesystem-source,filesystem-executable,guest-stdout,guest-exit' ;;
+        simpleos-simple-toolchain) echo 'image-identity,compiler,interpreter,loader,filesystem-source,hello-build,hello-run' ;;
+        simpleos-server-executables) echo 'image-identity,web-executable,db-executable,listen,request,stop,no-leak' ;;
+        riscv32-riscv64-shared) echo 'shared-template-inventory,rv32-projection,rv64-projection,arch-only-leaves,review' ;;
+        simple-generated-vhdl-linux) echo 'stage4-generator,generator-provenance,rtl-tools,vhdl-generated,linux-boot,linux-ls' ;;
+        binary-size-go-parity) echo 'semantic-equivalence,simple-binary,go-binary,toolchains,stripped-size,simple-le-go' ;;
+        interpreter-startup-parity) echo 'semantic-equivalence,cold-samples,warm-samples,python,bun,go,simple-faster' ;;
+        rust-go-benchmark-parity) echo 'semantic-equivalence,raw-samples,statistics,rust,go,simple-ge-parity' ;;
+        *) return 1 ;;
+    esac
+}
+
+[ -f "$receipt" ] && [ ! -L "$receipt" ] || fail missing-receipt-blob
+[ -f "$artifact" ] && [ ! -L "$artifact" ] || fail missing-artifact-blob
+expected_ids=$(expected_acceptance_ids "$expected_gate") || fail unsupported-gate
+
+require_eq_in "$artifact" evidence_schema simple.must-check-external-evidence/v2
+require_eq_in "$artifact" gate_id "$expected_gate"
+require_eq_in "$artifact" source_fingerprint "$expected_fingerprint"
+require_eq_in "$artifact" final_verdict PASS
+require_eq_in "$artifact" acceptance_contract "${expected_gate}/v1"
+require_eq_in "$artifact" acceptance_ids "$expected_ids"
+run_id=$(require_token_in "$artifact" run_id)
+require_token_in "$artifact" produced_at_utc >/dev/null
+producer_id=$(require_token_in "$artifact" producer_id)
+require_token_in "$artifact" producer_kind >/dev/null
+reviewer_key_id=$(require_token_in "$artifact" reviewer_key_id)
+[ "$producer_id" != "$reviewer_key_id" ] || fail reviewer-must-be-independent
+
+for _kind in command_receipt target_identity toolchain_identity observations; do
+    load_named_artifact_blob "$_kind"
+done
+
+require_eq_in "$work/command_receipt" evidence_schema simple.must-check-command/v1
+require_eq_in "$work/command_receipt" gate_id "$expected_gate"
+require_eq_in "$work/command_receipt" source_fingerprint "$expected_fingerprint"
+require_eq_in "$work/command_receipt" run_id "$run_id"
+require_eq_in "$work/command_receipt" exit_status 0
+require_eq_in "$work/command_receipt" final_verdict PASS
+require_text_in "$work/command_receipt" command >/dev/null
+
+require_eq_in "$work/target_identity" evidence_schema simple.must-check-target/v1
+require_eq_in "$work/target_identity" gate_id "$expected_gate"
+require_eq_in "$work/target_identity" run_id "$run_id"
+require_eq_in "$work/target_identity" final_verdict PASS
+require_token_in "$work/target_identity" target_kind >/dev/null
+require_token_in "$work/target_identity" target_id >/dev/null
+
+require_eq_in "$work/toolchain_identity" evidence_schema simple.must-check-toolchain/v1
+require_eq_in "$work/toolchain_identity" gate_id "$expected_gate"
+require_eq_in "$work/toolchain_identity" run_id "$run_id"
+require_eq_in "$work/toolchain_identity" final_verdict PASS
+require_token_in "$work/toolchain_identity" toolchain_id >/dev/null
+
+require_eq_in "$work/observations" evidence_schema simple.must-check-observations/v1
+require_eq_in "$work/observations" gate_id "$expected_gate"
+require_eq_in "$work/observations" source_fingerprint "$expected_fingerprint"
+require_eq_in "$work/observations" run_id "$run_id"
+require_eq_in "$work/observations" acceptance_ids "$expected_ids"
+require_eq_in "$work/observations" final_verdict PASS
+_observed_count=$(grep -c '^acceptance\.[a-z0-9-]*=PASS$' "$work/observations" 2>/dev/null || true)
+_all_acceptance_count=$(grep -c '^acceptance\.' "$work/observations" 2>/dev/null || true)
+_expected_count=$(printf '%s\n' "$expected_ids" | awk -F, '{print NF}')
+[ "$_observed_count" -eq "$_expected_count" ] || fail acceptance-count-mismatch
+[ "$_all_acceptance_count" -eq "$_expected_count" ] || fail contradictory-or-malformed-acceptance
+_old_ifs=$IFS; IFS=,
+for _acceptance in $expected_ids; do
+    [ "$(grep -c "^acceptance\.${_acceptance}=PASS$" "$work/observations" 2>/dev/null || true)" -eq 1 ] || fail "acceptance-${_acceptance}-missing"
+done
+IFS=$_old_ifs
+
+signature_path=$(field "$receipt" reviewer_signature_path) || fail missing-or-duplicate-reviewer-signature-path
+signature_sha=$(field "$receipt" reviewer_signature_sha256) || fail missing-or-duplicate-reviewer-signature-sha256
+load_head_blob "$signature_path" "$signature_sha" "$work/reviewer.sig"
+
+[ -f "$POLICY" ] && [ ! -L "$POLICY" ] || fail reviewer-policy-missing
+[ "$(grep -c '^[[:space:]]*schema: "simple.must-check-reviewer-policy/v1"$' "$POLICY" 2>/dev/null || true)" -eq 1 ] || fail reviewer-policy-schema
+_policy_row=$(awk -F, -v id="$reviewer_key_id" '{x=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); if (x==id) {print; n++}} END {if (n != 1) exit 1}' "$POLICY") || fail reviewer-not-trusted
+_key_path=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
+_key_sha=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$3; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
+load_head_blob "$_key_path" "$_key_sha" "$work/reviewer.pem"
+
+openssl dgst -sha256 -verify "$work/reviewer.pem" -signature "$work/reviewer.sig" "$artifact" >/dev/null 2>&1 || fail invalid-reviewer-signature
+echo "STATUS: PASS external-must-check-receipt — $expected_gate committed evidence and reviewer signature admitted"

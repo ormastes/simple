@@ -1056,6 +1056,15 @@ expensive gates through `scripts/check/check-bootstrap-must-pass.shs`. Ledger v3
 rows must name a non-empty owner; TODO/blocked rows require an actionable
 non-`none` unblock condition, while PASS rows require
 `unblock_condition=none`. The push consumer must fail closed on violations.
+External host, device, installed-provider, and benchmark rows use registry mode
+`external-receipt` and the registry-owned semantic validator. A generic
+hash-bound receipt or prose artifact is not promotion authority: require the
+exact gate acceptance-ID matrix and separate committed command, target,
+toolchain, and observation blobs whose hashes are recomputed. Require the
+evidence summary to carry a valid signature from a repository-pinned independent
+reviewer key, plus a final validator PASS.
+Keep that validator bootstrap-owned; the bounded push consumer only validates
+the committed ledger and evidence hashes.
 
 ## Log-retention convention (debug/perf instrumentation)
 

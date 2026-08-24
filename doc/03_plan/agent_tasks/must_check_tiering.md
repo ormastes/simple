@@ -21,6 +21,16 @@ These rows stay TODO until the named checker exists and produces real evidence.
 Contract/self-tests never promote live or performance acceptance. Merge owner
 and final reviewer for every row is the primary high-capability agent.
 
+Every non-Stage4 row below is registered as `external-receipt`. Its signed
+committed summary uses `simple.must-check-external-evidence/v2` and references
+separate committed command, target, toolchain, and observation blobs. The
+validator recomputes their hashes, binds their gate/source/run identities,
+checks every exact acceptance ID, and verifies the summary signature with a
+repository-pinned reviewer public key. The generic receipt and a prose report
+alone cannot promote the row. Provisioning a real reviewer trust root in
+`config/check/must_check_external_reviewers.sdn` remains a prerequisite for all
+external rows.
+
 | Gate | Owner / prerequisite | Exact resume command and retained evidence |
 |---|---|---|
 | `stage4-tooling-matrix` | compiler/tooling teams; admitted Stage 3 compiler plus CLI/MCP/LSP journals | Run `sh scripts/bootstrap/bootstrap-from-scratch.sh stage4-tooling-matrix --matrix-id=<frozen-id> --compiler-manifest=<stage3-manifest> --cli-journal=<cli> --mcp-journal=<mcp> --lsp-journal=<lsp> --scope=full`; retain `Stage4ToolingMatrixSummaryV1` as the receipt artifact, create a committed `simple.must-check-gate-receipt/v1`, then use `--record-gate-pass stage4-tooling-matrix`. The recorder independently requires 49 terminal rows, full scope, zero required/optional failures or blockers, and `stage4_compiler_files=0`. |

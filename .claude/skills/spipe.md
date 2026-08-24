@@ -1340,6 +1340,13 @@ if ($LASTEXITCODE -ne 0) { & scripts/setup/install-must-check-hooks.ps1 -Install
 
 The canonical tier and hook contract is
 `doc/07_guide/tooling/must_check_tiering.md`.
+External host, device, installed-provider, and performance TODO rows are
+`external-receipt` rows. Promotion must run their registry-owned semantic
+validator against exact committed receipt/artifact blobs; a generic PASS label,
+hash-shaped assertion, or prose report alone is not acceptance evidence. Hashes
+must be recomputed from separate committed evidence blobs and the summary must
+verify against a repository-pinned reviewer public key. This validation stays
+bootstrap-owned and must not be added to the interactive push path.
 
 On this repo's shared working tree, a concurrent session's checkout/reconcile
 can silently WIPE an in-progress file — no `git status` trace, not even

@@ -42,7 +42,12 @@ This agent CREATES the initial state file. All subsequent agents read and append
      - Must-check receipt rows earn PASS only through
        `check-bootstrap-must-pass.shs --record-gate-pass <id> --evidence
        <repo-relative-committed-receipt>`; automated evidence remains
-       source-fingerprint scoped and push reads evidence from the pushed ref
+       source-fingerprint scoped and push reads evidence from the pushed ref.
+       External host/device/provider/performance rows must additionally use the
+       registry-owned `external-receipt` semantic validator; a generic receipt
+       plus arbitrary or prose-only artifact cannot earn PASS. The validator
+       recomputes hashes for separate committed evidence blobs and verifies the
+       signed summary with a repository-pinned reviewer public key.
    - If the request ALSO changes workflow, tooling, evidence wrappers,
      verification contracts, or SPipe behavior, extend that AC to cover
      `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,

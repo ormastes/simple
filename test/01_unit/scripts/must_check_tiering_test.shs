@@ -25,7 +25,184 @@ grep -q 'Move-Item' "$INSTALL_WINDOWS"
 
 fixture=$(mktemp -d)
 rules_fixture=$(mktemp -d)
-trap 'rm -rf "$fixture" "$fixture-hook-repo" "$fixture-hook-peer" "$rules_fixture"' EXIT INT TERM
+external_fixture=$(mktemp -d)
+trap 'rm -rf "$fixture" "$fixture-hook-repo" "$fixture-hook-peer" "$rules_fixture" "$external_fixture"' EXIT INT TERM
+
+# The production external-evidence validator owns the acceptance matrix. Prove
+# one valid row and adjacent semantic mutations before testing recorder wiring.
+mkdir -p "$external_fixture/evidence" "$external_fixture/scripts/check" "$external_fixture/config/check"
+cp "$ROOT/scripts/check/check-external-must-check-receipt.shs" "$external_fixture/scripts/check/"
+external_validator="$external_fixture/scripts/check/check-external-must-check-receipt.shs"
+git -C "$external_fixture" init -q
+git -C "$external_fixture" config user.name must-check-test
+git -C "$external_fixture" config user.email must-check-test@example.invalid
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$external_fixture/reviewer-private.pem" >/dev/null 2>&1
+openssl pkey -in "$external_fixture/reviewer-private.pem" -pubout -out "$external_fixture/config/check/fixture-reviewer.pem" >/dev/null 2>&1
+reviewer_public_sha=$(sha256sum "$external_fixture/config/check/fixture-reviewer.pem" | awk '{print $1}')
+printf '%s\n' \
+    'must_check_external_reviewers:' \
+    '  schema: "simple.must-check-reviewer-policy/v1"' \
+    'trusted_reviewers |key_id, public_key_path, public_key_sha256|' \
+    "    fixture-reviewer, config/check/fixture-reviewer.pem, $reviewer_public_sha" \
+    > "$external_fixture/config/check/must_check_external_reviewers.sdn"
+external_fp=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+external_run=run-001
+cat > "$external_fixture/evidence/command.env" <<EOF
+evidence_schema=simple.must-check-command/v1
+gate_id=web-server-request-port
+source_fingerprint=$external_fp
+run_id=$external_run
+command=check-web-server-request-port
+exit_status=0
+final_verdict=PASS
+EOF
+cat > "$external_fixture/evidence/target.env" <<EOF
+evidence_schema=simple.must-check-target/v1
+gate_id=web-server-request-port
+run_id=$external_run
+target_kind=native-host
+target_id=fixture-host
+final_verdict=PASS
+EOF
+cat > "$external_fixture/evidence/toolchain.env" <<EOF
+evidence_schema=simple.must-check-toolchain/v1
+gate_id=web-server-request-port
+run_id=$external_run
+toolchain_id=fixture-toolchain
+final_verdict=PASS
+EOF
+cat > "$external_fixture/evidence/observations.env" <<EOF
+evidence_schema=simple.must-check-observations/v1
+gate_id=web-server-request-port
+source_fingerprint=$external_fp
+run_id=$external_run
+acceptance_ids=configurable-port,listen,request,response,ownership,stop,no-leak
+acceptance.configurable-port=PASS
+acceptance.listen=PASS
+acceptance.request=PASS
+acceptance.response=PASS
+acceptance.ownership=PASS
+acceptance.stop=PASS
+acceptance.no-leak=PASS
+final_verdict=PASS
+EOF
+git -C "$external_fixture" add evidence scripts/check config/check
+git -C "$external_fixture" commit -qm external-evidence-blobs
+command_sha=$(sha256sum "$external_fixture/evidence/command.env" | awk '{print $1}')
+target_sha=$(sha256sum "$external_fixture/evidence/target.env" | awk '{print $1}')
+toolchain_sha=$(sha256sum "$external_fixture/evidence/toolchain.env" | awk '{print $1}')
+observations_sha=$(sha256sum "$external_fixture/evidence/observations.env" | awk '{print $1}')
+external_artifact="$external_fixture/evidence/summary.env"
+cat > "$external_artifact" <<'EOF'
+evidence_schema=simple.must-check-external-evidence/v2
+gate_id=web-server-request-port
+source_fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+final_verdict=PASS
+producer_id=server-producer
+producer_kind=native-host
+run_id=run-001
+produced_at_utc=2000-01-01T00:00:00Z
+reviewer_key_id=fixture-reviewer
+command_receipt_path=evidence/command.env
+command_receipt_sha256=COMMAND_SHA
+target_identity_path=evidence/target.env
+target_identity_sha256=TARGET_SHA
+toolchain_identity_path=evidence/toolchain.env
+toolchain_identity_sha256=TOOLCHAIN_SHA
+observations_path=evidence/observations.env
+observations_sha256=OBSERVATIONS_SHA
+acceptance_contract=web-server-request-port/v1
+acceptance_ids=configurable-port,listen,request,response,ownership,stop,no-leak
+EOF
+sed -i "s/COMMAND_SHA/$command_sha/; s/TARGET_SHA/$target_sha/; s/TOOLCHAIN_SHA/$toolchain_sha/; s/OBSERVATIONS_SHA/$observations_sha/" "$external_artifact"
+openssl dgst -sha256 -sign "$external_fixture/reviewer-private.pem" -out "$external_fixture/evidence/reviewer.sig" "$external_artifact"
+signature_sha=$(sha256sum "$external_fixture/evidence/reviewer.sig" | awk '{print $1}')
+external_receipt="$external_fixture/evidence/external.receipt"
+printf '%s\n' \
+    'reviewer_signature_path=evidence/reviewer.sig' \
+    "reviewer_signature_sha256=$signature_sha" > "$external_receipt"
+git -C "$external_fixture" add evidence/summary.env evidence/reviewer.sig evidence/external.receipt
+git -C "$external_fixture" commit -qm signed-external-summary
+external_signed_commit=$(git -C "$external_fixture" rev-parse HEAD)
+MUST_CHECK_ROOT="$external_fixture" \
+MUST_CHECK_RECEIPT_FILE="$external_receipt" \
+MUST_CHECK_ARTIFACT_FILE="$external_artifact" \
+MUST_CHECK_EXPECTED_GATE=web-server-request-port \
+MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    sh "$external_validator" | grep -q '^STATUS: PASS '
+for mutation in \
+    's/producer_id=server-producer/producer_id=fixture-reviewer/' \
+    's/reviewer_key_id=fixture-reviewer/reviewer_key_id=other-reviewer/' \
+    's/observations_sha256=[0-9a-f]*/observations_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+    's/,no-leak$//'; do
+    sed "$mutation" "$external_artifact" > "$external_fixture/external-bad.artifact"
+    MUST_CHECK_ROOT="$external_fixture" \
+    MUST_CHECK_RECEIPT_FILE="$external_receipt" \
+    MUST_CHECK_ARTIFACT_FILE="$external_fixture/external-bad.artifact" \
+    MUST_CHECK_EXPECTED_GATE=web-server-request-port \
+    MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        sh "$external_validator" >/dev/null 2>&1 && {
+            echo "FAIL: external semantic evidence mutation was accepted: $mutation"
+            exit 1
+        }
+done
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$external_fixture/wrong-private.pem" >/dev/null 2>&1
+openssl pkey -in "$external_fixture/wrong-private.pem" -pubout -out "$external_fixture/wrong-public.pem" >/dev/null 2>&1
+cp "$external_fixture/wrong-public.pem" "$external_fixture/config/check/fixture-reviewer.pem"
+wrong_public_sha=$(sha256sum "$external_fixture/config/check/fixture-reviewer.pem" | awk '{print $1}')
+sed -i "s/$reviewer_public_sha/$wrong_public_sha/" "$external_fixture/config/check/must_check_external_reviewers.sdn"
+git -C "$external_fixture" add config/check
+git -C "$external_fixture" commit -qm replace-reviewer-key-with-wrong-key
+MUST_CHECK_ROOT="$external_fixture" \
+MUST_CHECK_RECEIPT_FILE="$external_receipt" \
+MUST_CHECK_ARTIFACT_FILE="$external_artifact" \
+MUST_CHECK_EXPECTED_GATE=web-server-request-port \
+MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    sh "$external_validator" >/dev/null 2>&1 && {
+        echo 'FAIL: external summary signed by another key was accepted'
+        exit 1
+    }
+openssl pkey -in "$external_fixture/reviewer-private.pem" -pubout -out "$external_fixture/config/check/fixture-reviewer.pem" >/dev/null 2>&1
+restored_public_sha=$(sha256sum "$external_fixture/config/check/fixture-reviewer.pem" | awk '{print $1}')
+sed -i "s/$wrong_public_sha/$restored_public_sha/" "$external_fixture/config/check/must_check_external_reviewers.sdn"
+git -C "$external_fixture" add config/check
+git -C "$external_fixture" commit -qm restore-reviewer-key
+printf '%s\n' 'acceptance.unreviewed-extra=PASS' >> "$external_fixture/evidence/observations.env"
+git -C "$external_fixture" add evidence/observations.env
+git -C "$external_fixture" commit -qm tampered-observations-after-review
+MUST_CHECK_ROOT="$external_fixture" \
+MUST_CHECK_RECEIPT_FILE="$external_receipt" \
+MUST_CHECK_ARTIFACT_FILE="$external_artifact" \
+MUST_CHECK_EXPECTED_GATE=web-server-request-port \
+MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    sh "$external_validator" >/dev/null 2>&1 && {
+        echo 'FAIL: changed committed observation blob retained its old admission'
+        exit 1
+    }
+for contradiction in FAIL BLOCKED; do
+    git -C "$external_fixture" show "$external_signed_commit:evidence/observations.env" > "$external_fixture/evidence/observations.env"
+    printf 'acceptance.no-leak=%s\n' "$contradiction" >> "$external_fixture/evidence/observations.env"
+    git -C "$external_fixture" add evidence/observations.env
+    git -C "$external_fixture" commit -qm "contradictory-$contradiction-observation"
+    contradiction_observations_sha=$(sha256sum "$external_fixture/evidence/observations.env" | awk '{print $1}')
+    git -C "$external_fixture" show "$external_signed_commit:evidence/summary.env" > "$external_artifact"
+    sed -i "s/observations_sha256=[0-9a-f]*/observations_sha256=$contradiction_observations_sha/" "$external_artifact"
+    openssl dgst -sha256 -sign "$external_fixture/reviewer-private.pem" -out "$external_fixture/evidence/reviewer.sig" "$external_artifact"
+    contradiction_signature_sha=$(sha256sum "$external_fixture/evidence/reviewer.sig" | awk '{print $1}')
+    git -C "$external_fixture" show "$external_signed_commit:evidence/external.receipt" > "$external_receipt"
+    sed -i "s/reviewer_signature_sha256=[0-9a-f]*/reviewer_signature_sha256=$contradiction_signature_sha/" "$external_receipt"
+    git -C "$external_fixture" add evidence/summary.env evidence/reviewer.sig evidence/external.receipt
+    git -C "$external_fixture" commit -qm "signed-contradictory-$contradiction-summary"
+    MUST_CHECK_ROOT="$external_fixture" \
+    MUST_CHECK_RECEIPT_FILE="$external_receipt" \
+    MUST_CHECK_ARTIFACT_FILE="$external_artifact" \
+    MUST_CHECK_EXPECTED_GATE=web-server-request-port \
+    MUST_CHECK_EXPECTED_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        sh "$external_validator" >/dev/null 2>&1 && {
+            echo "FAIL: contradictory $contradiction acceptance was admitted"
+            exit 1
+        }
+done
 
 # A --ref scan must parse policy from that commit, not a hostile/dirty working
 # rules.sdl. The dirty command would sleep and fail if the checker read it.
@@ -149,7 +326,7 @@ chmod +x "$fixture/scripts/check/check-tree-size-push.shs"
 printf '%s\n' \
     'must_check_gates |id, tier, push_blocking, mode, command, description|' \
     '    compiler-stage1, bootstrap, true, receipt, "", "fixture"' \
-    '    fixture-manual-receipt, bootstrap, true, todo, "", "record fixture evidence"' \
+    '    fixture-manual-receipt, bootstrap, true, external-receipt, "sh scripts/check/check-fixture-external-receipt.shs", "record fixture evidence"' \
     '    push-conflict-tree, push, true, range, "sh scripts/check/check-no-conflict-tree-push.shs", "fixture"' \
     '    push-tree-size, push, true, range, "sh scripts/check/check-tree-size-push.shs", "fixture"' \
     '    push-conflict-markers, push, true, range, "sh scripts/check/check-no-conflict-markers-push.shs", "fixture"' \
@@ -164,17 +341,25 @@ printf '%s\n' \
     > "$fixture/doc/08_tracking/check/must_check_db.sdn"
 mkdir -p "$fixture/build"
 printf '    compiler-stage1, todo, never, "", "fixture bootstrap evidence pending", "never", "compiler-team", "run the fixture bootstrap producer"\n' >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
-printf '    fixture-manual-receipt, todo, never, "", "fixture manual evidence pending", "never", "release-team", "record fixture evidence"\n' >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
+printf '    fixture-manual-receipt, todo, never, "sh scripts/check/check-fixture-external-receipt.shs", "fixture manual evidence pending", "never", "release-team", "record fixture evidence"\n' >> "$fixture/doc/08_tracking/check/must_check_db.sdn"
 export MUST_CHECK_SELFTEST=1
 export MUST_CHECK_REQUIRED_IDS_FIXTURE='compiler-stage1
 fixture-manual-receipt'
 for phase in 1 2 3 4; do printf 'phase%s evidence\n' "$phase" > "$fixture/build/phase$phase.receipt"; done
-printf '%s\n' 'fixture manual gate artifact' > "$fixture/build/manual.artifact"
+cat > "$fixture/scripts/check/check-fixture-external-receipt.shs" <<'EOF'
+#!/bin/sh
+set -u
+artifact=${MUST_CHECK_ARTIFACT_FILE:-}
+[ -f "$artifact" ] || exit 1
+[ "$(grep -c '^evidence_schema=FixtureManualEvidenceV1$' "$artifact")" -eq 1 ] || exit 1
+[ "$(grep -c '^fixture_observation=real$' "$artifact")" -eq 1 ] || exit 1
+echo 'STATUS: PASS fixture external receipt semantic evidence admitted'
+EOF
 printf '%s\n' '#!/bin/sh' \
     'printf "%s\n" compiler-stage1=pass compiler-stage2=pass compiler-stage3=pass compiler-stage4=pass' \
     "printf '%s\\n' compiler-stage1-evidence=$fixture/build/phase1.receipt compiler-stage2-evidence=$fixture/build/phase2.receipt compiler-stage3-evidence=$fixture/build/phase3.receipt compiler-stage4-evidence=$fixture/build/phase4.receipt" \
     > "$fixture/phase-validator"
-chmod +x "$fixture/phase-validator"
+chmod +x "$fixture/phase-validator" "$fixture/scripts/check/check-fixture-external-receipt.shs"
 git -C "$fixture" init -q
 cp "$fixture/scripts/check/pre-push-conflict-tree-guard.shs" "$fixture/.git/hooks/pre-push.local"
 chmod +x "$fixture/.git/hooks/pre-push.local"
@@ -184,6 +369,7 @@ git -C "$fixture" add .
 git -C "$fixture" commit -qm base
 base=$(git -C "$fixture" rev-parse HEAD)
 fixture_fp=$(git -C "$fixture" ls-tree -r HEAD -- src scripts config test rules.sdl doc/07_guide doc/00_llm_process doc/glossary.md | sha256sum | awk '{print $1}')
+printf '%s\n' 'evidence_schema=FixtureManualEvidenceV1' 'fixture_observation=real' > "$fixture/build/manual.artifact"
 manual_artifact_sha=$(sha256sum "$fixture/build/manual.artifact" | awk '{print $1}')
 printf '%s\n' \
     'receipt_schema=simple.must-check-gate-receipt/v1' \
@@ -193,7 +379,7 @@ printf '%s\n' \
     'artifact_path=build/manual.artifact' \
     "artifact_sha256=$manual_artifact_sha" \
     > "$fixture/build/manual.receipt"
-git -C "$fixture" add build/manual.receipt
+git -C "$fixture" add build/manual.artifact build/manual.receipt
 git -C "$fixture" commit -qm bound-manual-receipt
 base=$(git -C "$fixture" rev-parse HEAD)
 printf '%s\n' 'unpromoted source change' > "$fixture/unpromoted-change"
@@ -238,9 +424,13 @@ grep -q 'completed_at_utc: "never"' "$fixture/doc/08_tracking/check/must_check_d
 printf '%s\n' 'STATUS: PASS arbitrary text' > "$fixture/build/arbitrary.txt"
 sed 's/gate_id=fixture-manual-receipt/gate_id=other-gate/' \
     "$fixture/build/manual.receipt" > "$fixture/build/wrong-gate.receipt"
-git -C "$fixture" add build/arbitrary.txt build/wrong-gate.receipt
+printf '%s\n' 'evidence_schema=FixtureManualEvidenceV1' 'fixture_observation=fabricated' > "$fixture/build/semantic-bad.artifact"
+semantic_bad_sha=$(sha256sum "$fixture/build/semantic-bad.artifact" | awk '{print $1}')
+sed "s|artifact_path=build/manual.artifact|artifact_path=build/semantic-bad.artifact|; s|artifact_sha256=.*|artifact_sha256=$semantic_bad_sha|" \
+    "$fixture/build/manual.receipt" > "$fixture/build/semantic-bad.receipt"
+git -C "$fixture" add build/arbitrary.txt build/wrong-gate.receipt build/semantic-bad.artifact build/semantic-bad.receipt
 git -C "$fixture" commit -qm rejected-manual-evidence-fixtures
-for rejected_receipt in build/arbitrary.txt build/wrong-gate.receipt; do
+for rejected_receipt in build/arbitrary.txt build/wrong-gate.receipt build/semantic-bad.receipt; do
     MUST_CHECK_ROOT="$fixture" \
     MUST_CHECK_MANIFEST="$fixture/config/check/must_check_gates.sdn" \
     MUST_CHECK_LEDGER="$fixture/doc/08_tracking/check/must_check_db.sdn" \

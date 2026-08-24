@@ -125,20 +125,41 @@ to `--scan-only`. Do not use scan-only without an explicit range or treat it as
 self-test evidence.
 
 Do not hand-edit a TODO to `pass`; promotion must come from its bootstrap-owned
-checker or a committed receipt:
+checker or a committed, semantically validated receipt:
 
 ```sh
 sh scripts/check/check-bootstrap-must-pass.shs \
   --record-gate-pass <gate-id> --evidence <repo-relative-committed-receipt>
 ```
 
-This interface accepts only a manifest `todo` row and a committed
-`simple.must-check-gate-receipt/v1`. The receipt must name the exact gate and
-source fingerprint, state `final_verdict=PASS`, and bind a separate committed
-artifact by repository-relative path and SHA-256. Arbitrary text, a receipt for
-another gate/source, or a mismatched artifact is rejected. Its original PASS time carries forward across
-source fingerprints only while the identical blob/hash remains committed.
-Automated source-sensitive rows still reset when their fingerprint changes.
+`stage4-tooling-matrix` retains its dedicated summary validator. Other external
+rows use manifest mode `external-receipt` and name the registry-owned
+`check-external-must-check-receipt.shs`; the recorder executes it only after
+extracting the exact receipt and artifact blobs from `HEAD`. The validator—not
+the receipt—defines the accepted observation matrix. It requires the common
+`simple.must-check-external-evidence/v2` summary to reference separate committed
+command, target, toolchain, and observation blobs. It recomputes every declared
+SHA-256, checks their shared gate/source/run identity, and requires every exact
+gate-specific acceptance ID to appear once as PASS in the observation blob.
+The acceptance namespace is closed: any additional, duplicate, malformed,
+FAIL, or BLOCKED `acceptance.*` line rejects the artifact even when a PASS for
+the same ID is also present.
+The summary itself must have an OpenSSL SHA-256 signature from a public key
+pinned by path and hash in
+`config/check/must_check_external_reviewers.sdn`. A zero exit without a final
+PASS verdict is rejected. The production policy intentionally contains no key
+until an independent reviewer trust root is provisioned; external promotion is
+fail-closed in the meantime.
+
+The generic receipt must name the exact gate and source fingerprint, state
+`final_verdict=PASS`, and bind a separate committed artifact by
+repository-relative path and SHA-256. Arbitrary text, a receipt for another
+gate/source, a mismatched artifact, an unknown gate, an untrusted/invalid
+reviewer signature, or a
+semantically incomplete artifact is rejected. Its original PASS time carries forward across
+the same source fingerprint while the identical blob/hash remains committed.
+External and automated rows reset when their fingerprint changes; a newly
+signed external summary must bind the new fingerprint before re-promotion.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.
 It cross-checks registry and ledger structure in one linear parser pass. Only
@@ -150,6 +171,18 @@ Production recording also refuses to run when fingerprinted inputs differ from
 `completed_at_utc` remains `never` while any bootstrap row is unfinished; once
 all rows pass it is the latest row's first PASS time, so replaying an unchanged
 receipt cannot invent a later completion.
+
+The signed summary is not a substitute for the raw retained command and
+observation blobs it names. The independent reviewer's signature is the
+authority boundary; repository review provisions or rotates only public trust
+roots. Private keys and test keys never enter the policy. Self-test key
+coverage copies the validator into an isolated fixture repository and commits a
+fixture-only public-key policy there. The production validator has no policy or
+key override, so a test flag cannot redirect trust while updating the real
+ledger. The recorder also canonicalizes the manifest and ledger parents and
+requires both to remain inside the same physical `MUST_CHECK_ROOT`; a disposable
+fixture root cannot target the production ledger through split environment
+overrides.
 
 ## Local hook installation
 
