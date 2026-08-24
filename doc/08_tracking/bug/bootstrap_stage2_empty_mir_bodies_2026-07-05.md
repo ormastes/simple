@@ -2004,3 +2004,73 @@ record, and a call-site patch must not be landed in place of the seed fix.
 
 **No fix applied here.** Verifying one requires a C-runtime addition, a seed
 rebuild, and a Stage 2 rebuild.
+
+## 2026-08-24 — NEGATIVE: the `mangle.rs` bare-name guard is NOT the binding site
+
+The two-part fix specified in the previous section was implemented and tested end
+to end. **It does not clear the misdispatch.** Recorded so the next lane does not
+re-derive and re-spend it.
+
+### What was implemented
+
+1. `mangle.rs:756` — `is_empty` added to the bare-name guard list.
+2. `calls.rs` — `is_empty` added to **both** redirect tables (bare and qualified),
+   redirecting to the already-present `rt_len` with a `== 0` compare materialised at
+   the result (`build_len_is_zero`). Deliberately **no new `rt_is_empty` symbol**:
+   a fresh ABI surface is the exact shape of the codegen-emitted-but-undefined
+   defects this session already saw three of.
+
+`cargo check --release --bin simple` clean; `cargo check --release -p simple-driver
+--features llvm` clean.
+
+### The measurement that refutes it
+
+A full `--fresh-cache` Stage 2 was built from that tree. The bootstrap log confirms
+the seed was genuinely rebuilt (`Seed/runtime stale (Rust source content changed
+since last build)` → `Building Rust seed compiler + runtime library...`, seed mtime
+inside the run window), `750 compiled, 0 cached`, Stage 2 admitted.
+
+The disassembly is **unchanged**:
+
+```
+_compiler__mir__mir_data__MirBuilder.finalize_block:
+  ...+0x14:  bl  <_compiler__common__diagnostics__span__Span.is_empty>
+```
+
+Two `Span.is_empty` references still inside `finalize_block`.
+
+### What that proves
+
+The name arriving at codegen is **already** `Span.is_empty`, not a bare `is_empty`.
+So the rebind happens **upstream of `resolve_method_call_static`** — either that
+function is not on this call's path at all, or the binding was already done before
+it ran. The bare-name guard (and the `bare_rt_redirect` table behind it) can only
+act on a name that is still bare, so neither can reach this defect.
+
+**The earlier section's "fix site" identification is therefore wrong**, and is
+corrected here. The disassembly evidence for the *misdispatch itself* stands
+unchanged — `is_empty()` on `[MirInst]` really does branch to `Span.is_empty`, in
+three independently built binaries. Only the attribution of *where it is bound* was
+wrong.
+
+### Where to look next
+
+Candidate binders outside `mangle.rs`, all in the seed:
+`pipeline/native_project/imports.rs`, `pipeline/native_project/compiler.rs`,
+`pipeline/native_project/mod.rs` (use/import map construction, which is what
+`resolve_name_variants` consults), and the HIR method-resolution sites that already
+special-case `is_empty` (`hir/lower/expr/mod.rs:1262,1280,1459,1624`;
+`codegen/instr/closures_structs.rs:164,1531,1605`).
+
+The decisive question for whoever continues: **at what point does the func_name
+become `Span.is_empty`?** Instrumenting the name as it passes through the import-map
+resolution would answer it directly.
+
+### Not landed
+
+The seed edits were **reverted in both worktrees** rather than landed: they are
+unverified against their goal and would be unused code on the bare path that never
+occurs. Both files are byte-identical to `origin/main` again.
+
+The interim note is unchanged and still not a fix: `.len() == 0` is safe at call
+sites, must not close this record, and must not be landed in place of the real fix.
