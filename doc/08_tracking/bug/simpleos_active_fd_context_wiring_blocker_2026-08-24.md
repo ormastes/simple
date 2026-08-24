@@ -99,3 +99,16 @@ No source adapter was landed in this audit: without the complete signature
 cut, any converted subset would misleadingly appear synchronized while legacy
 callers could still race it.  No tests, builds, SPipe, benchmarks, optimizer,
 bootstrap, or other verification were run by instruction.
+
+## Owner primitive progress (unverified)
+
+The bounded owner now has package-private single-call operation authorization
+that rotates the dispatch nonce before returning, opaque fork
+prepare/publish/abort receipts, and opaque cleanup retry receipts whose nonce is
+consumed and rotated at resume. Prepared fork children cannot be dispatched,
+and copied predecessor leases or receipts become stale owner-side.
+
+This does not complete the production cut. The legacy `fd_context_*` storage is
+still task-ID keyed, FD/OFD refcount copying still lacks rollback, and direct C
+and internal callers still use ambient `fd_activate_task`. Those pieces must be
+migrated together; wiring only these owner primitives would remain unsafe.
