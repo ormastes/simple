@@ -287,3 +287,140 @@ theories. Bisect the ~30-line region with more unconditional `log_phase` receipt
 (one between each call) to find the exact statement after which control escapes,
 then reduce that statement to a standalone miscompilation fixture against
 `c018ee15926`.
+
+---
+
+## MEASURED 2026-08-24 (second lane) — the ~30-line bracket narrows to SIX lines
+
+Reproduced the failure end to end in a private worktree at `73331690322`
+(`git status --porcelain` = 0 at creation; seed built in-lane), then re-ran
+Stage 3 with **twelve additional unconditional `log_phase` receipts**, all
+literal-string-only — no receipt dereferences a suspect owner, so the
+2026-08-24 "diagnostic SEGV'd and moved the crash" failure is avoided by
+construction.
+
+### Harness defect that must be recorded, because it silently voids this experiment
+
+`log_phase` is **gated**: `driver_phase_trace_enabled()`
+(`src/compiler/80.driver/driver_log_helpers.spl:25-26`) requires
+`SIMPLE_COMPILER_PHASE_PROFILE=1` or `SIMPLE_COMPILER_TRACE=1`. A run launched
+without it emits **no receipts at all**, including the pre-existing ones — and
+"no receipts" reads exactly like "control never got there". The first attempt
+here was launched without it and was discarded. Also: the stage-3 log lives at
+`build/bootstrap/<out>/logs/<triple>/stage3-native-build.log`, not at
+`<out>/stage3-native-build.log`.
+
+### Result — faithful reproduction, and the escape point
+
+```
+[BOOTSTRAP-PHASE] phase3:route
+[BOOTSTRAP-PHASE] phase3:streaming:entry
+[BOOTSTRAP-PHASE] phase3:streaming:r01-unwrapped     <-- LAST receipt emitted
+                  (r02 .. r12 and the pre-existing `visit` line: NONE)
+[BOOTSTRAP-PHASE] phase3:hir_typecheck:done
+[BOOTSTRAP-PHASE] phase4:monomorphize:start / :done
+[BOOTSTRAP-PHASE] aot:lower_to_mir:start
+[mir-lower-free] start
+Segmentation fault (core dumped)
+```
+
+Verbatim wrapper verdict, exit status captured directly into a variable on the
+line after the command (`STEP3_RC=2`; the receipt mint before it was
+`STEP2_RC=0`):
+
+```
+Stage 3: stage2 → bootstrap_main.spl (self-host)
+Segmentation fault (core dumped)
+  warning: stage3 self-host was KILLED by signal 11 (SEGV), not a compile failure; Stage 4 unavailable
+  Stage 2 native-build capability passed
+Stage 3 unavailable — no provenance-verified compiler for Stage 4
+```
+
+**`r01-unwrapped` prints and `r02-wellformed` does not.** Those two receipts
+bracket exactly six lines of
+`driver_hir_pipeline_lowering.spl::lower_and_check_streaming_surfaces_impl`:
+
+```
+val surfaces = self.streaming_module_surfaces_owner.unwrap()
+log_phase("phase3:streaming:r01-unwrapped")          # PRINTS
+if surfaces == nil:
+    self.ctx.add_error("Streaming module surface owner payload missing after phase 2")
+    return (self.ctx, false)
+unsafe(capabilities: [ffi]):
+    if not rt_heap_ref_wellformed(surfaces):
+        self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: ...")
+        return (self.ctx, false)
+log_phase("phase3:streaming:r02-wellformed")         # NEVER PRINTS
+```
+
+So the record's ~30-line bracket is now **six lines**, and the two candidate
+statements are named: the `if surfaces == nil:` guard and the
+`unsafe(capabilities: [ffi])` / `rt_heap_ref_wellformed(surfaces)` guard.
+Everything downstream — `hirlowering_for_module`, the `hir_cache_enabled`
+if-expression, the shard block, `hir_shard_visit_order` — is **excluded**, since
+none of their receipts fire.
+
+Still consistent with the original evidence: zero errors recorded, phase-3
+verdict `true`, and the empty program flowing on to SEGV at `[mir-lower-free]`.
+
+### Reduced fixtures — five shapes, ALL CLEAN, so they retire several theories
+
+Built with the in-lane seed, `--backend=cranelift`, native output compared
+against `bin/simple run`. Only difference in every case: native `print` omits
+newlines (cosmetic).
+
+| fixture | construct | verdict |
+|---|---|---|
+| `ifexpr` | `val x: T = if f(): g() else: ...` for text/i64/bool | values identical |
+| `tupret` | `return (self.ctx, false)` after `add_error`, incl. inside `unsafe(capabilities: [ffi])` | values identical |
+| `nestret` | the SAME nesting as the guard above: outer `if` -> `unsafe` -> inner `if` -> `return`, plus two controls | values identical |
+| `interp5` | one message with five interpolated `.len()` slots | values identical |
+| `chainfield` | interpolation over chained field-of-field owners inside a method | values identical |
+
+**Retired by measurement, do not re-open:**
+- The tuple `(heap-class, bool)` early return is NOT misread — `false` reads
+  back as `false` and the `add_error` mutation lands. The composite hypothesis
+  "a guard fired, `add_error` silently no-oped, and `false` was read as `true`"
+  does not reproduce.
+- A `return` nested three levels deep (`if` / `unsafe` / `if`) fires correctly.
+- The `visit` line's five-slot interpolation is not itself droppable.
+- An if-expression bound to a `val` is not lowered as a function return —
+  refuted from source: `lower_hir_block` keeps a `Return` tail as a STATEMENT,
+  and arms join through a real CFG merge block with a result temp
+  (`50.mir/mir_lowering_stmts.spl:2194-2281`).
+
+That every fixture is clean while the 692-module input fails is itself the
+finding: this defect is **scale- or state-dependent**, which is why
+`c018ee15926`'s standalone fixture did not reproduce either.
+
+### Live secondary signal, same family
+
+`E-HIR-BLOCK-VALUE-TYPE-DECAYED`
+(`20.hir/hir_lowering/_Expressions/block_and_asm_lowering.spl:161`) fires
+**6-10 times on a ~50-line fixture**. Its own comment says a fires-at-B split
+means the value "decayed in this function (transient scope end), which is the
+streaming-HIR-owner class" — i.e. heap-word decay across reclamation points is
+demonstrably live at tiny scale and merely CONTAINED there by a placeholder
+substitution. The phase-3 owner has containment only at the guards.
+
+### A separate, fully reproduced defect found on the way
+
+A Stage-2 binary SEGVs on a **two-line hello world**, and gdb puts the fault in
+`CompileContext.error_message_at` — i.e. the compiler crashes while REPORTING
+an error it correctly detected. Root cause is an element-type loss on `a[i]`
+for `[text]`/`[bool]`/`[f64]`, with a 7-line reproducer and named lowering
+sites. Filed separately as
+`native_typed_array_element_read_loses_element_type_2026-08-24.md`, with gate
+`scripts/check/check-native-array-element-type.shs`. Whether fixing it also
+unblocks Stage 3 is **NOT established** — the escape point above is a distinct
+measurement.
+
+### Next step
+
+Two more receipts inside the six-line window (after the `if surfaces == nil:`
+block, as the first statement inside the `unsafe` block, and after the inner
+`if` while still inside it) reduce this to a single statement. They are already
+written in this lane; the confirming run was blocked by
+`bootstrap-admission-error: parent-stage2-sanity-admission-mismatch`
+(`STEP2_RC=64`) — re-minting a receipt fails once Stage 2 has been rebuilt,
+which is the re-invocation defect already recorded above in this file.

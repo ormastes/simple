@@ -1,0 +1,219 @@
+#!/bin/sh
+# check-native-array-element-type.shs
+#
+# Fail-closed gate: reading an element out of a typed array (`a[i]`) must
+# produce the SAME value under the native lane as under the interpreter.
+#
+# Defect this pins (measured 2026-08-24, x86_64-unknown-linux-gnu, cranelift):
+#   fn main():
+#       var a: [text] = []
+#       a.push("BOOM")
+#       print "idx={a[0]}"
+#
+#   interpreter : BOOM
+#   native      : 107782906576033      <- the raw/tagged word, not the string
+#
+# `.len()` on the same array is CORRECT, so the array is intact; only the
+# ELEMENT READ loses its type. `[i64]` is correct; `[text]` renders as a raw
+# word and `[bool]` renders as `1`/`0` instead of `true`/`false`. Every form is
+# affected -- empty-literal-then-push, non-empty literal, inferred literal, and
+# an array received as a function parameter -- so this is not an
+# empty-literal-inference artifact.
+#
+# Why this matters beyond formatting: `CompileContext.error_message_at`
+# (src/compiler/80.driver/driver_types.spl:1013) returns `self.errors[index]`
+# from a `[text]`. Under a Stage-2-compiled compiler that read yields a garbage
+# text handle, and reporting ANY compile error SIGSEGVs -- measured with gdb at
+# `compiler__driver__driver_types__CompileContext_dot_error_message_at`, reached
+# from `driver_aot_pipeline.spl:97`. That is why a Stage-2 binary dies on a
+# two-line hello world instead of printing a diagnostic.
+#
+# Root-cause sites (from source, not inferred):
+#   - src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:1656
+#       `lower_index_expr` -- result type defaults to `MirType.i64()` (:1727)
+#       and the element type is recovered only from sources that are erased here.
+#   - src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:848
+#       `note_container_elem_type` -- records ONLY F64/F32/struct/nested-array
+#       element types, never Str or Bool.
+#   - the decoded element local is never passed to `remember_local_hir_type` /
+#       `mark_tagged_text_local`, so `coerce_concat_operand` (:572) falls
+#       through to `rt_raw_i64_to_string`.
+#   The `.first()`/`.last()` lowering
+#   (src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:4358-4461)
+#   already does this correctly and is the model to copy.
+#
+# Convention: --selftest runs FIRST and is FATAL. The verdict is the LAST line
+# on stdout. Exit statuses are read DIRECTLY into a variable on the line AFTER
+# the command, never through a pipe -- a pipeline's $? is the last stage's.
+#
+#   PASS — <n> case(s) checked, 0 diverged     exit 0
+#   FAIL — <n> case(s) checked, <k> diverged   exit 1
+#   ERROR — nothing was checked (<reason>)     exit 2
+#
+# A run that checked 0 cases is ERROR, never a pass. A missing compiler is
+# ERROR, never a pass: absence of a tool is absence of evidence.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)
+SIMPLE="${SIMPLE_BIN:-$ROOT/bin/simple}"
+BACKEND="${SIMPLE_CHECK_BACKEND:-cranelift}"
+WORK=$(mktemp -d 2>/dev/null) || WORK=/tmp/naet.$$
+mkdir -p "$WORK" 2>/dev/null
+CLEAN_WORK=1
+for a in "$@"; do
+    case "$a" in
+        --keep) CLEAN_WORK=0 ;;
+    esac
+done
+cleanup() { [ "$CLEAN_WORK" -eq 1 ] && rm -rf "$WORK" 2>/dev/null; }
+trap cleanup EXIT
+
+# ---------------------------------------------------------------- helpers
+
+# Emit a fixture that pushes one value of the given type and prints it back
+# through an index read. $1=file $2=element type $3=literal $4=marker
+emit_fixture() {
+    _f=$1; _ty=$2; _lit=$3
+    {
+        printf 'fn main():\n'
+        printf '    var a: [%s] = []\n' "$_ty"
+        printf '    a.push(%s)\n' "$_lit"
+        printf '    print "V={a[0]}"\n'
+    } > "$_f"
+}
+
+# Run a fixture both ways and echo "MATCH"/"DIVERGE <interp> <native>"/"SKIP <why>"
+run_case() {
+    _name=$1; _src=$2
+
+    "$SIMPLE" run "$_src" > "$WORK/$_name.interp.raw" 2>&1
+    _rci=$?
+    if [ "$_rci" -ne 0 ]; then
+        echo "SKIP interpreter-rc=$_rci"
+        return 0
+    fi
+    _iv=$(grep -o 'V=[^ ]*' "$WORK/$_name.interp.raw" | head -1)
+
+    "$SIMPLE" native-build "$_src" --backend="$BACKEND" -o "$WORK/$_name.bin" \
+        > "$WORK/$_name.build.log" 2>&1
+    _rcb=$?
+    if [ "$_rcb" -ne 0 ]; then
+        echo "DIVERGE build-rc=$_rcb (see $WORK/$_name.build.log)"
+        return 0
+    fi
+
+    "$WORK/$_name.bin" > "$WORK/$_name.native.raw" 2>&1
+    _rcr=$?
+    if [ "$_rcr" -ne 0 ]; then
+        echo "DIVERGE run-rc=$_rcr"
+        return 0
+    fi
+    _nv=$(grep -o 'V=[^ ]*' "$WORK/$_name.native.raw" | head -1)
+
+    if [ -z "$_iv" ]; then
+        echo "SKIP no-interpreter-value"
+        return 0
+    fi
+    if [ "$_iv" = "$_nv" ]; then
+        echo "MATCH $_iv"
+    else
+        echo "DIVERGE interp=[$_iv] native=[$_nv]"
+    fi
+}
+
+# ---------------------------------------------------------------- selftest
+# Runs FIRST and is FATAL. Proves the COMPARATOR discriminates, without
+# depending on the compiler under test being healthy: it feeds the comparison
+# logic known-equal and known-unequal pairs.
+selftest() {
+    _fails=0
+
+    # 1. equal pair must compare equal
+    if [ "V=abc" = "V=abc" ]; then :; else
+        echo "selftest: equal pair compared unequal"; _fails=$((_fails + 1))
+    fi
+    # 2. unequal pair must compare unequal (the mutation the gate must catch:
+    #    a string rendered as a raw word)
+    if [ "V=BOOM" = "V=107782906576033" ]; then
+        echo "selftest: unequal pair compared equal"; _fails=$((_fails + 1))
+    fi
+    # 3. the extractor must pull the marker out of real captured output
+    printf 'noise\nV=BOOM\nmore\n' > "$WORK/st.txt"
+    _got=$(grep -o 'V=[^ ]*' "$WORK/st.txt" | head -1)
+    if [ "$_got" != "V=BOOM" ]; then
+        echo "selftest: extractor returned [$_got], expected [V=BOOM]"
+        _fails=$((_fails + 1))
+    fi
+    # 4. the extractor must yield EMPTY on output with no marker, so a silent
+    #    run can never be mistaken for a match
+    printf 'nothing here\n' > "$WORK/st2.txt"
+    _got2=$(grep -o 'V=[^ ]*' "$WORK/st2.txt" | head -1)
+    if [ -n "$_got2" ]; then
+        echo "selftest: extractor invented [$_got2] from markerless output"
+        _fails=$((_fails + 1))
+    fi
+    # 5. emit_fixture must actually write a compilable-looking fixture
+    emit_fixture "$WORK/st.spl" text '"BOOM"'
+    if ! grep -q 'a.push("BOOM")' "$WORK/st.spl" 2>/dev/null; then
+        echo "selftest: emit_fixture did not write the push"
+        _fails=$((_fails + 1))
+    fi
+
+    if [ "$_fails" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed: $_fails fixture(s))"
+        exit 2
+    fi
+}
+
+selftest
+
+# ---------------------------------------------------------------- scan
+
+if [ ! -x "$SIMPLE" ]; then
+    echo "ERROR — nothing was checked (no compiler at $SIMPLE)"
+    exit 2
+fi
+
+CHECKED=0
+DIVERGED=0
+SKIPPED=0
+NAMES=""
+
+# element type | literal
+for spec in "i64|42" "text|\"BOOM\"" "bool|true" "f64|1.5"; do
+    ty=${spec%%|*}
+    lit=${spec#*|}
+    name="elem_$ty"
+    emit_fixture "$WORK/$name.spl" "$ty" "$lit"
+    out=$(run_case "$name" "$WORK/$name.spl")
+    case "$out" in
+        MATCH*)
+            CHECKED=$((CHECKED + 1))
+            echo "$ty: $out"
+            ;;
+        DIVERGE*)
+            CHECKED=$((CHECKED + 1))
+            DIVERGED=$((DIVERGED + 1))
+            NAMES="$NAMES $ty"
+            echo "$ty: $out"
+            ;;
+        SKIP*)
+            SKIPPED=$((SKIPPED + 1))
+            echo "$ty: $out"
+            ;;
+    esac
+done
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked ($SKIPPED skipped, 0 cases reached both lanes)"
+    exit 2
+fi
+
+if [ "$DIVERGED" -ne 0 ]; then
+    echo "FAIL — $CHECKED case(s) checked, $DIVERGED diverged:$NAMES"
+    exit 1
+fi
+
+echo "PASS — $CHECKED case(s) checked, 0 diverged"
+exit 0

@@ -135,9 +135,11 @@ impl CompilerDriver:
         # validate absence first, then unwrap. Never dereference a value merely
         # because the adjacent scalar says it is ready.
         val surfaces = self.streaming_module_surfaces_owner.unwrap()
+        log_phase("phase3:streaming:r01-unwrapped")
         if surfaces == nil:
             self.ctx.add_error("Streaming module surface owner payload missing after phase 2")
             return (self.ctx, false)
+        log_phase("phase3:streaming:r01a-past-nil-guard")
         # Fail closed on a malformed payload, never on a valid one. A
         # heap-typed payload must be a tagged pointer outside the zero page;
         # the 2026-08-22 incident read back a Some-tagged Option with payload
@@ -145,9 +147,12 @@ impl CompilerDriver:
         # formation probe (rt_heap_ref_wellformed), not a liveness proof, so
         # it cannot false-reject a live owner.
         unsafe(capabilities: [ffi]):
+            log_phase("phase3:streaming:r01b-in-unsafe")
             if not rt_heap_ref_wellformed(surfaces):
                 self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
                 return (self.ctx, false)
+            log_phase("phase3:streaming:r01c-past-wellformed-if")
+        log_phase("phase3:streaming:r02-wellformed")
         # Fail closed on an empty surface graph, the streaming-mode counterpart
         # of the legacy path's zero-module guard. On this path the SURFACES are
         # the module set (phase 2 empties ctx.modules by design), so an empty
@@ -157,7 +162,9 @@ impl CompilerDriver:
             self.ctx.add_error(
                 "error[E-DRV-PHASE3-EMPTY-SURFACES]: phase 3 (HIR typecheck, streaming) received 0 module surfaces from {self.ctx.source_paths_owner.len()} source(s) -- the phase-2 surface graph was lost across the phase boundary; refusing to type-check an empty program")
             return (self.ctx, false)
+        log_phase("phase3:streaming:r03-past-empty-surface-guard")
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
+        log_phase("phase3:streaming:r04-lowering-built")
         var lowered_by_surface: Dict<i64, HirModule> = {}
         var poisoned_by_surface: Dict<i64, bool> = {}
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
@@ -168,7 +175,9 @@ impl CompilerDriver:
         val entry_source_index = self.streaming_entry_source_index_owner
         var source_index = 0
         var progress_hir_done = 0
+        log_phase("phase3:streaming:r05-locals-init")
         bootstrap_hir_modules_reset()
+        log_phase("phase3:streaming:r06-hir-modules-reset")
         # HIR cache + shards on the streaming path. The surfaces are FROZEN
         # in full before this loop (surface_freeze completes in phase 2), so
         # one digest over every surface is exactly what each module's
@@ -177,14 +186,21 @@ impl CompilerDriver:
             hir_cache_closure_digest(surfaces)
         else:
             ""
+        log_phase("phase3:streaming:r07-closure-digest-bound")
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
+        log_phase("phase3:streaming:r08-shard-mode-bound")
         var hir_level_count: i64 = 0
         var hir_shard_lowered: i64 = 0
         var hir_levels: [i64] = []
+        log_phase("phase3:streaming:r09-shard-locals-init")
         if hir_shard_mode:
+            log_phase("phase3:streaming:r10a-shard-branch-taken")
             hir_levels = hir_shard_levels(surfaces)
             hir_level_count = hir_shard_level_count(hir_levels)
+            log_phase("phase3:streaming:r10b-shard-levels-done")
+        log_phase("phase3:streaming:r11-past-shard-block")
         val hir_visit_order: [i64] = hir_shard_visit_order(self.ctx.source_module_names_owner, surfaces, hir_levels)
+        log_phase("phase3:streaming:r12-visit-order-built")
         # The loop below is driven ENTIRELY by hir_visit_order, which is built
         # from ctx.source_module_names_owner. If that owner array is empty the
         # loop iterates zero times, phase 3 "succeeds" over zero modules in
