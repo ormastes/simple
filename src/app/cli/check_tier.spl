@@ -174,43 +174,49 @@ fn check_line_lambda(code_line: text, tier: text) -> bool:
 
 fn strip_strings_and_comments(line: text) -> text:
     """Remove string literal contents and inline comments from a code line.
-    String content is replaced with spaces; everything after # is removed."""
-    var result = ""
-    var in_str = false
+    String bytes are replaced one-for-one with spaces; everything after # is
+    removed. A trailing string escape retains the historical two-space mask."""
+    var parts: [text] = []
+    var segment_start = 0
     var i = 0
     val n = line.len()
 
     while i < n:
-        val ch = line[i : i + 1]
-
-        if in_str:
-            if ch == "\\":
-                # Skip escaped character
-                result = result + "  "
-                i = i + 2
-                continue
-            if ch == "\"":
-                in_str = false
-                result = result + " "
-            else:
-                result = result + " "
-            i = i + 1
-            continue
-
-        # Not in string
-        if ch == "#":
+        val byte = line.byte_at(i)
+        if byte == 35:
             # Inline comment - skip rest of line
-            break
-        if ch == "\"":
-            in_str = true
-            result = result + " "
+            if parts.len() == 0:
+                if i == 0:
+                    return ""
+                return line.substring(0, i)
+            if i > segment_start:
+                parts.push(line.substring(segment_start, i))
+            return parts.join("")
+        if byte == 34:
+            if i > segment_start:
+                parts.push(line.substring(segment_start, i))
+            val string_start = i
             i = i + 1
+            while i < n:
+                val string_byte = line.byte_at(i)
+                if string_byte == 92:
+                    # Preserve the historical two-column mask for escapes,
+                    # including a trailing backslash at end of input.
+                    i = i + 2
+                    continue
+                i = i + 1
+                if string_byte == 34:
+                    break
+            parts.push(" ".repeat(i - string_start))
+            segment_start = i
             continue
-
-        result = result + ch
         i = i + 1
 
-    result
+    if parts.len() == 0:
+        return line
+    if segment_start < n:
+        parts.push(line.substring(segment_start, n))
+    parts.join("")
 
 fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
     """Check if a file stays within the given tier's grammar.
