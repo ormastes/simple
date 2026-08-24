@@ -708,3 +708,36 @@ With `SIMPLE_HIR_CACHE=0`: `error: bootstrap entry lowered to 0 MIR
 instructions (ret-0 stub module)`. With the cache on: find which slot hands a
 non-nil, non-`HirTypeKind` value to `hc_enc_hir_type_kind` — by the `Visibility`
 precedent, look for a call site passing the wrong type into a `HirType` slot.
+
+## Admission loose end CLOSED — reproduced on an ADMITTED Stage 2 (2026-08-24)
+
+The unadmitted-binary caveat above is discharged. A sibling lane independently
+ran the sanctioned command in the boot worktree, from a **clean** tree at
+`d4b1dee0d63` that carries the seed `if`-merge fix, and it minted both
+receipts:
+
+```
+stage2-provenance.receipt   stage2-provenance: pure-simple
+                            authority=explicit-full-bootstrap-stage2-trust-root
+                            candidate_sha256=7e45db55a89aed6f04139d157467e1adb6235a3b8a1006f0dacf8221375e9b40
+                            admission_receipt_sha256=1ac9c87557259e718ca9866309c614e3b53a2bd54e8a50b326e7a2c032ba2514
+stage2-sanity.receipt       stage2-sanity: pass
+```
+
+Every measurement above reproduces on that admitted binary — a different build,
+by a different lane, from a different tree state:
+
+| | unadmitted `aaac7c62…` | **admitted `7e45db55…`** |
+|---|---|---|
+| `ands #0xfffffff8` total | 517 | **517** |
+| ... inside `hc_enc_hir_module` | 0 | **0** |
+| hello world, `SIMPLE_HIR_CACHE=1` | rc=1, `no \`HirTypeKind\` arm for tag -1` | **identical** |
+| hello world, `SIMPLE_HIR_CACHE=0` | rc=1, `bootstrap entry lowered to 0 MIR instructions` | **identical** |
+
+So the pre-fix `rc=139` / 7-mask result and the post-fix `rc=1` / 0-mask result
+now both rest on trust-root artifacts, and the `tag -1` characterisation holds
+on an admitted Stage 2. The earlier admission failure is confirmed to have been
+purely the concurrent-edit artifact described above, not a property of the fix.
+
+Still true, and still the honest bound: **the SIGSEGV this record documents is
+eliminated; Stage 2 does not yet compile a hello world.**
