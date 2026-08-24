@@ -197,6 +197,9 @@ latency against both references before full live Stage 4 verification. Each
 measured artifact must be an ELF executable or shared-object image, not merely
 an ELF relocatable object with a matching class, endianness, and machine. This
 v1 evidence schema is Linux-only; non-Linux environment claims fail closed.
+The signed outer target must use `target_kind=native-host`, and its `target_id`
+must exactly match the closed benchmark environment's `host_id` before large
+artifacts or the live Stage 4 chain are inspected.
 Independent signatures cannot substitute for either quantitative oracle.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.

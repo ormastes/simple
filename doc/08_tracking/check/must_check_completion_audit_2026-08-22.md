@@ -26,7 +26,7 @@ never counts as PASS.
 | Shared RV32/RV64 templates and Simple-generated VHDL Linux boot | TODO | Requires ownership audit, generator provenance, boot, and command-correlated `ls` receipt |
 | Binary size at most Go | TODO | Requires retained comparable stripped-artifact measurement |
 | Interpreter startup beats Python/Bun/Go | TODO | Requires retained cold and warm launch distributions on matched workloads |
-| Runtime benchmark at least Rust/Go | TODO | Requires retained representative benchmark, semantic parity, timing, and memory evidence. Executable header/statistics validation exists, but outer target identity and per-language build origin remain open in `../bug/rust_go_benchmark_receipt_target_origin_binding_2026-08-25.md` |
+| Runtime benchmark at least Rust/Go | TODO | Requires retained representative benchmark, semantic parity, timing, and memory evidence. Executable header/statistics and outer target identity validation exist, but per-language build origin remains open in `../bug/rust_go_benchmark_receipt_target_origin_binding_2026-08-25.md` |
 
 ## Current completion boundary
 
