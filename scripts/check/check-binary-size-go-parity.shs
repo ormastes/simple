@@ -6,6 +6,7 @@ export LC_ALL
 
 ROOT=""; EXPECTED_FINGERPRINT=""; EXPECTED_RUN_ID=""
 MEASUREMENT=""; EQUIVALENCE=""; COMPILE_TRACE=""; STAGE4_PROVENANCE=""; SIMPLE_COMPILER=""; SIMPLE_BINARY=""; GO_BINARY=""
+SIMPLE_UNSTRIPPED=""; GO_UNSTRIPPED=""; GO_COMPILER=""; STRIP_TOOL=""; SIMPLE_VERSION=""; GO_VERSION=""
 
 fail() { echo "STATUS: FAIL binary-size-go-parity — $*" >&2; exit 1; }
 
@@ -21,6 +22,12 @@ while [ "$#" -gt 0 ]; do
         --simple-compiler) SIMPLE_COMPILER=$2; shift 2 ;;
         --simple-binary) SIMPLE_BINARY=$2; shift 2 ;;
         --go-binary) GO_BINARY=$2; shift 2 ;;
+        --simple-unstripped-binary) SIMPLE_UNSTRIPPED=$2; shift 2 ;;
+        --go-unstripped-binary) GO_UNSTRIPPED=$2; shift 2 ;;
+        --go-compiler) GO_COMPILER=$2; shift 2 ;;
+        --strip-tool) STRIP_TOOL=$2; shift 2 ;;
+        --simple-version) SIMPLE_VERSION=$2; shift 2 ;;
+        --go-version) GO_VERSION=$2; shift 2 ;;
         *) fail "unknown-argument-$1" ;;
     esac
 done
@@ -73,12 +80,18 @@ decimal_le() {
     [ "$(printf '%s\n%s\n' "$_a" "$_b" | LC_ALL=C sort | head -n 1)" = "$_a" ]
 }
 
-closed_lines "$MEASUREMENT" 17 measurement \
+measurement_schema=$(field "$MEASUREMENT" measurement_schema) || fail measurement-missing-schema
+case "$measurement_schema" in
+simple.binary-size-go-parity/v1) measurement_lines=17 ;;
+simple.binary-size-go-parity/v2) measurement_lines=21 ;;
+*) fail measurement-schema ;;
+esac
+closed_lines "$MEASUREMENT" "$measurement_lines" measurement \
     measurement_schema gate_id source_fingerprint run_id fixture_id \
     simple_artifact_sha256 go_artifact_sha256 simple_stripped_bytes go_stripped_bytes \
     simple_artifact_kind go_artifact_kind simple_strip_exit go_strip_exit \
     compression_tool_count target_format target_machine_id_hex final_verdict
-eq_field "$MEASUREMENT" measurement_schema measurement simple.binary-size-go-parity/v1
+eq_field "$MEASUREMENT" measurement_schema measurement "$measurement_schema"
 eq_field "$MEASUREMENT" gate_id measurement binary-size-go-parity
 eq_field "$MEASUREMENT" source_fingerprint measurement "$EXPECTED_FINGERPRINT"
 eq_field "$MEASUREMENT" run_id measurement "$EXPECTED_RUN_ID"
@@ -99,24 +112,53 @@ go_bytes=$(positive_field "$MEASUREMENT" go_stripped_bytes measurement)
 [ "$simple_bytes" = "$(wc -c < "$SIMPLE_BINARY" | tr -d ' ')" ] || fail simple-byte-count
 [ "$go_bytes" = "$(wc -c < "$GO_BINARY" | tr -d ' ')" ] || fail go-byte-count
 decimal_le "$simple_bytes" "$go_bytes" || fail simple-larger-than-go
+if [ "$measurement_schema" = simple.binary-size-go-parity/v2 ]; then
+    for f in "$SIMPLE_UNSTRIPPED" "$GO_UNSTRIPPED" "$GO_COMPILER" "$STRIP_TOOL" "$SIMPLE_VERSION" "$GO_VERSION"; do [ -f "$f" ] && [ ! -L "$f" ] || fail missing-v2-evidence-blob; done
+    eq_field "$MEASUREMENT" simple_unstripped_sha256 measurement "$(sha256sum "$SIMPLE_UNSTRIPPED" | awk '{print $1}')"
+    eq_field "$MEASUREMENT" go_unstripped_sha256 measurement "$(sha256sum "$GO_UNSTRIPPED" | awk '{print $1}')"
+    eq_field "$MEASUREMENT" simple_unstripped_bytes measurement "$(wc -c < "$SIMPLE_UNSTRIPPED" | tr -d ' ')"
+    eq_field "$MEASUREMENT" go_unstripped_bytes measurement "$(wc -c < "$GO_UNSTRIPPED" | tr -d ' ')"
+fi
 
-simple_magic=$(od -An -t x1 -N 4 "$SIMPLE_BINARY" | tr -d ' \n')
-go_magic=$(od -An -t x1 -N 4 "$GO_BINARY" | tr -d ' \n')
-[ "$simple_magic" = 7f454c46 ] && [ "$go_magic" = 7f454c46 ] || fail non-elf-artifact
-simple_class_data=$(od -An -t x1 -j 4 -N 2 "$SIMPLE_BINARY" | tr -d ' \n')
-go_class_data=$(od -An -t x1 -j 4 -N 2 "$GO_BINARY" | tr -d ' \n')
-[ "$simple_class_data" = "$go_class_data" ] || fail elf-class-or-endianness-mismatch
-simple_machine=$(od -An -t x1 -j 18 -N 2 "$SIMPLE_BINARY" | tr -d ' \n')
-go_machine=$(od -An -t x1 -j 18 -N 2 "$GO_BINARY" | tr -d ' \n')
-[ "$simple_machine" = "$go_machine" ] || fail elf-machine-mismatch
+elf_identity() {
+    [ -s "$1" ] || fail empty-elf-artifact
+    _magic=$(od -An -t x1 -N 4 "$1" | tr -d ' \n'); [ "$_magic" = 7f454c46 ] || fail non-elf-artifact
+    _class_data=$(od -An -t x1 -j 4 -N 2 "$1" | tr -d ' \n')
+    _osabi=$(od -An -t x1 -j 7 -N 1 "$1" | tr -d ' \n')
+    _type=$(od -An -t x1 -j 16 -N 2 "$1" | tr -d ' \n'); case "$_type" in 0200|0300) ;; *) fail non-executable-or-shared-elf ;; esac
+    _machine=$(od -An -t x1 -j 18 -N 2 "$1" | tr -d ' \n')
+    printf '%s:%s:%s' "$_class_data" "$_osabi" "$_machine"
+}
+simple_identity=$(elf_identity "$SIMPLE_BINARY"); go_identity=$(elf_identity "$GO_BINARY")
+[ "$simple_identity" = "$go_identity" ] || fail stripped-elf-identity-mismatch
+simple_machine=${simple_identity##*:}
+if [ "$measurement_schema" = simple.binary-size-go-parity/v2 ]; then
+    [ "$(elf_identity "$SIMPLE_UNSTRIPPED")" = "$simple_identity" ] || fail simple-unstripped-elf-identity
+    [ "$(elf_identity "$GO_UNSTRIPPED")" = "$go_identity" ] || fail go-unstripped-elf-identity
+    _strip_work=$(mktemp -d) || fail strip-replay-temp
+    trap 'rm -rf "$_strip_work"' EXIT INT TERM
+    cp "$SIMPLE_UNSTRIPPED" "$_strip_work/simple"; cp "$GO_UNSTRIPPED" "$_strip_work/go"
+    env -i LC_ALL=C PATH=/usr/bin:/bin "$STRIP_TOOL" --strip-all "$_strip_work/simple" || fail simple-strip-replay
+    env -i LC_ALL=C PATH=/usr/bin:/bin "$STRIP_TOOL" --strip-all "$_strip_work/go" || fail go-strip-replay
+    cmp -s "$_strip_work/simple" "$SIMPLE_BINARY" || fail simple-strip-lineage
+    cmp -s "$_strip_work/go" "$GO_BINARY" || fail go-strip-lineage
+fi
 machine=$(field "$MEASUREMENT" target_machine_id_hex) || fail measurement-machine
 [ "$machine" = "$simple_machine" ] || fail machine-id-mismatch
 
-closed_lines "$COMPILE_TRACE" 14 compile-trace \
-    trace_schema gate_id source_fingerprint run_id simple_compiler_path simple_compiler_sha256 \
-    simple_compiler_kind stage4_admitted rust_seed_process_count cargo_process_count \
-    rustc_process_count simple_compile_exit go_compile_exit final_verdict
-eq_field "$COMPILE_TRACE" trace_schema compile-trace simple.binary-size-compile-trace/v1
+trace_schema=$(field "$COMPILE_TRACE" trace_schema) || fail compile-trace-missing-schema
+case "$trace_schema" in simple.binary-size-compile-trace/v1) trace_lines=14 ;; simple.binary-size-compile-trace/v2) trace_lines=28 ;; simple.binary-size-compile-trace/v3) trace_lines=32 ;; *) fail compile-trace-schema ;; esac
+if [ "$trace_schema" = simple.binary-size-compile-trace/v3 ]; then
+    closed_lines "$COMPILE_TRACE" "$trace_lines" compile-trace trace_schema gate_id source_fingerprint run_id \
+        simple_compiler_path simple_compiler_sha256 simple_compiler_kind stage4_admitted \
+        simple_compile_exit go_compile_exit final_verdict go_compiler_path strip_tool_path strip_tool_sha256 \
+        build_working_dir goos goarch go_cache
+else
+    closed_lines "$COMPILE_TRACE" "$trace_lines" compile-trace trace_schema gate_id source_fingerprint run_id \
+        simple_compiler_path simple_compiler_sha256 simple_compiler_kind stage4_admitted rust_seed_process_count cargo_process_count \
+        rustc_process_count simple_compile_exit go_compile_exit final_verdict
+fi
+eq_field "$COMPILE_TRACE" trace_schema compile-trace "$trace_schema"
 eq_field "$COMPILE_TRACE" gate_id compile-trace binary-size-go-parity
 eq_field "$COMPILE_TRACE" source_fingerprint compile-trace "$EXPECTED_FINGERPRINT"
 eq_field "$COMPILE_TRACE" run_id compile-trace "$EXPECTED_RUN_ID"
@@ -127,10 +169,52 @@ compiler_sha=$(sha_field "$COMPILE_TRACE" simple_compiler_sha256 compile-trace)
 [ "$compiler_sha" = "$(sha256sum "$SIMPLE_COMPILER" | awk '{print $1}')" ] || fail compiler-artifact-hash
 eq_field "$COMPILE_TRACE" simple_compiler_kind compile-trace pure-simple-stage4
 eq_field "$COMPILE_TRACE" stage4_admitted compile-trace true
-for zero_field in rust_seed_process_count cargo_process_count rustc_process_count simple_compile_exit go_compile_exit; do
+if [ "$trace_schema" = simple.binary-size-compile-trace/v3 ]; then zero_fields='simple_compile_exit go_compile_exit'; else zero_fields='rust_seed_process_count cargo_process_count rustc_process_count simple_compile_exit go_compile_exit'; fi
+for zero_field in $zero_fields; do
     eq_field "$COMPILE_TRACE" "$zero_field" compile-trace 0
 done
 eq_field "$COMPILE_TRACE" final_verdict compile-trace PASS
+if [ "$trace_schema" = simple.binary-size-compile-trace/v2 ] || [ "$trace_schema" = simple.binary-size-compile-trace/v3 ]; then
+    eq_field "$COMPILE_TRACE" build_environment_id compile-trace clean-build-environment-v1
+    eq_field "$COMPILE_TRACE" lc_all compile-trace C
+    eq_field "$COMPILE_TRACE" build_path compile-trace /usr/bin:/bin
+    if [ "$trace_schema" = simple.binary-size-compile-trace/v2 ]; then eq_field "$COMPILE_TRACE" simple_lib compile-trace src; else eq_field "$COMPILE_TRACE" simple_lib compile-trace "$ROOT/src"; fi
+    eq_field "$COMPILE_TRACE" simple_no_stub_fallback compile-trace 1
+    eq_field "$COMPILE_TRACE" goenv compile-trace off
+    eq_field "$COMPILE_TRACE" goflags compile-trace unset
+    eq_field "$COMPILE_TRACE" cgo_enabled compile-trace 0
+    if [ "$trace_schema" = simple.binary-size-compile-trace/v2 ]; then
+        eq_field "$COMPILE_TRACE" simple_command compile-trace 'simple native-build test/05_perf/fixtures/binary_size_go_parity/workload.spl --backend llvm --opt-level=aggressive --output simple.unstripped'
+        eq_field "$COMPILE_TRACE" go_command compile-trace 'go build -trimpath -o go.unstripped test/05_perf/fixtures/binary_size_go_parity/workload.go'
+        eq_field "$COMPILE_TRACE" strip_command compile-trace 'strip --strip-all'
+    else
+        eq_field "$COMPILE_TRACE" simple_command compile-trace "$compiler_path native-build test/05_perf/fixtures/binary_size_go_parity/workload.spl --backend llvm --opt-level=aggressive --output simple.unstripped"
+        go_path=$(field "$COMPILE_TRACE" go_compiler_path) || fail compile-trace-go-compiler-path
+        strip_path=$(field "$COMPILE_TRACE" strip_tool_path) || fail compile-trace-strip-tool-path
+        build_dir=$(field "$COMPILE_TRACE" build_working_dir) || fail compile-trace-build-working-dir
+        go_cache=$(field "$COMPILE_TRACE" go_cache) || fail compile-trace-go-cache
+        case "$go_path:$strip_path:$build_dir:$go_cache" in /*:/*:/*:/*) ;; *) fail non-absolute-tool-or-build-path ;; esac
+        case "$go_path:$strip_path:$build_dir:$go_cache" in *' '*|*..*) fail non-normalized-tool-or-build-path ;; esac
+        eq_field "$COMPILE_TRACE" goos compile-trace linux
+        case "$(uname -m)" in x86_64) expected_goarch=amd64 ;; aarch64|arm64) expected_goarch=arm64 ;; riscv64) expected_goarch=riscv64 ;; *) fail unsupported-host-arch ;; esac
+        eq_field "$COMPILE_TRACE" goarch compile-trace "$expected_goarch"
+        eq_field "$COMPILE_TRACE" go_command compile-trace "$go_path build -trimpath -o go.unstripped test/05_perf/fixtures/binary_size_go_parity/workload.go"
+        eq_field "$COMPILE_TRACE" strip_command compile-trace "$strip_path --strip-all"
+    fi
+    eq_field "$COMPILE_TRACE" go_compiler_sha256 compile-trace "$(sha256sum "$GO_COMPILER" | awk '{print $1}')"
+    if [ "$trace_schema" = simple.binary-size-compile-trace/v3 ]; then eq_field "$COMPILE_TRACE" strip_tool_sha256 compile-trace "$(sha256sum "$STRIP_TOOL" | awk '{print $1}')"; fi
+    [ -s "$SIMPLE_VERSION" ] && [ -s "$GO_VERSION" ] || fail empty-version-capture
+    eq_field "$COMPILE_TRACE" simple_version_sha256 compile-trace "$(sha256sum "$SIMPLE_VERSION" | awk '{print $1}')"
+    eq_field "$COMPILE_TRACE" go_version_sha256 compile-trace "$(sha256sum "$GO_VERSION" | awk '{print $1}')"
+    if [ "$trace_schema" = simple.binary-size-compile-trace/v3 ]; then
+        _version_work=$(mktemp -d) || fail version-replay-temp
+        env -i LC_ALL=C PATH=/usr/bin:/bin SIMPLE_LIB="$ROOT/src" "$SIMPLE_COMPILER" --version >"$_version_work/simple" 2>&1 || fail simple-version-replay
+        env -i LC_ALL=C PATH=/usr/bin:/bin "$GO_COMPILER" version >"$_version_work/go" 2>&1 || fail go-version-replay
+        cmp -s "$_version_work/simple" "$SIMPLE_VERSION" || fail simple-version-compiler-mismatch
+        cmp -s "$_version_work/go" "$GO_VERSION" || fail go-version-compiler-mismatch
+        rm -rf "$_version_work"
+    fi
+fi
 
 closed_lines "$STAGE4_PROVENANCE" 21 stage4-provenance \
     schema status artifact_kind output_path output_sha256 source_revision_kind \

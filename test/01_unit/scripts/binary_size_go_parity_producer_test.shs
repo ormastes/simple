@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+PRODUCER=$ROOT/scripts/check/produce-binary-size-go-parity-evidence.shs
+CHECKER=$ROOT/scripts/check/check-binary-size-go-parity.shs
+output=$(sh "$PRODUCER" --self-test)
+printf '%s\n' "$output" | grep -Fxq 'STATUS: PASS binary-size-go-parity-producer self-test'
+fail_case() { label=$1; shift; sh "$PRODUCER" "$@" >/dev/null 2>&1 && { echo "FAIL: producer accepted $label" >&2; exit 1; }; return 0; }
+fail_case unsafe-output --output-dir ../bad --run-id negative
+fail_case invalid-run-id --output-dir build/bad --run-id 'bad id'
+fail_case producer-reviewer-alias --output-dir build/bad --run-id negative --producer-id same --reviewer-key-id same
+grep -Fq '[ "$FINGERPRINT" = "$(source_fingerprint "$work/tree-final")" ] || fail head-drift-during-production' "$PRODUCER"
+grep -Fq 'external-evidence.unsigned.env' "$PRODUCER"
+grep -Fq 'simple.binary-size-go-parity/v2' "$CHECKER"
+grep -Fq 'simple.binary-size-compile-trace/v3' "$CHECKER"
+grep -Fq 'simple_unstripped_sha256' "$CHECKER"
+grep -Fq 'go_compiler_sha256' "$CHECKER"
+grep -Fq 'stage4_verify_candidate_provenance' "$CHECKER"
+if grep -Eq 'openssl[[:space:]].*(-sign|-signkey)|reviewer_signature_path=' "$PRODUCER"; then echo 'FAIL: producer contains reviewer signing behavior' >&2; exit 1; fi
+for mutation in simple-artifact-hash simple-byte-count simple-larger-than-go elf-machine-mismatch rust-seed-compiler-path go_version_sha256; do
+    grep -Fq "$mutation" "$CHECKER" || { echo "FAIL: missing mutation oracle $mutation" >&2; exit 1; }
+done
+echo 'PASS: binary-size Go parity producer contract and mutation oracles'

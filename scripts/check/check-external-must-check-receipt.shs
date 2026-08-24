@@ -77,6 +77,19 @@ load_named_artifact_blob() {
     load_head_blob "$_path" "$_sha" "$work/$_kind" "$_max_size"
 }
 
+# Executed attachments have a stronger contract than data blobs. The ordinary
+# loader authenticates content and bounds size; this wrapper additionally
+# authenticates Git executable mode before making only that private copy runnable.
+load_named_executable_artifact_blob() {
+    _kind=$1
+    load_named_artifact_blob "$@"
+    _path=$(field "$artifact" "${_kind}_path") || fail "missing-or-duplicate-${_kind}_path"
+    _entry=$(git -C "$ROOT" ls-tree HEAD -- "$_path" 2>/dev/null) || fail evidence-ls-tree
+    [ "$(printf '%s\n' "$_entry" | wc -l | tr -d ' ')" -eq 1 ] || fail evidence-not-unique
+    [ "$(printf '%s\n' "$_entry" | awk '{print $1}')" = 100755 ] || fail "${_kind}-not-committed-executable"
+    chmod 700 "$work/$_kind" || fail "${_kind}-chmod"
+}
+
 expected_acceptance_ids() {
     case "$1" in
         windows-hook-installation) echo 'native-windows,linked-worktree-a,linked-worktree-b,install,check,launcher-hash' ;;
@@ -119,6 +132,22 @@ require_token_in "$artifact" producer_kind >/dev/null
 reviewer_key_id=$(require_token_in "$artifact" reviewer_key_id)
 [ "$producer_id" != "$reviewer_key_id" ] || fail reviewer-must-be-independent
 
+# Establish reviewer authority before loading any external attachment or
+# invoking a gate-specific checker. In particular, no unsigned executable blob
+# may reach the v3 compiler/version or strip replay paths below.
+signature_path=$(field "$receipt" reviewer_signature_path) || fail missing-or-duplicate-reviewer-signature-path
+signature_sha=$(field "$receipt" reviewer_signature_sha256) || fail missing-or-duplicate-reviewer-signature-sha256
+load_head_blob "$signature_path" "$signature_sha" "$work/reviewer.sig"
+
+[ -f "$POLICY" ] && [ ! -L "$POLICY" ] || fail reviewer-policy-missing
+[ "$(grep -c '^[[:space:]]*schema: "simple.must-check-reviewer-policy/v1"$' "$POLICY" 2>/dev/null || true)" -eq 1 ] || fail reviewer-policy-schema
+_policy_row=$(awk -F, -v id="$reviewer_key_id" '{x=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); if (x==id) {print; n++}} END {if (n != 1) exit 1}' "$POLICY") || fail reviewer-not-trusted
+_key_path=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
+_key_sha=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$3; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
+load_head_blob "$_key_path" "$_key_sha" "$work/reviewer.pem"
+
+openssl dgst -sha256 -verify "$work/reviewer.pem" -signature "$work/reviewer.sig" "$artifact" >/dev/null 2>&1 || fail invalid-reviewer-signature
+
 for _kind in command_receipt target_identity toolchain_identity observations; do
     load_named_artifact_blob "$_kind"
 done
@@ -137,10 +166,30 @@ fi
 if [ "$expected_gate" = binary-size-go-parity ]; then
     # A stripped full CLI is materially larger than ordinary receipt blobs but
     # remains below GitHub's 100 MiB single-object limit.
-    load_named_artifact_blob simple_compiler 104857600
     for _kind in simple_binary go_binary size_measurement semantic_equivalence compile_trace stage4_provenance; do
         load_named_artifact_blob "$_kind"
     done
+    if [ "$(field "$work/compile_trace" trace_schema 2>/dev/null || true)" = simple.binary-size-compile-trace/v3 ]; then
+        load_named_executable_artifact_blob simple_compiler 104857600
+    else
+        load_named_artifact_blob simple_compiler 104857600
+    fi
+    _binary_size_v2_args=
+    if [ "$(field "$work/size_measurement" measurement_schema 2>/dev/null || true)" = simple.binary-size-go-parity/v2 ]; then
+        load_named_artifact_blob simple_unstripped_binary
+        load_named_artifact_blob go_unstripped_binary
+        if [ "$(field "$work/compile_trace" trace_schema 2>/dev/null || true)" = simple.binary-size-compile-trace/v3 ]; then
+            load_named_executable_artifact_blob go_compiler 104857600
+            load_named_executable_artifact_blob strip_tool 104857600
+        else
+            load_named_artifact_blob go_compiler 104857600
+            load_named_artifact_blob strip_tool 104857600
+        fi
+        load_named_artifact_blob simple_version
+        load_named_artifact_blob go_version
+        _binary_size_v2_args="--simple-unstripped-binary $work/simple_unstripped_binary --go-unstripped-binary $work/go_unstripped_binary --go-compiler $work/go_compiler --strip-tool $work/strip_tool --simple-version $work/simple_version --go-version $work/go_version"
+    fi
+    set -- $_binary_size_v2_args
     sh "$ROOT/scripts/check/check-binary-size-go-parity.shs" \
         --root "$ROOT" --fingerprint "$expected_fingerprint" --run-id "$run_id" \
         --measurement "$work/size_measurement" \
@@ -148,7 +197,7 @@ if [ "$expected_gate" = binary-size-go-parity ]; then
         --compile-trace "$work/compile_trace" \
         --stage4-provenance "$work/stage4_provenance" \
         --simple-compiler "$work/simple_compiler" \
-        --simple-binary "$work/simple_binary" --go-binary "$work/go_binary" \
+        --simple-binary "$work/simple_binary" --go-binary "$work/go_binary" "$@" \
         || fail binary-size-semantic-evidence
 fi
 
@@ -247,16 +296,4 @@ for _acceptance in $expected_ids; do
 done
 IFS=$_old_ifs
 
-signature_path=$(field "$receipt" reviewer_signature_path) || fail missing-or-duplicate-reviewer-signature-path
-signature_sha=$(field "$receipt" reviewer_signature_sha256) || fail missing-or-duplicate-reviewer-signature-sha256
-load_head_blob "$signature_path" "$signature_sha" "$work/reviewer.sig"
-
-[ -f "$POLICY" ] && [ ! -L "$POLICY" ] || fail reviewer-policy-missing
-[ "$(grep -c '^[[:space:]]*schema: "simple.must-check-reviewer-policy/v1"$' "$POLICY" 2>/dev/null || true)" -eq 1 ] || fail reviewer-policy-schema
-_policy_row=$(awk -F, -v id="$reviewer_key_id" '{x=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); if (x==id) {print; n++}} END {if (n != 1) exit 1}' "$POLICY") || fail reviewer-not-trusted
-_key_path=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
-_key_sha=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$3; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
-load_head_blob "$_key_path" "$_key_sha" "$work/reviewer.pem"
-
-openssl dgst -sha256 -verify "$work/reviewer.pem" -signature "$work/reviewer.sig" "$artifact" >/dev/null 2>&1 || fail invalid-reviewer-signature
 echo "STATUS: PASS external-must-check-receipt — $expected_gate committed evidence and reviewer signature admitted"

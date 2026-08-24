@@ -183,6 +183,22 @@ the committed compiler/provenance copies to match the producer host's live
 canonical files, and runs the full canonical Stage-3/Stage-4 verifier there.
 Detached or custom `admitted=true` summaries are not provenance. Rust-seed,
 Cargo, or rustc process evidence fails.
+
+Produce the reviewer-ready bundle with `sh
+scripts/check/produce-binary-size-go-parity-evidence.shs --output-dir
+doc/08_tracking/check/evidence/binary-size-go-parity/<run-id> --run-id <run-id>
+--simple-compiler /absolute/path/bin/release/<triple>/simple`. The producer
+never signs or promotes evidence. It uses `env -i`, a fixed `/usr/bin:/bin`
+path, isolated Go cache, `GOENV=off`, `CGO_ENABLED=0`, and
+`SIMPLE_NO_STUB_FALLBACK=1`. Measurement v2 and compile-trace v3 retain both
+pre-strip and post-strip executables, the Go compiler, both version captures,
+absolute normalized tool/environment paths and literal recipes. The validator
+executes the retained compilers to authenticate exact version captures and
+replays the retained strip tool to prove both stripped artifacts derive from
+their retained unstripped counterparts. Import remains compatible with
+v1 and requires every new v2 attachment. A trusted independent reviewer must
+inspect the bundle, set the timestamp, sign the exact summary, and create the
+outer gate receipt; there is no production test-mode or signing-key override.
 `interpreter-startup-parity` loads committed raw samples, statistics,
 equivalence, environment, compiler, and canonical provenance blobs. Its oracle
 requires 50–1000 ordered samples per cold/warm × Simple/Python/Bun/Go cell,
