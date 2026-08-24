@@ -424,6 +424,11 @@ String/comment masking is also span-owned: scan bytes once, retain unchanged
 code spans, represent each quoted span with one repeated-space fragment, and
 stop at the first unquoted comment marker. This preserves byte-column masking
 and escape handling without cumulative per-character string construction.
+Keyword extraction consumes the masked line through one byte-indexed delimiter
+scan. Its delimiter table is exactly the legacy ASCII-space and punctuation
+set; tabs and non-ASCII bytes remain word content. The collector emits maximal
+source spans in encounter order and never materializes a chain of normalized
+whole-line copies.
 
 ### Raw-SFFI source-view ownership
 
