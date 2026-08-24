@@ -4,6 +4,7 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_stage4_streaming}
+use compiler.driver.bootstrap_api_low_memory.{bootstrap_low_memory_requested}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
 use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
@@ -623,11 +624,19 @@ impl CompilerDriver:
                 # deep-promotes the retained ParserModule out of it, then ends
                 # the scope (freeing the garbage) and resets the lexer/AST
                 # arena owners in the load-bearing order documented in
-                # driver_end_transient_parse_scope(). Opt-in under
-                # --low-memory only: the default path is left byte-identical
-                # so no bootstrap lane changes behaviour until this has been
-                # exercised across a full self-compile.
-                val entry_module = if self.ctx.options.low_memory:
+                # driver_end_transient_parse_scope(). Opt-in only: the default
+                # path is left byte-identical so no bootstrap lane changes
+                # behaviour until this has been exercised across a full
+                # self-compile. Two ways in, because neither alone reaches
+                # every caller: `options.low_memory` (set by the full CLI's
+                # --low-memory) and the pre-existing env opt-in
+                # bootstrap_low_memory_requested() (SIMPLE_BOOTSTRAP=1 +
+                # SIMPLE_BOOTSTRAP_STAGE4=1 + SIMPLE_BOOTSTRAP_LOW_MEMORY=1),
+                # which is the ONLY reachable gate on the bootstrap CLI --
+                # bootstrap_main.spl parses no --low-memory flag, so a
+                # flag-only gate would be dead code there.
+                val entry_module = if (self.ctx.options.low_memory or
+                                       bootstrap_low_memory_requested()):
                     parse_full_frontend_stage4_streaming(
                         source.content,
                         source.path,
