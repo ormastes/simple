@@ -21,6 +21,7 @@ use os.kernel.memory.user_address_space.{create_user_address_space, destroy_user
 use os.kernel.loader.segment_mapper.{map_all, map_stack, stage_raw_image, stage_elf64_load_image, direct_load_entry_point, verify_direct_load_entry}
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.scheduler.green_carrier.{GreenCarrierExecutionState, GreenCarrierParallelismState}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 export use os.kernel.scheduler.scheduler_executable_adoption_state.{
     SchedulerExecutableAdoptionOwnerStateV1
 }
@@ -41,14 +42,46 @@ pub val SCHED_RT_BASE_PRIORITY_UNSET: i64 = 9223372036854775807
 
 # Module-level task-id counter shared across all task-creation paths.
 var g_scheduler_next_task_id: u64 = 1
+var g_scheduler_next_lifecycle_generation: u64 = 1u64
+val g_scheduler_identity_allocator_mutex: i64 = mutex_raw_create()
+var g_scheduler_identity_allocator_quarantined: bool = false
+
+fn _scheduler_identity_allocator_lock_v1() -> bool:
+    g_scheduler_identity_allocator_mutex > 0 and
+        not g_scheduler_identity_allocator_quarantined and
+        mutex_raw_lock(g_scheduler_identity_allocator_mutex)
+
+fn _scheduler_identity_allocator_unlock_v1() -> bool:
+    if mutex_raw_unlock(g_scheduler_identity_allocator_mutex): return true
+    g_scheduler_identity_allocator_quarantined = true
+    false
 
 pub fn scheduler_next_task_id_take() -> u64:
-    var next_id = g_scheduler_next_task_id
-    if next_id == 0 or next_id >= 0x40000000:
-        log_raw_println("[scheduler] create_task: normalized next_task_id")
-        next_id = 1
-    g_scheduler_next_task_id = next_id + 1
+    # TaskId is the scheduler's current-task lookup key. Reuse would make a
+    # `{task_id,lifecycle_generation}` authority impossible to derive safely
+    # from `Scheduler.current`, which intentionally carries only TaskId.
+    if not _scheduler_identity_allocator_lock_v1(): return 0u64
+    if g_scheduler_next_task_id == 0u64 or
+        g_scheduler_next_task_id >= 0x40000000u64:
+        log_raw_println("[scheduler] create_task: task id space exhausted")
+        _ = _scheduler_identity_allocator_unlock_v1()
+        return 0u64
+    val next_id = g_scheduler_next_task_id
+    g_scheduler_next_task_id = next_id + 1u64
+    if not _scheduler_identity_allocator_unlock_v1(): return 0u64
     next_id
+
+pub fn scheduler_next_lifecycle_generation_take_v1() -> u64:
+    """Take a never-wrapped task-lifetime identity; zero means exhausted."""
+    if not _scheduler_identity_allocator_lock_v1(): return 0u64
+    if g_scheduler_next_lifecycle_generation == 0u64 or
+        g_scheduler_next_lifecycle_generation == 0xFFFFFFFFFFFFFFFFu64:
+        _ = _scheduler_identity_allocator_unlock_v1()
+        return 0u64
+    val generation = g_scheduler_next_lifecycle_generation
+    g_scheduler_next_lifecycle_generation = generation + 1u64
+    if not _scheduler_identity_allocator_unlock_v1(): return 0u64
+    generation
 
 @cfg(x86_64)
 pub fn sched_exec_arch() -> Architecture:
@@ -99,6 +132,8 @@ pub struct TaskControlBlock:
     assigned_cpu: u32
     exit_code: i32
     ticks_remaining: u64
+    # Appended to preserve every pre-existing @repr("C") field offset.
+    lifecycle_generation: u64
 
 pub struct WaitCollectResult:
     """Result of collecting child exit state for waitpid-compatible syscalls."""

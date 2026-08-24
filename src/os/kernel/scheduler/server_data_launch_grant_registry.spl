@@ -1,0 +1,324 @@
+# Scheduler-owned sealed server-data launch grant registry.
+#
+# Canonical mutable state is one checked-mutex capsule. Boundary values are
+# opaque generational handles or claims; neither carries DBFS/namespace
+# authority. A future namespace owner may consume a claim inside the kernel,
+# but scalar task identifiers and copied image metadata never authorize data
+# access.
+
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, executable_image_handle_validate
+}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.kernel.loader.server_launch_grants.{SIMPLEOS_SERVER_EXECUTABLE_V1}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+
+pub(package) enum ServerDataLaunchGrantInstallStatusV1:
+    NotApplicable
+    Installed
+    Rejected
+    Exhausted
+    SerializationUnavailable
+
+pub(package) struct ServerDataLaunchGrantLifecycleHandleV1:
+    slot: i64
+    generation: u64
+    nonce: u64
+    task_id: u64
+    lifecycle_generation: u64
+
+pub(package) struct ServerDataLaunchGrantClaimV1:
+    slot: i64
+    generation: u64
+    nonce: u64
+    task_id: u64
+    lifecycle_generation: u64
+
+pub(package) struct ServerDataLaunchGrantInstallResultV1:
+    status: ServerDataLaunchGrantInstallStatusV1
+    handle: ServerDataLaunchGrantLifecycleHandleV1?
+
+enum ServerDataLaunchGrantSlotStateV1:
+    Empty
+    Installed
+    Claimed
+    Quarantined
+    Retired
+
+struct ServerDataLaunchGrantSlotV1:
+    state: ServerDataLaunchGrantSlotStateV1
+    generation: u64
+    nonce: u64
+    task_id: u64
+    lifecycle_generation: u64
+    canonical_source_path: text
+    image_hash: text
+    admission_id: text
+    trust_epoch: u64
+    mount_id: u64
+    mount_generation: u64
+    file_id: u64
+    file_generation: u64
+
+struct ServerDataLaunchGrantRegistryStateV1:
+    nonce_counter: u64
+    permanently_quarantined: bool
+    slots: [ServerDataLaunchGrantSlotV1]
+
+val SERVER_DATA_LAUNCH_GRANT_LIMIT_V1: i64 = 64
+val _server_data_launch_grant_mutex_v1: i64 = mutex_raw_create()
+var _server_data_launch_grant_registry_v1 = ServerDataLaunchGrantRegistryStateV1(
+    nonce_counter: 0x5345525645524441u64,
+    permanently_quarantined: false,
+    slots: [])
+
+fn _server_data_launch_grant_empty_slot_v1(generation: u64) -> ServerDataLaunchGrantSlotV1:
+    ServerDataLaunchGrantSlotV1(
+        state: ServerDataLaunchGrantSlotStateV1.Empty,
+        generation: generation,
+        nonce: 0u64,
+        task_id: 0u64,
+        lifecycle_generation: 0u64,
+        canonical_source_path: "",
+        image_hash: "",
+        admission_id: "",
+        trust_epoch: 0u64,
+        mount_id: 0u64,
+        mount_generation: 0u64,
+        file_id: 0u64,
+        file_generation: 0u64)
+
+fn _server_data_launch_grant_lock_v1() -> bool:
+    _server_data_launch_grant_mutex_v1 > 0 and
+        not _server_data_launch_grant_registry_v1.permanently_quarantined and
+        mutex_raw_lock(_server_data_launch_grant_mutex_v1)
+
+fn _server_data_launch_grant_unlock_v1() -> bool:
+    if mutex_raw_unlock(_server_data_launch_grant_mutex_v1): return true
+    # A mutation may already have linearized. Suppress all future authority
+    # instead of guessing whether the transition committed.
+    _server_data_launch_grant_registry_v1.permanently_quarantined = true
+    false
+
+fn _server_data_launch_grant_install_result_v1(
+    status: ServerDataLaunchGrantInstallStatusV1,
+    handle: ServerDataLaunchGrantLifecycleHandleV1?
+) -> ServerDataLaunchGrantInstallResultV1:
+    ServerDataLaunchGrantInstallResultV1(status: status, handle: handle)
+
+fn _server_data_launch_grant_live_task_index_v1(
+    task_id: u64, lifecycle_generation: u64
+) -> i64:
+    var i = 0
+    while i < _server_data_launch_grant_registry_v1.slots.len():
+        val slot = _server_data_launch_grant_registry_v1.slots[i]
+        if (slot.state == ServerDataLaunchGrantSlotStateV1.Installed or
+            slot.state == ServerDataLaunchGrantSlotStateV1.Claimed) and
+            slot.task_id == task_id and
+            slot.lifecycle_generation == lifecycle_generation:
+            return i
+        i = i + 1
+    -1
+
+fn _server_data_launch_grant_handle_index_v1(
+    handle: ServerDataLaunchGrantLifecycleHandleV1
+) -> i64:
+    if handle.slot < 0 or
+        handle.slot >= _server_data_launch_grant_registry_v1.slots.len() or
+        handle.generation == 0u64 or handle.nonce == 0u64 or
+        handle.task_id == 0u64 or handle.lifecycle_generation == 0u64:
+        return -1
+    val slot = _server_data_launch_grant_registry_v1.slots[handle.slot]
+    if slot.state != ServerDataLaunchGrantSlotStateV1.Installed or
+        slot.generation != handle.generation or slot.nonce != handle.nonce or
+        slot.task_id != handle.task_id or
+        slot.lifecycle_generation != handle.lifecycle_generation:
+        return -1
+    handle.slot
+
+fn _server_data_launch_grant_image_policy_v1(image: ExecutableImageHandleV1) -> bool:
+    val checked = executable_image_handle_validate(image)
+    checked.ok and
+        image.canonical_source_path == SIMPLEOS_SERVER_EXECUTABLE_V1 and
+        image.target.os == "simpleos" and image.target.abi == "simpleos" and
+        (image.target.arch == "x86_64" or image.target.arch == "aarch64" or
+            image.target.arch == "riscv64")
+
+pub(package) fn server_data_launch_grant_install_before_publication_v1(
+    task_id: u64,
+    lifecycle_generation: u64,
+    image: ExecutableImageHandleV1
+) -> ServerDataLaunchGrantInstallResultV1:
+    # Other executables do not receive or require this optional server grant.
+    # The path comes only from the execute-open-sealed image handle.
+    if image.canonical_source_path != SIMPLEOS_SERVER_EXECUTABLE_V1:
+        return _server_data_launch_grant_install_result_v1(
+            ServerDataLaunchGrantInstallStatusV1.NotApplicable, nil)
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+        not _server_data_launch_grant_image_policy_v1(image):
+        return _server_data_launch_grant_install_result_v1(
+            ServerDataLaunchGrantInstallStatusV1.Rejected, nil)
+    if not _server_data_launch_grant_lock_v1():
+        return _server_data_launch_grant_install_result_v1(
+            ServerDataLaunchGrantInstallStatusV1.SerializationUnavailable, nil)
+    if _server_data_launch_grant_live_task_index_v1(task_id, lifecycle_generation) >= 0:
+        val unlocked = _server_data_launch_grant_unlock_v1()
+        return _server_data_launch_grant_install_result_v1(
+            if unlocked: ServerDataLaunchGrantInstallStatusV1.Rejected
+            else: ServerDataLaunchGrantInstallStatusV1.SerializationUnavailable,
+            nil)
+
+    var reusable = -1
+    var i = 0
+    while i < _server_data_launch_grant_registry_v1.slots.len():
+        if _server_data_launch_grant_registry_v1.slots[i].state ==
+            ServerDataLaunchGrantSlotStateV1.Empty:
+            reusable = i
+            break
+        i = i + 1
+    if reusable < 0 and
+        _server_data_launch_grant_registry_v1.slots.len() >=
+            SERVER_DATA_LAUNCH_GRANT_LIMIT_V1:
+        val unlocked = _server_data_launch_grant_unlock_v1()
+        return _server_data_launch_grant_install_result_v1(
+            if unlocked: ServerDataLaunchGrantInstallStatusV1.Exhausted
+            else: ServerDataLaunchGrantInstallStatusV1.SerializationUnavailable,
+            nil)
+
+    val prior_generation = if reusable >= 0:
+        _server_data_launch_grant_registry_v1.slots[reusable].generation
+    else:
+        0u64
+    if prior_generation == 0xFFFFFFFFFFFFFFFFu64 or
+        _server_data_launch_grant_registry_v1.nonce_counter == 0xFFFFFFFFFFFFFFFFu64:
+        if reusable >= 0:
+            var retired = _server_data_launch_grant_registry_v1.slots[reusable]
+            retired.state = ServerDataLaunchGrantSlotStateV1.Retired
+            _server_data_launch_grant_registry_v1.slots[reusable] = retired
+        val unlocked = _server_data_launch_grant_unlock_v1()
+        return _server_data_launch_grant_install_result_v1(
+            if unlocked: ServerDataLaunchGrantInstallStatusV1.Exhausted
+            else: ServerDataLaunchGrantInstallStatusV1.SerializationUnavailable,
+            nil)
+
+    val generation = prior_generation + 1u64
+    _server_data_launch_grant_registry_v1.nonce_counter =
+        _server_data_launch_grant_registry_v1.nonce_counter + 1u64
+    val nonce = _server_data_launch_grant_registry_v1.nonce_counter
+    val slot_index = if reusable >= 0:
+        reusable
+    else:
+        _server_data_launch_grant_registry_v1.slots.len()
+    val installed = ServerDataLaunchGrantSlotV1(
+        state: ServerDataLaunchGrantSlotStateV1.Installed,
+        generation: generation,
+        nonce: nonce,
+        task_id: task_id,
+        lifecycle_generation: lifecycle_generation,
+        canonical_source_path: image.canonical_source_path,
+        image_hash: image.image_hash,
+        admission_id: image.admission_id,
+        trust_epoch: image.trust_epoch,
+        mount_id: image.mount_id,
+        mount_generation: image.mount_generation,
+        file_id: image.file_id,
+        file_generation: image.file_generation)
+    if reusable >= 0:
+        _server_data_launch_grant_registry_v1.slots[reusable] = installed
+    else:
+        _server_data_launch_grant_registry_v1.slots.push(installed)
+    val handle = ServerDataLaunchGrantLifecycleHandleV1(
+        slot: slot_index,
+        generation: generation,
+        nonce: nonce,
+        task_id: task_id,
+        lifecycle_generation: lifecycle_generation)
+    if not _server_data_launch_grant_unlock_v1():
+        return _server_data_launch_grant_install_result_v1(
+            ServerDataLaunchGrantInstallStatusV1.SerializationUnavailable, nil)
+    _server_data_launch_grant_install_result_v1(
+        ServerDataLaunchGrantInstallStatusV1.Installed, Some(handle))
+
+pub(package) fn server_data_launch_grant_rollback_before_publication_v1(
+    handle: ServerDataLaunchGrantLifecycleHandleV1
+) -> bool:
+    if not _server_data_launch_grant_lock_v1(): return false
+    val index = _server_data_launch_grant_handle_index_v1(handle)
+    if index < 0:
+        _ = _server_data_launch_grant_unlock_v1()
+        return false
+    val generation = _server_data_launch_grant_registry_v1.slots[index].generation
+    _server_data_launch_grant_registry_v1.slots[index] =
+        _server_data_launch_grant_empty_slot_v1(generation)
+    _server_data_launch_grant_unlock_v1()
+
+pub(package) fn server_data_launch_grant_quarantine_before_publication_v1(
+    handle: ServerDataLaunchGrantLifecycleHandleV1
+) -> bool:
+    if not _server_data_launch_grant_lock_v1(): return false
+    val index = _server_data_launch_grant_handle_index_v1(handle)
+    if index < 0:
+        _ = _server_data_launch_grant_unlock_v1()
+        return false
+    var slot = _server_data_launch_grant_registry_v1.slots[index]
+    slot.state = ServerDataLaunchGrantSlotStateV1.Quarantined
+    _server_data_launch_grant_registry_v1.slots[index] = slot
+    _server_data_launch_grant_unlock_v1()
+
+pub(package) fn server_data_launch_grant_claim_once_for_task_v1(
+    task_id: u64, lifecycle_generation: u64
+) -> ServerDataLaunchGrantClaimV1?:
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+        not _server_data_launch_grant_lock_v1():
+        return nil
+    val index = _server_data_launch_grant_live_task_index_v1(
+        task_id, lifecycle_generation)
+    if index < 0 or _server_data_launch_grant_registry_v1.slots[index].state !=
+        ServerDataLaunchGrantSlotStateV1.Installed:
+        _ = _server_data_launch_grant_unlock_v1()
+        return nil
+    var slot = _server_data_launch_grant_registry_v1.slots[index]
+    slot.state = ServerDataLaunchGrantSlotStateV1.Claimed
+    _server_data_launch_grant_registry_v1.slots[index] = slot
+    val claim = ServerDataLaunchGrantClaimV1(
+        slot: index,
+        generation: slot.generation,
+        nonce: slot.nonce,
+        task_id: slot.task_id,
+        lifecycle_generation: slot.lifecycle_generation)
+    if not _server_data_launch_grant_unlock_v1(): return nil
+    Some(claim)
+
+pub(package) fn server_data_launch_grant_revoke_task_lifecycle_v1(
+    task_id: u64, lifecycle_generation: u64
+) -> bool:
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+        not _server_data_launch_grant_lock_v1():
+        return false
+    val index = _server_data_launch_grant_live_task_index_v1(
+        task_id, lifecycle_generation)
+    if index < 0:
+        # Already revoked or not applicable is an idempotent terminal absence.
+        return _server_data_launch_grant_unlock_v1()
+    val generation = _server_data_launch_grant_registry_v1.slots[index].generation
+    _server_data_launch_grant_registry_v1.slots[index] =
+        _server_data_launch_grant_empty_slot_v1(generation)
+    _server_data_launch_grant_unlock_v1()
+
+impl Scheduler:
+    pub(package) me claim_current_server_data_launch_grant_once_v1(
+    ) -> ServerDataLaunchGrantClaimV1?:
+        # The caller supplies no PID, lifecycle generation, path, image hash,
+        # or slot token. Both identity components come from the scheduler's
+        # canonical current TCB under the scheduler owner boundary.
+        if self.current.id == 0u64: return nil
+        var i = 0
+        while i < self.tasks.len():
+            val maybe_task = self.tasks[i]
+            if maybe_task != nil:
+                val task = maybe_task.unwrap()
+                if task.id.id == self.current.id:
+                    return server_data_launch_grant_claim_once_for_task_v1(
+                        task.id.id, task.lifecycle_generation)
+            i = i + 1
+        nil

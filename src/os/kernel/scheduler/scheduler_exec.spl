@@ -60,6 +60,9 @@ use os.kernel.scheduler.scheduler_task_mgmt.{
 }
 
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
+use os.kernel.scheduler.server_data_launch_grant_registry.{
+    server_data_launch_grant_revoke_task_lifecycle_v1
+}
 use os.kernel.ipc.capability.{register_task_vmspace}
 
 @cfg(arm64)
@@ -227,9 +230,12 @@ pub fn sched_create_user_task_pid_impl(
             return (0, tasks, -1)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
     val user_next_id = scheduler_next_task_id_take()
+    if user_next_id == 0u64:
+        destroy_user_address_space(user_as)
+        return (0u64, tasks, -1)
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
-        id: id, name: "user-{id.id}",
+        id: id, lifecycle_generation: 0u64, name: "user-{id.id}",
         state: TaskState.Ready, priority: priority, is_user: true,
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
@@ -314,9 +320,12 @@ pub fn sched_create_user_task_from_bytes_pid_impl(
             return (0, tasks, -1)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
     val user_next_id = scheduler_next_task_id_take()
+    if user_next_id == 0u64:
+        destroy_user_address_space(user_as)
+        return (0u64, tasks, -1)
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
-        id: id, name: "user-{id.id}",
+        id: id, lifecycle_generation: 0u64, name: "user-{id.id}",
         state: TaskState.Ready, priority: priority, is_user: true,
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
@@ -366,9 +375,12 @@ pub fn sched_create_bootstrap_user_task_pid_impl(
             return (0, tasks)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
     val user_next_id = scheduler_next_task_id_take()
+    if user_next_id == 0u64:
+        destroy_user_address_space(user_as)
+        return (0u64, tasks)
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
-        id: id, name: "bootstrap-user",
+        id: id, lifecycle_generation: 0u64, name: "bootstrap-user",
         state: TaskState.Ready, priority: priority, is_user: true,
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
@@ -401,6 +413,8 @@ pub fn sched_clone_task_impl(
         return (TaskId(id: 0), tasks, -1)
     val parent = parent_tcb
     val child_id = TaskId(id: scheduler_next_task_id_take())
+    if child_id.id == 0u64:
+        return (TaskId(id: 0u64), tasks, -1)
     val child_slot = _find_empty_slot_in(tasks)
     if child_slot < 0:
         return (TaskId(id: 0), tasks, -1)
@@ -420,7 +434,7 @@ pub fn sched_clone_task_impl(
         user_ctx.rax = 0
         child_user_ctx = Some(user_ctx)
     val child = TaskControlBlock(
-        id: child_id, name: "{parent.name}:fork",
+        id: child_id, lifecycle_generation: 0u64, name: "{parent.name}:fork",
         state: TaskState.Ready, priority: parent.priority, is_user: parent.is_user,
         entry_point: parent.entry_point, context: child_ctx, user_context: child_user_ctx,
         address_space: child_as, kernel_stack: parent.kernel_stack, user_stack: parent.user_stack,
@@ -481,11 +495,14 @@ pub fn sched_exec_image_impl(
             destroy_user_address_space(new_as)
             return (-12, tasks)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
+    _ = server_data_launch_grant_revoke_task_lifecycle_v1(
+        old_task.id.id, old_task.lifecycle_generation)
     sched_release_task_address_space(old_task)
     var new_isolation = old_task.isolation
     new_isolation.address_space_id = new_as.id
     new_isolation.capability_generation = new_isolation.capability_generation + 1
     var task = old_task
+    task.lifecycle_generation = 0u64
     task.is_user = true
     task.entry_point = mapped_entry
     task.context = user_ctx

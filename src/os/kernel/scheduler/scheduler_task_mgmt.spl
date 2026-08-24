@@ -35,6 +35,9 @@ use os.kernel.scheduler.scheduler_types.{
     scheduler_next_task_id_take
 }
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
+use os.kernel.scheduler.server_data_launch_grant_registry.{
+    server_data_launch_grant_revoke_task_lifecycle_v1
+}
 
 # ============================================================================
 # Task Creation
@@ -49,6 +52,8 @@ pub fn sched_create_task_impl(
 ) -> (TaskId, [TaskControlBlock?]):
     """Core logic for Scheduler.create_task."""
     val next_id = scheduler_next_task_id_take()
+    if next_id == 0u64:
+        return (TaskId(id: 0u64), tasks)
     val id = TaskId(id: next_id)
 
     val slot = _find_empty_slot_in(tasks)
@@ -69,6 +74,7 @@ pub fn sched_create_task_impl(
 
     val tcb = TaskControlBlock(
         id: id,
+        lifecycle_generation: 0u64,
         name: "task-{id.id}",
         state: TaskState.Ready,
         priority: priority,
@@ -110,6 +116,8 @@ pub fn sched_exit_task_by_id_impl(
         return (tasks, id)
     var task = tcb
     posix_close_task_fds_with_backends(id.id)
+    _ = server_data_launch_grant_revoke_task_lifecycle_v1(
+        task.id.id, task.lifecycle_generation)
     task.state = TaskState.Zombie
     task.exit_code = 0
     var new_tasks = tasks
@@ -130,6 +138,8 @@ pub fn sched_exit_task_by_id_with_code_impl(
         return tasks
     var task = tcb
     posix_close_task_fds_with_backends(id.id)
+    _ = server_data_launch_grant_revoke_task_lifecycle_v1(
+        task.id.id, task.lifecycle_generation)
     task.state = TaskState.Zombie
     task.exit_code = code
     var new_tasks = tasks
