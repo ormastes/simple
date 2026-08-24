@@ -65,50 +65,55 @@ fn _is_space(ch: text) -> bool:
 # Blanking (rather than deleting) preserves column positions, which every
 # later heuristic depends on.
 pub fn strip_code(line: text) -> text:
-    var out: text = ""
+    var fragments: [text] = []
     var i = 0
     val n = line.len()
     while i < n:
         val ch: text = line.char_at(i)
         if ch == "\"":
-            out = out + " "
+            fragments = fragments.push(" ")
             i = i + 1
             var closed = false
             while i < n and not closed:
                 val c2: text = line.char_at(i)
                 if c2 == "\\":
-                    out = out + "  "
+                    fragments = fragments.push("  ")
                     i = i + 2
                 elif c2 == "\"":
-                    out = out + " "
+                    fragments = fragments.push(" ")
                     i = i + 1
                     closed = true
                 else:
-                    out = out + " "
+                    fragments = fragments.push(" ")
                     i = i + 1
         elif ch == "#":
             i = n
         else:
-            out = out + ch
+            fragments = fragments.push(ch)
             i = i + 1
-    out
+    fragments.join("")
 
 # Last non-space character of `s`, or "" when `s` is blank.
-fn _last_meaningful(s: text) -> text:
-    var i = s.len() - 1
-    while i >= 0:
-        val ch: text = s.char_at(i)
-        if not _is_space(ch):
-            return ch
-        i = i - 1
-    ""
+fn _last_meaningful_at(s: text, last: i64) -> text:
+    if last < 0:
+        return ""
+    s.char_at(last)
 
-# Does the prefix end with the bare keyword `kw` (whitespace-separated)?
-fn _ends_with_keyword(prefix: text, kw: text) -> bool:
-    val t: text = prefix.trim()
-    if t == kw:
-        return true
-    t.ends_with(" " + kw)
+# Does code through `last` end with the bare keyword `kw` after trimming?
+# Historical behavior requires a literal space before a non-leading keyword.
+fn _ends_with_keyword_at(code: text, last: i64, first_non_space: i64, kw: text) -> bool:
+    val start = last - kw.len() + 1
+    if start < 0:
+        return false
+    var k = 0
+    while k < kw.len():
+        if code.char_at(start + k) != kw.char_at(k):
+            return false
+        k = k + 1
+    start == first_non_space or code.char_at(start - 1) == " "
+
+fn _ends_with_arrow_at(code: text, last: i64) -> bool:
+    last >= 1 and code.char_at(last - 1) == "-" and code.char_at(last) == ">"
 
 pub fn classify_occurrences(raw_line: text) -> [text]:
     val code: text = strip_code(raw_line)
@@ -123,6 +128,8 @@ pub fn classify_occurrences(raw_line: text) -> [text]:
     var angle = 0
     var square = 0
     var paren = 0
+    var last_non_space = -1
+    var first_non_space = -1
     while i < n:
         val ch: text = code.char_at(i)
         if ch == "<":
@@ -159,20 +166,15 @@ pub fn classify_occurrences(raw_line: text) -> [text]:
                 if j > i + 3 and j < n and _is_lower(code.char_at(j)):
                     ok = false
             if ok:
-                var prefix: text = ""
-                var k = 0
-                while k < i:
-                    prefix = prefix + code.char_at(k)
-                    k = k + 1
-                val pm: text = _last_meaningful(prefix)
+                val pm: text = _last_meaningful_at(code, last_non_space)
                 var cls: text = ""
-                if _ends_with_keyword(prefix, "as"):
+                if _ends_with_keyword_at(code, last_non_space, first_non_space, "as"):
                     cls = "cast"
                 elif angle > 0 or square > 0:
                     cls = "generic"
-                elif _ends_with_keyword(prefix, "is") or st.starts_with("match ") or st.starts_with("case "):
+                elif _ends_with_keyword_at(code, last_non_space, first_non_space, "is") or st.starts_with("match ") or st.starts_with("case "):
                     cls = "match"
-                elif prefix.trim().ends_with("->"):
+                elif _ends_with_arrow_at(code, last_non_space):
                     cls = "ret"
                 elif pm == ":":
                     if st.starts_with("val ") or st.starts_with("var ") or st.starts_with("let "):
@@ -183,6 +185,18 @@ pub fn classify_occurrences(raw_line: text) -> [text]:
                         cls = "field"
                 if cls != "":
                     found = found.push(cls)
+                if first_non_space < 0:
+                    first_non_space = i
+                last_non_space = i + 2
                 i = i + 2
+            else:
+                if first_non_space < 0:
+                    first_non_space = i
+                last_non_space = i + 2
+                i = i + 2
+        elif not _is_space(ch):
+            if first_non_space < 0:
+                first_non_space = i
+            last_non_space = i
         i = i + 1
     found

@@ -777,3 +777,12 @@ array of normalized paths. Reverse-dependency matching consumes those cached
 texts; it must not normalize a changed path inside the graph/import loops.
 This is an allocation-hoist boundary, not a new dependency index: current graph
 order and `dominated` semantics remain authoritative.
+# Repository audit text ownership
+
+Line-oriented repository audits must not construct immutable growing prefixes.
+`any_audit` owns one sanitized line buffer assembled from fragments, then uses
+indices into that stable text for classification. Bounded token checks inspect
+the existing buffer and allocate no prefix snapshots.
+
+The CLI owns aggregate counts, not aggregate site records: sites are emitted in
+source order and immediately folded into counters derived from `ANY_CLASSES`.

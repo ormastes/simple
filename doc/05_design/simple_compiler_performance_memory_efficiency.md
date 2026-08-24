@@ -1061,3 +1061,16 @@ corresponding cached value to `normalized_file_matches_import`.
 Do not reorder graph entries or changed files, and do not reset or reinterpret
 `dominated`: those choices would be a separate correctness change. Import
 prefix conversion and both historical `contains` alternatives remain exact.
+# Any-audit linear classifier design
+
+`strip_code` pushes the original character, one blank, or the historical
+two-blank escaped-pair fragment and performs one `join("")`. It deliberately
+keeps indexed `char_at` rather than the known-unsafe text iterator route.
+
+`_last_meaningful_at`, `_ends_with_keyword_at`, and `_ends_with_arrow_at`
+consume the running last-non-space index. Keyword matching preserves the old rule that a
+non-leading `as`/`is` must have a literal space immediately before it.
+
+The driver initializes one counter per `ANY_CLASSES` entry and keeps a scalar
+site count. Each printed site updates these values immediately; class
+and summary records retain their established order and format.

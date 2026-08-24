@@ -3388,3 +3388,24 @@ growing dependent list, so no end-to-end asymptotic improvement is claimed.
 For empty/no-import graphs it eagerly normalizes paths the former lazy route did
 not touch. Graph order, duplicate suppression, prefix stripping, and the
 existing order-sensitive `dominated` behavior are pinned.
+# 2026-08-24 follow-up: linear Any-inventory classification
+
+The repository-wide `any_audit` sanitizer formerly appended one- or two-byte
+texts to an immutable growing output for each source character. A line of
+length `N` therefore copied `Theta(N^2)` cumulative payload. Each accepted
+`Any` occurrence independently rebuilt its entire prefix the same way, adding
+`sum Theta(i_a^2)` copied payload for occurrence offsets `i_a`.
+
+`strip_code` now records exact character/blank fragments and joins once,
+preserving indexed traversal, escape spacing, comment truncation, and columns.
+Classification maintains the last non-space index and performs constant-size
+checks for literal-space-delimited `as`/`is` and `->`, without prefix text,
+slicing, backward whitespace rescans, or trim allocation. Sanitization is
+`Theta(N)` payload assembly with `O(N)` fragment references; classification is
+one forward scan plus bounded token checks per occurrence.
+
+The driver also replaces retained `AnySite` storage and later class scans with
+one counter per `ANY_CLASSES` entry plus a site count updated while printing. Output order
+and totals remain unchanged; retained driver memory falls from `O(S)` sites to
+`O(K)` counters for the fixed class schema, excluding the per-file census
+already owned by `scan_source`.

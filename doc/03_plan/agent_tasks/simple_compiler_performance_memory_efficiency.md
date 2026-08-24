@@ -1656,3 +1656,15 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Parallel performance audit supplied the defect and bounded patch contract;
   semantic, performance, and fixture reviews remain required before sync.
 - No manual verification was run under the user override.
+# Completed tranche: Any-audit linear text and bounded totals (2026-08-24)
+
+- Replaced per-character immutable prefix growth with fragments plus one join.
+- Replaced per-occurrence prefix reconstruction/trim with bounded index checks.
+- Preserved column blanks, comments, keyword boundaries, nesting, precedence,
+  and classification order.
+- Replaced retained all-site aggregation with class counters and one site count.
+- Extended the existing canonical/legacy fixture pair and added a canonical
+  manual covering exact sanitizer and long-prefix behavior.
+- Runtime timing/RSS evidence remains unavailable under the no-verification
+  override; only source-level complexity and retained-data bounds are claimed.
+- Parallel semantic, performance, and fixture review remains required.
