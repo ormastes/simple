@@ -65,3 +65,28 @@ value-bound block remains `HirExprKind::UnsafeBlock` with its `i64` tail type.
 This is a parser/HIR-only change: it adds no runtime wrapper, closure,
 allocation, copy, or dispatch. Rebuilding/deploying the seed and rerunning the
 imported TLS fixture remain separate admission evidence.
+
+## 2026-08-24 rebuilt-seed result
+
+A clean `cargo build -p simple-driver --bin simple` rebuilt the seed from the
+parser/HIR fix, but an imported `std.io_runtime` function containing a
+value-bound unsafe block still fails in executable compiler paths:
+
+```text
+[CODEGEN BODY] Function 'env_get' body compilation failed:
+GlobalLoad: unresolved identifier 'ffi'
+...
+error[E1002]: function `unsafe` not found
+```
+
+The JIT failure proves the capability list is still lowered as ordinary
+expression data in at least one imported-module route; the interpreter
+fallback independently preserves the original call-to-`unsafe` failure. The
+focused direct parser/HIR tests therefore cover less than the production
+import/JIT/fallback path and are not sufficient admission evidence.
+
+Required next evidence is an imported module compiled through both JIT and
+interpreter fallback, with the unsafe block tail value observed and `ffi`
+absent from generated global loads. Until that passes, safe-owner migrations
+using this expression form must remain unpushed or be considered blocked by
+the compiler defect; helper extraction is not an acceptable language fix.
