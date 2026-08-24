@@ -2868,3 +2868,20 @@ full insertion with no overwrite preserves cross-section duplicate precedence;
 unknown words remain ignored. The active tier level is resolved once per file,
 not once per token. Direct precedence contracts were added but not executed
 under the user's no-verification instruction.
+
+### Linear MIR written-region atom deduplication
+
+Region state hashing, projected verification effects, and frame-obligation
+construction previously deduplicated by scanning their growing output arrays.
+For E effects and U unique entries, membership work was O(E*U), worst-case
+O(E^2), before any required canonical sort. Request-local dictionaries now
+index entries while ordered arrays retain first discovery; unchanged final
+sorts continue to define canonical atom order. Deduplication is expected O(E),
+followed where applicable by O(U log U) sorting, with O(U) temporary dictionary
+storage.
+
+Read effects remain excluded from frame writes, distinct region/type pairs
+remain distinct, and projected read/write effects retain first-occurrence
+order. Canonical state/frame text and hashes therefore receive identical unique
+sets. A focused interleaved read/repeated-write contract was added but not
+executed under the user's no-verification instruction.

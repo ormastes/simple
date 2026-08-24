@@ -455,3 +455,16 @@ forward preorder under LIFO execution, and eliminates per-node child arrays
 and recursive wrapper flattening. Legacy `hir_children_of*` functions remain
 allocating compatibility adapters until downstream usage and freshness gates
 prove migration complete.
+
+### MIR verification set ownership
+
+Canonical MIR verification sets use two structures with separate duties: an
+operation-local dictionary answers membership, while an array retains values
+for deterministic sorting and serialization. Input-sized verification effects
+must not use the output array itself as a linear membership index. Written
+region atoms are keyed by the exact `region_id@value_type_identity` text,
+deduplicated per obligation, then sorted once. Projected verification effects
+use separate read and write region indexes while retaining first-occurrence
+array order, avoiding a composite-key allocation per effect. Reads never enter
+the frame-write set, and dictionary iteration order never reaches canonical
+text or hashes.
