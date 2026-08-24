@@ -36,6 +36,180 @@ fn _http_field_name_is_host(line_bytes: [u8], colon: i64) -> bool:
         (line_bytes[2u64] == 83u8 or line_bytes[2u64] == 115u8) and
         (line_bytes[3u64] == 84u8 or line_bytes[3u64] == 116u8))
 
+fn _host_ascii_alpha_numeric(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+        (ch >= "0" and ch <= "9")
+
+fn _host_decimal_digit(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    -1
+
+fn _host_hex_digit(ch: text) -> bool:
+    _host_decimal_digit(ch) >= 0 or
+        (ch >= "a" and ch <= "f") or (ch >= "A" and ch <= "F")
+
+fn _host_ipv4_tail_is_valid(authority: text, start: i64, end: i64) -> bool:
+    var component_count: i32 = 0
+    var index = start
+    while index < end:
+        val component_start = index
+        var value: i64 = 0
+        while index < end and authority.char_at(index) != ".":
+            val digit = _host_decimal_digit(authority.char_at(index))
+            if digit < 0 or index - component_start >= 3:
+                return false
+            value = value * 10 + digit
+            if value > 255:
+                return false
+            index = index + 1
+        if index == component_start:
+            return false
+        if index - component_start > 1 and authority.char_at(component_start) == "0":
+            return false
+        component_count = component_count + 1
+        if index < end:
+            index = index + 1
+            if index == end:
+                return false
+    component_count == 4
+
+fn _host_ipv6_is_valid(authority: text, start: i64, end: i64) -> bool:
+    if start >= end:
+        return false
+    var index = start
+    var group_count: i32 = 0
+    var compressed = false
+    if authority.char_at(index) == ":":
+        if index + 1 >= end or authority.char_at(index + 1) != ":":
+            return false
+        compressed = true
+        index = index + 2
+        if index == end:
+            return true
+    while index < end:
+        val group_start = index
+        var has_dot = false
+        while index < end and authority.char_at(index) != ":":
+            if authority.char_at(index) == ".":
+                has_dot = true
+            index = index + 1
+        if index == group_start:
+            return false
+        if has_dot:
+            if index != end or not _host_ipv4_tail_is_valid(
+                authority, group_start, end):
+                return false
+            group_count = group_count + 2
+        else:
+            val group_length = index - group_start
+            if group_length > 4:
+                return false
+            var hex_index = group_start
+            while hex_index < index:
+                if not _host_hex_digit(authority.char_at(hex_index)):
+                    return false
+                hex_index = hex_index + 1
+            group_count = group_count + 1
+        if group_count > 8:
+            return false
+        if index < end:
+            if index + 1 < end and authority.char_at(index + 1) == ":":
+                if compressed:
+                    return false
+                compressed = true
+                index = index + 2
+                if index == end:
+                    break
+            else:
+                index = index + 1
+                if index == end:
+                    return false
+    if compressed:
+        group_count < 8
+    else:
+        group_count == 8
+
+fn _host_port_is_valid(authority: text, start: i64) -> bool:
+    if start >= authority.len():
+        return false
+    var value: i64 = 0
+    var index = start
+    while index < authority.len():
+        val ch = authority.char_at(index)
+        val digit = _host_decimal_digit(ch)
+        if digit < 0:
+            return false
+        value = value * 10 + digit
+        if value > 65535:
+            return false
+        index = index + 1
+    value > 0
+
+fn _host_reg_name_is_valid(authority: text, end: i64) -> bool:
+    if end < 1 or end > 253:
+        return false
+    var label_length: i64 = 0
+    var label_ends_hyphen = false
+    var index: i64 = 0
+    while index < end:
+        val ch = authority.char_at(index)
+        if ch == ".":
+            if label_length == 0 or label_ends_hyphen:
+                return false
+            label_length = 0
+            label_ends_hyphen = false
+        else:
+            if not _host_ascii_alpha_numeric(ch) and ch != "-":
+                return false
+            if label_length == 0 and ch == "-":
+                return false
+            label_length = label_length + 1
+            if label_length > 63:
+                return false
+            label_ends_hyphen = ch == "-"
+        index = index + 1
+    label_length > 0 and not label_ends_hyphen
+
+fn _host_authority_is_valid(authority: text) -> bool:
+    # Filesystem service deployment profile: bounded ASCII DNS/IPv4 reg-name
+    # or bracketed IPv6 literal, with an optional nonzero TCP port. Reject URI
+    # userinfo, path/query/fragment material, ambiguous unbracketed IPv6, and
+    # Unicode before any route owner can interpret the authority differently.
+    if authority.len() < 1 or authority.len() > 261:
+        return false
+    if authority.starts_with("["):
+        val close = authority.index_of("]")
+        if close <= 1:
+            return false
+        if not _host_ipv6_is_valid(authority, 1, close):
+            return false
+        if close + 1 == authority.len():
+            return true
+        return (authority.char_at(close + 1) == ":" and
+            _host_port_is_valid(authority, close + 2))
+
+    var colon: i64 = -1
+    var index: i64 = 0
+    while index < authority.len():
+        if authority.char_at(index) == ":":
+            if colon >= 0:
+                return false
+            colon = index
+        index = index + 1
+    val host_end = if colon < 0: authority.len() else: colon
+    if not _host_reg_name_is_valid(authority, host_end):
+        return false
+    colon < 0 or _host_port_is_valid(authority, colon + 1)
+
 class Http1RequestFrameOwner:
     policy: SecureServerPolicy
     retained: [u8]
@@ -154,6 +328,9 @@ class Http1RequestFrameOwner:
         val name = line.slice(0, colon)
         val value = line.slice(colon + 1, line.len()).trim()
         if _http_field_name_is_host(line_bytes, colon):
+            if not _host_authority_is_valid(value):
+                self._fail("400 Invalid Host authority")
+                return
             self.host_seen = true
             self.host_nonempty = value != ""
         if name.lower() == "upgrade":
