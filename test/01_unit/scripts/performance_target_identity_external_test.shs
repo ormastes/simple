@@ -5,6 +5,9 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT INT TERM
 mkdir -p "$work/evidence" "$work/scripts/check" "$work/config/check"
 cp "$ROOT/scripts/check/check-external-must-check-receipt.shs" "$work/scripts/check/"
 cp "$ROOT/scripts/check/check-performance-target-identity.shs" "$work/scripts/check/"
+cp "$ROOT/scripts/check/check-rust-go-benchmark-parity.shs" "$work/scripts/check/"
+cp "$ROOT/scripts/check/check-rust-go-benchmark-build-origin.shs" "$work/scripts/check/"
+cp "$ROOT/scripts/check/check-rust-go-benchmark-samples.shs" "$work/scripts/check/"
 git -C "$work" init -q
 git -C "$work" config user.name performance-target-test
 git -C "$work" config user.email performance-target@example.invalid
@@ -113,6 +116,26 @@ benchmark_environment_sha256=$environment_sha
 acceptance_contract=rust-go-benchmark-parity/v1
 acceptance_ids=$ids
 EOF
+    if [ -f "$work/evidence/build-origin.env" ]; then
+        for pair in \
+            simple_compiler:simple-compiler \
+            benchmark_rust_compiler:rust-compiler \
+            benchmark_go_compiler:go-compiler \
+            benchmark_simple_executable:simple-executable \
+            benchmark_rust_executable:rust-executable \
+            benchmark_go_executable:go-executable \
+            benchmark_raw_samples:raw-samples \
+            benchmark_statistics:statistics \
+            semantic_equivalence:equivalence \
+            benchmark_build_origin:build-origin \
+            benchmark_simple_version:simple-version \
+            benchmark_rust_version:rust-version \
+            benchmark_go_version:go-version \
+            stage4_provenance:stage4-provenance; do
+            key=${pair%%:*}; name=${pair#*:}; blob_sha=$(sha256sum "$work/evidence/$name.env" | awk '{print $1}')
+            printf '%s_path=evidence/%s.env\n%s_sha256=%s\n' "$key" "$name" "$key" "$blob_sha" >>"$work/evidence/summary.env"
+        done
+    fi
     openssl dgst -sha256 -sign "$work/reviewer-private.pem" -out "$work/evidence/reviewer.sig" "$work/evidence/summary.env"
     signature_sha=$(sha256sum "$work/evidence/reviewer.sig" | awk '{print $1}')
     printf '%s\n' 'reviewer_signature_path=evidence/reviewer.sig' "reviewer_signature_sha256=$signature_sha" >"$work/evidence/external.receipt"
@@ -136,4 +159,38 @@ write_target native-host other-host; write_environment fixture-host; seal mutate
 expect_reason mutated-target-id rust-go-benchmark-target-identity
 write_target native-host fixture-host; write_environment other-host; seal mutated-environment-host
 expect_reason mutated-environment-host rust-go-benchmark-target-identity
-echo 'PASS: signed benchmark target/environment mutations fail before large artifact loading'
+
+# Supply every retained blob and a valid derived toolchain. The intentionally
+# empty build-origin blob must then fail inside the lane validator, proving the
+# signed importer reaches that checker rather than stopping at attachment load.
+printf simple-compiler >"$work/evidence/simple-compiler.env"
+printf rust-compiler >"$work/evidence/rust-compiler.env"
+printf go-compiler >"$work/evidence/go-compiler.env"
+printf 'simple version\n' >"$work/evidence/simple-version.env"
+printf 'rust version\n' >"$work/evidence/rust-version.env"
+printf 'go version\n' >"$work/evidence/go-version.env"
+simple_compiler_sha=$(sha256sum "$work/evidence/simple-compiler.env" | awk '{print $1}')
+rust_compiler_sha=$(sha256sum "$work/evidence/rust-compiler.env" | awk '{print $1}')
+go_compiler_sha=$(sha256sum "$work/evidence/go-compiler.env" | awk '{print $1}')
+simple_version_sha=$(sha256sum "$work/evidence/simple-version.env" | awk '{print $1}')
+rust_version_sha=$(sha256sum "$work/evidence/rust-version.env" | awk '{print $1}')
+go_version_sha=$(sha256sum "$work/evidence/go-version.env" | awk '{print $1}')
+toolchain_digest=$(printf 'simple=%s\nrust=%s\ngo=%s\nsimple-version=%s\nrust-version=%s\ngo-version=%s\n' "$simple_compiler_sha" "$rust_compiler_sha" "$go_compiler_sha" "$simple_version_sha" "$rust_version_sha" "$go_version_sha" | sha256sum | awk '{print $1}')
+cat >"$work/evidence/toolchain.env" <<EOF
+evidence_schema=simple.must-check-toolchain/v1
+gate_id=rust-go-benchmark-parity
+run_id=$run_id
+toolchain_id=sha256:$toolchain_digest
+simple_compiler_sha256=$simple_compiler_sha
+simple_version_sha256=$simple_version_sha
+rust_compiler_sha256=$rust_compiler_sha
+rust_version_sha256=$rust_version_sha
+go_compiler_sha256=$go_compiler_sha
+go_version_sha256=$go_version_sha
+final_verdict=PASS
+EOF
+: >"$work/evidence/build-origin.env"
+for name in simple-executable rust-executable go-executable raw-samples statistics equivalence stage4-provenance; do printf placeholder >"$work/evidence/$name.env"; done
+write_target native-host fixture-host; write_environment fixture-host; seal retained-build-origin-placeholders
+expect_reason retained-build-origin-placeholders origin-field-count
+echo 'PASS: signed benchmark target and build-origin wiring fail closed'

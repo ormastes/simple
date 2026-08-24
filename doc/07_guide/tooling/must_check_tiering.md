@@ -199,7 +199,18 @@ an ELF relocatable object with a matching class, endianness, and machine. This
 v1 evidence schema is Linux-only; non-Linux environment claims fail closed.
 The signed outer target must use `target_kind=native-host`, and its `target_id`
 must exactly match the closed benchmark environment's `host_id` before large
-artifacts or the live Stage 4 chain are inspected.
+artifacts or the live Stage 4 chain are inspected. A closed build-origin
+receipt then binds the exact committed Simple/Rust/Go sources, fixed recipe
+IDs and argv, retained outputs, nonempty version captures, and retained compiler
+blobs. Its toolchain ID is recomputed from all six compiler/version hashes.
+The independent reviewer attests that the fixed recipes ran; import recomputes
+identity and consistency but deliberately does not rebuild timed artifacts.
+
+The fixed recipe argv are:
+
+- `simple native-build test/05_perf/fixtures/rust_go_benchmark/workload.spl --backend llvm --opt-level=aggressive --strip --output benchmark_simple_executable`
+- `rustc -C opt-level=3 -C codegen-units=1 -C strip=symbols -o benchmark_rust_executable test/05_perf/fixtures/rust_go_benchmark/workload.rs`
+- `go build -trimpath -o benchmark_go_executable test/05_perf/fixtures/rust_go_benchmark/workload.go`
 Independent signatures cannot substitute for either quantitative oracle.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.

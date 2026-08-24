@@ -10,6 +10,7 @@ mkdir -p "$fixture/scripts/check/lib" "$fixture/scripts/bootstrap" "$fixture/src
 cp -R "$ROOT/test/05_perf/fixtures/rust_go_benchmark" "$fixture/test/05_perf/fixtures/"
 cp "$ROOT/scripts/check/check-rust-go-benchmark-samples.shs" "$fixture/scripts/check/"
 cp "$ROOT/scripts/check/check-rust-go-benchmark-parity.shs" "$fixture/scripts/check/"
+cp "$ROOT/scripts/check/check-rust-go-benchmark-build-origin.shs" "$fixture/scripts/check/"
 cp "$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs" "$fixture/scripts/check/lib/"
 cp "$ROOT/scripts/check/lib/stage4-candidate-provenance.shs" "$fixture/scripts/check/lib/"
 cp -R "$ROOT/scripts/check/lib/bootstrap-stage3" "$fixture/scripts/check/lib/"
@@ -171,6 +172,85 @@ sed 's/simple_p\(50\|95\)_ns=00000000000000000100/simple_p\1_ns=0000000000000000
 run "$fixture/raw.slow" "$fixture/statistics.slow" >/dev/null 2>&1 && { echo 'FAIL: slower Simple benchmark accepted' >&2; exit 1; }
 cp /bin/true "$fixture/stage4-simple"; compiler_sha=$(hash "$fixture/stage4-simple")
 sed "s/simple_compiler_sha256=$identity/simple_compiler_sha256=$compiler_sha/" "$fixture/environment.env" >"$fixture/environment.wrapper"
+printf rustc-compiler >"$fixture/rustc"; rust_compiler_sha=$(hash "$fixture/rustc")
+printf go-compiler >"$fixture/go"; go_compiler_sha=$(hash "$fixture/go")
+chmod +x "$fixture/rustc" "$fixture/go"
+printf 'simple fixture version\n' >"$fixture/simple.version"; simple_version_sha=$(hash "$fixture/simple.version")
+printf 'rustc fixture version\n' >"$fixture/rust.version"; rust_version_sha=$(hash "$fixture/rust.version")
+printf 'go fixture version\n' >"$fixture/go.version"; go_version_sha=$(hash "$fixture/go.version")
+toolchain_digest=$(printf 'simple=%s\nrust=%s\ngo=%s\nsimple-version=%s\nrust-version=%s\ngo-version=%s\n' \
+    "$compiler_sha" "$rust_compiler_sha" "$go_compiler_sha" "$simple_version_sha" "$rust_version_sha" "$go_version_sha" | sha256sum | awk '{print $1}')
+cat >"$fixture/toolchain.env" <<EOF
+evidence_schema=simple.must-check-toolchain/v1
+gate_id=rust-go-benchmark-parity
+run_id=$run_id
+toolchain_id=sha256:$toolchain_digest
+simple_compiler_sha256=$compiler_sha
+simple_version_sha256=$simple_version_sha
+rust_compiler_sha256=$rust_compiler_sha
+rust_version_sha256=$rust_version_sha
+go_compiler_sha256=$go_compiler_sha
+go_version_sha256=$go_version_sha
+final_verdict=PASS
+EOF
+toolchain_sha=$(hash "$fixture/toolchain.env"); environment_sha=$(hash "$fixture/environment.wrapper")
+cat >"$fixture/build-origin.env" <<EOF
+build_schema=simple.rust-go-benchmark-build-origin/v1
+gate_id=rust-go-benchmark-parity
+source_fingerprint=$fingerprint
+run_id=$run_id
+fixture_id=$fixture_id
+toolchain_identity_sha256=$toolchain_sha
+environment_sha256=$environment_sha
+simple_source_path=$base/workload.spl
+simple_source_sha256=$(hash "$fixture/$base/workload.spl")
+simple_command_id=simple-native-o3-v1
+simple_command=simple native-build test/05_perf/fixtures/rust_go_benchmark/workload.spl --backend llvm --opt-level=aggressive --strip --output benchmark_simple_executable
+simple_output_sha256=$simple_exe_sha
+simple_compile_exit=0
+rust_source_path=$base/workload.rs
+rust_source_sha256=$(hash "$fixture/$base/workload.rs")
+rust_command_id=rust-opt3-codegen1-v1
+rust_command=rustc -C opt-level=3 -C codegen-units=1 -C strip=symbols -o benchmark_rust_executable test/05_perf/fixtures/rust_go_benchmark/workload.rs
+rust_output_sha256=$rust_exe_sha
+rust_compile_exit=0
+go_source_path=$base/workload.go
+go_source_sha256=$(hash "$fixture/$base/workload.go")
+go_command_id=go-trimpath-v1
+go_command=go build -trimpath -o benchmark_go_executable test/05_perf/fixtures/rust_go_benchmark/workload.go
+go_output_sha256=$go_exe_sha
+go_compile_exit=0
+simple_compiler_sha256=$compiler_sha
+rust_compiler_sha256=$rust_compiler_sha
+go_compiler_sha256=$go_compiler_sha
+simple_version_sha256=$simple_version_sha
+rust_version_sha256=$rust_version_sha
+go_version_sha256=$go_version_sha
+final_verdict=PASS
+EOF
+check_origin() { sh "$fixture/scripts/check/check-rust-go-benchmark-build-origin.shs" --root "$fixture" --fingerprint "$fingerprint" --run-id "$run_id" --origin "$1" --toolchain "${2:-$fixture/toolchain.env}" --equivalence "$fixture/equivalence.env" --environment "$fixture/environment.wrapper" --simple-compiler "$fixture/stage4-simple" --rust-compiler "$fixture/rustc" --go-compiler "$fixture/go" --simple-executable "$fixture/simple-benchmark" --rust-executable "$fixture/rust-benchmark" --go-executable "$fixture/go-benchmark" --simple-version "$fixture/simple.version" --rust-version "$fixture/rust.version" --go-version "$fixture/go.version"; }
+check_origin "$fixture/build-origin.env" | grep -q '^STATUS: PASS '
+sed 's/simple_command_id=simple-native-o3-v1/simple_command_id=custom-command/' "$fixture/build-origin.env" >"$fixture/build-origin.command"
+check_origin "$fixture/build-origin.command" >/dev/null 2>&1 && { echo 'FAIL: custom Simple build command was accepted' >&2; exit 1; }
+sed 's/rustc -C opt-level=3/rustc -C opt-level=1/' "$fixture/build-origin.env" >"$fixture/build-origin.flags"
+check_origin "$fixture/build-origin.flags" >/dev/null 2>&1 && { echo 'FAIL: mutated Rust optimization flags were accepted' >&2; exit 1; }
+sed "s/rust_output_sha256=$rust_exe_sha/rust_output_sha256=$simple_exe_sha/" "$fixture/build-origin.env" >"$fixture/build-origin.output"
+check_origin "$fixture/build-origin.output" >/dev/null 2>&1 && { echo 'FAIL: swapped Rust build output was accepted' >&2; exit 1; }
+sed 's/simple_source_sha256=[0-9a-f]*/simple_source_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$fixture/build-origin.env" >"$fixture/build-origin.source"
+check_origin "$fixture/build-origin.source" >/dev/null 2>&1 && { echo 'FAIL: wrong committed Simple source hash was accepted' >&2; exit 1; }
+sed 's/rust_compile_exit=0/rust_compile_exit=1/' "$fixture/build-origin.env" >"$fixture/build-origin.exit"
+check_origin "$fixture/build-origin.exit" >/dev/null 2>&1 && { echo 'FAIL: failed Rust compilation was accepted' >&2; exit 1; }
+sed 's/environment_sha256=[0-9a-f]*/environment_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$fixture/build-origin.env" >"$fixture/build-origin.environment"
+check_origin "$fixture/build-origin.environment" >/dev/null 2>&1 && { echo 'FAIL: detached benchmark environment was accepted' >&2; exit 1; }
+sed 's/fixture_id=runtime-fed-lcg-100k/fixture_id=other-fixture/' "$fixture/build-origin.env" >"$fixture/build-origin.fixture"
+check_origin "$fixture/build-origin.fixture" >/dev/null 2>&1 && { echo 'FAIL: wrong benchmark fixture identity was accepted' >&2; exit 1; }
+cp "$fixture/build-origin.env" "$fixture/build-origin.extra"; printf 'unknown_field=x\n' >>"$fixture/build-origin.extra"
+check_origin "$fixture/build-origin.extra" >/dev/null 2>&1 && { echo 'FAIL: extra build-origin field was accepted' >&2; exit 1; }
+cp "$fixture/toolchain.env" "$fixture/toolchain.extra"; printf 'unknown_field=x\n' >>"$fixture/toolchain.extra"
+check_origin "$fixture/build-origin.env" "$fixture/toolchain.extra" >/dev/null 2>&1 && { echo 'FAIL: extra toolchain field was accepted' >&2; exit 1; }
+check_origin "$fixture/build-origin.env" "$fixture/toolchain.env" >/dev/null
+printf 'mutated rustc version\n' >"$fixture/rust.version.mutated"
+sh "$fixture/scripts/check/check-rust-go-benchmark-build-origin.shs" --root "$fixture" --fingerprint "$fingerprint" --run-id "$run_id" --origin "$fixture/build-origin.env" --toolchain "$fixture/toolchain.env" --equivalence "$fixture/equivalence.env" --environment "$fixture/environment.wrapper" --simple-compiler "$fixture/stage4-simple" --rust-compiler "$fixture/rustc" --go-compiler "$fixture/go" --simple-executable "$fixture/simple-benchmark" --rust-executable "$fixture/rust-benchmark" --go-executable "$fixture/go-benchmark" --simple-version "$fixture/simple.version" --rust-version "$fixture/rust.version.mutated" --go-version "$fixture/go.version" >/dev/null 2>&1 && { echo 'FAIL: mutated Rust version capture was accepted' >&2; exit 1; }
 cat >"$fixture/stage4-provenance.env" <<EOF
 schema=simple-bootstrap-stage4-provenance-v1
 status=pass
@@ -196,7 +276,9 @@ completed_gate=stage4-essential-tools-smoke
 EOF
 sh "$fixture/scripts/check/check-rust-go-benchmark-parity.shs" --root "$fixture" --fingerprint "$fingerprint" --run-id "$run_id" \
  --raw-samples "$fixture/raw.env" --statistics "$fixture/statistics.env" --equivalence "$fixture/equivalence.env" \
- --environment "$fixture/environment.wrapper" --simple-compiler "$fixture/stage4-simple" --stage4-provenance "$fixture/stage4-provenance.env" \
+ --environment "$fixture/environment.wrapper" --toolchain "$fixture/toolchain.env" --build-origin "$fixture/build-origin.env" \
+ --simple-version "$fixture/simple.version" --rust-version "$fixture/rust.version" --go-version "$fixture/go.version" \
+ --simple-compiler "$fixture/stage4-simple" --rust-compiler "$fixture/rustc" --go-compiler "$fixture/go" --stage4-provenance "$fixture/stage4-provenance.env" \
  --simple-executable "$fixture/simple-benchmark" --rust-executable "$fixture/rust-benchmark" --go-executable "$fixture/go-benchmark" \
  >/dev/null 2>&1 && { echo 'FAIL: fabricated Stage 4 benchmark compiler admitted' >&2; exit 1; }
 grep -Fq 'stage4_verify_candidate_provenance "$live_provenance" "$compiler_path" "$ROOT"' "$fixture/scripts/check/check-rust-go-benchmark-parity.shs"

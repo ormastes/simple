@@ -1,6 +1,7 @@
 # Rust/Go benchmark receipt target and origin binding gap
 
-Status: PARTIALLY FIXED. The `rust-go-benchmark-parity` ledger row remains TODO.
+Status: VALIDATOR FIXED; producer evidence remains TODO. The
+`rust-go-benchmark-parity` ledger row remains TODO.
 
 The lane-specific numeric oracle now validates a Linux ELF executable/shared-
 object header, binds class/endianness/machine to the declared environment,
@@ -13,14 +14,15 @@ The signed target is now fail-closed before large artifact loading:
 environment's `host_id`, and that environment binds Linux architecture to all
 three ELF headers.
 
-One binding remains before an external receipt may promote the row. Distinct
-hashes do not prove that the three blobs were produced from the committed
-Simple/Rust/Go sources. Closed build receipts must bind each source hash,
-compiler/toolchain hash, compile flags, output hash, and exit status. The
-validator must recompute those bindings rather than trusting a signed language
-label.
+The closed build-origin receipt now binds each committed source hash, fixed
+recipe ID and literal argv, retained compiler blob, nonempty version capture,
+output hash, and zero exit status. The toolchain identity is derived from the
+three compiler and three version hashes. Import recomputes every identity and
+the source/output/environment relationships without rebuilding timed artifacts.
 
-Required remaining mutations: substituted output with updated hash, wrong
-source hash, wrong toolchain hash, and compile-command/output contradiction.
-Until those fail closed and real benchmark samples pass under an independently
-reviewed receipt, no TODO-to-PASS promotion is authoritative.
+This proves closed, independently reviewed producer-origin binding, not
+cryptographic compiler-to-output causality. The independent reviewer attests
+that the fixed recipes ran; stronger causality would require compiler-signed
+outputs or replaying builds, which is intentionally outside benchmark import.
+Real benchmark samples and a production receipt are still required before any
+TODO-to-PASS promotion.
