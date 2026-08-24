@@ -1,6 +1,6 @@
 """
 ## Purpose and audience
-Purpose: Prove that predicate_promote — MaskFromCmp+MaskedAdd fuses to PredicatedAdd.
+Purpose: Prove that predicate_promote is quarantined until sole-use legality exists.
 Audience: compiler and tooling engineers who maintain this spec.
 """
 # @req: REQ-COMPILER-MIR-OPT-001 — stable requirement identity for this spec.
@@ -9,11 +9,10 @@ Audience: compiler and tooling engineers who maintain this spec.
 #
 # Feature ID: #COMPILER-MIROPT-PP-I2
 # Category:   Compiler | MIR Optimization | Predicate Promotion
-# Status:     Active — fusion pass implementation (Wave I2)
+# Status:     Disabled — function-wide sole-use/dominance proof is incomplete
 #
 # Test plan:
-#   Positive cases (5): MaskFromCmp + Masked{Add,Mul,Fma} -> Predicated* fusion
-#   Negative cases (3): mask mismatch / non-adjacent -> no fusion; insts preserved
+#   Quarantine cases: every public adapter preserves exact instruction sequences
 #   No-op case   (1):   empty module passes through unchanged
 #
 # Interpreter-mode note (per .claude/rules/testing.md):
@@ -26,11 +25,10 @@ use compiler.mir.mir_data.{MirInst, MirInstKind, MirOperand, MirOperandKind,
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir_opt.mir_opt.predicate_promote.{
     run_predicate_promote,
-    promote_block_predicate,
-    operand_is_local,
-    try_fuse_binary,
-    try_fuse_ternary
+    promote_function_predicate, promote_block_predicate,
+    operand_is_local, try_fuse_binary, try_fuse_ternary
 }
+use compiler.mir_opt.mir_opt.mod.{PassKind, run_typed_pass_on_function}
 
 # ============================================================================
 # Helpers — minimal MIR construction for tests
@@ -93,21 +91,6 @@ fn make_test_block(id: i64, insts: [MirInst]) -> MirBlock:
         terminator: make_jump_terminator()
     )
 
-fn inst_is_predicated_add(inst: MirInst) -> bool:
-    match inst.kind:
-        case PredicatedAdd(_, _, _, _, _, _): true
-        case _: false
-
-fn inst_is_predicated_mul(inst: MirInst) -> bool:
-    match inst.kind:
-        case PredicatedMul(_, _, _, _, _, _): true
-        case _: false
-
-fn inst_is_predicated_fma(inst: MirInst) -> bool:
-    match inst.kind:
-        case PredicatedFma(_, _, _, _, _, _, _): true
-        case _: false
-
 fn inst_is_mask_from_cmp(inst: MirInst) -> bool:
     match inst.kind:
         case MaskFromCmp(_, _, _, _): true
@@ -119,14 +102,14 @@ fn inst_is_masked_add(inst: MirInst) -> bool:
         case _: false
 
 # ============================================================================
-# Positive cases — fusion should produce Predicated* ops
+# Former positive candidates — quarantine must preserve exact MIR
 # ============================================================================
 
 use std.spec.step
 
-describe "predicate_promote — MaskFromCmp+MaskedAdd fuses to PredicatedAdd":
-    it "two-instruction block yields one instruction after fusion":
-        step("Verify: two-instruction block yields one instruction after fusion")
+describe "predicate_promote — adjacent MaskFromCmp+MaskedAdd is quarantined":
+    it "two-instruction block remains unchanged":
+        step("Verify: adjacent pair remains unchanged without a sole-use receipt")
         # @req: REQ-COMPILER-MIR-OPT-001
         val insts = [
             make_mask_from_cmp_inst(10, 1, 2),
@@ -134,36 +117,37 @@ describe "predicate_promote — MaskFromCmp+MaskedAdd fuses to PredicatedAdd":
         ]
         val blk = make_test_block(1, insts)
         val result = promote_block_predicate(blk)
-        expect(result.instructions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(inst_is_predicated_add(result.instructions[0])).to_equal(true)
+        expect(result.instructions.len()).to_equal(2)
+        expect(inst_is_mask_from_cmp(result.instructions[0])).to_equal(true)
+        expect(inst_is_masked_add(result.instructions[1])).to_equal(true)
 
-describe "predicate_promote — MaskFromCmp+MaskedMul fuses to PredicatedMul":
-    it "two-instruction block yields one PredicatedMul":
-        step("Verify: two-instruction block yields one PredicatedMul")
+describe "predicate_promote — MaskFromCmp+MaskedMul is quarantined":
+    it "two-instruction block remains unchanged":
+        step("Verify: MaskedMul pair remains unchanged")
         val insts = [
             make_mask_from_cmp_inst(10, 1, 2),
             make_masked_mul_inst(20, 10, 3, 4)
         ]
         val blk = make_test_block(1, insts)
         val result = promote_block_predicate(blk)
-        expect(result.instructions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(inst_is_predicated_mul(result.instructions[0])).to_equal(true)
+        expect(result.instructions.len()).to_equal(2)
+        expect(inst_is_mask_from_cmp(result.instructions[0])).to_equal(true)
 
-describe "predicate_promote — MaskFromCmp+MaskedFma fuses to PredicatedFma":
-    it "two-instruction block yields one PredicatedFma":
-        step("Verify: two-instruction block yields one PredicatedFma")
+describe "predicate_promote — MaskFromCmp+MaskedFma is quarantined":
+    it "two-instruction block remains unchanged":
+        step("Verify: MaskedFma pair remains unchanged")
         val insts = [
             make_mask_from_cmp_inst(10, 1, 2),
             make_masked_fma_inst(20, 10, 3, 4, 5)
         ]
         val blk = make_test_block(1, insts)
         val result = promote_block_predicate(blk)
-        expect(result.instructions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(inst_is_predicated_fma(result.instructions[0])).to_equal(true)
+        expect(result.instructions.len()).to_equal(2)
+        expect(inst_is_mask_from_cmp(result.instructions[0])).to_equal(true)
 
-describe "predicate_promote — fuses second pair in block independently":
-    it "block with two MaskFromCmp+MaskedAdd pairs yields two PredicatedAdd instructions":
-        step("Verify: block with two MaskFromCmp+MaskedAdd pairs yields two PredicatedAdd instructions")
+describe "predicate_promote — multiple adjacent pairs remain exact":
+    it "block with two pairs preserves all four instructions":
+        step("Verify: quarantine does not partially transform a block")
         val insts = [
             make_mask_from_cmp_inst(10, 1, 2),
             make_masked_add_inst(20, 10, 3, 4),
@@ -172,21 +156,46 @@ describe "predicate_promote — fuses second pair in block independently":
         ]
         val blk = make_test_block(1, insts)
         val result = promote_block_predicate(blk)
-        expect(result.instructions.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
-        expect(inst_is_predicated_add(result.instructions[0])).to_equal(true)
-        expect(inst_is_predicated_add(result.instructions[1])).to_equal(true)
+        expect(result.instructions.len()).to_equal(4)
+        expect(inst_is_mask_from_cmp(result.instructions[0])).to_equal(true)
+        expect(inst_is_masked_add(result.instructions[1])).to_equal(true)
+        expect(inst_is_mask_from_cmp(result.instructions[2])).to_equal(true)
+        expect(inst_is_masked_add(result.instructions[3])).to_equal(true)
 
-describe "predicate_promote — operand_is_local utility":
-    it "Copy operand matching local id returns true":
-        step("Verify: Copy operand matching local id returns true")
-        val op = make_copy_op(42)
-        val id = make_local(42)
-        expect(operand_is_local(op, id)).to_equal(true)
-    it "Copy operand with different id returns false":
-        step("Verify: Copy operand with different id returns false")
-        val op = make_copy_op(42)
-        val id = make_local(99)
-        expect(operand_is_local(op, id)).to_equal(false)
+describe "predicate_promote — later mask use cannot be orphaned":
+    it "adjacent candidate followed by another mask consumer remains exact":
+        step("Verify: later same-block mask use prevents undefined-local MIR")
+        val insts = [
+            make_mask_from_cmp_inst(10, 1, 2),
+            make_masked_add_inst(20, 10, 3, 4),
+            make_masked_mul_inst(21, 10, 5, 6)
+        ]
+        val result = promote_block_predicate(make_test_block(1, insts))
+        expect(result.instructions.len()).to_equal(3)
+        expect(inst_is_mask_from_cmp(result.instructions[0])).to_equal(true)
+
+describe "predicate_promote — function and typed routes are identities":
+    it "preserves a non-empty function through both public routes":
+        step("Verify: direct and typed function adapters retain the mask definition")
+        val block = make_test_block(1, [
+            make_mask_from_cmp_inst(10, 1, 2),
+            make_masked_add_inst(20, 10, 3, 4)
+        ])
+        val func = MirFunction(name: "predicate_identity", blocks: [block], locals: [])
+        val direct = promote_function_predicate(func)
+        val typed = run_typed_pass_on_function(PassKind.PredicatePromote, func)
+        expect(direct.blocks[0].instructions.len()).to_equal(2)
+        expect(typed.blocks[0].instructions.len()).to_equal(2)
+        expect(inst_is_mask_from_cmp(typed.blocks[0].instructions[0])).to_equal(true)
+        expect(inst_is_masked_add(typed.blocks[0].instructions[1])).to_equal(true)
+
+describe "predicate_promote — compatibility helpers cannot construct rewrites":
+    it "retains operand matching but returns nil for both fuse helpers":
+        step("Verify: exported compatibility helpers are fail-closed")
+        val mask = make_copy_op(10)
+        expect(operand_is_local(mask, make_local(10))).to_equal(true)
+        expect(try_fuse_binary(Some(make_local(10)), "CmpLt", Some(make_copy_op(1)), Some(make_copy_op(2)), mask, make_local(20), make_copy_op(3), make_copy_op(4), "add")).to_be_nil()
+        expect(try_fuse_ternary(Some(make_local(10)), "CmpLt", Some(make_copy_op(1)), Some(make_copy_op(2)), mask, make_local(20), make_copy_op(3), make_copy_op(4), make_copy_op(5))).to_be_nil()
 
 # ============================================================================
 # Negative cases — no fusion when conditions are not met

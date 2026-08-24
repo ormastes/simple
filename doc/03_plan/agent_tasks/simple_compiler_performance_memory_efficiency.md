@@ -1629,3 +1629,17 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Track the blocker in
   `doc/08_tracking/bug/workspace_diagnostics_nested_process_overhead_2026-08-22.md`.
 - Verification intentionally not run under the user's no-verify instruction.
+# Completed tranche: predicate-promotion quarantine (2026-08-24)
+
+- Marked `PredicatePromote` disabled with an explicit sole-use/dominance/span
+  reason and removed its active witness registration.
+- Converted module, function, and block adapters to constant-time identity
+  paths, closing direct-call bypasses and disabled-pass allocation overhead.
+- Removed the stale `simple-predicate-promote` backend/JIT recommendation so
+  facts or profile hotness cannot advertise a disabled transform.
+- Replaced positive fusion assertions with quarantine oracles, including the
+  later-mask-use witness that would previously create undefined-local MIR.
+- Updated descriptor expectations and the generated/manual evidence companion.
+- Parallel compiler audit supplied the defect and reactivation contract;
+  semantic, performance, and fixture reviews are required before sync.
+- No manual verification was run under the user override.

@@ -1034,3 +1034,20 @@ The first-lines helper keeps its split/limit loop but records every would-be
 append (`"\n"`, then line) as a fragment. It joins once, then applies the exact
 joined-output/trailing-newline gate. Empty leading segments, nonpositive limits,
 exact boundaries, and trailing empty segments retain historical results.
+# Predicate promotion fail-closed design
+
+The current implementation keeps the manifest/pass name for compatibility but
+returns its exact MIR input from module, function, and block entry points. The
+descriptor reports `Disabled("mask single-use, dominance, and span proof incomplete")`
+and advertises no transform witness.
+The backend recommendation registry likewise omits
+`simple-predicate-promote`; neither former fact names nor JIT hotness can
+reactivate an implementation whose legality contract is incomplete.
+The former public `try_fuse_*` signatures remain for source compatibility but
+return `nil`; they cannot construct a replacement instruction.
+
+Reactivation is a separate change. It must build or reuse one function-wide
+def-use index, count instruction and terminator uses, require the adjacent
+masked operation to be the only use, prove dominance and SIMD legality, define
+whether a `Move` mask can be folded, and preserve a deliberate source span.
+Rejected candidates remain byte-for-byte unchanged and report the missing fact.

@@ -759,3 +759,14 @@ with codepoint indices or depend on the currently unsafe text iterator.
 Bounded renderers preserve their truncation/newline contract by recording append
 fragments and joining once. A future newline-offset prefix slice requires exact
 compatibility with today's trailing-empty split behavior.
+# Predicate-promotion activation boundary
+
+`PredicatePromote` is `Disabled`, not `Active` or `AnalysisOnly`. Structural
+adjacency is not a legality receipt because deleting the mask definition needs
+function-wide exact-use and dominance facts. The disabled public adapters are
+identities, so direct callers cannot bypass descriptor filtering.
+
+The future active capsule must consume the shared `PerfFacts` def-use service once
+per function and attach a receipt covering the sole adjacent consumer,
+dominance, type/lane/comparison legality, `Move` semantics, and chosen source
+span. It must never rebuild def-use for each candidate.

@@ -3353,3 +3353,20 @@ The larger `simple_pipe` defect remains open because raw search and workspace
 symbols have incompatible roots, regex rules, limits, ordering, and errors. The
 freshness-safe target and acceptance evidence are recorded in
 `doc/08_tracking/bug/simple_pipe_codebase_duplicate_scan_2026-08-24.md`.
+# 2026-08-24 follow-up: predicate-promotion quarantine
+
+The active `predicate_promote` adapter removed an adjacent `MaskFromCmp`
+definition whenever the following masked operation referenced it. It did not
+compute the documented exact-one-use fact. A later instruction, successor
+block, or terminator could therefore retain an undefined-local use. The pass is
+now fail-closed: its module, function, and block adapters preserve their exact
+inputs and its descriptor is `Disabled` with a concrete missing-proof reason.
+The separate `simple-predicate-promote` backend/JIT recommendation was removed
+from the active registry for the same reason; hotness is not a legality proof.
+
+Reactivation requires a shared function-wide def-use result, dominance, exact
+sole-use identity, type/lane/comparison legality, an explicit `Move` policy, and
+source-span preservation. That analysis must be built once per function; a
+whole-function scan for every adjacent candidate would turn a linear fusion
+walk into quadratic compile-time work. This quarantine removes both the
+miscompile path and all pass-local traversal/allocation overhead while disabled.
