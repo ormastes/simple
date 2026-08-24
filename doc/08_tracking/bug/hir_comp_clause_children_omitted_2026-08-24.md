@@ -1,6 +1,6 @@
 # HIR comprehension-clause children are omitted
 
-**Status:** Open  
+**Status:** Fixed in current compiler-performance branch; execution unverified
 **Area:** generated HIR traversal / typed performance facts  
 **Observed:** 2026-08-24
 
@@ -19,10 +19,12 @@ Typed `PerfFacts` does not visit iterable/filter expressions owned by
 comprehension clauses. Collection operations there can be missed, making
 coverage appear stronger than the traversed graph warrants.
 
-## Required fix
+## Resolution
 
-Skip `kind` only for base carriers. Wrapper structs must traverse a node-bearing
-kind field through its generated wrapper function/frame. Add exact ordering and
-coverage fixtures for `For` and `If` clauses, regenerate visitors, and confirm
-legacy and frame traversal remain order-equivalent. Until then, comprehension
-analysis must remain explicitly incomplete and must not authorize transforms.
+The generator now skips `kind` only for base carriers. Non-base wrapper structs
+classify the field normally, repairing `DimExprKind`, `EffectKind`, and
+`HirCompClauseKind` across recursive visit, child enumeration, structural hash,
+and frame expansion. A focused typed-PerfFacts fixture pins `For` iterable and
+`If` condition discovery and order. Comprehension analysis remains explicitly
+incomplete because cardinality/execution-domain modeling is still pending; the
+repair does not authorize transforms.
