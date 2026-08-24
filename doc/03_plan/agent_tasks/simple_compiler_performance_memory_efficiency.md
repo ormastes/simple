@@ -1150,6 +1150,17 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add positive, missing-name, and misbound-name contracts; verification
   intentionally not run under the user's no-verify instruction.
 
+## Completed optimizer registry snapshot tranche
+
+- Materialize the descriptor/provider registry once per combined integrity
+  audit and reuse it across status, witness, alias, and fact phases.
+- Add a private snapshot-taking witness kernel while retaining the public
+  no-argument compatibility check.
+- Preserve finding order and payload while removing two full registry/provider
+  reconstructions from the combined path.
+- Existing positive registry/witness integrity contracts cover behavior;
+  verification intentionally not run under the user's no-verify instruction.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
