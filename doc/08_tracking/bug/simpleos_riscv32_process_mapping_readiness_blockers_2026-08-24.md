@@ -80,3 +80,44 @@ registry-backed scheduler adoption move that takes sole mapping teardown
 ownership, constructs and maps the RV32 four-byte initial stack, publishes the
 TCB, switches SATP, and performs U-mode entry/reap. Filesystem-backed RV32 QEMU
 evidence is also still required.
+
+## 2026-08-24 scheduler-adoption static review
+
+An attempted scheduler integration was removed after independent ownership
+review rather than retaining an unsafe partial implementation. The existing
+three prerequisites do not yet form a transferable process mapping:
+
+1. `riscv32_sv32_mapping_owner_v1.spl` maps authenticated `PT_LOAD` pages but
+   does not own or map the four-byte initial stack and retains neither the
+   canonical initial SP nor an ownership-bound scheduler identity.
+2. `sv32_user_root_owner_v1.spl` has an unused `AdoptionReserved` state, but no
+   per-hart `Inactive <-> Active` transitions, SATP readback, kernel-root
+   restoration receipt, or terminal transition. A single global active-root
+   flag is insufficient for SMP and was rejected.
+3. `address_space_switch.spl` can write an arbitrary RV32 root directly. Until
+   managed roots are distinguishable and rejected by that raw path, an
+   architecture owner cannot prove that detach makes a root unreachable.
+4. `TaskControlBlock` carries no opaque RV32 mapping handle. Zombie transitions
+   do not first restore the kernel root and mark the exact task generation
+   terminal; `wait` destroys a generic address space and clears the TCB even
+   when an RV32 registry/root release would need a retry.
+5. The mapping-pin transaction is deliberately non-committable through the
+   generic joint path while its pin is live. Scheduler adoption therefore needs
+   one dedicated registry transition that consumes the exact prepared mapping
+   move without reopening or double-consuming the retained executable source.
+
+The required ownership sequence is:
+
+`authenticated source + stack -> loader-owned prepared mapping -> registry
+commit of the exact mapping transaction -> scheduler reserve -> TCB/ready/
+vmspace publication -> scheduler publish -> per-hart activation -> kernel-root
+restore -> inactive -> terminal Zombie -> retryable detach/registry completion
+-> frame/table/root release -> TCB removal`.
+
+Every boundary must use a bounded opaque `{slot,generation}` handle plus exact
+`{task_id,lifecycle_generation}` validation. Activation must validate the
+calling scheduler CPU/hart, perform SATP write/readback plus `sfence.vma`, and
+record the active root under the architecture mutex. Reap failure must retain
+the Zombie TCB and handle for retry. Fork must never alias the handle, and exec
+requires a two-mapping transaction. `riscv32.process_image_builder_ready` stays
+false until this complete sequence and filesystem-backed QEMU evidence exist.

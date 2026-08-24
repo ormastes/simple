@@ -119,3 +119,30 @@ become observable. Wait collection must destroy the exact terminal mapping
 successfully before it clears the TCB or publishes reap success. Until all of
 those transitions share the canonical Scheduler owner, readiness stays false.
 No source wiring was retained and no manual verification was run.
+
+## 2026-08-24 exit/reap transaction review
+
+An attempted source wiring was reverted after independent static ownership
+review. Four prerequisites remain before the opaque handle can be connected to
+generic exit/wait safely:
+
+1. The scheduler needs an authoritative per-CPU quiescence receipt proving the
+   exact task generation is absent from every CPU before its mapping is freed.
+   A local TTBR0 read and process-global root value are insufficient on SMP.
+2. FD close and server-data grant revoke need explicit complete/retry results.
+   Current exit code discards both outcomes, so it cannot atomically publish
+   observation and Zombie only after terminal cleanup is retained or complete.
+3. The bounded ARM32 owner needs replay semantics for both `Quarantined`
+   residual destruction and the case where physical destruction completed but
+   load-lifecycle close reporting failed. Neither case may strand a Zombie or
+   permanently consume one of four slots.
+4. Both public scheduler exit helpers must return an explicit transaction
+   result. The legacy `(tasks, id)` result cannot distinguish refusal from a
+   successful terminal transition and could incorrectly wake waiters.
+
+The safe implementation point is a canonical mutable Scheduler method that
+holds scheduler exclusion, consumes per-CPU quiescence evidence, and commits
+the mapping/cleanup/observation/TCB transition with owner-side retry records.
+The SVC producer must then call that method with its task/lifecycle/execution
+receipt. Readiness stays false. No build, test, SPipe, benchmark, optimizer,
+bootstrap, or QEMU command was run.

@@ -63,3 +63,26 @@ A package-level helper that locks only around `resolve_path` plus
 mutation callers would not share that lock, output compilation spans multiple
 calls, and the resulting snapshot would still be a time-of-check/time-of-use
 claim rather than exact live proof.
+
+## 2026-08-24 retry v2 outcome
+
+A three-cycle static design/implementation retry was reverted in full without
+running verification. It successfully explored raw validated LFN retention,
+generation fields on `FileHandle`, mutation invalidation, and a bounded
+output-leaf reservation, but the final review still found two mount-lifecycle
+violations:
+
+- filesystem operations entered the owner by `device_id`; after unmount and
+  remount, a stale copied filesystem value could therefore join the newer
+  generation while carrying stale geometry/cache state;
+- mount mutated `bpb_parsed` and geometry before fallible recovery, root reads,
+  and identity enrollment, with no already-mounted guard or transactional
+  rollback. Double-mount and intermediate failure could strand a live seal or
+  leave contradictory local state.
+
+The next retry must make every begin/current/end operation consume the exact
+instance seal (never device lookup), carry the exact operation receipt through
+the call, reject double mount before state mutation, build mount state off-root,
+and publish it only after recovery, root reads, and identity enrollment all
+succeed. Every failure after enrollment must close that exact seal before
+returning; an indeterminate close must quarantine and withdraw publication.
