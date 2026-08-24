@@ -434,6 +434,14 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void) {
             SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
         return fn ? fn(a0, a1, a2, a3) : 0; \
     }
+#define SPL_VULKAN_DISPATCH5(name) \
+    SPL_HOSTED_UNAVAILABLE_WEAK int64_t name( \
+            int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4) { \
+        typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t); \
+        fn_t fn = (fn_t)spl_gpu_provider_symbol( \
+            SPL_GPU_PROVIDER_VULKAN_BIT, #name); \
+        return fn ? fn(a0, a1, a2, a3, a4) : 0; \
+    }
 
 SPL_VULKAN_DISPATCH0(rt_vulkan_init)
 SPL_VULKAN_DISPATCH0(rt_vulkan_shutdown)
@@ -459,12 +467,188 @@ SPL_VULKAN_DISPATCH1(rt_vulkan_submit_no_wait)
 SPL_VULKAN_DISPATCH2(rt_vulkan_wait_fence)
 SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_fence)
 SPL_VULKAN_DISPATCH0(rt_vulkan_wait_idle)
+SPL_VULKAN_DISPATCH0(rt_vulkan_selected_device_driver_identity_hash)
+SPL_VULKAN_DISPATCH3(rt_vulkan_init_headless_present)
+SPL_VULKAN_DISPATCH3(rt_vulkan_init_window_present)
+SPL_VULKAN_DISPATCH1(rt_vulkan_last_present_copy_bytes)
+SPL_VULKAN_DISPATCH1(rt_vulkan_last_present_copy_rects)
+SPL_VULKAN_DISPATCH1(rt_vulkan_destroy_swapchain)
+SPL_VULKAN_DISPATCH5(rt_vulkan_present_buffer)
 
 #undef SPL_VULKAN_DISPATCH0
 #undef SPL_VULKAN_DISPATCH1
 #undef SPL_VULKAN_DISPATCH2
 #undef SPL_VULKAN_DISPATCH3
 #undef SPL_VULKAN_DISPATCH4
+#undef SPL_VULKAN_DISPATCH5
+
+static int64_t spl_vulkan_call_raw2(
+        const char *symbol, int64_t a0, int64_t a1) {
+    typedef int64_t (*fn_t)(int64_t, int64_t);
+    fn_t fn = (fn_t)spl_gpu_provider_symbol(
+        SPL_GPU_PROVIDER_VULKAN_BIT, symbol);
+    return fn ? fn(a0, a1) : 0;
+}
+
+static int64_t spl_vulkan_call_raw4(
+        const char *symbol, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {
+    typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t);
+    fn_t fn = (fn_t)spl_gpu_provider_symbol(
+        SPL_GPU_PROVIDER_VULKAN_BIT, symbol);
+    return fn ? fn(a0, a1, a2, a3) : 0;
+}
+
+static int64_t spl_vulkan_call_raw5(const char *symbol,
+        int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4) {
+    typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t, int64_t);
+    fn_t fn = (fn_t)spl_gpu_provider_symbol(
+        SPL_GPU_PROVIDER_VULKAN_BIT, symbol);
+    return fn ? fn(a0, a1, a2, a3, a4) : 0;
+}
+
+static int64_t spl_vulkan_call_raw7(const char *symbol,
+        int64_t a0, int64_t a1, int64_t a2, int64_t a3,
+        int64_t a4, int64_t a5, int64_t a6) {
+    typedef int64_t (*fn_t)(int64_t, int64_t, int64_t, int64_t,
+                            int64_t, int64_t, int64_t);
+    fn_t fn = (fn_t)spl_gpu_provider_symbol(
+        SPL_GPU_PROVIDER_VULKAN_BIT, symbol);
+    return fn ? fn(a0, a1, a2, a3, a4, a5, a6) : 0;
+}
+
+static uint8_t *spl_vulkan_copy_input_bytes(
+        int64_t value, int64_t byte_count) {
+    uint8_t *bytes;
+    if (byte_count <= 0 || byte_count > 268435456) return NULL;
+    bytes = (uint8_t*)malloc((size_t)byte_count);
+    if (!bytes) return NULL;
+    if (rt_array_bytes_copy_checked(value, bytes, byte_count) != byte_count) {
+        free(bytes);
+        return NULL;
+    }
+    return bytes;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_compile_spirv_array(int64_t data) {
+    int64_t byte_count = rt_array_len_safe(data);
+    uint8_t *bytes = spl_vulkan_copy_input_bytes(data, byte_count);
+    int64_t result;
+    if (!bytes) return 0;
+    result = spl_vulkan_call_raw2(
+        "rt_vulkan_compile_spirv_raw", (int64_t)(intptr_t)bytes, byte_count);
+    free(bytes);
+    return result;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_copy_to_buffer_array(
+        int64_t handle, int64_t data, int64_t byte_count, int64_t offset) {
+    uint8_t *bytes = spl_vulkan_copy_input_bytes(data, byte_count);
+    int64_t result;
+    if (!bytes) return 0;
+    result = spl_vulkan_call_raw4("rt_vulkan_copy_to_buffer_raw",
+        handle, (int64_t)(intptr_t)bytes, byte_count, offset);
+    free(bytes);
+    return result;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_push_constants_array(
+        int64_t command, int64_t pipeline, int64_t data, int64_t byte_count) {
+    uint8_t *bytes = spl_vulkan_copy_input_bytes(data, byte_count);
+    int64_t result;
+    if (!bytes) return 0;
+    result = spl_vulkan_call_raw4("rt_vulkan_push_constants_raw",
+        command, pipeline, (int64_t)(intptr_t)bytes, byte_count);
+    free(bytes);
+    return result;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_copy_from_buffer_array(
+        int64_t data, int64_t byte_count, int64_t handle, int64_t offset) {
+    uint8_t *bytes;
+    int64_t result;
+    if (byte_count <= 0 || byte_count > 268435456) return 0;
+    bytes = (uint8_t*)malloc((size_t)byte_count);
+    if (!bytes) return 0;
+    result = spl_vulkan_call_raw4("rt_vulkan_copy_from_buffer_raw",
+        (int64_t)(intptr_t)bytes, byte_count, handle, offset);
+    if (result && rt_array_bytes_store_checked(data, bytes, byte_count) != byte_count)
+        result = 0;
+    free(bytes);
+    return result;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_copy_from_buffer_strided(
+        int64_t data, int64_t handle, int64_t src_offset, int64_t row_bytes,
+        int64_t row_count, int64_t src_stride) {
+    int64_t data_len;
+    uint8_t *bytes;
+    int64_t result;
+    if (row_bytes <= 0 || row_count <= 0 || row_bytes > 268435456 / row_count)
+        return 0;
+    data_len = row_bytes * row_count;
+    bytes = (uint8_t*)malloc((size_t)data_len);
+    if (!bytes) return 0;
+    result = spl_vulkan_call_raw7("rt_vulkan_copy_from_buffer_strided_raw",
+        (int64_t)(intptr_t)bytes, data_len, handle, src_offset,
+        row_bytes, row_count, src_stride);
+    if (result && rt_array_bytes_store_checked(data, bytes, data_len) != data_len)
+        result = 0;
+    free(bytes);
+    return result;
+}
+
+static uint8_t *spl_vulkan_encode_i64_array(
+        int64_t value, int64_t *byte_count_out) {
+    int64_t count = rt_array_len_safe(value);
+    uint8_t *bytes;
+    int64_t i;
+    if (!byte_count_out || count <= 0 || count > 4096 || count > INT64_MAX / 8)
+        return NULL;
+    *byte_count_out = count * 8;
+    bytes = (uint8_t*)malloc((size_t)*byte_count_out);
+    if (!bytes) return NULL;
+    for (i = 0; i < count; i++) {
+        int64_t field = rt_array_get_i64_raw((SplArray*)(intptr_t)value, i);
+        memcpy(bytes + i * 8, &field, 8);
+    }
+    return bytes;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_copy_from_buffer_regions(
+        int64_t data, int64_t handle, int64_t regions) {
+    int64_t data_len = rt_array_len_safe(data);
+    int64_t regions_len = 0;
+    uint8_t *region_bytes;
+    uint8_t *bytes;
+    int64_t result;
+    if (data_len <= 0 || data_len > 268435456) return 0;
+    region_bytes = spl_vulkan_encode_i64_array(regions, &regions_len);
+    if (!region_bytes) return 0;
+    bytes = (uint8_t*)malloc((size_t)data_len);
+    if (!bytes) { free(region_bytes); return 0; }
+    result = spl_vulkan_call_raw5("rt_vulkan_copy_from_buffer_regions_raw",
+        (int64_t)(intptr_t)bytes, data_len, handle,
+        (int64_t)(intptr_t)region_bytes, regions_len);
+    if (result && rt_array_bytes_store_checked(data, bytes, data_len) != data_len)
+        result = 0;
+    free(bytes);
+    free(region_bytes);
+    return result;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_present_buffer_regions(
+        int64_t swapchain, int64_t buffer, int64_t width, int64_t height,
+        int64_t revision, int64_t rects) {
+    int64_t rects_len = 0;
+    uint8_t *rect_bytes = spl_vulkan_encode_i64_array(rects, &rects_len);
+    int64_t result;
+    if (!rect_bytes) return 0;
+    result = spl_vulkan_call_raw7("rt_vulkan_present_buffer_regions_raw",
+        swapchain, buffer, width, height, revision,
+        (int64_t)(intptr_t)rect_bytes, rects_len);
+    free(rect_bytes);
+    return result;
+}
 
 /*
  * Core-C parity for the runtime-owned Vulkan dependency-quarantine gate.

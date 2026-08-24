@@ -33,11 +33,13 @@ unloading code while those handles may exist is invalid.
 ## Migration order
 
 1. Admit and pin backend artifacts; route probes and scalar Vulkan operations.
-2. Add raw pointer/length Vulkan operations and provenance receipts.
-3. Remove hosted `libsimple_runtime.a` GPU selection from native linking.
-4. Apply the same table ownership to CUDA and Metal, with Metal framework
+2. Add core-owned array conversion and raw pointer/length Vulkan operations.
+3. Add provider provenance receipts and the remaining text-bearing operations.
+4. Remove hosted `libsimple_runtime.a` GPU selection from native linking.
+5. Apply the same table ownership to CUDA and Metal, with Metal framework
    dependencies present only in its provider.
-5. Require device execution/readback evidence before declaring a backend ready.
+6. Require device execution/readback evidence before declaring a backend ready.
 
-The current implementation covers step 1. Static hosted operation linkage and
-full Engine2D readback remain release blockers, not accepted compatibility.
+The current implementation covers step 1 and the byte-array portion of step 2.
+Text-bearing pipeline creation, static hosted selection, and full Engine2D
+readback remain release blockers, not accepted compatibility.
