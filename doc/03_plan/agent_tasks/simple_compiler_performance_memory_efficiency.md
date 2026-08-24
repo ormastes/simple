@@ -1095,6 +1095,17 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add a real projection/lifetime fixture covering multiline and one-line
   docstrings; verification intentionally not run under the user's no-verify
   instruction.
+
+## Completed dynamic-capability line reuse tranche
+
+- Add canonical-line kernels for the DCA file-scope decision and acquisition
+  scan; keep source APIs as compatibility adapters.
+- Route the main lint driver through its existing line array, removing the two
+  DCA-owned full-source splits in critical mode.
+- Preserve allow-mode early return, configured severity, group matching,
+  acquisition ordering, physical lines, and complete finding payloads.
+- Add complete-field source/lines parity coverage; verification intentionally
+  not run under the user's no-verify instruction.
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
