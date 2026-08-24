@@ -876,3 +876,37 @@ unit:test_runner/mode_filter_spec.spl
 unit:tools/cat_spec.spl
 unit:tools/simple_os_primary_spec.spl
 ```
+
+## Step-over record — 2026-08-24
+
+`sh scripts/check/check-test-tree-divergence-delta.shs origin/main <NEW>` →
+**PASS — 11 pre-existing offender(s), 0 introduced by this range**, for the
+landing that restores the three clobbered smux SSpec conversions and fixes the
+LLM Caret multi-process manager's leaked-child reporting.
+
+Base verdict at `origin/main`: `FAIL — 865 diverged vs 854 baselined (11 new,
+0 fixed-but-still-baselined); 1 mirror-only (0 unallowlisted, 0
+stale-allowlist)`. The landing range touches `test/01_unit/**` and
+`test/unit/**` identically (all three mirror pairs verified byte-identical with
+`cmp`), so it introduces no divergence and adds nothing to this list.
+
+The 11 unbaselined offenders that make the base red — recorded here because the
+delta-escape requires it, and left for their owning lanes:
+
+```
+app/cli/query_engine_spec.spl
+app/protocol/jsonrpc_framing_spec.spl
+compiler/hir/hir_codec_optional_node_decode_source_spec.spl
+compiler/verification/cache_correctness_spec.spl
+lib/database_core_spec.spl
+lib/database/database_core_spec.spl
+lib/ffi/dynamic_versioned_spec.spl
+os/kernel/arch/riscv32_boot_spec.spl
+os/kernel/loader/executable_source_vfs_spec.spl
+os/kernel/scheduler/scheduler_spec.spl
+storage/dbfs/dbfs_no_regression_spec.spl
+```
+
+Not fixed here and not baselined away: each belongs to a different lane, and
+`--generate-baseline` over a diff nobody read is exactly what this record
+exists to prevent.

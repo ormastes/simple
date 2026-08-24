@@ -37,6 +37,29 @@ coverage that fails if the legacy shape or mirror drift reappears.
 | AC-6 | DONE | `static_factory_method_chain_wrong_value_2026-08-16.md` and `module_var_stale_in_it_closure_2026-08-16.md` filed |
 | AC-7 | DONE (seed-observed) | 56 `fn test_*` -> 56 `it` across 13 REQ groups; `executed=56 passed=56 failed=0`; 858 -> ~700 lines |
 
+## Regression and repair (2026-08-24)
+
+Every AC below was re-verified against the tree and three had been **clobbered
+back to the legacy shape** after being recorded DONE:
+
+- `test/03_system/tools/smux_system_spec.spl` — AC-7's conversion
+  (`aa94bed2717`, 56 examples) reverted by `376031072c5`; the file was RED under
+  the zero-examples gate (`executed=0 dropped=1`) while AC-7 read DONE.
+- `test/01_unit/os/smux_spec.spl` and `test/01_unit/os/smux/smux_dashboard_spec.spl`
+  — AC-1's cleanup (`76c0f2f0837`) reverted by `f13adc2eca5`, which re-added all
+  41 `fn test_*` helpers and reduced each oracle to `expect(test_x()).to_equal(true)`.
+
+All three restored; `smux_caret_sspec_quality_system_spec` went 10/15 -> 15/15.
+The AC-4 guard detected every one of these correctly — nothing was reading its
+verdict, which is the actual process gap. `origin/main` still carries the
+clobbered versions.
+
+Documentization score raised 74 -> 91 on both unit specs (narrative, structure
+and oracle all at 100). 91 is the generator's ceiling, filed as
+`doc/08_tracking/bug/sspec_docgen_dumps_source_instead_of_scenario_manual_2026-08-24.md`.
+
+Full audit: `doc/09_report/caret_smux_slang_agent_manager_gap_audit_2026-08-24.md`.
+
 ## Upstream audit
 
 The **LLM Caret half was already complete upstream** and was not redone. A sweep
