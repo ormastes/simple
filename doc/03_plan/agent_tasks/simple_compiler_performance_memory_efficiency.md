@@ -162,6 +162,9 @@ current-head research reconciliation.
   regeneration; no sidecar result alone may approve ordering or COW semantics.
 - Current status: designed, not implemented; stage-4 generator execution and
   manual verification were excluded by the user's no-verify instruction.
+- Freshness prerequisite completed: both visitor gates now isolate every
+  generator output in temporary roots, and the combined gate includes a
+  hand-edit-sensitive `hir_children.spl` comparison.
 
 ## Completed VHDL deterministic-sort tranche
 
