@@ -137,3 +137,38 @@ codegen.
 - Whether the same miscompile explains Lane Q/P's 152 HIR-phase SEGVs. Same
   defect shape, different site; unproven.
 - No fix landed. Do not read this record as "diagnosed and repaired".
+
+## CONFIRMED: minimal repro of the PRODUCER bug (2026-08-24)
+
+`build/lanes_s/dv2.spl` — a 16-field struct (`Big`: nested struct, `text`,
+arrays, `text?`, `i64?`, `Dict`) stored in a `Dict<i64, Big>` and read back via
+`.values()`. Nothing compiler-specific; ~35 lines.
+
+| run | output |
+|-----|--------|
+| seed interpreter (`bin/simple run`) | `name=[main] sig_ret=9 nlocals=0 nblocks=1 entry=3 sym=1` — CORRECT |
+| seed `native-build` + execute | `name=[95505753971696] sig_ret=1 nlocals=1 nblocks=1 entry=95505753971696 sym=1` — **CORRUPT** |
+
+Four of six probed fields are wrong in the native build:
+- `name` (`text`) prints as a raw pointer value — the field holds a non-text word.
+- `signature.return_type` reads 1, not 9.
+- `locals.len()` reads 1, not 0.
+- `entry_block` reads **the same garbage word as `name`** — i.e. two distinct
+  fields alias the same slot. That is a field-offset / layout defect, not a
+  lost write.
+- `blocks.len()` and `symbol.id` happen to be right.
+
+This is the same signature as the Stage-2 failure (`MirFunction` read out of
+`Dict<SymbolId, MirFunction>` with `name` dead and other fields inconsistent),
+reproduced in 35 lines with a build measured in minutes instead of a full
+bootstrap. **The miscompiler is the Rust seed's native codegen
+(`src/compiler_rust`), which is what produces Stage 2.**
+
+Fixture: `build/lanes_s/dv2.spl` (and `dv4.spl`, which additionally probes
+direct value, `d[k]` index read, `.values()` iteration and array element in one
+program, to separate the dict from the struct layout itself).
+
+### Still UNKNOWN at time of writing
+- Whether the corruption needs the Dict at all (dv4 answers this).
+- The exact codegen site. Not yet located in `src/compiler_rust`.
+- No fix landed.
