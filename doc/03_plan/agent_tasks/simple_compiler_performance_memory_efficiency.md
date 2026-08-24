@@ -1643,3 +1643,16 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Parallel compiler audit supplied the defect and reactivation contract;
   semantic, performance, and fixture reviews are required before sync.
 - No manual verification was run under the user override.
+# Completed tranche: watch dependency normalization hoist (2026-08-24)
+
+- Extracted exact changed-path normalization behind a single helper.
+- Precomputed one normalized text per changed file before graph/import scans.
+- Preserved the compatibility matcher, graph order, duplicate behavior, prefix
+  handling, and order-sensitive self/dependency behavior.
+- Added one canonical executable spec and manual for matching and ordering
+  oracles without creating a legacy shadow copy.
+- Recorded the allocation reduction separately from the unchanged nested-search
+  complexity; no runtime speedup or RSS claim is made without measurement.
+- Parallel performance audit supplied the defect and bounded patch contract;
+  semantic, performance, and fixture reviews remain required before sync.
+- No manual verification was run under the user override.

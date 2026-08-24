@@ -73,32 +73,40 @@ fn build_dep_graph(files: [text]) -> DepGraph:
             deps.push(FileDeps(path: file, imports: imports))
     DepGraph(deps: deps)
 
-# Check if a file's module path matches a given import prefix
-fn file_matches_import(file_path: text, import_path: text) -> bool:
-    # Convert file path to module-like path
-    # e.g., src/lib/nogc_sync_mut/io/file_ops.spl -> nogc_sync_mut.io.file_ops
-    val normalized = file_path.replace("/", ".").replace("\\", ".")
+# Convert a source path once before testing it against multiple imports.
+fn normalize_dep_file_path(file_path: text) -> text:
+    file_path.replace("/", ".").replace("\\", ".")
 
+fn normalized_file_matches_import(normalized: text, import_path: text) -> bool:
     # Check the import prefix (stripped of std/lib/app/compiler)
     val prefix = module_to_prefix(import_path)
 
     # Check if the file path contains the module path segments
     normalized.contains(prefix.replace(".", "/")) or normalized.contains(prefix)
 
+# Compatibility wrapper for callers that test one path/import pair.
+fn file_matches_import(file_path: text, import_path: text) -> bool:
+    normalized_file_matches_import(normalize_dep_file_path(file_path), import_path)
+
 # Find all files that depend on the changed files (reverse dependency lookup)
 fn find_dependents(graph: DepGraph, changed_files: [text]) -> [text]:
     var dependents: [text] = []
+    var normalized_changed_files: [text] = []
+    for changed in changed_files:
+        normalized_changed_files.push(normalize_dep_file_path(changed))
 
     for file_dep in graph.deps:
         var dominated = false
-        for changed in changed_files:
+        var changed_i = 0
+        while changed_i < changed_files.len():
+            val changed = changed_files[changed_i]
             if file_dep.path == changed:
                 dominated = true
 
             if not dominated:
                 # Check if any of this file's imports match the changed file
                 for imp in file_dep.imports:
-                    if file_matches_import(file_path: changed, import_path: imp):
+                    if normalized_file_matches_import(normalized_changed_files[changed_i], imp):
                         # This file depends on the changed file
                         var already_added = false
                         for d in dependents:
@@ -106,5 +114,6 @@ fn find_dependents(graph: DepGraph, changed_files: [text]) -> [text]:
                                 already_added = true
                         if not already_added:
                             dependents.push(file_dep.path)
+            changed_i = changed_i + 1
 
     dependents

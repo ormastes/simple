@@ -3370,3 +3370,21 @@ source-span preservation. That analysis must be built once per function; a
 whole-function scan for every adjacent candidate would turn a linear fusion
 walk into quadratic compile-time work. This quarantine removes both the
 miscompile path and all pass-local traversal/allocation overhead while disabled.
+# 2026-08-24 follow-up: watch dependency normalization allocations
+
+`app.watch.deps.find_dependents` scans graph entries, changed files, and imports
+after every debounced watch event. The former inner matcher normalized the same
+changed path with two full `replace` operations for every import comparison.
+For `D` dependency entries, `C` changed files, `I` imports, and path length `P`,
+that produced up to `2*D*C*I` replacement results and worst-case
+`O(D*C*I*P)` normalization scans/copies.
+
+The changed paths are now normalized once, in input order, before the graph
+scan. Normalization alone becomes `O(C*P)` scans/copies with `O(C*P)` retained
+normalized paths and up to two replacement results per changed file; no-match
+allocation behavior differs by runtime. The patch does not change the nested
+`D/C/I` matcher, prefix conversion, substring searches, or linear scan of the
+growing dependent list, so no end-to-end asymptotic improvement is claimed.
+For empty/no-import graphs it eagerly normalizes paths the former lazy route did
+not touch. Graph order, duplicate suppression, prefix stripping, and the
+existing order-sensitive `dominated` behavior are pinned.

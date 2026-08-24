@@ -770,3 +770,10 @@ The future active capsule must consume the shared `PerfFacts` def-use service on
 per function and attach a receipt covering the sole adjacent consumer,
 dominance, type/lane/comparison legality, `Move` semantics, and chosen source
 span. It must never rebuild def-use for each candidate.
+# Watch dependency fact ownership
+
+The watch request owns one ordered snapshot of changed files and one parallel
+array of normalized paths. Reverse-dependency matching consumes those cached
+texts; it must not normalize a changed path inside the graph/import loops.
+This is an allocation-hoist boundary, not a new dependency index: current graph
+order and `dominated` semantics remain authoritative.

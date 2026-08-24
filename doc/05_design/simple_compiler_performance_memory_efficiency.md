@@ -1051,3 +1051,13 @@ def-use index, count instruction and terminator uses, require the adjacent
 masked operation to be the only use, prove dominance and SIMD legality, define
 whether a `Move` mask can be folded, and preserve a deliberate source span.
 Rejected candidates remain byte-for-byte unchanged and report the missing fact.
+# Watch dependency normalization design
+
+`normalize_dep_file_path` owns the exact `/` then `\\` to `.` replacements.
+`file_matches_import` remains a compatibility wrapper for single comparisons,
+while `find_dependents` creates `normalized_changed_files` once and passes the
+corresponding cached value to `normalized_file_matches_import`.
+
+Do not reorder graph entries or changed files, and do not reset or reinterpret
+`dominated`: those choices would be a separate correctness change. Import
+prefix conversion and both historical `contains` alternatives remain exact.
