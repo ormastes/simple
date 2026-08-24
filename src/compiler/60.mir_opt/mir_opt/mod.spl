@@ -438,11 +438,13 @@ fn pass_witness_contract(kind: PassKind) -> PassWitnessContract?:
             Some(PassWitnessContract(kind, "fs.two_calls_same_callee", "fs.different_callees"))
         case _: nil
 
-fn pass_witness_registry_integrity_errors() -> [text]:
+fn pass_witness_registry_integrity_errors_for(
+    registry: [MirPassDescriptor]
+) -> [text]:
     var errors: [text] = []
     var seen_positive: {text: bool} = {}
     var seen_negative: {text: bool} = {}
-    for descriptor in mir_pass_descriptor_registry():
+    for descriptor in registry:
         val witness = pass_witness_contract(descriptor.kind)
         if pass_status_allows_transform(descriptor.status):
             if not witness.?:
@@ -462,6 +464,10 @@ fn pass_witness_registry_integrity_errors() -> [text]:
         elif witness.?:
             errors.push("inactive pass must not advertise executable witnesses: " + descriptor.stable_name)
     errors
+
+fn pass_witness_registry_integrity_errors() -> [text]:
+    """Compatibility entrypoint that owns one registry snapshot."""
+    pass_witness_registry_integrity_errors_for(mir_pass_descriptor_registry())
 
 fn pass_run_record_new(requested_name: text, effective_name: text,
                        status: PassStatus, expectation: PassExpectation,
@@ -921,7 +927,11 @@ fn mir_pass_registry_integrity_errors() -> [text]:
     """Fail-closed structural audit for registered transformation claims."""
     var errors: [text] = []
     var seen_names: {text: bool} = {}
-    for descriptor in mir_pass_descriptor_registry():
+    # Descriptor construction also creates provider metadata. Keep one
+    # immutable snapshot for every phase of this audit rather than rebuilding
+    # it for status, witness, and fact-preservation checks.
+    val registry = mir_pass_descriptor_registry()
+    for descriptor in registry:
         if seen_names.contains_key(descriptor.stable_name):
             errors.push("duplicate pass name: " + descriptor.stable_name)
         else:
@@ -945,9 +955,9 @@ fn mir_pass_registry_integrity_errors() -> [text]:
             val resolved = mir_pass_descriptor_for_name(alias)
             if not resolved.? or resolved.unwrap().stable_name != descriptor.stable_name:
                 errors.push("broken pass alias: " + alias + " -> " + descriptor.stable_name)
-    for witness_error in pass_witness_registry_integrity_errors():
+    for witness_error in pass_witness_registry_integrity_errors_for(registry):
         errors.push(witness_error)
-    for descriptor in mir_pass_descriptor_registry():
+    for descriptor in registry:
         for fact_error in perf_fact_preservation_integrity_errors(mir_pass_fact_preservation(descriptor.kind)):
             errors.push("invalid fact preservation for " + descriptor.stable_name + ": " + fact_error)
     errors
