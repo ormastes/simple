@@ -135,10 +135,30 @@ index 640/971 with 119,824,002 bytes peak tracked heap, 301,792 KiB RSS, and
 301,792 KiB HWM. The live sample immediately before termination was about
 623 MiB RSS. No OOM/kernel/service termination record was available.
 
+The retained invocation evidence now rules out the repository kill monitor,
+the orphan-resource-hog reaper, kernel OOM, and `earlyoom`: none recorded a
+matching action, and the reaper would use SIGKILL rather than the observed
+SIGTERM. Two retained compiler logs end without a compiler verdict at roughly
+345--348 seconds. That repeated boundary strongly indicates the invoking
+command/tool manager's approximately 360-second blocking-call deadline, not a
+compiler-owned timeout or memory failure.
+
 This interruption did not reach MIR and therefore neither proves nor refutes
 the `enum_bodies` removal. It is distinct from cycle 1/2 SIGSEGVs, but the
 mandatory three-cycle cap is exhausted. Do not launch a fourth Stage 3 build in
 the same logical session. Resume in a fresh scoped session from the admitted
-Stage 2 under `build/bootstrap/mustcheck-stage3-arm-body`, first identifying or
-isolating the external SIGTERM owner; then require `real-lower:done eval_gteq`
-and complete Stage 3 admission before promoting any must-check compiler row.
+Stage 2 under `build/bootstrap/mustcheck-stage3-arm-body`. Run the existing
+resume through a persistent PTY/session with a short initial yield and poll
+that session at intervals no longer than 60 seconds; do not hold the build in
+one blocking tool call. Preserve the existing cache and use:
+
+```sh
+SIMPLE_TIMEOUT_SECONDS=0 sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --strategy=adhoc \
+  --resume-stage3-from-admitted=build/bootstrap/mustcheck-stage3-arm-body \
+  --bootstrap-receipt=build/bootstrap/mustcheck-stage3-arm-body/planner-admission-v2.env \
+  --jobs=1
+```
+
+Then require `real-lower:done eval_gteq` and complete Stage 3 admission before
+promoting any must-check compiler row.
