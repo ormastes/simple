@@ -217,3 +217,35 @@ placement?) risks silent memory corruption at every call site — strictly worse
 than the link error it would replace, and it would pass the link while
 misbehaving at runtime. Derive each return shape from the actual lowering, not
 by inspection, and add them in batches with a link check per batch.
+
+### The 68 split into TWO different problems (measured)
+
+Classified against the linked archive and the C sources:
+
+| group | count | what it needs |
+|---|---|---|
+| defined in C, but the defining file is not compiled into the linked archive | **31** | a BUILD-CONFIG fix |
+| no definition in any C source at all | **37** | real IMPLEMENTATION |
+| present in `libsimple_native_all.a` already | **0** | — |
+
+The 31 live in `runtime_native.c` (25) and `runtime.c` (5). Neither is in the
+Rust runtime crate's `build.rs` list, and the `core-c-bootstrap` archive path is
+never reached for a `bootstrap_main` entry (see above), so neither file reaches
+the link. Note `runtime.c` also still fails to compile here under gcc, so it
+needs both a compile fix and the build-config fix.
+
+The 37 have no definition anywhere and must be written. Their return shapes are
+NOT uniform — measured across the 68: 13 `bool`, 11 `i64`, 3 `f32`, 3 `text`,
+3 `[u8]`, 3 `[i64]`, and **26 SIMD vector returns** (`Vec8f`, `Vec4u64`,
+`Vec4u32`, `Vec4d`, `Vec4f`, `Vec4i64`), plus optional-of-tuple shapes like
+`([u8], text)?`.
+
+The SIMD returns are the reason this must not be batch-guessed: vector return
+ABI (register class, alignment, whether it is returned in XMM/YMM or via sret)
+is exactly where a plausible-looking stub links cleanly and then corrupts state
+at every call site.
+
+**Suggested order for whoever takes this:** fix the 31 first — it is a
+build-config change with an immediate, checkable signal (the undefined count
+should drop 68 -> 37) — then implement the 37 in shape-groups, scalars first,
+SIMD last, re-linking after each group.
