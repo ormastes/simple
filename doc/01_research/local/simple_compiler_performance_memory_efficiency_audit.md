@@ -2905,3 +2905,23 @@ to G validly-spanned global accesses.
 Global span bytes and missing-span rejection are unchanged. Focused multiplicity
 and exact mismatch contracts were updated but not executed under the user's
 no-verification instruction.
+
+### Linear TRK001 tracking-row decoding
+
+The feature-tracking deny gate decoded each CSV field with
+`current = current + ch`. A decoded field of m bytes therefore constructed and
+copied every prefix, for O(m^2) byte traffic, while also allocating a
+one-character substring per input byte. The parser now scans bytes once,
+retains maximal unchanged spans, emits a fragment only at a quote or delimiter,
+and joins once per completed field. Work and auxiliary fragment storage are
+linear in the row, with substring allocation proportional to structural
+boundaries rather than characters.
+
+The parser's existing permissive dialect is preserved: commas split only
+outside quotes, doubled quotes decode only while already quoted, quotes may
+appear mid-field, unmatched quotes remain tolerated, empty fields survive, and
+decoded fields are edge-trimmed. UTF-8 bytes remain inside unchanged spans.
+An exact deny-level diagnostic fixture uses a quoted identifier to prove comma
+and doubled-quote decoding directly, while quoted title and description fields
+exercise column alignment. It was not executed under the user's no-verification
+instruction.
