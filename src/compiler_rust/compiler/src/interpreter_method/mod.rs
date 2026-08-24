@@ -277,6 +277,45 @@ pub(crate) fn evaluate_method_call(
                 return instantiate_class(class_name, args, env, functions, classes, enums, impl_methods);
             }
         }
+        // Self-named module shadowing: `use a.b.Foo.{Foo}` binds the *module*
+        // namespace dict to `Foo` when the module file and the class share a
+        // name, so `Foo.static_method(..)` reached here as a Dict receiver and
+        // died with "method `static_method` not found on type `dict`". The
+        // module dict still carries both the class constructor (`Foo`) and its
+        // mangled static (`Foo__static_method`), so resolve through them.
+        // Ambiguity (two classes in the module both exposing the static) is
+        // deliberately left to the normal error below.
+        {
+            let mut hit: Option<&Value> = None;
+            let mut ambiguous = false;
+            for entry in module_dict.values() {
+                if let Value::Constructor { class_name } = entry {
+                    if let Some(static_fn) = module_dict.get(&format!("{class_name}__{method}")) {
+                        if matches!(static_fn, Value::Function { .. }) {
+                            if hit.is_some() {
+                                ambiguous = true;
+                            }
+                            hit = Some(static_fn);
+                        }
+                    }
+                }
+            }
+            if !ambiguous {
+                if let Some(Value::Function { def, captured_env, .. }) = hit {
+                    let mut captured_env_clone = Env::clone(captured_env);
+                    return exec_function_with_captured_env(
+                        def,
+                        args,
+                        env,
+                        &mut captured_env_clone,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
+                }
+            }
+        }
         // Handle typed dict objects (from ClassName.new()) - look up methods from impl/class
         if let Some(Value::Str(type_name)) = module_dict.get("__type__") {
             // Try impl_methods for this type
