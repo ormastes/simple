@@ -73,3 +73,19 @@ unverified teardown draft. The remaining prerequisite is more specific:
 
 No implementation from the rejected draft remains and no verification was
 run.
+
+## Identity-owner prerequisite progress (2026-08-24)
+
+The bounded Pure Simple identity owner now exists at
+`std.fs_driver.nvfs_device_identity_owner_v1`. It reserves the canonical outer
+identity and admitted device region before registration, activates only with an
+exact positive inner DBFS identity, validates copied bindings through one
+slot+generation+nonce lookup, and provides bounded terminal eviction and
+fail-stop quarantine. Static lifecycle specifications cover outer/inner/device
+substitution, stale copied bindings after reuse, pre-registration rollback,
+terminal replay, and indeterminate cleanup.
+
+This is an unverified and deliberately unwired prerequisite. The blocker
+remains open: `NvfsPosixDriver.new_on_device` does not yet consume the owner,
+and no busy-aware DBFS close/unregister operation exists. Therefore neither
+normal teardown nor registration-count restoration is claimed.
