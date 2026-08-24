@@ -527,49 +527,49 @@ class HwModuleDef:
             return "HWIR-E-MODULE-COUNT: summary counts must match represented strict-HWIR nodes"
         if self.summary.register_count != 0 or self.summary.memory_count != 0:
             return "HWIR-E-MODULE-STATE: combinational module definition cannot claim unrepresented state or memories"
-        var domains: [text] = []
+        var domains: {text: bool} = {}
         for domain in self.clock_domains:
-            if domain.name == "" or domains.contains(domain.name):
+            if domain.name == "" or domains.has(domain.name):
                 return "HWIR-E-CLOCK-DOMAIN: clock domains must be non-empty and unique"
-            domains.push(domain.name)
-        if not domains.contains("default"):
+            domains[domain.name] = true
+        if not domains.has("default"):
             return "HWIR-E-CLOCK-DOMAIN: strict combinational modules require the default clock domain metadata"
         # VHDL basic identifiers are case-insensitive.  Preserve each spelling
         # in the graph for source lineage and deterministic emission, but use
         # a folded comparison key so `Result` and `result` cannot create two
         # declarations for the same VHDL object.
-        var names: [text] = []
+        var names: {text: bool} = {}
         for port in self.ports:
             val comparison_name = port.name.lower()
-            if not hwir_vhdl_identifier(port.name) or names.contains(comparison_name) or (port.direction != "in" and port.direction != "out") or
-                port.type_name != "Bits" or port.bit_width < 1 or not domains.contains(port.clock_domain):
+            if not hwir_vhdl_identifier(port.name) or names.has(comparison_name) or (port.direction != "in" and port.direction != "out") or
+                port.type_name != "Bits" or port.bit_width < 1 or not domains.has(port.clock_domain):
                 return "HWIR-E-PORT: ports must be unique typed Bits in an existing clock domain"
-            names.push(comparison_name)
+            names[comparison_name] = true
         for signal in self.signals:
             val comparison_name = signal.name.lower()
-            if not hwir_vhdl_identifier(signal.name) or names.contains(comparison_name) or signal.type_name != "Bits" or signal.bit_width < 1:
+            if not hwir_vhdl_identifier(signal.name) or names.has(comparison_name) or signal.type_name != "Bits" or signal.bit_width < 1:
                 return "HWIR-E-SIGNAL: signals must be unique positive-width Bits"
-            names.push(comparison_name)
+            names[comparison_name] = true
         for constant in self.constants:
             val comparison_name = constant.name.lower()
-            if not hwir_vhdl_identifier(constant.name) or names.contains(comparison_name) or constant.bit_width < 1:
+            if not hwir_vhdl_identifier(constant.name) or names.has(comparison_name) or constant.bit_width < 1:
                 return "HWIR-E-CONSTANT: constants must be unique and positive-width"
             if constant.bit_width < 63 and constant.value >= 0 and constant.value >= (1i64 << constant.bit_width):
                 return "HWIR-E-CONSTANT-VALUE: unsigned constant does not fit its declared width"
             if constant.bit_width < 63 and constant.value < 0 and
                 (constant.value < -(1i64 << (constant.bit_width - 1)) or constant.value >= (1i64 << (constant.bit_width - 1))):
                 return "HWIR-E-CONSTANT-VALUE: signed constant does not fit its declared width"
-            names.push(comparison_name)
-        var origin_ids: [text] = []
+            names[comparison_name] = true
+        var origin_ids: {text: bool} = {}
         for origin in self.origins:
-            if not origin.node_id.is_valid() or origin.source_name == "" or origin.node_id.value == self.node_id.value or origin_ids.contains(origin.node_id.value):
+            if not origin.node_id.is_valid() or origin.source_name == "" or origin.node_id.value == self.node_id.value or origin_ids.has(origin.node_id.value):
                 return "HWIR-E-DUPLICATE-ORIGIN: origin IDs must be distinct from the module and each other"
             if origin.source_name.starts_with("zca.") and self.config.compressed_decode_profile != "zca-common-critical":
                 return "HWIR-E-COMPRESSED-PROFILE: zca semantic origins require zca-common-critical profile"
-            origin_ids.push(origin.node_id.value)
+            origin_ids[origin.node_id.value] = true
         if self.origins.len() == 0:
             return "HWIR-E-ORIGIN: strict HWIR module requires source origins"
-        var driven: [text] = []
+        var driven: {text: bool} = {}
         for op in self.comb_ops:
             if not hwir_supported_comb_op(op.op) or not hwir_value_is_writable(self, op.result) or
                 hwir_width_for_name(self, op.result) != (if hwir_comb_is_predicate(op.op): 1 else: op.bit_width):
@@ -589,9 +589,9 @@ class HwModuleDef:
                 return "HWIR-E-COMB-WIDTH: shift input and result must have the declared width"
             if (op.op == "passthrough" or op.op == "zext" or op.op == "trunc" or op.op == "sext") and op.rhs != "":
                 return "HWIR-E-COMB-WIDTH: unary operation must not have a right operand"
-            if driven.contains(op.result):
+            if driven.has(op.result):
                 return "HWIR-E-MULTIPLE-DRIVER: each strict combinational result must have one driver"
-            driven.push(op.result)
+            driven[op.result] = true
         for op in self.compare_ops:
             if not hwir_value_is_writable(self, op.result) or hwir_width_for_name(self, op.result) != 1 or hwir_width_for_name(self, op.lhs) != op.bit_width or
                 hwir_width_for_name(self, op.rhs) != op.bit_width or not hwir_value_is_readable(self, op.lhs) or
@@ -599,9 +599,9 @@ class HwModuleDef:
                 return "HWIR-E-COMPARE: comparisons require same-width readable operands and one-bit result"
             if op.lhs == op.result or op.rhs == op.result:
                 return "HWIR-E-COMB-CYCLE: strict comparison cannot read its own result"
-            if driven.contains(op.result):
+            if driven.has(op.result):
                 return "HWIR-E-MULTIPLE-DRIVER: each strict combinational result must have one driver"
-            driven.push(op.result)
+            driven[op.result] = true
         for op in self.select_ops:
             if hwir_width_for_name(self, op.condition) != 1 or not hwir_value_is_readable(self, op.condition):
                 return "HWIR-E-SELECT-CONDITION: select condition must be a readable one-bit value"
@@ -611,11 +611,11 @@ class HwModuleDef:
                 return "HWIR-E-SELECT: muxes require same-width readable branches and a writable result"
             if op.condition == op.result or op.when_true == op.result or op.when_false == op.result:
                 return "HWIR-E-COMB-CYCLE: strict select cannot read its own result"
-            if driven.contains(op.result):
+            if driven.has(op.result):
                 return "HWIR-E-MULTIPLE-DRIVER: each strict combinational result must have one driver"
-            driven.push(op.result)
+            driven[op.result] = true
         for port in self.ports:
-            if port.direction == "out" and not driven.contains(port.name):
+            if port.direction == "out" and not driven.has(port.name):
                 return "HWIR-E-OUTPUT-DRIVER: every output must have exactly one explicit driver"
         ""
 
