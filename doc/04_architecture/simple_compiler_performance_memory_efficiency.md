@@ -549,3 +549,18 @@ TYPE001 is the reference contract: the cursor resumes at `match + 1` so
 overlapping textual candidates remain observable, while the boundary check uses
 the original line and absolute end position. Rule-name order remains diagnostic
 order; search order within a line does not reorder or multiply findings.
+
+### Canonical-module function and purity indexes
+
+Contract-module validation owns two request-local dictionaries. The mandatory
+name-validation pass builds compact `name -> SymbolId` entries while it produces
+the ordered internal-name list. This dictionary is authoritative only after all names have
+passed the existing nonempty/unique gate; owner resolution remains earlier to
+preserve failure precedence.
+
+Direct-call traversal resolves through that immutable index. A separate set
+memoizes only successful closed-and-pure leaf validations. Missing, unclosed,
+and effectful callees fail immediately and are never cached. Recursive self
+calls retain their existing exclusion. Neither structure enters canonical
+serialization, obligation hashes, module state, or cross-request caches, so no
+invalidation surface is introduced.
