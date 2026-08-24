@@ -164,6 +164,19 @@ current-head research reconciliation.
 - Manual verification intentionally omitted under the user's explicit
   no-verification instruction.
 
+## Completed WM module-path snapshot tranche
+
+- Snapshot normalized module-path segments once after existing exemption exits.
+- Reuse cached root and second segment across host-root, mutable-tier, and
+  rendering-sublane policy scans.
+- Preserve missing/empty segment behavior, sequential `std.`/`lib.`
+  normalization, prefix boundaries, diagnostics, severity, and ordering.
+- Reduce the `common.*` hot case from 26 split arrays plus 26 copies of every
+  segment to one split array and one copy of every segment.
+- Retain small ordered policy arrays instead of adding per-request hash maps.
+- Manual verification intentionally omitted under the user's explicit
+  no-verification instruction.
+
 ## Completed assertion-head boundary tranche
 
 - Scan the exact ASCII assertion identifier alphabet on original statement

@@ -681,3 +681,14 @@ predicate is part of the lint contract and must match the prior character-set
 recognizer exactly. `bytes()` is not a view and must not be used for a bounded
 prefix scan because it copies the full input; semantic family classification
 remains a separate consumer.
+
+### Single-snapshot bounded path dispatch
+
+When a lint dispatches on several segments of one normalized module path, it
+must create at most one segment snapshot per classification and reuse the first
+two segments across policy loops. Segment extraction must sit after earlier
+empty/prefix exemptions so exempt imports retain the zero-split fast path.
+Small fixed policy lists remain ordered arrays with linear early exit: their
+bounded contiguous scans preserve diagnostic precedence and avoid request-local
+hash-table construction. Classification refactors must retain empty-segment,
+normalization, warning payload, severity, and emission-order behavior.

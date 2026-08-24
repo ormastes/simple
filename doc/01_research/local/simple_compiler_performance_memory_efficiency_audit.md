@@ -2653,6 +2653,28 @@ input with a different lifetime. Complete warning payload/order parity is
 covered using a generated RV64 bundle, but not executed under the user's
 no-verification instruction.
 
+### Single-snapshot WM module-path classification
+
+The WM lane boundary lint classified module roots through `_wml_seg`, which
+called `String.split(".")` for every lookup. The `common.*` path requested the
+second segment inside the 25-entry host-root loop, so a non-host import reached
+26 full splits. The native split implementation scans the input to count
+segments, allocates an array, scans again, and allocates each segment string.
+For a K-segment path, the hot case therefore created 26 arrays and 26*K segment
+strings even though classification consumes only `root` and `sub`.
+
+Classification now takes one segment snapshot after the existing empty,
+intra-scope, and host-door exits, then reuses `root` and `sub` across all small
+constant policy lists. Worst-case path splitting falls from 26 scans/arrays to
+one, with one set of K segment strings. Empty, leading, interior-empty, and
+trailing segments retain `split` semantics; sequential `std.`/`lib.`
+normalization, warning text, severity, and order are unchanged. The remaining
+25/4/12-entry policy scans are deliberately linear and cache-friendly; building
+per-request hash tables would add allocation without changing their fixed
+bounds. These allocation counts are source/runtime-derived because manual
+tests, optimizer runs, benchmarks, and RSS measurement remain excluded by the
+user's no-verification instruction.
+
 ### Allocation-bounded assertion-head classification
 
 SPIPE assertion recognition scans each candidate statement for a paren-less
