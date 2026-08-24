@@ -1765,3 +1765,78 @@ Stage 2 and only on a call the interpreter never makes. This does **not** settle
 "born dead vs killed in transit", and it does not confirm the unification
 hypothesis with the codec blocker — the function's own return type is live in both
 engines. Left open.
+
+## 2026-08-24 — LOCALISED to a ONE-STATEMENT window inside `end_function`
+
+Bracketing probes (`dab9def9b15`) on an admitted `--fresh-cache` Stage 2
+(`750 compiled, 0 cached`, sha256 `b96c4d1649dc21d686090ccb3cfc160a62546bf837b1b6c611be21fa00a0891f`),
+with the interpreted lane as a matched control on the same fixture:
+
+| point | interpreted | Stage 2 |
+|---|---|---|
+| after `lower_expr` | pending=3 | pending=3 |
+| post-impl (`lower_stmt` wrapper) | pending=3 | pending=3 |
+| post-restore (`self.builder = b_restore`) | pending=3 | pending=3 |
+| pre-`end_function` (`self.builder`) | pending=0 finalized=**3** | pending=0 finalized=**3** |
+| `MIRB end` — **inside** `end_function` | b0_insts=**3** locals=3 | b0_insts=**0** locals=3 |
+| returned function | instr_total=**3** | instr_total=**0** |
+
+**Every value agrees until control enters `end_function`.**
+
+### What this exonerates
+
+The write-back chain is **not** at fault. The `lower_stmt` wrapper's
+`self.builder = b_restore` persists, and `self.builder` still holds all three
+instructions immediately before the call. So the earlier suspicion that a
+`self.builder = b` assignment fails to survive is **refuted** — every one of them
+survives.
+
+### The remaining window
+
+Between `end_function`'s entry and its own `SIMPLE_MIRB_TRACE` print there is
+exactly **one** statement:
+
+```
+me end_function() -> MirFunction:
+    self.finalize_block()          # <-- the entire remaining window
+    ...
+    print "MIRB end ... b0_insts={first_insts} ..."
+```
+
+### Mechanism hypothesis — consistent with everything, NOT proven
+
+`finalize_block()` opens with:
+
+```
+if self.instructions.is_empty():
+    return
+...
+block.instructions = self.instructions
+```
+
+Pending **is** empty here (measured `pending=0`). If that guard fails to fire on
+the self-compiled binary, control falls through to
+`block.instructions = self.instructions` and **overwrites the already-finalized 3
+with the empty pending list**.
+
+Two independent observations match this and argue against the alternative (a lossy
+`var bldr3 = self.builder` copy): the **`blocks` count (1) survives** and
+**`locals` (3) survives**, in both engines. A lossy builder copy would be expected
+to damage those too; only the per-block instruction list is zeroed.
+
+This is the same family as the rest of the cluster — a value read wrongly on a
+self-compiled binary — but note it is a *predicate* (`is_empty()` on an empty
+collection), not an enum payload.
+
+### Not yet done
+
+The hypothesis is not proven: no probe has yet observed `is_empty()`'s answer or
+whether `finalize_block` takes its early return. That is the next measurement, and
+it is a one-line probe inside `finalize_block` — but it needs a Stage 2 build,
+because the interpreted lane does not reproduce the defect at all.
+
+**No fix is attempted here, and no workaround has been applied.** When a fix is
+made, per the standing instruction: if the root is a seed miscompile it should be
+fixed there; if a local restructure is used instead it must be recorded explicitly
+as a workaround for a live seed defect, with the seed defect filed separately, and
+it must not close this record.
