@@ -193,7 +193,10 @@ comparisons. The outer checker also runs full live Stage 3/4 verification.
 environment/compiler/provenance blobs. Its runtime-fed 100,000-operation
 Simple/Rust/Go fixture rotates launch order per trial, recomputes p50/p95 and
 max RSS from 50–1000 fixed-width samples, and derives equality-or-better Simple
-latency against both references before full live Stage 4 verification.
+latency against both references before full live Stage 4 verification. Each
+measured artifact must be an ELF executable or shared-object image, not merely
+an ELF relocatable object with a matching class, endianness, and machine. This
+v1 evidence schema is Linux-only; non-Linux environment claims fail closed.
 Independent signatures cannot substitute for either quantitative oracle.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.

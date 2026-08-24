@@ -50,7 +50,12 @@ operation_count=100000
 final_verdict=PASS
 EOF
 identity=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-cp /bin/true "$fixture/simple-benchmark"; cp /bin/true "$fixture/rust-benchmark"; cp /bin/true "$fixture/go-benchmark"
+make_x86_64_elf() {
+    { printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\003\000\076\000\001\000\000\000'; dd if=/dev/zero bs=1 count=40 2>/dev/null; printf '%s' "$2"; } >"$1"
+}
+make_x86_64_elf "$fixture/simple-benchmark" simple
+make_x86_64_elf "$fixture/rust-benchmark" rust
+make_x86_64_elf "$fixture/go-benchmark" go
 simple_exe_sha=$(hash "$fixture/simple-benchmark"); rust_exe_sha=$(hash "$fixture/rust-benchmark"); go_exe_sha=$(hash "$fixture/go-benchmark")
 cat >"$fixture/environment.env" <<EOF
 environment_schema=simple.rust-go-benchmark-environment/v1
@@ -119,10 +124,38 @@ go_max_rss_kib=00000000000000003000
 comparison_policy=simple-p50-p95-le-rust-go
 final_verdict=PASS
 EOF
-run() { sh "$CHECKER" --root "$fixture" --fingerprint "$fingerprint" --run-id "$run_id" --raw-samples "$1" --statistics "$2" --equivalence "${3:-$fixture/equivalence.env}" --environment "${4:-$fixture/environment.env}" --simple-executable "$fixture/simple-benchmark" --rust-executable "$fixture/rust-benchmark" --go-executable "$fixture/go-benchmark"; }
+run() { sh "$CHECKER" --root "$fixture" --fingerprint "$fingerprint" --run-id "$run_id" --raw-samples "$1" --statistics "$2" --equivalence "${3:-$fixture/equivalence.env}" --environment "${4:-$fixture/environment.env}" --simple-executable "${5:-$fixture/simple-benchmark}" --rust-executable "${6:-$fixture/rust-benchmark}" --go-executable "${7:-$fixture/go-benchmark}"; }
 run "$fixture/raw.env" "$fixture/statistics.env" | grep -q '^STATUS: PASS '
+sed -e "s/rust_executable_sha256=$rust_exe_sha/rust_executable_sha256=$simple_exe_sha/" \
+    -e "s/go_executable_sha256=$go_exe_sha/go_executable_sha256=$simple_exe_sha/" \
+    "$fixture/environment.env" >"$fixture/environment.identical-executables"
+run "$fixture/raw.env" "$fixture/statistics.env" "$fixture/equivalence.env" "$fixture/environment.identical-executables" "$fixture/simple-benchmark" "$fixture/simple-benchmark" "$fixture/simple-benchmark" >/dev/null 2>&1 && { echo 'FAIL: identical Simple/Rust/Go benchmark artifacts were accepted' >&2; exit 1; }
+sed 's/os=linux/os=darwin/' "$fixture/environment.env" >"$fixture/environment.non-linux"
+run "$fixture/raw.env" "$fixture/statistics.env" "$fixture/equivalence.env" "$fixture/environment.non-linux" >/dev/null 2>&1 && { echo 'FAIL: non-Linux environment with ELF artifacts was accepted' >&2; exit 1; }
 sed 's/arch=x86_64/arch=aarch64/' "$fixture/environment.env" >"$fixture/environment.cross-arch"
 run "$fixture/raw.env" "$fixture/statistics.env" "$fixture/equivalence.env" "$fixture/environment.cross-arch" >/dev/null 2>&1 && { echo 'FAIL: environment/executable target mismatch accepted' >&2; exit 1; }
+printf 'not-an-elf-benchmark\n' >"$fixture/rust-benchmark.nonelf"
+rust_nonelf_sha=$(hash "$fixture/rust-benchmark.nonelf")
+sed "s/rust_executable_sha256=$rust_exe_sha/rust_executable_sha256=$rust_nonelf_sha/" "$fixture/environment.env" >"$fixture/environment.rust-nonelf"
+run "$fixture/raw.env" "$fixture/statistics.env" "$fixture/equivalence.env" "$fixture/environment.rust-nonelf" "$fixture/simple-benchmark" "$fixture/rust-benchmark.nonelf" "$fixture/go-benchmark" >/dev/null 2>&1 && { echo 'FAIL: non-ELF Rust benchmark was accepted' >&2; exit 1; }
+cp "$fixture/go-benchmark" "$fixture/go-benchmark.rel"
+printf '\001\000' | dd of="$fixture/go-benchmark.rel" bs=1 seek=16 conv=notrunc 2>/dev/null
+go_rel_sha=$(hash "$fixture/go-benchmark.rel")
+sed "s/go_executable_sha256=$go_exe_sha/go_executable_sha256=$go_rel_sha/" "$fixture/environment.env" >"$fixture/environment.go-rel"
+run "$fixture/raw.env" "$fixture/statistics.env" "$fixture/equivalence.env" "$fixture/environment.go-rel" "$fixture/simple-benchmark" "$fixture/rust-benchmark" "$fixture/go-benchmark.rel" >/dev/null 2>&1 && { echo 'FAIL: relocatable Go object was accepted as a benchmark executable' >&2; exit 1; }
+reject_go_mutation() {
+    _artifact=$1; _label=$2
+    _sha=$(hash "$_artifact")
+    sed "s/go_executable_sha256=$go_exe_sha/go_executable_sha256=$_sha/" "$fixture/environment.env" >"$fixture/environment.go-mutation"
+    run "$fixture/raw.env" "$fixture/statistics.env" "$fixture/equivalence.env" "$fixture/environment.go-mutation" "$fixture/simple-benchmark" "$fixture/rust-benchmark" "$_artifact" >/dev/null 2>&1 && { echo "FAIL: $_label Go benchmark mutation was accepted" >&2; exit 1; }
+    return 0
+}
+cp "$fixture/go-benchmark" "$fixture/go-benchmark.truncated"; dd if="$fixture/go-benchmark.truncated" of="$fixture/go-benchmark.short" bs=1 count=63 2>/dev/null; reject_go_mutation "$fixture/go-benchmark.short" truncated-elf64
+cp "$fixture/go-benchmark" "$fixture/go-benchmark.ident-version"; printf '\002' | dd of="$fixture/go-benchmark.ident-version" bs=1 seek=6 conv=notrunc 2>/dev/null; reject_go_mutation "$fixture/go-benchmark.ident-version" bad-ident-version
+cp "$fixture/go-benchmark" "$fixture/go-benchmark.elf-version"; printf '\002' | dd of="$fixture/go-benchmark.elf-version" bs=1 seek=20 conv=notrunc 2>/dev/null; reject_go_mutation "$fixture/go-benchmark.elf-version" bad-elf-version
+cp "$fixture/go-benchmark" "$fixture/go-benchmark.big-endian"; printf '\002' | dd of="$fixture/go-benchmark.big-endian" bs=1 seek=5 conv=notrunc 2>/dev/null; reject_go_mutation "$fixture/go-benchmark.big-endian" unsupported-endianness
+cp "$fixture/go-benchmark" "$fixture/go-benchmark.elf32"; printf '\001' | dd of="$fixture/go-benchmark.elf32" bs=1 seek=4 conv=notrunc 2>/dev/null; reject_go_mutation "$fixture/go-benchmark.elf32" class-mismatch
+cp "$fixture/go-benchmark" "$fixture/go-benchmark.aarch64"; printf '\267\000' | dd of="$fixture/go-benchmark.aarch64" bs=1 seek=18 conv=notrunc 2>/dev/null; reject_go_mutation "$fixture/go-benchmark.aarch64" machine-mismatch
 sed '0,/sample|rust|2|/s//sample|simple|2|/' "$fixture/raw.env" >"$fixture/raw.order"
 run "$fixture/raw.order" "$fixture/statistics.env" >/dev/null 2>&1 && { echo 'FAIL: launch-order bias accepted' >&2; exit 1; }
 sed '0,/00000000000000000100/s//n\/a/' "$fixture/raw.env" >"$fixture/raw.numeric"
