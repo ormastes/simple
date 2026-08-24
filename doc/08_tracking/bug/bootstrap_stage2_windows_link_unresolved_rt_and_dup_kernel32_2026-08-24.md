@@ -190,3 +190,30 @@ Consequences for whoever picks this up:
 - do NOT "fix" it with `-Wl,--unresolved-symbols=ignore-all` or an equivalent;
   that reproduces the Linux behaviour and converts a caught link error back into
   a latent runtime SIGSEGV.
+
+### Where the 68 signatures live (for whoever implements them)
+
+They are NOT in `src/compiler_rust/common/src/runtime_symbols.rs` (checked: 0
+hits for all four probes). The authoritative source is the Simple `extern`
+declarations that generate the calls:
+
+```
+src/lib/common/crypto/constant_time.spl:7      extern fn rt_black_box(value: i64) -> i64?
+src/lib/nogc_async_mut/io/platform_event.spl:147  extern fn rt_event_ports_create() -> i64
+src/lib/nogc_sync_mut/io/udp.spl:223           extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?
+```
+
+Enumerate the full set with:
+
+```sh
+grep -rn "extern fn rt_" src/lib src/compiler src/app --include=*.spl
+```
+
+**Why this was NOT mass-generated into trap stubs in one pass.** The shapes are
+not uniform. `rt_event_ports_create() -> i64` is trivial, but
+`rt_io_udp_recv_from(...) -> ([u8], text)?` returns an OPTIONAL OF A TUPLE, and
+guessing how that lowers to the C ABI (sret pointer? packed struct? discriminant
+placement?) risks silent memory corruption at every call site — strictly worse
+than the link error it would replace, and it would pass the link while
+misbehaving at runtime. Derive each return shape from the actual lowering, not
+by inspection, and add them in batches with a link check per batch.
