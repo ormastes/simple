@@ -50,3 +50,25 @@ pins in one coherent change. No scalar backend handle is authorized here.
 That adapter must route every close and replacement through this owner's
 reservation checks and add package-level lifecycle coverage for reserve,
 commit, rollback, stale transactions, and child publication.
+
+## Owner API gap phase
+
+Contexts now use the complete `{task_id, lifecycle_generation}` key.
+Generation zero is invalid; task zero remains the boot/root task. The bounded
+hash index compares both fields, preventing numeric task-ID reuse from
+recovering an earlier lifecycle's descriptors.
+
+The owner-only surface now includes descriptor and context snapshots, local
+descriptor-flag mutation, shared OFD status mutation, atomic lowest-free dup
+reservation, reserved close, and context destruction receipts. Destruction
+rejects outstanding reservations and unpublishes the context before releasing
+its OFD references. A release failure returns a partial destruction receipt
+containing every already-issued close receipt, marks the result incomplete,
+and quarantines the descriptor owner. The adapter can still finalize issued
+tickets; unreleased OFD refs may leak, but no reachable descriptor contains a
+released reference.
+Close reservations are exclusive because their commit removes the alias and
+its reservation counter; a competing dup, fork, or close must finish first.
+
+Lock order remains `descriptor owner -> OFD owner`. Backend dispatch and
+scheduler mutation are forbidden while either owner lock is held.

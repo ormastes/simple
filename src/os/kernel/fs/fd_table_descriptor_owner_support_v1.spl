@@ -1,0 +1,132 @@
+"""Fixed-layout support records for the transactional descriptor owner."""
+
+use os.kernel.fs.open_file_description_owner_v1.{
+    OpenFileDescriptionRefV1, OpenFileDescriptionCloseBeginV1,
+    OpenFileDescriptionSnapshotV1
+}
+
+pub struct FdTaskLifecycleKeyV1:
+    task_id: u64
+    lifecycle_generation: u64
+
+pub enum FdDescriptorTransactionKindV1:
+    Dup
+    Dup2
+    Fork
+    Close
+
+pub(package) struct FdDescriptorTransactionV1:
+    slot: i32
+    generation: u32
+
+pub(package) struct FdDescriptorCommitV1:
+    inherited_count: u32
+    descriptor: i32
+    displaced: bool
+    displaced_close: OpenFileDescriptionCloseBeginV1?
+
+pub struct FdDescriptorSnapshotV1:
+    descriptor: i32
+    descriptor_flags: u32
+    ofd: OpenFileDescriptionSnapshotV1
+
+pub struct FdDescriptorContextSnapshotV1:
+    key: FdTaskLifecycleKeyV1
+    mutation_generation: u32
+    descriptors: [FdDescriptorSnapshotV1]
+
+pub(package) struct FdDescriptorContextDestroyV1:
+    descriptor_count: u32
+    released_count: u32
+    complete: bool
+    failure: text
+    close_begins: [OpenFileDescriptionCloseBeginV1]
+
+pub(package) struct FdDescriptorAliasV1:
+    occupied: bool
+    ofd: OpenFileDescriptionRefV1
+    descriptor_flags: u32
+    reservation_count: u32
+    close_reserved: bool
+
+pub(package) struct FdDescriptorContextV1:
+    occupied: bool
+    key: FdTaskLifecycleKeyV1
+    generation: u32
+    mutation_generation: u32
+    descriptors: [FdDescriptorAliasV1]
+
+pub(package) struct FdDescriptorTransactionSlotV1:
+    occupied: bool
+    generation: u32
+    kind: FdDescriptorTransactionKindV1
+    parent_context: i32
+    parent_generation: u32
+    parent_mutation_generation: u32
+    child_key: FdTaskLifecycleKeyV1
+    target_fd: i32
+    descriptor_flags: u32
+    no_op: bool
+    retained: [OpenFileDescriptionRefV1]
+    source_fds: [i32]
+    source_flags: [u32]
+
+pub fn fd_task_lifecycle_key_valid_v1(key: FdTaskLifecycleKeyV1) -> bool:
+    # Task zero is the explicit boot/root context; only generation zero is
+    # reserved as an invalid/unbound lifecycle.
+    key.lifecycle_generation != 0u64
+
+pub fn fd_context_destroy_receipt_valid_v1(
+    descriptor_count: u32, released_count: u32, receipt_count: u32,
+    complete: bool, failure: text
+) -> bool:
+    if released_count != receipt_count or released_count > descriptor_count:
+        return false
+    if complete:
+        return released_count == descriptor_count and failure == ""
+    released_count < descriptor_count and failure != ""
+
+pub(package) fn fd_empty_key_v1() -> FdTaskLifecycleKeyV1:
+    FdTaskLifecycleKeyV1(task_id: 0u64, lifecycle_generation: 0u64)
+
+pub(package) fn fd_empty_ref_v1() -> OpenFileDescriptionRefV1:
+    OpenFileDescriptionRefV1(slot: -1, generation: 0u32)
+
+pub(package) fn fd_empty_alias_v1() -> FdDescriptorAliasV1:
+    FdDescriptorAliasV1(
+        occupied: false, ofd: fd_empty_ref_v1(), descriptor_flags: 0u32,
+        reservation_count: 0u32, close_reserved: false)
+
+pub(package) fn fd_empty_aliases_v1(limit: i32) -> [FdDescriptorAliasV1]:
+    val aliases: [FdDescriptorAliasV1] = []
+    var i = 0
+    while i < limit:
+        aliases.push(fd_empty_alias_v1())
+        i = i + 1
+    aliases
+
+pub(package) fn fd_empty_context_v1(
+    generation: u32, descriptor_limit: i32
+) -> FdDescriptorContextV1:
+    FdDescriptorContextV1(
+        occupied: false, key: fd_empty_key_v1(), generation: generation,
+        mutation_generation: 1u32,
+        descriptors: fd_empty_aliases_v1(descriptor_limit))
+
+pub(package) fn fd_empty_transaction_v1(
+    generation: u32
+) -> FdDescriptorTransactionSlotV1:
+    val refs: [OpenFileDescriptionRefV1] = []
+    val fds: [i32] = []
+    val flags: [u32] = []
+    FdDescriptorTransactionSlotV1(
+        occupied: false, generation: generation,
+        kind: FdDescriptorTransactionKindV1.Dup,
+        parent_context: -1, parent_generation: 0u32,
+        parent_mutation_generation: 0u32, child_key: fd_empty_key_v1(),
+        target_fd: -1, descriptor_flags: 0u32, no_op: false,
+        retained: refs, source_fds: fds, source_flags: flags)
+
+export FdTaskLifecycleKeyV1, FdDescriptorTransactionKindV1
+export FdDescriptorSnapshotV1, FdDescriptorContextSnapshotV1
+export fd_task_lifecycle_key_valid_v1, fd_context_destroy_receipt_valid_v1

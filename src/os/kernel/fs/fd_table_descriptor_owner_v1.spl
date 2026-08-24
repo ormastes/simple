@@ -12,7 +12,19 @@ use os.kernel.fs.open_file_description_owner_v1.{
     OpenFileDescriptionStateV1,
     open_file_description_retain_v1,
     open_file_description_snapshot_v1,
-    open_file_description_begin_close_v1
+    open_file_description_begin_close_v1,
+    open_file_description_set_status_v1
+}
+use os.kernel.fs.fd_table_descriptor_owner_support_v1.{
+    FdTaskLifecycleKeyV1, FdDescriptorTransactionKindV1,
+    FdDescriptorTransactionV1, FdDescriptorCommitV1,
+    FdDescriptorSnapshotV1, FdDescriptorContextSnapshotV1,
+    FdDescriptorContextDestroyV1, FdDescriptorAliasV1,
+    FdDescriptorContextV1, FdDescriptorTransactionSlotV1,
+    fd_task_lifecycle_key_valid_v1, fd_context_destroy_receipt_valid_v1,
+    fd_empty_key_v1,
+    fd_empty_alias_v1, fd_empty_aliases_v1, fd_empty_context_v1,
+    fd_empty_transaction_v1
 }
 
 pub val FD_DESCRIPTOR_LIMIT_V1: i32 = 256
@@ -22,25 +34,19 @@ pub val FD_TRANSACTION_LIMIT_V1: i32 = 64
 val _FD_CONTEXT_MAP_LIMIT_V1: i32 = 512
 val _FD_GENERATION_MAX_V1: u32 = 0xffffffffu32
 
-pub enum FdDescriptorTransactionKindV1:
-    Dup
-    Dup2
-    Fork
-
-pub(package) struct FdDescriptorTransactionV1:
-    slot: i32
-    generation: u32
-
-pub(package) struct FdDescriptorCommitV1:
-    inherited_count: u32
-    descriptor: i32
-    displaced: bool
-    displaced_close: OpenFileDescriptionCloseBeginV1?
-
 export FD_DESCRIPTOR_LIMIT_V1, FD_CONTEXT_LIMIT_V1, FD_TRANSACTION_LIMIT_V1
-export FdDescriptorTransactionKindV1
+export FdTaskLifecycleKeyV1, FdDescriptorTransactionKindV1
+export FdDescriptorSnapshotV1, FdDescriptorContextSnapshotV1
+export fd_task_lifecycle_key_valid_v1
+export fd_descriptor_close_reservation_allowed_v1
+export fd_context_destroy_receipt_valid_v1
 
 pub fn fd_descriptor_replacement_allowed_v1(reservation_count: u32) -> bool:
+    reservation_count == 0u32
+
+pub fn fd_descriptor_close_reservation_allowed_v1(
+    reservation_count: u32
+) -> bool:
     reservation_count == 0u32
 
 pub fn fd_descriptor_snapshot_current_v1(
@@ -49,58 +55,15 @@ pub fn fd_descriptor_snapshot_current_v1(
     (reserved_mutation_generation != 0u32 and
         reserved_mutation_generation == current_mutation_generation)
 
-struct FdDescriptorAliasV1:
-    occupied: bool
-    ofd: OpenFileDescriptionRefV1
-    descriptor_flags: u32
-    reservation_count: u32
-
-struct FdDescriptorContextV1:
-    occupied: bool
-    owner: u64
-    generation: u32
-    mutation_generation: u32
-    descriptors: [FdDescriptorAliasV1]
-
-struct FdDescriptorTransactionSlotV1:
-    occupied: bool
-    generation: u32
-    kind: FdDescriptorTransactionKindV1
-    parent_context: i32
-    parent_generation: u32
-    parent_mutation_generation: u32
-    child_owner: u64
-    target_fd: i32
-    descriptor_flags: u32
-    no_op: bool
-    retained: [OpenFileDescriptionRefV1]
-    source_fds: [i32]
-    source_flags: [u32]
-
 struct FdDescriptorOwnerV1:
     initialized: bool
     quarantined: bool
     contexts: [FdDescriptorContextV1]
     transactions: [FdDescriptorTransactionSlotV1]
     context_map_state: [u8]
-    context_map_owner: [u64]
+    context_map_task_id: [u64]
+    context_map_lifecycle_generation: [u64]
     context_map_slot: [i32]
-
-fn _fd_empty_ref_v1() -> OpenFileDescriptionRefV1:
-    OpenFileDescriptionRefV1(slot: -1, generation: 0u32)
-
-fn _fd_empty_alias_v1() -> FdDescriptorAliasV1:
-    FdDescriptorAliasV1(
-        occupied: false, ofd: _fd_empty_ref_v1(), descriptor_flags: 0u32,
-        reservation_count: 0u32)
-
-fn _fd_empty_aliases_v1() -> [FdDescriptorAliasV1]:
-    val aliases: [FdDescriptorAliasV1] = []
-    var i = 0
-    while i < FD_DESCRIPTOR_LIMIT_V1:
-        aliases.push(_fd_empty_alias_v1())
-        i = i + 1
-    aliases
 
 fn _fd_empty_refs_v1() -> [OpenFileDescriptionRefV1]:
     val refs: [OpenFileDescriptionRefV1] = []
@@ -114,27 +77,11 @@ fn _fd_empty_flags_v1() -> [u32]:
     val flags: [u32] = []
     flags
 
-fn _fd_empty_context_v1(generation: u32) -> FdDescriptorContextV1:
-    FdDescriptorContextV1(
-        occupied: false, owner: 0u64, generation: generation,
-        mutation_generation: 1u32,
-        descriptors: _fd_empty_aliases_v1())
-
-fn _fd_empty_transaction_v1(generation: u32) -> FdDescriptorTransactionSlotV1:
-    FdDescriptorTransactionSlotV1(
-        occupied: false, generation: generation,
-        kind: FdDescriptorTransactionKindV1.Dup,
-        parent_context: -1, parent_generation: 0u32,
-        parent_mutation_generation: 0u32, child_owner: 0u64,
-        target_fd: -1, descriptor_flags: 0u32,
-        no_op: false, retained: _fd_empty_refs_v1(),
-        source_fds: _fd_empty_fds_v1(), source_flags: _fd_empty_flags_v1())
-
 fn _fd_empty_contexts_v1() -> [FdDescriptorContextV1]:
     val contexts: [FdDescriptorContextV1] = []
     var i = 0
     while i < FD_CONTEXT_LIMIT_V1:
-        contexts.push(_fd_empty_context_v1(1u32))
+        contexts.push(fd_empty_context_v1(1u32, FD_DESCRIPTOR_LIMIT_V1))
         i = i + 1
     contexts
 
@@ -142,7 +89,7 @@ fn _fd_empty_transactions_v1() -> [FdDescriptorTransactionSlotV1]:
     val transactions: [FdDescriptorTransactionSlotV1] = []
     var i = 0
     while i < FD_TRANSACTION_LIMIT_V1:
-        transactions.push(_fd_empty_transaction_v1(1u32))
+        transactions.push(fd_empty_transaction_v1(1u32))
         i = i + 1
     transactions
 
@@ -174,14 +121,16 @@ val _fd_descriptor_mutex_v1: i64 = mutex_raw_create()
 var _fd_descriptor_owner_v1 = FdDescriptorOwnerV1(
     initialized: false, quarantined: false,
     contexts: [], transactions: [],
-    context_map_state: [], context_map_owner: [], context_map_slot: [])
+    context_map_state: [], context_map_task_id: [],
+    context_map_lifecycle_generation: [], context_map_slot: [])
 
 fn _fd_initialize_v1():
     if _fd_descriptor_owner_v1.initialized: return
     _fd_descriptor_owner_v1.contexts = _fd_empty_contexts_v1()
     _fd_descriptor_owner_v1.transactions = _fd_empty_transactions_v1()
     _fd_descriptor_owner_v1.context_map_state = _fd_empty_u8_map_v1()
-    _fd_descriptor_owner_v1.context_map_owner = _fd_empty_u64_map_v1()
+    _fd_descriptor_owner_v1.context_map_task_id = _fd_empty_u64_map_v1()
+    _fd_descriptor_owner_v1.context_map_lifecycle_generation = _fd_empty_u64_map_v1()
     _fd_descriptor_owner_v1.context_map_slot = _fd_empty_i32_map_v1()
     _fd_descriptor_owner_v1.initialized = true
 
@@ -199,31 +148,36 @@ fn _fd_unlock_v1() -> bool:
     _fd_descriptor_owner_v1.quarantined = true
     false
 
-fn _fd_hash_v1(owner: u64) -> i32:
-    ((owner ^ (owner >> 32u64)) & 511u64) as i32
+fn _fd_hash_v1(key: FdTaskLifecycleKeyV1) -> i32:
+    ((key.task_id ^ (key.task_id >> 32u64) ^ key.lifecycle_generation ^
+        (key.lifecycle_generation >> 32u64)) & 511u64) as i32
 
-fn _fd_context_map_lookup_v1(owner: u64) -> i32:
+fn _fd_context_map_lookup_v1(key: FdTaskLifecycleKeyV1) -> i32:
     var probe = 0
-    val start = _fd_hash_v1(owner)
+    val start = _fd_hash_v1(key)
     while probe < _FD_CONTEXT_MAP_LIMIT_V1:
         val bucket = (start + probe) & 511
         val state = _fd_descriptor_owner_v1.context_map_state[bucket]
         if state == 0u8: return -1
         if (state == 1u8 and
-            _fd_descriptor_owner_v1.context_map_owner[bucket] == owner):
+            _fd_descriptor_owner_v1.context_map_task_id[bucket] == key.task_id and
+            _fd_descriptor_owner_v1.context_map_lifecycle_generation[bucket] ==
+                key.lifecycle_generation):
             return _fd_descriptor_owner_v1.context_map_slot[bucket]
         probe = probe + 1
     -1
 
-fn _fd_context_map_insert_v1(owner: u64, context_slot: i32) -> bool:
+fn _fd_context_map_insert_v1(key: FdTaskLifecycleKeyV1, context_slot: i32) -> bool:
     var probe = 0
     var tombstone = -1
-    val start = _fd_hash_v1(owner)
+    val start = _fd_hash_v1(key)
     while probe < _FD_CONTEXT_MAP_LIMIT_V1:
         val bucket = (start + probe) & 511
         val state = _fd_descriptor_owner_v1.context_map_state[bucket]
         if state == 1u8:
-            if _fd_descriptor_owner_v1.context_map_owner[bucket] == owner:
+            if (_fd_descriptor_owner_v1.context_map_task_id[bucket] == key.task_id and
+                _fd_descriptor_owner_v1.context_map_lifecycle_generation[bucket] ==
+                    key.lifecycle_generation):
                 return false
         else:
             if state == 2u8 and tombstone < 0:
@@ -231,15 +185,39 @@ fn _fd_context_map_insert_v1(owner: u64, context_slot: i32) -> bool:
             if state == 0u8:
                 val target = if tombstone >= 0: tombstone else: bucket
                 _fd_descriptor_owner_v1.context_map_state[target] = 1u8
-                _fd_descriptor_owner_v1.context_map_owner[target] = owner
+                _fd_descriptor_owner_v1.context_map_task_id[target] = key.task_id
+                _fd_descriptor_owner_v1.context_map_lifecycle_generation[target] =
+                    key.lifecycle_generation
                 _fd_descriptor_owner_v1.context_map_slot[target] = context_slot
                 return true
         probe = probe + 1
     if tombstone >= 0:
         _fd_descriptor_owner_v1.context_map_state[tombstone] = 1u8
-        _fd_descriptor_owner_v1.context_map_owner[tombstone] = owner
+        _fd_descriptor_owner_v1.context_map_task_id[tombstone] = key.task_id
+        _fd_descriptor_owner_v1.context_map_lifecycle_generation[tombstone] =
+            key.lifecycle_generation
         _fd_descriptor_owner_v1.context_map_slot[tombstone] = context_slot
         return true
+    false
+
+fn _fd_context_map_remove_v1(key: FdTaskLifecycleKeyV1) -> bool:
+    val slot = _fd_context_map_lookup_v1(key)
+    if slot < 0: return false
+    var probe = 0
+    val start = _fd_hash_v1(key)
+    while probe < _FD_CONTEXT_MAP_LIMIT_V1:
+        val bucket = (start + probe) & 511
+        if (_fd_descriptor_owner_v1.context_map_state[bucket] == 1u8 and
+            _fd_descriptor_owner_v1.context_map_slot[bucket] == slot and
+            _fd_descriptor_owner_v1.context_map_task_id[bucket] == key.task_id and
+            _fd_descriptor_owner_v1.context_map_lifecycle_generation[bucket] ==
+                key.lifecycle_generation):
+            _fd_descriptor_owner_v1.context_map_state[bucket] = 2u8
+            _fd_descriptor_owner_v1.context_map_task_id[bucket] = 0u64
+            _fd_descriptor_owner_v1.context_map_lifecycle_generation[bucket] = 0u64
+            _fd_descriptor_owner_v1.context_map_slot[bucket] = -1
+            return true
+        probe = probe + 1
     false
 
 fn _fd_find_free_context_v1() -> i32:
@@ -288,12 +266,40 @@ fn _fd_release_source_reservations_v1(
         i = i + 1
     true
 
+fn _fd_clear_close_reservation_v1(
+    context_index: i32, source_fds: [i32]
+) -> bool:
+    if source_fds.len() != 1:
+        _fd_descriptor_owner_v1.quarantined = true
+        return false
+    val fd = source_fds[0]
+    if (context_index < 0 or context_index >= FD_CONTEXT_LIMIT_V1 or
+        fd < 0 or fd >= FD_DESCRIPTOR_LIMIT_V1):
+        _fd_descriptor_owner_v1.quarantined = true
+        return false
+    val alias = _fd_descriptor_owner_v1.contexts[context_index].descriptors[fd]
+    if not alias.occupied or not alias.close_reserved:
+        _fd_descriptor_owner_v1.quarantined = true
+        return false
+    _fd_descriptor_owner_v1.contexts[context_index].descriptors[fd].close_reserved = false
+    true
+
+fn _fd_release_transaction_reservations_v1(
+    reserved: FdDescriptorTransactionSlotV1
+) -> bool:
+    if reserved.kind == FdDescriptorTransactionKindV1.Close:
+        if not _fd_clear_close_reservation_v1(
+            reserved.parent_context, reserved.source_fds):
+            return false
+    _fd_release_source_reservations_v1(
+        reserved.parent_context, reserved.source_fds)
+
 fn _fd_allocate_transaction_v1(
     kind: FdDescriptorTransactionKindV1,
     parent_context: i32,
     parent_generation: u32,
     parent_mutation_generation: u32,
-    child_owner: u64,
+    child_key: FdTaskLifecycleKeyV1,
     target_fd: i32,
     descriptor_flags: u32,
     retained: [OpenFileDescriptionRefV1],
@@ -311,7 +317,7 @@ fn _fd_allocate_transaction_v1(
         occupied: true, generation: generation, kind: kind,
         parent_context: parent_context, parent_generation: parent_generation,
         parent_mutation_generation: parent_mutation_generation,
-        child_owner: child_owner, target_fd: target_fd,
+        child_key: child_key, target_fd: target_fd,
         descriptor_flags: descriptor_flags,
         no_op: no_op, retained: retained, source_fds: source_fds,
         source_flags: source_flags)
@@ -327,9 +333,12 @@ fn _fd_transaction_index_v1(transaction: FdDescriptorTransactionV1) -> i32:
         return -1
     transaction.slot
 
-pub(package) fn fd_descriptor_context_create_v1(owner: u64) -> Result<(), text>:
+pub(package) fn fd_descriptor_context_create_v1(
+    key: FdTaskLifecycleKeyV1
+) -> Result<(), text>:
+    if not fd_task_lifecycle_key_valid_v1(key): return Err("invalid-lifecycle-key")
     if not _fd_lock_v1(): return Err("serialization-unavailable")
-    if _fd_context_map_lookup_v1(owner) >= 0:
+    if _fd_context_map_lookup_v1(key) >= 0:
         _ = _fd_unlock_v1()
         return Err("context-already-exists")
     val slot = _fd_find_free_context_v1()
@@ -342,25 +351,26 @@ pub(package) fn fd_descriptor_context_create_v1(owner: u64) -> Result<(), text>:
         return Err("context-generation-exhausted")
     val generation = prior.generation + 1u32
     _fd_descriptor_owner_v1.contexts[slot] = FdDescriptorContextV1(
-        occupied: true, owner: owner, generation: generation,
+        occupied: true, key: key, generation: generation,
         mutation_generation: 1u32,
-        descriptors: _fd_empty_aliases_v1())
-    if not _fd_context_map_insert_v1(owner, slot):
-        _fd_descriptor_owner_v1.contexts[slot] = _fd_empty_context_v1(generation)
+        descriptors: fd_empty_aliases_v1(FD_DESCRIPTOR_LIMIT_V1))
+    if not _fd_context_map_insert_v1(key, slot):
+        _fd_descriptor_owner_v1.contexts[slot] =
+            fd_empty_context_v1(generation, FD_DESCRIPTOR_LIMIT_V1)
         _ = _fd_unlock_v1()
         return Err("context-map-capacity-exhausted")
     if not _fd_unlock_v1(): return Err("serialization-unavailable")
     Ok(())
 
 pub(package) fn fd_descriptor_install_v1(
-    owner: u64,
+    key: FdTaskLifecycleKeyV1,
     fd: i32,
     ofd: OpenFileDescriptionRefV1,
     descriptor_flags: u32
 ) -> Result<(), text>:
     if fd < 0 or fd >= FD_DESCRIPTOR_LIMIT_V1: return Err("invalid-descriptor")
     if not _fd_lock_v1(): return Err("serialization-unavailable")
-    val context_index = _fd_context_map_lookup_v1(owner)
+    val context_index = _fd_context_map_lookup_v1(key)
     if context_index < 0:
         _ = _fd_unlock_v1()
         return Err("unknown-context")
@@ -381,31 +391,46 @@ pub(package) fn fd_descriptor_install_v1(
     _fd_descriptor_owner_v1.contexts[context_index].descriptors[fd] =
         FdDescriptorAliasV1(
             occupied: true, ofd: ofd, descriptor_flags: descriptor_flags,
-            reservation_count: 0u32)
+            reservation_count: 0u32, close_reserved: false)
     _fd_descriptor_owner_v1.contexts[context_index].mutation_generation = mutation + 1u32
     if not _fd_unlock_v1(): return Err("serialization-unavailable")
     Ok(())
 
 fn _fd_reserve_dup_common_v1(
-    owner: u64,
+    key: FdTaskLifecycleKeyV1,
     old_fd: i32,
     target_fd: i32,
+    minimum_fd: i32,
+    choose_lowest: bool,
     descriptor_flags: u32,
     kind: FdDescriptorTransactionKindV1
 ) -> Result<FdDescriptorTransactionV1, text>:
     if (old_fd < 0 or old_fd >= FD_DESCRIPTOR_LIMIT_V1 or
-        target_fd < 0 or target_fd >= FD_DESCRIPTOR_LIMIT_V1):
+        (choose_lowest and (minimum_fd < 0 or minimum_fd >= FD_DESCRIPTOR_LIMIT_V1)) or
+        (not choose_lowest and (target_fd < 0 or target_fd >= FD_DESCRIPTOR_LIMIT_V1))):
         return Err("invalid-descriptor")
     if not _fd_lock_v1(): return Err("serialization-unavailable")
-    val context_index = _fd_context_map_lookup_v1(owner)
+    val context_index = _fd_context_map_lookup_v1(key)
     if context_index < 0:
         _ = _fd_unlock_v1()
         return Err("unknown-context")
     val context = _fd_descriptor_owner_v1.contexts[context_index]
+    var selected_fd = target_fd
+    if choose_lowest:
+        selected_fd = minimum_fd
+        while (selected_fd < FD_DESCRIPTOR_LIMIT_V1 and
+            context.descriptors[selected_fd].occupied):
+            selected_fd = selected_fd + 1
+        if selected_fd >= FD_DESCRIPTOR_LIMIT_V1:
+            _ = _fd_unlock_v1()
+            return Err("descriptor-capacity-exhausted")
     val source = context.descriptors[old_fd]
     if not source.occupied:
         _ = _fd_unlock_v1()
         return Err("invalid-source-descriptor")
+    if source.close_reserved:
+        _ = _fd_unlock_v1()
+        return Err("descriptor-close-reserved")
     val source_fds = _fd_empty_fds_v1()
     source_fds.push(old_fd)
     val source_flags = _fd_empty_flags_v1()
@@ -415,7 +440,7 @@ fn _fd_reserve_dup_common_v1(
         return Err("descriptor-reservation-exhausted")
     _fd_descriptor_owner_v1.contexts[context_index].descriptors[old_fd].reservation_count =
         source.reservation_count + 1u32
-    if kind == FdDescriptorTransactionKindV1.Dup2 and old_fd == target_fd:
+    if kind == FdDescriptorTransactionKindV1.Dup2 and old_fd == selected_fd:
         val retained_result = open_file_description_retain_v1(source.ofd)
         if retained_result.is_err():
             _ = _fd_release_source_reservations_v1(context_index, source_fds)
@@ -425,14 +450,14 @@ fn _fd_reserve_dup_common_v1(
         no_op_refs.push(source.ofd)
         val no_op_transaction = _fd_allocate_transaction_v1(
             kind, context_index, context.generation, context.mutation_generation,
-            0u64, target_fd,
+            fd_empty_key_v1(), selected_fd,
             source.descriptor_flags, no_op_refs, source_fds, source_flags, true)
         if no_op_transaction.is_err():
             _ = _fd_release_retained_v1(no_op_refs)
             _ = _fd_release_source_reservations_v1(context_index, source_fds)
         if not _fd_unlock_v1(): return Err("serialization-unavailable")
         return no_op_transaction
-    if kind == FdDescriptorTransactionKindV1.Dup and context.descriptors[target_fd].occupied:
+    if kind == FdDescriptorTransactionKindV1.Dup and context.descriptors[selected_fd].occupied:
         _ = _fd_release_source_reservations_v1(context_index, source_fds)
         _ = _fd_unlock_v1()
         return Err("target-descriptor-occupied")
@@ -445,7 +470,7 @@ fn _fd_reserve_dup_common_v1(
     retained.push(source.ofd)
     val allocated = _fd_allocate_transaction_v1(
         kind, context_index, context.generation, context.mutation_generation,
-        0u64, target_fd,
+        fd_empty_key_v1(), selected_fd,
         descriptor_flags, retained, source_fds, source_flags, false)
     if allocated.is_err():
         _fd_release_retained_v1(retained)
@@ -456,25 +481,71 @@ fn _fd_reserve_dup_common_v1(
     allocated
 
 pub(package) fn fd_descriptor_reserve_dup_v1(
-    owner: u64, old_fd: i32, target_fd: i32, descriptor_flags: u32
+    key: FdTaskLifecycleKeyV1, old_fd: i32, target_fd: i32, descriptor_flags: u32
 ) -> Result<FdDescriptorTransactionV1, text>:
     _fd_reserve_dup_common_v1(
-        owner, old_fd, target_fd, descriptor_flags,
+        key, old_fd, target_fd, 0, false, descriptor_flags,
         FdDescriptorTransactionKindV1.Dup)
 
 pub(package) fn fd_descriptor_reserve_dup2_v1(
-    owner: u64, old_fd: i32, target_fd: i32, descriptor_flags: u32
+    key: FdTaskLifecycleKeyV1, old_fd: i32, target_fd: i32, descriptor_flags: u32
 ) -> Result<FdDescriptorTransactionV1, text>:
     _fd_reserve_dup_common_v1(
-        owner, old_fd, target_fd, descriptor_flags,
+        key, old_fd, target_fd, 0, false, descriptor_flags,
         FdDescriptorTransactionKindV1.Dup2)
 
-pub(package) fn fd_descriptor_reserve_fork_v1(
-    parent_owner: u64, child_owner: u64
+pub(package) fn fd_descriptor_reserve_dup_lowest_v1(
+    key: FdTaskLifecycleKeyV1, old_fd: i32, minimum_fd: i32,
+    descriptor_flags: u32
 ) -> Result<FdDescriptorTransactionV1, text>:
+    _fd_reserve_dup_common_v1(
+        key, old_fd, -1, minimum_fd, true, descriptor_flags,
+        FdDescriptorTransactionKindV1.Dup)
+
+pub(package) fn fd_descriptor_reserve_close_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32
+) -> Result<FdDescriptorTransactionV1, text>:
+    if fd < 0 or fd >= FD_DESCRIPTOR_LIMIT_V1: return Err("invalid-descriptor")
     if not _fd_lock_v1(): return Err("serialization-unavailable")
-    val parent_index = _fd_context_map_lookup_v1(parent_owner)
-    if parent_index < 0 or _fd_context_map_lookup_v1(child_owner) >= 0:
+    val context_index = _fd_context_map_lookup_v1(key)
+    if context_index < 0:
+        _ = _fd_unlock_v1()
+        return Err("unknown-context")
+    val context = _fd_descriptor_owner_v1.contexts[context_index]
+    val source = context.descriptors[fd]
+    if not source.occupied:
+        _ = _fd_unlock_v1()
+        return Err("invalid-source-descriptor")
+    # Commit removes the alias, so a close reservation must be exclusive.
+    if not fd_descriptor_close_reservation_allowed_v1(source.reservation_count):
+        _ = _fd_unlock_v1()
+        return Err("descriptor-reserved")
+    _fd_descriptor_owner_v1.contexts[context_index].descriptors[fd].reservation_count =
+        source.reservation_count + 1u32
+    _fd_descriptor_owner_v1.contexts[context_index].descriptors[fd].close_reserved = true
+    val source_fds = _fd_empty_fds_v1()
+    source_fds.push(fd)
+    val source_flags = _fd_empty_flags_v1()
+    source_flags.push(source.descriptor_flags)
+    val allocated = _fd_allocate_transaction_v1(
+        FdDescriptorTransactionKindV1.Close, context_index,
+        context.generation, context.mutation_generation, fd_empty_key_v1(),
+        fd, 0u32, _fd_empty_refs_v1(), source_fds, source_flags, false)
+    if allocated.is_err():
+        _fd_descriptor_owner_v1.contexts[context_index].descriptors[fd].close_reserved = false
+        _ = _fd_release_source_reservations_v1(context_index, source_fds)
+    if not _fd_unlock_v1(): return Err("serialization-unavailable")
+    allocated
+
+pub(package) fn fd_descriptor_reserve_fork_v1(
+    parent_key: FdTaskLifecycleKeyV1, child_key: FdTaskLifecycleKeyV1
+) -> Result<FdDescriptorTransactionV1, text>:
+    if (not fd_task_lifecycle_key_valid_v1(parent_key) or
+        not fd_task_lifecycle_key_valid_v1(child_key) or parent_key == child_key):
+        return Err("invalid-fork-context")
+    if not _fd_lock_v1(): return Err("serialization-unavailable")
+    val parent_index = _fd_context_map_lookup_v1(parent_key)
+    if parent_index < 0 or _fd_context_map_lookup_v1(child_key) >= 0:
         _ = _fd_unlock_v1()
         return Err("invalid-fork-context")
     if _fd_find_free_context_v1() < 0:
@@ -488,6 +559,11 @@ pub(package) fn fd_descriptor_reserve_fork_v1(
     while fd < FD_DESCRIPTOR_LIMIT_V1:
         val alias = parent.descriptors[fd]
         if alias.occupied:
+            if alias.close_reserved:
+                _ = _fd_release_source_reservations_v1(parent_index, source_fds)
+                _ = _fd_release_retained_v1(retained)
+                _ = _fd_unlock_v1()
+                return Err("descriptor-close-reserved")
             if alias.reservation_count == 0xffffffffu32:
                 _ = _fd_release_source_reservations_v1(parent_index, source_fds)
                 _ = _fd_release_retained_v1(retained)
@@ -508,7 +584,7 @@ pub(package) fn fd_descriptor_reserve_fork_v1(
     val allocated = _fd_allocate_transaction_v1(
         FdDescriptorTransactionKindV1.Fork,
         parent_index, parent.generation, parent.mutation_generation,
-        child_owner, -1, 0u32,
+        child_key, -1, 0u32,
         retained, source_fds, source_flags, false)
     if allocated.is_err():
         _ = _fd_release_retained_v1(retained)
@@ -521,7 +597,7 @@ pub(package) fn fd_descriptor_reserve_fork_v1(
 fn _fd_finish_transaction_v1(index: i32):
     val generation = _fd_descriptor_owner_v1.transactions[index].generation
     _fd_descriptor_owner_v1.transactions[index] =
-        _fd_empty_transaction_v1(generation)
+        fd_empty_transaction_v1(generation)
 
 pub(package) fn fd_descriptor_commit_v1(
     transaction: FdDescriptorTransactionV1
@@ -537,33 +613,29 @@ pub(package) fn fd_descriptor_commit_v1(
         not fd_descriptor_snapshot_current_v1(
             reserved.parent_mutation_generation, parent.mutation_generation)):
         _ = _fd_release_retained_v1(reserved.retained)
-        _ = _fd_release_source_reservations_v1(
-            reserved.parent_context, reserved.source_fds)
+        _ = _fd_release_transaction_reservations_v1(reserved)
         _fd_finish_transaction_v1(index)
         _ = _fd_unlock_v1()
         return Err("parent-context-changed")
 
     if reserved.kind == FdDescriptorTransactionKindV1.Fork:
-        if _fd_context_map_lookup_v1(reserved.child_owner) >= 0:
+        if _fd_context_map_lookup_v1(reserved.child_key) >= 0:
             _ = _fd_release_retained_v1(reserved.retained)
-            _ = _fd_release_source_reservations_v1(
-                reserved.parent_context, reserved.source_fds)
+            _ = _fd_release_transaction_reservations_v1(reserved)
             _fd_finish_transaction_v1(index)
             _ = _fd_unlock_v1()
             return Err("child-context-already-visible")
         val child_index = _fd_find_free_context_v1()
         if child_index < 0:
             _ = _fd_release_retained_v1(reserved.retained)
-            _ = _fd_release_source_reservations_v1(
-                reserved.parent_context, reserved.source_fds)
+            _ = _fd_release_transaction_reservations_v1(reserved)
             _fd_finish_transaction_v1(index)
             _ = _fd_unlock_v1()
             return Err("context-capacity-exhausted")
         val prior_generation = _fd_descriptor_owner_v1.contexts[child_index].generation
         if prior_generation == _FD_GENERATION_MAX_V1:
             _ = _fd_release_retained_v1(reserved.retained)
-            _ = _fd_release_source_reservations_v1(
-                reserved.parent_context, reserved.source_fds)
+            _ = _fd_release_transaction_reservations_v1(reserved)
             _fd_finish_transaction_v1(index)
             _ = _fd_unlock_v1()
             return Err("context-generation-exhausted")
@@ -579,35 +651,32 @@ pub(package) fn fd_descriptor_commit_v1(
             check = check + 1
         if not source_valid:
             _ = _fd_release_retained_v1(reserved.retained)
-            _ = _fd_release_source_reservations_v1(
-                reserved.parent_context, reserved.source_fds)
+            _ = _fd_release_transaction_reservations_v1(reserved)
             _fd_finish_transaction_v1(index)
             _ = _fd_unlock_v1()
             return Err("parent-descriptors-changed")
         var child = FdDescriptorContextV1(
-            occupied: true, owner: reserved.child_owner,
+            occupied: true, key: reserved.child_key,
             generation: child_generation, mutation_generation: 1u32,
-            descriptors: _fd_empty_aliases_v1())
+            descriptors: fd_empty_aliases_v1(FD_DESCRIPTOR_LIMIT_V1))
         var i = 0
         while i < reserved.retained.len():
             val fd = reserved.source_fds[i]
             child.descriptors[fd] = FdDescriptorAliasV1(
                 occupied: true, ofd: reserved.retained[i],
                 descriptor_flags: reserved.source_flags[i],
-                reservation_count: 0u32)
+                reservation_count: 0u32, close_reserved: false)
             i = i + 1
         _fd_descriptor_owner_v1.contexts[child_index] = child
-        if not _fd_context_map_insert_v1(reserved.child_owner, child_index):
+        if not _fd_context_map_insert_v1(reserved.child_key, child_index):
             _fd_descriptor_owner_v1.contexts[child_index] =
-                _fd_empty_context_v1(child_generation)
+                fd_empty_context_v1(child_generation, FD_DESCRIPTOR_LIMIT_V1)
             _ = _fd_release_retained_v1(reserved.retained)
-            _ = _fd_release_source_reservations_v1(
-                reserved.parent_context, reserved.source_fds)
+            _ = _fd_release_transaction_reservations_v1(reserved)
             _fd_finish_transaction_v1(index)
             _ = _fd_unlock_v1()
             return Err("context-map-capacity-exhausted")
-        if not _fd_release_source_reservations_v1(
-            reserved.parent_context, reserved.source_fds):
+        if not _fd_release_transaction_reservations_v1(reserved):
             _fd_descriptor_owner_v1.quarantined = true
             _ = _fd_unlock_v1()
             return Err("descriptor-reservation-corrupt")
@@ -618,6 +687,36 @@ pub(package) fn fd_descriptor_commit_v1(
             inherited_count: inherited, descriptor: -1, displaced: false,
             displaced_close: nil))
 
+    if reserved.kind == FdDescriptorTransactionKindV1.Close:
+        val target = reserved.target_fd
+        val current = parent.descriptors[target]
+        if (not current.occupied or current.descriptor_flags != reserved.source_flags[0] or
+            not current.close_reserved or current.reservation_count != 1u32):
+            _ = _fd_release_transaction_reservations_v1(reserved)
+            _fd_finish_transaction_v1(index)
+            _ = _fd_unlock_v1()
+            return Err("source-descriptor-changed")
+        val mutation = parent.mutation_generation
+        if mutation == _FD_GENERATION_MAX_V1:
+            _ = _fd_release_transaction_reservations_v1(reserved)
+            _fd_finish_transaction_v1(index)
+            _ = _fd_unlock_v1()
+            return Err("context-mutation-generation-exhausted")
+        _fd_descriptor_owner_v1.contexts[reserved.parent_context].descriptors[target] =
+            fd_empty_alias_v1()
+        _fd_descriptor_owner_v1.contexts[reserved.parent_context].mutation_generation =
+            mutation + 1u32
+        val close_result = open_file_description_begin_close_v1(current.ofd)
+        if close_result.is_err():
+            _fd_descriptor_owner_v1.quarantined = true
+            _ = _fd_unlock_v1()
+            return Err("ofd-release-failed")
+        _fd_finish_transaction_v1(index)
+        if not _fd_unlock_v1(): return Err("serialization-unavailable")
+        return Ok(FdDescriptorCommitV1(
+            inherited_count: 0u32, descriptor: target, displaced: true,
+            displaced_close: Some(close_result.unwrap())))
+
     val target = reserved.target_fd
     val current_source = parent.descriptors[reserved.source_fds[0]]
     if reserved.no_op:
@@ -625,8 +724,7 @@ pub(package) fn fd_descriptor_commit_v1(
             current_source.ofd != reserved.retained[0] or
             current_source.descriptor_flags != reserved.source_flags[0]):
             _ = _fd_release_retained_v1(reserved.retained)
-            _ = _fd_release_source_reservations_v1(
-                reserved.parent_context, reserved.source_fds)
+            _ = _fd_release_transaction_reservations_v1(reserved)
             _fd_finish_transaction_v1(index)
             _ = _fd_unlock_v1()
             return Err("source-descriptor-changed")
@@ -634,8 +732,7 @@ pub(package) fn fd_descriptor_commit_v1(
             _fd_finish_transaction_v1(index)
             _ = _fd_unlock_v1()
             return Err("ofd-retain-rollback-failed")
-        if not _fd_release_source_reservations_v1(
-            reserved.parent_context, reserved.source_fds):
+        if not _fd_release_transaction_reservations_v1(reserved):
             _fd_descriptor_owner_v1.quarantined = true
             _ = _fd_unlock_v1()
             return Err("descriptor-reservation-corrupt")
@@ -646,8 +743,7 @@ pub(package) fn fd_descriptor_commit_v1(
             displaced_close: nil))
     if not current_source.occupied or current_source.ofd != reserved.retained[0]:
         _ = _fd_release_retained_v1(reserved.retained)
-        _ = _fd_release_source_reservations_v1(
-            reserved.parent_context, reserved.source_fds)
+        _ = _fd_release_transaction_reservations_v1(reserved)
         _fd_finish_transaction_v1(index)
         _ = _fd_unlock_v1()
         return Err("source-descriptor-changed")
@@ -655,23 +751,20 @@ pub(package) fn fd_descriptor_commit_v1(
     if (displaced.occupied and
         not fd_descriptor_replacement_allowed_v1(displaced.reservation_count)):
         _ = _fd_release_retained_v1(reserved.retained)
-        _ = _fd_release_source_reservations_v1(
-            reserved.parent_context, reserved.source_fds)
+        _ = _fd_release_transaction_reservations_v1(reserved)
         _fd_finish_transaction_v1(index)
         _ = _fd_unlock_v1()
         return Err("target-descriptor-reserved")
     if reserved.kind == FdDescriptorTransactionKindV1.Dup and displaced.occupied:
         _ = _fd_release_retained_v1(reserved.retained)
-        _ = _fd_release_source_reservations_v1(
-            reserved.parent_context, reserved.source_fds)
+        _ = _fd_release_transaction_reservations_v1(reserved)
         _fd_finish_transaction_v1(index)
         _ = _fd_unlock_v1()
         return Err("target-descriptor-changed")
     val mutation = _fd_descriptor_owner_v1.contexts[reserved.parent_context].mutation_generation
     if mutation == _FD_GENERATION_MAX_V1:
         _ = _fd_release_retained_v1(reserved.retained)
-        _ = _fd_release_source_reservations_v1(
-            reserved.parent_context, reserved.source_fds)
+        _ = _fd_release_transaction_reservations_v1(reserved)
         _fd_finish_transaction_v1(index)
         _ = _fd_unlock_v1()
         return Err("context-mutation-generation-exhausted")
@@ -679,7 +772,7 @@ pub(package) fn fd_descriptor_commit_v1(
         FdDescriptorAliasV1(
             occupied: true, ofd: reserved.retained[0],
             descriptor_flags: reserved.descriptor_flags,
-            reservation_count: 0u32)
+            reservation_count: 0u32, close_reserved: false)
     _fd_descriptor_owner_v1.contexts[reserved.parent_context].mutation_generation = mutation + 1u32
     var displaced_close: OpenFileDescriptionCloseBeginV1? = nil
     if displaced.occupied:
@@ -689,8 +782,7 @@ pub(package) fn fd_descriptor_commit_v1(
             _ = _fd_unlock_v1()
             return Err("displaced-ofd-release-failed")
         displaced_close = Some(close_result.unwrap())
-    if not _fd_release_source_reservations_v1(
-        reserved.parent_context, reserved.source_fds):
+    if not _fd_release_transaction_reservations_v1(reserved):
         _fd_descriptor_owner_v1.quarantined = true
         _ = _fd_unlock_v1()
         return Err("descriptor-reservation-corrupt")
@@ -713,8 +805,7 @@ pub(package) fn fd_descriptor_rollback_v1(
     if not _fd_release_retained_v1(retained):
         _ = _fd_unlock_v1()
         return Err("ofd-retain-rollback-failed")
-    if not _fd_release_source_reservations_v1(
-        reserved.parent_context, reserved.source_fds):
+    if not _fd_release_transaction_reservations_v1(reserved):
         _fd_descriptor_owner_v1.quarantined = true
         _ = _fd_unlock_v1()
         return Err("descriptor-reservation-corrupt")
@@ -723,8 +814,156 @@ pub(package) fn fd_descriptor_rollback_v1(
     if not _fd_unlock_v1(): return Err("serialization-unavailable")
     Ok(count)
 
-pub(package) fn fd_descriptor_context_exists_v1(owner: u64) -> bool:
+pub(package) fn fd_descriptor_snapshot_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32
+) -> Result<FdDescriptorSnapshotV1, text>:
+    if fd < 0 or fd >= FD_DESCRIPTOR_LIMIT_V1: return Err("invalid-descriptor")
+    if not _fd_lock_v1(): return Err("serialization-unavailable")
+    val context_index = _fd_context_map_lookup_v1(key)
+    if context_index < 0:
+        _ = _fd_unlock_v1()
+        return Err("unknown-context")
+    val alias = _fd_descriptor_owner_v1.contexts[context_index].descriptors[fd]
+    if not alias.occupied:
+        _ = _fd_unlock_v1()
+        return Err("invalid-descriptor")
+    val ofd = open_file_description_snapshot_v1(alias.ofd)
+    if ofd.is_err():
+        _fd_descriptor_owner_v1.quarantined = true
+        _ = _fd_unlock_v1()
+        return Err("stale-open-file-description")
+    val result = FdDescriptorSnapshotV1(
+        descriptor: fd, descriptor_flags: alias.descriptor_flags,
+        ofd: ofd.unwrap())
+    if not _fd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(result)
+
+pub(package) fn fd_descriptor_set_flags_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32, descriptor_flags: u32
+) -> Result<u32, text>:
+    if fd < 0 or fd >= FD_DESCRIPTOR_LIMIT_V1: return Err("invalid-descriptor")
+    if not _fd_lock_v1(): return Err("serialization-unavailable")
+    val context_index = _fd_context_map_lookup_v1(key)
+    if context_index < 0:
+        _ = _fd_unlock_v1()
+        return Err("unknown-context")
+    val context = _fd_descriptor_owner_v1.contexts[context_index]
+    if not context.descriptors[fd].occupied:
+        _ = _fd_unlock_v1()
+        return Err("invalid-descriptor")
+    if context.mutation_generation == _FD_GENERATION_MAX_V1:
+        _ = _fd_unlock_v1()
+        return Err("context-mutation-generation-exhausted")
+    _fd_descriptor_owner_v1.contexts[context_index].descriptors[fd].descriptor_flags =
+        descriptor_flags
+    _fd_descriptor_owner_v1.contexts[context_index].mutation_generation =
+        context.mutation_generation + 1u32
+    if not _fd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(descriptor_flags)
+
+pub(package) fn fd_descriptor_set_status_v1(
+    key: FdTaskLifecycleKeyV1, fd: i32, status_flags: u32
+) -> Result<u32, text>:
+    if fd < 0 or fd >= FD_DESCRIPTOR_LIMIT_V1: return Err("invalid-descriptor")
+    if not _fd_lock_v1(): return Err("serialization-unavailable")
+    val context_index = _fd_context_map_lookup_v1(key)
+    if context_index < 0:
+        _ = _fd_unlock_v1()
+        return Err("unknown-context")
+    val alias = _fd_descriptor_owner_v1.contexts[context_index].descriptors[fd]
+    if not alias.occupied:
+        _ = _fd_unlock_v1()
+        return Err("invalid-descriptor")
+    val updated = open_file_description_set_status_v1(alias.ofd, status_flags)
+    if updated.is_err():
+        _ = _fd_unlock_v1()
+        return Err(updated.unwrap_err())
+    if not _fd_unlock_v1(): return Err("serialization-unavailable")
+    updated
+
+pub(package) fn fd_descriptor_context_snapshot_v1(
+    key: FdTaskLifecycleKeyV1
+) -> Result<FdDescriptorContextSnapshotV1, text>:
+    if not _fd_lock_v1(): return Err("serialization-unavailable")
+    val context_index = _fd_context_map_lookup_v1(key)
+    if context_index < 0:
+        _ = _fd_unlock_v1()
+        return Err("unknown-context")
+    val context = _fd_descriptor_owner_v1.contexts[context_index]
+    val descriptors: [FdDescriptorSnapshotV1] = []
+    var fd = 0
+    while fd < FD_DESCRIPTOR_LIMIT_V1:
+        val alias = context.descriptors[fd]
+        if alias.occupied:
+            val ofd = open_file_description_snapshot_v1(alias.ofd)
+            if ofd.is_err():
+                _fd_descriptor_owner_v1.quarantined = true
+                _ = _fd_unlock_v1()
+                return Err("stale-open-file-description")
+            descriptors.push(FdDescriptorSnapshotV1(
+                descriptor: fd, descriptor_flags: alias.descriptor_flags,
+                ofd: ofd.unwrap()))
+        fd = fd + 1
+    val result = FdDescriptorContextSnapshotV1(
+        key: key, mutation_generation: context.mutation_generation,
+        descriptors: descriptors)
+    if not _fd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(result)
+
+pub(package) fn fd_descriptor_context_destroy_v1(
+    key: FdTaskLifecycleKeyV1
+) -> Result<FdDescriptorContextDestroyV1, text>:
+    if not _fd_lock_v1(): return Err("serialization-unavailable")
+    val context_index = _fd_context_map_lookup_v1(key)
+    if context_index < 0:
+        _ = _fd_unlock_v1()
+        return Err("unknown-context")
+    val context = _fd_descriptor_owner_v1.contexts[context_index]
+    var fd = 0
+    var descriptor_count = 0u32
+    while fd < FD_DESCRIPTOR_LIMIT_V1:
+        if context.descriptors[fd].reservation_count != 0u32:
+            _ = _fd_unlock_v1()
+            return Err("context-reserved")
+        if context.descriptors[fd].occupied:
+            descriptor_count = descriptor_count + 1u32
+        fd = fd + 1
+    if not _fd_context_map_remove_v1(key):
+        _fd_descriptor_owner_v1.quarantined = true
+        _ = _fd_unlock_v1()
+        return Err("context-map-corrupt")
+    val generation = context.generation
+    _fd_descriptor_owner_v1.contexts[context_index] =
+        fd_empty_context_v1(generation, FD_DESCRIPTOR_LIMIT_V1)
+    val close_begins: [OpenFileDescriptionCloseBeginV1] = []
+    fd = 0
+    while fd < FD_DESCRIPTOR_LIMIT_V1:
+        val alias = context.descriptors[fd]
+        if alias.occupied:
+            val closed = open_file_description_begin_close_v1(alias.ofd)
+            if closed.is_err():
+                # The context was unpublished before releases began. Failure
+                # can leak an OFD reference, but can never leave a reachable
+                # descriptor pointing at an already-released reference.
+                _fd_descriptor_owner_v1.quarantined = true
+                val partial = FdDescriptorContextDestroyV1(
+                    descriptor_count: descriptor_count,
+                    released_count: close_begins.len() as u32,
+                    complete: false, failure: "ofd-release-failed",
+                    close_begins: close_begins)
+                if not _fd_unlock_v1(): return Err("serialization-unavailable")
+                return Ok(partial)
+            close_begins.push(closed.unwrap())
+        fd = fd + 1
+    val result = FdDescriptorContextDestroyV1(
+        descriptor_count: descriptor_count,
+        released_count: close_begins.len() as u32,
+        complete: true, failure: "", close_begins: close_begins)
+    if not _fd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(result)
+
+pub(package) fn fd_descriptor_context_exists_v1(key: FdTaskLifecycleKeyV1) -> bool:
     if not _fd_lock_v1(): return false
-    val exists = _fd_context_map_lookup_v1(owner) >= 0
+    val exists = _fd_context_map_lookup_v1(key) >= 0
     if not _fd_unlock_v1(): return false
     exists

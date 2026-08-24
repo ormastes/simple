@@ -63,3 +63,8 @@ is permitted.
 
 Sidecar implementation lanes: N/A for this isolated phase. Merge owner:
 root agent. Final reviewer: independent normal/highest-capability static review.
+
+The package-private close finalizer accepts only `Confirmed` or
+`Indeterminate`. An adapter must resolve the opaque ticket, perform backend
+work outside owner locks, and then finalize. Confirmed outcomes recycle or
+retire the slot; indeterminate outcomes quarantine it permanently.

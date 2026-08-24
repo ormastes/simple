@@ -1,0 +1,104 @@
+"""Package-scoped lifecycle coverage for the opaque FD/OFD owners."""
+
+use std.spec.*
+use os.kernel.fs.open_file_description_owner_v1.{
+    OpenFileDescriptionAccessV1, OpenFileDescriptionBackendBindingV1,
+    OpenFileDescriptionCloseDispositionV1,
+    OpenFileDescriptionBackendCloseOutcomeV1,
+    open_file_description_create_v1,
+    open_file_description_resolve_close_backend_v1,
+    open_file_description_finalize_close_v1
+}
+use os.kernel.fs.fd_table_descriptor_owner_v1.{
+    FdTaskLifecycleKeyV1, fd_descriptor_context_create_v1,
+    fd_descriptor_install_v1, fd_descriptor_reserve_close_v1,
+    fd_descriptor_commit_v1, fd_descriptor_rollback_v1,
+    fd_descriptor_snapshot_v1, fd_descriptor_context_snapshot_v1,
+    fd_descriptor_set_flags_v1, fd_descriptor_set_status_v1,
+    fd_descriptor_reserve_dup_lowest_v1, fd_descriptor_context_destroy_v1,
+    fd_context_destroy_receipt_valid_v1
+}
+
+fn _lifecycle_test_ofd(object_id: u64):
+    open_file_description_create_v1(
+        OpenFileDescriptionAccessV1.ReadWrite, 0u32,
+        OpenFileDescriptionBackendBindingV1(
+            file_object_id: object_id, file_object_generation: 1u32,
+            backend_kind: 1u8),
+        0u64).unwrap()
+
+describe "package-scoped fd descriptor lifecycle":
+    it "preserves issued receipts in an incomplete context destroy result":
+        expect(fd_context_destroy_receipt_valid_v1(
+            3u32, 2u32, 2u32, false, "ofd-release-failed")).to_be(true)
+        expect(fd_context_destroy_receipt_valid_v1(
+            3u32, 2u32, 0u32, false, "ofd-release-failed")).to_be(false)
+
+    it "makes close reservation exclusive and rollback reusable":
+        val key = FdTaskLifecycleKeyV1(
+            task_id: 9001u64, lifecycle_generation: 101u64)
+        expect(fd_descriptor_context_create_v1(key).is_ok()).to_be(true)
+        val ofd = _lifecycle_test_ofd(9101u64)
+        expect(fd_descriptor_install_v1(key, 7, ofd, 0u32).is_ok()).to_be(true)
+        val first = fd_descriptor_reserve_close_v1(key, 7).unwrap()
+        expect(fd_descriptor_reserve_close_v1(key, 7).is_err()).to_be(true)
+        expect(fd_descriptor_reserve_dup_lowest_v1(
+            key, 7, 0, 0u32).is_err()).to_be(true)
+        expect(fd_descriptor_rollback_v1(first).is_ok()).to_be(true)
+        val committed = fd_descriptor_commit_v1(
+            fd_descriptor_reserve_close_v1(key, 7).unwrap()).unwrap()
+        expect(fd_descriptor_snapshot_v1(key, 7).is_err()).to_be(true)
+        val begin = committed.displaced_close.unwrap()
+        expect(begin.disposition ==
+            OpenFileDescriptionCloseDispositionV1.BackendCloseRequired).to_be(true)
+        val ticket = begin.ticket.unwrap()
+        expect(open_file_description_resolve_close_backend_v1(ticket).is_ok()).to_be(true)
+        expect(open_file_description_finalize_close_v1(
+            ticket, OpenFileDescriptionBackendCloseOutcomeV1.Confirmed).is_ok()).to_be(true)
+        expect(fd_descriptor_context_destroy_v1(key).unwrap().complete).to_be(true)
+
+    it "returns all close receipts when destroying a context":
+        val key = FdTaskLifecycleKeyV1(
+            task_id: 9002u64, lifecycle_generation: 102u64)
+        expect(fd_descriptor_context_create_v1(key).is_ok()).to_be(true)
+        expect(fd_descriptor_install_v1(
+            key, 3, _lifecycle_test_ofd(9201u64), 0u32).is_ok()).to_be(true)
+        expect(fd_descriptor_install_v1(
+            key, 4, _lifecycle_test_ofd(9202u64), 1u32).is_ok()).to_be(true)
+        val destroyed = fd_descriptor_context_destroy_v1(key).unwrap()
+        expect(destroyed.complete).to_be(true)
+        expect(destroyed.descriptor_count).to_equal(2u32)
+        expect(destroyed.released_count).to_equal(2u32)
+        expect(destroyed.close_begins.len()).to_equal(2)
+        var i = 0
+        while i < destroyed.close_begins.len():
+            val ticket = destroyed.close_begins[i].ticket.unwrap()
+            expect(open_file_description_resolve_close_backend_v1(ticket).is_ok()).to_be(true)
+            expect(open_file_description_finalize_close_v1(
+                ticket, OpenFileDescriptionBackendCloseOutcomeV1.Confirmed).is_ok()).to_be(true)
+            i = i + 1
+
+    it "reserves the lowest free fd and shares OFD status":
+        val key = FdTaskLifecycleKeyV1(
+            task_id: 9003u64, lifecycle_generation: 103u64)
+        expect(fd_descriptor_context_create_v1(key).is_ok()).to_be(true)
+        expect(fd_descriptor_install_v1(
+            key, 9, _lifecycle_test_ofd(9301u64), 0u32).is_ok()).to_be(true)
+        expect(fd_descriptor_set_flags_v1(key, 9, 1u32).unwrap()).to_equal(1u32)
+        expect(fd_descriptor_set_status_v1(key, 9, 1024u32).unwrap()).to_equal(1024u32)
+        val duplicated = fd_descriptor_commit_v1(
+            fd_descriptor_reserve_dup_lowest_v1(key, 9, 0, 0u32).unwrap()).unwrap()
+        expect(duplicated.descriptor).to_equal(0)
+        expect(fd_descriptor_snapshot_v1(key, 0).unwrap().ofd.status_flags).to_equal(1024u32)
+        expect(fd_descriptor_snapshot_v1(key, 9).unwrap().descriptor_flags).to_equal(1u32)
+        expect(fd_descriptor_context_snapshot_v1(key).unwrap().descriptors.len()).to_equal(2)
+        val destroyed = fd_descriptor_context_destroy_v1(key).unwrap()
+        var i = 0
+        while i < destroyed.close_begins.len():
+            val begin = destroyed.close_begins[i]
+            if begin.ticket.?:
+                val ticket = begin.ticket.unwrap()
+                expect(open_file_description_resolve_close_backend_v1(ticket).is_ok()).to_be(true)
+                expect(open_file_description_finalize_close_v1(
+                    ticket, OpenFileDescriptionBackendCloseOutcomeV1.Confirmed).is_ok()).to_be(true)
+            i = i + 1
