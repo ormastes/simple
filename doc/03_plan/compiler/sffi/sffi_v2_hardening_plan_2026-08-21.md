@@ -1337,3 +1337,11 @@ focused classifier spec; `[ffi]` metadata is no longer reported as indexed
 runtime access. Next assign the remaining 23 rebase-added calls by canonical
 owner, prioritizing status-bearing wrappers over additional raw call sites and
 retaining zero extra provider calls, allocations, and dynamic dispatch.
+
+The debug-only MIR return-type probe now scopes four raw discriminant calls,
+and MIR method tracing caches two environment flags instead of issuing seven
+repeated raw reads. Preserve the debug-off zero-call path and the two process-
+lifetime scalar caches. Current census: 21,435 calls (2,116 explicit, 19,319
+missing), 12,112 declarations (883 tagged, 382 minimized, 10,963 untouched),
+zero signed/admitted. The rebase regression is now +16; continue with the
+remaining exact owner table rather than increasing either ratchet.

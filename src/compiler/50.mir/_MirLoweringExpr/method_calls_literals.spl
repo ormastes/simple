@@ -26,6 +26,7 @@ use compiler.mir.mir_types.{LocalId, mir_type_probe_text}  # explicit: a glob is
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
 extern fn rt_dict_contains(dict: i64, key: Any) -> bool
+@unsafe(reason: "raw debug-environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
 
@@ -38,14 +39,27 @@ var mir_mc_trace_state: i64 = -1
 # the same env var. Retained per the log-retention policy: do not delete, it is
 # the only visibility into the dict-projection element-type dataflow.
 var mir_dict_elem_trace_state: i64 = -1
+var mir_log_conv_trace_state: i64 = -1
 
 fn mir_dict_elem_trace_on() -> bool:
     if mir_dict_elem_trace_state < 0:
-        if rt_env_get("SIMPLE_TRACE_DICT_ELEM") == "1":
+        val configured = unsafe(capabilities: [ffi]):
+            rt_env_get("SIMPLE_TRACE_DICT_ELEM")
+        if configured == "1":
             mir_dict_elem_trace_state = 1
         else:
             mir_dict_elem_trace_state = 0
     mir_dict_elem_trace_state == 1
+
+fn mir_log_conv_trace_on() -> bool:
+    if mir_log_conv_trace_state < 0:
+        val configured = unsafe(capabilities: [ffi]):
+            rt_env_get("SIMPLE_MIR_LOG_CONV")
+        if configured == "1":
+            mir_log_conv_trace_state = 1
+        else:
+            mir_log_conv_trace_state = 0
+    mir_log_conv_trace_state == 1
 
 # ============================================================================
 # Expression Lowering
@@ -1598,7 +1612,7 @@ impl MirLowering:
             # Probe (SIMPLE_TRACE_DICT_ELEM=1) for bug
             # stage2_cranelift_direct_segv_nil_struct_fields_2026-08-24: reads out
             # whether the Dict(k,v) match below actually fires. Default off.
-            if (rt_env_get("SIMPLE_TRACE_DICT_ELEM") ?? "") == "1":
+            if mir_dict_elem_trace_on():
                 val probe_shape = if dict_keys_recv_type == nil: "nil" else: "{dict_keys_recv_type.kind}"
                 eprint("[dict-elem-probe] method={method} recv_local={receiver_local.id} recv_mir_type={probe_shape}")
             if dict_keys_recv_type != nil:
@@ -1645,7 +1659,7 @@ impl MirLowering:
             val result = b_dict.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
             self.builder = b_dict
             if val result_local = result:
-                if (rt_env_get("SIMPLE_TRACE_DICT_ELEM") ?? "") == "1":
+                if mir_dict_elem_trace_on():
                     eprint("[dict-elem-probe] stamped elem_type={dict_keys_elem_type.kind} for method={method}")
                 val dict_keys_array_type = MirType(kind: MirTypeKind.Array(dict_keys_elem_type, 0))
                 var b_dict_typed = self.builder
@@ -1955,7 +1969,7 @@ impl MirLowering:
             case Unresolved: join_is_unresolved = true
             case _: ()
         if method == "join" and args.len() == 1 and join_is_unresolved:
-            if (rt_env_get("SIMPLE_MIR_LOG_CONV") ?? "") == "1":
+            if mir_log_conv_trace_on():
                 eprint("[conv-lower] join arm hit\n")
             match receiver.kind:
                 case ArrayLit(jn_elements, _):
@@ -3213,7 +3227,7 @@ impl MirLowering:
                         conv_narrow = MirType(kind: MirTypeKind.I32)
                         conv_is_int = true
                     if conv_is_int:
-                        if (rt_env_get("SIMPLE_MIR_LOG_CONV") ?? "") == "1":
+                        if mir_log_conv_trace_on():
                             eprint("[conv-lower] narrowing conversion arm hit method={method}\n")
                         var b_conv_n = self.builder
                         val conv_narrowed = b_conv_n.emit_cast(mir_operand_copy(unresolved_receiver_local), conv_narrow)
@@ -3223,13 +3237,13 @@ impl MirLowering:
                     # `to_i64` on an already-i64 receiver is the identity; the
                     # receiver local is already lowered and i64-typed.
                     if method == "to_i64":
-                        if (rt_env_get("SIMPLE_MIR_LOG_CONV") ?? "") == "1":
+                        if mir_log_conv_trace_on():
                             eprint("[conv-lower] identity conversion arm hit method={method}\n")
                         return unresolved_receiver_local
                     # Float conversions genuinely change representation, so they
                     # are a single Cast with no widen-back (the result IS f64).
                     if method == "to_f64" or method == "to_f32":
-                        if (rt_env_get("SIMPLE_MIR_LOG_CONV") ?? "") == "1":
+                        if mir_log_conv_trace_on():
                             eprint("[conv-lower] float conversion arm hit method={method}\n")
                         var conv_float_ty = MirType.f64()
                         if method == "to_f32":
@@ -3411,7 +3425,7 @@ impl MirLowering:
                 # native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md.
                 val poly_recv_is_handle = self.local_is_runtime_array(unresolved_receiver_local)
                 if poly_recv_is_handle and args.len() == 1 and method == "contains":
-                    if (rt_env_get("SIMPLE_MIR_LOG_CONV") ?? "") == "1":
+                    if mir_log_conv_trace_on():
                         eprint("[conv-lower] polymorphic accessor arm hit method={method}\n")
                     val poly_symbol = "rt_contains"
                     val poly_arg_local = self.lower_expr(args[0].value)

@@ -2269,3 +2269,24 @@ spec passes 2/2. Corrected analysis reports 93 opportunities, 4.81 s, and
 272,196 KiB versus the pre-change 95 opportunities, 4.69 s, and 278,984 KiB.
 The two removed findings are pre-existing unsafe metadata false positives, not
 elided runtime checks.
+
+## MIR diagnostic and trace authority
+
+The four debug-only MIR return-type discriminant probes now use expression-
+scoped `unsafe(ffi)` calls under a documented `-1` sentinel contract. Their
+debug gate, call count, values, and formatting are unchanged. Focused source
+coverage passes 1/1; optimizer findings remain 137 before and after, with
+11.75 s / 271,504 KiB before and 11.41 s / 270,432 KiB after.
+
+`method_calls_literals.spl` now reads each of its two trace environment flags
+once and caches the boolean result. Seven repeated raw environment call sites
+become two lexically scoped calls, reducing provider dispatch on traced method
+paths without changing normal lowering results. The added state is one `i64`;
+there are no collections, copies, retries, or dynamic lookups. Its focused spec
+passes 1/1. Optimizer findings remain 404; measurement changes from 11.30 s /
+273,004 KiB to 11.00 s / 274,620 KiB (+0.59% RSS).
+
+After a concurrent mainline change added five missing-authority calls, these
+two MIR owners leave the repository at 21,435 raw calls, 2,116 explicit, and
+19,319 missing. Declaration totals are 12,112: 883 tagged, 648 contract-
+documented, 382 minimized, 10,963 untouched, and zero signed/admitted.
