@@ -2074,3 +2074,94 @@ occurs. Both files are byte-identical to `origin/main` again.
 
 The interim note is unchanged and still not a fix: `.len() == 0` is safe at call
 sites, must not close this record, and must not be landed in place of the real fix.
+
+## 2026-08-24 — STANDALONE REPRODUCER: ~15 lines, ~2 s, no Stage 2 build
+
+The defect reproduces outside the bootstrap entirely. The earlier fixtures missed it
+for one reason: **they contained no user-defined `is_empty`**, so there was nothing
+to rebind to. Add one anywhere in the entry closure and it reproduces exactly.
+
+`span_mod.spl`
+```simple
+struct Sp:
+    lo: i64
+impl Sp:
+    me is_empty() -> bool:
+        self.lo == 0
+```
+
+`repro.spl`
+```simple
+use span_mod.{Sp}
+struct Inst:
+    op: i64
+struct Bldr:
+    instructions: [Inst]
+impl Bldr:
+    me probe() -> bool:
+        self.instructions.is_empty()
+fn main():
+    var empty = Bldr(instructions: [])
+    var full = Bldr(instructions: [Inst(op: 1)])
+    print("empty.is_empty()={empty.probe()}  (expected true)")
+    print("full.is_empty()={full.probe()}   (expected false)")
+```
+
+```sh
+SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_BOOTSTRAP=1 SIMPLE_PROJECT_ROOT=<repo> \
+  <seed> native-build --backend llvm --source . --entry repro.spl -o rp
+```
+
+Measured (pristine seed, `src/compiler_rust/target/bootstrap/simple`, 2026-08-24 13:34):
+
+```
+empty.is_empty()=false  (expected true)     <-- WRONG
+full.is_empty()=false   (expected false)    <-- accidentally right
+```
+
+Disassembly of `Bldr.probe`, both call sites:
+
+```
+bl  <_span_mod__Sp.is_empty>
+```
+
+`Sp.is_empty` reads `self.lo == 0` against an array handle, so a non-null handle
+yields `false` for **every** receiver — which is why the non-empty case looks right
+and only the empty case exposes it. That is exactly the Stage-2 shape:
+`finalize_block`'s guard needed `true` on an empty list and got `false`.
+
+### The control proves the two faces are one defect
+
+Delete `Sp.is_empty` (nothing else changed) and rebuild:
+
+```
+run rc=139   (SIGSEGV, no output)
+```
+
+Because with no user method to bind to, the call is emitted as the **unresolved**
+`Array.is_empty`, the linker stubs it, and the stub crashes.
+
+**So there is no correct path at all for `is_empty()` on an array:**
+
+| user `is_empty` in closure | outcome |
+|---|---|
+| present | silently rebound to it → **wrong answer** |
+| absent | unresolved `Array.is_empty` → stub → **SEGV** |
+
+### Why this matters for the next lane
+
+The decisive question — *at what point does `func_name` become `Sp.is_empty`?* — can
+now be answered against a **2-second** build instead of an 845 s Stage 2. Both the
+wrong-answer and the SEGV face are one toggle apart in the same fixture, so any
+candidate fix can be checked against both in one pass.
+
+Required shape, established by bisection (each of these was needed; simpler fixtures
+did NOT reproduce):
+* the receiver is a **struct field** read inside a `me` method (`self.instructions`),
+  not a local — a local with a known type resolved correctly;
+* a user-defined `is_empty` exists **in another module** in the entry closure.
+
+Still open: whether a *local* receiver can also be captured (the local case tested
+here resolved correctly, which bounds it), and the census of other bare methods with
+a single user-defined implementation — `is_empty` is special-cased in seven places
+in the seed, which hints the population is larger than one.
