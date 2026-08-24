@@ -254,3 +254,40 @@ interpreter**, which does not go through this bridge. Verified pre-existing by
 stashing the fix and re-running: the output is byte-identical with and without
 the change. It is a distinct seed-interpreter defect and is out of scope for
 this record.
+
+### Known remaining #2: FLOAT payloads are still wrong (pre-existing, NOT a regression)
+
+`if val f = <f64?>` does not produce a usable float on the native lane. Measured
+on the same binary and working tree, one probe, both sides:
+
+```
+# fixture: val fo: f64? = Some(1.5) ; val fr: f64? = 2.5
+before this fix:  f=(false, 0.0)   g=(false, 0.0)      # raw nullable-ABI tuple
+after  this fix:  f=0              g=4612811918334230528   # raw f64 bits of 2.5
+```
+
+Both are wrong, so this fix did NOT regress a working case — it changed one
+broken rendering into a different broken rendering. It specifically did **not**
+cause the double-decode that was the theorised risk: the float compensation at
+`src/compiler/50.mir/mir_lowering_stmts.spl:1952-1991` (and its twin at ~2128)
+shape-detects `v != nil` where `v` is MIR-I64 / HIR-Float and rebinds via
+`enum_payload_value`; it evidently does not fire for these shapes on either
+side of the change.
+
+This is a distinct defect in the float payload decode seam and is out of scope
+for this record. The pinning gate covers i64, struct-field, bare-migration-form
+and absent cases only; a float row should be added when that seam is fixed, and
+the now-questionable float compensation should be re-evaluated at the same time
+(it is provenance-blind shape detection of exactly the kind this fix replaces).
+
+### Known remaining #3: `native-smoke-matrix.shs` is red for an unrelated reason
+
+Observed red on `arith_fn_call` and `if_elif_else` with `rc=build-failed`. The
+build logs fail at HIR step 2/6 with `missing importing module surface for
+/tmp/native-smoke-matrix.<pid>/case_*.spl` — the matrix writes its fixtures to
+`/tmp`, outside the workspace, and `native-build` resolves a module surface
+relative to the workspace. (This is the same constraint the if-val gate's own
+header documents, and why that gate keeps its work dir inside `build/`.)
+Byte-identical source built and ran clean from an in-repo path on the same
+binary with the fix applied (`R=7`, rc 0), and neither failing case contains an
+optional at all. Unrelated to this change.
