@@ -1,0 +1,435 @@
+"""Bounded pre-launch owner for a guest-native Clang hello pipeline.
+
+This capsule reserves preparation only.  It binds authenticated installed
+Clang/LLD catalog rows to one declared task identity and an exact non-delegable
+capability pouch, then issues one consume-once internal dispatch. It neither
+establishes current-TCB liveness nor claims that compilation, linking, or
+execution occurred; scheduler binding and backend receipts remain separate.
+"""
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE
+}
+use std.common.contracts.execution.simpleos_vfs_mutation_v1.{TaskExecutionInstanceV1}
+use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet}
+use os.kernel.loader.installed_artifact_catalog_v1.{
+    installed_artifact_catalog_lookup_target_v1
+}
+
+pub const CLANG_FILESYSTEM_PIPELINE_SLOT_LIMIT_V1: i32 = 32
+pub const CLANG_FILESYSTEM_PIPELINE_PATH_MAX_V1: i64 = 512
+
+pub enum ClangFilesystemPipelineFilesystemV1:
+    Fat32
+    Dbfs
+    Nvfs
+
+pub enum ClangFilesystemPipelineStateV1:
+    Free
+    Reserved
+    Dispatched
+    Retired
+
+pub enum ClangFilesystemPipelineEventV1:
+    Reserve
+    Dispatch
+    Cancel
+    OutcomeUnknown
+
+pub fn clang_filesystem_pipeline_transition_v1(
+    state: ClangFilesystemPipelineStateV1,
+    event: ClangFilesystemPipelineEventV1
+) -> ClangFilesystemPipelineStateV1?:
+    if state == ClangFilesystemPipelineStateV1.Free and
+       event == ClangFilesystemPipelineEventV1.Reserve:
+        return Some(ClangFilesystemPipelineStateV1.Reserved)
+    if state == ClangFilesystemPipelineStateV1.Reserved and
+       event == ClangFilesystemPipelineEventV1.Dispatch:
+        return Some(ClangFilesystemPipelineStateV1.Dispatched)
+    if state == ClangFilesystemPipelineStateV1.Reserved and
+       event == ClangFilesystemPipelineEventV1.Cancel:
+        return Some(ClangFilesystemPipelineStateV1.Free)
+    if state == ClangFilesystemPipelineStateV1.Dispatched and
+       event == ClangFilesystemPipelineEventV1.OutcomeUnknown:
+        return Some(ClangFilesystemPipelineStateV1.Retired)
+    nil
+
+pub struct ClangFilesystemPipelineRequestV1:
+    actor: TaskExecutionInstanceV1
+    target_triple: text
+    filesystem: ClangFilesystemPipelineFilesystemV1
+    source_path: text
+    object_path: text
+    executable_path: text
+    working_directory: text
+
+pub(package) struct ClangFilesystemPipelineReservationV1:
+    _slot: i32
+    _generation: u32
+    _nonce: u64
+
+pub(package) struct ClangFilesystemPipelineDispatchV1:
+    reservation: ClangFilesystemPipelineReservationV1
+    actor: TaskExecutionInstanceV1
+    target: ManifestTarget
+    clang_path: text
+    clang_sha256: text
+    lld_path: text
+    lld_sha256: text
+    source_path: text
+    object_path: text
+    executable_path: text
+    working_directory: text
+
+struct ClangFilesystemPipelineSlotV1:
+    state: ClangFilesystemPipelineStateV1
+    generation: u32
+    nonce: u64
+    request: ClangFilesystemPipelineRequestV1
+    target: ManifestTarget
+    clang_sha256: text
+    lld_sha256: text
+
+struct ClangFilesystemPipelineOwnerV1:
+    initialized: bool
+    quarantined: bool
+    next_nonce: u64
+    slots: [ClangFilesystemPipelineSlotV1]
+    free_slots: [i32]
+
+fn _empty_actor_v1() -> TaskExecutionInstanceV1:
+    TaskExecutionInstanceV1(
+        task_id: 0u64, lifecycle_generation: 0u64, exec_generation: 0u64)
+
+fn _empty_target_v1() -> ManifestTarget:
+    ManifestTarget(os: "", arch: "", abi: "")
+
+fn _empty_request_v1() -> ClangFilesystemPipelineRequestV1:
+    ClangFilesystemPipelineRequestV1(
+        actor: _empty_actor_v1(), target_triple: "",
+        filesystem: ClangFilesystemPipelineFilesystemV1.Fat32,
+        source_path: "", object_path: "", executable_path: "",
+        working_directory: "")
+
+fn _empty_slot_v1(generation: u32) -> ClangFilesystemPipelineSlotV1:
+    ClangFilesystemPipelineSlotV1(
+        state: ClangFilesystemPipelineStateV1.Free,
+        generation: generation, nonce: 0u64,
+        request: _empty_request_v1(), target: _empty_target_v1(),
+        clang_sha256: "", lld_sha256: "")
+
+fn _new_slots_v1() -> [ClangFilesystemPipelineSlotV1]:
+    var result: [ClangFilesystemPipelineSlotV1] = []
+    var i: i32 = 0
+    while i < CLANG_FILESYSTEM_PIPELINE_SLOT_LIMIT_V1:
+        result.push(_empty_slot_v1(1u32))
+        i = i + 1
+    result
+
+fn _new_free_slots_v1() -> [i32]:
+    var result: [i32] = []
+    var i = CLANG_FILESYSTEM_PIPELINE_SLOT_LIMIT_V1 - 1
+    while i >= 0:
+        result.push(i)
+        i = i - 1
+    result
+
+val _clang_pipeline_mutex_v1 = mutex_raw_create()
+var _clang_pipeline_owner_v1 = ClangFilesystemPipelineOwnerV1(
+    initialized: false, quarantined: false,
+    next_nonce: 0x434c414e47504631u64, slots: [], free_slots: [])
+
+fn _initialize_locked_v1():
+    if not _clang_pipeline_owner_v1.initialized:
+        _clang_pipeline_owner_v1.slots = _new_slots_v1()
+        _clang_pipeline_owner_v1.free_slots = _new_free_slots_v1()
+        _clang_pipeline_owner_v1.initialized = true
+
+fn _lock_v1() -> bool:
+    if _clang_pipeline_mutex_v1 <= 0 or
+       not mutex_raw_lock(_clang_pipeline_mutex_v1):
+        return false
+    _initialize_locked_v1()
+    if _clang_pipeline_owner_v1.quarantined:
+        _ = mutex_raw_unlock(_clang_pipeline_mutex_v1)
+        return false
+    true
+
+fn _unlock_v1() -> bool:
+    if mutex_raw_unlock(_clang_pipeline_mutex_v1): return true
+    _clang_pipeline_owner_v1.quarantined = true
+    false
+
+fn _next_nonce_locked_v1() -> u64:
+    if _clang_pipeline_owner_v1.next_nonce == 0xffffffffffffffffu64:
+        return 0u64
+    _clang_pipeline_owner_v1.next_nonce =
+        _clang_pipeline_owner_v1.next_nonce + 1u64
+    _clang_pipeline_owner_v1.next_nonce
+
+fn _target_v1(triple: text) -> ManifestTarget?:
+    if triple == SIMPLEOS_TARGET_V1_X86_64_TRIPLE:
+        return Some(ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"))
+    if triple == SIMPLEOS_TARGET_V1_AARCH64_TRIPLE:
+        return Some(ManifestTarget(os: "simpleos", arch: "aarch64", abi: "simpleos"))
+    if triple == SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE:
+        return Some(ManifestTarget(os: "simpleos", arch: "riscv64", abi: "simpleos"))
+    nil
+
+fn _path_valid_v1(path: text) -> bool:
+    path.len() > 1 and path.len() <= CLANG_FILESYSTEM_PIPELINE_PATH_MAX_V1 and
+        path.starts_with("/") and not path.ends_with("/") and
+        not path.contains("//") and not path.contains("/./") and
+        not path.contains("/../") and not path.ends_with("/.") and
+        not path.ends_with("/..") and not path.contains("\\") and
+        not path.contains("\0") and not path.contains("\n") and
+        not path.contains("\r")
+
+fn _filesystem_root_v1(filesystem: ClangFilesystemPipelineFilesystemV1) -> text:
+    match filesystem:
+        ClangFilesystemPipelineFilesystemV1.Fat32: "/fat32"
+        ClangFilesystemPipelineFilesystemV1.Dbfs: "/dbfs"
+        ClangFilesystemPipelineFilesystemV1.Nvfs: "/nvfs"
+
+fn _filesystem_supported_v1(
+    filesystem: ClangFilesystemPipelineFilesystemV1
+) -> bool:
+    # FAT32 textual paths are not stable object identities because of case,
+    # short-name, and Unicode aliases. Its integration must supply a backend-
+    # canonical object key before this owner can serialize output paths.
+    filesystem == ClangFilesystemPipelineFilesystemV1.Dbfs or
+        filesystem == ClangFilesystemPipelineFilesystemV1.Nvfs
+
+fn _inside_root_v1(path: text, root: text) -> bool:
+    path.starts_with(root + "/")
+
+fn _actor_valid_v1(actor: TaskExecutionInstanceV1) -> bool:
+    actor.task_id != 0u64 and actor.lifecycle_generation != 0u64 and
+        actor.exec_generation != 0u64
+
+fn _exact_kind_count_v1(caps: CapabilitySet, expected: CapabilityKind) -> i64:
+    var count: i64 = 0
+    for token in caps.caps:
+        if token.kind == expected: count = count + 1
+    count
+
+pub fn clang_filesystem_pipeline_request_valid_v1(
+    request: ClangFilesystemPipelineRequestV1,
+    caps: CapabilitySet
+) -> bool:
+    if not _actor_valid_v1(request.actor) or not _target_v1(request.target_triple).?:
+        return false
+    if not _filesystem_supported_v1(request.filesystem): return false
+    val root = _filesystem_root_v1(request.filesystem)
+    val paths = [request.source_path, request.object_path,
+                 request.executable_path, request.working_directory]
+    for path in paths:
+        if not _path_valid_v1(path) or not _inside_root_v1(path, root):
+            return false
+    if request.source_path == request.object_path or
+       request.source_path == request.executable_path or
+       request.object_path == request.executable_path:
+        return false
+    if not caps.is_pledged or caps.caps.len() != 8:
+        return false
+    var token_index: i64 = 0
+    while token_index < caps.caps.len():
+        val token = caps.caps[token_index]
+        if token.owner != request.actor.task_id or token.generation == 0u64 or
+           token.token_id == 0u64 or token.depth != 0:
+            return false
+        var prior: i64 = 0
+        while prior < token_index:
+            if caps.caps[prior].token_id == token.token_id: return false
+            prior = prior + 1
+        token_index = token_index + 1
+    _exact_kind_count_v1(caps,
+        CapabilityKind.FileExec(path_prefix: "/usr/bin/clang")) == 1 and
+    _exact_kind_count_v1(caps,
+        CapabilityKind.FileExec(path_prefix: "/usr/bin/ld.lld")) == 1 and
+    _exact_kind_count_v1(caps,
+        CapabilityKind.FileRead(path_prefix: request.source_path)) == 1 and
+    _exact_kind_count_v1(caps,
+        CapabilityKind.FileRead(path_prefix: request.working_directory)) == 1 and
+    _exact_kind_count_v1(caps,
+        CapabilityKind.FileWrite(path_prefix: request.object_path)) == 1 and
+    _exact_kind_count_v1(caps,
+        CapabilityKind.FileCreate(path_prefix: request.object_path)) == 1 and
+    _exact_kind_count_v1(caps,
+        CapabilityKind.FileWrite(path_prefix: request.executable_path)) == 1 and
+    _exact_kind_count_v1(caps,
+        CapabilityKind.FileCreate(path_prefix: request.executable_path)) == 1
+
+fn _reservation_index_locked_v1(
+    reservation: ClangFilesystemPipelineReservationV1,
+    state: ClangFilesystemPipelineStateV1
+) -> i32:
+    if reservation._slot < 0 or
+       reservation._slot >= CLANG_FILESYSTEM_PIPELINE_SLOT_LIMIT_V1 or
+       reservation._generation == 0u32 or reservation._nonce == 0u64:
+        return -1
+    val slot = _clang_pipeline_owner_v1.slots[reservation._slot]
+    if slot.state != state or slot.generation != reservation._generation or
+       slot.nonce != reservation._nonce:
+        return -1
+    reservation._slot
+
+fn _request_paths_overlap_v1(
+    left: ClangFilesystemPipelineRequestV1,
+    right: ClangFilesystemPipelineRequestV1
+) -> bool:
+    val left_paths = [left.source_path, left.object_path, left.executable_path]
+    val right_paths = [right.source_path, right.object_path, right.executable_path]
+    for left_path in left_paths:
+        for right_path in right_paths:
+            if left_path == right_path: return true
+    false
+
+fn _request_available_locked_v1(request: ClangFilesystemPipelineRequestV1) -> bool:
+    # Fixed 32-slot upper bound prevents concurrent read/write or write/write
+    # aliasing without allocating a second path index.
+    for slot in _clang_pipeline_owner_v1.slots:
+        if slot.state != ClangFilesystemPipelineStateV1.Free and
+           _request_paths_overlap_v1(request, slot.request):
+            return false
+    true
+
+fn _release_locked_v1(index: i32):
+    val generation = _clang_pipeline_owner_v1.slots[index].generation
+    if generation == 0xffffffffu32:
+        _clang_pipeline_owner_v1.slots[index].state =
+            ClangFilesystemPipelineStateV1.Retired
+        _clang_pipeline_owner_v1.slots[index].nonce = 0u64
+        return
+    _clang_pipeline_owner_v1.slots[index] = _empty_slot_v1(generation + 1u32)
+    _clang_pipeline_owner_v1.free_slots.push(index)
+
+pub(package) fn clang_filesystem_pipeline_reserve_v1(
+    request: ClangFilesystemPipelineRequestV1,
+    caps: CapabilitySet
+) -> Result<ClangFilesystemPipelineReservationV1, text>:
+    if not clang_filesystem_pipeline_request_valid_v1(request, caps):
+        return Err("invalid-request-or-authority")
+    val target = _target_v1(request.target_triple) ?? return Err("invalid-target")
+    val clang_record = installed_artifact_catalog_lookup_target_v1(
+        "/usr/bin/clang", target) ?? return Err("clang-not-authenticated")
+    val lld_record = installed_artifact_catalog_lookup_target_v1(
+        "/usr/bin/ld.lld", target) ?? return Err("lld-not-authenticated")
+    if not _lock_v1(): return Err("serialization-unavailable")
+    if not _request_available_locked_v1(request):
+        _ = _unlock_v1()
+        return Err("pipeline-path-busy")
+    if _clang_pipeline_owner_v1.free_slots.len() == 0:
+        _ = _unlock_v1()
+        return Err("pipeline-capacity-exhausted")
+    val nonce = _next_nonce_locked_v1()
+    if nonce == 0u64:
+        _clang_pipeline_owner_v1.quarantined = true
+        _ = _unlock_v1()
+        return Err("nonce-exhausted")
+    val last = _clang_pipeline_owner_v1.free_slots.len() - 1
+    val index = _clang_pipeline_owner_v1.free_slots[last]
+    _clang_pipeline_owner_v1.free_slots.pop()
+    val generation = _clang_pipeline_owner_v1.slots[index].generation
+    val reserved_state = clang_filesystem_pipeline_transition_v1(
+        ClangFilesystemPipelineStateV1.Free,
+        ClangFilesystemPipelineEventV1.Reserve)
+    if not reserved_state.?:
+        _clang_pipeline_owner_v1.quarantined = true
+        _ = _unlock_v1()
+        return Err("invalid-lifecycle-transition")
+    _clang_pipeline_owner_v1.slots[index] = ClangFilesystemPipelineSlotV1(
+        state: reserved_state.unwrap(),
+        generation: generation, nonce: nonce, request: request,
+        target: target, clang_sha256: clang_record.content_sha256,
+        lld_sha256: lld_record.content_sha256)
+    val result = ClangFilesystemPipelineReservationV1(
+        _slot: index, _generation: generation, _nonce: nonce)
+    if not _unlock_v1(): return Err("committed-unknown")
+    Ok(result)
+
+pub(package) fn clang_filesystem_pipeline_dispatch_v1(
+    reservation: ClangFilesystemPipelineReservationV1,
+    caller: TaskExecutionInstanceV1
+) -> Result<ClangFilesystemPipelineDispatchV1, text>:
+    if not _lock_v1(): return Err("serialization-unavailable")
+    val index = _reservation_index_locked_v1(
+        reservation, ClangFilesystemPipelineStateV1.Reserved)
+    if index < 0:
+        _ = _unlock_v1()
+        return Err("stale-or-consumed-reservation")
+    val slot = _clang_pipeline_owner_v1.slots[index]
+    if slot.request.actor != caller:
+        _ = _unlock_v1()
+        return Err("task-lifecycle-mismatch")
+    val dispatched_state = clang_filesystem_pipeline_transition_v1(
+        _clang_pipeline_owner_v1.slots[index].state,
+        ClangFilesystemPipelineEventV1.Dispatch)
+    if not dispatched_state.?:
+        _clang_pipeline_owner_v1.quarantined = true
+        _ = _unlock_v1()
+        return Err("invalid-lifecycle-transition")
+    _clang_pipeline_owner_v1.slots[index].state = dispatched_state.unwrap()
+    val result = ClangFilesystemPipelineDispatchV1(
+        reservation: reservation, actor: caller, target: slot.target,
+        clang_path: "/usr/bin/clang", clang_sha256: slot.clang_sha256,
+        lld_path: "/usr/bin/ld.lld", lld_sha256: slot.lld_sha256,
+        source_path: slot.request.source_path,
+        object_path: slot.request.object_path,
+        executable_path: slot.request.executable_path,
+        working_directory: slot.request.working_directory)
+    if not _unlock_v1(): return Err("committed-unknown")
+    Ok(result)
+
+pub(package) fn clang_filesystem_pipeline_cancel_v1(
+    reservation: ClangFilesystemPipelineReservationV1
+) -> Result<bool, text>:
+    if not _lock_v1(): return Err("serialization-unavailable")
+    val index = _reservation_index_locked_v1(
+        reservation, ClangFilesystemPipelineStateV1.Reserved)
+    if index < 0:
+        _ = _unlock_v1()
+        return Err("stale-or-consumed-reservation")
+    val cancelled = clang_filesystem_pipeline_transition_v1(
+        _clang_pipeline_owner_v1.slots[index].state,
+        ClangFilesystemPipelineEventV1.Cancel)
+    if not cancelled.? or
+       cancelled.unwrap() != ClangFilesystemPipelineStateV1.Free:
+        _clang_pipeline_owner_v1.quarantined = true
+        _ = _unlock_v1()
+        return Err("invalid-lifecycle-transition")
+    _release_locked_v1(index)
+    if not _unlock_v1(): return Err("committed-unknown")
+    Ok(true)
+
+pub(package) fn clang_filesystem_pipeline_mark_outcome_unknown_v1(
+    dispatch: ClangFilesystemPipelineDispatchV1
+) -> Result<bool, text>:
+    if not _lock_v1(): return Err("serialization-unavailable")
+    val index = _reservation_index_locked_v1(
+        dispatch.reservation, ClangFilesystemPipelineStateV1.Dispatched)
+    if index < 0:
+        _ = _unlock_v1()
+        return Err("stale-or-nondispatched-reservation")
+    # A backend may have mutated either output. Keep their paths unavailable
+    # forever in v1 rather than retrying a committed-unknown operation.
+    val retired = clang_filesystem_pipeline_transition_v1(
+        _clang_pipeline_owner_v1.slots[index].state,
+        ClangFilesystemPipelineEventV1.OutcomeUnknown)
+    if not retired.?:
+        _clang_pipeline_owner_v1.quarantined = true
+        _ = _unlock_v1()
+        return Err("invalid-lifecycle-transition")
+    _clang_pipeline_owner_v1.slots[index].state = retired.unwrap()
+    _clang_pipeline_owner_v1.slots[index].nonce = 0u64
+    if not _unlock_v1(): return Err("committed-unknown")
+    Ok(true)
+
+export ClangFilesystemPipelineEventV1, ClangFilesystemPipelineFilesystemV1
+export ClangFilesystemPipelineRequestV1, ClangFilesystemPipelineStateV1
+export clang_filesystem_pipeline_request_valid_v1
+export clang_filesystem_pipeline_transition_v1
