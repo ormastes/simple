@@ -1130,6 +1130,133 @@ fn apk_open_catalog_v1(data: [u8]) -> ApkCatalogHandleV1:
         schema_version: schema, entry_count: entry_count, total_size: total_size,
         profile_count: profile_count, body_off: off)
 
+fn _apk_validate_catalog_slice_semantics(keys: [text], packs: [text], modules: [text],
+        kinds: [i64], abi_hashes: [text], start: i64, count: i64) -> text:
+    """O(slice entries) ambiguity/ABI validation matching the catalog builder."""
+    var routes: Dict<text, bool> = {}
+    var binding_abis: Dict<text, text> = {}
+    var i = start
+    val end = start + count
+    while i < end:
+        val route_key = "{kinds[i]}\0{keys[i]}"
+        if routes.has(route_key):
+            return "duplicate catalog route: {keys[i]}"
+        routes[route_key] = true
+        if abi_hashes[i] != "":
+            val binding_key = "{kinds[i]}\0{packs[i]}\0{modules[i]}"
+            if binding_abis.has(binding_key) and binding_abis[binding_key] != abi_hashes[i]:
+                return "module {modules[i]} has conflicting contract ABI hashes"
+            binding_abis[binding_key] = abi_hashes[i]
+        i = i + 1
+    ""
+
+fn apk_validate_catalog_v1(data: [u8], handle: ApkCatalogHandleV1) -> text:
+    """Validate every profile and route before a catalog becomes visible.
+
+    Routing deliberately checks only the selected record for hot-path cost.
+    Installation instead walks the complete bounded catalog once, checking
+    geometry, checksums, enum domains, profile ranges, and exact final size.
+    Empty text means valid; otherwise the returned diagnostic is fail-closed.
+    """
+    if not handle.ok:
+        return handle.error_message
+    var off = APK_CATALOG_HEADER_SIZE_V1
+    var profile_ids: Dict<text, bool> = {}
+    var profile_starts: [i64] = []
+    var profile_counts: [i64] = []
+    var profile = 0
+    while profile < handle.profile_count:
+        if off + 4 > handle.body_off:
+            return "profile record extends past the profile table"
+        val id_len = _apk_read_u32(data, off)
+        if id_len <= 0 or off + 4 + id_len + 20 > handle.body_off:
+            return "profile record escapes the profile table"
+        val profile_id = _apk_read_text(data, off + 4, id_len)
+        if profile_ids.has(profile_id):
+            return "duplicate profile id: {profile_id}"
+        profile_ids[profile_id] = true
+        val start = _apk_read_u64(data, off + 4 + id_len)
+        val count = _apk_read_u64(data, off + 4 + id_len + 8)
+        if start < 0 or count < 0 or start > handle.entry_count or count > handle.entry_count - start:
+            return "profile {profile_id} names entries outside the catalog"
+        profile_starts.push(start)
+        profile_counts.push(count)
+        var joined: [u8] = []
+        _apk_push_text(joined, profile_id)
+        _apk_push_u64(joined, start)
+        _apk_push_u64(joined, count)
+        if _apk_crc(joined) != _apk_read_u32(data, off + 4 + id_len + 16):
+            return "profile record failed its checksum: {profile_id}"
+        off = off + 4 + id_len + 20
+        profile = profile + 1
+    if off != handle.body_off:
+        return "profile table does not end at the catalog body"
+
+    var keys: [text] = []
+    var packs: [text] = []
+    var modules: [text] = []
+    var kinds: [i64] = []
+    var abi_hashes: [text] = []
+    var slot = 0
+    while slot < handle.entry_count:
+        if off + 4 > handle.total_size:
+            return "catalog entry extends past section end"
+        val key_len = _apk_read_u32(data, off)
+        val p_off = off + 4 + key_len
+        if key_len <= 0 or p_off + 4 > handle.total_size:
+            return "facet key span escapes the section"
+        val pack_len = _apk_read_u32(data, p_off)
+        val m_off = p_off + 4 + pack_len
+        if pack_len <= 0 or m_off + 4 > handle.total_size:
+            return "pack path span escapes the section"
+        val mod_len = _apk_read_u32(data, m_off)
+        val k_off = m_off + 4 + mod_len
+        if mod_len <= 0 or k_off + 12 > handle.total_size:
+            return "module id span escapes the section"
+        val entry_kind = _apk_read_u32(data, k_off)
+        val activation = _apk_read_u32(data, k_off + 4)
+        val abi_len = _apk_read_u32(data, k_off + 8)
+        val crc_off = k_off + 12 + abi_len
+        if crc_off + 4 > handle.total_size:
+            return "contract abi span escapes the section"
+        if entry_kind < APK_ENTRY_FACET or entry_kind > APK_ENTRY_STARTUP:
+            return "catalog entry has an unknown route kind"
+        if activation < APK_ACT_OFF or activation > APK_ACT_HOT:
+            return "catalog entry has an unknown activation mode"
+        val key = _apk_read_text(data, off + 4, key_len)
+        val pack_path = _apk_read_text(data, p_off + 4, pack_len)
+        val module_id = _apk_read_text(data, m_off + 4, mod_len)
+        val abi_hash = _apk_read_text(data, k_off + 12, abi_len)
+        var joined: [u8] = []
+        _apk_push_bytes(joined, text_to_bytes(key))
+        _apk_push_bytes(joined, text_to_bytes(pack_path))
+        _apk_push_bytes(joined, text_to_bytes(module_id))
+        _apk_push_u32(joined, entry_kind)
+        _apk_push_u32(joined, activation)
+        _apk_push_bytes(joined, text_to_bytes(abi_hash))
+        if _apk_crc(joined) != _apk_read_u32(data, crc_off):
+            return "catalog entry failed its checksum: {key}"
+        keys.push(key)
+        packs.push(pack_path)
+        modules.push(module_id)
+        kinds.push(entry_kind)
+        abi_hashes.push(abi_hash)
+        off = crc_off + 4
+        slot = slot + 1
+    if off != handle.total_size:
+        return "catalog has trailing bytes after its declared entries"
+    if handle.profile_count == 0:
+        return _apk_validate_catalog_slice_semantics(keys, packs, modules, kinds,
+            abi_hashes, 0, handle.entry_count)
+    profile = 0
+    while profile < handle.profile_count:
+        val semantic_error = _apk_validate_catalog_slice_semantics(keys, packs, modules,
+            kinds, abi_hashes, profile_starts[profile], profile_counts[profile])
+        if semantic_error != "":
+            return semantic_error
+        profile = profile + 1
+    ""
+
 fn _apk_route_error(code: text, message: text) -> ApkCatalogRouteV1:
     ApkCatalogRouteV1(ok: false, found: false, error_code: code, error_message: message,
         facet_key: "", pack_path: "", module_id: "",
@@ -1345,6 +1472,12 @@ var _ld_expected_core_layout: [text] = []
 var _ld_profile: [text] = []
 # design §14.7: number of bindings this loader has actually RELEASED.
 var _ld_unloads: [i64] = []
+# Visible catalog identity is owned by the product ModuleLoader, but the
+# provider owns the fail-closed binding invalidation primitive used when that
+# identity changes. This counter is intentionally separate from facet
+# activation generations: a catalog update with no bound facet must not make a
+# later FacetRef look as though a facet was published.
+var _ld_catalog_invalidations: [i64] = []
 
 # Already-bound facet registry (design §14.3 step 3): a second acquisition of
 # the same facet must not reopen its pack nor inflate its frame again, and is
@@ -1414,6 +1547,7 @@ fn apk_loader_new() -> i64:
     _ld_expected_core_layout = _ld_expected_core_layout.push("")
     _ld_profile = _ld_profile.push("")
     _ld_unloads = _ld_unloads.push(0)
+    _ld_catalog_invalidations = _ld_catalog_invalidations.push(0)
     _ld_operational_sealed = _ld_operational_sealed.push(false)
     id
 
@@ -1472,6 +1606,15 @@ fn apk_loader_unloads(ld: i64) -> i64:
     """design §14.7: how many bindings this loader has RELEASED. A quiescing
     unload that could not free its binding does not move this counter."""
     _ld_unloads[ld]
+
+fn apk_loader_catalog_invalidations_v1(ld: i64) -> i64:
+    """Number of changed visible catalogs committed for this loader.
+
+    The first catalog install has no old resident state to invalidate and is
+    therefore not counted. An unchanged digest and a refused update do not
+    move this counter.
+    """
+    _ld_catalog_invalidations[ld]
 
 fn apk_loader_packs_opened(ld: i64) -> i64:
     _ld_packs_opened[ld]
@@ -1889,7 +2032,7 @@ fn apk_facet_unpin_v1(ld: i64, facet_key: text) -> bool:
 fn _apk_record_unloaded(ld: i64, key: text):
     _fc_unloaded["{ld}\0{key}"] = true
 
-fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool):
+fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, all_loader: bool):
     """design §14.7 step 5: free the binding. Only ever reached with a zero
     refcount, so a resident, still-referenced module can never be freed."""
     # Compact the SoA and reference-backed payload values in one pass. Leaving
@@ -1909,10 +2052,13 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool):
     var released = 0
     var row = 0
     while row < _fc_ld.len():
-        val drop_row = if by_pack:
-            _fc_ld[row] == ld and _fc_pack[row] == pack_path
+        var drop_row = false
+        if all_loader:
+            drop_row = _fc_ld[row] == ld
+        elif by_pack:
+            drop_row = _fc_ld[row] == ld and _fc_pack[row] == pack_path
         else:
-            row == index
+            drop_row = row == index
         if drop_row:
             _apk_record_unloaded(_fc_ld[row], _fc_key[row])
             released = released + 1
@@ -1942,11 +2088,36 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool):
 
 fn _apk_release_binding(ld: i64, i: i64):
     """Free one unpinned binding and retain only compact state history."""
-    _apk_compact_bindings(ld, i, "", false)
+    _apk_compact_bindings(ld, i, "", false, false)
 
 fn _apk_release_pack_bindings(ld: i64, path: text):
     """Free all unpinned bindings for a pack with one O(active-bindings) pass."""
-    _apk_compact_bindings(ld, -1, path, true)
+    _apk_compact_bindings(ld, -1, path, true, false)
+
+fn apk_loader_invalidate_catalog_v1(ld: i64) -> bool:
+    """Release every unpinned binding before a visible-catalog replacement.
+
+    This is a two-phase, O(active bindings + activation depth) transition:
+    first prove that no activation or pin can observe a partial replacement,
+    then compact all loader rows once. Pack registrations and payload arrays
+    are not scanned or copied. On refusal absolutely no state changes.
+    """
+    var i = 0
+    while i < _stk_ld.len():
+        if _stk_ld[i] == ld:
+            _ld_last_error[ld] = "loader has an activating facet; catalog update refused"
+            return false
+        i = i + 1
+    i = 0
+    while i < _fc_ld.len():
+        if _fc_ld[i] == ld and _fc_state[i] != APK_FC_UNLOADED and _fc_refs[i] > 0:
+            _ld_last_error[ld] = "loader has pinned facets; catalog update refused"
+            return false
+        i = i + 1
+    _apk_compact_bindings(ld, -1, "", false, true)
+    _ld_catalog_invalidations[ld] = _ld_catalog_invalidations[ld] + 1
+    _ld_last_error[ld] = ""
+    true
 
 fn apk_unload_facet_v1(ld: i64, facet_key: text) -> ApkUnloadResultV1:
     """design §14.7: request unload of one bound facet.

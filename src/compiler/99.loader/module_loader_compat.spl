@@ -17,8 +17,10 @@ use std.common.aspect_pack.{
     ApkFacetLoadV1, APK_ACT_OFF, APK_FC_BOUND, APK_FC_QUIESCING,
     apk_loader_new, apk_loader_unregister_pack, apk_load_facet, apk_try_facet,
     apk_facet_pin_v1, apk_facet_unpin_v1, apk_facet_state_v1,
-    apk_facet_generation_v1
+    apk_facet_generation_v1, apk_open_catalog_v1, apk_validate_catalog_v1,
+    apk_loader_invalidate_catalog_v1, apk_loader_catalog_invalidations_v1
 }
+use std.common.crypto.sha256.{sha256_u8_hex}
 use std.io_runtime.{file_read_bytes}
 
 fn _path_tag(path: text) -> text:
@@ -216,6 +218,13 @@ struct ModuleLoader:
     # this loader. Ordinary source/SMF loads allocate no aspect state.
     aspect_loader_cell: Dict<i64, i64>
     aspect_pack_paths: Dict<text, bool>
+    # One validated visible catalog, retained as a reference-backed COW array.
+    # Assignment does not copy its bytes, and later caller mutation detaches
+    # rather than changing the loader-owned snapshot.
+    aspect_catalog_cell: Dict<i64, [u8]>
+    aspect_catalog_digest_cell: Dict<i64, text>
+    aspect_catalog_generation: i64
+    aspect_catalog_digest_computations: i64
 
 fn _moduleloader_aspect_result(found: bool, facet_key: text, code: text, message: text) -> ApkFacetLoadV1:
     var empty: [u8] = []
@@ -299,20 +308,61 @@ impl ModuleLoader:
         val owner = self.aspect_loader_cell[0]
         _moduleloader_facet_ref(apk_try_facet(owner, facet_key), owner)
 
-    fn aspect_facet(catalog: [u8], facet_key: text) -> ModuleFacetRefV1:
-        """Acquire the exact catalog key through this loader's admitted packs.
+    me install_aspect_catalog(catalog: [u8]) -> Result<text, text>:
+        """Validate and atomically install/update the visible aspect catalog.
 
-        The catalog and returned resident payload remain reference-backed array
-        values; this facade neither rebuilds the catalog nor copies payload
-        bytes. Aspect packs must first be admitted through `load`, which owns
-        the single lazy aspect-loader handle and its unload/pin generations.
+        SHA-256 is computed only at this explicit configuration boundary.
+        An unchanged digest is a true no-op. A changed digest first asks the
+        provider to prove every binding is safely releasable; a pin or active
+        acquisition refuses the update without changing catalog or bindings.
         """
+        val opened = apk_open_catalog_v1(catalog)
+        if not opened.ok:
+            return Err("invalid visible aspect catalog: " + opened.error_message)
+        val validation_error = apk_validate_catalog_v1(catalog, opened)
+        if validation_error != "":
+            return Err("invalid visible aspect catalog: " + validation_error)
+        val digest = sha256_u8_hex(catalog)
+        self.aspect_catalog_digest_computations = self.aspect_catalog_digest_computations + 1
+        if self.aspect_catalog_digest_cell.has(0):
+            if self.aspect_catalog_digest_cell[0] == digest:
+                return Ok(digest)
+            if self.aspect_loader_cell.has(0):
+                if not apk_loader_invalidate_catalog_v1(self.aspect_loader_cell[0]):
+                    return Err("visible aspect catalog update refused while bindings are live")
+        self.aspect_catalog_cell[0] = catalog
+        self.aspect_catalog_digest_cell[0] = digest
+        self.aspect_catalog_generation = self.aspect_catalog_generation + 1
+        Ok(digest)
+
+    fn aspect_facet_visible(facet_key: text) -> ModuleFacetRefV1:
+        """Acquire through the installed catalog without hashing or copying it."""
+        if not self.aspect_catalog_cell.has(0):
+            return _moduleloader_facet_ref(
+                _moduleloader_aspect_result(false, facet_key, "APK_CATALOG_MISSING",
+                    "no visible aspect catalog is installed"), -1)
         if not self.aspect_loader_cell.has(0):
             return _moduleloader_facet_ref(
                 _moduleloader_aspect_result(false, facet_key, "APK_PACK_MISSING",
                     "no aspect pack has been admitted by this module loader"), -1)
         val owner = self.aspect_loader_cell[0]
-        _moduleloader_facet_ref(apk_load_facet(owner, catalog, facet_key), owner)
+        _moduleloader_facet_ref(apk_load_facet(owner, self.aspect_catalog_cell[0], facet_key), owner)
+
+    me aspect_facet(catalog: [u8], facet_key: text) -> ModuleFacetRefV1:
+        """Acquire the exact catalog key through this loader's admitted packs.
+
+        Compatibility calls preserve the historical exact-supplied-catalog
+        semantics: every call installs or compares its catalog before lookup,
+        so a changed route cannot return a resident binding from the previous
+        catalog. This compatibility cost includes one catalog digest. Hot
+        callers install explicitly and use aspect_facet_visible instead.
+        """
+        match self.install_aspect_catalog(catalog):
+            case Err(message):
+                return _moduleloader_facet_ref(
+                    _moduleloader_aspect_result(false, facet_key, "APK_CATALOG_INVALID", message), -1)
+            case Ok(_): pass
+        self.aspect_facet_visible(facet_key)
 
     # NOTE: the body below is inlined directly (rather than delegating to a
     # free helper function) because the interpreter used by `bin/simple`
@@ -667,7 +717,11 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
             semantic_fingerprints: {},
             dependency_semantic_fingerprints: {},
             aspect_loader_cell: {},
-            aspect_pack_paths: {}
+            aspect_pack_paths: {},
+            aspect_catalog_cell: {},
+            aspect_catalog_digest_cell: {},
+            aspect_catalog_generation: 0,
+            aspect_catalog_digest_computations: 0
     )
 
 fn moduleloader_aspect_loader_handle(self: ModuleLoader) -> i64:
@@ -675,11 +729,33 @@ fn moduleloader_aspect_loader_handle(self: ModuleLoader) -> i64:
         return self.aspect_loader_cell[0]
     -1
 
+me moduleloader_install_aspect_catalog(self: ModuleLoader, catalog: [u8]) -> Result<text, text>:
+    self.install_aspect_catalog(catalog)
+
+fn moduleloader_visible_aspect_catalog_digest(self: ModuleLoader) -> text:
+    if self.aspect_catalog_digest_cell.has(0):
+        return self.aspect_catalog_digest_cell[0]
+    ""
+
+fn moduleloader_visible_aspect_catalog_generation(self: ModuleLoader) -> i64:
+    self.aspect_catalog_generation
+
+fn moduleloader_aspect_catalog_digest_computations(self: ModuleLoader) -> i64:
+    self.aspect_catalog_digest_computations
+
+fn moduleloader_aspect_catalog_invalidations(self: ModuleLoader) -> i64:
+    if not self.aspect_loader_cell.has(0):
+        return 0
+    apk_loader_catalog_invalidations_v1(self.aspect_loader_cell[0])
+
 fn moduleloader_try_aspect_facet(self: ModuleLoader, facet_key: text) -> ModuleFacetRefV1:
     self.try_aspect_facet(facet_key)
 
-fn moduleloader_aspect_facet(self: ModuleLoader, catalog: [u8], facet_key: text) -> ModuleFacetRefV1:
+me moduleloader_aspect_facet(self: ModuleLoader, catalog: [u8], facet_key: text) -> ModuleFacetRefV1:
     self.aspect_facet(catalog, facet_key)
+
+fn moduleloader_aspect_facet_visible(self: ModuleLoader, facet_key: text) -> ModuleFacetRefV1:
+    self.aspect_facet_visible(facet_key)
 
 fn modulefacetref_is_live(self: ModuleFacetRefV1) -> bool:
     self.is_live()
