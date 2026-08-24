@@ -3492,3 +3492,17 @@ Filename extraction uses one last-slash lookup rather than allocating every path
 segment. Under the native join contract, construction is linear in input
 metadata plus rendered output size, excluding file I/O. No timing/RSS
 measurement was run under the user override.
+
+# 2026-08-24 follow-up: app feature-index construction
+
+The app-document aggregate index retained the same growing immutable Markdown
+pattern as the former usage index: every emitted row recopied the full prefix,
+and basename extraction split every path solely to read its last segment. For
+final rendered size `R`, cumulative prefix copying was quadratic in the number
+and size of emitted rows.
+
+The app index now pushes fixed headers and complete rows into a fragment array
+and joins once under the native join contract. It preserves input order, nested
+behavior counts, status fallback, exact table framing, output path, and final
+newline. A final-slash search plus one basename slice replaces whole-path
+splitting. No runtime measurement was run under the no-verification override.

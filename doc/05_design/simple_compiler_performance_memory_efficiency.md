@@ -1129,3 +1129,9 @@ append their name and first-entry bucket together. Rendering walks the two
 parallel arrays, pushes complete Markdown lines into `fragments`, and writes
 `fragments.join("")`. `extract_index_filename` slices after the final `/` and
 then applies the existing suffix rules.
+
+`generate_app_index` uses the same fragment policy without category buckets:
+six fixed heading/table fragments, one complete row per `FeatureFileInfo`, and
+one final newline fragment. Behavior totals still traverse describes and
+contexts exactly once per row. `extract_app_index_filename` slices after the
+last `/` before applying unchanged `_spec.spl` and `.spl` precedence.

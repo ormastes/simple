@@ -829,3 +829,8 @@ one final join. Category lookup owns only stable integer bucket IDs; category
 membership lives in indexed nested arrays so growth never crosses a dictionary
 value-copy boundary. A parallel category-name array is the authoritative
 first-encounter ordering surface.
+
+App aggregate indexes use the same append-only rendering boundary: fixed header
+fragments, one complete fragment per input row, one final blank-line fragment,
+and one native join. App inputs are not regrouped, so their source order is the
+authoritative row order.

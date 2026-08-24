@@ -1733,3 +1733,13 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Added paired rendering/path oracles and a canonical manual.
 - No manual execution was run under the user override; static semantic,
   performance, and fixture review is required before sync.
+
+# Completed tranche: linear app feature index (2026-08-24)
+
+- Replaced growing app-index Markdown prefixes with fragments and one join.
+- Replaced whole-path splitting with a final-slash basename slice.
+- Preserved exact bytes, input order, nested behavior counts, status fallback,
+  output path, table framing, and final newline.
+- Added paired exact nonempty/empty/path oracles and a canonical manual.
+- No manual execution was run under the user override; static semantic,
+  performance, and fixture review is required before sync.
