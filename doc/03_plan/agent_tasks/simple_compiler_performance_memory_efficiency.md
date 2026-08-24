@@ -1172,6 +1172,17 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Existing backend-decision and deterministic report contracts cover behavior;
   verification intentionally not run under the user's no-verify instruction.
 
+## Completed optimizer report assembly tranche
+
+- Replace cumulative top-level JSON concatenation with ordered pass-entry
+  accumulation and one final join.
+- Preserve schema bytes, ordinals, status/reason fields, backend outcomes,
+  commas, empty-pipeline rendering, and deterministic ordering.
+- Reduce top-level report assembly from cumulative-prefix copying to O(output)
+  work and storage.
+- Existing deterministic report contracts cover behavior; verification
+  intentionally not run under the user's no-verify instruction.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace

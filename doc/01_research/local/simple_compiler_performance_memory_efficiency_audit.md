@@ -2706,3 +2706,12 @@ resolved-descriptor kernel. The public name-taking decision API remains the
 compatibility boundary, while callers that already resolved a descriptor reuse
 it. Existing deterministic report and backend-decision contracts cover output
 behavior but were not executed under the user's no-verification instruction.
+
+The deterministic optimizer JSON report also appended every pass record to a
+growing output string. With output size proportional to the requested pass
+count, repeated whole-prefix copying can become quadratic in emitted bytes.
+The renderer now builds independent ordered entry strings and joins them once,
+preserving the exact schema, ordinal order, comma placement, and empty-pipeline
+form while making top-level assembly linear in output size. Existing schema,
+delegation, order, and repeatability contracts were not rerun under the user's
+no-verification instruction.
