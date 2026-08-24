@@ -155,6 +155,9 @@ dev-done
 For must-check work, acceptance criteria keep interactive push bounded: a
 guard whose default command runs mutation fixtures uses scan-only mode in push,
 with the mutation self-test retained as a required bootstrap-owned row.
+Source-decidable external gates also require a lane-specific committed-tree
+oracle after common signature/hash validation; a signed PASS label is not
+enough.
 
 For ordinary feature development, first apply
 `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: name

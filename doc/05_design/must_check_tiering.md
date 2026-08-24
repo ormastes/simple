@@ -69,6 +69,11 @@ to manifest `todo` rows and accepts a committed
 PASS verdict, and separate committed artifact SHA-256 all validate. Repeating
 the same receipt preserves its first PASS timestamp; later fingerprints retain
 it only while the same blob and SHA-256 remain committed.
+For `riscv32-riscv64-shared`, common signature validation is followed by the
+dedicated ownership checker over shared, RV32, and RV64 attachments. The three
+sorted inventories must form an exact disjoint partition of the committed
+RISC-V-named source universe; shared entries bind existing bilateral consumer
+paths and sibling-only entries bind explicit specialization reasons.
 In completion mode, automated dispatch receives the canonical validated Stage 4
 candidate as both `SIMPLE_BINARY` and `SIMPLE_BIN`; these assignments override
 any ambient value. The

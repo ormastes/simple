@@ -1,0 +1,114 @@
+#!/bin/sh
+# Validate the complete committed RISC-V source ownership inventory used by the
+# riscv32-riscv64-shared external must-check gate.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+ROOT=""
+EXPECTED_FINGERPRINT=""
+SHARED=""
+RV32=""
+RV64=""
+
+fail() {
+    echo "STATUS: FAIL riscv32-riscv64-template-ownership — $*" >&2
+    exit 1
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --root) ROOT=$2; shift 2 ;;
+        --fingerprint) EXPECTED_FINGERPRINT=$2; shift 2 ;;
+        --shared) SHARED=$2; shift 2 ;;
+        --rv32) RV32=$2; shift 2 ;;
+        --rv64) RV64=$2; shift 2 ;;
+        *) fail "unknown-argument-$1" ;;
+    esac
+done
+
+[ -n "$ROOT" ] && [ -n "$EXPECTED_FINGERPRINT" ] || fail missing-root-or-fingerprint
+ROOT=$(CDPATH= cd -- "$ROOT" && pwd -P) || fail invalid-root
+for input in "$SHARED" "$RV32" "$RV64"; do
+    [ -f "$input" ] && [ ! -L "$input" ] || fail missing-inventory
+done
+
+work=$(mktemp -d) || exit 2
+trap 'rm -rf "$work"' EXIT INT TERM
+
+validate_inventory() {
+    _file=$1
+    _kind=$2
+    [ "$(grep -c '^inventory_schema=simple.riscv-template-ownership/v1$' "$_file" || true)" -eq 1 ] || fail "$_kind-schema"
+    [ "$(grep -c "^inventory_kind=$_kind$" "$_file" || true)" -eq 1 ] || fail "$_kind-kind"
+    [ "$(grep -c "^source_fingerprint=$EXPECTED_FINGERPRINT$" "$_file" || true)" -eq 1 ] || fail "$_kind-fingerprint"
+    _all=$(grep -c '^entry=' "$_file" || true)
+    [ "$_all" -gt 0 ] || fail "$_kind-empty"
+    _lines=$(wc -l < "$_file" | tr -d ' ')
+    [ "$_lines" -eq $((_all + 3)) ] || fail "$_kind-unknown-or-duplicate-field"
+    awk -F '\t' -v kind="$_kind" '
+        BEGIN { bad=0; previous="" }
+        /^entry=/ {
+            path=$1; sub(/^entry=/, "", path)
+            reason=$2
+            if (NF != 2 || path !~ /^src\// || path ~ /(^|\/)\.\.($|\/)/ || reason == "") bad=1
+            if (previous != "" && path <= previous) bad=1
+            previous=path
+            if (kind == "shared") {
+                if (reason !~ /^bilateral:rv32=src\// || reason !~ /;rv64=src\//) bad=1
+            } else if (reason !~ /^specialization:/) bad=1
+            print path
+        }
+        END { exit bad }
+    ' "$_file" > "$work/$_kind.paths" || fail "$_kind-malformed-unsorted-or-unjustified"
+}
+
+validate_inventory "$SHARED" shared
+validate_inventory "$RV32" rv32
+validate_inventory "$RV64" rv64
+
+cat "$work/shared.paths" "$work/rv32.paths" "$work/rv64.paths" | sort > "$work/actual"
+[ "$(uniq -d "$work/actual" | wc -l | tr -d ' ')" -eq 0 ] || fail duplicate-path
+
+# The universe is intentionally broad and path-name independent after this
+# discovery step: every owned committed src path mentioning the RISC-V family
+# participates, then the reviewed inventory supplies its semantic class.
+git -C "$ROOT" ls-tree -r --name-only HEAD -- src |
+    awk 'tolower($0) ~ /(riscv|rv32|rv64)/ &&
+        $0 !~ /^src\/compiler_rust\/vendor\// &&
+        $0 !~ /^src\/runtime\/vendor\// &&
+        $0 != "src/runtime/miniaudio.h" &&
+        $0 != "src/runtime/stb_image.h" &&
+        $0 != "src/runtime/stb_truetype.h" { print }
+    ' | sort -u > "$work/expected"
+[ -s "$work/expected" ] || fail empty-committed-universe
+cmp -s "$work/expected" "$work/actual" || fail inventory-does-not-match-head
+
+while IFS= read -r path; do
+    mode=$(git -C "$ROOT" ls-tree HEAD -- "$path" | awk '{print $1}')
+    case "$mode" in 100644|100755) ;; *) fail nonregular-or-nonexistent-path ;; esac
+done < "$work/actual"
+
+# A shared row must cite one existing consumer/projection from each sibling.
+awk -F '\t' '/^entry=/ {
+    reason=$2
+    sub(/^bilateral:rv32=/, "", reason)
+    split(reason, refs, /;rv64=/)
+    print refs[1] "\t" refs[2]
+}' "$SHARED" | while IFS='	' read -r rv32_ref rv64_ref; do
+    [ -n "$rv32_ref" ] && [ -n "$rv64_ref" ] || fail missing-bilateral-reference
+    case "$rv32_ref:$rv64_ref" in *..*|*' '*|*';'*) fail unsafe-bilateral-reference ;; esac
+    [ "$rv32_ref" != "$rv64_ref" ] || fail bilateral-references-not-distinct
+    [ "$(grep -Fxc "$rv32_ref" "$work/rv32.paths" || true)" -eq 1 ] || fail rv32-reference-not-in-projection
+    [ "$(grep -Fxc "$rv64_ref" "$work/rv64.paths" || true)" -eq 1 ] || fail rv64-reference-not-in-projection
+    rv32_mode=$(git -C "$ROOT" ls-tree HEAD -- "$rv32_ref" | awk '{print $1}')
+    rv64_mode=$(git -C "$ROOT" ls-tree HEAD -- "$rv64_ref" | awk '{print $1}')
+    case "$rv32_mode" in 100644|100755) ;; *) fail missing-rv32-reference ;; esac
+    case "$rv64_mode" in 100644|100755) ;; *) fail missing-rv64-reference ;; esac
+done
+
+shared_count=$(wc -l < "$work/shared.paths" | tr -d ' ')
+rv32_count=$(wc -l < "$work/rv32.paths" | tr -d ' ')
+rv64_count=$(wc -l < "$work/rv64.paths" | tr -d ' ')
+total=$((shared_count + rv32_count + rv64_count))
+echo "STATUS: PASS riscv32-riscv64-template-ownership — total=$total shared=$shared_count rv32=$rv32_count rv64=$rv64_count exact HEAD inventory"

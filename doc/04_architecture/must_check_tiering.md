@@ -46,6 +46,11 @@ The producer refuses production recording if fingerprinted inputs differ from
 `HEAD`. External or hardware TODO receipts use a separate explicit import:
 their first PASS requires a regular committed blob at `HEAD`, and later source
 fingerprints carry the PASS only while that exact blob/hash remains committed.
+The external validator owns a shared signature/hash loader plus narrow
+gate-specific semantic oracles. The RISC-V sharing oracle compares three
+reviewed ownership attachments with the exhaustive committed HEAD path
+universe and rejects missing bilateral or specialization rationale; it does not
+promote runtime or board evidence.
 Automated source-sensitive results still invalidate on fingerprint changes.
 After Stage 1-4 admission succeeds, the bootstrap owner canonicalizes the exact
 validated Stage 4 path and injects it as `SIMPLE_BINARY` and the established

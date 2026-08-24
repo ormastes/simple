@@ -34,6 +34,7 @@ trap 'rm -rf "$fixture" "$fixture-hook-repo" "$fixture-hook-peer" "$rules_fixtur
 # one valid row and adjacent semantic mutations before testing recorder wiring.
 mkdir -p "$external_fixture/evidence" "$external_fixture/scripts/check" "$external_fixture/config/check"
 cp "$ROOT/scripts/check/check-external-must-check-receipt.shs" "$external_fixture/scripts/check/"
+cp "$ROOT/scripts/check/check-riscv32-riscv64-template-ownership.shs" "$external_fixture/scripts/check/"
 external_validator="$external_fixture/scripts/check/check-external-must-check-receipt.shs"
 git -C "$external_fixture" init -q
 git -C "$external_fixture" config user.name must-check-test
@@ -205,6 +206,145 @@ for contradiction in FAIL BLOCKED; do
             exit 1
         }
 done
+
+# RISC-V ownership is source-decidable and therefore requires more than a
+# signed list of PASS labels. Exercise the lane-specific exact-HEAD inventory
+# validator through the real signed external-receipt entrypoint.
+mkdir -p "$external_fixture/src/shared" "$external_fixture/src/rv32" "$external_fixture/src/rv64"
+printf '%s\n' '# shared RISC-V template' > "$external_fixture/src/shared/riscv_common.spl"
+printf '%s\n' '# RV32 projection' > "$external_fixture/src/rv32/core.spl"
+printf '%s\n' '# RV64 projection' > "$external_fixture/src/rv64/core.spl"
+for kind in command target toolchain observations; do
+    git -C "$external_fixture" show "$external_signed_commit:evidence/$kind.env" > "$external_fixture/evidence/$kind.env"
+    sed -i 's/web-server-request-port/riscv32-riscv64-shared/g' "$external_fixture/evidence/$kind.env"
+done
+sed -i 's/server-producer/riscv-producer/' "$external_fixture/evidence/command.env" 2>/dev/null || true
+cat > "$external_fixture/evidence/observations.env" <<EOF
+evidence_schema=simple.must-check-observations/v1
+gate_id=riscv32-riscv64-shared
+source_fingerprint=$external_fp
+run_id=$external_run
+acceptance_ids=shared-template-inventory,rv32-projection,rv64-projection,arch-only-leaves,review
+acceptance.shared-template-inventory=PASS
+acceptance.rv32-projection=PASS
+acceptance.rv64-projection=PASS
+acceptance.arch-only-leaves=PASS
+acceptance.review=PASS
+final_verdict=PASS
+EOF
+cat > "$external_fixture/evidence/shared.inventory" <<EOF
+inventory_schema=simple.riscv-template-ownership/v1
+inventory_kind=shared
+source_fingerprint=$external_fp
+entry=src/shared/riscv_common.spl	bilateral:rv32=src/rv32/core.spl;rv64=src/rv64/core.spl
+EOF
+cat > "$external_fixture/evidence/rv32.inventory" <<EOF
+inventory_schema=simple.riscv-template-ownership/v1
+inventory_kind=rv32
+source_fingerprint=$external_fp
+entry=src/rv32/core.spl	specialization:RV32 XLEN projection
+EOF
+cat > "$external_fixture/evidence/rv64.inventory" <<EOF
+inventory_schema=simple.riscv-template-ownership/v1
+inventory_kind=rv64
+source_fingerprint=$external_fp
+entry=src/rv64/core.spl	specialization:RV64 XLEN projection
+EOF
+git -C "$external_fixture" add src evidence scripts/check
+git -C "$external_fixture" commit -qm riscv-ownership-raw-evidence
+command_sha=$(sha256sum "$external_fixture/evidence/command.env" | awk '{print $1}')
+target_sha=$(sha256sum "$external_fixture/evidence/target.env" | awk '{print $1}')
+toolchain_sha=$(sha256sum "$external_fixture/evidence/toolchain.env" | awk '{print $1}')
+observations_sha=$(sha256sum "$external_fixture/evidence/observations.env" | awk '{print $1}')
+shared_sha=$(sha256sum "$external_fixture/evidence/shared.inventory" | awk '{print $1}')
+rv32_sha=$(sha256sum "$external_fixture/evidence/rv32.inventory" | awk '{print $1}')
+rv64_sha=$(sha256sum "$external_fixture/evidence/rv64.inventory" | awk '{print $1}')
+cat > "$external_artifact" <<EOF
+evidence_schema=simple.must-check-external-evidence/v2
+gate_id=riscv32-riscv64-shared
+source_fingerprint=$external_fp
+final_verdict=PASS
+producer_id=riscv-producer
+producer_kind=source-audit
+run_id=$external_run
+produced_at_utc=2000-01-01T00:00:00Z
+reviewer_key_id=fixture-reviewer
+command_receipt_path=evidence/command.env
+command_receipt_sha256=$command_sha
+target_identity_path=evidence/target.env
+target_identity_sha256=$target_sha
+toolchain_identity_path=evidence/toolchain.env
+toolchain_identity_sha256=$toolchain_sha
+observations_path=evidence/observations.env
+observations_sha256=$observations_sha
+shared_inventory_path=evidence/shared.inventory
+shared_inventory_sha256=$shared_sha
+rv32_projection_path=evidence/rv32.inventory
+rv32_projection_sha256=$rv32_sha
+rv64_projection_path=evidence/rv64.inventory
+rv64_projection_sha256=$rv64_sha
+acceptance_contract=riscv32-riscv64-shared/v1
+acceptance_ids=shared-template-inventory,rv32-projection,rv64-projection,arch-only-leaves,review
+EOF
+openssl dgst -sha256 -sign "$external_fixture/reviewer-private.pem" -out "$external_fixture/evidence/reviewer.sig" "$external_artifact"
+signature_sha=$(sha256sum "$external_fixture/evidence/reviewer.sig" | awk '{print $1}')
+printf '%s\n' 'reviewer_signature_path=evidence/reviewer.sig' "reviewer_signature_sha256=$signature_sha" > "$external_receipt"
+git -C "$external_fixture" add evidence/summary.env evidence/reviewer.sig evidence/external.receipt
+git -C "$external_fixture" commit -qm signed-riscv-ownership-summary
+riscv_valid_commit=$(git -C "$external_fixture" rev-parse HEAD)
+MUST_CHECK_ROOT="$external_fixture" MUST_CHECK_RECEIPT_FILE="$external_receipt" \
+MUST_CHECK_ARTIFACT_FILE="$external_artifact" MUST_CHECK_EXPECTED_GATE=riscv32-riscv64-shared \
+MUST_CHECK_EXPECTED_FINGERPRINT="$external_fp" sh "$external_validator" | grep -q '^STATUS: PASS '
+
+# Re-sign a summary that omits one mandatory attachment: a valid reviewer
+# signature cannot waive the registry-owned semantic contract.
+sed '/^rv64_projection_/d' "$external_artifact" > "$external_fixture/evidence/summary.missing"
+mv "$external_fixture/evidence/summary.missing" "$external_artifact"
+openssl dgst -sha256 -sign "$external_fixture/reviewer-private.pem" -out "$external_fixture/evidence/reviewer.sig" "$external_artifact"
+signature_sha=$(sha256sum "$external_fixture/evidence/reviewer.sig" | awk '{print $1}')
+sed -i "s/reviewer_signature_sha256=.*/reviewer_signature_sha256=$signature_sha/" "$external_receipt"
+git -C "$external_fixture" add evidence/summary.env evidence/reviewer.sig evidence/external.receipt
+git -C "$external_fixture" commit -qm signed-riscv-summary-missing-inventory
+MUST_CHECK_ROOT="$external_fixture" MUST_CHECK_RECEIPT_FILE="$external_receipt" \
+MUST_CHECK_ARTIFACT_FILE="$external_artifact" MUST_CHECK_EXPECTED_GATE=riscv32-riscv64-shared \
+MUST_CHECK_EXPECTED_FINGERPRINT="$external_fp" sh "$external_validator" >/dev/null 2>&1 && {
+    echo 'FAIL: signed RISC-V summary without RV64 inventory was admitted'
+    exit 1
+}
+
+# Direct semantic mutations isolate exact-HEAD and justification failures from
+# signature/hash failures already covered above.
+git -C "$external_fixture" show "$riscv_valid_commit:evidence/shared.inventory" > "$external_fixture/evidence/shared.valid"
+git -C "$external_fixture" show "$riscv_valid_commit:evidence/rv32.inventory" > "$external_fixture/evidence/rv32.valid"
+git -C "$external_fixture" show "$riscv_valid_commit:evidence/rv64.inventory" > "$external_fixture/evidence/rv64.valid"
+sed 's|entry=src/rv32/core.spl|entry=src/rv32/missing.spl|' "$external_fixture/evidence/rv32.valid" > "$external_fixture/evidence/rv32.stale"
+sh "$external_fixture/scripts/check/check-riscv32-riscv64-template-ownership.shs" \
+    --root "$external_fixture" --fingerprint "$external_fp" \
+    --shared "$external_fixture/evidence/shared.valid" \
+    --rv32 "$external_fixture/evidence/rv32.stale" \
+    --rv64 "$external_fixture/evidence/rv64.valid" >/dev/null 2>&1 && {
+        echo 'FAIL: stale RISC-V inventory was accepted'
+        exit 1
+    }
+sed 's/specialization:RV32 XLEN projection//' "$external_fixture/evidence/rv32.valid" > "$external_fixture/evidence/rv32.unjustified"
+sh "$external_fixture/scripts/check/check-riscv32-riscv64-template-ownership.shs" \
+    --root "$external_fixture" --fingerprint "$external_fp" \
+    --shared "$external_fixture/evidence/shared.valid" \
+    --rv32 "$external_fixture/evidence/rv32.unjustified" \
+    --rv64 "$external_fixture/evidence/rv64.valid" >/dev/null 2>&1 && {
+        echo 'FAIL: unjustified RV32-only leaf was accepted'
+        exit 1
+    }
+sed 's|bilateral:rv32=src/rv32/core.spl;rv64=src/rv64/core.spl|bilateral:rv32=src/rv64/core.spl;rv64=src/rv64/core.spl|' \
+    "$external_fixture/evidence/shared.valid" > "$external_fixture/evidence/shared.cross-class"
+sh "$external_fixture/scripts/check/check-riscv32-riscv64-template-ownership.shs" \
+    --root "$external_fixture" --fingerprint "$external_fp" \
+    --shared "$external_fixture/evidence/shared.cross-class" \
+    --rv32 "$external_fixture/evidence/rv32.valid" \
+    --rv64 "$external_fixture/evidence/rv64.valid" >/dev/null 2>&1 && {
+        echo 'FAIL: same/cross-class bilateral RISC-V references were accepted'
+        exit 1
+    }
 
 # A --ref scan must parse policy from that commit, not a hostile/dirty working
 # rules.sdl. The dirty command would sleep and fail if the checker read it.

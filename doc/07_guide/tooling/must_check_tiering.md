@@ -160,6 +160,16 @@ semantically incomplete artifact is rejected. Its original PASS time carries for
 the same source fingerprint while the identical blob/hash remains committed.
 External and automated rows reset when their fingerprint changes; a newly
 signed external summary must bind the new fingerprint before re-promotion.
+`riscv32-riscv64-shared` also references `shared_inventory`,
+`rv32_projection`, and `rv64_projection` blobs using the standard
+`_path`/`_sha256` fields. Each uses schema
+`simple.riscv-template-ownership/v1`, its matching inventory kind, the source
+fingerprint, and sorted tab-separated `entry=<repo-path><TAB><reason>` rows.
+Their union must exactly equal every owned committed `src` path mentioning
+RISC-V/RV32/RV64. Shared reasons name existing bilateral consumers as
+`bilateral:rv32=<path>;rv64=<path>`; sibling-only rows require a nonempty
+`specialization:` reason. This proves review scope and inventory integrity, not
+runtime/FPGA readiness or completion of the broader sharing target.
 The push consumer reads and hashes evidence from the exact pushed revision, so
 dirty, removed, or substituted live-worktree bytes cannot affect the verdict.
 It cross-checks registry and ledger structure in one linear parser pass. Only

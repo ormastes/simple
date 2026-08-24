@@ -1065,6 +1065,9 @@ evidence summary to carry a valid signature from a repository-pinned independent
 reviewer key, plus a final validator PASS.
 Keep that validator bootstrap-owned; the bounded push consumer only validates
 the committed ledger and evidence hashes.
+For source-decidable external gates, add a narrow registry-owned semantic
+oracle after common signature/hash validation; RISC-V sharing requires an
+exhaustive disjoint HEAD inventory with bilateral and specialization evidence.
 When a push guard's default command also runs mutation fixtures, register its
 scan-only mode in the push tier and retain the self-test as a distinct required
 bootstrap row.
