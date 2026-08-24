@@ -15,6 +15,7 @@ MAX_PUSH_REF_ROWS=2
 MAX_EVIDENCE_BYTES=67108864
 ALLOW_EXTERNAL_EVIDENCE=0
 ALLOW_UNPROMOTED_LEDGER=0
+MUST_CHECK_CONFLICT_UNION_DONE=0
 EVIDENCE_REV=""
 REQUIRED_BOOTSTRAP_IDS='compiler-stage1
 compiler-stage2
@@ -42,6 +43,8 @@ outline-parse-terminates
 runtime-api-regression-selftest
 interpreter-extern-registry-gap-selftest
 type-walk-constructor-parity-selftest
+interpreter-module-owners-selftest
+native-array-element-type
 windows-hook-installation
 caret-local-llm-launch
 caret-provider-wrappers
@@ -283,15 +286,16 @@ run_manifest_push_gates() {
         _blocking=$(printf '%s' "$_blocking" | tr -d ' ')
         case "$_id:$_mode:$_command" in
             'push-conflict-tree:range:sh scripts/check/check-no-conflict-tree-push.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+                [ "${MUST_CHECK_CONFLICT_UNION_DONE:-0}" = 1 ] ||
+                    run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-tree-size:range:sh scripts/check/check-tree-size-push.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-tree-size-push.shs" --push-tip "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-conflict-markers:range:sh scripts/check/check-no-conflict-markers-push.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-rules-quick:ref:sh scripts/check/check-rules-sdl.shs --group quick --ref')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rules-sdl.shs" --group quick --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-interpreter-module-owners:ref:sh scripts/check/check-interpreter-module-owners.shs --ref')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-interpreter-module-owners.shs" --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rules-quick:ref:sh scripts/check/check-rules-sdl.shs --scan-only --group quick --ref')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rules-sdl.shs" --scan-only --group quick --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-interpreter-module-owners:ref:sh scripts/check/check-interpreter-module-owners.shs --scan-only --ref')
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-interpreter-module-owners.shs" --scan-only --ref "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
             'push-runtime-api-regression:range:sh scripts/check/check-runtime-api-regression-push.shs --scan-only')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-no-direct-rt:tree:sh scripts/check/check-no-direct-rt.shs')
@@ -310,8 +314,6 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-guard-wiring.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-outline-parse-terminates:tree:sh scripts/check/check-outline-parse-terminates.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-outline-parse-terminates.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-native-array-element-type:tree:sh scripts/check/check-native-array-element-type.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-native-array-element-type.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-c-runtime-compiles:tree:sh scripts/check/check-c-runtime-compiles-push.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-c-runtime-compiles-push.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-process-wait-eintr-retry:tree:sh scripts/check/check-process-wait-eintr-retry.shs')
@@ -320,6 +322,35 @@ run_manifest_push_gates() {
         esac
     done < "$_push_rows"
     rm -f "$_push_rows"
+}
+
+run_conflict_tree_union() {
+    _ref_file=$1
+    set -- --rev-list-args-or-tips
+    while read -r _local_ref _local_sha _remote_ref _remote_sha; do
+        [ "$_local_sha" = "$ZERO" ] || set -- "$@" "$_local_sha"
+    done < "$_ref_file"
+    [ "$#" -gt 1 ] || return 0
+    set -- "$@" --
+    while read -r _local_ref _local_sha _remote_ref _remote_sha; do
+        [ "$_local_sha" = "$ZERO" ] || set -- "$@" "$_local_sha"
+    done < "$_ref_file"
+    set -- "$@" --not
+    _has_new=0
+    while read -r _local_ref _local_sha _remote_ref _remote_sha; do
+        [ "$_local_sha" = "$ZERO" ] && continue
+        if [ "$_remote_sha" = "$ZERO" ]; then
+            _has_new=1
+        else
+            set -- "$@" "$_remote_sha"
+        fi
+    done < "$_ref_file"
+    if [ "$_has_new" -eq 1 ]; then
+        _push_remote=${MUST_CHECK_PUSH_REMOTE:-}
+        case "$_push_remote" in ''|*[!A-Za-z0-9._/-]*) die "new ref requires the actual push remote name" ;; esac
+        set -- "$@" "--remotes=$_push_remote"
+    fi
+    run_push_gate push-conflict-tree true "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$@"
 }
 
 if [ "${1:-}" = --self-test ]; then
@@ -403,6 +434,10 @@ _ref_count=$(wc -l < "$_unique_refs" | tr -d ' ')
 [ "$_ref_count" -gt 0 ] || die "no non-duplicate pushed refs were provided"
 [ "$_ref_count" -le "$MAX_PUSH_REF_ROWS" ] ||
     die "$_ref_count unique ref updates exceed the bounded limit $MAX_PUSH_REF_ROWS; split the push"
+
+run_conflict_tree_union "$_unique_refs" || die "outgoing commit union contains a conflict tree or exceeds its bounded history limit"
+MUST_CHECK_CONFLICT_UNION_DONE=1
+export MUST_CHECK_CONFLICT_UNION_DONE
 
 while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     [ "$_local_sha" = "$ZERO" ] && continue

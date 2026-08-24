@@ -67,9 +67,23 @@ committed range, while a separate required bootstrap row runs `--selftest`.
 The interpreter-extern registry and type-walk parity guards use the same split:
 push executes only their source scan, while bootstrap owns mutation fixtures.
 The normal standalone command keeps self-test-first behavior.
+Quick rules and interpreter-module ownership use the same scan-only push split;
+their seven- and five-fixture calibration suites stay in bootstrap. The native
+array element interpreter/native-build matrix has no honest structural
+substitute and is therefore bootstrap-only, not advisory push work.
 The exhaustive structural-tree fixture campaign is a bootstrap automated row.
 Interactive push retains the same final-tree invariants but evaluates only each
 bounded committed tip and its count-only first-parent reference.
+Conflict-tree validation is global across pushed refs: existing updates exclude
+their advertised old tips and new refs exclude every advertised ref on the
+actual push remote. The deduplicated outgoing set is capped at 64 commits, tree
+IDs are resolved in one batch, and each unique tree is scanned once. A conflict
+introduced and resolved before the final tip is still rejected; an over-limit
+history fails closed and must be split.
+When those exclusions leave an empty object set (for example, a new branch or
+tag targeting an already-advertised commit), every non-deletion local
+destination tip is deduplicated and scanned directly. The production limit is a
+fixed constant; environment variables cannot raise or lower it.
 Whole-tree semantic scans, compiler-dependent checks, C runtime compilation,
 and executable parse probes are bootstrap producers even when their gate names
 originated in the push hook. Retiering changes their execution owner, not their

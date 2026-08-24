@@ -41,6 +41,26 @@ run only as distinct required bootstrap rows; their production push rows use
 `--scan-only`. The same exact committed-ref production oracle passes in 4.57
 seconds/227,920 KiB afterward: 58.6% lower elapsed time than 11.05 seconds, with
 a 0.97% peak-RSS increase. NFR-MCT-001 is GREEN.
+The broader focused tiering fixture is not the production timing oracle. On the
+same host it measured 23.70 seconds/6,656 KiB before this hardening and 18.01
+seconds/6,656 KiB after it (about 24% lower elapsed time, unchanged peak RSS).
+Those fixture totals include setup and adversarial repository construction;
+they complement, but do not replace or redefine, the retained 4.57-second
+production measurement and the approximately ten-second push target.
+Quick-rules and interpreter-module-owner push rows now also use `--scan-only`;
+their calibration fixtures remain bootstrap work. The 20-case native-array
+interpreter/native-build matrix is bootstrap-only because no bounded structural
+check proves its semantic parity.
+The driver combines pushed refs into one outgoing commit set, subtracting the
+advertised old tips and, for new refs, all refs on the actual push remote. The
+conflict guard rejects more than 64 commits, batch-resolves tree IDs, deduplicates
+equal trees, and scans every remaining tree. This catches a conflict introduced
+and removed before the tip without unbounded per-commit subprocess growth.
+If remote exclusion yields no outgoing commit, the guard falls back to the
+deduplicated non-deletion local tips and validates their trees, allowing an
+already-present commit to receive a new branch/tag safely. The driver cannot
+override the fixed 64 limit through its environment; the low-level fixture-only
+argument can only lower the limit.
 For the runtime-API range gate, Git tree equality over both runtime roots is an
 algorithmic fast path: an unchanged range extracts and counts the tip once;
 any changed runtime root performs the full base/tip removal analysis. The

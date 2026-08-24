@@ -34,7 +34,8 @@ grep -Fq 'check-rust-go-benchmark-parity.shs' "$EXTERNAL_VALIDATOR"
 fixture=$(mktemp -d)
 rules_fixture=$(mktemp -d)
 external_fixture=$(mktemp -d)
-trap 'rm -rf "$fixture" "$fixture-hook-repo" "$fixture-hook-peer" "$rules_fixture" "$external_fixture"' EXIT INT TERM
+conflict_fixture=$(mktemp -d)
+trap 'rm -rf "$fixture" "$fixture-hook-repo" "$fixture-hook-peer" "$rules_fixture" "$external_fixture" "$conflict_fixture"' EXIT INT TERM
 
 # The production external-evidence validator owns the acceptance matrix. Prove
 # one valid row and adjacent semantic mutations before testing recorder wiring.
@@ -681,8 +682,75 @@ grep -Eq 'type-walk-constructor-parity-selftest,[[:space:]]*bootstrap,[[:space:]
     echo "FAIL: type-walk mutation selftest is not bootstrap-owned"
     exit 1
 }
+grep -Eq 'push-rules-quick,[[:space:]]*push,[[:space:]]*true,[[:space:]]*ref,[[:space:]]*"sh scripts/check/check-rules-sdl.shs --scan-only --group quick --ref"' "$ROOT/config/check/must_check_gates.sdn" || {
+    echo "FAIL: push rules guard still runs its 7 mutation fixtures"
+    exit 1
+}
+grep -Eq 'push-interpreter-module-owners,[[:space:]]*push,[[:space:]]*true,[[:space:]]*ref,[[:space:]]*"sh scripts/check/check-interpreter-module-owners.shs --scan-only --ref"' "$ROOT/config/check/must_check_gates.sdn" || {
+    echo "FAIL: push module-owner guard still runs its 5 mutation fixtures"
+    exit 1
+}
+grep -Eq 'interpreter-module-owners-selftest,[[:space:]]*bootstrap,[[:space:]]*false,[[:space:]]*automated,[[:space:]]*"sh scripts/check/check-interpreter-module-owners.shs --selftest"' "$ROOT/config/check/must_check_gates.sdn" || {
+    echo "FAIL: module-owner mutation selftest is not bootstrap-owned"
+    exit 1
+}
+grep -Eq 'native-array-element-type,[[:space:]]*bootstrap,[[:space:]]*false,[[:space:]]*automated,[[:space:]]*"sh scripts/check/check-native-array-element-type.shs"' "$ROOT/config/check/must_check_gates.sdn" || {
+    echo "FAIL: native array execution matrix is not bootstrap-owned"
+    exit 1
+}
+if grep -Eq 'push-native-array-element-type,[[:space:]]*push,' "$ROOT/config/check/must_check_gates.sdn"; then
+    echo "FAIL: native array interpreter/native-build matrix remains in push tier"
+    exit 1
+fi
 sh "$ROOT/scripts/check/check-interpreter-extern-registry-gap.shs" --scan-only >/dev/null
 sh "$ROOT/scripts/check/check-type-walk-constructor-parity.shs" --scan-only >/dev/null
+
+mkdir -p "$conflict_fixture/scripts/check"
+cp "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$conflict_fixture/scripts/check/"
+git -C "$conflict_fixture" init -q
+git -C "$conflict_fixture" config user.name must-check-test
+git -C "$conflict_fixture" config user.email must-check-test@example.invalid
+printf 'clean\n' > "$conflict_fixture/kept"
+git -C "$conflict_fixture" add kept
+git -C "$conflict_fixture" commit -qm base
+conflict_base=$(git -C "$conflict_fixture" rev-parse HEAD)
+mkdir "$conflict_fixture/.jjconflict-base-0" "$conflict_fixture/.jjconflict-side-0"
+printf 'base\n' > "$conflict_fixture/.jjconflict-base-0/kept"
+printf 'side\n' > "$conflict_fixture/.jjconflict-side-0/kept"
+git -C "$conflict_fixture" add .
+git -C "$conflict_fixture" commit -qm introduced-conflict
+rm -rf "$conflict_fixture/.jjconflict-base-0" "$conflict_fixture/.jjconflict-side-0"
+git -C "$conflict_fixture" add -A
+git -C "$conflict_fixture" commit -qm resolved-conflict
+resolved_tip=$(git -C "$conflict_fixture" rev-parse HEAD)
+(cd "$conflict_fixture" && sh scripts/check/check-no-conflict-tree-push.shs "$conflict_base..$resolved_tip" >/dev/null 2>&1) && {
+    echo "FAIL: introduced-then-removed conflict tree was not detected"
+    exit 1
+}
+long_base=$resolved_tip
+for n in 1 2 3 4 5 6 7 8 9; do git -C "$conflict_fixture" commit -q --allow-empty -m "long-$n"; done
+long_tip=$(git -C "$conflict_fixture" rev-parse HEAD)
+(cd "$conflict_fixture" && sh scripts/check/check-no-conflict-tree-push.shs --test-max-commits 8 "$long_base..$long_tip" > "$conflict_fixture/long-range.out" 2>&1) && {
+    echo "FAIL: over-limit conflict-tree history was accepted"
+    exit 1
+}
+grep -q 'bounded limit of 8 commits' "$conflict_fixture/long-range.out" || {
+    echo "FAIL: over-limit conflict-tree history did not fail closed with a bounded verdict"
+    exit 1
+}
+# Production ignores the former environment override entirely. A hostile huge
+# value must still hit the immutable 64-commit limit.
+env_limit_base=$long_tip
+for n in $(awk 'BEGIN {for (i=1; i<=65; i++) print i}'); do git -C "$conflict_fixture" commit -q --allow-empty -m "env-limit-$n"; done
+env_limit_tip=$(git -C "$conflict_fixture" rev-parse HEAD)
+(cd "$conflict_fixture" && MUST_CHECK_SELFTEST=1 MUST_CHECK_MAX_PUSH_COMMITS_FIXTURE=999999 sh scripts/check/check-no-conflict-tree-push.shs "$env_limit_base..$env_limit_tip" > "$conflict_fixture/env-limit.out" 2>&1) && {
+    echo "FAIL: environment raised the production conflict-tree history limit"
+    exit 1
+}
+grep -q 'bounded limit of 64 commits' "$conflict_fixture/env-limit.out" || {
+    echo "FAIL: malicious environment did not retain the fixed 64-commit limit"
+    exit 1
+}
 chmod +x "$hook_repo/scripts/hooks/pre-push" "$hook_repo/scripts/check/"*.shs
 git -C "$hook_repo" init -q
 git -C "$hook_repo" config user.name must-check-test
@@ -774,8 +842,8 @@ printf '%s\n' \
     '    push-conflict-tree, push, true, range, "sh scripts/check/check-no-conflict-tree-push.shs", "fixture"' \
     '    push-tree-size, push, true, range, "sh scripts/check/check-tree-size-push.shs", "fixture"' \
     '    push-conflict-markers, push, true, range, "sh scripts/check/check-no-conflict-markers-push.shs", "fixture"' \
-    '    push-rules-quick, push, true, ref, "sh scripts/check/check-rules-sdl.shs --group quick --ref", "fixture"' \
-    '    push-interpreter-module-owners, push, true, ref, "sh scripts/check/check-interpreter-module-owners.shs --ref", "fixture"' \
+    '    push-rules-quick, push, true, ref, "sh scripts/check/check-rules-sdl.shs --scan-only --group quick --ref", "fixture"' \
+    '    push-interpreter-module-owners, push, true, ref, "sh scripts/check/check-interpreter-module-owners.shs --scan-only --ref", "fixture"' \
     > "$fixture/config/check/must_check_gates.sdn"
 printf '%s\n' \
     'must_check_ledger:' \
@@ -917,6 +985,13 @@ grep -q 'completed_at_utc: "2000-01-02T00:00:00Z"' "$fixture/doc/08_tracking/che
 git -C "$fixture" add doc/08_tracking/check/must_check_db.sdn build/must-check-evidence
 git -C "$fixture" commit -qm bootstrap-ledger
 tip=$(git -C "$fixture" rev-parse HEAD)
+
+# A new branch/tag may point at a commit the remote already advertises. The
+# outgoing object union is then empty, but push must still validate the exact
+# local destination tip tree rather than treating the ref as an error/vacuous.
+git -C "$fixture" update-ref refs/remotes/origin/main "$tip"
+printf 'refs/heads/already-there %s refs/heads/already-there %s\n' "$tip" "$ZERO" |
+    MUST_CHECK_PUSH_REMOTE=origin MUST_CHECK_ROOT="$fixture" sh "$fixture/scripts/check/check-push-must-pass.shs" >/dev/null
 
 cp "$fixture/doc/08_tracking/check/must_check_db.sdn" "$fixture/promoted-ledger.saved"
 sed 's/source_fingerprint: "[0-9a-f]*"/source_fingerprint: "unrecorded"/; s/completed_at_utc: "[^"]*"/completed_at_utc: "never"/; s/, pass, [^,]*,/, todo, never,/; s/, "none"$/, "produce fresh bootstrap-owned evidence for this gate"/' \

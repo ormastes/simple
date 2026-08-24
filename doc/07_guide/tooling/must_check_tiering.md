@@ -94,9 +94,21 @@ uses the bounded `--push-tip` path, deduplicates identical ref updates, and
 fails closed above two unique updates so operators split unusually broad
 pushes. Ledger evidence must be repository-contained and the consumer hashes at
 most 64 MiB total per validation.
+The conflict-tree gate unions those ref updates before scanning. Existing refs
+subtract their advertised old tips; a new ref subtracts all advertised refs on
+the actual push remote. More than 64 outgoing commits fails closed with a split
+instruction. Within the bound, commit tree IDs are batch-resolved and duplicate
+trees scan once, while an introduced-then-resolved conflict tree still blocks.
+If a new branch or tag targets a commit already advertised by that remote, the
+empty outgoing object set falls back to the deduplicated local destination tips,
+so their exact trees are still checked. The hook's 64-commit limit is immutable
+from the environment.
 The quick rules gate also extracts `rules.sdl` from the exact pushed ref; local
 dirty policy cannot alter commands or floors, and `rules.sdl` is included in
 the bootstrap/push source fingerprint.
+Push invokes quick rules and interpreter-module ownership in scan-only mode;
+their detector fixtures run during bootstrap. The native-array interpreter and
+native-build parity matrix is also bootstrap-only.
 
 Whole-tree use resolution, C runtime compilation, direct-runtime scanning,
 signature provenance, performance-mechanism coverage, process-wait EINTR
