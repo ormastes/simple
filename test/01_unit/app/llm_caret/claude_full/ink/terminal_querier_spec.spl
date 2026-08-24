@@ -1,0 +1,88 @@
+use std.spec.*
+use app.llm_caret.claude_full.ink.terminal_querier.{TerminalQuerier, decrqm, da1, da2, oscColor, cursorPosition, kittyKeyboard, xtversion, queryMatches, response, decrpmResponse, oscResponse, csi, osc, sentinel}
+
+fn main() -> ():
+    describe("ink TerminalQuerier", fn() -> ():
+        it("builds request sequences from the CSI/OSC helpers", fn() -> ():
+            expect(da1().request).to_equal(csi("c"))
+            expect(da2().request).to_equal(csi(">c"))
+            expect(kittyKeyboard().request).to_equal(csi("?u"))
+            expect(xtversion().request).to_equal(csi(">0q"))
+            expect(decrqm(2026).request).to_equal(csi("?2026$p"))
+            expect(oscColor(11).request).to_equal(osc(11, "?"))
+        )
+
+        it("uses DEC private CSI ?6n for cursor position to avoid F-key ambiguity", fn() -> ():
+            expect(cursorPosition().request).to_equal(csi("?6n"))
+        )
+
+        it("matches DECRPM only on the same mode", fn() -> ():
+            expect(queryMatches(decrqm(2026), decrpmResponse(2026))).to_equal(true)
+            expect(queryMatches(decrqm(2026), decrpmResponse(1049))).to_equal(false)
+        )
+
+        it("matches OSC only on the same code", fn() -> ():
+            expect(queryMatches(oscColor(11), oscResponse(11))).to_equal(true)
+            expect(queryMatches(oscColor(11), oscResponse(10))).to_equal(false)
+        )
+
+        it("rejects a response whose type differs from the query", fn() -> ():
+            expect(queryMatches(da2(), response("da1"))).to_equal(false)
+        )
+
+        it("writes each query request to stdout as it is sent", fn() -> ():
+            var q = TerminalQuerier.new()
+            q.send(da2())
+            q.send(kittyKeyboard())
+            expect(q.pendingCount()).to_equal(2)
+            expect(q.writtenText()).to_equal(csi(">c") + csi("?u"))
+        )
+
+        it("resolves the first matching pending query, not only the queue head", fn() -> ():
+            var q = TerminalQuerier.new()
+            q.send(da2())
+            q.send(oscColor(11))
+            q.onResponse(oscResponse(11))
+            expect(q.pendingCount()).to_equal(1)
+            expect(q.resolved.len()).to_equal(1)
+            expect(q.resolved[0]).to_equal("osc:osc")
+        )
+
+        it("writes a DA1 sentinel on flush", fn() -> ():
+            var q = TerminalQuerier.new()
+            q.flush()
+            expect(q.writtenText()).to_equal(sentinel())
+            expect(q.pendingCount()).to_equal(1)
+        )
+
+        it("drains unsupported queries through the sentinel when DA1 comes back unmatched", fn() -> ():
+            var q = TerminalQuerier.new()
+            q.send(kittyKeyboard())
+            q.send(decrqm(2026))
+            q.flush()
+            q.onResponse(response("da1"))
+            expect(q.pendingCount()).to_equal(0)
+            expect(q.resolved.len()).to_equal(3)
+            expect(q.resolved[0]).to_equal("kittyKeyboard:undefined")
+            expect(q.resolved[1]).to_equal("decrpm:undefined")
+            expect(q.resolved[2]).to_equal("sentinel:resolved")
+        )
+
+        it("keeps queries sent after the sentinel queued for a later batch", fn() -> ():
+            var q = TerminalQuerier.new()
+            q.send(kittyKeyboard())
+            q.flush()
+            q.send(da2())
+            q.onResponse(response("da1"))
+            expect(q.pendingCount()).to_equal(1)
+            expect(q.resolved.len()).to_equal(2)
+        )
+
+        it("ignores an unmatched DA1 when no sentinel is queued", fn() -> ():
+            var q = TerminalQuerier.new()
+            q.send(kittyKeyboard())
+            q.onResponse(response("da1"))
+            expect(q.pendingCount()).to_equal(1)
+            expect(q.resolved.len()).to_equal(0)
+        )
+    )
