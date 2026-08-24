@@ -86,3 +86,28 @@ the call, reject double mount before state mutation, build mount state off-root,
 and publish it only after recovery, root reads, and identity enrollment all
 succeed. Every failure after enrollment must close that exact seal before
 returning; an indeterminate close must quarantine and withdraw publication.
+
+## 2026-08-24 retry v3 outcome
+
+A lifecycle-only draft was independently rejected and reverted without running
+verification. It confirmed that an exact slot/slot-generation/mount-generation
+seal is necessary, but exposed additional requirements that must be designed as
+one canonical transaction:
+
+- generation publication and `g_fat32_mount_fs`/device publication cannot be
+  separate state transitions; otherwise a published generation can leak when
+  canonical publication fails, and concurrent publishers can overwrite;
+- copied `Fat32Filesystem` values cannot receive close authority merely by
+  carrying a copied exact seal; only a non-copyable canonical mount owner may
+  invalidate the generation;
+- candidate recovery currently publishes process-global atomic-replace
+  capabilities, so it is not an isolated off-root transaction and can disturb
+  an already-live mount;
+- legacy test-created filesystems publish without a mounted identity, requiring
+  an explicit test-only boundary rather than weakening production admission;
+- capacity and identity-exhaustion behavior needs executable coverage.
+
+The next design must therefore combine canonical filesystem/device publication,
+generation state, replace-capability publication, and close authority under one
+owner-side commit. A candidate may return only frozen state to that owner; it
+must not mutate process globals or carry a caller-usable close operation.
