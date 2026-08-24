@@ -986,3 +986,9 @@ unchanged and wildcard arms still fail closed. `For` scheduling remains
 iterable-at-parent-depth before body-at-derived-depth; Loop, While, Lambda, and
 Comprehension retain their current depth rules. Generator freshness comparison
 must include `hir_children.spl` before the collector switches APIs.
+
+Wrapper structs named `kind` are not base-carrier dispatch slots. The generator
+must classify them normally; only `HirExpr`, `HirStmt`, `HirType`, and
+`HirPattern` skip their field because their explicit kind match already owns
+the payload. This keeps `DimExpr`, `Effect`, and comprehension-clause children
+and hashes complete without double-visiting carrier variants.
