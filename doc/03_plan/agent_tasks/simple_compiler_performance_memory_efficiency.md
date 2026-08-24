@@ -149,6 +149,19 @@ current-head research reconciliation.
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed MIR verification atom-set tranche
+
+- Replace growing state-atom, projected-effect, and written-region arrays'
+  linear membership scans with operation-local dictionaries while retaining
+  arrays for canonical sorting or first-occurrence output.
+- Reduce deduplication from O(E*U), worst O(E^2), to expected O(E), followed by
+  the unchanged O(U log U) sort and O(U) temporary membership storage.
+- Preserve exact region/type atom identity, read exclusion, unique sorted
+  output, frame canonical text, and hash semantics.
+- Add an interleaved read and repeated-write contract proving duplicate
+  collapse and canonical order.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Implemented generated HIR child-frame tranche
 
 - Generator owner: add `HirChildFrame`, its context-neutral sink, reverse
