@@ -671,3 +671,13 @@ alter ASCII token boundaries or UTF-8 payload bytes. Candidate-only normalized
 keys stay separate from authoritative tokenizer/cosine feature vectors. Raw
 multi-line keys follow the same rule: collect trimmed-line and newline fragments
 in encounter order and join once.
+
+### Boundary-first lint token extraction
+
+Small textual lint classifiers should discover ASCII token boundaries on the
+original byte storage and slice only after boundaries are known. They must not
+construct token prefixes or repeatedly slice away leading bytes. The byte
+predicate is part of the lint contract and must match the prior character-set
+recognizer exactly. `bytes()` is not a view and must not be used for a bounded
+prefix scan because it copies the full input; semantic family classification
+remains a separate consumer.

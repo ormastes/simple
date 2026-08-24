@@ -164,6 +164,18 @@ current-head research reconciliation.
 - Manual verification intentionally omitted under the user's explicit
   no-verification instruction.
 
+## Completed assertion-head boundary tranche
+
+- Scan the exact ASCII assertion identifier alphabet on original statement
+  bytes and materialize the head once.
+- Strip leading underscores with one boundary scan and at most one slice.
+- Preserve assertion families, required-space behavior, operand trimming,
+  assignment exclusion, equality acceptance, and SPIPE005 diagnostic behavior.
+- Reduce H-byte head/underscore processing from O(H^2) copied bytes and O(H)
+  temporary slices to O(H) work with constant slice count.
+- Manual verification intentionally omitted under the user's explicit
+  no-verification instruction.
+
 ## Completed duplicate structural-key assembly tranche
 
 - Preserve the exact identifier, number-with-dot, and unchanged-byte grammar of

@@ -2653,6 +2653,24 @@ input with a different lifetime. Complete warning payload/order parity is
 covered using a generated RV64 bundle, but not executed under the user's
 no-verification instruction.
 
+### Allocation-bounded assertion-head classification
+
+SPIPE assertion recognition scans each candidate statement for a paren-less
+assertion-family head such as `check value` or `fail "message"`. It previously
+created a one-character slice and appended it to an immutable head on every
+identifier byte, producing O(H^2) prefix copying and O(H) temporary strings for
+an H-byte head. Assertion-family classification also removed leading underscores
+by repeatedly slicing the remaining name, with the same quadratic worst case.
+
+Both paths now scan their existing byte storage with allocation-free `byte_at`
+using the exact prior ASCII alphabet (`A-Z`, `a-z`, `0-9`, underscore), then
+materialize a constant number of result slices. Head/tail separation, required
+literal space, trimmed nonempty operand,
+single-assignment exclusion, `==` acceptance, leading-underscore handling, and
+all assertion-family names remain unchanged. Work is O(H), with constant slice
+count rather than per-character allocation. No manual verification or allocation
+measurement was run under the user's explicit no-verification instruction.
+
 ### Linear duplicate-key normalization
 
 The duplicate detector first assembled each sliding-window key by repeatedly
