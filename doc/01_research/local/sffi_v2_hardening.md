@@ -2534,3 +2534,19 @@ Current census is 21,267 calls (2,159 explicit, 19,108 missing), 12,111
 declarations (903 tagged, 385 minimized, 10,942 untouched), zero
 signed/admitted. Empty text still conflates unset configuration with provider
 failure, so this is minimized authority, not a safe verified result contract.
+
+## LLVM codegen adapter trace-policy boundary
+
+The adapter's trace and bare-metal target reads now execute through two minimal
+lexical `unsafe(ffi)` scopes on one tagged declaration. More importantly, each
+compile operation snapshots the trace flag once as a boolean. The direct path
+therefore performs one foreign trace-policy read instead of eight, and the
+compiled-module path one instead of two, while preserving every trace branch,
+message, and ordering point. Target-mode reads remain mutation-visible.
+
+The hosted-target guard passes 20/20. Optimizer findings remain 17. One paired
+analyzer sample is 4.70 s / 277,740 KiB before versus 6.80 s / 270,416 KiB
+after; the lower RSS and unchanged findings/source complexity do not establish
+a regression or general speedup. Current census is 21,267 calls (2,161
+explicit, 19,106 missing), 12,111 declarations (904 tagged, 385 minimized,
+10,941 untouched), zero signed/admitted.
