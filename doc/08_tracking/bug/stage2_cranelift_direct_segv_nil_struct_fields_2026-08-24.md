@@ -93,12 +93,47 @@ one systemic miscompile produces both is a hypothesis, not a finding.
 `native-build`, which predates goal-r4 — pointing at the producing codegen
 (seed/stage1), not this bootstrap run.
 
+## DECISIVE: the .spl source is correct; stage2 is MISCOMPILED
+
+The identical compiler source, interpreted by the Rust seed, compiles the same
+fixture end to end:
+
+```
+bin/simple run src/app/cli/bootstrap_main.spl compile build/lanes_s/h2.spl --format=smf -o build/lanes_s/h2i.smf
+...
+[cranelift-direct] module
+[cranelift-direct] declare __simple_main      <- func.name resolved to "main"
+[cranelift-direct] compile main
+[cranelift-direct] emit /mnt/data/tmp/simple_cranelift_build.lanes_s.h2.o
+```
+
+Interpreted: `func.name == "main"`, signature populated, no crash.
+Stage-2 native: `func.name == nil`, signature nil, SEGV at the same line.
+
+**Therefore no edit to `cranelift_codegen_adapter.spl` or the MIR builder can
+fix this.** The defect is a miscompilation introduced by the codegen that
+PRODUCED stage2 (stage1 / the seed's native backend): reading a struct value
+back out of a `Dict<SymbolId, MirFunction>` yields an object with a subset of
+its fields nil'd. Fixing it means fixing the producing codegen's struct-valued
+Dict read (or struct copy) path and redeploying, not patching the victim.
+
+Corroborating: a `Dict<text, Outer>`-of-struct round-trip fixture
+(`.values()` iteration, 6 fields incl. a nested struct) is CORRECT under the
+seed interpreter — so the interpreter path is not implicated, only native
+codegen.
+
 ## Open / UNKNOWN
 
 - Whether the MirFunction fields are nil at dict-INSERT time or corrupted at
   dict-READ time (`rt_dict_values` copy). Not yet measured.
 - Whether a freshly built native binary from current `main` reproduces the
-  selective-nil-field pattern (minimal fixture written, native-build blocked
-  by an unrelated `error[E1002]: function \`fun\` not found` sweeping a stray
-  file into the build).
+  selective-nil-field pattern. The `E1002: function \`fun\` not found` that
+  blocked this was a `fun` vs `fn` typo at `src/compiler/20.hir/hir_types.spl:212`
+  in ANOTHER LANE'S UNCOMMITTED working-copy edit (origin/main is clean); fixed
+  locally in the shared worktree so source-based compiles run again, NOT pushed
+  as a source change.
+- WHICH codegen construct is miscompiled — dict-value read, struct copy, or
+  field-offset assignment. Not yet isolated to a minimal native fixture.
+- Whether the same miscompile explains Lane Q/P's 152 HIR-phase SEGVs. Same
+  defect shape, different site; unproven.
 - No fix landed. Do not read this record as "diagnosed and repaired".
