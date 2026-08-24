@@ -70,9 +70,15 @@ after the compiler emitted a `[hir-payload-origin-unresolved]` /
 by `compiler.types.const_key_type` / `compiler.types.macro_def`. Lane Q has
 since fixed the underlying missing imports for `const_key_type`, so a re-run of
 the non-CLEAN rows against the fixed tree will say whether the crash was
-*caused* by the unresolved-origin state or merely adjacent to it. Until that
-re-run lands, the correlation is recorded as a lead and nothing more — the
-other seven crashed with no advisory at all.
+*caused* by the unresolved-origin state or merely adjacent to it. **RESOLVED 2026-08-24 by that re-run: the correlation is REFUTED.**
+All 24 non-CLEAN rows were re-compiled against the fixed tree
+(`/mnt/data/goal-logs/laneq/results_rerun.tsv`, logs in `rerun_logs/`).
+Result: **4 CLEAN, 4 ERROR, 16 NOLOWER** — every one of the 16 crashes
+survived, `const_keys.spl` and `macro_checker.spl` included. The four that
+turned CLEAN were all ERROR rows lane Q had fixed (`macro_expander.spl`,
+`inference_expr_calls.spl`, `inference_expr_ops.spl`, `traits.spl`). So the
+unresolved-origin state was adjacent, not causal, and the 16 are a real crash
+class independent of every source fix landed by this lane.
 
 ## Not reproducible against a rebuilt compiler yet
 
