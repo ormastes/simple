@@ -18,7 +18,11 @@ Audience: compiler and tooling engineers who maintain this spec.
 use std.spec.*
 use compiler.semantics.lint.option_me_call.{
     OptionMeCallWarning,
-    check_option_me_call_source
+    check_option_me_call_source, check_option_me_call_source_lines,
+    optme_collect_me_methods, optme_collect_me_methods_lines,
+    optme_collect_opt_fields, optme_collect_opt_fields_lines,
+    optme_collect_ret_optionals, optme_collect_ret_optionals_lines,
+    optme_collect_source_index_lines
 }
 
 fn _optme_join(lines: [text]) -> text:
@@ -300,3 +304,43 @@ describe "OPTME001: mutating `me` call through an option-typed receiver":
             expect(warnings[0].message.contains("Backend?")).to_equal(true)
             expect(warnings[0].message.contains("discarded temporary")).to_equal(true)
             expect(warnings[0].hint.contains("if val Some(active) =")).to_equal(true)
+
+    context "canonical line adapters":
+        it "preserves collector and warning order and payload":
+            step("Verify: source and canonical-line OPTME APIs are equivalent")
+            val source = _optme_source([
+                "class Engine:",
+                "    var backend: Backend? = nil",
+                "    me flush():",
+                "        val active = self.backend",
+                "        active.bump()",
+                "        active.bump()"
+            ])
+            val lines = source.split("\n")
+            expect(optme_collect_me_methods_lines(lines)).to_equal(
+                optme_collect_me_methods(source))
+            expect(optme_collect_opt_fields_lines(lines)).to_equal(
+                optme_collect_opt_fields(source))
+            expect(optme_collect_ret_optionals_lines(lines)).to_equal(
+                optme_collect_ret_optionals(source))
+            val source_index = optme_collect_source_index_lines(lines)
+            expect(source_index.me_methods).to_equal(optme_collect_me_methods(source))
+            expect(source_index.opt_fields).to_equal(optme_collect_opt_fields(source))
+            expect(source_index.ret_optionals).to_equal(optme_collect_ret_optionals(source))
+            val source_warnings = check_option_me_call_source(
+                "src/app/probe/engine.spl", source)
+            val line_warnings = check_option_me_call_source_lines(
+                "src/app/probe/engine.spl", lines)
+            expect(line_warnings.len()).to_equal(source_warnings.len())
+            var i = 0
+            while i < source_warnings.len():
+                expect(line_warnings[i].code).to_equal(source_warnings[i].code)
+                expect(line_warnings[i].severity).to_equal(source_warnings[i].severity)
+                expect(line_warnings[i].message).to_equal(source_warnings[i].message)
+                expect(line_warnings[i].hint).to_equal(source_warnings[i].hint)
+                expect(line_warnings[i].binding).to_equal(source_warnings[i].binding)
+                expect(line_warnings[i].class_name).to_equal(source_warnings[i].class_name)
+                expect(line_warnings[i].method).to_equal(source_warnings[i].method)
+                expect(line_warnings[i].line_num).to_equal(source_warnings[i].line_num)
+                expect(line_warnings[i].file_path).to_equal(source_warnings[i].file_path)
+                i = i + 1
