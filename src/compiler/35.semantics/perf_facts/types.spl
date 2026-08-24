@@ -1,0 +1,199 @@
+# Typed HIR performance facts.
+#
+# These records are diagnostic evidence only.  They do not authorize MIR
+# rewriting.  Unknown receiver, call, effect, or registry state remains
+# explicit and fail-closed.
+
+use compiler.common.diagnostics.span.{Span}
+
+enum HirPerfReceiverKind:
+    Array
+    Slice
+    Dict
+    Text
+    Tuple
+    Named(symbol_id: i64)
+    Unknown(reason: text)
+
+enum HirPerfOperationKind:
+    LinearLookup
+    IndexedLookup
+    Materialize
+    Sort
+    Append
+    Enumerate
+    Unknown(reason: text)
+
+enum HirPerfCostClass:
+    Constant
+    AmortizedConstant
+    ExpectedConstant
+    LinearReceiver
+    NLogNReceiver
+    Unknown(reason: text)
+
+enum HirPerfCardinality:
+    Exact(value: i64)
+    SameAsReceiver
+    AtMostReceiver
+    Product
+    Unknown(reason: text)
+
+enum HirPerfEnumerationClass:
+    None
+    Once
+    Repeated(count: i64)
+    InputDependent
+    Unknown
+
+enum HirPerfAllocationClass:
+    None
+    InitOnly
+    BoundedPool
+    Unbounded
+    Unknown
+
+struct HirPerfEffectFacts:
+    reads: bool
+    writes: bool
+    allocates: bool
+    throws: bool
+    suspends: bool
+    observable: bool
+    unknown: bool
+
+struct CollectionOperationSummary:
+    symbol_id: i64
+    stable_name: text
+    operation: HirPerfOperationKind
+    cost: HirPerfCostClass
+    output_cardinality: HirPerfCardinality
+    enumeration: HirPerfEnumerationClass
+    expected_receiver: HirPerfReceiverKind
+    signature_fingerprint: text
+    effects: HirPerfEffectFacts
+    allocation: HirPerfAllocationClass
+    preserves_order: bool
+    materializes: bool
+    metadata_version: text
+    provenance: text
+    verification_receipt: text
+
+class CollectionOperationRegistry:
+    metadata_version: text
+    summaries: Dict<i64, CollectionOperationSummary>
+    ambiguous_symbols: Dict<i64, bool>
+    errors: [text]
+
+impl CollectionOperationRegistry:
+    static fn new(metadata_version: text) -> CollectionOperationRegistry:
+        CollectionOperationRegistry(
+            metadata_version: metadata_version, summaries: {},
+            ambiguous_symbols: {}, errors: [])
+
+    me register(summary: CollectionOperationSummary):
+        if summary.symbol_id < 0:
+            self.errors.push("operation metadata has invalid symbol id: " + summary.stable_name)
+            return
+        if self.summaries.contains_key(summary.symbol_id) or
+           self.ambiguous_symbols.contains_key(summary.symbol_id):
+            self.summaries.remove(summary.symbol_id)
+            self.ambiguous_symbols[summary.symbol_id] = true
+            self.errors.push("duplicate operation symbol: " + summary.symbol_id.to_text())
+            return
+        if summary.metadata_version != self.metadata_version:
+            self.errors.push("operation metadata version mismatch: " + summary.stable_name)
+            return
+        if summary.stable_name == "" or summary.provenance == "" or
+           summary.signature_fingerprint == "" or
+           summary.verification_receipt == "":
+            self.errors.push("operation metadata lacks verification evidence: " + summary.stable_name)
+            return
+        var incomplete = summary.effects.unknown
+        match summary.expected_receiver:
+            case HirPerfReceiverKind.Unknown(_): incomplete = true
+            case _: pass_do_nothing
+        match summary.operation:
+            case HirPerfOperationKind.Unknown(_): incomplete = true
+            case _: pass_do_nothing
+        match summary.cost:
+            case HirPerfCostClass.Unknown(_): incomplete = true
+            case _: pass_do_nothing
+        match summary.output_cardinality:
+            case HirPerfCardinality.Exact(value):
+                if value < 0: incomplete = true
+            case HirPerfCardinality.Unknown(_): incomplete = true
+            case _: pass_do_nothing
+        match summary.enumeration:
+            case HirPerfEnumerationClass.Repeated(count):
+                if count < 0: incomplete = true
+            case HirPerfEnumerationClass.Unknown: incomplete = true
+            case _: pass_do_nothing
+        match summary.allocation:
+            case HirPerfAllocationClass.Unknown: incomplete = true
+            case HirPerfAllocationClass.None:
+                if summary.effects.allocates: incomplete = true
+            case _:
+                if not summary.effects.allocates: incomplete = true
+        if incomplete:
+            self.errors.push("operation metadata is incomplete or contradictory: " + summary.stable_name)
+            return
+        self.summaries[summary.symbol_id] = summary
+
+    fn contains(symbol_id: i64) -> bool:
+        self.summaries.contains_key(symbol_id) and
+        not self.ambiguous_symbols.contains_key(symbol_id)
+
+    fn lookup(symbol_id: i64) -> CollectionOperationSummary?:
+        if self.contains(symbol_id):
+            return Some(self.summaries[symbol_id])
+        nil
+
+    fn is_valid() -> bool:
+        self.errors.len() == 0
+
+struct ResolvedCollectionOp:
+    function_symbol_id: i64
+    function_name: text
+    method_name: text
+    stable_operation_name: text
+    span: Span
+    loop_depth: i64
+    resolved_symbol_id: i64?
+    receiver: HirPerfReceiverKind
+    operation: HirPerfOperationKind
+    cost: HirPerfCostClass
+    output_cardinality: HirPerfCardinality
+    enumeration: HirPerfEnumerationClass
+    effects: HirPerfEffectFacts
+    allocation: HirPerfAllocationClass
+    materializes: bool
+    preserves_order: bool
+    registry_verified: bool
+    incomplete_reason: text
+
+struct HirPerfFacts:
+    collection_ops: [ResolvedCollectionOp]
+    functions_scanned: i64
+    nodes_scanned: i64
+    incomplete_ops: i64
+    unclassified_method_calls: i64
+    unavailable_method_bodies: i64
+    unknown_execution_domains: i64
+    coverage_complete: bool
+    registry_valid: bool
+    registry_version: text
+
+struct TypedCollectionFinding:
+    code: text
+    function_name: text
+    line: i64
+    column: i64
+    message: text
+    evidence: [text]
+
+export HirPerfReceiverKind, HirPerfOperationKind, HirPerfCostClass
+export HirPerfCardinality, HirPerfEnumerationClass
+export HirPerfEffectFacts, HirPerfAllocationClass, CollectionOperationSummary
+export CollectionOperationRegistry, ResolvedCollectionOp, HirPerfFacts
+export TypedCollectionFinding
