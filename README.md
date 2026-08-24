@@ -621,6 +621,10 @@ simple test test --whole              # Release gate: specs/long tests plus conf
 In the canonical release command, the positional `test` selects the spec tree
 only. `--whole` still discovers Markdown from `config/sdoctest.sdn` and comment
 sdoctests from the production `src/lib`, `src/compiler`, and `src/app` roots.
+The bootstrap-owned `sdoctest-markdown-comments` gate requires both discovered
+lanes to execute non-vacuously with zero failures and zero skips. Its local
+checker self-test validates this fail-closed contract, while ledger promotion
+still requires a full run by the exact admitted Stage-4 compiler.
 
 ### Functional Update Operator (`->`)
 

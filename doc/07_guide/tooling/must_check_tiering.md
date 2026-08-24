@@ -51,6 +51,15 @@ legacy Stage 2 fallback. Every successful producer must also end in a standalone
 `PASS` verdict; an exit status of zero or an intermediate marker alone is not
 accepted by the ledger.
 
+The `sdoctest-markdown-comments` automated row first runs explicit Markdown and
+source-comment fixtures, then runs `simple test test --whole --mode=interpreter`.
+The whole run must contain exactly one non-empty, zero-failure, zero-skip summary
+for each of `Sdoctest:` and `SPL Doctest:`, plus exactly one non-vacuous green
+aggregate `Results:` line. Its `--self-test` proves the command wiring and
+negative summary shapes with a fake local runner; that structural PASS does not
+promote the ledger. Only bootstrap completion with the exact admitted Stage-4
+binary may retain the full-run log and change this row from TODO.
+
 ## Operator commands
 
 ```sh

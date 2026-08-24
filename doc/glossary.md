@@ -1184,6 +1184,11 @@ fence in Markdown. A **comment sdoctest** is a runnable fenced example or
 use a `text` fence. In **whole-test scope**, the positional spec path does not
 become doctest provenance: Markdown follows `config/sdoctest.sdn`, and comment
 sdoctests follow the production `src/lib`, `src/compiler`, and `src/app` roots.
+The mandatory `sdoctest-markdown-comments` bootstrap gate separately proves an
+explicit fixture in each lane and then requires both lanes to be non-empty and
+fully green in one repository-wide `--whole` run. Its local structural self-test
+is checker evidence, not Stage-4 execution evidence and cannot promote the
+must-check ledger.
 
 ## LLM Fraud Prevention (rules.sdl)
 

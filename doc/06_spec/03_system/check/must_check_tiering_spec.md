@@ -96,7 +96,11 @@ The Sdoctest bootstrap row first executes the named Markdown fixture
 `test/fixtures/doctest/green.spl`, then runs the whole tree.
 Both `Sdoctest:` and `SPL Doctest:` summaries must report at least one passing
 case with zero failures and zero skips; the aggregate `Results:` count alone is
-insufficient.
+insufficient. The checker rejects missing or duplicate canonical summaries.
+Its structural self-test drives the production path through a fake local Simple
+runner, pins all three exact commands, and proves that an empty comment lane, a
+skipped Markdown lane, or a missing Markdown lane cannot emit PASS. This proves
+the producer contract without claiming execution by an admitted Stage-4 binary.
 
 ## Bootstrap Caret suite
 
