@@ -18,6 +18,30 @@ abi_registry=$8
 verification_report=$9
 output=${10}
 
+# A failed re-admission must not leave a previously valid receipt available to
+# consumers. The caller explicitly owns this exact output path; publication
+# below remains atomic through a same-directory staged file and rename.
+canonical_path() {
+    canonical_dir=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd)
+    printf '%s/%s\n' "$canonical_dir" "$(basename -- "$1")"
+}
+output_path=$(canonical_path "$output")
+for input_path in "$manifest" "$signature" "$trust_store" "$artifact" \
+    "$source_snapshot" "$build_input" "$compiler" "$abi_registry" \
+    "$verification_report"; do
+    test "$output" != "$input_path" || {
+        echo 'sffi evidence admission: output must not alias an input' >&2
+        exit 1
+    }
+    if test -e "$input_path" || test -L "$input_path"; then
+        test "$output_path" != "$(canonical_path "$input_path")" || {
+            echo 'sffi evidence admission: output must not alias an input' >&2
+            exit 1
+        }
+    fi
+done
+rm -f -- "$output"
+
 manifest_source=$manifest
 signature_source=$signature
 trust_store_source=$trust_store
@@ -83,6 +107,14 @@ command -v file >/dev/null 2>&1 || {
 
 export LC_ALL=C
 
+max_manifest_bytes=2097152
+max_symbols=8192
+manifest_bytes=$(wc -c <"$manifest" | tr -d ' ')
+test "$manifest_bytes" -le "$max_manifest_bytes" || {
+    echo 'sffi evidence admission: manifest exceeds 2 MiB limit' >&2
+    exit 1
+}
+
 # Canonical v1 is UTF-8-compatible printable TSV with LF only, a final LF,
 # fixed singleton fields, then sorted unique symbol rows.
 if LC_ALL=C grep -q "$(printf '\r')" "$manifest" ||
@@ -125,6 +157,9 @@ case "$symbol_count" in
 esac
 test "$symbol_count" -gt 0 || {
     echo 'sffi evidence admission: empty symbol closure' >&2; exit 1;
+}
+test "$symbol_count" -le "$max_symbols" || {
+    echo 'sffi evidence admission: symbol_count exceeds 8192 limit' >&2; exit 1;
 }
 
 allowed='schema provider_id target signer_key_id artifact_sha256 canonical_source_tree_sha256 exact_build_input_sha256 compiler_artifact_sha256 abi_registry_sha256 verification_report_sha256 symbol_count symbol'

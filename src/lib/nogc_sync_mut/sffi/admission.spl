@@ -1,0 +1,114 @@
+# Canonical SFFI admission receipt parsing.
+#
+# The cryptographic verifier emits this bounded text record once during
+# provider admission. Parsing does not perform cryptography and therefore does
+# not make arbitrary caller-provided text trusted; raw slot publication must
+# remain ffi-unsafe until the loader supplies a verifier-minted receipt.
+
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+
+val SFFI_ADMISSION_MAX_TEXT: i64 = 2097152
+val SFFI_ADMISSION_MAX_SYMBOLS: i64 = 8192
+
+struct SffiAdmissionReceiptV1:
+    provider_id: text
+    target: text
+    signer_key_id: text
+    artifact_sha256: text
+    abi_registry_sha256: text
+    signed_manifest_sha256: text
+    verification_report_sha256: text
+    source_signatures: {text: text}
+
+fn _admission_pair(line: text, expected_key: text) -> Result<text, text>:
+    val fields = line.split("\t")
+    if fields.len() != 2 or fields[0] != expected_key or fields[1] == "":
+        return Err("E-SFFI-005: malformed admission field {expected_key}")
+    Ok(fields[1])
+
+fn _admission_digest(line: text, expected_key: text) -> Result<text, text>:
+    match _admission_pair(line, expected_key):
+        case Ok(value):
+            if not hash256_hex_valid(value):
+                return Err("E-SFFI-005: invalid admission digest {expected_key}")
+            Ok(value)
+        case Err(error):
+            Err(error)
+
+fn parse_sffi_admission_v1(content: text) -> Result<SffiAdmissionReceiptV1, text>:
+    if content.len() > SFFI_ADMISSION_MAX_TEXT:
+        return Err("E-SFFI-005: admission receipt exceeds 2 MiB limit")
+    if content == "" or not content.ends_with("\n") or content.contains("\r"):
+        return Err("E-SFFI-005: admission receipt must be canonical LF text")
+
+    val lines = content.split("\n")
+    if lines.len() < 11 or lines[lines.len() - 1] != "":
+        return Err("E-SFFI-005: truncated admission receipt")
+    if lines[0] != "schema\tsimple.sffi-admission.v1":
+        return Err("E-SFFI-005: unsupported admission schema")
+
+    val provider_result = _admission_pair(lines[1], "provider_id")
+    val target_result = _admission_pair(lines[2], "target")
+    val signer_result = _admission_pair(lines[3], "signer_key_id")
+    val artifact_result = _admission_digest(lines[4], "artifact_sha256")
+    val abi_result = _admission_digest(lines[5], "abi_registry_sha256")
+    val manifest_result = _admission_digest(lines[6], "signed_manifest_sha256")
+    val report_result = _admission_digest(lines[7], "verification_report_sha256")
+    val count_result = _admission_pair(lines[8], "symbol_count")
+
+    match provider_result:
+        case Err(error): return Err(error)
+        case Ok(_): pass
+    match target_result:
+        case Err(error): return Err(error)
+        case Ok(_): pass
+    match signer_result:
+        case Err(error): return Err(error)
+        case Ok(_): pass
+    match artifact_result:
+        case Err(error): return Err(error)
+        case Ok(_): pass
+    match abi_result:
+        case Err(error): return Err(error)
+        case Ok(_): pass
+    match manifest_result:
+        case Err(error): return Err(error)
+        case Ok(_): pass
+    match report_result:
+        case Err(error): return Err(error)
+        case Ok(_): pass
+    match count_result:
+        case Err(error): return Err(error)
+        case Ok(_): pass
+
+    val parsed_count = count_result!.parse_int()
+    if parsed_count == nil or parsed_count! <= 0 or parsed_count! > SFFI_ADMISSION_MAX_SYMBOLS:
+        return Err("E-SFFI-005: invalid admission symbol_count")
+    val symbol_count = parsed_count!
+    if lines.len() != symbol_count + 10:
+        return Err("E-SFFI-005: admission symbol_count does not match rows")
+
+    var signatures: {text: text} = {}
+    var index = 0
+    while index < symbol_count:
+        val fields = lines[index + 9].split("\t")
+        if fields.len() != 5 or fields[0] != "symbol" or
+           not fields[1].starts_with("rt_") or
+           not hash256_hex_valid(fields[2]) or
+           fields[3] != "true" or fields[4] != "true":
+            return Err("E-SFFI-005: malformed admitted symbol row")
+        if signatures.contains(fields[1]):
+            return Err("E-SFFI-019: duplicate admitted symbol {fields[1]}")
+        signatures[fields[1]] = fields[2]
+        index = index + 1
+
+    Ok(SffiAdmissionReceiptV1(
+        provider_id: provider_result!,
+        target: target_result!,
+        signer_key_id: signer_result!,
+        artifact_sha256: artifact_result!,
+        abi_registry_sha256: abi_result!,
+        signed_manifest_sha256: manifest_result!,
+        verification_report_sha256: report_result!,
+        source_signatures: signatures,
+    ))

@@ -1,0 +1,87 @@
+use std.sffi.admission.{SFFI_ADMISSION_MAX_SYMBOLS, parse_sffi_admission_v1}
+use std.sffi.dynamic.{DynLib}
+use std.sffi.dynamic_versioned.{VersionedDynLib, lib_version_any}
+use std.sffi.sffi_signature.{
+    EvidenceBoundI64ManifestV1, resolve_evidence_bound_i64_manifest,
+}
+use std.spec.{describe, it, expect}
+
+val DIGEST_A = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val DIGEST_B = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn admission_fixture() -> text:
+    "schema\tsimple.sffi-admission.v1\n" +
+    "provider_id\ttest.provider\n" +
+    "target\tx86_64-linux\n" +
+    "signer_key_id\ttest-key\n" +
+    "artifact_sha256\t{DIGEST_A}\n" +
+    "abi_registry_sha256\t{DIGEST_B}\n" +
+    "signed_manifest_sha256\t{DIGEST_A}\n" +
+    "verification_report_sha256\t{DIGEST_B}\n" +
+    "symbol_count\t1\n" +
+    "symbol\trt_test\t{DIGEST_A}\ttrue\ttrue\n"
+
+describe "SFFI admission receipt v1":
+    it "parses an exact canonical signed-evidence receipt":
+        match parse_sffi_admission_v1(admission_fixture()):
+            case Ok(receipt):
+                expect(receipt.provider_id).to_equal("test.provider")
+                expect(receipt.source_signatures["rt_test"]).to_equal(DIGEST_A)
+            case Err(error):
+                expect("unexpected parse error: {error}").to_equal("")
+
+    it "rejects a forged verification boolean":
+        val forged = admission_fixture().replace("\ttrue\ttrue\n", "\ttrue\tfalse\n")
+        match parse_sffi_admission_v1(forged):
+            case Err(error):
+                expect(error).to_contain("E-SFFI-005")
+            case Ok(_):
+                expect("forged receipt was accepted").to_equal("")
+
+    it "rejects symbol-count truncation":
+        val truncated = admission_fixture().replace("symbol_count\t1", "symbol_count\t2")
+        match parse_sffi_admission_v1(truncated):
+            case Err(error):
+                expect(error).to_contain("symbol_count")
+            case Ok(_):
+                expect("truncated receipt was accepted").to_equal("")
+
+    it "rejects an admission closure above the allocation cap":
+        val oversized = admission_fixture().replace(
+            "symbol_count\t1", "symbol_count\t{SFFI_ADMISSION_MAX_SYMBOLS + 1}",
+        )
+        match parse_sffi_admission_v1(oversized):
+            case Err(error):
+                expect(error).to_contain("symbol_count")
+            case Ok(_):
+                expect("oversized closure was accepted").to_equal("")
+
+    it "rejects a non-canonical digest spelling":
+        val uppercase = admission_fixture().replace(DIGEST_A, DIGEST_A.to_upper())
+        match parse_sffi_admission_v1(uppercase):
+            case Err(error):
+                expect(error).to_contain("digest")
+            case Ok(_):
+                expect("uppercase digest was accepted").to_equal("")
+
+    it "rejects provider identity before touching the foreign handle":
+        match parse_sffi_admission_v1(admission_fixture()):
+            case Ok(receipt):
+                val manifest = EvidenceBoundI64ManifestV1.create(
+                    "wrong.provider", "x86_64-linux", DIGEST_A, DIGEST_B,
+                )
+                val lib = VersionedDynLib(
+                    lib: DynLib(handle: 0, path: "must-not-be-touched"),
+                    name: "fixture",
+                    version: lib_version_any(),
+                    path: "must-not-be-touched",
+                )
+                val result = unsafe(capabilities: [ffi, raw_ptr]):
+                    resolve_evidence_bound_i64_manifest(lib, manifest, receipt)
+                match result:
+                    case Err(error):
+                        expect(error).to_contain("E-SFFI-005")
+                    case Ok(_):
+                        expect("identity mismatch was accepted").to_equal("")
+            case Err(error):
+                expect("unexpected fixture parse error: {error}").to_equal("")

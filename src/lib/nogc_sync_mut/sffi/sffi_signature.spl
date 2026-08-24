@@ -5,6 +5,7 @@
 
 use std.sffi.dynamic.{DynI64FnSlot}
 use std.sffi.dynamic_versioned.{VersionedDynLib}
+use std.sffi.admission.{SffiAdmissionReceiptV1}
 
 # ============================================================================
 # Signature Declaration
@@ -131,6 +132,78 @@ impl ResolvedI64Manifest:
         if not self.slots.contains(name):
             return Err("E-SFFI-001: symbol was not admitted into the resolved manifest: {name}")
         self.slots[name].call_checked(args)
+
+struct EvidenceBoundI64SignatureV1:
+    name: text
+    arg_count: i64
+    source_signature_sha256: text
+
+class EvidenceBoundI64ManifestV1:
+    provider_id: text
+    target: text
+    artifact_sha256: text
+    abi_registry_sha256: text
+    entries: {text: EvidenceBoundI64SignatureV1}
+
+impl EvidenceBoundI64ManifestV1:
+    static fn create(
+        provider_id: text,
+        target: text,
+        artifact_sha256: text,
+        abi_registry_sha256: text,
+    ) -> EvidenceBoundI64ManifestV1:
+        EvidenceBoundI64ManifestV1(
+            provider_id: provider_id,
+            target: target,
+            artifact_sha256: artifact_sha256,
+            abi_registry_sha256: abi_registry_sha256,
+            entries: {},
+        )
+
+    me add(name: text, arg_count: i64, source_signature_sha256: text):
+        self.entries[name] = EvidenceBoundI64SignatureV1(
+            name: name,
+            arg_count: arg_count,
+            source_signature_sha256: source_signature_sha256,
+        )
+
+    fn count() -> i64:
+        self.entries.len()
+
+@unsafe(
+    reason: "receipt identity is checked once, but the platform loader does not yet bind the open handle to the hashed artifact",
+    capabilities: [ffi, raw_ptr],
+)
+fn resolve_evidence_bound_i64_manifest(
+    lib: VersionedDynLib,
+    manifest: EvidenceBoundI64ManifestV1,
+    receipt: SffiAdmissionReceiptV1,
+) -> Result<ResolvedI64Manifest, text>:
+    if receipt.provider_id != manifest.provider_id or receipt.target != manifest.target:
+        return Err("E-SFFI-005: provider admission identity mismatch")
+    if receipt.artifact_sha256 != manifest.artifact_sha256:
+        return Err("E-SFFI-004: provider artifact admission mismatch")
+    if receipt.abi_registry_sha256 != manifest.abi_registry_sha256:
+        return Err("E-SFFI-003: provider ABI registry admission mismatch")
+    if receipt.source_signatures.len() != manifest.count():
+        return Err("E-SFFI-006: admitted symbol closure size mismatch")
+
+    var slots: {text: DynI64FnSlot} = {}
+    for name in manifest.entries:
+        val signature = manifest.entries[name]
+        if not receipt.source_signatures.contains(name) or
+           receipt.source_signatures[name] != signature.source_signature_sha256:
+            return Err("E-SFFI-006: stale or missing admitted signature for {name}")
+        if signature.arg_count < 0 or signature.arg_count > 8:
+            return Err("E-SFFI-003: {name} arity {signature.arg_count} is outside 0..8")
+        match lib.lib.resolve_i64_checked(name, signature.arg_count):
+            case Ok(slot):
+                slots[name] = slot
+            case Err(error):
+                return Err(error)
+
+    # Publish only after every identity, signature, arity, and symbol resolves.
+    Ok(ResolvedI64Manifest(slots: slots))
 
 @unsafe(reason: "resolves unverified provider symbols into integer-only ABI slots", capabilities: [ffi, raw_ptr])
 fn resolve_i64_manifest(lib: VersionedDynLib, manifest: FfiManifest) -> Result<ResolvedI64Manifest, text>:

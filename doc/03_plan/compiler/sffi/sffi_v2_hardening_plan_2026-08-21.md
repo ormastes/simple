@@ -1587,3 +1587,18 @@ artifact. Replace the checked result array with status/out or direct typed
 return contracts where appropriate so hot calls allocate nothing. Admission
 must remain one-time and atomic; revocation/generation state must not add a
 mutex, hash, or string lookup to each call.
+
+### Admission-to-cached-slot follow-up (2026-08-24)
+
+- [x] Emit complete provider/artifact/ABI/report identity in the canonical
+  admission receipt.
+- [x] Remove stale output on every rejected re-admission and reject output/input
+  aliases.
+- [x] Strictly parse canonical receipt metadata and exact symbol signatures in
+  the canonical Simple SFFI owner.
+- [x] Validate the complete closure and resolve all integer slots before atomic
+  publication, while retaining lexical `unsafe(ffi, raw_ptr)`.
+- [ ] Replace pathname `dlopen` with a loader-minted immutable provider handle
+  whose open object identity is bound to the admitted artifact digest.
+- [ ] Make the verifier-minted receipt/token unforgeable to ordinary Simple
+  source and then narrow the generated wrapper's unsafe region.

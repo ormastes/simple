@@ -19,8 +19,13 @@ hash() { sha256sum "$1" | awk '{ print $1 }'; }
 expect_reject() {
     name=$1
     shift
+    printf 'stale admission must not survive\n' >"$work/admission.tsv"
     if "$@" >"$work/$name.stdout" 2>"$work/$name.stderr"; then
         echo "FAIL: $name was admitted" >&2
+        exit 1
+    fi
+    if test -e "$work/admission.tsv"; then
+        echo "FAIL: $name retained a stale admission receipt" >&2
         exit 1
     fi
     echo "PASS: $name rejected"
@@ -102,6 +107,25 @@ grep -qx "artifact_sha256	$artifact_hash" "$work/admission.tsv"
 grep -qx "abi_registry_sha256	$abi_hash" "$work/admission.tsv"
 grep -qx "symbol	$test_symbol	$signature_hash	true	true" "$work/admission.tsv"
 echo 'PASS: exact signed evidence admitted'
+
+manifest_before_alias=$(hash "$work/manifest.tsv")
+if sh "$root/scripts/audit/sffi-evidence-admission.shs" \
+    "$work/manifest.tsv" "$work/signature.bin" "$work/trust.tsv" \
+    "$work/artifact" "$work/source" "$work/build" "$work/compiler" \
+    "$work/abi" "$work/report.tsv" "$work/manifest.tsv" \
+    >"$work/output-alias.stdout" 2>"$work/output-alias.stderr"; then
+    echo 'FAIL: output/input alias was admitted' >&2
+    exit 1
+fi
+test "$(hash "$work/manifest.tsv")" = "$manifest_before_alias" || {
+    echo 'FAIL: output/input alias damaged the signed manifest' >&2
+    exit 1
+}
+echo 'PASS: output/input alias rejected without damaging input'
+
+mv "$work/artifact" "$work/artifact.missing"
+expect_reject missing-input-file verify
+mv "$work/artifact.missing" "$work/artifact"
 
 cp "$work/report.tsv" "$work/report.good"
 cp "$work/manifest.tsv" "$work/manifest.good"
@@ -215,10 +239,17 @@ openssl pkeyutl -sign -inkey "$work/private.pem" -rawin \
     -in "$work/manifest.tsv" -out "$work/signature.bin"
 expect_reject noncanonical-manifest verify
 mv "$work/manifest.good" "$work/manifest.tsv"
+sign_manifest
+
+cp "$work/manifest.tsv" "$work/manifest.good"
+sed 's/^symbol_count\t1$/symbol_count\t8193/' \
+    "$work/manifest.good" >"$work/manifest.tsv"
+sign_manifest
+expect_reject oversized-symbol-closure verify
+mv "$work/manifest.good" "$work/manifest.tsv"
+sign_manifest
 
 printf 'test-key\ttest.provider\tpublic.pem\ntest-key\ttest.provider\tpublic.pem\n' >"$work/trust.tsv"
-openssl pkeyutl -sign -inkey "$work/private.pem" -rawin \
-    -in "$work/manifest.tsv" -out "$work/signature.bin"
 expect_reject duplicate-trust-entry verify
 printf 'test-key\ttest.provider\tpublic.pem\n' >"$work/trust.tsv"
 

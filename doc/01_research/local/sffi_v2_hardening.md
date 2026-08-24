@@ -2759,3 +2759,20 @@ exact C ABI `i64(i64...)` is representable, provider signatures remain
 declarative rather than cryptographically bound, and checked result arrays
 allocate per call. Safe/critical hot paths still require compiler-generated
 direct signature-specific slots plus signed artifact/ABI admission.
+
+## 2026-08-24 admission-to-dispatch follow-up
+
+The signed evidence tool now emits `simple.sffi-admission.v1`, retaining the
+provider, target, signer, exact artifact, ABI registry, signed manifest, report,
+and per-symbol source-signature identities. Re-admission invalidates the exact
+output first, so a failed check cannot leave an older receipt consumable; an
+output path that aliases an input is rejected without modifying the input.
+
+The canonical Simple SFFI owner strictly parses this bounded format and can
+compare its complete signature closure before resolving integer slots into a
+local map. Publication remains explicitly `unsafe(ffi, raw_ptr)`: a parsed
+record is not cryptographic authority, and `VersionedDynLib` still opens by
+pathname rather than consuming a platform-minted immutable handle bound to the
+artifact digest. Identity checks and symbol resolution are one-time O(n)
+admission work; cached calls retain their existing O(argument-count) path with
+no hashing, signature verification, pathname lookup, or symbol lookup added.
