@@ -19,3 +19,8 @@
   64 MiB aggregate input per ledger validation.
 - NFR-MCT-007: A production bootstrap recorder refuses to label evidence with
   `HEAD` while any fingerprinted input differs from that revision.
+- NFR-MCT-008: Size evidence uses equivalent stripped native Simple and Go
+  artifacts with hashes. Startup evidence compares cold and warm Simple
+  interpreter launch with equivalent Python, Bun, and Go programs. Throughput
+  evidence compares semantically equivalent native Simple, Rust, and Go work;
+  a Rust-seed interpreter measurement cannot promote a native-Simple row.

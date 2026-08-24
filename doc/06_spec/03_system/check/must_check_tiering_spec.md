@@ -1,6 +1,6 @@
 # Must-Check Tiering Operator Manual
 
-Requirements: REQ-MCT-001 through REQ-MCT-006. Executable source:
+Requirements: REQ-MCT-001 through REQ-MCT-009. Executable source:
 `test/03_system/check/must_check_tiering_spec.spl`.
 
 ## Run the lightweight push must-check
@@ -96,8 +96,16 @@ insufficient.
 ## Bootstrap Caret suite
 
 Bootstrap separately gates Claude/Codex/Gemini/Kimi process wrappers,
-agent-manager messaging primitives, and the bounded multi-Caret manager. The
-separate production `os.apps.smux` adapter row remains TODO. The
+messaging primitives, and the bounded injected-command batch adapter. Those
+fixture gates do not prove the separate production agent-runtime or sustained
+multi-manager rows. Installed providers, both production runtime rows, and the
+production `os.apps.smux` adapter remain TODO. The
 Slang-through-Caret local inference row also remains TODO until a real
 generation request passes; `local_torch` is a distinct provider and cannot
 satisfy that row.
+
+Stage 4 compiler admission does not promote the separate 49-row CLI/MCP/LSP
+tooling matrix. Web and database handlers do not promote their real configurable
+listener-port rows. GPU admission decisions do not promote output parity:
+retained evidence must prove identical CPU/device results, real device hits,
+and equivalent nginx or PostgreSQL/MySQL fixtures.

@@ -32,6 +32,19 @@ textual SDN ledger.
 - REQ-MCT-006: Unix and Windows setup scripts must install the dispatcher while
   preserving unrelated local hooks. An exact legacy canonical copy or symlink
   may be replaced without destroying its already-preserved payload.
+- REQ-MCT-007: Stage 4 compiler admission and the 49-row CLI/MCP/LSP tooling
+  matrix are separate obligations. The compiler row cannot promote the tooling
+  row; the latter requires a committed receipt with no required FAIL/BLOCKED
+  result bound to the admitted candidate and its journals.
+- REQ-MCT-008: Fixture-backed Caret messaging, injected provider commands, and
+  batch adapters must not be labeled as installed-provider, production agent
+  runtime, sustained multi-manager, Slang inference, or smux evidence. Each
+  production behavior remains a distinct TODO until its own lifecycle receipt.
+- REQ-MCT-009: Web and database server evidence must separately prove ownership
+  of configurable real listener ports before GPU/performance promotion. GPU
+  rows require identical CPU/device outputs and real device-hit evidence; the
+  comparison corpus must name nginx for web and both PostgreSQL and MySQL for
+  database workloads.
 
 ## Exclusion
 

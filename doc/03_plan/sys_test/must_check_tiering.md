@@ -4,6 +4,12 @@
 - Prove stale fingerprints, failed blocking rows, missing rows, duplicate rows,
   and empty manifests fail.
 - Prove TODO rows are preserved and visibly reported.
+- Prove Stage 4 compiler admission cannot erase or promote the distinct 49-row
+  CLI/MCP/LSP tooling-matrix receipt obligation.
+- Prove fixture-backed Caret rows remain distinct from installed-provider,
+  production runtime, sustained multi-manager, Slang, and smux evidence.
+- Prove web/database listener-port obligations remain distinct from handler,
+  GPU-admission, and benchmark rows.
 - Prove bootstrap receipt promotion is deterministic and requires all four
   compiler phase oracle lines.
 - Prove bootstrap completion also runs automated rows, retains an evidence log,
@@ -54,6 +60,7 @@ Focused command: `sh test/01_unit/scripts/must_check_tiering_test.shs`.
 | REQ-MCT-002, REQ-MCT-005 | `test/03_system/check/must_check_tiering_spec.spl` | bootstrap producer | Source present; Stage-4 execution pending |
 | REQ-MCT-004, REQ-MCT-006 | `test/03_system/check/must_check_tiering_spec.spl` | producer-to-consumer and installer | Shell fixture PASS; Stage-4 SSpec pending |
 | REQ-MCT-006 Windows | `scripts/setup/install-must-check-hooks.ps1` | linked-worktree install/check | TODO: native Windows host evidence required |
+| REQ-MCT-007, REQ-MCT-008, REQ-MCT-009 | `test/03_system/check/must_check_tiering_spec.spl` | distinct Stage 4/Caret/server evidence rows | Source present; Stage-4 execution pending |
 
 The manual mirror is
 `doc/06_spec/03_system/check/must_check_tiering_spec.md`. Regenerate it with

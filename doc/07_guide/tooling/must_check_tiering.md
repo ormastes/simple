@@ -73,10 +73,12 @@ sh scripts/check/check-bootstrap-must-pass.shs \
 A bare invocation fails closed. It cannot run automated rows or mutate the
 ledger because it has no Stage 1–4 admission binding.
 
-The Caret bootstrap suite has automated fixture-backed gates for the
-Claude/Codex/Gemini/Kimi argv/process wrapper contracts, agent-manager messaging
-primitives, and the bounded parent-owned
-multi-Caret manager with its derived terminal view. `caret-smux-multi-launch`
+The Caret bootstrap suite has automated fixture-backed gates for injected
+Claude/Codex/Gemini/Kimi argv/process wrapper contracts, messaging HTTP/MCP
+primitives, and a bounded injected-command batch adapter with its derived
+terminal view. These fixtures do not prove installed providers, production
+agent-runtime lifecycle, or sustained multi-provider supervision; those remain
+separate TODO rows. `caret-smux-multi-launch`
 remains TODO until that manager is bound to real `os.apps.smux` sessions and
 PTY lifecycle evidence. `caret-local-llm-launch`
 remains TODO: Slang currently owns loader/readiness primitives but does not yet
@@ -106,6 +108,13 @@ Whole-tree means materialized: `check-use-target-resolves.shs` rejects sparse
 tracked inputs rather than inferring missing members from absent bytes. Run it
 from the complete bootstrap checkout. Its ratchet follows semantic import
 identity, while source lines remain diagnostics only.
+Stage 4 compiler admission and Stage 4 tooling admission are distinct. The
+compiler-stage row cannot substitute for the receipt-backed 49-row CLI/MCP/LSP
+matrix. Likewise, server handler or GPU-admission tests cannot substitute for a
+real configurable listener port, identical CPU/device outputs with device-hit
+proof, or equivalent nginx/PostgreSQL/MySQL measurements. Binary-size and
+startup rows require native Simple artifacts where specified; Rust-seed
+interpreter measurements cannot promote them.
 The runtime-API deletion detector similarly splits fixture proof from the hot
 path: bootstrap runs `--selftest`, and push supplies an explicit committed range
 to `--scan-only`. Do not use scan-only without an explicit range or treat it as

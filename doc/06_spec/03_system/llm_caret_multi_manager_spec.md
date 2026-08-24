@@ -26,6 +26,6 @@ returned child handle.
 
 ## Boundary
 
-This is evidence for `caret-multi-manager-launch`. The derived
+This is evidence for `caret-batch-process-adapter`. The derived
 `AgentTmuxEmbed` is a display model only. It does not create an `os.apps.smux`
 session or bind PTYs, so it cannot satisfy `caret-smux-multi-launch`.

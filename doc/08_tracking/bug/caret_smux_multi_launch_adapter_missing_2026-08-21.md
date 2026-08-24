@@ -6,7 +6,7 @@ Status: open
 rejects over-capacity admission before spawn, rolls back partial launch, and
 derives an embedded terminal pane view from parent-owned process records. Poll
 and stop remain parent-only lifecycle transitions. This satisfies the separate
-`caret-multi-manager-launch` gate.
+`caret-batch-process-adapter` gate.
 
 It does not call or own `os.apps.smux`, create a production smux session, bind
 child PTYs to smux panes, or prove capture/resize/stop cleanup. Therefore
