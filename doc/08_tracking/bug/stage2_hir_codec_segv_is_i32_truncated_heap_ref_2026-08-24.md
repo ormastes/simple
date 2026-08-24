@@ -606,3 +606,105 @@ matched. The next lane should treat it as a match/enum-discriminant problem in
 the Stage-2 binary (nil or otherwise erased `HirTypeKind` reaching the encoder,
 or a mis-tagged payload), not as "regenerate the codec", which the error message
 itself misleadingly suggests.
+
+## The `tag -1` frontier, characterised (2026-08-24, follow-up)
+
+Four questions were asked about the new blocker. All four are now answered by
+measurement, and one of the answers is a NEGATIVE that saves the next lane a
+wrong turn.
+
+### 1. There is no "tag producer". The `-1` is a hardcoded literal.
+
+`hc_bad_tag` is called from **62** sites in `hir_codec.spl`, split exactly:
+
+* **31 encoder catch-alls**, every one of them `case _: hc_bad_tag("X", -1)` —
+  a literal, identical in all 31.
+* **31 decoder sites**, every one `hc_bad_tag("X", tag)` — the real decoded tag.
+
+So `no \`X\` arm for tag -1` means one thing only, for ANY enum `X`: **the
+ENCODER's `match` fell through to its catch-all.** The `-1` carries zero
+information about the offending value.
+
+This retires the tempting reading that `HirTypeKind` and `Visibility` both
+showing `-1` points at a shared discriminant producer returning `-1`. They
+share nothing but the sentinel. (The already-filed
+`hir_codec_visibility_bool_in_define_slot_2026-08-24.md` states this too —
+"The `-1` is a hardcoded sentinel in that fallthrough, not a decoded tag" —
+and it was reached here independently before that record was found.)
+
+### 2. It is the same CLASS as the fixed `Visibility` defect, on the same path.
+
+That record's root cause was a **bool** sitting in a `Visibility` slot: a bool
+is not nil, so the codec's `if node.x == nil` guard took the ENCODE branch, and
+the value then matched none of the variants. Any non-nil, wrong-typed value in
+a codec'd slot produces this exact diagnostic.
+
+Confirmed here with the same kill-switch that record used
+(post-fix Stage 2 `aaac7c62…`, three-line hello world, only `SIMPLE_HIR_CACHE`
+changed):
+
+| `SIMPLE_HIR_CACHE` | rc | ending |
+|---|---|---|
+| `1` | 1 | `error: hir codec: no \`HirTypeKind\` arm for tag -1` |
+| `0` | 1 | **error gone**; a new `[bootstrap-error-count] … point=post-store count=0` counter appears and the run advances to `error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)` |
+
+So the malformed value reaches only the `hir_cache_store` encode path
+(`driver_hir_pipeline_lowering.spl` -> `driver_hir_cache.spl` ->
+`hir_module_encode`) — the codec is the messenger, not the producer — and the
+defect is **independent of the `if`-merge fix**, which concerns array element
+typing and never touches this path.
+
+### 3. NEGATIVE RESULT: `d4b1dee0d63` does NOT cover this one.
+
+`d4b1dee0d63` ("an Option handle in `HirStmtKind.Let.type_` SIGSEGV'd
+monomorphize") is the same class and an excellent candidate: a `Some(HirType)`
+enum handle in a slot declared bare `HirType` would make `hc_enc_hir_type` read
+the enum header as a `HirTypeKind` and fall straight through to the catch-all.
+
+**It was already present in the tree this Stage 2 was built from.** The boot
+worktree's `src/compiler/20.hir/hir_lowering/statements.spl` is byte-identical
+to `origin/main` (which carries `d4b1dee0d63`), and that file did not change
+during the build — the run's own before/after source snapshots differ in
+exactly 3 files, all under `src/compiler/50.mir/**`. Stage 2 compiled all 750
+modules from source with 0 cached.
+
+Therefore the `HirTypeKind` fall-through has a **different producer site** from
+the one `d4b1dee0d63` fixed. Do not assume that commit clears it.
+
+### 4. Pre-existing, to the extent it can be established
+
+The class predates this fix — the `Visibility` instance was filed AND fixed
+earlier the same day, on the same encode path, with the same sentinel — and
+with the cache off the post-fix binary sails past it to a later, unrelated
+failure. The pre-fix Stage 2 cannot be re-run for a direct control: a parallel
+session deleted that binary mid-session (only its two receipts remain at
+`build/bootstrap/stage2/aarch64-apple-darwin/`). The pre/post numbers in the
+section above were taken before the deletion.
+
+### The diagnostic itself is a defect and cost real time
+
+```
+error: hir codec: no `HirTypeKind` arm for tag -1; regenerate
+       src/compiler/20.hir/generated/hir_codec.spl
+```
+
+Every actionable word of this is wrong for the encoder half:
+
+* **"for tag -1"** — no tag was decoded; `-1` is a literal.
+* **"regenerate ..."** — the codec is COMPLETE (27 concrete arms vs 27
+  `HirTypeKind` variants). Regenerating it changes nothing, and it sends the
+  reader to the one file that is not at fault. This misdirection is what the
+  count above had to be spent to refute.
+
+The producing site is the generated encoder catch-all. A useful message would
+name the SLOT being encoded and dump the offending value's runtime tag /
+discriminant, and would say "a wrongly-typed value reached the encoder", not
+"regenerate". Filed here rather than fixed: it needs a change to the codec
+GENERATOR, not to the generated file, which is out of scope for this lane.
+
+### Next lane's frontier
+
+With `SIMPLE_HIR_CACHE=0`: `error: bootstrap entry lowered to 0 MIR
+instructions (ret-0 stub module)`. With the cache on: find which slot hands a
+non-nil, non-`HirTypeKind` value to `hc_enc_hir_type_kind` — by the `Visibility`
+precedent, look for a call site passing the wrong type into a `HirType` slot.
