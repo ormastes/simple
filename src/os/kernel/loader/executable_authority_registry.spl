@@ -951,6 +951,46 @@ pub(package) fn executable_authority_mark_riscv32_mapping_installed_v1(
         return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
     if error == ExecutableAuthorityErrorV1.None: Ok(()) else: Err(error)
 
+pub(package) fn executable_authority_validate_riscv32_mapping_adoption_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    transaction: ExecutableRiscv32MappingTransactionV1,
+    root_id: u64,
+    root_generation: u64,
+    entry_point: u64,
+    user_sp: u64
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    """Validate the exact installed pin and entry state without transferring raw authority."""
+    if (root_id == 0u64 or root_generation == 0u64 or entry_point == 0u64 or
+        user_sp == 0u64 or entry_point > 0xFFFFFFFFu64 or user_sp > 0xFFFFFFFFu64):
+        return Err(ExecutableAuthorityErrorV1.InvalidMappingPinLease)
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    match _authority_registry_state:
+        case nil: error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(state):
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_rv32_mapping_pin_index(
+                    state, transaction._pin)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+                else:
+                    val slot = state.slots[index]
+                    if (slot.rv32_mapping_pin_state !=
+                            ExecutableRiscv32MappingPinStateV1.Installed or
+                        slot.rv32_mapping_root_id != root_id or
+                        slot.rv32_mapping_root_generation != root_generation or
+                        slot.rv32_entry_point != entry_point as u32 or
+                        slot.rv32_user_sp != user_sp as u32 or
+                        transaction._entry._state.sepc != entry_point as u32 or
+                        transaction._entry._state.sp != user_sp as u32):
+                        error = ExecutableAuthorityErrorV1.InvalidMappingPinLease
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error == ExecutableAuthorityErrorV1.None: Ok(()) else: Err(error)
+
 pub(package) fn executable_authority_begin_riscv32_mapping_release_v1(
     owner: ExecutableAuthorityRegistryV1,
     pin: ExecutableRiscv32MappingPinLeaseV1

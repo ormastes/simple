@@ -17,9 +17,14 @@ use os.kernel.loader.executable_authority_registry.{
     ExecutableRiscv32MappingReleaseCoordinateV1,
     executable_authority_bind_riscv32_mapping_root_v1,
     executable_authority_mark_riscv32_mapping_installed_v1,
+    executable_authority_validate_riscv32_mapping_adoption_v1,
     executable_authority_begin_riscv32_mapping_release_v1,
     executable_authority_mapping_release_indeterminate_v1,
     executable_authority_complete_riscv32_mapping_release_v1
+}
+use os.kernel.types.riscv32_mapping_handle_v1.{
+    SchedulerRiscv32MappingHandleV1,
+    scheduler_riscv32_mapping_handle_absent_v1
 }
 use os.kernel.arch.riscv32.sv32_user_root_owner_v1.{
     Riscv32Sv32RootLeaseV1, Riscv32Sv32RootUnreachableReceiptV1,
@@ -42,6 +47,8 @@ pub enum Riscv32Sv32MappingStateV1:
     RegistryReleased
     Destroyed
     Quarantined
+    TransferCommitted
+    TransferIndeterminate
 
 pub enum Riscv32Sv32MappingErrorV1:
     None
@@ -82,6 +89,24 @@ struct Riscv32Sv32MappingSlotV1:
     unreachable: Riscv32Sv32RootUnreachableReceiptV1?
     admission_id: text
     image_hash: text
+    entry_point: u64
+    initial_stack_pointer: u64
+    task_id: u64
+    task_lifecycle_generation: u64
+
+pub enum Riscv32Sv32TcbTransferDispositionV1:
+    Committed
+    Rejected
+    Indeterminate
+
+pub struct Riscv32Sv32TransferQuarantineCoordinateV1:
+    slot_plus_one: u32
+    mapping_generation: u64
+
+pub struct Riscv32Sv32TcbTransferResultV1:
+    disposition: Riscv32Sv32TcbTransferDispositionV1
+    handle: SchedulerRiscv32MappingHandleV1
+    quarantine: Riscv32Sv32TransferQuarantineCoordinateV1?
 
 val _rv32_mapping_mutex_v1: i64 = mutex_raw_create()
 var _rv32_mapping_slots_v1: [Riscv32Sv32MappingSlotV1] = []
@@ -307,7 +332,10 @@ pub(package) fn riscv32_sv32_mapping_prepare_v1(
         state: Riscv32Sv32MappingStateV1.MappedBlocked,
         root: root.unwrap(), leaves: leaves, transaction: transaction,
         release: nil, unreachable: nil,
-        admission_id: handle.admission_id, image_hash: handle.image_hash)
+        admission_id: handle.admission_id, image_hash: handle.image_hash,
+        entry_point: entry_point,
+        initial_stack_pointer: transaction._entry._state.sp as u64,
+        task_id: 0u64, task_lifecycle_generation: 0u64)
     if map_error == Riscv32Sv32MappingErrorV1.None:
         val installed = executable_authority_mark_riscv32_mapping_installed_v1(
             owner, transaction._pin, slot.root.root_id, slot.root.generation)
@@ -358,10 +386,102 @@ pub(package) fn riscv32_sv32_mapping_destroy_v1(
             Riscv32Sv32MappingErrorV1.SerializationUnavailable)
     result
 
+fn _rv32_transfer_rejected_v1() -> Riscv32Sv32TcbTransferResultV1:
+    Riscv32Sv32TcbTransferResultV1(
+        disposition: Riscv32Sv32TcbTransferDispositionV1.Rejected,
+        handle: scheduler_riscv32_mapping_handle_absent_v1(), quarantine: nil)
+
+fn _rv32_transfer_coordinate_v1(
+    index: i64,
+    generation: u64
+) -> Riscv32Sv32TransferQuarantineCoordinateV1:
+    Riscv32Sv32TransferQuarantineCoordinateV1(
+        slot_plus_one: (index + 1) as u32, mapping_generation: generation)
+
+fn _rv32_transfer_indeterminate_v1(
+    coordinate: Riscv32Sv32TransferQuarantineCoordinateV1?
+) -> Riscv32Sv32TcbTransferResultV1:
+    Riscv32Sv32TcbTransferResultV1(
+        disposition: Riscv32Sv32TcbTransferDispositionV1.Indeterminate,
+        handle: scheduler_riscv32_mapping_handle_absent_v1(),
+        quarantine: coordinate)
+
+pub(package) fn riscv32_sv32_mapping_transfer_to_tcb_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    receipt: Riscv32Sv32MappingReceiptV1,
+    task_id: u64,
+    task_lifecycle_generation: u64,
+    entry_point: u64,
+    initial_stack_pointer: u64
+) -> Riscv32Sv32TcbTransferResultV1:
+    """Consume one mapped receipt into an exact task-bound opaque locator."""
+    if (task_id == 0u64 or task_lifecycle_generation == 0u64 or
+        entry_point == 0u64 or initial_stack_pointer == 0u64):
+        return _rv32_transfer_rejected_v1()
+    if (_rv32_mapping_mutex_v1 <= 0 or _rv32_mapping_poisoned_v1 or
+        not mutex_raw_lock(_rv32_mapping_mutex_v1)):
+        # No caller identity has been authenticated. Never disclose or mint a
+        # canonical reconciliation coordinate from caller-provided fields.
+        return _rv32_transfer_indeterminate_v1(nil)
+    if receipt.slot_index < 0 or receipt.slot_index >= _rv32_mapping_slots_v1.len():
+        if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+            _rv32_mapping_poisoned_v1 = true
+            return _rv32_transfer_indeterminate_v1(nil)
+        return _rv32_transfer_rejected_v1()
+    var slot = _rv32_mapping_slots_v1[receipt.slot_index]
+    if (not _rv32_slot_matches_v1(receipt, slot) or
+        slot.state != Riscv32Sv32MappingStateV1.MappedBlocked or
+        slot.entry_point != entry_point or
+        slot.initial_stack_pointer != initial_stack_pointer):
+        if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+            _rv32_mapping_poisoned_v1 = true
+            # The receipt failed authentication; do not reveal the canonical
+            # live slot generation even though owner serialization is lost.
+            return _rv32_transfer_indeterminate_v1(nil)
+        return _rv32_transfer_rejected_v1()
+    val registry = executable_authority_validate_riscv32_mapping_adoption_v1(
+        owner, slot.transaction, slot.root.root_id, slot.root.generation,
+        entry_point, initial_stack_pointer)
+    if registry.is_err():
+        if registry.unwrap_err() == ExecutableAuthorityErrorV1.SerializationUnavailable:
+            slot.state = Riscv32Sv32MappingStateV1.TransferIndeterminate
+            slot.task_id = task_id
+            slot.task_lifecycle_generation = task_lifecycle_generation
+            _rv32_mapping_slots_v1[receipt.slot_index] = slot
+            val coordinate = _rv32_transfer_coordinate_v1(
+                receipt.slot_index, slot.generation)
+            if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+                _rv32_mapping_poisoned_v1 = true
+            return _rv32_transfer_indeterminate_v1(Some(coordinate))
+        if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+            _rv32_mapping_poisoned_v1 = true
+            return _rv32_transfer_indeterminate_v1(
+                Some(_rv32_transfer_coordinate_v1(
+                    receipt.slot_index, slot.generation)))
+        return _rv32_transfer_rejected_v1()
+    slot.state = Riscv32Sv32MappingStateV1.TransferCommitted
+    slot.task_id = task_id
+    slot.task_lifecycle_generation = task_lifecycle_generation
+    _rv32_mapping_slots_v1[receipt.slot_index] = slot
+    val handle = SchedulerRiscv32MappingHandleV1(
+        slot_plus_one: (receipt.slot_index + 1) as u32,
+        handle_generation: slot.generation)
+    val coordinate = _rv32_transfer_coordinate_v1(receipt.slot_index, slot.generation)
+    if not mutex_raw_unlock(_rv32_mapping_mutex_v1):
+        _rv32_mapping_poisoned_v1 = true
+        return _rv32_transfer_indeterminate_v1(Some(coordinate))
+    Riscv32Sv32TcbTransferResultV1(
+        disposition: Riscv32Sv32TcbTransferDispositionV1.Committed,
+        handle: handle, quarantine: nil)
+
 export Riscv32Sv32MappingStateV1
 export Riscv32Sv32MappingErrorV1
 export Riscv32Sv32MappingReceiptV1
+export Riscv32Sv32TcbTransferDispositionV1
+export Riscv32Sv32TransferQuarantineCoordinateV1
+export Riscv32Sv32TcbTransferResultV1
 export riscv32_sv32_mapping_max_live_v1
 export riscv32_sv32_mapping_max_pages_v1
 export riscv32_sv32_mapping_prepare_v1
 export riscv32_sv32_mapping_destroy_v1
+export riscv32_sv32_mapping_transfer_to_tcb_v1
