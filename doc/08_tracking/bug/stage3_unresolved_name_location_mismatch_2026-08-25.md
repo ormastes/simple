@@ -2,8 +2,9 @@
 
 ## Status
 
-OPEN. Stage 3 is the frontier after the Stage-2 `is_empty` misdispatch fix
-(`3edcb8c2605`). It now fails **much later and on a single error**.
+SOURCE FIXED; rebuilt Stage 2 and Stage 3 evidence pending. Stage 3 is the
+frontier after the Stage-2 `is_empty` misdispatch fix (`3edcb8c2605`). It failed
+**much later and on a single error**.
 
 ## How far the chain got
 
@@ -24,19 +25,30 @@ OPEN. Stage 3 is the frontier after the Stage-2 `is_empty` misdispatch fix
 
 Three log lines, one distinct error. Nothing else fails.
 
-## Why it is suspicious rather than obvious
+## Root cause
 
-* **`parser.spl` never references `is_option_generic_tag`.** `git grep` finds zero
-  uses in that file.
-* **The reported location is a different construct entirely.**
-  `parser.spl:36` is `extern fn rt_env_get(key: text) -> text`; column 8 is
-  `rt_env_get`, not `is_option_generic_tag`.
-* **The symbol exists and resolves elsewhere.** It is defined at
-  `src/compiler/10.frontend/core/types.spl:383` and imported explicitly by
-  `_FlatAstBridge/convert_nodes.spl:35` and `core/type_inference.spl:14`.
+The unresolved name is accurate: `parser.spl` calls
+`is_option_generic_tag(base)` while its explicit `compiler.core.types` imports
+included `option_generic_type_register` but omitted the predicate. The call was
+introduced by `3dc5b8dd8a` and is already present in the measured
+`f4bfeda746b` tree. The earlier claim that the file did not reference the name
+was incorrect.
 
-So the diagnostic's **name and span disagree** — the reported identifier is not at
-the reported position, and the file blamed does not use it.
+The reported location remains a separate diagnostic defect.
+`parser.spl:36` is `extern fn rt_env_get(key: text) -> text`; column 8 is
+`rt_env_get`, not `is_option_generic_tag`. The symbol is defined and exported
+by `src/compiler/10.frontend/core/types.spl`.
+
+The parser now imports `is_option_generic_tag` explicitly beside its registry
+owner. `stage3_parser_optional_generic_import_spec.spl` pins the consumer import
+and call.
+Only a rebuilt admitted Stage 2 followed by Stage 3 can close the runtime row.
+
+The focused source-owner spec passed in interpreter mode with the bootstrap
+seed (one example, zero failures). This is diagnostic evidence only, not
+self-host acceptance. The dedicated sparse worktree has no pure-Simple
+`bin/simple`, so the Simple optimizer was unavailable for the touched `.spl`
+files and was not replaced with a Rust implementation or claimed as run.
 
 ## Prior worth testing first
 
@@ -48,8 +60,9 @@ qualifier and bound a call to an unrelated same-named method
 `unresolved name` diagnostic is consistent with the resolver reporting one symbol's
 identity against another's span.
 
-Do **not** assume the diagnostic is accurate and go looking for a missing import in
-`parser.spl` — the grep above says there is nothing there to import.
+The name/location mismatch must not override direct source evidence: resolve
+the named symbol at the real call site first, while tracking the stale span as
+diagnostic metadata debt.
 
 ## Measured on
 
