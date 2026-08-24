@@ -388,6 +388,21 @@ pub(super) fn eval_literal_expr(
                 ctx = ctx.with_note(format!("available variables: {}", names_list));
             }
 
+            // Provenance probe for an unresolved identifier. The error text
+            // carries only the NAME -- no file, line, or enclosing function --
+            // which made `variable `type_` not found` unlocalizable during the
+            // 2026-08-24 native-build investigation. Level-gated, default off;
+            // reuses the DEBUG_CALL_STACK that SIMPLE_BOOTSTRAP_DIAG already
+            // populates (see interpreter_state::push_call_depth).
+            if std::env::var_os("SIMPLE_DEBUG_UNDEFINED_VAR").is_some()
+                || crate::interpreter::field_access_debug_enabled()
+            {
+                let stack = crate::interpreter::debug_call_stack_snapshot();
+                let tail: Vec<&str> = stack.iter().rev().take(12).map(|s| s.as_str()).collect();
+                let mut avail: Vec<&str> = known_names.clone();
+                avail.sort();
+                eprintln!("[undefined-var] name={} call_stack_top={:?} in_scope={:?}", name, tail, avail);
+            }
             Err(CompileError::semantic_with_context(
                 format!("variable `{}` not found", name),
                 ctx,

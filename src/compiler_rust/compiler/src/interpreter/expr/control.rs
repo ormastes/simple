@@ -73,18 +73,63 @@ pub(super) fn eval_control_expr(
             }))
         }
         Expr::If {
+            let_pattern,
             condition,
             then_branch,
             else_branch,
-            ..
         } => {
             let cond_val = evaluate_expr(condition, env, functions, classes, enums, impl_methods)?;
+            // `let_pattern` is the `val NAME =` of `if val NAME = EXPR:`. It
+            // used to be discarded here by a `..` in this destructure, so an
+            // optional-binding `if` in EXPRESSION position (`val x = if val v
+            // = e: ... else: ...`) decided the branch from the condition's
+            // TRUTHINESS and entered the then-branch with NAME never bound --
+            // every read of NAME then failed with `variable `NAME` not found`.
+            // That blocked native-build of any module whose lowering reached
+            // `lower_index_expr` (expr_dispatch.spl:1794).
+            // doc/08_tracking/bug/io_runtime_import_borrow_local13_native_build_2026-08-24.md
+            // Presence and binding are delegated to `optional_let_binding`,
+            // the same helper the statement form (`exec_if_core`) uses, so
+            // both forms agree -- including on the "0 is falsy" landmine
+            // (`Some(0)` is PRESENT and must take the then-branch).
+            let mut pattern_decision: Option<bool> = None;
+            if let Some(pattern) = let_pattern {
+                match crate::interpreter::interpreter_control::optional_let_binding(pattern, &cond_val) {
+                    crate::interpreter::interpreter_control::LetBind::Bind(name, inner) => {
+                        // `mark_local` before `insert`, exactly as `exec_if_core`
+                        // does: without it `is_local(NAME)` stays false and the
+                        // identifier read prefers a same-named MODULE GLOBAL.
+                        env.mark_local(name.clone());
+                        env.insert(name, inner);
+                        pattern_decision = Some(true);
+                    }
+                    crate::interpreter::interpreter_control::LetBind::Skip => {
+                        pattern_decision = Some(false);
+                    }
+                    crate::interpreter::interpreter_control::LetBind::NotApplicable => {
+                        let mut bindings = HashMap::new();
+                        if pattern_matches(pattern, &cond_val, &mut bindings, enums, classes)? {
+                            for (name, val) in bindings {
+                                env.mark_local(name.clone());
+                                env.insert(name, val);
+                            }
+                            pattern_decision = Some(true);
+                        } else {
+                            pattern_decision = Some(false);
+                        }
+                    }
+                }
+            }
             // `is_condition_present` (not plain `.truthy()`): see its doc
             // comment in `interpreter_control.rs` -- `x = if opt.?: a else:
             // b` has the same "0 is falsy" landmine as the statement form
             // (`exec_if`/`exec_if_core`) if `.?`'s presence decision is
             // re-derived from the payload's truthiness instead of trusted.
-            let branch_result = if crate::interpreter::interpreter_control::is_condition_present(condition, &cond_val) {
+            let take_then = match pattern_decision {
+                Some(d) => d,
+                None => crate::interpreter::interpreter_control::is_condition_present(condition, &cond_val),
+            };
+            let branch_result = if take_then {
                 evaluate_expr(then_branch, env, functions, classes, enums, impl_methods)?
             } else if let Some(else_b) = else_branch {
                 evaluate_expr(else_b, env, functions, classes, enums, impl_methods)?
