@@ -12,6 +12,8 @@ use std.nogc_sync_mut.binary_io.{bytes_to_string}
 pub class Http1OwnedFrameResult:
     complete: bool
     request: text
+    websocket_upgrade_candidate: bool
+    upgrade_tail: [u8]
     error: text
     scanned_bytes: i64
 
@@ -50,6 +52,8 @@ class Http1RequestFrameOwner:
     terminal_error: text
     scanned_bytes: i64
     maximum_retained: i64
+    websocket_upgrade_candidate: bool
+    upgrade_tail: [u8]
 
     static fn create(policy: SecureServerPolicy) -> Http1RequestFrameOwner:
         Http1RequestFrameOwner(
@@ -70,7 +74,9 @@ class Http1RequestFrameOwner:
             maximum_retained: policy.max_request_line as i64 + 2 +
                 policy.max_header_count as i64 *
                     (policy.max_header_line as i64 + 2) + 2 +
-                policy.max_body as i64
+                policy.max_body as i64,
+            websocket_upgrade_candidate: false,
+            upgrade_tail: []
         )
 
     fn terminal() -> bool:
@@ -117,7 +123,13 @@ class Http1RequestFrameOwner:
                 self._fail("400 HTTP/1.1 requires one non-empty Host header")
                 return
             self.headers_complete = true
-            self.expected_total = self.retained.len() as i64 + decision.1 as i64
+            # A WebSocket candidate has no HTTP request body. Any bytes after
+            # the header are owned frame tail and are validated only after the
+            # complete handshake is accepted.
+            self.expected_total = if self.websocket_upgrade_candidate:
+                self.retained.len() as i64
+            else:
+                self.retained.len() as i64 + decision.1 as i64
             if self.expected_total > self.maximum_retained:
                 self._fail("413 Request exceeds retained-byte policy")
             return
@@ -144,6 +156,10 @@ class Http1RequestFrameOwner:
         if _http_field_name_is_host(line_bytes, colon):
             self.host_seen = true
             self.host_nonempty = value != ""
+        if name.lower() == "upgrade":
+            for token in value.split(","):
+                if token.trim().lower() == "websocket":
+                    self.websocket_upgrade_candidate = true
         self.headers.push((name, value))
 
     me append(fragment: [u8]):
@@ -154,6 +170,16 @@ class Http1RequestFrameOwner:
         while index < fragment.len():
             if self.headers_complete:
                 val remaining = fragment.len() - index
+                if self.websocket_upgrade_candidate:
+                    # socket_recv is capped at 8192 bytes. Preserve only the
+                    # read-ahead from the exact fragment that completed the
+                    # header; later reads belong to the RFC6455 owner.
+                    if self.upgrade_tail.len() + remaining > 8192u64:
+                        self._fail("413 WebSocket upgrade tail exceeds read quantum")
+                        return
+                    self.upgrade_tail.extend(fragment.slice(index, fragment.len()))
+                    self.scanned_bytes = self.scanned_bytes + remaining as i64
+                    return
                 val allowed = self.expected_total - self.retained.len() as i64
                 if remaining as i64 > allowed:
                     self._fail("400 Bytes follow declared request body")
@@ -205,6 +231,8 @@ class Http1RequestFrameOwner:
             return Http1OwnedFrameResult(
                 complete: true,
                 request: bytes_to_string(self.retained),
+                websocket_upgrade_candidate: self.websocket_upgrade_candidate,
+                upgrade_tail: self.upgrade_tail,
                 error: "",
                 scanned_bytes: self.scanned_bytes
             )
@@ -215,6 +243,8 @@ class Http1RequestFrameOwner:
         Http1OwnedFrameResult(
             complete: false,
             request: "",
+            websocket_upgrade_candidate: false,
+            upgrade_tail: [],
             error: message,
             scanned_bytes: self.scanned_bytes
         )
@@ -240,6 +270,8 @@ fn _invalid_policy_result(message: text) -> Http1OwnedFrameResult:
     Http1OwnedFrameResult(
         complete: false,
         request: "",
+        websocket_upgrade_candidate: false,
+        upgrade_tail: [],
         error: "400 Invalid HTTP framing policy: {message}",
         scanned_bytes: 0
     )

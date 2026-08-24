@@ -222,6 +222,13 @@ pub fn validate_rfc6455_server_handshake(request: text) -> Rfc6455HandshakeDecis
         elif lower == "sec-websocket-key":
             key_count = key_count + 1
             key = value
+        elif lower == "content-length" or lower == "transfer-encoding":
+            return _handshake_reject("WebSocket upgrade request body framing is forbidden")
+        elif lower == "origin":
+            # This development endpoint has no configured browser-origin
+            # allowlist. Refuse browser ambient-authority upgrades instead of
+            # pretending that a non-empty Origin is authenticated.
+            return _handshake_reject("WebSocket Origin policy is not configured")
         index = index + 1u64
 
     # split("\r\n") leaves two terminal empty elements for the required
@@ -483,6 +490,22 @@ pub class Rfc6455ServerConnectionOwner:
         if input.len() == 0u64 and not self.terminal:
             events.extend(self._drain_wire())
         events
+
+    me close_for_policy() -> Rfc6455ServerEvent:
+        # 1001 (Going Away) is the bounded server-lifecycle close. It is
+        # emitted at most once because every later call observes terminal.
+        if self.terminal:
+            return _event(Rfc6455ServerEventKind.ProtocolClose, [], [], 0,
+                "connection is already terminal")
+        self.terminal = true
+        self.wire = []
+        self.wire_start = 0u64
+        self.fragmented = []
+        self.fragmented_opcode = 0u8
+        self.fragment_count = 0
+        _event(Rfc6455ServerEventKind.ProtocolClose, [],
+            _server_frame(8u8, _close_payload(1001)), 1001,
+            "server connection policy ended the session")
 
     fn is_terminal() -> bool: self.terminal
     fn protocol_failed() -> bool: self.failed

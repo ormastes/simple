@@ -2,10 +2,10 @@
 
 ## Scope
 
-This is a pure-Simple prerequisite, not a `/SERVERS.ELF` integration. It owns
-strict server-side upgrade validation and all WebSocket frame/fragment state.
-The filesystem-launched server remains HTTP/1-only until a later connection
-owner transfers the upgraded socket and any already-read tail bytes.
+This pure-Simple owner is integrated into `/SERVERS.ELF` for plaintext `ws://`
+connections. It owns strict server-side upgrade validation and all WebSocket
+frame/fragment state. The HTTP framer transfers any bytes read after the header
+terminator as one bounded 8,192-byte tail; ordinary HTTP body framing is unchanged.
 
 ## Contract
 
@@ -47,10 +47,18 @@ Retained wire and message storage are separately bounded.
 No runtime calls, global state, sockets, filesystem access, or hidden retries
 exist in the owner.
 
-## Deferred integration
+## Transport integration
 
-The later transport integration must validate before writing 101, preserve
-HTTP read-ahead bytes through `append_tail`, keep the socket open after 101,
-write returned control frames, and close exactly once on terminal state. TLS,
-origin/authentication policy, routing, subprotocol and extension negotiation,
-and concurrent connection admission remain outside this protocol owner.
+The handler admits only exact `/ws` upgrades, validates before writing 101,
+transfers HTTP read-ahead through `append_tail`, and moves the socket into one
+bounded `WebSocketTransportOwner`. That owner performs at most one receive per
+outer HTTP/DB service iteration, writes every returned Pong/Close, emits 1001
+before idle-policy or server shutdown, and closes its fd at most once. A hard
+transport error closes immediately without a retry spin. Only one WebSocket is
+admitted at a time; further upgrades fail before 101. Text and binary messages
+are consumed but no application message service is claimed. TLS,
+origin/authentication policy, subprotocol and extension negotiation remain
+outside this protocol owner. Until an origin allowlist exists, every request
+carrying `Origin` is rejected to prevent browser ambient-authority upgrades.
+The non-browser development endpoint remains unauthenticated; therefore WSS or
+production service is not claimed.

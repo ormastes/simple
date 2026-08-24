@@ -27,6 +27,21 @@ describe "SimpleOS filesystem HTTP/1 incremental framing owner":
         expect(result.request).to_equal(wire)
         expect(result.scanned_bytes).to_equal(text_to_bytes_pure(wire).len() as i64)
 
+    it "transfers coalesced WebSocket frame bytes without changing ordinary HTTP framing":
+        val header = "GET /ws HTTP/1.1\r\nHost: simpleos\r\n" +
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n" +
+            "Sec-WebSocket-Version: 13\r\n" +
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        val tail: [u8] = [0x89u8, 0x80u8, 1u8, 2u8, 3u8, 4u8]
+        var coalesced = text_to_bytes_pure(header)
+        coalesced.extend(tail)
+        val result = frame_http1_fragments_owned_for_test(
+            [coalesced], SecureServerPolicy.production())
+        expect(result.complete).to_equal(true)
+        expect(result.websocket_upgrade_candidate).to_equal(true)
+        expect(result.request).to_equal(header)
+        expect(result.upgrade_tail).to_equal(tail)
+
     it "accepts the exact ten MiB body policy boundary without a header rescan":
         val header = text_to_bytes_pure(
             "POST /health HTTP/1.1\r\nHost: simpleos\r\nContent-Length: 10485760\r\n\r\n")
