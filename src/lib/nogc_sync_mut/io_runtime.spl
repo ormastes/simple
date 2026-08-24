@@ -59,9 +59,13 @@ extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_append_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text
+@unsafe(reason: "raw nullable environment lookup; wrapper normalizes absence", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw environment mutation status; wrapper preserves exact boolean result", capabilities: [ffi])
 extern fn rt_env_set(key: text, value_str: text) -> bool
+@unsafe(reason: "raw process identifier provider; nonpositive result is invalid", capabilities: [ffi])
 extern fn rt_getpid() -> i64
+@unsafe(reason: "raw wall-clock provider; negative sentinel is failure", capabilities: [ffi])
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 @unsafe(reason: "raw recursive-directory-create status; false sentinel means creation did not complete", capabilities: [ffi])
@@ -273,7 +277,8 @@ pub fn process_run(cmd: text, args: [text]) -> (text, text, i64):
 # ============================================================================
 
 pub fn env_get(key: text) -> text:
-    val value = rt_env_get(key)
+    val value = unsafe(capabilities: [ffi]):
+        rt_env_get(key)
     if value == nil:
         ""
     else:
@@ -293,7 +298,8 @@ pub fn env_get_opt(key: text) -> text?:
     does not. An explicitly-empty variable also reports nil here, because the two
     are indistinguishable through `rt_env_get`.
     """
-    val value = rt_env_get(key)
+    val value = unsafe(capabilities: [ffi]):
+        rt_env_get(key)
     if value == nil:
         return nil
     if value == "":
@@ -305,7 +311,8 @@ pub fn env_get_or(key: text, default_value: text) -> text:
     env_get_opt(key) ?? default_value
 
 pub fn env_set(key: text, value: text) -> bool:
-    rt_env_set(key, value)
+    unsafe(capabilities: [ffi]):
+        rt_env_set(key, value)
 
 pub fn cwd() -> text:
     shell_output("pwd")
@@ -314,17 +321,25 @@ pub fn cwd() -> text:
 # already reports unset as ""). Use `env_get_opt("HOME")` to tell unset
 # apart from empty.
 pub fn home() -> text:
-    rt_env_get("HOME") ?? ""
+    env_get("HOME")
 
 # ============================================================================
 # System
 # ============================================================================
 
 pub fn getpid() -> i64:
-    rt_getpid()
+    val pid = unsafe(capabilities: [ffi]):
+        rt_getpid()
+    if pid <= 0:
+        panic("E-SFFI-SYSTEM-001: process identifier provider failed")
+    pid
 
 pub fn time_now_unix_micros() -> i64:
-    rt_time_now_unix_micros()
+    val value = unsafe(capabilities: [ffi]):
+        rt_time_now_unix_micros()
+    if value < 0:
+        panic("E-SFFI-TIME-001: wall clock provider failed")
+    value
 
 pub fn get_args() -> [text]:
     sys_get_args() ?? []
