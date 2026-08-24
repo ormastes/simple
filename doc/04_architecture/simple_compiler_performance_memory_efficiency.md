@@ -126,6 +126,13 @@ PassRunRecord:
 
 Only `Active` entries dispatch transforms. `AnalysisOnly` and `RemarkOnly` may inspect but never replace MIR. `Skeleton`/`Disabled` never dispatch. Unknown pass names, invalid status combinations, and missing required facts fail pipeline planning. Requested and effective pipelines are separate immutable evidence.
 
+Registry integrity is bidirectional: every descriptor's stable name must resolve
+through canonical dispatch to the same `PassKind`, and every alias must resolve
+to that descriptor. Missing or misbound stable names are compiler-integrity
+failures even when status/expectation metadata is internally consistent.
+Stable-name and witness identities use hash-set uniqueness checks so those
+uniqueness phases remain linear as the pass inventory grows.
+
 ### Diagnostic model
 
 ```text
