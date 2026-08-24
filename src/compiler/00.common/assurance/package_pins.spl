@@ -284,29 +284,59 @@ fn _string_list(v: SdnValue, key: text) -> [text]:
                             case None: out = out
                     out
 
+# Hoist each matched node into a `var` before calling `.get()` on it. Calling a
+# method DIRECTLY on a value bound by a `case Some(x)` arm returns as if the key
+# were absent, and the value stays degraded when passed on to a function — so
+# the nested `av.get("waivers")` this used to do silently produced no waivers at
+# all, with no parse error and no missing-field error, and the three waiver
+# rules below were never reached. `_parse_deps` was unaffected only because its
+# caller already hoists (`var project = root` + `case Some(pv): project = pv`),
+# which is the same shape used here now. Measured A/B/C: inline-arm MISSING,
+# hoisted-var FOUND, arm-value-passed-as-parameter MISSING.
+# Bug: doc/08_tracking/bug/match_arm_bound_value_method_call_returns_none_2026-08-24.md
 fn _parse_waivers(root: SdnValue, path: text, mut errors: [PinDocError]) -> [Waiver]:
     var out: [Waiver] = []
+    var assurance = root
+    var has_assurance = false
     match root.get("assurance"):
-        case None: out
+        case None: has_assurance = false
         case Some(av):
-            match av.get("waivers"):
-                case None: out
-                case Some(wv):
-                    match wv.as_array():
-                        case None:
-                            errors.push(PinDocError.WrongShape(path, "`assurance.waivers:` must be a sequence"))
-                            out
-                        case Some(items):
-                            for item in items:
-                                val rule = _pin_opt_text(item, "rule", "")
-                                if rule == "":
-                                    errors.push(PinDocError.MissingField(path, "assurance.waivers.rule"))
-                                out = out + [Waiver(
-                                    rule: rule,
-                                    owner: _pin_opt_text(item, "owner", ""),
-                                    expires: _pin_opt_text(item, "expires", "")
-                                )]
-                            out
+            assurance = av
+            has_assurance = true
+    if not has_assurance:
+        return out
+
+    var waivers_node = root
+    var has_waivers = false
+    match assurance.get("waivers"):
+        case None: has_waivers = false
+        case Some(wv):
+            waivers_node = wv
+            has_waivers = true
+    if not has_waivers:
+        return out
+
+    var items: [SdnValue] = []
+    var is_array = false
+    match waivers_node.as_array():
+        case None: is_array = false
+        case Some(arr):
+            items = arr
+            is_array = true
+    if not is_array:
+        errors.push(PinDocError.WrongShape(path, "`assurance.waivers:` must be a sequence"))
+        return out
+
+    for item in items:
+        val rule = _pin_opt_text(item, "rule", "")
+        if rule == "":
+            errors.push(PinDocError.MissingField(path, "assurance.waivers.rule"))
+        out = out + [Waiver(
+            rule: rule,
+            owner: _pin_opt_text(item, "owner", ""),
+            expires: _pin_opt_text(item, "expires", "")
+        )]
+    out
 
 fn _parse_deps(project: SdnValue, path: text, mut errors: [PinDocError]) -> [DepEdge]:
     var out: [DepEdge] = []
