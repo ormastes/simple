@@ -10,7 +10,8 @@
 
 use app.cli.query_rich_common.{query_file_read_rich, query_process_run}
 use app.cli.query_helpers.{_extract_params_from, _extract_ident_from, _extract_return_from, _count_indent}
-use app.cli.query_outline.{OutlineSymbol, OutlineImport, OutlineOptions, parse_outline_file, parse_outline_imports}
+use app.cli.query_outline.{OutlineSymbol, OutlineImport, OutlineSnapshot,
+    OutlineOptions, parse_outline_file, parse_outline_snapshot}
 
 # ============================================================================
 # Internal Types (used within this file only)
@@ -29,8 +30,10 @@ struct _ImportedSym:
 fn _parse_file(file: text) -> [OutlineSymbol]:
     parse_outline_file(file, OutlineOptions(parent_for_types: false, include_import_symbols: false, include_fields: false, extract_binding_types: true))
 
-fn _parse_imports(file: text) -> [OutlineImport]:
-    parse_outline_imports(file)
+fn _parse_snapshot(file: text) -> OutlineSnapshot:
+    parse_outline_snapshot(file, OutlineOptions(parent_for_types: false,
+        include_import_symbols: false, include_fields: false,
+        extract_binding_types: true))
 
 # ============================================================================
 # Safe grep wrapper (local copy to avoid import issues)
@@ -44,8 +47,7 @@ fn _safe_grep_file(pattern: text, file: text) -> (text, i64):
     val (stdout, stderr, code) = query_process_run("grep", ["-n", pattern, file])
     (stdout, code)
 
-fn _collect_imported_symbols(file: text) -> [_ImportedSym]:
-    val imports = _parse_imports(file)
+fn _collect_imported_symbols(imports: [OutlineImport]) -> [_ImportedSym]:
     var imported: [_ImportedSym] = []
     for imp in imports:
         val resolved = _resolve_module_path(imp.module_path)
@@ -61,7 +63,8 @@ fn _collect_imported_symbols(file: text) -> [_ImportedSym]:
 
 # Find definition of symbol — scope-aware, cross-file via imports
 fn engine_find_definition(file: text, symbol: text) -> i64:
-    val symbols = _parse_file(file)
+    val snapshot = _parse_snapshot(file)
+    val symbols = snapshot.symbols
     var found = false
 
     # Search in file's own symbols
@@ -76,7 +79,7 @@ fn engine_find_definition(file: text, symbol: text) -> i64:
     if found:
         return 0
 
-    for imported in _collect_imported_symbols(file):
+    for imported in _collect_imported_symbols(snapshot.imports):
         val sym = imported.symbol
         if sym.name == symbol:
             print "{imported.source_file}:{sym.line}: [{sym.kind}] {sym.signature}"
@@ -135,7 +138,8 @@ fn engine_find_references(file: text, symbol: text) -> i64:
 
 # Hover info — type signature + doc comment + kind from outline
 fn engine_hover(file: text, line_num: i64, symbol: text) -> i64:
-    val symbols = _parse_file(file)
+    val snapshot = _parse_snapshot(file)
+    val symbols = snapshot.symbols
 
     # First check in this file's symbols
     for sym in symbols:
@@ -143,7 +147,7 @@ fn engine_hover(file: text, line_num: i64, symbol: text) -> i64:
             _print_hover_info(sym, file)
             return 0
 
-    for imported in _collect_imported_symbols(file):
+    for imported in _collect_imported_symbols(snapshot.imports):
         val sym = imported.symbol
         if sym.name == symbol:
             _print_hover_info(sym, imported.source_file)
@@ -189,7 +193,8 @@ fn _print_hover_info(sym: OutlineSymbol, file: text) -> i64:
 # Completions — collect local symbols + imported symbols + keywords
 fn engine_completions(file: text, line_num: i64, prefix: text) -> i64:
     var found: [text] = []
-    val symbols = _parse_file(file)
+    val snapshot = _parse_snapshot(file)
+    val symbols = snapshot.symbols
 
     # Local symbols matching prefix
     print "--- Local ---"
@@ -199,7 +204,7 @@ fn engine_completions(file: text, line_num: i64, prefix: text) -> i64:
             found.push(sym.name)
 
     var imp_found: [text] = []
-    for imported in _collect_imported_symbols(file):
+    for imported in _collect_imported_symbols(snapshot.imports):
         val sym = imported.symbol
         if sym.name.starts_with(prefix) and not _list_contains(imp_found, sym.name) and not _list_contains(found, sym.name):
             imp_found.push(sym.name + " [" + sym.kind + "] (" + imported.module_path + ")")
@@ -222,14 +227,12 @@ fn engine_completions(file: text, line_num: i64, prefix: text) -> i64:
 
 # Type at position — extract type from declaration
 fn engine_type_at(file: text, line_num: i64, symbol: text) -> i64:
-    val symbols = _parse_file(file)
+    val snapshot = _parse_snapshot(file)
+    val symbols = snapshot.symbols
 
     # Read the line at position
-    val content = query_file_read_rich(file) ?? ""
-    if content != "":
-        val lines = content.split("\n")
-        if line_num >= 1 and line_num <= lines.len():
-            print "Line {line_num}: {lines[line_num - 1].trim()}"
+    if line_num >= 1 and line_num <= snapshot.lines.len():
+        print "Line {line_num}: {snapshot.lines[line_num - 1].trim()}"
 
     print "Symbol: {symbol}"
 
@@ -245,7 +248,7 @@ fn engine_type_at(file: text, line_num: i64, symbol: text) -> i64:
             print "Definition: {sym.signature}"
             return 0
 
-    for imported in _collect_imported_symbols(file):
+    for imported in _collect_imported_symbols(snapshot.imports):
         val sym = imported.symbol
         if sym.name == symbol:
             if sym.return_type != "":
@@ -264,7 +267,8 @@ fn engine_signature_help(file: text, line_num: i64, col: i64, symbol: text) -> i
     var found_fn = false
 
     # Search in file
-    val symbols = _parse_file(file)
+    val snapshot = _parse_snapshot(file)
+    val symbols = snapshot.symbols
     for sym in symbols:
         if sym.name == symbol and (sym.kind == "fn" or sym.kind == "method" or sym.kind == "static_method" or sym.kind == "extern_fn"):
             fn_sym = sym
@@ -273,7 +277,7 @@ fn engine_signature_help(file: text, line_num: i64, col: i64, symbol: text) -> i
 
     # Search imported files if not found
     if not found_fn:
-        for imported in _collect_imported_symbols(file):
+        for imported in _collect_imported_symbols(snapshot.imports):
             val sym = imported.symbol
             if sym.name == symbol and (sym.kind == "fn" or sym.kind == "method" or sym.kind == "static_method" or sym.kind == "extern_fn"):
                 fn_sym = sym
@@ -287,22 +291,19 @@ fn engine_signature_help(file: text, line_num: i64, col: i64, symbol: text) -> i
     # Count commas before cursor to find active parameter
     var active_param = 0
     if col > 0:
-        val content = query_file_read_rich(file) ?? ""
-        if content != "":
-            val file_lines = content.split("\n")
-            if line_num >= 1 and line_num <= file_lines.len():
-                val call_line = file_lines[line_num - 1]
-                var paren_depth = 0
-                var ci = 0
-                while ci < col and ci < call_line.len():
-                    val c = call_line.substring(ci, ci + 1)
-                    if c == "(":
-                        paren_depth = paren_depth + 1
-                    elif c == ")":
-                        paren_depth = paren_depth - 1
-                    elif c == "," and paren_depth == 1:
-                        active_param = active_param + 1
-                    ci = ci + 1
+        if line_num >= 1 and line_num <= snapshot.lines.len():
+            val call_line = snapshot.lines[line_num - 1]
+            var paren_depth = 0
+            var ci = 0
+            while ci < col and ci < call_line.len():
+                val c = call_line.substring(ci, ci + 1)
+                if c == "(":
+                    paren_depth = paren_depth + 1
+                elif c == ")":
+                    paren_depth = paren_depth - 1
+                elif c == "," and paren_depth == 1:
+                    active_param = active_param + 1
+                ci = ci + 1
 
     print "Function: {fn_sym.name}"
     print "Parameters: {fn_sym.params}"
