@@ -191,6 +191,22 @@ current-head research reconciliation.
   column alignment.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed API-surface snapshot assembly tranche
+
+- Replace repeated edge slicing and character concatenation with one-pass ASCII
+  trim/comma span scans.
+- Mutate file, directory, and request entry accumulators through their unique
+  local owners instead of rebinding returned `push` values.
+- Remove the roots-sized count-only array while preserving `module_count ==
+  roots.len()` for duplicate and empty roots.
+- Replace cumulative SDN prefix concatenation with ordered fragments and one
+  join, reducing worst-case assembly copies from O(P^2) to O(P).
+- Preserve sorted file-read order, final module/symbol order, duplicate exports,
+  exact grouping, and trailing newlines; correct the stale deduplication claim.
+- Add ordered export parsing plus exact empty/multi-module serialization
+  contracts; verification intentionally not run under the user's no-verify
+  instruction.
+
 ## Implemented generated HIR child-frame tranche
 
 - Generator owner: add `HirChildFrame`, its context-neutral sink, reverse
