@@ -2653,6 +2653,28 @@ input with a different lifetime. Complete warning payload/order parity is
 covered using a generated RV64 bundle, but not executed under the user's
 no-verification instruction.
 
+### Linear canonical MIR DAG validation
+
+Canonical termination closure previously resolved every branch target by
+scanning all blocks and found Kahn progress by repeatedly rescanning the full
+processed set. A reverse-storage-order chain therefore required quadratic
+block work, while switch successor deduplication also compared each target with
+every earlier target.
+
+The validator now builds one first-pass `BlockId -> position` dictionary,
+rejecting duplicates before any terminator diagnostics as before. A second pass
+validates and stores successor positions once and computes indegrees. Kahn's
+worklist is an append-only array with a monotonic cursor, and switch successor
+deduplication uses a local membership dictionary while retaining default-first
+encounter order. For B blocks, T raw successor entries, E distinct CFG edges,
+and switch arities k, validation is expected O(B+T), down from
+O(B^2+B*E+sum(k^2)) in adversarial layouts. Live graph storage is O(B+E), plus
+O(max(k)) transient switch membership. Hash input, diagnostic text and
+precedence, unsupported-edge handling, missing-target behavior, and cycle
+classification remain unchanged. Small CFGs may pay additional dictionary,
+nested-array, and pointer-locality overhead; no runtime measurement was made
+under the user's no-verification instruction.
+
 ### Linear TYPE001 rejected-prefix scanning
 
 The default nonexistent-type lint searched each physical line for four bad cast

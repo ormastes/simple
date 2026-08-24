@@ -596,3 +596,19 @@ and searches the fixed `pass_todo` byte sequence. The existing normalized checks
 remain authoritative for equality, call-prefix, colon, and assignment shapes.
 Adjacent TODO and SDN checks stay outside the gate so diagnostic ownership and
 ordering cannot be skipped.
+
+### Indexed immutable CFG validation facts
+
+Canonical MIR validators must construct request-local graph facts once rather
+than recover them with repeated block scans. The minimum closure is a unique
+block-id index, ordered adjacency, indegrees, and a cursor-owned ready queue.
+Graph facts remain outside canonical serialization and therefore cannot change
+hash identity. Construction order is part of diagnostic behavior: validate all
+block identities first, then visit terminators and targets in storage and
+successor order, then classify cycles. Switch-edge deduplication preserves its
+default-first order while using membership indexing. For B blocks, T raw
+successor entries, E distinct edges, and maximum switch arity K, this provides
+expected O(B+T) validation with O(B+E) live graph storage plus O(K) transient
+membership storage. The design accepts dictionary and nested-array overhead on
+small CFGs to bound adversarial work, without a persistent cache or invalidation
+surface.
