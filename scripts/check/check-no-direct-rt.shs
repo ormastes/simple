@@ -41,12 +41,15 @@ BASELINE_FILE="$ROOT/scripts/check/no_direct_rt_baseline.txt"
 # Call-position matches only; a line whose first non-space char is '#' is a
 # comment and never a call site (measured false positive: js/builtins/date.spl).
 RT_RE='^[^#]*\brt_[a-z0-9_]*\('
+# Declarations are boundary metadata, not runtime calls. They are measured
+# separately so neither class can disappear from the structured result.
+DECL_RE='^[[:space:]]*extern[[:space:]]+fn[[:space:]]+rt_[a-z0-9_]*\('
 
 # scan_dir <dir> <allowlist-file> [offender-output]
-# stdout: "scanned direct allowed forbidden" counts.
+# stdout: "scanned direct allowed forbidden declarations" counts.
 scan_dir() {
   sd_root="$1"; sd_allow="$2"; sd_off="${3:-}"
-  sd_scanned=0; sd_allowed=0; sd_forbidden=0
+  sd_scanned=0; sd_allowed=0; sd_forbidden=0; sd_decls=0
   if ! command -v rg >/dev/null 2>&1; then
     echo "ERR"
     return
@@ -62,6 +65,8 @@ scan_dir() {
   tmp_find="$tmp_scan/find.sorted"
   tmp_rg="$tmp_scan/rg.sorted"
   tmp_matches="$tmp_scan/matches"
+  tmp_decls="$tmp_scan/decls"
+  tmp_classified="$tmp_scan/classified"
   if ! find "$sd_scan_root" -name '*.spl' -type f ! -path '*/vendor/*' -print0 > "$tmp_find_raw"; then
     rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
     echo "ERR"
@@ -93,8 +98,28 @@ scan_dir() {
     echo "ERR"
     return
   fi
-  while IFS=: read -r f n; do
+  rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$DECL_RE" "$sd_scan_root" > "$tmp_decls"
+  st=$?
+  if [ $st -gt 1 ]; then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches" "$tmp_decls" "$tmp_classified"; rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  awk -F: '
+    FILENAME == ARGV[1] { matched[$1]=$2; order[++count]=$1; next }
+    { declarations[$1]=$2 }
+    END {
+      for (i=1; i<=count; i++) {
+        path=order[i]
+        print path ":" matched[path] ":" (declarations[path] + 0)
+      }
+    }
+  ' "$tmp_matches" "$tmp_decls" > "$tmp_classified"
+  while IFS=: read -r f matched declarations; do
     [ -n "$f" ] || continue
+    sd_decls=$((sd_decls + declarations))
+    n=$((matched - declarations))
+    [ "$n" -gt 0 ] || continue
     case "$f" in
       "$sd_root"/*) rel=${f#"$sd_root"/} ;;
       ./*) rel=${f#./} ;;
@@ -113,10 +138,10 @@ scan_dir() {
       sd_forbidden=$((sd_forbidden + n))
       if [ -n "$sd_off" ]; then echo "$n $rel" >> "$sd_off"; fi
     fi
-  done < "$tmp_matches"
-  rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"
+  done < "$tmp_classified"
+  rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches" "$tmp_decls" "$tmp_classified"
   rmdir "$tmp_scan"
-  echo "$sd_scanned $((sd_allowed + sd_forbidden)) $sd_allowed $sd_forbidden"
+  echo "$sd_scanned $((sd_allowed + sd_forbidden)) $sd_allowed $sd_forbidden $sd_decls"
 }
 
 # ---- selftest (runs first, always, fatal) ----
@@ -178,12 +203,30 @@ selftest() {
   NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/b" >/dev/null 2>&1
   st_rc=$?
   if [ "$st_rc" != "2" ] || [ -f "$st_dir/b/scripts/check/no_direct_rt_baseline.txt" ]; then echo "ERROR — selftest failed: missing baseline on verification run did not fail closed (rc=$st_rc)"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 10: an extern declaration is measured but is not a call site.
+  mkdir -p "$st_dir/e/src/lib/x"
+  printf 'extern fn rt_decl(value: i64) -> i64\n' > "$st_dir/e/src/lib/x/decl.spl"
+  r=$(scan_dir "$st_dir/e" /dev/null)
+  set -- $r
+  if [ "${4:-x}" != "0" ] || [ "${5:-x}" != "1" ]; then echo "ERROR — selftest failed: declaration not split from calls (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 11: a real invocation remains forbidden and is not a declaration.
+  mkdir -p "$st_dir/f/src/lib/x"
+  printf 'fn f():\n    y = rt_call(1)\n' > "$st_dir/f/src/lib/x/call.spl"
+  r=$(scan_dir "$st_dir/f" /dev/null)
+  set -- $r
+  if [ "${4:-x}" != "1" ] || [ "${5:-x}" != "0" ]; then echo "ERROR — selftest failed: call misclassified (got '$r')"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 12: mixed input reconciles two declarations and one call.
+  mkdir -p "$st_dir/g/src/lib/x"
+  printf 'extern fn rt_a(x: i64) -> i64\nextern fn rt_b(x: i64) -> i64\nfn f():\n    y = rt_a(1)\n' > "$st_dir/g/src/lib/x/both.spl"
+  r=$(scan_dir "$st_dir/g" /dev/null)
+  set -- $r
+  if [ "${4:-x}" != "1" ] || [ "${5:-x}" != "2" ]; then echo "ERROR — selftest failed: mixed declarations/call did not reconcile (got '$r')"; rm -rf "$st_dir"; exit 2; fi
   rm -rf "$st_dir"
 }
 
 if [ "${NO_DIRECT_RT_SELFTEST_CHILD:-0}" = "0" ]; then selftest; fi
 if [ $SELFTEST_ONLY -eq 1 ]; then
-  echo "PASS — 9 selftest fixture(s) checked"
+  echo "PASS — 12 selftest fixture(s) checked"
   exit 0
 fi
 
@@ -193,7 +236,7 @@ OFF_FILE="$(mktemp).off"
 : > "$OFF_FILE"
 counts=$(scan_dir "$ROOT" "$ALLOWLIST" "$OFF_FILE")
 set -- $counts
-if [ "${1:-ERR}" = "ERR" ] || [ $# -ne 4 ]; then
+if [ "${1:-ERR}" = "ERR" ] || [ $# -ne 5 ]; then
   rm -f "$OFF_FILE"
   echo "ERROR — nothing was checked: direct runtime scan failed"
   exit 2
@@ -202,6 +245,7 @@ scanned=$1
 direct_total=$2
 allowed=$3
 forbidden=$4
+decls=$5
 
 if [ $((allowed + forbidden)) -ne "$direct_total" ]; then
   rm -f "$OFF_FILE"
@@ -215,6 +259,8 @@ echo "  scanned_files: $scanned"
 echo "  direct_total: $direct_total"
 echo "  allowed_provider: $allowed"
 echo "  forbidden_product: $forbidden"
+echo "  extern_declarations: $decls"
+echo "  match_total_incl_declarations: $((direct_total + decls))"
 
 if [ "$scanned" -eq 0 ]; then rm -f "$OFF_FILE"; echo "ERROR — nothing was checked"; exit 2; fi
 
@@ -223,7 +269,7 @@ if [ $CRITICAL -eq 1 ] && [ "$forbidden" -gt 0 ]; then
   top=$(sort -rn "$OFF_FILE" | head -5 | awk '{printf "%s:%s ", $2, $1}')
   rm -f "$OFF_FILE"
   echo "fix: route through the std.* semantic API, or a sanctioned provider alias (see scripts/check/no_direct_rt_allowlist.txt)."
-  echo "FAIL — critical mode: $forbidden forbidden direct rt_* call site(s), 0 allowed; top offenders: $top"
+  echo "FAIL — critical mode: $forbidden forbidden direct rt_* call site(s), extern_decls=$decls; top offenders: $top"
   exit 1
 fi
 
@@ -233,7 +279,7 @@ if [ ! -f "$BASELINE_FILE" ]; then
   if [ $GENERATE_BASELINE -eq 1 ]; then
     echo "$forbidden" > "$BASELINE_FILE"
     rm -f "$OFF_FILE"
-    echo "PASS — $scanned file(s) scanned, forbidden=$forbidden (baseline recorded)"
+    echo "PASS — $scanned file(s) scanned, forbidden=$forbidden, extern_decls=$decls (baseline recorded)"
     exit 0
   fi
   rm -f "$OFF_FILE"
@@ -252,17 +298,17 @@ if [ "$forbidden" -gt "$baseline" ]; then
   echo "     or — for a genuine runtime primitive — import a sanctioned provider alias:"
   echo "         use runtime.primitive.{rt_memcpy as _memory_copy_primitive}   # provider dirs only, see scripts/check/no_direct_rt_allowlist.txt"
   echo "     Never add a new 'extern fn rt_*' to product code. Process: doc/03_plan/infra/binary_runtime_hardening/plan.md"
-  echo "FAIL — forbidden direct rt_* count $forbidden exceeds baseline $baseline; top offenders: $top"
+  echo "FAIL — forbidden direct rt_* count $forbidden exceeds baseline $baseline, extern_decls=$decls; top offenders: $top"
   exit 1
 fi
 rm -f "$OFF_FILE"
 if [ $GENERATE_BASELINE -eq 1 ]; then
   echo "$forbidden" > "$BASELINE_FILE"
-  echo "PASS — $scanned file(s) scanned, forbidden=$forbidden (baseline updated $baseline -> $forbidden)"
+  echo "PASS — $scanned file(s) scanned, forbidden=$forbidden, extern_decls=$decls (baseline updated $baseline -> $forbidden)"
   exit 0
 fi
 if [ "$forbidden" -lt "$baseline" ]; then
   echo "note: forbidden count improved ($forbidden < baseline $baseline); tighten deliberately with --generate-baseline."
 fi
-echo "PASS — $scanned file(s) scanned, forbidden=$forbidden (baseline $baseline)"
+echo "PASS — $scanned file(s) scanned, forbidden=$forbidden, extern_decls=$decls (baseline $baseline)"
 exit 0

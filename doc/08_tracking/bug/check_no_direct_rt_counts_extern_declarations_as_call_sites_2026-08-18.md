@@ -135,3 +135,30 @@ allowlist is being edited in parallel, which moves `allowed_provider` /
 recording.
 
 Status: **RESOLVED (scanner)** / baseline re-record OPEN.
+
+## 2026-08-24 regression repair and exact baseline tightening
+
+The declaration split had been lost from the current checker even though this
+record still claimed it was resolved. The live implementation again used only
+`RT_RE`, returned four counters, and counted every `extern fn rt_*` declaration
+as a call. The declaration-aware logic was restored on top of the newer
+NUL-manifest parity scan and read-only/explicit-baseline policy; those newer
+safety properties were retained.
+
+Three regression fixtures now prove declaration-only, call-only, and mixed
+files. Together with the existing hidden/ignored traversal, failure, provider,
+and baseline-write fixtures, `--selftest-only` reports 12/12 PASS.
+
+The production scan on the same tree measured:
+
+| scanned files | calls | allowed calls | forbidden calls | declarations | all matches |
+|---:|---:|---:|---:|---:|---:|
+| 15,217 | 12,632 | 4,857 | 7,775 | 6,556 | 19,188 |
+
+`12,632 + 6,556 = 19,188`, so no match disappeared. The tracked baseline was
+then explicitly tightened from 11,818 to the exact corrected-definition value
+7,775 with `--generate-baseline`. The 4,043 drop is measurement
+reclassification, not removal of 4,043 product calls. The canonical bootstrap
+row remains TODO until an admitted Stage 4 invocation retains the checker PASS.
+
+Status: **RESOLVED (scanner and exact baseline)** / bootstrap receipt pending.
