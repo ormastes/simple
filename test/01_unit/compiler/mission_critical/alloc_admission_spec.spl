@@ -1,0 +1,123 @@
+"""
+## Purpose and audience
+Purpose: Prove the mission-critical allocation-admission port of the Simple
+compiler, loader and interpreter admits and refuses for real.
+Audience: compiler and assurance engineers who maintain this policy.
+"""
+# @req: REQ-COMPILER-MISSION-CRITICAL-ALLOC-001 — stable requirement identity.
+
+# @cover src/compiler/00.common/mission_critical/alloc_admission.spl 80%
+#
+# Drives the REAL `compiler.common.mission_critical.alloc_admission` module and
+# the REAL `compiler.semantics.noalloc_checker` admitted gate — not a replica.
+#
+# What is being pinned: under mission-critical mode the startup seal closes and
+# the steady-state gate rejects `Unbounded`/`Unknown` symbols, which would
+# reject the compiler, its loader and its interpreter outright. This port
+# ADMITS those three under a declared, sealed quota contract, and refuses
+# everything else. It does NOT bound allocation at runtime — see the module's
+# HONESTY LIMIT note.
+
+use compiler.common.mission_critical.alloc_admission.*
+use compiler.semantics.noalloc_checker.{
+    NoallocCapabilityManifest, AllocClass, check_steady_state_gate,
+    check_steady_state_gate_admitted, check_steady_state_gate_admitted_normal,
+    steady_state_gate_active
+}
+use std.nogc_sync_mut.mission_critical.domain_arena_v1.{
+    ARENA_CONTEXT_NORMAL, ARENA_CONTEXT_KERNEL, ARENA_CONTEXT_ISR
+}
+
+describe "Mission-critical allocation admission — compiler, loader, interpreter":
+    it "admits the compiler in normal execution context":
+        # @req: REQ-COMPILER-MISSION-CRITICAL-ALLOC-001
+        val a = mci_alloc_admit("compiler.hir.hir_lowering", ARENA_CONTEXT_NORMAL)
+        expect(a.admitted).to_equal(true)
+        expect(a.domain_name).to_equal("compiler")
+
+    it "admits the loader under its own domain, not the enclosing compiler domain":
+        val a = mci_alloc_admit("compiler.loader.object_provider", ARENA_CONTEXT_NORMAL)
+        expect(a.admitted).to_equal(true)
+        expect(a.domain_name).to_equal("loader")
+
+    it "admits the interpreter under its own domain":
+        val a = mci_alloc_admit("compiler.frontend.core.interpreter.eval_ops", ARENA_CONTEXT_NORMAL)
+        expect(a.admitted).to_equal(true)
+        expect(a.domain_name).to_equal("interpreter")
+
+    it "normalizes a std.-prefixed module path":
+        val a = mci_alloc_admit("std.compiler.loader.segment_mapper", ARENA_CONTEXT_NORMAL)
+        expect(a.admitted).to_equal(true)
+        expect(a.domain_name).to_equal("loader")
+
+    it "refuses a module outside every declared domain":
+        val a = mci_alloc_admit("app.io.cli_lint_commands", ARENA_CONTEXT_NORMAL)
+        expect(a.admitted).to_equal(false)
+        expect(a.code.name()).to_equal("unknown_domain")
+
+    it "refuses an empty module path":
+        val a = mci_alloc_admit("", ARENA_CONTEXT_NORMAL)
+        expect(a.admitted).to_equal(false)
+        expect(a.code.name()).to_equal("unknown_domain")
+
+    it "refuses an admitted domain in kernel context":
+        val a = mci_alloc_admit("compiler.loader.object_provider", ARENA_CONTEXT_KERNEL)
+        expect(a.admitted).to_equal(false)
+        expect(a.code.name()).to_equal("forbidden_context")
+
+    it "refuses an admitted domain in ISR context":
+        val a = mci_alloc_admit("compiler.frontend.core.interpreter.eval_ops", ARENA_CONTEXT_ISR)
+        expect(a.admitted).to_equal(false)
+        expect(a.code.name()).to_equal("forbidden_context")
+
+    it "refuses a zero context mask rather than defaulting permissively":
+        val a = mci_alloc_admit("compiler.loader.object_provider", 0u64)
+        expect(a.admitted).to_equal(false)
+        expect(a.code.name()).to_equal("invalid_request")
+
+    it "matches module prefixes on a dot boundary, never a bare prefix":
+        expect(mci_alloc_domain_for_module("compiler.loader_stub").domain_name).to_equal("compiler")
+
+    it "declares exactly three domains, every one sealed with a non-zero quota":
+        val domains = mci_alloc_domains()
+        expect(domains.len()).to_equal(3)
+        var sealed_nonzero = 0
+        for d in domains:
+            if d.profile.sealed and d.profile.quota_bytes > 0u64:
+                sealed_nonzero = sealed_nonzero + 1
+        expect(sealed_nonzero).to_equal(3)
+
+describe "Mission-critical admitted steady-state gate":
+    it "seals under critical and its mission-critical alias, not under moderate":
+        expect(steady_state_gate_active("critical", false)).to_equal(true)
+        expect(steady_state_gate_active("mission-critical", false)).to_equal(true)
+        expect(steady_state_gate_active("moderate", false)).to_equal(false)
+
+    it "leaves the unadmitted baseline gate rejecting all three symbols":
+        val m = NoallocCapabilityManifest.new()
+        m.register("compiler.loader.map_segment", false, true, "compiler.loader.segment_mapper")
+        m.register("app.tool.slurp", false, true, "app.tool")
+        val symbols = ["compiler.loader.map_segment", "app.tool.slurp", "never.registered"]
+        expect(check_steady_state_gate(m, symbols).len()).to_equal(3)
+
+    it "admits the loader symbol in normal context and still rejects the other two":
+        val m = NoallocCapabilityManifest.new()
+        m.register("compiler.loader.map_segment", false, true, "compiler.loader.segment_mapper")
+        m.register("app.tool.slurp", false, true, "app.tool")
+        val symbols = ["compiler.loader.map_segment", "app.tool.slurp", "never.registered"]
+        val remaining = check_steady_state_gate_admitted_normal(m, symbols)
+        expect(remaining.len()).to_equal(2)
+        expect(remaining[0].fn_name).to_equal("app.tool.slurp")
+        expect(remaining[1].fn_name).to_equal("never.registered")
+
+    it "rejects all three again in kernel context":
+        val m = NoallocCapabilityManifest.new()
+        m.register("compiler.loader.map_segment", false, true, "compiler.loader.segment_mapper")
+        m.register("app.tool.slurp", false, true, "app.tool")
+        val symbols = ["compiler.loader.map_segment", "app.tool.slurp", "never.registered"]
+        expect(check_steady_state_gate_admitted(m, symbols, ARENA_CONTEXT_KERNEL).len()).to_equal(3)
+
+    it "does not reclassify an admitted symbol as bounded":
+        val m = NoallocCapabilityManifest.new()
+        m.register("compiler.loader.map_segment", false, true, "compiler.loader.segment_mapper")
+        expect(m.lookup("compiler.loader.map_segment").alloc_class).to_equal(AllocClass.Unbounded)
