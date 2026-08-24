@@ -1351,21 +1351,29 @@ fn mir_pass_applies_to_backend(pass_name: text, backend_name: text) -> bool:
 fn mir_pass_applies_to_backend_budget(pass_name: text, backend_name: text, max_cost_class: text) -> bool:
     mir_pass_applies_to_backend(pass_name, backend_name) and mir_pass_cost_allowed(mir_pass_cost_class(pass_name), max_cost_class)
 
-fn mir_pass_backend_decision(pass_name: text, backend_name: text, max_cost_class: text) -> MirPassBackendDecision:
-    if not mir_pass_known_fast(pass_name):
-        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, "unknown", false, MirPassBackendOutcome.Rejected, "unknown pass")
+fn mir_pass_backend_decision_for_descriptor(
+    pass_name: text, backend_name: text, max_cost_class: text,
+    descriptor: MirPassDescriptor
+) -> MirPassBackendDecision:
     val cost_class = mir_pass_cost_class(pass_name)
-    val descriptor = mir_pass_descriptor_for_name(pass_name)
-    if not descriptor.?:
-        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Rejected, "missing descriptor")
-    if not pass_status_allows_transform(descriptor.unwrap().status):
-        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Rejected, pass_status_name(descriptor.unwrap().status))
+    if not pass_status_allows_transform(descriptor.status):
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Rejected, pass_status_name(descriptor.status))
     val backend_skip = mir_pass_backend_skip_reason_fast(pass_name, backend_name)
     if backend_skip.?:
         return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Delegated, backend_skip.unwrap())
     if not mir_pass_cost_allowed(cost_class, max_cost_class):
         return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Rejected, "cost budget exceeded")
     MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, true, MirPassBackendOutcome.Selected, "ready")
+
+fn mir_pass_backend_decision(pass_name: text, backend_name: text, max_cost_class: text) -> MirPassBackendDecision:
+    if not mir_pass_known_fast(pass_name):
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, "unknown", false, MirPassBackendOutcome.Rejected, "unknown pass")
+    val descriptor = mir_pass_descriptor_for_name(pass_name)
+    if not descriptor.?:
+        val cost_class = mir_pass_cost_class(pass_name)
+        return MirPassBackendDecision(pass_name, backend_name, max_cost_class, cost_class, false, MirPassBackendOutcome.Rejected, "missing descriptor")
+    mir_pass_backend_decision_for_descriptor(
+        pass_name, backend_name, max_cost_class, descriptor.unwrap())
 
 fn optimizationpipeline_for_backend(level: OptLevel, backend_name: text) -> OptimizationPipeline:
     val passes = optimizationpipeline_pass_names_for_level(level)
@@ -1388,9 +1396,13 @@ fn optimizationpipeline_for_backend_budget(level: OptLevel, backend_name: text, 
     var pass_i = 0
     while pass_i < passes.len():
         val pass_name: text = passes[pass_i]
-        val decision = mir_pass_backend_decision(pass_name, backend_name, max_cost_class)
+        val descriptor = mir_pass_descriptor_for_name(pass_name)
+        val decision = if descriptor.?:
+            mir_pass_backend_decision_for_descriptor(
+                pass_name, backend_name, max_cost_class, descriptor.unwrap())
+        else:
+            mir_pass_backend_decision(pass_name, backend_name, max_cost_class)
         if decision.applies:
-            val descriptor = mir_pass_descriptor_for_name(pass_name)
             filtered = filtered.push(descriptor.unwrap().stable_name)
         pass_i = pass_i + 1
     OptimizationPipeline(level: level, passes: filtered, target_ctx: target_opt_context_default())
@@ -1449,7 +1461,13 @@ fn optimizationpipeline_report_json(level: OptLevel, backend_name: text, max_cos
             output = output + ","
         val requested_name = requested[ordinal]
         val descriptor = mir_pass_descriptor_for_name(requested_name)
-        val decision = mir_pass_backend_decision(requested_name, backend_name, max_cost_class)
+        val decision = if descriptor.?:
+            mir_pass_backend_decision_for_descriptor(
+                requested_name, backend_name, max_cost_class,
+                descriptor.unwrap())
+        else:
+            mir_pass_backend_decision(
+                requested_name, backend_name, max_cost_class)
         var stable_name = requested_name
         var status_name = "unknown"
         var status_reason = "unknown pass"
