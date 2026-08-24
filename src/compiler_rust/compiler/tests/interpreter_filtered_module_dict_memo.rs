@@ -51,7 +51,14 @@ fn imported_module_dict_is_filtered_once_per_source_not_per_importer() {
     // Pre-memo: hits == 0 and builds >= IMPORTERS (one rebuild of base's dict
     // per mid module). Post-memo: base's dict is built once and the other
     // IMPORTERS-1 importers hit the memo.
-    assert!(hits >= (IMPORTERS as u64) - 1, "expected >= {} memo hits, got builds={builds} hits={hits}", IMPORTERS - 1);
-    assert!(builds < hits + 2, "builds={builds} should not scale with importers (hits={hits})");
+    assert!(
+        hits >= (IMPORTERS as u64) - 1,
+        "expected >= {} memo hits, got builds={builds} hits={hits}",
+        IMPORTERS - 1
+    );
+    assert!(
+        builds < hits + 2,
+        "builds={builds} should not scale with importers (hits={hits})"
+    );
     interpreter::clear_module_cache();
 }

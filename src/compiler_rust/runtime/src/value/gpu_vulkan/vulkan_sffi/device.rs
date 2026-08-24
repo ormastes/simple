@@ -1,8 +1,6 @@
 //! Vulkan device management SFFI functions
 
-use super::common::{
-    next_handle, VulkanFfiError, COMMAND_BUFFER_REGISTRY, DEVICE_REGISTRY, WINDOW_SURFACES,
-};
+use super::common::{next_handle, VulkanFfiError, COMMAND_BUFFER_REGISTRY, DEVICE_REGISTRY, WINDOW_SURFACES};
 
 /// Create a Vulkan device
 ///

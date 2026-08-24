@@ -217,9 +217,7 @@ pub unsafe extern "C" fn rt_io_file_seek(fd: i64, offset: i64, whence: i64) -> i
 /// Flush userspace buffers and sync data to disk.
 #[no_mangle]
 pub unsafe extern "C" fn rt_io_file_flush(fd: i64) -> bool {
-    with_fd(fd, false, |file| {
-        file.flush().is_ok() && file.sync_data().is_ok()
-    })
+    with_fd(fd, false, |file| file.flush().is_ok() && file.sync_data().is_ok())
 }
 
 /// Close `fd`. Unlike the helpers above this genuinely drops the handle.

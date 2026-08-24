@@ -147,7 +147,11 @@ pub fn guard_alloc_sampled(size: usize, owner: u32) -> Option<usize> {
 /// On Windows this is always `false`: `guard_alloc_sampled` never actually
 /// hands out a slot there, so nothing is ever tracked — see its doc comment.
 pub fn guard_is_slot(ptr: usize) -> bool {
-    guard_state().lock().unwrap_or_else(|e| e.into_inner()).slots.contains_key(&ptr)
+    guard_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .slots
+        .contains_key(&ptr)
 }
 
 /// Free a sampled guard slot: `mprotect(PROT_NONE)`s the whole mapping
@@ -177,7 +181,9 @@ pub fn guard_free_sampled(ptr: usize) -> bool {
     }
     st.free_ring.push_back(ptr);
     while st.free_ring.len() > FREE_RING_CAP {
-        let Some(evict_ptr) = st.free_ring.pop_front() else { break };
+        let Some(evict_ptr) = st.free_ring.pop_front() else {
+            break;
+        };
         if let Some(evicted) = st.slots.remove(&evict_ptr) {
             unsafe {
                 libc::munmap(evicted.page_base as *mut libc::c_void, evicted.total_pages * PAGE_SIZE);
@@ -262,13 +268,7 @@ mod tests {
         // protection must succeed (0) — a legal no-op re-application,
         // proving the slot is still a valid, currently-PROT_NONE mapping
         // (not munmapped, not writable) without ever touching its bytes.
-        let rc = unsafe {
-            libc::mprotect(
-                page_base as *mut libc::c_void,
-                total_pages * PAGE_SIZE,
-                libc::PROT_NONE,
-            )
-        };
+        let rc = unsafe { libc::mprotect(page_base as *mut libc::c_void, total_pages * PAGE_SIZE, libc::PROT_NONE) };
         assert_eq!(rc, 0, "guarded slot must still be a valid PROT_NONE mapping");
     }
 

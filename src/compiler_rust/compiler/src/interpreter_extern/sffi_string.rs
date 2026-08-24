@@ -156,10 +156,7 @@ pub fn rt_string_rfind_fn(args: &[Value]) -> Result<Value, CompileError> {
     if needle.is_empty() {
         return Ok(Value::Int(s.len() as i64));
     }
-    let found = s
-        .as_bytes()
-        .windows(needle.len())
-        .rposition(|w| w == needle.as_bytes());
+    let found = s.as_bytes().windows(needle.len()).rposition(|w| w == needle.as_bytes());
     Ok(Value::Int(found.map_or(-1, |i| i as i64)))
 }
 
@@ -193,8 +190,7 @@ fn extern_string_pair(args: &[Value], who: &str) -> Result<(String, String), Com
                 }
                 // SAFETY: `ptr`/`len` come from the runtime string registry for
                 // a handle it just validated; the bytes outlive this copy.
-                let bytes =
-                    unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+                let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
                 Ok(String::from_utf8_lossy(bytes).into_owned())
             }
         }
@@ -496,9 +492,7 @@ mod tests {
 
     #[test]
     fn string_eq_preserves_comparison_semantics() {
-        let eq = |a: &str, b: &str| {
-            rt_string_eq_fn(&[Value::text(a.to_string()), Value::text(b.to_string())]).unwrap()
-        };
+        let eq = |a: &str, b: &str| rt_string_eq_fn(&[Value::text(a.to_string()), Value::text(b.to_string())]).unwrap();
         assert_eq!(eq("alpha", "alpha"), Value::Bool(true));
         assert_eq!(eq("alpha", "alphb"), Value::Bool(false));
         assert_eq!(eq("alpha", "alph"), Value::Bool(false));

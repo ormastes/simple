@@ -349,8 +349,7 @@ impl RuntimeEncodedCopy {
             kind,
             payload: bytes[ENCODED_COPY_HEADER_LEN..].to_vec(),
         };
-        (value.payload_is_valid() && encoded_copy_checksum(kind, &value.payload) == expected_checksum)
-            .then_some(value)
+        (value.payload_is_valid() && encoded_copy_checksum(kind, &value.payload) == expected_checksum).then_some(value)
     }
 
     pub(crate) fn materialize(&self) -> Option<RuntimeValue> {
@@ -561,11 +560,11 @@ mod tests {
         assert_eq!(
             copy.encode().unwrap(),
             [
-                0x53, 0x50, 0x54, 0x52, 0x01, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x10, 0x9a, 0x9b, 0xda, 0x7b, 0x41, 0x33,
-                0x74, 0x79, 0x70, 0x65, 0x64,
+                0x53, 0x50, 0x54, 0x52, 0x01, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x10, 0x9a, 0x9b, 0xda, 0x7b, 0x41, 0x33, 0x74, 0x79, 0x70, 0x65,
+                0x64,
             ]
         );
     }
@@ -588,12 +587,9 @@ mod tests {
             } else if let Some(value) = source.as_heap_u64() {
                 assert_eq!(destination.as_heap_u64(), Some(value));
             } else {
-                let destination_copy = RuntimeEncodedCopy::from_value(
-                    destination,
-                    TransferDomain::Thread,
-                    TransferDomain::Parent,
-                )
-                .unwrap();
+                let destination_copy =
+                    RuntimeEncodedCopy::from_value(destination, TransferDomain::Thread, TransferDomain::Parent)
+                        .unwrap();
                 assert_eq!(copy.payload, destination_copy.payload);
                 assert_eq!(rt_string_free(source), 1);
                 assert_eq!(rt_string_free(destination), 1);
@@ -635,11 +631,7 @@ mod tests {
         oversize[48..56].copy_from_slice(&((MAX_ENCODED_COPY_BYTES as u64) + 1).to_le_bytes());
         assert!(RuntimeEncodedCopy::decode_for_target(&oversize, TransferDomain::Actor).is_none());
         let invalid_utf8 = RuntimeEncodedCopy {
-            envelope: RuntimeTransferEnvelopeV1::encoded_copy(
-                TransferDomain::Parent,
-                TransferDomain::Actor,
-            )
-            .unwrap(),
+            envelope: RuntimeTransferEnvelopeV1::encoded_copy(TransferDomain::Parent, TransferDomain::Actor).unwrap(),
             kind: EncodedLeafKind::Utf8,
             payload: vec![0xff],
         };

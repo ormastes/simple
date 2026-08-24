@@ -72,10 +72,26 @@ fn module_has_method_leaf(module: &Module<'static>, leaf: &str) -> bool {
 
 fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
     match rt_name {
-        "rt_len" | "rt_to_string" | "rt_string_to_int" | "rt_string_parse_int" | "rt_string_to_float" | "rt_string_to_upper"
-        | "rt_string_to_lower" | "rt_string_trim" | "rt_string_bytes" | "rt_string_chars" | "rt_string_lines"
-        | "rt_array_pop" | "rt_array_sort" | "rt_array_reverse" | "rt_array_clear" | "rt_dict_keys"
-        | "rt_dict_values" | "rt_is_none" | "rt_is_some" | "rt_enum_payload" => Some(1),
+        "rt_len"
+        | "rt_to_string"
+        | "rt_string_to_int"
+        | "rt_string_parse_int"
+        | "rt_string_to_float"
+        | "rt_string_to_upper"
+        | "rt_string_to_lower"
+        | "rt_string_trim"
+        | "rt_string_bytes"
+        | "rt_string_chars"
+        | "rt_string_lines"
+        | "rt_array_pop"
+        | "rt_array_sort"
+        | "rt_array_reverse"
+        | "rt_array_clear"
+        | "rt_dict_keys"
+        | "rt_dict_values"
+        | "rt_is_none"
+        | "rt_is_some"
+        | "rt_enum_payload" => Some(1),
         "rt_string_starts_with"
         | "rt_string_ends_with"
         | "rt_contains"
@@ -173,8 +189,8 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_process_run_with_limits" => Some(&[0]),
 
         // Directory operations
-        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_walk"
-        | "rt_set_current_dir" | "rt_dir_exists" => Some(&[0]),
+        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_walk" | "rt_set_current_dir"
+        | "rt_dir_exists" => Some(&[0]),
         "rt_dir_glob" => Some(&[0, 1]),
         "rt_file_find" => Some(&[0, 1]),
 
@@ -1843,7 +1859,7 @@ impl LlvmBackend {
         let exact_string_bytes_runtime = (receiver_is_exact_string
             && args.len() == 1
             && (direct_leaf_is_bytes(func_name_raw) || direct_leaf_is_bytes(resolved_name)))
-            .then_some("rt_string_bytes");
+        .then_some("rt_string_bytes");
 
         if sffi_name == "rt_typed_bytes_u8_at"
             && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, true)?
@@ -2049,7 +2065,7 @@ impl LlvmBackend {
             "byte_at" => Some("rt_string_byte_at"),
             "to_text" | "to_string" => Some("rt_to_string"),
             "to_int" | "to_i64" => Some("rt_string_to_int"),
-                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
+            "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
             "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
             "concat" => Some("rt_string_concat"),
             // Array methods (verified as T symbols)
@@ -2935,10 +2951,12 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(bool_fn, &[value.into()], "boxed_bool")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_bool call", &e))?;
-                            value = call_result
-                                .try_as_basic_value()
-                                .left()
-                                .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_value_bool result", &"missing return value"))?;
+                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                                crate::error::factory::llvm_build_failed(
+                                    "rt_value_bool result",
+                                    &"missing return value",
+                                )
+                            })?;
                         }
                         TypeId::I8 | TypeId::I16 | TypeId::I32 => {
                             // Sign-extend to i64, then call rt_value_int
@@ -2952,10 +2970,9 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(int_fn, &[extended.into()], "boxed_int")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
-                            value = call_result
-                                .try_as_basic_value()
-                                .left()
-                                .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value"))?;
+                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                                crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value")
+                            })?;
                         }
                         TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::CHAR => {
                             // Zero-extend to i64, then call rt_value_int
@@ -2969,10 +2986,9 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(int_fn, &[extended.into()], "boxed_int")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
-                            value = call_result
-                                .try_as_basic_value()
-                                .left()
-                                .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value"))?;
+                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                                crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value")
+                            })?;
                         }
                         TypeId::I64 | TypeId::U64 => {
                             // Call rt_value_int to box
@@ -2983,10 +2999,9 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(int_fn, &[value.into()], "boxed_int")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
-                            value = call_result
-                                .try_as_basic_value()
-                                .left()
-                                .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value"))?;
+                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                                crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value")
+                            })?;
                         }
                         TypeId::F64 => {
                             // Call rt_value_float to box
@@ -2997,10 +3012,12 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(float_fn, &[value.into()], "boxed_float")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_float call", &e))?;
-                            value = call_result
-                                .try_as_basic_value()
-                                .left()
-                                .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_value_float result", &"missing return value"))?;
+                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                                crate::error::factory::llvm_build_failed(
+                                    "rt_value_float result",
+                                    &"missing return value",
+                                )
+                            })?;
                         }
                         _ => {
                             // For unknown types, store raw (matches Cranelift fallthrough)

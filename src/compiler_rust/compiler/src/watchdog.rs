@@ -179,8 +179,21 @@ mod tests {
     use super::*;
     use simple_common::fault_detection;
 
+    // These tests exercise process-global watchdog state (WATCHDOG,
+    // TIMEOUT_EXCEEDED, the recorded limit, context, and SIMPLE_LOG_DIR).
+    // Rust runs unit tests concurrently by default, so an adjacent watchdog
+    // test can otherwise stop or reconfigure the watchdog under test.
+    static WATCHDOG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn watchdog_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        WATCHDOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn test_watchdog_start_stop() {
+        let _guard = watchdog_test_guard();
         fault_detection::reset_timeout();
         assert!(!fault_detection::is_timeout_exceeded());
         // Start with large timeout, stop immediately
@@ -196,6 +209,7 @@ mod tests {
     /// exceeded 0 second limit" reported despite SIMPLE_TIMEOUT_SECONDS=3000).
     #[test]
     fn test_watchdog_records_configured_timeout_limit() {
+        let _guard = watchdog_test_guard();
         fault_detection::reset_timeout();
         assert_eq!(fault_detection::timeout_limit_secs(), 0);
 
@@ -215,6 +229,7 @@ mod tests {
 
     #[test]
     fn test_watchdog_triggers_timeout() {
+        let _guard = watchdog_test_guard();
         fault_detection::reset_timeout();
         // 1-second timeout
         start_watchdog(1);
@@ -231,6 +246,7 @@ mod tests {
 
     #[test]
     fn test_watchdog_does_not_fire_before_deadline() {
+        let _guard = watchdog_test_guard();
         fault_detection::reset_timeout();
         start_watchdog(60);
         std::thread::sleep(Duration::from_millis(200));
@@ -240,6 +256,7 @@ mod tests {
 
     #[test]
     fn test_watchdog_restart() {
+        let _guard = watchdog_test_guard();
         fault_detection::reset_timeout();
         start_watchdog(60);
         // Restart with new timeout
@@ -250,6 +267,7 @@ mod tests {
 
     #[test]
     fn test_watchdog_crash_log_includes_spec_context() {
+        let _guard = watchdog_test_guard();
         use std::time::{SystemTime, UNIX_EPOCH};
         fault_detection::reset_timeout();
         // Route the crash log to a test-private dir so we don't pollute .simple/logs

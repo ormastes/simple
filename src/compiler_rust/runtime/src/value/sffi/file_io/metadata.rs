@@ -67,12 +67,8 @@ fn file_exists_probe_end_closed_test_hook() {
 fn file_exists_probe_try_add_total() -> bool {
     let mut current = FILE_EXISTS_PROBE_TOTAL.load(Ordering::Relaxed);
     while current < FILE_EXISTS_PROBE_TOTAL_MAX {
-        match FILE_EXISTS_PROBE_TOTAL.compare_exchange_weak(
-            current,
-            current + 1,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match FILE_EXISTS_PROBE_TOTAL.compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+        {
             Ok(_) => return true,
             Err(observed) => current = observed,
         }
@@ -488,10 +484,7 @@ mod tests {
         let token = rt_file_exists_probe_begin();
         assert!(token > 0);
         assert_eq!(
-            file_exists_probe_test_seed_counters(
-                FILE_EXISTS_PROBE_TOTAL_MAX - 1,
-                FILE_EXISTS_PROBE_TOTAL_MAX - 1,
-            ),
+            file_exists_probe_test_seed_counters(FILE_EXISTS_PROBE_TOTAL_MAX - 1, FILE_EXISTS_PROBE_TOTAL_MAX - 1,),
             0
         );
         unsafe {
@@ -521,8 +514,7 @@ mod tests {
         let release = Arc::new(Barrier::new(2));
         *FILE_EXISTS_PROBE_AFTER_ADMIT_HOOK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Some((Arc::clone(&admitted), Arc::clone(&release)));
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((Arc::clone(&admitted), Arc::clone(&release)));
 
         let token = rt_file_exists_probe_begin();
         assert!(token > 0);

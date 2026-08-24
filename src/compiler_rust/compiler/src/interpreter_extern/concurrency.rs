@@ -142,9 +142,7 @@ pub fn spl_mutex_destroy(args: &[Value]) -> Result<Value, CompileError> {
         .lock()
         .map_err(|_| CompileError::Runtime("SFFI mutex poisoned".to_string()))?
     {
-        return Err(CompileError::Runtime(
-            "cannot destroy a locked SFFI mutex".to_string(),
-        ));
+        return Err(CompileError::Runtime("cannot destroy a locked SFFI mutex".to_string()));
     }
     let removed = SFFI_MUTEXES
         .lock()
@@ -1090,19 +1088,10 @@ mod backend_aware_spawn_tests {
             Value::Int(handle) if handle > 0 => handle,
             other => panic!("mutex create fabricated an invalid handle: {other:?}"),
         };
-        assert_eq!(
-            spl_mutex_try_lock(&[Value::Int(handle)]).unwrap(),
-            Value::Bool(true)
-        );
-        assert_eq!(
-            spl_mutex_try_lock(&[Value::Int(handle)]).unwrap(),
-            Value::Bool(false)
-        );
+        assert_eq!(spl_mutex_try_lock(&[Value::Int(handle)]).unwrap(), Value::Bool(true));
+        assert_eq!(spl_mutex_try_lock(&[Value::Int(handle)]).unwrap(), Value::Bool(false));
         assert!(spl_mutex_destroy(&[Value::Int(handle)]).is_err());
-        assert_eq!(
-            spl_mutex_unlock(&[Value::Int(handle)]).unwrap(),
-            Value::Bool(true)
-        );
+        assert_eq!(spl_mutex_unlock(&[Value::Int(handle)]).unwrap(), Value::Bool(true));
         assert_eq!(spl_mutex_destroy(&[Value::Int(handle)]).unwrap(), Value::Nil);
         assert!(spl_mutex_lock(&[Value::Int(handle)]).is_err());
         assert!(spl_mutex_lock(&[Value::Int(0)]).is_err());

@@ -26,9 +26,7 @@ fn parse_if_else_statement() {
 
 #[test]
 fn parse_capability_scoped_unsafe_block() {
-    let items = parse(
-        "fn call_raw():\n    unsafe(capabilities: [ffi, raw_ptr]):\n        raw_call()",
-    );
+    let items = parse("fn call_raw():\n    unsafe(capabilities: [ffi, raw_ptr]):\n        raw_call()");
     let Node::Function(function) = &items[0] else {
         panic!("expected function");
     };
@@ -431,9 +429,7 @@ fn parse_inline_match_call_arg_terminated_by_comma() {
 #[test]
 fn parse_inline_match_last_call_arg_terminated_by_rparen() {
     // The `)` shares the last arm's line, so no Dedent has been flushed.
-    parse_ok(
-        "fn f(x: i64) -> text:\n    return take_flipped(x, match x:\n        1: \"one\"\n        _: \"other\")",
-    );
+    parse_ok("fn f(x: i64) -> text:\n    return take_flipped(x, match x:\n        1: \"one\"\n        _: \"other\")");
 }
 
 #[test]

@@ -1119,10 +1119,7 @@ mod lock_value_roundtrip_tests {
                 "array",
                 Value::array(vec![Value::Int(1), Value::text("two".to_string())]),
             ),
-            (
-                "tuple",
-                Value::Tuple(vec![Value::Int(7), Value::Bool(false)]),
-            ),
+            ("tuple", Value::Tuple(vec![Value::Int(7), Value::Bool(false)])),
         ];
         for (label, original) in cases {
             let rv = value_to_runtime(&original);

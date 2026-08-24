@@ -27,12 +27,8 @@ fn main():
 
 main()
 "#;
-    let module =
-        parse_and_lower(source).expect("literal braces must not leak expressions across functions");
-    assert!(module
-        .functions
-        .iter()
-        .any(|function| function.name == "open_brace"));
+    let module = parse_and_lower(source).expect("literal braces must not leak expressions across functions");
+    assert!(module.functions.iter().any(|function| function.name == "open_brace"));
     assert!(module.functions.iter().any(|function| function.name == "main"));
 }
 
@@ -114,7 +110,9 @@ fn option_none_unit_variant_resolves_under_lenient_mode() {
 
     let mut lowerer = Lowerer::new();
     lowerer.set_lenient_types(true);
-    let lowered = lowerer.lower_module(&parsed).expect("lowering must succeed under lenient mode");
+    let lowered = lowerer
+        .lower_module(&parsed)
+        .expect("lowering must succeed under lenient mode");
 
     let function = lowered.functions.iter().find(|f| f.name == "make").unwrap();
     let HirStmt::Let {
@@ -139,13 +137,21 @@ fn nested_result_option_receivers_both_route_through_static_construct() {
     else {
         panic!("expected let binding, got {:?}", function.body[0]);
     };
-    let HirExprKind::Call { func: outer_callee, args: outer_args } = &expr.kind else {
+    let HirExprKind::Call {
+        func: outer_callee,
+        args: outer_args,
+    } = &expr.kind
+    else {
         panic!("expected outer Call, got {:?}", expr.kind);
     };
     assert_eq!(outer_callee.kind, HirExprKind::Global("Result::Ok".to_string()));
     assert_eq!(outer_args.len(), 1);
 
-    let HirExprKind::Call { func: inner_callee, args: inner_args } = &outer_args[0].kind else {
+    let HirExprKind::Call {
+        func: inner_callee,
+        args: inner_args,
+    } = &outer_args[0].kind
+    else {
         panic!("expected nested Call for Option.Some(1), got {:?}", outer_args[0].kind);
     };
     assert_eq!(inner_callee.kind, HirExprKind::Global("Option::Some".to_string()));
@@ -184,9 +190,21 @@ fn struct_init_brace_form_lowers_fields_in_declared_order_regardless_of_written_
     let function = module.functions.iter().find(|f| f.name == "test").unwrap();
     let fields = struct_init_fields(function);
     assert_eq!(fields.len(), 3);
-    assert_eq!(fields[0].kind, HirExprKind::Integer(1), "declared slot 0 (x) must get the x: 1 value");
-    assert_eq!(fields[1].kind, HirExprKind::Integer(2), "declared slot 1 (y) must get the y: 2 value");
-    assert_eq!(fields[2].kind, HirExprKind::Integer(3), "declared slot 2 (z) must get the z: 3 value");
+    assert_eq!(
+        fields[0].kind,
+        HirExprKind::Integer(1),
+        "declared slot 0 (x) must get the x: 1 value"
+    );
+    assert_eq!(
+        fields[1].kind,
+        HirExprKind::Integer(2),
+        "declared slot 1 (y) must get the y: 2 value"
+    );
+    assert_eq!(
+        fields[2].kind,
+        HirExprKind::Integer(3),
+        "declared slot 2 (z) must get the z: 3 value"
+    );
 }
 
 #[test]
@@ -198,9 +216,21 @@ fn struct_init_paren_form_agrees_with_brace_form_on_declared_order() {
     let function = module.functions.iter().find(|f| f.name == "test").unwrap();
     let fields = struct_init_fields(function);
     assert_eq!(fields.len(), 3);
-    assert_eq!(fields[0].kind, HirExprKind::Integer(1), "paren form must match brace form: declared slot 0 (x)");
-    assert_eq!(fields[1].kind, HirExprKind::Integer(2), "paren form must match brace form: declared slot 1 (y)");
-    assert_eq!(fields[2].kind, HirExprKind::Integer(3), "paren form must match brace form: declared slot 2 (z)");
+    assert_eq!(
+        fields[0].kind,
+        HirExprKind::Integer(1),
+        "paren form must match brace form: declared slot 0 (x)"
+    );
+    assert_eq!(
+        fields[1].kind,
+        HirExprKind::Integer(2),
+        "paren form must match brace form: declared slot 1 (y)"
+    );
+    assert_eq!(
+        fields[2].kind,
+        HirExprKind::Integer(3),
+        "paren form must match brace form: declared slot 2 (z)"
+    );
 }
 
 #[test]
@@ -213,8 +243,16 @@ fn struct_init_partial_fields_nil_fill_missing_declared_slots() {
     let fields = struct_init_fields(function);
     assert_eq!(fields.len(), 3);
     assert_eq!(fields[0].kind, HirExprKind::Integer(10), "x provided");
-    assert_eq!(fields[1].kind, HirExprKind::Nil, "y omitted -- must nil-fill, not shift z into slot 1");
-    assert_eq!(fields[2].kind, HirExprKind::Integer(30), "z provided, must stay in its own declared slot");
+    assert_eq!(
+        fields[1].kind,
+        HirExprKind::Nil,
+        "y omitted -- must nil-fill, not shift z into slot 1"
+    );
+    assert_eq!(
+        fields[2].kind,
+        HirExprKind::Integer(30),
+        "z provided, must stay in its own declared slot"
+    );
 }
 
 /// Sibling: zero explicit fields -- every declared slot must nil-fill (not
@@ -227,9 +265,17 @@ fn struct_init_zero_fields_nil_fills_all_declared_slots() {
     .unwrap();
     let function = module.functions.iter().find(|f| f.name == "test").unwrap();
     let fields = struct_init_fields(function);
-    assert_eq!(fields.len(), 3, "all 3 declared fields must be present even with zero provided args");
+    assert_eq!(
+        fields.len(),
+        3,
+        "all 3 declared fields must be present even with zero provided args"
+    );
     for (idx, field) in fields.iter().enumerate() {
-        assert_eq!(field.kind, HirExprKind::Nil, "slot {idx} must nil-fill when nothing is provided");
+        assert_eq!(
+            field.kind,
+            HirExprKind::Nil,
+            "slot {idx} must nil-fill when nothing is provided"
+        );
     }
 }
 

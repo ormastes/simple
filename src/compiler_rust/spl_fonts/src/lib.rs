@@ -817,9 +817,7 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../vendor/sctk-adwaita/src/title/Cantarell-Regular.ttf"
     );
-    const OWNED_DEMO_FONT: &[u8] = include_bytes!(
-        "../../vendor/ttf-parser/tests/fonts/demo.ttf"
-    );
+    const OWNED_DEMO_FONT: &[u8] = include_bytes!("../../vendor/ttf-parser/tests/fonts/demo.ttf");
 
     fn init_owned_test_font() {
         assert!(std::path::Path::new(OWNED_TEST_FONT).exists());
@@ -837,9 +835,7 @@ mod tests {
             let offset = u32::from_be_bytes(source[offset_pos..offset_pos + 4].try_into().unwrap()) + 16;
             source[offset_pos..offset_pos + 4].copy_from_slice(&offset.to_be_bytes());
         }
-        let kern_directory = [
-            b'k', b'e', b'r', b'n', 0, 8, 255, 215, 0, 0, 1, 160, 0, 0, 0, 24,
-        ];
+        let kern_directory = [b'k', b'e', b'r', b'n', 0, 8, 255, 215, 0, 0, 1, 160, 0, 0, 0, 24];
         let kern_table = [
             0, 0, 0, 1, 0, 0, 0, 20, 0, 1, 0, 1, 0, 6, 0, 0, 0, 0, 0, 1, 0, 1, 255, 192,
         ];

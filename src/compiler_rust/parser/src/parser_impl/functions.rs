@@ -223,8 +223,8 @@ impl<'a> Parser<'a> {
                 // misreported deep inside contract parsing (same family as the
                 // `grid`-identifier hijack). See
                 // doc/08_tracking/bug/identifier_named_out_param_hijacked_by_modifier_keyword_2026-08-11.md.
-                let out_starts_contract = (self.check(&TokenKind::Out) || self.check(&TokenKind::OutErr))
-                    && self.peek_is(&TokenKind::LParen);
+                let out_starts_contract =
+                    (self.check(&TokenKind::Out) || self.check(&TokenKind::OutErr)) && self.peek_is(&TokenKind::LParen);
                 let contract = if self.check(&TokenKind::In)
                     || self.check(&TokenKind::Invariant)
                     || out_starts_contract

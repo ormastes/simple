@@ -208,7 +208,7 @@ impl Lowerer {
         // whose absence caused the undeclared-global defect.
         let bindings = self.extract_pattern_bindings(pattern, subject_ty);
         let previous_bindings = self.register_match_bindings(pattern, &bindings, ctx);
-        let binding_stmts = self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
+        let binding_stmts = self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
 
         let then_hir = self.lower_expr(then_branch, ctx)?;
         let ty = then_hir.ty;
@@ -2007,8 +2007,8 @@ impl Lowerer {
     /// runtime representation is a tagged `RuntimeValue` (a nullable `T?`, or
     /// `Any`). Returns the expression unchanged in every other case.
     fn box_scalar_into_tagged_result(&self, result_ty: TypeId, value: HirExpr) -> HirExpr {
-        let tagged_slot = result_ty == TypeId::ANY
-            || matches!(self.module.types.get(result_ty), Some(HirType::Pointer { .. }));
+        let tagged_slot =
+            result_ty == TypeId::ANY || matches!(self.module.types.get(result_ty), Some(HirType::Pointer { .. }));
         if !tagged_slot {
             return value;
         }

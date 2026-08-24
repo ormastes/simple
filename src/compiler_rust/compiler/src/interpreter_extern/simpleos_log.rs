@@ -87,33 +87,25 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let level = as_int(name, args, 0)?;
             let msg_ptr = as_int(name, args, 1)?;
             let msg_len = as_int(name, args, 2)?;
-            Ok(Value::Bool(unsafe {
-                rt_simpleos_log_emit(level, msg_ptr, msg_len)
-            }))
+            Ok(Value::Bool(unsafe { rt_simpleos_log_emit(level, msg_ptr, msg_len) }))
         }
         "rt_simpleos_log_set_device" => {
             expect_arity(name, args, 2)?;
             let kind = as_int(name, args, 0)?;
             let base = as_int(name, args, 1)?;
-            Ok(Value::Bool(unsafe {
-                rt_simpleos_log_set_device(kind, base)
-            }))
+            Ok(Value::Bool(unsafe { rt_simpleos_log_set_device(kind, base) }))
         }
         "rt_log_target_device_write_bytes" => {
             expect_arity(name, args, 2)?;
             let ptr = as_int(name, args, 0)?;
             let len = as_int(name, args, 1)?;
-            Ok(Value::Bool(unsafe {
-                rt_log_target_device_write_bytes(ptr, len)
-            }))
+            Ok(Value::Bool(unsafe { rt_log_target_device_write_bytes(ptr, len) }))
         }
         "rt_log_target_semihost_write_bytes" => {
             expect_arity(name, args, 2)?;
             let ptr = as_int(name, args, 0)?;
             let len = as_int(name, args, 1)?;
-            Ok(Value::Bool(unsafe {
-                rt_log_target_semihost_write_bytes(ptr, len)
-            }))
+            Ok(Value::Bool(unsafe { rt_log_target_semihost_write_bytes(ptr, len) }))
         }
         _ => Err(CompileError::runtime(format!(
             "{name}: unknown hosted log-lib function (no C definition in runtime_log_hosted.c)"

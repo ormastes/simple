@@ -124,9 +124,7 @@ impl<'a> MirLowerer<'a> {
                     _ => None,
                 };
                 if let Some(gname) = rhs_global_name {
-                    let enum_variant = gname
-                        .rsplit_once("::")
-                        .or_else(|| gname.rsplit_once('.'));
+                    let enum_variant = gname.rsplit_once("::").or_else(|| gname.rsplit_once('.'));
                     let is_enum_rhs = enum_variant.is_some()
                         && self
                             .type_registry
@@ -190,8 +188,7 @@ impl<'a> MirLowerer<'a> {
                 let right_is_any = right.ty == TypeId::ANY;
                 // ANY+ANY Add stays on the rt_any_add runtime-dispatch path
                 // below (it must handle string concat too).
-                let any_involved = (left_is_any || right_is_any)
-                    && !(op == BinOp::Add && left_is_any && right_is_any);
+                let any_involved = (left_is_any || right_is_any) && !(op == BinOp::Add && left_is_any && right_is_any);
                 if any_involved {
                     // ANY+ANY float-possible ops (Sub/Mul/Div/Mod and ordered
                     // comparisons) cannot pick UnboxInt vs UnboxFloat
@@ -278,8 +275,7 @@ impl<'a> MirLowerer<'a> {
                         // it raw made `(d >> 24) & 0xFF` on an any element
                         // decode as garbage (seed_mir_any_binop_result_unboxed
                         // _2026-08-15.md).
-                        let is_compare =
-                            matches!(op, BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq);
+                        let is_compare = matches!(op, BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq);
                         let raw = self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();

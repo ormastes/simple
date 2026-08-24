@@ -161,7 +161,11 @@ fn build_bootstrap_hosted_native_all_archive(native_all_name: &str, temp_dir: &P
         return None;
     }
     let built = target_dir.join("release").join(native_all_name);
-    if built.is_file() { Some(built) } else { None }
+    if built.is_file() {
+        Some(built)
+    } else {
+        None
+    }
 }
 
 fn runtime_path_has_abi_complete_simple_core(runtime_path: Option<&Path>) -> bool {

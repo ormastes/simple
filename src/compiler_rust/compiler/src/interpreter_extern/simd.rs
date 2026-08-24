@@ -276,9 +276,8 @@ pub fn rt_aes128_encrypt_block_pure(args: &[Value]) -> Result<Value, CompileErro
             "rt_aes128_encrypt_block_pure requires a 16-byte key and block".to_string(),
         ));
     }
-    let cipher = aes128_encrypt_one_block(&key, &block).ok_or_else(|| {
-        CompileError::runtime("rt_aes128_encrypt_block_pure rejected its inputs".to_string())
-    })?;
+    let cipher = aes128_encrypt_one_block(&key, &block)
+        .ok_or_else(|| CompileError::runtime("rt_aes128_encrypt_block_pure rejected its inputs".to_string()))?;
     Ok(Value::byte_array(cipher.to_vec()))
 }
 
@@ -291,9 +290,7 @@ pub fn rt_aes128_decrypt_block_pure(args: &[Value]) -> Result<Value, CompileErro
     let key = expect_byte_array("rt_aes128_decrypt_block_pure", &args[0])?;
     let block = expect_byte_array("rt_aes128_decrypt_block_pure", &args[1])?;
     let plain = aes128_decrypt_one_block(&key, &block).ok_or_else(|| {
-        CompileError::runtime(
-            "rt_aes128_decrypt_block_pure requires a 16-byte key and block".to_string(),
-        )
+        CompileError::runtime("rt_aes128_decrypt_block_pure requires a 16-byte key and block".to_string())
     })?;
     Ok(Value::byte_array(plain.to_vec()))
 }
@@ -310,9 +307,8 @@ pub fn rt_tls13_aes128_gcm_encrypt(args: &[Value]) -> Result<Value, CompileError
     let nonce = expect_byte_array("rt_tls13_aes128_gcm_encrypt", &args[1])?;
     let plaintext = expect_byte_array("rt_tls13_aes128_gcm_encrypt", &args[2])?;
     let aad = expect_byte_array("rt_tls13_aes128_gcm_encrypt", &args[3])?;
-    let result = aes128_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad).ok_or_else(|| {
-        CompileError::runtime("rt_tls13_aes128_gcm_encrypt rejected its inputs".to_string())
-    })?;
+    let result = aes128_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad)
+        .ok_or_else(|| CompileError::runtime("rt_tls13_aes128_gcm_encrypt rejected its inputs".to_string()))?;
     Ok(Value::array(
         result.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
     ))
@@ -355,9 +351,8 @@ pub fn rt_aes256_encrypt_block_pure(args: &[Value]) -> Result<Value, CompileErro
             "rt_aes256_encrypt_block_pure requires a 32-byte key and 16-byte block".to_string(),
         ));
     }
-    let cipher = aes256_encrypt_one_block(&key, &block).ok_or_else(|| {
-        CompileError::runtime("rt_aes256_encrypt_block_pure rejected its inputs".to_string())
-    })?;
+    let cipher = aes256_encrypt_one_block(&key, &block)
+        .ok_or_else(|| CompileError::runtime("rt_aes256_encrypt_block_pure rejected its inputs".to_string()))?;
     Ok(Value::byte_array(cipher.to_vec()))
 }
 
@@ -373,9 +368,8 @@ pub fn rt_tls13_aes256_gcm_encrypt(args: &[Value]) -> Result<Value, CompileError
     let nonce = expect_byte_array("rt_tls13_aes256_gcm_encrypt", &args[1])?;
     let plaintext = expect_byte_array("rt_tls13_aes256_gcm_encrypt", &args[2])?;
     let aad = expect_byte_array("rt_tls13_aes256_gcm_encrypt", &args[3])?;
-    let result = aes256_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad).ok_or_else(|| {
-        CompileError::runtime("rt_tls13_aes256_gcm_encrypt rejected its inputs".to_string())
-    })?;
+    let result = aes256_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad)
+        .ok_or_else(|| CompileError::runtime("rt_tls13_aes256_gcm_encrypt rejected its inputs".to_string()))?;
     Ok(Value::array(
         result.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
     ))
@@ -2291,9 +2285,9 @@ mod engine2d_span_tests {
 #[cfg(test)]
 mod aes_bridge_contract_tests {
     use super::{
-        expect_byte_array, rt_aes128_decrypt_block_pure, rt_aes128_encrypt_block_pure,
-        rt_aes256_encrypt_block_pure, rt_tls13_aes128_gcm_decrypt, rt_tls13_aes128_gcm_encrypt,
-        rt_tls13_aes256_gcm_decrypt, rt_tls13_aes256_gcm_encrypt,
+        expect_byte_array, rt_aes128_decrypt_block_pure, rt_aes128_encrypt_block_pure, rt_aes256_encrypt_block_pure,
+        rt_tls13_aes128_gcm_decrypt, rt_tls13_aes128_gcm_encrypt, rt_tls13_aes256_gcm_decrypt,
+        rt_tls13_aes256_gcm_encrypt,
     };
     use crate::value::Value;
 
@@ -2312,10 +2306,7 @@ mod aes_bridge_contract_tests {
         let cipher = rt_aes128_encrypt_block_pure(&[zero.clone(), zero]).unwrap();
         assert_eq!(
             expect_byte_array("cipher", &cipher).unwrap(),
-            [
-                0x66, 0xe9, 0x4b, 0xd4, 0xef, 0x8a, 0x2c, 0x3b, 0x88, 0x4c, 0xfa, 0x59, 0xca, 0x34,
-                0x2b, 0x2e,
-            ]
+            [0x66, 0xe9, 0x4b, 0xd4, 0xef, 0x8a, 0x2c, 0x3b, 0x88, 0x4c, 0xfa, 0x59, 0xca, 0x34, 0x2b, 0x2e,]
         );
     }
 
@@ -2324,20 +2315,8 @@ mod aes_bridge_contract_tests {
         let empty = Value::byte_array(vec![]);
         let nonce = Value::byte_array(vec![0; 12]);
         let block = Value::byte_array(vec![0; 16]);
-        assert!(rt_tls13_aes128_gcm_encrypt(&[
-            empty.clone(),
-            nonce.clone(),
-            empty.clone(),
-            empty.clone(),
-        ])
-        .is_err());
-        assert!(rt_tls13_aes256_gcm_encrypt(&[
-            empty.clone(),
-            nonce.clone(),
-            empty.clone(),
-            empty.clone(),
-        ])
-        .is_err());
+        assert!(rt_tls13_aes128_gcm_encrypt(&[empty.clone(), nonce.clone(), empty.clone(), empty.clone(),]).is_err());
+        assert!(rt_tls13_aes256_gcm_encrypt(&[empty.clone(), nonce.clone(), empty.clone(), empty.clone(),]).is_err());
         assert!(rt_tls13_aes128_gcm_decrypt(&[
             empty.clone(),
             nonce.clone(),

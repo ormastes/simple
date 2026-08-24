@@ -1590,9 +1590,8 @@ mod tests {
         );
         assert!(valid.parse().is_ok());
 
-        let mut fallthrough = Parser::new(
-            "fn invalid(value: i64?) -> i64:\n    val Some(inner) = value else: pass\n    return inner\n",
-        );
+        let mut fallthrough =
+            Parser::new("fn invalid(value: i64?) -> i64:\n    val Some(inner) = value else: pass\n    return inner\n");
         assert!(fallthrough.parse().is_err());
 
         let mut shadowable_call = Parser::new(

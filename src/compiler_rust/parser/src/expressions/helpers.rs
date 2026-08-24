@@ -12,7 +12,11 @@ impl<'a> Parser<'a> {
     /// backslash-lambda form (`\x, y: body`) uses a bare trailing `:` to end
     /// the parameter list and start the body, so a per-param `: Type` there
     /// would be ambiguous with that terminator and must stay disabled.
-    pub(super) fn parse_remaining_lambda_params(&mut self, params: &mut Vec<LambdaParam>, allow_types: bool) -> Result<(), ParseError> {
+    pub(super) fn parse_remaining_lambda_params(
+        &mut self,
+        params: &mut Vec<LambdaParam>,
+        allow_types: bool,
+    ) -> Result<(), ParseError> {
         while self.check(&TokenKind::Comma) {
             self.advance();
             // Support wildcard parameter: \x, _: or |x, _|
@@ -259,8 +263,7 @@ impl<'a> Parser<'a> {
                             | TokenKind::Minus
                             | TokenKind::Not
                     );
-                let equal_column =
-                    deferred_before > 0 && !self.check(&TokenKind::Indent) && body_starts_here;
+                let equal_column = deferred_before > 0 && !self.check(&TokenKind::Indent) && body_starts_here;
                 if equal_column {
                     // The body's terminating DEDENT and the pseudo-INDENT's
                     // compensating DEDENT are the SAME token, consumed by the

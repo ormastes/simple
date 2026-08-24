@@ -158,10 +158,7 @@ impl<'a> Parser<'a> {
     ///
     /// doc/08_tracking/bug/
     /// seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23.md
-    fn try_arrow_lambda_from_paren_list(
-        &mut self,
-        elements: &[Expr],
-    ) -> Result<Option<Expr>, ParseError> {
+    fn try_arrow_lambda_from_paren_list(&mut self, elements: &[Expr]) -> Result<Option<Expr>, ParseError> {
         if !self.check(&TokenKind::FatArrow) {
             return Ok(None);
         }

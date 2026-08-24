@@ -90,11 +90,15 @@ fn enum_runtime_identity_uses_unique_global_enum_suffix() {
     let mut mir = MirModule::new();
     let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
     let dest = function.new_vreg();
-    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
-        dest,
-        enum_name: "FixConfidence".to_string(),
-        variant_name: "Safe".to_string(),
-    });
+    function
+        .block_mut(BlockId(0))
+        .unwrap()
+        .instructions
+        .push(MirInst::EnumUnit {
+            dest,
+            enum_name: "FixConfidence".to_string(),
+            variant_name: "Safe".to_string(),
+        });
     mir.functions.push(function);
 
     let runtime_names = std::collections::HashMap::from([(
@@ -126,11 +130,15 @@ fn enum_runtime_identity_preserves_unlisted_external_owner() {
     let mut mir = MirModule::new();
     let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
     let dest = function.new_vreg();
-    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
-        dest,
-        enum_name: "ByteOrder".to_string(),
-        variant_name: "LittleEndian".to_string(),
-    });
+    function
+        .block_mut(BlockId(0))
+        .unwrap()
+        .instructions
+        .push(MirInst::EnumUnit {
+            dest,
+            enum_name: "ByteOrder".to_string(),
+            variant_name: "LittleEndian".to_string(),
+        });
     mir.functions.push(function);
 
     super::mangle::qualify_enum_runtime_names(
@@ -542,7 +550,9 @@ __attribute__((constructor)) static void llvm_style_ctor(void) {}
                 "expected .init_array among {sections:?}"
             );
             assert!(
-                StripError::VerificationFailed { sections }.to_string().contains("LIM-010"),
+                StripError::VerificationFailed { sections }
+                    .to_string()
+                    .contains("LIM-010"),
                 "post-condition failure is untagged"
             );
         }
@@ -1014,7 +1024,10 @@ fn test_multi_root_sibling_dirs_do_not_collide_on_module_prefix() {
     assert_eq!(compiler_root, src, "multi-root naming must use the shared ancestor");
     let app_prefix = module_prefix_from_path(&app_init, &app_root);
     let compiler_prefix = module_prefix_from_path(&compiler_init, &compiler_root);
-    assert_ne!(app_prefix, compiler_prefix, "sibling roots must not collide after sanitization");
+    assert_ne!(
+        app_prefix, compiler_prefix,
+        "sibling roots must not collide after sanitization"
+    );
     assert_eq!(app_prefix, "app____init__");
     assert_eq!(compiler_prefix, "compiler____init__");
 
@@ -1352,10 +1365,23 @@ fn test_incremental_cache_dir_default() {
     let cache_dir = builder.cache_dir().to_string_lossy().replace('\\', "/");
     // Entries are partitioned by a per-lane scope subdirectory (see
     // doc/05_design/compiler/incremental_build/per_lane_private_caches.md).
-    let parent = builder.cache_dir().parent().unwrap().to_string_lossy().replace('\\', "/");
-    assert!(parent.ends_with("/project/.simple/native_cache"), "unexpected cache dir {cache_dir}");
+    let parent = builder
+        .cache_dir()
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
     assert!(
-        builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"),
+        parent.ends_with("/project/.simple/native_cache"),
+        "unexpected cache dir {cache_dir}"
+    );
+    assert!(
+        builder
+            .cache_dir()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("scope-"),
         "unexpected cache dir {cache_dir}"
     );
 }
@@ -1464,7 +1490,12 @@ fn test_incremental_cache_dir_custom() {
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple")).config(config);
 
     assert_eq!(builder.cache_dir().parent().unwrap(), PathBuf::from("/tmp/my_cache"));
-    assert!(builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"));
+    assert!(builder
+        .cache_dir()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("scope-"));
 }
 
 #[test]
@@ -3797,7 +3828,10 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
             "{symbol} must be owner-overridable (weak or undefined) in the capsule, found strong/local"
         );
     }
-    assert!(unresolved_runtime.is_subset(&owner_provided), "unexpected unresolved: {unresolved_runtime:?}");
+    assert!(
+        unresolved_runtime.is_subset(&owner_provided),
+        "unexpected unresolved: {unresolved_runtime:?}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -3861,7 +3895,10 @@ fn test_runtime_bundle_host_gpu_discovers_target_root_bootstrap_authority() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
 
-    assert_eq!(builder.selected_runtime_library(temp.path()).unwrap(), Some((runtime, false)));
+    assert_eq!(
+        builder.selected_runtime_library(temp.path()).unwrap(),
+        Some((runtime, false))
+    );
     assert_eq!(find_hosted_runtime_rlib(&target_root), Some(hosted));
 }
 
@@ -3881,7 +3918,10 @@ fn test_runtime_bundle_host_gpu_accepts_adjacent_bootstrap_root() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
 
-    assert_eq!(builder.selected_runtime_library(temp.path()).unwrap(), Some((runtime, false)));
+    assert_eq!(
+        builder.selected_runtime_library(temp.path()).unwrap(),
+        Some((runtime, false))
+    );
     assert_eq!(find_hosted_runtime_rlib(&bootstrap_root), Some(hosted));
 }
 
@@ -4147,9 +4187,21 @@ fn aliased_family_facade_rejects_adjacent_duplicate_path_owner() {
     let sync_platform = sync_root.join("platform.spl");
     let gc_path = gc_root.join("path.spl");
     let consumer = sync_root.join("consumer.spl");
-    std::fs::write(&sync_path, "fn normalize_path(path: text) -> text:\n    path\nfn is_absolute_path(path: text) -> bool:\n    true\n").unwrap();
-    std::fs::write(&sync_platform, "export use std.nogc_sync_mut.path.{normalize_path, is_absolute_path}\n").unwrap();
-    std::fs::write(&gc_path, "fn normalize_path(path: text) -> text:\n    \"wrong\"\nfn is_absolute_path(path: text) -> bool:\n    false\n").unwrap();
+    std::fs::write(
+        &sync_path,
+        "fn normalize_path(path: text) -> text:\n    path\nfn is_absolute_path(path: text) -> bool:\n    true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &sync_platform,
+        "export use std.nogc_sync_mut.path.{normalize_path, is_absolute_path}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &gc_path,
+        "fn normalize_path(path: text) -> text:\n    \"wrong\"\nfn is_absolute_path(path: text) -> bool:\n    false\n",
+    )
+    .unwrap();
     std::fs::write(&consumer, "use std.nogc_sync_mut.platform.{normalize_path as platform_normalize, is_absolute_path as platform_is_absolute}\n").unwrap();
     let file_sources = [&sync_path, &sync_platform, &gc_path, &consumer]
         .into_iter()
@@ -4162,7 +4214,10 @@ fn aliased_family_facade_rejects_adjacent_duplicate_path_owner() {
     let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
     let expected_prefix = module_prefix_from_path(&sync_path, &src_root);
 
-    assert_eq!(use_map.get("platform_normalize"), Some(&format!("{expected_prefix}__normalize_path")));
+    assert_eq!(
+        use_map.get("platform_normalize"),
+        Some(&format!("{expected_prefix}__normalize_path"))
+    );
     assert_eq!(
         use_map.get("platform_is_absolute"),
         Some(&format!("{expected_prefix}__is_absolute_path"))
@@ -5802,11 +5857,7 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
     let main_object = builder.compile_main_stub(temp.path()).unwrap();
     let args_provider = temp.path().join("args-provider.cpp");
     let args_provider_object = temp.path().join("args-provider.o");
-    std::fs::write(
-        &args_provider,
-        "extern \"C\" void rt_set_args(int, char**) {}\n",
-    )
-    .unwrap();
+    std::fs::write(&args_provider, "extern \"C\" void rt_set_args(int, char**) {}\n").unwrap();
     assert!(std::process::Command::new("c++")
         .args(["-c"])
         .arg(&args_provider)
@@ -5825,9 +5876,9 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
             .unwrap();
         let symbols = String::from_utf8_lossy(&symbols.stdout);
         assert!(symbols.lines().any(|line| line.contains(" U _rt_set_args")));
-        assert!(!symbols.lines().any(|line| {
-            line.contains(" _rt_set_args") && !line.contains(" U _rt_set_args")
-        }));
+        assert!(!symbols
+            .lines()
+            .any(|line| { line.contains(" _rt_set_args") && !line.contains(" U _rt_set_args") }));
     }
 
     let linked_probe = temp.path().join("linked-probe");
@@ -6487,7 +6538,10 @@ int main(void) {
     if (rt_value_bool(1) != 11) return 11;
     if (rt_value_bool(0) != 19) return 12;
     if (rt_value_nil() != 3) return 13;
-    if (rt_value_float(0x123456789LL) != ((0x123456789LL & ~7LL) | 2LL)) return 14;
+    double float_input = (double)0x123456789LL;
+    int64_t float_bits = 0;
+    memcpy(&float_bits, &float_input, sizeof(float_bits));
+    if (rt_value_float(float_input) != ((float_bits & ~7LL) | 2LL)) return 14;
 
     uint8_t* p = (uint8_t*)rt_alloc(4);
     if (!p) return 20;
@@ -6649,6 +6703,7 @@ int main(void) {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source() {
+    let _guard = no_stub_fallback_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir
         .parent()
@@ -6662,7 +6717,13 @@ fn test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source() {
     let _ = std::fs::create_dir_all(&output_dir);
     let output = output_dir.join("simple_lsp_mcp_startup");
 
-    let result = NativeProjectBuilder::new(repo_root.clone(), output.clone())
+    // The entry closure is deliberately reduced: source objects still contain
+    // references from functions which the final link's section GC discards.
+    // Exercise the production strict-link policy so the linker, rather than
+    // the non-strict object-wide preflight, decides which providers are live.
+    let previous_strict = std::env::var("SIMPLE_NO_STUB_FALLBACK").ok();
+    std::env::set_var("SIMPLE_NO_STUB_FALLBACK", "1");
+    let build_result = NativeProjectBuilder::new(repo_root.clone(), output.clone())
         .config(NativeBuildConfig {
             entry_closure: true,
             runtime_bundle: "core-c".to_string(),
@@ -6673,8 +6734,12 @@ fn test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source() {
         .source_dir(repo_root.join("src/app"))
         .source_dir(repo_root.join("src/lib"))
         .entry_file(repo_root.join("src/app/simple_lsp_mcp/main.spl"))
-        .build()
-        .unwrap();
+        .build();
+    match previous_strict {
+        Some(value) => std::env::set_var("SIMPLE_NO_STUB_FALLBACK", value),
+        None => std::env::remove_var("SIMPLE_NO_STUB_FALLBACK"),
+    }
+    let result = build_result.unwrap();
 
     assert!(
         result.binary_size < 512_000,
@@ -6997,7 +7062,10 @@ fn test_compile_failure_preserves_completed_objects_for_retry() {
                 .source_dir(source_dir.clone())
                 .build()
                 .unwrap();
-            assert_eq!(result.cached, 1, "retry did not reuse the object completed before the failed batch");
+            assert_eq!(
+                result.cached, 1,
+                "retry did not reuse the object completed before the failed batch"
+            );
 
             fs::write(&failing, "fn failing_probe() -> i64:\n    return 202\n").unwrap();
             NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
@@ -7063,7 +7131,10 @@ fn test_incremental_cache_rejects_corrupt_mangled_object() {
     fs::write(source_dir.join("b.spl"), "fn cache_b() -> i64:\n    return 33\n").unwrap();
     let changed = build();
     assert_eq!(changed.cached, 1, "unchanged sibling should still hit its key");
-    assert_eq!(changed.compiled, 1, "changed source key must not reuse stale object bytes");
+    assert_eq!(
+        changed.compiled, 1,
+        "changed source key must not reuse stale object bytes"
+    );
 }
 
 #[test]
@@ -7119,7 +7190,10 @@ fn test_cache_invalid_read_never_unlinks_concurrent_publication_path() {
     let path = temp.path().join("shared.o");
     fs::write(&path, b"invalid").unwrap();
     assert!(super::read_usable_cached_object(&path).is_none());
-    assert!(path.exists(), "reader must not unlink a path another builder can publish");
+    assert!(
+        path.exists(),
+        "reader must not unlink a path another builder can publish"
+    );
 }
 
 #[test]
@@ -7829,7 +7903,7 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
     let src = temp.path().join("fixture.c");
     std::fs::write(
         &src,
-        "long rt_fixture_missing(long x);\nlong fixture_entry(long x) { return rt_fixture_missing(x); }\n",
+        "long rt_fixture_missing(long x);\nlong fixture_entry(long x) { return rt_fixture_missing(x); }\nint main(void) { return (int)fixture_entry(1); }\n",
     )
     .unwrap();
     let obj = temp.path().join("fixture.o");
@@ -7880,6 +7954,36 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
     assert!(
         err.contains("SIMPLE_ALLOW_UNRESOLVED_RUNTIME"),
         "the verdict must state the escape hatch; got: {err}"
+    );
+
+    // In strict mode the preflight defers its object-wide result to section
+    // GC. A truly live missing provider must still fail at the final linker.
+    let prev_strict = std::env::var("SIMPLE_NO_STUB_FALLBACK").ok();
+    std::env::set_var("SIMPLE_NO_STUB_FALLBACK", "1");
+    let strict_stub = super::stubs::generate_stub_object(temp.path(), &[], &obj, &[], &imports)
+        .expect("strict final link should own the live unresolved verdict");
+    let linked = temp.path().join("strict-missing-runtime");
+    let link = std::process::Command::new(&cc)
+        .arg(&obj)
+        .arg(&strict_stub)
+        .arg("-Wl,--gc-sections")
+        .arg("-o")
+        .arg(&linked)
+        .output()
+        .unwrap();
+    if let Some(v) = prev_strict {
+        std::env::set_var("SIMPLE_NO_STUB_FALLBACK", v);
+    } else {
+        std::env::remove_var("SIMPLE_NO_STUB_FALLBACK");
+    }
+    assert!(
+        !link.status.success(),
+        "strict linker must reject a live missing runtime provider"
+    );
+    assert!(
+        String::from_utf8_lossy(&link.stderr).contains("rt_fixture_missing"),
+        "strict linker verdict must name the live missing symbol; stderr={}",
+        String::from_utf8_lossy(&link.stderr)
     );
 }
 
@@ -7939,16 +8043,23 @@ fn test_simpleos_link_uses_core_archive_from_env_and_all_libc_archive() {
     ] {
         let target = simple_common::target::Target::new(arch, simple_common::target::TargetOS::SimpleOS);
         let resolved = NativeProjectBuilder::simpleos_user_runtime_paths(target);
-        let (crt0, runtime, libc) =
-            resolved.unwrap_or_else(|| panic!("{arch:?}: SimpleOS runtime paths must resolve from SIMPLE_SIMPLE_CORE_PATH"));
+        let (crt0, runtime, libc) = resolved
+            .unwrap_or_else(|| panic!("{arch:?}: SimpleOS runtime paths must resolve from SIMPLE_SIMPLE_CORE_PATH"));
 
         assert_eq!(crt0, sysroot.join("lib/crt0.o"), "{arch:?}: crt0");
         // The core archive must come from the env var, NOT from a sysroot path
         // that no producer writes. This is the assertion that fails pre-fix.
-        assert_eq!(runtime, core_archive, "{arch:?}: target simple-core archive must reach the link line");
+        assert_eq!(
+            runtime, core_archive,
+            "{arch:?}: target simple-core archive must reach the link line"
+        );
         // libsimpleos_all.a carries the C runtime; libsimpleos_c.a is libc alone
         // and linking only it left every C-runtime symbol undefined.
-        assert_eq!(libc, sysroot.join("lib/libsimpleos_all.a"), "{arch:?}: libc+runtime archive");
+        assert_eq!(
+            libc,
+            sysroot.join("lib/libsimpleos_all.a"),
+            "{arch:?}: libc+runtime archive"
+        );
     }
 
     match prev_sysroot {

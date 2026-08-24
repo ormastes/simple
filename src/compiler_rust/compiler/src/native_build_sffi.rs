@@ -41,7 +41,6 @@ use crate::optimizations::{format_optimization_guide, NativeOptimizationLevel};
 use crate::pipeline::{NativeBuildConfig, NativeProjectBuilder};
 use simple_runtime::value::{rt_array_get, rt_array_len, rt_string_data, rt_string_len, RuntimeValue};
 
-
 pub fn native_build_rust_trace_enabled() -> bool {
     matches!(
         std::env::var("SIMPLE_NATIVE_BUILD_RUST_TRACE").as_deref(),
@@ -203,7 +202,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --verbose, -v       Verbose output");
                 println!("  --strip             Strip symbols from output");
                 println!("  --threads <n>       Number of compilation threads");
-                println!("  --timeout <secs>    Per-file timeout (default: 60)");
+                println!("  --timeout <secs>    Per-file timeout (0 disables; default: 60)");
                 println!("  --no-incremental    Disable incremental compilation");
                 println!("  --clean             Force clean rebuild");
                 println!("  --cache-dir <dir>   Cache directory");

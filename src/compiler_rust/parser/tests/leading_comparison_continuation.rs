@@ -42,9 +42,7 @@ fn binding_leading(op: &str) -> String {
 
 /// The same shape in an `if` condition.
 fn if_cond_leading(op: &str) -> String {
-    format!(
-        "fn f(a: i64, b: i64) -> i64:\n    if a\n        {op} b:\n        return 1\n    return 2\n"
-    )
+    format!("fn f(a: i64, b: i64) -> i64:\n    if a\n        {op} b:\n        return 1\n    return 2\n")
 }
 
 /// Every operator in the previously-rejected family. `is`/`in` take the same

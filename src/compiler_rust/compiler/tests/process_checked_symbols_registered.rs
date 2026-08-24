@@ -19,10 +19,7 @@ use simple_native_loader::{RuntimeSymbolProvider, static_provider};
 
 /// C-only (`src/runtime/runtime_process.c`) runtime symbols that are listed in
 /// `RUNTIME_SYMBOL_NAMES` and so must be resolvable by the JIT.
-const C_ONLY_PROCESS_SYMBOLS: &[&str] = &[
-    "rt_process_read_stdout_checked",
-    "rt_process_is_alive_checked",
-];
+const C_ONLY_PROCESS_SYMBOLS: &[&str] = &["rt_process_read_stdout_checked", "rt_process_is_alive_checked"];
 
 fn registered() -> std::sync::Arc<dyn RuntimeSymbolProvider> {
     simple_runtime::register_static_runtime_symbols();

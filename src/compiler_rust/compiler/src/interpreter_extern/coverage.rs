@@ -675,7 +675,14 @@ pub fn rt_coverage_condition_probe_fn(args: &[Value]) -> Result<Value, CompileEr
 
     let file_cstr = std::ffi::CString::new(file).unwrap_or_else(|_| std::ffi::CString::new("<error>").unwrap());
     unsafe {
-        simple_runtime::rt_coverage_condition_probe(decision_id, condition_id, result, file_cstr.as_ptr(), line, column);
+        simple_runtime::rt_coverage_condition_probe(
+            decision_id,
+            condition_id,
+            result,
+            file_cstr.as_ptr(),
+            line,
+            column,
+        );
     }
     Ok(Value::Nil)
 }

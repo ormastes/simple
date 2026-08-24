@@ -14,7 +14,7 @@
 //!                        cranelift, clamped to 4 for llvm -- see LLVM_DEFAULT_MAX_THREADS
 //!                        in pipeline/native_project/mod.rs)
 //!   --low-memory        Force single-worker compilation regardless of backend/--threads
-//!   --timeout <secs>    Per-file compilation timeout (default: 60)
+//!   --timeout <secs>    Per-file compilation timeout (0 disables; default: 300)
 //!   --no-incremental    Disable incremental compilation
 //!   --clean             Force clean rebuild (delete cache)
 //!   --cache-dir <dir>   Cache directory for incremental builds
@@ -722,10 +722,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_allowed_runtime_bundle, normalize_backend, seed_build_mode_notice,
-        SEED_DEFAULT_BUILD_MODE,
-    };
+    use super::{is_allowed_runtime_bundle, normalize_backend, seed_build_mode_notice, SEED_DEFAULT_BUILD_MODE};
 
     #[test]
     fn seed_default_build_mode_is_not_dynload() {
@@ -737,7 +734,11 @@ mod tests {
     #[test]
     fn explicit_dynload_is_skipped_with_named_notice() {
         let notice = seed_build_mode_notice("dynload").expect("dynload must emit a named notice");
-        assert!(notice.contains("E-SEED-NATIVE-BUILD-MODE-DYNLOAD-UNSUPPORTED"), "{}", notice);
+        assert!(
+            notice.contains("E-SEED-NATIVE-BUILD-MODE-DYNLOAD-UNSUPPORTED"),
+            "{}",
+            notice
+        );
         assert!(notice.contains("SKIPPED"), "{}", notice);
     }
 
@@ -802,7 +803,7 @@ fn print_help() {
     println!("  --strip             Strip symbols from output");
     println!("  --threads <n>       Number of compilation threads (default: all CPUs; llvm backend defaults to at most 4 -- each worker owns a full LLVM Context/optimizer, so unclamped parallelism balloons memory)");
     println!("  --low-memory        Force single-worker compilation (overrides --threads); use when even the llvm default (4 workers) is too much for the host");
-    println!("  --timeout <secs>    Per-file timeout in seconds (default: 60)");
+    println!("  --timeout <secs>    Per-file timeout in seconds (0 disables; default: 300)");
     println!("  --no-incremental    Disable incremental compilation");
     println!("  --clean             Force clean rebuild (delete cache)");
     println!("  --cache-dir <dir>   Cache directory for incremental builds");

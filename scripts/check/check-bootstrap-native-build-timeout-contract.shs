@@ -1,0 +1,43 @@
+#!/bin/sh
+# Focused contract: Stage 2/3 bootstrap builds must bind their per-file timeout
+# into both the recorded argument digest and the transcribed command.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+producer="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+verifier="$root/scripts/check/lib/bootstrap-stage3/manifest-verify.shs"
+
+fail() {
+  echo "bootstrap-native-build-timeout-contract: FAIL: $*" >&2
+  exit 1
+}
+
+grep -Fq 'native_build_timeout="${SIMPLE_BOOTSTRAP_NATIVE_BUILD_TIMEOUT_SECONDS:-0}"' \
+  "$producer" || fail "missing disabled-by-default timeout policy"
+grep -Fq -- '--native-build-timeout=*)' "$producer" || \
+  fail "missing explicit wrapper option"
+
+stage2_hash=$(sed -n '/stage2_build_args_sha256=$(/{:a;p;n;/stage3_evidence_run_id=/q;ba}' "$producer")
+stage2_run=$(sed -n '/bootstrap_stage3_run_transcribed \\/{:a;p;n;/stage2_status=\$?/q;ba}' "$producer")
+stage3_hash=$(sed -n '/stage3_build_args_sha256=$(/{:a;p;n;/rm -f "${stage2_bin}"/q;ba}' "$producer")
+stage3_run=$(sed -n '/# Stage 3: stage2 recompiles/{:a;p;n;/stage3_status=\$?/q;ba}' "$producer")
+
+printf '%s\n' "$stage2_hash" | grep -Fq -- '--timeout "${native_build_timeout}"' || \
+  fail "Stage 2 digest omits timeout"
+printf '%s\n' "$stage2_run" | grep -Fq -- '--timeout "${native_build_timeout}"' || \
+  fail "Stage 2 transcript command omits timeout"
+printf '%s\n' "$stage3_hash" | grep -Fq -- '--timeout "${native_build_timeout}"' || \
+  fail "Stage 3 digest omits timeout"
+printf '%s\n' "$stage3_run" | grep -Fq -- '--timeout "${native_build_timeout}"' || \
+  fail "Stage 3 transcript command omits timeout"
+
+grep -Fq '"$bootstrap_stage3_stage2_transcript" --timeout' "$verifier" || \
+  fail "manifest verifier does not read Stage 2 timeout"
+grep -Fq '"$bootstrap_stage3_stage3_transcript" --timeout' "$verifier" || \
+  fail "manifest verifier does not read Stage 3 timeout"
+grep -Fq -- '--timeout "$bootstrap_stage3_stage2_timeout"' "$verifier" || \
+  fail "manifest verifier does not bind Stage 2 timeout"
+grep -Fq -- '--timeout "$bootstrap_stage3_stage3_timeout"' "$verifier" || \
+  fail "manifest verifier does not bind Stage 3 timeout"
+
+echo "bootstrap-native-build-timeout-contract: PASS"

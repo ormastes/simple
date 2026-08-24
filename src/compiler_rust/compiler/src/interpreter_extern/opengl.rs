@@ -63,16 +63,7 @@ unsafe extern "C" {
     ) -> bool;
     fn rt_opengl_draw_line(ctx: i64, x1: i64, y1: i64, x2: i64, y2: i64, color: i64, thickness: i64) -> bool;
     fn rt_opengl_draw_circle(ctx: i64, cx: i64, cy: i64, radius: i64, color: i64, filled: i64) -> bool;
-    fn rt_opengl_draw_triangle(
-        ctx: i64,
-        x1: i64,
-        y1: i64,
-        x2: i64,
-        y2: i64,
-        x3: i64,
-        y3: i64,
-        color: i64,
-    ) -> bool;
+    fn rt_opengl_draw_triangle(ctx: i64, x1: i64, y1: i64, x2: i64, y2: i64, x3: i64, y3: i64, color: i64) -> bool;
     fn rt_opengl_flush(ctx: i64) -> bool;
     fn rt_opengl_read_pixels(ctx: i64, pixels: i64, width: i64, height: i64) -> bool;
 }
@@ -239,6 +230,9 @@ mod tests {
 
     #[test]
     fn is_available_returns_a_defined_value_not_an_error() {
-        assert!(matches!(dispatch("rt_opengl_is_available", &[]).unwrap(), Value::Int(0)));
+        assert!(matches!(
+            dispatch("rt_opengl_is_available", &[]).unwrap(),
+            Value::Int(0)
+        ));
     }
 }

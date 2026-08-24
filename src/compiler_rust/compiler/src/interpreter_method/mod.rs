@@ -416,8 +416,7 @@ pub(crate) fn evaluate_method_call(
         // destroyed a genuine bare `expect <cond>` failure raised by a
         // different expect in the same example — see
         // doc/08_tracking/bug/bare_expect_statement_vacuous_2026-08-18.md.
-        let owns_provisional = BDD_PROVISIONAL_SEQ
-            .with(|cell: &std::cell::RefCell<usize>| *cell.borrow())
+        let owns_provisional = BDD_PROVISIONAL_SEQ.with(|cell: &std::cell::RefCell<usize>| *cell.borrow())
             == BDD_EXPECT_SEQ.with(|cell: &std::cell::RefCell<usize>| *cell.borrow());
         if owns_provisional {
             BDD_EXPECT_PROVISIONAL.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
@@ -1188,7 +1187,10 @@ pub(crate) fn evaluate_method_call(
                         // WRITE side of the enum-payload provenance diagnostic
                         // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1).
                         crate::interpreter::note_enum_payload_function_opt(
-                            "variant-construction", &(enum_name.clone()), &(method.to_string()), &payload,
+                            "variant-construction",
+                            &(enum_name.clone()),
+                            &(method.to_string()),
+                            &payload,
                         );
                         return Ok(Value::Enum {
                             enum_name: enum_name.clone(),

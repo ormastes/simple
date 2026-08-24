@@ -774,10 +774,7 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
                     native_worker_arg(copied_data2, raw_worker_args),
                 )
             }
-            NativeCallable::DirectFunction {
-                entry,
-                raw_worker_args,
-            } => {
+            NativeCallable::DirectFunction { entry, raw_worker_args } => {
                 let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
                     unsafe { std::mem::transmute(entry) };
                 func(
@@ -1133,10 +1130,7 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
                         native_worker_arg(copied_data2, raw_worker_args),
                     )
                 }
-                NativeCallable::DirectFunction {
-                    entry,
-                    raw_worker_args,
-                } => {
+                NativeCallable::DirectFunction { entry, raw_worker_args } => {
                     let func: extern "C" fn(u64, RuntimeValue, RuntimeValue) -> RuntimeValue =
                         unsafe { std::mem::transmute(entry) };
                     func(

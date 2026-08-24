@@ -55,8 +55,21 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     fn emit_copy(&mut self, dest: VReg, src: VReg) -> Result<(), String> {
         super::instr::basic_ops::compile_copy(self.ctx, self.builder, dest, src)
     }
-    fn emit_aggregate_copy(&mut self, dest: VReg, src: VReg, byte_size: u32, deep_fields: &[crate::mir::AggregateFieldCopy]) -> Result<(), String> {
-        super::instr::closures_structs::compile_aggregate_copy(self.ctx, self.builder, dest, src, byte_size, deep_fields);
+    fn emit_aggregate_copy(
+        &mut self,
+        dest: VReg,
+        src: VReg,
+        byte_size: u32,
+        deep_fields: &[crate::mir::AggregateFieldCopy],
+    ) -> Result<(), String> {
+        super::instr::closures_structs::compile_aggregate_copy(
+            self.ctx,
+            self.builder,
+            dest,
+            src,
+            byte_size,
+            deep_fields,
+        );
         Ok(())
     }
     fn emit_binop(&mut self, dest: VReg, op: BinOp, left: VReg, right: VReg) -> Result<(), String> {
@@ -735,8 +748,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         // immediate for everything that fits the 61-bit payload and heap-boxes
         // only what does not, so in-range behaviour is unchanged.
         // Mirrors emit_box_float's rt_value_float call exactly.
-        let boxed =
-            super::instr::helpers::call_runtime_1(self.ctx, self.builder, "rt_value_int", val);
+        let boxed = super::instr::helpers::call_runtime_1(self.ctx, self.builder, "rt_value_int", val);
         self.ctx.vreg_values.insert(dest, boxed);
         Ok(())
     }
@@ -760,8 +772,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         // HeapFloat holding the full double and returns a tagged heap pointer.
         // The old inline (bits>>3)<<3|TAG_FLOAT zeroed the low 3 mantissa bits,
         // so [0.1][0] != 0.1. Scalar f64 in native registers is unaffected.
-        let boxed =
-            super::instr::helpers::call_runtime_1(self.ctx, self.builder, "rt_value_float", val);
+        let boxed = super::instr::helpers::call_runtime_1(self.ctx, self.builder, "rt_value_float", val);
         self.ctx.vreg_values.insert(dest, boxed);
         Ok(())
     }
@@ -782,12 +793,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         // passthrough arm, yielding a raw pointer. rt_value_unbox_int implements
         // exactly the same three-way decision plus the wide-int case, and is
         // total on any input including a raw untagged i64.
-        let unboxed = super::instr::helpers::call_runtime_1(
-            self.ctx,
-            self.builder,
-            "rt_value_unbox_int",
-            val,
-        );
+        let unboxed = super::instr::helpers::call_runtime_1(self.ctx, self.builder, "rt_value_unbox_int", val);
         self.ctx.vreg_values.insert(dest, unboxed);
         Ok(())
     }
@@ -800,8 +806,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
             .unwrap_or_else(|| self.builder.ins().iconst(types::I64, 0));
         // rt_value_as_float(RuntimeValue) -> f64 reads the heap-boxed float (or a
         // legacy inline TAG_FLOAT) losslessly, mirroring emit_box_float.
-        let unboxed =
-            super::instr::helpers::call_runtime_1(self.ctx, self.builder, "rt_value_as_float", val);
+        let unboxed = super::instr::helpers::call_runtime_1(self.ctx, self.builder, "rt_value_as_float", val);
         self.ctx.vreg_values.insert(dest, unboxed);
         Ok(())
     }

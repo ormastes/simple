@@ -105,8 +105,7 @@ impl Lowerer {
                 // reorders named args to their declared slot and fills any
                 // field the call site omits (relying on a class-level
                 // default) with `nil` instead of leaving it unset.
-                let provided: Vec<(Option<&str>, &Expr)> =
-                    args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
+                let provided: Vec<(Option<&str>, &Expr)> = args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
                 let fields_hir = self.lower_struct_init_fields(name, struct_ty, &provided, ctx)?;
                 return Ok(HirExpr {
                     kind: HirExprKind::StructInit {
@@ -126,8 +125,7 @@ impl Lowerer {
                 // lower_struct_init_fields falls back to source-order lowering
                 // (its "unresolvable struct" branch) — same effective
                 // behavior as before, just centralized through one helper.
-                let provided: Vec<(Option<&str>, &Expr)> =
-                    args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
+                let provided: Vec<(Option<&str>, &Expr)> = args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
                 let fields_hir = self.lower_struct_init_fields(name, TypeId::ANY, &provided, ctx)?;
                 return Ok(HirExpr {
                     kind: HirExprKind::StructInit {

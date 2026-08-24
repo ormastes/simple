@@ -37,7 +37,13 @@ pub trait CodegenEmitter {
     /// Duplicate the STORAGE behind an aggregate (lane F1 / S5). Unlike
     /// `emit_copy`, which aliases a struct's tagged heap pointer, this must
     /// produce a pointer to a fresh `byte_size`-byte copy.
-    fn emit_aggregate_copy(&mut self, dest: VReg, src: VReg, byte_size: u32, deep_fields: &[crate::mir::AggregateFieldCopy]) -> Result<(), Self::Error>;
+    fn emit_aggregate_copy(
+        &mut self,
+        dest: VReg,
+        src: VReg,
+        byte_size: u32,
+        deep_fields: &[crate::mir::AggregateFieldCopy],
+    ) -> Result<(), Self::Error>;
     fn emit_binop(&mut self, dest: VReg, op: BinOp, left: VReg, right: VReg) -> Result<(), Self::Error>;
     fn emit_unary_op(&mut self, dest: VReg, op: UnaryOp, operand: VReg) -> Result<(), Self::Error>;
     fn emit_cast(&mut self, dest: VReg, source: VReg, from_ty: TypeId, to_ty: TypeId) -> Result<(), Self::Error>;

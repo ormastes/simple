@@ -350,10 +350,7 @@ impl<'a> super::Lexer<'a> {
                             if quote == c {
                                 in_string = None; // End of string
                             }
-                        } else if paren_depth == 0
-                            && !is_triple
-                            && !Self::nested_string_may_open(&expr)
-                        {
+                        } else if paren_depth == 0 && !is_triple && !Self::nested_string_may_open(&expr) {
                             expr_failed = true;
                             break;
                         } else {

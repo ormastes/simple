@@ -103,8 +103,14 @@ fn init() -> bool {
             sa.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
             libc::sigemptyset(&mut sa.sa_mask);
             libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
-            let tv = libc::timeval { tv_sec: us / 1_000_000, tv_usec: (us % 1_000_000) as libc::suseconds_t };
-            let it = libc::itimerval { it_interval: tv, it_value: tv };
+            let tv = libc::timeval {
+                tv_sec: us / 1_000_000,
+                tv_usec: (us % 1_000_000) as libc::suseconds_t,
+            };
+            let it = libc::itimerval {
+                it_interval: tv,
+                it_value: tv,
+            };
             libc::setitimer(libc::ITIMER_PROF, &it, std::ptr::null_mut());
             libc::atexit(dump_at_exit);
         }
@@ -171,7 +177,10 @@ impl KindGuard {
         if !enabled() {
             return KindGuard(None);
         }
-        let prev = (CUR_KIND_PTR.load(Ordering::Relaxed), CUR_KIND_LEN.load(Ordering::Relaxed));
+        let prev = (
+            CUR_KIND_PTR.load(Ordering::Relaxed),
+            CUR_KIND_LEN.load(Ordering::Relaxed),
+        );
         CUR_KIND_PTR.store(kind.as_ptr() as *mut u8, Ordering::Relaxed);
         CUR_KIND_LEN.store(kind.len(), Ordering::Relaxed);
         KindGuard(Some(prev))
@@ -276,7 +285,13 @@ fn slot_name(s: &Slot) -> String {
 /// Render the histograms, most frequent first. Public so specs can assert on it.
 pub fn render() -> String {
     let total = TOTAL_SAMPLES.load(Ordering::Relaxed);
-    let pct = |v: u64| if total == 0 { 0.0 } else { v as f64 * 100.0 / total as f64 };
+    let pct = |v: u64| {
+        if total == 0 {
+            0.0
+        } else {
+            v as f64 * 100.0 / total as f64
+        }
+    };
     let mut out = String::from("interp-sample-profile:\n");
     out.push_str(&format!(
         "  total_samples: {}  idle: {}  dropped: {}\n",
@@ -287,12 +302,25 @@ pub fn render() -> String {
     let mut rows: Vec<(String, u64, u64)> = FRAMES
         .iter()
         .filter(|s| !s.key.load(Ordering::Acquire).is_null())
-        .map(|s| (slot_name(s), s.self_hits.load(Ordering::Relaxed), s.incl_hits.load(Ordering::Relaxed)))
+        .map(|s| {
+            (
+                slot_name(s),
+                s.self_hits.load(Ordering::Relaxed),
+                s.incl_hits.load(Ordering::Relaxed),
+            )
+        })
         .collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
     out.push_str("  frames (self / inclusive):\n");
     for (name, s, i) in rows.iter().take(60) {
-        out.push_str(&format!("    {:>8} {:>6.2}%  {:>8} {:>6.2}%  {}\n", s, pct(*s), i, pct(*i), name));
+        out.push_str(&format!(
+            "    {:>8} {:>6.2}%  {:>8} {:>6.2}%  {}\n",
+            s,
+            pct(*s),
+            i,
+            pct(*i),
+            name
+        ));
     }
     let mut kinds: Vec<(String, u64)> = KINDS
         .iter()
@@ -312,7 +340,10 @@ pub fn render() -> String {
 extern "C" fn dump_at_exit() {
     unsafe {
         let zero = libc::timeval { tv_sec: 0, tv_usec: 0 };
-        let it = libc::itimerval { it_interval: zero, it_value: zero };
+        let it = libc::itimerval {
+            it_interval: zero,
+            it_value: zero,
+        };
         libc::setitimer(libc::ITIMER_PROF, &it, std::ptr::null_mut());
     }
     let text = render();

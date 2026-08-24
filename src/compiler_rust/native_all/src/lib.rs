@@ -31,7 +31,7 @@ use spl_hosted_runtime as _;
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -51,9 +51,12 @@ pub extern "C" fn rt_jit_cleanup(handle: i64) -> i64 {
 // This crate still exports the identical symbol via `pub use simple_compiler;`
 // above -- the same mechanism that rolls the `rt_cranelift_*` symbols in.
 pub use simple_compiler::native_build_sffi::rt_native_build;
+// `simple-runtime` is the sole C-ABI owner; explicitly retain its symbol in
+// the combined archive without defining a competing implementation here.
+pub use simple_runtime::value::sffi::file_io::file_ops::rt_file_atomic_write;
 use simple_compiler::native_build_sffi::{
-    extract_rt_string, extract_rt_string_array, native_build_bootstrap_mode,
-    native_build_process_args_usable, resolve_native_build_entry,
+    extract_rt_string, extract_rt_string_array, native_build_bootstrap_mode, native_build_process_args_usable,
+    resolve_native_build_entry,
 };
 
 // ============================================================================
@@ -443,48 +446,6 @@ pub extern "C" fn __rt_btreemap_last_key(handle: i64) -> i64 {
         .get(&handle)
         .and_then(|map| map.keys().next_back().map(|key| stub_make_string(key)))
         .unwrap_or(0)
-}
-
-// -- File I/O stubs --
-//
-// `rt_file_size`, `rt_file_delete`, `rt_file_lock`, `rt_file_unlock`, and
-// `rt_file_hash_sha256` are provided by the bundled `simple-runtime` and are
-// NOT redefined here (duplicate symbols fail the macOS link). Only shims the
-// runtime lacks remain below.
-
-fn atomic_write_parent(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-}
-
-fn atomic_write_file(path: &Path, content: &[u8]) -> bool {
-    let parent = atomic_write_parent(path);
-    if std::fs::create_dir_all(parent).is_err() {
-        return false;
-    }
-    let permissions = std::fs::metadata(path).ok().map(|metadata| metadata.permissions());
-    let Ok(mut temp) = tempfile::NamedTempFile::new_in(parent) else {
-        return false;
-    };
-    if temp.write_all(content).is_err() {
-        return false;
-    }
-    if permissions.is_some_and(|permissions| temp.as_file().set_permissions(permissions).is_err()) {
-        return false;
-    }
-    if temp.as_file().sync_all().is_err() {
-        return false;
-    }
-    temp.persist(path).is_ok()
-}
-
-#[no_mangle]
-pub extern "C" fn rt_file_atomic_write(path: i64, content: i64) -> i64 {
-    match (stub_extract_path(path), stub_extract_path(content)) {
-        (Some(path), Some(content)) if atomic_write_file(Path::new(&path), content.as_bytes()) => 1,
-        _ => 0,
-    }
 }
 
 // -- Process/System stubs --
@@ -1501,34 +1462,4 @@ mod tests {
             .collect();
         assert_eq!(keys, vec!["alpha".to_string(), "beta".to_string()]);
     }
-}
-#[test]
-fn atomic_write_file_replaces_complete_content_and_fails_closed() {
-    assert_eq!(atomic_write_parent(Path::new("state.txt")), Path::new("."));
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("state.txt");
-    std::fs::write(&target, b"old").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o4740)).unwrap();
-    }
-
-    assert!(atomic_write_file(&target, b"complete replacement"));
-    assert_eq!(std::fs::read(&target).unwrap(), b"complete replacement");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
-            0o4740
-        );
-    }
-
-    let occupied = dir.path().join("occupied");
-    std::fs::create_dir(&occupied).unwrap();
-    let before = std::fs::read_dir(dir.path()).unwrap().count();
-    assert!(!atomic_write_file(&occupied, b"must not replace a directory"));
-    assert!(occupied.is_dir());
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
 }

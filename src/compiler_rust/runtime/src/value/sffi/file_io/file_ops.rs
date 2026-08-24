@@ -416,7 +416,10 @@ pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: Runti
     ));
 
     let write_result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp_path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
         file.write_all(&content_bytes)?;
         file.sync_all()?;
         Ok(())
@@ -2032,19 +2035,7 @@ sandbox_lowering:
         );
         let unchanged = output;
         assert_eq!(
-            unsafe {
-                rt_write_u32s_strided_to_raw(
-                    output.as_mut_ptr() as i64,
-                    6 * 4,
-                    5 * 4,
-                    values,
-                    3,
-                    1,
-                    1,
-                    2,
-                    2,
-                )
-            },
+            unsafe { rt_write_u32s_strided_to_raw(output.as_mut_ptr() as i64, 6 * 4, 5 * 4, values, 3, 1, 1, 2, 2,) },
             0
         );
         assert_eq!(output, unchanged);

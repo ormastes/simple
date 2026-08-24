@@ -129,14 +129,17 @@ impl Drop for FingerprintSequenceGuard {
 
 fn config_cache() -> &'static Mutex<HostCpuConfigCache> {
     static CACHE: OnceLock<Mutex<HostCpuConfigCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HostCpuConfigCache { cached: None, resolutions: 0 }))
+    CACHE.get_or_init(|| {
+        Mutex::new(HostCpuConfigCache {
+            cached: None,
+            resolutions: 0,
+        })
+    })
 }
 
 #[doc(hidden)]
 pub fn clear_host_cpu_config_cache() {
-    let mut cache = config_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut cache = config_cache().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     cache.cached = None;
     cache.resolutions = 0;
 }
@@ -168,9 +171,7 @@ pub fn active_simd_tier() -> SimdTier {
 
 pub fn host_cpu_config() -> Result<HostCpuConfig, HostCpuConfigError> {
     let path = cpu_config_path().ok_or(HostCpuConfigError::MissingPath)?;
-    let mut guard = config_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = config_cache().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let fingerprint = config_fingerprint(&path)?;
     if let Some(cached) = guard.cached.as_ref() {
         if cached.path == path && cached.fingerprint == fingerprint {
@@ -184,8 +185,8 @@ pub fn host_cpu_config() -> Result<HostCpuConfig, HostCpuConfigError> {
     let (config, fingerprint) = {
         let mut attempts = 0;
         loop {
-        let config = load_or_initialize_config(&path)?;
-        let after = config_fingerprint(&path)?;
+            let config = load_or_initialize_config(&path)?;
+            let after = config_fingerprint(&path)?;
             attempts += 1;
             if before == after || attempts >= MAX_CONFIG_STABILITY_ATTEMPTS {
                 if before != after {

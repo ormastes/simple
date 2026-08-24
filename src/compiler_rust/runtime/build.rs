@@ -159,22 +159,18 @@ fn runtime_symbol_declaration(
         "rt_ptr_write_bytes_raw" => "(addr: i64, offset: i64, src: *const u8, len: i64) -> i64",
         "rt_memset" => "(dst: *mut u8, val: i8, n: i64) -> *mut u8",
         "rt_memcpy" => "(dst: *mut u8, src: *const u8, n: i64) -> *mut u8",
-        "rt_atomic_compare_exchange" =>
-            "(atomic: i64, expected: i64, new_value: i64, result_ptr: *mut i64) -> i64",
+        "rt_atomic_compare_exchange" => "(atomic: i64, expected: i64, new_value: i64, result_ptr: *mut i64) -> i64",
         "rt_atomic_bool_new" => "(initial: bool) -> i64",
         "rt_atomic_bool_load" => "(handle: i64) -> bool",
         "rt_atomic_bool_store" => "(handle: i64, value: bool)",
         "rt_atomic_bool_swap" => "(handle: i64, value: bool) -> bool",
-        "rt_atomic_int_compare_exchange" =>
-            "(handle: i64, current: i64, new_value: i64) -> bool",
+        "rt_atomic_int_compare_exchange" => "(handle: i64, current: i64, new_value: i64) -> bool",
         "rt_atomic_flag_test_and_set" => "(handle: i64) -> bool",
-        "rt_file_mmap" =>
-            "(addr: *mut u8, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> *mut u8",
+        "rt_file_mmap" => "(addr: *mut u8, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> *mut u8",
         "rt_file_munmap" => "(addr: *mut u8, length: u64) -> i32",
         "rt_file_madvise" => "(addr: *mut u8, length: u64, advice: i32) -> i32",
         "rt_file_msync" => "(addr: *mut u8, length: u64, flags: i32) -> i32",
-        "rt_file_lock" =>
-            "(path_ptr: *const u8, path_len: u64, timeout_secs: i64) -> i64",
+        "rt_file_lock" => "(path_ptr: *const u8, path_len: u64, timeout_secs: i64) -> i64",
         "rt_file_unlock" => "(handle: i64) -> bool",
         "rt_file_read_text_at_checked" => "(path: i64, offset: i64, size: i64) -> i64",
         "rt_time_now_nanos" | "rt_time_now_micros" | "rt_time_now_unix_micros" => "() -> i64",
@@ -202,9 +198,7 @@ fn canonical_runtime_symbol_declaration(
         [ty] => format!(" -> {}", rust_abi_type(ty)),
         many => {
             let tuple = many.iter().map(|ty| rust_abi_type(ty)).collect::<Vec<_>>().join(", ");
-            return format!(
-                "#[allow(improper_ctypes)]\n        pub fn {alias}({params}) -> ({tuple});"
-            );
+            return format!("#[allow(improper_ctypes)]\n        pub fn {alias}({params}) -> ({tuple});");
         }
     };
     format!("pub fn {alias}({params}){result};")

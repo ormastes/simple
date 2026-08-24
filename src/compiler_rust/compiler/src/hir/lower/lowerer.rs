@@ -418,10 +418,7 @@ impl Lowerer {
     /// instead of appearing with no source location at all.
     pub(super) fn record_lenient_global(&mut self, name: &str, kind: LenientGlobalKind) {
         let entry = LenientGlobal {
-            file: self
-                .current_file
-                .as_ref()
-                .map(|path| path.display().to_string()),
+            file: self.current_file.as_ref().map(|path| path.display().to_string()),
             function: self.current_function_name.clone(),
             function_line: self.current_function_line,
             name: name.to_string(),
@@ -725,8 +722,7 @@ impl Lowerer {
     /// lower to unresolved external symbols.
     pub(super) fn collect_flattened_import_aliases(&mut self, ast_module: &simple_parser::Module) {
         use crate::interpreter::{
-            decode_import_binding_marker, flatten_owner_mangled_name,
-            FLATTEN_MODULE_OWNER_ATTR_PREFIX,
+            decode_import_binding_marker, flatten_owner_mangled_name, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
         };
 
         // Flattening merges every imported module's items into one namespace. An
@@ -767,9 +763,11 @@ impl Lowerer {
                     // (owner, name) lets an alias be disambiguated by the module
                     // the `use` actually names, even though only `main` is
                     // owner-MANGLED and every other name stays bare.
-                    if let Some(owner) = f.attributes.iter().find_map(|a| {
-                        a.name.strip_prefix(FLATTEN_MODULE_OWNER_ATTR_PREFIX)
-                    }) {
+                    if let Some(owner) = f
+                        .attributes
+                        .iter()
+                        .find_map(|a| a.name.strip_prefix(FLATTEN_MODULE_OWNER_ATTR_PREFIX))
+                    {
                         *owner_definition_counts.entry((owner, f.name.as_str())).or_insert(0) += 1;
                     }
                 }
@@ -817,8 +815,7 @@ impl Lowerer {
             let simple_parser::Node::Const(marker) = item else {
                 continue;
             };
-            let Some((_importer, local_name, source_owner, source_name)) =
-                decode_import_binding_marker(&marker.name)
+            let Some((_importer, local_name, source_owner, source_name)) = decode_import_binding_marker(&marker.name)
             else {
                 continue;
             };

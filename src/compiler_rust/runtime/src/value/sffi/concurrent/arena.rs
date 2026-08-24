@@ -105,10 +105,7 @@ pub extern "C" fn rt_arena_capacity(handle: i64) -> i64 {
     let Ok(arenas) = ARENA_MAP.lock() else {
         return 0;
     };
-    arenas
-        .get(&handle)
-        .map(|arena| arena.capacity as i64)
-        .unwrap_or(0)
+    arenas.get(&handle).map(|arena| arena.capacity as i64).unwrap_or(0)
 }
 
 /// Get arena used bytes
@@ -117,10 +114,7 @@ pub extern "C" fn rt_arena_used(handle: i64) -> i64 {
     let Ok(arenas) = ARENA_MAP.lock() else {
         return 0;
     };
-    arenas
-        .get(&handle)
-        .map(|arena| arena.used as i64)
-        .unwrap_or(0)
+    arenas.get(&handle).map(|arena| arena.used as i64).unwrap_or(0)
 }
 
 /// Reset arena (clear all allocations)

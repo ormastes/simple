@@ -33,10 +33,11 @@ use super::{
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
     BLANKET_IMPL_METHODS, CLASS_OVERLOADS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, FUNCTION_OVERLOADS,
-    FUNCTION_MODULE_OWNER, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
-    FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS,
-    MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER,
-    SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    FUNCTION_MODULE_OWNER, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
+    MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
+    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
+    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -444,7 +445,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     // resolves qualified names through the thread-local
                     // registries, not this module-local map.
                     super::interpreter_state::GLOBAL_ENUMS.with(|cell| {
-                        cell.borrow_mut().entry(def.name.clone()).or_insert_with(|| Arc::clone(&def));
+                        cell.borrow_mut()
+                            .entry(def.name.clone())
+                            .or_insert_with(|| Arc::clone(&def));
                     });
                     enums.entry(def.name.clone()).or_insert(def);
                 }
@@ -1143,9 +1146,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             let trait_def = match matched_trait {
                                 Some(def) => def,
                                 None => {
-                                    return Err(CompileError::Semantic(
-                                        best_problems.unwrap_or_default().join("; "),
-                                    ));
+                                    return Err(CompileError::Semantic(best_problems.unwrap_or_default().join("; ")));
                                 }
                             };
 
@@ -1733,10 +1734,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // doing `use compiler.tools.lint.main.{Linter, ...}`). A Single or
                         // Aliased import is explicit user intent and is left untouched.
                         let is_path_derived_main = binding_name == "main"
-                            && matches!(
-                                &use_stmt.target,
-                                ImportTarget::Glob | ImportTarget::Group(_)
-                            );
+                            && matches!(&use_stmt.target, ImportTarget::Glob | ImportTarget::Group(_));
                         if !is_path_derived_main {
                             env.insert(binding_name.clone(), value.clone());
                             // Sync module binding to MODULE_GLOBALS so functions can access it

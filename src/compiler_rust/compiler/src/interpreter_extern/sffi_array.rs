@@ -8,9 +8,9 @@ use simple_runtime::value::RuntimeValue;
 
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{
-    rt_array_clear, rt_array_extend_i64, rt_array_free, rt_array_free_deep, rt_array_get,
-    rt_array_len, rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
-    rt_bytes_u8_set, rt_typed_bytes_u8_push, rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set,
+    rt_array_clear, rt_array_extend_i64, rt_array_free, rt_array_free_deep, rt_array_get, rt_array_len, rt_array_new,
+    rt_array_pop, rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set,
+    rt_typed_bytes_u8_push, rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set,
     rt_typed_words_u32_unchecked, rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
 };
 
@@ -765,8 +765,8 @@ pub fn rt_array_extend_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        interpreter_byte_at, rt_array_concat_fn, rt_array_free_fn, rt_array_len_safe_fn,
-        rt_bytes_u32_le_at_fn, rt_bytes_u64_le_at_fn, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn,
+        interpreter_byte_at, rt_array_concat_fn, rt_array_free_fn, rt_array_len_safe_fn, rt_bytes_u32_le_at_fn,
+        rt_bytes_u64_le_at_fn, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn,
     };
     use crate::value::Value;
     use simple_runtime::value::heap::is_registered_heap_ptr;

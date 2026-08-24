@@ -966,11 +966,7 @@ pub fn compile_instruction<M: Module>(
                         vtable_data_id = Some(
                             ctx.module
                                 .declare_data(symbol, Linkage::Import, false, false)
-                                .map_err(|e| {
-                                    format!(
-                                        "failed to declare imported vtable data `{symbol}`: {e}"
-                                    )
-                                })?,
+                                .map_err(|e| format!("failed to declare imported vtable data `{symbol}`: {e}"))?,
                         );
                     }
                 }
@@ -1015,13 +1011,7 @@ pub fn compile_instruction<M: Module>(
             // on `vtable_type_ids`); field access must apply the identical shift or
             // it reads the vtable slot as field 0 (a truncated pointer, not the
             // field). Keyed on the same authoritative set so the two never disagree.
-            let off = effective_field_offset(
-                ctx,
-                *object,
-                owner_name.as_deref(),
-                *owner_has_vtable,
-                *byte_offset,
-            );
+            let off = effective_field_offset(ctx, *object, owner_name.as_deref(), *owner_has_vtable, *byte_offset);
             compile_field_get(ctx, builder, *dest, *object, off as usize, *field_type)?;
         }
 
@@ -1033,13 +1023,7 @@ pub fn compile_instruction<M: Module>(
             field_type,
             value,
         } => {
-            let off = effective_field_offset(
-                ctx,
-                *object,
-                owner_name.as_deref(),
-                *owner_has_vtable,
-                *byte_offset,
-            );
+            let off = effective_field_offset(ctx, *object, owner_name.as_deref(), *owner_has_vtable, *byte_offset);
             compile_field_set(ctx, builder, *object, off as usize, *field_type, *value)?;
         }
 

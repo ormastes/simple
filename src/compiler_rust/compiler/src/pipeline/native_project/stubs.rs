@@ -300,8 +300,7 @@ fn check_fabricated_stub_ratchet(project_root: &Path, output: &Path, fabricated:
     let entry_key = fabricated_stub_entry_key(output);
     let baseline_path = fabricated_stub_baseline_path(project_root);
     let existing = std::fs::read_to_string(&baseline_path).unwrap_or_default();
-    let rows = parse_fabricated_stub_baseline(&existing)
-        .map_err(|e| format!("{} ({})", e, baseline_path.display()))?;
+    let rows = parse_fabricated_stub_baseline(&existing).map_err(|e| format!("{} ({})", e, baseline_path.display()))?;
     let entry_baselined = rows.iter().any(|(k, _)| k == &entry_key);
     let (known, new_syms) = partition_fabricated_against_baseline(&rows, &entry_key, fabricated);
 
@@ -431,10 +430,7 @@ pub(crate) fn simple_module_symbol_tail(sym: &str) -> Option<&str> {
 /// Low false positive by construction: a dangling `lib__A__f` reference is a
 /// defect in every case (it can only ever become a fabricated nil stub), and the
 /// presence of a live `lib__B__f` in the same link names the module it moved to.
-fn stale_module_move_report(
-    needs_stub: &[String],
-    defined: &std::collections::HashSet<String>,
-) -> Option<String> {
+fn stale_module_move_report(needs_stub: &[String], defined: &std::collections::HashSet<String>) -> Option<String> {
     use std::collections::HashMap;
 
     // tail -> defined mangled symbols sharing that bare function name.
@@ -765,26 +761,23 @@ pub(crate) fn generate_stub_object_freestanding(
     }
     if compat_symbols.contains("rt_unwrap_or_self") {
         code.push_str(
-            "__stub_i64 __stub_compat_rt_unwrap_or_self(__stub_i64 val) __asm__(\"rt_unwrap_or_self\");\n\
+            "__stub_i64 rt_enum_id(__stub_i64 val);\n\
+             __stub_i64 rt_enum_discriminant(__stub_i64 val);\n\
+             __stub_i64 rt_enum_payload(__stub_i64 val);\n\
+             __stub_i64 __stub_compat_rt_unwrap_or_self(__stub_i64 val) __asm__(\"rt_unwrap_or_self\");\n\
              __stub_i64 __stub_compat_rt_unwrap_or_self(__stub_i64 val) {\n\
-                 if (val == 3) return 3;\n\
-                 if ((((unsigned long long)val) & 0x7ULL) != 0x1ULL) return val;\n\
-                 __stub_i64* p = (__stub_i64*)((((unsigned long long)val) & ~0x7ULL));\n\
-                 if (!p) return val;\n\
-                 if (((unsigned int)p[0]) != 7U) return val;\n\
-                 return p[2] == 3 ? val : p[2];\n\
+                 if (rt_enum_id(val) != 1) return val;\n\
+                 return rt_enum_discriminant(val) >= 0 ? rt_enum_payload(val) : val;\n\
              }\n\n",
         );
     }
     if compat_symbols.contains("rt_is_none") || compat_symbols.contains("rt_is_some") {
         code.push_str(
-            "static __stub_i64 __stub_compat_rt_is_none_value(__stub_i64 val) {\n\
+            "__stub_i64 rt_enum_id(__stub_i64 val);\n\
+             __stub_i64 rt_enum_discriminant(__stub_i64 val);\n\
+             static __stub_i64 __stub_compat_rt_is_none_value(__stub_i64 val) {\n\
                  if (val == 3) return 1;\n\
-                 if ((((unsigned long long)val) & 0x7ULL) != 0x1ULL) return 0;\n\
-                 __stub_i64* p = (__stub_i64*)((((unsigned long long)val) & ~0x7ULL));\n\
-                 if (!p) return 0;\n\
-                 if (((unsigned int)p[0]) != 7U) return 0;\n\
-                 return p[2] == 3 ? 1 : 0;\n\
+                 return rt_enum_id(val) == 1 && rt_enum_discriminant(val) == 1;\n\
              }\n\n",
         );
     }
@@ -1028,7 +1021,13 @@ pub(crate) fn generate_stub_object(
         .filter(|s| !is_runtime_optional_symbol(s))
         .cloned()
         .collect();
-    if !undefined_runtime.is_empty() && !stub_missing_runtime {
+    // An object-wide nm scan also sees references from functions that the
+    // strict link's section GC will discard.  In strict mode defer the verdict
+    // to that authoritative link; it still rejects every live missing symbol.
+    // Non-strict links keep this preflight because their platform flags may
+    // deliberately tolerate unresolved symbols.
+    let strict_final_link = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
+    if !undefined_runtime.is_empty() && !stub_missing_runtime && !strict_final_link {
         let names = undefined_runtime.join(", ");
         if std::env::var(ALLOW_UNRESOLVED_RUNTIME_ENV).as_deref() == Ok("1") {
             eprintln!(
@@ -1482,11 +1481,7 @@ mod tests {
         assert!(report.contains("stale object cache"), "report names the cause");
 
         // No sibling under a different prefix -> not this class, stays quiet.
-        assert!(stale_module_move_report(
-            &["lib__common__text__genuinely_absent".to_string()],
-            &defined
-        )
-        .is_none());
+        assert!(stale_module_move_report(&["lib__common__text__genuinely_absent".to_string()], &defined).is_none());
 
         // `rt_*` externs are a different channel and must not be disturbed.
         assert!(simple_module_symbol_tail("rt_array_copy").is_none());
@@ -1498,10 +1493,7 @@ mod tests {
 
         // Tail extraction takes everything after the LAST separator.
         assert_eq!(simple_module_symbol_tail(live), Some("skip_wrap_spaces"));
-        assert_eq!(
-            simple_module_symbol_tail("os__kernel__mm__map_page"),
-            Some("map_page")
-        );
+        assert_eq!(simple_module_symbol_tail("os__kernel__mm__map_page"), Some("map_page"));
     }
 
     #[test]
@@ -1629,8 +1621,7 @@ mod tests {
     #[test]
     fn baseline_rows_are_scoped_per_entry() {
         let rows = parse_fabricated_stub_baseline("other.elf rt_known\n").unwrap();
-        let (known, new_syms) =
-            partition_fabricated_against_baseline(&rows, "kernel.elf", &["rt_known".to_string()]);
+        let (known, new_syms) = partition_fabricated_against_baseline(&rows, "kernel.elf", &["rt_known".to_string()]);
         assert!(known.is_empty());
         assert_eq!(new_syms, vec!["rt_known".to_string()]);
     }
@@ -1665,10 +1656,7 @@ mod tests {
         // and the identical build with only known symbols must pass. This is
         // the vacuity check for the gate -- the pure helpers are covered
         // above, but only this function decides pass/fail.
-        let dir = std::env::temp_dir().join(format!(
-            "fabricated_ratchet_fire_test_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("fabricated_ratchet_fire_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let baseline = dir.join("baseline.sdn");
         std::fs::write(&baseline, "kernel.elf rt_known\n").unwrap();

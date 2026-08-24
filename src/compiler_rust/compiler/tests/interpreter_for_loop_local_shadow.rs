@@ -69,5 +69,9 @@ fn for_loop_variable_does_not_publish_into_the_module_global() {
 #[test]
 fn nested_for_loops_keep_their_own_bindings() {
     let main = "use pkg.lib.*\n\nfn main() -> i32:\n    var acc = \"\"\n    for name in \"a,b\".split(\",\"):\n        for name2 in \"1,2\".split(\",\"):\n            touch(\"x\", 1, 1)\n            acc = acc + name + name2\n    if acc != \"a1a2b1b2\":\n        return 1\n    return 0\n";
-    assert_eq!(run_pkg_program(LIB, main), Ok(0), "nested loop bindings must not alias globals");
+    assert_eq!(
+        run_pkg_program(LIB, main),
+        Ok(0),
+        "nested loop bindings must not alias globals"
+    );
 }

@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use simple_parser::ast::{AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, ImportTarget, Node, Type};
+use simple_parser::ast::{
+    AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, ImportTarget, Node, Type,
+};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{strict_mem_enabled, Env, Value};
 use super::core_types::{
@@ -748,7 +750,7 @@ pub(crate) fn exec_assignment(
                                 if let Some(v) = env.get(name) {
                                     cell.borrow_mut().insert(name.clone(), v.clone());
                                 }
-                                });
+                            });
                             return Ok(Control::Next);
                         }
                     }
@@ -781,7 +783,7 @@ pub(crate) fn exec_assignment(
                                     if let Some(v) = env.get(name) {
                                         cell.borrow_mut().insert(name.clone(), v.clone());
                                     }
-                                    });
+                                });
                                 return Ok(Control::Next);
                             }
                             Some(rhs_val) => {
@@ -812,7 +814,7 @@ pub(crate) fn exec_assignment(
                                     if let Some(v) = env.get(name) {
                                         cell.borrow_mut().insert(name.clone(), v.clone());
                                     }
-                                    });
+                                });
                                 return Ok(Control::Next);
                             }
                         }
@@ -872,7 +874,7 @@ pub(crate) fn exec_assignment(
                         return;
                     }
                     cell.borrow_mut().insert(name.clone(), env.get(name).unwrap().clone());
-                    });
+                });
             }
         }
         Ok(Control::Next)
@@ -3071,7 +3073,10 @@ mod nested_assignment_target_tests {
         let mut env = Env::new();
         let row = obj("Row", vec![("cols", Value::array(vec![Value::Int(0), Value::Int(0)]))]);
         env.insert("s".to_string(), obj("S", vec![("rows", Value::array(vec![row]))]));
-        let target = index(field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"), Expr::Integer(1));
+        let target = index(
+            field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"),
+            Expr::Integer(1),
+        );
         exec(&assign(target, Expr::Integer(42)), &mut env).expect("nested assignment must be accepted");
         assert_eq!(read(&env, "s", &["rows", "0", "cols", "1"]), Value::Int(42));
         assert_eq!(
@@ -3120,7 +3125,10 @@ mod nested_assignment_target_tests {
         let alias = read(&env, "s", &["rows"]);
         env.insert("alias".to_string(), alias);
 
-        let target = index(field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"), Expr::Integer(1));
+        let target = index(
+            field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"),
+            Expr::Integer(1),
+        );
         exec(&assign(target, Expr::Integer(42)), &mut env).expect("nested assignment must be accepted");
 
         assert_eq!(read(&env, "s", &["rows", "0", "cols", "1"]), Value::Int(42));
@@ -3145,7 +3153,10 @@ mod nested_assignment_target_tests {
             Expr::Integer(0),
         );
         let err = exec(&assign(target, Expr::Integer(1)), &mut env);
-        assert!(err.is_err(), "a call-result index target is not a place and must be an error");
+        assert!(
+            err.is_err(),
+            "a call-result index target is not a place and must be an error"
+        );
     }
 }
 
@@ -3166,16 +3177,25 @@ mod indexed_field_receiver_tests {
         for (k, v) in fields {
             map.insert(k.to_string(), v);
         }
-        Value::Object { class: class.to_string(), fields: Arc::new(map) }
+        Value::Object {
+            class: class.to_string(),
+            fields: Arc::new(map),
+        }
     }
     fn ident(name: &str) -> Expr {
         Expr::Identifier(name.to_string())
     }
     fn field(recv: Expr, name: &str) -> Expr {
-        Expr::FieldAccess { receiver: Box::new(recv), field: name.to_string() }
+        Expr::FieldAccess {
+            receiver: Box::new(recv),
+            field: name.to_string(),
+        }
     }
     fn index(recv: Expr, i: Expr) -> Expr {
-        Expr::Index { receiver: Box::new(recv), index: Box::new(i) }
+        Expr::Index {
+            receiver: Box::new(recv),
+            index: Box::new(i),
+        }
     }
     fn exec(target: Expr, value: Expr, env: &mut Env) -> Result<Control, CompileError> {
         let stmt = simple_parser::ast::AssignmentStmt {
@@ -3234,10 +3254,7 @@ mod indexed_field_receiver_tests {
     fn field_under_index_of_index_assignment_lands() {
         let mut env = Env::new();
         let mk = |n: i64| obj("Cell", vec![("n", Value::Int(n))]);
-        env.insert(
-            "grid".to_string(),
-            Value::array(vec![Value::array(vec![mk(0), mk(0)])]),
-        );
+        env.insert("grid".to_string(), Value::array(vec![Value::array(vec![mk(0), mk(0)])]));
         exec(
             field(index(index(ident("grid"), Expr::Integer(0)), Expr::Integer(1)), "n"),
             Expr::Integer(3),
@@ -3253,10 +3270,7 @@ mod indexed_field_receiver_tests {
     fn aliased_intermediate_still_copies_on_write() {
         let mut env = Env::new();
         let mk = |n: i64| obj("Row", vec![("n", Value::Int(n))]);
-        env.insert(
-            "s".to_string(),
-            obj("S", vec![("rows", Value::array(vec![mk(0)]))]),
-        );
+        env.insert("s".to_string(), obj("S", vec![("rows", Value::array(vec![mk(0)]))]));
         let alias = read(&env, "s", &["rows"]);
         env.insert("alias".to_string(), alias);
         exec(

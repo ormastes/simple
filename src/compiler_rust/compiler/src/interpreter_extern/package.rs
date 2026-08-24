@@ -30,12 +30,7 @@ extern "C" {
         dest_dir_len: usize,
     ) -> i32;
     fn rt_package_file_size(file_path: *const u8, file_path_len: usize) -> i64;
-    fn rt_package_copy_file(
-        src_path: *const u8,
-        src_path_len: usize,
-        dst_path: *const u8,
-        dst_path_len: usize,
-    ) -> i32;
+    fn rt_package_copy_file(src_path: *const u8, src_path_len: usize, dst_path: *const u8, dst_path_len: usize) -> i32;
     fn rt_package_mkdir_all(dir_path: *const u8, dir_path_len: usize) -> i32;
     fn rt_package_remove_dir_all(dir_path: *const u8, dir_path_len: usize) -> i32;
     fn rt_package_create_symlink(

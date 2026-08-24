@@ -72,7 +72,11 @@ fn time_pushes(pushes: usize) -> Duration {
     let start = Instant::now();
     let result = run_program(&program(pushes));
     let elapsed = start.elapsed();
-    assert_eq!(result, Ok(0), "program with {pushes} pushes must run and keep its contents");
+    assert_eq!(
+        result,
+        Ok(0),
+        "program with {pushes} pushes must run and keep its contents"
+    );
     elapsed
 }
 
@@ -87,11 +91,17 @@ fn global_array_push_in_a_function_does_not_clone_per_frame() {
     let calls = perf_counters::ARR_MUT_CALLS.load(Ordering::Relaxed) - before_calls;
     let elems = perf_counters::ARR_MUT_COW_ELEMS_CLONED.load(Ordering::Relaxed) - before_clones;
     eprintln!("[global-push] {n} allocs: in-place calls={calls} cow-elements-cloned={elems}");
-    assert!(calls >= 2 * n as u64, "the in-place path must handle every push (got {calls})");
+    assert!(
+        calls >= 2 * n as u64,
+        "the in-place path must handle every push (got {calls})"
+    );
     // Pre-fix this is ~n^2 (two pools x n frames x growing length = ~4M).
     // A handful of element copies from one-off promotions is fine; a per-frame
     // deep copy is not.
-    assert!(elems < 10 * n as u64, "global pushes deep-copied {elems} elements for {n} allocs (quadratic)");
+    assert!(
+        elems < 10 * n as u64,
+        "global pushes deep-copied {elems} elements for {n} allocs (quadratic)"
+    );
 }
 
 #[test]
@@ -101,8 +111,13 @@ fn global_array_push_scales_linearly() {
     let small = time_pushes(2_000);
     let large = time_pushes(8_000);
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.001);
-    eprintln!("[global-push] 2000 allocs {small:?}, 8000 allocs {large:?}, ratio {ratio:.2} (linear ~4, quadratic ~16)");
-    assert!(ratio < 9.0, "global array push from a function is super-linear: x4 allocs cost x{ratio:.1}");
+    eprintln!(
+        "[global-push] 2000 allocs {small:?}, 8000 allocs {large:?}, ratio {ratio:.2} (linear ~4, quadratic ~16)"
+    );
+    assert!(
+        ratio < 9.0,
+        "global array push from a function is super-linear: x4 allocs cost x{ratio:.1}"
+    );
 }
 
 #[test]

@@ -33,8 +33,7 @@ fn main() {
     // whether memprof's instrumentation survives DCE (empirically it does
     // survive optimization too — see the M4 lane report — but None keeps
     // this probe's signal unambiguous).
-    let backend =
-        LlvmBackend::new_with_opt_level(target, NativeOptimizationLevel::None).expect("create LlvmBackend");
+    let backend = LlvmBackend::new_with_opt_level(target, NativeOptimizationLevel::None).expect("create LlvmBackend");
     backend
         .build_m4_memprof_probe_function("heap_touch")
         .expect("build M4 memprof probe function");

@@ -147,7 +147,11 @@ pub(crate) fn compile_builtin_method<M: Module>(
         // two compiled a given call decided whether it was correct.
         // See doc/08_tracking/bug/jit_substring_chained_to_int_returns_pointer_2026-08-04.md
         if from_ty == TypeId::STRING && (to_is_int || matches!(to_ty, TypeId::F32 | TypeId::F64)) {
-            let helper = if to_is_int { "rt_string_to_int" } else { "rt_string_to_float" };
+            let helper = if to_is_int {
+                "rt_string_to_int"
+            } else {
+                "rt_string_to_float"
+            };
             let parsed = call_runtime_1(ctx, builder, helper, receiver_val);
             let converted = if to_is_int {
                 match to_ty {

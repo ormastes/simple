@@ -67,10 +67,27 @@ fn array_param_has_scalar_elements(param: &Parameter) -> bool {
     };
     matches!(
         name.as_str(),
-        "text" | "str" | "String" | "bool" | "char" | "int" | "float"
-            | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
-            | "f32" | "f64"
+        "text"
+            | "str"
+            | "String"
+            | "bool"
+            | "char"
+            | "int"
+            | "float"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
     )
 }
 
@@ -456,8 +473,7 @@ pub(crate) fn bind_args_with_injected(
                     // Built HERE, on the error path only: hoisted out of the
                     // loop it allocated one Vec plus one String per parameter
                     // on EVERY call, for a diagnostic that is off by default.
-                    let all_param_names: Vec<&str> =
-                        params_to_bind.iter().map(|p| p.name.as_str()).collect();
+                    let all_param_names: Vec<&str> = params_to_bind.iter().map(|p| p.name.as_str()).collect();
                     eprintln!(
                         "[DEBUG arg_binding TMP] missing param '{}'; full param list={:?}; args given={}",
                         param.name,
@@ -637,19 +653,30 @@ mod scalar_array_param_tests {
     // nested array, and an unannotated parameter must all keep it.
     #[test]
     fn scalar_element_arrays_skip_the_scan_everything_else_keeps_it() {
-        for scalar in ["text", "str", "String", "bool", "char", "i64", "u8", "f64", "int", "float"] {
+        for scalar in [
+            "text", "str", "String", "bool", "char", "i64", "u8", "f64", "int", "float",
+        ] {
             assert!(
                 array_param_has_scalar_elements(&param("xs", Some(array_of(Type::Simple(scalar.into()))))),
                 "[{scalar}] must skip"
             );
         }
-        assert!(!array_param_has_scalar_elements(&param("xs", Some(array_of(Type::Simple("Point".into()))))));
-        assert!(!array_param_has_scalar_elements(&param("xs", Some(array_of(Type::Simple("Any".into()))))));
+        assert!(!array_param_has_scalar_elements(&param(
+            "xs",
+            Some(array_of(Type::Simple("Point".into())))
+        )));
+        assert!(!array_param_has_scalar_elements(&param(
+            "xs",
+            Some(array_of(Type::Simple("Any".into())))
+        )));
         assert!(!array_param_has_scalar_elements(&param(
             "xs",
             Some(array_of(array_of(Type::Simple("text".into()))))
         )));
-        assert!(!array_param_has_scalar_elements(&param("xs", Some(Type::Simple("text".into())))));
+        assert!(!array_param_has_scalar_elements(&param(
+            "xs",
+            Some(Type::Simple("text".into()))
+        )));
         assert!(!array_param_has_scalar_elements(&param("xs", None)));
     }
 
@@ -680,7 +707,10 @@ mod scalar_array_param_tests {
         };
         classes.insert("Point".to_string(), Arc::new(point));
         let fields = Arc::new(HashMap::from([("x".to_string(), Value::Int(1))]));
-        let pt = Value::Object { class: "Point".to_string(), fields: Arc::clone(&fields) };
+        let pt = Value::Object {
+            class: "Point".to_string(),
+            fields: Arc::clone(&fields),
+        };
         let params = vec![
             param("chars", Some(array_of(Type::Simple("text".into())))),
             param("pts", Some(array_of(Type::Simple("Point".into())))),
@@ -767,5 +797,11 @@ pub(crate) fn reorder_named_arg_values(
     if filled != arg_vals.len() {
         return None;
     }
-    Some(slots.into_iter().take(filled).map(|s| s.expect("dense prefix")).collect())
+    Some(
+        slots
+            .into_iter()
+            .take(filled)
+            .map(|s| s.expect("dense prefix"))
+            .collect(),
+    )
 }

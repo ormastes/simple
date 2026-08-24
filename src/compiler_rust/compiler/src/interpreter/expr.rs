@@ -16,7 +16,7 @@ use super::{
 };
 
 /// Helper to unwrap Option or Result values, returning Some(inner_value) or None
-fn try_unwrap_option_or_result(val: &Value) -> Option<Value> {
+pub(super) fn try_unwrap_option_or_result(val: &Value) -> Option<Value> {
     match val {
         Value::Enum {
             ref enum_name,

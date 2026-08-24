@@ -1040,7 +1040,10 @@ mod tests {
         // Oversized byte buffer so `byte_shift + 32` bytes always fits, and
         // deliberately offset so the resulting pointer is NOT 4-byte aligned
         // (byte_shift in 1..=3).
-        assert!(byte_shift >= 1 && byte_shift <= 3, "byte_shift must produce a misaligned i32 pointer");
+        assert!(
+            byte_shift >= 1 && byte_shift <= 3,
+            "byte_shift must produce a misaligned i32 pointer"
+        );
         let mut buf = vec![0_u8; byte_shift + 32 + 4];
         unsafe {
             let base = buf.as_mut_ptr().add(byte_shift) as *mut i32;

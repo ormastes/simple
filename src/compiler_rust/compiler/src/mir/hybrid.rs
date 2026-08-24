@@ -229,9 +229,7 @@ mod tests {
         let module = parser.parse().expect("parse repro source");
         let statuses = analyze_module(&module.items, CompilabilityMode::HybridJit);
 
-        let ret_built_status = statuses
-            .get("ret_built")
-            .expect("ret_built should be analyzed");
+        let ret_built_status = statuses.get("ret_built").expect("ret_built should be analyzed");
         assert!(
             ret_built_status.is_compilable(),
             "ret_built (Dict-returning, Dict-literal body) must be classified compilable \
@@ -297,9 +295,7 @@ mod tests {
         let module = parser.parse().expect("parse repro source");
         let statuses = analyze_module(&module.items, CompilabilityMode::HybridJit);
 
-        let status = statuses
-            .get("ret_via_try")
-            .expect("ret_via_try should be analyzed");
+        let status = statuses.get("ret_via_try").expect("ret_via_try should be analyzed");
         assert!(
             !status.is_compilable(),
             "ret_via_try (Dict-returning, TryOperator body) must still require the \

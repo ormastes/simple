@@ -15,51 +15,115 @@ use std::sync::Arc;
 pub const MAX_PRESENT_DAMAGE_RECTS: usize = 1024;
 
 #[derive(Clone)]
-struct PresentDamageRecord { revision: i64, rects: Vec<[u32; 4]> }
+struct PresentDamageRecord {
+    revision: i64,
+    rects: Vec<[u32; 4]>,
+}
 
-fn retained_damage_regions(history: &[PresentDamageRecord], prior: i64, current: i64, width: u32, height: u32) -> Option<Vec<[u32; 4]>> {
-    if prior < 0 { return None; }
+fn retained_damage_regions(
+    history: &[PresentDamageRecord],
+    prior: i64,
+    current: i64,
+    width: u32,
+    height: u32,
+) -> Option<Vec<[u32; 4]>> {
+    if prior < 0 {
+        return None;
+    }
     let start = history.iter().position(|record| record.revision == prior)?;
     let end = history.iter().rposition(|record| record.revision == current)?;
-    if start >= end { return None; }
+    if start >= end {
+        return None;
+    }
     let records = &history[start + 1..=end];
-    if records.iter().any(|record| record.rects.is_empty()) { return None; }
+    if records.iter().any(|record| record.rects.is_empty()) {
+        return None;
+    }
     let mut regions = Vec::new();
     for record in records {
         for &[x, y, w, h] in &record.rects {
-            if w == 0 || h == 0 || x >= width || y >= height || w > width - x || h > height - y || regions.len() >= MAX_PRESENT_DAMAGE_RECTS { return None; }
+            if w == 0
+                || h == 0
+                || x >= width
+                || y >= height
+                || w > width - x
+                || h > height - y
+                || regions.len() >= MAX_PRESENT_DAMAGE_RECTS
+            {
+                return None;
+            }
             let rect = [x, y, w, h];
-            if !regions.contains(&rect) { regions.push(rect); }
+            if !regions.contains(&rect) {
+                regions.push(rect);
+            }
         }
     }
-    if regions.is_empty() { None } else { Some(regions) }
+    if regions.is_empty() {
+        None
+    } else {
+        Some(regions)
+    }
 }
 
-fn retained_damage_regions_with_candidate(history: &[PresentDamageRecord], prior: i64, current: i64, damage: &[[u32; 4]], width: u32, height: u32) -> Option<Vec<[u32; 4]>> {
+fn retained_damage_regions_with_candidate(
+    history: &[PresentDamageRecord],
+    prior: i64,
+    current: i64,
+    damage: &[[u32; 4]],
+    width: u32,
+    height: u32,
+) -> Option<Vec<[u32; 4]>> {
     if history.last().map(|record| record.revision) == Some(current) {
         return retained_damage_regions(history, prior, current, width, height);
     }
-    if prior < 0 { return None; }
+    if prior < 0 {
+        return None;
+    }
     let start = history.iter().position(|record| record.revision == prior)?;
     // Appending a new revision to a full history evicts index zero before the
     // next frame can consume it. Model that prospective eviction without
     // cloning the 128-record history.
-    if history.len() >= 128 && start == 0 { return None; }
+    if history.len() >= 128 && start == 0 {
+        return None;
+    }
     let mut regions = Vec::new();
     for record in &history[start + 1..] {
-        if record.rects.is_empty() { return None; }
+        if record.rects.is_empty() {
+            return None;
+        }
         for &rect in &record.rects {
-            if regions.len() >= MAX_PRESENT_DAMAGE_RECTS { return None; }
-            if !regions.contains(&rect) { regions.push(rect); }
+            if regions.len() >= MAX_PRESENT_DAMAGE_RECTS {
+                return None;
+            }
+            if !regions.contains(&rect) {
+                regions.push(rect);
+            }
         }
     }
-    if damage.is_empty() { return None; }
-    for &[x, y, w, h] in damage {
-        if w == 0 || h == 0 || x >= width || y >= height || w > width - x || h > height - y || regions.len() >= MAX_PRESENT_DAMAGE_RECTS { return None; }
-        let rect = [x, y, w, h];
-        if !regions.contains(&rect) { regions.push(rect); }
+    if damage.is_empty() {
+        return None;
     }
-    if regions.is_empty() { None } else { Some(regions) }
+    for &[x, y, w, h] in damage {
+        if w == 0
+            || h == 0
+            || x >= width
+            || y >= height
+            || w > width - x
+            || h > height - y
+            || regions.len() >= MAX_PRESENT_DAMAGE_RECTS
+        {
+            return None;
+        }
+        let rect = [x, y, w, h];
+        if !regions.contains(&rect) {
+            regions.push(rect);
+        }
+    }
+    if regions.is_empty() {
+        None
+    } else {
+        Some(regions)
+    }
 }
 
 fn invalidate_present_history(image_revisions: &mut [i64], history: &mut Vec<PresentDamageRecord>) {
@@ -105,14 +169,22 @@ impl VulkanSwapchain {
 
         // Query surface capabilities
         let capabilities = surface.get_capabilities(physical_device)?;
-        if !capabilities.supported_usage_flags.contains(vk::ImageUsageFlags::TRANSFER_DST) {
-            return Err(VulkanError::SurfaceError("Swapchain surface does not support transfer-destination images".to_string()));
+        if !capabilities
+            .supported_usage_flags
+            .contains(vk::ImageUsageFlags::TRANSFER_DST)
+        {
+            return Err(VulkanError::SurfaceError(
+                "Swapchain surface does not support transfer-destination images".to_string(),
+            ));
         }
 
         // Select format (prefer HDR if requested)
         let format = surface.select_format(physical_device, prefer_hdr)?;
         if format.format != vk::Format::B8G8R8A8_UNORM && format.format != vk::Format::B8G8R8A8_SRGB {
-            return Err(VulkanError::SurfaceError(format!("Engine2D presentation requires BGRA8 swapchain format, got {:?}", format.format)));
+            return Err(VulkanError::SurfaceError(format!(
+                "Engine2D presentation requires BGRA8 swapchain format, got {:?}",
+                format.format
+            )));
         }
 
         // Select present mode (mailbox preferred, fifo fallback)
@@ -459,36 +531,67 @@ impl VulkanSwapchain {
         self.present_mode
     }
 
-    pub fn last_present_copy_bytes(&self) -> u64 { *self.last_present_copy_bytes.lock() }
-    pub fn last_present_copy_rects(&self) -> u64 { *self.last_present_copy_rects.lock() }
+    pub fn last_present_copy_bytes(&self) -> u64 {
+        *self.last_present_copy_bytes.lock()
+    }
+    pub fn last_present_copy_rects(&self) -> u64 {
+        *self.last_present_copy_rects.lock()
+    }
 
     /// Copy a tightly packed ARGB/BGRA storage buffer into an acquired image
     /// and complete presentation. Prior writes to `source` must be fenced.
-    pub fn copy_buffer_and_present(self: &Arc<Self>, source: &VulkanBuffer, width: u32, height: u32, content_revision: i64) -> VulkanResult<(u32, bool)> {
+    pub fn copy_buffer_and_present(
+        self: &Arc<Self>,
+        source: &VulkanBuffer,
+        width: u32,
+        height: u32,
+        content_revision: i64,
+    ) -> VulkanResult<(u32, bool)> {
         self.copy_buffer_regions_and_present(source, width, height, content_revision, &[])
             .map(|(image, suboptimal, _partial)| (image, suboptimal))
     }
 
-    pub fn copy_buffer_regions_and_present(self: &Arc<Self>, source: &VulkanBuffer, width: u32, height: u32, content_revision: i64, damage: &[[u32; 4]]) -> VulkanResult<(u32, bool, bool)> {
+    pub fn copy_buffer_regions_and_present(
+        self: &Arc<Self>,
+        source: &VulkanBuffer,
+        width: u32,
+        height: u32,
+        content_revision: i64,
+        damage: &[[u32; 4]],
+    ) -> VulkanResult<(u32, bool, bool)> {
         if width != self.extent.width || height != self.extent.height {
-            return Err(VulkanError::SurfaceError(format!("Present buffer extent {}x{} does not match swapchain {}x{}", width, height, self.extent.width, self.extent.height)));
+            return Err(VulkanError::SurfaceError(format!(
+                "Present buffer extent {}x{} does not match swapchain {}x{}",
+                width, height, self.extent.width, self.extent.height
+            )));
         }
-        let expected = u64::from(width).checked_mul(u64::from(height)).and_then(|n| n.checked_mul(4)).ok_or(VulkanError::BufferTooSmall)?;
-        if source.size() < expected { return Err(VulkanError::BufferTooSmall); }
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(VulkanError::BufferTooSmall)?;
+        if source.size() < expected {
+            return Err(VulkanError::BufferTooSmall);
+        }
         for &[x, y, w, h] in damage {
-            if w == 0 || h == 0 || x >= width || y >= height || w > width - x || h > height - y { return Err(VulkanError::BufferTooSmall); }
+            if w == 0 || h == 0 || x >= width || y >= height || w > width - x || h > height - y {
+                return Err(VulkanError::BufferTooSmall);
+            }
         }
         let acquire_fence = self.acquire_fence.lock();
         acquire_fence.reset()?;
         let (image_index, acquire_suboptimal) = unsafe {
-            self.swapchain_loader.acquire_next_image(self.swapchain, u64::MAX, vk::Semaphore::null(), acquire_fence.handle())
+            self.swapchain_loader
+                .acquire_next_image(self.swapchain, u64::MAX, vk::Semaphore::null(), acquire_fence.handle())
                 .map_err(|error| match error {
                     vk::Result::ERROR_OUT_OF_DATE_KHR => VulkanError::SwapchainOutOfDate,
                     other => VulkanError::SurfaceError(format!("Failed to acquire image: {:?}", other)),
                 })?
         };
         acquire_fence.wait(u64::MAX)?;
-        let image = *self.images.get(image_index as usize).ok_or(VulkanError::InvalidHandle)?;
+        let image = *self
+            .images
+            .get(image_index as usize)
+            .ok_or(VulkanError::InvalidHandle)?;
         let prior_revision = self.image_revision.lock()[image_index as usize];
         if prior_revision == content_revision && damage.is_empty() {
             *self.last_present_copy_bytes.lock() = 0;
@@ -503,43 +606,106 @@ impl VulkanSwapchain {
             return Ok((image_index, acquire_suboptimal || present_suboptimal, false));
         }
         let copy_regions = retained_damage_regions_with_candidate(
-            &self.damage_history.lock(), prior_revision, content_revision,
-            damage, width, height);
+            &self.damage_history.lock(),
+            prior_revision,
+            content_revision,
+            damage,
+            width,
+            height,
+        );
         let was_presented = prior_revision >= 0;
-        let old_layout = if was_presented { vk::ImageLayout::PRESENT_SRC_KHR } else { vk::ImageLayout::UNDEFINED };
+        let old_layout = if was_presented {
+            vk::ImageLayout::PRESENT_SRC_KHR
+        } else {
+            vk::ImageLayout::UNDEFINED
+        };
         let cmd = self.device.begin_transfer_command()?;
-        let range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+        let range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
         let to_transfer = vk::ImageMemoryBarrier::default()
-            .old_layout(old_layout).new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(image).subresource_range(range).src_access_mask(vk::AccessFlags::empty())
+            .old_layout(old_layout)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(range)
+            .src_access_mask(vk::AccessFlags::empty())
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
         unsafe {
-            self.device.handle().cmd_pipeline_barrier(cmd,
-                if was_presented { vk::PipelineStageFlags::BOTTOM_OF_PIPE } else { vk::PipelineStageFlags::TOP_OF_PIPE },
-                vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[to_transfer]);
+            self.device.handle().cmd_pipeline_barrier(
+                cmd,
+                if was_presented {
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE
+                } else {
+                    vk::PipelineStageFlags::TOP_OF_PIPE
+                },
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_transfer],
+            );
             let full = [[0, 0, width, height]];
             let regions = copy_regions.as_deref().unwrap_or(&full);
             for &[x, y, w, h] in regions {
                 let copy = vk::BufferImageCopy::default()
                     .buffer_offset((u64::from(y) * u64::from(width) + u64::from(x)) * 4)
-                    .buffer_row_length(width).buffer_image_height(height)
-                    .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
-                    .image_offset(vk::Offset3D { x: x as i32, y: y as i32, z: 0 })
-                    .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
-                self.device.handle().cmd_copy_buffer_to_image(cmd, source.handle(), image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]);
+                    .buffer_row_length(width)
+                    .buffer_image_height(height)
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .image_offset(vk::Offset3D {
+                        x: x as i32,
+                        y: y as i32,
+                        z: 0,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: w,
+                        height: h,
+                        depth: 1,
+                    });
+                self.device.handle().cmd_copy_buffer_to_image(
+                    cmd,
+                    source.handle(),
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[copy],
+                );
             }
             let to_present = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL).new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(image).subresource_range(range).src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(range)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .dst_access_mask(vk::AccessFlags::empty());
-            self.device.handle().cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[], &[to_present]);
+            self.device.handle().cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_present],
+            );
         }
         self.device.submit_transfer_command(cmd)?;
         if let Some(regions) = copy_regions.as_ref() {
-            *self.last_present_copy_bytes.lock() = regions.iter().map(|rect| u64::from(rect[2]) * u64::from(rect[3]) * 4).sum();
+            *self.last_present_copy_bytes.lock() = regions
+                .iter()
+                .map(|rect| u64::from(rect[2]) * u64::from(rect[3]) * 4)
+                .sum();
             *self.last_present_copy_rects.lock() = regions.len() as u64;
         } else {
             *self.last_present_copy_bytes.lock() = expected;
@@ -558,11 +724,20 @@ impl VulkanSwapchain {
         {
             let mut history = self.damage_history.lock();
             if history.last().map(|record| record.revision) != Some(content_revision) {
-                history.push(PresentDamageRecord { revision: content_revision, rects: damage.to_vec() });
-                if history.len() > 128 { history.remove(0); }
+                history.push(PresentDamageRecord {
+                    revision: content_revision,
+                    rects: damage.to_vec(),
+                });
+                if history.len() > 128 {
+                    history.remove(0);
+                }
             }
         }
-        Ok((image_index, acquire_suboptimal || present_suboptimal, copy_regions.is_some()))
+        Ok((
+            image_index,
+            acquire_suboptimal || present_suboptimal,
+            copy_regions.is_some(),
+        ))
     }
 }
 
@@ -749,16 +924,37 @@ mod tests {
     #[test]
     fn retained_damage_keeps_exact_regions_and_fails_safe() {
         let history = vec![
-            PresentDamageRecord { revision: 10, rects: vec![[1, 2, 3, 4]] },
-            PresentDamageRecord { revision: 20, rects: vec![[20, 30, 5, 6]] },
-            PresentDamageRecord { revision: 35, rects: vec![[8, 9, 2, 2]] },
+            PresentDamageRecord {
+                revision: 10,
+                rects: vec![[1, 2, 3, 4]],
+            },
+            PresentDamageRecord {
+                revision: 20,
+                rects: vec![[20, 30, 5, 6]],
+            },
+            PresentDamageRecord {
+                revision: 35,
+                rects: vec![[8, 9, 2, 2]],
+            },
         ];
-        assert_eq!(retained_damage_regions(&history, 10, 35, 100, 80), Some(vec![[20, 30, 5, 6], [8, 9, 2, 2]]));
+        assert_eq!(
+            retained_damage_regions(&history, 10, 35, 100, 80),
+            Some(vec![[20, 30, 5, 6], [8, 9, 2, 2]])
+        );
         assert_eq!(retained_damage_regions(&history, -1, 35, 100, 80), None);
         let full = vec![
-            PresentDamageRecord { revision: 10, rects: vec![[1, 2, 3, 4]] },
-            PresentDamageRecord { revision: 20, rects: vec![] },
-            PresentDamageRecord { revision: 35, rects: vec![[8, 9, 2, 2]] },
+            PresentDamageRecord {
+                revision: 10,
+                rects: vec![[1, 2, 3, 4]],
+            },
+            PresentDamageRecord {
+                revision: 20,
+                rects: vec![],
+            },
+            PresentDamageRecord {
+                revision: 35,
+                rects: vec![[8, 9, 2, 2]],
+            },
         ];
         assert_eq!(retained_damage_regions(&full, 10, 35, 100, 80), None);
         let pending = [[40, 50, 3, 2]];
@@ -771,31 +967,36 @@ mod tests {
 
     #[test]
     fn retained_damage_accepts_the_shared_1024_region_cap() {
-        let many: Vec<[u32; 4]> = (0..MAX_PRESENT_DAMAGE_RECTS as u32)
-            .map(|x| [x, 0, 1, 1])
-            .collect();
+        let many: Vec<[u32; 4]> = (0..MAX_PRESENT_DAMAGE_RECTS as u32).map(|x| [x, 0, 1, 1]).collect();
         let history = vec![
-            PresentDamageRecord { revision: 10, rects: vec![[0, 0, 1, 1]] },
-            PresentDamageRecord { revision: 20, rects: many },
+            PresentDamageRecord {
+                revision: 10,
+                rects: vec![[0, 0, 1, 1]],
+            },
+            PresentDamageRecord {
+                revision: 20,
+                rects: many,
+            },
         ];
-        let regions = retained_damage_regions(
-            &history, 10, 20, (MAX_PRESENT_DAMAGE_RECTS + 1) as u32, 1,
-        ).expect("the shared cap is admissible");
+        let regions = retained_damage_regions(&history, 10, 20, (MAX_PRESENT_DAMAGE_RECTS + 1) as u32, 1)
+            .expect("the shared cap is admissible");
         assert_eq!(regions.len(), MAX_PRESENT_DAMAGE_RECTS);
         assert_eq!(regions.first(), Some(&[0, 0, 1, 1]));
         assert_eq!(regions.last(), Some(&[(MAX_PRESENT_DAMAGE_RECTS - 1) as u32, 0, 1, 1]));
 
-        let overflow: Vec<[u32; 4]> = (0..=MAX_PRESENT_DAMAGE_RECTS as u32)
-            .map(|x| [x, 0, 1, 1])
-            .collect();
+        let overflow: Vec<[u32; 4]> = (0..=MAX_PRESENT_DAMAGE_RECTS as u32).map(|x| [x, 0, 1, 1]).collect();
         let overfull = vec![
-            PresentDamageRecord { revision: 10, rects: vec![[0, 0, 1, 1]] },
-            PresentDamageRecord { revision: 20, rects: overflow },
+            PresentDamageRecord {
+                revision: 10,
+                rects: vec![[0, 0, 1, 1]],
+            },
+            PresentDamageRecord {
+                revision: 20,
+                rects: overflow,
+            },
         ];
         assert_eq!(
-            retained_damage_regions(
-                &overfull, 10, 20, (MAX_PRESENT_DAMAGE_RECTS + 2) as u32, 1,
-            ),
+            retained_damage_regions(&overfull, 10, 20, (MAX_PRESENT_DAMAGE_RECTS + 2) as u32, 1,),
             None,
         );
     }
@@ -804,8 +1005,14 @@ mod tests {
     fn failed_present_invalidates_revision_and_damage_history() {
         let mut revisions = vec![10, 20, 35];
         let mut history = vec![
-            PresentDamageRecord { revision: 10, rects: vec![[1, 2, 3, 4]] },
-            PresentDamageRecord { revision: 20, rects: vec![[5, 6, 7, 8]] },
+            PresentDamageRecord {
+                revision: 10,
+                rects: vec![[1, 2, 3, 4]],
+            },
+            PresentDamageRecord {
+                revision: 20,
+                rects: vec![[5, 6, 7, 8]],
+            },
         ];
         invalidate_present_history(&mut revisions, &mut history);
         assert_eq!(revisions, vec![-1, -1, -1]);
@@ -816,10 +1023,16 @@ mod tests {
     #[test]
     fn candidate_damage_models_full_history_eviction() {
         let history: Vec<PresentDamageRecord> = (0..128)
-            .map(|revision| PresentDamageRecord { revision, rects: vec![[revision as u32, 0, 1, 1]] })
+            .map(|revision| PresentDamageRecord {
+                revision,
+                rects: vec![[revision as u32, 0, 1, 1]],
+            })
             .collect();
         let pending = [[200, 0, 1, 1]];
-        assert_eq!(retained_damage_regions_with_candidate(&history, 0, 128, &pending, 256, 4), None);
+        assert_eq!(
+            retained_damage_regions_with_candidate(&history, 0, 128, &pending, 256, 4),
+            None
+        );
         let retained = retained_damage_regions_with_candidate(&history, 1, 128, &pending, 256, 4);
         assert!(retained.is_some());
         assert_eq!(retained.unwrap().last(), Some(&pending[0]));

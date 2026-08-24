@@ -168,8 +168,7 @@ pub use runtime_profile::profiler::clear_global_profiler;
 pub use security::{
     build_security_gate_map, build_security_inventory, build_security_inventory_for_source, build_security_maps,
     infer_security_coordinate, lower_security_to_aop, sandbox_manifest_for_source, security_metadata_id,
-    security_sdn_merge_violations_sdn,
-    source_security_violations_sdn, source_security_violations_sdn_with_module,
+    security_sdn_merge_violations_sdn, source_security_violations_sdn, source_security_violations_sdn_with_module,
     source_security_violations_sdn_with_modules, SecurityAdvicePlan, SecurityAdviceStep, SecurityAopLowering,
     SecurityCoordinate, SecurityInventory, SecuritySdnConfig, SecuritySourceFile,
 };

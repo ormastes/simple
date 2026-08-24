@@ -352,9 +352,7 @@ mod tests {
         let help = test_help_text();
         assert!(help.contains("--unstable"));
         assert!(help.contains("--no-unstable"));
-        for outcome in [
-            "OK", "ERROR", "CRASHED", "TERMINATED", "TIMEOUT", "NOT_RUN",
-        ] {
+        for outcome in ["OK", "ERROR", "CRASHED", "TERMINATED", "TIMEOUT", "NOT_RUN"] {
             assert!(help.contains(outcome), "help must name outcome {outcome}");
         }
         assert!(help.contains("unverified, not failures"));

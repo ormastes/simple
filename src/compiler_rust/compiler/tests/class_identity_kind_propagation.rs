@@ -319,7 +319,9 @@ fn mutable_struct_receiver_never_emits_aggregate_copy() {
         .find(|f| f.name == "bump" || f.name.ends_with("__bump") || f.name.ends_with(".bump"))
         .expect("fixture must lower SCell.bump into HIR");
     assert!(
-        bump.params.first().is_some_and(|param| param.name == "self" && param.is_mutable()),
+        bump.params
+            .first()
+            .is_some_and(|param| param.name == "self" && param.is_mutable()),
         "a me-method self parameter must remain mutable through HIR lowering: {:?}",
         bump.params
     );

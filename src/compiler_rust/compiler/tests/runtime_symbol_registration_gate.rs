@@ -74,8 +74,7 @@ fn workspace_root() -> PathBuf {
 /// own (intentionally simple) parser is what keeps this test honest about
 /// what the build actually sees.
 fn parse_listed_symbols(path: &Path) -> BTreeSet<String> {
-    let content = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let content = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let mut in_list = false;
     let mut names = BTreeSet::new();
     for line in content.lines() {
@@ -122,8 +121,7 @@ fn collect_emitted_symbols(codegen_dir: &Path) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut files_scanned = 0usize;
     for entry in walk_rs_files(codegen_dir) {
-        let content = fs::read_to_string(&entry)
-            .unwrap_or_else(|e| panic!("read {}: {e}", entry.display()));
+        let content = fs::read_to_string(&entry).unwrap_or_else(|e| panic!("read {}: {e}", entry.display()));
         files_scanned += 1;
         for pat in &patterns {
             for cap in pat.captures_iter(&content) {
@@ -198,10 +196,7 @@ fn every_emitted_runtime_symbol_is_registered_or_allowlisted() {
     // emitted set. If a name in ALLOWED_UNLISTED stops being emitted, or gets
     // added to RUNTIME_SYMBOL_NAMES, the allowlist is stale and should shrink
     // — this keeps the allowlist from silently growing unbounded.
-    let stale: Vec<&&str> = ALLOWED_UNLISTED
-        .iter()
-        .filter(|name| listed.contains(**name))
-        .collect();
+    let stale: Vec<&&str> = ALLOWED_UNLISTED.iter().filter(|name| listed.contains(**name)).collect();
     assert!(
         stale.is_empty(),
         "ALLOWED_UNLISTED name(s) {:?} are now present in RUNTIME_SYMBOL_NAMES — \

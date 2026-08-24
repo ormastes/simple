@@ -124,7 +124,7 @@ impl Lowerer {
                 for (name, ty) in &bindings {
                     ctx.add_local(name.clone(), *ty, mutability);
                 }
-                let mut then_block = self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
+                let mut then_block = self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
                 then_block.extend(self.lower_block(body, ctx)?);
                 for (name, _) in &bindings {
                     ctx.local_map.remove(name);
@@ -316,7 +316,11 @@ impl Lowerer {
                         };
                         self.lifetime_context.register_variable(name, origin);
                         let local_index = ctx.add_local(name.clone(), ty, Mutability::Mutable);
-                        return Ok(vec![HirStmt::Let { local_index, ty, value: Some(value) }]);
+                        return Ok(vec![HirStmt::Let {
+                            local_index,
+                            ty,
+                            value: Some(value),
+                        }]);
                     }
                 }
 
@@ -505,7 +509,7 @@ impl Lowerer {
                     // 5. Generate payload extraction stmts through the same owner
                     // used by match arms, including multi-field array typing.
                     let binding_stmts =
-                        self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
+                        self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
 
                     // 6. Lower then_block with bindings in scope
                     let mut then_block = Vec::new();
@@ -602,8 +606,7 @@ impl Lowerer {
                         // it would silently drop them. No site in the tree combines
                         // the two forms; refuse loudly rather than lose the contract.
                         return Err(LowerError::Unsupported(
-                            "loop invariants are not supported on a `while val <pattern> = ...` loop"
-                                .to_string(),
+                            "loop invariants are not supported on a `while val <pattern> = ...` loop".to_string(),
                         ));
                     }
 
@@ -638,7 +641,7 @@ impl Lowerer {
                     }
 
                     let mut then_block =
-                        self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
+                        self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
                     then_block.extend(self.lower_block(&while_stmt.body, ctx)?);
 
                     for (name, _) in &bindings {
@@ -1181,6 +1184,44 @@ impl Lowerer {
     /// compiled code. Or-patterns (`case Copy(x) | Move(x)`) are normalized to
     /// their first alternative: every alternative must bind the same names,
     /// the same invariant `collect_pattern_bindings` relies on.
+    /// Bind an optional-control-flow identifier to its payload while accepting
+    /// both canonical boxed Option values and the raw migration form.
+    /// Match-arm identifiers intentionally continue to bind their full subject
+    /// through `build_pattern_binding_stmts` below.
+    pub(crate) fn build_if_let_binding_stmts(
+        &mut self,
+        pattern: &Pattern,
+        subject_idx: usize,
+        subject_ty: TypeId,
+        bindings: &[(String, TypeId)],
+        ctx: &mut FunctionContext,
+    ) -> Vec<HirStmt> {
+        if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = pattern {
+            let mut binding_stmts = Vec::new();
+            if bindings.iter().any(|(binding, _)| binding == name) {
+                let Some(&local_index) = ctx.local_map.get(name) else {
+                    return binding_stmts;
+                };
+                binding_stmts.push(HirStmt::Let {
+                    local_index,
+                    ty: subject_ty,
+                    value: Some(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![HirExpr {
+                                kind: HirExprKind::Local(subject_idx),
+                                ty: subject_ty,
+                            }],
+                        },
+                        ty: subject_ty,
+                    }),
+                });
+            }
+            return binding_stmts;
+        }
+        self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, bindings, ctx)
+    }
+
     pub(crate) fn build_pattern_binding_stmts(
         &mut self,
         arm_pattern: &Pattern,
@@ -1221,7 +1262,14 @@ impl Lowerer {
                 kind: HirExprKind::Local(subject_idx),
                 ty: subject_ty,
             };
-            self.bind_sequence(&subject_ref, elements, is_array, &binding_type_map, ctx, &mut binding_stmts);
+            self.bind_sequence(
+                &subject_ref,
+                elements,
+                is_array,
+                &binding_type_map,
+                ctx,
+                &mut binding_stmts,
+            );
             return binding_stmts;
         }
         // Top-level named-field struct destructuring: `case Point { x: 0, y: b }:`.
@@ -1307,10 +1355,8 @@ impl Lowerer {
             // path; a subject KNOWN to be a struct keeps the positional-struct
             // path; an unknown/ANY subject falls back to the variant-name test
             // so closure type degradation cannot re-trigger the miscompile.
-            let subject_is_known_enum =
-                matches!(self.module.types.get(subject_ty), Some(HirType::Enum { .. }));
-            let subject_is_known_struct =
-                matches!(self.module.types.get(subject_ty), Some(HirType::Struct { .. }));
+            let subject_is_known_enum = matches!(self.module.types.get(subject_ty), Some(HirType::Enum { .. }));
+            let subject_is_known_struct = matches!(self.module.types.get(subject_ty), Some(HirType::Struct { .. }));
             let variant_of_some_enum = || {
                 self.global_enum_defs.as_ref().is_some_and(|defs| {
                     defs.values()
@@ -1320,9 +1366,8 @@ impl Lowerer {
                         if variants.iter().any(|(v, _)| v == enum_variant.as_str()))
                 })
             };
-            let struct_reinterpret_ok = enum_name == "_"
-                && !subject_is_known_enum
-                && (subject_is_known_struct || !variant_of_some_enum());
+            let struct_reinterpret_ok =
+                enum_name == "_" && !subject_is_known_enum && (subject_is_known_struct || !variant_of_some_enum());
             let class_struct_fields: Option<Vec<(String, TypeId)>> = if struct_reinterpret_ok {
                 self.module.types.lookup(enum_variant.as_str()).and_then(|tid| {
                     if let Some(HirType::Struct { fields, .. }) = self.module.types.get(tid) {
@@ -1597,8 +1642,7 @@ impl Lowerer {
                         // the named-field spelling `Point(x: a, y: b)`, so
                         // there is no name to look up here, only position.
                         for (field_index, field_pattern) in nested_patterns.iter().enumerate() {
-                            let (Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name)) =
-                                field_pattern
+                            let (Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name)) = field_pattern
                             else {
                                 continue;
                             };
@@ -1645,12 +1689,8 @@ impl Lowerer {
                             kind: HirExprKind::Local(subject_idx),
                             ty: subject_ty,
                         };
-                        let slot_expr = Self::payload_slot_expr(
-                            enum_variant,
-                            &outer_subject_ref,
-                            i,
-                            payload_patterns.len(),
-                        );
+                        let slot_expr =
+                            Self::payload_slot_expr(enum_variant, &outer_subject_ref, i, payload_patterns.len());
                         // Walk the inner variant's own payload. Recursive, so a
                         // binder at depth 3+ (`C(L2.S(L3.X(n)), tag)`) is
                         // emitted too; the previous non-recursive loop bound
@@ -1686,8 +1726,7 @@ impl Lowerer {
                         kind: HirExprKind::Local(subject_idx),
                         ty: subject_ty,
                     };
-                    let slot_expr =
-                        Self::payload_slot_expr(enum_variant, &subject_ref, i, payload_patterns.len());
+                    let slot_expr = Self::payload_slot_expr(enum_variant, &subject_ref, i, payload_patterns.len());
                     self.bind_subpattern(&slot_expr, p, &binding_type_map, ctx, &mut binding_stmts);
                 }
             }
@@ -1972,7 +2011,8 @@ impl Lowerer {
     /// Does `out` already carry a `Let` for `local_index`? The structural half
     /// of the no-double-emit guarantee on [`Self::bind_struct_fields`].
     fn already_bound(out: &[HirStmt], local_index: usize) -> bool {
-        out.iter().any(|stmt| matches!(stmt, HirStmt::Let { local_index: idx, .. } if *idx == local_index))
+        out.iter()
+            .any(|stmt| matches!(stmt, HirStmt::Let { local_index: idx, .. } if *idx == local_index))
     }
 
     /// Emit binders for every element of an array/tuple pattern at `slot`,
@@ -2117,16 +2157,12 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         if matches!(pattern, Pattern::Identifier(_) | Pattern::MutIdentifier(_)) {
             return Ok(HirExpr {
-                kind: HirExprKind::Binary {
-                    op: BinOp::NotEq,
-                    left: Box::new(HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_is_some".to_string(),
+                    args: vec![HirExpr {
                         kind: HirExprKind::Local(subject_idx),
                         ty: subject_ty,
-                    }),
-                    right: Box::new(HirExpr {
-                        kind: HirExprKind::Nil,
-                        ty: TypeId::NIL,
-                    }),
+                    }],
                 },
                 ty: TypeId::BOOL,
             });
@@ -2334,18 +2370,22 @@ impl Lowerer {
             // `sequence_condition` in hir/lower/expr/control.rs for why a length
             // test ALONE would only trade one wrong answer for another — the
             // binders emitted by `bind_sequence` are the other required half.
-            Pattern::Tuple(elements) => Ok(self
-                .sequence_condition(&subject_ref, elements, false, ctx)
-                .unwrap_or(HirExpr {
-                    kind: HirExprKind::Bool(true),
-                    ty: TypeId::BOOL,
-                })),
-            Pattern::Array(elements) => Ok(self
-                .sequence_condition(&subject_ref, elements, true, ctx)
-                .unwrap_or(HirExpr {
-                    kind: HirExprKind::Bool(true),
-                    ty: TypeId::BOOL,
-                })),
+            Pattern::Tuple(elements) => {
+                Ok(self
+                    .sequence_condition(&subject_ref, elements, false, ctx)
+                    .unwrap_or(HirExpr {
+                        kind: HirExprKind::Bool(true),
+                        ty: TypeId::BOOL,
+                    }))
+            }
+            Pattern::Array(elements) => {
+                Ok(self
+                    .sequence_condition(&subject_ref, elements, true, ctx)
+                    .unwrap_or(HirExpr {
+                        kind: HirExprKind::Bool(true),
+                        ty: TypeId::BOOL,
+                    }))
+            }
             // Named-field spelling `case Point { x: 0, y: b }:`. Same rule as the
             // positional class spelling below: the class is fixed by the type
             // system, the FIELD sub-patterns are not, and this used to be an
@@ -2449,21 +2489,16 @@ impl Lowerer {
                 // Unknown/ANY subjects fall back to the variant-name test
                 // (enum wins on collision), mirroring the .spl lowering's
                 // `not enum_variant_names.has(variant)` guard.
-                let subject_is_known_enum = matches!(
-                    self.module.types.get(subject_ty),
-                    Some(HirType::Enum { .. })
-                );
-                let subject_is_known_struct = matches!(
-                    self.module.types.get(subject_ty),
-                    Some(HirType::Struct { .. })
-                );
-                let variant_of_some_enum = self.global_enum_defs.as_ref().is_some_and(|defs| {
-                    defs.values()
-                        .any(|vs| vs.iter().any(|(v, _)| v == variant.as_str()))
-                }) || self.module.types.iter().any(|(_, ty)| {
-                    matches!(ty, HirType::Enum { variants, .. }
+                let subject_is_known_enum = matches!(self.module.types.get(subject_ty), Some(HirType::Enum { .. }));
+                let subject_is_known_struct = matches!(self.module.types.get(subject_ty), Some(HirType::Struct { .. }));
+                let variant_of_some_enum = self
+                    .global_enum_defs
+                    .as_ref()
+                    .is_some_and(|defs| defs.values().any(|vs| vs.iter().any(|(v, _)| v == variant.as_str())))
+                    || self.module.types.iter().any(|(_, ty)| {
+                        matches!(ty, HirType::Enum { variants, .. }
                         if variants.iter().any(|(v, _)| v == variant.as_str()))
-                });
+                    });
                 let is_class_pattern = !subject_is_known_enum
                     && (subject_is_known_struct || !variant_of_some_enum)
                     && self.module.types.lookup(variant.as_str()).map_or(false, |tid| {
@@ -3086,9 +3121,7 @@ mod nested_struct_pattern_in_enum_payload_tests {
     fn find_let_value<'a>(stmts: &'a [HirStmt], locals: &[LocalVar], name: &str) -> Option<&'a HirExpr> {
         for stmt in stmts {
             match stmt {
-                HirStmt::Let {
-                    local_index, value, ..
-                } => {
+                HirStmt::Let { local_index, value, .. } => {
                     if locals.get(*local_index).map(|l| l.name.as_str()) == Some(name) {
                         if let Some(v) = value {
                             return Some(v);

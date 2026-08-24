@@ -456,8 +456,7 @@ fn dispatch_memory_barrier() -> (
         vk::PipelineStageFlags::COMPUTE_SHADER,
         vk::AccessFlags::SHADER_WRITE,
         vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER,
-        vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE |
-            vk::AccessFlags::TRANSFER_READ,
+        vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_READ,
     )
 }
 

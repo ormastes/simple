@@ -188,9 +188,9 @@ impl LlvmBackend {
                 (false, false) => unreachable!("handled by the early return above"),
             };
             let options = PassBuilderOptions::create();
-            return module
-                .run_passes(&pipeline, target_machine, options)
-                .map_err(|e| crate::error::factory::llvm_build_failed("run LLVM mem-infra instrumentation passes", &e.to_string()));
+            return module.run_passes(&pipeline, target_machine, options).map_err(|e| {
+                crate::error::factory::llvm_build_failed("run LLVM mem-infra instrumentation passes", &e.to_string())
+            });
         }
 
         let options = PassBuilderOptions::create();
@@ -1296,9 +1296,13 @@ impl LlvmBackend {
     pub fn build_m4_asan_probe_function(&self, name: &str) -> Result<(), CompileError> {
         self.create_module("m4_asan_probe")?;
         let module = self.module.borrow();
-        let module = module.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let module = module
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
         let builder = self.builder.borrow();
-        let builder = builder.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let builder = builder
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
         let ctx = self.context_ref();
 
         let i8t = ctx.i8_type();
@@ -1367,9 +1371,13 @@ impl LlvmBackend {
     pub fn build_m4_memprof_probe_function(&self, name: &str) -> Result<(), CompileError> {
         self.create_module("m4_memprof_probe")?;
         let module = self.module.borrow();
-        let module = module.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let module = module
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
         let builder = self.builder.borrow();
-        let builder = builder.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let builder = builder
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
         let ctx = self.context_ref();
 
         let i32t = ctx.i32_type();

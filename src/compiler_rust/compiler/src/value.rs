@@ -290,8 +290,7 @@ static STRICT_MEM_FORCED: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 #[inline]
 pub fn strict_mem_enabled() -> bool {
     STRICT_MEM_FORCED.load(std::sync::atomic::Ordering::Relaxed)
-        || *STRICT_MEM_ENABLED
-            .get_or_init(|| std::env::var("SIMPLE_STRICT_MEM").map(|v| v == "1").unwrap_or(false))
+        || *STRICT_MEM_ENABLED.get_or_init(|| std::env::var("SIMPLE_STRICT_MEM").map(|v| v == "1").unwrap_or(false))
 }
 
 /// Programmatic enable (CLI `--mem-infra=strict` path, and tests). Effective

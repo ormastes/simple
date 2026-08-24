@@ -89,7 +89,11 @@ fn config_for(source: &str) -> WasiConfig {
         return config;
     };
     let names = simple_wasm_runtime::declared_sandbox_names(&manifest);
-    assert_eq!(names.len(), 1, "fixture must declare exactly one sandbox, got {names:?}");
+    assert_eq!(
+        names.len(),
+        1,
+        "fixture must declare exactly one sandbox, got {names:?}"
+    );
     config
         .with_sandbox_policy(&names[0], &manifest)
         .expect("declared sandbox must attach")
@@ -107,8 +111,8 @@ fn build(config: &WasiConfig) -> Result<(), String> {
 /// would also pass against an empty table, and "denied" would prove nothing.
 #[test]
 fn policy_fixture_renders_its_grants() {
-    let manifest =
-        simple_compiler::sandbox_manifest_for_source("<test>", GRANTS_REPORTS_ONLY).expect("fixture declares a sandbox");
+    let manifest = simple_compiler::sandbox_manifest_for_source("<test>", GRANTS_REPORTS_ONLY)
+        .expect("fixture declares a sandbox");
     assert!(manifest.contains("admin_sandbox:"), "manifest was: {manifest}");
     assert!(manifest.contains(r#"ReadDir["/reports"]"#), "manifest was: {manifest}");
     assert_eq!(

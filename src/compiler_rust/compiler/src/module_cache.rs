@@ -92,12 +92,12 @@ pub fn clear_probe_source_cache() {
 /// Print a one-line breakdown of every never-evicted loader cache.
 pub fn report_cache_sizes(tag: &str) {
     let exports = MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
-    let (cls_m, cls_e) = MODULE_CLASSES_CACHE
-        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
-    let (fn_m, fn_e) = MODULE_FUNCTIONS_CACHE
-        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
-    let (en_m, en_e) = MODULE_ENUMS_CACHE
-        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let (cls_m, cls_e) =
+        MODULE_CLASSES_CACHE.with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let (fn_m, fn_e) =
+        MODULE_FUNCTIONS_CACHE.with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let (en_m, en_e) =
+        MODULE_ENUMS_CACHE.with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
     let partial = PARTIAL_MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
     let (env_m, env_e) =
         MODULE_ENV_BY_OWNER.with(|c| (c.borrow().len(), c.borrow().values().map(|e| e.len()).sum::<usize>()));
@@ -688,7 +688,9 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
             // with every other loader cache in `clear_module_cache`.
             let key = Arc::as_ptr(dict) as usize;
             if let Some(hit) = FILTERED_DICT_CACHE.with(|c| {
-                c.borrow().get(&key).and_then(|(src, out)| Arc::ptr_eq(src, dict).then(|| Arc::clone(out)))
+                c.borrow()
+                    .get(&key)
+                    .and_then(|(src, out)| Arc::ptr_eq(src, dict).then(|| Arc::clone(out)))
             }) {
                 crate::perf_counters::bump(&crate::perf_counters::FILTERED_DICT_HITS, 1);
                 return Value::Dict(hit);

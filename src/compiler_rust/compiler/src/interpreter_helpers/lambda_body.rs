@@ -42,7 +42,8 @@ pub(crate) fn eval_lambda_body(
         statements: nodes.clone(),
         ..Default::default()
     };
-    let (flow, last_val) = crate::interpreter::block_exec::exec_block_fn(&block, env, functions, classes, enums, impl_methods)?;
+    let (flow, last_val) =
+        crate::interpreter::block_exec::exec_block_fn(&block, env, functions, classes, enums, impl_methods)?;
     match flow {
         // A `return` inside a lambda body must leave the enclosing function,
         // not silently become the body's value. Same early-return channel the

@@ -198,7 +198,10 @@ pub(super) fn persist_compiled_object_best_effort(cache_path: &Path, object: &[u
     match persist_compiled_object(cache_path, object) {
         Ok(()) => true,
         Err(error) => {
-            eprintln!("[native-incremental] cache write skipped for {}: {error}", source_path.display());
+            eprintln!(
+                "[native-incremental] cache write skipped for {}: {error}",
+                source_path.display()
+            );
             false
         }
     }
@@ -898,7 +901,10 @@ pub(crate) fn compile_file_to_object(
                 }
             };
             if let Err(dump_error) = persist_llvm_codegen_success(&llvm, &mir, file_path, source_root) {
-                return Err(format!("{}: LLVM diagnostic emission: {dump_error}", file_path.display()));
+                return Err(format!(
+                    "{}: LLVM diagnostic emission: {dump_error}",
+                    file_path.display()
+                ));
             }
 
             if is_entry && std::env::var("SIMPLE_DEBUG_LLVM").is_ok() {
@@ -1016,9 +1022,57 @@ pub(crate) fn compile_file_safe(
         })
         .map_err(|e| format!("spawn: {e}"))?;
 
+    wait_for_compiler_thread(rx, handle, timeout_secs)
+}
+
+/// Wait for one native compilation worker.
+///
+/// A zero timeout is the documented spelling for an unbounded native build.
+/// Calling `recv_timeout(Duration::ZERO)` would instead fail immediately, so
+/// keep the disabled and bounded paths explicit here.
+fn wait_for_compiler_thread(
+    rx: std::sync::mpsc::Receiver<()>,
+    handle: std::thread::JoinHandle<Result<Vec<u8>, String>>,
+    timeout_secs: u64,
+) -> Result<Vec<u8>, String> {
+    if timeout_secs == 0 {
+        return handle.join().unwrap_or_else(|_| Err("thread join error".to_string()));
+    }
+
     match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
         Ok(()) => handle.join().unwrap_or_else(|_| Err("thread join error".to_string())),
         Err(_) => Err(format!("timeout ({}s)", timeout_secs)),
+    }
+}
+
+#[cfg(test)]
+mod native_compile_timeout_tests {
+    use super::wait_for_compiler_thread;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn zero_timeout_waits_until_worker_completes() {
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            tx.send(()).unwrap();
+            Ok(vec![1, 2, 3])
+        });
+
+        assert_eq!(wait_for_compiler_thread(rx, handle, 0).unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn positive_timeout_still_rejects_slow_worker() {
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1_100));
+            let _ = tx.send(());
+            Ok(Vec::new())
+        });
+
+        assert_eq!(wait_for_compiler_thread(rx, handle, 1), Err("timeout (1s)".to_string()));
     }
 }
 
@@ -1416,13 +1470,22 @@ mod bootstrap_rewrite_try_operator_tests {
     #[test]
     fn parseable_source_keeps_all_try_operator_forms() {
         let call = "fn f() -> Result<i64, text>:\n    val v = call(1)?\n    Ok(v)\n";
-        assert!(bootstrap_rewrite_if_unparseable(call, false).contains(")?"), "call form eaten");
+        assert!(
+            bootstrap_rewrite_if_unparseable(call, false).contains(")?"),
+            "call form eaten"
+        );
 
         let var = "fn f() -> Result<i64, text>:\n    val r = mk()\n    val h = r?\n    Ok(h)\n";
-        assert!(bootstrap_rewrite_if_unparseable(var, false).contains("r?"), "var form eaten");
+        assert!(
+            bootstrap_rewrite_if_unparseable(var, false).contains("r?"),
+            "var form eaten"
+        );
 
         let index = "fn f() -> Result<i64, text>:\n    val v = xs[0]?\n    Ok(v)\n";
-        assert!(bootstrap_rewrite_if_unparseable(index, false).contains("]?"), "index form eaten");
+        assert!(
+            bootstrap_rewrite_if_unparseable(index, false).contains("]?"),
+            "index form eaten"
+        );
     }
 
     /// Vacuity anchor: the RAW textual rewrite really does eat the var and
@@ -1455,7 +1518,10 @@ mod bootstrap_rewrite_try_operator_tests {
             simple_parser::Parser::new(legacy).parse().is_err(),
             "fixture must be unparseable for this test to exercise the fallback"
         );
-        assert!(!out.contains("[u8]?"), "optional type suffix not stripped in fallback: {out}");
+        assert!(
+            !out.contains("[u8]?"),
+            "optional type suffix not stripped in fallback: {out}"
+        );
     }
 }
 

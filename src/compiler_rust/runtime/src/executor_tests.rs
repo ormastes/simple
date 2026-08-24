@@ -226,11 +226,8 @@ fn test_isolated_thread_rejects_mutable_heap_graph_before_spawn() {
 fn test_isolated_thread_with_args_rejects_heap_graph_in_second_input() {
     let closure = native_closure_record(add_values as *const ());
     let array = crate::value::rt_array_new(1);
-    let handle = rt_thread_spawn_isolated_with_args(
-        (&*closure) as *const usize as u64,
-        RuntimeValue::from_int(1),
-        array,
-    );
+    let handle =
+        rt_thread_spawn_isolated_with_args((&*closure) as *const usize as u64, RuntimeValue::from_int(1), array);
 
     assert_eq!(handle, 0);
     crate::value::rt_array_free(array);
@@ -256,14 +253,7 @@ fn test_isolated_thread_accepts_synchronized_channel_handle() {
 fn test_limited_thread_rejects_mutable_heap_graph_before_spawn() {
     let closure = native_closure_record(double_value as *const ());
     let array = crate::value::rt_array_new(1);
-    let handle = rt_thread_spawn_limited(
-        (&*closure) as *const usize as u64,
-        array,
-        -1,
-        -1,
-        -1,
-        -1,
-    );
+    let handle = rt_thread_spawn_limited((&*closure) as *const usize as u64, array, -1, -1, -1, -1);
 
     assert_eq!(handle, 0);
     crate::value::rt_array_free(array);

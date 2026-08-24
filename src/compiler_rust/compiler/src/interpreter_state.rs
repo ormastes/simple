@@ -41,12 +41,7 @@ pub(crate) fn owned_globals_snapshot() -> OwnedGlobals {
 }
 
 pub(crate) fn owned_global(owner: &str, name: &str) -> Option<Value> {
-    MODULE_GLOBALS_BY_OWNER.with(|cell| {
-        cell.borrow()
-            .get(owner)
-            .and_then(|globals| globals.get(name))
-            .cloned()
-    })
+    MODULE_GLOBALS_BY_OWNER.with(|cell| cell.borrow().get(owner).and_then(|globals| globals.get(name)).cloned())
 }
 
 pub(crate) fn owned_global_present(owner: &str, name: &str) -> bool {

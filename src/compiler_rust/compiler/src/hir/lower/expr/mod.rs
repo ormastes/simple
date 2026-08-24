@@ -633,9 +633,7 @@ impl Lowerer {
             Some(HirType::Pointer { inner, .. }) => {
                 // One pointer-strip: `T?` / `&T` text receivers are common.
                 let inner = *inner;
-                if inner == TypeId::STRING
-                    || matches!(self.module.types.get(inner), Some(HirType::String))
-                {
+                if inner == TypeId::STRING || matches!(self.module.types.get(inner), Some(HirType::String)) {
                     "TEXT"
                 } else {
                     "OTHER"
@@ -953,8 +951,10 @@ impl Lowerer {
         // doc/08_tracking/bug/native_char_code_at_tag_shift_2026-07-19.md.
         // Only applies as a last-resort fallback (a genuine user method of the
         // same name matched above), and only on a string/erased receiver.
-        if matches!(method, "char_code_at" | "byte_at" | "ord" | "codepoint" | "code_point" | "hash")
-            && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY)
+        if matches!(
+            method,
+            "char_code_at" | "byte_at" | "ord" | "codepoint" | "code_point" | "hash"
+        ) && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY)
         {
             return TypeId::I64;
         }
@@ -1049,7 +1049,14 @@ impl Lowerer {
         if method == "abs"
             && matches!(
                 recv_ty,
-                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
             )
         {
             return recv_ty;
@@ -1308,34 +1315,30 @@ impl Lowerer {
                 | "center" | "zfill" | "substr" | "rev" | "reversed" | "sorted" | "take" | "taken" | "drop"
                 | "dropped" | "skip" => Some(TypeId::STRING),
                 // `partition`/`rpartition` return [before, separator, after].
-                "partition" | "rpartition" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::STRING, size: None }),
-                ),
+                "partition" | "rpartition" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::STRING,
+                    size: None,
+                })),
                 // `find_all`/`find_indices` return an array of BYTE offsets,
                 // the same shape as `.bytes()`.
-                "find_all" | "find_indices" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::I64, size: None }),
-                ),
-                "split" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::STRING, size: None }),
-                ),
+                "find_all" | "find_indices" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::I64,
+                    size: None,
+                })),
+                "split" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::STRING,
+                    size: None,
+                })),
                 // One `chars()` element is a one-codepoint String in both the
                 // interpreter and `rt_string_chars`.  Keep that element type
                 // precise so indexing the result remains a String receiver;
                 // otherwise a following text builtin (for example
                 // `s.chars()[0].char_code_at(0)`) is lowered from ANY and can
                 // be stolen by an unrelated custom method owner.
-                "chars" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::STRING, size: None }),
-                ),
+                "chars" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::STRING,
+                    size: None,
+                })),
                 // `.lines()` / `.split_lines()` had NO codegen mapping at all
                 // until `rt_string_lines` was added alongside the sibling
                 // `rt_string_bytes`/`rt_string_chars` unary string->array
@@ -1343,11 +1346,10 @@ impl Lowerer {
                 // with `Function 'str.lines' not found` and the nil result made
                 // `.len()` report `-1`. That `-1` is the ordinary "len of a nil
                 // receiver" answer, NOT the `Dict.len()` native sentinel.
-                "lines" | "split_lines" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::STRING, size: None }),
-                ),
+                "lines" | "split_lines" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::STRING,
+                    size: None,
+                })),
                 // find/rfind return -1 if not found, position if found (raw i64 from rt_string_find)
                 "find" | "index_of" | "find_str" | "rfind" | "last_index_of" => Some(TypeId::I64),
                 // `s.count(needle)` (interpreter_method/string.rs "count") is
@@ -1376,11 +1378,10 @@ impl Lowerer {
                 // results (bug
                 // seed_interp_bytes_u8_relational_boxtag_shift_2026-07-17.md;
                 // marker: seed_bytes_u8_boxtag_2026-07-17).
-                "bytes" => Some(
-                    self.module
-                        .types
-                        .register(HirType::Array { element: TypeId::I64, size: None }),
-                ),
+                "bytes" => Some(self.module.types.register(HirType::Array {
+                    element: TypeId::I64,
+                    size: None,
+                })),
                 // `parse_int` and its `to_int`/`to_i64` aliases all lower to the
                 // runtime's `rt_string_to_int`, which returns a RAW (untagged)
                 // i64 — see the identical

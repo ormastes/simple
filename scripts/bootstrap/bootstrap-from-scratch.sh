@@ -1703,8 +1703,9 @@ trap 'rm -f "$config_tmp" "$matrix_tmp"' EXIT INT TERM HUP
     printf 'mcp_protocol\trequired\tmcp_help,mcp_version,mcp_check\n'
     printf 'mcp_focused\trequired\tmcp_protocol\n'
     printf 'lsp_protocol\trequired\tlsp_help,lsp_version,lsp_check,link_lsp\n'
-    printf 'mcp_stdio_integration\trequired\tmcp_protocol,mcp_focused,mcp_unit_tests\n'
-    printf 'lsp_stdio_integration\trequired\tlsp_protocol,lsp_unit_tests,lsp_log_modes_tests\n'
+    printf 'mcp_native_smoke\trequired\tmcp_protocol,lsp_protocol,core_runtime_smoke\n'
+    printf 'mcp_stdio_integration\trequired\tmcp_native_smoke,mcp_focused,mcp_unit_tests\n'
+    printf 'lsp_stdio_integration\trequired\tmcp_native_smoke,lsp_unit_tests,lsp_log_modes_tests\n'
     printf 'test_daemon\trequired\tessential_tools\n'
     printf 'examples_check\trequired\tessential_tools\n'
     printf 'fmt\trequired\tessential_tools\n'
@@ -1960,9 +1961,16 @@ task_input_fingerprint() {
         path_fingerprint "$source_root/src/app/simple_lsp_mcp"
         path_fingerprint "$source_root/scripts/smoke/simple_lsp_protocol_smoke.spl"
         ;;
+      mcp_native_smoke)
+        path_fingerprint "$(tool_output cli)"
+        path_fingerprint "$(tool_output mcp)"
+        path_fingerprint "$(tool_output lsp)"
+        path_fingerprint "$source_root/scripts/check/check-mcp-native-smoke.shs"
+        path_fingerprint "$source_root/scripts/check/check-interface-cache-contract.shs"
+        path_fingerprint "$source_root/scripts/check/check-mcp-wrapper-contract.shs"
+        ;;
       tooling_contract_tests)
         path_fingerprint "$(tool_output cli)"
-        path_fingerprint "$source_root/test/01_unit/lib/tooling/bootstrap_stage_split_spec.spl"
         path_fingerprint "$source_root/test/02_integration/app/cli/stage4_tools_only_manifest_spec.spl"
         ;;
       mcp_unit_tests)
@@ -2910,9 +2918,14 @@ run_gate_command() {
       run_logged_with_input "$gate_task" "$protocol_input" env SIMPLE_LIB="$source_root/src" \
         SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 SIMPLE_MCP_TOOL_SET=all "$protocol_binary" || gate_status=$?
       ;;
+    mcp_native_smoke)
+      run_logged "$gate_task" env SIMPLE_BINARY="$(tool_output cli)" \
+        MCP_SERVER="$(tool_output mcp)" LSP_MCP_SERVER="$(tool_output lsp)" \
+        MCP_NATIVE_BOOTSTRAP_FRESH=1 SIMPLE_LIB="$source_root/src" \
+        sh "$source_root/scripts/check/check-mcp-native-smoke.shs" || gate_status=$?
+      ;;
     tooling_contract_tests)
       run_test_task "$gate_task" - \
-        "$source_root/test/01_unit/lib/tooling/bootstrap_stage_split_spec.spl" \
         "$source_root/test/02_integration/app/cli/stage4_tools_only_manifest_spec.spl" || gate_status=$?
       ;;
     mcp_unit_tests)
@@ -3084,6 +3097,11 @@ run_gate_command() {
         grep -Fq 'protocolVersion' "$gate_log" || gate_status=1
         grep -Fq 'inputSchema' "$gate_log" || gate_status=1
         ! grep -Fq '"error"' "$gate_log" || gate_status=1
+        ;;
+      mcp_native_smoke)
+        grep -Fqx 'mcp_core_request_ids_preserved=true' "$gate_log" || gate_status=1
+        grep -Fqx 'mcp_server_exit_code=0' "$gate_log" || gate_status=1
+        grep -Fqx 'lsp_mcp_server_exit_code=0' "$gate_log" || gate_status=1
         ;;
     esac
   fi
@@ -3485,12 +3503,15 @@ stage2_backend=$(bootstrap_stage3_transcript_argv_value_after \
   "$stage2_transcript" --backend) || exit 1
 stage2_threads=$(bootstrap_stage3_transcript_argv_value_after \
   "$stage2_transcript" --threads) || exit 1
+stage2_timeout=$(bootstrap_stage3_transcript_argv_value_after \
+  "$stage2_transcript" --timeout) || exit 1
 stage2_compile_stack_mib=$(bootstrap_stage3_transcript_argv_value_after \
   "$stage2_transcript" --compile-stack-mib 2>/dev/null || true)
 stage2_progress=$(bootstrap_stage3_transcript_explicit_env_value \
   "$stage2_transcript" SIMPLE_BUILD_PROGRESS_EVENTS) || exit 1
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
+case "$stage2_timeout" in ''|*[!0-9]*) exit 1 ;; esac
 case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
 if [ -n "$stage2_compile_stack_mib" ]; then
   stage2_args=$(bootstrap_stage3_args_sha256 \
@@ -3501,6 +3522,7 @@ if [ -n "$stage2_compile_stack_mib" ]; then
   native-build --target "$platform" --backend "$stage2_backend" \
   --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
   --source src/lib --entry-closure --threads "$stage2_threads" \
+  --timeout "$stage2_timeout" \
   --compile-stack-mib "$stage2_compile_stack_mib" \
   --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
   --runtime-path "$runtime" -o "$stage2")
@@ -3513,6 +3535,7 @@ else
   native-build --target "$platform" --backend "$stage2_backend" \
   --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
   --source src/lib --entry-closure --threads "$stage2_threads" \
+  --timeout "$stage2_timeout" \
   --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
   --runtime-path "$runtime" -o "$stage2")
 fi
@@ -3662,7 +3685,8 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" "SIMPLE_BINARY=$admitted" \
   ${stage3_diagnostic_env} \
   native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
+  --runtime-bundle core-c-bootstrap --threads 1 --timeout "$stage2_timeout" \
+  --cache-dir "$stage3_cache" \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
   src/app/cli/bootstrap_main.spl)
 
@@ -3684,7 +3708,8 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_BINARY="$admitted" \
   ${stage3_diagnostic_env} -- \
   "$admitted" native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
+  --runtime-bundle core-c-bootstrap --threads 1 --timeout "$stage2_timeout" \
+  --cache-dir "$stage3_cache" \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
   src/app/cli/bootstrap_main.spl
 status=$?
@@ -4056,6 +4081,10 @@ Options:
   --verbose          Accepted for compatibility
   --jobs=<n|full|half|min|auto>
                      Native build workers (default: half CPUs locally, 2 on GitHub Actions)
+  --native-build-timeout=<seconds>
+                     Per-file compiler timeout for Stage 2 and Stage 3
+                     (default: 0, disabled; env:
+                     SIMPLE_BOOTSTRAP_NATIVE_BUILD_TIMEOUT_SECONDS)
   --no-mcp           Skip MCP server builds (Stage 5)
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs
@@ -4126,6 +4155,7 @@ build_mcp=1
 target=""
 verbose=0
 jobs=""
+native_build_timeout="${SIMPLE_BOOTSTRAP_NATIVE_BUILD_TIMEOUT_SECONDS:-0}"
 pure_simple=0
 full_bootstrap=0
 resume_stage3_output=""
@@ -4181,6 +4211,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --jobs=*)
       jobs=${1#*=}
+      ;;
+    --native-build-timeout=*)
+      native_build_timeout=${1#*=}
       ;;
     --deploy)
       deploy=1
@@ -4300,6 +4333,13 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+case "${native_build_timeout}" in
+  ''|*[!0-9]*)
+    echo "error: --native-build-timeout must be a non-negative integer" >&2
+    exit 1
+    ;;
+esac
 
 if [ "${stop_after_stage2}" -eq 1 ]; then
   [ "${stop_after_stage3}" -eq 0 ] &&
@@ -6100,6 +6140,7 @@ else
       --runtime-bundle core-c-bootstrap \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${jobs}" --cache-dir "${stage2_cache_absolute}" \
+      --timeout "${native_build_timeout}" \
       ${native_verbose_arg} \
       --mode "${bootstrap_mode}" --entry src/app/cli/bootstrap_main.spl \
       --runtime-path "${stage_runtime_absolute}" \
@@ -6142,6 +6183,7 @@ else
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
       --threads "${selfhost_jobs}" \
+      --timeout "${native_build_timeout}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
       --runtime-path "${stage_runtime_absolute}" \
       -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
@@ -6173,6 +6215,7 @@ else
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
+    --timeout "${native_build_timeout}" \
     ${native_verbose_arg} \
     --cache-dir "${stage2_cache_absolute}" \
     --mode "${bootstrap_mode}" \
@@ -6459,6 +6502,7 @@ else
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
     --threads "${selfhost_jobs}" \
+    --timeout "${native_build_timeout}" \
     --cache-dir "${stage3_cache_absolute}" \
     --mode "${bootstrap_mode}" \
     --runtime-path "${stage_runtime_absolute}" \
