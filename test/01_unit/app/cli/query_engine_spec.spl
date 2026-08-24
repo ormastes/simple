@@ -31,11 +31,12 @@ doc/05_design/REQ-APP-CLI-001.md
 
 use std.io.file_read
 use std.spec.step
-use app.cli.query_outline.{OutlineOptions, parse_outline_snapshot_source}
+use app.cli.query_outline.{OutlineOptions, parse_outline_import_lines,
+    parse_outline_snapshot_source}
 
 describe "request-local outline snapshot":
-    it "projects lines symbols and imports from one source view":
-        step("Verify: one snapshot preserves outline and import source order")
+    it "projects symbols once and imports lazily from retained lines":
+        step("Verify: one snapshot preserves outline and lazy import source order")
         val source = "use lib.math.{sum}\nfn local_calc(a: i64, b: i64) -> i64:\n    a + b\nimpl Worker:\n    fn run(value: i64) -> bool:\n        true"
         val snapshot = parse_outline_snapshot_source(source, OutlineOptions(
             parent_for_types: false, include_import_symbols: false,
@@ -48,9 +49,10 @@ describe "request-local outline snapshot":
         expect(snapshot.symbols[1].name).to_equal("Worker")
         expect(snapshot.symbols[2].name).to_equal("run")
         expect(snapshot.symbols[2].parent).to_equal("Worker")
-        expect(snapshot.imports.len()).to_equal(1)
-        expect(snapshot.imports[0].module_path).to_equal("lib.math")
-        expect(snapshot.imports[0].items).to_equal(["sum"])
+        val imports = parse_outline_import_lines(snapshot.lines)
+        expect(imports.len()).to_equal(1)
+        expect(imports[0].module_path).to_equal("lib.math")
+        expect(imports[0].items).to_equal(["sum"])
 
     it "routes cursor and imported lookup through the same snapshot":
         step("Verify: target query paths do not reread or resplit their file")
@@ -60,6 +62,9 @@ describe "request-local outline snapshot":
         expect(source).not.to_contain("_collect_imported_symbols(file)")
         expect(source).to_contain(
             "val snapshot = _parse_snapshot(file)")
+        expect(source).not.to_contain("snapshot.imports")
+        expect(source).to_contain(
+            "if not found_fn:\n        for imported in _collect_imported_symbols(\n            parse_outline_import_lines(snapshot.lines))")
         val type_start = source.index_of("fn engine_type_at(")
         val type_end = source.index_of("fn engine_signature_help(", type_start)
         val type_body = source.slice(type_start, type_end)
