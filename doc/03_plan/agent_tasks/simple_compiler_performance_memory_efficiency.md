@@ -177,6 +177,20 @@ current-head research reconciliation.
 - Strengthen repeated-effect multiplicity and exact mismatch contracts;
   verification intentionally not run under the user's no-verify instruction.
 
+## Completed TRK001 linear CSV-decoder tranche
+
+- Replace character-by-character immutable field concatenation with one byte
+  scan, maximal unchanged spans, boundary fragments, and one join per field.
+- Reduce worst-case decoded-field copying from O(m^2) to O(m), eliminating one
+  substring allocation per ordinary input byte.
+- Preserve empty fields, quoted commas, mid-field quotes, conditional doubled
+  quotes, unmatched quotes, edge trimming, UTF-8 bytes, row order, and line
+  numbers.
+- Add an exact `LintLevel.Deny`/message contract whose quoted identifier proves
+  comma and doubled-quote decoding while quoted title/description exercise
+  column alignment.
+- Verification intentionally not run under the user's no-verify instruction.
+
 ## Implemented generated HIR child-frame tranche
 
 - Generator owner: add `HirChildFrame`, its context-neutral sink, reverse
