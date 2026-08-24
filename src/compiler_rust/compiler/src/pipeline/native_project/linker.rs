@@ -195,7 +195,7 @@ impl NativeProjectBuilder {
         }
     }
 
-    fn simpleos_sysroot_dir(arch: simple_common::target::TargetArch) -> PathBuf {
+    pub(super) fn simpleos_sysroot_dir(arch: simple_common::target::TargetArch) -> PathBuf {
         if let Ok(explicit) = std::env::var("SIMPLEOS_SYSROOT") {
             return PathBuf::from(explicit);
         }
@@ -222,7 +222,7 @@ impl NativeProjectBuilder {
     /// codegen-emitted `rt_*` came back undefined even though the archive defined
     /// it. See
     /// `doc/08_tracking/bug/simpleos_target_build_link_omits_simple_core_archive_2026-08-24.md`.
-    fn simpleos_runtime_archive(sysroot: &Path) -> Option<PathBuf> {
+    pub(super) fn simpleos_runtime_archive(sysroot: &Path) -> Option<PathBuf> {
         for env_var in ["SIMPLE_SIMPLE_CORE_PATH", "SIMPLE_CORE_RUNTIME_PATH"] {
             if let Ok(value) = std::env::var(env_var) {
                 if value.is_empty() {
@@ -240,7 +240,7 @@ impl NativeProjectBuilder {
         None
     }
 
-    fn simpleos_user_runtime_paths(cross_target: simple_common::target::Target) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    pub(super) fn simpleos_user_runtime_paths(cross_target: simple_common::target::Target) -> Option<(PathBuf, PathBuf, PathBuf)> {
         if cross_target.os != simple_common::target::TargetOS::SimpleOS
             || !matches!(
                 cross_target.arch,

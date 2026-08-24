@@ -7882,3 +7882,143 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
         "the verdict must state the escape hatch; got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SimpleOS link line: the target simple-core archive and the C runtime must
+// actually reach the linker.
+//
+// Regression for
+// doc/08_tracking/bug/simpleos_target_build_link_omits_simple_core_archive_2026-08-24.md
+// -- building for aarch64/riscv64-unknown-simpleos failed with 20 distinct
+// undefined codegen-emitted rt_* symbols ("referenced 978 more times") while the
+// archive that defined them had been resolved, echoed by CI as
+// `runtime_archive=`, and then never placed on the link line.
+// ---------------------------------------------------------------------------
+
+fn simpleos_sysroot_fixture(root: &Path, with_all_archive: bool) -> PathBuf {
+    let sysroot = root.join("sysroot");
+    let lib = sysroot.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(lib.join("crt0.o"), b"crt0").unwrap();
+    std::fs::write(lib.join("libsimpleos_c.a"), b"libc").unwrap();
+    if with_all_archive {
+        // libc + the cross-compiled src/runtime C runtime, as the real sysroot
+        // producers build it. Deliberately NO libsimple_runtime.a here: no
+        // sysroot producer installs that name, which is precisely why looking
+        // only for it found nothing.
+        std::fs::write(lib.join("libsimpleos_all.a"), b"libc+c-runtime").unwrap();
+    }
+    sysroot
+}
+
+fn simpleos_core_archive_fixture(root: &Path) -> PathBuf {
+    let dir = root.join("simple-core-simpleos");
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive = dir.join("libsimple_runtime.a");
+    std::fs::write(&archive, b"target simple-core").unwrap();
+    archive
+}
+
+#[test]
+fn test_simpleos_link_uses_core_archive_from_env_and_all_libc_archive() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let sysroot = simpleos_sysroot_fixture(temp.path(), true);
+    let core_archive = simpleos_core_archive_fixture(temp.path());
+
+    let prev_sysroot = std::env::var("SIMPLEOS_SYSROOT").ok();
+    let prev_core = std::env::var("SIMPLE_SIMPLE_CORE_PATH").ok();
+    std::env::set_var("SIMPLEOS_SYSROOT", &sysroot);
+    // The DIRECTORY spelling; the bug record measured both spellings in use.
+    std::env::set_var("SIMPLE_SIMPLE_CORE_PATH", core_archive.parent().unwrap());
+
+    for arch in [
+        simple_common::target::TargetArch::Aarch64,
+        simple_common::target::TargetArch::Riscv64,
+        simple_common::target::TargetArch::X86_64,
+    ] {
+        let target = simple_common::target::Target::new(arch, simple_common::target::TargetOS::SimpleOS);
+        let resolved = NativeProjectBuilder::simpleos_user_runtime_paths(target);
+        let (crt0, runtime, libc) =
+            resolved.unwrap_or_else(|| panic!("{arch:?}: SimpleOS runtime paths must resolve from SIMPLE_SIMPLE_CORE_PATH"));
+
+        assert_eq!(crt0, sysroot.join("lib/crt0.o"), "{arch:?}: crt0");
+        // The core archive must come from the env var, NOT from a sysroot path
+        // that no producer writes. This is the assertion that fails pre-fix.
+        assert_eq!(runtime, core_archive, "{arch:?}: target simple-core archive must reach the link line");
+        // libsimpleos_all.a carries the C runtime; libsimpleos_c.a is libc alone
+        // and linking only it left every C-runtime symbol undefined.
+        assert_eq!(libc, sysroot.join("lib/libsimpleos_all.a"), "{arch:?}: libc+runtime archive");
+    }
+
+    match prev_sysroot {
+        Some(v) => std::env::set_var("SIMPLEOS_SYSROOT", v),
+        None => std::env::remove_var("SIMPLEOS_SYSROOT"),
+    }
+    match prev_core {
+        Some(v) => std::env::set_var("SIMPLE_SIMPLE_CORE_PATH", v),
+        None => std::env::remove_var("SIMPLE_SIMPLE_CORE_PATH"),
+    }
+}
+
+#[test]
+fn test_simpleos_link_accepts_core_archive_file_spelling_and_falls_back_to_libc_only() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    // No libsimpleos_all.a: must fall back to libsimpleos_c.a rather than bail.
+    let sysroot = simpleos_sysroot_fixture(temp.path(), false);
+    let core_archive = simpleos_core_archive_fixture(temp.path());
+
+    let prev_sysroot = std::env::var("SIMPLEOS_SYSROOT").ok();
+    let prev_core = std::env::var("SIMPLE_SIMPLE_CORE_PATH").ok();
+    std::env::set_var("SIMPLEOS_SYSROOT", &sysroot);
+    // The FILE spelling this time.
+    std::env::set_var("SIMPLE_SIMPLE_CORE_PATH", &core_archive);
+
+    let target = simple_common::target::Target::new(
+        simple_common::target::TargetArch::Riscv64,
+        simple_common::target::TargetOS::SimpleOS,
+    );
+    let (_crt0, runtime, libc) = NativeProjectBuilder::simpleos_user_runtime_paths(target)
+        .expect("riscv64 must be a supported SimpleOS user target");
+    assert_eq!(runtime, core_archive);
+    assert_eq!(libc, sysroot.join("lib/libsimpleos_c.a"));
+
+    match prev_sysroot {
+        Some(v) => std::env::set_var("SIMPLEOS_SYSROOT", v),
+        None => std::env::remove_var("SIMPLEOS_SYSROOT"),
+    }
+    match prev_core {
+        Some(v) => std::env::set_var("SIMPLE_SIMPLE_CORE_PATH", v),
+        None => std::env::remove_var("SIMPLE_SIMPLE_CORE_PATH"),
+    }
+}
+
+#[test]
+fn test_simpleos_riscv64_gets_its_own_sysroot_and_linker_script() {
+    // riscv64 previously fell through to the x86_64 unsuffixed build/os/sysroot,
+    // and resolve_freestanding_linker_script's X86_64|Aarch64 guard meant it
+    // never received the sysroot's simpleos.ld either.
+    let prev = std::env::var("SIMPLEOS_SYSROOT").ok();
+    std::env::remove_var("SIMPLEOS_SYSROOT");
+
+    let rv = NativeProjectBuilder::simpleos_sysroot_dir(simple_common::target::TargetArch::Riscv64);
+    assert_eq!(rv, PathBuf::from("build/os/sysroot-riscv64"));
+    assert_ne!(
+        rv,
+        NativeProjectBuilder::simpleos_sysroot_dir(simple_common::target::TargetArch::X86_64)
+    );
+
+    let target = simple_common::target::Target::new(
+        simple_common::target::TargetArch::Riscv64,
+        simple_common::target::TargetOS::SimpleOS,
+    );
+    assert_eq!(
+        NativeProjectBuilder::resolve_freestanding_linker_script(None, target, &rv),
+        Some(rv.join("share/simpleos/simpleos.ld"))
+    );
+
+    if let Some(v) = prev {
+        std::env::set_var("SIMPLEOS_SYSROOT", v);
+    }
+}

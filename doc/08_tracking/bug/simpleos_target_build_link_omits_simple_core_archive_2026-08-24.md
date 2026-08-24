@@ -1,6 +1,22 @@
 # Simple cannot be built for SimpleOS on any arch: the target simple-core archive never reaches the link line (2026-08-24)
 
-- Status: OPEN (P1 for the SimpleOS bootstrap goal)
+- Status: **FIXED for aarch64** at `6a1d98f9c10` (2026-08-24, Lane F). riscv64 now
+  resolves every symbol and fails one step later on a separate, unrelated defect:
+  `simpleos_riscv64_crt0_weak_undef_pcrel_out_of_range_2026-08-24.md`.
+  x86_64 still has no sysroot producer (unchanged).
+- **CORRECTION (2026-08-24, measured): the "1-3 genuinely missing symbols" claim
+  below is FALSE. Nothing was missing.** `rt_string_new_literal`, `rt_native_cmp`
+  and `rt_unwrap_or_trap` are all defined in `src/runtime/runtime_native.c`, which
+  the sysroot producers already cross-compile into
+  `<sysroot>/lib/libsimpleos_all.a` -- that archive defines **761** `rt_*` symbols
+  (vs the core archive's 316), including all three. They read as missing only
+  because the cross-check was made against the core archive alone, while the link
+  line was in fact carrying neither archive. `simpleos_guest_arch_id` is a
+  different thing again: an unbacked `extern fn` in
+  `src/app/simpleos_tool/guest_target.spl`, not a runtime symbol, and it does not
+  appear in the current build. The ONLY genuinely absent symbol was
+  `__extenddftf2`, a compiler-rt builtin -- see "What the fix actually was".
+- Status was: OPEN (P1 for the SimpleOS bootstrap goal)
 - Measured in `/mnt/data/worktrees/goal-lane-c-simpleos-arch` at `22615820e65`.
 - Companion to `simpleos_guest_simple_cli_staged_but_never_executed_2026-08-24.md`.
 
@@ -92,9 +108,53 @@ all three and the CI header states x86_64 "must go green". The producer was neve
   deployed seed lacking the `llvm` cargo feature (see CLAUDE.md's inkwell/LLVM pin);
   `--backend cranelift` — what the 2026-08-21 build stamp itself records — builds all 19 parts.
 
-## Fix order
+## What the fix actually was (2026-08-24, `6a1d98f9c10`)
 
-1. Pass the resolved target `simple-core` archive to the link (make `SIMPLE_SIMPLE_CORE_PATH`
-   actually reach the link line, or have the CI pass it explicitly) and re-run both arches.
-2. Add the 1-3 genuinely missing symbols to the target runtime.
-3. Write `scripts/os/simpleos-sysroot-x86_64.shs`.
+The diagnosis "the archive is resolved, reported, and then not linked" was exactly
+right. `NativeProjectBuilder::simpleos_user_runtime_paths()` in
+`src/compiler_rust/compiler/src/pipeline/native_project/linker.rs` is the only
+thing that puts a runtime on the freestanding link line, and it failed four ways:
+
+1. its arch guard was `X86_64 | Aarch64`, excluding **Riscv64** entirely -- so
+   riscv64 got no crt0, no libc and no runtime at all;
+2. it looked for the runtime only at `<sysroot>/lib/libsimple_runtime.a`, a path
+   **no sysroot producer creates**, and never consulted `SIMPLE_SIMPLE_CORE_PATH`
+   (which is how the separately-built core archive is communicated) -- so the
+   archive the CI resolved and echoed as `runtime_archive=` was never passed on;
+3. the all-or-nothing `crt0 && runtime && libc` test silently returned `None`
+   when the runtime was missing, dropping **crt0 and libc too**;
+4. it linked `libsimpleos_c.a` (libc ALONE) rather than `libsimpleos_all.a`
+   (libc + the cross-compiled `src/runtime` C runtime), leaving every C-runtime
+   symbol undefined -- this is what made three present symbols look missing.
+
+Also fixed: riscv64 mapped to the x86_64 unsuffixed `build/os/sysroot` instead of
+`build/os/sysroot-riscv64`, and `resolve_freestanding_linker_script` carried the
+same `X86_64 | Aarch64` guard so riscv64 never got the sysroot's `simpleos.ld`.
+A SimpleOS link whose inputs cannot be resolved now **fails closed** with an
+actionable message instead of silently linking with no runtime.
+
+Measured result: undefined `rt_*` went **20 -> 0 on both arches**. One genuinely
+absent symbol was then exposed on both, `__extenddftf2` -- the binary64 ->
+binary128 compiler-rt builtin, needed because `long double` is IEEE quad on both
+ABIs and `strtold()` is `(long double)strtod(...)`, while these freestanding
+targets have no compiler-rt (`cc -print-libgcc-file-name` returns nothing for
+`aarch64-none-elf` / `riscv64-unknown-elf`). Implemented as a real exact
+conversion in `src/os/libc/simpleos_softfloat_builtins.c`, validated bit-identical
+against the compiler's own conversion over all edge cases (signed zeros,
+subnormals incl. the minimum, inf, NaN) plus 300,000 random doubles.
+
+Final state:
+
+| target | result |
+|---|---|
+| `aarch64-unknown-simpleos` | **PASS** -- `bin/release/aarch64-unknown-simpleos/simple`, 4393120 bytes, first PT_LOAD 0x50000000 |
+| `riscv64-unknown-simpleos` | 0 undefined symbols; blocked on `simpleos_riscv64_crt0_weak_undef_pcrel_out_of_range_2026-08-24.md` |
+| `x86_64-unknown-simpleos` | unchanged -- no sysroot producer exists |
+
+## Remaining fix order
+
+1. ~~Pass the resolved target `simple-core` archive to the link.~~ DONE.
+2. ~~Add the 1-3 genuinely missing symbols.~~ Void -- none were missing; the one
+   real gap, `__extenddftf2`, is DONE.
+3. Fix the riscv64 crt0 weak-undef relocation (separate record, above).
+4. Write `scripts/os/simpleos-sysroot-x86_64.shs`.
