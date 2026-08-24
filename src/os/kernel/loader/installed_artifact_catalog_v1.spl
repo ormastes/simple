@@ -16,9 +16,13 @@ use std.common.contracts.execution.simpleos_executable_v1.{
 use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
 use os.kernel.loader.artifact_manifest.{manifest_sha256_hex}
 
-pub const SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_V1: i64 = 16
+pub const SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1: i64 = 16
+pub const SIMPLEOS_INSTALLED_ARTIFACT_TARGET_LIMIT_V1: i64 = 6
+pub const SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_V1: i64 =
+    SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1 *
+    SIMPLEOS_INSTALLED_ARTIFACT_TARGET_LIMIT_V1
 pub const SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1: i64 = 8
-pub const SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1: i64 = 256
+pub const SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1: i64 = 2048
 pub const SIMPLEOS_INSTALLED_ARTIFACT_PATH_MAX_BYTES_V1: i64 = 4096
 pub const SIMPLEOS_INSTALLED_ARTIFACT_IDENTITY_MAX_BYTES_V1: i64 = 256
 
@@ -88,8 +92,9 @@ struct InstalledArtifactSlotV1:
 
 struct InstalledArtifactKeySlotV1:
     occupied: bool
-    path_hash: u64
+    key_hash: u64
     path: text
+    target_id: i64
     record_slot: i64
 
 struct InstalledArtifactLookupCandidateV1:
@@ -113,7 +118,8 @@ fn _installed_artifact_empty_slots_v1() -> [InstalledArtifactSlotV1]:
 
 fn _installed_artifact_empty_key_v1() -> InstalledArtifactKeySlotV1:
     InstalledArtifactKeySlotV1(
-        occupied: false, path_hash: 0u64, path: "", record_slot: -1)
+        occupied: false, key_hash: 0u64, path: "",
+        target_id: -1, record_slot: -1)
 
 fn _installed_artifact_empty_keys_v1() -> [InstalledArtifactKeySlotV1]:
     var keys: [InstalledArtifactKeySlotV1] = []
@@ -193,14 +199,18 @@ fn _installed_artifact_path_valid_v1(path: text) -> bool:
         not path.ends_with("/.") and not path.contains("/../") and
         not path.ends_with("/..")
 
+fn _installed_artifact_target_id_v1(target: ManifestTarget) -> i64:
+    if target.os != "simpleos" or target.abi != "simpleos": return -1
+    if target.arch == "x86_64": return 0
+    if target.arch == "x86": return 1
+    if target.arch == "aarch64": return 2
+    if target.arch == "arm": return 3
+    if target.arch == "riscv64": return 4
+    if target.arch == "riscv32": return 5
+    -1
+
 fn _installed_artifact_target_valid_v1(target: ManifestTarget) -> bool:
-    _installed_artifact_text_bounded_v1(
-        target.os, SIMPLEOS_INSTALLED_ARTIFACT_IDENTITY_MAX_BYTES_V1) and
-        _installed_artifact_text_bounded_v1(
-            target.arch, SIMPLEOS_INSTALLED_ARTIFACT_IDENTITY_MAX_BYTES_V1) and
-        _installed_artifact_text_bounded_v1(
-            target.abi, SIMPLEOS_INSTALLED_ARTIFACT_IDENTITY_MAX_BYTES_V1) and
-        target.os != "any" and target.arch != "any" and target.abi != "any"
+    _installed_artifact_target_id_v1(target) >= 0
 
 fn _installed_artifact_target_equal_v1(a: ManifestTarget, b: ManifestTarget) -> bool:
     a.os == b.os and a.arch == b.arch and a.abi == b.abi
@@ -317,44 +327,88 @@ fn _installed_artifact_record_copy_v1(slot: InstalledArtifactSlotV1) -> Installe
             manifest: manifest))
     nil
 
-fn _installed_artifact_path_hash_v1(path: text) -> u64:
-    # FNV-1a is only a bounded table index, never an integrity decision.
-    var hash = 1469598103934665603u64
-    for byte in path.bytes():
+fn _installed_artifact_hash_field_v1(hash_seed: u64, value: text) -> u64:
+    var hash = hash_seed
+    for byte in value.bytes():
         hash = hash ^ (byte as u64)
         hash = hash * 1099511628211u64
     hash
 
-fn _installed_artifact_find_locked_v1(path: text) -> i64:
+fn _installed_artifact_key_hash_v1(path: text, target: ManifestTarget) -> u64:
+    # The compact target ID is a one-to-one encoding of the six admitted
+    # (os, arch, ABI) tuples. It avoids retaining three texts in every key slot.
+    var hash = 1469598103934665603u64
+    hash = _installed_artifact_hash_field_v1(hash, path)
+    hash = _installed_artifact_hash_field_v1(hash, "\0")
+    hash = hash ^ (_installed_artifact_target_id_v1(target) as u64)
+    hash = hash * 1099511628211u64
+    hash
+
+fn _installed_artifact_find_locked_v1(path: text, target: ManifestTarget) -> i64:
     val capacity = SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1
-    val path_hash = _installed_artifact_path_hash_v1(path)
-    val start = (path_hash % (capacity as u64)) as i64
+    val target_id = _installed_artifact_target_id_v1(target)
+    if target_id < 0: return -1
+    val key_hash = _installed_artifact_key_hash_v1(path, target)
+    val start = (key_hash % (capacity as u64)) as i64
     var probe: i64 = 0
     while probe < capacity:
         val index = (start + probe) % capacity
         val key = _installed_artifact_catalog_v1.keys[index]
         if not key.occupied: return -1
-        if key.path_hash == path_hash and key.path == path: return key.record_slot
+        if key.key_hash == key_hash and key.path == path and
+            key.target_id == target_id:
+            return key.record_slot
         probe = probe + 1
     -1
 
-fn _installed_artifact_key_insert_locked_v1(path: text, record_slot: i64) -> bool:
+fn _installed_artifact_key_insert_locked_v1(
+    path: text, target: ManifestTarget, record_slot: i64
+) -> bool:
     val capacity = SIMPLEOS_INSTALLED_ARTIFACT_KEY_TABLE_CAPACITY_V1
-    val path_hash = _installed_artifact_path_hash_v1(path)
-    val start = (path_hash % (capacity as u64)) as i64
+    val target_id = _installed_artifact_target_id_v1(target)
+    if target_id < 0: return false
+    val key_hash = _installed_artifact_key_hash_v1(path, target)
+    val start = (key_hash % (capacity as u64)) as i64
     var probe: i64 = 0
     while probe < capacity:
         val index = (start + probe) % capacity
         if not _installed_artifact_catalog_v1.keys[index].occupied:
             _installed_artifact_catalog_v1.keys[index] = InstalledArtifactKeySlotV1(
-                occupied: true, path_hash: path_hash,
-                path: path, record_slot: record_slot)
+                occupied: true, key_hash: key_hash, path: path,
+                target_id: target_id, record_slot: record_slot)
             return true
-        if _installed_artifact_catalog_v1.keys[index].path_hash == path_hash and
-            _installed_artifact_catalog_v1.keys[index].path == path:
+        val key = _installed_artifact_catalog_v1.keys[index]
+        if key.key_hash == key_hash and key.path == path and
+            key.target_id == target_id:
             return false
         probe = probe + 1
     false
+
+fn _installed_artifact_target_count_locked_v1(target: ManifestTarget) -> i64:
+    var count: i64 = 0
+    for slot in _installed_artifact_catalog_v1.records:
+        if _installed_artifact_target_equal_v1(slot.target, target):
+            count = count + 1
+    count
+
+fn _installed_artifact_record_has_path_v1(slot: InstalledArtifactSlotV1, path: text) -> bool:
+    if slot.canonical_path == path: return true
+    for alias in slot.aliases:
+        if alias == path: return true
+    false
+
+fn _installed_artifact_find_unique_path_locked_v1(path: text) -> i64:
+    # Compatibility diagnostics may omit a target only when the path resolves
+    # to exactly one retained target. Ambiguity fails closed.
+    var found: i64 = -1
+    var index: i64 = 0
+    while index < _installed_artifact_catalog_v1.records.len():
+        if _installed_artifact_record_has_path_v1(
+            _installed_artifact_catalog_v1.records[index], path):
+            if found >= 0: return -1
+            found = index
+        index = index + 1
+    found
 
 pub(package) fn installed_artifact_catalog_bootstrap_begin_v1(
 ) -> InstalledArtifactBootstrapSessionV1?:
@@ -427,11 +481,13 @@ pub(package) fn installed_artifact_catalog_bootstrap_add_v1(
             SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_V1:
         _ = _installed_artifact_unlock_v1()
         return false
-    if _installed_artifact_find_locked_v1(canonical_path) >= 0:
+    if _installed_artifact_target_count_locked_v1(candidate.target) >=
+        SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1 or
+        _installed_artifact_find_locked_v1(canonical_path, candidate.target) >= 0:
         _ = _installed_artifact_unlock_v1()
         return false
     for alias in owned_aliases:
-        if _installed_artifact_find_locked_v1(alias) >= 0:
+        if _installed_artifact_find_locked_v1(alias, candidate.target) >= 0:
             _ = _installed_artifact_unlock_v1()
             return false
     val generation = (_installed_artifact_catalog_v1.records.len() as u64) + 1u64
@@ -448,13 +504,15 @@ pub(package) fn installed_artifact_catalog_bootstrap_add_v1(
         manifest_identity_sha256: manifest_identity,
         record_integrity_sha256: integrity,
         manifest: owned_manifest))
-    if not _installed_artifact_key_insert_locked_v1(canonical_path, record_slot):
+    if not _installed_artifact_key_insert_locked_v1(
+        canonical_path, candidate.target, record_slot):
         _installed_artifact_catalog_v1.lifecycle =
             InstalledArtifactCatalogLifecycleV1.Quarantined
         _ = _installed_artifact_unlock_v1()
         return false
     for alias in owned_aliases:
-        if not _installed_artifact_key_insert_locked_v1(alias, record_slot):
+        if not _installed_artifact_key_insert_locked_v1(
+            alias, candidate.target, record_slot):
             _installed_artifact_catalog_v1.lifecycle =
                 InstalledArtifactCatalogLifecycleV1.Quarantined
             _ = _installed_artifact_unlock_v1()
@@ -483,7 +541,9 @@ fn _installed_artifact_catalog_lookup_bound_v1(
     if _installed_artifact_catalog_v1.lifecycle != InstalledArtifactCatalogLifecycleV1.Sealed:
         _ = _installed_artifact_unlock_v1()
         return nil
-    val index = _installed_artifact_find_locked_v1(path)
+    val index = match expected_target:
+        case Some(target): _installed_artifact_find_locked_v1(path, target)
+        case nil: _installed_artifact_find_unique_path_locked_v1(path)
     if index < 0:
         _ = _installed_artifact_unlock_v1()
         return nil
@@ -537,7 +597,9 @@ fn _installed_artifact_catalog_lookup_bound_v1(
         return nil
 
     if not _installed_artifact_lock_v1(): return nil
-    val confirmed_slot = _installed_artifact_find_locked_v1(path)
+    val confirmed_slot = match expected_target:
+        case Some(target): _installed_artifact_find_locked_v1(path, target)
+        case nil: _installed_artifact_find_unique_path_locked_v1(path)
     if _installed_artifact_catalog_v1.lifecycle != InstalledArtifactCatalogLifecycleV1.Sealed or
         confirmed_slot != candidate.slot or
         candidate.slot < 0 or

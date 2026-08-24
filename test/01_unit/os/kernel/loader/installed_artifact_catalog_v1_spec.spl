@@ -5,6 +5,8 @@ use std.common.contracts.execution.simpleos_executable_v1.{
 use os.kernel.loader.installed_artifact_catalog_v1.{
     SIMPLEOS_INSTALLED_ARTIFACT_ALIAS_LIMIT_V1,
     SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_V1,
+    SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1,
+    SIMPLEOS_INSTALLED_ARTIFACT_TARGET_LIMIT_V1,
     InstalledArtifactBootstrapSessionV1,
     InstalledArtifactCatalogLifecycleV1, InstalledArtifactCatalogProtocolEventV1,
     installed_artifact_record_input_valid_v1,
@@ -19,11 +21,13 @@ use os.kernel.loader.installed_artifact_catalog_v1.{
 fn catalog_digest() -> text:
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-fn catalog_manifest(path: text = "/bin/simple") -> SimpleArtifactManifest:
+fn catalog_manifest(
+    path: text = "/bin/simple", arch: text = "x86_64"
+) -> SimpleArtifactManifest:
     SimpleArtifactManifest(
         format_version: 1,
         artifact_kind: "elf",
-        target: ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"),
+        target: ManifestTarget(os: "simpleos", arch: arch, abi: "simpleos"),
         entrypoint: path,
         required_abi_features: [],
         required_services: ["filesystem"],
@@ -79,6 +83,10 @@ describe "installed artifact catalog bounded input":
         val other_path_manifest = catalog_manifest("/bin/other")
         expect(catalog_input_valid(manifest: other_path_manifest)).to_be(false)
 
+        var unsupported = catalog_manifest()
+        unsupported.target.arch = "mips64"
+        expect(catalog_input_valid(manifest: unsupported)).to_be(false)
+
     it "rejects unsigned records and uppercase digests":
         expect(catalog_input_valid(signature: "")).to_be(false)
         expect(catalog_input_valid(
@@ -105,7 +113,7 @@ describe "installed artifact catalog bounded input":
             InstalledArtifactCatalogLifecycleV1.Quarantined,
             InstalledArtifactCatalogProtocolEventV1.BeginBootstrap).?).to_be(false)
 
-    it "keeps bootstrap population private bounded stale-safe and copy-isolated":
+    it "keys paths by all six bounded targets and keeps snapshots isolated":
         val session = installed_artifact_catalog_bootstrap_begin_v1()
         expect(session.?).to_be(true)
         val active = session.unwrap()
@@ -116,10 +124,10 @@ describe "installed artifact catalog bounded input":
             "boot-root-1", "signed-fixture", catalog_manifest("/bin/forged")))
             .to_be(false)
 
-        var caller_aliases = ["/alias/zero"]
-        var caller_manifest = catalog_manifest("/bin/tool0")
+        var caller_aliases = ["/usr/bin/simple", "/diagnostic/x86-simple"]
+        var caller_manifest = catalog_manifest("/bin/simple", "x86_64")
         expect(installed_artifact_catalog_bootstrap_add_v1(
-            active, "/bin/tool0", caller_aliases, catalog_digest(), "ed25519",
+            active, "/bin/simple", caller_aliases, catalog_digest(), "ed25519",
             "boot-root-1", "signed-fixture", caller_manifest))
             .to_be(true)
         caller_aliases.push("/alias/late-mutation")
@@ -127,16 +135,38 @@ describe "installed artifact catalog bounded input":
         caller_manifest.content_hashes.push(
             "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
 
-        var i: i64 = 1
-        while i < SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_V1:
-            val path = "/bin/tool{i}"
+        val architectures = ["x86_64", "x86", "aarch64", "arm", "riscv64", "riscv32"]
+        expect(architectures.len()).to_equal(SIMPLEOS_INSTALLED_ARTIFACT_TARGET_LIMIT_V1)
+        var arch_index: i64 = 1
+        while arch_index < architectures.len():
             expect(installed_artifact_catalog_bootstrap_add_v1(
-                active, path, [], catalog_digest(), "ed25519", "boot-root-1",
-                "signed-fixture", catalog_manifest(path))).to_be(true)
-            i = i + 1
+                active, "/bin/simple", ["/usr/bin/simple"], catalog_digest(),
+                "ed25519", "boot-root-1", "signed-fixture",
+                catalog_manifest("/bin/simple", architectures[arch_index])))
+                .to_be(true)
+            arch_index = arch_index + 1
+
+        arch_index = 0
+        while arch_index < architectures.len():
+            var i: i64 = 1
+            while i < SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1:
+                val path = "/bin/tool{i}"
+                expect(installed_artifact_catalog_bootstrap_add_v1(
+                    active, path, [], catalog_digest(), "ed25519", "boot-root-1",
+                    "signed-fixture", catalog_manifest(path, architectures[arch_index])))
+                    .to_be(true)
+                i = i + 1
+            expect(installed_artifact_catalog_bootstrap_add_v1(
+                active, "/bin/overflow", [], catalog_digest(), "ed25519",
+                "boot-root-1", "signed-fixture",
+                catalog_manifest("/bin/overflow", architectures[arch_index])))
+                .to_be(false)
+            arch_index = arch_index + 1
+        expect(SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_V1).to_equal(
+            SIMPLEOS_INSTALLED_ARTIFACT_LIMIT_PER_TARGET_V1 * architectures.len())
         expect(installed_artifact_catalog_bootstrap_add_v1(
-            active, "/bin/overflow", [], catalog_digest(), "ed25519",
-            "boot-root-1", "signed-fixture", catalog_manifest("/bin/overflow")))
+            active, "/bin/over-total", [], catalog_digest(), "ed25519",
+            "boot-root-1", "signed-fixture", catalog_manifest("/bin/over-total")))
             .to_be(false)
         expect(installed_artifact_catalog_bootstrap_seal_v1(active)).to_be(true)
         expect(installed_artifact_catalog_bootstrap_add_v1(
@@ -144,44 +174,54 @@ describe "installed artifact catalog bounded input":
             "boot-root-1", "signed-fixture", catalog_manifest("/bin/stale")))
             .to_be(false)
 
-        val first = installed_artifact_catalog_lookup_v1("/alias/zero")
+        # Target-free compatibility lookup rejects a cross-target collision.
+        expect(installed_artifact_catalog_lookup_v1("/bin/simple").?).to_be(false)
+        expect(installed_artifact_catalog_lookup_v1("/usr/bin/simple").?).to_be(false)
+        val first = installed_artifact_catalog_lookup_v1("/diagnostic/x86-simple")
         expect(first.?).to_be(true)
-        expect(first.unwrap().aliases.len()).to_equal(1)
+        expect(first.unwrap().aliases.len()).to_equal(2)
         var changed = first.unwrap()
         changed.aliases.push("/alias/output-mutation")
         changed.manifest.content_hashes.push(
             "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
-        val second = installed_artifact_catalog_lookup_v1("/bin/tool0")
+        val second = installed_artifact_catalog_lookup_v1("/diagnostic/x86-simple")
         expect(second.?).to_be(true)
-        expect(second.unwrap().aliases.len()).to_equal(1)
+        expect(second.unwrap().aliases.len()).to_equal(2)
         expect(second.unwrap().manifest.required_services.len()).to_equal(1)
         expect(second.unwrap().manifest.content_hashes.len()).to_equal(1)
 
         val exact_target = ManifestTarget(
             os: "simpleos", arch: "x86_64", abi: "simpleos")
         val exact = installed_artifact_catalog_lookup_target_v1(
-            "/alias/zero", exact_target)
+            "/usr/bin/simple", exact_target)
         expect(exact.?).to_be(true)
-        expect(exact.unwrap().canonical_path).to_equal("/bin/tool0")
+        expect(exact.unwrap().canonical_path).to_equal("/bin/simple")
+
+        for architecture in architectures:
+            val target_record = installed_artifact_catalog_lookup_target_v1(
+                "/bin/simple", ManifestTarget(
+                    os: "simpleos", arch: architecture, abi: "simpleos"))
+            expect(target_record.?).to_be(true)
+            expect(target_record.unwrap().target.arch).to_equal(architecture)
 
         val wrong_arch = installed_artifact_catalog_lookup_target_v1(
-            "/bin/tool0", ManifestTarget(
-                os: "simpleos", arch: "aarch64", abi: "simpleos"))
+            "/bin/simple", ManifestTarget(
+                os: "simpleos", arch: "mips64", abi: "simpleos"))
         expect(wrong_arch.?).to_be(false)
         val wrong_os = installed_artifact_catalog_lookup_target_v1(
-            "/bin/tool0", ManifestTarget(
+            "/bin/simple", ManifestTarget(
                 os: "linux", arch: "x86_64", abi: "simpleos"))
         expect(wrong_os.?).to_be(false)
         val wrong_abi = installed_artifact_catalog_lookup_target_v1(
-            "/bin/tool0", ManifestTarget(
+            "/bin/simple", ManifestTarget(
                 os: "simpleos", arch: "x86_64", abi: "sysv"))
         expect(wrong_abi.?).to_be(false)
         val invalid_target = installed_artifact_catalog_lookup_target_v1(
-            "/bin/tool0", ManifestTarget(
+            "/bin/simple", ManifestTarget(
                 os: "simpleos", arch: "any", abi: "simpleos"))
         expect(invalid_target.?).to_be(false)
         # Mismatches do not quarantine a sound sealed catalog.
         val after_mismatch = installed_artifact_catalog_lookup_target_v1(
-            "/bin/tool0", exact_target)
+            "/bin/simple", exact_target)
         expect(after_mismatch.?).to_be(true)
-        expect(after_mismatch.unwrap().canonical_path).to_equal("/bin/tool0")
+        expect(after_mismatch.unwrap().canonical_path).to_equal("/bin/simple")

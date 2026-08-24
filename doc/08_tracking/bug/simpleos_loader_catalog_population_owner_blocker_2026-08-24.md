@@ -15,9 +15,11 @@ API's current architecture-fixture callers.
 - The authenticated filesystem admission callers construct manifests directly
   in architecture fixtures. They do not receive a sealed installed-artifact
   catalog from a boot/image owner.
-- `executable_loader_admit_authenticated_open_binding_v1` currently maps only
-  `x86_64`, `aarch64`, and `riscv64` into the ELF layout owner. The ELF owner
-  supports all six architecture enum values, but canonical admission does not.
+- `executable_loader_admit_authenticated_open_binding_v1` now maps all six
+  canonical userland architecture spellings into the existing ELF layout
+  owner. This closes the parser-dispatch prerequisite, but does not populate or
+  seal the installed-artifact catalog and therefore cannot make catalog lookup
+  mandatory yet.
 - The signed Simplebox catalog producer contract currently names x86_64,
   aarch64, riscv64, and riscv32. It has no signed x86-32 or ARM32 target row.
 
@@ -40,12 +42,12 @@ The canonical image/boot owner must, before starting any filesystem launcher:
    rows; and
 5. fail boot closed if population, sealing, or target coverage is incomplete.
 
-The catalog is keyed by path rather than `(path, target)`, so rows for several
-targets with the same canonical path cannot coexist: duplicate paths are
-rejected. Loading all six target variants into one catalog is therefore not a
-valid substitute for target-specific image population. If an image needs more
-than 16 installed executable records, owner capacity must be redesigned rather
-than silently truncating the image catalog.
+The former path-only key and 16-record global capacity blocker is resolved by
+the target-scoped catalog redesign: keys now contain `(path, os, arch, abi)`,
+each of the six SimpleOS targets owns a 16-record partition, and the bounded
+owner retains at most 96 records. Identical canonical paths and aliases may
+coexist across targets without collision. Boot population and ownership
+transfer remain deliberately unwired, so this blocker is not otherwise closed.
 
 After that transfer exists, canonical admission can safely perform exactly one
 `installed_artifact_catalog_lookup_target_v1(binding.canonical_source_path,
@@ -60,11 +62,13 @@ remain the only hot-path work.
 
 - Static ownership coverage showing one boot producer and no alternate catalog.
 - Static admission coverage for all six target-image tuples and alias/canonical
-  paths, including alias collision and the 16-record capacity boundary.
+  paths, including same-path cross-target coexistence, path-only ambiguity
+  rejection, and each 16-record target capacity boundary.
 - Rejection cases for unsealed catalog, absent row, target mismatch, digest
   mismatch, signer mismatch, and stale execute binding.
-- Success coverage proving one expected-O(1) lookup (bounded worst case: 256
+- Success coverage proving one expected-O(1) lookup (bounded worst case: 2048
   probes plus bounded deep copy/integrity hashing), one image read/hash, one ELF
   layout pass, and one consume-once authority issuance.
 
-No runtime verification was run while recording this blocker, per user request.
+No runtime verification was run while recording or updating this blocker, per
+user request.

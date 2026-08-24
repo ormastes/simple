@@ -18,13 +18,15 @@ target exactly equal that OS, architecture, and ABI tuple.
 The operation is metadata-only. It does not mint or replace an executable
 authority token. Invalid or mismatched loader-context targets return `nil`
 without quarantining a sound sealed catalog. Existing path-only lookup remains
-intact for diagnostics and compatibility. If the catalog record target and its
+for diagnostics and compatibility but fails closed when the path is retained
+for multiple target tuples. If the catalog record target and its
 signed manifest target disagree, the owner quarantines the catalog before
 considering the request because that is retained-state corruption.
 
 ## Safety and cost
 
-The target check is bounded `O(os + arch + abi)` after indexed path lookup. It
+The key lookup is expected `O(path + os + arch + abi)` and bounded by 2048
+open-addressing probes. It
 runs against the immutable sealed slot before nested copying, canonical
 serialization, and hashing, so a mismatch cannot amplify that work. It adds no
 permanent allocation, cache, scan, or mutable state. A match returns the same

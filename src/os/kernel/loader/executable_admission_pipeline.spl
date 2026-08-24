@@ -110,6 +110,28 @@ fn _loader_target_exact(target: ManifestTarget) -> bool:
     target.os != "" and target.arch != "" and target.abi != "" and
         target.os != "any" and target.arch != "any" and target.abi != "any"
 
+pub fn executable_loader_architecture_for_target_v1(
+    target: ManifestTarget
+) -> Architecture?:
+    """Map an exact SimpleOS manifest target to the canonical ELF parser.
+
+    This pure projection grants no execution authority.  It deliberately
+    accepts only the six architecture spellings emitted by the canonical
+    SimpleOS userland target contract; aliases and non-SimpleOS targets fail
+    closed before executable bytes reach the ELF layout owner.
+    """
+    if not _loader_target_exact(target) or target.os != "simpleos" or
+        target.abi != "simpleos":
+        return nil
+    match target.arch:
+        case "x86_64": Some(Architecture.X86_64)
+        case "x86": Some(Architecture.X86)
+        case "aarch64": Some(Architecture.Arm64)
+        case "arm": Some(Architecture.Arm32)
+        case "riscv64": Some(Architecture.Riscv64)
+        case "riscv32": Some(Architecture.Riscv32)
+        case _: nil
+
 fn _loader_binding_matches_admission(
     binding: ExecuteOpenBinding,
     admission: ExecutableAdmissionV1
@@ -328,15 +350,10 @@ pub fn executable_loader_admit_authenticated_open_binding_v1(
     if not executable_loader_signature_verify_trusted_v1(
         proof.signer_key_id, inputs.manifest, admission, actual_hash, proof.signature):
         return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.SignatureInvalid)
-    val layout_arch = if inputs.target.arch == "riscv64":
-        Architecture.Riscv64
-    elif inputs.target.arch == "x86_64":
-        Architecture.X86_64
-    elif inputs.target.arch == "aarch64":
-        Architecture.Arm64
-    else:
+    val layout_arch = executable_loader_architecture_for_target_v1(inputs.target)
+    if not layout_arch.?:
         return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.TargetInvalid)
-    val layout = elf_authenticated_layout_v1(source.unwrap(), layout_arch)
+    val layout = elf_authenticated_layout_v1(source.unwrap(), layout_arch.unwrap())
     if layout.is_err():
         return _loader_close_rejection(table, binding, ExecutableLoaderAdmissionErrorV1.RangeInvalid)
     var authoritative_inputs = inputs
@@ -498,6 +515,7 @@ export ExecutableLoaderImageRetrievalV1
 export ExecutableLoaderCryptographicProofV1
 export executable_loader_admit_open_binding
 export executable_loader_admit_authenticated_open_binding_v1
+export executable_loader_architecture_for_target_v1
 export executable_loader_authority_owner_initialize
 export executable_loader_commit, executable_loader_retrieve_once
 export executable_loader_commit_joint_reservation_v1

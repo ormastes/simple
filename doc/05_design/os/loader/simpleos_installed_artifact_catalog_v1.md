@@ -17,7 +17,10 @@ or integrity failure transitioning permanently to `Quarantined`.
 
 ## Retained records
 
-The owner retains at most 16 records and at most 8 aliases per record. Paths
+The owner retains at most 16 records for each of the six canonical SimpleOS
+targets (96 records total) and at most 8 aliases per record. The admitted target
+tuples are `simpleos/simpleos` with architecture `x86_64`, `x86`, `aarch64`,
+`arm`, `riscv64`, or `riscv32`. Paths
 are canonical absolute paths capped at 4096 UTF-8 bytes. Every record retains:
 
 - the canonical path and exact aliases;
@@ -27,10 +30,18 @@ are canonical absolute paths capped at 4096 UTF-8 bytes. Every record retains:
   canonical manifest digest;
 - a fully bounded, deeply owned `SimpleArtifactManifest`.
 
-Canonical paths and aliases share one 256-slot open-addressed collision domain.
-At most 144 keys can be retained, keeping load below 57%. Duplicate or
-ambiguous names fail before mutation. Sealing requires at least one record and
-destroys the bootstrap nonce. No deletion or slot reuse exists in v1.
+Canonical paths and aliases are keyed by the complete
+`(path, os, architecture, ABI)` tuple in one 2048-slot open-addressed collision
+domain. At most 864 keys can be retained, keeping load below 43%. A duplicate
+name for one target fails before mutation, while the same executable path may
+soundly identify a distinct record for every target. Sealing requires at least
+one record and destroys the bootstrap nonce. No deletion or slot reuse exists
+in v1.
+
+The target-bound package-private lookup is the canonical execution-facing API.
+The original public path-only lookup remains for diagnostic compatibility, but
+returns no record when a path or alias occurs in more than one target partition;
+it never guesses a platform.
 
 ## Integrity and synchronization
 
@@ -48,12 +59,17 @@ only after acquiring the same mutex, avoiding an unsynchronized pre-lock read.
 
 ## Complexity and memory
 
-Bootstrap insertion and lookup use bounded open addressing. A cached path hash
-avoids text equality for ordinary nonmatching probes: expected O(path bytes),
-with the honest adversarial bound O(256 × path bytes) if every occupied key has
-the same 64-bit hash. Copying and integrity work are O(one manifest's bytes),
-with hashing outside the mutex on lookup. All counts and retained values have
-fixed ceilings; no public request can cause persistent growth.
+Bootstrap insertion and target-bound lookup use bounded open addressing. A
+cached tuple hash avoids text equality for ordinary nonmatching probes: expected
+O(path + target bytes), with the honest adversarial bound O(2048 × tuple bytes)
+if every occupied key has the same 64-bit hash. The compatibility path-only
+diagnostic scans at most 96 records and rejects a second match. Per-target
+capacity admission scans at most 96 compact slots and occurs only during
+bootstrap. Each admitted target tuple maps one-to-one to a compact integer tag
+in the key table, avoiding three retained text fields per key; hashing does not
+allocate a concatenated key. Copying and integrity work are O(one manifest's bytes), with
+hashing outside the mutex on lookup. All counts and retained values have fixed
+ceilings; no public request can cause persistent growth.
 
 ## Deferred work
 
