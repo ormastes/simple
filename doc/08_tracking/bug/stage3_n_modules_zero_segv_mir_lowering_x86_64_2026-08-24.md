@@ -823,3 +823,56 @@ behavioural check runs in, so the invocation failed 127, emitted no signature,
 and scored CLEAN. The path is now made absolute, and an invocation that produces
 an empty log is ERROR rather than a pass. Promote to MANDATORY once a real fix
 makes it green.
+
+### SECOND DEFECT (independent, and the reason this took a day to find): phase 3's `return false` is lost
+
+The guard at `driver_hir_pipeline_lowering.spl:584-586` does `self.ctx.add_error(...)`
+followed by `return (self.ctx, false)`. `driver_orchestration.spl` destructures
+that into `analyze_ok` and has an `if not analyze_ok:` block that prints
+`phase 3 FAILED` with every recorded error. **That block did not run.** Instead
+the log shows `phase3:hir_typecheck:done`, monomorphize over `generic_fns=0`,
+MIR lowering `functions=0`, and the error only surfacing three phases later,
+relabelled `[ERROR] MIR error: ...`, immediately before the SEGV.
+
+So an early `return (ctx, false)` from deep inside the large `me lower_and_check_impl()`
+method reached the caller as a SUCCESS verdict. Consequences:
+
+- A fail-closed guard that fires is downgraded to an advisory note.
+- An empty HIR program flows into monomorphize and MIR lowering, which is what
+  actually SEGVs (`NATIVE_BUILD_RC=139`).
+- The operator sees a MIR-stage error for a phase-3 defect.
+
+This is latent only in the sense that the guard still prints *something*. It is
+the same family as the already-recorded `c018ee15926` boolean-misread and the
+"stale CompileContext snapshot" verdict defects noted in
+`driver_source_pipeline_parsing.spl:840-852` and `driver_orchestration.spl:176-182`.
+Fixing it alone would convert the SEGV into a clean, correctly-attributed
+phase-3 failure — worth doing regardless of the payload root cause.
+
+### FIFTH BLOCKER found underneath (fixed): origin/main could not build a Stage 2 at all
+
+Rebuilding Stage 2 from `origin/main` (f7a49a61c0b) to carry the probes failed
+before reaching the driver at all:
+
+```
+[CODEGEN BODY] Function 'MirToLlvm.translate_instruction_at' body compilation failed:
+  GlobalLoad: unresolved identifier 'load_symbol_slot'
+Build failed: native-build aborted: 1 file(s) failed to compile
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+Cause: `be3e6fe4a21` (landed 2026-08-24) replaced the raw `LoadGlobal` payload
+decode in `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl` with
+typed accessors and deleted the `load_symbol_slot` local, but left a reference
+to it inside the adjacent `if bootstrap_debug:` print. The seed's tree-walk
+interpreter never evaluates that branch, so `simple run` / `test` stayed green;
+native codegen resolves every identifier in a function body and rejects it.
+
+Note the shape: a *debug print* — exactly the class of line that gets removed
+during cleanup — is what made the whole self-host lane unbuildable, and no gate
+caught it because every non-native lane is blind to it. This is independent of
+the surfaces-payload defect and strictly upstream of it: while it stood, no
+Stage 2 existed to reproduce the payload defect on.
+
+Fixed by dropping the stale interpolation (an identical fix landed concurrently
+from another lane, so `origin/main` already carries it).
