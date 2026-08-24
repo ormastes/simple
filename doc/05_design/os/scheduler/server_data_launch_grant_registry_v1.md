@@ -14,8 +14,8 @@ caller path. It admits only a contract-valid, unconsumed SimpleOS image whose
 sealed canonical path is exactly `/SERVERS.ELF` and whose architecture is
 x86_64, aarch64, or riscv64.
 
-The scheduler allocates a nonzero, never-wrapped `lifecycle_generation` with
-the PID and stores both in the TCB. Installation occurs before TCB/ready-queue
+The scheduler atomically allocates a nonzero, never-wrapped
+`{task_id,lifecycle_generation}` pair and stores both in the TCB. Installation occurs before TCB/ready-queue
 publication. The registry binds that pair to the verified image, admission,
 trust, mount, and file identities.
 
@@ -24,8 +24,11 @@ TCB lookup ambiguous. The scheduler therefore never wraps or reuses TaskIds;
 task creation fails closed when the bounded PID space is exhausted. Every task
 creation path handles the zero exhaustion sentinel before publication.
 The PID and lifecycle counters share one checked allocator mutex; lock or
-unlock indeterminacy quarantines allocation and returns zero, preventing two
+unlock indeterminacy quarantines allocation and returns no pair, preventing two
 scheduler instances or CPUs from publishing duplicate identities.
+
+Fork receives a fresh pair and cannot inherit the parent's generation. Exec
+preserves the task-lifetime pair while revoking image-scoped launch authority.
 
 ## Ownership and lifecycle
 
@@ -52,7 +55,8 @@ It deliberately cannot erase a quarantined tombstone. A failure after grant
 installation but before TCB publication rolls the exact lifecycle handle back;
 an indeterminate rollback quarantines rather than publishes authority.
 
-The current-TCB lookup remains inside the mutable `Scheduler.me` owner domain;
+The current-TCB lookup uses the scheduler's canonical lifecycle-identity helper
+inside the mutable `Scheduler.me` owner domain;
 the registry mutex is acquired only after that scheduler-owned identity is
 copied, preserving the fixed scheduler-then-registry lock order.
 

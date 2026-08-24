@@ -32,7 +32,7 @@ use os.kernel.scheduler.scheduler_types.{
     MAX_TASKS, TIME_SLICE_TICKS, sched_exec_arch,
     _address_space_can_map, _scheduler_uses_direct_load_arena, _scheduler_mapped_entry,
     _map_user_process_image, _initial_user_task_context,
-    scheduler_next_task_id_take
+    scheduler_next_task_lifecycle_identity_take_v1
 }
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
 use os.kernel.scheduler.server_data_launch_grant_registry.{
@@ -51,14 +51,15 @@ pub fn sched_create_task_impl(
     caps: CapabilitySet
 ) -> (TaskId, [TaskControlBlock?]):
     """Core logic for Scheduler.create_task."""
-    val next_id = scheduler_next_task_id_take()
-    if next_id == 0u64:
-        return (TaskId(id: 0u64), tasks)
-    val id = TaskId(id: next_id)
-
     val slot = _find_empty_slot_in(tasks)
     if slot < 0:
         return (TaskId(id: 0), tasks)
+
+    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
+    if maybe_identity == nil:
+        return (TaskId(id: 0u64), tasks)
+    val identity = maybe_identity.unwrap()
+    val id = TaskId(id: identity.task_id)
 
     val ctx = TaskContext(
         rax: 0, rbx: 0, rcx: 0, rdx: 0,
@@ -74,7 +75,7 @@ pub fn sched_create_task_impl(
 
     val tcb = TaskControlBlock(
         id: id,
-        lifecycle_generation: 0u64,
+        lifecycle_generation: identity.lifecycle_generation,
         name: "task-{id.id}",
         state: TaskState.Ready,
         priority: priority,

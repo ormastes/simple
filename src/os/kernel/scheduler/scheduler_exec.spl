@@ -51,7 +51,7 @@ use os.kernel.scheduler.scheduler_types.{
     _address_space_can_map, _scheduler_uses_direct_load_arena, _scheduler_mapped_entry,
     _map_user_process_image, _initial_user_task_context,
     Scheduler, SchedulerExecutableAdoptionOwnerStateV1,
-    scheduler_next_task_id_take
+    scheduler_next_task_lifecycle_identity_take_v1
 }
 use os.kernel.scheduler.green_carrier.{green_carrier_execution_state_new, green_carrier_parallelism_new}
 use os.kernel.scheduler.scheduler_task_mgmt.{
@@ -229,13 +229,15 @@ pub fn sched_create_user_task_pid_impl(
             destroy_user_address_space(user_as)
             return (0, tasks, -1)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    val user_next_id = scheduler_next_task_id_take()
-    if user_next_id == 0u64:
+    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
+    if maybe_identity == nil:
         destroy_user_address_space(user_as)
         return (0u64, tasks, -1)
+    val identity = maybe_identity.unwrap()
+    val user_next_id = identity.task_id
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
-        id: id, lifecycle_generation: 0u64, name: "user-{id.id}",
+        id: id, lifecycle_generation: identity.lifecycle_generation, name: "user-{id.id}",
         state: TaskState.Ready, priority: priority, is_user: true,
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
@@ -319,13 +321,15 @@ pub fn sched_create_user_task_from_bytes_pid_impl(
             destroy_user_address_space(user_as)
             return (0, tasks, -1)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    val user_next_id = scheduler_next_task_id_take()
-    if user_next_id == 0u64:
+    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
+    if maybe_identity == nil:
         destroy_user_address_space(user_as)
         return (0u64, tasks, -1)
+    val identity = maybe_identity.unwrap()
+    val user_next_id = identity.task_id
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
-        id: id, lifecycle_generation: 0u64, name: "user-{id.id}",
+        id: id, lifecycle_generation: identity.lifecycle_generation, name: "user-{id.id}",
         state: TaskState.Ready, priority: priority, is_user: true,
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
@@ -374,13 +378,15 @@ pub fn sched_create_bootstrap_user_task_pid_impl(
             destroy_user_address_space(user_as)
             return (0, tasks)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    val user_next_id = scheduler_next_task_id_take()
-    if user_next_id == 0u64:
+    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
+    if maybe_identity == nil:
         destroy_user_address_space(user_as)
         return (0u64, tasks)
+    val identity = maybe_identity.unwrap()
+    val user_next_id = identity.task_id
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
-        id: id, lifecycle_generation: 0u64, name: "bootstrap-user",
+        id: id, lifecycle_generation: identity.lifecycle_generation, name: "bootstrap-user",
         state: TaskState.Ready, priority: priority, is_user: true,
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
@@ -412,12 +418,14 @@ pub fn sched_clone_task_impl(
     if parent_tcb == nil:
         return (TaskId(id: 0), tasks, -1)
     val parent = parent_tcb
-    val child_id = TaskId(id: scheduler_next_task_id_take())
-    if child_id.id == 0u64:
-        return (TaskId(id: 0u64), tasks, -1)
     val child_slot = _find_empty_slot_in(tasks)
     if child_slot < 0:
         return (TaskId(id: 0), tasks, -1)
+    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
+    if maybe_identity == nil:
+        return (TaskId(id: 0u64), tasks, -1)
+    val identity = maybe_identity.unwrap()
+    val child_id = TaskId(id: identity.task_id)
     val child_as = if parent.address_space == 0 or parent.address_space == 1:
         parent.address_space
     else:
@@ -434,7 +442,7 @@ pub fn sched_clone_task_impl(
         user_ctx.rax = 0
         child_user_ctx = Some(user_ctx)
     val child = TaskControlBlock(
-        id: child_id, lifecycle_generation: 0u64, name: "{parent.name}:fork",
+        id: child_id, lifecycle_generation: identity.lifecycle_generation, name: "{parent.name}:fork",
         state: TaskState.Ready, priority: parent.priority, is_user: parent.is_user,
         entry_point: parent.entry_point, context: child_ctx, user_context: child_user_ctx,
         address_space: child_as, kernel_stack: parent.kernel_stack, user_stack: parent.user_stack,
@@ -502,7 +510,8 @@ pub fn sched_exec_image_impl(
     new_isolation.address_space_id = new_as.id
     new_isolation.capability_generation = new_isolation.capability_generation + 1
     var task = old_task
-    task.lifecycle_generation = 0u64
+    # Exec replaces the image, not the task lifetime. Keep the scheduler-owned
+    # identity stable while image-scoped grants and address-space state rotate.
     task.is_user = true
     task.entry_point = mapped_entry
     task.context = user_ctx

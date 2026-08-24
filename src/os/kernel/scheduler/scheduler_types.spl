@@ -56,32 +56,33 @@ fn _scheduler_identity_allocator_unlock_v1() -> bool:
     g_scheduler_identity_allocator_quarantined = true
     false
 
-pub fn scheduler_next_task_id_take() -> u64:
-    # TaskId is the scheduler's current-task lookup key. Reuse would make a
-    # `{task_id,lifecycle_generation}` authority impossible to derive safely
-    # from `Scheduler.current`, which intentionally carries only TaskId.
-    if not _scheduler_identity_allocator_lock_v1(): return 0u64
-    if g_scheduler_next_task_id == 0u64 or
-        g_scheduler_next_task_id >= 0x40000000u64:
-        log_raw_println("[scheduler] create_task: task id space exhausted")
-        _ = _scheduler_identity_allocator_unlock_v1()
-        return 0u64
-    val next_id = g_scheduler_next_task_id
-    g_scheduler_next_task_id = next_id + 1u64
-    if not _scheduler_identity_allocator_unlock_v1(): return 0u64
-    next_id
+pub struct TaskLifecycleIdentityV1:
+    """Opaque authority identity for exactly one published TCB lifetime."""
+    task_id: u64
+    lifecycle_generation: u64
 
-pub fn scheduler_next_lifecycle_generation_take_v1() -> u64:
-    """Take a never-wrapped task-lifetime identity; zero means exhausted."""
-    if not _scheduler_identity_allocator_lock_v1(): return 0u64
-    if g_scheduler_next_lifecycle_generation == 0u64 or
+pub fn task_lifecycle_identity_valid_v1(identity: TaskLifecycleIdentityV1) -> bool:
+    identity.task_id != 0u64 and identity.lifecycle_generation != 0u64
+
+pub fn scheduler_next_task_lifecycle_identity_take_v1() -> TaskLifecycleIdentityV1?:
+    """Atomically take a never-reused PID/generation pair; exhaustion is terminal."""
+    if not _scheduler_identity_allocator_lock_v1(): return nil
+    if g_scheduler_next_task_id == 0u64 or
+        g_scheduler_next_task_id >= 0x40000000u64 or
+        g_scheduler_next_lifecycle_generation == 0u64 or
         g_scheduler_next_lifecycle_generation == 0xFFFFFFFFFFFFFFFFu64:
+        log_raw_println("[scheduler] task lifecycle identity space exhausted")
         _ = _scheduler_identity_allocator_unlock_v1()
-        return 0u64
+        return nil
+    val task_id = g_scheduler_next_task_id
     val generation = g_scheduler_next_lifecycle_generation
+    g_scheduler_next_task_id = task_id + 1u64
     g_scheduler_next_lifecycle_generation = generation + 1u64
-    if not _scheduler_identity_allocator_unlock_v1(): return 0u64
-    generation
+    # A failed unlock quarantines the owner. This already-taken pair is burned,
+    # never published, and can therefore never be reused by a later caller.
+    if not _scheduler_identity_allocator_unlock_v1(): return nil
+    Some(TaskLifecycleIdentityV1(
+        task_id: task_id, lifecycle_generation: generation))
 
 @cfg(x86_64)
 pub fn sched_exec_arch() -> Architecture:
@@ -152,6 +153,16 @@ pub fn wait_collect_result_error(result: WaitCollectResult) -> i32:
 
 pub fn task_control_pid(task: TaskControlBlock) -> u64:
     task.id.id
+
+pub fn task_control_lifecycle_generation_v1(task: TaskControlBlock) -> u64:
+    task.lifecycle_generation
+
+pub fn task_control_lifecycle_identity_v1(task: TaskControlBlock) -> TaskLifecycleIdentityV1?:
+    val identity = TaskLifecycleIdentityV1(
+        task_id: task.id.id,
+        lifecycle_generation: task.lifecycle_generation)
+    if not task_lifecycle_identity_valid_v1(identity): return nil
+    Some(identity)
 
 pub fn task_control_parent_pid(task: TaskControlBlock) -> u64:
     if task.parent == nil:
@@ -672,6 +683,22 @@ pub class Scheduler:
     executable_adoption_token_nonce: u64
     green_execution_state: GreenCarrierExecutionState
     green_parallelism_state: GreenCarrierParallelismState
+
+impl Scheduler:
+    fn task_lifecycle_identity_v1(id: TaskId) -> TaskLifecycleIdentityV1?:
+        if id.id == 0u64: return nil
+        var slot = 0
+        while slot < self.tasks.len():
+            val maybe_task = self.tasks[slot]
+            if maybe_task != nil:
+                val task = maybe_task.unwrap()
+                if task.id.id == id.id:
+                    return task_control_lifecycle_identity_v1(task)
+            slot = slot + 1
+        nil
+
+    fn current_task_lifecycle_identity_v1() -> TaskLifecycleIdentityV1?:
+        self.task_lifecycle_identity_v1(self.current)
 
 pub struct SchedulerBootstrapUserTaskResult:
     scheduler: Scheduler

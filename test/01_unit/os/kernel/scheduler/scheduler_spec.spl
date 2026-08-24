@@ -370,6 +370,24 @@ describe "Scheduler":
             val id2 = sched.create_task(0x2000, TaskPriority.Normal, caps2)
             expect(id2.id).to_equal(id1.id + 1)
 
+        it "publishes a nonzero distinct lifecycle generation for each task":
+            # @req: REQ-OS-KERNEL-001
+            step("Verify: task publication uses a nonzero distinct lifecycle identity")
+            var sched = Scheduler.new()
+            val first_id = sched.create_task(
+                0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val second_id = sched.create_task(
+                0x2000, TaskPriority.Normal, CapabilitySet.full())
+            val first = sched.get_task(first_id)
+            val second = sched.get_task(second_id)
+            expect(first).to_not_equal(nil)
+            expect(second).to_not_equal(nil)
+            if first != nil and second != nil:
+                expect(first.lifecycle_generation).to_be_greater_than(0)
+                expect(second.lifecycle_generation).to_be_greater_than(0)
+                expect(second.lifecycle_generation).to_not_equal(
+                    first.lifecycle_generation)
+
         it "creates task in Ready state":
             # @req: REQ-OS-KERNEL-001
             step("Verify: creates task in Ready state")
@@ -499,6 +517,10 @@ describe "Scheduler":
             step("Verify: exec_image replaces the image while preserving task id")
             var sched = Scheduler.new()
             val id = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+            val before = sched.get_task(id)
+            var lifecycle_generation = 0u64
+            if before != nil:
+                lifecycle_generation = before.lifecycle_generation
             val image = UserProcessImage(
                 binary_path: "/bin/new",
                 entry: 0x500000,
@@ -525,6 +547,8 @@ describe "Scheduler":
             if tcb != nil:
                 val task = tcb
                 expect(task.id.id).to_equal(id.id)
+                expect(task.lifecycle_generation).to_equal(lifecycle_generation)
+                expect(task.lifecycle_generation).to_be_greater_than(0)
                 expect(task.is_user).to_equal(true)
                 expect(task.entry_point).to_equal(0x500000)
                 expect(task.user_stack).to_equal(0x5000000000)
@@ -1140,8 +1164,13 @@ describe "Scheduler":
 
             expect(child.id).to_be_greater_than(0)
             val child_tcb = sched.get_task(child)
+            val parent_tcb = sched.get_task(parent)
             if child_tcb != nil:
                 val task = child_tcb
+                expect(task.lifecycle_generation).to_be_greater_than(0)
+                if parent_tcb != nil:
+                    expect(task.lifecycle_generation).to_not_equal(
+                        parent_tcb.lifecycle_generation)
                 val is_ready = match task.state:
                     TaskState.Ready: true
                     _: false
