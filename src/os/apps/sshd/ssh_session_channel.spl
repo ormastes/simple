@@ -7,7 +7,7 @@ use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
 use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_packet.{ssh_ascii_text_to_bytes}
 use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_KEXINIT}
-use os.apps.sshd.ssh_channel.{ChannelState, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust}
+use os.apps.sshd.ssh_channel.{ChannelState, ChannelTerminalRequestV1, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
 use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, _copy_bytes_stable, _push_u32_be_stable, _read_u32_stable, _read_text_field_fast, _bytes_to_hex, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable}
@@ -117,6 +117,55 @@ pub fn ssh_sftp_principal_admitted(
     """
     state == SshSessionState.Interactive and principal != "" and
         active_channels > 0 and active_channels <= SSH_MAX_CHANNELS_PER_SESSION
+
+pub fn ssh_channel_pty_request_payload_valid(payload: [u8], off: u64) -> bool:
+    """Validate the complete bounded RFC 4254 pty-req body."""
+    if off + 4u64 > payload.len():
+        return false
+    val terminal_len = _read_u32_stable(payload, off).to_u64()
+    if terminal_len == 0u64 or terminal_len > 64u64:
+        return false
+    var terminal_i = off + 4u64
+    val terminal_end = terminal_i + terminal_len
+    while terminal_i < terminal_end:
+        val code = ssh_session_u8_at(payload, terminal_i)
+        if code < 0x21u8 or code > 0x7Eu8:
+            return false
+        terminal_i = terminal_i + 1u64
+    val geometry_offset = off + 4u64 + terminal_len
+    if geometry_offset + 20u64 > payload.len():
+        return false
+    val modes_len_offset = geometry_offset + 16u64
+    val modes_len = _read_u32_stable(payload, modes_len_offset).to_u64()
+    if modes_len == 0u64 or modes_len > 1024u64 or
+        modes_len_offset + 4u64 + modes_len != payload.len():
+        return false
+    var mode_i = modes_len_offset + 4u64
+    val modes_end = mode_i + modes_len
+    while mode_i < modes_end:
+        val opcode = ssh_session_u8_at(payload, mode_i)
+        if opcode == 0u8:
+            return mode_i + 1u64 == modes_end
+        # RFC 4254 opcodes 1..159 carry one uint32 argument. Opcodes 160+
+        # terminate parsing for forward compatibility and are not accepted by
+        # this bounded v1 owner because their trailing interpretation is unknown.
+        if opcode >= 160u8 or mode_i + 5u64 > modes_end:
+            return false
+        mode_i = mode_i + 5u64
+    false
+
+pub fn ssh_channel_window_change_payload_valid(payload: [u8], off: u64) -> bool:
+    """A window-change body is exactly four uint32 geometry fields."""
+    off + 16u64 == payload.len()
+
+pub fn ssh_channel_exec_request_payload_valid(payload: [u8], off: u64) -> bool:
+    """Validate one bounded, non-empty exec command with no trailing bytes."""
+    val command = _read_text_field_fast(payload, off)
+    if command.is_err():
+        return false
+    val field = command.unwrap()
+    field.value != "" and field.value.len() <= 4096u64 and
+        field.next_offset == payload.len()
 
 # Phase 2e Inc 3: scp-source (`scp -f <path>`) file retrieval. The FAT read
 # below is a plain C buffer read (simpleos_fat32_stream_open/stream_read_at
@@ -366,15 +415,15 @@ impl SshSession:
             return
         val want_reply = ssh_session_u8_at(payload, request_end) != 0
         val off = request_end + 1
-        val reply_remote_id =
-            if recipient == 0:
-                self.active_remote_channel_id
-            else:
-                val ch = self.channels.find(recipient)
-                if ch != nil:
-                    ch.remote_id
-                else:
-                    0u32
+        # ChannelTable is the sole mutable channel authority. Never dispatch a
+        # request, spawn a process, or synthesize a reply channel from ambient
+        # session state when the wire recipient is unknown or no longer open.
+        if not self.channels.is_open_session(recipient):
+            return
+        val request_channel = self.channels.find(recipient)
+        if request_channel == nil:
+            return
+        val reply_remote_id = request_channel.remote_id
 
         if ssh_channel_request_is_sftp(payload):
             if not ssh_sftp_principal_admitted(
@@ -389,6 +438,11 @@ impl SshSession:
                 if want_reply:
                     self.send_packet(_build_channel_failure_stable(reply_remote_id))
                 return
+            if not self.channels.begin_terminal_request(
+                recipient, ChannelTerminalRequestV1.Subsystem):
+                if want_reply:
+                    self.send_packet(_build_channel_failure_stable(reply_remote_id))
+                return
             self.sftp = SftpSessionV3.new()
             self.sftp_enabled = true
             self.capability_sftp_opened = true
@@ -399,27 +453,44 @@ impl SshSession:
             if want_reply:
                 self.send_packet(_build_channel_failure_stable(reply_remote_id))
         elif _field_range_equals_bytes_stable(payload, request_start, request_end, [0x70, 0x74, 0x79, 0x2D, 0x72, 0x65, 0x71]):
-            self._mark_channel_shell(recipient)
-            if want_reply:
+            val admitted = ssh_channel_pty_request_payload_valid(payload, off) and
+                self.channels.mark_pty_requested_once(recipient)
+            if want_reply and admitted:
                 self.send_packet(_build_channel_success_stable(reply_remote_id))
+            elif want_reply:
+                self.send_packet(_build_channel_failure_stable(reply_remote_id))
         elif _field_range_equals_bytes_stable(payload, request_start, request_end, [0x65, 0x6E, 0x76]):
+            # Environment forwarding has no bounded per-channel policy owner
+            # yet. Reject instead of claiming success while discarding it.
             if want_reply:
-                self.send_packet(_build_channel_success_stable(reply_remote_id))
+                self.send_packet(_build_channel_failure_stable(reply_remote_id))
         elif _field_range_equals_bytes_stable(payload, request_start, request_end, [0x73, 0x68, 0x65, 0x6C, 0x6C]):
             serial_println("[sshd-session] inline channel request=shell want_reply={want_reply}")
-            self._mark_channel_shell(recipient)
-            if want_reply:
-                self.send_packet(_build_channel_success_stable(reply_remote_id))
-            self._ensure_shell_started(true)
-            self._forward_shell_output()
+            val admitted = off == payload.len() and self.channels.begin_terminal_request(
+                recipient, ChannelTerminalRequestV1.Shell)
+            if admitted:
+                if want_reply:
+                    self.send_packet(_build_channel_success_stable(reply_remote_id))
+                self._ensure_shell_started(true)
+                self._forward_shell_output()
+            elif want_reply:
+                self.send_packet(_build_channel_failure_stable(reply_remote_id))
         elif _field_range_equals_bytes_stable(payload, request_start, request_end, [0x65, 0x78, 0x65, 0x63]):
             serial_println("[sshd-session] inline channel request=exec want_reply={want_reply}")
-            self._handle_exec_request(payload, off, recipient, reply_remote_id, want_reply)
+            val admitted = ssh_channel_exec_request_payload_valid(payload, off) and
+                self.channels.begin_terminal_request(
+                    recipient, ChannelTerminalRequestV1.Exec)
+            if admitted:
+                self._handle_exec_request(payload, off, recipient, reply_remote_id, want_reply)
+            elif want_reply:
+                self.send_packet(_build_channel_failure_stable(reply_remote_id))
         elif _field_range_equals_bytes_stable(payload, request_start, request_end, [0x77, 0x69, 0x6E, 0x64, 0x6F, 0x77, 0x2D, 0x63, 0x68, 0x61, 0x6E, 0x67, 0x65]):
-            # Resize metadata is accepted for compatibility; this shell has no
-            # terminal geometry owner to update.
-            if want_reply:
+            val admitted = ssh_channel_window_change_payload_valid(payload, off) and
+                self.channels.window_change_allowed(recipient)
+            if want_reply and admitted:
                 self.send_packet(_build_channel_success_stable(reply_remote_id))
+            elif want_reply:
+                self.send_packet(_build_channel_failure_stable(reply_remote_id))
             return
         else:
             serial_println("[sshd-session] inline channel request unsupported payload={_bytes_to_hex(payload)}")
@@ -435,11 +506,10 @@ impl SshSession:
 
         val command = r_command.unwrap().value
         serial_println("[sshd-session] exec command={command}")
-        self._mark_channel_shell(local_id)
-        if want_reply:
-            self.send_packet(_build_channel_success_stable(remote_id))
 
         if command.trim() == "true":
+            if want_reply:
+                self.send_packet(_build_channel_success_stable(remote_id))
             self._finish_exec_request(local_id, remote_id, 0, [])
             return
 
@@ -470,6 +540,7 @@ impl SshSession:
             self.pending_ring3_exec_remote_id = remote_id
             self.pending_ring3_exec_local_id = local_id
             self.pending_ring3_exec = true
+            self.pending_ring3_exec_want_reply = want_reply
             self.pending_ring3_exec_command = command
             self.transition_closed()
             return
@@ -491,6 +562,7 @@ impl SshSession:
             self.pending_ring3_exec_remote_id = remote_id
             self.pending_ring3_exec_local_id = local_id
             self.pending_ring3_exec = true
+            self.pending_ring3_exec_want_reply = want_reply
             self.pending_ring3_exec_command = command
             self.transition_closed()
             return
@@ -507,8 +579,12 @@ impl SshSession:
             val (gfile_bytes, gfsize) = _scp_read_file_bytes(gpath_text)
             serial_println("[sshd-session] getfile path={gpath_text} fsize={gfsize} bytes={gfile_bytes.len()}")
             if gfsize <= 0:
+                if want_reply:
+                    self.send_packet(_build_channel_failure_stable(remote_id))
                 self._finish_exec_request(local_id, remote_id, 1, [])
                 return
+            if want_reply:
+                self.send_packet(_build_channel_success_stable(remote_id))
             self._finish_exec_request(local_id, remote_id, 0, gfile_bytes)
             return
 
@@ -538,8 +614,12 @@ impl SshSession:
             val (file_bytes, fsize) = _scp_read_file_bytes(path_text)
             serial_println("[sshd-session] scp read path={path_text} fsize={fsize}")
             if fsize <= 0:
+                if want_reply:
+                    self.send_packet(_build_channel_failure_stable(remote_id))
                 self._finish_exec_request(local_id, remote_id, 1, [])
                 return
+            if want_reply:
+                self.send_packet(_build_channel_success_stable(remote_id))
             self.scp_pending = true
             self.scp_stage = 0
             self.scp_local_id = local_id
@@ -564,6 +644,7 @@ impl SshSession:
         self.pending_ring3_exec_remote_id = remote_id
         self.pending_ring3_exec_local_id = local_id
         self.pending_ring3_exec = true
+        self.pending_ring3_exec_want_reply = want_reply
         self.pending_ring3_exec_command = command
         self.transition_closed()
 
@@ -729,6 +810,18 @@ impl SshSession:
             val remote_id = self.pending_ring3_exec_remote_id
             val local_id = self.pending_ring3_exec_local_id
             var exit_code = self.pending_ring3_exec_exit_code.to_u32()
+            val want_reply = self.pending_ring3_exec_want_reply
+            val admitted = self.pending_ring3_exec_admitted
+            # Consume the bounded deferred record before any packet send can
+            # re-enter session teardown. A second call cannot replay success.
+            self.pending_ring3_exec = false
+            self.pending_ring3_exec_want_reply = false
+            self.pending_ring3_exec_admitted = false
+            if want_reply:
+                if admitted:
+                    self.send_packet(_build_channel_success_stable(remote_id))
+                else:
+                    self.send_packet(_build_channel_failure_stable(remote_id))
             if self.pending_ring3_exec_stdout.len() > 0:
                 if self.channels.consume_remote_window(local_id, self.pending_ring3_exec_stdout.len().to_u32()):
                     self.send_packet(_build_channel_data_stable(remote_id, self.pending_ring3_exec_stdout))

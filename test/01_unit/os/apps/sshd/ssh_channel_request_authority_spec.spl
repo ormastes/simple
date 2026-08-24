@@ -1,0 +1,85 @@
+"""
+## Purpose and audience
+Purpose: Prove that SSH channel requests are bound to one live session channel.
+Audience: SimpleOS SSH and scheduler-boundary maintainers.
+"""
+# @req: REQ-OS-APPS-001
+
+use std.spipe.*
+use std.spec.step
+use os.apps.sshd.ssh_channel.{
+    ChannelTable, ChannelType, ChannelTerminalRequestV1,
+    DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET
+}
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_string}
+use os.apps.sshd.ssh_session.{
+    ssh_channel_pty_request_payload_valid,
+    ssh_channel_window_change_payload_valid,
+    ssh_channel_exec_request_payload_valid
+}
+
+describe "SSH channel request authority is fail-closed":
+    it "rejects terminal requests for unknown and non-session channels":
+        step("Reject requests that have no live session-channel owner")
+        var table = ChannelTable.new()
+        val forwarded = table.open(
+            ChannelType.DirectTcpip, 8u32, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(table.begin_terminal_request(
+            77u32, ChannelTerminalRequestV1.Exec)).to_be(false)
+        expect(table.begin_terminal_request(
+            forwarded, ChannelTerminalRequestV1.Exec)).to_be(false)
+
+    it "commits exactly one terminal request per session channel":
+        step("Commit one terminal request and reject every competing replay")
+        var table = ChannelTable.new()
+        val channel = table.open(
+            ChannelType.Session, 9u32, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(table.begin_terminal_request(
+            channel, ChannelTerminalRequestV1.Exec)).to_be(true)
+        expect(table.begin_terminal_request(
+            channel, ChannelTerminalRequestV1.Exec)).to_be(false)
+        expect(table.begin_terminal_request(
+            channel, ChannelTerminalRequestV1.Shell)).to_be(false)
+        expect(table.begin_terminal_request(
+            channel, ChannelTerminalRequestV1.Subsystem)).to_be(false)
+
+    it "permits window changes only after a PTY-backed shell":
+        step("Bind geometry updates to the same PTY and shell owner")
+        var table = ChannelTable.new()
+        val channel = table.open(
+            ChannelType.Session, 10u32, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(table.window_change_allowed(channel)).to_be(false)
+        expect(table.mark_pty_requested_once(channel)).to_be(true)
+        expect(table.mark_pty_requested_once(channel)).to_be(false)
+        expect(table.window_change_allowed(channel)).to_be(false)
+        expect(table.begin_terminal_request(
+            channel, ChannelTerminalRequestV1.Shell)).to_be(true)
+        expect(table.window_change_allowed(channel)).to_be(true)
+
+    it "validates complete bounded pty exec and window bodies":
+        step("Reject truncation trailing bytes and empty executable commands")
+        var pty: [u8] = []
+        pty = ssh_put_text(pty, "xterm")
+        pty = ssh_put_u32(pty, 80u32)
+        pty = ssh_put_u32(pty, 24u32)
+        pty = ssh_put_u32(pty, 640u32)
+        pty = ssh_put_u32(pty, 480u32)
+        pty = ssh_put_string(pty, [0u8])
+        expect(ssh_channel_pty_request_payload_valid(pty, 0u64)).to_be(true)
+        pty.push(1u8)
+        expect(ssh_channel_pty_request_payload_valid(pty, 0u64)).to_be(false)
+
+        var geometry: [u8] = []
+        geometry = ssh_put_u32(geometry, 80u32)
+        geometry = ssh_put_u32(geometry, 24u32)
+        geometry = ssh_put_u32(geometry, 640u32)
+        geometry = ssh_put_u32(geometry, 480u32)
+        expect(ssh_channel_window_change_payload_valid(geometry, 0u64)).to_be(true)
+        geometry.push(0u8)
+        expect(ssh_channel_window_change_payload_valid(geometry, 0u64)).to_be(false)
+
+        val command = ssh_put_text([], "/bin/hello")
+        expect(ssh_channel_exec_request_payload_valid(command, 0u64)).to_be(true)
+        expect(ssh_channel_exec_request_payload_valid(
+            ssh_put_text([], ""), 0u64)).to_be(false)
+

@@ -51,6 +51,12 @@ enum ChannelState:
     Closing
     Closed
 
+enum ChannelTerminalRequestV1:
+    None
+    Shell
+    Exec
+    Subsystem
+
 struct SshChannel:
     """State for one SSH channel."""
     local_id: u32
@@ -63,6 +69,7 @@ struct SshChannel:
     remote_max_packet: u32
     pty_requested: bool
     shell_requested: bool
+    terminal_request: ChannelTerminalRequestV1
     peer_eof: bool
     env_vars: [(text, text)]
 
@@ -93,6 +100,7 @@ impl ChannelTable:
             remote_max_packet: remote_max_packet,
             pty_requested: false,
             shell_requested: false,
+            terminal_request: ChannelTerminalRequestV1.None,
             peer_eof: false,
             env_vars: []
         ))
@@ -122,6 +130,7 @@ impl ChannelTable:
             remote_max_packet: remote_max_packet,
             pty_requested: false,
             shell_requested: false,
+            terminal_request: ChannelTerminalRequestV1.None,
             peer_eof: false,
             env_vars: []
         )
@@ -157,6 +166,63 @@ impl ChannelTable:
         if idx >= 0:
             return self.channels[idx as u64]
         nil
+
+    pub fn is_open_session(local_id: u32) -> bool:
+        """Return true only for a live RFC 4254 session channel."""
+        val idx = self._find_local_index(local_id)
+        if idx < 0:
+            return false
+        val channel = self.channels[idx as u64]
+        channel.state == ChannelState.Open and
+            channel.channel_type == ChannelType.Session
+
+    pub me begin_terminal_request(
+        local_id: u32, request: ChannelTerminalRequestV1
+    ) -> bool:
+        """Commit one shell, exec, or subsystem request exactly once.
+
+        The per-session ChannelTable is the sole mutable request-state owner.
+        Invalid channels and a second terminal request leave state unchanged.
+        """
+        if request == ChannelTerminalRequestV1.None:
+            return false
+        val idx = self._find_local_index(local_id)
+        if idx < 0:
+            return false
+        val channel = self.channels[idx as u64]
+        if channel.state != ChannelState.Open or
+            channel.channel_type != ChannelType.Session or
+            channel.terminal_request != ChannelTerminalRequestV1.None:
+            return false
+        self.channels[idx as u64].terminal_request = request
+        self.channels[idx as u64].shell_requested =
+            request == ChannelTerminalRequestV1.Shell
+        true
+
+    pub me mark_pty_requested_once(local_id: u32) -> bool:
+        """Commit one PTY request on an open session before its terminal request."""
+        val idx = self._find_local_index(local_id)
+        if idx < 0:
+            return false
+        val channel = self.channels[idx as u64]
+        if channel.state != ChannelState.Open or
+            channel.channel_type != ChannelType.Session or
+            channel.pty_requested or
+            channel.terminal_request != ChannelTerminalRequestV1.None:
+            return false
+        self.channels[idx as u64].pty_requested = true
+        true
+
+    pub fn window_change_allowed(local_id: u32) -> bool:
+        """Accept geometry updates only for a live PTY-backed shell."""
+        val idx = self._find_local_index(local_id)
+        if idx < 0:
+            return false
+        val channel = self.channels[idx as u64]
+        channel.state == ChannelState.Open and
+            channel.channel_type == ChannelType.Session and
+            channel.pty_requested and
+            channel.terminal_request == ChannelTerminalRequestV1.Shell
 
     fn find_mut(local_id: u32) -> SshChannel?:
         """Find a channel by local ID (mutable access).
@@ -449,7 +515,7 @@ fn ssh_build_channel_failure(recipient: u32) -> [u8]:
     buf = ssh_put_u32(buf, recipient)
     buf
 
-export ChannelTable, SshChannel, ChannelType, ChannelState
+export ChannelTable, SshChannel, ChannelType, ChannelState, ChannelTerminalRequestV1
 export ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request
 export ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close
 export ssh_build_channel_open_confirmation, ssh_build_channel_open_failure

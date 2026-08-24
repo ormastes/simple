@@ -128,16 +128,16 @@ fn _sshd_default_envp() -> [text]:
 # payload (Phase 2e Inc 1) — this is what /usr/bin/clang (bare "clang" or
 # absolute "/usr/bin/clang") and any other PATH-resolved binary use.
 @cfg(x86_64)
-fn _sshd_run_pending_exec(command: text) -> i64:
+fn _sshd_run_pending_exec(command: text) -> (i64, bool):
     val all_tokens = _sshd_tokenize_command(command)
     if all_tokens.len() == 0:
         serial_println("[fs-exec] command not found: (empty)")
-        return 127
+        return (127, false)
     val name = all_tokens[0]
     val resolved = fs_exec_resolve(name)
     if resolved.length() == 0u64:
         serial_println("[fs-exec] command not found: {name}")
-        return 127
+        return (127, false)
     # x86_64_fs_exec_* builds the initial stack itself and inserts `resolved`
     # as argv[0].  Pass only the command operands here; otherwise argv[0] is
     # duplicated and the first real operand is shifted to argv[2].  RV64 uses
@@ -153,25 +153,25 @@ fn _sshd_run_pending_exec(command: text) -> i64:
         serial_println("[sshd] ring3 deferred spawn {resolved} command={command}")
         val rc = x86_64_fs_exec_spawn(resolved, argv, _sshd_default_envp())
         serial_println("[sshd] ring3 deferred spawn returned rc={rc}; accept loop continues")
-        return rc
+        return (rc, true)
     serial_println("[sshd] ring3 deferred heap-stream spawn {resolved} command={command}")
     val rc = x86_64_fs_exec_spawn_heap(resolved, argv, _sshd_default_envp())
     serial_println("[sshd] ring3 deferred heap-stream spawn returned rc={rc}; accept loop continues")
-    rc
+    (rc, true)
 
 @cfg(riscv64)
-fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool, bool):
     val all_tokens = _sshd_tokenize_command(command)
     if all_tokens.len() == 0:
         serial_println("[fs-exec] command not found: (empty)")
         val failed = riscv64_fs_exec_failed_capture(127)
-        return (failed.bytes, failed.exit_code, failed.truncated)
+        return (failed.bytes, failed.exit_code, failed.truncated, false)
     val name = all_tokens[0]
     val resolved = fs_exec_resolve(name)
     if resolved.length() == 0u64:
         serial_println("[fs-exec] command not found: {name}")
         val failed = riscv64_fs_exec_failed_capture(127)
-        return (failed.bytes, failed.exit_code, failed.truncated)
+        return (failed.bytes, failed.exit_code, failed.truncated, false)
     var argv: [text] = [resolved]
     var i: u64 = 1
     while i < all_tokens.len():
@@ -180,27 +180,32 @@ fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
     serial_println("[sshd] rv64 filesystem exec {resolved} command={command}")
     val result = riscv64_fs_exec_spawn_capture(resolved, argv, _sshd_default_envp())
     serial_println("[sshd] rv64 filesystem exec returned rc={result.exit_code}")
-    (result.bytes, result.exit_code, result.truncated)
+    (result.bytes, result.exit_code, result.truncated, true)
 
 @cfg(x86_64)
-fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
-    ([], _sshd_run_pending_exec(command), false)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool, bool):
+    val (exit_code, admitted) = _sshd_run_pending_exec(command)
+    ([], exit_code, false, admitted)
 
 @cfg(x86)
-fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool):
-    sshd_unsupported_architecture_exec_result_v1()
+fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool, bool):
+    val result = sshd_unsupported_architecture_exec_result_v1()
+    (result.0, result.1, result.2, false)
 
 @cfg(arm64)
-fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool):
-    sshd_unsupported_architecture_exec_result_v1()
+fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool, bool):
+    val result = sshd_unsupported_architecture_exec_result_v1()
+    (result.0, result.1, result.2, false)
 
 @cfg(arm32)
-fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool):
-    sshd_unsupported_architecture_exec_result_v1()
+fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool, bool):
+    val result = sshd_unsupported_architecture_exec_result_v1()
+    (result.0, result.1, result.2, false)
 
 @cfg(riscv32)
-fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool):
-    sshd_unsupported_architecture_exec_result_v1()
+fn _sshd_run_pending_exec_result(_command: text) -> ([u8], i64, bool, bool):
+    val result = sshd_unsupported_architecture_exec_result_v1()
+    (result.0, result.1, result.2, false)
 
 fn _sshd_bytes_equal(a: [u8], b: [u8]) -> bool:
     if a.len() != b.len():
@@ -661,10 +666,11 @@ impl SshDaemon:
         # Must run BEFORE session.close(): the real exit-status reply for
         # the deferred exec goes out on the still-open session socket.
         if session.pending_ring3_exec:
-            val (stdout_bytes, exit_rc, stdout_truncated) = _sshd_run_pending_exec_result(session.pending_ring3_exec_command)
+            val (stdout_bytes, exit_rc, stdout_truncated, admitted) = _sshd_run_pending_exec_result(session.pending_ring3_exec_command)
             session.pending_ring3_exec_exit_code = exit_rc.to_u32()
             session.pending_ring3_exec_stdout = stdout_bytes
             session.pending_ring3_exec_stdout_truncated = stdout_truncated
+            session.pending_ring3_exec_admitted = admitted
             session._send_deferred_ring3_exec_response()
         serial_println("[sshd] session close")
         session.close()
