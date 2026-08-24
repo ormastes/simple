@@ -220,7 +220,7 @@ impl Arm64SshRequestContextOwnerV1:
         self.slots[index].transition_nonce = lease_nonce
         Ok(Arm64SshLaunchLeaseV1(_handle: handle, _launch_nonce: lease_nonce))
 
-    pub me complete_launch(
+    pub(package) me complete_launch(
         lease: Arm64SshLaunchLeaseV1
     ) -> Result<bool, Arm64SshContextErrorV1>:
         val index = self._handle_index(lease._handle)
@@ -230,6 +230,37 @@ impl Arm64SshRequestContextOwnerV1:
         if slot.state != Arm64SshContextStateV1.LaunchLeased or
             slot.transition_nonce != lease._launch_nonce or lease._launch_nonce == 0u64:
             return Err(Arm64SshContextErrorV1.InvalidLaunchLease)
+        self._quarantine(index)
+        Ok(true)
+
+    pub me complete_launch_bound(
+        lease: Arm64SshLaunchLeaseV1,
+        session_id: u64,
+        channel_id: u32,
+        principal: text,
+        request_id: u64
+    ) -> Result<bool, Arm64SshContextErrorV1>:
+        """Consume a launch lease only for its exact authenticated request.
+
+        This is the SSH-owner half of a future loader joint transition.  The
+        binding comparison and terminal quarantine happen in one owner call;
+        no copied snapshot can authorize completion and no mismatch changes
+        the live LaunchLeased slot.
+        """
+        if not _arm64_ssh_binding_valid(
+            session_id, channel_id, principal, request_id):
+            return Err(Arm64SshContextErrorV1.InvalidBinding)
+        val index = self._handle_index(lease._handle)
+        if index < 0:
+            return Err(Arm64SshContextErrorV1.InvalidLaunchLease)
+        val slot = self.slots[index]
+        if slot.state != Arm64SshContextStateV1.LaunchLeased or
+            slot.transition_nonce != lease._launch_nonce or
+            lease._launch_nonce == 0u64:
+            return Err(Arm64SshContextErrorV1.InvalidLaunchLease)
+        if not _arm64_ssh_binding_matches(
+            slot, session_id, channel_id, principal, request_id):
+            return Err(Arm64SshContextErrorV1.InvalidBinding)
         self._quarantine(index)
         Ok(true)
 

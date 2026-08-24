@@ -13,6 +13,13 @@ use os.kernel.loader.executable_authority_registry.{
     executable_authority_commit,
     executable_authority_slot_count
 }
+use os.kernel.loader.executable_load_plan_v1.{
+    executable_load_consumer_new_v1
+}
+use os.kernel.loader.arm64_ssh_joint_launch_validation.{
+    Arm64SshJointLaunchValidationErrorV1,
+    arm64_ssh_joint_launch_validate_loader_half_v1
+}
 
 fn identity_handle() -> ExecutableImageHandleV1:
     ExecutableImageHandleV1(
@@ -73,6 +80,59 @@ describe "loader-owned Armed authority identity snapshot":
         expect(repeated.unwrap().admission_id).to_equal("ssh-web-launch-1")
         expect(executable_authority_slot_count(owner)).to_equal(1)
 
+        val consumer = executable_load_consumer_new_v1(
+            "simpleos", "aarch64", "simpleos")
+        val exact = arm64_ssh_joint_launch_validate_loader_half_v1(
+            repeated.unwrap(), token, consumer, 0x400100u64,
+            "/servers/simple-web")
+        expect(exact.ok).to_be_true()
+        val wrong_path = arm64_ssh_joint_launch_validate_loader_half_v1(
+            repeated.unwrap(), token, consumer, 0x400100u64,
+            "/servers/other")
+        expect(wrong_path.error).to_equal(
+            Arm64SshJointLaunchValidationErrorV1.InvalidPath)
+        val wrong_entry = arm64_ssh_joint_launch_validate_loader_half_v1(
+            repeated.unwrap(), token, consumer, 0x400200u64,
+            "/servers/simple-web")
+        expect(wrong_entry.error).to_equal(
+            Arm64SshJointLaunchValidationErrorV1.EntryIdentityMismatch)
+        var invalid_token = token
+        invalid_token.nonce = 0u64
+        val zero_nonce = arm64_ssh_joint_launch_validate_loader_half_v1(
+            repeated.unwrap(), invalid_token, consumer, 0x400100u64,
+            "/servers/simple-web")
+        expect(zero_nonce.error).to_equal(
+            Arm64SshJointLaunchValidationErrorV1.TokenIdentityMismatch)
+        invalid_token = token
+        invalid_token.generation = 0u64
+        val zero_generation = arm64_ssh_joint_launch_validate_loader_half_v1(
+            repeated.unwrap(), invalid_token, consumer, 0x400100u64,
+            "/servers/simple-web")
+        expect(zero_generation.error).to_equal(
+            Arm64SshJointLaunchValidationErrorV1.TokenIdentityMismatch)
+        invalid_token = token
+        invalid_token.slot_index = -1
+        val negative_slot = arm64_ssh_joint_launch_validate_loader_half_v1(
+            repeated.unwrap(), invalid_token, consumer, 0x400100u64,
+            "/servers/simple-web")
+        expect(negative_slot.error).to_equal(
+            Arm64SshJointLaunchValidationErrorV1.TokenIdentityMismatch)
+        var wrong_target_identity = repeated.unwrap()
+        wrong_target_identity.target = ManifestTarget(
+            os: "simpleos", arch: "riscv64", abi: "simpleos")
+        val wrong_target = arm64_ssh_joint_launch_validate_loader_half_v1(
+            wrong_target_identity, token, consumer, 0x400100u64,
+            "/servers/simple-web")
+        expect(wrong_target.error).to_equal(
+            Arm64SshJointLaunchValidationErrorV1.TargetMismatch)
+        var dirty_consumer = consumer
+        dirty_consumer.segment_count = 1
+        val dirty = arm64_ssh_joint_launch_validate_loader_half_v1(
+            repeated.unwrap(), token, dirty_consumer, 0x400100u64,
+            "/servers/simple-web")
+        expect(dirty.error).to_equal(
+            Arm64SshJointLaunchValidationErrorV1.InvalidConsumer)
+
         if executable_authority_commit(owner, token).is_err():
             fail("authority commit failed")
         match executable_authority_snapshot_armed_identity(owner, token):
@@ -87,6 +147,11 @@ describe "loader-owned Armed authority identity snapshot":
         if legacy.is_err(): fail("legacy identity snapshot failed")
         expect(legacy.unwrap().has_entry_identity).to_be_false()
         expect(legacy.unwrap().entry_point).to_equal(0u64)
+        val missing_entry_check = arm64_ssh_joint_launch_validate_loader_half_v1(
+            legacy.unwrap(), missing_entry.unwrap(), consumer, 0x400100u64,
+            "/servers/simple-web")
+        expect(missing_entry_check.error).to_equal(
+            Arm64SshJointLaunchValidationErrorV1.MissingEntryIdentity)
 
         val before_invalid = executable_authority_slot_count(owner)
         match executable_authority_issue_verified(
