@@ -147,3 +147,121 @@ Stage 4 was not produced on either attempt, so there is no self-hosted artifact
 to deploy, and the MCP `tools/call simple_info` probe still executes the Rust
 seed and still returns `exit: 1` with "this Rust-built Simple binary is a
 bootstrap seed only". That probe cannot turn green until Stage 3 self-host does.
+
+---
+
+## ROOT CAUSE FOUND — fix `af74374c355` (2026-08-24)
+
+### `n_modules=0` was never the defect
+
+It is **correct by design** on this path. Phase 2's streaming-surface path ends
+with (`driver_source_pipeline_parsing.spl`):
+
+```
+self.ctx.module_surfaces = Some(retained_surfaces)
+self.ctx.modules = {}
+```
+
+On the streaming path the **surfaces ARE the module set**; `ctx.modules` is
+deliberately emptied. `phase2:parse:done` read `ctx.modules` unconditionally and
+so printed a bare `n_modules=0` after a fully successful 692-module parse. That
+line reads as catastrophic loss and misdirected this investigation to the wrong
+field. It now names its carrier.
+
+Streaming was confirmed active: `bootstrap-from-scratch.sh` exports
+`SIMPLE_STAGE3_STREAMING_SURFACES=1` for Stage 3, and the 692
+`phase2:surface:file:released` lines are emitted only by the streaming path
+(`log_module_surface_released`, `driver_log_helpers.spl:177`).
+
+### The actual defect: phase 3 dispatched on a lost readiness flag
+
+`driver_hir_pipeline_lowering.spl`, `lower_and_check_impl`:
+
+```
+if self.streaming_surface_owner_ready:          # <-- the mutable scalar, ALONE
+    return self.lower_and_check_streaming_surfaces_impl()
+```
+
+Phase 2 sets `streaming_surface_owner_ready = true`. Under native value
+semantics that boolean was **lost across the phase boundary**, so this test read
+false and fell into the **legacy** path — which iterates `ctx.modules`, the
+collection phase 2 had just deliberately emptied. Result: zero iterations, phase
+3 "completes" in 1 ms, returns SUCCESS with zero HIR modules.
+
+The empty program then flows on: monomorphize reports `0/0` (vacuous), and MIR
+lowering is simply the first phase that DEREFERENCES rather than iterating —
+`_bootstrap_entry_hir_module` is nil, `.?` enters the Some arm anyway (the
+predicate-misread class of `c018ee15926`, where `is_empty()` returns false on an
+empty list in Stage-2-compiled code), and `hir_module.symbols` SEGVs.
+**The crash site was three phases downstream of the defect site.**
+
+### Proven from the existing log — no new run required
+
+From the 367 KB `stage3-native-build.log` of the original failing run:
+
+- `grep -c 'phase=hir'` → **0**. The streaming impl's pre-loop
+  `log_build_progress("hir", "modules", 0, surfaces.surfaces.len(), "pending", …)`
+  **never printed**.
+- `grep -c FAILED` → **0**, and phase 3 returned true in 1 ms.
+- The streaming impl has **no success path before that log line** — every exit
+  above it is `return (self.ctx, false)` with a recorded error.
+
+Therefore the streaming impl was **never entered**, while the 692
+`surface:file:released` lines prove phase 2 *did* take the streaming path. The
+two halves of the pipeline disagreed about the mode. That is the seam.
+
+Corroboration: `phase1:load_sources:done n_sources=968` — the sources were all
+there; `phase2:source_reclaim` and `[parse-shard]` are both absent, excluding
+eviction and shard-exit as alternative mechanisms.
+
+### Fix (minimal, semantics-preserving)
+
+`driver_orchestration` already derived *its* phase-3 routing from stable
+configuration for exactly this reason — *"not the adjacent mutable readiness
+boolean that native value semantics can lose between phase methods"*. This
+dispatch was the one place still trusting the boolean.
+
+1. **Route on both** — `streaming_ready_flag or streaming_config_gate`.
+   Configuration rescues a lost flag; the flag serves compat callers that stage
+   surfaces without the env gates.
+2. **Legacy path fails closed** — `E-DRV-PHASE3-EMPTY`: 0 modules from >0
+   sources aborts.
+3. **Streaming path fails closed** — `E-DRV-PHASE3-EMPTY-SURFACES`.
+4. **MIR entry fails closed** — `E-MIR-BOOTSTRAP-ENTRY-NIL` explicitly
+   nil-checks the payload instead of trusting `.?`, turning the SEGV into a
+   named error.
+5. `phase2:parse:done` now reports `carrier=surfaces|modules`.
+
+A zero-module parse result can no longer flow into a later phase on any path.
+
+### Regression gate
+
+`scripts/check/check-phase3-empty-module-abort.shs` — `--selftest` first and
+fatal (4 fixtures: clean, incident-replay, partial-regression, empty-tree);
+verdict last on stdout. Validated against reality:
+
+```
+# at origin/main (the broken tree)
+FAIL — 4 invariant(s) checked in <tree>, violated: phase3-dispatch-routes-on-mutable-flag-alone \
+  legacy-phase3-missing-zero-module-abort streaming-phase3-missing-zero-surface-abort \
+  mir-bootstrap-entry-missing-nil-check
+
+# at af74374c355 (fixed)
+PASS — 4 invariant(s) checked, phase-3 zero-module abort intact (dispatch routes on config+flag; \
+  legacy, streaming and MIR-entry paths all fail closed)
+```
+
+### Relationship to the arm64 report
+
+One defect, not two. `stage3_monomorphize_segv_at_origin_main_arm64_2026-08-24.md`
+describes the same empty-program condition ("clears HIR entirely"); after its own
+monomorphize fault was fixed, that lane also proceeds to `aot:lower_to_mir` —
+converging on exactly this x86_64 crash site.
+
+### Status
+
+**Root cause identified, fixed and landed at `af74374c355`; regression gate green.**
+End-to-end Stage 3 / Stage 4 artifact verification is a separate long bootstrap
+run and is recorded below when complete. Note that even absent that run, the
+change is a strict improvement: the silent SEGV is now a named, fail-closed
+error on every path.
