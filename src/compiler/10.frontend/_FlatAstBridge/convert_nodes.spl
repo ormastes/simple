@@ -749,7 +749,7 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
     # like CSS/JSON).
     var interps: [Interpolation] = []
     var depth = 0
-    var inner = ""
+    var inner_parts: [text] = []
     var i = 0
     val n = value.len()
     while i < n:
@@ -769,14 +769,14 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
             i = i + 1
         elif depth == 0 and ch == "{":
             depth = 1
-            inner = ""
+            inner_parts = []
         elif depth > 0 and ch == "{":
             depth = depth + 1
-            inner = inner + ch
+            inner_parts.push(ch)
         elif depth > 0 and ch == "}":
             depth = depth - 1
             if depth == 0:
-                val part_idx = parse_interpolation_fragment(inner)
+                val part_idx = parse_interpolation_fragment(inner_parts.join(""))
                 if part_idx < 0:
                     return []
                 interps.push(Interpolation(
@@ -786,9 +786,9 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
                     span: span
                 ))
             else:
-                inner = inner + ch
+                inner_parts.push(ch)
         elif depth > 0:
-            inner = inner + ch
+            inner_parts.push(ch)
         i = i + 1
     if depth != 0:
         return []
@@ -811,22 +811,30 @@ fn flat_bridge_decode_brace_escapes(value: text) -> text:
     as an empty/false `.?` check), so signaling through the interps field
     silently degrades an intended `Some([])` into `nil`.
     """
-    var result = ""
+    var parts: [text] = []
     var i = 0
+    var run_start = 0
     val n = value.len()
     while i < n:
         val ch = value[i:i + 1]
         val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
         if ch == "{" and ch_next == "{":
-            result = result + "{"
+            if run_start < i:
+                parts.push(value[run_start:i])
+            parts.push("{")
             i = i + 2
+            run_start = i
         elif ch == "}" and ch_next == "}":
-            result = result + "}"
+            if run_start < i:
+                parts.push(value[run_start:i])
+            parts.push("}")
             i = i + 2
+            run_start = i
         else:
-            result = result + ch
             i = i + 1
-    result
+    if run_start < n:
+        parts.push(value[run_start:n])
+    parts.join("")
 
 fn convert_flat_expr(idx: i64) -> Expr:
     if idx < 0:
@@ -844,6 +852,10 @@ fn convert_flat_expr(idx: i64) -> Expr:
         val str_val = expr_get_str(idx)
         if expr_get_int(idx) != 0:
             return Expr(kind: ExprKind.StringLit(str_val, nil), span: span)
+        # Ordinary literals dominate this path. Avoid interpolation parsing and
+        # brace-decoder allocation when no brace can affect either operation.
+        if not str_val.contains("{") and not str_val.contains("}"):
+            return Expr(kind: ExprKind.StringLit(str_val, nil), span: span)
         val str_interps = flat_bridge_build_string_interps(str_val, span)
         if str_interps.len() > 0:
             return Expr(kind: ExprKind.StringLit(str_val, str_interps), span: span)
@@ -851,6 +863,8 @@ fn convert_flat_expr(idx: i64) -> Expr:
             # No real `{expr}` placeholder (str_interps is empty). Decode any
             # `{{`/`}}` escapes directly since nothing downstream will (see
             # flat_bridge_decode_brace_escapes).
+            if not str_val.contains("{{") and not str_val.contains("}}"):
+                return Expr(kind: ExprKind.StringLit(str_val, nil), span: span)
             return Expr(kind: ExprKind.StringLit(flat_bridge_decode_brace_escapes(str_val), nil), span: span)
     if tag == EXPR_BOOL_LIT:
         return Expr(kind: ExprKind.BoolLit(expr_get_int(idx) != 0), span: span)

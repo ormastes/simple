@@ -899,3 +899,12 @@ empty; negative symbol/local IDs remain rejected. No deletion or tombstone is
 needed. Constructor initialization, per-function reset, and each temporary
 lambda scope save/restore own all three arrays as one state capsule. A bucket is
 published only after its authoritative id/value append is complete.
+
+# Flat-bridge string ownership
+
+The parser-owned string value remains authoritative until a transformation is
+required. Raw strings always bypass interpolation. Non-raw strings without any
+brace return the same value; brace-bearing strings enter interpolation parsing;
+and only a plain result containing doubled braces enters decoding. Decoder and
+interpolation-body builders own ordered fragments and publish text through one
+final join. MIR remains the owner of decoding when real interpolation exists.

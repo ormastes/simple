@@ -1216,3 +1216,14 @@ two detectable structural failures, lookup falls back to the former reverse
 authoritative scan and mutation rebuilds before updating, preventing a duplicate
 append. The index is otherwise protected by its lifecycle invariant; arbitrary
 in-range bucket corruption is outside this recovery contract.
+
+# Flat-bridge string scan design
+
+`convert_flat_expr` rejects raw strings first, then returns non-raw no-brace text
+without constructing interpolation or decoder state. After interpolation scan,
+an empty interpolation list returns the original text unless doubled braces are
+present. `flat_bridge_decode_brace_escapes` records ordinary `[start,i)` runs and
+single-brace escape fragments, advances by two for a matched escape, appends the
+final suffix, and joins once. `flat_bridge_build_string_interps` replaces its
+growing `inner` prefix with fragments joined only when a top-level placeholder
+closes. Parse failure still returns an empty interpolation list.

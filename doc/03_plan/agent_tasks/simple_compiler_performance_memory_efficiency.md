@@ -1734,6 +1734,18 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - No manual execution was run under the user override; static semantic,
   performance, and fixture review is required before sync.
 
+# Completed tranche: flat-bridge string construction (2026-08-24)
+
+- Added no-brace and no-doubled-brace identity paths for non-raw literals.
+- Replaced per-character immutable decoder prefixes with ordinary-run fragments
+  and one join.
+- Replaced interpolation-body prefix concatenation with fragments and one join.
+- Preserved raw bypass, invalid-fragment fallback, escape order, and MIR
+  interpolation ownership.
+- Added paired exact semantic and structural fixtures plus a canonical manual.
+- Static target: remove O(S²) and O(K²) copied bytes; no execution or
+  performance/RSS measurement was run under the user override.
+
 # Completed tranche: MIR local binding index (2026-08-24)
 
 - Retained the staged-native-safe parallel binding arrays as authority.

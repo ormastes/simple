@@ -3579,6 +3579,25 @@ tier checker. Each source is scanned once in O(N) time with one integer result
 per physical line and no masked text construction for DEPR002. No timing,
 allocation, or RSS measurement was run under the no-verification override.
 
+# 2026-08-24 follow-up: flat-bridge string construction
+
+Every ordinary non-raw string entered the interpolation scanner even when it
+contained no brace. On the no-interpolation path it then entered a second brace
+decoder, which appended one character to an immutable prefix per iteration.
+For S literal bytes this added O(S²) cumulative copied/allocated bytes to a
+compiler-wide frontend path. Actual interpolation bodies likewise accumulated
+their inner text one character at a time, giving O(K²) copied bytes for a K-byte
+placeholder before parsing it.
+
+No-brace strings now return the parser-owned text directly. Brace-bearing
+non-interpolated strings also return directly unless they contain `{{` or `}}`.
+The decoder retains ordinary runs as slices, emits one literal brace per escape,
+and joins once; interpolation bodies collect fragments and join once at the
+closing brace. Work and copied output are linear in inspected bytes, with
+fragment storage proportional to escape runs or interpolation payload. Raw
+strings, invalid-fragment fallback, expression ordering, and MIR interpolation
+ownership are unchanged. No execution or runtime/RSS measurement was run.
+
 # 2026-08-24 follow-up: doc-coverage repeated traversal removal
 
 The live self-hosted doc-coverage path ran three recursive grep pipelines for
