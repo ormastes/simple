@@ -2827,3 +2827,16 @@ unchanged span fragments once: `O(n)` work and output-sized storage. It preserve
 Unicode/non-space spans, operator-rewrite order, context cleanup, and final
 trim behavior. Boundary and idempotence contracts were added but not executed
 under the user's no-verification instruction.
+
+### Linear `check-tier` accumulation
+
+Repository and configuration scans in `check_tier.spl` accumulated keywords,
+module tiers, and classified paths with `array = array + [item]`. Under
+copy-on-write value semantics this can copy every prior prefix, producing
+quadratic element traffic as repository size grows. The owned accumulators now
+use `push`, preserving encounter and diagnostic order. Full-tier paths are no
+longer retained at all because only their count reaches the summary, reducing
+peak path storage from all files to the seed/core subsets. Operator tables are
+constructed once per checked file and shared across its lines instead of being
+rebuilt for every line. Source contracts were added but not executed under the
+user's no-verification instruction.
