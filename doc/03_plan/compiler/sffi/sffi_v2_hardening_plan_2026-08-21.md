@@ -1380,3 +1380,11 @@ calls (2,127 explicit, 19,308 missing), zero signed/admitted. Optimizer findings
 remain 70 and RSS remains flat; do not infer a runtime regression from the
 single noisy optimizer-process wall-time pair. Four unrelated stale assertions
 keep the broad source-contract spec at 5/9 and require their own owner repair.
+
+The authority tool now excludes comments, strings, and multiline docstrings,
+removing 169 prose-only rows. Corrected census: 21,266 calls (2,127 explicit,
+19,139 missing), 3,277 symbols, 3,111 caller files, zero signed/admitted. Keep
+the line-oriented masker and marker-free fast path: measured full-scan time is
+30.42 s / 14,432 KiB versus approximately 34 seconds before the correction.
+Historical pre/post-rebase deltas from the old scanner are not comparable; use
+the corrected current snapshot as the next same-tool regression baseline.

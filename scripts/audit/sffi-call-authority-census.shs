@@ -38,11 +38,57 @@ find "$root/src" "$root/test" -type f -name '*.spl' ! -path '*/vendor/*' -print0
 xargs -0 -r -n 200 perl -0ne '
     my $file = $ARGV;
     my @lines = split /\n/, $_, -1;
+    my @code_lines;
     my %raw;
     my $in_sffi_use = 0;
 
+    # Mask comments, ordinary string literals, and multiline docstrings once,
+    # preserving indentation and line numbers. The census is a code inventory:
+    # prose such as `rt_exit(1)` must never create an authority row. This is a
+    # single linear pass over source bytes, not another tree scan.
+    my $triple = "";
     for my $line (@lines) {
-        next if $line =~ /^\s*#/;
+        if ($triple eq "" && index($line, "\"") < 0 && index($line, "\x27") < 0) {
+            my $code = $line;
+            my $comment = index($code, "#");
+            if ($comment >= 0) {
+                substr($code, $comment) = " " x (length($code) - $comment);
+            }
+            push @code_lines, $code;
+            next;
+        }
+        my $code = $line;
+        my $cursor = 0;
+        while (1) {
+            if ($triple ne "") {
+                my $end = index($code, $triple, $cursor);
+                if ($end < 0) {
+                    substr($code, $cursor) = " " x (length($code) - $cursor);
+                    last;
+                }
+                substr($code, $cursor, $end + 3 - $cursor) =
+                    " " x ($end + 3 - $cursor);
+                $cursor = $end + 3;
+                $triple = "";
+            }
+            my $double_at = index($code, "\"\"\"", $cursor);
+            my $single_at = index($code, "\x27\x27\x27", $cursor);
+            last if $double_at < 0 && $single_at < 0;
+            my $start = $double_at < 0 ? $single_at :
+                ($single_at < 0 || $double_at < $single_at ? $double_at : $single_at);
+            $triple = substr($code, $start, 3);
+            substr($code, $start, 3) = "   ";
+            $cursor = $start + 3;
+        }
+        # Mask ordinary literals before stripping comments so a # inside text
+        # does not truncate real code that follows the literal.
+        $code =~ s/"(?:\\.|[^"\\])*"/" " x length($&)/ge;
+        $code =~ s/\x27(?:\\.|[^\x27\\])*\x27/" " x length($&)/ge;
+        $code =~ s/#.*$/" " x length($&)/e;
+        push @code_lines, $code;
+    }
+
+    for my $line (@code_lines) {
         if ($line =~ /^\s*(?:pub\s+)?(?:unsafe\s+)?extern\s+fn\s+([A-Za-z_]\w*)/) {
             $raw{$1} = 1;
         }
@@ -60,20 +106,20 @@ xargs -0 -r -n 200 perl -0ne '
     }
 
     for (my $i = 0; $i <= $#lines; $i++) {
-        my $header = $lines[$i];
+        my $header = $code_lines[$i];
         next unless $header =~ /^(\s*)(?:(?:pub|static)\s+)*(?:fn|me)\s+[A-Za-z_]\w*/;
         my $header_indent = length($1);
         my $fn_unsafe = 0;
         for (my $p = $i - 1; $p >= 0 && $i - $p <= 8; $p--) {
-            next if $lines[$p] =~ /^\s*$/;
-            if ($lines[$p] =~ /^\s*\@unsafe\b.*capabilities.*\bffi\b/i) {
+            next if $code_lines[$p] =~ /^\s*$/;
+            if ($code_lines[$p] =~ /^\s*\@unsafe\b.*capabilities.*\bffi\b/i) {
                 $fn_unsafe = 1;
             }
-            last if $lines[$p] !~ /^\s*\@/;
+            last if $code_lines[$p] !~ /^\s*\@/;
         }
         my $lexical_indent = -1;
         for (my $j = $i + 1; $j <= $#lines; $j++) {
-            my $body = $lines[$j];
+            my $body = $code_lines[$j];
             next if $body =~ /^\s*$/;
             my ($spaces) = $body =~ /^(\s*)/;
             my $indent = length($spaces);
@@ -84,7 +130,6 @@ xargs -0 -r -n 200 perl -0ne '
                 next;
             }
             my $code = $body;
-            $code =~ s/#.*$//;
             while ($code =~ /(?<![A-Za-z0-9_])([A-Za-z_]\w*)\s*\(/g) {
                 my $name = $1;
                 next unless $raw{$name};

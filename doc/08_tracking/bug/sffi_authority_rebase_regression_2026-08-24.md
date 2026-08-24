@@ -5,6 +5,13 @@
 **Scope:** owned Simple sources and tests scanned by
 `sffi-call-authority-census.shs`
 
+**Measurement correction:** The scanner formerly counted call-shaped prose in
+docstrings and string literals. Those historical totals are retained below as
+the original observation but are not comparable to the corrected scanner. The
+2026-08-24 corrected baseline is 21,266 raw, 2,127 explicit, and 19,139 missing.
+Future regression claims must compare snapshots produced by the corrected
+scanner; do not subtract the old 19,303 figure from the corrected total.
+
 ## Evidence
 
 Before rebasing the cache-GC branch, the census reported 21,382 raw calls,

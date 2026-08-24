@@ -2372,3 +2372,20 @@ pre-existing expectations for other lowering files are stale.
 
 Current authority totals are 21,435 raw calls, 2,127 explicit, and 19,308
 missing. Signed and admitted provider evidence remains zero.
+
+## Authority-census prose exclusion correction
+
+The authority scanner previously treated call-shaped text inside triple-quoted
+docstrings and ordinary string literals as executable calls. The apparent new
+`rt_exit` in `bootstrap_globals.spl` was one such false row. The scanner now
+masks comments, literals, and multiline docstrings in one line-preserving pass
+before declaration/call analysis. A standalone fixture proves that three prose
+mentions yield no row while the real call retains its exact line and symbol.
+
+The first correct implementation was rejected after exceeding 90 seconds. The
+line-oriented replacement completed in 38.81 s / 14,680 KiB, and a marker-free
+fast path reduced that to 30.42 s / 14,432 KiB, below the prior scanner's
+approximately 34-second observed run. Complexity remains O(source bytes + call
+sites), with no additional tree scan. Corrected totals are 21,266 raw calls,
+2,127 explicit, 19,139 missing, 3,277 distinct called symbols, and 3,111 caller
+files. Signed and admitted provider evidence remains zero.

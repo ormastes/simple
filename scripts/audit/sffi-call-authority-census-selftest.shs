@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+mkdir -p "$work/scripts/audit/baselines" "$work/src" "$work/test"
+cp "$root/scripts/audit/sffi-call-authority-census.shs" "$work/scripts/audit/"
+cp "$root/scripts/audit/baselines/sffi-call-authority-v1.tsv" "$work/scripts/audit/baselines/"
+
+cat >"$work/src/docstring_probe.spl" <<'EOF'
+extern fn rt_probe() -> bool
+
+fn checked() -> bool:
+    """The text rt_probe() is documentation, not a call."""
+    val quoted = "rt_probe() is also not code"
+    # rt_probe() in a comment is not code either.
+    rt_probe()
+EOF
+
+SFFI_MAX_MISSING=1 sh "$work/scripts/audit/sffi-call-authority-census.shs" \
+    "$work/calls.tsv" "$work/summary.tsv" "$work/symbols.tsv" \
+    "$work/families.tsv" "$work/scopes.tsv" >/dev/null
+
+rows=$(awk -F '\t' 'NR > 1 { count++ } END { print count + 0 }' "$work/calls.tsv")
+line=$(awk -F '\t' 'NR == 2 { print $2 }' "$work/calls.tsv")
+symbol=$(awk -F '\t' 'NR == 2 { print $3 }' "$work/calls.tsv")
+test "$rows" -eq 1
+test "$line" -eq 7
+test "$symbol" = rt_probe
+
+echo 'sffi call authority census selftest: PASS'
