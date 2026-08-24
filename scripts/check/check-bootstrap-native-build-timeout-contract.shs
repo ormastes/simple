@@ -22,6 +22,16 @@ stage2_run=$(sed -n '/bootstrap_stage3_run_transcribed \\/{:a;p;n;/stage2_status
 stage3_hash=$(sed -n '/stage3_build_args_sha256=$(/{:a;p;n;/rm -f "${stage2_bin}"/q;ba}' "$producer")
 stage3_run=$(sed -n '/# Stage 3: stage2 recompiles/{:a;p;n;/stage3_status=\$?/q;ba}' "$producer")
 
+assert_timeout_precedes_cache() {
+  label=$1
+  block=$2
+  timeout_line=$(printf '%s\n' "$block" | grep -n -m1 -- '--timeout "${native_build_timeout}"' | cut -d: -f1)
+  cache_line=$(printf '%s\n' "$block" | grep -n -m1 -- '--cache-dir' | cut -d: -f1)
+  [ -n "$timeout_line" ] && [ -n "$cache_line" ] &&
+    [ "$timeout_line" -lt "$cache_line" ] ||
+    fail "$label digest/transcript argument order disagrees"
+}
+
 printf '%s\n' "$stage2_hash" | grep -Fq -- '--timeout "${native_build_timeout}"' || \
   fail "Stage 2 digest omits timeout"
 printf '%s\n' "$stage2_run" | grep -Fq -- '--timeout "${native_build_timeout}"' || \
@@ -30,6 +40,10 @@ printf '%s\n' "$stage3_hash" | grep -Fq -- '--timeout "${native_build_timeout}"'
   fail "Stage 3 digest omits timeout"
 printf '%s\n' "$stage3_run" | grep -Fq -- '--timeout "${native_build_timeout}"' || \
   fail "Stage 3 transcript command omits timeout"
+assert_timeout_precedes_cache "Stage 2 digest" "$stage2_hash"
+assert_timeout_precedes_cache "Stage 2 transcript" "$stage2_run"
+assert_timeout_precedes_cache "Stage 3 digest" "$stage3_hash"
+assert_timeout_precedes_cache "Stage 3 transcript" "$stage3_run"
 
 grep -Fq '"$bootstrap_stage3_stage2_transcript" --timeout' "$verifier" || \
   fail "manifest verifier does not read Stage 2 timeout"

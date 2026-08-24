@@ -17,6 +17,11 @@ fn is_numbered_placeholder(name: &str) -> bool {
     if name.len() < 2 || !name.starts_with('_') {
         return false;
     }
+    // Numbered placeholders are canonical and 1-indexed. Reject `_0` and
+    // leading-zero aliases before replacement subtracts one from the index.
+    if name.as_bytes()[1] == b'0' {
+        return false;
+    }
     name[1..].chars().all(|c| c.is_ascii_digit())
 }
 
@@ -644,6 +649,16 @@ fn replace_numbered_fstring_parts(parts: Vec<FStringPart>) -> Vec<FStringPart> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbered_placeholders_are_canonical_and_one_based() {
+        for rejected in ["_0", "_00", "_01", "env_get", "_a", "_9x"] {
+            assert!(!is_numbered_placeholder(rejected), "accepted {rejected}");
+            assert_eq!(numbered_placeholder_index(rejected), None);
+        }
+        assert_eq!(numbered_placeholder_index("_1"), Some(1));
+        assert_eq!(numbered_placeholder_index("_10"), Some(10));
+    }
 
     fn fstring_with_expr(expr: Expr) -> Expr {
         let parts = vec![FStringPart::Literal("item:".to_string()), FStringPart::Expr(expr)];
