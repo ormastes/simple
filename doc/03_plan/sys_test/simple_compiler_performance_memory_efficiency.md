@@ -10,9 +10,10 @@ End-to-end evidence for REQ-001..REQ-025 and NFR-001..NFR-015. Static design is 
 | Surface | Executable | Manual |
 |---|---|---|
 | Operator flow | `test/03_system/app/compiler/feature/simple_compiler_performance_memory_efficiency_spec.spl` | `doc/06_spec/03_system/app/compiler/feature/simple_compiler_performance_memory_efficiency_spec.md` |
+| Initial typed HIR facts | `test/01_unit/compiler/semantics/hir_perf_facts_spec.spl` | focused unit evidence; generated manual not yet owned |
 | Transform integrity | `test/02_integration/compiler/optimizer_transform_integrity_spec.spl` | mirrored `doc/06_spec/02_integration/...md` |
-| Diagnostics | `test/02_integration/compiler/perf_diagnostic_contract_spec.spl` | mirrored manual |
-| Shared facts/summaries | `test/02_integration/compiler/perf_facts_summary_spec.spl` | mirrored manual |
+| Diagnostics (planned) | `test/02_integration/compiler/perf_diagnostic_contract_spec.spl` | not yet implemented |
+| Shared facts/summaries (planned) | `test/02_integration/compiler/perf_facts_summary_spec.spl` | not yet implemented |
 | Fact budgets | `test/05_perf/compiler/compiler_perf_facts_budget_spec.spl` | mirrored manual |
 | Tool hot paths | `test/05_perf/compiler/compiler_tool_hot_path_spec.spl` | mirrored manual |
 | Profiles/curves | `test/05_perf/compiler/compiler_perf_profile_curve_spec.spl` | mirrored manual |
@@ -33,8 +34,8 @@ Frozen helpers: `setup_optimizer_integrity_fixture`, `setup_perf_diagnostic_fixt
 | Group | Positive | Boundary | Failure/unknown |
 |---|---|---|---|
 | REQ-001..005 | effective plan + valid sentinel/verifier | non-candidate, idempotence, backend | identity/empty active pass, unavailable fact, verifier fail |
-| REQ-006..009 | one revision and indexed typed facts | edit/invalidation + COLL snapshot | stale/reparse/unknown fact |
-| REQ-010..012 | catalog positives + known costs | fixed-small and cost variants | unsupported op and bounded Unknown |
+| REQ-006..009 | REQ-009 initial request-local typed collection facts; shared revision remains planned | resolved call/typed receiver | missing metadata/type stays incomplete |
+| REQ-010..012 | initial typed COLL002 candidate + symbol-keyed cost metadata; functional COLL010 and full catalog remain planned | verified `Array.contains` in finite or unknown loop domains | absent/unverified registry emits no candidate |
 | REQ-013..015 | fact reuse + proven escape/COW | targeted invalidation/lost uniqueness | unsafe promotion/clone rejection |
 | REQ-016..018 | pure plan/scalar transform | legal-unprofitable/idempotent | alias/effect/control/numeric rejection |
 | REQ-019..022 | SCC/.sperf/.sprof-v2/curve | invalidation/disabled profile | timeout/stale/single-timeout reject |
@@ -51,7 +52,11 @@ Every requirement receives positive, boundary/suppression, and failure/unknown e
 - Profile: valid optional records and disabled-path evidence; ranking never legality.
 - Documentation: docgen complete, zero stubs after implementation, visible claim boundaries and REQ links.
 
-Before endpoints exist, scaffolds fail with `assert(false)` and cannot count as coverage. Missing binary/backend/baseline/profile, timeout, stale/corrupt evidence, or unsupported stage is FAIL/BLOCKED, never skip/PASS.
+Before endpoints exist, scaffolds fail with `assert(false)` and cannot count as coverage.
+The umbrella and focused HIR-facts sources now contain production API oracles, but
+remain unexecuted evidence while the admitted Stage-4 binary is absent. Missing
+binary/backend/baseline/profile, timeout, stale/corrupt evidence, or unsupported
+stage is FAIL/BLOCKED, never skip/PASS.
 
 ## Execution order
 

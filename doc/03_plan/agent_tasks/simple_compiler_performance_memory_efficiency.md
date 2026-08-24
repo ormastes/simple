@@ -10,7 +10,7 @@
 | Collection/vector safety | Unsafe hoist inert; vector analysis-only and unit-step bounded | MIR optimization layer | Keep disabled until legality/profitability proof |
 | Escape authority | Unknown/return/field/size paths hardened | GC analysis owner | Execute escape regressions before allocation placement |
 | Lint/tool hot paths | Shared views/indexes/policy/assembly tranches integrated | lint/tool owners | Same-fixture timing and peak-RSS comparison |
-| Typed collection analysis | Not implemented | semantics performance owner | Build one typed fact collector and operation registry |
+| Typed collection analysis | Initial request-local collector and fail-closed COLL002 candidate projection implemented | semantics performance owner | Generate verified stdlib registry, wire driver adapter, execute focused spec |
 | Interprocedural/profile tiers | Not implemented | performance summary/profile owners | `.sperf`/`.sprof-v2` designs plus bounded evidence |
 | Runtime acceptance | Blocked: admitted Stage-4 binary absent | bootstrap/release owner | Restore binary, then run each final gate once |
 
@@ -18,6 +18,21 @@ Parallel review lanes `pass_integrity_review`, `lint_perf_review`, and
 `docs_plan_review` completed read-only current-HEAD audits. Merge and final
 review remain owned by `/root`; their findings are reflected above and in the
 current-head research reconciliation.
+
+### Typed HIR facts tranche — 2026-08-24
+
+- Owned files: `35.semantics/perf_facts`, its focused unit spec, and status docs.
+- Complexity: one indexed worklist pass over immediate HIR children; no per-rule
+  recursive traversal or front removal.
+- Memory: request-local event/work arrays only; no global retained HIR or cache.
+- Safety: resolved symbol + authoritative receiver type + verified versioned
+  metadata are mandatory; Unknown never becomes a lint candidate or transform.
+- Claim boundary: the current registry is fixture-only. Receipts and signature
+  fingerprints are not authoritative until a post-resolution stdlib builder
+  derives them from the resolved owner/signature; no driver warning is wired.
+- Remaining integration: generate the standard-library metadata registry and
+  adapt typed findings into driver-owned diagnostics without a second parse.
+- Runtime status: source-reviewed only while the admitted Stage-4 binary is absent.
 
 ## Diagnostic JSON serialization follow-up
 
