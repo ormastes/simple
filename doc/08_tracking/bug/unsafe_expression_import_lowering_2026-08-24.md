@@ -35,3 +35,16 @@ the block form. It must preserve the inner expression type and value, reject
 missing capabilities identically in every compiler stage, and introduce no
 closure, allocation, dynamic dispatch, or runtime wrapper. Add an executed
 imported-module fixture; source-shape acceptance alone is insufficient.
+
+## 2026-08-24 TLS transcript reproduction
+
+`src/os/tls13/transcript.spl` now uses value-bound lexical unsafe blocks for
+the hosted SHA-256 accelerator. The focused `_finished_probe_spec.spl` reaches
+the imported module and fails two transcript-dependent examples with the same
+`semantic: function unsafe not found` diagnostic; the unrelated finished-key
+example passes. This confirms the defect on a security-critical imported
+module rather than only a synthetic environment-read reproducer.
+
+The source is intentionally not rewritten to an extra helper-call workaround:
+lexical unsafe must lower as a zero-runtime-cost HIR marker. Fixing the compiler
+remains required for authoritative execution of the hardened transcript path.

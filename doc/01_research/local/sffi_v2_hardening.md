@@ -2875,3 +2875,11 @@ distinct symbols / 91 files, C++ 219 / 1, Rust 2,106 / 173, and Simple 535 / 46;
 languages overlap when one symbol has more than one implementation. The
 fixture-only clock provider separately admits three signed symbols and is not
 counted as general production admission.
+
+The transcript module is the next migrated boundary. Its byte accessor and
+hosted SHA-256 declarations are explicitly FFI-unsafe; each call uses a minimal
+lexical scope, and the SHA-256 result remains accepted only at exactly 32 bytes
+before falling back to pure Simple. The declaration ratchet decreases by two
+more identities. Bootstrap-seed execution remains blocked by the known
+value-bound unsafe-expression import-lowering bug; a helper workaround was not
+introduced because it would add dispatch to the hot transcript path.
