@@ -130,6 +130,16 @@ void *rt_alloc(spl_i64 size) {
     return (void *)next;
 }
 
+/* Codegen emits rt_struct_alloc for struct literals (e.g. the pmm module
+ * initializer). The hosted implementation (src/runtime/runtime_memory.c:491)
+ * is rt_alloc plus a registration table that exists ONLY to answer
+ * rt_struct_receiver_valid; this freestanding runtime defines no such check,
+ * so the table would be dead weight and the wrapper is the whole contract.
+ * Non-zeroed, matching hosted rt_alloc (malloc): codegen writes every field. */
+void *rt_struct_alloc(spl_i64 size) {
+    return rt_alloc(size);
+}
+
 void rt_free(void *ptr) {
     (void)ptr;
 }
