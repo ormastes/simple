@@ -1,0 +1,99 @@
+# DETECTION spec for the defect CLASS: `fn main(args)` entrypoint parameter.
+#
+# Bug: doc/08_tracking/bug/main_args_parameter_unsupported_breaks_mkfs_tools_2026-08-24.md
+#
+# The toolchain never binds the entrypoint's parameter. Measured 2026-08-24 on
+# the Rust seed (bin/release/x86_64-unknown-linux-gnu/simple, 60650360 bytes,
+# 2026-08-23 04:47:05Z):
+#
+#   fn main(args: [text])  no argv  -> rc=0, args.len() == 8246223157400007265
+#                                     (0x72707845736d7261 == ASCII "armsExpr",
+#                                     a non-array heap value read as the array
+#                                     header; STABLE across 3 runs, so this is
+#                                     deterministic type confusion, not ASLR)
+#   fn main(args: [text])  with argv -> Segmentation fault, rc=139
+#   fn main(args)          either     -> rc=0, args.len() == -1 (nil), so every
+#                                     dispatch on args silently falls through
+#   fn main()                         -> correct; read argv with get_args()
+#
+# A silent wrong answer plus an out-of-bounds-capable length is the worst
+# possible behaviour, so until the compiler either wires argv or rejects the
+# form outright, NO product entrypoint may declare the parameter. This spec is
+# the ratchet: it walks the directories that hold Simple entrypoints and fails
+# on any `fn main(<param>)` declaration.
+#
+# Run: bin/simple test test/01_unit/language/entrypoint/main_args_parameter_unsound_spec.spl
+
+use std.spec.{describe, context, it, assert_true, assert_equal}
+use std.io_runtime.{read_file, file_exists, dir_list}
+
+val SCANNED_DIRS: [text] = [
+    "src/lib/nogc_sync_mut/package/",
+    "src/lib/nogc_async_mut/package/",
+    "src/lib/gc_async_mut/package/",
+    "src/lib/gc_sync_mut/package/",
+    "src/os/port/",
+    "src/os/tools/simplebox/",
+]
+
+# True when `line` declares a top-level `fn main` that takes any parameter.
+# `fn main():` and `fn main() -> i32:` are the correct forms and must not match.
+fn declares_main_with_param(line: text) -> bool:
+    if not line.starts_with("fn main("):
+        return false
+    var rest = line.substring(8, line.len())
+    var i = 0
+    while i < rest.len():
+        val ch = rest.substring(i, i + 1)
+        if ch == ")":
+            return i > 0
+        i = i + 1
+    false
+
+fn offenders_in(path: text) -> [text]:
+    var bad: [text] = []
+    val body = read_file(path)
+    for line in body.split("\n"):
+        if declares_main_with_param(line):
+            bad.push(path + ": " + line.trim())
+    bad
+
+describe "no product entrypoint declares the unbound `fn main(args)` parameter":
+
+    context "self-check of the detector (guards against a vacuous green)":
+
+        it "flags the typed offending form":
+            assert_true(declares_main_with_param("fn main(args: [text]):"))
+
+        it "flags the untyped offending form":
+            assert_true(declares_main_with_param("fn main(args):"))
+
+        it "flags a renamed parameter":
+            assert_true(declares_main_with_param("fn main(argv: [text]) -> i32:"))
+
+        it "accepts the correct zero-parameter forms":
+            assert_true(not declares_main_with_param("fn main():"))
+            assert_true(not declares_main_with_param("fn main() -> i32:"))
+
+        it "ignores a function that merely starts like main":
+            assert_true(not declares_main_with_param("fn main_helper(x: i64):"))
+
+    context "every entrypoint directory known to hold a `fn main`":
+
+        it "has zero `fn main(<param>)` declarations":
+            var offenders: [text] = []
+            var scanned = 0
+            for dir in SCANNED_DIRS:
+                if file_exists(dir):
+                    for name in dir_list(dir):
+                        if name.ends_with(".spl"):
+                            scanned = scanned + 1
+                            for bad in offenders_in(dir + name):
+                                offenders.push(bad)
+            # non-vacuity: an empty scan must never read as a pass
+            assert_true(scanned > 0)
+            if offenders.len() > 0:
+                print("unbound `fn main` parameter declarations:")
+                for o in offenders:
+                    print("  " + o)
+            assert_equal(offenders.len(), 0)
