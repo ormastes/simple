@@ -141,12 +141,20 @@ fn extract_doctests(file_path: text) -> [Doctest]:
 
         # Detect doc comments
         if trimmed.starts_with("///") or trimmed.starts_with("#"):
-            val doc_content = if trimmed.starts_with("///"):
-                trimmed[3:].trim()
+            val doc_marker_len = if trimmed.starts_with("///"):
+                3
             elif trimmed.starts_with("##"):
-                trimmed[2:].trim()
+                2
             else:
-                trimmed[1:].trim()
+                1
+            # Fence/marker detection wants the trimmed text, but the BODY must
+            # keep its indentation: `.trim()`ing it flattened every indented
+            # line inside a `#` doctest (lambda bodies, if/for/while blocks,
+            # nested calls), so the harness compiled mangled code and reported
+            # a parse error the documented example never had. Strip the marker
+            # and at most ONE following space, matching sdoctest/extractor.spl.
+            val doc_body = _dt_strip_doc_marker(trimmed, doc_marker_len)
+            val doc_content = doc_body.trim()
 
             if doc_content.starts_with("```simple") or doc_content.starts_with("```spl") or doc_content.starts_with("```sdoctest"):
                 in_code_block = true
@@ -164,7 +172,7 @@ fn extract_doctests(file_path: text) -> [Doctest]:
                         should_fail: should_fail
                     ))
             elif in_code_block:
-                code_lines.push(doc_content)
+                code_lines.push(doc_body)
 
         else:
             if in_code_block:
@@ -382,6 +390,12 @@ fn _dt_failure_reason(stderr: text) -> text:
     if fallback != "":
         return fallback
     "Exit code non-zero"
+
+fn _dt_strip_doc_marker(trimmed: text, marker_len: i64) -> text:
+    var r = trimmed[marker_len:]
+    if r.starts_with(" "):
+        r = r[1:]
+    r
 
 fn build_spl_doctest_code(source_content: text, dt: Doctest) -> text:
     source_content + "\n\n# --- doctest from line {dt.line_number} ---\nuse std.spec.*\n" + dt.code
