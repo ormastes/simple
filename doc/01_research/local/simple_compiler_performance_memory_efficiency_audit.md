@@ -2653,6 +2653,29 @@ input with a different lifetime. Complete warning payload/order parity is
 covered using a generated RV64 bundle, but not executed under the user's
 no-verification instruction.
 
+### Linear duplicate-key normalization
+
+The duplicate detector first assembled each sliding-window key by repeatedly
+appending newlines and trimmed lines, then its cosine prefilter normalized the
+key by collapsing ASCII identifier runs to `#`, digit/dot runs to `0`, and
+retaining all other bytes. Both stages appended to growing immutable prefixes.
+For W lines and K window bytes, raw assembly copied O(W*K) bytes (O(K^2) when
+W scales with K), while byte-granular normalization could independently copy
+O(K^2), multiplied across overlapping windows.
+
+Raw windows now record ordered trimmed-line/newline fragments and join once.
+Normalization records one marker per collapsed run and one source slice per
+maximal unchanged span, then also joins once. The scanner still recognizes exactly
+ASCII letters/underscore as identifier starts, ASCII alphanumeric/underscore as
+identifier continuation, and digits plus subsequent dots as number runs.
+Punctuation, operators, newlines, whitespace, and non-ASCII UTF-8 bytes remain
+byte-for-byte and in encounter order. Work and copied output bytes are O(K),
+with O(F) fragment references for F normalized runs/spans. The real cosine
+feature vectors remain unchanged; these changes only construct exact and
+structural candidate keys. Aggregate sliding-window work remains proportional
+to the sum of window-key lengths. No manual verification or allocation
+measurement was run under the user's explicit no-verification instruction.
+
 ### Indexed MIR local metadata updates
 
 `MirBuilder.set_local_name` and `set_local_type` previously allocated a new

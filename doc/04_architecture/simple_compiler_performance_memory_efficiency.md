@@ -660,3 +660,14 @@ shared. Metadata-write paths address the authoritative nested builder directly;
 they must not introduce a setter-specific `temporary = self.builder` / mutate /
 store-back alias. Earlier control-flow builder aliases must also be eliminated
 before production merge retyping can claim unconditional O(1) mutation.
+
+### Span-owned structural key assembly
+
+Textual structural normalizers must scan bytes once, emit fixed replacement
+markers for collapsed semantic runs, retain maximal unchanged source spans, and
+join once. They must not append individual retained bytes to a growing immutable
+prefix. Recognition remains byte-defined so grouping unchanged spans cannot
+alter ASCII token boundaries or UTF-8 payload bytes. Candidate-only normalized
+keys stay separate from authoritative tokenizer/cosine feature vectors. Raw
+multi-line keys follow the same rule: collect trimmed-line and newline fragments
+in encounter order and join once.

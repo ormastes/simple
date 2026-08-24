@@ -164,6 +164,22 @@ current-head research reconciliation.
 - Manual verification intentionally omitted under the user's explicit
   no-verification instruction.
 
+## Completed duplicate structural-key assembly tranche
+
+- Preserve the exact identifier, number-with-dot, and unchanged-byte grammar of
+  the cosine candidate prefilter.
+- Assemble raw windows from ordered trimmed-line/newline fragments with one
+  join, preserving empty lines and placing no separator after the final line
+  fragment.
+- Replace per-marker/per-byte immutable concatenation with ordered marker and
+  maximal unchanged-span fragments plus one join.
+- Reduce raw assembly from O(W*K) copied bytes to O(K+W), and normalized
+  assembly from O(K^2) copied bytes to O(K), with O(W+F) fragment references.
+- Keep authoritative tokenization, cosine vectors, candidate counts, file
+  ordering, and public duplicate diagnostics unchanged.
+- Manual verification intentionally omitted under the user's explicit
+  no-verification instruction.
+
 ## Completed MIR local metadata-update tranche
 
 - Share one guarded dense-index/unique-sparse fallback position resolver across
