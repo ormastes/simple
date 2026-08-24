@@ -612,3 +612,15 @@ expected O(B+T) validation with O(B+E) live graph storage plus O(K) transient
 membership storage. The design accepts dictionary and nested-array overhead on
 small CFGs to bound adversarial work, without a persistent cache or invalidation
 surface.
+
+### Discovery-indexed dependency traversal
+
+Repository dependency gates must admit graph nodes exactly once through a
+request-local discovered set. A path is marked at insertion, not after removal
+from the FIFO queue, so neither the processed prefix nor queued suffix requires
+linear membership scans. This retains deterministic root and import encounter
+order, bounds file reads to one per resolver-produced path string, and makes
+membership expected O(V+E) with O(V) auxiliary ownership. Here path identity is
+the resolver-produced string; filesystem canonicalization, source scanning, and
+candidate probes are separate concerns. The index is ephemeral and has no cache
+invalidation or cross-request lifetime.

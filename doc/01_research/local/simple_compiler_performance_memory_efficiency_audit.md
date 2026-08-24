@@ -2924,6 +2924,23 @@ unchanged. Imported-module parsing remains independent. Snapshot projection and
 source-topology contracts were added but not executed under the user's
 no-verification instruction.
 
+### Indexed no-allocation import closure
+
+The no-allocation dependency gate previously kept discovered paths in arrays.
+Every popped file scanned the processed array and every resolved import scanned
+both processed and queued arrays; because processed queue entries remain live,
+a closure with V files and E imports performed O(V^2+E*V) path comparisons.
+
+The traversal now owns one request-local `path -> discovered` dictionary and
+marks a path immediately before its single FIFO admission. Initial root order,
+first-import discovery order, one-read-per-resolver-path-string behavior,
+diagnostic order and public output remain unchanged. Expected graph-membership
+work becomes O(V+E) hash lookups (more precisely proportional to hashed path
+bytes), with O(V) queue and index storage; source scanning and filesystem probes
+remain additional work. Dictionary hashing and allocation can add constant
+overhead for tiny closures; no runtime measurement was made under the user's
+explicit no-verification instruction.
+
 ### Request-local semantic-query call index
 
 The semantic query `calls(...)` predicate previously reread and split the same
