@@ -429,6 +429,11 @@ scan. Its delimiter table is exactly the legacy ASCII-space and punctuation
 set; tabs and non-ASCII bytes remain word content. The collector emits maximal
 source spans in encounter order and never materializes a chain of normalized
 whole-line copies.
+Keyword availability is resolved through one immutable request-owned index
+mapping each spelling to its minimum required tier. Seed entries are inserted
+before core and full entries, and later duplicates never overwrite an earlier
+tier. File scans share this index read-only; compatibility adapters may build a
+temporary index for isolated callers.
 
 ### Raw-SFFI source-view ownership
 
