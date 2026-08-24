@@ -1129,6 +1129,17 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
 - Add direct boundary coverage; verification intentionally not run under the
   user's no-verify instruction.
 
+## Completed tool line-count tranche
+
+- Replace count-only split arrays in context metadata, LLM Caret message
+  statistics, and SPipe documentation validation with direct newline scans.
+- Preserve the two distinct empty-input contracts: zero for context/message
+  statistics and one-per-block for SPipe split compatibility.
+- Preserve trailing-newline final segments and reduce auxiliary storage from
+  O(lines) to O(1) without changing outputs or public APIs.
+- Add context and SPipe boundary coverage; verification intentionally not run
+  under the user's no-verify instruction.
+
 ## Reviewed workspace JSON process tranche
 
 - Rejected the direct parent-lint shortcut after parallel review found trace
