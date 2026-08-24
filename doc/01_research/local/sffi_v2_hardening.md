@@ -2454,3 +2454,27 @@ remain 34; one paired sample changes from 3.28 s / 283,828 KiB to 3.49 s /
 Current totals are 21,266 raw calls, 2,136 explicit, 19,130 missing; 12,111
 declarations, 893 tagged, 383 minimized, 10,952 untouched, and zero
 signed/admitted.
+
+## Textual LLVM backend policy boundary
+
+The textual LLVM helper now tags its raw `rt_env_get` declaration and places
+the three executable reads in minimal lexical `unsafe(ffi)` blocks. The two
+`SIMPLE_BOOTSTRAP` reads remain at their original ABI-declaration and string-
+global sites; the `SIMPLE_ALLOW_UNLOWERED_MIR` read remains at the fail-closed
+unsupported-instruction site. Each still accepts only the exact text `"1"`.
+The emitted LLVM declarations containing the spelling `rt_env_get` are data,
+not executable host calls.
+
+The edit keeps O(1) work and exactly one provider call per original site. It
+adds only stack-local booleans, with no cache, loop, lookup, copy, allocation,
+or dispatch. Optimizer findings remain 106. One paired analyzer sample changed
+from 3.37 s / 282,796 KiB to 3.93 s / 270,844 KiB; the unchanged source
+algorithm/finding set and lower peak RSS do not support a performance or memory
+regression claim. Backend capability coverage passes 20/20.
+
+The reconciled census is 21,267 raw calls, 2,145 explicit and 19,122 missing;
+12,111 declarations, 896 tagged, 383 minimized and 10,949 untouched. The raw
+call baseline had not been refreshed after the preceding C-backend policy
+slice, so the ratchet is updated to the measured same-tree totals rather than
+hiding a new call. Signed and admitted evidence remains zero; this module is
+explicitly unsafe, not verified or signed.

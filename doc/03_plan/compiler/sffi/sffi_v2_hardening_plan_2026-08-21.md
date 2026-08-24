@@ -1419,3 +1419,18 @@ missing); 12,111 declarations (895 tagged, 383 minimized, 10,950 untouched),
 zero signed/admitted. Optimizer findings remain 153 and no hot-path environment
 read was added. The focused updated assertion passes; six unrelated stale
 source expectations keep the enclosing legacy spec at 5/11.
+
+The C-backend fail-closed policy read and the textual LLVM helper's three
+policy reads now have declaration tags and minimal block-form `unsafe(ffi)`
+authority. Preserve the exact `"1"` opt-ins and original read cardinality; do
+not cache mutation-visible bootstrap policy or turn boolean policy into integer
+sentinels. The LLVM slice remains O(1), optimizer findings stay at 106, and its
+paired analyzer sample is 3.37 s / 282,796 KiB before versus 3.93 s /
+270,844 KiB after. Backend capability coverage passes 20/20.
+
+Current reconciled census: 21,267 calls (2,145 explicit, 19,122 missing),
+12,111 declarations (896 tagged, 383 minimized, 10,949 untouched), zero
+signed/admitted. The next owner should continue the backend policy family, then
+move to status-bearing provider admission. Tagging is debt containment only:
+completion still requires cryptographically admitted evidence for every safe
+provider or a minimized explicit unsafe boundary for every remaining call.
