@@ -2326,3 +2326,20 @@ used and the language defect is recorded in
 requirement. Current totals are 21,435 raw, 2,121 explicit, 19,314 missing;
 12,112 declarations, 885 tagged, 382 minimized, 10,961 untouched, and zero
 signed/admitted.
+
+## Runtime-object-cache authority and performance evidence
+
+The two newly added runtime-object-cache environment reads and its cached-object
+existence probe now use the smallest executable block-form `unsafe(ffi)` scopes.
+The environment remains read once per cache-directory calculation, and the
+existence provider remains called once only for a non-empty cache path. No
+provider call, loop, lookup, copy, or heap-owning data structure was added.
+
+The optimizer reports the same 70 findings before and after. One paired host
+sample changed from 4.78 s / 269,808 KiB to 4.48 s / 269,624 KiB; this is
+consistent with no performance or memory regression, not a general speedup
+claim. The focused runtime-compiler specification remains blocked by two
+pre-existing harness/upstream failures: an unresolved `plan` variable and a
+child runner resolving the sibling `simple-main` worktree. Current authority
+totals are 21,435 raw calls, 2,124 explicit, and 19,311 missing. Signed and
+admitted provider evidence remains zero.

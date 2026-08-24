@@ -1358,3 +1358,12 @@ explicit, 19,314 missing), 12,112 declarations (885 tagged, 382 minimized,
 10,961 untouched), zero signed/admitted. The rebase regression is +11. Repair
 the recorded unsafe-expression lowering defect before relying on expression-
 scoped capability syntax; until then, use executed block-form coverage.
+
+Runtime-object-cache follow-up scopes its two environment reads and one
+conditional existence probe. Current census: 21,435 calls (2,124 explicit,
+19,311 missing), with the declaration census unchanged and zero signed/admitted.
+Continue the exact rebase-owner table; do not cache mutable environment policy
+or introduce a second per-object filesystem probe. The optimizer remains at 70
+findings and the paired measurement is 4.78 s / 269,808 KiB before versus
+4.48 s / 269,624 KiB after. The focused specification's unrelated `plan` and
+cross-worktree child-runner failures must be repaired by their canonical owners.
