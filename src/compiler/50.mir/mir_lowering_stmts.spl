@@ -13,7 +13,7 @@ use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.frontend.resource_registry.{resource_is_declared}
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.mir.mir_types.{LocalId, mir_type_probe_text}  # explicit: a glob is not an import-origin for surface projection
 
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
@@ -21,6 +21,94 @@ extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 extern fn rt_enum_discriminant(value: HirStmtKind) -> i64
 extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr
 extern fn rt_env_get(key: text) -> text
+
+# Cached `SIMPLE_TRACE_DICT_ELEM` gate (-1 unknown, 0 off, 1 on). Default OFF.
+# Companion of the probe in _MirLoweringExpr/method_calls_literals.spl: that one
+# prints the element type STAMPED onto a `Dict.keys()`/`.values()` result, this
+# one prints the element type the for-loop actually RECOVERS from the
+# collection. Together they discriminate "the stamp was never applied" from
+# "the stamp was applied but lost before the loop saw it". Retained per the
+# log-retention policy.
+var mir_for_elem_trace_state: i64 = -1
+
+fn mir_for_elem_trace_on() -> bool:
+    if mir_for_elem_trace_state < 0:
+        if rt_env_get("SIMPLE_TRACE_DICT_ELEM") == "1":
+            mir_for_elem_trace_state = 1
+        else:
+            mir_for_elem_trace_state = 0
+    mir_for_elem_trace_state == 1
+
+fn mir_elem_type_is_unspecific(t: MirType) -> bool:
+    """True when an array/slice element type carries no real element info.
+
+    `I64` is this lowering\'s stand-in for "element type unknown": an EMPTY
+    array literal has no element to take a type from, and `lower_for_iterator`
+    documents the same `MirType.i64()` default for a loop variable whose symbol
+    has no resolved HIR type. Treat nil the same way."""
+    if t == nil:
+        return true
+    match t.kind:
+        case I64: true
+        case _: false
+
+fn mir_merge_arm_types(first: MirType, second: MirType) -> MirType:
+    """Pick the more specific of two branch result types at a merge block.
+
+    Bug (native_if_merge_empty_array_elem_type): `lower_if` / `lower_if_chain`
+    typed the merged result from the FIRST arm that had a type and ignored
+    every later arm. For the pervasive generated-codec shape
+
+        val ks3 = if node.functions == nil: [] else: node.functions.keys()
+        for dk3 in ks3: ... hc_enc_symbol_id(w, dk3)
+
+    the then-arm is an empty array literal, which lowers to `Array(I64, 0)`
+    because it has no element to take a type from. The else-arm carries the
+    correct `Array(Struct(SymbolId), 0)` stamped by the `.keys()` lowering in
+    _MirLoweringExpr/method_calls_literals.spl -- and it was discarded. The
+    merged local therefore reached `lower_for_iterator` as `Array(I64, 0)`, so
+    the loop variable was bound as an INTEGER: each element was unboxed with
+    `rt_value_unbox_int` and every derived operation (the `== nil` compare and
+    the by-value CoW-clone guard) was emitted at 32-bit width. On a 64-bit
+    tagged heap handle that destroys the high half -- LLVM folds the resulting
+    `zext(trunc_i32(v)) & ~7` into a single 32-bit `and #0xfffffff8`, and the
+    truncated pointer is then dereferenced. That is the arm64 stage-2
+    `hc_enc_hir_module` SIGSEGV recorded in
+    doc/08_tracking/bug/stage2_hir_codec_segv_is_i32_truncated_heap_ref_2026-08-24.md.
+
+    Only the ELEMENT type is refined, and only in the one direction where the
+    incumbent carries no information (`mir_elem_type_is_unspecific`), so a
+    genuinely i64-element array is never retyped and the arm chosen for the
+    merge is otherwise unchanged."""
+    if first == nil:
+        return second
+    if second == nil:
+        return first
+    var second_elem = MirType.i64()
+    var second_is_sequence = false
+    match second.kind:
+        case Array(second_array_elem, _):
+            second_elem = second_array_elem
+            second_is_sequence = true
+        case Slice(second_slice_elem):
+            second_elem = second_slice_elem
+            second_is_sequence = true
+        case _:
+            ()
+    if not second_is_sequence:
+        return first
+    if mir_elem_type_is_unspecific(second_elem):
+        return first
+    match first.kind:
+        case Array(first_elem, first_size):
+            if mir_elem_type_is_unspecific(first_elem):
+                return MirType(kind: MirTypeKind.Array(second_elem, first_size))
+            first
+        case Slice(first_elem):
+            if mir_elem_type_is_unspecific(first_elem):
+                return MirType(kind: MirTypeKind.Slice(second_elem))
+            first
+        case _: first
 
 fn mir_stmt_symbol_id_value(symbol: SymbolId) -> i64:
     symbol.id
@@ -1937,6 +2025,25 @@ impl MirLowering:
                 else:
                     cond_local
 
+    me propagate_branch_collection_marks(source: LocalId, dest: LocalId):
+        """Carry runtime-collection markings from a branch arm to the merge slot.
+
+        Bug (native_if_merge_empty_array_elem_type), second half: the merge
+        result temp is created with `new_temp` and therefore belongs to no
+        marking set, even when every arm copied into it is a runtime array or
+        dict handle. `.len()` on an unmarked `Array(elem, 0)` local takes the
+        STATIC size path and answered 0 for
+        `(if d == nil: [] else: d.keys()).len()` while the very same local
+        iterated the real N elements -- so the generated codecs wrote a 0 count
+        ahead of N records. Mirror the arm\'s markings onto the result so the
+        merged local behaves exactly like the arm it was copied from."""
+        if self.runtime_array_locals.contains(source.id):
+            self.runtime_array_locals[dest.id] = true
+            self.mark_runtime_value_local(dest.id)
+        if self.runtime_dict_locals.contains(source.id):
+            self.runtime_dict_locals[dest.id] = true
+            self.mark_runtime_value_local(dest.id)
+
     me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?, expected_type: HirType?) -> LocalId:
         """Lower if expression."""
         # The If dispatcher decodes and validates its mandatory payloads, but
@@ -2033,9 +2140,12 @@ impl MirLowering:
                 # a const-0 def in that case.
                 if not self.local_is_unit(then_local):
                     b3.emit_copy(result, then_local)
+                    self.propagate_branch_collection_marks(then_local, result)
                     result_defined = true
-                    if not inferred_known:
-                        if val then_ty_found = self.local_mir_type_of(then_local):
+                    if val then_ty_found = self.local_mir_type_of(then_local):
+                        if inferred_known:
+                            inferred_ty = mir_merge_arm_types(inferred_ty, then_ty_found)
+                        else:
                             inferred_known = true
                             inferred_ty = then_ty_found
             b3.terminate_goto(merge_block)
@@ -2054,9 +2164,12 @@ impl MirLowering:
                     val else_local = else_result ?? else_local_fb
                     if not self.local_is_unit(else_local):
                         b5.emit_copy(result, else_local)
+                        self.propagate_branch_collection_marks(else_local, result)
                         result_defined = true
-                        if not inferred_known:
-                            if val else_ty_found = self.local_mir_type_of(else_local):
+                        if val else_ty_found = self.local_mir_type_of(else_local):
+                            if inferred_known:
+                                inferred_ty = mir_merge_arm_types(inferred_ty, else_ty_found)
+                            else:
                                 inferred_known = true
                                 inferred_ty = else_ty_found
                 b5.terminate_goto(merge_block)
@@ -2181,9 +2294,12 @@ impl MirLowering:
                     val arm_local = arm_result ?? arm_fallback
                     if chain_has_else and not self.local_is_unit(arm_local):
                         b_then.emit_copy(result, arm_local)
+                        self.propagate_branch_collection_marks(arm_local, result)
                         result_defined = true
-                        if not inferred_known:
-                            if val arm_ty = self.local_mir_type_of(arm_local):
+                        if val arm_ty = self.local_mir_type_of(arm_local):
+                            if inferred_known:
+                                inferred_ty = mir_merge_arm_types(inferred_ty, arm_ty)
+                            else:
                                 inferred_known = true
                                 inferred_ty = arm_ty
                 b_then.terminate_goto(merge_block)
@@ -2202,9 +2318,12 @@ impl MirLowering:
                     val else_local = else_result ?? else_fallback
                     if not self.local_is_unit(else_local):
                         b_else.emit_copy(result, else_local)
+                        self.propagate_branch_collection_marks(else_local, result)
                         result_defined = true
-                        if not inferred_known:
-                            if val else_ty = self.local_mir_type_of(else_local):
+                        if val else_ty = self.local_mir_type_of(else_local):
+                            if inferred_known:
+                                inferred_ty = mir_merge_arm_types(inferred_ty, else_ty)
+                            else:
                                 inferred_known = true
                                 inferred_ty = else_ty
                 b_else.terminate_goto(merge_block)
@@ -2587,6 +2706,9 @@ impl MirLowering:
                     body,
                     source_span
                 )
+
+        if mir_for_elem_trace_on():
+            eprint("[dict-elem] for-in coll_mir_type={mir_type_probe_text(self.local_mir_type_of(collection_local))} element_type={mir_type_probe_text(element_type)}\n")
 
         # Runtime-array fast path: lower `for x in arr` to an index-based
         # counted loop over rt_array_len / rt_array_get (mirrors the array

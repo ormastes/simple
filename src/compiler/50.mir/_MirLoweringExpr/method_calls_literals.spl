@@ -21,6 +21,7 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.mir.mir_lowering_stmts.{mir_expr_kind_is_place}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.mir_instruction_support.{GpuBarrierScope, GpuMemoryScope}
+use compiler.mir.mir_types.{mir_type_probe_text}  # explicit: a glob is not an import-origin for surface projection
 
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
@@ -30,6 +31,21 @@ extern fn rt_enum_discriminant(value: Any) -> i64
 
 # Cached MIR method-call trace gate (-1 unknown, 0 off, 1 on). Default OFF.
 var mir_mc_trace_state: i64 = -1
+
+# Cached `SIMPLE_TRACE_DICT_ELEM` gate (-1 unknown, 0 off, 1 on). Default OFF.
+# Prints the element type recovered for `Dict.keys()`/`.values()` results; the
+# other half is printed by `lower_for_iterator` in mir_lowering_stmts.spl under
+# the same env var. Retained per the log-retention policy: do not delete, it is
+# the only visibility into the dict-projection element-type dataflow.
+var mir_dict_elem_trace_state: i64 = -1
+
+fn mir_dict_elem_trace_on() -> bool:
+    if mir_dict_elem_trace_state < 0:
+        if rt_env_get("SIMPLE_TRACE_DICT_ELEM") == "1":
+            mir_dict_elem_trace_state = 1
+        else:
+            mir_dict_elem_trace_state = 0
+    mir_dict_elem_trace_state == 1
 
 # ============================================================================
 # Expression Lowering
@@ -1514,6 +1530,8 @@ impl MirLowering:
                         else:
                             picked_type
                     case _: ()
+            if mir_dict_elem_trace_on():
+                eprint("[dict-elem] method={method} recv_mir_type={mir_type_probe_text(dict_keys_recv_type)} stamped_elem_type={mir_type_probe_text(dict_keys_elem_type)}\n")
             var b_dict = self.builder
             val result = b_dict.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
             self.builder = b_dict

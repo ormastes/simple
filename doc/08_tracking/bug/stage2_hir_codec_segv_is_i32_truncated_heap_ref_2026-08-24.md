@@ -256,3 +256,182 @@ second, independent stage-2 defect, not as evidence for the first.
 
 Net: there is no known flag that makes this stage-2 binary compile a
 three-line hello world.
+
+---
+
+# LOCALIZED TO `src/compiler_rust` — the Simple-side lowering is NOT the code that builds Stage 2 (2026-08-24, later the same day)
+
+## Verdict
+
+**The defect this record documents lives in the Rust seed, not in
+`src/compiler/50.mir/**`.** A 1.7-second runnable reproducer now exists. The
+narrowing mechanism is the **value-position `if` merge** — `if cond: [] else:
+d.keys()` — and it is confirmed by a positive/negative pair on the same binary
+and the same fixture.
+
+## Why the Simple-side fix does not reach Stage 2
+
+`scripts/bootstrap/bootstrap-from-scratch.sh:3499` and `:3511` set
+**`SIMPLE_NATIVE_BUILD_RUST=1`** on the Stage-2 `native-build`. Per the seed's
+own source, `driver/src/cli/native_build.rs:603`:
+
+> "this Rust handler is reached only via `SIMPLE_NATIVE_BUILD_RUST=1` or a
+> cross-target executable build (see `dispatch_command` in
+> `driver/src/main.rs`) -- plain `bin/simple native-build` runs the pure-Simple
+> driver instead (`src/compiler/80.driver/driver_aot_native_output.spl`)"
+
+(dispatch: `driver/src/main.rs:168-172`.) So Stage 2's 750 modules are lowered
+and codegen'd entirely by `src/compiler_rust`. Measured directly on one fixture,
+one seed binary, changing only that env var:
+
+| path | probe lines | result |
+|---|---|---|
+| plain `native-build` (pure-Simple driver) | 4 | rc=0, correct |
+| `SIMPLE_NATIVE_BUILD_RUST=1` (Rust handler) | **0** | **rc=139** |
+
+Zero probe lines is the direct evidence: `SIMPLE_TRACE_DICT_ELEM=1` instruments
+`src/compiler/50.mir/**`, and that code never runs on the Stage-2 path.
+
+A Stage 2 WAS built from a tree carrying the Simple-side merge fix
+(commit `c1f1ade8bc4`, sanctioned lane, `--stop-after-stage2`, admitted, sha256
+`4a2dba4e58459a44ae4bd19e8a0e083404fe9c4248ba77eb5d05d0ce0863d9de`). It still
+returns **rc=139**, and the census is unchanged: **7** `ands x*, x*,
+#0xfffffff8`, all still inside `_compiler__hir__generated__hir_codec__hc_enc_hir_module`,
+with the instruction sequence byte-identical to the one at the top of this
+record. That is the experiment that proves the localization, not an inference.
+
+## The reproducer — 1.7 s, no bootstrap
+
+```sh
+cat > b2.spl <<'SPL'
+struct SymbolId:
+    id: i64
+class Node:
+    functions: Dict<SymbolId, i64>
+fn enc_sym(node: SymbolId) -> i64:
+    node.id
+fn enc_node(node: Node) -> i64:
+    val ks3 = if node.functions == nil: [] else: node.functions.keys()
+    var acc = ks3.len()
+    for dk3 in ks3:
+        if dk3 == nil:
+            acc = acc + 0
+        else:
+            acc = acc + 1000 + enc_sym(dk3)
+    acc
+fn main():
+    var d: Dict<SymbolId, i64> = {}
+    d[SymbolId(id: 7)] = 100
+    d[SymbolId(id: 9)] = 200
+    print("total={enc_node(Node(functions: d))}")
+SPL
+
+SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_BOOTSTRAP=1 SIMPLE_PROJECT_ROOT=<repo> \
+  <seed> native-build --backend llvm --source . --entry b2.spl -o b2llvm
+./b2llvm; echo $?      # 139, deterministic, no output
+```
+
+Two harness notes: `fn main()` in newline-block form is rejected by the Rust
+handler's discovery parser (`expected expression, found Indent`) — write
+`fn main():`. And `setsid(1)` does not exist on Darwin; the shim in the macOS
+note above is still required.
+
+Generated code, `_b2__enc_node` — the SAME sequence as `hc_enc_hir_module`:
+
+```
+bl   _rt_alloc                     ; #8
+and  x8, x22, #0x7                 ; tag
+cmp  x8, #0x1
+cset w8, eq
+ands x9, x22, #0xfffffff8          ; <-- 32-BIT MASK
+cset w10, ne
+tst  w8, w10
+csel x8, x9, x0, ne
+ldr  x8, [x8]                      ; *** SIGSEGV ***
+```
+
+`objdump -d`: exactly **1** `ands ..., #0xfffffff8` and **9**
+`rt_value_unbox_int` call sites.
+
+## The discriminator: it is the `if` MERGE, on this path too
+
+Same file, same command, only the binding changed:
+
+| binding | rc | 32-bit masks |
+|---|---|---|
+| `val ks3 = if node.functions == nil: [] else: node.functions.keys()` | **139** | 1 |
+| `val ks3 = node.functions.keys()` | **0** (`total=2018`, correct) | **0** |
+
+So the `.keys()` lowering on the Rust path produces a correct element type; the
+value-position `if` merge throws it away, exactly as the pure-Simple lowering did
+before it was fixed. The then-arm is an EMPTY array literal — it has no element
+to take a type from — and it wins the merge.
+
+**Candidate site, named but NOT confirmed by measurement:**
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_control.rs:69`
+`lower_if_expr` types the merge slot from `expr_ty`, the HIR-inferred type of the
+whole if-expression, and stores both arms into it with that same `ty`. If the
+HIR type of `if …: [] else: d.keys()` is inferred from the empty-literal arm,
+that is where the i64 element type enters. This was read, not proven; the next
+lane should confirm against the reproducer before editing.
+
+## What was fixed, and where it does apply
+
+The identical defect in the pure-Simple lowering (`lower_if` / `lower_if_chain`
+in `src/compiler/50.mir/mir_lowering_stmts.spl`) was found first, by the probes
+below, and IS fixed. That path is the DEFAULT tooling path — plain
+`bin/simple native-build` — so the fix is load-bearing there even though it does
+not touch Stage 2. Fixture: rc=139 -> rc=0 with the correct value; and
+`(if d == nil: [] else: d.keys()).len()` 0 -> 2.
+
+### Probe output (the discriminator that found it)
+
+`SIMPLE_TRACE_DICT_ELEM=1`, default OFF, both ends of the dataflow:
+
+```
+# `val ks = if d == nil: [] else: d.keys()`      <- the real shape
+[dict-elem] method=keys recv_mir_type=Dict(Struct(...),I64) stamped_elem_type=Struct(...)
+[dict-elem] for-in coll_mir_type=Array(I64,0) element_type=I64          <- LOST at the merge
+
+# `val ks = d.keys()`                             <- no merge
+[dict-elem] method=keys recv_mir_type=Dict(Struct(...),I64) stamped_elem_type=Struct(...)
+[dict-elem] for-in coll_mir_type=Array(Struct(...),0) element_type=Struct(...)
+```
+
+The stamp was always correct — which is why every `.values()`-targeted probe in
+the earlier lanes found nothing, and why `field-idx-fallback0` legitimately fires
+0 times. Confirmed for a class-valued dict (`Dict<SymbolId, HirFunction>`) and
+for a receiver whose class lives in an imported module: both recover
+`Dict(Struct, …)` correctly, so receiver-type recovery is NOT implicated.
+
+Second half, same change: the merge result temp comes from `new_temp` and belongs
+to no marking set, so `.len()` on an `Array(elem, 0)` local took the STATIC size
+path and answered 0 while the same local iterated N elements — `direct=2
+merge=0`. `hc_enc_hir_module` does `w.put_i64(ks3.len())` immediately before each
+such loop, so this would have written a 0 count ahead of N records. Fixed by
+mirroring the arm's `runtime_array_locals`/`runtime_dict_locals` onto the merge
+slot; `direct=2 merge=2` after.
+
+## Corrections to earlier sections of this record
+
+* The "Incidental finding: the seed's own hosted `native-build` still cannot link
+  on macOS" section is **RESOLVED at `origin/main`**. The Mach-O weak-DEFINITION
+  fix (a weak `__simple_startup_before_main` under `#if defined(__APPLE__)`)
+  landed in `llvm_native_link_hosted_support.spl`. Independently re-derived here
+  before that was noticed, with a two-TU clang probe confirming both halves:
+  `__attribute__((weak_import))` on a bare declaration does **not** satisfy ld64,
+  a weak definition does, and a strong definition in another object overrides it.
+* The "LLVM emitter is NOT at fault" section is **confirmed and explained**: the
+  emitter's mask really is 64-bit; instcombine folded `zext(trunc_i32(v)) & ~7`
+  because the VALUE was narrowed upstream, at the `if` merge.
+
+## Still NOT verified
+
+* Whether the `> 11 min` runaway in `lower_mir_storage_project_fields_v1` under
+  `SIMPLE_HIR_CACHE=0` is the same root cause. Not retested.
+* Stage 3 and beyond. Not attempted; a separate lane owns the
+  `phase4:monomorphize` blocker.
+* x86_64-linux. Every measurement here is aarch64-apple-darwin.
+* `for e2 in (node.domain_blocks ?? [])` in the real codec. A minimal `?? []`
+  fixture fails differently (loud for-in panic) and the discrepancy was not
+  chased — see `if_merge_collection_identity_residual_2026-08-24.md`.
