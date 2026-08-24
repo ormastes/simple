@@ -1,7 +1,7 @@
 # Unsafe expression import lowering resolves `unsafe` as a function
 
-**Status:** Seed parser/HIR fix implemented and focused-tested; deployed
-imported-module execution remains pending
+**Status:** Seed parser/HIR fix implemented; current-worker imported execution
+passes; installed release worker still requires redeployment
 **Observed:** 2026-08-24
 **Area:** frontend/import lowering and lexical unsafe expressions
 

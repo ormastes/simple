@@ -37,8 +37,7 @@ use compiler.frontend.trace_policy.{
     frontend_trace_suppressed, frontend_trace_suppression_set,
     frontend_compiler_trace_enabled,
     frontend_compiler_trace_scope_enter, frontend_compiler_trace_scope_exit}
-extern fn rt_env_get(key: text) -> text
-extern fn rt_env_set(key: text, value: text) -> bool
+use std.nogc_sync_mut.io_runtime.{env_get, env_set, time_now_unix_micros}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
@@ -106,7 +105,7 @@ var par_env_save_cached: i64 = -1
 extern fn rt_is_debug_mode_enabled() -> bool
 
 fn parser_env_i64(key: text) -> i64:
-    val raw = rt_env_get(key) ?? ""
+    val raw = env_get(key)
     var value: i64 = 0
     var i: i64 = 0
     var neg: bool = false
@@ -125,7 +124,7 @@ fn parser_env_i64(key: text) -> i64:
 
 fn par_env_save_enabled() -> bool:
     if par_env_save_cached < 0:
-        par_env_save_cached = if (rt_env_get("SIMPLE_BOOTSTRAP_PAR_ENV_SAVE") ?? "") == "1": 1 else: 0
+        par_env_save_cached = if env_get("SIMPLE_BOOTSTRAP_PAR_ENV_SAVE") == "1": 1 else: 0
     par_env_save_cached == 1
 
 fn parser_current_token_text(kind: i64) -> text:
@@ -136,7 +135,7 @@ fn parser_current_token_text(kind: i64) -> text:
 fn par_kind_set(value: i64):
     par_kind_slot[0] = value
     if par_env_save_enabled():
-        rt_env_set("SIMPLE_BOOTSTRAP_PAR_KIND", "{value}")
+        env_set("SIMPLE_BOOTSTRAP_PAR_KIND", "{value}")
 
 fn par_kind_get() -> i64:
     if par_kind_slot == nil:
@@ -146,19 +145,19 @@ fn par_kind_get() -> i64:
 fn par_text_set(value: text):
     par_text_slot[0] = value
     if par_env_save_enabled():
-        rt_env_set("SIMPLE_BOOTSTRAP_PAR_TEXT", value)
+        env_set("SIMPLE_BOOTSTRAP_PAR_TEXT", value)
 
 fn par_text_get() -> text:
     if par_text_slot != nil:
         return par_text_slot[0]
     if par_env_save_enabled():
-        return rt_env_get("SIMPLE_BOOTSTRAP_PAR_TEXT") ?? ""
+        return env_get("SIMPLE_BOOTSTRAP_PAR_TEXT")
     ""
 
 fn par_line_set(value: i64):
     par_line_slot[0] = value
     if par_env_save_enabled():
-        rt_env_set("SIMPLE_BOOTSTRAP_PAR_LINE", "{value}")
+        env_set("SIMPLE_BOOTSTRAP_PAR_LINE", "{value}")
 
 fn par_line_get() -> i64:
     if par_line_slot == nil:
@@ -168,7 +167,7 @@ fn par_line_get() -> i64:
 fn par_col_set(value: i64):
     par_col_slot[0] = value
     if par_env_save_enabled():
-        rt_env_set("SIMPLE_BOOTSTRAP_PAR_COL", "{value}")
+        env_set("SIMPLE_BOOTSTRAP_PAR_COL", "{value}")
 
 fn par_col_get() -> i64:
     if par_col_slot == nil:
@@ -195,13 +194,13 @@ fn par_had_error_get() -> bool:
 # existing parser or bootstrap behaviour changes; the cost is one rt_env_set on
 # the (cold) error paths.
 fn par_had_error_mirror_set():
-    rt_env_set("SIMPLE_PARSER_HAD_ERROR", "1")
+    env_set("SIMPLE_PARSER_HAD_ERROR", "1")
 
 fn par_had_error_mirror_clear():
-    rt_env_set("SIMPLE_PARSER_HAD_ERROR", "")
+    env_set("SIMPLE_PARSER_HAD_ERROR", "")
 
 fn par_had_error_mirror_get() -> bool:
-    (rt_env_get("SIMPLE_PARSER_HAD_ERROR") ?? "") == "1"
+    env_get("SIMPLE_PARSER_HAD_ERROR") == "1"
 
 # Mirror of the FIRST parser error's location and reason.
 #
@@ -215,15 +214,15 @@ fn par_had_error_mirror_get() -> bool:
 # First error wins: later errors are usually cascade noise from the first.
 # Written only on the (cold) error path, so no hot-path cost.
 fn par_first_error_mirror_set(line: i64, col: i64, msg: text):
-    if (rt_env_get("SIMPLE_PARSER_FIRST_ERROR") ?? "") == "":
-        rt_env_set("SIMPLE_PARSER_FIRST_ERROR", int_to_str(line) + ":" + int_to_str(col) + ":" + msg)
+    if env_get("SIMPLE_PARSER_FIRST_ERROR") == "":
+        env_set("SIMPLE_PARSER_FIRST_ERROR", int_to_str(line) + ":" + int_to_str(col) + ":" + msg)
 
 fn par_first_error_mirror_clear():
-    rt_env_set("SIMPLE_PARSER_FIRST_ERROR", "")
+    env_set("SIMPLE_PARSER_FIRST_ERROR", "")
 
 # Returns "" when no error was recorded, else "<line>:<col>:<message>".
 fn parser_first_error_get() -> text:
-    rt_env_get("SIMPLE_PARSER_FIRST_ERROR") ?? ""
+    env_get("SIMPLE_PARSER_FIRST_ERROR")
 
 fn parser_diagnostics_suppressed_get() -> bool:
     par_diagnostics_suppressed
@@ -268,7 +267,7 @@ fn parser_init_with_path(source: text, path: text):
     par_had_error = false
     par_diagnostics_suppressed = false
     par_diagnostic_emit_count = 0
-    if ((rt_env_get("SIMPLE_TRACE_AST_RESET") ?? "") == "1" and
+    if (env_get("SIMPLE_TRACE_AST_RESET") == "1" and
         not frontend_trace_suppressed()):
         print "[parser_init_with_path] resetting for path={path}"
     ast_reset()
@@ -305,11 +304,10 @@ fn parser_init_with_path(source: text, path: text):
 # SIMPLE_PARSE_PROFILE=1). Token and declaration probes share one env sample.
 # Same idiom as lint_prof_now/lint_prof_mark; see the block comment in
 # parser_decls_use.spl. NOT a throwaway probe — do not delete during cleanup.
-extern fn rt_time_now_unix_micros() -> i64
 var par_prof_enabled_cached: i64 = -1
 fn par_prof_enabled() -> bool:
     if par_prof_enabled_cached < 0:
-        par_prof_enabled_cached = if (rt_env_get("SIMPLE_PARSE_PROFILE") ?? "") == "": 0 else: 1
+        par_prof_enabled_cached = if env_get("SIMPLE_PARSE_PROFILE") == "": 0 else: 1
     if par_prof_enabled_cached == 0:
         return false
     not frontend_trace_suppressed()
@@ -317,20 +315,20 @@ fn par_prof_enabled() -> bool:
 fn parser_advance():
     if par_prof_enabled():
         # Times the SAME batched path as the non-prof branch below.
-        val t0 = rt_time_now_unix_micros()
+        val t0 = time_now_unix_micros()
         val snap_p = lex_next_snapshot()
-        val t1 = rt_time_now_unix_micros()
+        val t1 = time_now_unix_micros()
         val kind_p: i64 = snap_p.kind
         par_kind_set(kind_p)
-        val ta = rt_time_now_unix_micros()
+        val ta = time_now_unix_micros()
         if kind_p == 180 or kind_p == 181 or kind_p == 182 or kind_p == 190:
             par_text_set("")
         else:
             par_text_set(snap_p.token_text)
-        val tc = rt_time_now_unix_micros()
+        val tc = time_now_unix_micros()
         par_line_set(snap_p.line)
         par_col_set(snap_p.col)
-        val t2 = rt_time_now_unix_micros()
+        val t2 = time_now_unix_micros()
         print("PARSEPROF\ttok:lex_snapshot\t{t1 - t0}")
         print("PARSEPROF\ttok:kind_set\t{ta - t1}")
         print("PARSEPROF\ttok:text_set\t{tc - ta}")
@@ -354,10 +352,10 @@ fn parser_advance():
     par_line_slot[0] = snap.line
     par_col_slot[0] = snap.col
     if par_env_save_enabled():
-        rt_env_set("SIMPLE_BOOTSTRAP_PAR_KIND", "{kind}")
-        rt_env_set("SIMPLE_BOOTSTRAP_PAR_TEXT", par_text_slot[0])
-        rt_env_set("SIMPLE_BOOTSTRAP_PAR_LINE", "{par_line_slot[0]}")
-        rt_env_set("SIMPLE_BOOTSTRAP_PAR_COL", "{par_col_slot[0]}")
+        env_set("SIMPLE_BOOTSTRAP_PAR_KIND", "{kind}")
+        env_set("SIMPLE_BOOTSTRAP_PAR_TEXT", par_text_slot[0])
+        env_set("SIMPLE_BOOTSTRAP_PAR_LINE", "{par_line_slot[0]}")
+        env_set("SIMPLE_BOOTSTRAP_PAR_COL", "{par_col_slot[0]}")
 
 # ===== Token Checking =====
 
@@ -1111,8 +1109,8 @@ fn parser_parse_type_with_union() -> i64:
 # ===== Top-Level Module Entry Points =====
 
 fn _parse_module_with_diagnostics(source: text, path: text, suppress_diagnostics: bool) -> bool:
-    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
-    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    val saved_lex_source = env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE")
+    val saved_lex_path = env_get("SIMPLE_BOOTSTRAP_LEX_PATH")
     val saved_diagnostics_suppressed = parser_diagnostics_suppressed_get()
     val saved_trace_suppressed = frontend_trace_suppression_set(
         suppress_diagnostics or frontend_trace_suppressed())
@@ -1131,8 +1129,8 @@ fn _parse_module_with_diagnostics(source: text, path: text, suppress_diagnostics
     parser_diagnostics_suppressed_set(saved_diagnostics_suppressed)
     frontend_trace_suppression_set(saved_trace_suppressed)
     frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+    env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
     parse_failed
 
 fn parse_module(source: text, path: text):
@@ -1155,8 +1153,8 @@ fn parse_module_silent_checked(source: text, path: text) -> bool:
 
 fn parse_module_file(source: text, path: text):
     # Parse additional file without resetting AST
-    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
-    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    val saved_lex_source = env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE")
+    val saved_lex_path = env_get("SIMPLE_BOOTSTRAP_LEX_PATH")
     # Nil-guards: module-level vars may be nil in native binaries
     if par_errors == nil:
         par_errors = []
@@ -1170,8 +1168,8 @@ fn parse_module_file(source: text, path: text):
     lex_init_with_path(preprocessed, path)
     parser_advance()
     parse_module_body()
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+    env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
 
 fn parser_has_errors() -> bool:
     par_had_error_get()
