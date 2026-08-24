@@ -2459,3 +2459,17 @@ codegen/runtime root cause and not grounds to close this record.  The next bound
 Stage 3 run must show that all twelve `disc=-1` diagnostics disappear, check
 whether the missing-return cascade disappears, and compare peak RSS because the
 local may introduce one additional value-semantic `HirParam` copy per parameter.
+
+### Follow-up: indexed base MIR-type projection
+
+The next provenance-correct Stage 3 run reduced the twelve diagnostics to two,
+both immediately before the missing-return report for
+`native_build_has_source_arg`.  That function contains exactly two `args[i]`
+index expressions. Their common MIR index path once read `item.type_` inline
+from the builder-local array. The current follow-up uses the established typed
+`MirBuilder.local_type` owner boundary and its canonical O(1) dense lookup,
+then dispatches the returned `type_.kind`, retaining the authoritative `Array(Str)`
+element type instead of falling into the HIR fallback whose nested type became
+scalar zero.  This remains a local workaround for the live self-host aggregate
+projection defect.  A bounded Stage 3 run must prove both residual diagnostics
+and the `native_build_has_source_arg` missing-return cascade disappear.
