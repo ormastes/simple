@@ -1279,9 +1279,12 @@ Final scope includes `check src/compiler`, `check src/lib`, `check src/app/mcp`,
   code spans, one mask fragment per string, and a final join.
 - Replace the punctuation replacement chain plus split with one byte-indexed
   maximal-word span collector using the exact legacy delimiter set.
+- Build one minimum-required-tier dictionary per request and reuse it across
+  files instead of linearly rescanning keyword arrays twice per word.
 - Add guards for owner mutation, full-tier count-only storage, direct operator
   literals, per-file pattern reuse, span-owned string/comment masking, and
-  replacement-free keyword extraction, plus direct delimiter/ordering cases.
+  replacement-free keyword extraction, plus direct delimiter, duplicate-tier,
+  and ordering cases.
 - Verification intentionally not run under the user's no-verify instruction.
 
 ## Reviewed workspace JSON process tranche
