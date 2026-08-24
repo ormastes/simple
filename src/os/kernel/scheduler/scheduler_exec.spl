@@ -60,6 +60,10 @@ use os.kernel.scheduler.scheduler_task_mgmt.{
 }
 
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
+use os.kernel.types.arm32_mapping_handle_v1.{
+    scheduler_arm32_mapping_handle_absent_v1,
+    scheduler_arm32_mapping_handle_present_v1
+}
 use os.kernel.scheduler.server_data_launch_grant_registry.{
     server_data_launch_grant_revoke_task_lifecycle_v1
 }
@@ -244,7 +248,8 @@ pub fn sched_create_user_task_pid_impl(
         capabilities: caps, parent: Some(current),
         schedule: default_task_schedule(priority),
         isolation: default_task_isolation(user_as.id),
-        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS
+        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
+        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1()
     )
     var new_tasks = tasks
     new_tasks[slot] = tcb
@@ -336,7 +341,8 @@ pub fn sched_create_user_task_from_bytes_pid_impl(
         capabilities: caps, parent: Some(current),
         schedule: default_task_schedule(priority),
         isolation: default_task_isolation(user_as.id),
-        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS
+        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
+        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1()
     )
     var new_tasks = tasks
     new_tasks[slot] = tcb
@@ -393,7 +399,8 @@ pub fn sched_create_bootstrap_user_task_pid_impl(
         capabilities: caps, parent: nil,
         schedule: default_task_schedule(priority),
         isolation: default_task_isolation(user_as.id),
-        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS
+        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
+        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1()
     )
     var new_tasks = tasks
     new_tasks[0] = tcb
@@ -448,7 +455,10 @@ pub fn sched_clone_task_impl(
         address_space: child_as, kernel_stack: parent.kernel_stack, user_stack: parent.user_stack,
         capabilities: parent.capabilities, parent: Some(parent_id),
         schedule: parent.schedule, isolation: default_task_isolation(child_as_id),
-        assigned_cpu: parent.assigned_cpu, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS
+        assigned_cpu: parent.assigned_cpu, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
+        # Fork cannot alias the parent's ARM32 destruction authority. A future
+        # ARM32 fork transaction must create and attach a distinct mapping.
+        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1()
     )
     var new_tasks = tasks
     new_tasks[child_slot] = child
@@ -478,6 +488,11 @@ pub fn sched_exec_image_impl(
         case _: false
     if is_zombie:
         return (-22, tasks)
+    # Replacing an owned ARM32 image requires a two-mapping commit.  Reject
+    # before grant, vmspace, or address-space side effects until that owner
+    # transaction exists.
+    if scheduler_arm32_mapping_handle_present_v1(old_task.arm32_mapping_handle):
+        return (-16, tasks)
     val entry = user_process_image_entry(image)
     val stack_top = user_process_image_stack_top(image)
     val stack_size = user_process_image_stack_size(image)

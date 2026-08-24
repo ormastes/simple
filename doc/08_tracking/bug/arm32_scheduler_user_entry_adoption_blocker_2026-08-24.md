@@ -82,6 +82,29 @@ canonical scheduler are:
    token generation. Raw status alone is insufficient and may not authorize
    teardown.
 
+## 2026-08-24 opaque TCB handle prerequisite
+
+`TaskControlBlock` now appends only a generation-bound opaque mapping locator.
+The full ARM32 mapping remains in the canonical page-table owner's existing
+four-slot bounded table. Every operation checks handle generation plus task ID and lifecycle
+generation; slot reuse cannot make a stale copied TCB authoritative. All seven
+constructors initialize the handle explicitly, fork starts absent, and generic
+exec rejects a present handle before side effects rather than aliasing or
+orphaning the old mapping.
+The owner serializes each lookup/transition/store through its existing mutex.
+Raw scheduler-ownership transitions are module-private; admission mutates the
+canonical slot and returns only its locator, so no caller receives a second
+destruction receipt. The shared TCB imports only the architecture-neutral locator contract,
+and its size change is encoded as ABI revision 2.
+
+The table exposes the owner-side attach, pre-publication rollback, publication,
+terminal, and reap prerequisites. It is not wired into generic exit/wait: the
+existing order closes FDs and revokes grants before Zombie publication and
+cannot roll those effects back if ARM32 terminal marking fails. Kernel-root
+restore and the atomic Scheduler lifecycle transaction remain required before
+this blocker can close. This change is statically specified but unverified by
+explicit instruction.
+
 The required transaction order is now explicit: reserve the opaque TCB handle;
 move mapping ownership; consume the exact loader joint reservation; publish the
 TCB without runnable visibility; publish the mapping owner; bind entry and the

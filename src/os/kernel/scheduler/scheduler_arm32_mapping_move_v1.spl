@@ -1,140 +1,64 @@
-# Scheduler-side ARM32 mapping ownership prerequisite.  The page-table capsule
-# remains the physical destructor owner; this binds its move to one task life.
+# Scheduler adapter for the canonical ARM32 page-table owner's opaque handle.
+# No raw mapping receipt crosses this boundary after admission.
+
+use os.kernel.types.arm32_mapping_handle_v1.{SchedulerArm32MappingHandleV1}
 use os.kernel.arch.arm32.user_page_table_owner_v1.{
-    Arm32UserPageTableReceiptV1, Arm32UserPageTableStateV1,
-    Arm32UserPageTableErrorV1, arm32_user_page_table_move_to_scheduler_v1,
-    arm32_user_page_table_rollback_scheduler_move_v1,
-    arm32_user_page_table_publish_scheduler_move_v1,
-    arm32_user_page_table_mark_terminal_v1,
-    arm32_user_page_table_reap_scheduler_owned_v1
+    Arm32UserPageTableReceiptV1,
+    arm32_scheduler_mapping_handle_admit_v1,
+    arm32_scheduler_mapping_handle_rollback_v1,
+    arm32_scheduler_mapping_handle_publish_v1,
+    arm32_scheduler_mapping_handle_mark_terminal_v1,
+    arm32_scheduler_mapping_handle_reap_v1,
+    arm32_scheduler_mapping_entry_state_v1
 }
-use os.kernel.arch.arm32.user_entry_state_v1.{
-    Arm32UserEntryStateV1, arm32_user_entry_state_v1
-}
+use os.kernel.arch.arm32.user_entry_state_v1.{Arm32UserEntryStateV1}
 
-pub enum SchedulerArm32MappingMoveErrorV1:
-    None
-    InvalidPreparedMapping
-    InvalidTaskIdentity
-    EntryStateRejected
-    MoveRejected
-    RollbackIndeterminate
-    ReapRejected
+pub(package) fn scheduler_arm32_mapping_handle_admit_v1(
+    prepared: Arm32UserPageTableReceiptV1,
+    task_id: u64,
+    lifecycle_generation: u64,
+    exec_token: u64,
+    exec_generation: u64
+) -> SchedulerArm32MappingHandleV1?:
+    arm32_scheduler_mapping_handle_admit_v1(
+        prepared, task_id, lifecycle_generation, exec_token, exec_generation)
 
-pub struct SchedulerArm32MappingMoveV1:
-    mapping: Arm32UserPageTableReceiptV1
-    entry_state: Arm32UserEntryStateV1?
-    task_id: u64
-    lifecycle_generation: u64
-    scheduler_owned: bool
-    globally_ready: bool
-    error: SchedulerArm32MappingMoveErrorV1
-
-fn _arm32_move_reject(mapping: Arm32UserPageTableReceiptV1,
-    error: SchedulerArm32MappingMoveErrorV1) -> SchedulerArm32MappingMoveV1:
-    SchedulerArm32MappingMoveV1(
-        mapping: mapping, entry_state: nil, task_id: 0u64,
-        lifecycle_generation: 0u64, scheduler_owned: false,
-        globally_ready: false, error: error)
-
-pub(package) fn scheduler_arm32_mapping_move_v1(
-    prepared: Arm32UserPageTableReceiptV1, task_id: u64,
-    lifecycle_generation: u64, exec_token: u64, exec_generation: u64
-) -> SchedulerArm32MappingMoveV1:
-    if (prepared.state != Arm32UserPageTableStateV1.AdoptionReserved or
-        prepared.error != Arm32UserPageTableErrorV1.None or
-        prepared.execution_authorized or prepared.root_phys == 0u64 or
-        prepared.entry_point == 0u64 or prepared.initial_sp == 0u64):
-        return _arm32_move_reject(prepared,
-            SchedulerArm32MappingMoveErrorV1.InvalidPreparedMapping)
-    if task_id == 0u64 or lifecycle_generation == 0u64:
-        return _arm32_move_reject(prepared,
-            SchedulerArm32MappingMoveErrorV1.InvalidTaskIdentity)
-    val maybe_entry = arm32_user_entry_state_v1(
-        prepared.root_phys, prepared.entry_point, prepared.initial_sp,
-        task_id, lifecycle_generation, exec_token, exec_generation)
-    if maybe_entry == nil:
-        return _arm32_move_reject(prepared,
-            SchedulerArm32MappingMoveErrorV1.EntryStateRejected)
-    val moved = arm32_user_page_table_move_to_scheduler_v1(
-        prepared, task_id, lifecycle_generation)
-    if (moved.state != Arm32UserPageTableStateV1.SchedulerOwnedUnpublished or
-        moved.execution_authorized or moved.owner_task_id != task_id or
-        moved.owner_lifecycle_generation != lifecycle_generation):
-        return _arm32_move_reject(moved,
-            SchedulerArm32MappingMoveErrorV1.MoveRejected)
-    SchedulerArm32MappingMoveV1(
-        mapping: moved, entry_state: maybe_entry, task_id: task_id,
-        lifecycle_generation: lifecycle_generation, scheduler_owned: true,
-        globally_ready: false, error: SchedulerArm32MappingMoveErrorV1.None)
-
-pub(package) fn scheduler_arm32_mapping_rollback_before_publication_v1(
-    moved: SchedulerArm32MappingMoveV1
-) -> SchedulerArm32MappingMoveV1:
-    if not moved.scheduler_owned or moved.entry_state == nil:
-        return _arm32_move_reject(moved.mapping,
-            SchedulerArm32MappingMoveErrorV1.MoveRejected)
-    val rolled_back = arm32_user_page_table_rollback_scheduler_move_v1(
-        moved.mapping, moved.task_id, moved.lifecycle_generation)
-    if rolled_back.state != Arm32UserPageTableStateV1.AdoptionReserved or
-        rolled_back.error != Arm32UserPageTableErrorV1.None:
-        return _arm32_move_reject(rolled_back,
-            SchedulerArm32MappingMoveErrorV1.RollbackIndeterminate)
-    _arm32_move_reject(rolled_back, SchedulerArm32MappingMoveErrorV1.None)
-
-pub(package) fn scheduler_arm32_mapping_publish_v1(
-    moved: SchedulerArm32MappingMoveV1
-) -> SchedulerArm32MappingMoveV1:
-    """Close rollback after the canonical Scheduler publishes its TCB."""
-    if not moved.scheduler_owned or moved.entry_state == nil:
-        return _arm32_move_reject(moved.mapping,
-            SchedulerArm32MappingMoveErrorV1.MoveRejected)
-    val published = arm32_user_page_table_publish_scheduler_move_v1(
-        moved.mapping, moved.task_id, moved.lifecycle_generation)
-    if published.state != Arm32UserPageTableStateV1.SchedulerOwnedPublished:
-        return _arm32_move_reject(published,
-            SchedulerArm32MappingMoveErrorV1.MoveRejected)
-    var out = moved
-    out.mapping = published
-    out
-
-pub(package) fn scheduler_arm32_mapping_mark_terminal_v1(
-    published: SchedulerArm32MappingMoveV1,
+pub(package) fn scheduler_arm32_mapping_handle_rollback_v1(
+    handle: SchedulerArm32MappingHandleV1,
     task_id: u64,
     lifecycle_generation: u64
-) -> SchedulerArm32MappingMoveV1:
-    """Mint terminal reap state only beside Scheduler Zombie publication."""
-    if (not published.scheduler_owned or published.task_id != task_id or
-        published.lifecycle_generation != lifecycle_generation or
-        published.mapping.state !=
-            Arm32UserPageTableStateV1.SchedulerOwnedPublished):
-        return _arm32_move_reject(published.mapping,
-            SchedulerArm32MappingMoveErrorV1.InvalidTaskIdentity)
-    val terminal = arm32_user_page_table_mark_terminal_v1(
-        published.mapping, task_id, lifecycle_generation)
-    if terminal.state != Arm32UserPageTableStateV1.SchedulerTerminal:
-        return _arm32_move_reject(terminal,
-            SchedulerArm32MappingMoveErrorV1.ReapRejected)
-    var out = published
-    out.mapping = terminal
-    out
+) -> bool:
+    arm32_scheduler_mapping_handle_rollback_v1(
+        handle, task_id, lifecycle_generation)
 
-pub(package) fn scheduler_arm32_mapping_reap_v1(
-    moved: SchedulerArm32MappingMoveV1, task_id: u64,
+pub(package) fn scheduler_arm32_mapping_handle_publish_v1(
+    handle: SchedulerArm32MappingHandleV1,
+    task_id: u64,
     lifecycle_generation: u64
-) -> SchedulerArm32MappingMoveV1:
-    if (not moved.scheduler_owned or moved.task_id != task_id or
-        moved.lifecycle_generation != lifecycle_generation or
-        moved.mapping.state != Arm32UserPageTableStateV1.SchedulerTerminal):
-        return _arm32_move_reject(moved.mapping,
-            SchedulerArm32MappingMoveErrorV1.InvalidTaskIdentity)
-    val destroyed = arm32_user_page_table_reap_scheduler_owned_v1(
-        moved.mapping, task_id, lifecycle_generation)
-    if destroyed.state != Arm32UserPageTableStateV1.Destroyed or
-        destroyed.error != Arm32UserPageTableErrorV1.None:
-        return _arm32_move_reject(destroyed,
-            SchedulerArm32MappingMoveErrorV1.ReapRejected)
-    _arm32_move_reject(destroyed, SchedulerArm32MappingMoveErrorV1.None)
+) -> bool:
+    arm32_scheduler_mapping_handle_publish_v1(
+        handle, task_id, lifecycle_generation)
 
-export SchedulerArm32MappingMoveErrorV1
-export SchedulerArm32MappingMoveV1
+pub(package) fn scheduler_arm32_mapping_handle_mark_terminal_v1(
+    handle: SchedulerArm32MappingHandleV1,
+    task_id: u64,
+    lifecycle_generation: u64
+) -> bool:
+    arm32_scheduler_mapping_handle_mark_terminal_v1(
+        handle, task_id, lifecycle_generation)
+
+pub(package) fn scheduler_arm32_mapping_handle_reap_v1(
+    handle: SchedulerArm32MappingHandleV1,
+    task_id: u64,
+    lifecycle_generation: u64
+) -> bool:
+    arm32_scheduler_mapping_handle_reap_v1(
+        handle, task_id, lifecycle_generation)
+
+pub(package) fn scheduler_arm32_mapping_entry_state_v1(
+    handle: SchedulerArm32MappingHandleV1,
+    task_id: u64,
+    lifecycle_generation: u64
+) -> Arm32UserEntryStateV1?:
+    arm32_scheduler_mapping_entry_state_v1(
+        handle, task_id, lifecycle_generation)
