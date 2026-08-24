@@ -14,32 +14,19 @@
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
 use app.ponytail.audit.{ponytail_audit, ponytail_simplification_report}
 use std.io_runtime.{env_get, file_exists, file_read}
-use std.string_core.{char_from_code}
 use .main_lazy_json.{mcp_run_argv}
 
 fn _mcp_json_escape(value: text) -> text:
-    var out = ""
-    var i = 0
-    while i < value.len():
-        val ch = value.char_code_at(i)
-        if ch == 92:
-            out = out + "\\\\"
-        elif ch == 34:
-            out = out + "\\\""
-        elif ch == 10:
-            out = out + "\\n"
-        else:
-            # `text.from_char_code(ch)` (static call on the builtin type name)
-            # does not lower on the native entry-closure HIR path — the
-            # receiver `text` resolves as a value ident and dies "unresolved
-            # name: text". Use the std free function; static-call lowering gap
-            # filed: doc/08_tracking/bug/text_static_method_hir_lowering_2026-07-23.md
-            out = out + char_from_code(ch)
-        i = i + 1
-    out
+    # Keep Unicode opaque. The old byte-length/codepoint-index loop appended
+    # NULs after multibyte characters and repeatedly copied the growing prefix.
+    if not value.contains("\\") and not value.contains("\"") and not value.contains("\n"):
+        return value
+    var escaped = value.replace("\\", "\\\\")
+    escaped = escaped.replace("\"", "\\\"")
+    escaped.replace("\n", "\\n")
 
 fn _mcp_first_lines(value: text, maximum: i64) -> text:
-    var out = ""
+    var out_parts: [text] = []
     var count: i64 = 0
     var has_more = false
     for line in value.split("\n"):
@@ -48,9 +35,10 @@ fn _mcp_first_lines(value: text, maximum: i64) -> text:
                 has_more = true
             break
         if count > 0:
-            out = out + "\n"
-        out = out + line
+            out_parts.push("\n")
+        out_parts.push(line)
         count = count + 1
+    var out = out_parts.join("")
     if out != "" and (has_more or value.ends_with("\n")):
         out = out + "\n"
     out
@@ -604,3 +592,4 @@ export handle_simple_dependencies
 export handle_simple_pipe
 export handle_simple_search
 export _mcp_public_api_change_details
+export _mcp_json_escape, _mcp_first_lines

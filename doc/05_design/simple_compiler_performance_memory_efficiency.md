@@ -1021,3 +1021,16 @@ references and preserves the existing silent discard. No filtering, per-line
 trim, builder FFI, or extra parser state is introduced. Focused fixtures pin
 empty blocks, blank-line multiplicity, indentation, metadata/title extraction,
 nested association, and unterminated EOF.
+
+## MCP serializer and prefix-renderer design
+
+JSON escaping checks for backslash, quote, and LF. If absent it returns the
+original text. Otherwise replacements run in that order, so original
+backslashes are doubled before later escape markers appear. Tabs, CR, and other
+controls intentionally retain current policy; standards expansion is separate.
+This fixes multibyte NUL corruption without `for ch in text`.
+
+The first-lines helper keeps its split/limit loop but records every would-be
+append (`"\n"`, then line) as a fragment. It joins once, then applies the exact
+joined-output/trailing-newline gate. Empty leading segments, nonpositive limits,
+exact boundaries, and trailing empty segments retain historical results.

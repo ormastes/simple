@@ -748,3 +748,14 @@ individual fragments must not be trimmed or filtered because indentation and
 interior blank lines are semantic documentation content. Runtime-specific
 linearity claims name the Pure Simple or C-native join implementation and do not
 silently extend to legacy seed implementations with different internals.
+
+### MCP bounded text ownership
+
+MCP serializers avoid per-codepoint growing-prefix construction. For a small,
+fixed escape alphabet they use an unchanged-value fast path and bounded ordered
+whole-text replacements, treating Unicode opaquely. They do not mix byte counts
+with codepoint indices or depend on the currently unsafe text iterator.
+
+Bounded renderers preserve their truncation/newline contract by recording append
+fragments and joining once. A future newline-offset prefix slice requires exact
+compatibility with today's trailing-empty split behavior.

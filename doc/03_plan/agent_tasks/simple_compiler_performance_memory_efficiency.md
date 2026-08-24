@@ -149,6 +149,19 @@ current-head research reconciliation.
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed MCP bounded-text tranche
+
+- Replaced quadratic JSON prefix assembly with an unchanged fast path and three
+  ordered linear replacements.
+- Removed byte-length/codepoint-index NUL corruption without the unsafe text
+  iterator in both app and standard-library MCP serializers.
+- Replaced first-lines prefix concatenation with append fragments plus one join
+  while retaining truncation and trailing-empty behavior.
+- Added paired behavioral specs/manual for Unicode, escaping, controls, limits,
+  truncation, and newline edges.
+- Recorded the duplicate-scan/child-startup target and freshness/parity/perf
+  gates. Verification intentionally not run under the user's instruction.
+
 ## Completed MEXH004 cause-arbitration tranche
 
 - Unified query and semantic unreachable-arm precedence.

@@ -3334,3 +3334,22 @@ current MIR lowering uses a separate `rt_array_join_any` route not implemented
 there. Without route-specific execution evidence, this audit makes no exact
 seed-runtime allocation or scaling claim. No new runtime measurement or manual
 verification was run.
+
+### MCP JSON and bounded-prefix assembly
+
+`_mcp_json_escape` mixed byte-length iteration with codepoint-indexed lookup,
+appended a newly encoded character to a growing prefix, and could add NULs after
+multibyte Unicode. For emitted prefixes S_i, copied payload is `sum(S_i)`, worst
+case quadratic, plus per-character text construction.
+
+The replacement returns unchanged text when no backslash, quote, or LF exists;
+otherwise it applies three ordered linear replacements. Unicode remains opaque,
+the historical escape alphabet is preserved, and NUL corruption is removed
+without the repository's unsafe text iterator. `_mcp_first_lines` records its
+exact legacy append fragments and joins once, removing prefix copies while
+retaining full-input split and unusual trailing-empty behavior.
+
+The larger `simple_pipe` defect remains open because raw search and workspace
+symbols have incompatible roots, regex rules, limits, ordering, and errors. The
+freshness-safe target and acceptance evidence are recorded in
+`doc/08_tracking/bug/simple_pipe_codebase_duplicate_scan_2026-08-24.md`.
