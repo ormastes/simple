@@ -2740,3 +2740,21 @@ the allocated cells with no growth copies. Existing branch propagation,
 budget, dangling-edge, no-liveness-allocation, and duplicate-local contracts
 cover behavior; they were not rerun under the user's no-verification
 instruction.
+
+### Hoisted liveness adjacency and linear diagnostic dedupe
+
+The liveness solver previously resolved `successors[block]` inside its
+per-local loop. For V worklist visits and L locals this caused V*L dictionary
+lookups and array-value extractions even though adjacency is immutable for the
+entire solve. It now binds the successor array once per visit, reducing those
+operations to V while preserving the same successor iteration and liveness
+equations. The now-fixed-size worklist also writes only into its proven free
+prefix; its unreachable growth fallback was removed.
+
+MEXH006 similarly deduplicated suspect variant names by linearly scanning an
+array of previously emitted names. With input-dependent suspect counts this was
+quadratic in the number of distinct candidates. Membership now uses a
+dictionary set while warnings remain appended in first-occurrence source
+order. A non-bogus occurrence still does not suppress a later bogus finding.
+Existing liveness and match-diagnostic contracts were not rerun under the
+user's no-verification instruction.
