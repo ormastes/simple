@@ -162,6 +162,21 @@ current-head research reconciliation.
   collapse and canonical order.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed MIR verification manifest-index tranche
+
+- Replace the per-effect scan of all prior effects with a manifest-local exact
+  region-to-type dictionary while retaining every admitted effect in order.
+- Reduce type-consistency validation from O(E^2) comparisons to expected O(E)
+  lookups with O(R) request-local index storage.
+- Preserve the first-conflict failure point and exact
+  `FV2-E-REGION-TYPE-MISMATCH` diagnostic.
+- Format source provenance only for `LoadGlobal` and `StoreGlobal`, reducing
+  worst-case transient span text construction from O(I) validly-spanned
+  instructions to O(G) validly-spanned global accesses without changing
+  global span validation.
+- Strengthen repeated-effect multiplicity and exact mismatch contracts;
+  verification intentionally not run under the user's no-verify instruction.
+
 ## Implemented generated HIR child-frame tranche
 
 - Generator owner: add `HirChildFrame`, its context-neutral sink, reverse
