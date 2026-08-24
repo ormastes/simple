@@ -240,3 +240,109 @@ chain (`v=10`, `s=hello n=7 len=5`, `x=a z=c k=3 zlen=1`), so nothing regressed.
 - MCP still does not produce a binary, and clearing #143 entirely would not be
   enough on its own: `borrow_check()` runs after `lower_to_mir`, so the NLL false
   positive is still queued behind it and has never executed on this closure.
+
+## 2026-08-24 (later) — hot-path validation, and what it does and does not cover
+
+The `effective_type` change above is on a hot path and was landed on seven
+fixtures plus a site count. That is not proportionate coverage, so it was
+validated properly afterwards. Results, including the part that came out
+negative.
+
+### There is no test suite for this code path, and that is not a footnote
+
+`simple test` cannot exercise this change **at all**. The pure-Simple test runner
+never native-builds: `grep -rnE "native_build|native-build|compile_to_native"
+src/app/test_runner_new/` returns nothing, and specs run interpreted.
+`effective_type` lives in `50.mir/mir_lowering_stmts.spl`, reached only from
+`lower_to_mir`. So a green suite run would have been theatre — it would have
+executed zero lines of the change. Stated plainly rather than left as "not
+verified".
+
+### Differential native-build corpus: 16 real programs, before vs after
+
+Two `git worktree` checkouts isolating exactly this commit (`9ca094b44ee~1` vs
+`9ca094b44ee`), same seed, per-tree `SIMPLE_CACHE_SCOPE`. Corpus chosen by weighting
+`test/**` single-file programs toward `Dict<`, `.keys()`, `.values()` and
+optional usage.
+
+| | before | after |
+|---|---|---|
+| build 0 / run 0 | 6 | 6 |
+| build 1 (pre-existing failures) | 10 | 10 |
+
+`diff` of the full result files, including each failure's error signature, is
+**empty — byte-identical**.
+
+**And that evidence is weaker than it looks, which is the point of reporting it.**
+Instrumenting the two new branches with a counter and re-running the same 16
+programs gives **TOTAL_NEWBRANCH_HITS=0**. The corpus never entered the changed
+code. Byte-identical results therefore establish only that the change does not
+perturb paths it does not touch — real, but not evidence that the change itself
+is correct.
+
+### Purpose-built corpus that DOES enter the branch
+
+Three fixtures, each confirmed to fire a new branch exactly once:
+
+| fixture | shape | before | after | hits |
+|---|---|---|---|---|
+| `c1` | `val map: Dict<text,i64> = <fn -> any?>`, `for k in map.keys()` | build FAILS | builds, runs, `n=6` | 1 |
+| `c2` | `val xs: [i64] = <fn -> any?>`, `for v in xs` | build FAILS | builds, runs, `s=12` | 1 |
+| `c3` | `val xs: [text] = <fn -> any?>`, `for v in xs` | build FAILS | builds, runs, `s=5` | 1 |
+
+`c3` is the element-type check: `v.len()` on a destructured `text` element
+returns 2+3=5, which is impossible if the elements had decayed to i64 handles.
+
+### Why the change's blast radius is narrow
+
+The new branches fire only when the annotation is a container AND the
+initializer is NOT that same container kind. When the initializer already is one,
+the pre-existing arms still handle it unchanged — verified by the two fixtures
+that specifically cover them: an annotated dict plus an EMPTY `Dict<text,S>`
+literal (Bug #189's shape, `n=5 m=0 elen=0`) and an annotated `[i64]` literal
+(`s=6`), both with zero new-branch hits. In well-typed source the only remaining
+way to reach the new branches is an Option-wrapped initializer, which is exactly
+the defect being fixed; every other combination (annotation `[T]` with a dict
+initializer, annotation `Dict` with a float initializer, ...) is already a type
+error in the source.
+
+### The remaining 15 are NOT the shape that was just fixed
+
+Earlier framing implied the 12 unannotated `NamedVar` residuals were mechanical
+follow-ups. **They are not, and they must not be annotated on that assumption.**
+Their actual source shapes, reduced to minimal fixtures, **build and run fine**:
+
+| source shape | site | minimal fixture |
+|---|---|---|
+| `val lines = check_output.split(NL)` then `for line in lines` | `main_lazy_diag_tools.spl:122` and 5 others | builds, runs (`n=6`) |
+| same, with an explicit `[text]` annotation | — | builds, runs (`n=6`) |
+| `for ch in name` over a `text` | `main_static_tools.spl:321` | builds, runs (`n=3`) |
+
+None involves an optional initializer, and none reproduces in isolation, so the
+cause is contextual and **uncharacterized**. Annotating them would be a guess
+dressed as type information — the failure mode worth avoiding, since a wrong
+annotation is a lie the compiler will act on. Left alone.
+
+Breakdown of the 15: **12** unannotated `NamedVar`/`I64` (above, uncharacterized),
+**2** `Field`/`I64` (`main_lazy_assistant.spl:20`, the field-receiver hole
+`fb7e76c489a` left open), **1** `NamedVar`/`Tuple` (not localized — empty span).
+
+### The defect vs the compensation — read this before "15 remaining"
+
+The general hole is the defect and it is **still open**: `val x = f()` with no
+annotation, where `f` returns `T?`, still loses `T`, because unwrapping the
+Option yields `any` rather than a container. The compiler change fixes only the
+case where an annotation EXISTS; the `src/lib/common/json/**` annotations are
+**compensation for the open hole**, not a fix for it. Anyone reading "32 -> 15"
+as progress toward #143 should read it as "17 sites compensated, one type-loss
+class closed, the inference hole untouched".
+
+### Still not verified
+
+- No suite exists for this path (above). The evidence is the 16-program
+  differential plus 12 targeted fixtures, nothing broader.
+- The 12 residual sites are uncharacterized.
+- MCP still produces no binary. Clearing #143 entirely would not be enough:
+  `borrow_check()` runs after `lower_to_mir`, so the NLL false positive in
+  `nll_mut_borrow_of_local_false_positive_at_return_2026-08-24.md` is still queued
+  behind it and has never executed on this closure.
