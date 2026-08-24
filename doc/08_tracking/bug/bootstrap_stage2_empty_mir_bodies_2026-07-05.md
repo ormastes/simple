@@ -1313,3 +1313,98 @@ logging both under the existing `SIMPLE_MIR_STMT_CALLER_DEBUG` gate turns this
 from "the comparison fails" into "these two numbers differ, and here is which
 producer is wrong". That is a one-line probe on the Simple side and needs no
 seed rebuild.
+
+## 2026-08-24 (later) — CORRECTION: the disc is CORRECT and the span is NORMAL; the defect is native execution, not dispatch
+
+**This supersedes two claims made in the section immediately above.** Both were
+wrong, and a run that SUCCEEDS proves it.
+
+### The experiment
+
+The same Simple MIR source, the same fixture, executed by the Rust seed
+INTERPRETING `src/compiler/**` (`native-build --entry-closure`, no
+`SIMPLE_NATIVE_BUILD_RUST`) instead of by the self-compiled Stage 2 binary:
+
+```
+[bootstrap-flat-entry] index=0 modules=1 functions=1
+[mir-stmt-caller] before disc=4119164143 file= line=0 col=0
+[mir-stmt-caller] after  disc=4119164143 file= line=0 col=0
+rc=0   ->  ./hbin5  ->  prints "hi", exit 0
+```
+
+**Identical disc. Identical empty span. rc=0 and a real running binary.**
+
+### What that corrects
+
+| earlier claim | verdict |
+|---|---|
+| "the disc pre-dispatch is itself defeated" / the incoming disc does not equal the locally-constructed one | **WRONG.** 4119164143 is the CORRECT discriminant for `HirStmtKind.Expr`; a working run shows the same value, so the comparison succeeds. |
+| "every arriving `HirStmt` has an empty span — a second signal about the producer" | **WRONG.** The empty span is present on the working run too. It is normal on this path and carries no signal. |
+
+### The collision that started this was not a collision
+
+`HirStmtKind` (`hir_definitions.spl:763`) has exactly five variants — `Expr`,
+`Let`, `Assign`, `Block`, `AsmAssert`. There is **no `Return` variant**:
+`Return(value: HirExpr?)` belongs to `HirExprKind`
+(`hir_definitions.spl:605`). So `return 7` is a `HirStmtKind.Expr` wrapping a
+`HirExprKind.Return`, and `print("hi")` and `return 7` sharing 4119164143 is
+two statements of the SAME variant reporting the same discriminant — exactly
+correct behaviour. Two distinct kinds observed (`Expr`, `Let`) produced two
+distinct values. Nothing here is a hash collision or a non-discriminant; the
+values are simply large and content-derived rather than dense ordinals.
+
+### Where the defect actually is
+
+Dispatch succeeds. On Stage 2 the pre-dispatch branch
+(`mir_lowering_stmts.spl:1102-1113`) is therefore taken, `rt_enum_payload`
+returns a NON-nil payload (the `empty HIR expression-statement payload` guard
+never fires), `self.lower_expr(expr)` is called — **and emits nothing**.
+
+That is precisely the hazard the code's own comment at that site names:
+
+> "The native worker can misbind this first-variant payload in a qualified
+> match even after exact discriminator dispatch."
+
+So the fault is **not** in the Simple source, which demonstrably compiles and
+runs a hello world when interpreted. It is in how the **self-compiled Stage 2
+binary executes that source** — a non-nil but misbound first-variant payload
+flowing into `lower_expr`, which then produces no instructions and no
+diagnostic. Same family as the other surfacings, but the discriminating fact is
+now *interpreted works / self-compiled does not*, on identical source.
+
+### Reusable fast loop (and the macOS blocker it needed)
+
+Iterating on `src/compiler/**` costs seconds, not a 27-minute Stage 2 build:
+
+```sh
+SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 \
+SIMPLE_PROJECT_ROOT=<repo> SIMPLE_CACHE_SCOPE=<fresh> \
+  src/compiler_rust/target/bootstrap/simple \
+  native-build --backend llvm --source . --entry h.spl --entry-closure -o hbin
+```
+
+Two traps cost real time here and are worth writing down:
+
+* **Use the IN-TREE seed, not a copy.** A `cp` of the same binary elsewhere
+  fails with `error: pure-Simple tool 'native-build' unavailable; refusing Rust
+  fallback` — the app dispatch resolves `src/app/**` relative to the executable.
+* **macOS has no `setsid(1)`**, and the worker invokes it as `setsid -w …`. A
+  shim that only does `exec "$@"` fails with `exec: -w: invalid option`; it must
+  strip options first:
+
+```sh
+#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done
+exec "$@"
+```
+
+### The remaining question, and why the scoped probe cannot answer it cheaply
+
+The one bit still unmeasured is whether Stage 2 computes the same value for the
+LOCALLY constructed `HirStmtKind.Expr(fallback_expr)` as for the incoming one.
+The probe for it (log `expr_disc`/`let_disc` beside the incoming disc under
+`SIMPLE_MIR_STMT_CALLER_DEBUG`) is still one line — but it has to run inside a
+Stage 2 binary, because the interpreted lane above does not reproduce the bug at
+all. That means a ~27-minute rebuild, and the file to be probed
+(`mir_lowering_stmts.spl`) is a parallel session's live working file, so it was
+not edited here.

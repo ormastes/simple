@@ -766,3 +766,26 @@ owning record), with the sibling mechanism in
 * **No silent-wrong-output risk.** The guard is loud and fail-closed
   (`eprint` + `rt_exit(1)`, rc=1, no `.smf` written) — the 2026-07-05 lane added
   it for precisely this shape.
+
+### CORRECTION to the summary above (same day, later)
+
+Two claims in the bullet list above are **wrong** and are corrected in
+`bootstrap_stage2_empty_mir_bodies_2026-07-05.md`:
+
+* The disc pre-dispatch is **not** defeated. `4119164143` is the CORRECT
+  `HirStmtKind.Expr` discriminant — a run that SUCCEEDS shows the same value.
+* The empty span is **normal** on this path, not a signal — the working run has
+  it too.
+
+The "collision" that prompted the reading was not one: `HirStmtKind` has no
+`Return` variant (`Return` is a `HirExprKind`, `hir_definitions.spl:605`), so
+`print("hi")` and `return 7` are both `HirStmtKind.Expr` and correctly report
+the same discriminant.
+
+The real discriminating fact: the identical Simple source, run by the Rust seed
+INTERPRETING `src/compiler/**`, compiles this hello world to a binary that
+prints `hi` with rc=0. Only the **self-compiled Stage 2** fails. Dispatch
+succeeds there, `rt_enum_payload` returns non-nil, and `lower_expr` then emits
+nothing — the "native worker can misbind this first-variant payload" hazard the
+code comments at that site. The defect is in native execution of the source, not
+in the source.
