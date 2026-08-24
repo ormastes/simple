@@ -25,6 +25,7 @@ use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
 use std.db.dbfs_driver.{DbFsDriver}
 use std.db.dbfs_engine.superblock.{dbfs_superblock_set_device}
 use os.port.dbfs_image.{DbfsImageConfig, PayloadEntry, build_dbfs_rootfs_image}
+use os.port.cached_raw_image_block_device.{CachedRawImageBlockDevice}
 use os.port.nvfs_image.{
     NvfsImageConfig, NvfsImageSeed, build_nvfs_rootfs_image, NVFS_IMAGE_PROVIDER
 }
@@ -99,3 +100,51 @@ describe "MemBlockDevice.from_file rejects what it cannot mount":
         val dev = MemBlockDevice.new(700u64, 1u32)
         expect(dev.write_to_file(ragged).is_ok()).to_equal(true)
         expect(MemBlockDevice.from_file(ragged, SECTOR_SIZE).is_err()).to_equal(true)
+
+describe "the mount seam is the BlockDevice trait, not MemBlockDevice":
+    # The point of these two scenarios is the DEVICE TYPE, not the filesystem.
+    #
+    # `DbFsDriver.open_on_device` (dbfs_driver.spl:307), `NvfsPosixDriver.new_on_device`
+    # (nvfs_posix_driver.spl:49) and `dbfs_superblock_set_device`
+    # (dbfs_engine/superblock.spl:48) all take `dev: BlockDevice` -- the trait.
+    # Every scenario above happens to pass a MemBlockDevice, which cannot
+    # distinguish "generic over the trait" from "accidentally concrete".
+    #
+    # These mount the same images through CachedRawImageBlockDevice
+    # (src/os/port/cached_raw_image_block_device.spl:61), an unrelated impl
+    # backed by a real file. Passing proves the seam is the trait, which is what
+    # makes mounting over BootNvmeBlockDevice
+    # (src/os/services/vfs/nvme_boot_runtime_owner.spl:81) a wiring exercise
+    # rather than a filesystem change.
+
+    it "mounts DBFS over CachedRawImageBlockDevice and returns seeded content":
+        val img = "/tmp/spl-dbfs-seam.img"
+        val cfg = DbfsImageConfig(
+            size_sectors: SECTORS,
+            seeds: [PayloadEntry(name: "/etc/motd", data: text_to_bytes(DBFS_MOTD))]
+        )
+        expect(build_dbfs_rootfs_image(cfg, img).is_ok()).to_equal(true)
+
+        val dev = CachedRawImageBlockDevice.load_with_sector_size(img, SECTOR_SIZE).unwrap()
+        dbfs_superblock_set_device(dev)
+        val driver = DbFsDriver.open_on_device(dev, FIRST_ARENA_LBA, _arena_blocks()).unwrap()
+        val handle = driver.open_path(Path(raw: "/etc/motd"), OpenFlags.read_only()).unwrap()
+        expect(driver.read_handle(handle, 64).unwrap()).to_equal("SimpleOS DBFS root\n")
+        expect(driver.close_handle(handle).is_ok()).to_equal(true)
+
+    it "mounts NVFS over CachedRawImageBlockDevice and returns seeded content":
+        val img = "/tmp/spl-nvfs-seam.img"
+        val cfg = NvfsImageConfig(
+            size_sectors: SECTORS,
+            seeds: [NvfsImageSeed(name: "/etc/motd", data: text_to_bytes(NVFS_MOTD))]
+        )
+        expect(build_nvfs_rootfs_image(cfg, img).is_ok()).to_equal(true)
+
+        val dev = CachedRawImageBlockDevice.load_with_sector_size(img, SECTOR_SIZE).unwrap()
+        dbfs_superblock_set_device(dev)
+        val driver = NvfsPosixDriver.new_on_device(
+            NVFS_IMAGE_PROVIDER, dev, FIRST_ARENA_LBA, _arena_blocks()
+        ).unwrap()
+        val handle = driver.open_path(Path(raw: "/etc/motd"), OpenFlags.read_only()).unwrap()
+        expect(driver.read_handle(handle, 64).unwrap()).to_equal("SimpleOS NVFS root\n")
+        expect(driver.close_handle(handle).is_ok()).to_equal(true)
