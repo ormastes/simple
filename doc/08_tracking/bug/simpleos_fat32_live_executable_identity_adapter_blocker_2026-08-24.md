@@ -14,10 +14,11 @@ wired to launch yet.
 - `open_at` and `resolve_path` do not enter any mutation owner. They may read a
   directory entry before a concurrent replacement and return a handle after
   that replacement.
-- `fat32_dir_find_entry` concatenates any adjacent live `attr == 0x0f` slots.
-  It does not validate the ordinal sequence, LAST flag, type byte, first-cluster
-  zero field, 8.3 checksum, terminator/padding placement, or the 255-code-unit
-  bound. Its decoded `text` also loses the raw UTF-16 material required by
+- The raw directory scan now has a bounded fail-closed validator for ordinal
+  sequence, LAST, type/cluster-zero, alias checksum, canonical short-field
+  padding, UTF-16 scalar structure, terminator/padding, and the 255-code-unit
+  bound. This closes malformed-name lookup, but the decoded result still does
+  not retain a serialized raw-chain digest for
   `Fat32ExecutableObjectObservationV1`.
 - `fat32_executable_identity_observe_v1` has its own mutex. That mutex is not
   shared with the FAT directory/FAT mutation paths, so observing a dirent and
@@ -36,9 +37,8 @@ adapter. It must:
    by every live directory lookup, open, and mutation path for that mount;
 2. make lookup/open/create/write/flush/unlink/rename/atomic-replace enter that
    same owner rather than consult an object-local boolean;
-3. parse raw LFN slots with bounded storage and validate ordinals, LAST flag,
-   checksum, type/cluster-zero fields, UTF-16 scalar structure, and
-   terminator/padding before matching a name;
+3. retain the validated raw LFN-chain/alias digest from the bounded directory
+   validator inside the same serialized observation used for launch;
 4. atomically read the validated LFN chain and 8.3 dirent, publish the
    executable identity, and acquire a generation-bound open handle while the
    owner remains held;
