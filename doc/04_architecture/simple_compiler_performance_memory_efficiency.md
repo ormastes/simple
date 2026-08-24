@@ -734,3 +734,17 @@ then duplicate exact pattern. Classification captures pre-arm wildcard state so
 the first wildcard remains reachable, and continues coverage/pattern collection
 after reporting so `MEXH006` remains complete. Query retains its existing arm
 span; the semantic warning API is not expanded merely for arbitration.
+
+### Parsed block assembly contract
+
+Parsers that already own an ordered line array assemble multiline payloads as
+ordered references plus one final join. They do not repeatedly copy a growing
+text prefix. Delimiter detection happens before a line is retained, and joining
+happens only after a valid closing delimiter, so unterminated blocks do not
+allocate a discarded output buffer.
+
+Whitespace normalization remains a single whole-block operation after joining;
+individual fragments must not be trimmed or filtered because indentation and
+interior blank lines are semantic documentation content. Runtime-specific
+linearity claims name the Pure Simple or C-native join implementation and do not
+silently extend to legacy seed implementations with different internals.

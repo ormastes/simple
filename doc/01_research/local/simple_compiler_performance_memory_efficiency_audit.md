@@ -3313,3 +3313,24 @@ emit at most one record without a diagnostic-deduplication set. Query spans and
 source order remain unchanged. The semantic suffix after a wildcard uses direct
 control flow rather than duplicate scans, while coverage and `MEXH006`
 collection continue. No runtime measurement or manual verification was run.
+
+### Feature-document block assembly
+
+`src/app/feature_doc/parser.spl` built every triple-quoted documentation block
+with `block_content = block_content + line + "\n"`. With m equal-width L-byte
+lines, eager flat text copies `(L+1)m(m+1)-m` payload bytes across the two
+left-associative concatenations per iteration: quadratic in block length. The
+loop also constructs and discards the full quadratic buffer for an unterminated
+block.
+
+The parser now retains raw line references and calls `join("\n")` once only
+after finding the closing delimiter, followed by the same whole-block `trim()`.
+Empty blocks, internal blank lines, indentation, title/metadata extraction,
+describe/context association, delimiter consumption, and silent unterminated
+EOF behavior remain unchanged. Pure Simple and C-native joins perform a length
+pass and one exact output allocation. The legacy Rust seed exposes both a
+mutable-builder string join and a repeated-concatenation array join, while
+current MIR lowering uses a separate `rt_array_join_any` route not implemented
+there. Without route-specific execution evidence, this audit makes no exact
+seed-runtime allocation or scaling claim. No new runtime measurement or manual
+verification was run.

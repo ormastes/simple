@@ -161,6 +161,19 @@ current-head research reconciliation.
 - Updated research, architecture, and detailed performance design. Manual
   verification intentionally not run under the user's instruction.
 
+## Completed feature-document block-assembly tranche
+
+- Replaced two growing-prefix text concatenations per documentation line with
+  raw line fragments and one post-delimiter join.
+- Reduced Pure Simple/C-native block construction from quadratic copied payload
+  to linear join work plus an O(m) reference array.
+- Preserved empty blocks, whitespace, metadata/title extraction, nested
+  association, delimiter movement, and unterminated EOF behavior.
+- Added real parser fixtures, focused behavioral/source contracts, and a manual.
+- Scoped exact join evidence to Pure Simple/C-native paths; the Rust seed's
+  multiple join entrypoints remain unclaimed without route-specific execution.
+  Verification intentionally not run under the user's instruction.
+
 ## Completed manifest Remove quarantine tranche
 
 - Audited schema loading, direct block/function/module adapters, and backend

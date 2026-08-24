@@ -1007,3 +1007,17 @@ after a wildcard. Tracking and suspect-name collection still run after emission;
 an early `continue` would incorrectly weaken coverage and `MEXH006`. Focused
 paired specs pin one record per arm, query line order, and semantic/query message
 precedence.
+
+## Feature-document parser fragment assembly
+
+The triple-quote scanner retains each raw non-delimiter line in a local `[text]`
+array. On a closing delimiter it joins with `"\n"` and applies the existing
+whole-text `trim()`. It does not add a trailing newline: the old trailing newline
+was always removed by the same trim, making empty, one-line, multiline, and
+leading/trailing-blank inputs equivalent.
+
+The closing line is not retained. An EOF without a delimiter leaves only line
+references and preserves the existing silent discard. No filtering, per-line
+trim, builder FFI, or extra parser state is introduced. Focused fixtures pin
+empty blocks, blank-line multiplicity, indentation, metadata/title extraction,
+nested association, and unterminated EOF.
