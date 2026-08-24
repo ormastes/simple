@@ -1,0 +1,125 @@
+"""Fail-closed image-builder contract for a Simplebox catalog record.
+
+The existing ImageSimpleboxArtifactReceiptV1 proves a bounded digest and build
+shape only.  It is deliberately not accepted as authenticated catalog input.
+This value contract tells the image producer exactly which immutable signed
+metadata must accompany the staged payload before bootstrap population can be
+wired.  It grants neither catalog-population nor loader authority.
+"""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.tools.simplebox.simplebox_artifact_contract.{
+    SIMPLEBOX_CANONICAL_PATH_V1, simplebox_canonical_aliases_v1
+}
+
+pub const IMAGE_SIMPLEBOX_CATALOG_RECORD_SCHEMA_V1: i64 = 1
+pub const IMAGE_SIMPLEBOX_CATALOG_SIGNATURE_SCHEME_V1: text = "ed25519"
+pub const IMAGE_SIMPLEBOX_CATALOG_SIGNING_CODEC_V1: text =
+    "encode_simple_artifact_manifest_v1_signing_bytes"
+pub const IMAGE_SIMPLEBOX_CATALOG_UNSIGNED_RECEIPT_BLOCKER_V1: text =
+    "simplebox-installer-receipt-has-no-authenticated-manifest-signer-or-signature"
+
+pub enum ImageSimpleboxCatalogRecordReadinessV1:
+    UnsignedInstallerReceipt
+    SignedRecordCandidate
+
+pub struct ImageSimpleboxCatalogRecordProductionContractV1:
+    schema_version: i64
+    canonical_path: text
+    exact_aliases: [text]
+    target: ManifestTarget
+    artifact_sha256: text
+    signature_scheme: text
+    signer_identity: text
+    detached_signature: text
+    expected_trust_root_sha256: text
+    signing_codec: text
+    readiness: ImageSimpleboxCatalogRecordReadinessV1
+    blocker: text
+
+fn _simplebox_catalog_target_v1(target_triple: text) -> ManifestTarget?:
+    if target_triple == "x86_64-unknown-simpleos":
+        return Some(ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"))
+    if target_triple == "aarch64-unknown-simpleos":
+        return Some(ManifestTarget(os: "simpleos", arch: "aarch64", abi: "simpleos"))
+    if target_triple == "riscv64gc-unknown-simpleos":
+        return Some(ManifestTarget(os: "simpleos", arch: "riscv64", abi: "simpleos"))
+    if target_triple == "riscv32-unknown-simpleos":
+        return Some(ManifestTarget(os: "simpleos", arch: "riscv32", abi: "simpleos"))
+    nil
+
+fn _simplebox_catalog_lower_hex_v1(value: text, size: i64) -> bool:
+    if value.len() != size: return false
+    for ch in value:
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f')):
+            return false
+    true
+
+fn _simplebox_catalog_nonzero_sha256_v1(value: text) -> bool:
+    _simplebox_catalog_lower_hex_v1(value, 64) and value != "0" * 64
+
+fn _simplebox_catalog_signer_identity_valid_v1(value: text) -> bool:
+    # Mirror the loader trust-root key-id gate exactly so a shape-complete
+    # producer value cannot be rejected later for a looser identity alphabet.
+    if value.len() == 0 or value.len() > 128: return false
+    var i: i64 = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 33 or code > 126 or code == 58: return false
+        i = i + 1
+    true
+
+fn _simplebox_catalog_target_supported_v1(target: ManifestTarget) -> bool:
+    target.os == "simpleos" and target.abi == "simpleos" and
+        (target.arch == "x86_64" or target.arch == "aarch64" or
+         target.arch == "riscv64" or target.arch == "riscv32")
+
+fn _simplebox_catalog_signature_envelope_valid_v1(
+    envelope: text, signer_identity: text
+) -> bool:
+    val fields = envelope.split(":")
+    fields.len() == 3 and fields[0] == IMAGE_SIMPLEBOX_CATALOG_SIGNATURE_SCHEME_V1 and
+        fields[1] == signer_identity and
+        _simplebox_catalog_lower_hex_v1(fields[2], 128)
+
+pub fn image_simplebox_unsigned_catalog_contract_v1(
+    artifact_sha256: text,
+    target_triple: text,
+) -> ImageSimpleboxCatalogRecordProductionContractV1?:
+    """Describe required signed output without promoting an unsigned receipt."""
+    if not _simplebox_catalog_nonzero_sha256_v1(artifact_sha256): return nil
+    val target = _simplebox_catalog_target_v1(target_triple)
+    if not target.?: return nil
+    Some(ImageSimpleboxCatalogRecordProductionContractV1(
+        schema_version: IMAGE_SIMPLEBOX_CATALOG_RECORD_SCHEMA_V1,
+        canonical_path: SIMPLEBOX_CANONICAL_PATH_V1,
+        exact_aliases: simplebox_canonical_aliases_v1(),
+        target: target.unwrap(),
+        artifact_sha256: artifact_sha256,
+        signature_scheme: IMAGE_SIMPLEBOX_CATALOG_SIGNATURE_SCHEME_V1,
+        signer_identity: "",
+        detached_signature: "",
+        expected_trust_root_sha256: "",
+        signing_codec: IMAGE_SIMPLEBOX_CATALOG_SIGNING_CODEC_V1,
+        readiness: ImageSimpleboxCatalogRecordReadinessV1.UnsignedInstallerReceipt,
+        blocker: IMAGE_SIMPLEBOX_CATALOG_UNSIGNED_RECEIPT_BLOCKER_V1))
+
+pub fn image_simplebox_catalog_record_candidate_complete_v1(
+    contract: ImageSimpleboxCatalogRecordProductionContractV1
+) -> bool:
+    """Shape-only gate; cryptographic verification remains loader-owned."""
+    if contract.schema_version != IMAGE_SIMPLEBOX_CATALOG_RECORD_SCHEMA_V1 or
+        contract.canonical_path != SIMPLEBOX_CANONICAL_PATH_V1 or
+        contract.signature_scheme != IMAGE_SIMPLEBOX_CATALOG_SIGNATURE_SCHEME_V1 or
+        contract.signing_codec != IMAGE_SIMPLEBOX_CATALOG_SIGNING_CODEC_V1 or
+        not _simplebox_catalog_signer_identity_valid_v1(contract.signer_identity) or
+        not _simplebox_catalog_nonzero_sha256_v1(contract.artifact_sha256) or
+        not _simplebox_catalog_signature_envelope_valid_v1(
+            contract.detached_signature, contract.signer_identity) or
+        not _simplebox_catalog_lower_hex_v1(contract.expected_trust_root_sha256, 64) or
+        not _simplebox_catalog_target_supported_v1(contract.target) or
+        contract.readiness != ImageSimpleboxCatalogRecordReadinessV1.SignedRecordCandidate or
+        contract.blocker != "":
+        return false
+    if contract.exact_aliases != simplebox_canonical_aliases_v1(): return false
+    true

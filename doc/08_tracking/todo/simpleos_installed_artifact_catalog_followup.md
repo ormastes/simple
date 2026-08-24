@@ -3,6 +3,16 @@
 Status: bounded catalog owner implemented as an unverified draft; authenticated
 bootstrap population and launch integration remain deferred.
 
+The staged Simplebox lane now exposes the fail-closed producer contract in
+`src/os/installer/simplebox_catalog_record_contract_v1.spl`. The current
+image-builder receipt is explicitly classified as insufficient because it has
+no authenticated manifest, signer identity, trust-root binding, or detached
+signature. Exact canonical path, eight aliases, target projection, digest, and
+the loader signing codec are frozen for a future signed record; no catalog row
+is fabricated and no launcher authority is introduced. The exact active
+blocker is
+`simplebox-installer-receipt-has-no-authenticated-manifest-signer-or-signature`.
+
 ## Implemented prerequisite primitive
 
 The common `SimpleArtifactManifest` owner now defines fixed collection,

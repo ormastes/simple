@@ -1,0 +1,62 @@
+use std.spec.{describe, it, expect}
+use os.installer.simplebox_catalog_record_contract_v1.{
+    IMAGE_SIMPLEBOX_CATALOG_UNSIGNED_RECEIPT_BLOCKER_V1,
+    IMAGE_SIMPLEBOX_CATALOG_RECORD_SCHEMA_V1,
+    IMAGE_SIMPLEBOX_CATALOG_SIGNATURE_SCHEME_V1,
+    IMAGE_SIMPLEBOX_CATALOG_SIGNING_CODEC_V1,
+    ImageSimpleboxCatalogRecordProductionContractV1,
+    ImageSimpleboxCatalogRecordReadinessV1,
+    image_simplebox_unsigned_catalog_contract_v1,
+    image_simplebox_catalog_record_candidate_complete_v1
+}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.tools.simplebox.simplebox_artifact_contract.{simplebox_canonical_aliases_v1}
+
+fn _catalog_digest_v1() -> text:
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+describe "Simplebox installed-catalog production boundary":
+    it "keeps the current digest receipt explicitly unauthenticated":
+        val contract = image_simplebox_unsigned_catalog_contract_v1(
+            _catalog_digest_v1(), "aarch64-unknown-simpleos")
+        expect(contract.?).to_be(true)
+        if val value = contract:
+            expect(value.readiness).to_equal(
+                ImageSimpleboxCatalogRecordReadinessV1.UnsignedInstallerReceipt)
+            expect(value.blocker).to_equal(
+                IMAGE_SIMPLEBOX_CATALOG_UNSIGNED_RECEIPT_BLOCKER_V1)
+            expect(value.canonical_path).to_equal("/bin/simplebox")
+            expect(value.exact_aliases.len()).to_equal(8)
+            expect(image_simplebox_catalog_record_candidate_complete_v1(value)).to_be(false)
+
+    it "rejects malformed digest and unsupported target projections":
+        expect(image_simplebox_unsigned_catalog_contract_v1(
+            "bad", "aarch64-unknown-simpleos").?).to_be(false)
+        expect(image_simplebox_unsigned_catalog_contract_v1(
+            _catalog_digest_v1(), "armv7-unknown-simpleos").?).to_be(false)
+
+    it "requires the loader-compatible signature envelope and trusted-root identity":
+        val signer = "release-simplebox-v1"
+        val signature_hex = "ab" * 64
+        var candidate = ImageSimpleboxCatalogRecordProductionContractV1(
+            schema_version: IMAGE_SIMPLEBOX_CATALOG_RECORD_SCHEMA_V1,
+            canonical_path: "/bin/simplebox",
+            exact_aliases: simplebox_canonical_aliases_v1(),
+            target: ManifestTarget(os: "simpleos", arch: "riscv64", abi: "simpleos"),
+            artifact_sha256: _catalog_digest_v1(),
+            signature_scheme: IMAGE_SIMPLEBOX_CATALOG_SIGNATURE_SCHEME_V1,
+            signer_identity: signer,
+            detached_signature: "ed25519:{signer}:{signature_hex}",
+            expected_trust_root_sha256: "cd" * 32,
+            signing_codec: IMAGE_SIMPLEBOX_CATALOG_SIGNING_CODEC_V1,
+            readiness: ImageSimpleboxCatalogRecordReadinessV1.SignedRecordCandidate,
+            blocker: "")
+        expect(image_simplebox_catalog_record_candidate_complete_v1(candidate)).to_be(true)
+        candidate.detached_signature = signature_hex
+        expect(image_simplebox_catalog_record_candidate_complete_v1(candidate)).to_be(false)
+        candidate.detached_signature = "ed25519:{signer}:{signature_hex}"
+        candidate.signer_identity = "release signer"
+        expect(image_simplebox_catalog_record_candidate_complete_v1(candidate)).to_be(false)
+        candidate.signer_identity = signer
+        candidate.artifact_sha256 = "0" * 64
+        expect(image_simplebox_catalog_record_candidate_complete_v1(candidate)).to_be(false)
