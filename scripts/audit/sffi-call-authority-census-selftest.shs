@@ -17,17 +17,45 @@ fn checked() -> bool:
     val quoted = "rt_probe() is also not code"
     # rt_probe() in a comment is not code either.
     rt_probe()
+
+fn checked_multiline(
+    value: i64,
+    label: text
+) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_probe()
+
+trait ProbeOwner:
+    me checked_method(
+        value: i64
+    ) -> bool:
+        unsafe(capabilities: [ffi]):
+            rt_probe()
+
+extern fn rt_other(
+    value: i64
+) -> bool
+
+fn after_multiline_extern() -> bool:
+    rt_other(1)
 EOF
 
-SFFI_MAX_MISSING=1 sh "$work/scripts/audit/sffi-call-authority-census.shs" \
+SFFI_MAX_MISSING=100 sh "$work/scripts/audit/sffi-call-authority-census.shs" \
     "$work/calls.tsv" "$work/summary.tsv" "$work/symbols.tsv" \
     "$work/families.tsv" "$work/scopes.tsv" >/dev/null
 
 rows=$(awk -F '\t' 'NR > 1 { count++ } END { print count + 0 }' "$work/calls.tsv")
-line=$(awk -F '\t' 'NR == 2 { print $2 }' "$work/calls.tsv")
-symbol=$(awk -F '\t' 'NR == 2 { print $3 }' "$work/calls.tsv")
-test "$rows" -eq 1
-test "$line" -eq 7
-test "$symbol" = rt_probe
+line=$(awk -F '\t' '$3 == "rt_probe" && $4 == "missing" { print $2 }' "$work/calls.tsv")
+symbol=$(awk -F '\t' '$3 == "rt_probe" && $4 == "missing" { print $3 }' "$work/calls.tsv")
+lexical=$(awk -F '\t' 'NR > 1 && $4 == "lexical_unsafe" { count++ } END { print count + 0 }' "$work/calls.tsv")
+missing=$(awk -F '\t' 'NR > 1 && $4 == "missing" { count++ } END { print count + 0 }' "$work/calls.tsv")
+probe_rows=$(awk -F '\t' 'NR > 1 && $3 == "rt_probe" { count++ } END { print count + 0 }' "$work/calls.tsv")
+other_rows=$(awk -F '\t' 'NR > 1 && $3 == "rt_other" { count++ } END { print count + 0 }' "$work/calls.tsv")
+if [ "$rows" -ne 4 ] || [ "$line" -ne 7 ] || [ "$symbol" != rt_probe ] ||
+   [ "$lexical" -ne 2 ] || [ "$missing" -ne 2 ] ||
+   [ "$probe_rows" -ne 3 ] || [ "$other_rows" -ne 1 ]; then
+    cat "$work/calls.tsv" >&2
+    exit 1
+fi
 
 echo 'sffi call authority census selftest: PASS'

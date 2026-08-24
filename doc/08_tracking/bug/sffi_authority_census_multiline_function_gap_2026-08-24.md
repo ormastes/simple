@@ -1,6 +1,6 @@
 # SFFI authority census skips multiline function bodies
 
-**Status:** Open
+**Status:** Resolved
 
 ## Evidence
 
@@ -28,3 +28,14 @@ tracking, prose masking, and the single O(source bytes + call sites) tree pass.
 3. Multiline declarations without a body do not absorb the following function.
 4. The selftest covers multiline `fn` and `me` signatures plus nested unsafe
    blocks.
+
+## Resolution
+
+The scanner now advances through a bounded complete signature before applying
+body indentation, with a zero-lookahead fast path for ordinary one-line
+headers. The selftest covers multiline functions, methods, lexical unsafe
+blocks, and a multiline extern followed by a separate function. The corrected
+full scan includes the Cranelift unsupported-MIR call as `lexical_unsafe`.
+
+Performance acceptance remains separate and open in
+`sffi_authority_multiline_scan_perf_regression_2026-08-24.md`.

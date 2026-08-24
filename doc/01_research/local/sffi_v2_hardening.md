@@ -2327,6 +2327,23 @@ requirement. Current totals are 21,435 raw, 2,121 explicit, 19,314 missing;
 12,112 declarations, 885 tagged, 382 minimized, 10,961 untouched, and zero
 signed/admitted.
 
+## Multiline authority-census correction
+
+The source census previously stopped at the closing `):` of multiline function
+and method signatures, omitting their entire bodies. It now locates the bounded
+signature end before applying indentation and retains a fast path for one-line
+headers. The focused fixture covers multiline `fn`, multiline `me`, nested
+lexical unsafe, and a multiline extern followed by an independent function.
+
+Corrected totals are 21,556 raw calls, 2,187 explicit, and 19,369 missing. This
+adds 289 real call rows, including the Cranelift reflection and unsupported-MIR
+boundaries. The increase is newly visible debt, not a regression to hide.
+
+Performance is not accepted: the same-tree old scanner measured 40.85 s /
+14,132 KiB, while corrected samples measured 43.81 s / 14,632 KiB and 57.09 s /
+14,504 KiB. The open performance bug requires profiling and an identical idle-
+host comparison. Signed/admitted evidence remains zero.
+
 ## Cranelift backend policy boundary
 
 The Cranelift adapter's unsupported-MIR and no-mangle reads now use minimal

@@ -1484,6 +1484,16 @@ after. The existing source census sees only the one-line-function call because
 it incorrectly stops at multiline signature closures; fix the recorded scanner
 gap before treating the measured 21,267-call total as complete.
 
+The multiline-function census gap is functionally repaired and covered. The
+authoritative source-level lower bound is now 21,556 calls (2,187 explicit,
+19,369 missing), revealing 289 previously omitted rows. Do not lower this debt
+back to the old incomplete baseline.
+
+Scanner performance remains an open measured blocker: 40.85 s / 14,132 KiB
+before versus corrected samples of 43.81 s / 14,632 KiB and 57.09 s /
+14,504 KiB. Profile and bring the identical idle-host run within 5% wall time
+and 1 MiB RSS before marking the tool improvement performance-safe.
+
 The LLVM target module now scopes both normalized target-policy reads without
 changing provider cardinality. Optimizer findings remain 22 and paired analyzer
 evidence is 5.94 s / 271,172 KiB before versus 4.93 s / 270,708 KiB after.

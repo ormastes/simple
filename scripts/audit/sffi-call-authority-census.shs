@@ -117,8 +117,26 @@ xargs -0 -r -n 200 perl -0ne '
             }
             last if $code_lines[$p] !~ /^\s*\@/;
         }
+        # A function signature may span multiple lines. Find its terminating
+        # colon before applying body indentation rules; otherwise the closing
+        # `):` at header indentation looks like the next top-level statement
+        # and the entire body is silently skipped.
+        my $header_end = $i;
+        if ($header !~ /:\s*$/) {
+            my $paren_depth = 0;
+            my $seen_paren = 0;
+            for (my $k = $i; $k <= $#lines && $k - $i <= 128; $k++) {
+                my $signature = $code_lines[$k];
+                my $opens = ($signature =~ tr/(//);
+                my $closes = ($signature =~ tr/)//);
+                $seen_paren = 1 if $opens > 0;
+                $paren_depth += $opens - $closes;
+                $header_end = $k;
+                last if $seen_paren && $paren_depth <= 0 && $signature =~ /:\s*$/;
+            }
+        }
         my $lexical_indent = -1;
-        for (my $j = $i + 1; $j <= $#lines; $j++) {
+        for (my $j = $header_end + 1; $j <= $#lines; $j++) {
             my $body = $code_lines[$j];
             next if $body =~ /^\s*$/;
             my ($spaces) = $body =~ /^(\s*)/;
