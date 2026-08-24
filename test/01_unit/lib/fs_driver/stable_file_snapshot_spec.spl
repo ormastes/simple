@@ -1,0 +1,89 @@
+"""Generation-bound, bounded stable-file snapshots across filesystem backends."""
+
+use std.spec.*
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind, StableFileSnapshotLeaseV1}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.types.{MountOptions, OpenFlags}
+
+fn dbfs_table_with_bytes(path: text, data: [u8]) -> MountTable:
+    var table = MountTable.new()
+    table.mount("/", DriverInstance.DbFs(DbFsDriver.new_hosted()), MountOptions.default()).unwrap()
+    val file = table.open(path, OpenFlags.create_write()).unwrap()
+    table.positioned_write_bytes(file.id, PositionedDriverKind.Dbfs, 0u64, data).unwrap()
+    table.close(file).unwrap()
+    table
+
+fn nvfs_table_with_bytes(path: text, data: [u8]) -> MountTable:
+    var table = MountTable.new()
+    table.mount("/", DriverInstance.Nvfs(NvfsDriver.new("stable-snapshot")), MountOptions.default()).unwrap()
+    val file = table.open(path, OpenFlags.create_write()).unwrap()
+    table.positioned_write_bytes(file.id, PositionedDriverKind.Nvfs, 0u64, data).unwrap()
+    table.close(file).unwrap()
+    table
+
+describe "stable file snapshot leases":
+    it "returns independently owned binary chunks with exact EOF on DBFS and NVFS":
+        var dbfs = dbfs_table_with_bytes("/payload.bin", [0u8, 1u8, 255u8, 4u8])
+        val db = dbfs.open_stable_snapshot("/payload.bin", 16u64).unwrap()
+        var first = dbfs.read_stable_snapshot(db.lease, 1u64, 3u64).unwrap()
+        expect(first).to_equal([1u8, 255u8, 4u8])
+        first[0] = 99u8
+        expect(dbfs.read_stable_snapshot(db.lease, 1u64, 3u64).unwrap()).to_equal([1u8, 255u8, 4u8])
+        expect(dbfs.read_stable_snapshot(db.lease, 4u64, 1u64).unwrap()).to_equal([])
+        dbfs.close_stable_snapshot(db.lease).unwrap()
+
+        var nvfs = nvfs_table_with_bytes("/payload.bin", [9u8, 0u8, 8u8, 7u8])
+        val nv = nvfs.open_stable_snapshot("/payload.bin", 16u64).unwrap()
+        expect(nvfs.read_stable_snapshot(nv.lease, 2u64, 64u64).unwrap()).to_equal([8u8, 7u8])
+        nvfs.close_stable_snapshot(nv.lease).unwrap()
+
+    it "uses true FAT32 offsets and short EOF without cursor coupling":
+        var fat = FsFat32Driver.new_ram_backed_with_file("HELLO.BIN", "abcdef")
+        var table = MountTable.new()
+        table.mount("/", DriverInstance.Fat32(fat), MountOptions.default()).unwrap()
+        val snapshot = table.open_stable_snapshot("/HELLO.BIN", 16u64).unwrap()
+        expect(table.read_stable_snapshot(snapshot.lease, 3u64, 2u64).unwrap()).to_equal([100u8, 101u8])
+        expect(table.read_stable_snapshot(snapshot.lease, 1u64, 2u64).unwrap()).to_equal([98u8, 99u8])
+        expect(table.read_stable_snapshot(snapshot.lease, 5u64, 8u64).unwrap()).to_equal([102u8])
+        table.close_stable_snapshot(snapshot.lease).unwrap()
+
+    it "rejects malformed ranges forged leases oversize files and close replay":
+        var table = dbfs_table_with_bytes("/bounded.bin", [1u8, 2u8, 3u8])
+        expect(table.open_stable_snapshot("/bounded.bin", 2u64).unwrap_err()).to_equal(FsError.TooLarge)
+        val snapshot = table.open_stable_snapshot("/bounded.bin", 3u64).unwrap()
+        expect(table.read_stable_snapshot(snapshot.lease, 0u64, 0u64).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(table.read_stable_snapshot(snapshot.lease, 0u64, 65537u64).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(table.read_stable_snapshot(snapshot.lease, 0xffffffffffffffffu64, 2u64).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(table.read_stable_snapshot(StableFileSnapshotLeaseV1(id: 1u64), 0u64, 1u64).unwrap_err()).to_equal(FsError.StaleHandle)
+        table.close_stable_snapshot(snapshot.lease).unwrap()
+        expect(table.close_stable_snapshot(snapshot.lease).unwrap_err()).to_equal(FsError.StaleHandle)
+        expect(table.read_stable_snapshot(snapshot.lease, 0u64, 1u64).unwrap_err()).to_equal(FsError.StaleHandle)
+
+    it "invalidates reads on content or namespace changes but permits one close":
+        var table = dbfs_table_with_bytes("/mutable.bin", [10u8, 20u8, 30u8])
+        val stale_content = table.open_stable_snapshot("/mutable.bin", 16u64).unwrap()
+        val writer = table.open("/mutable.bin", OpenFlags.write_only()).unwrap()
+        table.positioned_write_bytes(writer.id, PositionedDriverKind.Dbfs, 1u64, [99u8]).unwrap()
+        expect(table.read_stable_snapshot(stale_content.lease, 0u64, 3u64).unwrap_err()).to_equal(FsError.StaleHandle)
+        table.close_stable_snapshot(stale_content.lease).unwrap()
+        table.close(writer).unwrap()
+
+        val stale_namespace = table.open_stable_snapshot("/mutable.bin", 16u64).unwrap()
+        table.mkdir("/other", 0o755).unwrap()
+        expect(table.read_stable_snapshot(stale_namespace.lease, 0u64, 1u64).unwrap_err()).to_equal(FsError.StaleHandle)
+        table.close_stable_snapshot(stale_namespace.lease).unwrap()
+
+    it "blocks unmount while leased and prevents replay after slot reuse":
+        var table = nvfs_table_with_bytes("/leased.bin", [4u8, 5u8])
+        val first = table.open_stable_snapshot("/leased.bin", 8u64).unwrap()
+        expect(table.unmount("/").unwrap_err()).to_equal(FsError.Busy)
+        table.close_stable_snapshot(first.lease).unwrap()
+        val second = table.open_stable_snapshot("/leased.bin", 8u64).unwrap()
+        expect(second.lease.id == first.lease.id).to_be(false)
+        expect(table.read_stable_snapshot(first.lease, 0u64, 1u64).unwrap_err()).to_equal(FsError.StaleHandle)
+        table.close_stable_snapshot(second.lease).unwrap()
+        table.unmount("/").unwrap()

@@ -88,6 +88,35 @@ fn driver_positioned_read_bytes(driver: DriverInstance, kind: PositionedDriverKi
                 case DriverInstance.DbFs(d): d.pread_bytes_handle(handle, offset, length)
                 case _: Err(FsError.Unsupported)
 
+fn driver_bounded_positioned_read_bytes(
+    driver: DriverInstance, kind: PositionedDriverKind,
+    handle: FileHandle, offset: i64, length: i64
+) -> Result<[u8], FsError>:
+    """Return one independently owned positioned chunk of at most 64 KiB."""
+    if offset < 0 or length < 0 or length > 65536 or offset + length < offset:
+        return Err(FsError.InvalidArg)
+    match kind:
+        case PositionedDriverKind.Auto:
+            driver_bounded_positioned_read_bytes(
+                driver, driver_positioned_kind(driver)?, handle, offset, length)
+        case PositionedDriverKind.Fat32:
+            match driver:
+                case DriverInstance.Fat32(d):
+                    var buf = alloc_zeroed_bytes(length)
+                    val n = d.pread(handle, offset, buf)?
+                    if n < 0 or n > length: return Err(FsError.IoError(code: 0u32))
+                    Ok(_positioned_prefix(buf, n))
+                case _: Err(FsError.Unsupported)
+        case PositionedDriverKind.Nvfs:
+            match driver:
+                case DriverInstance.Nvfs(d): d.pread_bounded_bytes_handle(handle, offset, length)
+                case DriverInstance.NvfsPosix(d): d.pread_bounded_bytes_handle(handle, offset, length)
+                case _: Err(FsError.Unsupported)
+        case PositionedDriverKind.Dbfs:
+            match driver:
+                case DriverInstance.DbFs(d): d.pread_bounded_bytes_handle(handle, offset, length)
+                case _: Err(FsError.Unsupported)
+
 fn driver_positioned_write_bytes(driver: DriverInstance, kind: PositionedDriverKind,
                                  handle: FileHandle, offset: i64, data: [u8]) -> Result<i64, FsError>:
     match kind:
@@ -121,4 +150,5 @@ export PositionedDriverKind, POSITIONED_DRIVER_MAX_BYTES
 export mount_handle_encode, mount_handle_slot, mount_handle_generation
 export mount_path_canonical, text_has_mount_prefix
 export driver_positioned_read_bytes, driver_positioned_write_bytes
+export driver_bounded_positioned_read_bytes
 export driver_positioned_kind
