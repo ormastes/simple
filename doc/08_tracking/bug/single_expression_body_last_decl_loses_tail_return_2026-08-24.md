@@ -69,3 +69,26 @@ library-only modules get compiled at all — which is what produced this finding
 
 `src/compiler/00.common/di_test_tmp.spl` fails the same way
 (`missing return in non-unit function 'test_fn'`).
+
+## Correction — "last declaration" is sufficient, NOT necessary
+
+Found while surveying the other occurrences in the same census, and recorded
+rather than smoothed over: `make_core_decl` at
+`src/compiler/10.frontend/core/ast_types.spl:103` fails the same way and is
+**not** the last declaration in its file (`make_core_arm`, `make_core_elif` and
+several structs follow it). Its body is also a single bare expression, but a very
+large one — a 17-field struct literal on one line.
+
+So the fixture table above is accurate for the fixtures it names, and the 2-line
+reproduce stands, but the trigger is broader than "last declaration in the file".
+The invariant that holds across every observed case is only: **the body is a
+single bare tail expression and its value is dropped.** Whatever additional
+condition gates it (position, expression size, or both) is NOT yet isolated, and
+the fix must not be validated against the 2-line fixture alone —
+`ast_types.spl:103` must also compile.
+
+Full list of functions hit in the slice-A census:
+`bootstrap_low_memory_opt_ins_requested`
+(`00.common/bootstrap_low_memory_config.spl`), `test_fn`
+(`00.common/di_test_tmp.spl`), `make_core_decl`
+(`10.frontend/core/ast_types.spl:103`), `layout_execution_profile`, `entity_ref`.
