@@ -265,6 +265,25 @@ spl_i64 rt_raw_u64_to_string(spl_i64 raw) {
     return rt_string_new((spl_i64)(spl_u64)buf, (spl_i64)len);
 }
 
+/* rt_raw_i64_to_string — freestanding mirror of the same function in
+ * src/runtime/runtime_native.c:3228. That one uses snprintf("%lld"); there is
+ * no libc here, so the sign is handled explicitly. INT64_MIN cannot be negated
+ * in two's complement, so the magnitude is taken in unsigned space
+ * (0 - (spl_u64)raw), which is exact for every input including INT64_MIN.
+ * Needed by limine_aarch64_boot_main()'s `{...}` interpolation of raw i64
+ * values (found by a real ld.lld undefined-symbol error, not speculation). */
+spl_i64 rt_raw_i64_to_string(spl_i64 raw) {
+    char buf[21];
+    spl_u64 len = 0;
+    if (raw < 0) {
+        buf[0] = '-';
+        rt_write_decimal(buf + 1, &len, (spl_u64)0 - (spl_u64)raw);
+        return rt_string_new((spl_i64)(spl_u64)buf, (spl_i64)(len + 1));
+    }
+    rt_write_decimal(buf, &len, (spl_u64)raw);
+    return rt_string_new((spl_i64)(spl_u64)buf, (spl_i64)len);
+}
+
 spl_i64 rt_to_string(spl_i64 value) {
     char buf[21];
     spl_u64 len = 0;
