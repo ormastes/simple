@@ -71,6 +71,12 @@ pub fn hosted_safe_artifact_relative_path_valid_v1(relative_path: text) -> bool:
             return false
     true
 
+pub fn hosted_safe_artifact_provider_result_bounded_v1(
+    bytes: [u8], max_bytes: i64,
+) -> bool:
+    max_bytes >= 0 and max_bytes <= HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 and
+        bytes.len() <= max_bytes
+
 fn _hosted_safe_artifact_root_matches_locked_v1(
     authority: HostedSafeArtifactRootAuthorityV1,
 ) -> bool:
@@ -186,6 +192,10 @@ pub(package) fn hosted_safe_artifact_read_prepare_v1(
     if bytes == nil:
         _ = _hosted_safe_artifact_unlock_v1()
         return Err("hosted-safe-io-read-rejected")
+    if not hosted_safe_artifact_provider_result_bounded_v1(
+        bytes ?? [], max_bytes):
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-provider-bound-violation")
     val generation = _hosted_safe_artifact_next_generation_locked_v1()
     if generation == 0u64:
         _hosted_safe_artifact_owner_v1.quarantined = true
@@ -215,6 +225,37 @@ pub(package) fn hosted_safe_artifact_read_redeem_v1(
     if not _hosted_safe_artifact_unlock_v1():
         return Err("hosted-safe-io-owner-quarantined")
     Ok(grant._bytes)
+
+pub(package) fn hosted_safe_artifact_read_once_v1(
+    authority: HostedSafeArtifactRootAuthorityV1,
+    relative_path: text, max_bytes: i64,
+) -> Result<[u8], text>:
+    """Perform one provider-owned read without creating a copied grant."""
+    if not hosted_safe_artifact_relative_path_valid_v1(relative_path):
+        return Err("hosted-safe-io-invalid-path")
+    if max_bytes < 0 or max_bytes > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1:
+        return Err("hosted-safe-io-invalid-bound")
+    if not _hosted_safe_artifact_lock_v1():
+        return Err("hosted-safe-io-owner-unavailable")
+    if _hosted_safe_artifact_owner_v1.read_generation != 0u64 or
+        not _hosted_safe_artifact_root_matches_locked_v1(authority):
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-root-invalid-or-read-busy")
+    var bytes: [u8]? = nil
+    unsafe(capabilities: [ffi]):
+        bytes = rt_hosted_safe_artifact_read_v1(
+            _hosted_safe_artifact_owner_v1.root_handle,
+            relative_path, max_bytes)
+    if bytes == nil:
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-read-rejected")
+    if not hosted_safe_artifact_provider_result_bounded_v1(
+        bytes ?? [], max_bytes):
+        _ = _hosted_safe_artifact_unlock_v1()
+        return Err("hosted-safe-io-provider-bound-violation")
+    if not _hosted_safe_artifact_unlock_v1():
+        return Err("hosted-safe-io-owner-quarantined")
+    Ok(bytes ?? [])
 
 pub(package) fn hosted_safe_artifact_publish_prepare_v1(
     authority: HostedSafeArtifactRootAuthorityV1,
@@ -278,3 +319,4 @@ pub(package) fn hosted_safe_artifact_publish_redeem_v1(
 
 export HostedSafeArtifactPublishReceiptV1
 export hosted_safe_artifact_relative_path_valid_v1
+export hosted_safe_artifact_provider_result_bounded_v1

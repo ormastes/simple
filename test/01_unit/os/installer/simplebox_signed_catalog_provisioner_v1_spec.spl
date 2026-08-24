@@ -1,0 +1,137 @@
+use std.spec
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestResourceLimits, ManifestTarget, SimpleArtifactManifest
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
+    encode_simple_artifact_manifest_v1_signing_bytes
+}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SimpleboxSignedCatalogExternalCandidateV1,
+    SimpleboxSignedCatalogProvisionErrorV1,
+    simplebox_signed_catalog_record_encode_v1,
+    simplebox_signed_catalog_record_decode_v1,
+    simplebox_signed_catalog_candidate_plan_v1
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1
+}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootRecordV1
+}
+use os.tools.simplebox.simplebox_artifact_contract.{
+    SIMPLEBOX_CANONICAL_PATH_V1, simplebox_canonical_aliases_v1
+}
+
+fn target_fixture() -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos")
+
+fn manifest_fixture(payload_sha256: text) -> SimpleArtifactManifest:
+    SimpleArtifactManifest(
+        format_version: 1, artifact_kind: "native-executable",
+        target: target_fixture(), entrypoint: SIMPLEBOX_CANONICAL_PATH_V1,
+        required_abi_features: [], required_services: [],
+        required_capabilities: 0u32,
+        resource_limits: ManifestResourceLimits(
+            max_memory_bytes: 1048576, max_open_handles: 16,
+            max_threads: 1, cpu_budget_us: 0),
+        namespace_template: "simplebox-primary-tools",
+        native_libraries: [], smf_libraries: [], interpreter: "",
+        argument_schema: [], startup_preloads: [],
+        content_hashes: [payload_sha256],
+        signature: "ed25519:image-key:" + "11" * 64,
+        debug_identity: "simplebox")
+
+fn candidate_fixture(payload: [u8]) -> SimpleboxSignedCatalogExternalCandidateV1:
+    val payload_sha256 = sha256_u8_hex(payload)
+    val manifest = manifest_fixture(payload_sha256)
+    val sam1 = encode_simple_artifact_manifest_v1_signing_bytes(
+        manifest, payload_sha256)
+    SimpleboxSignedCatalogExternalCandidateV1(
+        sam1_identity_sha256: sha256_u8_hex(sam1.bytes),
+        record: InstalledArtifactBootRecordV1(
+            canonical_path: SIMPLEBOX_CANONICAL_PATH_V1,
+            aliases: simplebox_canonical_aliases_v1(),
+            content_sha256: payload_sha256,
+            detached_signature: manifest.signature,
+            expected_trust_root_sha256: "22" * 32,
+            manifest: manifest))
+
+fn trust_fixture() -> [ExecutableManifestTrustedSignerV1]:
+    [ExecutableManifestTrustedSignerV1(
+        key_id: "image-key", public_key: [7u8] * 32)]
+
+describe "externally signed Simplebox catalog provisioning":
+    it "binds canonical record bytes, SAM1 identity, payload, target, and boot plan":
+        val payload = [1u8, 2u8, 3u8, 4u8]
+        val candidate = candidate_fixture(payload)
+        val encoded = simplebox_signed_catalog_record_encode_v1(candidate)
+        expect(encoded.?).to_be(true)
+        val decoded = simplebox_signed_catalog_record_decode_v1(
+            encoded.unwrap(), candidate.record.manifest)
+        expect(decoded.?).to_be(true)
+        expect(decoded.unwrap().record.detached_signature).to_equal(
+            candidate.record.detached_signature)
+        val result = simplebox_signed_catalog_candidate_plan_v1(
+            target_fixture(), trust_fixture(), candidate, encoded.unwrap(), payload)
+        expect(result.ok).to_be(true)
+        expect(result.plan.records.len()).to_equal(1)
+        expect(result.receipt.artifact_sha256).to_equal(candidate.record.content_sha256)
+        expect(result.receipt.sam1_identity_sha256).to_equal(candidate.sam1_identity_sha256)
+
+    it "rejects a changed payload before creating a boot plan":
+        val payload = [1u8, 2u8, 3u8]
+        val candidate = candidate_fixture(payload)
+        val encoded = simplebox_signed_catalog_record_encode_v1(candidate)
+        val result = simplebox_signed_catalog_candidate_plan_v1(
+            target_fixture(), trust_fixture(), candidate,
+            encoded.unwrap(), [1u8, 2u8, 4u8])
+        expect(result.ok).to_be(false)
+        expect(result.error).to_equal(
+            SimpleboxSignedCatalogProvisionErrorV1.PayloadHashMismatch)
+
+    it "rejects noncanonical or substituted signed-record bytes":
+        val payload = [9u8, 8u8, 7u8]
+        val candidate = candidate_fixture(payload)
+        val result = simplebox_signed_catalog_candidate_plan_v1(
+            target_fixture(), trust_fixture(), candidate,
+            [0u8, 1u8, 2u8], payload)
+        expect(result.ok).to_be(false)
+        expect(result.error).to_equal(
+            SimpleboxSignedCatalogProvisionErrorV1.CanonicalRecordMismatch)
+
+    it "decoder rejects an SCR1 file against a substituted manifest projection":
+        val payload = [3u8, 2u8, 1u8]
+        val candidate = candidate_fixture(payload)
+        val encoded = simplebox_signed_catalog_record_encode_v1(candidate)
+        var substituted = candidate.record.manifest
+        substituted.namespace_template = "substituted"
+        expect(simplebox_signed_catalog_record_decode_v1(
+            encoded.unwrap(), substituted).?).to_be(false)
+
+    it "decoder rejects truncated and trailing SCR1 encodings":
+        val payload = [4u8, 5u8, 6u8]
+        val candidate = candidate_fixture(payload)
+        val encoded = simplebox_signed_catalog_record_encode_v1(candidate).unwrap()
+        expect(simplebox_signed_catalog_record_decode_v1(
+            encoded.slice(0, encoded.len() - 1), candidate.record.manifest).?).to_be(false)
+        var trailing = encoded
+        trailing.push(0u8)
+        expect(simplebox_signed_catalog_record_decode_v1(
+            trailing, candidate.record.manifest).?).to_be(false)
+
+    it "encoder rejects oversized outer fields before allocating SCR1":
+        val payload = [7u8]
+        var candidate = candidate_fixture(payload)
+        candidate.record.canonical_path = "/" + "a" * 4096
+        expect(simplebox_signed_catalog_record_encode_v1(candidate).?).to_be(false)
+
+    it "rejects a SAM1 identity not derived from canonical signing bytes":
+        val payload = [5u8, 6u8]
+        var candidate = candidate_fixture(payload)
+        candidate.sam1_identity_sha256 = "33" * 32
+        val result = simplebox_signed_catalog_candidate_plan_v1(
+            target_fixture(), trust_fixture(), candidate, [1u8], payload)
+        expect(result.ok).to_be(false)
+        expect(result.error).to_equal(
+            SimpleboxSignedCatalogProvisionErrorV1.Sam1IdentityMismatch)
