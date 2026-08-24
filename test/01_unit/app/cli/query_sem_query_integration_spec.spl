@@ -1,5 +1,7 @@
 extern fn rt_file_read_text(path: text) -> text
 
+use app.cli.query_sem_query.{_parse_sem_query, _sem_call_key, _sem_call_matches}
+
 describe "Semantic Query Integration":
     it "keeps semantic query parser and executor available":
         val source = rt_file_read_text("src/app/cli/query_sem_query.spl") ?? ""
@@ -9,3 +11,53 @@ describe "Semantic Query Integration":
         expect(source).to_contain("fn _parse_sem_query(query_str: text) -> _SemQuery")
         expect(source).to_contain("fn _execute_sem_query(query: _SemQuery, files: [text]) -> [_SemResult]")
         expect(source).to_contain("fn engine_sem_query(query_str: text, files: [text], format_str: text) -> i64")
+
+    it "indexes call predicates once per source snapshot":
+        val query = _parse_sem_query(
+            "FIND fn WHERE calls(\"target\") AND calls(\"other\")")
+        val matches = _sem_call_matches(query, [
+            "fn alpha():",
+            "    target()",
+            "fn beta ():",
+            "    # other() remains a textual match",
+            "val closed = target()",
+            "fn alpha():",
+            "    other()"
+        ])
+
+        expect(matches.has(_sem_call_key("alpha", "target"))).to_be(true)
+        expect(matches.has(_sem_call_key("alpha", "other"))).to_be(true)
+        expect(matches.has(_sem_call_key("beta", "other"))).to_be(true)
+        expect(matches.has(_sem_call_key("beta", "target"))).to_be(false)
+        expect(_sem_call_key("a", "bc") == _sem_call_key("ab", "c")).to_be(false)
+
+    it "preserves legacy top-level call recognition boundaries":
+        val query = _parse_sem_query("FIND fn WHERE calls(\"target\")")
+        val matches = _sem_call_matches(query, [
+            "pub fn public_one():",
+            "    target()",
+            "fn spaced  ():",
+            "    target()",
+            "class Box:",
+            "    fn method():",
+            "        target()",
+            "fn admitted ():",
+            "    val text_value = \"target()\""
+        ])
+
+        expect(matches.has(_sem_call_key("public_one", "target"))).to_be(false)
+        expect(matches.has(_sem_call_key("spaced", "target"))).to_be(false)
+        expect(matches.has(_sem_call_key("method", "target"))).to_be(false)
+        expect(matches.has(_sem_call_key("admitted", "target"))).to_be(true)
+
+    it "keeps the semantic query source snapshot request-local":
+        val source = rt_file_read_text("src/app/cli/query_sem_query.spl") ?? ""
+        expect(source).to_contain("val snapshot = parse_outline_snapshot(file")
+        expect(source).to_contain(
+            "call_matches = _sem_call_matches(query, snapshot.lines)")
+        expect(source).to_contain("var call_needles: [_SemCallNeedle] = []")
+        expect(source).to_contain(
+            "if _sem_pred_is_calls(pred) and not call_index_ready:")
+        expect(source).to_contain(
+            "return call_matches.has(_sem_call_key(sym.name, pred.fn_arg))")
+        expect(source).not_to_contain("query_file_read_rich(file)")

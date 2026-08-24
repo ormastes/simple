@@ -2816,6 +2816,33 @@ unchanged. Imported-module parsing remains independent. Snapshot projection and
 source-topology contracts were added but not executed under the user's
 no-verification instruction.
 
+### Request-local semantic-query call index
+
+The semantic query `calls(...)` predicate previously reread and split the same
+source file, then scanned every line, for every matching outline symbol and
+call predicate. For S symbols, C call predicates, and N source bytes, this made
+the worst-case query path O(S*C*N) scanning with repeated whole-file line-array
+allocation.
+The executor now consumes the existing one-read outline snapshot and builds a
+query-specific call-match dictionary in one line walk. Distinct callees are
+deduplicated before the walk and predicate evaluation becomes an expected-O(1)
+lookup. The index is built lazily at the first `calls(...)` predicate that is
+actually evaluated, so target or earlier-predicate rejection performs no
+call-index scan. Indexed queries use expected O(N*C + S*C) call work and
+O(N+S+M+C) request-local entries, plus the bytes for precomputed needles and
+length-prefixed keys for M matched pairs.
+
+The index deliberately preserves the old textual contract: only indent-zero
+`fn name(` and `fn name (` headers open bodies, the next indent-zero line closes
+them, duplicate function declarations union their matches, and occurrences in
+comments or strings still count. `pub fn`, methods, and wider header spacing
+remain excluded. `implements(...)` reuses the same snapshot lines, eliminating
+its repeated file reads and splits—though not its per-candidate line scan—without
+changing its textual matching.
+Focused positive, negative, duplicate-name, closure-boundary, legacy-exclusion,
+and source-topology contracts were added but not executed under the user's
+no-verification instruction.
+
 ### Linear formatter space normalization
 
 The formatter's expression-spacing path previously collapsed repeated ASCII

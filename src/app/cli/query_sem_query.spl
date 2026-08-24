@@ -13,9 +13,9 @@
 #   FIND import WHERE module contains "std"
 #   FIND impl WHERE trait = "Iterator"
 
-use app.cli.query_rich_common.{query_file_read_rich, query_process_run}
+use app.cli.query_rich_common.{query_process_run}
 use app.cli.query_helpers.{_extract_params_from, _extract_ident_from, _extract_return_from, _count_indent}
-use app.cli.query_outline.{OutlineSymbol, OutlineOptions, parse_outline_file}
+use app.cli.query_outline.{OutlineSymbol, OutlineOptions, parse_outline_snapshot}
 
 # ============================================================================
 # Types
@@ -40,13 +40,9 @@ struct _SemResult:
     name: text
     signature: text
 
-# ============================================================================
-# Internal: reuse outline parser (local copy)
-# ============================================================================
-
-
-fn _parse_file(file: text) -> [OutlineSymbol]:
-    parse_outline_file(file, OutlineOptions(parent_for_types: true, include_import_symbols: true, include_fields: true, extract_binding_types: false))
+struct _SemCallNeedle:
+    callee: text
+    needle: text
 
 # ============================================================================
 # SQL-like Query Parser
@@ -257,27 +253,44 @@ fn _execute_sem_query(query: _SemQuery, files: [text]) -> [_SemResult]:
     var results: [_SemResult] = []
 
     for file in files:
-        val syms = _parse_file(file)
+        val snapshot = parse_outline_snapshot(file, OutlineOptions(
+            parent_for_types: true, include_import_symbols: true,
+            include_fields: true, extract_binding_types: false))
+        val syms = snapshot.symbols
+        var call_matches: {text: bool} = {}
+        var call_index_ready = false
         for sym in syms:
             if _target_matches(query.target, sym.kind):
                 var all_match = true
                 for pred in query.predicates:
-                    if not _eval_sem_pred(pred, sym, file, syms):
+                    if _sem_pred_is_calls(pred) and not call_index_ready:
+                        call_matches = _sem_call_matches(query, snapshot.lines)
+                        call_index_ready = true
+                    if not _eval_sem_pred(
+                            pred, sym, snapshot.lines, call_matches, syms):
                         all_match = false
                         break
                 if all_match:
-                    results.push(_SemResult(file: file, line: sym.line, kind: sym.kind, name: sym.name, signature: sym.signature))
+                    results.push(_SemResult(file: file, line: sym.line,
+                        kind: sym.kind, name: sym.name,
+                        signature: sym.signature))
 
     results
 
-fn _eval_sem_pred(pred: _SemPred, sym: OutlineSymbol, file: text, all_syms: [OutlineSymbol]) -> bool:
+fn _eval_sem_pred(
+    pred: _SemPred,
+    sym: OutlineSymbol,
+    lines: [text],
+    call_matches: {text: bool},
+    all_syms: [OutlineSymbol]
+) -> bool:
     if pred.kind == "fn_call":
         if pred.fn_name == "calls":
-            return _eval_calls(sym.name, pred.fn_arg, file)
+            return call_matches.has(_sem_call_key(sym.name, pred.fn_arg))
         elif pred.fn_name == "has_method":
             return _eval_has_method(sym.name, pred.fn_arg, all_syms)
         elif pred.fn_name == "implements":
-            return _eval_implements(sym.name, pred.fn_arg, file)
+            return _eval_implements(sym.name, pred.fn_arg, lines)
         elif pred.fn_name == "imports":
             return _eval_imports(sym.name, pred.fn_arg)
         return false
@@ -379,29 +392,44 @@ fn _count_fields(kind: text, name: text, syms: [OutlineSymbol]) -> i64:
             count = count + 1
     count
 
-fn _eval_calls(fn_name: text, callee: text, file: text) -> bool:
-    # Grep file for callee( to check if fn calls it
-    val content = query_file_read_rich(file) ?? ""
-    if content == "":
-        return false
-    # Find the function body and check if it contains callee(
-    val lines = content.split("\n")
-    var in_fn = false
-    var fn_indent = -1
+fn _sem_call_key(fn_name: text, callee: text) -> text:
+    fn_name.len().to_string() + ":" + fn_name + callee
+
+fn _sem_pred_is_calls(pred: _SemPred) -> bool:
+    pred.kind == "fn_call" and pred.fn_name == "calls"
+
+fn _sem_top_level_fn_name(trimmed: text) -> text:
+    if not trimmed.starts_with("fn "): return ""
+    val open = _find_char(trimmed, "(")
+    if open < 3: return ""
+    val name = trimmed.substring(3, open).trim()
+    if (trimmed.starts_with("fn " + name + "(") or
+        trimmed.starts_with("fn " + name + " (")):
+        return name
+    ""
+
+fn _sem_call_matches(query: _SemQuery, lines: [text]) -> {text: bool}:
+    var matches: {text: bool} = {}
+    var callees: {text: bool} = {}
+    for pred in query.predicates:
+        if pred.kind == "fn_call" and pred.fn_name == "calls":
+            callees[pred.fn_arg] = true
+    var call_needles: [_SemCallNeedle] = []
+    for callee in callees.keys():
+        call_needles.push(_SemCallNeedle(
+            callee: callee, needle: callee + "("))
+    if call_needles.len() == 0: return matches
+    var fn_name = ""
     for line in lines:
         val trimmed = line.trim()
         val indent = _count_indent(line)
         if indent == 0:
-            if in_fn:
-                in_fn = false
-            if (trimmed.starts_with("fn " + fn_name + "(") or
-                trimmed.starts_with("fn " + fn_name + " (")):
-                in_fn = true
-                fn_indent = 0
-        elif in_fn and indent > 0:
-            if trimmed.contains(callee + "("):
-                return true
-    false
+            fn_name = _sem_top_level_fn_name(trimmed)
+        elif fn_name != "":
+            for call_needle in call_needles:
+                if trimmed.contains(call_needle.needle):
+                    matches[_sem_call_key(fn_name, call_needle.callee)] = true
+    matches
 
 fn _eval_has_method(type_name: text, method: text, syms: [OutlineSymbol]) -> bool:
     for sym in syms:
@@ -411,17 +439,12 @@ fn _eval_has_method(type_name: text, method: text, syms: [OutlineSymbol]) -> boo
             return true
     false
 
-fn _eval_implements(type_name: text, trait_name: text, file: text) -> bool:
+fn _eval_implements(type_name: text, trait_name: text, lines: [text]) -> bool:
     # Grep for "impl Trait for Type" or "impl Trait" in the same file
-    val content = query_file_read_rich(file) ?? ""
-    if content == "":
-        return false
     val pattern1 = "impl " + trait_name + " for " + type_name
     val pattern2 = "impl " + trait_name + ":"
-    if content.contains(pattern1):
-        return true
-    if content.contains(pattern2):
-        return true
+    for line in lines:
+        if line.contains(pattern1) or line.contains(pattern2): return true
     false
 
 fn _eval_imports(sym_name: text, module_pattern: text) -> bool:

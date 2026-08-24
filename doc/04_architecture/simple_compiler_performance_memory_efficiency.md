@@ -520,3 +520,19 @@ Constant store operands bypass the resolver. Missing positions resolve to the
 empty identity consumed by the stable load/store diagnostics. Neither index is
 attached to `MirFunction`, included in canonical MIR serialization, or retained
 across passes, so there is no invalidation or hash surface.
+
+### Semantic-query request snapshot and call facts
+
+Each semantic-query file owns one `OutlineSnapshot`. Symbol selection, source
+lines, `calls(...)` indexing, and `implements(...)` matching share that snapshot;
+predicate evaluators must not reopen or resplit the file. A query-local set
+deduplicates requested callees, and one ordered line scan records collision-free
+length-prefixed `(function, callee)` keys in a dictionary. The dictionary is
+discarded with the request and therefore has no invalidation or persistent-cache
+surface.
+
+The call-fact extractor is intentionally textual and preserves the historical
+top-level header, indentation, body-closure, comment, and string rules. A later
+syntax-aware query engine may strengthen those semantics only as a separate API
+change; this performance layer does not broaden matches while removing repeated
+I/O and splitting plus the repeated full-file scans of `calls(...)`.
