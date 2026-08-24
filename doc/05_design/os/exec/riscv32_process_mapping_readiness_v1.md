@@ -10,21 +10,29 @@ one materialization per argument/environment string and one exact final-frame
 allocation.
 
 `executable_riscv32_mapping_owner_v1.spl` owns the immutable RV32 word size and
-can validate copy-only authenticated handle evidence for the exact
-`simpleos/riscv32/simpleos` target. The evidence is not authority and mapping
-readiness deliberately remains false.
+validates copy-only authenticated handle evidence for the exact
+`simpleos/riscv32/simpleos` target. The admitted user half is now strictly below
+`0x80000000`, disjoint from the copied Sv32 kernel-root half.
+
+An isolated authoritative mapper was drafted and rejected during static safety
+review. It was removed rather than retaining an unenforceable ownership claim.
+The required registry/lease boundary and rollback quarantine are recorded in
+the blocker below.
 
 ## Remaining safety gates
 
 Canonical dispatch must remain blocked until all of these are connected:
 
-- the RV32 address-space adapter must use an authoritative RV32 paging owner,
-  rather than the generic VMM path;
-- user mappings and the stack must not overlap Sv32 root entries copied for the
-  kernel (the current `0x81000000` stack lies in copied root index 516);
-- initial context return must enter U-mode rather than setting `SSTATUS_SPP`;
-- authenticated ELF32 layout evidence must be checked before the loader's
-  one-shot token is committed/retrieved, not afterward.
+- the RV32 stack policy/default selector now names `0x7ffff000`, below the
+  copied kernel half, but the canonical ELF process-image builder still rejects
+  RV32 and always requests an eight-byte stack; it must admit RV32 and select
+  the existing four-byte serializer before the future mapper binds the value;
+- an opaque registry-backed mapper must bind a live loader joint lease, own the
+  root and frames, and quarantine any PTE whose unmap fails before freeing;
+- the scheduler must consume/move that owner and perform the one-shot SATP plus
+  U-mode entry transfer; mapping receipts never authorize execution;
+- the authenticated loader joint transition must call the mapper before token
+  commit/retrieval and bind its result to scheduler adoption.
 
 Static specs cover four-byte serialization, truncation rejection, exact target
 evidence, W+X rejection, and the retained false readiness bit. Per user
