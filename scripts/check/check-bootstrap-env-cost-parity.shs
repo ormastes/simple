@@ -1,0 +1,218 @@
+#!/bin/sh
+# check-bootstrap-env-cost-parity.shs
+#
+# Pins the cost of the BOOTSTRAP ENVIRONMENT ITSELF on the seed native-build
+# path: compiling the SAME closure with the SAME binary must not become
+# dramatically slower merely because SIMPLE_BOOTSTRAP=1 /
+# SIMPLE_BOOTSTRAP_STAGE4=1 are exported.
+#
+# Why this guard exists
+# ---------------------
+# Lane M reported a 20x wall / +73% RSS regression attributed to those two
+# environment variables alone (plain 16.56 s vs bootstrap 343.19 s on a
+# 61-module closure of src/app/mcp/main.spl). Lane T could NOT reproduce it on
+# the deployed seed: six configurations, including the full Stage-3 env set,
+# all landed within noise of each other (15.3-16.2 s, RSS flat at ~137 MB).
+# See doc/08_tracking/bug/bootstrap_env_cost_parity_unreproducible_2026-08-24.md
+# for the full matrix and the identification gap.
+#
+# Because the reported regression was never root-caused, this guard does not
+# encode a mechanism -- it encodes the OBSERVABLE: env-only cost parity. If the
+# regression is real and returns (or is reintroduced), the ratio moves and this
+# fails. If Lane M's exact configuration is later recovered and differs, the
+# fixture here should be widened, not the threshold.
+#
+# Verdict convention (last line of stdout is always the verdict):
+#   PASS  -- <n> configuration(s) timed, ratio <r> within budget <b>   exit 0
+#   FAIL  -- ...                                                       exit 1
+#   ERROR -- nothing was checked (<reason>)                            exit 2
+# A run that timed 0 configurations is ERROR, never a pass. A missing verdict
+# line MUST be read by the caller as FAIL.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BUDGET_RATIO="${BOOTSTRAP_ENV_COST_RATIO:-4}"   # bootstrap wall / plain wall
+MIN_PLAIN_MS="${BOOTSTRAP_ENV_MIN_PLAIN_MS:-2000}"  # below this, ratios are noise
+TIMEOUT_S="${BOOTSTRAP_ENV_TIMEOUT_S:-900}"
+
+# ---------------------------------------------------------------------------
+# Verdict logic, factored so --selftest can drive it without running a compile.
+# adjudicate <plain_ms> <boot_ms> -> echoes "PASS|FAIL <detail>", returns 0/1/2
+# ---------------------------------------------------------------------------
+adjudicate() {
+    ap_plain="$1"
+    ap_boot="$2"
+    case "$ap_plain" in ''|*[!0-9]*) echo "ERROR nonnumeric_plain"; return 2 ;; esac
+    case "$ap_boot"  in ''|*[!0-9]*) echo "ERROR nonnumeric_boot";  return 2 ;; esac
+    [ "$ap_plain" -gt 0 ] || { echo "ERROR zero_plain"; return 2; }
+    [ "$ap_boot"  -gt 0 ] || { echo "ERROR zero_boot";  return 2; }
+    if [ "$ap_plain" -lt "$MIN_PLAIN_MS" ]; then
+        echo "ERROR plain_too_fast_to_discriminate(${ap_plain}ms<${MIN_PLAIN_MS}ms)"
+        return 2
+    fi
+    # integer ratio in hundredths, avoids bc
+    ap_ratio_x100=$(( ap_boot * 100 / ap_plain ))
+    ap_budget_x100=$(( BUDGET_RATIO * 100 ))
+    if [ "$ap_ratio_x100" -gt "$ap_budget_x100" ]; then
+        echo "FAIL ratio=${ap_ratio_x100} budget=${ap_budget_x100}"
+        return 1
+    fi
+    echo "PASS ratio=${ap_ratio_x100} budget=${ap_budget_x100}"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Selftest -- runs first, unconditionally, and is fatal.
+# ---------------------------------------------------------------------------
+selftest() {
+    st_fail=0
+    st_n=0
+
+    st_check() { # name expected_rc expected_prefix plain boot
+        st_n=$((st_n + 1))
+        st_out=$(adjudicate "$4" "$5"); st_rc=$?
+        st_got=${st_out%% *}
+        if [ "$st_rc" != "$2" ] || [ "$st_got" != "$3" ]; then
+            echo "selftest FAIL [$1]: got rc=$st_rc '$st_out', want rc=$2 '$3 ...'"
+            st_fail=$((st_fail + 1))
+        fi
+    }
+
+    # 1. parity (the healthy, currently-measured shape: 15.3s vs 16.2s)
+    st_check parity            0 PASS  15300 16200
+    # 2. the reported regression shape: 16.56s -> 343.19s (20.7x) must FAIL
+    st_check reported_20x      1 FAIL  16560 343190
+    # 3. just over budget must FAIL (4x budget, 4.01x actual)
+    st_check just_over         1 FAIL  10000 40100
+    # 4. just under budget must PASS
+    st_check just_under        0 PASS  10000 39900
+    # 5. bootstrap FASTER than plain is fine
+    st_check boot_faster       0 PASS  15000  9000
+    # 6. a zero/absent timing is ERROR, never a pass
+    st_check zero_plain        2 ERROR     0 15000
+    st_check empty_boot        2 ERROR 15000 ""
+    # 7. a fixture too fast to discriminate is ERROR, not a vacuous PASS
+    st_check too_fast          2 ERROR   500   600
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed: $st_fail of $st_n fixtures)"
+        exit 2
+    fi
+    echo "selftest OK ($st_n fixtures)"
+}
+
+# ---------------------------------------------------------------------------
+# Fixture: a synthetic multi-module closure, so the guard does not depend on
+# any product file staying compilable. Module count is large enough that
+# per-module env-gated work would show up.
+# ---------------------------------------------------------------------------
+FIXTURE_MODULES="${BOOTSTRAP_ENV_FIXTURE_MODULES:-40}"
+
+build_fixture() {
+    bf_dir="$1"
+    mkdir -p "$bf_dir" || return 1
+    bf_i=0
+    while [ "$bf_i" -lt "$FIXTURE_MODULES" ]; do
+        bf_f="$bf_dir/mod${bf_i}.spl"
+        : > "$bf_f"
+        if [ "$bf_i" -gt 0 ]; then
+            bf_prev=$((bf_i - 1))
+            printf 'use gen.mod%d.{envcost_f_%d}\n' "$bf_prev" "$bf_prev" >> "$bf_f"
+        fi
+        printf 'fn envcost_f_%d() -> i64:\n' "$bf_i" >> "$bf_f"
+        if [ "$bf_i" -gt 0 ]; then
+            bf_prev=$((bf_i - 1))
+            printf '    envcost_f_%d() + %d\n' "$bf_prev" "$bf_i" >> "$bf_f"
+        else
+            printf '    0\n' >> "$bf_f"
+        fi
+        bf_i=$((bf_i + 1))
+    done
+    bf_last=$((FIXTURE_MODULES - 1))
+    printf '\nfn main() -> i64:\n    envcost_f_%d()\n' "$bf_last" >> "$bf_dir/mod${bf_last}.spl"
+    echo "$bf_dir/mod${bf_last}.spl"
+}
+
+# run_config <label> <workdir> <entry> [env assignments...] -> echoes elapsed ms
+run_config() {
+    rc_label="$1"; rc_work="$2"; rc_entry="$3"; shift 3
+    rc_cache="$rc_work/cache_$rc_label"
+    rm -rf "$rc_cache"; mkdir -p "$rc_cache"
+    rc_t0=$(date +%s%N)
+    # Exit status is read DIRECTLY into a variable on the line after the
+    # invocation -- never through a pipe (a pipeline's $? is the last
+    # command's status and has produced false greens in this repo).
+    env "$@" timeout -k 5s "${TIMEOUT_S}s" "$SIMPLE_BIN" native-build \
+        --target x86_64-unknown-linux-gnu --backend cranelift \
+        --runtime-bundle core-c-bootstrap \
+        --source "$rc_work/gen" --entry-closure --threads 1 --mode dynload \
+        --cache-dir "$rc_cache" \
+        --entry "$rc_entry" -o "$rc_work/$rc_label.bin" \
+        > "$rc_work/$rc_label.out" 2> "$rc_work/$rc_label.err"
+    rc_status=$?
+    rc_t1=$(date +%s%N)
+    rc_ms=$(( (rc_t1 - rc_t0) / 1000000 ))
+    echo "$rc_ms" > "$rc_work/$rc_label.ms"
+    echo "$rc_status" > "$rc_work/$rc_label.rc"
+    echo "$rc_ms"
+}
+
+# ---------------------------------------------------------------------------
+main() {
+    selftest
+
+    SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+    if [ ! -x "$SIMPLE_BIN" ]; then
+        echo "ERROR — nothing was checked (no executable compiler at $SIMPLE_BIN)"
+        exit 2
+    fi
+    SIMPLE_BIN=$(readlink -f "$SIMPLE_BIN")
+
+    WORK=$(mktemp -d "${TMPDIR:-/tmp}/envcost.XXXXXX") || {
+        echo "ERROR — nothing was checked (cannot create work dir)"; exit 2; }
+    trap 'rm -rf "$WORK"' EXIT
+
+    ENTRY=$(build_fixture "$WORK/gen") || {
+        echo "ERROR — nothing was checked (fixture build failed)"; exit 2; }
+
+    echo "binary: $SIMPLE_BIN ($(stat -c %s "$SIMPLE_BIN") bytes)"
+    echo "fixture: $FIXTURE_MODULES modules, entry $ENTRY"
+
+    CONFIGS=0
+
+    PLAIN_MS=$(run_config plain "$WORK" "$ENTRY")
+    CONFIGS=$((CONFIGS + 1))
+    echo "plain:     ${PLAIN_MS}ms (rc=$(cat "$WORK/plain.rc"))"
+
+    BOOT_MS=$(run_config bootstrap "$WORK" "$ENTRY" \
+        SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_STAGE4=1)
+    CONFIGS=$((CONFIGS + 1))
+    echo "bootstrap: ${BOOT_MS}ms (rc=$(cat "$WORK/bootstrap.rc"))"
+
+    if [ "$CONFIGS" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 configurations timed)"
+        exit 2
+    fi
+
+    VERDICT=$(adjudicate "$PLAIN_MS" "$BOOT_MS"); VRC=$?
+    VKIND=${VERDICT%% *}
+    VDETAIL=${VERDICT#* }
+
+    case "$VKIND" in
+        PASS)
+            echo "PASS — $CONFIGS configuration(s) timed, plain=${PLAIN_MS}ms bootstrap=${BOOT_MS}ms, $VDETAIL (budget ${BUDGET_RATIO}x)"
+            exit 0 ;;
+        FAIL)
+            echo "FAIL — $CONFIGS configuration(s) timed, plain=${PLAIN_MS}ms bootstrap=${BOOT_MS}ms exceeds ${BUDGET_RATIO}x budget, $VDETAIL"
+            exit 1 ;;
+        *)
+            echo "ERROR — nothing was checked ($VDETAIL)"
+            exit 2 ;;
+    esac
+}
+
+case "${1:-}" in
+    --selftest) selftest; echo "SELFTEST OK — 8 fixtures, 0 configuration(s) timed, no cost verdict"; exit 0 ;;
+    *) main "$@" ;;
+esac
