@@ -1,6 +1,6 @@
 # Importing `std.io_runtime` breaks `native-build` — `method 'len' not found on type 'i64'` (2026-08-24)
 
-- **Status:** OPEN
+- **Status:** FIXED 2026-08-24 (see final section) — the localization in the earlier sections is superseded
 - **Severity:** HIGH — blocks building the MCP server locally, and any app that
   touches `std.io_runtime`
 - **Area:** seed interpreter extern dispatch + the
@@ -156,3 +156,135 @@ run thinking you are testing two variants.
 Three hypotheses eliminated (cycle; tuple extern declared; tuple fn imported),
 one file localized, nothing fixed. No further hypothesis was pursued rather than
 casting around for one.
+
+## 2026-08-24 (later still) — ROOT CAUSED and FIXED. It was never about `io_runtime.spl`.
+
+**Status of this defect: FIXED** by `parse_match_arms_common` / `parse_receive_stmt`
+local renames in `src/compiler/10.frontend/core/parser_stmts.spl`.
+
+### The localization above was wrong, and the reproducer is much smaller
+
+`io_runtime.spl` is not special. The real trigger is **any non-entry module that
+contains a `match` statement**. `io_runtime.spl` merely happens to contain three
+(lines 144, 172, 177). Seven-line reproducer, no `std` import anywhere:
+
+```
+# matchmod.spl
+pub fn pick(n: i64) -> i64:
+    match n:
+        case 0: 10
+        case _: 20
+```
+```
+# mmain.spl
+use matchmod.{pick}
+fn main() -> i64:
+    print("v={pick(0)}")
+    return 0
+```
+-> `error: semantic: method 'len' not found on type 'i64' (receiver value: 1)`
+
+The entry file's own `match` statements do not trigger it; only an imported
+module's do. That is why hello-world and `stderr_ops` (0 `match`) built and every
+`io_runtime` fixture did not.
+
+### How it was found (technique worth reusing)
+
+The seed already carries a level-gated probe at the error site
+(`SIMPLE_INTERP_OOB_DEBUG`, `compiler/src/interpreter_method/mod.rs`), but it
+printed only a *Rust* backtrace, which names interpreter dispatch frames and not
+the interpreted `.spl` function. Adding `debug_call_stack_snapshot()` to that
+probe (populated when `SIMPLE_DEBUG_FIELD_ACCESS=1`) printed the interpreted
+stack in one run:
+
+```
+main -> run_native_build_bootstrap -> compiler_driver_run_compile -> compile
+ -> parse_all_committing_impl -> ... -> parse_and_build_module_scoped
+ -> flat_pools_dump_all -> flat_decl_pools_dump
+ -> flat_pool_enc_i64_list -> flat_pool_enc_i64
+```
+
+So the failure is on the **frontend cache STORE path**, after a successful parse,
+not in the parser proper. `flat_pool_enc_i64_list(pool: [[i64]])` iterated a pool
+whose element was a bare `i64`. A temporary `print` before each
+`flat_pool_enc_i64_list` call in `flat_decl_pools_dump` named the pool:
+**`arm_body`** (`_Ast/decl_nodes.spl:1240`, `var arm_body: [[i64]] = []`).
+
+### Root cause (proven by experiment)
+
+Probes placed inside `arm_new_with_binding_and_rationale` show the arena is
+CORRECT when built:
+
+```
+[armnew] body=[0]      [armnew-after] arm_body=[[0]]
+[armnew] body=[1]      [armnew-after] arm_body=[[0], [1]]
+```
+
+and CORRUPT by the time the dump reads it:
+
+```
+[dump] arm_body=[1]        <- flat [i64], not [[i64]]
+```
+
+`parser_stmts.spl` declared **function-local** variables named `arm_body`
+(`:1790` `val`, `:1827` `var`, `:1956` `val`), each of type `[i64]` — the same
+name as the `[[i64]]` module-global arena owned by `_Ast/decl_nodes.spl`. Under
+the seed interpreter the parser's local write reached the global, replacing the
+`[[i64]]` arena with the last arm's flat `[i64]` body. The encoder then called
+`.len()` on `1`, an element of that flat list. The unstable "receiver value"
+(38 / 254 / 1) is simply the last arm body's element, which of course differs
+per input — consistent with "corrupted handle" only by coincidence.
+
+**Fix:** rename those three locals to `case_arm_body`. Nine token replacements,
+no behaviour change, no rename of the arena or of `arm_body_flat`.
+
+Verified: the seven-line `matchmod` fixture now builds (rc=0), links, and the
+binary RUNS printing `v=10`.
+
+### Corrections to earlier entries in this record
+
+- "the culprit is inside `io_runtime.spl`'s own 488 lines" — **wrong**. The
+  refutation of the cycle hypothesis was sound; the inference drawn from it was
+  not. `io_runtime` is a trigger input, not the defective code.
+- The comment at `_Ast/decl_nodes.spl:1241-1247` explains `arm_body_flat` as a
+  workaround for the seed "erasing the inner list of a `[[i64]]` to a boxed i64
+  handle". That theory is **superseded**: there is no erasure. A control fixture
+  (module-global `var pool: [[i64]]`, cross-module push/read/iterate) round-trips
+  correctly under the same seed. `arm_body_flat` is left in place — it is
+  harmless and independently load-bearing for reads today — but it was treating
+  a symptom of the name collision.
+
+### What is NOT fixed, and is filed separately
+
+The underlying **interpreter defect** — a function-local binding in one module
+writing through to a same-named module-global in another module — is not fixed
+here. See
+`doc/08_tracking/bug/interp_local_shadows_cross_module_global_arm_body_2026-08-24.md`.
+
+The mechanism is **not fully characterized**, and a naive statement of it is
+contradicted by evidence in this same tree: a scan for the same shape found
+latent same-class sites that demonstrably do **not** fire —
+`val decl_span = flat_span_new(...)` at `parser_decls_use.spl:475,488,506,524`,
+`_ParserDecls/fn_struct_decls.spl:666,724`,
+`_ParserDecls/enum_module_body.spl:571,918` (local `i64` vs global `[i64]`),
+`interpreter/eval_decls.spl:29` (`decl_name`), and
+`compiler/cg_stmt.spl:518` (`arm_body` again). After the fix the same build
+passes parse and cache-dump cleanly, so those shadows are not clobbering. What
+distinguishes the firing case from the non-firing ones is an open question. They
+are deliberately NOT renamed: renaming code that provably does not misbehave
+would be speculative churn.
+
+### A LATER, DISTINCT defect is now exposed
+
+With this fixed, the original four-line `std.io_runtime` fixture gets past parse,
+HIR and into MIR, and fails on something else entirely — a borrow-checker
+verdict, six times, in the `std.io_runtime` closure:
+
+```
+[ERROR] Borrow error: 43:1: borrow of `local(13)` may still be active at return
+        |||RELATED:6:1:borrow created here|||HELP:ensure borrow ends before returning
+(also 37:1, 54:1, 66:1, 73:1, 79:1)
+```
+
+That is a separate bug and is tracked on its own; it was previously unreachable
+behind this one.
