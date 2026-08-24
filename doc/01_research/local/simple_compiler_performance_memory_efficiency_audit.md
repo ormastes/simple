@@ -2522,7 +2522,28 @@ domains, case-folded declaration names, source-origin IDs, and driven results.
 The repeated `contains` scans made these validation kernels quadratic in their
 respective node counts and retained four growable arrays. They now use
 `{text: bool}` membership indexes while keeping traversal order, insertion
-points, case folding, and the first returned diagnostic unchanged. Other HWIR
-lookups, including repeated width/name resolution, remain separate audit work.
+points, case folding, and the first returned diagnostic unchanged. The same
+validated declaration pass now builds width/read/write indexes, replacing the
+remaining per-operation port/signal/constant scans. Shape validation is thus
+linear in declarations plus operation references under dictionary lookup,
+rather than multiplying operation references by declaration count.
 No timing, allocation, or RSS measurement is claimed under the no-verify
 instruction.
+
+### Generated HIR child traversal follow-up
+
+The typed `PerfFacts` collector is iterative only above its generated child
+API. Each popped base node currently constructs a fresh `[HirNode]`, while
+transparent wrapper helpers recursively construct and concatenate additional
+arrays. The correct replacement is a generated `HirChildFrame` work union and
+context-neutral sink in layer 20. It must include base carriers and every
+transparent wrapper, push schema fields/lists/pairs in exact reverse order,
+and let the layer-35 collector attach loop depth. This removes per-node arrays
+and wrapper recursion without coupling HIR to performance semantics.
+
+Do not hand-specialize the collector or pass its array into generated code:
+Simple value/COW semantics make by-value mutation unsafe, and a base-node-only
+callback leaves recursive wrappers. Keep the allocating API as a compatibility
+adapter during migration. The generated-visitor freshness gate must also cover
+`hir_children.spl`; today it checks other visitor outputs but can miss drift in
+this file.

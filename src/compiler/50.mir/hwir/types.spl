@@ -539,17 +539,28 @@ class HwModuleDef:
         # a folded comparison key so `Result` and `result` cannot create two
         # declarations for the same VHDL object.
         var names: {text: bool} = {}
+        var widths: {text: i32} = {}
+        var readable: {text: bool} = {}
+        var writable: {text: bool} = {}
         for port in self.ports:
             val comparison_name = port.name.lower()
             if not hwir_vhdl_identifier(port.name) or names.has(comparison_name) or (port.direction != "in" and port.direction != "out") or
                 port.type_name != "Bits" or port.bit_width < 1 or not domains.has(port.clock_domain):
                 return "HWIR-E-PORT: ports must be unique typed Bits in an existing clock domain"
             names[comparison_name] = true
+            widths[port.name] = port.bit_width
+            if port.direction == "in":
+                readable[port.name] = true
+            else:
+                writable[port.name] = true
         for signal in self.signals:
             val comparison_name = signal.name.lower()
             if not hwir_vhdl_identifier(signal.name) or names.has(comparison_name) or signal.type_name != "Bits" or signal.bit_width < 1:
                 return "HWIR-E-SIGNAL: signals must be unique positive-width Bits"
             names[comparison_name] = true
+            widths[signal.name] = signal.bit_width
+            readable[signal.name] = true
+            writable[signal.name] = true
         for constant in self.constants:
             val comparison_name = constant.name.lower()
             if not hwir_vhdl_identifier(constant.name) or names.has(comparison_name) or constant.bit_width < 1:
@@ -560,6 +571,8 @@ class HwModuleDef:
                 (constant.value < -(1i64 << (constant.bit_width - 1)) or constant.value >= (1i64 << (constant.bit_width - 1))):
                 return "HWIR-E-CONSTANT-VALUE: signed constant does not fit its declared width"
             names[comparison_name] = true
+            widths[constant.name] = constant.bit_width
+            readable[constant.name] = true
         var origin_ids: {text: bool} = {}
         for origin in self.origins:
             if not origin.node_id.is_valid() or origin.source_name == "" or origin.node_id.value == self.node_id.value or origin_ids.has(origin.node_id.value):
@@ -571,21 +584,21 @@ class HwModuleDef:
             return "HWIR-E-ORIGIN: strict HWIR module requires source origins"
         var driven: {text: bool} = {}
         for op in self.comb_ops:
-            if not hwir_supported_comb_op(op.op) or not hwir_value_is_writable(self, op.result) or
-                hwir_width_for_name(self, op.result) != (if hwir_comb_is_predicate(op.op): 1 else: op.bit_width):
+            if not hwir_supported_comb_op(op.op) or not writable.has(op.result) or
+                widths[op.result] != (if hwir_comb_is_predicate(op.op): 1 else: op.bit_width):
                 return "HWIR-E-COMB: combinational operations require a supported writable result"
-            if not hwir_value_is_readable(self, op.lhs) or (op.rhs != "" and not hwir_value_is_readable(self, op.rhs)):
+            if not readable.has(op.lhs) or (op.rhs != "" and not readable.has(op.rhs)):
                 return "HWIR-E-OP-OPERAND-DIRECTION: operation operands must be input ports"
             if op.lhs == op.result or op.rhs == op.result:
                 return "HWIR-E-COMB-CYCLE: strict combinational operation cannot read its own result"
             if (op.op == "and" or op.op == "or" or op.op == "xor" or op.op == "add" or op.op == "sub") and
-                (op.rhs == "" or hwir_width_for_name(self, op.lhs) != op.bit_width or hwir_width_for_name(self, op.rhs) != op.bit_width):
+                (op.rhs == "" or widths[op.lhs] != op.bit_width or widths[op.rhs] != op.bit_width):
                 return "HWIR-E-COMB-WIDTH: binary operation operands and result must have the declared width"
             if hwir_comb_is_predicate(op.op) and
-                (op.rhs == "" or hwir_width_for_name(self, op.lhs) != op.bit_width or hwir_width_for_name(self, op.rhs) != op.bit_width):
+                (op.rhs == "" or widths[op.lhs] != op.bit_width or widths[op.rhs] != op.bit_width):
                 return "HWIR-E-COMB-WIDTH: predicate operands must have the declared comparison width"
             if (op.op == "shl" or op.op == "shr") and
-                (op.rhs == "" or hwir_width_for_name(self, op.lhs) != op.bit_width):
+                (op.rhs == "" or widths[op.lhs] != op.bit_width):
                 return "HWIR-E-COMB-WIDTH: shift input and result must have the declared width"
             if (op.op == "passthrough" or op.op == "zext" or op.op == "trunc" or op.op == "sext") and op.rhs != "":
                 return "HWIR-E-COMB-WIDTH: unary operation must not have a right operand"
@@ -593,9 +606,8 @@ class HwModuleDef:
                 return "HWIR-E-MULTIPLE-DRIVER: each strict combinational result must have one driver"
             driven[op.result] = true
         for op in self.compare_ops:
-            if not hwir_value_is_writable(self, op.result) or hwir_width_for_name(self, op.result) != 1 or hwir_width_for_name(self, op.lhs) != op.bit_width or
-                hwir_width_for_name(self, op.rhs) != op.bit_width or not hwir_value_is_readable(self, op.lhs) or
-                not hwir_value_is_readable(self, op.rhs):
+            if not writable.has(op.result) or widths[op.result] != 1 or not readable.has(op.lhs) or
+                not readable.has(op.rhs) or widths[op.lhs] != op.bit_width or widths[op.rhs] != op.bit_width:
                 return "HWIR-E-COMPARE: comparisons require same-width readable operands and one-bit result"
             if op.lhs == op.result or op.rhs == op.result:
                 return "HWIR-E-COMB-CYCLE: strict comparison cannot read its own result"
@@ -603,11 +615,10 @@ class HwModuleDef:
                 return "HWIR-E-MULTIPLE-DRIVER: each strict combinational result must have one driver"
             driven[op.result] = true
         for op in self.select_ops:
-            if hwir_width_for_name(self, op.condition) != 1 or not hwir_value_is_readable(self, op.condition):
+            if not readable.has(op.condition) or widths[op.condition] != 1:
                 return "HWIR-E-SELECT-CONDITION: select condition must be a readable one-bit value"
-            if not hwir_value_is_writable(self, op.result) or hwir_width_for_name(self, op.result) != op.bit_width or
-                hwir_width_for_name(self, op.when_true) != op.bit_width or hwir_width_for_name(self, op.when_false) != op.bit_width or
-                not hwir_value_is_readable(self, op.when_true) or not hwir_value_is_readable(self, op.when_false):
+            if not writable.has(op.result) or not readable.has(op.when_true) or not readable.has(op.when_false) or
+                widths[op.result] != op.bit_width or widths[op.when_true] != op.bit_width or widths[op.when_false] != op.bit_width:
                 return "HWIR-E-SELECT: muxes require same-width readable branches and a writable result"
             if op.condition == op.result or op.when_true == op.result or op.when_false == op.result:
                 return "HWIR-E-COMB-CYCLE: strict select cannot read its own result"
