@@ -218,3 +218,36 @@ Per `.claude/rules/code-style.md` (logs are not unused code):
   expression when an extern argument fails to evaluate. This is the probe that
   turned an unlocalizable `cannot convert object to int` into a one-line
   answer; it is generic and will localize the whole class.
+
+
+## Proof status (honest) — 2026-08-24
+
+Both fenced signatures are gone, and the LoadGlobal accessor change is verified
+not to break native codegen:
+
+```text
+$ timeout 3600 "$SEED" native-build control.spl -o control.bin
+$ NB_RC=$?
+NB_RC=124
+$ grep -c "E-HIR-BLOCK-VALUE-TYPE-DECAYED" fix2.log
+0
+$ grep -c "cannot convert object to int" fix2.log
+0
+
+$ timeout 540 "$SEED" native-build hello.spl -o hello.bin
+$ HRC=$?
+HELLO_NB_RC=0
+$ ./hello.bin
+hello
+$ RUN_RC=0
+```
+
+`NB_RC=0` for the `io_runtime` importer is **NOT** claimed and is not yet
+achievable: a FIFTH blocker sits underneath — `native_compile` does not
+terminate. Filed as
+`doc/08_tracking/bug/native_compile_nonterminating_io_runtime_2026-08-24.md`.
+The gate is deliberately left asserting the real end state (exit 0), so it
+reports that hang as a FAIL rather than being softened to a signature-only
+green.
+
+**Landed:** `be3e6fe4a21`
