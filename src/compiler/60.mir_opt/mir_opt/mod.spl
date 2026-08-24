@@ -440,8 +440,8 @@ fn pass_witness_contract(kind: PassKind) -> PassWitnessContract?:
 
 fn pass_witness_registry_integrity_errors() -> [text]:
     var errors: [text] = []
-    var seen_positive: [text] = []
-    var seen_negative: [text] = []
+    var seen_positive: {text: bool} = {}
+    var seen_negative: {text: bool} = {}
     for descriptor in mir_pass_descriptor_registry():
         val witness = pass_witness_contract(descriptor.kind)
         if pass_status_allows_transform(descriptor.status):
@@ -451,14 +451,14 @@ fn pass_witness_registry_integrity_errors() -> [text]:
                 val found = witness.unwrap()
                 if found.positive_id == "" or found.negative_id == "":
                     errors.push("active pass has empty witness identity: " + descriptor.stable_name)
-                if seen_positive.contains(found.positive_id):
+                if seen_positive.contains_key(found.positive_id):
                     errors.push("duplicate positive witness identity: " + found.positive_id)
                 else:
-                    seen_positive.push(found.positive_id)
-                if seen_negative.contains(found.negative_id):
+                    seen_positive[found.positive_id] = true
+                if seen_negative.contains_key(found.negative_id):
                     errors.push("duplicate negative witness identity: " + found.negative_id)
                 else:
-                    seen_negative.push(found.negative_id)
+                    seen_negative[found.negative_id] = true
         elif witness.?:
             errors.push("inactive pass must not advertise executable witnesses: " + descriptor.stable_name)
     errors
@@ -907,15 +907,30 @@ fn mir_pass_provider_registry() -> [OptimizationRuleProvider]:
         providers.push(descriptor.provider)
     providers
 
+fn mir_pass_stable_name_integrity_error(
+    stable_name: text, expected_kind: PassKind
+) -> text:
+    val resolved = mir_pass_descriptor_for_name(stable_name)
+    if not resolved.?:
+        return "unresolved stable pass name: " + stable_name
+    if resolved.unwrap().kind != expected_kind:
+        return "stable pass name resolves to wrong kind: " + stable_name
+    ""
+
 fn mir_pass_registry_integrity_errors() -> [text]:
     """Fail-closed structural audit for registered transformation claims."""
     var errors: [text] = []
-    var seen_names: [text] = []
+    var seen_names: {text: bool} = {}
     for descriptor in mir_pass_descriptor_registry():
-        if seen_names.contains(descriptor.stable_name):
+        if seen_names.contains_key(descriptor.stable_name):
             errors.push("duplicate pass name: " + descriptor.stable_name)
         else:
-            seen_names.push(descriptor.stable_name)
+            seen_names[descriptor.stable_name] = true
+
+        val stable_name_error = mir_pass_stable_name_integrity_error(
+            descriptor.stable_name, descriptor.kind)
+        if stable_name_error != "":
+            errors.push(stable_name_error)
 
         val active = pass_status_allows_transform(descriptor.status)
         match descriptor.expectation:
@@ -1900,7 +1915,7 @@ export pass_status, pass_expectation, pass_status_allows_transform, pass_status_
 export mir_pass_fact_preservation
 export pass_status_kind_name, pass_status_reason, pass_expectation_name, mir_pass_backend_outcome_name
 export mir_pass_provider_registry, mir_pass_provider_name, mir_pass_uses_pipeline_provider
-export mir_pass_registry_integrity_errors
+export mir_pass_stable_name_integrity_error, mir_pass_registry_integrity_errors
 export run_named_pass, run_typed_pass_on_function
 export run_pass_on_module, run_typed_pass_on_module
 export pipeline_optimize
