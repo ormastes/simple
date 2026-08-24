@@ -59,6 +59,27 @@ extern fn rt_transient_scope_promoted_bytes() -> i64
 extern fn rt_exit(code: i64)
 extern fn rt_stdout_flush()
 
+# Formation probe wrapper, deliberately shaped as a plain `fn` that returns a
+# SCALAR out of the unsafe block. Mirrors `hir_heap_ref_wellformed`
+# (20.hir/hir_lowering/types.spl:28), which is the same wrapper for layer 20.
+#
+# The shape is load-bearing, not stylistic. Two phase-3 guards used to write
+# `return (self.ctx, false)` from INSIDE an `unsafe(capabilities: [ffi])` block;
+# a tuple-shaped return in that position is lost under native codegen — control
+# falls through and the caller reads SUCCESS. Those two were the only
+# tuple-returns-inside-unsafe in the whole owned tree, against 87 scalar/enum
+# returns inside unsafe that work fine. Routing the probe through this wrapper
+# keeps the callers free of `unsafe` entirely, so their verdict `return` sits at
+# function-body level (the proven shape) and no boolean has to cross an unsafe
+# block boundary via an outer local.
+#
+# It is a formation check, never a dereference, so it cannot false-reject a live
+# owner and is safe to call from a diagnostic path.
+# See doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
+fn driver_heap_ref_wellformed(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        return rt_heap_ref_wellformed(value)
+
 struct StreamingHirPromotion:
     module: HirModule
     hir_promoted_nodes: i64
@@ -159,11 +180,14 @@ impl CompilerDriver:
         # verdict at function-body level -- the shape that works everywhere.
         # See doc/08_tracking/bug/stage3_n_modules_zero_segv_mir_lowering_x86_64_2026-08-24.md
         # Pinned by scripts/check/check-no-tuple-return-in-unsafe.shs
-        var streaming_owner_wellformed = false
-        unsafe(capabilities: [ffi]):
-            log_phase("phase3:streaming:r01b-in-unsafe")
-            streaming_owner_wellformed = rt_heap_ref_wellformed(surfaces)
-            log_phase("phase3:streaming:r01c-past-wellformed-if")
+        # NOTE for anyone reading OLD logs against NEW ones: `r01c` used to sit
+        # after the malformed-payload `if` and therefore printed only on the
+        # GOOD path. It is now a plain post-probe receipt and prints on BOTH
+        # paths; `r02` is still the past-the-guard receipt. Earlier sections of
+        # the bug record reason from the old semantics.
+        log_phase("phase3:streaming:r01b-probe")
+        val streaming_owner_wellformed = driver_heap_ref_wellformed(surfaces)
+        log_phase("phase3:streaming:r01c-past-wellformed-probe")
         if not streaming_owner_wellformed:
             self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
             return (self.ctx, false)
@@ -601,10 +625,14 @@ impl CompilerDriver:
         # the `return (self.ctx, false)` written here was lost, so phase 3
         # reported SUCCESS and the malformed payload flowed on to SEGV in MIR
         # lowering with the error relabelled `[ERROR] MIR error: ...`.
-        var retained_surfaces_wellformed = true
-        if self.ctx.module_surfaces != nil:
-            unsafe(capabilities: [ffi]):
-                retained_surfaces_wellformed = rt_heap_ref_wellformed(self.ctx.module_surfaces.unwrap())
+        # `driver_heap_ref_wellformed` returns the probe result as a scalar out
+        # of its own unsafe block, so this method needs no `unsafe` at all and
+        # the verdict `return` below sits at function-body level. The nil case
+        # is unchanged: no owner staged means nothing to reject here.
+        val retained_surfaces_wellformed = if self.ctx.module_surfaces != nil:
+            driver_heap_ref_wellformed(self.ctx.module_surfaces.unwrap())
+        else:
+            true
         if not retained_surfaces_wellformed:
             self.ctx.add_error("E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module surface payload malformed at HIR entry (heap-typed payload word is 0 or in the zero page)")
             return (self.ctx, false)
