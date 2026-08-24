@@ -67,6 +67,14 @@ implementation-in-progress
   generated-child worklist traversal, loop ancestry, resolved-symbol registry
   evidence, explicit incomplete outcomes, and a fail-closed COLL002 candidate
   projection. Standard-library registry generation and driver adaptation remain open.
+- correctness/design-2026-08-24: Tightened COLL002 to a distinct
+  `ContainsLookup` kind, exact Array receiver, one explicit argument, linear
+  cost, and finite/unknown loop ancestry. Registry state is structurally
+  admitted rather than called verified. Parallel audits proved Array/Slice
+  built-ins currently lack HIR method identity and the pure-Simple native
+  generic Array contains helper is absent; production wiring remains blocked
+  on the tracked identity/runtime contract rather than trusting method text or
+  fixture SymbolIds.
 - review: Parallel warning/error, MIR-safety, tool-hot-path, and completion audits were source-checked by the merge owner. Remaining requirements stay explicitly incomplete.
 - implementation: Added deterministic `simple.opt-pipeline-report/v1` planning evidence, typed backend outcomes, structured `PassRunRecord` integrity checks, stable positive/negative witness contracts for the four admitted active transforms, and fail-closed witness registry validation. Planning counters remain explicitly unavailable rather than implying execution.
 - implementation: Reclassified target narrowing and inline facades as `Skeleton` and read-ahead hoisting as `AnalysisOnly`; updated effective-pipeline and hotspot-plan expectations so quarantined passes are never advertised as runnable.
