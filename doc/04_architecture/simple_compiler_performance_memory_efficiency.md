@@ -582,3 +582,17 @@ caller-visible output.
 The byte contract is the native/Pure-Simple split contract: leading whitespace
 and CRLF's CR byte are retained. Cursor implementations intentionally avoid the
 interpreter's known newline-split indentation-loss defect.
+
+### Virtual-normalization candidate gates
+
+When a textual lint needs a normalized representation only for a rare token,
+the common path first scans a virtual projection without allocating it. The
+scanner must encode exactly the historical deletion alphabet and token bytes;
+it is a necessary-candidate gate, not the final classifier. Candidate lines then
+run the unchanged normalizer and semantic shape checks.
+
+STUB003 is the reference: its virtual stream deletes only ASCII space and tab,
+and searches the fixed `pass_todo` byte sequence. The existing normalized checks
+remain authoritative for equality, call-prefix, colon, and assignment shapes.
+Adjacent TODO and SDN checks stay outside the gate so diagnostic ownership and
+ordering cannot be skipped.

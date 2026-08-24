@@ -2672,6 +2672,25 @@ messages, and hints remain unchanged. Prefix-heavy, repeated-exact, reverse-
 source-order, and topology contracts were added but not executed under the
 user's no-verification instruction.
 
+### Allocation-free STUB003 candidate gating
+
+The default per-line lint path removed ASCII spaces and then tabs from every
+nonempty trimmed line before checking four rare `pass_todo` shapes. Those two
+whole-line replacements allocated and copied roughly two line projections even
+when the source could not contain the token, producing Θ(B) avoidable temporary
+bytes across ordinary B-byte inputs.
+
+A byte scanner now recognizes `pass_todo` in the virtual stream formed by
+deleting exactly ASCII space and tab. It performs no substring, array, or
+normalized-text allocation. Only candidate lines execute the historical two
+replacements and exact four-shape classifier. Common noncandidate inputs retain
+Θ(0) normalization-copy bytes while total scanning stays linear with a fixed
+nine-byte target. Split spellings, tabs, comments, strings, ASCII-only deletion,
+production/test suppression, STUB003 count/message/fix, and its position before
+T001/D001 remain unchanged. Direct virtual-stream, production/test, ordering,
+Unicode-whitespace, and source-dominance contracts were added but not executed
+under the user's no-verification instruction.
+
 ### Sparse native-build diagnostic streaming
 
 The oversized native-build failure path already retained the complete worker
