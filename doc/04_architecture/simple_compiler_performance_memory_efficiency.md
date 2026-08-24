@@ -704,3 +704,19 @@ facts produces a missed remark and leaves MIR unchanged. Environment flags may
 request analysis but must not bypass a Disabled status or any proof obligation.
 Quarantined compatibility adapters return their input without scanning or
 rebuilding functions.
+
+### Manifest rewrite activation contract
+
+Manifest pattern and rewrite fields are compatibility metadata, not authority
+to mutate MIR. A free-text safety claim, cost estimate, backend policy, or
+environment setting cannot upgrade a `Skeleton` or `Disabled` rewrite to an
+active transform. While no manifest rewrite kind has a complete proof contract,
+the block, function, module, and backend execution surfaces must all preserve
+the exact input and return before matching or rebuilding.
+
+`Remove` activation additionally requires shared per-function def-use and
+terminator-use facts, an exact zero-use result, pure and non-trapping effect
+classification, dominance/ownership validity, and post-transform verification.
+Missing or incomplete facts fail closed and produce a structured missed/failure
+record. Legacy v1 manifests remain loadable so quarantine does not become a
+wire-format or API break.

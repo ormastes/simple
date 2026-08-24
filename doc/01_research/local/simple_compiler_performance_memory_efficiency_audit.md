@@ -3273,3 +3273,27 @@ duplicated exactly as before. The existing repeated-access contract exercises
 the adaptive path; duplicate-id, constant-store, exact indexed-missing, and
 source-topology contracts were added but not executed under the user's
 no-verification instruction.
+
+### Quarantined manifest `Remove` rewrite
+
+The manifest rule schema accepted a raw, case-sensitive `kind_tag: "Remove"`
+and the public block, function, module, and backend adapters could delete any
+matched MIR instruction. The free-text `safety` and numeric `cost_delta`
+metadata were not legality proofs; the executor had no use/liveness, effect,
+trap, dominance, or ownership check. A live `Copy`, `Store`, `Call`, or
+`Intrinsic` could therefore be removed.
+
+The v1 schema and public APIs remain load-compatible, but every execution
+surface is now an exact identity. The module entrypoint exits before rule
+flattening, pattern matching, formatted operand-key creation, wildcard binding,
+or MIR rebuilding. This also removes the exposed O(I*R) matcher work and its
+temporary allocation churn while the transform is disabled; it does not claim
+a normal-build speedup because these adapters are not broadly wired into every
+backend pipeline.
+
+Future activation requires a typed rewrite kind, shared per-function def-use
+facts, exact zero-use proof including terminators, explicit pure/non-trapping
+effect receipts, dominance and ownership checks, post-rewrite MIR verification,
+positive and negative witnesses, and a structured
+`OPT-MANIFEST-REMOVE-QUARANTINED` missed/failure diagnostic. No manual runtime
+measurement or verification was run under the user's instruction.

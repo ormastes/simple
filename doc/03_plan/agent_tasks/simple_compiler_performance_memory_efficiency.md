@@ -149,6 +149,21 @@ current-head research reconciliation.
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed manifest Remove quarantine tranche
+
+- Audited schema loading, direct block/function/module adapters, and backend
+  routing; confirmed arbitrary instruction deletion lacked def-use, effect,
+  trap, dominance, and ownership proofs.
+- Preserved v1 manifest and public API compatibility while making every
+  execution surface an exact identity.
+- Added early returns before O(I*R) matching, formatted operand keys, wildcard
+  binding arrays, and unconditional MIR reconstruction.
+- Changed backend-policy witnesses to retain a deliberately live copy while
+  preserving bundled manifest/rule identifiers and v1 metadata compatibility.
+- Updated research, architecture, runtime design, executable-spec prose, and
+  generated manual expectations. Verification intentionally not run under the
+  user's no-verify instruction.
+
 ## Completed lint-cache reverse-index tranche
 
 - Canonicalize dependency membership for indexing without changing the public

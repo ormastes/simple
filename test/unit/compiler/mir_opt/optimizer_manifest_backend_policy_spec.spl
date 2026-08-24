@@ -44,7 +44,7 @@ use compiler.mir_opt.pattern.rule_engine.{
     optimization_rule_provider_with_backend_policy
 }
 use compiler.mir.mir_data.{
-    MirModule, MirFunction, MirBlock, MirInst, MirInstKind,
+    MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind,
     MirTerminator, LocalId, BlockId, SymbolId
 }
 use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind}
@@ -98,7 +98,7 @@ fn manifest_test_module() -> MirModule:
         instructions: [
             MirInst(kind: MirInstKind.Copy(manifest_test_local(1), manifest_test_local(2)), span: nil)
         ],
-        terminator: MirTerminator.Ret(nil)
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(manifest_test_local(1)))))
     )
     MirModule(
         name: "manifest_backend_test_module",
@@ -110,7 +110,7 @@ fn manifest_test_module() -> MirModule:
 
 fn remove_copy_rule() -> PatternRule:
     PatternRule(
-        name: "remove-test-copy",
+        name: "quarantined-remove-test-copy",
         pattern: MirPattern(
             inst_count: 1,
             slots: [
@@ -268,9 +268,9 @@ describe "optimizer manifest backend policy for REQ-OPJH-023 REQ-OPJH-024":
         expect(llvm_medium.contains("backend_high_test_pass")).to_equal(false)
         expect(llvm_medium_skipped.contains("backend_high_test_pass")).to_equal(true)
 
-    it "runs manifest pattern rules only for backend-applicable dynamic passes":
+    it "routes backend-applicable Remove rules without deleting live definitions":
         # @req: REQ-OPJH-024
-        step("Verify: runs manifest pattern rules only for backend-applicable dynamic passes")
+        step("Verify: routes backend-applicable Remove metadata without deleting live definitions")
         val entry = manifest_pass_entry_new_with_backend_policy(
             "backend_rule_exec_test_pass",
             [],
@@ -298,7 +298,7 @@ describe "optimizer manifest backend policy for REQ-OPJH-023 REQ-OPJH-024":
         val cranelift_result = run_manifest_pattern_rules_for_backend(manifest_test_module(), registry, manifest, "cranlift")
         val llvm_result = run_manifest_pattern_rules_for_backend(manifest_test_module(), registry, manifest, "llvm")
 
-        expect(cranelift_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(cranelift_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: live Copy retained while Remove is quarantined
         expect(llvm_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "does not run high-cost manifest pattern rules when JIT budget is medium":
@@ -334,7 +334,7 @@ describe "optimizer manifest backend policy for REQ-OPJH-023 REQ-OPJH-024":
         val cranelift_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "cranelift", "high")
 
         expect(llvm_medium_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: Remove cannot delete the live Copy
         expect(cranelift_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "loads JSON pattern rules and gates execution by backend budget":
@@ -355,5 +355,5 @@ describe "optimizer manifest backend policy for REQ-OPJH-023 REQ-OPJH-024":
         val cranelift_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "cranelift", "high")
 
         expect(llvm_medium_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: JSON Remove remains loadable but non-transforming
         expect(cranelift_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
