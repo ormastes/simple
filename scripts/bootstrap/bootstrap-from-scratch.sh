@@ -5428,7 +5428,19 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   windows_include="${INCLUDE:-}"
   windows_lib="${LIB:-}"
   windows_libpath="${LIBPATH:-}"
-  windows_system_root="${SystemRoot:-}"
+  # MSYS / Git Bash exports the Windows names in UPPER CASE (SYSTEMROOT,
+  # SYSTEMDRIVE, PROGRAMDATA); the mixed-case spellings a native cmd shell has
+  # are absent, so reading only those captured EMPTY and the hermetic `env -i`
+  # below handed the toolchain a Windows-less environment.
+  windows_system_root="${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}"
+  # SystemDrive is REQUIRED for the MSVC lane. Without it every drive-rooted
+  # LIB entry fails to resolve and link.exe reports `LNK1181: cannot open
+  # input file 'kernel32.lib'` even though LIB is correct and the file exists
+  # (bisected 2026-08-24: adding SystemDrive alone flips the identical rustc
+  # invocation from exit 1 to exit 0). ProgramData is forwarded for the same
+  # class of drive-rooted resolution.
+  windows_system_drive="${SystemDrive:-${SYSTEMDRIVE:-}}"
+  windows_program_data="${ProgramData:-${PROGRAMDATA:-}}"
   windows_temp="${TEMP:-${rust_authority_tmp}}"
   rust_llvm_authority=$(
     bootstrap_stage3_resolve_llvm_build_authority \
@@ -5527,6 +5539,8 @@ run_rust_authority_cargo() {
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+        SystemDrive="${windows_system_drive}" \
+        ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
         "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
@@ -5545,6 +5559,8 @@ run_rust_authority_cargo() {
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+        SystemDrive="${windows_system_drive}" \
+        ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
         "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
@@ -5564,6 +5580,8 @@ run_rust_authority_cargo() {
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+      SystemDrive="${windows_system_drive}" \
+      ProgramData="${windows_program_data}" \
       TEMP="${windows_temp}" \
       CARGO_PROFILE_BOOTSTRAP_LTO=off "${cargo_abs}" "$@"
   else
@@ -5578,6 +5596,8 @@ run_rust_authority_cargo() {
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+      SystemDrive="${windows_system_drive}" \
+      ProgramData="${windows_program_data}" \
       TEMP="${windows_temp}" \
       "${cargo_abs}" "$@"
   fi
