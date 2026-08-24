@@ -992,3 +992,18 @@ must classify them normally; only `HirExpr`, `HirStmt`, `HirType`, and
 `HirPattern` skip their field because their explicit kind match already owns
 the payload. This keeps `DimExpr`, `Effect`, and comprehension-clause children
 and hashes complete without double-visiting carrier variants.
+
+## MEXH004 single-emission design
+
+The query and semantic match analyzers classify each arm in encounter order.
+They capture whether a wildcard existed before the arm, then select exactly one
+cause: duplicate wildcard, arm after wildcard, or duplicate exact pattern. The
+selected branch constructs the existing message, severity, hint, and query span.
+No post-pass deduplication collection is introduced.
+
+The duplicate exact-pattern membership check is last in the `elif` chain, so it
+does not scan the semantic seen-pattern array for an arm already unreachable
+after a wildcard. Tracking and suspect-name collection still run after emission;
+an early `continue` would incorrectly weaken coverage and `MEXH006`. Focused
+paired specs pin one record per arm, query line order, and semantic/query message
+precedence.

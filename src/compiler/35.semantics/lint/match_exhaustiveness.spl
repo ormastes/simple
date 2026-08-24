@@ -267,6 +267,7 @@ fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text
 
         val pat_tag = expr_get_tag(pattern)
         var pat_repr = ""
+        var duplicate_wildcard = false
 
         # Wildcard pattern: EXPR_IDENT with name "_"
         if pat_tag == EXPR_IDENT:
@@ -276,14 +277,7 @@ fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text
                     has_wildcard = true
                     wildcard_arm_pos = arm_pos
                 else:
-                    # Duplicate wildcard is unreachable
-                    warnings.push(MatchExhaustivenessWarning(
-                        code: "MEXH004",
-                        severity: "WARNING",
-                        message: "unreachable match arm: duplicate wildcard '_'",
-                        hint: "remove this arm — it can never be reached",
-                        fn_name: fn_name
-                    ))
+                    duplicate_wildcard = true
                 pat_repr = "_"
             else:
                 # Could be an enum variant name or a binding variable.
@@ -334,8 +328,18 @@ fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text
         elif pat_tag == EXPR_STRING_LIT:
             pat_repr = "str:" + expr_get_str(pattern)
 
-        # Check for unreachable: arm after wildcard
-        if has_wildcard and arm_pos > wildcard_arm_pos:
+        # Classify one reachability cause per arm. Keep the specific duplicate
+        # wildcard message, then prefer the earlier wildcard over a secondary
+        # exact-duplicate cause. The elif avoids a redundant linear scan.
+        if duplicate_wildcard:
+            warnings.push(MatchExhaustivenessWarning(
+                code: "MEXH004",
+                severity: "WARNING",
+                message: "unreachable match arm: duplicate wildcard '_'",
+                hint: "remove this arm — it can never be reached",
+                fn_name: fn_name
+            ))
+        elif has_wildcard and arm_pos > wildcard_arm_pos:
             warnings.push(MatchExhaustivenessWarning(
                 code: "MEXH004",
                 severity: "WARNING",
@@ -344,16 +348,14 @@ fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text
                 fn_name: fn_name
             ))
 
-        # Check for unreachable: duplicate exact pattern
-        if pat_repr != "" and pat_repr != "_":
-            if list_contains_text(seen_patterns, pat_repr):
-                warnings.push(MatchExhaustivenessWarning(
-                    code: "MEXH004",
-                    severity: "WARNING",
-                    message: "unreachable match arm: duplicate pattern '{pat_repr}'",
-                    hint: "remove this duplicate arm — an earlier arm already matches this pattern",
-                    fn_name: fn_name
-                ))
+        elif pat_repr != "" and pat_repr != "_" and list_contains_text(seen_patterns, pat_repr):
+            warnings.push(MatchExhaustivenessWarning(
+                code: "MEXH004",
+                severity: "WARNING",
+                message: "unreachable match arm: duplicate pattern '{pat_repr}'",
+                hint: "remove this duplicate arm — an earlier arm already matches this pattern",
+                fn_name: fn_name
+            ))
 
         if pat_repr != "":
             seen_patterns.push(pat_repr)

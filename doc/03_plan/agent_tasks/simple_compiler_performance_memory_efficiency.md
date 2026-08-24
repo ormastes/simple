@@ -149,6 +149,18 @@ current-head research reconciliation.
 - Add mirrored clean-view, policy, parse/count order, and active-source contracts.
 - Verification intentionally not run under the user's no-verify instruction.
 
+## Completed MEXH004 cause-arbitration tranche
+
+- Unified query and semantic unreachable-arm precedence.
+- Replaced independent emission branches with one mutually exclusive decision,
+  avoiding duplicate records and redundant suffix membership scans.
+- Preserved diagnostic code, severity, query span, source order, coverage, and
+  `MEXH006` collection.
+- Added paired behavioral specs and a manual covering duplicate wildcard,
+  after-wildcard, and pre-wildcard duplicate-pattern cases.
+- Updated research, architecture, and detailed performance design. Manual
+  verification intentionally not run under the user's instruction.
+
 ## Completed manifest Remove quarantine tranche
 
 - Audited schema loading, direct block/function/module adapters, and backend

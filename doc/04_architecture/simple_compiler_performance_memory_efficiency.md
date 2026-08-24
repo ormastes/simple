@@ -720,3 +720,17 @@ classification, dominance/ownership validity, and post-transform verification.
 Missing or incomplete facts fail closed and produce a structured missed/failure
 record. Legacy v1 manifests remain loadable so quarantine does not become a
 wire-format or API break.
+
+### Diagnostic cause arbitration
+
+A lint emitter owns cause arbitration before constructing a diagnostic. When
+several predicates prove the same source region unreachable, it uses stable
+precedence and creates at most one record for that code and region. It must not
+emit duplicates and repair them later with a hash set: that adds allocations,
+can disturb ordering, and hides divergent rule control flow.
+
+For `MEXH004`, query and semantic owners use duplicate wildcard, prior wildcard,
+then duplicate exact pattern. Classification captures pre-arm wildcard state so
+the first wildcard remains reachable, and continues coverage/pattern collection
+after reporting so `MEXH006` remains complete. Query retains its existing arm
+span; the semantic warning API is not expanded merely for arbitration.

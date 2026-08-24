@@ -109,24 +109,24 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text) -> 
                 elif at.contains(":"):
                     pat_name = at.split(":")[0].split("(")[0].trim()
 
-                if pat_name == "_":
-                    if not has_wildcard:
-                        has_wildcard = true
-                        wildcard_pos = arm_count
-                    else:
-                        # Duplicate wildcard — unreachable
-                        count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
-                            "unreachable match arm: duplicate wildcard '_'", format)
-                elif pat_name != "":
-                    # Check for duplicate exact pattern
-                    if arm_pattern_set.has(pat_name):
-                        count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
-                            "unreachable match arm: duplicate pattern '{pat_name}'", format)
-
-                # Check for unreachable arm after wildcard
-                if has_wildcard and arm_count > wildcard_pos:
+                # Classify once, before the first wildcard mutates state. One
+                # arm receives at most one MEXH004, with stable precedence:
+                # duplicate wildcard > earlier wildcard > duplicate pattern.
+                val duplicate_wildcard = pat_name == "_" and has_wildcard
+                val after_wildcard = has_wildcard and arm_count > wildcard_pos
+                if duplicate_wildcard:
+                    count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                        "unreachable match arm: duplicate wildcard '_'", format)
+                elif after_wildcard:
                     count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
                         "unreachable match arm after wildcard '_'", format)
+                elif pat_name != "" and pat_name != "_" and arm_pattern_set.has(pat_name):
+                    count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                        "unreachable match arm: duplicate pattern '{pat_name}'", format)
+
+                if pat_name == "_" and not has_wildcard:
+                    has_wildcard = true
+                    wildcard_pos = arm_count
 
                 if pat_name != "" and pat_name != "_":
                     arm_patterns.push(pat_name)

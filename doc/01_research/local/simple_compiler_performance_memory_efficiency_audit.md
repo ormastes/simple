@@ -3297,3 +3297,19 @@ effect receipts, dominance and ownership checks, post-rewrite MIR verification,
 positive and negative witnesses, and a structured
 `OPT-MANIFEST-REMOVE-QUARANTINED` missed/failure diagnostic. No manual runtime
 measurement or verification was run under the user's instruction.
+
+### Duplicate `MEXH004` emission
+
+Both the text-query and semantic match-exhaustiveness paths independently
+reported overlapping reachability causes. A second wildcard produced a
+duplicate-wildcard warning and an after-wildcard warning; an exact duplicate
+after a wildcard produced both after-wildcard and duplicate-pattern warnings.
+One arm could therefore allocate, retain, serialize, and display two records,
+while the semantic path also performed a needless linear seen-pattern scan.
+
+Each path now classifies an arm once with shared precedence: duplicate wildcard,
+then earlier wildcard, then duplicate exact pattern. Mutually exclusive branches
+emit at most one record without a diagnostic-deduplication set. Query spans and
+source order remain unchanged. The semantic suffix after a wildcard uses direct
+control flow rather than duplicate scans, while coverage and `MEXH006`
+collection continue. No runtime measurement or manual verification was run.
