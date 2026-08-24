@@ -2,6 +2,63 @@
 
 Status: open, unsafe prerequisite draft rejected and removed, unverified.
 
+## 2026-08-24 provider-wiring audit
+
+A direct wiring pass was stopped before source edits because every current
+provider boundary loses evidence required by the fence:
+
+- `posix_close_task_fds_with_backends(owner)` returns only the number of
+  successful closes. It deliberately retains a task FD context when a backend
+  close fails, but exposes neither the surviving descriptor identities nor a
+  terminal/retryable/quarantined receipt. A count cannot distinguish an empty
+  context from an attempted partial close and therefore cannot complete a
+  cleanup attempt.
+- `server_data_launch_grant_revoke_task_lifecycle_v1` returns a Boolean and
+  treats absent rows as success. The namespace owner has a helper that first
+  clears its lease slot and then calls grant revocation, but that helper has no
+  live source caller: both scheduler exit implementations call grant
+  revocation directly. An Active namespace lease can therefore survive while
+  its launch-grant row is removed and the TCB becomes `Zombie`. Even the
+  unused helper has no joint receipt proving both removals for one attempt
+  identity; an unlock failure can make either transition indeterminate.
+- `CapabilityManager.revoke_all_for_task` mutates a value-threaded IPC manager
+  and returns no receipt. The scheduler-only exit helpers do not own that IPC
+  manager, while `_handle_exit_state` performs cleanup separately before it
+  calls `Scheduler.exit_task`. Consequently there are currently two exit
+  cleanup paths and no single owner that can retain a provider attempt across
+  retries.
+- DBD durability and close state are fields of the filesystem-launched
+  `DbdServer` user-process owner. The kernel scheduler has no task/lifecycle-
+  authenticated request/receipt channel to that owner. Importing the app into
+  the kernel would invert the layer boundary and still would operate on a
+  value copy rather than the live server instance.
+
+The safe integration order is therefore:
+
+1. Add provider-owned, bounded attempt adapters beside FD, namespace/grant,
+   capability, and DBD owners. Each adapter accepts the opaque fence target,
+   deduplicates the exact attempt ID before dispatch, and returns an exact
+   completion or provider-authenticated cancellation/quiescence ACK. It must
+   retain retry/quarantine state without inferring success from absence.
+2. Add a bounded kernel-to-DBD exit-cleanup channel whose request binds task
+   ID, lifecycle generation, cleanup transaction generation, and attempt
+   ordinal. DBD must acknowledge only after all admitted persistence work is
+   durable or after its own authenticated quarantine owner has retained the
+   exact journal state.
+3. Move all exit initiation into one scheduler-owned pre-Zombie transaction.
+   Both syscall exit and direct scheduler exit must enter that transaction;
+   neither may call provider cleanup independently. Keep the TCB non-Zombie
+   while any provider is issued, started, cancellation-pending, retryable, or
+   indeterminate.
+4. Publish `Zombie` only after exact terminal receipts from every required
+   provider. Retry exhaustion is a bounded parked/quarantined scheduler state,
+   not success. PID/lifecycle identity remains reserved until reap consumes
+   the transaction and all provider receipts.
+
+No source adapter was retained from this audit: wrapping the current Boolean,
+count, or void results in `provider_cleanup_complete_v1` would falsely upgrade
+ambiguous cleanup into authenticated success.
+
 Update: the generic bounded provider-side transaction prerequisite now exists
 in `src/os/kernel/scheduler/provider_cleanup_attempt_fence_v1.spl`. It provides
 provider-issued opaque attempts, explicit side-effect start, exact idempotent

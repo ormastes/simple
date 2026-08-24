@@ -64,6 +64,19 @@ x86-32 execution must remain blocked before loader authority consumption.
   transfer bound to the exact TCB lifecycle, followed by terminal reap. The
   locator exposes neither the page-directory address nor mapper teardown
   authority.
+  A three-cycle static review of the transfer owner was completed and its
+  unaccepted draft was reverted. The first two reviews required terminal
+  rollback (so a copyable stale handle cannot revive), complete comparison of
+  the mapping receipt, and a scheduler-owned reservation rather than
+  caller-asserted task scalars. The bounded reservation registry closed those
+  issues, but the final review found two remaining lifecycle requirements:
+  `Reserved` entries need an exact slot/generation/nonce cancellation path that
+  burns the allocated task identity, otherwise four abandoned preparations
+  permanently exhaust the owner; and binding validation must compare the
+  supplied admission handle with the registry-retained handle before asking
+  the loader owner to validate entry material. Resume by implementing both in
+  the same owner transaction, quarantining indeterminate cancellation unlocks,
+  then obtain a fresh independent review before adding a present-handle path.
 
 Until those owners join the scheduler transaction,
 `executable_target_dispatch_v1` must retain
