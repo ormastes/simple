@@ -122,3 +122,180 @@ M-series with `--jobs` defaulting to 5. `build/` in the worktree is 3.8 GB.
   it was reachable and none of it was attempted.
 * Whether fixing the Stage-2 `hc_enc_hir_module` truncation would clear this.
 * The `--no-mcp` fallback was **never** used, because Stage 5 was never reached.
+
+## RESOLVED 2026-08-24 — an Option HANDLE was stored in `HirStmtKind.Let.type_`
+
+The crash attribution recorded above is now **first-party and proven**, and it
+is **not** the i32-truncation family the previous section hypothesised.
+
+### First-party backtrace
+
+The `env -i` sandbox was reproduced faithfully (the transcript's five host-env
+vars plus all 23 `explicit-env` records, notably `SIMPLE_BINARY`) and the
+compiler was launched under `lldb --batch`. The replay tracked the real run —
+0 `HIR lowering error` lines, same phase order — and faulted identically:
+
+```
+EXC_BAD_ACCESS (code=1, address=0xf198715900000000)
+ #0 substitute_stmt + 1520          (ldr x9, [x8];  x25 = 0xf198715900000001)
+ #1 substitute_block + 1416
+ #2 canonicalize_template + 4796
+ #3 MonomorphizationPass.collect_generics + 428
+ #4 MonomorphizationPass.process_modules + 452
+ #5 run_monomorphization_with_diagnostics + 32
+ #6 CompilerDriver.monomorphize_impl + 1288
+ #7 CompilerDriver.compile + 3216
+ #8 run_native_build_bootstrap + 1324
+```
+
+### The faulting word, read out of the core
+
+Walking the live objects in the saved core (`process save-core`):
+
+```
+x23 = 0xaccbc8041 -> HirStmtKind enum @0xaccbc8040
+    word0 = 0x0000001800000007   kind = 0x07 = RT_VALUE_HEAP_ENUM
+    word1 = 0x80f86b381ed418e2   enum_id 0x1ed418e2 (== the enum-id immediate
+                                 materialised in substitute_stmt's disassembly)
+    word2 = 0xaccbc8021 -> payload array (len 3 = Let(symbol, type_, init))
+      elements = [0xacc72f171 sym, 0xaccbc3e41 ty, 0xaccdab261 init]
+
+ty = 0xaccbc3e41 -> object @0xaccbc3e40
+    word0 = 0x0000001800000007   kind = 0x07 = AN ENUM, not a HirType struct
+    word1 = 0xf198715900000001   *** THE FAULTING WORD ***  enum_id = 1 = Option
+    word2 = 0xacc72e6e1 -> the real HirType {kind: heap-ref, span: heap-ref}
+```
+
+`HirStmtKind.Let`'s second slot is declared `type_: HirType`
+(`hir_definitions.spl:765`), **not** `HirType?`. It was holding a
+`Some(HirType)` **Option handle**. `substitute_stmt`'s
+`case HirStmtKind.Let(sym, ty, init)` CoW-clones `ty` as a 2-word
+`HirType{kind, span}`: it takes the enum header's word0 as `kind` and word1 —
+`enum_id | (variant << 32)`, i.e. `0xf1987159_00000001` — as `span`, then
+deep-clones that as a 6-word `Span` (`rt_alloc #0x30`) behind nothing but the
+`tag == HEAP && (v & ~7) != 0` shape test. `enum_id == 1` makes the word
+HEAP-tagged and non-zero, so the guard passes and `0xf198715900000000` is
+dereferenced.
+
+### Why it is NOT the i32-truncation family
+
+A census of the admitted Stage-2 binary (`objdump -d`, 64-bit register
+operands) finds the wrong 32-bit flag-setting mask
+`ands xN, xN, #0xfffffff8` at exactly **7** sites, **all** of them inside
+`hc_enc_hir_module` — the defect recorded in
+`stage2_hir_codec_segv_is_i32_truncated_heap_ref_2026-08-24.md`.
+`substitute_stmt` uses the **correct** 64-bit mask
+(`#0xfffffffffffffff8`). The mask is right here; the **value** is an Option
+handle. The remaining 367 32-bit `and` sites are all in vendored LLVM/C++.
+
+### Producer and fix
+
+`src/compiler/20.hir/hir_lowering/statements.spl` built one local as an Option
+and passed it to two consumers with different contracts:
+
+```
+val hir_type = if type_.?:
+    Some(self.lower_type(...))
+else:
+    nil
+val symbol = self.symbols.define(name, ..., hir_type, ...)   # wants HirType?  OK
+HirStmtKind.Let(symbol, hir_type, hir_init)                  # wants HirType   BUG
+```
+
+`SymbolTable.define` (`hir_types.spl:316`) genuinely takes `HirType?`. Four
+sites did this: `StmtKind.Val` and `StmtKind.Var` in the `match`, and their two
+early-return twins (`v_hir_type`, `vr_hir_type`). The fix computes the bare
+`HirType` once and wraps it for the symbol table only, so the HIR node stores
+the bare value — matching every other `HirStmtKind.Let(...)` site in the tree,
+which pass a bare value or literal `nil`.
+
+### Minimal reproducer (seconds, not 9 minutes)
+
+Against the *unfixed* Stage 2, this six-line file faults identically —
+same symbol, same `+1520`, same `0xf198715900000000`:
+
+```
+fn id<T>(v: T) -> T:
+    val x: T = v
+    x
+
+fn main():
+    print(id(1))
+```
+
+Any generic template whose body contains a **type-annotated** `val`/`var` is
+enough: `collect_generics` canonicalizes every template, and
+`canonicalize_template` walks its body.
+
+### Family
+
+This is a fourth surfacing of "a wrong-shaped value sits in a slot and a shape
+test lets it through", alongside `lower_hir_block` (`7c453e7b076`),
+`hc_enc_hir_module`, and the `if val` binder (`9854efed570`). It shares the
+`if val` case's *consequence* — an Option handle where the payload belongs, so
+field reads land on the enum header — with a different producer: here the
+`Some(...)` is explicit in the source, not a lost binder marker.
+
+`rt_heap_ref_wellformed` cannot catch this class: it accepts any HEAP-tagged
+word whose payload is `>= 4096`, and `0xf198715900000000` is. Rejecting
+non-canonical addresses (`payload >= 1<<47`) would have caught it; that
+hardening is deliberately NOT bundled into this producer fix.
+
+### Verification (measured, this lane)
+
+A cold Stage 2 was rebuilt from the fixed source (`--fresh-cache`,
+`750 compiled, 0 cached, 0 failed`, 845 s compile), sha256 `e6761bfea2d9…` —
+distinct from the crashing `3e535c58…`.
+
+**Two earlier warm rebuilds produced a BYTE-IDENTICAL binary** (`cmp` rc=0,
+`3 compiled, 747 cached`) even though a deliberate syntax-error probe proved
+the build re-parses the edited file "during discovery". The Simple object cache
+did not invalidate on the content change; only `--fresh-cache` picked the edit
+up. Anyone validating a compiler-source fix on this lane must force a cold
+cache or they will measure the OLD binary and conclude the fix does nothing.
+That `Some(...)` really does emit code is independently confirmed: `lower_hir_stmt`
+contains 44 `rt_enum_new` call sites.
+
+On the fixed Stage 2 the reproducer now reports **`phase4:monomorphize:done`**
+and proceeds to `phase5:mode_dispatch` / `aot:lower_to_mir`. The monomorphize
+SIGSEGV is gone.
+
+### Still open — the SAME family, one phase later
+
+The reproducer now faults at the identical address `0xf198715900000000` in MIR
+lowering, which was previously unreachable:
+
+```
+ #0 MirLowering.lower_type + 200        (ldr x10, [x9])
+ #1 MirLowering.lower_call + 14968      (`ret_type = self.lower_type(callee.type_)`)
+ #2 MirLowering.lower_expr + 1580
+ #3 MirLowering.lower_bootstrap_print_call + 96
+ ...
+ #9 bootstrap_lower_flat_hir_module_to_mir + 2312
+ #12 CompilerDriver.aot_compile + 568
+```
+
+`HirExpr` uses the same desugared shape as `HirBlock` (`has_type_: bool` +
+`type_: HirType`), and `switch_operators_calls.spl:4781` guards correctly on
+`callee.has_type_`. So an Option handle was **stored into** `type_` by some
+producer; a grep for `type_: Some(` / `.type_ = Some(` finds nothing, so the
+producer is an Option-typed *variable* flowing into the field rather than a
+literal `Some(...)`. NOT yet located.
+
+### Latent siblings of the same shape, NOT touched
+
+Explicit `Some(...)` flowing into a non-Option HIR field elsewhere — each needs
+its own evidence before being changed, and none is on the path fixed here:
+
+* `_Expressions/expression_support.spl:635` — `HirBlock(..., value: Some(...), ...)`
+  (`value: HirExpr` gated by `has: bool`)
+* `statements.spl:132` — `lower_hir_assign_op_opt` into `Assign`'s `op: HirAssignOp`
+* `statements.spl:622` — `val yield_value = Some(...)`
+* `_Items/trait_impl_lowering.spl:352` — `Some(self.lower_type(at.default))`
+
+The generated codec (`hir_codec.spl:4695`) writes
+`var f_type_: HirType? = nil; ... HirStmtKind.Let(f_symbol, f_type_, f_init)`,
+which LOOKS like the same bug but is not: assigning a bare value to an
+optional-typed variable does not box (`hc_dec_hir_stmt_kind` contains exactly 5
+`rt_enum_new`, one per HirStmtKind variant). Only an explicit `Some(v)` boxes.
+Do not "fix" the generated codec on the strength of its spelling.
