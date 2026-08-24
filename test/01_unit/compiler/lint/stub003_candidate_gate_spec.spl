@@ -1,0 +1,69 @@
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.tools.lint.main.{Linter}
+use compiler.tools.lint._LintMain.lint_checks.{
+    lint_line_may_contain_pass_todo}
+
+describe "STUB003 virtual-whitespace candidate gate":
+    it "recognizes the exact legacy ASCII space and tab projection":
+        expect(lint_line_may_contain_pass_todo("pass_todo")).to_be(true)
+        expect(lint_line_may_contain_pass_todo(
+            "p a s s _ t o d o")).to_be(true)
+        expect(lint_line_may_contain_pass_todo(
+            "x:\tp a s s _ t o d o(value)")).to_be(true)
+        expect(lint_line_may_contain_pass_todo("pass_tod")).to_be(false)
+        expect(lint_line_may_contain_pass_todo("pass\u{00a0}_todo")).to_be(false)
+
+    it "preserves production detection and test-path suppression":
+        var production = Linter.new(false)
+        val production_results = production.lint_source(
+            "/tmp/stub_candidate.spl", "p a s s _ t o d o\n")
+        var production_count = 0
+        for result in production_results:
+            if result.lint.code == "STUB003": production_count = production_count + 1
+        expect(production_count).to_equal(1)
+
+        var shapes = Linter.new(false)
+        val shape_results = shapes.lint_source(
+            "/tmp/stub_shapes.spl",
+            "pass_todo(\"why\")\nlabel: pass_todo\nval x = pass_todo\n" +
+            "\u{e9}: pass_todo\nxpass_todo\nval text_value = \"xpass_todo\"\n")
+        var shape_count = 0
+        for result in shape_results:
+            if result.lint.code == "STUB003": shape_count = shape_count + 1
+        expect(shape_count).to_equal(4)
+
+        var test_linter = Linter.new(false)
+        val test_results = test_linter.lint_source(
+            "/tmp/stub_candidate_spec.spl", "p a s s _ t o d o\n")
+        var test_count = 0
+        for result in test_results:
+            if result.lint.code == "STUB003": test_count = test_count + 1
+        expect(test_count).to_equal(0)
+
+    it "keeps STUB003 before adjacent TODO diagnostics":
+        var linter = Linter.new(false)
+        val results = linter.lint_source(
+            "/tmp/stub_order.spl", "# TODO: pass_todo\n")
+        var stub_position = -1
+        var todo_position = -1
+        var position = 0
+        for result in results:
+            if result.lint.code == "STUB003": stub_position = position
+            if result.lint.code == "T001": todo_position = position
+            position = position + 1
+        expect(stub_position).to_be_greater_than(-1)
+        expect(todo_position).to_be_greater_than(stub_position)
+
+    it "normalizes only after the allocation-free candidate gate":
+        val source = file_read(
+            "src/compiler/90.tools/lint/_LintMain/lint_checks.spl")
+        val gate = source.index_of(
+            "if lint_line_may_contain_pass_todo(trimmed):")
+        val normalization = source.index_of(
+            "var normalized = trimmed.replace(\" \", \"\")", gate)
+        expect(gate).to_be_greater_than(-1)
+        expect(normalization).to_be_greater_than(gate)
+        expect(source).to_contain("value.byte_at(source_at)")
+        expect(source).to_contain("val target_first = target.byte_at(0)")
+        expect(source).to_contain("value.byte_at(start) == target_first")

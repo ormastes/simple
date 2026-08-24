@@ -24,6 +24,29 @@ fn lint_rule_code_from_easyfix_id(id: text) -> text:
         return id
     id.slice(code_start, code_end)
 
+fn lint_line_may_contain_pass_todo(value: text) -> bool:
+    """Match pass_todo in the virtual stream formed by deleting ASCII space/tab."""
+    val target = "pass_todo"
+    val target_len = target.len()
+    val target_first = target.byte_at(0)
+    val value_len = value.len()
+    var start = 0
+    while start < value_len:
+        if value.byte_at(start) == target_first:
+            var source_at = start + 1
+            var target_at = 1
+            while source_at < value_len and target_at < target_len:
+                val byte = value.byte_at(source_at)
+                source_at = source_at + 1
+                if byte == 32 or byte == 9:
+                    continue
+                if byte != target.byte_at(target_at):
+                    break
+                target_at = target_at + 1
+            if target_at == target_len: return true
+        start = start + 1
+    false
+
 # I/O imports
 use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_write)
 use std.nogc_sync_mut.io.dir_ops (is_dir)
@@ -768,17 +791,18 @@ impl Linter:
                             self.results.push(LintRunResult.new(path, line_num, 0, lint))
 
         # These checks examine content (comments, strings) — always run
-        var normalized = trimmed.replace(" ", "")
-        normalized = normalized.replace("\t", "")
         var has_production_pass_todo = false
-        if normalized == "pass_todo":
-            has_production_pass_todo = true
-        if normalized.starts_with("pass_todo("):
-            has_production_pass_todo = true
-        if normalized.contains(":pass_todo"):
-            has_production_pass_todo = true
-        if normalized.contains("=pass_todo"):
-            has_production_pass_todo = true
+        if lint_line_may_contain_pass_todo(trimmed):
+            var normalized = trimmed.replace(" ", "")
+            normalized = normalized.replace("\t", "")
+            if normalized == "pass_todo":
+                has_production_pass_todo = true
+            if normalized.starts_with("pass_todo("):
+                has_production_pass_todo = true
+            if normalized.contains(":pass_todo"):
+                has_production_pass_todo = true
+            if normalized.contains("=pass_todo"):
+                has_production_pass_todo = true
         if not is_test_like_file(path) and has_production_pass_todo:
             val lint = LintDiag.new("STUB003", LintLevel.Deny, LintCategory.Warning,
                 "Explicit pass_todo placeholder in production code")
