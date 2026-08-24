@@ -1,0 +1,191 @@
+#!/bin/sh
+# Fail-closed gate for the mission-critical ALLOCATION ADMISSION port of the
+# Simple compiler, loader and interpreter.
+#
+# What it proves: `compiler.common.mission_critical.alloc_admission` and
+# `compiler.semantics.noalloc_checker.check_steady_state_gate_admitted`
+# actually RUN and DISCRIMINATE -- the three declared domains are admitted in
+# normal context, everything outside them is refused, a critical execution
+# context (kernel/ISR) refuses even an admitted domain, a zero context mask is
+# an invalid request, and the unadmitted baseline gate is unchanged.
+#
+# What it does NOT prove: that allocation is bounded at runtime. The admitted
+# subsystems allocate on the ordinary GC heap; this is an admission policy,
+# not an enforced quota. See the HONESTY LIMIT note in
+# src/compiler/00.common/mission_critical/alloc_admission.spl.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> case(s) checked, ...        exit 0   (n is always > 0)
+#   FAIL  — ...                             exit 1
+#   ERROR — nothing was checked (<reason>)  exit 2
+# A run that compared 0 cases is ERROR, never a pass. --selftest runs FIRST
+# and is FATAL.
+set -u
+LC_ALL=C
+export LC_ALL
+
+root=$(cd "$(dirname "$0")/../.." && pwd)
+probe="$root/scripts/check/mci_alloc_admission_probe.spl"
+simple_bin="${SIMPLE_BIN:-$root/bin/simple}"
+
+# The expected receipt table. Every line must be produced by the probe, and
+# the probe must produce no `case=` line that is not listed here.
+expected_table() {
+    cat <<'EOF'
+case=compiler_normal domain=compiler admitted=true code=admitted
+case=loader_normal domain=loader admitted=true code=admitted
+case=interpreter_normal domain=interpreter admitted=true code=admitted
+case=std_prefixed_loader domain=loader admitted=true code=admitted
+case=outside_domain domain= admitted=false code=unknown_domain
+case=empty_module domain= admitted=false code=unknown_domain
+case=loader_kernel domain=loader admitted=false code=forbidden_context
+case=interpreter_isr domain=interpreter admitted=false code=forbidden_context
+case=zero_context domain= admitted=false code=invalid_request
+case=dot_boundary domain=compiler
+case=domains names=compiler;loader;interpreter; count=3 sealed_nonzero=3
+case=seal critical=true mission_critical=true moderate=false
+case=gate symbols=3 baseline=3 admitted_normal=2 admitted_kernel=3
+case=gate_remaining names=app.tool.slurp;never.registered;
+EOF
+}
+
+# compare_tables EXPECTED_FILE ACTUAL_FILE
+# Sets COMPARE_CHECKED (cases compared) and COMPARE_DIFF (offending lines).
+# Exit status: 0 identical, 1 mismatch, 2 nothing compared.
+compare_tables() {
+    cmp_expected=$1
+    cmp_actual=$2
+    COMPARE_CHECKED=$(/bin/grep '^case=' "$cmp_expected" 2>/dev/null | wc -l | tr -d ' ')
+    cmp_actual_count=$(/bin/grep '^case=' "$cmp_actual" 2>/dev/null | wc -l | tr -d ' ')
+    [ -n "$COMPARE_CHECKED" ] || COMPARE_CHECKED=0
+    [ -n "$cmp_actual_count" ] || cmp_actual_count=0
+    if [ "$COMPARE_CHECKED" -eq 0 ] || [ "$cmp_actual_count" -eq 0 ]; then
+        COMPARE_CHECKED=0
+        COMPARE_DIFF="no case= lines"
+        return 2
+    fi
+    COMPARE_DIFF=$(diff "$cmp_expected" "$cmp_actual" 2>/dev/null | /bin/grep '^[<>]' | tr '\n' ' ')
+    if [ -n "$COMPARE_DIFF" ]; then
+        return 1
+    fi
+    COMPARE_DIFF=""
+    return 0
+}
+
+selftest() {
+    st_dir=$(mktemp -d) || return 1
+    st_rc=0
+
+    expected_table > "$st_dir/exp"
+
+    # Fixture 1 — an identical table must compare clean.
+    cp "$st_dir/exp" "$st_dir/same"
+    compare_tables "$st_dir/exp" "$st_dir/same"
+    st_status=$?
+    if [ "$st_status" -ne 0 ]; then
+        echo "selftest: identical tables must PASS (got status $st_status)" >&2
+        st_rc=1
+    fi
+
+    # Fixture 2 — a flipped admitted verdict must FAIL. This replays the exact
+    # defect the gate exists to catch: allocation silently refused for a domain
+    # the port admits.
+    sed 's/^case=loader_normal .*/case=loader_normal domain=loader admitted=false code=unknown_domain/' \
+        "$st_dir/exp" > "$st_dir/flipped"
+    compare_tables "$st_dir/exp" "$st_dir/flipped"
+    st_status=$?
+    if [ "$st_status" -ne 1 ]; then
+        echo "selftest: a flipped admission verdict must FAIL (got status $st_status)" >&2
+        st_rc=1
+    fi
+
+    # Fixture 3 — a widened admission (something outside the declared domains
+    # becoming admitted) must FAIL. The opposite direction of fixture 2.
+    sed 's/^case=outside_domain .*/case=outside_domain domain=compiler admitted=true code=admitted/' \
+        "$st_dir/exp" > "$st_dir/widened"
+    compare_tables "$st_dir/exp" "$st_dir/widened"
+    st_status=$?
+    if [ "$st_status" -ne 1 ]; then
+        echo "selftest: a widened admission must FAIL (got status $st_status)" >&2
+        st_rc=1
+    fi
+
+    # Fixture 4 — a regressed BASELINE gate must FAIL. The unadmitted
+    # `check_steady_state_gate` must stay byte-identical in behaviour; if
+    # admission leaked into it, baseline would drop below 3.
+    sed 's/^case=gate .*/case=gate symbols=3 baseline=2 admitted_normal=2 admitted_kernel=3/' \
+        "$st_dir/exp" > "$st_dir/baseline"
+    compare_tables "$st_dir/exp" "$st_dir/baseline"
+    st_status=$?
+    if [ "$st_status" -ne 1 ]; then
+        echo "selftest: a regressed unadmitted baseline must FAIL (got status $st_status)" >&2
+        st_rc=1
+    fi
+
+    # Fixture 5 — an empty probe output must compare 0 cases, forcing the
+    # caller to ERROR rather than pass vacuously.
+    : > "$st_dir/empty"
+    compare_tables "$st_dir/exp" "$st_dir/empty"
+    st_status=$?
+    if [ "$st_status" -ne 2 ] || [ "$COMPARE_CHECKED" -ne 0 ]; then
+        echo "selftest: empty probe output must yield 0 compared cases (status $st_status, checked $COMPARE_CHECKED)" >&2
+        st_rc=1
+    fi
+
+    rm -rf "$st_dir"
+    return "$st_rc"
+}
+
+selftest
+selftest_rc=$?
+if [ "$selftest_rc" -ne 0 ]; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 5 case(s) checked, selftest fixtures only (no probe executed)"
+    exit 0
+fi
+
+if [ ! -f "$probe" ]; then
+    echo "ERROR — nothing was checked (probe missing: $probe)"
+    exit 2
+fi
+if [ ! -x "$simple_bin" ]; then
+    echo "ERROR — nothing was checked (no runnable simple binary at $simple_bin)"
+    exit 2
+fi
+
+work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+expected_table > "$work/expected"
+
+# Exit status read DIRECTLY into a variable on the line after the invocation.
+# Never through a pipe: a pipeline's $? is the last element's status.
+( cd "$root" && SIMPLE_TIMEOUT_SECONDS=0 "$simple_bin" run "$probe" ) > "$work/raw" 2>"$work/err"
+probe_rc=$?
+if [ "$probe_rc" -ne 0 ]; then
+    echo "probe stderr: $(tail -3 "$work/err" 2>/dev/null | tr '\n' ' ')" >&2
+    rm -rf "$work"
+    echo "ERROR — nothing was checked (probe exited $probe_rc)"
+    exit 2
+fi
+
+/bin/grep '^case=' "$work/raw" > "$work/actual" 2>/dev/null
+
+compare_tables "$work/expected" "$work/actual"
+status=$?
+checked=$COMPARE_CHECKED
+diff_lines=$COMPARE_DIFF
+rm -rf "$work"
+
+if [ "$status" -eq 2 ] || [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked (probe produced no case= lines)"
+    exit 2
+fi
+if [ "$status" -ne 0 ]; then
+    echo "FAIL — $checked case(s) checked, admission receipts diverged: $diff_lines"
+    exit 1
+fi
+echo "PASS — $checked case(s) checked, 3 domain(s) admitted (compiler, loader, interpreter), all refusals intact, unadmitted baseline unchanged"
+exit 0

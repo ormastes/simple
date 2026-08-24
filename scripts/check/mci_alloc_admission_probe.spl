@@ -1,0 +1,78 @@
+# Probe for scripts/check/check-mci-alloc-admission.shs.
+#
+# Executes the mission-critical allocation-admission policy
+# (`compiler.common.mission_critical.alloc_admission`) and the admitted
+# steady-state gate (`compiler.semantics.noalloc_checker`) for real, and
+# prints one deterministic `case=` line per case. The gate compares those
+# lines against its own expected table; it never re-derives them.
+#
+# Every line is produced by a real call. Nothing here is hardcoded output.
+
+use compiler.common.mission_critical.alloc_admission.*
+use compiler.semantics.noalloc_checker.*
+use std.nogc_sync_mut.mission_critical.domain_arena_v1.{
+    ARENA_CONTEXT_NORMAL, ARENA_CONTEXT_KERNEL, ARENA_CONTEXT_ISR
+}
+
+fn emit(case_id: text, module_path: text, context_mask: u64):
+    val a = mci_alloc_admit(module_path, context_mask)
+    var admitted = "false"
+    if a.admitted:
+        admitted = "true"
+    print "case={case_id} domain={a.domain_name} admitted={admitted} code={a.code.name()}"
+
+# --- admission decisions -----------------------------------------------------
+emit("compiler_normal", "compiler.hir.hir_lowering", ARENA_CONTEXT_NORMAL)
+emit("loader_normal", "compiler.loader.object_provider", ARENA_CONTEXT_NORMAL)
+emit("interpreter_normal", "compiler.frontend.core.interpreter.eval_ops", ARENA_CONTEXT_NORMAL)
+emit("std_prefixed_loader", "std.compiler.loader.segment_mapper", ARENA_CONTEXT_NORMAL)
+emit("outside_domain", "app.io.cli_lint_commands", ARENA_CONTEXT_NORMAL)
+emit("empty_module", "", ARENA_CONTEXT_NORMAL)
+emit("loader_kernel", "compiler.loader.object_provider", ARENA_CONTEXT_KERNEL)
+emit("interpreter_isr", "compiler.frontend.core.interpreter.eval_ops", ARENA_CONTEXT_ISR)
+emit("zero_context", "compiler.loader.object_provider", 0u64)
+
+# Dot-boundary discipline: `compiler.loader_stub` must NOT resolve to the
+# loader domain (it falls back to the enclosing `compiler` domain).
+print "case=dot_boundary domain={mci_alloc_domain_for_module("compiler.loader_stub").domain_name}"
+
+# --- declared domain set -----------------------------------------------------
+val domains = mci_alloc_domains()
+var domain_names = ""
+var sealed_count = 0
+for d in domains:
+    domain_names = domain_names + d.domain_name + ";"
+    if d.profile.sealed and d.profile.quota_bytes > 0u64:
+        sealed_count = sealed_count + 1
+print "case=domains names={domain_names} count={domains.len()} sealed_nonzero={sealed_count}"
+
+# --- the seal predicate itself ----------------------------------------------
+var critical_seals = "false"
+if steady_state_gate_active("critical", false):
+    critical_seals = "true"
+var mission_critical_seals = "false"
+if steady_state_gate_active("mission-critical", false):
+    mission_critical_seals = "true"
+var moderate_seals = "false"
+if steady_state_gate_active("moderate", false):
+    moderate_seals = "true"
+print "case=seal critical={critical_seals} mission_critical={mission_critical_seals} moderate={moderate_seals}"
+
+# --- the admitted steady-state gate -----------------------------------------
+# Three unbounded/unknown symbols: one inside an admitted domain, one outside
+# it, one never registered. The unadmitted baseline must reject all three; the
+# admitted gate in NORMAL context must reject exactly the two that are not
+# admitted; in KERNEL context it must reject all three again.
+var manifest = NoallocCapabilityManifest.new()
+manifest.register("compiler.loader.map_segment", false, true, "compiler.loader.segment_mapper")
+manifest.register("app.tool.slurp", false, true, "app.tool")
+val symbols = ["compiler.loader.map_segment", "app.tool.slurp", "never.registered"]
+val baseline = check_steady_state_gate(manifest, symbols)
+val admitted_normal = check_steady_state_gate_admitted_normal(manifest, symbols)
+val admitted_kernel = check_steady_state_gate_admitted(manifest, symbols, ARENA_CONTEXT_KERNEL)
+print "case=gate symbols={symbols.len()} baseline={baseline.len()} admitted_normal={admitted_normal.len()} admitted_kernel={admitted_kernel.len()}"
+
+var remaining = ""
+for v in admitted_normal:
+    remaining = remaining + v.fn_name + ";"
+print "case=gate_remaining names={remaining}"
