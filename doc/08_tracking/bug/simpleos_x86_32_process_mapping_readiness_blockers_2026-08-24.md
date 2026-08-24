@@ -29,6 +29,17 @@ x86-32 execution must remain blocked before loader authority consumption.
   nonblocking try-lock/fail-stop primitive or an owner protocol that cannot
   strand waiters is available; committed provisional leaves must never be
   returned to callers.
+  A subsequent static review established that merely exposing the existing
+  hosted `spl_mutex_try_lock` through the scalar Pure Simple facade is not that
+  primitive: the SimpleOS-linked `src/os/kernel/net/thread_shim.spl` currently
+  implements mutex try-lock and unlock as unconditional success, so copied
+  owners can concurrently enter on the actual target. A callback wrapper also
+  cannot make page-table registration or mapping provisional merely by
+  discarding its return value after unlock failure. The target backend needs
+  shared atomic lock state, and the page-root transaction needs an authoritative
+  rollback/quarantine owner (including the case where unlock released but
+  reported failure) before a receipt may escape. The rejected wrapper and its
+  hosted-only specs were reverted; no target exclusion claim is retained.
 - Classic two-level non-PAE i386 has no NX bit. A future mapping receipt must
   not claim writable-vs-executable hardware isolation without a selected
   PAE/NX policy or an explicitly accepted non-NX security row.
