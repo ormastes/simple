@@ -336,3 +336,16 @@ snapshot carrying raw text, trimmed text, and physical line
 number, then projects separate call and declaration finding arrays. Category
 ordering remains a caller contract: SFFI009 precedes SFFI010. Standalone public
 string APIs remain compatibility adapters and do not share process-global state.
+
+### Allocation-free generated HIR traversal boundary
+
+Layer 20 owns a generated `HirChildFrame` union containing the four base HIR
+carriers and every transparent wrapper reachable from them. A layer-20 sink
+accepts frames in reverse schema order; it has no knowledge of lint facts or
+loop depth. Layer 35 owns the work stack, attaches analysis context to each
+frame, analyzes only base-carrier frames, and expands wrapper frames without
+counting them. This keeps dependency direction downward, preserves current
+forward preorder under LIFO execution, and eliminates per-node child arrays
+and recursive wrapper flattening. Legacy `hir_children_of*` functions remain
+allocating compatibility adapters until downstream usage and freshness gates
+prove migration complete.
