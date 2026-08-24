@@ -235,6 +235,29 @@ must_not_contain "seed: no eager coverage file per decision"      "$ROOT/src/com
 must_contain     "seed: CowEnv frame maps on ahash"               "$ROOT/src/compiler_rust/compiler/src/value.rs" 'pub(crate) type FrameMap<K, V> = HashMap<K, V, ahash::RandomState>;'
 must_contain     "seed: shadow capture tests prior value first"   "$ROOT/src/compiler_rust/compiler/src/interpreter/block_exec.rs" 'if let Some(value) = prior_value.as_ref() {'
 
+# --- DEPTAIL (2026-08-24, 8th session of the same record): the explicit- and
+# declared-dependency SWEEPS were already one-per-phase facts
+# (`explicit_dep_target_memo`), but the TAIL that ran after a memo HIT -- a
+# register_imported_symbol, a lookup_or_invalid and two bind_qualified_type
+# calls -- still ran on every repeat. The real 662-module closure's entry
+# module issued 2,670 explicit-dependency calls against only 280 real sweeps,
+# so ~2,390 re-ran a tail that had already written exactly those bindings;
+# explicit_dep was the largest EXCLUSIVE slot (14,065 ms of 38,500 ms of
+# imports) and declared_dep was second (7,893 ms). A per-importer memo skips
+# the repeat. It is deliberately NOT phase-invariant (the tail writes into the
+# importing module's table, which begin_module wipes) and records a key only
+# after the bind actually happened, so an unresolved tail stays retryable and
+# the ambiguity/unresolved diagnostics keep their per-call multiplicity.
+# Record: doc/08_tracking/bug/phase3_hir_import_materialization_time_rss_2026-08-22.md
+DEPTAILF="$ROOT/src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl"
+must_contain     "DEPTAIL per-importer tail memo helper"          "$DEPTAILF" "me dep_tail_already_bound(tail_key: text) -> bool:"
+must_contain     "DEPTAIL explicit route consults the memo"       "$DEPTAILF" "if self.dep_tail_already_bound(explicit_tail_key):"
+must_contain     "DEPTAIL declared route consults the memo"       "$DEPTAILF" "if self.dep_tail_already_bound(declared_tail_key):"
+must_contain     "DEPTAIL recorded only after a valid bind"       "$DEPTAILF" "self.dep_tail_memo[explicit_tail_key] = true"
+must_contain     "DEPTAIL memo dropped per importer"              "$ROOT/src/compiler/20.hir/hir_lowering/context_helpers.spl" "self.dep_tail_memo_owner = filename"
+must_contain     "DEPTAIL skip count pinned by the cost spec"     "$ROOT/test/01_unit/compiler/hir/hir_import_registration_cost_spec.spl" "expect(lowering.dep_tail_skip_count).to_equal(2)"
+must_contain     "DEPTAIL unresolved tail stays retryable"        "$ROOT/test/01_unit/compiler/hir/hir_import_registration_cost_spec.spl" "never memoizes an UNRESOLVED tail"
+
 # --- pure-Simple core interpreter: collection writes through the owner, not a
 # temp alias (`var v = val_arrays[x]; v.push(e); val_arrays[x] = v` deep-copies
 # the whole array per write under COW value semantics: 22.3 s vs 1 ms at N=16k).

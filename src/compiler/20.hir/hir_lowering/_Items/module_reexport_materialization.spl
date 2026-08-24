@@ -564,6 +564,19 @@ impl HirLowering:
             imported_mod, imported_mod_name, hir_dependency_type_name(dependency), import_span, materialize_enum)
         hir_phase_profile_add(HIR_PROF_RIS_DECLARED_DEP, started)
 
+    me dep_tail_already_bound(tail_key: text) -> bool:
+        """DEPTAIL: has this importer already run this dependency tail to
+        completion? Drops the memo when `module_filename` names a different
+        module, exactly as the `register_imported_symbol` wrapper does."""
+        if self.dep_tail_memo_owner != self.module_filename:
+            val fresh_dep_tail_memo: {text: bool} = {}
+            self.dep_tail_memo = fresh_dep_tail_memo
+            self.dep_tail_memo_owner = self.module_filename
+        if self.dep_tail_memo.contains_key(tail_key):
+            self.dep_tail_skip_count = self.dep_tail_skip_count + 1
+            return true
+        false
+
     me materialize_imported_callable_declared_dependency_inner(
         imported_mod: ModuleSurface,
         imported_mod_name: text,
@@ -572,6 +585,10 @@ impl HirLowering:
         materialize_enum: bool
     ):
         val local_name = "{imported_mod.module_name}::{dependency}"
+        val declared_enum_tag = if materialize_enum: " E" else: " -"
+        val declared_tail_key = "D " + local_name + declared_enum_tag
+        if self.dep_tail_already_bound(declared_tail_key):
+            return
         self.register_imported_symbol(
             imported_mod.physical_index, imported_mod_name, dependency, local_name,
             import_span, materialize_enum)
@@ -579,6 +596,9 @@ impl HirLowering:
         if symbol.is_valid():
             self.symbols.bind_qualified_type(
                 imported_mod.module_name, dependency, symbol)
+            # Recorded only after the bind actually happened; an invalid
+            # lookup stays retryable within this importer.
+            self.dep_tail_memo[declared_tail_key] = true
 
     me materialize_imported_callable_explicit_dependency(
         imported_mod: ModuleSurface,
@@ -609,6 +629,10 @@ impl HirLowering:
         # after the memo -- register_imported_symbol and the two
         # bind_qualified_type calls -- still runs per importer, against that
         # importer's own symbol table.
+        val explicit_enum_tag = if materialize_enum: " E" else: " -"
+        val explicit_tail_key = "X " + imported_mod.module_name + " " + dependency + explicit_enum_tag
+        if self.dep_tail_already_bound(explicit_tail_key):
+            return
         val memo_key = imported_mod.module_name + " " + dependency
         var selected_target: i64 = -1
         var selected_item: text = ""
@@ -778,6 +802,11 @@ impl HirLowering:
             self.symbols.bind_qualified_type(
                 imported_mod.module_name, dependency,
                 terminal_symbol)
+            # DEPTAIL: recorded only after BOTH qualified aliases were
+            # published. The `-2` ambiguity and `< 0` unresolved branches
+            # above return earlier and are never recorded, so their
+            # diagnostics keep their exact per-call multiplicity.
+            self.dep_tail_memo[explicit_tail_key] = true
 
     me cached_surface_package_name(module_name: text) -> text:
         """Package name of `surface`, memoized by module name.

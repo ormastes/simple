@@ -295,6 +295,37 @@ class HirLowering:
     # Registrations skipped by the memo. Observable mechanism counter: a spec
     # pins that repeating one (module, name, local, enum) query registers once.
     registered_import_skip_count: i64
+    # DEPTAIL (2026-08-24): completed callable-dependency TAILS, keyed on
+    # `{route} {declaring module} {dependency} {materialize_enum}` where route
+    # is `D` (declared) or `X` (explicit). Like `registered_import_memo` and
+    # UNLIKE `explicit_dep_target_memo` this is NOT phase-invariant: the tail
+    # calls `bind_qualified_type` into the IMPORTING module's symbol table, so
+    # the memo is owned by one importer and is dropped the moment
+    # `module_filename` names a different module.
+    #
+    # Why it pays: `explicit_dep_target_memo` already makes the SWEEP a
+    # one-per-phase fact, but the tail that runs after the memo hit -- a
+    # `register_imported_symbol`, a `lookup_or_invalid` and two
+    # `bind_qualified_type` calls -- still ran on every one of the repeats.
+    # The real-closure entry module issued 2,670 explicit-dependency calls
+    # against only 280 real sweeps, so ~2,390 of them re-ran a tail that had
+    # already written exactly these bindings (5.3 ms exclusive per call on the
+    # seed interpreter; explicit_dep was the single largest exclusive slot at
+    # 14,065 ms of 38,500 ms of imports). The declared-dependency route has the
+    # identical register + lookup + bind shape and was slot #2 at 7,893 ms.
+    #
+    # A key is recorded only AFTER the tail completes AND the looked-up symbol
+    # is valid -- same discipline as `registered_import_memo`. An invalid
+    # lookup binds nothing, so memoizing it would make the tuple unretryable
+    # within the importer even though a later registration could make it
+    # resolve. The ambiguity (`-2`) and unresolved (`< 0`) branches are
+    # deliberately NOT memoized, so their diagnostics keep the exact
+    # per-call multiplicity they had before.
+    dep_tail_memo: {text: bool}
+    # Importer that `dep_tail_memo` describes ("" = none yet).
+    dep_tail_memo_owner: text
+    # Dependency tails skipped by the memo. Observable mechanism counter.
+    dep_tail_skip_count: i64
     # IMPLIDX (2026-08-22): impl positions per (frozen surface, implemented
     # type name). `register_imported_type_methods_inner` swept EVERY impl of
     # the declaring module per imported composite/enum, copying each impl row
@@ -429,6 +460,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_payload_origin_miss_memo: {text: bool} = {}
     val empty_explicit_dep_item_memo: {text: text} = {}
     val empty_registered_import_memo: {text: bool} = {}
+    val empty_dep_tail_memo: {text: bool} = {}
     val empty_impl_index_built: {text: bool} = {}
     val empty_impl_index_positions: {text: [i64]} = {}
     val empty_impl_method_name_index: {text: [text]} = {}
@@ -497,6 +529,9 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         registered_import_memo: empty_registered_import_memo,
         registered_import_memo_owner: "",
         registered_import_skip_count: 0,
+        dep_tail_memo: empty_dep_tail_memo,
+        dep_tail_memo_owner: "",
+        dep_tail_skip_count: 0,
         impl_index_built: empty_impl_index_built,
         impl_index_positions: empty_impl_index_positions,
         impl_method_name_index: empty_impl_method_name_index,
