@@ -16,14 +16,33 @@ fail() {
     exit 1
 }
 
-entry=src/compiler/70.backend/backend/llvm_native_link.spl
+# The generated POSIX entry is emitted by whichever backend module owns
+# compile_entry_point_c.  Do NOT pin a single path here: this gate was RED for
+# exactly that reason -- llvm_native_link.spl was split into a 12-line re-export
+# facade and the emission moved to llvm_native_link_hosted_support.spl, so a
+# path-pinned grep reported "hook missing" while the hook was present and
+# correct.  That is a false RED of the rename/move-drift class, and a gate that
+# cries wolf gets ignored.  Search the backend package instead, and NAME the
+# file that satisfied each assertion so a reader can see the gate really looked
+# at something.
+entry_dir=src/compiler/70.backend/backend
 x64=src/os/libc/simpleos_crt0.S
 arm64=src/os/libc/simpleos_crt0_aarch64.S
 
-grep -Fq 'extern int __simple_startup_before_main(int argc, char** argv) __attribute__((weak));' "$entry" ||
-    fail "generated_native_entry_hook_missing"
-grep -Fq 'if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) return 125;' "$entry" ||
-    fail "generated_native_entry_call_missing"
+[ -d "$entry_dir" ] || fail "entry_backend_dir_missing:$entry_dir"
+
+entry_decl_file=$(grep -rlF \
+    'extern int __simple_startup_before_main(int argc, char** argv) __attribute__((weak));' \
+    "$entry_dir" --include='*.spl' 2>/dev/null | head -n 1)
+[ -n "$entry_decl_file" ] || fail "generated_native_entry_hook_missing"
+
+entry_call_file=$(grep -rlF \
+    'if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) return 125;' \
+    "$entry_dir" --include='*.spl' 2>/dev/null | head -n 1)
+[ -n "$entry_call_file" ] || fail "generated_native_entry_call_missing"
+
+echo "dedicated_host_startup_wiring_entry_decl=$entry_decl_file"
+echo "dedicated_host_startup_wiring_entry_call=$entry_call_file"
 
 for crt in "$x64" "$arm64"; do
     grep -Fq '.weak __simple_startup_before_main' "$crt" ||
