@@ -387,6 +387,18 @@ offsets until the completed token or parameter slice is needed.
 Character-by-character string append is forbidden on input-sized headers: it
 turns an otherwise linear scan into cumulative O(header_bytes^2) copying.
 
+### Request-local query outline ownership
+
+Each definition, hover, completion, type-at, and signature-help invocation owns
+one `OutlineSnapshot` for its target file. The snapshot is produced by one read
+and one split and carries ordered physical lines, outline symbols, and imports.
+Local lookup consumes `symbols`; imported lookup consumes `imports`; cursor
+display and active-parameter calculation consume `lines`. Imported modules keep
+their existing independent parsing and resolver precedence. The snapshot is
+never process-global or path-cached, so freshness, empty/unreadable behavior,
+duplicate imports, output limits, and local-before-import-before-grep ordering
+remain unchanged.
+
 ### Raw-SFFI source-view ownership
 
 Raw-SFFI analysis owns one request-local, read-only-by-convention `CodeLine`
