@@ -28,17 +28,27 @@
 
 use compiler.tools.lint._LintMain.name_lints.{NameLintWarning}
 
+struct _NtCastPattern:
+    name: text
+    needle: text
+
 # Type names that do not exist in Simple, each confirmed to produce
 # `unresolved type: <name>` from the compiler. Keep this list empirical: only
 # add a name after observing the compiler reject it.
 fn nonexistent_type_names() -> [text]:
     ["int", "long", "double", "uint"]
 
+fn _nt_cast_patterns() -> [_NtCastPattern]:
+    var patterns: [_NtCastPattern] = []
+    for name in nonexistent_type_names():
+        patterns.push(_NtCastPattern(name: name, needle: " as " + name))
+    patterns
+
 fn lint_nonexistent_types_lines(path: String, lines: [text]) -> [NameLintWarning]:
     var warnings: [NameLintWarning] = []
     if not path.ends_with(".spl"):
         return warnings
-    val bad_names = nonexistent_type_names()
+    val cast_patterns = _nt_cast_patterns()
     var i = 0
     while i < lines.len():
         val line = lines[i]
@@ -46,12 +56,12 @@ fn lint_nonexistent_types_lines(path: String, lines: [text]) -> [NameLintWarning
         if trimmed == "" or trimmed.starts_with("#"):
             i = i + 1
             continue
-        for name in bad_names:
-            if _nt_has_cast_to(line, name):
+        for pattern in cast_patterns:
+            if _nt_has_cast_to(line, pattern.needle):
                 warnings.push(NameLintWarning(
                     code: "TYPE001",
                     line: i + 1,
-                    message: "cast to `{name}`, which is not a Simple type - HIR lowering reports `unresolved type: {name}`",
+                    message: "cast to `{pattern.name}`, which is not a Simple type - HIR lowering reports `unresolved type: {pattern.name}`",
                     hint: "use a real Simple integer type, e.g. `as i64`"))
         if _nt_has_for_range(trimmed):
             warnings.push(NameLintWarning(
@@ -65,19 +75,18 @@ fn lint_nonexistent_types_lines(path: String, lines: [text]) -> [NameLintWarning
 fn lint_nonexistent_types(path: String, content: String) -> [NameLintWarning]:
     lint_nonexistent_types_lines(path, content.split("\n"))
 
-# True when `line` contains a cast `as <name>` with `name` standing alone as a
-# whole word (so `as int` matches but `as integer_thing` / `as i64` do not).
-fn _nt_has_cast_to(line: text, name: text) -> Bool:
-    val needle = " as " + name
-    var rest = line
+# True when `line` contains the prebuilt `as <name>` needle with the name
+# standing alone (so `as int` matches but `as integer_thing` / `as i64` do not).
+fn _nt_has_cast_to(line: text, needle: text) -> Bool:
+    var search_from = 0
     while true:
-        val at = rest.find(needle)
+        val at = line.find(needle, search_from)
         if at < 0:
             return false
         val after = at + needle.len()
-        if _nt_is_word_boundary(rest, after):
+        if _nt_is_word_boundary(line, after):
             return true
-        rest = rest[at + 1:]
+        search_from = at + 1
     false
 
 fn _nt_has_for_range(trimmed: text) -> Bool:
