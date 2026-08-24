@@ -32,3 +32,42 @@ Additional follow-up: path mutations (`mkdir`, `unlink`, `rename`,
 legacy FAT32 mount globals. Add canonical owner wrappers for the corresponding
 `MountTable` operations before removing `fat32_fd_table.spl`. `SEEK_END` also
 requires a MountTable-owned fstat-by-virtual-object API.
+
+## FAT32 positioned/open prerequisite blocker audit
+
+A pure-Simple draft for supplied `pread`/`pwrite` offsets, `O_EXCL`, `O_TRUNC`,
+and `O_APPEND` was statically rejected and fully reverted. Correct append is
+not a local cursor fix because FAT32 currently copies size/start-cluster state
+into each open handle and does not maintain one durable object identity.
+
+The replacement must land as one coherent owner design with all of these
+properties:
+
+- A mount epoch remains monotonic across unmount/remount. Unmount must reject or
+  retire live opens without clearing generation history, so an old handle can
+  never alias a new-volume handle.
+- File identity cannot be only a start cluster: unlink can free and reuse that
+  cluster while an old handle remains live. Use a generational directory-entry
+  object identity (or defer unlink reclamation until the last open reference),
+  and update identity location across rename.
+- Logical size and first-cluster changes must persist to the owning directory
+  entry transactionally. Close/reopen, path stat, independent append handles,
+  and remount must observe the same value. Cache the validated directory-entry
+  location at open so append does not scan the open table or directory.
+- Truncate must propagate `follow_chain` and every FAT-entry write failure. It
+  may publish the new size only after all required chain mutations and directory
+  metadata succeed, with a rollback/recovery state for partial device failure.
+- Positioned writes beyond EOF must zero every newly exposed byte, including
+  reused cluster contents, before publishing the larger size.
+- `pread`/`pwrite` must restore cursor state on success and failure; `pwrite`
+  ignores `O_APPEND`, while ordinary append selects shared EOF and writes under
+  the same serialized owner operation.
+
+Required focused coverage before enabling the MountTable descriptor route:
+independent append handles; `pwrite` on an append handle; exclusive create;
+writable and read-only truncate; close/reopen and remount persistence; stale
+pre-unmount handles; unlink-open-recreate cluster reuse; injected FAT and
+directory-write failures; and sparse writes over non-zero recycled clusters.
+
+No tests, builds, or runtime verification were run for this audit by explicit
+instruction.
